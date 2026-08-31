@@ -80,12 +80,14 @@ training/scripts/
 # Training notebooks and research PDFs (machine-specific)
 training/
 docs/research/
+*.ipynb
 
 # Temporary CDP debug scripts
 scripts/cdp_*.js
 scripts/check_*.js
 scripts/test_*.js
 scripts/show_*.js
+scripts/debug_*.js
 scripts/test_*.ps1
 scripts/collect_wake_samples.py
 
@@ -113,3 +115,10 @@ src-tauri/resources/oww/*.backup
 # Test/example directories
 src-tauri/examples/
 src-tauri/src/test_wda.rs
+
+# NLU training outputs (only the runtime ONNX model + tokenizer are committed;
+# the PyTorch checkpoint and any future training artifacts are ignored).
+server/nlu/model/best_model.pt
+server/nlu/model/*.pt
+server/nlu/model/*.ckpt
+server/nlu/__pycache__/

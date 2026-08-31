@@ -1397,11 +1397,6 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     while rx.recv().is_ok() {
         tracing::info!("wake-word: NEXUS detected → triggering wake");
 
-        // Start the STT server on-demand (lazy STT — saves ~340 MB at idle).
-        // The server takes ~5-10s to start, so we kick it off here so it's
-        // ready by the time the user finishes speaking.
-        crate::lazy_stt::ensure_stt_running();
-
         // Only use the direct eval — the frontend's __NEXUS_WAKE__ handler
         // calls wakeWithGreeting(). Do NOT also emit Tauri events, as the
         // frontend listens to those too and would call wakeWithGreeting()

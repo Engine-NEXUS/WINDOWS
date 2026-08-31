@@ -73,7 +73,7 @@ let pendingQuery = "";
 
 // Build-time fallback only — the real URL comes from get_server_config at runtime.
 // This is the Cloudflare Worker URL (HTTPS, not WebSocket — serverless architecture).
-const FALLBACK_URL = (import.meta.env.VITE_SERVER_URL as string) ?? "https://nexus-worker.example.workers.dev";
+const FALLBACK_URL = (import.meta.env.VITE_SERVER_URL as string) ?? "wss://nexus-worker.chitkullakshya.workers.dev/ws";
 const DEVICE_TOKEN = (import.meta.env.VITE_DEVICE_TOKEN as string) ?? "";
 
 /**

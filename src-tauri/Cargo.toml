@@ -35,6 +35,8 @@ walkdir = "2.5"
 ignore = "0.4"
 rayon = "1.10"
 petgraph = "0.6"
+# Regex for intent parser patterns
+regex = "1"
 
 # Audio capture (16k mono) for wake word detection
 cpal = "0.15"
@@ -52,9 +54,14 @@ circular-buffer = "1.2"
 # The recorder streams raw 16 kHz PCM by default; enable `opus-encode` to compress upstream.
 opus = { version = "0.3", optional = true }
 
-# HTTP client for local STT (faster-whisper on localhost)
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+# HTTP client for diagnostics
+reqwest = { version = "0.12", features = ["json"] }
 chrono = { version = "0.4.45", features = ["serde"] }
+
+# STT & TTS Upgrade (August 2026)
+transcribe-rs = { version = "0.3.0", features = ["onnx"] }
+kokoro-micro = "1.0"
+rodio = "0.19"
 
 # Cross-platform app/URL launching (open::that, open::with)
 open = "5"

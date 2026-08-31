@@ -17,8 +17,7 @@ export function SetupApp() {
   const [step, setStep] = useState<Step>(0);
   const [serverUrl, setServerUrl] = useState("");
   const [userId, setUserId] = useState("");
-  const [selectedVoice, setSelectedVoice] = useState<string>("jarvis");
-  const [fishAudioKey, setFishAudioKey] = useState<string>("");
+  const [selectedVoice, setSelectedVoice] = useState<string>("af_sky");
   const [playingVoice, setPlayingVoice] = useState<string | null>(null);
 
   // Settings
@@ -46,7 +45,6 @@ export function SetupApp() {
         if (s) {
           if (s.ttsVoice) setSelectedVoice(s.ttsVoice);
           if (s.hotkey) setHotkey(s.hotkey);
-          if (s.fishAudioApiKey) setFishAudioKey(s.fishAudioApiKey);
           if (typeof s.wakeWordEnabled === "boolean") setWakeWordEnabled(s.wakeWordEnabled);
           if (typeof s.autostart === "boolean") setAutostart(s.autostart);
         }
@@ -62,7 +60,7 @@ export function SetupApp() {
       return;
     }
     setPlayingVoice(voice.id);
-    await previewVoice(voice, fishAudioKey, () => {
+    await previewVoice(voice, undefined, () => {
       setPlayingVoice(null);
     });
   };
@@ -107,7 +105,6 @@ export function SetupApp() {
       const updated = {
         ...current,
         ttsVoice: selectedVoice,
-        fishAudioApiKey: fishAudioKey,
         hotkey,
         wakeWordEnabled,
         autostart,
@@ -172,24 +169,7 @@ export function SetupApp() {
                 })}
               </div>
 
-              {/* Fish Audio API Key — FREE, no credit card */}
-              <div style={{ marginTop: "var(--nx-space-4)", display: "flex", flexDirection: "column", gap: "8px" }}>
-                <div style={{ padding: "var(--nx-space-3)", background: "var(--nx-bg-subtle, rgba(0,0,0,0.02))", borderRadius: "8px", border: "1px solid var(--nx-border)" }}>
-                  <div style={{ fontSize: "var(--nx-text-xs)", fontWeight: 600, color: "var(--nx-text-primary)", marginBottom: "4px" }}>
-                    � Fish Audio API Key (Free — No Credit Card)
-                  </div>
-                  <div style={{ fontSize: "var(--nx-text-xs)", color: "var(--nx-text-secondary)", marginBottom: "8px" }}>
-                    Get a free key: fish.audio → Sign Up → Dashboard → API Keys → Create Key
-                  </div>
-                  <input
-                    type="password"
-                    placeholder="Paste Fish Audio API Key"
-                    value={fishAudioKey}
-                    onChange={(e) => setFishAudioKey(e.target.value)}
-                    style={{ width: "100%", padding: "8px 12px", fontSize: "var(--nx-text-xs)", border: "1px solid var(--nx-border)", borderRadius: "6px" }}
-                  />
-                </div>
-              </div>
+
             </div>
           )}
 

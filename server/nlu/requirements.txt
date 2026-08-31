@@ -1,0 +1,13 @@
+# NEXUS NLU Server — runtime dependencies.
+# The NLU server (server/nlu_server.py) loads a BERT-Mini ONNX model and
+# provides a /parse endpoint for intent classification + slot filling.
+#
+# Install:  pip install -r requirements.txt
+# Run:      python nlu_server.py  (lazy-started by Rust on port 39218)
+
+numpy>=1.26,<3.0
+onnxruntime>=1.18,<2.0
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+pydantic>=2.0,<3.0
+transformers>=4.40,<5.0

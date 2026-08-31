@@ -1,36 +1,62 @@
 # NEXUS — Project Notes
 
-## STT Pipeline Fixes (2026-08-30)
+## STT Architecture — Moonshine In-Process (2026-08-31)
 
-### Root cause of "didn't catch that sir"
+**STT is now in-process Rust — no Python sidecar.**
 
-The STT server (`server/stt_server.py`) was not starting when NEXUS woke
-via hotkey. Four bugs were found and fixed:
+The old faster-whisper Python server (`server/stt_server.py`) and its
+lazy manager (`src-tauri/src/lazy_stt.rs`) have been removed. STT now
+uses **Moonshine Tiny** via the `transcribe-rs` crate, loaded directly
+inside the Tauri process:
+
+- **File:** `src-tauri/src/stt.rs`
+- **Model:** `MoonshineVariant::Tiny`, `Quantization::Int8`
+- **First-run:** `transcribe-rs` auto-downloads the Moonshine ONNX model
+  to the Hugging Face cache dir (`~/.cache/huggingface` on Linux/macOS,
+  `%USERPROFILE%\.cache\huggingface` on Windows). Requires network on
+  first transcription only.
+- **Latency:** in-process, no IPC, no port, no idle timeout.
+- **Hallucination filter:** still applied in `stt.rs` — catches
+  "thank you for watching", < 2 alphabetic chars, etc.
+
+The old `lazy_stt.rs` / port 39217 / `stt_server.py` references in this
+file are **historical** — kept for context but no longer apply at runtime.
+
+## NLU Server — Lazy Python Sidecar (2026-08-31)
+
+The **NLU server** (`server/nlu_server.py`) is the only remaining Python
+dependency. It provides ML-based intent classification (BERT-Mini ONNX)
+as a fallback when the deterministic parser (`intent_parser.rs`) can't
+handle a command.
+
+- **Port:** `39218` (separate from the old STT port 39217)
+- **Lazy manager:** `src-tauri/src/lazy_nlu.rs` — spawns on first
+  unparseable command, kills after 60s idle.
+- **Model:** `server/nlu/model/nexus_nlu.onnx` + `.data` + `tokenizer/`
+  — committed to git (~18 MB) so fresh clones work without downloading.
+- **Requirements:** `server/nlu/requirements.txt` (numpy, onnxruntime,
+  fastapi, uvicorn, pydantic, transformers).
+- **Fallback:** if the NLU server is unavailable, `nlu_client.rs`
+  returns `None` and the deterministic parser handles the command.
+
+### Historical STT Pipeline Fixes (2026-08-30, faster-whisper era)
+
+These bugs were fixed in the old faster-whisper Python sidecar. They are
+**no longer relevant** (the sidecar was replaced by in-process Moonshine)
+but kept for historical context:
 
 1. **`lazy_stt.rs` path bug:** `stt_script_path()` was missing one
-   `.parent()` level. It looked for `src-tauri/server/stt_server.py`
-   but the file is at `ULTRON/server/stt_server.py` (one directory
-   above `src-tauri`). Fixed by adding the correct path:
-   `target/release → target → src-tauri → ULTRON → server/stt_server.py`.
-
-2. **`ensure_stt_running()` not called on hotkey:** Only the wake-word
-   path called `ensure_stt_running()`. The hotkey handler in `hotkey.rs`
-   and the `transcribe_audio` command in `stt.rs` did not. Fixed by
-   adding `ensure_stt_running()` calls to both.
-
-3. **`is_stt_responsive()` used tokio runtime:** The health check used
-   `tokio::runtime::Handle::try_current()` which fails on non-tokio
-   threads (wake-word thread, hotkey handler). The STT server was
-   actually running but the health check always returned `false`.
-   Fixed by using a raw TCP connection instead.
-
-4. **STT idle timeout too aggressive:** 60 seconds. The server was killed
-   before the user could speak again. Increased to 5 minutes.
+   `.parent()` level. Fixed by adding the correct path.
+2. **`ensure_stt_running()` not called on hotkey:** Fixed by adding
+   calls to `hotkey.rs` and `stt.rs`.
+3. **`is_stt_responsive()` used tokio runtime:** Fixed by using a raw
+   TCP connection instead.
+4. **STT idle timeout too aggressive:** 60s → 5 minutes.
 
 ### Whisper hallucination filter (`stt.rs`)
 
-Added a hallucination filter in `transcribe_audio` that catches common
-faster-whisper tiny.en hallucinations on noisy/silent audio:
+The hallucination filter is still active in the new Moonshine-based
+`stt.rs`. It catches common hallucinations on noisy/silent audio:
 - "thank you for watching", "you", "bye", "okay", etc.
 - Text with < 2 alphabetic characters
 Filtered text is replaced with empty string, triggering the frontend's

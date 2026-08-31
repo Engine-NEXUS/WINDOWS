@@ -29,6 +29,8 @@ export type Intent =
   | { action: "open_url"; target: string; url: string }
   | { action: "open_architect" }
   | { action: "search"; query: string }
+  | { action: "analyse_repo"; owner?: string; repo: string }
+  | { action: "analyse_pr"; owner?: string; repo: string; pr_number: number }
   | { action: "media_play_pause" }
   | { action: "media_next" }
   | { action: "media_previous" }

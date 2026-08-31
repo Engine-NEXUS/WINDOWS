@@ -92,7 +92,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             server_url: option_env!("NEXUS_SERVER_URL")
-                .unwrap_or("https://nexus-worker.example.workers.dev")
+                .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev")
                 .to_string(),
             user_id: String::new(),
             device_id: String::new(),
@@ -961,18 +961,10 @@ pub struct NexusSettings {
     pub speech_rate: f64,
     #[serde(default = "default_tts_provider")]
     pub tts_provider: String,
-    #[serde(default)]
-    pub elevenlabs_api_key: String,
-    #[serde(default)]
-    pub fish_audio_api_key: String,
-    #[serde(default)]
-    pub gemini_api_key: String,
-    #[serde(default)]
-    pub google_cloud_api_key: String,
 }
 
 fn default_tts_provider() -> String {
-    "neural".to_string()
+    "kokoro".to_string()
 }
 
 impl Default for NexusSettings {
@@ -989,17 +981,13 @@ impl Default for NexusSettings {
             suppress_tts_in_meetings: true,
             local_stt_only: true,
             server_url: option_env!("NEXUS_SERVER_URL")
-                .unwrap_or("https://nexus-worker.example.workers.dev")
+                .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev")
                 .to_string(),
             user_id: String::new(),
             device_id: String::new(),
-            tts_voice: "jarvis".to_string(),
+            tts_voice: "af_sky".to_string(),
             speech_rate: 1.0,
-            tts_provider: "fish_audio".to_string(),
-            elevenlabs_api_key: String::new(),
-            fish_audio_api_key: String::new(),
-            gemini_api_key: String::new(),
-            google_cloud_api_key: String::new(),
+            tts_provider: "kokoro".to_string(),
         }
     }
 }
@@ -1032,21 +1020,6 @@ pub fn get_settings<R: Runtime>(
                     settings.device_id = did.to_string();
                 }
             }
-        }
-    }
-    if settings.fish_audio_api_key.is_empty() {
-        if let Ok(key) = std::env::var("FISH_AUDIO_API_KEY").or_else(|_| std::env::var("NEXUS_FISH_AUDIO_API_KEY")) {
-            settings.fish_audio_api_key = key;
-        }
-    }
-    if settings.gemini_api_key.is_empty() {
-        if let Ok(key) = std::env::var("GEMINI_API_KEY").or_else(|_| std::env::var("NEXUS_GEMINI_API_KEY")) {
-            settings.gemini_api_key = key;
-        }
-    }
-    if settings.google_cloud_api_key.is_empty() {
-        if let Ok(key) = std::env::var("GOOGLE_CLOUD_API_KEY").or_else(|_| std::env::var("NEXUS_GOOGLE_CLOUD_API_KEY")) {
-            settings.google_cloud_api_key = key;
         }
     }
     Ok(settings)

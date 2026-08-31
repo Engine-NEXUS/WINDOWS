@@ -325,6 +325,18 @@ pub fn force_refresh() {
     refresh_from_os(registry);
 }
 
+/// Get all search names from the registry (for phonetic/fuzzy matching
+/// in the intent parser). Returns a Vec of lowercase app name strings.
+pub fn all_search_names() -> Vec<String> {
+    let registry = &*REGISTRY;
+    let cache = registry.cache.read();
+    let mut names = Vec::with_capacity(cache.len());
+    for (name, _entry) in cache.iter() {
+        names.push(name.clone());
+    }
+    names
+}
+
 /// Record that an app was used (for usage-weighted ranking + resolution cache).
 /// Also saves the phrase → app mapping so future lookups are instant.
 pub fn record_usage(query: &str) {

@@ -1,158 +1,16 @@
 /**
- * Local & Cloud Speech-to-Text interface.
- *
- * Supports Gemini 3.5 Transcribe API (ultra low latency, 85+ languages)
- * with automatic fallback to local faster-whisper server (127.0.0.1:39217).
+ * Local Speech-to-Text interface.
+ * Uses the in-process Moonshine Rust engine.
  */
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
 }
 
-/** STT timeout — first call loads the whisper model (~10s on CPU), so allow 30s. */
 const STT_TIMEOUT_MS = 30000;
 
-/** Track last Gemini 429 to skip it for 60s after rate limiting. */
-let lastGemini429 = 0;
-
 /**
- * Convert 16kHz mono PCM16 samples to WAV Base64 string for Gemini 3.5 Transcribe.
- */
-function pcmToWavBase64(samples: Int16Array, sampleRate = 16000): string {
-  const buffer = new ArrayBuffer(44 + samples.length * 2);
-  const view = new DataView(buffer);
-
-  /* RIFF header */
-  writeString(view, 0, "RIFF");
-  view.setUint32(4, 36 + samples.length * 2, true);
-  writeString(view, 8, "WAVE");
-  writeString(view, 12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true); // PCM
-  view.setUint16(22, 1, true); // Mono
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true); // 16-bit
-  writeString(view, 36, "data");
-  view.setUint32(40, samples.length * 2, true);
-
-  let offset = 44;
-  for (let i = 0; i < samples.length; i++, offset += 2) {
-    view.setInt16(offset, samples[i], true);
-  }
-
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
-function writeString(view: DataView, offset: number, string: string) {
-  for (let i = 0; i < string.length; i++) {
-    view.setUint8(offset + i, string.charCodeAt(i));
-  }
-}
-
-/**
- * Transcribe speech using Google Gemini Transcribe (gemini-2.0-flash with gemini-1.5-flash fallback).
- */
-export async function transcribeGeminiAudio(
-  samples: Int16Array,
-  apiKey: string,
-): Promise<string> {
-  const models = ["gemini-3.5-transcribe", "gemini-2.0-flash", "gemini-1.5-flash"];
-  const base64Wav = pcmToWavBase64(samples, 16000);
-
-  for (const model of models) {
-    try {
-      // 8s timeout per model — if Gemini hangs, fall through to local STT
-      const response = await Promise.race([
-        fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey.trim()}`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              contents: [
-                {
-                  parts: [
-                    {
-                      inline_data: {
-                        mime_type: "audio/wav",
-                        data: base64Wav,
-                      },
-                    },
-                    {
-                      text: "Transcribe the spoken audio accurately into text. Return ONLY the raw transcript text without markdown, quotes, or conversational commentary.",
-                    },
-                  ],
-                },
-              ],
-            }),
-          },
-        ),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("Gemini STT timeout")), 8000),
-        ),
-      ]);
-
-      if (!response.ok) {
-        if (response.status === 429) {
-          lastGemini429 = Date.now();
-          console.log("[NEXUS] STT: Gemini 429 rate-limited, will skip for 60s");
-        }
-        continue;
-      }
-
-      const data = await response.json();
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      if (text.trim()) {
-        return text.trim();
-      }
-    } catch {
-      // Try next model
-    }
-  }
-
-  return "";
-}
-
-/**
- * Transcribe speech via Cloudflare Worker serverless endpoint (@cf/openai/whisper).
- */
-export async function transcribeWorkerAudio(
-  samples: Int16Array,
-  serverUrl: string,
-): Promise<string> {
-  if (!serverUrl || serverUrl.includes("example.workers.dev")) return "";
-  try {
-    const base64Wav = pcmToWavBase64(samples, 16000);
-    const endpoint = `${serverUrl.replace(/\/+$/, "")}/api/transcribe`;
-    const resp = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ audio_base64: base64Wav }),
-    });
-    if (resp.ok) {
-      const data = await resp.json() as any;
-      if (data.text) return data.text.trim();
-    }
-  } catch (err) {
-    console.warn("[STT] Worker transcribe failed:", err);
-  }
-  return "";
-}
-
-/**
- * Transcribe raw 16-bit mono PCM audio to text with multi-tier fallbacks:
- * 1. Gemini Transcribe (gemini-2.0-flash)
- * 2. Local Faster-Whisper (127.0.0.1:39217)
- * 3. Cloudflare Worker (@cf/openai/whisper)
+ * Transcribe raw 16-bit mono PCM audio to text with local Moonshine ONNX.
  *
  * @param samples - Raw 16-bit LE mono PCM at 16 kHz
  * @returns Transcribed text, or empty string on failure
@@ -160,26 +18,6 @@ export async function transcribeWorkerAudio(
 export async function transcribeAudio(samples: Int16Array): Promise<string> {
   if (!isTauri()) return "";
 
-  let settings: any = null;
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    settings = await invoke<any>("get_settings").catch(() => null);
-  } catch {}
-
-  // Tier 1: Gemini 3.5 Transcribe — skip if rate-limited recently
-  const DEFAULT_KEY = "AQ.Ab8RN6IQHjANZWrQJn2AgOee37Sqln_aYlEOJUraqW1L54Lkug";
-  const apiKey = settings?.geminiApiKey || DEFAULT_KEY;
-  const now = Date.now();
-  if (apiKey && (apiKey.startsWith("AIza") || apiKey.startsWith("AQ.")) && now - lastGemini429 > 60000) {
-    console.log("[NEXUS] STT: trying Gemini transcribe...");
-    const geminiText = await transcribeGeminiAudio(samples, apiKey);
-    console.log(`[NEXUS] STT: Gemini result = "${geminiText}"`);
-    if (geminiText) return geminiText;
-  } else if (now - lastGemini429 <= 60000) {
-    console.log("[NEXUS] STT: skipping Gemini (rate-limited recently)");
-  }
-
-  // Tier 2: Local Faster-Whisper STT (127.0.0.1:39217)
   const payload = Array.from(samples);
   try {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -189,39 +27,19 @@ export async function transcribeAudio(samples: Int16Array): Promise<string> {
         setTimeout(() => reject(new Error("STT timeout")), STT_TIMEOUT_MS),
       ),
     ]);
+    
     if (text && text.trim()) {
-      const trimmed = text.trim();
-      // Filter out known tiny.en hallucinations on silence/noise
-      const hallucinations = [
-        "thank you for watching",
-        "thank you for watching.",
-        "thanks for watching",
-        "thanks for watching.",
-        "you",
-        "you.",
-        "",
-      ];
-      if (!hallucinations.includes(trimmed.toLowerCase())) {
-        return trimmed;
-      }
-      console.log(`[NEXUS] STT: filtered hallucination "${trimmed}"`);
+      return text.trim();
     }
-  } catch {
-    // Local STT not running, fall through to Tier 3
-  }
-
-  // Tier 3: Cloudflare Worker Whisper
-  if (settings?.serverUrl) {
-    const workerText = await transcribeWorkerAudio(samples, settings.serverUrl);
-    if (workerText) return workerText;
+  } catch (err) {
+    console.error("[NEXUS] Local Moonshine STT failed:", err);
   }
 
   return "";
 }
 
 /**
- * Check if the local STT server is reachable.
- * @returns true if the local STT server is running and healthy
+ * Check if the local STT model is loaded/healthy.
  */
 export async function sttStatus(): Promise<boolean> {
   if (!isTauri()) return false;

@@ -9,7 +9,61 @@ import {
 } from "../net/wsBridge";
 import { transcribeAudio } from "./stt";
 import { speak } from "./ttsPlayer";
-import { parseIntent } from "../intent/parser";
+import { parseIntent, type Intent } from "../intent/parser";
+
+/**
+ * Parse a transcript using the Rust-side enhanced intent parser.
+ *
+ * The Rust parser (intent_parser.rs) has:
+ *   - Full app registry access (hundreds of installed apps, not a fixed list)
+ *   - Phonetic + Levenshtein matching against real installed app names
+ *   - "analyse PR 23 servx" / "analyse servx repo" / "analyse owner/repo" support
+ *   - NLU server fallback (BERT-Mini, lazy-started)
+ *
+ * Falls back to the TypeScript parseIntent() if:
+ *   - Running outside Tauri (e.g. in a browser dev environment)
+ *   - The Rust parse_transcript command fails
+ *
+ * Returns the parsed intent plus metadata about the parse source.
+ */
+async function parseTranscriptEnhanced(
+  transcript: string,
+): Promise<{ intent: Intent; confidence: number; source: string }> {
+  // Try Rust parser first
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const result = await invoke<{
+      intent: Intent;
+      confidence: number;
+      source: string;
+    }>("parse_transcript", { transcript });
+    console.log(
+      `[NEXUS] rust parse: action=${result.intent.action}, confidence=${result.confidence}, source=${result.source}`,
+    );
+    return result;
+  } catch (err) {
+    // Rust parser unavailable — fall back to TypeScript parser
+    console.warn("[NEXUS] rust parse_transcript unavailable, using TS fallback:", err);
+    const intent = parseIntent(transcript);
+    return { intent, confidence: 1.0, source: "ts-fallback" };
+  }
+}
+
+/**
+ * Check if an intent is an analyse-type command that should go to the
+ * remote backend (not be executed locally).
+ *
+ * The Rust parser can identify "analyse repo" and "analyse PR" commands
+ * with structured data. These are still sent to the remote backend for
+ * processing, but the structured data helps the backend and the sidebar
+ * display the correct heading.
+ */
+function isAnalyseIntent(intent: Intent): boolean {
+  return (
+    intent.action === "analyse_repo" ||
+    intent.action === "analyse_pr"
+  );
+}
 
 /**
  * Long-running query queue.
@@ -489,7 +543,8 @@ export async function finishCapture(): Promise<void> {
   //    (open app, open URL, search), execute it locally — no need to send
   //    to the remote backend. Only send to the backend if the intent is
   //    "unknown" (i.e. it's a conversational query needing n8n/Ollama).
-  const intent = parseIntent(transcript);
+  //    Uses the Rust-side enhanced parser (app registry + analyse patterns).
+  const { intent } = await parseTranscriptEnhanced(transcript);
 
   // Special case: open architecture mapper window directly
   if (intent.action === "open_architect") {
@@ -521,7 +576,11 @@ export async function finishCapture(): Promise<void> {
     return;
   }
 
-  if (intent.action !== "unknown") {
+  // Analyse intents go to the remote backend (they're long-running queries)
+  // but the Rust parser has already extracted the repo/PR data.
+  if (isAnalyseIntent(intent)) {
+    console.log("[NEXUS] analyse intent detected, sending to backend:", intent);
+  } else if (intent.action !== "unknown") {
     // Known local command — execute it directly.
     useAssistant.getState().setState("speaking");
     useAssistant.getState().addAssistantMessage("Ok sir.");
@@ -547,15 +606,15 @@ export async function finishCapture(): Promise<void> {
     return;
   }
 
-  // 4. Unknown intent — try the remote backend (n8n/Ollama/Hermes).
+  // 4. Unknown intent (or analyse intent) — try the remote backend.
   //    If the backend is available, send the transcript and let the server
   //    handle it. The server sends back ack/result/done events.
   try {
     // For long-running queries (PR analysis, repo review), give an immediate
     // "On it sir" ack and hide the orb. The result handler will show the
     // sidebar + speak "Here is the analysis sir" when the response arrives.
-    const isLong = isLongRunningQuery(transcript);
-    console.log("[NEXUS] finishCapture: intent=unknown, isLongRunning=", isLong, "transcript=", transcript);
+    const isLong = isLongRunningQuery(transcript) || isAnalyseIntent(intent);
+    console.log("[NEXUS] finishCapture: intent=", intent.action, "isLongRunning=", isLong, "transcript=", transcript);
 
     // ─── Dedup + Queue for long-running queries ──────────────────────
     // If a long-running query is already in flight:
@@ -740,7 +799,8 @@ async function _finishCaptureFromVadInner(
   //    (open app, open URL, search), execute it locally — no need to send
   //    to the remote backend. Only send to the backend if the intent is
   //    "unknown" (i.e. it's a conversational query needing n8n/Ollama).
-  const intent = parseIntent(transcript);
+  //    Uses the Rust-side enhanced parser (app registry + analyse patterns).
+  const { intent } = await parseTranscriptEnhanced(transcript);
 
   // Special case: open architecture mapper window directly
   if (intent.action === "open_architect") {
@@ -772,7 +832,11 @@ async function _finishCaptureFromVadInner(
     return;
   }
 
-  if (intent.action !== "unknown") {
+  // Analyse intents go to the remote backend (they're long-running queries)
+  // but the Rust parser has already extracted the repo/PR data.
+  if (isAnalyseIntent(intent)) {
+    console.log("[NEXUS] analyse intent detected (vad), sending to backend:", intent);
+  } else if (intent.action !== "unknown") {
     // Known local command — execute it directly.
     useAssistant.getState().setState("speaking");
     useAssistant.getState().addAssistantMessage("Ok sir.");
@@ -798,13 +862,13 @@ async function _finishCaptureFromVadInner(
     return;
   }
 
-  // 4. Unknown intent — try the remote backend (n8n/Ollama/Hermes).
+  // 4. Unknown intent (or analyse intent) — try the remote backend.
   try {
     // For long-running queries (PR analysis, repo review), give an immediate
     // "On it sir" ack and hide the orb. The result handler will show the
     // sidebar + speak "Here is the analysis sir" when the response arrives.
-    const isLong = isLongRunningQuery(transcript);
-    console.log("[NEXUS] finishCaptureFromVad: intent=unknown, isLongRunning=", isLong, "transcript=", transcript);
+    const isLong = isLongRunningQuery(transcript) || isAnalyseIntent(intent);
+    console.log("[NEXUS] finishCaptureFromVad: intent=", intent.action, "isLongRunning=", isLong, "transcript=", transcript);
 
     // ─── Dedup + Queue for long-running queries ──────────────────────
     // If a long-running query is already in flight:

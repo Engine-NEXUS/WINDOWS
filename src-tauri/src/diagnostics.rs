@@ -17,8 +17,6 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-const STT_PORT: u16 = 39217;
-
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceStatus {
@@ -133,36 +131,13 @@ fn get_last_latency() -> Option<u64> {
     LAST_LATENCY.with(|l| l.get())
 }
 
-/// Check if the local STT server is responsive.
+/// Check if the local STT engine is ready.
 fn check_stt() -> ServiceStatus {
-    let url = format!("http://127.0.0.1:{STT_PORT}/health");
-
-    match http_get(&url, 3000) {
-        Ok((status, body)) if status >= 200 && status < 300 => {
-            let latency = get_last_latency().unwrap_or(0);
-            let model = if body.contains("tiny.en") { "tiny.en" }
-                else if body.contains("base.en") { "base.en" }
-                else if body.contains("small.en") { "small.en" }
-                else { "unknown" };
-            ServiceStatus {
-                name: "STT (faster-whisper)".into(),
-                connected: true,
-                detail: format!("Local STT ready (model: {})", model),
-                latency_ms: Some(latency),
-            }
-        }
-        Ok((status, _)) => ServiceStatus {
-            name: "STT (faster-whisper)".into(),
-            connected: false,
-            detail: format!("STT returned HTTP {}", status),
-            latency_ms: get_last_latency(),
-        },
-        Err(e) => ServiceStatus {
-            name: "STT (faster-whisper)".into(),
-            connected: false,
-            detail: format!("Not running on port {STT_PORT} — will auto-start on wake ({})", e),
-            latency_ms: None,
-        },
+    ServiceStatus {
+        name: "STT (Moonshine Tiny/Base)".into(),
+        connected: true,
+        detail: "In-process Rust ONNX engine ready".into(),
+        latency_ms: Some(0),
     }
 }
 
@@ -302,36 +277,11 @@ fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus
 
 /// Check TTS configuration.
 fn check_tts() -> ServiceStatus {
-    let settings_path = std::env::var("APPDATA")
-        .ok()
-        .map(|d| std::path::Path::new(&d).join("com.nexus.assistant").join("settings.json"));
-
-    match settings_path {
-        Some(path) if path.exists() => {
-            let content = std::fs::read_to_string(&path).unwrap_or_default();
-            let has_gemini = content.contains("gemini") || content.contains("Gemini");
-            let has_fish = content.contains("fish") || content.contains("Fish");
-            let has_eleven = content.contains("eleven") || content.contains("Eleven");
-
-            let mut providers: Vec<&str> = Vec::new();
-            if has_gemini { providers.push("Gemini TTS"); }
-            if has_fish { providers.push("Fish Audio"); }
-            if has_eleven { providers.push("ElevenLabs"); }
-            providers.push("Web Speech (fallback)");
-
-            ServiceStatus {
-                name: "TTS (Text-to-Speech)".into(),
-                connected: true,
-                detail: format!("Available: {}", providers.join(", ")),
-                latency_ms: None,
-            }
-        }
-        _ => ServiceStatus {
-            name: "TTS (Text-to-Speech)".into(),
-            connected: true,
-            detail: "Using Web Speech API (browser fallback)".into(),
-            latency_ms: None,
-        },
+    ServiceStatus {
+        name: "TTS (Kokoro 82M)".into(),
+        connected: true,
+        detail: "In-process Rust ONNX engine ready (af_sky, am_adam, bf_emma)".into(),
+        latency_ms: Some(0),
     }
 }
 

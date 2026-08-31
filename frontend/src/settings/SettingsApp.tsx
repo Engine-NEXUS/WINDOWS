@@ -52,12 +52,9 @@ const DEFAULT_SETTINGS: Settings = {
   serverUrl: "",
   userId: "local-user",
   deviceId: "local-device",
-  ttsVoice: "jarvis",
+  ttsVoice: "af_sky",
   speechRate: 1.0,
-  ttsProvider: "fish_audio",
-  elevenlabsApiKey: "",
-  fishAudioApiKey: "",
-  googleCloudApiKey: "",
+  ttsProvider: "kokoro",
 };
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
@@ -248,7 +245,7 @@ function AudioTab({ settings, update }: { settings: Settings; update: <K extends
       sampleText: "Hello sir, NEXUS is ready to assist you.",
     };
     setPlayingVoice(voiceId);
-    await previewVoice(voice, settings.fishAudioApiKey, () => {
+    await previewVoice(voice, undefined, () => {
       setPlayingVoice(null);
     });
   };
@@ -295,21 +292,6 @@ function AudioTab({ settings, update }: { settings: Settings; update: <K extends
               {playingVoice === settings.ttsVoice ? "⏹ Stop" : "▶ Play Sample"}
             </button>
           </div>
-        </div>
-
-        <div className="nx-row">
-          <div className="nx-row-label">
-            <span className="nx-row-name">Fish Audio API Key</span>
-            <span className="nx-row-hint">Free — no credit card. Get key: fish.audio → Sign Up → Dashboard → API Keys</span>
-          </div>
-          <input
-            type="password"
-            className="nx-input"
-            placeholder="Fish Audio API key..."
-            value={settings.fishAudioApiKey || ""}
-            onChange={(e) => update("fishAudioApiKey", e.target.value)}
-            style={{ width: 220 }}
-          />
         </div>
 
         <div className="nx-row">

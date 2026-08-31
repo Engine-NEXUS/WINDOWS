@@ -58,11 +58,6 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                     // Sidebar is hidden → wake NEXUS, do NOT touch sidebar.
                     tracing::info!("hotkey ({}) → sidebar hidden, waking NEXUS", hk);
 
-                    // Start the STT server on-demand (same as wake-word path).
-                    // The hotkey bypasses the wake-word pipeline, so we must
-                    // ensure STT is running here too.
-                    crate::lazy_stt::ensure_stt_running();
-
                     if let Some(win) = handle.get_webview_window("main") {
                         let _ = win.show();
                         let _ = crate::window_manager::configure_non_activating_overlay(&win);

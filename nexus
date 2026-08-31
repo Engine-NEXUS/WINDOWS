@@ -1,0 +1,10 @@
+#!/usr/bin/env node
+// Unix shim — delegates to nexus.mjs
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { spawn } from "node:child_process";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const args = process.argv.slice(2);
+const child = spawn("node", [join(__dirname, "nexus.mjs"), ...args], { stdio: "inherit" });
+child.on("exit", (code) => process.exit(code ?? 1));

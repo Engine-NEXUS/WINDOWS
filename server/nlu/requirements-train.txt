@@ -1,0 +1,8 @@
+# NEXUS NLU — training-only dependencies (not needed to run the server).
+# Used by train.py to fine-tune a BERT-Mini model and export to ONNX.
+#
+# Install:  pip install -r requirements-train.txt
+# Run:      cd server/nlu && python train.py
+
+-r requirements.txt
+torch>=2.2,<3.0

@@ -1,162 +1,121 @@
-//! Local Speech-to-Text via a local faster-whisper HTTP server.
-//!
-//! Audio is captured by the AudioWorklet (16-bit mono PCM at 16 kHz) and sent
-//! to a LOCAL STT endpoint (default: http://127.0.0.1:39217/transcribe).
-//! The audio NEVER leaves the device — it goes to localhost, not the remote
-//! NEXUS server. Only the resulting transcript text is sent to the remote
-//! server.
-//!
-//! The local STT server is `server/stt_server.py` (faster-whisper + FastAPI).
-//! It must be running on the device before NEXUS starts listening.
-//!
-//! Environment variables:
-//!   - `NEXUS_LOCAL_STT_URL` — override the local STT endpoint (default:
-//!     http://127.0.0.1:39217/transcribe)
+use transcribe_rs::onnx::moonshine::{MoonshineModel, MoonshineVariant};
+use transcribe_rs::onnx::Quantization;
+use transcribe_rs::{SpeechModel, TranscribeOptions};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tauri::State;
 
-use tauri::Runtime;
-
-/// Default local STT endpoint. Audio goes here (127.0.0.1), not the remote server.
-/// Use 127.0.0.1 instead of "localhost" — Rust's hyper/tokio tries IPv6 (::1)
-/// first when resolving "localhost", and uvicorn binds to IPv4 only by default.
-const DEFAULT_LOCAL_STT_URL: &str = "http://127.0.0.1:39217/transcribe";
-
-fn local_stt_url() -> String {
-    std::env::var("NEXUS_LOCAL_STT_URL").unwrap_or_else(|_| DEFAULT_LOCAL_STT_URL.to_string())
+pub struct SttState {
+    pub transcriber: Arc<Mutex<Option<MoonshineModel>>>,
 }
 
-/// IPC: transcribe raw 16-bit mono PCM audio to text via the local STT server.
-///
-/// Args:
-///   - samples: Vec<i16> — raw 16-bit LE mono PCM at 16 kHz
-///
-/// Returns: String — the transcribed text, or empty string on failure.
+/// Resolve the Moonshine model directory.
+/// Looks in (1) NEXUS_STT_MODEL_DIR env var, (2) app data dir /models/moonshine,
+/// (3) dev path <repo>/src-tauri/models/moonshine.
+fn resolve_model_dir() -> Result<PathBuf, String> {
+    if let Ok(dir) = std::env::var("NEXUS_STT_MODEL_DIR") {
+        let p = PathBuf::from(dir);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let p = PathBuf::from(&appdata)
+            .join("com.nexus.assistant")
+            .join("models")
+            .join("moonshine");
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+
+    // Dev path relative to the executable
+    let dev_path = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .parent()
+        .and_then(|p| p.parent()) // target/release -> target
+        .and_then(|p| p.parent()) // target -> src-tauri
+        .map(|p| p.join("models").join("moonshine"));
+    if let Some(p) = dev_path {
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+
+    Err("Moonshine model directory not found. Place ONNX model files in %APPDATA%/com.nexus.assistant/models/moonshine or set NEXUS_STT_MODEL_DIR.".to_string())
+}
+
 #[tauri::command]
-pub async fn transcribe_audio<R: Runtime>(
-    _app: tauri::AppHandle<R>,
+pub async fn transcribe_audio(
     samples: Vec<i16>,
+    state: State<'_, SttState>,
 ) -> Result<String, String> {
-    if samples.is_empty() {
-        return Ok(String::new());
+    tracing::info!("stt: received {} samples for local Moonshine transcription", samples.len());
+
+    let transcriber_arc = state.transcriber.clone();
+    let mut lock = transcriber_arc.lock().await;
+
+    if lock.is_none() {
+        tracing::info!("stt: initializing Moonshine Tiny model...");
+        let model_dir = resolve_model_dir()?;
+        tracing::info!("stt: using model dir: {:?}", model_dir);
+        let model = MoonshineModel::load(
+            &model_dir,
+            MoonshineVariant::Tiny,
+            &Quantization::default(),
+        )
+            .map_err(|e| format!("Failed to init Moonshine: {}", e))?;
+        *lock = Some(model);
+        tracing::info!("stt: Moonshine initialized.");
     }
 
-    // Ensure the STT server is running before attempting transcription.
-    // This is critical: the hotkey path doesn't call ensure_stt_running(),
-    // and the idle monitor may have killed the server after 60s of inactivity.
-    crate::lazy_stt::ensure_stt_running();
+    let model = lock.as_mut().unwrap();
 
-    // Mark that a transcription request is being made (resets the lazy STT idle timer).
-    crate::lazy_stt::mark_stt_request();
+    // Convert i16 to f32 for transcribe-rs
+    let f32_samples: Vec<f32> = samples.iter().map(|&s| s as f32 / 32768.0).collect();
 
-    // Convert i16 PCM → little-endian bytes for the HTTP multipart upload.
-    let mut bytes = Vec::with_capacity(samples.len() * 2);
-    for &s in &samples {
-        bytes.push(s as u8);
-        bytes.push((s >> 8) as u8);
-    }
+    let result = model.transcribe(&f32_samples, &TranscribeOptions::default())
+        .map_err(|e| format!("Transcription error: {}", e))?;
 
-    let url = local_stt_url();
-    tracing::debug!("sending {} bytes to local STT at {}", bytes.len(), url);
+    let text = result.text.trim().to_string();
 
-    // POST the raw PCM to the local faster-whisper server.
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
+    // Apply hallucination filter (same as before)
+    let filtered = apply_hallucination_filter(&text);
 
-    let part = reqwest::multipart::Part::bytes(bytes)
-        .file_name("audio.bin")
-        .mime_str("application/octet-stream")
-        .map_err(|e| format!("mime: {e}"))?;
-
-    let form = reqwest::multipart::Form::new().part("audio", part);
-
-    let resp = client
-        .post(&url)
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| format!("local STT request failed: {e}. Is stt_server.py running on 127.0.0.1:39217?"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("local STT returned {status}: {body}"));
-    }
-
-    let data: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("local STT JSON parse: {e}"))?;
-
-    let text = data
-        .get("text")
-        .or_else(|| data.get("transcript"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-
-    // Filter common Whisper hallucinations on noisy/silent audio.
-    // These are phrases that faster-whisper tiny.en commonly produces
-    // when fed noise or silence instead of real speech.
-    let text_lower = text.to_lowercase();
-    const HALLUCINATIONS: &[&str] = &[
-        "thank you for watching",
-        "thank you.",
-        "thanks for watching",
-        "you",
-        "you.",
-        "thank you gov",
-        "i'm sure i'm going to",
-        "you need to fill out",
-        "i've worked in none of those",
-        "i'm going to pull out",
-        "please subscribe",
-        "like and subscribe",
-        "see you in the next video",
-        "bye",
-        "bye.",
-        "okay",
-        "okay.",
-        "mm",
-        "mm-hmm",
-        "uh",
-        "um",
-    ];
-    let is_hallucination = HALLUCINATIONS.iter().any(|h| {
-        text_lower == *h || text_lower.starts_with(h)
-    }) || text_lower.chars().filter(|c| c.is_alphabetic()).count() < 2;
-
-    let filtered = if is_hallucination {
-        tracing::info!("local STT result: {:?} (filtered as hallucination)", text);
-        String::new()
+    if filtered != text {
+        tracing::info!("stt: filtered hallucination '{}' -> '{}'", text, filtered);
     } else {
-        tracing::info!("local STT result: {:?}", text);
-        text
-    };
+        tracing::info!("stt: transcript: '{}'", text);
+    }
+
     Ok(filtered)
 }
 
-/// Check if the local STT server is reachable (for health/status checks).
-#[tauri::command]
-pub async fn stt_status<R: Runtime>(_app: tauri::AppHandle<R>) -> Result<bool, String> {
-    let url = local_stt_url();
-    // Replace /transcribe with /health if present, otherwise just check the base URL.
-    let health_url = url.replace("/transcribe", "/health");
+fn apply_hallucination_filter(text: &str) -> String {
+    let lower = text.to_lowercase();
+    let hallucinations = [
+        "thank you for watching", "thanks for watching", "thank you.", "you.", "bye.",
+        "please subscribe", "subscribe to my channel",
+    ];
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
-
-    match client.get(&health_url).send().await {
-        Ok(resp) => Ok(resp.status().is_success()),
-        Err(_) => {
-            // Fall back to checking the transcribe endpoint itself.
-            match client.get(&url).send().await {
-                Ok(_) => Ok(true),
-                Err(_) => Ok(false),
-            }
+    for h in hallucinations.iter() {
+        if lower.contains(h) {
+            return "".to_string();
         }
     }
+
+    let alpha_count = text.chars().filter(|c| c.is_alphabetic()).count();
+    if alpha_count < 2 {
+        return "".to_string();
+    }
+
+    text.to_string()
+}
+
+#[tauri::command]
+pub async fn stt_status() -> Result<bool, String> {
+    // We are running in-process, so if this is called, we are up.
+    Ok(true)
 }
