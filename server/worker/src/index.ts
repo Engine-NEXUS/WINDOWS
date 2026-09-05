@@ -982,11 +982,25 @@ function levenshtein(a: string, b: string): number {
  * Fetch full PR context via GitHub REST API (no cloning needed).
  * Returns: metadata, files with diffs, commits, and review comments.
  */
+/** Result of fetchPRContext — includes both the text context for the LLM
+ * and the raw PR stats for deterministic section generation. */
+interface PRContextResult {
+  context: string;
+  stats: {
+    insertions: number;
+    deletions: number;
+    filesChanged: number;
+    commits: number;
+    mergeableState: string;
+    hasMergeConflicts: boolean;
+  } | null;
+}
+
 async function fetchPRContext(
   token: string,
   repo: string,
   prNumber: number,
-): Promise<string> {
+): Promise<PRContextResult> {
   const headers: Record<string, string> = {
     "Authorization": `Bearer ${token}`,
     "Accept": "application/vnd.github+json",
@@ -997,11 +1011,21 @@ async function fetchPRContext(
   // 1. PR metadata
   const prResp = await fetch(`https://api.github.com/repos/${repo}/pulls/${prNumber}`, { headers });
   if (!prResp.ok) {
-    if (prResp.status === 404) return `__ERROR__: PR #${prNumber} not found in ${repo}.`;
-    if (prResp.status === 401) return `__ERROR__: ${githubErrorMessage(401, `analyse PR #${prNumber}`)}`;
-    return `__ERROR__: GitHub API returned ${prResp.status} for PR #${prNumber}.`;
+    if (prResp.status === 404) return { context: `__ERROR__: PR #${prNumber} not found in ${repo}.`, stats: null };
+    if (prResp.status === 401) return { context: `__ERROR__: ${githubErrorMessage(401, `analyse PR #${prNumber}`)}`, stats: null };
+    return { context: `__ERROR__: GitHub API returned ${prResp.status} for PR #${prNumber}.`, stats: null };
   }
   const pr = await prResp.json() as Record<string, unknown>;
+
+  // Extract deterministic stats for the structured output sections
+  const prStats = {
+    insertions: (pr["additions"] as number) || 0,
+    deletions: (pr["deletions"] as number) || 0,
+    filesChanged: (pr["changed_files"] as number) || 0,
+    commits: (pr["commits"] as number) || 0,
+    mergeableState: (pr["mergeable_state"] as string) || "unknown",
+    hasMergeConflicts: (pr["mergeable_state"] as string) === "dirty" || pr["mergeable"] === false,
+  };
 
   // 2. Files with diffs (parallel with commits + comments)
   const [filesResp, commitsResp, commentsResp, reviewsResp] = await Promise.all([
@@ -1080,7 +1104,7 @@ ${patch}`);
     return `  ${user}: ${state}${body ? ` — ${body}` : ""}`;
   }).join("\n");
 
-  return `${meta}
+  const context = `${meta}
 
 === FILES CHANGED (${files.length}) ===
 ${fileSections.join("\n\n")}
@@ -1093,6 +1117,8 @@ ${commentList || "(none)"}
 
 === REVIEWS (${reviews.length}) ===
 ${reviewList || "(none)"}`;
+
+  return { context, stats: prStats };
 }
 
 /**
@@ -1164,11 +1190,13 @@ async function handleGitHubAnalyse(req: NexusRequest, env: Env, token: string): 
     }
 
     // Fetch full PR context
-    const context = await fetchPRContext(token, repo, actualPrNumber);
+    const prContextResult = await fetchPRContext(token, repo, actualPrNumber);
 
-    if (context.startsWith("__ERROR__:")) {
-      return context.replace("__ERROR__:", "");
+    if (prContextResult.context.startsWith("__ERROR__:")) {
+      return prContextResult.context.replace("__ERROR__:", "");
     }
+    const context = prContextResult.context;
+    const prStats = prContextResult.stats;
 
     // Determine which model to use:
     // 1. Re-evaluation request → deep model (GLM-5.3-Flash, 1M context)
@@ -1213,11 +1241,8 @@ async function handleGitHubAnalyse(req: NexusRequest, env: Env, token: string): 
 
 Format your response EXACTLY as follows (use Markdown):
 
-## Description
-What does this PR do? (2-3 sentences explaining the changes)
-
-## How It Helps the Project
-Explain the impact and benefit of this PR to the project. (2-3 sentences)
+## How It Helps the Existing Codebase
+Explain how this PR impacts and benefits the existing codebase/repo. Reference specific files, modules, or architecture patterns it touches. (3-4 sentences)
 
 ## Bugs Found
 
@@ -1270,16 +1295,41 @@ ${context}
     const repoShort = repo.includes("/") ? repo.split("/")[1] : repo;
     const understoodPrefix = `PR #${actualPrNumber} in ${repoShort}\n\n`;
 
+    // ── Deterministic sections (from GitHub API, not LLM) ──
+    // These are appended after the LLM output so they are always accurate.
+    let deterministicSection = "";
+    if (prStats) {
+      const conflictStatus = prStats.hasMergeConflicts
+        ? "Yes — merge conflicts detected. Resolve before merging."
+        : prStats.mergeableState === "unknown"
+          ? "Unknown — GitHub is still computing mergeability. Check again shortly."
+          : "No — this PR can be merged cleanly.";
+      deterministicSection = `
+
+## Stats
+
+| Metric | Value |
+|--------|-------|
+| Insertions | +${prStats.insertions} |
+| Deletions | -${prStats.deletions} |
+| Files changed | ${prStats.filesChanged} |
+| Commits | ${prStats.commits} |
+
+## Merge Conflicts
+
+**${conflictStatus}**`;
+    }
+
     // Prefix deep reviews so the user knows which model was used
     const finalText = useDeepModel
-      ? `${understoodPrefix}[${modelLabel}] ${analysis}`
-      : `${understoodPrefix}${analysis}`;
+      ? `${understoodPrefix}[${modelLabel}] ${analysis}${deterministicSection}`
+      : `${understoodPrefix}${analysis}${deterministicSection}`;
 
     // ── Cache the analysis result (2h TTL) ──
     // Store without the understoodPrefix so cached text is reusable.
     // The prefix is re-added on cache hit.
     if (!isReEval) {
-      const cacheText = useDeepModel ? `[${modelLabel}] ${analysis}` : analysis;
+      const cacheText = useDeepModel ? `[${modelLabel}] ${analysis}${deterministicSection}` : `${analysis}${deterministicSection}`;
       await cacheSet(env, cacheKey, cacheText, 7200);
       console.log(`[cache] PR analysis stored: ${repo}#${actualPrNumber} (TTL 2h)`);
     }
