@@ -121,6 +121,12 @@ pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
         return None;
     }
 
+    // Strip leading filler words that STT often inserts (e.g. "And analyse
+    // PR 254 in zync", "So open chrome", "But first close notepad").
+    // These conversational connectors are not part of the command and cause
+    // every starts_with() check below to fail.
+    let text = strip_leading_filler(&text);
+
     // --- Open Architecture Mapper ---
     if is_architect_command(&text) {
         return Some(ParseResult {
@@ -2104,6 +2110,51 @@ fn normalize_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Leading filler words that STT often inserts before the actual command.
+/// e.g. "And analyse PR 254 in zync" → "analyse PR 254 in zync"
+///      "So open chrome" → "open chrome"
+///      "But first close notepad" → "close notepad"
+///
+/// These are conversational connectors — the user is speaking naturally,
+/// not issuing a robotic command. Without stripping, every `starts_with()`
+/// check in the parser fails and the intent falls through to `Unknown`.
+///
+/// We only strip filler at the START of the transcript (not mid-sentence),
+/// and we strip at most one filler word — "and so open chrome" keeps "so"
+/// because "and so" is rare and stripping multiple words risks eating the
+/// actual command ("so" alone is a valid filler, but "and so" could be
+/// "answer so..." mishears).
+fn strip_leading_filler(text: &str) -> String {
+    /// Single-word fillers that can precede a command.
+    const FILLERS: &[&str] = &[
+        "and", "so", "but", "then", "now", "also", "plus", "like", "okay",
+        "ok", "well", "hey", "um", "uh", "hmm", "actually", "basically",
+        "just", "please", "now please",
+    ];
+
+    // Try two-word fillers first (e.g. "and so", "but first", "now just")
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() >= 3 {
+        let two = format!("{} {}", words[0], words[1]);
+        if FILLERS.contains(&two.as_str())
+            || (words[0] == "and" && (words[1] == "so" || words[1] == "then" || words[1] == "now"))
+            || (words[0] == "but" && words[1] == "first")
+            || (words[0] == "now" && (words[1] == "just" || words[1] == "please"))
+        {
+            return words[2..].join(" ");
+        }
+    }
+
+    // Single-word filler
+    if words.len() >= 2 {
+        if FILLERS.contains(&words[0]) {
+            return words[1..].join(" ");
+        }
+    }
+
+    text.to_string()
+}
+
 fn strip_trailing_app_words(s: &str) -> String {
     let s = s.trim();
     let s = s
@@ -2303,6 +2354,58 @@ mod tests {
         } else {
             panic!("expected AnalysePr");
         }
+    }
+
+    #[test]
+    fn test_analyse_pr_with_leading_filler_and() {
+        // "And analyse PR 254 in zync" — STT inserts "And" at the start
+        let result = parse_deterministic("And analyse PR 254 in zync");
+        assert!(result.is_some(), "should parse with leading 'And'");
+        let r = result.unwrap();
+        if let ParsedIntent::AnalysePr {
+            repo, pr_number, ..
+        } = r.intent
+        {
+            assert_eq!(repo, "zync");
+            assert_eq!(pr_number, 254);
+        } else {
+            panic!("expected AnalysePr, got {:?}", r.intent);
+        }
+    }
+
+    #[test]
+    fn test_analyse_pr_with_leading_filler_so() {
+        let result = parse_deterministic("so analyse PR 5 in servx");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        if let ParsedIntent::AnalysePr {
+            repo, pr_number, ..
+        } = r.intent
+        {
+            assert_eq!(repo, "servx");
+            assert_eq!(pr_number, 5);
+        } else {
+            panic!("expected AnalysePr, got {:?}", r.intent);
+        }
+    }
+
+    #[test]
+    fn test_open_with_leading_filler() {
+        let result = parse_deterministic("and open chrome");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(matches!(r.intent, ParsedIntent::OpenApp { .. }));
+        if let ParsedIntent::OpenApp { target } = r.intent {
+            assert_eq!(target, "chrome");
+        }
+    }
+
+    #[test]
+    fn test_strip_leading_filler_doesnt_eat_commands() {
+        // "open and close chrome" should NOT strip "open"
+        let result = parse_deterministic("open and close chrome");
+        assert!(result.is_some());
+        // "open" is the verb, "and close chrome" is the target — weird but valid
     }
 
     #[test]

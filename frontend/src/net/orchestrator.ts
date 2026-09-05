@@ -20,6 +20,7 @@
 import { useAssistant } from "../store/assistant";
 import { speak, stopTts } from "../audio/ttsPlayer";
 import { useSidebar } from "../sidebar/sidebarStore";
+import { clearLongRunningInFlight } from "./wsBridge";
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -156,6 +157,10 @@ export async function initOrchestratorListener(): Promise<void> {
         // Final result from the subsystem
         currentRequestId = ev.request_id;
 
+        // Clear the long-running in-flight flag so subsequent voice
+        // commands aren't incorrectly deduped/queued.
+        clearLongRunningInFlight();
+
         // Hide loading (Rust already does this, but update store too)
         store.setLoadingVisible(false);
 
@@ -187,6 +192,7 @@ export async function initOrchestratorListener(): Promise<void> {
       case "done": {
         // Request is fully complete (TTS finished speaking)
         currentRequestId = null;
+        clearLongRunningInFlight();
         store.setLoadingVisible(false);
         store.setVisible(true); // Show orb briefly before reset
         setTimeout(() => store.reset(), 550);
@@ -195,6 +201,7 @@ export async function initOrchestratorListener(): Promise<void> {
 
       case "error": {
         console.error("[NEXUS] orchestrator: error:", ev.message);
+        clearLongRunningInFlight();
         store.setLoadingVisible(false);
         store.setVisible(true);
         store.setState("speaking");
@@ -213,6 +220,7 @@ export async function initOrchestratorListener(): Promise<void> {
         // GitHub destructive operation needs confirmation.
         // Store the pending command so when the user says "yes",
         // processViaOrchestrator can re-invoke with confirmed=true.
+        clearLongRunningInFlight();
         store.setLoadingVisible(false);
         store.setVisible(true);
         store.setState("speaking");
@@ -230,6 +238,7 @@ export async function initOrchestratorListener(): Promise<void> {
         // GitHub merge conflict detected.
         // Speak the conflict summary and display the conflict panel
         // in the sidebar with copy-paste options.
+        clearLongRunningInFlight();
         store.setLoadingVisible(false);
         store.setVisible(true);
         store.setState("speaking");

@@ -232,8 +232,11 @@ let longRunningInFlight = false;
 let lastSentTranscript = "";
 let longRunningTimeout: ReturnType<typeof setTimeout> | null = null;
 
-/** Called by wsBridge when a result arrives — clears in-flight + fires callback. */
-function clearLongRunningInFlight(): void {
+/** Called by wsBridge when a result arrives — clears in-flight + fires callback.
+ *  Also called by orchestrator.ts when an orchestrator event (result/done/error)
+ *  arrives, so the long-running in-flight flag is cleared regardless of which
+ *  path handled the request. */
+export function clearLongRunningInFlight(): void {
   if (longRunningTimeout) {
     clearTimeout(longRunningTimeout);
     longRunningTimeout = null;
