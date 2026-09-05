@@ -24,6 +24,8 @@ mod app_registry;
 pub mod intent_parser;
 mod nlu_client;
 mod lazy_nlu;
+mod brain_client;
+mod brain_monitor;
 mod lazy_stt;
 mod stt;
 pub mod stt_groq;

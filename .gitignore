@@ -8,6 +8,13 @@ src-tauri/gen/
 src-tauri/target/
 target/
 
+# Brain model (398MB, downloaded on demand — not committed)
+server/brain/model/*.gguf
+
+# Brain debug output
+brain_stdout.txt
+brain_stderr.txt
+
 # Python
 __pycache__/
 *.pyc
