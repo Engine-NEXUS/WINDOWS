@@ -1117,10 +1117,17 @@ static LAST_CALLBACK_FOR_RECOVERY: std::sync::atomic::AtomicU64 = std::sync::ato
 /// Used to rate-limit restarts and log the count for debugging.
 static RECOVERY_RESTART_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Baton-pass flag: when true, the frontend has the mic and the
+/// silence-recovery thread should NOT restart the stream.
+/// Restarting while the frontend is recording disrupts the capture
+/// and causes empty transcripts.
+static MIC_BATON_PASSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Pause the wake-word audio stream (release the OS mic lock).
 /// Called by the frontend via `pause_wakeword` IPC before getUserMedia().
 #[cfg(not(feature = "mock-wake"))]
 pub fn pause_stream() {
+    MIC_BATON_PASSED.store(true, std::sync::atomic::Ordering::Relaxed);
     use cpal::traits::StreamTrait;
     let guard = CPAL_STREAM.read();
     if let Some(ref stream) = *guard {
@@ -1137,6 +1144,7 @@ pub fn pause_stream() {
 /// Called by the frontend via `resume_wakeword` IPC after releasing the mic.
 #[cfg(not(feature = "mock-wake"))]
 pub fn resume_stream() {
+    MIC_BATON_PASSED.store(false, std::sync::atomic::Ordering::Relaxed);
     use cpal::traits::StreamTrait;
     let guard = CPAL_STREAM.read();
     if let Some(ref stream) = *guard {
@@ -1243,6 +1251,14 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                         backoff.min(60)
                     };
                     std::thread::sleep(std::time::Duration::from_secs(poll_secs));
+
+                    // Skip recovery if the frontend has the mic (baton pass).
+                    // The stream is intentionally paused — restarting would
+                    // disrupt the frontend's audio capture and cause empty transcripts.
+                    if MIC_BATON_PASSED.load(Ordering::Relaxed) {
+                        continue;
+                    }
+
                     let last_cb = LAST_CALLBACK_FOR_RECOVERY.load(Ordering::Relaxed);
                     let last_non_silent = LAST_NONSILENT_FOR_RECOVERY.load(Ordering::Relaxed);
                     let now_cb = CALLBACK_COUNT_GLOBAL.load(Ordering::Relaxed);

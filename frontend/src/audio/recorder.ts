@@ -230,13 +230,13 @@ function correctSttTranscript(transcript: string): string {
   // user sees the corrected name in the orb/sidebar instead of the misheard one.
   const repoCorrections: Array<[RegExp, string]> = [
     // "ledger ai" mishearings: "lageria", "ledger a", "ledger i", "ledgeria", "leg daria"
-    [/\b(?:in|of|from)\s+(lageria|ledgeria|ledger\s*a|ledger\s*i|leg\s*daria|lager\s*ai|ledger\s*are)\b/gi, " in ledger-ai"],
+    [/\b(?:in|of|from|for)\s+(lageria|ledgeria|ledger\s*a|ledger\s*i|leg\s*daria|lager\s*ai|ledger\s*are)\b/gi, " in ledger-ai"],
     // "servx" mishearings (existing)
-    [/\b(?:in|of|from)\s+(?:cervix|service|weeks|serve\s*x|ser\s*fixes|surf\s*x|ser\s*vicks)\b/gi, " in servx"],
-    // "zync" mishearings: "zinc", "sink", "sync", "zinck"
-    [/\b(?:in|of|from)\s+(zinc|sink|sync|zinck|zin)\b/gi, " in zync"],
+    [/\b(?:in|of|from|for)\s+(?:cervix|service|weeks|serve\s*x|ser\s*fixes|surf\s*x|ser\s*vicks)\b/gi, " in servx"],
+    // "zync" mishearings: "zinc", "sink", "sync", "zinck", "zin", "unzinc", "on zinc"
+    [/\b(?:in|of|from|for)\s+(zinc|sink|sync|zinck|zin|unzinc|on\s*zinc)\b/gi, " in zync"],
     // "nexus" mishearings: "nexus", "nexa", "nexis", "nexus agent"
-    [/\b(?:in|of|from)\s+(nexa|nexis|nexus\s*agent)\b/gi, " in nexus"],
+    [/\b(?:in|of|from|for)\s+(nexa|nexis|nexus\s*agent)\b/gi, " in nexus"],
   ];
   for (const [pattern, replacement] of repoCorrections) {
     const before = t;

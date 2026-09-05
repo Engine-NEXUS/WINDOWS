@@ -629,7 +629,10 @@ fn parse_pr_analyse(text: &str) -> Option<ParseResult> {
 fn fuzzy_match_repo_name(repo: &str) -> Option<String> {
     for &known in KNOWN_REPOS {
         let dist = levenshtein(repo, known);
-        // Threshold: 2 for short repos (Γëñ6 chars), 3 for longer
+        // Threshold: 2 for short repos (≤6 chars), 3 for longer.
+        // STT mishearings are primarily handled in the frontend
+        // (correctSttTranscript) before reaching the parser.
+        // The fuzzy matcher is a safety net for residual mishearings.
         let threshold = if known.len() <= 6 { 2 } else { 3 };
         if dist <= threshold && dist > 0 {
             return Some(known.to_string());
