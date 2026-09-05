@@ -44,10 +44,11 @@ from faster_whisper import WhisperModel
 log = logging.getLogger("NEXUS.stt")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
-# Default to tiny.en ΓÇö fastest model (~0.5s transcription on CPU).
+# Default to base.en — better accuracy than tiny.en for command recognition.
+# tiny.en (39M params) mishears "give me the PR list" as "Google me the PR list".
+# base.en (74M params) is ~1.5s on CPU but much more accurate.
 # The .en variant is English-only, which is faster and smaller than multilingual.
-# STT corrections in recorder.ts + Worker fuzzy matching handle mishearings.
-MODEL_NAME = os.getenv("WHISPER_MODEL", "tiny.en")
+MODEL_NAME = os.getenv("WHISPER_MODEL", "base.en")
 DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE", "int8")
 
@@ -80,6 +81,10 @@ _DEFAULT_HOTWORDS = [
     # Analysis commands (improves recognition of NEXUS commands)
     "analyse", "analyze", "analysis", "review", "pull request", "PR",
     "branch", "commit", "merge", "diff",
+    # PR list commands — STT was mishearing "give me the PR list" as
+    # "Google me the PR list" and "show me the PR list" as "So, you have to list"
+    "PR list", "PRs", "list PRs", "show PRs", "give me", "show me",
+    "list", "open PRs", "closed PRs",
     # Architecture mapper commands — comprehensive coverage
     "architecture", "architect", "mapper", "codebase", "dependency",
     "dependencies", "diagram", "graph", "viewer", "explorer",

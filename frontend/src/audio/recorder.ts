@@ -223,6 +223,35 @@ function correctSttTranscript(transcript: string): string {
   // "pr5" → "PR 5" (no space)
   t = t.replace(/\bpr(\d+)\b/gi, "PR $1");
 
+  // Fix "PR list" mishearings — tiny.en/base.en struggles with "give me the PR list"
+  // "Google me the PR list" → "give me the PR list"
+  if (/^google\s+me\s+(?:the\s+)?pr\s*list/i.test(t)) {
+    t = t.replace(/^google\s+me\s+/i, "give me ");
+    logFixes.push("google me→give me");
+  }
+  // "So, you have to list" → "show me the PR list"
+  if (/^so,?\s+you\s+have\s+to\s+list/i.test(t)) {
+    t = "show me the PR list";
+    logFixes.push("so you have to list→show me the PR list");
+  }
+  // "So, we are list" → "show me the PR list"
+  if (/^so,?\s+we\s+are\s+list/i.test(t)) {
+    t = "show me the PR list";
+    logFixes.push("so we are list→show me the PR list");
+  }
+  // "So, meet a PR list" → "show me the PR list"
+  if (/^so,?\s+meet\s+a\s+pr\s*list/i.test(t)) {
+    t = "show me the PR list";
+    logFixes.push("so meet a PR list→show me the PR list");
+  }
+  // "give me the PR this" → "give me the PR list"
+  t = t.replace(/\bpr\s+this\b/gi, "PR list");
+  // Strip leading "So, " filler that STT often inserts
+  if (/^so,?\s+/i.test(t) && !/^so,?\s+(show|give|list|open|close|analyse|merge|approve)/i.test(t)) {
+    t = t.replace(/^so,?\s+/i, "");
+    logFixes.push("so→(stripped)");
+  }
+
   // Fix known repo name mishearings.
   // tiny.en (39M params) struggles with multi-word and hyphenated repo names.
   // This map covers common phonetic mishearings for the user's repos.

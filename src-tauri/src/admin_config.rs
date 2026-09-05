@@ -40,9 +40,23 @@ fn default_min_confidence() -> f32 { 0.90 }
 static ADMIN_CONFIG: OnceLock<Option<AdminConfig>> = OnceLock::new();
 
 /// Get the path to the admin config file.
+/// Checks two locations:
+///   1. %APPDATA%/com.nexus.assistant/admin.json (production)
+///   2. server/admin/admin_config.json (dev fallback)
 fn admin_config_path() -> PathBuf {
     let base = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    base.join("com.nexus.assistant").join("admin.json")
+    let prod_path = base.join("com.nexus.assistant").join("admin.json");
+    if prod_path.exists() {
+        return prod_path;
+    }
+    // Dev fallback: look for server/admin/admin_config.json relative to CWD
+    let dev_path = PathBuf::from("server").join("admin").join("admin_config.json");
+    if dev_path.exists() {
+        tracing::info!("[admin] using dev admin config at {:?}", dev_path);
+        return dev_path;
+    }
+    // Return the prod path even if it doesn't exist (so the error message is helpful)
+    prod_path
 }
 
 /// Load the admin config from disk. Returns None if the file doesn't

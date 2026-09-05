@@ -2397,7 +2397,43 @@ pub async fn parse_transcript(transcript: String) -> Result<ParseResult, String>
         return Ok(result);
     }
 
-    // 2. Try NLU server (if available)
+    // 2. Try brain server FIRST (admin-only, if enabled)
+    // The brain (Qwen 0.5B LLM) is much smarter than BERT-Mini and can
+    // understand mishearings, filler words, and unusual phrasing.
+    // BERT-Mini often returns confident-but-wrong results (e.g. "So, you
+    // have to list." → MediaPlayPause with 0.90 confidence), which blocks
+    // the brain from ever being tried. By trying the brain first, we get
+    // accurate classification for admin users.
+    #[cfg(feature = "admin-brain")]
+    if crate::admin_config::is_admin() {
+        if let Some(result) = crate::brain_client::brain_classify(&transcript).await {
+            tracing::info!(
+                "[intent_parser] brain: {:?} (confidence={}, source={})",
+                result.intent,
+                result.confidence,
+                result.source
+            );
+
+            // Brain monitor: observe the brain's own result
+            let brain_intent_name = format!("{:?}", result.intent);
+            crate::brain_monitor::monitor_transcript(
+                transcript.clone(),
+                None, // deterministic missed
+                Some(brain_intent_name),
+            );
+
+            // Only accept brain result if confidence is reasonable
+            if result.confidence >= 0.5 {
+                return Ok(result);
+            }
+            tracing::info!(
+                "[intent_parser] brain confidence too low ({:.2}), falling back to NLU",
+                result.confidence
+            );
+        }
+    }
+
+    // 3. Try NLU server (BERT-Mini fallback)
     if let Some(result) = crate::nlu_client::parse_via_nlu(&transcript).await {
         tracing::info!(
             "[intent_parser] nlu: {:?} (confidence={})",
@@ -2406,7 +2442,6 @@ pub async fn parse_transcript(transcript: String) -> Result<ParseResult, String>
         );
 
         // Brain monitor: observe the NLU result (non-blocking, background)
-        // Only compiled when admin-brain feature is enabled.
         #[cfg(feature = "admin-brain")]
         {
             let nlu_intent_name = format!("{:?}", result.intent);
@@ -2416,27 +2451,6 @@ pub async fn parse_transcript(transcript: String) -> Result<ParseResult, String>
                 Some(nlu_intent_name),
             );
         }
-
-        return Ok(result);
-    }
-
-    // 3. Try brain server (if available, admin-only)
-    // Only compiled when the admin-brain feature is enabled.
-    #[cfg(feature = "admin-brain")]
-    if let Some(result) = crate::brain_client::brain_classify(&transcript).await {
-        tracing::info!(
-            "[intent_parser] brain: {:?} (confidence={})",
-            result.intent,
-            result.confidence
-        );
-
-        // Brain monitor: observe the brain's own result
-        let brain_intent_name = format!("{:?}", result.intent);
-        crate::brain_monitor::monitor_transcript(
-            transcript.clone(),
-            None, // deterministic missed
-            Some(brain_intent_name),
-        );
 
         return Ok(result);
     }
