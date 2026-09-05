@@ -36,6 +36,17 @@ pub struct CachedAudio {
     pub sample_rate: u32,
 }
 
+/// Truncate text to at most `max_chars` CHARACTERS for log lines.
+/// Byte-slicing (`&text[..n]`) panics on multibyte UTF-8 (measured
+/// 2026-09-19: byte 50 inside 'の' → panic → `panic=abort` → whole app
+/// dead). This can never panic by construction.
+pub fn truncate_for_log(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    text.chars().take(max_chars).collect()
+}
+
 impl TtsState {
     pub fn new() -> Self {
         let piper_engine = crate::tts_piper::new_engine();
@@ -143,7 +154,7 @@ pub fn stop_tts() -> Result<(), String> {
 pub async fn speak_text(
     text: String,
     voice: Option<String>,
-    speed: Option<f32>,
+    _speed: Option<f32>,
     state: State<'_, TtsState>,
     meeting: State<'_, Arc<MeetingState>>,
     app: tauri::AppHandle,
@@ -158,20 +169,33 @@ pub async fn speak_text(
     let voice_id = voice.unwrap_or_else(|| edge_voice.clone());
     let tts_volume_pct = read_tts_volume(&app);
 
-    // Try to synthesize using the 3-tier fallback chain
-    let (audio, sample_rate) = match synthesize_with_fallback(&text, &voice_id, &state).await {
-        Ok(result) => result,
-        Err(e) => {
-            tracing::error!("tts: all TTS engines failed: {}", e);
-            meeting.set_tts_playing(false);
-            return Err(e);
+    // Fast path: exact-match cache (<5ms, no network, no synthesis).
+    // Acks like "Ok sir." were pre-generated at boot — replay them instead
+    // of re-synthesizing (which previously paid a probe + cold-engine cost).
+    // Falls through to synthesis on miss.
+    let (audio, sample_rate) = if let Some(hit) = state.cache.lock().await.get(&text).cloned() {
+        tracing::info!("tts: cache hit for '{}'", text);
+        (hit.samples, hit.sample_rate)
+    } else {
+        // Try to synthesize using the 2-tier fallback chain
+        match synthesize_with_fallback(&text, &voice_id, &state).await {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!("tts: all TTS engines failed: {}", e);
+                meeting.set_tts_playing(false);
+                return Err(e);
+            }
         }
     };
 
     // Check if stop was requested during synthesis
     if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
         tracing::info!("tts: stop requested during synthesis, skipping playback");
-        meeting.set_tts_playing(false);
+        // Do NOT set tts_playing=false here. A newer TTS call (higher
+        // generation) is already active and has set tts_playing=true.
+        // If we set it false, the wake word detector becomes un-suppressed
+        // during the newer TTS playback, causing false wakes from TTS echo.
+        // Only the current (newest) generation should clear the flag.
         return Ok(());
     }
 
@@ -201,7 +225,49 @@ pub async fn speak_text(
     play_result
 }
 
-/// IPC: Play a pre-cached TTS phrase instantly from memory.
+/// IPC: Preview a specific TTS voice with a short demo phrase.
+/// Used by the settings sidebar voice picker — plays a demo without
+/// saving the voice as the default. Does NOT change system volume.
+#[tauri::command]
+pub async fn preview_voice(
+    voice_id: String,
+    text: Option<String>,
+    state: State<'_, TtsState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let demo_text = text.unwrap_or_else(|| {
+        if voice_id.starts_with("en-US-") {
+            let name = voice_id
+                .strip_prefix("en-US-")
+                .unwrap_or("")
+                .trim_end_matches("Neural");
+            format!("Hello, I'm {}. This is how I sound.", name)
+        } else if voice_id == "piper-amy" {
+            "Hello, I'm Amy. This is the offline voice.".to_string()
+        } else {
+            "Hello, this is a voice preview.".to_string()
+        }
+    });
+
+    tracing::info!("tts: previewing voice '{}' with text '{}'", voice_id, demo_text);
+
+    let my_generation = TTS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+
+    let (audio, sample_rate) = match synthesize_with_fallback(&demo_text, &voice_id, &state).await {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::error!("tts: voice preview failed for '{}': {}", voice_id, e);
+            return Err(e);
+        }
+    };
+
+    if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
+        return Ok(());
+    }
+
+    let _ = app.emit("tts:audio-started", &demo_text);
+    play_audio(audio, sample_rate, my_generation).await
+}
 ///
 /// Falls back to `speak_text` if the phrase is not in the cache.
 #[tauri::command]
@@ -246,7 +312,7 @@ pub async fn speak_cached(
     // Check if stop was requested
     if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
         tracing::info!("tts: stop requested before cached playback, skipping");
-        meeting.set_tts_playing(false);
+        // Do NOT set tts_playing=false — a newer generation is active.
         return Ok(());
     }
 
@@ -285,26 +351,52 @@ async fn synthesize_with_fallback(
     voice: &str,
     state: &TtsState,
 ) -> Result<(Vec<f32>, u32), String> {
+    // If the voice is explicitly the local Piper voice, skip Edge TTS.
+    if voice == "piper-amy" {
+        tracing::info!("tts: using Piper directly (piper-amy voice selected)");
+        crate::tts_network::mark_piper_loaded();
+        return crate::tts_piper::synthesize(&state.piper_engine, text).await;
+    }
+
     // Check network state — if network is down, skip Edge TTS entirely
     // and go straight to Piper (saves ~1-2s of waiting for Edge to fail).
-    let network_up = crate::tts_network::check_network_now().await;
-
-    if network_up {
-        // Tier 1: edge-tts (cloud, ~200ms, best quality, 0 MB RAM)
-        match crate::tts_edge::synthesize_to_pcm(text, voice).await {
-            Ok((samples, sr)) => {
+    //
+    // NOTE: this is the CACHED flag only (maintained by the background
+    // monitor + synthesis outcomes below). We used to run a live HTTPS
+    // probe here on every call — it lied (reported down while Groq worked)
+    // and added up to 5s before synthesis even started. The Edge attempt
+    // itself, raced with a timeout, is the only honest connectivity check.
+    if !crate::tts_network::is_network_up() {
+        tracing::info!("tts: network down (cached) — using Piper directly (skipping Edge TTS)");
+    } else {
+        // Tier 1: edge-tts (cloud, ~200ms, best quality, 0 MB RAM),
+        // raced with a timeout so a hanging endpoint can't stall speech.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            crate::tts_edge::synthesize_to_pcm(text, voice),
+        )
+        .await
+        {
+            Ok(Ok((samples, sr))) => {
                 tracing::info!("tts: edge-tts synthesis OK (cloud)");
+                crate::tts_network::set_network_up();
                 return Ok((samples, sr));
             }
-            Err(e) => {
-                tracing::warn!("tts: edge-tts failed ({}), trying Piper fallback", e);
-                // Edge TTS failed even though network check passed —
-                // could be a transient error. Mark network as down.
+            Err(_elapsed) => {
+                // Timeout = genuine transport failure → mark down so the
+                // next call skips Edge (saves 8s per call while offline).
+                tracing::warn!("tts: edge-tts timed out, trying Piper fallback");
                 crate::tts_network::set_network_down();
             }
+            Ok(Err(e)) => {
+                // Content/API rejection (bad voice, unsupported script, 4xx)
+                // is NOT a network outage — a single bad sentence must not
+                // poison the global flag (measured 2026-09-19: Japanese text
+                // → English voice rejection → "network down" → forced Piper
+                // → panic). Fall through to Piper for THIS call only.
+                tracing::warn!("tts: edge-tts rejected ({e}), trying Piper fallback (network flag untouched)");
+            }
         }
-    } else {
-        tracing::info!("tts: network down — using Piper directly (skipping Edge TTS)");
     }
 
     // Tier 2: Piper (local, ~40ms, good quality, ~80 MB RAM)
