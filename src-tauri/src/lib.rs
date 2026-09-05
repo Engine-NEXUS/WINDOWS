@@ -836,6 +836,8 @@ pub fn run() {
             commands::get_pending_sidebar_content,
             commands::show_loading_indicator,
             commands::hide_loading_indicator,
+            commands::show_pr_list_sidebar,
+            commands::hide_pr_list_sidebar,
             commands::pause_wakeword,
             commands::resume_wakeword,
             stt::transcribe_audio,

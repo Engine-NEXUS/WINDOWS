@@ -723,6 +723,33 @@ pub async fn process_transcript<R: Runtime>(
                         },
                     );
                 }
+                crate::github_cmd::GitHubResult::PrList { repo, state, prs } => {
+                    // Report GitHub command success to the brain monitor
+                    #[cfg(feature = "admin-brain")]
+                    {
+                        let intent_name = format!("{:?}", intent);
+                        crate::brain_monitor::report_execution_success(&transcript, &intent_name);
+                    }
+                    // Emit a short TTS ack + the structured PR list for the sidebar.
+                    // The frontend will open the PR list sidebar panel.
+                    let count = prs.len();
+                    let ack_text = format!(
+                        "Showing {} {} PR{} in {}.",
+                        count,
+                        state,
+                        if count == 1 { "" } else { "s" },
+                        repo
+                    );
+                    emit(
+                        &app,
+                        &OrchestratorEvent::Result {
+                            text: ack_text,
+                            request_id: request_id.clone(),
+                            analysis: None,
+                            dialog_state: None,
+                        },
+                    );
+                }
                 crate::github_cmd::GitHubResult::Error { message, .. } => {
                     // Report GitHub command failure to the brain monitor
                     #[cfg(feature = "admin-brain")]
@@ -1019,6 +1046,25 @@ pub async fn orchestrator_github_execute<R: Runtime>(
                 &app,
                 &OrchestratorEvent::Result {
                     text: text.clone(),
+                    request_id: request_id.clone(),
+                    analysis: None,
+                    dialog_state: None,
+                },
+            );
+        }
+        crate::github_cmd::GitHubResult::PrList { repo, state, prs } => {
+            let count = prs.len();
+            let ack_text = format!(
+                "Showing {} {} PR{} in {}.",
+                count,
+                state,
+                if count == 1 { "" } else { "s" },
+                repo
+            );
+            emit(
+                &app,
+                &OrchestratorEvent::Result {
+                    text: ack_text,
                     request_id: request_id.clone(),
                     analysis: None,
                     dialog_state: None,

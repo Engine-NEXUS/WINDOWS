@@ -413,6 +413,13 @@ pub enum GitHubResult {
     Text {
         text: String,
     },
+    /// Structured PR list — rendered in the sidebar as cards with
+    /// Merge and Analyse buttons. Not spoken via TTS (visual-only).
+    PrList {
+        repo: String,
+        state: String,
+        prs: Vec<PrSummary>,
+    },
     /// Destructive operation needs confirmation.
     /// The orchestrator should ask the user to confirm, then re-execute
     /// with `confirmed: true`.
@@ -436,6 +443,21 @@ pub enum GitHubResult {
         /// Whether this is a token/permission error (user should reconnect)
         is_auth_error: bool,
     },
+}
+
+/// A summary of a single PR for list display in the sidebar.
+#[derive(Debug, Clone, Serialize)]
+pub struct PrSummary {
+    pub number: u64,
+    pub title: String,
+    pub author: String,
+    pub repo: String,
+    pub state: String,
+    /// ISO 8601 timestamp of PR creation
+    pub created_at: String,
+    /// Whether the PR is mergeable (null = unknown, true/false = GitHub's answer)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mergeable: Option<bool>,
 }
 
 /// A file with merge conflicts.
@@ -970,7 +992,7 @@ async fn execute_list_prs(
         .pulls(owner, repo_name)
         .list()
         .state(state_enum)
-        .per_page(10)
+        .per_page(20)
         .send()
         .await
     {
@@ -984,28 +1006,29 @@ async fn execute_list_prs(
         };
     }
 
-    let pr_list: Vec<String> = prs
+    // Build structured PR summaries for the sidebar.
+    // Sort by created_at descending (latest first).
+    let mut pr_summaries: Vec<PrSummary> = prs
         .items
         .iter()
-        .enumerate()
-        .map(|(i, pr)| {
-            format!(
-                "{}. PR #{}: {} (by {})",
-                i + 1,
-                pr.number,
-                pr.title.as_deref().unwrap_or("(no title)"),
-                pr.user.as_ref().map(|u| u.login.as_str()).unwrap_or("unknown")
-            )
+        .map(|pr| PrSummary {
+            number: pr.number,
+            title: pr.title.clone().unwrap_or_else(|| "(no title)".to_string()),
+            author: pr.user.as_ref().map(|u| u.login.clone()).unwrap_or_else(|| "unknown".to_string()),
+            repo: repo.to_string(),
+            state: state.to_string(),
+            created_at: pr.created_at.map(|d| d.to_rfc3339()).unwrap_or_default(),
+            mergeable: None, // not available in list view; fetched on demand
         })
         .collect();
 
-    GitHubResult::Text {
-        text: format!(
-            "Here are the {} pull requests in {}:\n{}",
-            state,
-            repo,
-            pr_list.join("\n")
-        ),
+    // Sort by created_at descending (latest first)
+    pr_summaries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    GitHubResult::PrList {
+        repo: repo.to_string(),
+        state: state.to_string(),
+        prs: pr_summaries,
     }
 }
 

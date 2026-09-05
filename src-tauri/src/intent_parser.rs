@@ -1370,6 +1370,41 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- List PRs ---
+    // Natural language patterns: "give me the pr list", "show live prs",
+    // "show open prs", "latest prs", "what prs are open", etc.
+    // These all map to ListPrs with a state filter.
+    if let Some(caps) = regex_captures(text, r"^(?:give\s+me\s+|show\s+|get\s+|tell\s+me\s+|what\s+(?:are\s+|is\s+)?(?:the\s+)?)?(?:(open|closed|all|live|latest|active)\s+)?prs?(?:\s+list)?(?:\s+in\s+(\S+))?$") {
+        let raw_state = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("open");
+        let state = match raw_state {
+            "live" | "active" | "open" => "open",
+            "closed" => "closed",
+            "all" => "all",
+            "latest" => "open", // latest implies most recent open PRs
+            _ => "open",
+        }.to_string();
+        let repo = if let Some(r) = caps.get(2) {
+            clean_repo_name(r.as_str())
+        } else {
+            return extract_repo(text).map(|(repo, _)| ParseResult {
+                intent: ParsedIntent::GitHubCommand {
+                    command: GitHubCommand::ListPrs { repo, state },
+                },
+                confidence: 0.9,
+                source: "deterministic".to_string(),
+            });
+        };
+        if !repo.is_empty() {
+            return Some(ParseResult {
+                intent: ParsedIntent::GitHubCommand {
+                    command: GitHubCommand::ListPrs { repo, state },
+                },
+                confidence: 0.95,
+                source: "deterministic".to_string(),
+            });
+        }
+    }
+
+    // Original pattern: "list (open|closed|all) prs in <repo>"
     if let Some(caps) = regex_captures(text, r"^list\s+(open\s+|closed\s+|all\s+)?prs?(?:\s+in\s+(\S+))?$") {
         let state = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("open").to_string();
         let repo = if let Some(r) = caps.get(2) {

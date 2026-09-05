@@ -44,6 +44,7 @@ export default defineConfig({
         sidebar: resolve(__dirname, "sidebar.html"),
         architect: resolve(__dirname, "architect.html"),
         loading: resolve(__dirname, "loading.html"),
+        prList: resolve(__dirname, "pr-list.html"),
       },
     },
   },

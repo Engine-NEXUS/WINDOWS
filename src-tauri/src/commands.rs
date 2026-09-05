@@ -859,6 +859,49 @@ pub fn hide_sidebar<R: Runtime>(
     Ok(())
 }
 
+// ─── PR List sidebar window ───────────────────────────────────────────
+
+/// IPC: Show the PR list sidebar window.
+/// Creates a 500x800 transparent, always-on-top, non-activating window
+/// on the right edge of the screen. Shows the PR list with Merge and
+/// Analyse buttons. The window is created on-demand and destroyed when
+/// closed (frees ~250 MB of WebView2 processes).
+#[tauri::command]
+pub async fn show_pr_list_sidebar<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let win = crate::dyn_windows::get_or_create_window(
+        &app,
+        crate::dyn_windows::WindowConfig::pr_list_sidebar(),
+    )?;
+
+    // Position at the right edge of the screen, vertically centered
+    if let Ok(Some(monitor)) = win.current_monitor() {
+        let scale = monitor.scale_factor();
+        let screen = monitor.size();
+        let win_w = 500i32;
+        let win_h = 800i32;
+        let phys_w = (win_w as f64 * scale) as i32;
+        let phys_h = (win_h as f64 * scale) as i32;
+        let x = screen.width as i32 - phys_w - 12; // 12px from right edge
+        let y = (screen.height as i32 - phys_h) / 2; // vertically centered
+        use tauri::PhysicalPosition;
+        let _ = win.set_position(PhysicalPosition::new(x, y));
+    }
+
+    win.show().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// IPC: Hide (destroy) the PR list sidebar window.
+#[tauri::command]
+pub fn hide_pr_list_sidebar<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let _ = crate::dyn_windows::destroy_window(&app, "pr-list-sidebar");
+    Ok(())
+}
+
 // ─── Loading indicator window ────────────────────────────────────────
 
 /// IPC: Show the loading indicator window.

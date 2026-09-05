@@ -20,7 +20,7 @@
     },
     "security": {
       "csp": "default-src 'self'; connect-src 'self' wss: https: ipc: http://ipc.localhost; media-src 'self' blob: data: https: http:; img-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:",
-      "capabilities": ["main-cap", "sidebar-cap", "architect-cap", "loading-cap"],
+      "capabilities": ["main-cap", "sidebar-cap", "architect-cap", "loading-cap", "pr-list-cap"],
       "assetProtocol": { "enable": false }
     },
     "macOSPrivateApi": true
