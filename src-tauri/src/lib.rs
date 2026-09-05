@@ -38,6 +38,7 @@ mod stt_learning;
 mod tts;
 pub mod tts_edge;
 pub mod tts_piper;
+mod tts_network;
 mod volume;
 // Verification is not yet wired into wakeword_oww (see AGENTS.md known limitations).
 mod meeting_detect;
@@ -612,6 +613,10 @@ pub fn run() {
                 tts::pregenerate_cache(&prewarm_cache2, &voice).await;
                 tracing::info!("tts: startup cache pre-generation complete — ack phrases ready");
             });
+
+            // Start TTS network monitor — checks Edge TTS availability every 60s
+            // and unloads Piper after 10 minutes of stable network.
+            tts_network::start_network_monitor();
 
             // STT pre-warm removed in Phase 2.
             // Primary STT is now Groq cloud (0 MB RAM, ~247ms latency).

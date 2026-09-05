@@ -13,7 +13,7 @@ let ttsGeneration = 0;
 export interface VoiceOption {
   id: string;
   name: string;
-  provider: "kokoro" | "system";
+  provider: "edge" | "kokoro" | "system";
   accent: string;
   description: string;
   locale: string;
@@ -23,24 +23,24 @@ export interface VoiceOption {
 
 export const CURATED_VOICES: VoiceOption[] = [
   {
-    id: "af_sky",
-    name: "Sky (Kokoro)",
-    provider: "kokoro",
+    id: "en-US-AvaNeural",
+    name: "Ava (Edge TTS)",
+    provider: "edge",
     accent: "American",
-    description: "Warm, natural female voice. Runs 100% locally with low latency (~1.7s load, ~350MB RAM).",
+    description: "Warm, natural female voice. Cloud-powered, free, 0 MB RAM.",
     locale: "en-US",
     gender: "female",
-    sampleText: "Hello, I am Sky. All systems are operational.",
+    sampleText: "Hello, I am Ava. All systems are operational.",
   },
   {
-    id: "am_adam",
-    name: "Adam (Kokoro)",
-    provider: "kokoro",
+    id: "en-US-GuyNeural",
+    name: "Guy (Edge TTS)",
+    provider: "edge",
     accent: "American",
-    description: "Deep, clear male voice. Runs 100% locally.",
+    description: "Deep, clear male voice. Cloud-powered, free, 0 MB RAM.",
     locale: "en-US",
     gender: "male",
-    sampleText: "Hello, I am Adam. All systems are operational.",
+    sampleText: "Hello, I am Guy. All systems are operational.",
   },
 ];
 
@@ -135,10 +135,10 @@ export async function previewVoice(
   speed?: number,
 ): Promise<void> {
   stopTts();
-  if (voice.provider === "kokoro") {
-    // After stopTts, capture the new generation (stopTts incremented it)
-    return playKokoro(voice.sampleText, voice.id, speed ?? 1.15, ttsGeneration, onEnd);
-  }
+  // All voices now go through the Rust speak_text command which tries
+  // Edge TTS (cloud) first, then Piper (local) fallback.
+  // The voice.id should be a valid Edge TTS voice (e.g. "en-US-AvaNeural").
+  return playKokoro(voice.sampleText, voice.id, speed ?? 1.15, ttsGeneration, onEnd);
 }
 
 export async function speak(text: string, onEnd?: () => void): Promise<void> {
@@ -166,7 +166,10 @@ export async function speak(text: string, onEnd?: () => void): Promise<void> {
     return;
   }
 
-  const voiceId = settings?.ttsVoice || "af_sky";
+  // Use Edge TTS voice (cloud) — this is the primary engine.
+  // The old default "af_sky" was a Kokoro voice ID that Edge TTS rejects,
+  // causing every speak() to silently fall back to Piper (local).
+  const voiceId = settings?.edgeTtsVoice || "en-US-AvaNeural";
   const speed = settings?.speechRate ?? 1.15;
 
   return playKokoro(text, voiceId, speed, myGen, onEnd);

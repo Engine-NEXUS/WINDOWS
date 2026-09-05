@@ -16,6 +16,11 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tauri::{Emitter, State};
 
+/// Global Piper engine reference — set at TtsState creation.
+/// Allows the network monitor to unload Piper without accessing TtsState.
+static GLOBAL_PIPER_ENGINE: std::sync::OnceLock<crate::tts_piper::PiperEngine> =
+    std::sync::OnceLock::new();
+
 pub struct TtsState {
     /// Piper fallback engine (lazy-loaded only when edge-tts fails).
     pub piper_engine: crate::tts_piper::PiperEngine,
@@ -33,10 +38,20 @@ pub struct CachedAudio {
 
 impl TtsState {
     pub fn new() -> Self {
+        let piper_engine = crate::tts_piper::new_engine();
+        // Store global reference for the network monitor to access
+        let _ = GLOBAL_PIPER_ENGINE.set(piper_engine.clone());
         Self {
-            piper_engine: crate::tts_piper::new_engine(),
+            piper_engine,
             cache: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+}
+
+/// Unload the Piper engine globally (called by network monitor after 10 min).
+pub async fn unload_piper_global() {
+    if let Some(engine) = GLOBAL_PIPER_ENGINE.get() {
+        crate::tts_piper::unload_engine(engine).await;
     }
 }
 
@@ -270,21 +285,33 @@ async fn synthesize_with_fallback(
     voice: &str,
     state: &TtsState,
 ) -> Result<(Vec<f32>, u32), String> {
-    // Tier 1: edge-tts (cloud, ~200ms, best quality)
-    match crate::tts_edge::synthesize_to_pcm(text, voice).await {
-        Ok((samples, sr)) => {
-            tracing::info!("tts: edge-tts synthesis OK");
-            return Ok((samples, sr));
+    // Check network state — if network is down, skip Edge TTS entirely
+    // and go straight to Piper (saves ~1-2s of waiting for Edge to fail).
+    let network_up = crate::tts_network::check_network_now().await;
+
+    if network_up {
+        // Tier 1: edge-tts (cloud, ~200ms, best quality, 0 MB RAM)
+        match crate::tts_edge::synthesize_to_pcm(text, voice).await {
+            Ok((samples, sr)) => {
+                tracing::info!("tts: edge-tts synthesis OK (cloud)");
+                return Ok((samples, sr));
+            }
+            Err(e) => {
+                tracing::warn!("tts: edge-tts failed ({}), trying Piper fallback", e);
+                // Edge TTS failed even though network check passed —
+                // could be a transient error. Mark network as down.
+                crate::tts_network::set_network_down();
+            }
         }
-        Err(e) => {
-            tracing::warn!("tts: edge-tts failed ({}), trying Piper fallback", e);
-        }
+    } else {
+        tracing::info!("tts: network down — using Piper directly (skipping Edge TTS)");
     }
 
-    // Tier 2: Piper (local, ~40ms, good quality, lazy-loaded)
+    // Tier 2: Piper (local, ~40ms, good quality, ~80 MB RAM)
+    crate::tts_network::mark_piper_loaded();
     match crate::tts_piper::synthesize(&state.piper_engine, text).await {
         Ok((samples, sr)) => {
-            tracing::info!("tts: piper fallback synthesis OK");
+            tracing::info!("tts: piper fallback synthesis OK (local)");
             return Ok((samples, sr));
         }
         Err(e) => {
