@@ -330,6 +330,33 @@ pub async fn process_transcript<R: Runtime>(
     // 2. Route to subsystem
     let subsystem = route_intent(&intent);
 
+    // 2b. Check for verbal "wrong" feedback (admin says "wrong" after a bad command)
+    #[cfg(feature = "admin-brain")]
+    {
+        if crate::brain_monitor::is_verbal_wrong(&transcript) {
+            crate::brain_monitor::report_verbal_wrong();
+            // Emit done immediately — "wrong" is a meta-command, not a real command
+            emit(
+                &app,
+                &OrchestratorEvent::Done {
+                    request_id: "verbal_wrong".to_string(),
+                },
+            );
+            return Ok(ProcessResult {
+                request_id: "verbal_wrong".to_string(),
+                subsystem: Subsystem::None,
+                handled_locally: true,
+            });
+        }
+    }
+
+    // 2c. Record the last command (for verbal "wrong" feedback)
+    #[cfg(feature = "admin-brain")]
+    {
+        let intent_name = format!("{:?}", intent);
+        crate::brain_monitor::record_last_command(transcript.clone(), intent_name);
+    }
+
     // 3. Install new request (cancels previous)
     let (request_id, cancel_flag) = install_new_request(subsystem.clone());
 
@@ -430,6 +457,17 @@ pub async fn process_transcript<R: Runtime>(
                 }
                 Err(e) => {
                     hide_loading(&app);
+                    // Report execution failure to the brain monitor
+                    // (admin-only, no-op if not admin)
+                    #[cfg(feature = "admin-brain")]
+                    {
+                        let intent_name = format!("{:?}", intent);
+                        crate::brain_monitor::report_execution_failure(
+                            &transcript,
+                            &intent_name,
+                            &e,
+                        );
+                    }
                     emit(
                         &app,
                         &OrchestratorEvent::Error {
@@ -640,6 +678,16 @@ pub async fn process_transcript<R: Runtime>(
                     );
                 }
                 crate::github_cmd::GitHubResult::Error { message, .. } => {
+                    // Report GitHub command failure to the brain monitor
+                    #[cfg(feature = "admin-brain")]
+                    {
+                        let intent_name = format!("{:?}", intent);
+                        crate::brain_monitor::report_execution_failure(
+                            &transcript,
+                            &intent_name,
+                            message,
+                        );
+                    }
                     emit(
                         &app,
                         &OrchestratorEvent::Error {

@@ -13,7 +13,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use tokio::sync::Mutex;
 
 use crate::brain_client;
 
@@ -46,6 +45,22 @@ struct GapEntry {
     brain_confidence: f32,
     timestamp: f64,
 }
+
+/// Rejected example entry (written to rejected_examples.jsonl when a
+/// command executes wrongly). These are REMOVED from the dataset before
+/// retraining — BERT-Mini unlearns the mistake.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RejectedExample {
+    text: String,
+    intent: String,
+    reason: String,       // "execution_failure", "verbal_wrong", "low_confidence"
+    error: Option<String>, // error message if available
+    timestamp: f64,
+}
+
+/// Track the last command's transcript + intent for verbal "wrong" feedback.
+use std::sync::Mutex as StdMutex;
+static LAST_COMMAND: StdMutex<Option<(String, String)>> = StdMutex::new(None);
 
 /// Get the path to the brain data directory.
 /// Uses the admin data directory at server/admin/data/ (relative to the
@@ -355,4 +370,218 @@ pub fn gaps_count() -> usize {
     std::fs::read_to_string(&path)
         .map(|s| s.lines().filter(|l| !l.is_empty()).count())
         .unwrap_or(0)
+}
+
+/// Get the number of rejected examples in the file.
+pub fn rejected_count() -> usize {
+    let path = rejected_examples_path();
+    if !path.exists() {
+        return 0;
+    }
+    std::fs::read_to_string(&path)
+        .map(|s| s.lines().filter(|l| !l.is_empty()).count())
+        .unwrap_or(0)
+}
+
+/// Record the last command's transcript + intent.
+///
+/// Called by the orchestrator after a command is parsed. This allows
+/// the admin to say "wrong" later and have the brain mark the correct
+/// command as bad.
+pub fn record_last_command(transcript: String, intent: String) {
+    if !crate::admin_config::is_admin() {
+        return;
+    }
+    let mut guard = LAST_COMMAND.lock().unwrap();
+    *guard = Some((transcript, intent));
+}
+
+/// Report that a command executed successfully.
+///
+/// This confirms the phrasing was correct — the brain can be more
+/// confident about it in future classifications.
+pub fn report_execution_success(transcript: &str, intent: &str) {
+    if !crate::admin_config::is_admin() {
+        return;
+    }
+    tracing::debug!(
+        "[brain_monitor] execution success: transcript='{}' intent='{}'",
+        transcript,
+        intent
+    );
+    // Success doesn't need to be logged to a file — the brain already
+    // auto-approves phrasings via the 3-gate system. This function
+    // exists for future use (e.g. confidence boosting).
+}
+
+/// Report that a command executed wrongly (automatic feedback).
+///
+/// This is called by the orchestrator when a command fails (GitHub API
+/// error, app not found, etc.). The brain marks the phrasing as bad
+/// and adds it to rejected_examples.jsonl. On the next retrain, this
+/// example is REMOVED from the dataset — BERT-Mini unlearns the mistake.
+pub fn report_execution_failure(transcript: &str, intent: &str, error: &str) {
+    if !crate::admin_config::is_admin() {
+        return;
+    }
+
+    tracing::info!(
+        "[brain_monitor] execution failure: transcript='{}' intent='{}' error='{}'",
+        transcript,
+        intent,
+        error
+    );
+
+    let rejected = RejectedExample {
+        text: transcript.to_string(),
+        intent: intent.to_string(),
+        reason: "execution_failure".to_string(),
+        error: Some(error.to_string()),
+        timestamp: chrono::Utc::now().timestamp() as f64,
+    };
+
+    append_jsonl(&rejected_examples_path(), &rejected);
+}
+
+/// Report that the admin said "wrong" about the last command (verbal feedback).
+///
+/// The admin says "wrong" or "no" or "that was wrong" after a bad command.
+/// The brain detects this (via the deterministic parser) and calls this
+/// function. It marks the LAST command's phrasing as bad.
+pub fn report_verbal_wrong() {
+    if !crate::admin_config::is_admin() {
+        return;
+    }
+
+    let last = {
+        let mut guard = LAST_COMMAND.lock().unwrap();
+        guard.take()
+    };
+
+    if let Some((transcript, intent)) = last {
+        tracing::info!(
+            "[brain_monitor] verbal 'wrong' — rejecting last command: transcript='{}' intent='{}'",
+            transcript,
+            intent
+        );
+
+        let rejected = RejectedExample {
+            text: transcript,
+            intent,
+            reason: "verbal_wrong".to_string(),
+            error: None,
+            timestamp: chrono::Utc::now().timestamp() as f64,
+        };
+
+        append_jsonl(&rejected_examples_path(), &rejected);
+    } else {
+        tracing::debug!("[brain_monitor] verbal 'wrong' but no last command recorded");
+    }
+}
+
+/// Check if a transcript is a "wrong" / "no" / "that was wrong" command.
+///
+/// This is called by the orchestrator to detect verbal feedback.
+/// Returns true if the transcript matches a "wrong" pattern.
+pub fn is_verbal_wrong(transcript: &str) -> bool {
+    let lower = transcript.to_lowercase().trim().to_string();
+    matches!(lower.as_str(),
+        "wrong" | "no" | "nope" | "that was wrong" | "that's wrong"
+        | "not right" | "incorrect" | "bad" | "mistake" | "error"
+        | "not what i meant" | "not what i wanted"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_verbal_wrong_exact() {
+        assert!(is_verbal_wrong("wrong"));
+        assert!(is_verbal_wrong("no"));
+        assert!(is_verbal_wrong("nope"));
+        assert!(is_verbal_wrong("that was wrong"));
+        assert!(is_verbal_wrong("that's wrong"));
+        assert!(is_verbal_wrong("not right"));
+        assert!(is_verbal_wrong("incorrect"));
+        assert!(is_verbal_wrong("bad"));
+        assert!(is_verbal_wrong("mistake"));
+        assert!(is_verbal_wrong("error"));
+        assert!(is_verbal_wrong("not what i meant"));
+        assert!(is_verbal_wrong("not what i wanted"));
+    }
+
+    #[test]
+    fn test_is_verbal_wrong_case_insensitive() {
+        assert!(is_verbal_wrong("Wrong"));
+        assert!(is_verbal_wrong("WRONG"));
+        assert!(is_verbal_wrong("No"));
+        assert!(is_verbal_wrong("That Was Wrong"));
+    }
+
+    #[test]
+    fn test_is_verbal_wrong_with_whitespace() {
+        assert!(is_verbal_wrong("  wrong  "));
+        assert!(is_verbal_wrong(" wrong "));
+        assert!(is_verbal_wrong("\twrong\t"));
+    }
+
+    #[test]
+    fn test_is_verbal_wrong_not_triggered_by_real_commands() {
+        assert!(!is_verbal_wrong("open whatsapp"));
+        assert!(!is_verbal_wrong("analyse pr 254 in zync"));
+        assert!(!is_verbal_wrong("close chrome"));
+        assert!(!is_verbal_wrong("search for cats"));
+        assert!(!is_verbal_wrong("merge pr 23 in owner/repo"));
+        assert!(!is_verbal_wrong("hello"));
+        assert!(!is_verbal_wrong("pause"));
+        assert!(!is_verbal_wrong("next track"));
+        // "no" is tricky — it's a valid verbal wrong, but "no problem" is not
+        assert!(!is_verbal_wrong("no problem"));
+        assert!(!is_verbal_wrong("no thanks"));
+    }
+
+    #[test]
+    fn test_record_and_reject_last_command() {
+        // Test the record + verbal wrong flow
+        // Set the last command directly
+        {
+            let mut guard = LAST_COMMAND.lock().unwrap();
+            *guard = Some(("open wrongapp".to_string(), "open_app".to_string()));
+        }
+
+        // Simulate verbal wrong
+        report_verbal_wrong();
+
+        // If admin: LAST_COMMAND should be cleared and rejected file should have an entry
+        // If not admin: report_verbal_wrong() is a no-op, LAST_COMMAND stays set
+        if crate::admin_config::is_admin() {
+            {
+                let guard = LAST_COMMAND.lock().unwrap();
+                assert!(guard.is_none(), "LAST_COMMAND should be cleared after verbal wrong (admin)");
+            }
+            let count = rejected_count();
+            assert!(count > 0, "rejected_examples.jsonl should have at least one entry (admin)");
+        } else {
+            // Not admin — report_verbal_wrong is a no-op, LAST_COMMAND stays
+            {
+                let guard = LAST_COMMAND.lock().unwrap();
+                assert!(guard.is_some(), "LAST_COMMAND should stay when not admin");
+            }
+        }
+
+        // Clean up
+        {
+            let mut guard = LAST_COMMAND.lock().unwrap();
+            *guard = None;
+        }
+    }
+
+    #[test]
+    fn test_rejected_examples_path() {
+        let path = rejected_examples_path();
+        // Should end with rejected_examples.jsonl
+        assert!(path.to_string_lossy().contains("rejected_examples.jsonl"));
+    }
 }
