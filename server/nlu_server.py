@@ -32,24 +32,82 @@ ONNX_PATH = MODEL_DIR / "nexus_nlu.onnx"
 TOKENIZER_DIR = MODEL_DIR / "tokenizer"
 
 INTENTS = [
+    # Local commands (11)
     "open_app",
+    "open_url",
+    "close_app",
+    "whatsapp_chat",
+    "open_architect",
+    "search",
+    "media_play_pause",
+    "media_next",
+    "media_previous",
+    "media_stop",
+    "greeting",
+    # Analysis commands (4)
     "analyse_repo",
     "analyse_pr",
-    "search",
-    "open_architect",
-    "media_control",
+    "analyse_latest_pr",
+    "check_branch",
+    # GitHub PR operations (10)
+    "merge_pr",
+    "approve_pr",
+    "close_pr",
+    "list_prs",
+    "get_pr",
+    "create_pr",
+    "update_branch",
+    "revert_pr",
+    "list_pr_files",
+    "comment_pr",
+    # GitHub collaborator/org (6)
+    "add_collaborator",
+    "remove_collaborator",
+    "list_collaborators",
+    "add_org_member",
+    "remove_org_member",
+    "list_org_members",
+    # GitHub branch/release/workflow (8)
+    "delete_branch",
+    "list_branches",
+    "create_release",
+    "list_releases",
+    "list_workflows",
+    "list_workflow_runs",
+    "rerun_workflow",
+    "cancel_workflow",
+    # Fallback (1)
     "unknown",
 ]
 ID_TO_INTENT = {i: intent for i, intent in enumerate(INTENTS)}
 
 SLOT_TYPES = [
     "O",
+    # App/URL
     "B-app_name", "I-app_name",
+    "B-url", "I-url",
+    # Communication
+    "B-contact", "I-contact",
+    # Search
+    "B-query", "I-query",
+    # Repo/PR
     "B-repo", "I-repo",
     "B-owner", "I-owner",
     "B-pr_number", "I-pr_number",
-    "B-query", "I-query",
-    "B-media_action", "I-media_action",
+    "B-author", "I-author",
+    # GitHub entities
+    "B-username", "I-username",
+    "B-org", "I-org",
+    "B-branch", "I-branch",
+    "B-release_tag", "I-release_tag",
+    "B-workflow_id", "I-workflow_id",
+    # PR creation
+    "B-title", "I-title",
+    "B-head", "I-head",
+    "B-base", "I-base",
+    "B-body", "I-body",
+    # Greeting
+    "B-greeting_type", "I-greeting_type",
 ]
 ID_TO_SLOT = {i: slot for i, slot in enumerate(SLOT_TYPES)}
 

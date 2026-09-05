@@ -2,14 +2,53 @@
 """
 NEXUS NLU — Train a BERT-Mini joint intent+slot model for command understanding.
 
-Intents:
-  - open_app       (slots: app_name)
-  - analyse_repo   (slots: owner?, repo)
-  - analyse_pr     (slots: owner?, repo, pr_number)
-  - search         (slots: query)
-  - open_architect ()
-  - media_control  (slots: action=play_pause|next|previous|stop)
-  - unknown        ()
+Intents (46 total — covers every ParsedIntent + GitHubCommand variant):
+  Local commands:
+    - open_app          (slots: app_name)
+    - open_url          (slots: url)
+    - close_app         (slots: app_name)
+    - whatsapp_chat     (slots: contact)
+    - open_architect    ()
+    - search            (slots: query)
+    - media_play_pause  ()
+    - media_next        ()
+    - media_previous    ()
+    - media_stop        ()
+    - greeting          (slots: greeting_type)
+  Analysis commands:
+    - analyse_repo      (slots: owner?, repo)
+    - analyse_pr        (slots: owner?, repo, pr_number)
+    - analyse_latest_pr (slots: owner?, repo, author?)
+    - check_branch      (slots: owner?, repo, author?)
+  GitHub PR operations:
+    - merge_pr          (slots: repo, pr_number)
+    - approve_pr        (slots: repo, pr_number)
+    - close_pr          (slots: repo, pr_number)
+    - list_prs          (slots: repo)
+    - get_pr            (slots: repo, pr_number)
+    - create_pr         (slots: repo, title, head, base)
+    - update_branch     (slots: repo, pr_number)
+    - revert_pr         (slots: repo, pr_number)
+    - list_pr_files     (slots: repo, pr_number)
+    - comment_pr        (slots: repo, pr_number, body)
+  GitHub collaborator/org:
+    - add_collaborator       (slots: repo, username, permission?)
+    - remove_collaborator    (slots: repo, username)
+    - list_collaborators     (slots: repo)
+    - add_org_member         (slots: org, username, role?)
+    - remove_org_member      (slots: org, username)
+    - list_org_members       (slots: org)
+  GitHub branch/release/workflow:
+    - delete_branch     (slots: repo, branch)
+    - list_branches     (slots: repo)
+    - create_release    (slots: repo, release_tag)
+    - list_releases     (slots: repo)
+    - list_workflows    (slots: repo)
+    - list_workflow_runs (slots: repo)
+    - rerun_workflow    (slots: repo, workflow_id)
+    - cancel_workflow   (slots: repo, workflow_id)
+  Fallback:
+    - unknown           ()
 
 The model is fine-tuned from google/bert_uncased_L-2_H-128_A-2 (BERT-Mini, ~4.4M params).
 Exported to ONNX for fast CPU inference in the NLU server.
@@ -41,27 +80,86 @@ OUTPUT_DIR = Path(__file__).parent / "model"
 ONNX_PATH = OUTPUT_DIR / "nexus_nlu.onnx"
 DATASET_PATH = Path(__file__).parent / "dataset.json"
 
+# 46 intents — covers every ParsedIntent + GitHubCommand variant
 INTENTS = [
+    # Local commands (11)
     "open_app",
+    "open_url",
+    "close_app",
+    "whatsapp_chat",
+    "open_architect",
+    "search",
+    "media_play_pause",
+    "media_next",
+    "media_previous",
+    "media_stop",
+    "greeting",
+    # Analysis commands (4)
     "analyse_repo",
     "analyse_pr",
-    "search",
-    "open_architect",
-    "media_control",
+    "analyse_latest_pr",
+    "check_branch",
+    # GitHub PR operations (10)
+    "merge_pr",
+    "approve_pr",
+    "close_pr",
+    "list_prs",
+    "get_pr",
+    "create_pr",
+    "update_branch",
+    "revert_pr",
+    "list_pr_files",
+    "comment_pr",
+    # GitHub collaborator/org (6)
+    "add_collaborator",
+    "remove_collaborator",
+    "list_collaborators",
+    "add_org_member",
+    "remove_org_member",
+    "list_org_members",
+    # GitHub branch/release/workflow (8)
+    "delete_branch",
+    "list_branches",
+    "create_release",
+    "list_releases",
+    "list_workflows",
+    "list_workflow_runs",
+    "rerun_workflow",
+    "cancel_workflow",
+    # Fallback (1)
     "unknown",
 ]
 INTENT_TO_ID = {intent: i for i, intent in enumerate(INTENTS)}
 ID_TO_INTENT = {i: intent for i, intent in enumerate(INTENTS)}
 
-# Slot types: BIO tagging
+# Slot types: BIO tagging — expanded for all 46 intents
 SLOT_TYPES = [
     "O",
+    # App/URL
     "B-app_name", "I-app_name",
+    "B-url", "I-url",
+    # Communication
+    "B-contact", "I-contact",
+    # Search
+    "B-query", "I-query",
+    # Repo/PR
     "B-repo", "I-repo",
     "B-owner", "I-owner",
     "B-pr_number", "I-pr_number",
-    "B-query", "I-query",
-    "B-media_action", "I-media_action",
+    "B-author", "I-author",
+    # GitHub entities
+    "B-username", "I-username",
+    "B-org", "I-org",
+    "B-branch", "I-branch",
+    "B-release_tag", "I-release_tag",
+    "B-workflow_id", "I-workflow_id",
+    # PR creation
+    "B-title", "I-title",
+    "B-head", "I-head",
+    "B-base", "I-base",
+    "B-body", "I-body",
+    # Greeting
+    "B-greeting_type", "I-greeting_type",
 ]
 SLOT_TO_ID = {slot: i for i, slot in enumerate(SLOT_TYPES)}
 ID_TO_SLOT = {i: slot for i, slot in enumerate(SLOT_TYPES)}
@@ -212,14 +310,43 @@ def train():
     print(f"  Train: {len(train_data)} examples")
     print(f"  Test:  {len(test_data)} examples")
 
+    # Split test into validation + test (50/50) so we don't overfit to test
+    if len(test_data) >= 4:
+        random.shuffle(test_data)
+        split = len(test_data) // 2
+        val_data = test_data[:split]
+        test_data = test_data[split:]
+    else:
+        val_data = test_data
+    print(f"  Val:   {len(val_data)} examples")
+
     print(f"Loading tokenizer: {MODEL_NAME}")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
     train_dataset = NLUDataset(train_data, tokenizer)
+    val_dataset = NLUDataset(val_data, tokenizer) if val_data else None
     test_dataset = NLUDataset(test_data, tokenizer) if test_data else None
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE) if val_dataset else None
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE) if test_dataset else None
+
+    # Compute class weights to counter imbalance (e.g. open_app dominating)
+    intent_counts = [0] * len(INTENTS)
+    for ex in train_data:
+        iid = INTENT_TO_ID.get(ex["intent"], INTENT_TO_ID["unknown"])
+        intent_counts[iid] += 1
+    # Inverse frequency weighting, clamped to avoid extreme values
+    intent_weights = []
+    for count in intent_counts:
+        if count == 0:
+            intent_weights.append(1.0)
+        else:
+            w = len(train_data) / (len(INTENTS) * count)
+            intent_weights.append(min(w, 5.0))  # cap at 5x
+    intent_weights_tensor = torch.tensor(intent_weights, dtype=torch.float)
+    print(f"  Intent counts: {dict(zip(INTENTS, intent_counts))}")
+    print(f"  Class weights: {[round(w, 2) for w in intent_weights]}")
 
     print("Initializing model...")
     model = JointNLUModel()
@@ -231,7 +358,7 @@ def train():
     total_steps = len(train_loader) * EPOCHS
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=50, num_training_steps=total_steps)
 
-    intent_loss_fn = nn.CrossEntropyLoss()
+    intent_loss_fn = nn.CrossEntropyLoss(weight=intent_weights_tensor)
     slot_loss_fn = nn.CrossEntropyLoss(ignore_index=SLOT_TO_ID["O"])
 
     print(f"Training for {EPOCHS} epochs...")
@@ -269,14 +396,14 @@ def train():
         train_acc = correct_intent / total
         avg_loss = total_loss / len(train_loader)
 
-        # Evaluate
-        test_acc = 0.0
-        if test_loader:
+        # Evaluate on validation set (for model selection)
+        val_acc = 0.0
+        if val_loader:
             model.eval()
             correct = 0
             total = 0
             with torch.no_grad():
-                for batch in test_loader:
+                for batch in val_loader:
                     input_ids = batch["input_ids"].to(device)
                     attention_mask = batch["attention_mask"].to(device)
                     intent_labels = batch["intent_label"].to(device)
@@ -284,18 +411,36 @@ def train():
                     preds = intent_logits.argmax(dim=-1)
                     correct += (preds == intent_labels).sum().item()
                     total += len(intent_labels)
-            test_acc = correct / total
+            val_acc = correct / total
 
-        print(f"  Epoch {epoch+1:2d}/{EPOCHS}: loss={avg_loss:.4f}, train_acc={train_acc:.3f}, test_acc={test_acc:.3f}")
+        print(f"  Epoch {epoch+1:2d}/{EPOCHS}: loss={avg_loss:.4f}, train_acc={train_acc:.3f}, val_acc={val_acc:.3f}")
 
-        # Save best model
-        if test_acc > best_test_acc:
-            best_test_acc = test_acc
+        # Save best model (based on validation accuracy)
+        if val_acc > best_test_acc:
+            best_test_acc = val_acc
             os.makedirs(OUTPUT_DIR, exist_ok=True)
             torch.save(model.state_dict(), OUTPUT_DIR / "best_model.pt")
-            print(f"    -> saved best model (test_acc={test_acc:.3f})")
+            print(f"    -> saved best model (val_acc={val_acc:.3f})")
 
-    print(f"\nBest test accuracy: {best_test_acc:.3f}")
+    # Final evaluation on test set
+    final_test_acc = 0.0
+    if test_loader:
+        model.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for batch in test_loader:
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                intent_labels = batch["intent_label"].to(device)
+                intent_logits, _ = model(input_ids, attention_mask)
+                preds = intent_logits.argmax(dim=-1)
+                correct += (preds == intent_labels).sum().item()
+                total += len(intent_labels)
+        final_test_acc = correct / total
+
+    print(f"\nBest validation accuracy: {best_test_acc:.3f}")
+    print(f"Final test accuracy: {final_test_acc:.3f}")
 
     # Export to ONNX
     print("Exporting to ONNX...")
