@@ -39,6 +39,9 @@ mod tts;
 pub mod tts_edge;
 pub mod tts_piper;
 mod tts_network;
+#[cfg(test)]
+mod tts_bench;
+mod pipeline_bench;
 mod volume;
 // Verification is not yet wired into wakeword_oww (see AGENTS.md known limitations).
 mod meeting_detect;

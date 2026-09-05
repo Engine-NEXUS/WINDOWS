@@ -545,27 +545,27 @@ fn parse_pr_analyse(text: &str) -> Option<ParseResult> {
     // Match: "PR <num> [in|of|for|from|on] <repo>" or "pull request <num> ..."
     // Also handles "PR number <num>" and "PR # <num>" (STT variations)
     // Also handles "the PR" (user says "analyse the pr 254 in zync")
-    let pr_patterns = [
+    let pr_patterns: &[&str] = &[
         // "PR number 24 on NEXUS agent" / "PR number 24 in repo"
-        regex::Regex::new(r"^pr\s*(?:number|#\s*)?\s*#?\s*(\d+)\s+(?:in|of|for|from|on)\s+(.+)$").ok()?,
+        r"^pr\s*(?:number|#\s*)?\s*#?\s*(\d+)\s+(?:in|of|for|from|on)\s+(.+)$",
         // "PR number 24 NEXUS agent" (no preposition)
-        regex::Regex::new(r"^pr\s*number\s*#?\s*(\d+)\s+(.+)$").ok()?,
-        regex::Regex::new(r"^pr\s*#?\s*(\d+)\s+(?:in|of|for|from)\s+(.+)$").ok()?,
-        regex::Regex::new(r"^pr\s*#?\s*(\d+)\s+(.+)$").ok()?,
-        regex::Regex::new(r"^pull\s+request\s*#?\s*(\d+)\s+(?:in|of|for|from|on)\s+(.+)$").ok()?,
-        regex::Regex::new(r"^pull\s+request\s*#?\s*(\d+)\s+(.+)$").ok()?,
+        r"^pr\s*number\s*#?\s*(\d+)\s+(.+)$",
+        r"^pr\s*#?\s*(\d+)\s+(?:in|of|for|from)\s+(.+)$",
+        r"^pr\s*#?\s*(\d+)\s+(.+)$",
+        r"^pull\s+request\s*#?\s*(\d+)\s+(?:in|of|for|from|on)\s+(.+)$",
+        r"^pull\s+request\s*#?\s*(\d+)\s+(.+)$",
         // "PR <num> owner/repo"
-        regex::Regex::new(r"^pr\s*#?\s*(\d+)\s+(\S+/\S+)$").ok()?,
+        r"^pr\s*#?\s*(\d+)\s+(\S+/\S+)$",
         // "the PR <num> in <repo>" ΓÇö user says "analyse the pr 254 in zync"
-        regex::Regex::new(r"^the\s+pr\s*#?\s*(\d+)\s+(?:in|of|for|from|on)\s+(.+)$").ok()?,
+        r"^the\s+pr\s*#?\s*(\d+)\s+(?:in|of|for|from|on)\s+(.+)$",
         // "the PR <num> <repo>" (no preposition)
-        regex::Regex::new(r"^the\s+pr\s*#?\s*(\d+)\s+(.+)$").ok()?,
+        r"^the\s+pr\s*#?\s*(\d+)\s+(.+)$",
         // "the pull request <num> in <repo>"
-        regex::Regex::new(r"^the\s+pull\s+request\s*#?\s*(\d+)\s+(?:in|of|for|from|on)\s+(.+)$").ok()?,
+        r"^the\s+pull\s+request\s*#?\s*(\d+)\s+(?:in|of|for|from|on)\s+(.+)$",
     ];
 
-    for pat in &pr_patterns {
-        if let Some(caps) = pat.captures(text) {
+    for &pat in pr_patterns {
+        if let Some(caps) = regex_captures(text, pat) {
             let pr_number: u32 = caps[1].parse().ok()?;
             let repo_part = caps[2].trim();
 
@@ -690,11 +690,7 @@ fn parse_latest_pr_analyse(text: &str) -> Option<ParseResult> {
     // 3. "of <repo>" (when "of" is followed by a known repo, not a person)
 
     // Pattern 1: "[of|by|from] <author> in <repo>"
-    let author_repo_pat = regex::Regex::new(
-        r"^(?:of|by|from)\s+(\S+)\s+in\s+(.+)$"
-    ).ok()?;
-
-    if let Some(caps) = author_repo_pat.captures(after_pr) {
+    if let Some(caps) = regex_captures(after_pr, r"^(?:of|by|from)\s+(\S+)\s+in\s+(.+)$") {
         let author = caps[1].trim().to_string();
         let repo_part = caps[2].trim();
 
@@ -733,8 +729,7 @@ fn parse_latest_pr_analyse(text: &str) -> Option<ParseResult> {
     }
 
     // Pattern 2: "in <repo>" (no author)
-    let in_repo_pat = regex::Regex::new(r"^in\s+(.+)$").ok()?;
-    if let Some(caps) = in_repo_pat.captures(after_pr) {
+    if let Some(caps) = regex_captures(after_pr, r"^in\s+(.+)$") {
         let repo_part = caps[1].trim();
 
         if let Some((owner, repo)) = parse_owner_repo(repo_part) {
@@ -772,8 +767,7 @@ fn parse_latest_pr_analyse(text: &str) -> Option<ParseResult> {
     // Pattern 3: "of <repo>" (when "of" is followed by a known repo)
     // This is ambiguous — "of prem" could be author "prem" or repo "prem"
     // Only treat as repo if it matches a KNOWN_REPO
-    let of_repo_pat = regex::Regex::new(r"^of\s+(.+)$").ok()?;
-    if let Some(caps) = of_repo_pat.captures(after_pr) {
+    if let Some(caps) = regex_captures(after_pr, r"^of\s+(.+)$") {
         let repo_part = caps[1].trim();
         let lower_repo = repo_part.to_lowercase();
         if KNOWN_REPOS.contains(&lower_repo.as_str()) {
@@ -889,11 +883,7 @@ fn parse_branch_command(text: &str) -> Option<ParseResult> {
 
     // Pattern A: "[of|in] <repo> [by] <author>"
     // The repo is everything between "of/in" and "by", or the rest if no "by"
-    let repo_author_pat_a = regex::Regex::new(
-        r"^(?:of|in)\s+(.+?)\s+by\s+(\S+)$"
-    ).ok()?;
-
-    if let Some(caps) = repo_author_pat_a.captures(&after_branch) {
+    if let Some(caps) = regex_captures(&after_branch, r"^(?:of|in)\s+(.+?)\s+by\s+(\S+)$") {
         let repo_part = caps[1].trim();
         let author = caps[2].trim().to_string();
 
@@ -930,11 +920,7 @@ fn parse_branch_command(text: &str) -> Option<ParseResult> {
     }
 
     // Pattern B: "[by] <author> [in|of] <repo>"
-    let author_repo_pat_b = regex::Regex::new(
-        r"^by\s+(\S+)\s+(?:in|of)\s+(.+)$"
-    ).ok()?;
-
-    if let Some(caps) = author_repo_pat_b.captures(&after_branch) {
+    if let Some(caps) = regex_captures(&after_branch, r"^by\s+(\S+)\s+(?:in|of)\s+(.+)$") {
         let author = caps[1].trim().to_string();
         let repo_part = caps[2].trim();
 
@@ -971,8 +957,7 @@ fn parse_branch_command(text: &str) -> Option<ParseResult> {
     }
 
     // Pattern C: "[of|in] <repo>" (no author — just latest branch)
-    let repo_only_pat = regex::Regex::new(r"^(?:of|in)\s+(.+)$").ok()?;
-    if let Some(caps) = repo_only_pat.captures(&after_branch) {
+    if let Some(caps) = regex_captures(&after_branch, r"^(?:of|in)\s+(.+)$") {
         let repo_part = caps[1].trim();
 
         // Strip trailing " by <something>" if present (already handled above, but just in case)
@@ -1134,7 +1119,7 @@ fn clean_repo_name(text: &str) -> String {
 
 // ΓöÇΓöÇΓöÇ Close app command ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
-const CLOSE_VERBS: &[&str] = &["close", "quit", "exit", "kill", "shut down", "shut"];
+const CLOSE_VERBS: &[&str] = &["close", "quit", "exit", "kill", "terminate", "end", "shut down", "shut"];
 
 fn parse_close_command(text: &str) -> Option<ParseResult> {
     for verb in CLOSE_VERBS {
@@ -1276,10 +1261,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     // "merge PR 23 in owner/repo"
     // "squash merge PR 23 in owner/repo"
     // "rebase merge PR 23 in owner/repo"
-    let merge_re = regex::Regex::new(
-        r"^(?:(squash|rebase)\s+)?merge\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$"
-    ).ok()?;
-    if let Some(caps) = merge_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^(?:(squash|rebase)\s+)?merge\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$") {
         let method = match caps.get(1).map(|m| m.as_str()) {
             Some("squash") => MergeMethod::Squash,
             Some("rebase") => MergeMethod::Rebase,
@@ -1310,10 +1292,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Approve PR ---
-    let approve_re = regex::Regex::new(
-        r"^approve\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$"
-    ).ok()?;
-    if let Some(caps) = approve_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^approve\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$") {
         let pr_number: u64 = caps[1].parse().ok()?;
         let repo = if let Some(r) = caps.get(2) {
             clean_repo_name(r.as_str())
@@ -1338,10 +1317,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Close PR ---
-    let close_re = regex::Regex::new(
-        r"^close\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$"
-    ).ok()?;
-    if let Some(caps) = close_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^close\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$") {
         let pr_number: u64 = caps[1].parse().ok()?;
         let repo = if let Some(r) = caps.get(2) {
             clean_repo_name(r.as_str())
@@ -1366,10 +1342,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Get PR ---
-    let get_re = regex::Regex::new(
-        r"^(?:get|show|tell\s+me\s+about)\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$"
-    ).ok()?;
-    if let Some(caps) = get_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^(?:get|show|tell\s+me\s+about)\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$") {
         let pr_number: u64 = caps[1].parse().ok()?;
         let repo = if let Some(r) = caps.get(2) {
             clean_repo_name(r.as_str())
@@ -1394,10 +1367,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- List PRs ---
-    let list_prs_re = regex::Regex::new(
-        r"^list\s+(open\s+|closed\s+|all\s+)?prs?(?:\s+in\s+(\S+))?$"
-    ).ok()?;
-    if let Some(caps) = list_prs_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^list\s+(open\s+|closed\s+|all\s+)?prs?(?:\s+in\s+(\S+))?$") {
         let state = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("open").to_string();
         let repo = if let Some(r) = caps.get(2) {
             clean_repo_name(r.as_str())
@@ -1422,16 +1392,26 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- List PR files ---
-    if let Some(rest) = text.strip_prefix("list pr files ") {
-        // "list pr files for PR <num> in <repo>" or "list pr files for <num> in <repo>"
-        let rest = rest.trim_start_matches("for ").trim();
-        let rest = rest.trim_start_matches("pr ").trim();
-        if let Ok(pr_number) = rest.parse::<u64>() {
+    // "list pr files for PR <num> in <repo>" or "list pr files <num> in <repo>"
+    if let Some(caps) = regex_captures(text, r"^list\s+pr\s+files\s+(?:for\s+)?(?:pr\s+)?#?\s*(\d+)(?:\s+in\s+(\S+))?$") {
+        let pr_number: u64 = caps[1].parse().ok()?;
+        let repo = if let Some(r) = caps.get(2) {
+            clean_repo_name(r.as_str())
+        } else {
             return extract_repo(text).map(|(repo, _)| ParseResult {
                 intent: ParsedIntent::GitHubCommand {
                     command: GitHubCommand::ListPrFiles { repo, pr_number },
                 },
                 confidence: 0.9,
+                source: "deterministic".to_string(),
+            });
+        };
+        if !repo.is_empty() {
+            return Some(ParseResult {
+                intent: ParsedIntent::GitHubCommand {
+                    command: GitHubCommand::ListPrFiles { repo, pr_number },
+                },
+                confidence: 0.95,
                 source: "deterministic".to_string(),
             });
         }
@@ -1453,10 +1433,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Revert PR ---
-    let revert_re = regex::Regex::new(
-        r"^revert\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$"
-    ).ok()?;
-    if let Some(caps) = revert_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^revert\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$") {
         let pr_number: u64 = caps[1].parse().ok()?;
         let repo = if let Some(r) = caps.get(2) {
             clean_repo_name(r.as_str())
@@ -1480,12 +1457,54 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
         }
     }
 
+    // --- Comment on PR ---
+    // "comment on PR <num> in <repo> <body>" or "comment on PR <num> <body>"
+    if let Some(caps) = regex_captures(text, r"^comment\s+on\s+(?:pr|pull\s+request)\s*#?\s*(\d+)\s+in\s+(\S+)\s+(.+)$") {
+        let pr_number: u64 = caps[1].parse().ok()?;
+        let repo = clean_repo_name(&caps[2]);
+        let body = caps[3].trim().to_string();
+        if !repo.is_empty() && !body.is_empty() {
+            return Some(ParseResult {
+                intent: ParsedIntent::GitHubCommand {
+                    command: GitHubCommand::CommentPr { repo, pr_number, body },
+                },
+                confidence: 0.95,
+                source: "deterministic".to_string(),
+            });
+        }
+    }
+    // "comment on PR <num> <body>" (repo extracted from context)
+    if let Some(caps) = regex_captures(text, r"^comment\s+on\s+(?:pr|pull\s+request)\s*#?\s*(\d+)\s+(.+)$") {
+        let pr_number: u64 = caps[1].parse().ok()?;
+        let rest = caps[2].trim();
+        // Try to split "in <repo> <body>" from "<body>"
+        if let Some(pos) = rest.find(" in ") {
+            let repo = clean_repo_name(&rest[..pos].trim());
+            let body = rest[pos + 4..].trim().to_string();
+            if !repo.is_empty() && !body.is_empty() {
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::CommentPr { repo, pr_number, body },
+                    },
+                    confidence: 0.9,
+                    source: "deterministic".to_string(),
+                });
+            }
+        }
+        // No "in <repo>" — try extracting repo from full text
+        return extract_repo(text).map(|(repo, _)| ParseResult {
+            intent: ParsedIntent::GitHubCommand {
+                command: GitHubCommand::CommentPr { repo, pr_number, body: rest.to_string() },
+            },
+            confidence: 0.85,
+            source: "deterministic".to_string(),
+        });
+    }
+
     // --- Add collaborator ---
     // "add <user> as collaborator to <repo>" or "add <user> as admin to <repo>"
-    let add_collab_re = regex::Regex::new(
-        r"^add\s+(\S+)\s+as\s+(admin|push|pull|triage|maintain)?\s*collaborator\s+to\s+(\S+)$"
-    ).ok()?;
-    if let Some(caps) = add_collab_re.captures(text) {
+    // Also: "add <user> as admin to <repo>" (without "collaborator" keyword)
+    if let Some(caps) = regex_captures(text, r"^add\s+(\S+)\s+as\s+(admin|push|pull|triage|maintain)?\s*(?:collaborator\s+)?to\s+(\S+)$") {
         let username = caps[1].to_string();
         let permission = match caps.get(2).map(|m| m.as_str().trim()) {
             Some("admin") => CollaboratorPermission::Admin,
@@ -1508,10 +1527,8 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Remove collaborator ---
-    let rem_collab_re = regex::Regex::new(
-        r"^remove\s+(\S+)\s+(?:as\s+)?collaborator\s+from\s+(\S+)$"
-    ).ok()?;
-    if let Some(caps) = rem_collab_re.captures(text) {
+    // "remove <user> from <repo>" or "remove <user> as collaborator from <repo>"
+    if let Some(caps) = regex_captures(text, r"^remove\s+(\S+)\s+(?:as\s+)?(?:collaborator\s+)?from\s+(\S+)$") {
         let username = caps[1].to_string();
         let repo = clean_repo_name(&caps[2]);
         if !repo.is_empty() {
@@ -1526,8 +1543,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- List collaborators ---
-    let list_collab_re = regex::Regex::new(r"^list\s+collaborators\s+in\s+(\S+)$").ok()?;
-    if let Some(caps) = list_collab_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^list\s+collaborators\s+in\s+(\S+)$") {
         let repo = clean_repo_name(&caps[1]);
         if !repo.is_empty() {
             return Some(ParseResult {
@@ -1542,10 +1558,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
 
     // --- Add org member ---
     // "add <user> to org <org>" or "add <user> as admin to org <org>"
-    let add_org_re = regex::Regex::new(
-        r"^add\s+(\S+)\s+(?:as\s+(admin|member)\s+)?to\s+org\s+(\S+)$"
-    ).ok()?;
-    if let Some(caps) = add_org_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^add\s+(\S+)\s+(?:as\s+(admin|member)\s+)?to\s+org\s+(\S+)$") {
         let username = caps[1].to_string();
         let role = match caps.get(2).map(|m| m.as_str()) {
             Some("admin") => OrgRole::Admin,
@@ -1562,8 +1575,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Remove org member ---
-    let rem_org_re = regex::Regex::new(r"^remove\s+(\S+)\s+from\s+org\s+(\S+)$").ok()?;
-    if let Some(caps) = rem_org_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^remove\s+(\S+)\s+from\s+org\s+(\S+)$") {
         let username = caps[1].to_string();
         let org = caps[2].to_string();
         return Some(ParseResult {
@@ -1576,8 +1588,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- List org members ---
-    let list_org_re = regex::Regex::new(r"^list\s+members\s+of\s+org\s+(\S+)$").ok()?;
-    if let Some(caps) = list_org_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^list\s+members\s+of\s+org\s+(\S+)$") {
         let org = caps[1].to_string();
         return Some(ParseResult {
             intent: ParsedIntent::GitHubCommand {
@@ -1589,8 +1600,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- List branches ---
-    let list_branches_re = regex::Regex::new(r"^list\s+branches\s+in\s+(\S+)$").ok()?;
-    if let Some(caps) = list_branches_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^list\s+branches\s+in\s+(\S+)$") {
         let repo = clean_repo_name(&caps[1]);
         if !repo.is_empty() {
             return Some(ParseResult {
@@ -1604,8 +1614,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Delete branch ---
-    let del_branch_re = regex::Regex::new(r"^delete\s+branch\s+(\S+)\s+in\s+(\S+)$").ok()?;
-    if let Some(caps) = del_branch_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^delete\s+branch\s+(\S+)\s+in\s+(\S+)$") {
         let branch = caps[1].to_string();
         let repo = clean_repo_name(&caps[2]);
         if !repo.is_empty() {
@@ -1620,8 +1629,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- List releases ---
-    let list_releases_re = regex::Regex::new(r"^list\s+releases\s+in\s+(\S+)$").ok()?;
-    if let Some(caps) = list_releases_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^list\s+releases\s+in\s+(\S+)$") {
         let repo = clean_repo_name(&caps[1]);
         if !repo.is_empty() {
             return Some(ParseResult {
@@ -1634,9 +1642,34 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
         }
     }
 
+    // --- Create release ---
+    // "create release v1.0 in owner/repo" or "create release v1.0 in owner/repo with notes <body>"
+    if let Some(caps) = regex_captures(text, r"^create\s+release\s+(\S+)\s+in\s+(\S+)(?:\s+with\s+notes\s+(.+))?$") {
+        let tag = caps[1].to_string();
+        let repo = clean_repo_name(&caps[2]);
+        let body = caps.get(3).map(|m| m.as_str().trim().to_string());
+        let name = tag.clone();
+        if !repo.is_empty() {
+            return Some(ParseResult {
+                intent: ParsedIntent::GitHubCommand {
+                    command: GitHubCommand::CreateRelease {
+                        repo,
+                        tag,
+                        name,
+                        body,
+                        draft: false,
+                        prerelease: false,
+                        target_commitish: None,
+                    },
+                },
+                confidence: 0.95,
+                source: "deterministic".to_string(),
+            });
+        }
+    }
+
     // --- List workflows ---
-    let list_wf_re = regex::Regex::new(r"^list\s+workflows\s+in\s+(\S+)$").ok()?;
-    if let Some(caps) = list_wf_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^list\s+workflows\s+in\s+(\S+)$") {
         let repo = clean_repo_name(&caps[1]);
         if !repo.is_empty() {
             return Some(ParseResult {
@@ -1650,8 +1683,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- List workflow runs ---
-    let list_runs_re = regex::Regex::new(r"^list\s+workflow\s+runs\s+in\s+(\S+)$").ok()?;
-    if let Some(caps) = list_runs_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^list\s+workflow\s+runs\s+in\s+(\S+)$") {
         let repo = clean_repo_name(&caps[1]);
         if !repo.is_empty() {
             return Some(ParseResult {
@@ -1665,8 +1697,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Rerun workflow ---
-    let rerun_re = regex::Regex::new(r"^rerun\s+workflow\s+(\d+)\s+in\s+(\S+)$").ok()?;
-    if let Some(caps) = rerun_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^rerun\s+workflow\s+(\d+)\s+in\s+(\S+)$") {
         let run_id: u64 = caps[1].parse().ok()?;
         let repo = clean_repo_name(&caps[2]);
         if !repo.is_empty() {
@@ -1681,8 +1712,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Cancel workflow ---
-    let cancel_re = regex::Regex::new(r"^cancel\s+workflow\s+(\d+)\s+in\s+(\S+)$").ok()?;
-    if let Some(caps) = cancel_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^cancel\s+workflow\s+(\d+)\s+in\s+(\S+)$") {
         let run_id: u64 = caps[1].parse().ok()?;
         let repo = clean_repo_name(&caps[2]);
         if !repo.is_empty() {
@@ -1711,7 +1741,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
 /// Returns a `Greeting` intent with a pre-written reply.
 fn parse_greeting(text: &str) -> Option<ParseResult> {
     // Hello / Hi / Hey
-    if regex_match(text, r"^(?:hello|hi|hey|yo|sup|what'?s\s+up|howdy|greetings|hi\s+ya|hiya|hey\s+(?:there|nexus)|hello\s+nexus|hi\s+nexus)$") {
+    if regex_match(text, r"^(?:hello|hi|hey|yo|sup|what'?s\s+up|howdy|greetings|hi\s+ya|hiya|hey\s+(?:there|nexus)|hello\s+nexus|hi\s+nexus|hey\s+nexus)$") {
         let replies = [
             "Hello, sir.",
             "Hi, sir. How can I help?",
@@ -1865,7 +1895,7 @@ fn parse_media(text: &str) -> Option<ParsedIntent> {
     if regex_match(text, r"^(?:previous|previous\s+song|previous\s+track|prev|prev\s+song|go\s+back\s+a\s+song)$") {
         return Some(ParsedIntent::MediaPrevious);
     }
-    if regex_match(text, r"^(?:stop\s+music|stop\s+media|stop\s+playback)$") {
+    if regex_match(text, r"^(?:stop\s+music|stop\s+media|stop\s+playback|stop)$") {
         return Some(ParsedIntent::MediaStop);
     }
     None
@@ -2058,16 +2088,16 @@ const BROWSER_FORCE_URLS: &[(&str, &str)] = &[
 
 fn parse_browser_force(text: &str) -> Option<ParseResult> {
     // "open gmail in browser" / "open gmail website" / "open gmail site"
-    let patterns = [
-        regex::Regex::new(r"^(.+?)\s+in\s+(?:the\s+)?browser$").ok()?,
-        regex::Regex::new(r"^(.+?)\s+website$").ok()?,
-        regex::Regex::new(r"^(.+?)\s+site$").ok()?,
-        regex::Regex::new(r"^(.+?)\s+on\s+(?:the\s+)?web$").ok()?,
-        regex::Regex::new(r"^(.+?)\s+web\s+version$").ok()?,
+    let patterns: &[&str] = &[
+        r"^(.+?)\s+in\s+(?:the\s+)?browser$",
+        r"^(.+?)\s+website$",
+        r"^(.+?)\s+site$",
+        r"^(.+?)\s+on\s+(?:the\s+)?web$",
+        r"^(.+?)\s+web\s+version$",
     ];
 
-    for pat in &patterns {
-        if let Some(caps) = pat.captures(text) {
+    for &pat in patterns {
+        if let Some(caps) = regex_captures(text, pat) {
             let app_name = caps[1].trim();
             // Check URL map
             for (key, url) in BROWSER_FORCE_URLS {
@@ -2128,9 +2158,18 @@ fn strip_leading_filler(text: &str) -> String {
     /// Single-word fillers that can precede a command.
     const FILLERS: &[&str] = &[
         "and", "so", "but", "then", "now", "also", "plus", "like", "okay",
-        "ok", "well", "hey", "um", "uh", "hmm", "actually", "basically",
+        "ok", "well", "um", "uh", "hmm", "actually", "basically",
         "just", "please", "now please",
     ];
+
+    // Protect "hey nexus" / "hello nexus" / "hi nexus" — these are greetings,
+    // not filler + command. "hey" alone is filler, but "hey nexus" is a wake.
+    let lower = text.to_lowercase();
+    if lower == "hey nexus" || lower == "hello nexus" || lower == "hi nexus"
+        || lower == "hey there" || lower == "hey nexus wake up"
+    {
+        return text.to_string();
+    }
 
     // Try two-word fillers first (e.g. "and so", "but first", "now just")
     let words: Vec<&str> = text.split_whitespace().collect();
@@ -2145,9 +2184,13 @@ fn strip_leading_filler(text: &str) -> String {
         }
     }
 
-    // Single-word filler
+    // Single-word filler — but NOT "hey" when followed by "nexus"/"there"
     if words.len() >= 2 {
         if FILLERS.contains(&words[0]) {
+            return words[1..].join(" ");
+        }
+        // "hey" is filler only when NOT followed by "nexus" or "there"
+        if words[0] == "hey" && words[1] != "nexus" && words[1] != "there" {
             return words[1..].join(" ");
         }
     }
@@ -2220,6 +2263,23 @@ fn regex_match(text: &str, pattern: &str) -> bool {
         .entry(pattern.to_string())
         .or_insert_with(|| regex::Regex::new(pattern).unwrap_or_else(|_| regex::Regex::new("$^").unwrap()));
     re.is_match(text)
+}
+
+/// Cached regex captures helper. Uses the same OnceLock+Mutex cache as
+/// `regex_match` but returns capture groups for pattern extraction.
+///
+/// `Captures` borrows from `text` (not from the `Regex`), so it is safe
+/// to return even though the MutexGuard is dropped when this function
+/// returns.
+fn regex_captures<'t>(text: &'t str, pattern: &str) -> Option<regex::Captures<'t>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, regex::Regex>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut guard = cache.lock().unwrap();
+    let re = guard
+        .entry(pattern.to_string())
+        .or_insert_with(|| regex::Regex::new(pattern).unwrap_or_else(|_| regex::Regex::new("$^").unwrap()));
+    re.captures(text)
 }
 
 // ΓöÇΓöÇΓöÇ Tauri command ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
