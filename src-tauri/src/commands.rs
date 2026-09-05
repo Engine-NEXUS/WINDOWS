@@ -880,7 +880,7 @@ pub async fn show_pr_list_sidebar<R: Runtime>(
         let scale = monitor.scale_factor();
         let screen = monitor.size();
         let win_w = 500i32;
-        let win_h = 800i32;
+        let win_h = 1000i32;
         let phys_w = (win_w as f64 * scale) as i32;
         let phys_h = (win_h as f64 * scale) as i32;
         let x = screen.width as i32 - phys_w - 12; // 12px from right edge
