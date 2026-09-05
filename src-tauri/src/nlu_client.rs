@@ -73,7 +73,7 @@ pub async fn parse_via_nlu(transcript: &str) -> Option<ParseResult> {
 
 /// Convert NLU server response to ParsedIntent.
 /// Handles all 46 intent labels (ParsedIntent + GitHubCommand variants).
-fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<ParsedIntent> {
+pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<ParsedIntent> {
     match intent {
         // ─── Local commands ───
         "open_app" => {

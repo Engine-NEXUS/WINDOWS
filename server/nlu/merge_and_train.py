@@ -89,16 +89,77 @@ def read_rejected_examples():
     return rejected
 
 
+def _levenshtein(a, b):
+    """Compute Levenshtein edit distance between two strings."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        curr = [i]
+        for j, cb in enumerate(b, 1):
+            curr.append(min(
+                prev[j] + 1,
+                curr[j - 1] + 1,
+                prev[j - 1] + (ca != cb),
+            ))
+        prev = curr
+    return prev[-1]
+
+
+def _fuzzy_match(text, rejected_text, threshold=0.8):
+    """Check if text is similar to a rejected text using normalized Levenshtein.
+    
+    threshold is the minimum similarity ratio (0-1) to consider a match.
+    0.8 means 80% similar — catches "close chrome browser" vs "close the chrome"
+    while not over-matching unrelated commands.
+    """
+    text = text.lower().strip()
+    rej = rejected_text.lower().strip()
+    if text == rej:
+        return True
+    max_len = max(len(text), len(rej))
+    if max_len == 0:
+        return True
+    dist = _levenshtein(text, rej)
+    similarity = 1.0 - (dist / max_len)
+    return similarity >= threshold
+
+
 def filter_rejected(examples, rejected):
     """Remove examples that match rejected entries.
     
-    Matching is by (text.lower(), intent) — same as dedup key.
+    Matching is by (text, intent) — both exact and fuzzy:
+    - Exact: same normalized text + same intent
+    - Fuzzy: text similarity >= 0.8 AND same intent
+      (catches "close chrome browser" vs "close the chrome" for the same intent)
     """
     if not rejected:
         return examples
-    rejected_set = {(r["text"].lower().strip(), r["intent"]) for r in rejected}
-    return [ex for ex in examples
-            if (ex["text"].lower().strip(), ex["intent"]) not in rejected_set]
+    # Group rejected by intent for faster fuzzy matching
+    rejected_by_intent = {}
+    for r in rejected:
+        intent = r["intent"]
+        rejected_by_intent.setdefault(intent, []).append(r["text"].lower().strip())
+    
+    result = []
+    for ex in examples:
+        ex_text = ex["text"].lower().strip()
+        ex_intent = ex["intent"]
+        rej_texts = rejected_by_intent.get(ex_intent, [])
+        
+        matched = False
+        for rej_text in rej_texts:
+            if ex_text == rej_text or _fuzzy_match(ex_text, rej_text, threshold=0.8):
+                matched = True
+                break
+        
+        if not matched:
+            result.append(ex)
+    return result
 
 
 def load_dataset():

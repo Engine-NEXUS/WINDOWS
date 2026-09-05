@@ -164,103 +164,42 @@ pub async fn is_brain_available() -> bool {
 }
 
 /// Convert brain server response to ParsedIntent.
-/// This reuses the same intent mapping as nlu_client.rs since the brain
-/// outputs the same 46-intent schema.
+/// The brain uses the same 46-intent schema as the NLU server, so we
+/// delegate to nlu_client::nlu_to_parsed_intent for the full mapping.
+/// This ensures all 46 intents are handled, including GitHub commands
+/// that the previous incomplete mapping was dropping.
 fn brain_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<ParsedIntent> {
-    // The brain uses the same intent labels as the NLU server.
-    // We can reuse the same mapping logic by calling nlu_client's function.
-    // However, nlu_client::nlu_to_parsed_intent is private. So we duplicate
-    // the mapping here (or make it public). For now, we handle the most
-    // common intents and fall back to Unknown for the rest.
-    //
-    // In practice, the brain is a fallback — the deterministic parser and
-    // BERT-Mini handle most commands. The brain only fires when both miss.
-    // So we only need to map the intents that are likely to reach the brain.
+    // The brain server returns pr_number and other numeric slots as
+    // strings sometimes (Qwen generates JSON with string values).
+    // nlu_to_parsed_intent expects u64 for some fields, so we normalize
+    // the slots to ensure numeric fields are numbers, not strings.
+    let normalized_slots = normalize_slots(slots);
+    crate::nlu_client::nlu_to_parsed_intent(intent, &normalized_slots)
+}
 
-    match intent {
-        // Local commands
-        "open_app" => {
-            let target = slots.get("app_name").and_then(|v| v.as_str()).unwrap_or("");
-            if target.is_empty() { return None; }
-            Some(ParsedIntent::OpenApp { target: target.to_string() })
+/// Normalize slot values: convert string-encoded numbers to actual numbers
+/// so that nlu_to_parsed_intent's as_u64() calls succeed.
+fn normalize_slots(slots: &serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = slots.as_object() {
+        let mut normalized = serde_json::Map::new();
+        for (key, value) in obj {
+            // Try to convert string numbers to actual numbers
+            if let Some(s) = value.as_str() {
+                if let Ok(n) = s.parse::<u64>() {
+                    normalized.insert(key.clone(), serde_json::Value::Number(n.into()));
+                    continue;
+                }
+                if let Ok(f) = s.parse::<f64>() {
+                    if let Some(num) = serde_json::Number::from_f64(f) {
+                        normalized.insert(key.clone(), serde_json::Value::Number(num));
+                        continue;
+                    }
+                }
+            }
+            normalized.insert(key.clone(), value.clone());
         }
-        "open_url" => {
-            let url = slots.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            if url.is_empty() { return None; }
-            Some(ParsedIntent::OpenUrl { target: url.to_string(), url: url.to_string() })
-        }
-        "close_app" => {
-            let target = slots.get("app_name").and_then(|v| v.as_str()).unwrap_or("");
-            if target.is_empty() { return None; }
-            Some(ParsedIntent::CloseApp { target: target.to_string() })
-        }
-        "whatsapp_chat" => {
-            let contact = slots.get("contact").and_then(|v| v.as_str()).unwrap_or("");
-            if contact.is_empty() { return None; }
-            Some(ParsedIntent::WhatsappChat { contact: contact.to_string() })
-        }
-        "open_architect" => Some(ParsedIntent::OpenArchitect),
-        "search" => {
-            let query = slots.get("query").and_then(|v| v.as_str()).unwrap_or("");
-            if query.is_empty() { return None; }
-            Some(ParsedIntent::Search { query: query.to_string() })
-        }
-        "media_play_pause" => Some(ParsedIntent::MediaPlayPause),
-        "media_next" => Some(ParsedIntent::MediaNext),
-        "media_previous" => Some(ParsedIntent::MediaPrevious),
-        "media_stop" => Some(ParsedIntent::MediaStop),
-
-        // Analysis commands
-        "analyse_repo" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
-            let owner = slots.get("owner").and_then(|v| v.as_str()).map(String::from);
-            if repo.is_empty() { return None; }
-            Some(ParsedIntent::AnalyseRepo { owner, repo: repo.to_string() })
-        }
-        "analyse_pr" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
-            let owner = slots.get("owner").and_then(|v| v.as_str()).map(String::from);
-            let pr_number = slots.get("pr_number").and_then(|v| {
-                v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-            }).unwrap_or(0) as u32;
-            if repo.is_empty() || pr_number == 0 { return None; }
-            Some(ParsedIntent::AnalysePr { owner, repo: repo.to_string(), pr_number })
-        }
-        "analyse_latest_pr" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
-            let owner = slots.get("owner").and_then(|v| v.as_str()).map(String::from);
-            let author = slots.get("author").and_then(|v| v.as_str()).map(String::from);
-            if repo.is_empty() { return None; }
-            Some(ParsedIntent::AnalyseLatestPr { owner, repo: repo.to_string(), author })
-        }
-        "check_branch" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
-            let owner = slots.get("owner").and_then(|v| v.as_str()).map(String::from);
-            let author = slots.get("author").and_then(|v| v.as_str()).map(String::from);
-            if repo.is_empty() { return None; }
-            Some(ParsedIntent::CheckBranch { owner, repo: repo.to_string(), author })
-        }
-
-        // GitHub commands — delegate to the same mapping as nlu_client
-        // For now, route GitHub commands as Unknown → Worker (the Worker
-        // can handle natural language GitHub commands). The brain's main
-        // value is pronunciation correction + phrasing generation, not
-        // GitHub command parsing (the deterministic parser handles those).
-        "merge_pr" | "approve_pr" | "close_pr" | "list_prs" | "get_pr" |
-        "create_pr" | "update_branch" | "revert_pr" | "list_pr_files" |
-        "comment_pr" | "add_collaborator" | "remove_collaborator" |
-        "list_collaborators" | "add_org_member" | "remove_org_member" |
-        "list_org_members" | "delete_branch" | "list_branches" |
-        "create_release" | "list_releases" | "list_workflows" |
-        "list_workflow_runs" | "rerun_workflow" | "cancel_workflow" => {
-            // These are better handled by the deterministic parser.
-            // If the brain classifies one, return Unknown so the Worker
-            // can handle it as a natural language query.
-            None
-        }
-
-        "greeting" => None, // greetings are handled locally
-        "unknown" => None,
-        _ => None,
+        serde_json::Value::Object(normalized)
+    } else {
+        slots.clone()
     }
 }

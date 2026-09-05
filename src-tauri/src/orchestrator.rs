@@ -320,11 +320,30 @@ pub async fn process_transcript<R: Runtime>(
     {
         let det_intent_name = parse_result.as_ref().map(|r| format!("{:?}", r.intent));
         let transcript_clone = transcript.clone();
-        crate::brain_monitor::monitor_transcript(
-            transcript_clone,
-            det_intent_name,
-            None, // NLU result not available here yet
-        );
+
+        if parse_result.is_some() {
+            // Deterministic hit — monitor with what we have
+            crate::brain_monitor::monitor_transcript(
+                transcript_clone,
+                det_intent_name,
+                None,
+            );
+        } else {
+            // Deterministic missed — spawn a BACKGROUND task to try NLU
+            // and pass the result to the brain monitor.
+            // This does NOT delay the main pipeline — the orchestrator
+            // continues to route the command while NLU runs in parallel.
+            tokio::spawn(async move {
+                let nlu_intent = crate::nlu_client::parse_via_nlu(&transcript_clone)
+                    .await
+                    .map(|r| format!("{:?}", r.intent));
+                crate::brain_monitor::monitor_transcript(
+                    transcript_clone,
+                    det_intent_name,
+                    nlu_intent,
+                );
+            });
+        }
     }
 
     // 2. Route to subsystem
@@ -375,6 +394,14 @@ pub async fn process_transcript<R: Runtime>(
             // Local commands are instant — no ack, no loading indicator.
             // The frontend handles these directly (open app, media, etc).
             // We just emit done immediately.
+
+            // Report execution success to the brain monitor (admin-only)
+            #[cfg(feature = "admin-brain")]
+            {
+                let intent_name = format!("{:?}", intent);
+                crate::brain_monitor::report_execution_success(&transcript, &intent_name);
+            }
+
             emit(
                 &app,
                 &OrchestratorEvent::Done {
@@ -433,6 +460,12 @@ pub async fn process_transcript<R: Runtime>(
 
             match result {
                 Ok((text, analysis, dialog_state)) => {
+                    // Report execution success to the brain monitor (admin-only)
+                    #[cfg(feature = "admin-brain")]
+                    {
+                        let intent_name = format!("{:?}", intent);
+                        crate::brain_monitor::report_execution_success(&transcript, &intent_name);
+                    }
                     // Emit result
                     emit(
                         &app,
@@ -638,6 +671,13 @@ pub async fn process_transcript<R: Runtime>(
             // Emit the appropriate event based on the result type
             match &gh_result {
                 crate::github_cmd::GitHubResult::NeedsConfirmation { prompt, command } => {
+                    // Report successful detection (even though it needs confirmation,
+                    // the parsing was correct)
+                    #[cfg(feature = "admin-brain")]
+                    {
+                        let intent_name = format!("{:?}", intent);
+                        crate::brain_monitor::report_execution_success(&transcript, &intent_name);
+                    }
                     let cmd_json = serde_json::to_value(command).unwrap_or(serde_json::Value::Null);
                     emit(
                         &app,
@@ -667,6 +707,12 @@ pub async fn process_transcript<R: Runtime>(
                     );
                 }
                 crate::github_cmd::GitHubResult::Text { text } => {
+                    // Report GitHub command success to the brain monitor
+                    #[cfg(feature = "admin-brain")]
+                    {
+                        let intent_name = format!("{:?}", intent);
+                        crate::brain_monitor::report_execution_success(&transcript, &intent_name);
+                    }
                     emit(
                         &app,
                         &OrchestratorEvent::Result {

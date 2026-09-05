@@ -22,6 +22,10 @@ const RETRAIN_THRESHOLD: u32 = 50;
 /// Minimum brain confidence for auto-approval.
 const MIN_CONFIDENCE: f32 = 0.90;
 
+/// Below this confidence, brain output is considered noise and ignored
+/// (not written as a rejection — there's nothing to unlearn).
+const NOISE_THRESHOLD: f32 = 0.30;
+
 static PENDING_COUNT: AtomicU32 = AtomicU32::new(0);
 
 /// Approved phrasing entry (written to approved_phrasings.jsonl).
@@ -160,6 +164,28 @@ async fn monitor_transcript_inner(
 
     let brain_intent_name = format!("{:?}", brain_result.intent);
     let brain_confidence = brain_result.confidence;
+
+    // 1b. Low-confidence rejection — if the brain classified something
+    // but with low confidence (between NOISE_THRESHOLD and MIN_CONFIDENCE),
+    // write it as a rejected example so BERT-Mini doesn't learn a weak
+    // or uncertain classification. Below NOISE_THRESHOLD, we treat it as
+    // noise and ignore it entirely (nothing to unlearn).
+    if brain_confidence >= NOISE_THRESHOLD && brain_confidence < MIN_CONFIDENCE {
+        let rejected = RejectedExample {
+            text: transcript.clone(),
+            intent: brain_intent_name.clone(),
+            reason: "low_confidence".to_string(),
+            error: Some(format!("brain confidence {:.2} < {:.2}", brain_confidence, MIN_CONFIDENCE)),
+            timestamp: chrono::Utc::now().timestamp() as f64,
+        };
+        append_jsonl(&rejected_examples_path(), &rejected);
+        tracing::info!(
+            "[brain_monitor] low-confidence rejection: transcript='{}' intent='{}' conf={:.2}",
+            transcript,
+            brain_intent_name,
+            brain_confidence
+        );
+    }
 
     // 2. Check for gaps (brain disagrees with both deterministic and NLU)
     let det_matches = deterministic_intent
@@ -399,7 +425,9 @@ pub fn record_last_command(transcript: String, intent: String) {
 /// Report that a command executed successfully.
 ///
 /// This confirms the phrasing was correct — the brain can be more
-/// confident about it in future classifications.
+/// confident about it in future classifications. The success is logged
+/// to approved_phrasings.jsonl as a "execution_verified" source, which
+/// gets merged into training data on the next retrain cycle.
 pub fn report_execution_success(transcript: &str, intent: &str) {
     if !crate::admin_config::is_admin() {
         return;
@@ -409,9 +437,32 @@ pub fn report_execution_success(transcript: &str, intent: &str) {
         transcript,
         intent
     );
-    // Success doesn't need to be logged to a file — the brain already
-    // auto-approves phrasings via the 3-gate system. This function
-    // exists for future use (e.g. confidence boosting).
+
+    // Log the successful command as an approved phrasing with high confidence.
+    // This is a "verified by execution" example — stronger than auto-approval
+    // because we know the command actually worked.
+    let entry = ApprovedPhrasing {
+        text: transcript.to_string(),
+        intent: intent.to_string(),
+        slots: serde_json::Value::Null,
+        source: "execution_verified".to_string(),
+        brain_confidence: 1.0, // verified by execution
+        timestamp: chrono::Utc::now().timestamp() as f64,
+    };
+    append_jsonl(&approved_phrasings_path(), &entry);
+
+    // Increment pending count — execution-verified examples count toward retrain
+    let count = PENDING_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if count >= RETRAIN_THRESHOLD {
+        // Trigger retrain in background
+        let count_copy = count;
+        tokio::spawn(async move {
+            if count_copy >= RETRAIN_THRESHOLD {
+                PENDING_COUNT.store(0, Ordering::Relaxed);
+                trigger_retrain().await;
+            }
+        });
+    }
 }
 
 /// Report that a command executed wrongly (automatic feedback).
