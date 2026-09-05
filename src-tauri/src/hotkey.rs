@@ -19,7 +19,7 @@
 
 #![cfg(not(target_os = "linux"))]
 
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 const HOTKEYS: &[&str] = &[
@@ -67,6 +67,10 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                     std::thread::spawn(|| {
                         crate::lazy_stt::ensure_stt_running();
                     });
+
+                    // Start Rust-side STT capture (same as wake word path).
+                    // Captures audio from the cpal stream — no getUserMedia needed.
+                    crate::wakeword_oww::start_stt_capture();
 
                     if let Some(win) = handle.get_webview_window("main") {
                         let _ = win.show();

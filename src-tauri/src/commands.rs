@@ -1156,7 +1156,7 @@ pub fn save_settings<R: Runtime>(
 
 /// Read the Groq API key from settings.json (non-IPC helper for stt.rs).
 /// Returns empty string if no key is set or settings file doesn't exist.
-pub fn read_groq_api_key(app: &tauri::AppHandle) -> String {
+pub fn read_groq_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
     let dir = app.path().app_data_dir();
     let Ok(dir) = dir else { return String::new(); };
     let path = dir.join("settings.json");
@@ -1174,7 +1174,7 @@ pub fn read_groq_api_key(app: &tauri::AppHandle) -> String {
 /// Read the localSttOnly flag from settings.json (non-IPC helper for stt.rs).
 /// Returns true if the user has enabled "Local STT only" (privacy mode —
 /// audio never leaves the device). Returns false if not set or file missing.
-pub fn read_local_stt_only(app: &tauri::AppHandle) -> bool {
+pub fn read_local_stt_only<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let dir = app.path().app_data_dir();
     let Ok(dir) = dir else { return false; };
     let path = dir.join("settings.json");
@@ -1458,5 +1458,16 @@ pub fn pause_wakeword() -> Result<(), String> {
 #[tauri::command]
 pub fn resume_wakeword() -> Result<(), String> {
     crate::wakeword_oww::resume_stream();
+    Ok(())
+}
+
+/// Start Rust-side STT capture from the cpal stream.
+/// Called by the frontend when the user wakes NEXUS or when retrying
+/// after an empty transcript. The cpal stream captures audio directly —
+/// no getUserMedia, no baton pass. This fixes the Intel SST driver issue
+/// where getUserMedia returns silence but cpal is still working.
+#[tauri::command]
+pub fn start_stt_capture() -> Result<(), String> {
+    crate::wakeword_oww::start_stt_capture();
     Ok(())
 }

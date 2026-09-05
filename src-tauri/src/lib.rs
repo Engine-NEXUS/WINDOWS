@@ -840,6 +840,7 @@ pub fn run() {
             commands::hide_pr_list_sidebar,
             commands::pause_wakeword,
             commands::resume_wakeword,
+            commands::start_stt_capture,
             stt::transcribe_audio,
             stt::stt_status,
             tts::speak_text,
