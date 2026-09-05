@@ -503,10 +503,13 @@ function cmdBuild() {
   run("npm", ["--prefix", "frontend", "install"], { allowFail: true, stdio: "ignore" });
   run("npm", ["--prefix", "frontend", "run", "build"]);
 
-  info("Building Rust release binary (custom-protocol)...");
+  info("Building Rust release binary (custom-protocol + admin-brain)...");
   const cargoEnv = {};
   if (IS_WIN && process.env.LIBCLANG_PATH) cargoEnv.LIBCLANG_PATH = process.env.LIBCLANG_PATH;
-  run("cargo", ["build", "--release", "--features", "custom-protocol"],
+  // admin-brain: enables the Qwen brain (admin-only, runtime-gated by admin.json).
+  // The brain code is compiled in but does nothing unless admin.json has is_admin=true.
+  // Normal users never have admin.json, so the brain is dormant in their builds.
+  run("cargo", ["build", "--release", "--features", "custom-protocol,admin-brain"],
     { cwd: join(ROOT, "src-tauri"), env: cargoEnv,
       hint: "Make sure LIBCLANG_PATH is set (Windows) or LLVM is installed" });
 

@@ -180,10 +180,18 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
         }
         "list_prs" => {
             let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
-            if repo.is_empty() { return None; }
+            // If no repo in slots, try auto-detection (browser URL, clipboard, etc.)
+            let repo = if repo.is_empty() {
+                match crate::architect::get_active_repo_url() {
+                    Some(repo_id) => format!("{}/{}", repo_id.owner, repo_id.repo),
+                    None => return None,
+                }
+            } else {
+                repo.to_string()
+            };
             Some(ParsedIntent::GitHubCommand {
                 command: crate::github_cmd::GitHubCommand::ListPrs {
-                    repo: repo.to_string(),
+                    repo,
                     state: "open".to_string(),
                 },
             })

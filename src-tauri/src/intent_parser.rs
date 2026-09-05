@@ -1429,6 +1429,60 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
         }
     }
 
+    // --- Fuzzy "list" fallback ---
+    // Catches STT mishearings where the user said "show me the pr list" or
+    // "list prs" but STT heard something like "so you have to list" or
+    // "show me the list". If the transcript contains "list" and doesn't
+    // match any other pattern, try ListPrs with auto-detected repo.
+    // This is a low-confidence fallback (0.6) — the brain/NLU can override.
+    // IMPORTANT: This must NOT catch "list branches", "list releases", etc.
+    // Those have their own patterns below. We exclude them here.
+    if text.contains("list") {
+        let lower = text.to_lowercase();
+        // Skip if it looks like a different list command or non-PR list
+        if lower.contains("to do") || lower.contains("todo") || lower.contains("shopping")
+            || lower.contains("bucket") || lower.contains("wait") || lower.contains("listen")
+            || lower.contains("branch") || lower.contains("release")
+            || lower.contains("workflow") || lower.contains("collaborator")
+            || lower.contains("file") || lower.contains("member")
+            || lower.contains("run") || lower.contains("pr files") {
+            // Not a PR list command — let the specific patterns handle it
+        } else {
+            // Try "in <repo>" / "for <repo>" first
+            if let Some((repo, _)) = extract_repo(text) {
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs {
+                            repo,
+                            state: "open".to_string(),
+                        },
+                    },
+                    confidence: 0.6,
+                    source: "deterministic-fuzzy".to_string(),
+                });
+            }
+            // No repo in text — try auto-detection (browser URL, clipboard, etc.)
+            // This is a blocking call, so we do it last.
+            if let Some(repo_id) = crate::architect::get_active_repo_url() {
+                let repo = format!("{}/{}", repo_id.owner, repo_id.repo);
+                tracing::info!(
+                    "[intent_parser] fuzzy 'list' fallback: auto-detected repo '{}'",
+                    repo
+                );
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs {
+                            repo,
+                            state: "open".to_string(),
+                        },
+                    },
+                    confidence: 0.6,
+                    source: "deterministic-fuzzy".to_string(),
+                });
+            }
+        }
+    }
+
     // --- List PR files ---
     // "list pr files for PR <num> in <repo>" or "list pr files <num> in <repo>"
     if let Some(caps) = regex_captures(text, r"^list\s+pr\s+files\s+(?:for\s+)?(?:pr\s+)?#?\s*(\d+)(?:\s+in\s+(\S+))?$") {
