@@ -315,6 +315,8 @@ pub async fn process_transcript<R: Runtime>(
     // Non-blocking: spawns a tokio task, never delays the main pipeline.
     // The brain cross-checks the deterministic parse, learns pronunciations,
     // and auto-generates training data for BERT-Mini.
+    // Only compiled when the admin-brain feature is enabled.
+    #[cfg(feature = "admin-brain")]
     {
         let det_intent_name = parse_result.as_ref().map(|r| format!("{:?}", r.intent));
         let transcript_clone = transcript.clone();

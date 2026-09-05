@@ -2254,17 +2254,23 @@ pub async fn parse_transcript(transcript: String) -> Result<ParseResult, String>
         );
 
         // Brain monitor: observe the NLU result (non-blocking, background)
-        let nlu_intent_name = format!("{:?}", result.intent);
-        crate::brain_monitor::monitor_transcript(
-            transcript.clone(),
-            None, // deterministic missed
-            Some(nlu_intent_name),
-        );
+        // Only compiled when admin-brain feature is enabled.
+        #[cfg(feature = "admin-brain")]
+        {
+            let nlu_intent_name = format!("{:?}", result.intent);
+            crate::brain_monitor::monitor_transcript(
+                transcript.clone(),
+                None, // deterministic missed
+                Some(nlu_intent_name),
+            );
+        }
 
         return Ok(result);
     }
 
     // 3. Try brain server (if available, admin-only)
+    // Only compiled when the admin-brain feature is enabled.
+    #[cfg(feature = "admin-brain")]
     if let Some(result) = crate::brain_client::brain_classify(&transcript).await {
         tracing::info!(
             "[intent_parser] brain: {:?} (confidence={})",

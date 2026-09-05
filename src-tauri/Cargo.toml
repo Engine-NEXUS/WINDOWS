@@ -153,6 +153,12 @@ default = ["wakeword-oww"]
 custom-protocol = ["tauri/custom-protocol"]
 wakeword-oww = []                # openWakeWord via tract-onnx (new, default)
 mock-wake = []                   # CI: skip native lib, emit fake wake on hotkey only
+# Admin-only brain system (Qwen 0.5B + pronunciation learning + auto-train).
+# When enabled, brain_client + brain_monitor modules are compiled in.
+# When disabled (default), all brain code is compiled out — normal users
+# can never run the brain even if they find the files.
+# Build with: cargo build --features admin-brain
+admin-brain = []
 
 [profile.dev]
 opt-level = 0

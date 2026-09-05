@@ -30,7 +30,10 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
 DATASET_PATH = SCRIPT_DIR / "dataset.json"
-APPROVED_PATH = SCRIPT_DIR / "approved_phrasings.jsonl"
+# Admin data lives in server/admin/data/ (gitignored, admin-only)
+ADMIN_DATA_DIR = SCRIPT_DIR.parent / "admin" / "data"
+APPROVED_PATH = ADMIN_DATA_DIR / "approved_phrasings.jsonl"
+REJECTED_PATH = ADMIN_DATA_DIR / "rejected_examples.jsonl"
 MODEL_PATH = SCRIPT_DIR / "model" / "nexus_nlu.onnx"
 MODEL_DATA_PATH = SCRIPT_DIR / "model" / "nexus_nlu.onnx.data"
 BACKUP_MODEL_PATH = SCRIPT_DIR / "model" / "nexus_nlu.onnx.bak"
@@ -59,6 +62,43 @@ def read_approved_phrasings():
             except (json.JSONDecodeError, KeyError):
                 continue
     return examples
+
+
+def read_rejected_examples():
+    """Read rejected (bad) examples from the JSONL file.
+    
+    These are examples that executed wrongly or were marked as bad
+    by the admin. They are REMOVED from the dataset before retraining.
+    """
+    if not REJECTED_PATH.exists():
+        return []
+    rejected = []
+    with open(REJECTED_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+                rejected.append({
+                    "text": entry.get("text", ""),
+                    "intent": entry.get("intent", ""),
+                })
+            except (json.JSONDecodeError, KeyError):
+                continue
+    return rejected
+
+
+def filter_rejected(examples, rejected):
+    """Remove examples that match rejected entries.
+    
+    Matching is by (text.lower(), intent) — same as dedup key.
+    """
+    if not rejected:
+        return examples
+    rejected_set = {(r["text"].lower().strip(), r["intent"]) for r in rejected}
+    return [ex for ex in examples
+            if (ex["text"].lower().strip(), ex["intent"]) not in rejected_set]
 
 
 def load_dataset():
@@ -96,10 +136,15 @@ def balance_classes(examples, max_per_class=80):
     return result
 
 
-def merge_and_save(approved):
-    """Merge approved phrasings into the dataset."""
+def merge_and_save(approved, rejected):
+    """Merge approved phrasings into the dataset and remove rejected ones."""
     dataset = load_dataset()
     train = dataset.get("train", [])
+    test = dataset.get("test", [])
+
+    # Remove rejected examples from BOTH train and test
+    train = filter_rejected(train, rejected)
+    test = filter_rejected(test, rejected)
 
     # Add approved phrasings to training data
     train.extend(approved)
@@ -116,6 +161,7 @@ def merge_and_save(approved):
     random.shuffle(train)
 
     dataset["train"] = train
+    dataset["test"] = test
     with open(DATASET_PATH, "w", encoding="utf-8") as f:
         json.dump(dataset, f, indent=2, ensure_ascii=False)
 
@@ -182,6 +228,8 @@ def clear_approved():
     """Clear the approved phrasings file after successful retrain."""
     if APPROVED_PATH.exists():
         APPROVED_PATH.unlink()
+    if REJECTED_PATH.exists():
+        REJECTED_PATH.unlink()
 
 
 # ─── Main ───────────────────────────────────────────────────────────────────
@@ -191,19 +239,30 @@ def main():
 
     # 1. Read approved phrasings
     approved = read_approved_phrasings()
-    if not approved:
-        print("[RETRAIN] No approved phrasings to merge. Exiting.")
+    rejected = read_rejected_examples()
+
+    if not approved and not rejected:
+        print("[RETRAIN] No approved phrasings or rejected examples. Exiting.")
         return
 
     print(f"[RETRAIN] Found {len(approved)} approved phrasings")
+    print(f"[RETRAIN] Found {len(rejected)} rejected examples to remove")
 
     # 2. Show distribution
-    dist = Counter(e["intent"] for e in approved)
-    for intent, count in dist.most_common():
-        print(f"  {intent:25s}: {count}")
+    if approved:
+        dist = Counter(e["intent"] for e in approved)
+        print("[RETRAIN] Approved distribution:")
+        for intent, count in dist.most_common():
+            print(f"  {intent:25s}: {count}")
 
-    # 3. Merge into dataset
-    new_train_count = merge_and_save(approved)
+    if rejected:
+        rdist = Counter(e["intent"] for e in rejected)
+        print("[RETRAIN] Rejected distribution:")
+        for intent, count in rdist.most_common():
+            print(f"  {intent:25s}: {count}")
+
+    # 3. Merge into dataset (also removes rejected)
+    new_train_count = merge_and_save(approved, rejected)
     print(f"[RETRAIN] Dataset now has {new_train_count} training examples")
 
     # 4. Backup current model

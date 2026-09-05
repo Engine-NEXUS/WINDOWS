@@ -51,8 +51,22 @@ pub struct PronunciationMapResponse {
 ///
 /// Returns None if the server is not running or the request fails.
 /// Returns Some(ParseResult) if the brain returns a valid classification.
+/// Returns None if not admin or the brain server is not running.
 pub async fn brain_classify(transcript: &str) -> Option<ParseResult> {
-    let url = format!("http://127.0.0.1:{}/classify", BRAIN_PORT);
+    // Runtime admin check — no-op if not admin
+    if !crate::admin_config::is_admin() {
+        return None;
+    }
+
+    // Ensure the brain server is running (lazy-start, admin-only)
+    tokio::task::spawn_blocking(|| {
+        crate::lazy_brain::ensure_brain_running();
+    })
+    .await
+    .ok()?;
+
+    let port = crate::admin_config::brain_port();
+    let url = format!("http://127.0.0.1:{}/classify", port);
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10)) // brain is slower than NLU (LLM inference)

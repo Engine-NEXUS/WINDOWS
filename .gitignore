@@ -8,8 +8,11 @@ src-tauri/gen/
 src-tauri/target/
 target/
 
-# Brain model (398MB, downloaded on demand — not committed)
-server/brain/model/*.gguf
+# Admin-only brain system — ENTIRE folder gitignored.
+# Only on the admin's laptop. Never committed, never shipped to users.
+# Contains: brain_server.py, Qwen GGUF model (398MB), pronunciation map,
+# gaps/approved/rejected training data, admin config.
+server/admin/
 
 # Brain debug output
 brain_stdout.txt

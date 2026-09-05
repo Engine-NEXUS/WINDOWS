@@ -48,9 +48,25 @@ struct GapEntry {
 }
 
 /// Get the path to the brain data directory.
+/// Uses the admin data directory at server/admin/data/ (relative to the
+/// executable in production, or the project root in dev).
 fn brain_data_dir() -> PathBuf {
-    let base = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    base.join("com.nexus.assistant").join("brain")
+    // In production: exe_dir/resources/server/admin/data/
+    // In dev: project_root/server/admin/data/
+    let exe = std::env::current_exe().ok();
+    if let Some(exe_path) = exe {
+        let prod = exe_path
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("resources").join("server").join("admin").join("data"));
+        if let Some(p) = prod {
+            if p.exists() {
+                return p;
+            }
+        }
+    }
+    // Dev fallback: C:\PROJECTS\ULTRON\server\admin\data
+    PathBuf::from("server").join("admin").join("data")
 }
 
 /// Get the path to approved_phrasings.jsonl.
@@ -61,6 +77,11 @@ fn approved_phrasings_path() -> PathBuf {
 /// Get the path to gaps.jsonl.
 fn gaps_path() -> PathBuf {
     brain_data_dir().join("gaps.jsonl")
+}
+
+/// Get the path to rejected_examples.jsonl (bad examples to discard).
+fn rejected_examples_path() -> PathBuf {
+    brain_data_dir().join("rejected_examples.jsonl")
 }
 
 /// Ensure the brain data directory exists.
@@ -93,11 +114,17 @@ fn append_jsonl(path: &PathBuf, entry: &impl Serialize) {
 /// the transcript. The brain watches the result and learns from it.
 ///
 /// NON-BLOCKING: spawns a tokio task, returns immediately.
+/// NO-OP if not admin (runtime check via admin_config).
 pub fn monitor_transcript(
     transcript: String,
     deterministic_intent: Option<String>,
     nlu_intent: Option<String>,
 ) {
+    // Runtime admin check — no-op if not admin
+    if !crate::admin_config::is_admin() {
+        return;
+    }
+
     // Don't await — fire and forget
     tokio::spawn(async move {
         monitor_transcript_inner(transcript, deterministic_intent, nlu_intent).await;

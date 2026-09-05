@@ -24,8 +24,13 @@ mod app_registry;
 pub mod intent_parser;
 mod nlu_client;
 mod lazy_nlu;
+mod admin_config;
+#[cfg(feature = "admin-brain")]
 mod brain_client;
+#[cfg(feature = "admin-brain")]
 mod brain_monitor;
+#[cfg(feature = "admin-brain")]
+mod lazy_brain;
 mod lazy_stt;
 mod stt;
 pub mod stt_groq;
