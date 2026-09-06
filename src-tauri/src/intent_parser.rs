@@ -33,6 +33,10 @@ pub enum ParsedIntent {
     WhatsappChat { contact: String },
     #[serde(rename = "open_architect")]
     OpenArchitect,
+    /// Open the settings sidebar (command center).
+    /// "open settings" / "open command center" / "show preferences" / "configure NEXUS"
+    #[serde(rename = "open_settings")]
+    OpenSettings,
     #[serde(rename = "search")]
     Search { query: String },
     #[serde(rename = "analyse_repo")]
@@ -87,6 +91,47 @@ pub enum ParsedIntent {
     GitHubCommand {
         command: crate::github_cmd::GitHubCommand,
     },
+    /// Order food from a restaurant (Swiggy Food MCP).
+    /// "order pizza from dominos" → OrderFood { query: "pizza", restaurant: Some("dominos") }
+    /// "order food from swiggy" → OrderFood { query: "", restaurant: None }
+    #[serde(rename = "order_food")]
+    OrderFood {
+        query: String,
+        restaurant: Option<String>,
+    },
+    /// Search for a product on Amazon.
+    /// "search for sony headphones on amazon" → SearchProduct { query: "sony headphones" }
+    #[serde(rename = "search_product")]
+    SearchProduct { query: String },
+    /// Send a WhatsApp message to a contact.
+    /// "send mom a whatsapp message saying i'll be late"
+    /// → SendWhatsAppMessage { contact: "mom", message: "i'll be late" }
+    #[serde(rename = "send_whatsapp_message")]
+    SendWhatsAppMessage {
+        contact: String,
+        message: String,
+    },
+    /// Partial MCP command — the user named the action but not all slots
+    /// (e.g. "send message to mummy" with no message body). The
+    /// orchestrator speaks `prompt` instead of letting the transcript fall
+    /// to the Worker, whose LLM can only guess (or refuse). Never executes.
+    #[serde(rename = "need_more_info")]
+    NeedMoreInfo { prompt: String },
+    /// Enter the Ghostwriter dictation room (persistent session).
+    /// "ghostwriter", "take a letter", "write this down for mom".
+    /// Contact is optional — asked inside the room if missing.
+    #[serde(rename = "enter_ghostwriter")]
+    EnterGhostwriter { contact: Option<String> },
+    /// Click the Nth on-screen actionable (1-based reading order).
+    /// "click the 3rd option" → ScreenClick { ordinal: 3 }.
+    #[serde(rename = "screen_click")]
+    ScreenClick { ordinal: u32 },
+    /// Read back the Nth on-screen actionable ("what's the 2nd button").
+    #[serde(rename = "screen_read")]
+    ScreenRead { ordinal: u32 },
+    /// Switch browser tab ("move to the 4th tab" → Ctrl+4).
+    #[serde(rename = "browser_tab")]
+    BrowserTab { index: u32 },
     #[serde(rename = "unknown")]
     Unknown { raw: String },
 }
@@ -100,6 +145,76 @@ pub struct ParseResult {
     pub confidence: f32,
     /// Source of the parse: "deterministic", "nlu", "fallback"
     pub source: String,
+}
+
+/// Convert a `ParsedIntent` to its snake_case NLU label.
+/// This is the reverse of `nlu_client::nlu_to_parsed_intent`.
+/// Used by the brain monitor and orchestrator to store intent labels
+/// that `merge_and_train.py` can use for BERT-Mini training.
+///
+/// Without this, `format!("{:?}", intent)` produces Debug output like
+/// `GitHubCommand { command: ListPrs { repo: "...", state: "..." } }`
+/// which doesn't match any NLU training label.
+pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
+    use crate::github_cmd::GitHubCommand;
+    match intent {
+        ParsedIntent::OpenApp { .. } => "open_app",
+        ParsedIntent::OpenUrl { .. } => "open_url",
+        ParsedIntent::CloseApp { .. } => "close_app",
+        ParsedIntent::WhatsappChat { .. } => "whatsapp_chat",
+        ParsedIntent::OpenArchitect => "open_architect",
+        ParsedIntent::OpenSettings => "open_settings",
+        ParsedIntent::Search { .. } => "search",
+        ParsedIntent::AnalyseRepo { .. } => "analyse_repo",
+        ParsedIntent::AnalysePr { .. } => "analyse_pr",
+        ParsedIntent::AnalyseLatestPr { .. } => "analyse_latest_pr",
+        ParsedIntent::CheckBranch { .. } => "check_branch",
+        ParsedIntent::MediaPlayPause => "media_play_pause",
+        ParsedIntent::MediaNext => "media_next",
+        ParsedIntent::MediaPrevious => "media_previous",
+        ParsedIntent::MediaStop => "media_stop",
+        ParsedIntent::Greeting { .. } => "greeting",
+        ParsedIntent::NluResult { .. } => "nlu_result",
+        ParsedIntent::Unknown { .. } => "unknown",
+        ParsedIntent::OrderFood { .. } => "order_food",
+        ParsedIntent::SearchProduct { .. } => "search_product",
+        ParsedIntent::SendWhatsAppMessage { .. } => "send_whatsapp_message",
+        ParsedIntent::NeedMoreInfo { .. } => "need_more_info",
+        ParsedIntent::EnterGhostwriter { .. } => "enter_ghostwriter",
+        ParsedIntent::ScreenClick { .. } => "screen_click",
+        ParsedIntent::ScreenRead { .. } => "screen_read",
+        ParsedIntent::BrowserTab { .. } => "browser_tab",
+        ParsedIntent::GitHubCommand { command } => match command {
+            GitHubCommand::MergePr { .. } => "merge_pr",
+            GitHubCommand::ApprovePr { .. } => "approve_pr",
+            GitHubCommand::ClosePr { .. } => "close_pr",
+            GitHubCommand::ListPrs { .. } => "list_prs",
+            GitHubCommand::GetPr { .. } => "get_pr",
+            GitHubCommand::CreatePr { .. } => "create_pr",
+            GitHubCommand::UpdateBranch { .. } => "update_branch",
+            GitHubCommand::RevertPr { .. } => "revert_pr",
+            GitHubCommand::ListPrFiles { .. } => "list_pr_files",
+            GitHubCommand::CommentPr { .. } => "comment_pr",
+            GitHubCommand::AddCollaborator { .. } => "add_collaborator",
+            GitHubCommand::RemoveCollaborator { .. } => "remove_collaborator",
+            GitHubCommand::ListCollaborators { .. } => "list_collaborators",
+            GitHubCommand::AddOrgMember { .. } => "add_org_member",
+            GitHubCommand::RemoveOrgMember { .. } => "remove_org_member",
+            GitHubCommand::ListOrgMembers { .. } => "list_org_members",
+            GitHubCommand::ConvertToOutsideCollaborator { .. } => "convert_to_outside_collaborator",
+            GitHubCommand::ListOutsideCollaborators { .. } => "list_outside_collaborators",
+            GitHubCommand::SetBranchProtection { .. } => "set_branch_protection",
+            GitHubCommand::DeleteBranch { .. } => "delete_branch",
+            GitHubCommand::ListBranches { .. } => "list_branches",
+            GitHubCommand::CreateRelease { .. } => "create_release",
+            GitHubCommand::ListReleases { .. } => "list_releases",
+            GitHubCommand::DeleteRelease { .. } => "delete_release",
+            GitHubCommand::ListWorkflows { .. } => "list_workflows",
+            GitHubCommand::ListWorkflowRuns { .. } => "list_workflow_runs",
+            GitHubCommand::RerunWorkflow { .. } => "rerun_workflow",
+            GitHubCommand::CancelWorkflow { .. } => "cancel_workflow",
+        },
+    }
 }
 
 // ΓöÇΓöÇΓöÇ Deterministic parser ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
@@ -116,6 +231,11 @@ pub struct ParseResult {
 pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
     let text = transcript.trim().to_lowercase();
     let text = normalize_whitespace(&text);
+    // Strip trailing punctuation that STT often appends (e.g. "Open the PR list."
+    // from Groq/Whisper). Without this, regexes anchored with `$` (like the
+    // ListPrs pattern) fail to match and the permissive OpenApp fallback
+    // catches the phrase — "the pr list." resolved to a cached app target.
+    let text = strip_trailing_punctuation(&text);
 
     if text.is_empty() {
         return None;
@@ -146,6 +266,30 @@ pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
             confidence: 0.85,
             source: "deterministic-fuzzy".to_string(),
         });
+    }
+
+    // --- Open Settings / Command Center ---
+    // "open settings" / "show settings" / "open command center" / "open preferences"
+    // "configure NEXUS" / "NEXUS settings" / "open config" / "show preferences"
+    if is_settings_command(&text) {
+        return Some(ParseResult {
+            intent: ParsedIntent::OpenSettings,
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    // --- Ghostwriter room entry ---
+    // Must precede greeting/media: "write this down" is dictation, not chat.
+    if let Some(result) = parse_ghostwriter_entry(&text) {
+        return Some(result);
+    }
+
+    // --- Screen control (click Nth option, Nth tab) ---
+    // Must precede live/open: "press the 3rd button" is grounding, not a
+    // hotkey; "open 4th tab" is a tab switch, not an app.
+    if let Some(result) = parse_screen_command(&text) {
+        return Some(result);
     }
 
     // --- Media Control ---
@@ -181,6 +325,16 @@ pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
         return Some(result);
     }
 
+    // --- Social: send WhatsApp message ---
+    // "send mom a whatsapp message saying i'll be late",
+    // "whatsapp dad saying i'm coming", "message mom on whatsapp saying hi"
+    // Must be BEFORE parse_whatsapp_command — "whatsapp mom saying X" would
+    // otherwise match the "whatsapp " prefix and swallow the whole message
+    // as the contact name.
+    if let Some(result) = parse_send_whatsapp_message(&text) {
+        return Some(result);
+    }
+
     // --- WhatsApp chat (must be BEFORE open command ΓÇö "open chat with X" would match open) ---
     // "open chat with lakshya", "message lakshya on whatsapp", "chat with mom"
     if let Some(result) = parse_whatsapp_command(&text) {
@@ -194,6 +348,30 @@ pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
     // Must be BEFORE open/close app — "close PR 10" and "show PR 42"
     // would match close_app / open_app respectively.
     if let Some(result) = parse_github_command(&text) {
+        return Some(result);
+    }
+
+    // --- Commerce: order food (Swiggy) ---
+    // "order pizza from dominos", "order food from swiggy",
+    // "order biryani", "get food from swiggy"
+    if let Some(result) = parse_order_food(&text) {
+        return Some(result);
+    }
+
+    // --- Commerce: product search (Amazon) ---
+    // "search for sony headphones on amazon",
+    // "find wireless earbuds on amazon", "amazon search for laptop"
+    if let Some(result) = parse_search_product(&text) {
+        return Some(result);
+    }
+
+    // --- Live mode commands ---
+    // "type hello world", "press enter", "press ctrl a"
+    // "send", "new tab", "open new tab"
+    // Must be BEFORE open/close — "open new tab" would match parse_open_command.
+    // "cancel" and "never mind" are already handled by the greeting parser
+    // above (they return a Greeting with "Very well, sir." which is appropriate).
+    if let Some(result) = parse_live_command(&text) {
         return Some(result);
     }
 
@@ -225,6 +403,40 @@ const OPEN_VERBS: &[&str] = &[
     "open", "launch", "start", "run", "fire up", "bring up", "show", "pull up",
     "go to", "visit", "browse to", "navigate to",
 ];
+
+/// Heuristic: does this target phrase look like a GitHub command that
+/// `parse_github_command` somehow missed? Used as a defensive guard in
+/// `parse_open_command` so we don't launch a wrong app (e.g. Dribbble
+/// for "the pr list.") when the GitHub regex failed on a punctuation or
+/// phrasing variant.
+///
+/// Matches phrases containing PR/pull-request/repo keywords. Returns
+/// `true` for things like "the pr list", "pull requests", "open prs",
+/// "the repo list", "my prs".
+fn looks_like_github_phrase(s: &str) -> bool {
+    let s = s.trim().to_lowercase();
+    if s.is_empty() {
+        return false;
+    }
+    // Word-boundary checks so "pr" doesn't match inside "preview" / "process".
+    // "pr" as a standalone token or followed by "s"/"list"/"number"/"#".
+    let tokens: Vec<&str> = s.split_whitespace().collect();
+    let has_pr = tokens.iter().any(|&t| {
+        t == "pr" || t == "prs" || t == "pr's"
+            || t == "pr-list" || t == "prlist"
+            || t.starts_with("pr#")
+            || t == "pull" // "pull request(s)" — check bigram below
+    });
+    let has_pull_request = s.contains("pull request") || s.contains("pull requests");
+    let has_repo_phrase = tokens.iter().any(|&t| {
+        t == "repo" || t == "repos" || t == "repository" || t == "repositories"
+    }) || s.contains("repo list");
+    // "pull request(s)" bigram
+    let has_pull_bigram = tokens.windows(2).any(|w| {
+        w[0] == "pull" && (w[1] == "request" || w[1] == "requests")
+    });
+    has_pr || has_pull_request || has_pull_bigram || has_repo_phrase
+}
 
 fn parse_open_command(text: &str) -> Option<ParseResult> {
     // Try each open verb
@@ -263,6 +475,19 @@ fn parse_open_command(text: &str) -> Option<ParseResult> {
             }
 
             // App name ΓÇö resolve against the app registry
+            // Defensive guard: if the target looks like a GitHub command
+            // phrase that the GitHub parser somehow missed (e.g. STT
+            // punctuation variants, unusual phrasing), do NOT treat it as
+            // an app name. Returning None lets the NLU/brain fallback
+            // classify it correctly instead of launching a wrong app.
+            if looks_like_github_phrase(&cleaned_no_site) {
+                tracing::info!(
+                    "[intent_parser] open-command fallback: '{}' looks like a GitHub phrase, skipping app resolution",
+                    cleaned_no_site
+                );
+                return None;
+            }
+
             let resolved = resolve_app_name(&cleaned_no_site);
             return Some(ParseResult {
                 intent: ParsedIntent::OpenApp {
@@ -284,16 +509,11 @@ fn resolve_app_name(name: &str) -> Option<String> {
 
     // 1. Direct registry lookup (handles exact, prefix, contains, Levenshtein)
     if let Some(entry) = app_registry::lookup(name) {
-        // Return the first search name (canonical form)
-        if let Some(canonical) = entry.search_names.first() {
-            tracing::debug!(
-                "app registry match: '{}' ΓåÆ '{}' ({})",
-                name,
-                canonical,
-                entry.display_name
-            );
-            return Some(canonical.clone());
-        }
+        // Return the display name (lowercased) — NOT search_names.first().
+        // The first search name is alphabetical ("creative" for a Dribbble
+        // PWA title), which launders any fuzzy hit into a nonsense target
+        // that then self-resolves forever. Display name round-trips through
+        // lookup() exactly (it's always names[0]).
         return Some(entry.display_name.to_lowercase());
     }
 
@@ -320,9 +540,7 @@ fn space_variation_lookup(name: &str) -> Option<String> {
     let no_spaces = name.replace(' ', "");
     if no_spaces != name {
         if let Some(entry) = app_registry::lookup(&no_spaces) {
-            if let Some(canonical) = entry.search_names.first() {
-                return Some(canonical.clone());
-            }
+            return Some(entry.display_name.to_lowercase());
         }
     }
 
@@ -338,9 +556,7 @@ fn space_variation_lookup(name: &str) -> Option<String> {
             modified.push(' ');
             modified.push_str(&name[i..]);
             if let Some(entry) = app_registry::lookup(&modified) {
-                if let Some(canonical) = entry.search_names.first() {
-                    return Some(canonical.clone());
-                }
+                return Some(entry.display_name.to_lowercase());
             }
         }
     }
@@ -1117,7 +1333,43 @@ fn clean_repo_name(text: &str) -> String {
         .or_else(|| text.strip_suffix(" project"))
         .or_else(|| text.strip_suffix(" codebase"))
         .unwrap_or(text);
-    text.trim().to_string()
+    canonical_repo_name(text.trim())
+}
+
+/// Sound-alike aliases for known repos: STT (and fast speech) renders the
+/// same name many ways — "servx" arrives as "cervix", "srvx", "service".
+/// Every alias points at the canonical repo, so all soundings resolve to
+/// the same entity. Applied per path segment (owner + name each), inside
+/// EVERY category — deterministic and NLU paths alike.
+fn repo_sound_alias(canonical: &str) -> Option<&'static str> {
+    match canonical {
+        "cervix" | "cervx" | "srvx" | "service" | "cervex" | "cervets"
+        | "servetus" | "servex" | "survex" => Some("servx"),
+        "zinc" | "zink" | "sync" | "zynk" | "zincs" => Some("zync"),
+        "incognito" | "incognit" | "congy" | "conji" => Some("congi"),
+        "meat" | "meets" => Some("meet"),
+        "shopcart" => Some("shopkart"),
+        "ledgerai" => Some("ledger-ai"),
+        _ => None,
+    }
+}
+
+/// Map a repo reference to its canonical form via the sound-alias table.
+/// Unknown segments pass through untouched (never rewrites a real name).
+pub fn canonical_repo_name(text: &str) -> String {
+    let mapped: Vec<String> = text
+        .split('/')
+        .map(|seg| {
+            let compact = seg.trim().to_lowercase().replace([' ', '-', '_'], "");
+            // "ledger ai" compacts to "ledgerai" and hits the table.
+            let plain = seg.trim().to_lowercase();
+            repo_sound_alias(&compact)
+                .or_else(|| repo_sound_alias(&plain))
+                .map(str::to_string)
+                .unwrap_or_else(|| seg.trim().to_string())
+        })
+        .collect();
+    mapped.join("/")
 }
 
 // ΓöÇΓöÇΓöÇ Close app command ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
@@ -1371,25 +1623,109 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
 
     // --- List PRs ---
     // Natural language patterns: "give me the pr list", "show live prs",
-    // "show open prs", "latest prs", "what prs are open", etc.
+    // "show open prs", "latest prs", "what prs are open", "open pr list", etc.
     // These all map to ListPrs with a state filter.
-    if let Some(caps) = regex_captures(text, r"^(?:give\s+me\s+|show\s+|get\s+|tell\s+me\s+|what\s+(?:are\s+|is\s+)?(?:the\s+)?)?(?:(open|closed|all|live|latest|active)\s+)?prs?(?:\s+list)?(?:\s+in\s+(\S+))?$") {
+    // "open pr list" is included because STT often transcribes "show" as "open"
+    // and the user means "open the PR list sidebar", not "open an app called pr list".
+    // "pull request(s)" is a full alternative to "prs" ("show me the pull
+    // requests"), and trailing "and all / all of them / everything" is
+    // tolerated ("show me the pull requests and all").
+    if let Some(caps) = regex_captures(text, r"^(?:give\s+me\s+(?:the\s+)?|show\s+(?:me\s+)?(?:the\s+)?|get\s+(?:me\s+)?(?:the\s+)?|tell\s+me\s+(?:the\s+)?|what\s+(?:are\s+|is\s+)?(?:the\s+)?|open\s+(?:the\s+)?|view\s+(?:the\s+)?|fetch\s+(?:me\s+)?(?:the\s+)?|display\s+(?:the\s+)?|bring\s+(?:me\s+)?(?:the\s+)?|pull\s+up\s+(?:the\s+)?)?(?:(open|closed|all|live|latest|active|merged)\s+)?(?:the\s+)?(?:prs?(?:\s+list)?|pull\s+requests?(?:\s+list)?)(?:\s+(?:and\s+)?all(?:\s+of\s+them)?|\s+everything)?(?:\s+in\s+(\S+))?(?:\s+(?:and\s+)?all(?:\s+of\s+them)?|\s+everything)?$") {
         let raw_state = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("open");
         let state = match raw_state {
             "live" | "active" | "open" => "open",
             "closed" => "closed",
             "all" => "all",
             "latest" => "open", // latest implies most recent open PRs
+            "merged" => "closed", // merged PRs are closed
             _ => "open",
         }.to_string();
         let repo = if let Some(r) = caps.get(2) {
             clean_repo_name(r.as_str())
         } else {
-            return extract_repo(text).map(|(repo, _)| ParseResult {
+            // Try "in <repo>" / "for <repo>" from text
+            if let Some((repo, _)) = extract_repo(text) {
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs { repo, state },
+                    },
+                    confidence: 0.9,
+                    source: "deterministic".to_string(),
+                });
+            }
+            // No repo in text — try auto-detection (browser URL, etc.)
+            if let Some(repo_id) = crate::architect::get_active_repo_url() {
+                let repo = format!("{}/{}", repo_id.owner, repo_id.repo);
+                tracing::info!(
+                    "[intent_parser] ListPrs: auto-detected repo '{}'",
+                    repo
+                );
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs { repo, state },
+                    },
+                    confidence: 0.85,
+                    source: "deterministic".to_string(),
+                });
+            }
+            // No repo found at all — return with empty repo, let the GitHub
+            // subsystem handle the error or use a default repo
+            return Some(ParseResult {
+                intent: ParsedIntent::GitHubCommand {
+                    command: GitHubCommand::ListPrs { repo: String::new(), state },
+                },
+                confidence: 0.7,
+                source: "deterministic".to_string(),
+            });
+        };
+        if !repo.is_empty() {
+            return Some(ParseResult {
                 intent: ParsedIntent::GitHubCommand {
                     command: GitHubCommand::ListPrs { repo, state },
                 },
-                confidence: 0.9,
+                confidence: 0.95,
+                source: "deterministic".to_string(),
+            });
+        }
+    }
+
+    // --- "what prs are open" / "which prs are open" / "are there any open prs" ---
+    // Different word order: state comes AFTER "prs"
+    if let Some(caps) = regex_captures(text, r"^(?:what|which|any)\s+prs?\s+(?:are\s+)?(?:(open|closed|all|live|active))?(?:\s+in\s+(\S+))?$") {
+        let raw_state = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("open");
+        let state = match raw_state {
+            "live" | "active" | "open" => "open",
+            "closed" => "closed",
+            "all" => "all",
+            _ => "open",
+        }.to_string();
+        let repo = if let Some(r) = caps.get(2) {
+            clean_repo_name(r.as_str())
+        } else {
+            if let Some((repo, _)) = extract_repo(text) {
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs { repo, state },
+                    },
+                    confidence: 0.9,
+                    source: "deterministic".to_string(),
+                });
+            }
+            if let Some(repo_id) = crate::architect::get_active_repo_url() {
+                let repo = format!("{}/{}", repo_id.owner, repo_id.repo);
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs { repo, state },
+                    },
+                    confidence: 0.85,
+                    source: "deterministic".to_string(),
+                });
+            }
+            return Some(ParseResult {
+                intent: ParsedIntent::GitHubCommand {
+                    command: GitHubCommand::ListPrs { repo: String::new(), state },
+                },
+                confidence: 0.7,
                 source: "deterministic".to_string(),
             });
         };
@@ -1410,11 +1746,32 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
         let repo = if let Some(r) = caps.get(2) {
             clean_repo_name(r.as_str())
         } else {
-            return extract_repo(text).map(|(repo, _)| ParseResult {
+            // Try "in <repo>" / "for <repo>" from text
+            if let Some((repo, _)) = extract_repo(text) {
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs { repo, state },
+                    },
+                    confidence: 0.9,
+                    source: "deterministic".to_string(),
+                });
+            }
+            // No repo in text — try auto-detection
+            if let Some(repo_id) = crate::architect::get_active_repo_url() {
+                let repo = format!("{}/{}", repo_id.owner, repo_id.repo);
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs { repo, state },
+                    },
+                    confidence: 0.85,
+                    source: "deterministic".to_string(),
+                });
+            }
+            return Some(ParseResult {
                 intent: ParsedIntent::GitHubCommand {
-                    command: GitHubCommand::ListPrs { repo, state },
+                    command: GitHubCommand::ListPrs { repo: String::new(), state },
                 },
-                confidence: 0.9,
+                confidence: 0.7,
                 source: "deterministic".to_string(),
             });
         };
@@ -1480,6 +1837,22 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
                     source: "deterministic-fuzzy".to_string(),
                 });
             }
+            // No repo found at all — return with empty repo for account-wide
+            // PR search. Without this, "show me the pr list" (no repo) falls
+            // through to Unknown even though it contains "list".
+            tracing::info!(
+                "[intent_parser] fuzzy 'list' fallback: no repo detected, returning account-wide ListPrs"
+            );
+            return Some(ParseResult {
+                intent: ParsedIntent::GitHubCommand {
+                    command: GitHubCommand::ListPrs {
+                        repo: String::new(),
+                        state: "open".to_string(),
+                    },
+                },
+                confidence: 0.6,
+                source: "deterministic-fuzzy".to_string(),
+            });
         }
     }
 
@@ -1821,6 +2194,571 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     None
 }
 
+// ─── Commerce: order food (Swiggy) ─────────────────────────────────────
+
+/// Parse food-ordering commands.
+///
+/// Patterns:
+///   "order pizza from dominos"      → OrderFood { query: "pizza", restaurant: Some("dominos") }
+///   "order food from swiggy"        → OrderFood { query: "", restaurant: None }
+///   "order biryani"                 → OrderFood { query: "biryani", restaurant: None }
+/// Parse food ordering commands (Swiggy MCP).
+///
+/// Patterns:
+///   "order pizza from dominos"      → OrderFood { query: "pizza", restaurant: Some("dominos") }
+///   "order a pizza from dominos"    → OrderFood { query: "pizza", restaurant: Some("dominos") }
+///   "order food from swiggy"        → OrderFood { query: "", restaurant: None }
+///   "order biryani on swiggy"       → OrderFood { query: "biryani", restaurant: None }
+///   "order biryani"                 → OrderFood { query: "biryani", restaurant: None }
+///   "get food from swiggy"          → OrderFood { query: "", restaurant: None }
+///   "order food"                    → OrderFood { query: "", restaurant: None }
+fn parse_order_food(text: &str) -> Option<ParseResult> {
+    let mut clean = text.trim();
+    for prefix in ["can you ", "could you ", "please ", "i want to "] {
+        if let Some(rest) = clean.strip_prefix(prefix) {
+            clean = rest.trim();
+            break;
+        }
+    }
+
+    // "order <dish> from <restaurant>" or "order <dish> on swiggy" or "order <dish>"
+    if let Some(rest) = clean.strip_prefix("order ") {
+        let rest = rest.trim_start_matches("a ").trim_start_matches("some ").trim();
+        if let Some(pos) = rest.find(" from ") {
+            let mut query = rest[..pos].trim();
+            let restaurant = rest[pos + 6..].trim();
+            if matches!(query, "food" | "something" | "lunch" | "dinner" | "something to eat") {
+                query = "";
+            }
+            return Some(ParseResult {
+                intent: ParsedIntent::OrderFood {
+                    query: query.to_string(),
+                    restaurant: if restaurant.is_empty() { None } else { Some(restaurant.to_string()) },
+                },
+                confidence: 0.95,
+                source: "deterministic".to_string(),
+            });
+        }
+        if let Some(pos) = rest.find(" on ") {
+            let mut query = rest[..pos].trim();
+            let restaurant = rest[pos + 4..].trim();
+            if matches!(query, "food" | "something" | "lunch" | "dinner" | "something to eat") {
+                query = "";
+            }
+            return Some(ParseResult {
+                intent: ParsedIntent::OrderFood {
+                    query: query.to_string(),
+                    restaurant: if restaurant.is_empty() { None } else { Some(restaurant.to_string()) },
+                },
+                confidence: 0.95,
+                source: "deterministic".to_string(),
+            });
+        }
+        // "order biryani" (no restaurant specified)
+        let mut query = rest.trim();
+        if matches!(query, "food" | "something" | "lunch" | "dinner" | "something to eat") {
+            query = "";
+        }
+        return Some(ParseResult {
+            intent: ParsedIntent::OrderFood {
+                query: query.to_string(),
+                restaurant: None,
+            },
+            confidence: 0.90,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    // "get me food from swiggy" / "get food from swiggy" / "get food"
+    if let Some(rest) = clean.strip_prefix("get me food").or_else(|| clean.strip_prefix("get food")) {
+        let restaurant = if let Some(r) = rest.strip_prefix(" from ") {
+            r.trim()
+        } else if let Some(r) = rest.strip_prefix(" on ") {
+            r.trim()
+        } else {
+            ""
+        };
+        return Some(ParseResult {
+            intent: ParsedIntent::OrderFood {
+                query: "".to_string(),
+                restaurant: if restaurant.is_empty() { None } else { Some(restaurant.to_string()) },
+            },
+            confidence: 0.90,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    None
+}
+
+// ─── Commerce: product search (Amazon) ─────────────────────────────────
+
+/// Parse Amazon product search commands.
+///
+/// Patterns:
+///   "search for sony headphones on amazon" → SearchProduct { query: "sony headphones" }
+///   "find wireless earbuds on amazon"      → SearchProduct { query: "wireless earbuds" }
+///   "buy laptop on amazon"                 → SearchProduct { query: "laptop" }
+///   "look for shoes on amazon"             → SearchProduct { query: "shoes" }
+///   "amazon search for laptop"            → SearchProduct { query: "laptop" }
+///   "search amazon for laptop"            → SearchProduct { query: "laptop" }
+fn parse_search_product(text: &str) -> Option<ParseResult> {
+    let mut clean = text.trim();
+    for prefix in ["can you ", "could you ", "please ", "i want to "] {
+        if let Some(rest) = clean.strip_prefix(prefix) {
+            clean = rest.trim();
+            break;
+        }
+    }
+
+    // "search for <query> on amazon" / "find <query> on amazon" / "buy <query> on amazon" / "look for <query> on amazon"
+    for verb in ["search for ", "find ", "buy ", "look for ", "search "] {
+        if let Some(rest) = clean.strip_prefix(verb) {
+            if let Some(query) = rest.strip_suffix(" on amazon").or_else(|| rest.strip_suffix(" in amazon")) {
+                let query = query.trim();
+                if !query.is_empty() {
+                    return Some(ParseResult {
+                        intent: ParsedIntent::SearchProduct {
+                            query: query.to_string(),
+                        },
+                        confidence: 0.95,
+                        source: "deterministic".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // "amazon search for <query>" / "amazon search <query>"
+    if let Some(rest) = clean.strip_prefix("amazon search for ").or_else(|| clean.strip_prefix("amazon search ")) {
+        return Some(ParseResult {
+            intent: ParsedIntent::SearchProduct {
+                query: rest.trim().to_string(),
+            },
+            confidence: 0.95,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    // "search amazon for <query>" / "search on amazon for <query>"
+    if let Some(rest) = clean.strip_prefix("search amazon for ").or_else(|| clean.strip_prefix("search on amazon for ")) {
+        return Some(ParseResult {
+            intent: ParsedIntent::SearchProduct {
+                query: rest.trim().to_string(),
+            },
+            confidence: 0.95,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    None
+}
+
+// ─── Ghostwriter room entry ──────────────────────────────────────────
+
+/// Enter the persistent dictation room.
+///
+/// Triggers: "ghostwriter", "ghost writer", "take a letter",
+/// "take dictation", "write this down", "start writing", "note this down",
+/// "scribe", "type for me" — optionally "for <contact> [on whatsapp]".
+/// Contact is optional; the room asks when missing.
+fn parse_ghostwriter_entry(text: &str) -> Option<ParseResult> {
+    // Ordered longest-first: "ghostwriter mode" must match before the
+    // "ghostwriter" prefix leaves a stray " mode" tail (which rejects).
+    const TRIGGERS: &[&str] = &[
+        "open the ghostwriter mode",
+        "open ghostwriter mode",
+        "open the ghostwriter",
+        "open the ghost mode",
+        "take a letter",
+        "write this down",
+        "take dictation",
+        "note this down",
+        "ghostwriter mode",
+        "enter ghostwriter",
+        "start ghostwriter",
+        "enable ghostwriter",
+        "open ghostwriter",
+        "start ghost mode",
+        "open ghost mode",
+        "go ghostwriter",
+        "go ghost mode",
+        "start writing",
+        "ghostwriter on",
+        "ghostwriter",
+        "ghost writer",
+        "ghost mode",
+        "type for me",
+        "scribe mode",
+        "scribe",
+    ];
+    for trigger in TRIGGERS {
+        if let Some(rest) = text.strip_prefix(trigger) {
+            let rest = rest.trim();
+            // Optional "for <contact> [on whatsapp]" tail.
+            let mut contact: Option<String> = None;
+            if let Some(after_for) = rest.strip_prefix("for ") {
+                let c = after_for
+                    .strip_suffix(" on whatsapp")
+                    .or_else(|| after_for.strip_suffix(" whatsapp"))
+                    .unwrap_or(after_for)
+                    .trim();
+                if !c.is_empty() {
+                    contact = Some(c.to_string());
+                }
+            } else if !rest.is_empty() {
+                // Trailing words that aren't a contact tail → not an entry.
+                return None;
+            }
+            return Some(ParseResult {
+                intent: ParsedIntent::EnterGhostwriter { contact },
+                confidence: 0.95,
+                source: "deterministic".to_string(),
+            });
+        }
+    }
+    None
+}
+
+// ─── Screen control (ordinal click, tab switch, read-back) ──────────
+
+/// "click on the 3rd option", "press the 2nd button", "choose 1st",
+/// "move to the 4th tab", "what's the 2nd link".
+fn parse_screen_command(text: &str) -> Option<ParseResult> {
+    // Tab switch: "move|go|switch|open to the Nth tab", "tab N".
+    for prefix in [
+        "move to the ",
+        "move to ",
+        "go to the ",
+        "go to ",
+        "switch to the ",
+        "switch to ",
+        "open ",
+    ] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            // rest like "4th tab" / "4 tab"
+            if let Some(num_part) = rest.strip_suffix(" tab") {
+                if let Some(n) = crate::screen::parse_ordinal(num_part) {
+                    if (1..=9).contains(&n) {
+                        return Some(ParseResult {
+                            intent: ParsedIntent::BrowserTab { index: n },
+                            confidence: 0.95,
+                            source: "deterministic".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if let Some(rest) = text.strip_prefix("tab ") {
+        if let Some(n) = crate::screen::parse_ordinal(rest.trim()) {
+            if (1..=9).contains(&n) {
+                return Some(ParseResult {
+                    intent: ParsedIntent::BrowserTab { index: n },
+                    confidence: 0.9,
+                    source: "deterministic".to_string(),
+                });
+            }
+        }
+    }
+
+    // Read-back: "what's the 3rd option/button/link".
+    for prefix in ["what's the ", "what is the ", "which is the ", "read the "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            for noun in ["option", "button", "link", "tab", "item", "choice"] {
+                if let Some(num_part) = rest.strip_suffix(&format!(" {noun}")) {
+                    if let Some(n) = crate::screen::parse_ordinal(num_part) {
+                        return Some(ParseResult {
+                            intent: ParsedIntent::ScreenRead { ordinal: n },
+                            confidence: 0.9,
+                            source: "deterministic".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Click: "click|press|choose|tap|select [on] [the] <ordinal> [noun]".
+    for verb in ["click on the ", "click on ", "click the ", "click ", "press the ", "press ",
+                 "choose the ", "choose ", "tap the ", "tap ", "select the ", "select "] {
+        if let Some(rest) = text.strip_prefix(verb) {
+            for noun in ["option", "button", "link", "tab", "item", "choice", "one"] {
+                let num_part = rest
+                    .strip_suffix(&format!(" {noun}"))
+                    .unwrap_or(rest)
+                    .trim();
+                // Accept when a noun was present, the rest is a bare number
+                // ("click 3"), or the whole rest is the ordinal ("choose 4th").
+                // This avoids eating non-ordinal tails ("click chrome" falls
+                // through to app resolution).
+                let noun_present = rest.len() != num_part.len();
+                let whole_is_ordinal = rest.trim() == num_part;
+                if let Some(n) = crate::screen::parse_ordinal(num_part) {
+                    if noun_present || whole_is_ordinal || num_part.chars().all(|c| c.is_ascii_digit()) {
+                        return Some(ParseResult {
+                            intent: ParsedIntent::ScreenClick { ordinal: n },
+                            confidence: 0.9,
+                            source: "deterministic".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+// ─── Social: send WhatsApp message ─────────────────────────────────────
+
+/// Parse WhatsApp message-sending commands.
+///
+/// Patterns:
+///   "send <message> to <contact> in/on/via whatsapp"
+///   "send <contact> a whatsapp message saying <message>"
+///   "send a whatsapp message to <contact> saying <message>"
+///   "send whatsapp message to <contact> saying <message>"
+///   "send whatsapp to <contact> saying <message>"
+///   "send a whatsapp to <contact> saying <message>"
+///   "whatsapp <contact> saying <message>"
+///   "message <contact> on whatsapp saying <message>"
+///   "send <contact> a message saying <message>"
+///   "send a message to <contact> saying <message>"
+fn parse_send_whatsapp_message(text: &str) -> Option<ParseResult> {
+    let mut clean_text = text.trim();
+    for prefix in ["can you ", "could you ", "please ", "i want to ", "just "] {
+        if let Some(rest) = clean_text.strip_prefix(prefix) {
+            clean_text = rest.trim();
+            break;
+        }
+    }
+
+    // Pattern 1: (send|message|text|tell|say) <message> to <contact> (in|on|via) whatsapp
+    // e.g. "send hi to mummy in whatsapp", "message hi to mommy in whatsapp", "say hi to mummy in whatsapp"
+    for verb in ["send ", "message ", "text ", "tell ", "say "] {
+        if let Some(rest) = clean_text.strip_prefix(verb) {
+            for wa_suffix in [" in whatsapp", " on whatsapp", " via whatsapp", " on wa", " in wa", " via wa"] {
+                if let Some(target_part) = rest.strip_suffix(wa_suffix) {
+                    // Must have " to " between message and contact
+                    // e.g. "hi to mummy", "good morning to mom"
+                    if let Some((msg, contact)) = target_part.rsplit_once(" to ") {
+                        let msg = msg.trim();
+                        let contact = contact.trim();
+                        let is_scaffolding = matches!(
+                            msg,
+                            "a message"
+                                | "a whatsapp message"
+                                | "a whatsapp"
+                                | "message"
+                                | "whatsapp message"
+                                | "whatsapp"
+                        );
+                        if !contact.is_empty() && !msg.is_empty() && !is_scaffolding {
+                            let msg_clean = msg
+                                .trim_start_matches("a whatsapp message saying ")
+                                .trim_start_matches("a message saying ")
+                                .trim_start_matches("a whatsapp saying ")
+                                .trim_start_matches("whatsapp message saying ")
+                                .trim();
+                            return Some(ParseResult {
+                                intent: ParsedIntent::SendWhatsAppMessage {
+                                    contact: contact.to_string(),
+                                    message: msg_clean.to_string(),
+                                },
+                                confidence: 0.95,
+                                source: "deterministic".to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Pattern 2: (send|message|text|tell|say) <message> (on|in|via) whatsapp to <contact>
+    // e.g. "send hi on whatsapp to mummy", "message good morning in whatsapp to dad", "say hi on whatsapp to mummy"
+    for verb in ["send ", "message ", "text ", "tell ", "say "] {
+        if let Some(rest) = clean_text.strip_prefix(verb) {
+            for wa_mid in [" on whatsapp to ", " in whatsapp to ", " via whatsapp to ", " on wa to ", " in wa to "] {
+                if let Some(pos) = rest.find(wa_mid) {
+                    let msg = rest[..pos].trim();
+                    let contact = rest[pos + wa_mid.len()..].trim();
+                    let is_scaffolding = matches!(
+                        msg,
+                        "a message"
+                            | "a whatsapp message"
+                            | "a whatsapp"
+                            | "message"
+                            | "whatsapp message"
+                            | "whatsapp"
+                    );
+                    if !contact.is_empty() && !msg.is_empty() && !is_scaffolding {
+                        return Some(ParseResult {
+                            intent: ParsedIntent::SendWhatsAppMessage {
+                                contact: contact.to_string(),
+                                message: msg.to_string(),
+                            },
+                            confidence: 0.95,
+                            source: "deterministic".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Pattern 3: (send|tell|message|text|say) + [a] [whatsapp] message to <contact> + (saying|that|: |. |,) + <message>
+    // e.g. "tell message to mommy. hi. all right", "tell message to mommy: hi", "send message to mommy. hi"
+    for verb in ["send ", "tell ", "message ", "text ", "say "] {
+        if let Some(rest) = clean_text.strip_prefix(verb) {
+            for prefix in [
+                "a whatsapp message to ",
+                "a whatsapp to ",
+                "whatsapp message to ",
+                "whatsapp to ",
+                "a message to ",
+                "message to ",
+            ] {
+                if let Some(after_prefix) = rest.strip_prefix(prefix) {
+                    for sep in [" saying ", " that ", ": ", ". ", ", "] {
+                        if let Some(pos) = after_prefix.find(sep) {
+                            let mut contact = after_prefix[..pos].trim();
+                            for cut in [" on whatsapp", " in whatsapp", " via whatsapp", " on wa"] {
+                                if let Some(c) = contact.strip_suffix(cut) {
+                                    contact = c.trim();
+                                }
+                            }
+                            let message = after_prefix[pos + sep.len()..].trim();
+                            if !contact.is_empty() && !message.is_empty() {
+                                return Some(ParseResult {
+                                    intent: ParsedIntent::SendWhatsAppMessage {
+                                        contact: contact.to_string(),
+                                        message: message.to_string(),
+                                    },
+                                    confidence: 0.95,
+                                    source: "deterministic".to_string(),
+                                });
+                            }
+                        }
+                    }
+                    // If no message separator found, it's a partial send: "tell message to mommy"
+                    let mut contact = after_prefix.trim();
+                    for cut in [" on whatsapp", " in whatsapp", " via whatsapp", " on wa"] {
+                        if let Some(c) = contact.strip_suffix(cut) {
+                            contact = c.trim();
+                        }
+                    }
+                    if !contact.is_empty() {
+                        return Some(ParseResult {
+                            intent: ParsedIntent::NeedMoreInfo {
+                                prompt: format!("What should I say to {}?", contact),
+                            },
+                            confidence: 0.90,
+                            source: "deterministic-partial".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Pattern 4: (send|tell|text|message|whatsapp|say) + <contact> + (a whatsapp message|a message|on whatsapp|...) + (saying|that|: |. |,) + <message>
+    for verb in ["send ", "tell ", "text ", "message ", "whatsapp ", "say "] {
+        if let Some(rest) = clean_text.strip_prefix(verb) {
+            for mid in [
+                " a whatsapp message saying ",
+                " a whatsapp message that ",
+                " a whatsapp message: ",
+                " a message saying ",
+                " a message that ",
+                " a message: ",
+                " whatsapp message saying ",
+                " whatsapp message that ",
+                " on whatsapp saying ",
+                " on whatsapp that ",
+                " on whatsapp: ",
+                " in whatsapp saying ",
+                " in whatsapp that ",
+                " in whatsapp: ",
+                " via whatsapp saying ",
+                " on whatsapp ",
+                " in whatsapp ",
+                " via whatsapp ",
+                " on wa ",
+                " in wa ",
+                " via wa ",
+                " saying ",
+                " that ",
+                ": ",
+                ". ",
+            ] {
+                if let Some(pos) = rest.find(mid) {
+                    let mut contact = rest[..pos].trim();
+                    for cut in [" on whatsapp", " in whatsapp", " via whatsapp", " on wa"] {
+                        if let Some(c) = contact.strip_suffix(cut) {
+                            contact = c.trim();
+                        }
+                    }
+                    let message = rest[pos + mid.len()..].trim();
+                    if !contact.is_empty() && !message.is_empty() {
+                        return Some(ParseResult {
+                            intent: ParsedIntent::SendWhatsAppMessage {
+                                contact: contact.to_string(),
+                                message: message.to_string(),
+                            },
+                            confidence: 0.95,
+                            source: "deterministic".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Pattern 5: Partial send / tell without message body
+    // ("send message to mummy", "can you send mummy a whatsapp message", "tell mom a message")
+    if (clean_text.contains("send") || clean_text.contains("tell") || clean_text.contains("text"))
+        && (clean_text.contains("whatsapp") || clean_text.contains("message"))
+    {
+        for verb in ["send ", "tell ", "text "] {
+            if let Some(rest) = clean_text.strip_prefix(verb) {
+                let mut contact_words = Vec::new();
+                for word in rest.split_whitespace() {
+                    let lower = word.to_lowercase();
+                    let trimmed_word = lower.trim_matches(|c: char| !c.is_alphanumeric());
+                    if !matches!(
+                        trimmed_word,
+                        "a" | "an" | "the" | "message" | "messages" | "whatsapp" | "wa" | "to" | "on" | "in" | "via"
+                    ) {
+                        contact_words.push(word);
+                    }
+                }
+                let contact = contact_words.join(" ");
+                let contact = contact.trim().trim_matches(|c: char| !c.is_alphanumeric());
+                if !contact.is_empty() && !contact.contains("saying") {
+                    return Some(ParseResult {
+                        intent: ParsedIntent::NeedMoreInfo {
+                            prompt: format!("What should I say to {}?", contact),
+                        },
+                        confidence: 0.85,
+                        source: "deterministic-partial".to_string(),
+                    });
+                } else if contact.is_empty() {
+                    return Some(ParseResult {
+                        intent: ParsedIntent::NeedMoreInfo {
+                            prompt: "Who should I message on WhatsApp, and what should I say?".to_string(),
+                        },
+                        confidence: 0.85,
+                        source: "deterministic-partial".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    None
+}
+
 // ΓöÇΓöÇΓöÇ Media control ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 // ΓöÇΓöÇΓöÇ Greetings / conversational replies ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
@@ -2029,6 +2967,83 @@ fn is_architect_command(text: &str) -> bool {
     )
 }
 
+// ─── Settings / Command Center ───────────────────────────────────────────
+
+/// Match settings/command center commands.
+/// Covers all natural phrasings:
+///   "open settings" / "open the settings"
+///   "show settings" / "show me the settings"
+///   "open command center" / "open the command center"
+///   "show command center" / "show me the command center"
+///   "open preferences" / "show preferences"
+///   "open configuration" / "open config"
+///   "configure NEXUS" / "NEXUS settings" / "NEXUS config"
+///   "NEXUS preferences" / "NEXUS command center"
+///   "bring up settings" / "pull up settings"
+///   "launch settings" / "start settings"
+///
+/// Also handles STT singular variants:
+///   "open setting" / "show setting" / "open preference"
+///
+/// Also handles bare words (Intel SST mic truncation):
+///   "settings" / "preferences" / "config" / "command center"
+fn is_settings_command(text: &str) -> bool {
+    let t = text.trim().to_lowercase();
+
+    // Bare words — Intel SST mic silence cuts the utterance mid-word.
+    // "settings" alone almost always means "open settings".
+    if t == "settings" || t == "preferences" || t == "config" || t == "configuration" {
+        return true;
+    }
+
+    // (open|launch|start|show|bring up|pull up|give me|show me) + (the)? + settings/setting
+    if regex_match(
+        text,
+        r"^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?settings?$",
+    ) {
+        return true;
+    }
+
+    // (open|show|launch) + (the)? + command center
+    if regex_match(
+        text,
+        r"^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?command\s+center$",
+    ) {
+        return true;
+    }
+
+    // (open|show) + (the)? + preferences? / preference
+    if regex_match(
+        text,
+        r"^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?preferences?$",
+    ) {
+        return true;
+    }
+
+    // (open|show) + (the)? + config / configuration
+    if regex_match(
+        text,
+        r"^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?(?:config|configuration)$",
+    ) {
+        return true;
+    }
+
+    // "configure NEXUS" / "configure nexus"
+    if regex_match(text, r"^configure\s+nexus$") {
+        return true;
+    }
+
+    // "NEXUS settings" / "NEXUS config" / "NEXUS preferences" / "NEXUS command center"
+    if regex_match(
+        text,
+        r"^nexus\s+(?:settings?|config|configuration|preferences?|command\s+center)$",
+    ) {
+        return true;
+    }
+
+    false
+}
+
 /// Fuzzy match for architecture mapper commands that STT misheard.
 ///
 /// faster-whisper tiny.en (39M params) commonly mishears "architecture mapper" as:
@@ -2232,6 +3247,19 @@ fn normalize_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Strip trailing sentence-ending punctuation that STT engines (Groq
+/// whisper-large-v3-turbo, faster-whisper) often append to transcripts.
+///
+/// Only strips from the very end of the string so internal punctuation
+/// (e.g. "owner/repo", "what's up") is preserved. Handles repeated
+/// punctuation ("ok...") and trailing quotes/brackets STT sometimes adds.
+fn strip_trailing_punctuation(s: &str) -> String {
+    let trimmed = s.trim_end_matches(|c: char| {
+        matches!(c, '.' | ',' | '?' | '!' | ';' | ':' | '"' | '\'' | ')' | ']' | '…')
+    });
+    trimmed.to_string()
+}
+
 /// Leading filler words that STT often inserts before the actual command.
 /// e.g. "And analyse PR 254 in zync" → "analyse PR 254 in zync"
 ///      "So open chrome" → "open chrome"
@@ -2415,7 +3443,7 @@ pub async fn parse_transcript(transcript: String) -> Result<ParseResult, String>
             );
 
             // Brain monitor: observe the brain's own result
-            let brain_intent_name = format!("{:?}", result.intent);
+            let brain_intent_name = intent_to_label(&result.intent).to_string();
             crate::brain_monitor::monitor_transcript(
                 transcript.clone(),
                 None, // deterministic missed
@@ -2444,7 +3472,7 @@ pub async fn parse_transcript(transcript: String) -> Result<ParseResult, String>
         // Brain monitor: observe the NLU result (non-blocking, background)
         #[cfg(feature = "admin-brain")]
         {
-            let nlu_intent_name = format!("{:?}", result.intent);
+            let nlu_intent_name = intent_to_label(&result.intent).to_string();
             crate::brain_monitor::monitor_transcript(
                 transcript.clone(),
                 None, // deterministic missed
@@ -2468,6 +3496,114 @@ pub async fn parse_transcript(transcript: String) -> Result<ParseResult, String>
 
 // ΓöÇΓöÇΓöÇ Tests ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
+// ─── Live mode commands ───────────────────────────────────────────────
+
+/// Parse live-mode commands: type, press, send, cancel, new tab, etc.
+///
+/// These are only matched after all other parsers fail, so they don't
+/// interfere with existing commands like "open app" or "search for X".
+///
+/// Patterns:
+///   "type <text>"              → TypeText
+///   "press <key>"              → PressKey
+///   "press <key1> <key2>"       → PressHotkey (multi-key combo)
+///   "press ctrl a"             → PressHotkey ["ctrl", "a"]
+///   "send"                     → ConfirmSend (requires confirmation)
+///   "cancel" / "never mind"    → CancelAction
+///   "new tab"                  → BrowserNewTab
+fn parse_live_command(text: &str) -> Option<ParseResult> {
+    // --- Type text ---
+    if let Some(rest) = text.strip_prefix("type ") {
+        let typed = rest.trim();
+        if !typed.is_empty() {
+            return Some(ParseResult {
+                intent: ParsedIntent::NluResult {
+                    intent: "type_text".to_string(),
+                    slots: serde_json::json!({ "text": typed }),
+                    confidence: 1.0,
+                },
+                confidence: 1.0,
+                source: "deterministic-live".to_string(),
+            });
+        }
+    }
+
+    // --- Press key / hotkey ---
+    if let Some(rest) = text.strip_prefix("press ") {
+        let keys_str = rest.trim();
+        if !keys_str.is_empty() {
+            let keys: Vec<&str> = keys_str.split_whitespace().collect();
+            if keys.len() == 1 {
+                return Some(ParseResult {
+                    intent: ParsedIntent::NluResult {
+                        intent: "press_key".to_string(),
+                        slots: serde_json::json!({ "key": keys[0] }),
+                        confidence: 1.0,
+                    },
+                    confidence: 1.0,
+                    source: "deterministic-live".to_string(),
+                });
+            } else {
+                return Some(ParseResult {
+                    intent: ParsedIntent::NluResult {
+                        intent: "press_hotkey".to_string(),
+                        slots: serde_json::json!({ "keys": keys }),
+                        confidence: 1.0,
+                    },
+                    confidence: 1.0,
+                    source: "deterministic-live".to_string(),
+                });
+            }
+        }
+    }
+
+    // --- Send (requires confirmation) ---
+    if text == "send" || text == "send it" || text == "send message" {
+        return Some(ParseResult {
+            intent: ParsedIntent::NluResult {
+                intent: "confirm_send".to_string(),
+                slots: serde_json::json!({}),
+                confidence: 1.0,
+            },
+            confidence: 1.0,
+            source: "deterministic-live".to_string(),
+        });
+    }
+
+    // --- Cancel ---
+    // "stop" is not handled by the greeting parser, so we catch it here.
+    // "cancel", "never mind", "forget it" are already handled by the
+    // greeting parser (they return "Very well, sir." which is appropriate).
+    // In live mode, the orchestrator should also reset the state machine
+    // when it sees a Greeting that is actually a cancel.
+    if text == "stop" {
+        return Some(ParseResult {
+            intent: ParsedIntent::NluResult {
+                intent: "cancel_action".to_string(),
+                slots: serde_json::json!({}),
+                confidence: 1.0,
+            },
+            confidence: 1.0,
+            source: "deterministic-live".to_string(),
+        });
+    }
+
+    // --- New tab ---
+    if text == "new tab" || text == "open new tab" || text == "open a new tab" {
+        return Some(ParseResult {
+            intent: ParsedIntent::NluResult {
+                intent: "browser_new_tab".to_string(),
+                slots: serde_json::json!({}),
+                confidence: 1.0,
+            },
+            confidence: 1.0,
+            source: "deterministic-live".to_string(),
+        });
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2478,6 +3614,34 @@ mod tests {
         assert!(result.is_some());
         let r = result.unwrap();
         assert!(matches!(r.intent, ParsedIntent::OpenApp { .. }));
+    }
+
+    #[test]
+    fn test_open_settings() {
+        let result = parse_deterministic("open the settings");
+        assert!(result.is_some(), "should parse 'open the settings'");
+        let r = result.unwrap();
+        assert!(
+            matches!(r.intent, ParsedIntent::OpenSettings),
+            "expected OpenSettings, got {:?}",
+            r.intent
+        );
+    }
+
+    #[test]
+    fn test_open_settings_no_the() {
+        let result = parse_deterministic("open settings");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(matches!(r.intent, ParsedIntent::OpenSettings));
+    }
+
+    #[test]
+    fn test_open_command_center() {
+        let result = parse_deterministic("open the command center");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(matches!(r.intent, ParsedIntent::OpenSettings));
     }
 
     #[test]
@@ -2597,6 +3761,25 @@ mod tests {
         assert!(matches!(r.intent, ParsedIntent::OpenApp { .. }));
         if let ParsedIntent::OpenApp { target } = r.intent {
             assert_eq!(target, "chrome");
+        }
+    }
+
+    #[test]
+    fn test_open_the_x_never_hijacked_by_stopword_app() {
+        // Regression: "open the room" used to resolve to a Dribbble PWA —
+        // the word "the" was a registry key (last-write-wins) owned by its
+        // long title, and resolve_app_name returned the alphabetical first
+        // search name ("creative"). Must never happen again.
+        let result = parse_deterministic("open the room");
+        assert!(result.is_some());
+        if let ParsedIntent::OpenApp { target } = result.unwrap().intent {
+            assert_ne!(target, "creative", "stop-word hijack regressed");
+            assert!(
+                !target.to_lowercase().contains("dribbble"),
+                "wrong app launched for 'open the room': {target}"
+            );
+        } else {
+            panic!("expected OpenApp");
         }
     }
 
@@ -2992,6 +4175,140 @@ mod tests {
     }
 
     #[test]
+    fn test_pr_list_commands() {
+        use crate::github_cmd::GitHubCommand;
+        // "open pr list" must NOT be parsed as OpenApp("pr list")
+        // It should be ListPrs
+        for cmd in &[
+            "open pr list",
+            "open the pr list",
+            "show pr list",
+            "show the pr list",
+            "show me the pr list",
+            "show me pr list",
+            "show me prs",
+            "give me the pr list",
+            "view pr list",
+            "view the pr list",
+            "get pr list",
+            "get me the pr list",
+            "get me prs",
+            "tell me the pr list",
+            "what prs are open",
+            "show open prs",
+            "show live prs",
+            "latest prs",
+            "give me prs",
+            "show prs",
+            "get prs",
+            "fetch prs",
+            "display prs",
+            "bring me the pr list",
+            "pull up the pr list",
+            "show merged prs",
+            "merged prs",
+        ] {
+            let result = parse_deterministic(cmd);
+            assert!(result.is_some(), "failed to parse: {}", cmd);
+            let r = result.unwrap();
+            assert!(
+                matches!(
+                    r.intent,
+                    ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs { .. }
+                    }
+                ),
+                "expected ListPrs for: {}, got {:?}",
+                cmd,
+                r.intent
+            );
+        }
+    }
+
+    #[test]
+    fn test_pr_list_with_trailing_punctuation() {
+        use crate::github_cmd::GitHubCommand;
+        // Groq whisper-large-v3-turbo appends trailing punctuation to
+        // transcripts. Without strip_trailing_punctuation() the ListPrs
+        // regex (anchored with $) fails and the permissive OpenApp
+        // fallback catches "the pr list." → resolves to a cached app
+        // (Dribbble). This test guards against that regression.
+        for cmd in &[
+            "open the pr list.",
+            "open the pr list?",
+            "open the pr list!",
+            "show the pr list.",
+            "show me the pr list.",
+            "show me pr list.",
+            "show open prs.",
+            "list open prs.",
+            "what prs are open.",
+            "give me the pr list.",
+            "view the pr list.",
+            "get prs.",
+            "get me the pr list.",
+            "fetch prs.",
+            "display prs.",
+        ] {
+            let result = parse_deterministic(cmd);
+            assert!(result.is_some(), "failed to parse: {}", cmd);
+            let r = result.unwrap();
+            assert!(
+                matches!(
+                    r.intent,
+                    ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs { .. }
+                    }
+                ),
+                "expected ListPrs for: {}, got {:?} (trailing punctuation not stripped?)",
+                cmd,
+                r.intent
+            );
+        }
+    }
+
+    #[test]
+    fn test_open_app_still_works_with_punctuation() {
+        // Ensure strip_trailing_punctuation doesn't break normal app opens
+        let result = parse_deterministic("open chrome.");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(
+            matches!(r.intent, ParsedIntent::OpenApp { .. }),
+            "expected OpenApp for 'open chrome.', got {:?}",
+            r.intent
+        );
+    }
+
+    #[test]
+    fn test_strip_trailing_punctuation_helper() {
+        assert_eq!(strip_trailing_punctuation("hello."), "hello");
+        assert_eq!(strip_trailing_punctuation("hello?"), "hello");
+        assert_eq!(strip_trailing_punctuation("hello!"), "hello");
+        assert_eq!(strip_trailing_punctuation("hello..."), "hello");
+        assert_eq!(strip_trailing_punctuation("hello"), "hello");
+        // Internal punctuation preserved
+        assert_eq!(strip_trailing_punctuation("owner/repo"), "owner/repo");
+        assert_eq!(strip_trailing_punctuation("what's up"), "what's up");
+        assert_eq!(strip_trailing_punctuation("pr#23"), "pr#23");
+    }
+
+    #[test]
+    fn test_looks_like_github_phrase() {
+        assert!(looks_like_github_phrase("the pr list"));
+        assert!(looks_like_github_phrase("pull requests"));
+        assert!(looks_like_github_phrase("the repo list"));
+        assert!(looks_like_github_phrase("open prs"));
+        assert!(looks_like_github_phrase("my prs"));
+        // Not github phrases
+        assert!(!looks_like_github_phrase("chrome"));
+        assert!(!looks_like_github_phrase("notepad"));
+        assert!(!looks_like_github_phrase("whatsapp"));
+        assert!(!looks_like_github_phrase("preview")); // "pr" inside word, not token
+        assert!(!looks_like_github_phrase("process"));
+    }
+
+    #[test]
     fn test_deep_analysis_pr() {
         // "deep analysis PR 24 in nexus-agent" ΓÇö noun form with "deep" prefix
         for cmd in &[
@@ -3216,13 +4533,18 @@ mod tests {
 
     #[test]
     fn test_fuzzy_match_confidence_lower() {
-        // Fuzzy matches should have lower confidence (0.8) than exact (1.0)
+        // Fuzzy matches should have lower confidence (0.8) than exact (1.0).
+        // NOTE: "zink" no longer goes fuzzy — the canonical sound-alias map
+        // resolves it to "zync" inside clean_repo_name, so the exact path
+        // wins at 1.0. A non-aliased misspelling still goes fuzzy.
         let result = parse_deterministic("analyse pr 254 in zink");
         assert!(result.is_some());
         let r = result.unwrap();
         if let ParsedIntent::AnalysePr { .. } = r.intent {
-            assert_eq!(r.confidence, 0.8);
-            assert_eq!(r.source, "fuzzy");
+            assert_eq!(r.confidence, 1.0);
+            assert_eq!(r.source, "deterministic");
+        } else {
+            panic!("expected AnalysePr");
         }
     }
 
@@ -3511,6 +4833,79 @@ mod tests {
     }
 
     #[test]
+    fn test_canonical_repo_name_sound_aliases() {
+        // Every sounding from real STT logs resolves to the same entity.
+        for heard in [
+            "servx", "cervix", "cervx", "srvx", "service", "cervex",
+            "cervets", "servetus", "servex",
+        ] {
+            assert_eq!(canonical_repo_name(heard), "servx", "heard: {heard}");
+        }
+        for heard in ["zync", "zinc", "zink", "sync", "zynk"] {
+            assert_eq!(canonical_repo_name(heard), "zync", "heard: {heard}");
+        }
+        assert_eq!(canonical_repo_name("incognito"), "congi");
+        assert_eq!(canonical_repo_name("meat"), "meet");
+        assert_eq!(canonical_repo_name("shopcart"), "shopkart");
+        assert_eq!(canonical_repo_name("ledger ai"), "ledger-ai");
+        // Owner/repo paths map per segment.
+        assert_eq!(canonical_repo_name("sync-meet/sync"), "sync-meet/zync");
+        // Unknown names pass through untouched — never rewrites a real name.
+        assert_eq!(canonical_repo_name("myrepo"), "myrepo");
+        assert_eq!(canonical_repo_name("ChitkulLakshya/ultrabot"), "ChitkulLakshya/ultrabot");
+    }
+
+    #[test]
+    fn test_parse_list_prs_heard_repo_resolves() {
+        // End to end: STT heard "cervix", user meant servx.
+        let result = parse_deterministic("list prs in cervix");
+        assert!(result.is_some());
+        if let ParsedIntent::GitHubCommand {
+            command: crate::github_cmd::GitHubCommand::ListPrs { repo, .. },
+        } = result.unwrap().intent
+        {
+            assert_eq!(repo, "servx");
+        } else {
+            panic!("expected ListPrs");
+        }
+    }
+
+    #[test]
+    fn test_parse_list_prs_pull_request_wording() {
+        // "pull requests" is a full alternative to "prs".
+        for phrase in [
+            "show me the prs",
+            "show me the pull requests",
+            "show me the pull requests and all",
+            "show the pull requests in owner/repo",
+            "give me all the pull requests",
+            "show prs and all of them",
+            "pull up the pull request list",
+        ] {
+            let result = parse_deterministic(phrase);
+            assert!(result.is_some(), "should parse '{phrase}'");
+            if let ParsedIntent::GitHubCommand {
+                command: crate::github_cmd::GitHubCommand::ListPrs { .. },
+            } = result.unwrap().intent
+            {
+            } else {
+                panic!("expected ListPrs for '{phrase}'");
+            }
+        }
+        // …but a bare "everything" with no PR noun must NOT list PRs.
+        let other = parse_deterministic("show me everything").map(|r| r.intent);
+        assert!(
+            !matches!(
+                other,
+                Some(ParsedIntent::GitHubCommand {
+                    command: crate::github_cmd::GitHubCommand::ListPrs { .. },
+                })
+            ),
+            "bare 'everything' must not list PRs"
+        );
+    }
+
+    #[test]
     fn test_parse_get_pr() {
         let result = parse_deterministic("show pr 42 in owner/repo");
         assert!(result.is_some());
@@ -3758,5 +5153,710 @@ mod tests {
         use crate::orchestrator::{route_intent, Subsystem};
         let intent = ParsedIntent::Search { query: "test".into() };
         assert_ne!(route_intent(&intent), Subsystem::GitHub);
+    }
+
+    // ─── Live mode intent parsing tests ─────────────────────────────
+
+    #[test]
+    fn test_parse_live_type_text() {
+        let result = parse_deterministic("type hello world");
+        assert!(result.is_some());
+        if let ParsedIntent::NluResult { intent, slots, .. } = result.unwrap().intent {
+            assert_eq!(intent, "type_text");
+            assert_eq!(slots["text"], "hello world");
+        } else {
+            panic!("expected NluResult for type_text");
+        }
+    }
+
+    #[test]
+    fn test_parse_live_press_key() {
+        let result = parse_deterministic("press enter");
+        assert!(result.is_some());
+        if let ParsedIntent::NluResult { intent, slots, .. } = result.unwrap().intent {
+            assert_eq!(intent, "press_key");
+            assert_eq!(slots["key"], "enter");
+        } else {
+            panic!("expected NluResult for press_key");
+        }
+    }
+
+    #[test]
+    fn test_parse_live_press_hotkey() {
+        let result = parse_deterministic("press ctrl a");
+        assert!(result.is_some());
+        if let ParsedIntent::NluResult { intent, slots, .. } = result.unwrap().intent {
+            assert_eq!(intent, "press_hotkey");
+            assert_eq!(slots["keys"][0], "ctrl");
+            assert_eq!(slots["keys"][1], "a");
+        } else {
+            panic!("expected NluResult for press_hotkey");
+        }
+    }
+
+    #[test]
+    fn test_parse_live_send() {
+        let result = parse_deterministic("send");
+        assert!(result.is_some());
+        if let ParsedIntent::NluResult { intent, .. } = result.unwrap().intent {
+            assert_eq!(intent, "confirm_send");
+        } else {
+            panic!("expected NluResult for confirm_send");
+        }
+    }
+
+    #[test]
+    fn test_parse_live_send_it() {
+        let result = parse_deterministic("send it");
+        assert!(result.is_some());
+        if let ParsedIntent::NluResult { intent, .. } = result.unwrap().intent {
+            assert_eq!(intent, "confirm_send");
+        } else {
+            panic!("expected NluResult for confirm_send");
+        }
+    }
+
+    #[test]
+    fn test_parse_live_cancel() {
+        // "cancel" is handled by the greeting parser, not live mode
+        let result = parse_deterministic("cancel");
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap().intent, ParsedIntent::Greeting { .. }));
+    }
+
+    #[test]
+    fn test_parse_live_never_mind() {
+        // "never mind" is handled by the greeting parser, not live mode
+        let result = parse_deterministic("never mind");
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap().intent, ParsedIntent::Greeting { .. }));
+    }
+
+    #[test]
+    fn test_parse_live_new_tab() {
+        let result = parse_deterministic("new tab");
+        assert!(result.is_some());
+        if let ParsedIntent::NluResult { intent, .. } = result.unwrap().intent {
+            assert_eq!(intent, "browser_new_tab");
+        } else {
+            panic!("expected NluResult for browser_new_tab");
+        }
+    }
+
+    #[test]
+    fn test_parse_live_open_new_tab() {
+        let result = parse_deterministic("open new tab");
+        assert!(result.is_some());
+        if let ParsedIntent::NluResult { intent, .. } = result.unwrap().intent {
+            assert_eq!(intent, "browser_new_tab");
+        } else {
+            panic!("expected NluResult for browser_new_tab");
+        }
+    }
+
+    #[test]
+    fn test_parse_live_does_not_interfere_with_open() {
+        // "open whatsapp" should still be OpenApp, not a live command
+        let result = parse_deterministic("open whatsapp");
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap().intent, ParsedIntent::OpenApp { .. }));
+    }
+
+    #[test]
+    fn test_parse_live_does_not_interfere_with_search() {
+        // "search for cats" should still be Search, not a live command
+        let result = parse_deterministic("search for cats");
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap().intent, ParsedIntent::Search { .. }));
+    }
+
+    // ─── Commerce: OrderFood ───────────────────────────────────────────
+
+    #[test]
+    fn test_order_food_with_restaurant() {
+        let result = parse_deterministic("order pizza from dominos");
+        assert!(result.is_some());
+        if let ParsedIntent::OrderFood { query, restaurant } = result.unwrap().intent {
+            assert_eq!(query, "pizza");
+            assert_eq!(restaurant.as_deref(), Some("dominos"));
+        } else {
+            panic!("expected OrderFood");
+        }
+    }
+
+    #[test]
+    fn test_order_food_generic_from_swiggy() {
+        let result = parse_deterministic("order food from swiggy");
+        assert!(result.is_some());
+        if let ParsedIntent::OrderFood { query, restaurant } = result.unwrap().intent {
+            assert_eq!(query, "");
+            assert_eq!(restaurant.as_deref(), Some("swiggy"));
+        } else {
+            panic!("expected OrderFood");
+        }
+    }
+
+    #[test]
+    fn test_order_food_no_restaurant() {
+        let result = parse_deterministic("order biryani");
+        assert!(result.is_some());
+        if let ParsedIntent::OrderFood { query, restaurant } = result.unwrap().intent {
+            assert_eq!(query, "biryani");
+            assert!(restaurant.is_none());
+        } else {
+            panic!("expected OrderFood");
+        }
+    }
+
+    #[test]
+    fn test_order_food_generic() {
+        let result = parse_deterministic("order food");
+        assert!(result.is_some());
+        if let ParsedIntent::OrderFood { query, .. } = result.unwrap().intent {
+            assert_eq!(query, "");
+        } else {
+            panic!("expected OrderFood");
+        }
+    }
+
+    #[test]
+    fn test_get_food_from_swiggy() {
+        let result = parse_deterministic("get food from swiggy");
+        assert!(result.is_some());
+        if let ParsedIntent::OrderFood { restaurant, .. } = result.unwrap().intent {
+            assert_eq!(restaurant.as_deref(), Some("swiggy"));
+        } else {
+            panic!("expected OrderFood");
+        }
+    }
+
+    // ─── Commerce: SearchProduct ───────────────────────────────────────
+
+    #[test]
+    fn test_search_product_on_amazon() {
+        let result = parse_deterministic("search for sony headphones on amazon");
+        assert!(result.is_some());
+        if let ParsedIntent::SearchProduct { query } = result.unwrap().intent {
+            assert_eq!(query, "sony headphones");
+        } else {
+            panic!("expected SearchProduct");
+        }
+    }
+
+    #[test]
+    fn test_find_product_on_amazon() {
+        let result = parse_deterministic("find wireless earbuds on amazon");
+        assert!(result.is_some());
+        if let ParsedIntent::SearchProduct { query } = result.unwrap().intent {
+            assert_eq!(query, "wireless earbuds");
+        } else {
+            panic!("expected SearchProduct");
+        }
+    }
+
+    #[test]
+    fn test_amazon_search_prefix() {
+        let result = parse_deterministic("amazon search for laptop");
+        assert!(result.is_some());
+        if let ParsedIntent::SearchProduct { query } = result.unwrap().intent {
+            assert_eq!(query, "laptop");
+        } else {
+            panic!("expected SearchProduct");
+        }
+    }
+
+    #[test]
+    fn test_search_amazon_for() {
+        let result = parse_deterministic("search amazon for keyboard");
+        assert!(result.is_some());
+        if let ParsedIntent::SearchProduct { query } = result.unwrap().intent {
+            assert_eq!(query, "keyboard");
+        } else {
+            panic!("expected SearchProduct");
+        }
+    }
+
+    #[test]
+    fn test_order_a_pizza_from_dominos() {
+        let result = parse_deterministic("can you order a pizza from dominos");
+        assert!(result.is_some());
+        if let ParsedIntent::OrderFood { query, restaurant } = result.unwrap().intent {
+            assert_eq!(query, "pizza");
+            assert_eq!(restaurant.as_deref(), Some("dominos"));
+        } else {
+            panic!("expected OrderFood");
+        }
+    }
+
+    #[test]
+    fn test_order_biryani_on_swiggy() {
+        let result = parse_deterministic("order biryani on swiggy");
+        assert!(result.is_some());
+        if let ParsedIntent::OrderFood { query, restaurant } = result.unwrap().intent {
+            assert_eq!(query, "biryani");
+            assert_eq!(restaurant.as_deref(), Some("swiggy"));
+        } else {
+            panic!("expected OrderFood");
+        }
+    }
+
+    #[test]
+    fn test_buy_product_on_amazon() {
+        let result = parse_deterministic("buy laptop on amazon");
+        assert!(result.is_some());
+        if let ParsedIntent::SearchProduct { query } = result.unwrap().intent {
+            assert_eq!(query, "laptop");
+        } else {
+            panic!("expected SearchProduct");
+        }
+    }
+
+    #[test]
+    fn test_look_for_shoes_on_amazon() {
+        let result = parse_deterministic("can you look for shoes on amazon");
+        assert!(result.is_some());
+        if let ParsedIntent::SearchProduct { query } = result.unwrap().intent {
+            assert_eq!(query, "shoes");
+        } else {
+            panic!("expected SearchProduct");
+        }
+    }
+
+    #[test]
+    fn test_search_without_amazon_is_regular_search() {
+        // "search for cats" (no "on amazon") should still be regular Search
+        let result = parse_deterministic("search for cats");
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap().intent, ParsedIntent::Search { .. }));
+    }
+
+    // ─── Social: SendWhatsAppMessage ───────────────────────────────────
+
+    #[test]
+    fn test_send_whatsapp_message_full() {
+        let result =
+            parse_deterministic("send mom a whatsapp message saying i'll be late");
+        assert!(result.is_some());
+        if let ParsedIntent::SendWhatsAppMessage { contact, message } = result.unwrap().intent {
+            assert_eq!(contact, "mom");
+            assert_eq!(message, "i'll be late");
+        } else {
+            panic!("expected SendWhatsAppMessage");
+        }
+    }
+
+    #[test]
+    fn test_send_message_saying() {
+        let result = parse_deterministic("send dad a message saying on my way");
+        assert!(result.is_some());
+        if let ParsedIntent::SendWhatsAppMessage { contact, message } = result.unwrap().intent {
+            assert_eq!(contact, "dad");
+            assert_eq!(message, "on my way");
+        } else {
+            panic!("expected SendWhatsAppMessage");
+        }
+    }
+
+    #[test]
+    fn test_whatsapp_contact_saying() {
+        let result = parse_deterministic("whatsapp mom saying i'm coming");
+        assert!(result.is_some());
+        if let ParsedIntent::SendWhatsAppMessage { contact, message } = result.unwrap().intent {
+            assert_eq!(contact, "mom");
+            assert_eq!(message, "i'm coming");
+        } else {
+            panic!("expected SendWhatsAppMessage");
+        }
+    }
+
+    #[test]
+    fn test_message_on_whatsapp_saying() {
+        let result = parse_deterministic("message lakshya on whatsapp saying hello");
+        assert!(result.is_some());
+        if let ParsedIntent::SendWhatsAppMessage { contact, message } = result.unwrap().intent {
+            assert_eq!(contact, "lakshya");
+            assert_eq!(message, "hello");
+        } else {
+            panic!("expected SendWhatsAppMessage");
+        }
+    }
+
+    #[test]
+    fn test_whatsapp_chat_still_parses_as_chat() {
+        // "open chat with mom" should still be WhatsappChat, not SendWhatsAppMessage
+        let result = parse_deterministic("open chat with mom");
+        assert!(result.is_some());
+        assert!(matches!(
+            result.unwrap().intent,
+            ParsedIntent::WhatsappChat { .. }
+        ));
+    }
+
+    #[test]
+    fn test_partial_send_asks_for_message() {
+        // The exact failure from the field: action + contact, no body.
+        // Must ask ("What should I say to mummy?") — never fall to Worker.
+        let result = parse_deterministic("can you send message to mummy in whatsapp");
+        assert!(result.is_some());
+        if let ParsedIntent::NeedMoreInfo { prompt } = result.unwrap().intent {
+            assert!(prompt.contains("mummy"), "prompt names the contact: {prompt}");
+        } else {
+            panic!("expected NeedMoreInfo");
+        }
+    }
+
+    #[test]
+    fn test_partial_send_without_saying_asks() {
+        let result = parse_deterministic("send mom a whatsapp message");
+        assert!(result.is_some());
+        assert!(matches!(
+            result.unwrap().intent,
+            ParsedIntent::NeedMoreInfo { .. }
+        ));
+    }
+
+    #[test]
+    fn test_send_message_to_contact_in_whatsapp() {
+        let result = parse_deterministic("send hi to mummy in whatsapp");
+        match result {
+            Some(ParseResult {
+                intent: ParsedIntent::SendWhatsAppMessage { contact, message },
+                ..
+            }) => {
+                assert_eq!(contact, "mummy");
+                assert_eq!(message, "hi");
+            }
+            other => panic!("expected SendWhatsAppMessage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_send_message_to_contact_on_whatsapp() {
+        let result = parse_deterministic("send hello to mom on whatsapp");
+        match result {
+            Some(ParseResult {
+                intent: ParsedIntent::SendWhatsAppMessage { contact, message },
+                ..
+            }) => {
+                assert_eq!(contact, "mom");
+                assert_eq!(message, "hello");
+            }
+            other => panic!("expected SendWhatsAppMessage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_can_you_send_message_to_contact_via_whatsapp() {
+        let result = parse_deterministic("can you send on my way to dad via whatsapp");
+        match result {
+            Some(ParseResult {
+                intent: ParsedIntent::SendWhatsAppMessage { contact, message },
+                ..
+            }) => {
+                assert_eq!(contact, "dad");
+                assert_eq!(message, "on my way");
+            }
+            other => panic!("expected SendWhatsAppMessage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_send_whatsapp_message_to_contact_saying() {
+        let result = parse_deterministic("send a whatsapp message to mummy saying hi");
+        match result {
+            Some(ParseResult {
+                intent: ParsedIntent::SendWhatsAppMessage { contact, message },
+                ..
+            }) => {
+                assert_eq!(contact, "mummy");
+                assert_eq!(message, "hi");
+            }
+            other => panic!("expected SendWhatsAppMessage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_send_whatsapp_to_contact_saying() {
+        let result = parse_deterministic("send whatsapp to dad saying dinner is ready");
+        match result {
+            Some(ParseResult {
+                intent: ParsedIntent::SendWhatsAppMessage { contact, message },
+                ..
+            }) => {
+                assert_eq!(contact, "dad");
+                assert_eq!(message, "dinner is ready");
+            }
+            other => panic!("expected SendWhatsAppMessage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_send_message_on_whatsapp_to_contact() {
+        let result = parse_deterministic("send hi on whatsapp to mummy");
+        match result {
+            Some(ParseResult {
+                intent: ParsedIntent::SendWhatsAppMessage { contact, message },
+                ..
+            }) => {
+                assert_eq!(contact, "mummy");
+                assert_eq!(message, "hi");
+            }
+            other => panic!("expected SendWhatsAppMessage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_send_a_message_on_whatsapp_empty_contact() {
+        let result = parse_deterministic("send a message on whatsapp");
+        assert!(result.is_some());
+        match result.unwrap().intent {
+            ParsedIntent::NeedMoreInfo { prompt } => {
+                assert!(prompt.contains("Who should I message"), "prompt is {prompt}");
+            }
+            other => panic!("expected NeedMoreInfo, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_tell_message_to_mommy_with_period_separator() {
+        let result = parse_deterministic("Tell message to mommy. Hi. All right.");
+        match result {
+            Some(ParseResult {
+                intent: ParsedIntent::SendWhatsAppMessage { contact, message },
+                ..
+            }) => {
+                assert_eq!(contact, "mommy");
+                assert_eq!(message, "hi. all right");
+            }
+            other => panic!("expected SendWhatsAppMessage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_tell_message_to_mommy_partial() {
+        let result = parse_deterministic("Tell message to mommy");
+        match result {
+            Some(ParseResult {
+                intent: ParsedIntent::NeedMoreInfo { prompt },
+                ..
+            }) => {
+                assert_eq!(prompt, "What should I say to mommy?");
+            }
+            other => panic!("expected NeedMoreInfo, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_tell_mommy_that_clause() {
+        let result = parse_deterministic("tell mommy that dinner is ready");
+        match result {
+            Some(ParseResult {
+                intent: ParsedIntent::SendWhatsAppMessage { contact, message },
+                ..
+            }) => {
+                assert_eq!(contact, "mommy");
+                assert_eq!(message, "dinner is ready");
+            }
+            other => panic!("expected SendWhatsAppMessage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_text_mommy_colon() {
+        let result = parse_deterministic("text mommy: I'm on my way");
+        match result {
+            Some(ParseResult {
+                intent: ParsedIntent::SendWhatsAppMessage { contact, message },
+                ..
+            }) => {
+                assert_eq!(contact, "mommy");
+                assert_eq!(message, "i'm on my way");
+            }
+            other => panic!("expected SendWhatsAppMessage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_message_hi_to_mommy_in_whatsapp() {
+        let result = parse_deterministic("Message Hi to mommy in WhatsApp.");
+        match result {
+            Some(ParseResult {
+                intent: ParsedIntent::SendWhatsAppMessage { contact, message },
+                ..
+            }) => {
+                assert_eq!(contact, "mommy");
+                assert_eq!(message, "hi");
+            }
+            other => panic!("expected SendWhatsAppMessage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_text_dinner_is_ready_to_dad_on_whatsapp() {
+        let result = parse_deterministic("Text dinner is ready to dad on WhatsApp");
+        match result {
+            Some(ParseResult {
+                intent: ParsedIntent::SendWhatsAppMessage { contact, message },
+                ..
+            }) => {
+                assert_eq!(contact, "dad");
+                assert_eq!(message, "dinner is ready");
+            }
+            other => panic!("expected SendWhatsAppMessage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_tell_on_my_way_to_mummy_in_whatsapp() {
+        let result = parse_deterministic("Tell I am on my way to mummy in whatsapp");
+        match result {
+            Some(ParseResult {
+                intent: ParsedIntent::SendWhatsAppMessage { contact, message },
+                ..
+            }) => {
+                assert_eq!(contact, "mummy");
+                assert_eq!(message, "i am on my way");
+            }
+            other => panic!("expected SendWhatsAppMessage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_message_contact_on_whatsapp_message() {
+        let result = parse_deterministic("message mommy on whatsapp hi");
+        match result {
+            Some(ParseResult {
+                intent: ParsedIntent::SendWhatsAppMessage { contact, message },
+                ..
+            }) => {
+                assert_eq!(contact, "mommy");
+                assert_eq!(message, "hi");
+            }
+            other => panic!("expected SendWhatsAppMessage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_bare_message_still_opens_chat() {
+        // No "send" verb → chat-open meaning preserved (not a partial send).
+        let result = parse_deterministic("message mom");
+        assert!(result.is_some());
+        assert!(matches!(
+            result.unwrap().intent,
+            ParsedIntent::WhatsappChat { .. }
+        ));
+    }
+
+    // ─── Routing ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_ghostwriter_entry_triggers() {
+        for phrase in [
+            "ghostwriter",
+            "ghost writer",
+            "ghost mode",
+            "go ghost mode",
+            "ghostwriter mode",
+            "open ghostwriter",
+            "open ghostwriter mode",
+            "open the ghostwriter mode",
+            "open ghost mode",
+            "open the ghost mode",
+            "take a letter",
+            "write this down",
+            "scribe",
+            "scribe mode",
+        ] {
+            let result = parse_deterministic(phrase);
+            assert!(result.is_some(), "{phrase} should enter Ghostwriter");
+            assert!(matches!(
+                result.unwrap().intent,
+                ParsedIntent::EnterGhostwriter { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn test_ghostwriter_entry_with_contact() {
+        let result = parse_deterministic("ghostwriter for mom on whatsapp");
+        assert!(result.is_some());
+        if let ParsedIntent::EnterGhostwriter { contact } = result.unwrap().intent {
+            assert_eq!(contact.as_deref(), Some("mom"));
+        } else {
+            panic!("expected EnterGhostwriter");
+        }
+    }
+
+    // ─── Screen control ──────────────────────────────────────────
+
+    #[test]
+    fn test_click_ordinal_forms() {
+        for (phrase, want) in [
+            ("click on the 3rd option", 3u32),
+            ("click the 2nd button", 2),
+            ("press the 1st link", 1),
+            ("choose 4th", 4),
+            ("tap the 12th item", 12),
+        ] {
+            let result = parse_deterministic(phrase);
+            assert!(result.is_some(), "{phrase} should parse");
+            if let ParsedIntent::ScreenClick { ordinal } = result.unwrap().intent {
+                assert_eq!(ordinal, want, "{phrase}");
+            } else {
+                panic!("expected ScreenClick for {phrase}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_browser_tab_forms() {
+        for (phrase, want) in [
+            ("move to the 4th tab", 4u32),
+            ("go to 2nd tab", 2),
+            ("switch to the 1st tab", 1),
+            ("tab 3", 3),
+        ] {
+            let result = parse_deterministic(phrase);
+            assert!(result.is_some(), "{phrase} should parse");
+            if let ParsedIntent::BrowserTab { index } = result.unwrap().intent {
+                assert_eq!(index, want, "{phrase}");
+            } else {
+                panic!("expected BrowserTab for {phrase}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_screen_read_form() {
+        let result = parse_deterministic("what's the 2nd button");
+        assert!(result.is_some());
+        assert!(matches!(
+            result.unwrap().intent,
+            ParsedIntent::ScreenRead { ordinal: 2 }
+        ));
+    }
+
+    #[test]
+    fn test_new_intents_have_labels() {
+        assert_eq!(
+            intent_to_label(&ParsedIntent::OrderFood {
+                query: "pizza".to_string(),
+                restaurant: None
+            }),
+            "order_food"
+        );
+        assert_eq!(
+            intent_to_label(&ParsedIntent::SearchProduct {
+                query: "laptop".to_string()
+            }),
+            "search_product"
+        );
+        assert_eq!(
+            intent_to_label(&ParsedIntent::SendWhatsAppMessage {
+                contact: "mom".to_string(),
+                message: "hi".to_string()
+            }),
+            "send_whatsapp_message"
+        );
     }
 }
