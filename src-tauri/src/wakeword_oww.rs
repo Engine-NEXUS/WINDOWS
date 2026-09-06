@@ -468,7 +468,7 @@ mod engine {
                 audio_features,
                 sample_rate: 16000,
                 chunk_buffer: Vec::with_capacity(OWW_CHUNK_SIZE),
-                threshold: 0.35,
+                threshold: 0.50,
                 detections_buffer: CircularBuffer::<DETECTION_BUFFER_SIZE, f32>::new(),
                 last_detection_time: std::time::Instant::now()
                     .checked_sub(std::time::Duration::from_secs(10))
@@ -484,7 +484,7 @@ mod engine {
 
         /// Run KWS detection on a single 80ms chunk.
         /// Returns (wake_detected, wake_probability, optional command_intent).
-        fn detect_chunk(
+        pub(crate) fn detect_chunk(
             &mut self,
             chunk: Vec<f32>,
         ) -> (bool, f32, Option<CommandIntent>) {
@@ -2098,6 +2098,49 @@ mod tests {
             !engine.process(&quiet),
             "near-silent mic noise must never trigger a wake"
         );
+    }
+
+    #[test]
+    fn test_negative_audio_files_do_not_trigger() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let resource_dir = PathBuf::from(manifest_dir).join("resources");
+        let app_data_dir = std::env::temp_dir().join("nexus_test_neg");
+
+        let negatives_dir = PathBuf::from(manifest_dir).join("..").join("tests").join("data").join("negatives");
+        if !negatives_dir.exists() {
+            eprintln!("SKIP: negatives dir not found at {}", negatives_dir.display());
+            return;
+        }
+
+        for entry in std::fs::read_dir(negatives_dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("wav") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            if bytes.len() <= 44 {
+                continue;
+            }
+            let samples: Vec<f32> = bytes[44..]
+                .chunks_exact(2)
+                .map(|b| (i16::from_le_bytes([b[0], b[1]]) as f32) / 32768.0)
+                .collect();
+
+            let mut engine = crate::wakeword_oww::engine::WakeEngine::new(resource_dir.clone(), app_data_dir.clone()).unwrap();
+            engine.engine_start_time = std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(10))
+                .unwrap();
+
+            let mut triggered = false;
+            for chunk in samples.chunks(1280) {
+                if engine.process(chunk) {
+                    triggered = true;
+                    break;
+                }
+            }
+            println!("Negative test {}: triggered = {}", path.file_name().unwrap().to_str().unwrap(), triggered);
+            assert!(!triggered, "Negative clip {} triggered false positive wake!", path.display());
+        }
     }
 
     /// Critical test: verify tract-onnx produces the same output as onnxruntime
