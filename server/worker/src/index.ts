@@ -45,30 +45,46 @@ interface Env {
   AI: Ai;
   DB: D1Database;
   CACHE?: KVNamespace;  // optional KV namespace for edge caching
+  MODELS?: R2Bucket;    // optional R2 bucket for NLU model distribution
   // Secrets (set via wrangler secret put)
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;
+  SWIGGY_CLIENT_ID: string;
+  SWIGGY_CLIENT_SECRET: string;
   NEXUS_ENCRYPTION_KEY: string;
+  NEXUS_ADMIN_TOKEN?: string;  // gates POST /models/nlu/publish
 }
 
 // ---- OAuth configuration ----
 
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
+const SWIGGY_TOKEN_URL = "https://partner.swiggy.com/oauth/token";
+const SWIGGY_AUTH_URL = "https://partner.swiggy.com/oauth/authorize";
 const OAUTH_REDIRECT_URI = "nexus://oauth/callback";
 
 const GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/gmail.send",
   "https://www.googleapis.com/auth/calendar",
-  "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/contacts",
+  "https://www.googleapis.com/auth/drive",
+  "https://www.googleapis.com/auth/spreadsheets",
   "openid",
   "email",
   "profile",
 ].join(" ");
 
 const GITHUB_SCOPES = "repo read:org workflow";
+
+// Swiggy MCP OAuth (Builders Club required for production; localhost dev free)
+const SWIGGY_SCOPES = "read write";
+// RFC 8707 resource indicator: binds the token to the MCP server it's for
+// (2026-07-28 spec makes sending it a client MUST). Base origin covers all
+// three Swiggy MCP endpoints (food/im/dineout).
+const SWIGGY_RESOURCE = "https://mcp.swiggy.com";
 
 // ---- Model constants (re-exported from models.ts for backward compat) ----
 const INTENT_MODEL = "@cf/meta/llama-3.2-1b-instruct";
@@ -100,6 +116,15 @@ function extractText(response: any): string {
   return "";
 }
 
+/**
+ * Detect greetings, thanks, and identity questions so the LLM classifier
+ * doesn't misclassify them as "search" (e.g., "who are you" → LLM says search).
+ */
+function isGreetingOrThanks(transcript: string): boolean {
+  const t = transcript.toLowerCase().trim();
+  return /\b(hello|hi|hey|thanks|thank you|good morning|good evening|good afternoon|how are you|who are you|what can you do|what is your name|bye|goodbye|see you|never mind)\b/.test(t);
+}
+
 async function classifyIntent(transcript: string, env: Env): Promise<string> {
   // Check keyword fallback FIRST for reliable intent detection.
   // The LLM classifier is a secondary signal — keywords are more reliable
@@ -107,6 +132,13 @@ async function classifyIntent(transcript: string, env: Env): Promise<string> {
   const keywordIntent = keywordFallback(transcript);
   if (keywordIntent !== "general") {
     return keywordIntent;
+  }
+
+  // Greetings/thanks were matched by keywordFallback as "general" — but we
+  // don't want the LLM classifier to override them with "search" (e.g.,
+  // "who are you" → LLM says "search"). Short-circuit here.
+  if (isGreetingOrThanks(transcript)) {
+    return "general";
   }
 
   const prompt = `You are an intent classifier. Read the user request and respond with exactly one word from this list:
@@ -213,10 +245,13 @@ function keywordFallback(transcript: string): string {
     return "github_analyse";
   }
 
-  if (/\b(pr|pull request|repo|repository|commit|issue|branch|merge|github|list\s+prs)\b/.test(t)) return "github";
+  if (/\b(pr|pull requests?|repo|repository|commit|issue|branch|merge|github|list\s+prs)\b/.test(t)) return "github";
 
   if (/\b(email|inbox|mail|message|gmail|send to)\b/.test(t)) return "gmail";
   if (/\b(calendar|schedule|meeting|event|appointment)\b/.test(t)) return "calendar";
+  // Greetings / thanks — must be checked BEFORE search so "thank you nexus"
+  // doesn't get misclassified as a search question by the LLM.
+  if (/\b(hello|hi|hey|thanks|thank you|thank you nexus|good morning|good evening|good afternoon|how are you|who are you|what can you do|what is your name|bye|goodbye|see you|never mind)\b/.test(t)) return "general";
   if (/\b(search|google|look up|find|what is|who is|where is|research|look\s*up|tell me about|explain|define)\b/.test(t)) return "search";
   return "general";
 }
@@ -293,6 +328,71 @@ async function refreshGoogleToken(env: Env, refreshToken: string): Promise<{ acc
   return { access_token: data.access_token, expires_in: data.expires_in || 3600 };
 }
 
+async function refreshSwiggyToken(env: Env, refreshToken: string): Promise<{ access_token: string; expires_in: number; refresh_token?: string }> {
+  const resp = await fetch(SWIGGY_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: env.SWIGGY_CLIENT_ID,
+      client_secret: env.SWIGGY_CLIENT_SECRET,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token",
+      resource: SWIGGY_RESOURCE,
+    }),
+  });
+  if (!resp.ok) throw new Error(`Swiggy refresh failed: ${resp.status}`);
+  const data = await resp.json() as any;
+  return { access_token: data.access_token, expires_in: data.expires_in || 3600, refresh_token: data.refresh_token };
+}
+
+/**
+ * Get a valid Swiggy token for MCP vault use. Mirrors Google: refresh
+ * silently when near expiry; null on refresh failure so the client
+ * guides reconnect instead of proceeding with a dead token.
+ */
+async function getValidSwiggyToken(env: Env, userId: string): Promise<string | null> {
+  const row = await env.DB.prepare(
+    "SELECT access_token, refresh_token, expires_at FROM oauth_tokens WHERE user_id = ? AND provider = 'swiggy'"
+  ).bind(userId).first();
+
+  if (!row) return null;
+
+  const now = Date.now() / 1000;
+  const expiresAt = row.expires_at as number;
+
+  // Refresh if expired (with 60s buffer) and we have a refresh token
+  if (expiresAt && now > expiresAt - 60 && row.refresh_token) {
+    try {
+      const refreshed = await refreshSwiggyToken(env, row.refresh_token as string);
+      const newExpiresAt = now + refreshed.expires_in;
+      // OAuth 2.1: public clients MUST rotate refresh tokens — persist the
+      // new one when the server rotated, or the next refresh uses a
+      // rotated-away token and dies.
+      if (refreshed.refresh_token) {
+        await env.DB.prepare(
+          "UPDATE oauth_tokens SET access_token = ?, refresh_token = ?, expires_at = ? WHERE user_id = ? AND provider = 'swiggy'"
+        ).bind(refreshed.access_token, refreshed.refresh_token, newExpiresAt, userId).run();
+      } else {
+        await env.DB.prepare(
+          "UPDATE oauth_tokens SET access_token = ?, expires_at = ? WHERE user_id = ? AND provider = 'swiggy'"
+        ).bind(refreshed.access_token, newExpiresAt, userId).run();
+      }
+      return refreshed.access_token;
+    } catch {
+      // Refresh failed (revoked or transient): report disconnected so the
+      // client guides reconnect instead of proceeding with a dead token.
+      return null;
+    }
+  }
+
+  // Expired without a refresh token: unusable — report disconnected.
+  if (expiresAt && now > expiresAt) {
+    return null;
+  }
+
+  return row.access_token as string;
+}
+
 async function getValidGoogleToken(env: Env, userId: string): Promise<string | null> {
   const row = await env.DB.prepare(
     "SELECT access_token, refresh_token, expires_at FROM oauth_tokens WHERE user_id = ? AND provider = 'google'"
@@ -313,9 +413,16 @@ async function getValidGoogleToken(env: Env, userId: string): Promise<string | n
       ).bind(refreshed.access_token, newExpiresAt, userId).run();
       return refreshed.access_token;
     } catch {
-      // Fall back to the stored token (might still work briefly)
-      return row.access_token as string;
+      // Refresh failed (revoked or transient): report disconnected so the
+      // client guides reconnect instead of proceeding with a dead token.
+      // Reconnect heals both cases; a stale token heals neither.
+      return null;
     }
+  }
+
+  // Expired without a refresh token: unusable — report disconnected.
+  if (expiresAt && now > expiresAt) {
+    return null;
   }
 
   return row.access_token as string;
@@ -412,13 +519,19 @@ async function handleGitHub(req: NexusRequest, env: Env, token: string): Promise
   // Match on lowercased transcript for keywords, but extract repo from original
   const prMatch = transcriptLower.match(/(?:pr|pull request)\s*#?\s*(\d+)\s*(?:of|in|from)?\s*(?:repo\s+)?([\w\-./]+)?/);
   const listPrMatch = transcriptLower.match(/(?:list|show|open)\s+(?:open\s+)?(?:prs|pull requests?)(?:\s+(?:in|of|from)\s+([\w\-./]+))?/);
+  // "latest PR", "current PR", "newest PR", "most recent PR", "check PR",
+  // "view PR", "see PR", "get PR" — fetch the most recent PR (open or all).
+  // The optional "in/of/from <repo>" group captures the repo.
+  const latestPrMatch = transcriptLower.match(/(?:check|view|see|get|show|look\s+at|latest|current|newest|most\s+recent|recent|last)\s+(?:the\s+)?(?:latest\s+|current\s+|newest\s+|most\s+recent\s+)?(?:pr|pull\s*request)(?:\s+(?:in|of|from)\s+([\w\-./]+))?/);
   const issueMatch = transcriptLower.match(/(?:issue|bug)\s*#?\s*(\d+)\s*(?:in|of|from)?\s*(?:repo\s+)?([\w\-./]+)?/);
 
-  // Extract repo name from the original transcript (preserves case)
-  function extractRepo(lowerMatch: RegExpMatchArray | null): string | null {
-    if (!lowerMatch || !lowerMatch[2]) return null;
+  // Extract repo name from the original transcript (preserves case).
+  // groupIdx: which capture group in the regex holds the repo name.
+  // prMatch uses group 2 (pr number is group 1), listPrMatch uses group 1.
+  function extractRepo(lowerMatch: RegExpMatchArray | null, groupIdx: number = 2): string | null {
+    if (!lowerMatch || !lowerMatch[groupIdx]) return null;
     // Find the repo name in the original transcript at the same position
-    const repoLower = lowerMatch[2];
+    const repoLower = lowerMatch[groupIdx];
     const idx = transcriptLower.indexOf(repoLower);
     if (idx >= 0) return transcriptOrig.substr(idx, repoLower.length);
     return repoLower;
@@ -450,7 +563,7 @@ Changes: +${pr["additions"]} -${pr["deletions"]} across ${pr["changed_files"]} f
     }
 
     if (listPrMatch) {
-      let repo = extractRepo(listPrMatch) || "zync";
+      let repo = extractRepo(listPrMatch, 1) || "zync";
       if (!repo.includes("/")) {
         const resolved = await resolveRepo(token, repo);
         if (resolved.full_name) repo = resolved.full_name;
@@ -466,6 +579,37 @@ Changes: +${pr["additions"]} -${pr["deletions"]} across ${pr["changed_files"]} f
 
       return await summarize(
         `The user asked for open PRs in ${repo}. Summarize this list concisely:\n\n${prList}`,
+        env
+      );
+    }
+
+    if (latestPrMatch) {
+      // Fetch the most recent PR. Default to open state, but if none are open,
+      // fall back to the most recent PR of any state so the user still gets an answer.
+      let repo = extractRepo(latestPrMatch, 1) || "zync";
+      if (!repo.includes("/")) {
+        const resolved = await resolveRepo(token, repo);
+        if (resolved.full_name) repo = resolved.full_name;
+      }
+
+      let resp = await fetch(`https://api.github.com/repos/${repo}/pulls?state=open&sort=created&direction=desc&per_page=1`, { headers });
+      let prs = resp.ok ? (await resp.json() as Array<Record<string, unknown>>) : [];
+      if (prs.length === 0) {
+        // No open PRs — try the most recent PR of any state
+        resp = await fetch(`https://api.github.com/repos/${repo}/pulls?state=all&sort=created&direction=desc&per_page=1`, { headers });
+        prs = resp.ok ? (await resp.json() as Array<Record<string, unknown>>) : [];
+      }
+      if (!resp.ok) return githubErrorMessage(resp.status, `fetch latest PR in ${repo}`);
+      if (prs.length === 0) return `There are no pull requests in ${repo}.`;
+      const pr = prs[0];
+      const prInfo = `PR #${pr["number"]}: ${pr["title"]}
+State: ${pr["state"]}, Mergeable: ${pr["mergeable_state"] || "unknown"}
+Author: ${(pr["user"] as Record<string, string>)?.login || "unknown"}
+Body: ${(pr["body"] as string || "").slice(0, 500)}
+Changes: +${pr["additions"]} -${pr["deletions"]} across ${pr["changed_files"]} files`;
+
+      return await summarize(
+        `Summarize this GitHub PR for the user in 2-3 sentences. Be concise and mention the status, what it changes, and whether it's ready to merge:\n\n${prInfo}`,
         env
       );
     }
@@ -1747,6 +1891,25 @@ export default {
       return json({ token });
     }
 
+    // ---- OAuth: get google token (for MCP vault: Gmail/Calendar/
+    // Contacts/Drive/Sheets/Meet — one union consent, refreshed here) ----
+    if (path === "/oauth/google-token" && method === "GET") {
+      const userId = url.searchParams.get("user_id") || "";
+      if (!userId) return json({ error: "user_id required" }, 400);
+      const token = await getValidGoogleToken(env, userId);
+      if (!token) return json({ error: "Google not connected" }, 404);
+      return json({ token });
+    }
+
+    // ---- OAuth: get swiggy token (for MCP vault — silently refreshed) ----
+    if (path === "/oauth/swiggy-token" && method === "GET") {
+      const userId = url.searchParams.get("user_id") || "";
+      if (!userId) return json({ error: "user_id required" }, 400);
+      const token = await getValidSwiggyToken(env, userId);
+      if (!token) return json({ error: "Swiggy not connected" }, 404);
+      return json({ token });
+    }
+
     // ---- OAuth: disconnect ----
     if (path === "/oauth/disconnect" && method === "DELETE") {
       return handleOAuthDisconnect(request, env, json);
@@ -1772,8 +1935,69 @@ export default {
       return json({
         google: { configured: !!env.GOOGLE_CLIENT_ID, scopes: GOOGLE_SCOPES },
         github: { configured: !!env.GITHUB_CLIENT_ID, scopes: GITHUB_SCOPES },
+        swiggy: { configured: !!env.SWIGGY_CLIENT_ID, scopes: SWIGGY_SCOPES },
         redirect_uri: OAUTH_REDIRECT_URI,
       });
+    }
+
+    // ---- NLU model distribution (family devices) ----
+    // Admin retrains BERT-Mini locally, uploads files to R2 via
+    // `wrangler r2 object put`, then POSTs the manifest here. Family
+    // devices poll /latest on startup and pull changed files.
+    //
+    // KV key: "nlu_model_latest" -> { version, updated_at, files: {name: {sha256, size}} }
+    // R2 keys: "nlu/<filename>" under MODELS bucket
+    if (path === "/models/nlu/latest" && method === "GET") {
+      if (!env.CACHE) return json({ error: "model distribution not configured" }, 503);
+      const manifest = await env.CACHE.get("nlu_model_latest");
+      if (!manifest) return json({ error: "no model published yet" }, 404);
+      return new Response(manifest, {
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+      });
+    }
+
+    if (path === "/models/nlu/download" && method === "GET") {
+      if (!env.MODELS) return json({ error: "model storage not configured" }, 503);
+      const name = url.searchParams.get("name") || "";
+      // Whitelist: only known model files can be fetched (path traversal guard)
+      const allowed = new Set([
+        "nexus_nlu.onnx", "nexus_nlu.onnx.data", "labels.json",
+        "temperature_calibration.json",
+        "tokenizer/tokenizer.json", "tokenizer/tokenizer_config.json",
+        "tokenizer/vocab.txt", "tokenizer/special_tokens_map.json",
+      ]);
+      if (!allowed.has(name)) return json({ error: "unknown file" }, 400);
+      const obj = await env.MODELS.get(`nlu/${name}`);
+      if (!obj) return json({ error: "file not found" }, 404);
+      return new Response(obj.body, {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    }
+
+    if (path === "/models/nlu/publish" && method === "POST") {
+      if (!env.CACHE) return json({ error: "model distribution not configured" }, 503);
+      const adminToken = env.NEXUS_ADMIN_TOKEN;
+      if (!adminToken) return json({ error: "publish disabled (no admin token)" }, 503);
+      const auth = request.headers.get("Authorization") || "";
+      if (auth !== `Bearer ${adminToken}`) return json({ error: "unauthorized" }, 401);
+      try {
+        const body = await request.json() as { version?: string; files?: Record<string, { sha256: string; size: number }> };
+        if (!body.version || !body.files || Object.keys(body.files).length === 0) {
+          return json({ error: "version and files required" }, 400);
+        }
+        const manifest = {
+          version: body.version,
+          updated_at: new Date().toISOString(),
+          files: body.files,
+        };
+        await env.CACHE.put("nlu_model_latest", JSON.stringify(manifest));
+        return json({ ok: true, version: body.version, file_count: Object.keys(body.files).length });
+      } catch (e) {
+        return json({ error: (e as Error).message }, 500);
+      }
     }
 
     // ---- STT: Transcribe audio via Workers AI Whisper ----
@@ -1882,6 +2106,23 @@ async function handleAuthUrl(
     return json({ url: authUrl, redirect_uri: callbackUrl });
   }
 
+  if (provider === "swiggy") {
+    if (!env.SWIGGY_CLIENT_ID) return json({ error: "Swiggy OAuth not configured" }, 500);
+    const authUrl = (
+      `${SWIGGY_AUTH_URL}`
+      + `?client_id=${encodeURIComponent(env.SWIGGY_CLIENT_ID)}`
+      + `&redirect_uri=${encodeURIComponent(callbackUrl)}`
+      + `&response_type=code`
+      + `&scope=${encodeURIComponent(SWIGGY_SCOPES)}`
+      + (codeChallenge ? `&code_challenge=${encodeURIComponent(codeChallenge)}&code_challenge_method=S256` : "")
+      + `&resource=${encodeURIComponent(SWIGGY_RESOURCE)}`
+      + `&state=${encodeURIComponent(state)}`
+      + `&access_type=offline`
+      + `&prompt=consent`
+    );
+    return json({ url: authUrl, redirect_uri: callbackUrl });
+  }
+
   return json({ error: `unsupported provider: ${provider}` }, 400);
 }
 
@@ -1892,7 +2133,7 @@ function renderOAuthHtml(
   userId: string,
   accountId = "",
 ): string {
-  const providerDisplay = provider.toLowerCase() === "google" ? "Google" : provider.toLowerCase() === "github" ? "GitHub" : provider;
+  const providerDisplay = provider.toLowerCase() === "google" ? "Google" : provider.toLowerCase() === "github" ? "GitHub" : provider.toLowerCase() === "swiggy" ? "Swiggy" : provider;
   const deepLink = `nexus://oauth/callback?provider=${encodeURIComponent(provider.toLowerCase())}&user_id=${encodeURIComponent(userId)}&status=${success ? "success" : "error"}`;
 
   if (!success) {
@@ -2073,6 +2314,43 @@ async function handleOAuthBrowserCallback(
           accountId = ghUser.login || userId;
         }
       } catch { /* ignore */ }
+    } else if (provider === "swiggy") {
+      if (!env.SWIGGY_CLIENT_ID) return new Response(renderOAuthHtml("Swiggy", false, "Swiggy OAuth not configured", userId), {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+      const resp = await fetch(SWIGGY_TOKEN_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: env.SWIGGY_CLIENT_ID,
+          client_secret: env.SWIGGY_CLIENT_SECRET,
+          code,
+          redirect_uri: callbackUrl,
+          grant_type: "authorization_code",
+          resource: SWIGGY_RESOURCE,
+        }),
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        return new Response(renderOAuthHtml("Swiggy", false, `Swiggy token exchange failed: ${resp.status} ${errText}`, userId), {
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
+
+      const tokens = await resp.json() as any;
+      if (!tokens.access_token) {
+        return new Response(renderOAuthHtml("Swiggy", false, `Swiggy exchange error: ${tokens.error_description || tokens.error || "No access token"}`, userId), {
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
+
+      accessToken = tokens.access_token;
+      refreshToken = tokens.refresh_token || null;
+      expiresIn = tokens.expires_in || 3600;
+
+      // Swiggy doesn't have a standard userinfo endpoint we can use
+      accountId = userId;
     } else {
       return new Response(renderOAuthHtml(provider || "Unknown", false, `Unsupported provider: ${provider}`, userId), {
         headers: { "Content-Type": "text/html; charset=utf-8" },
@@ -2082,7 +2360,7 @@ async function handleOAuthBrowserCallback(
     // Save in Cloudflare D1
     const now = Date.now() / 1000;
     const expiresAt = expiresIn ? now + expiresIn : 0;
-    const scopes = provider === "google" ? GOOGLE_SCOPES : GITHUB_SCOPES;
+    const scopes = provider === "google" ? GOOGLE_SCOPES : provider === "github" ? GITHUB_SCOPES : SWIGGY_SCOPES;
 
     await env.DB.prepare(
       "INSERT OR REPLACE INTO oauth_tokens (user_id, provider, access_token, refresh_token, expires_at, scopes, account_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
@@ -2091,7 +2369,8 @@ async function handleOAuthBrowserCallback(
       refreshToken, expiresAt, scopes, accountId, now
     ).run();
 
-    return new Response(renderOAuthHtml(provider === "google" ? "Google" : "GitHub", true, "", userId, accountId), {
+    const displayProvider = provider === "google" ? "Google" : provider === "github" ? "GitHub" : "Swiggy";
+    return new Response(renderOAuthHtml(displayProvider, true, "", userId, accountId), {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   } catch (err) {
@@ -2174,6 +2453,26 @@ async function handleOAuthExchange(
           accountId = ghUser.login || userId;
         }
       } catch { /* ignore */ }
+    } else if (provider === "swiggy") {
+      if (!env.SWIGGY_CLIENT_ID) return json({ error: "Swiggy OAuth not configured" }, 500);
+      const resp = await fetch(SWIGGY_TOKEN_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: env.SWIGGY_CLIENT_ID,
+          client_secret: env.SWIGGY_CLIENT_SECRET,
+          code,
+          code_verifier: codeVerifier,
+          redirect_uri: redirectUri,
+          grant_type: "authorization_code",
+          resource: SWIGGY_RESOURCE,
+        }),
+      });
+      if (!resp.ok) return json({ error: `Swiggy exchange failed (${resp.status})` }, 502);
+      tokens = await resp.json();
+      if (!tokens.access_token) return json({ error: tokens.error_description || tokens.error || "exchange failed" }, 400);
+      // Swiggy has no userinfo endpoint for account display
+      accountId = userId;
     } else {
       return json({ error: `unsupported provider: ${provider}` }, 400);
     }
@@ -2187,7 +2486,7 @@ async function handleOAuthExchange(
     ).bind(
       userId, provider, tokens.access_token,
       tokens.refresh_token || null, expiresAt,
-      provider === "google" ? GOOGLE_SCOPES : GITHUB_SCOPES,
+      provider === "google" ? GOOGLE_SCOPES : provider === "github" ? GITHUB_SCOPES : SWIGGY_SCOPES,
       accountId, now
     ).run();
 
@@ -2207,17 +2506,25 @@ async function handleOAuthStatus(
   const userId = url.searchParams.get("user_id") || "";
   if (!userId) return json({ error: "user_id required" }, 400);
 
-  const result = await env.DB.prepare(
-    "SELECT provider, expires_at, scopes FROM oauth_tokens WHERE user_id = ?"
-  ).bind(userId).all();
-
   const connected: Record<string, any> = {};
   const now = Date.now() / 1000;
-  for (const row of result.results || []) {
+  // We need refresh_token to determine if an expired token can be refreshed
+  const refreshResult = await env.DB.prepare(
+    "SELECT provider, expires_at, scopes, refresh_token FROM oauth_tokens WHERE user_id = ?"
+  ).bind(userId).all();
+
+  for (const row of refreshResult.results || []) {
     const expiresAt = row.expires_at as number;
+    const hasRefresh = !!row.refresh_token;
+    // Classic tokens (expires_at = 0) never expire.
+    // GitHub App tokens with a refresh_token can be refreshed even if
+    // expires_at has passed, so they are NOT reported as expired.
+    // Only report expired if the token has expired AND there is no
+    // refresh_token to renew it.
+    const isExpired = expiresAt ? (now > expiresAt && !hasRefresh) : false;
     connected[row.provider as string] = {
       connected: true,
-      expired: expiresAt ? now > expiresAt : false,
+      expired: isExpired,
       scopes: row.scopes as string,
     };
   }
@@ -2328,8 +2635,10 @@ async function handleTranscript(
   let intent = explicitIntent || await classifyIntent(req.task.request, env);
 
   // 1b. If intent is "general" but the transcript looks like a factual question,
-  // route to "search" so it goes through Wikipedia/Wikidata retrieval
-  if (intent === "general" && isSearchQuestion(req.task.request)) {
+  // route to "search" so it goes through Wikipedia/Wikidata retrieval.
+  // But skip this for greetings/identity questions ("who are you", "thank you")
+  // — those should stay "general" and get a conversational response.
+  if (intent === "general" && isSearchQuestion(req.task.request) && !isGreetingOrThanks(req.task.request)) {
     intent = "search";
   }
 
@@ -2504,14 +2813,18 @@ async function handleFastAnalyse(req: NexusRequest, env: Env, token: string): Pr
   const transcript = req.task.request;
   const userId = req.requester.id;
 
-  // Parse repo name from transcript: "analyse owner/repo" or "analyse repo"
-  const analyseMatch = transcript.match(/analy[sz]e\s+([a-zA-Z0-9_.\-]+\/[a-zA-Z0-9_.\-]+)/i);
+  // Parse repo name from transcript: "analyse owner/repo", "analyse repo owner/repo",
+  // "analyse repoName", or "analyse repo repoName"
+  // The optional "repo" word between the verb and the name must be skipped.
+  const analyseMatch = transcript.match(/analy[sz]e\s+(?:repo\s+)?([a-zA-Z0-9_.\-]+\/[a-zA-Z0-9_.\-]+)/i);
   let repoName: string | null = null;
 
   if (analyseMatch) {
     repoName = analyseMatch[1];
   } else {
-    const singleMatch = transcript.match(/analy[sz]e\s+([a-zA-Z0-9_.\-]+)/i);
+    // Single-name fallback: "analyse repoName" or "analyse repo repoName"
+    // Skip the word "repo" if it appears right after "analyse"
+    const singleMatch = transcript.match(/analy[sz]e\s+(?:repo\s+)?([a-zA-Z0-9_.\-]+)/i);
     if (singleMatch) {
       repoName = singleMatch[1];
     }
