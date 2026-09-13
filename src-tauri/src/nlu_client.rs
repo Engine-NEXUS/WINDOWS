@@ -61,6 +61,15 @@ pub async fn parse_via_nlu(transcript: &str) -> Option<ParseResult> {
     // Mark that a request was made (resets idle timer)
     crate::lazy_nlu::mark_nlu_request();
 
+    if nlu.confidence < 0.85 {
+        tracing::info!(
+            "[nlu_client] rejected low-confidence intent '{}' ({:.3})",
+            nlu.intent,
+            nlu.confidence
+        );
+        return None;
+    }
+
     // Convert NLU response to ParsedIntent
     let intent = nlu_to_parsed_intent(&nlu.intent, &nlu.slots)?;
 
@@ -98,6 +107,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
             Some(ParsedIntent::WhatsappChat { contact: contact.to_string() })
         }
         "open_architect" => Some(ParsedIntent::OpenArchitect),
+        "open_settings" => Some(ParsedIntent::OpenSettings),
         "search" => {
             let query = slots.get("query").and_then(|v| v.as_str()).unwrap_or("");
             if query.is_empty() { return None; }
@@ -180,11 +190,21 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
         }
         "list_prs" => {
             let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            // Read state from slots if provided (open/closed/all/merged)
+            // Default to "open" if not specified.
+            let raw_state = slots.get("state").and_then(|v| v.as_str()).unwrap_or("open");
+            let state = match raw_state.to_lowercase().as_str() {
+                "open" | "live" | "active" | "latest" => "open",
+                "closed" | "merged" => "closed",
+                "all" => "all",
+                _ => "open",
+            }.to_string();
             // If no repo in slots, try auto-detection (browser URL, clipboard, etc.)
+            // If that fails too, use empty repo for account-wide PR search.
             let repo = if repo.is_empty() {
                 match crate::architect::get_active_repo_url() {
                     Some(repo_id) => format!("{}/{}", repo_id.owner, repo_id.repo),
-                    None => return None,
+                    None => String::new(),
                 }
             } else {
                 repo.to_string()
@@ -192,7 +212,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
             Some(ParsedIntent::GitHubCommand {
                 command: crate::github_cmd::GitHubCommand::ListPrs {
                     repo,
-                    state: "open".to_string(),
+                    state,
                 },
             })
         }
@@ -384,6 +404,20 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
         // that's better handled by the deterministic parser. Return None so
         // the caller falls back to Unknown → Worker.
         "create_pr" | "comment_pr" | "create_release" => None,
+
+        // ─── Live mode commands (11) ───
+        // These use the generic NluResult wrapper so the orchestrator can
+        // route them to the live command executor.
+        "type_text" | "press_key" | "press_hotkey" | "confirm_send" |
+        "cancel_action" | "browser_new_tab" | "browser_navigate" |
+        "browser_search" | "whatsapp_open" | "whatsapp_search" |
+        "focus_app" => {
+            Some(ParsedIntent::NluResult {
+                intent: intent.to_string(),
+                slots: slots.clone(),
+                confidence: 0.85,
+            })
+        }
 
         // unknown or unrecognized
         _ => None,

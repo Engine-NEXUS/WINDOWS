@@ -363,12 +363,74 @@ def main():
         cleanup_backups()
         clear_approved()
         print("[RETRAIN] Done. Model hot-swapped successfully.")
+        # 7b. Sync model to the bundled resources directory (production copy)
+        sync_to_resources()
+        # 8. Notify the running NLU server to reload the new model
+        reload_nlu_server()
     else:
         print(f"[RETRAIN] New model is WORSE ({new_accuracy:.4f} < {old_accuracy:.4f}). Rolling back.")
         restore_model()
         cleanup_backups()
         # Don't clear approved — keep them for the next retrain attempt
         print("[RETRAIN] Rolled back to old model. Approved phrasings kept for next attempt.")
+
+
+def reload_nlu_server():
+    """Tell the running NLU server to reload the newly trained ONNX model.
+
+    Without this, the server keeps the old InferenceSession in memory and
+    never picks up the new model. The server caches the session in a global
+    variable and only loads on first use.
+    """
+    try:
+        import urllib.request
+        import urllib.error
+        url = "http://127.0.0.1:39218/reload"
+        req = urllib.request.Request(url, method="POST", data=b"")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            result = json.loads(resp.read())
+            if result.get("reloaded"):
+                print("[RETRAIN] NLU server reloaded new model successfully.")
+            else:
+                print(f"[RETRAIN] NLU server reload failed: {result.get('error', 'unknown')}")
+    except urllib.error.URLError:
+        print("[RETRAIN] NLU server not running — no reload needed (will load new model on next start).")
+    except Exception as e:
+        print(f"[RETRAIN] NLU server reload error (non-fatal): {e}")
+
+
+def sync_to_resources():
+    """Copy the newly trained model to the bundled resources directory.
+
+    merge_and_train.py updates server/nlu/model/, but the production NLU
+    server loads from src-tauri/resources/server/nlu/model/ (bundled via
+    Tauri resources config). Without this sync, a retrained model never
+    reaches the production app.
+    """
+    src_model = MODEL_PATH
+    src_data = MODEL_DATA_PATH
+    src_tokenizer = SCRIPT_DIR / "model" / "tokenizer"
+
+    # Find the resources directory relative to the script
+    # server/nlu/merge_and_train.py → ../../src-tauri/resources/server/nlu/model/
+    resources_model_dir = SCRIPT_DIR.parent.parent / "src-tauri" / "resources" / "server" / "nlu" / "model"
+
+    if not resources_model_dir.exists():
+        print(f"[RETRAIN] Resources model dir not found ({resources_model_dir}), skipping sync.")
+        return
+
+    try:
+        shutil.copy2(str(src_model), str(resources_model_dir / "nexus_nlu.onnx"))
+        shutil.copy2(str(src_data), str(resources_model_dir / "nexus_nlu.onnx.data"))
+        # Copy tokenizer if it exists
+        res_tokenizer = resources_model_dir / "tokenizer"
+        if res_tokenizer.exists():
+            shutil.rmtree(str(res_tokenizer))
+        if src_tokenizer.exists():
+            shutil.copytree(str(src_tokenizer), str(res_tokenizer))
+        print(f"[RETRAIN] Model synced to resources: {resources_model_dir}")
+    except Exception as e:
+        print(f"[RETRAIN] Resources sync failed (non-fatal): {e}")
 
 
 if __name__ == "__main__":

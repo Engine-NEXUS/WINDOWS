@@ -2,13 +2,14 @@
 """
 NEXUS NLU — Train a BERT-Mini joint intent+slot model for command understanding.
 
-Intents (46 total — covers every ParsedIntent + GitHubCommand variant):
+Intents (47 total — covers every ParsedIntent + GitHubCommand variant):
   Local commands:
     - open_app          (slots: app_name)
     - open_url          (slots: url)
     - close_app         (slots: app_name)
     - whatsapp_chat     (slots: contact)
     - open_architect    ()
+    - open_settings     ()
     - search            (slots: query)
     - media_play_pause  ()
     - media_next        ()
@@ -80,14 +81,15 @@ OUTPUT_DIR = Path(__file__).parent / "model"
 ONNX_PATH = OUTPUT_DIR / "nexus_nlu.onnx"
 DATASET_PATH = Path(__file__).parent / "dataset.json"
 
-# 46 intents — covers every ParsedIntent + GitHubCommand variant
+# 58 intents — covers every ParsedIntent + GitHubCommand variant + LiveMode
 INTENTS = [
-    # Local commands (11)
+    # Local commands (12)
     "open_app",
     "open_url",
     "close_app",
     "whatsapp_chat",
     "open_architect",
+    "open_settings",
     "search",
     "media_play_pause",
     "media_next",
@@ -126,13 +128,25 @@ INTENTS = [
     "list_workflow_runs",
     "rerun_workflow",
     "cancel_workflow",
+    # Live mode commands (11) — NEW
+    "type_text",
+    "press_key",
+    "press_hotkey",
+    "confirm_send",
+    "cancel_action",
+    "browser_new_tab",
+    "browser_navigate",
+    "browser_search",
+    "whatsapp_open",
+    "whatsapp_search",
+    "focus_app",
     # Fallback (1)
     "unknown",
 ]
 INTENT_TO_ID = {intent: i for i, intent in enumerate(INTENTS)}
 ID_TO_INTENT = {i: intent for i, intent in enumerate(INTENTS)}
 
-# Slot types: BIO tagging — expanded for all 46 intents
+# Slot types: BIO tagging — expanded for all 58 intents
 SLOT_TYPES = [
     "O",
     # App/URL
@@ -160,6 +174,11 @@ SLOT_TYPES = [
     "B-body", "I-body",
     # Greeting
     "B-greeting_type", "I-greeting_type",
+    # Live mode slots (NEW)
+    "B-text", "I-text",          # for type_text
+    "B-key", "I-key",            # for press_key
+    "B-keys", "I-keys",          # for press_hotkey
+    "B-target", "I-target",      # for focus_app
 ]
 SLOT_TO_ID = {slot: i for i, slot in enumerate(SLOT_TYPES)}
 ID_TO_SLOT = {i: slot for i, slot in enumerate(SLOT_TYPES)}
@@ -195,14 +214,15 @@ def annotate_slots(text: str, slots: dict) -> list[str]:
     for slot_type, slot_value in slots.items():
         if slot_value is None or slot_value == "":
             continue
-        slot_tokens = str(slot_value).lower().split()
-        # Find the slot tokens in the text
-        for i in range(len(tokens) - len(slot_tokens) + 1):
-            if tokens[i:i + len(slot_tokens)] == slot_tokens:
-                tags[i] = f"B-{slot_type}"
-                for j in range(1, len(slot_tokens)):
-                    tags[i + j] = f"I-{slot_type}"
-                break
+        values = slot_value if isinstance(slot_value, list) else [slot_value]
+        for value in values:
+            slot_tokens = str(value).lower().split()
+            for i in range(len(tokens) - len(slot_tokens) + 1):
+                if tokens[i:i + len(slot_tokens)] == slot_tokens:
+                    tags[i] = f"B-{slot_type}"
+                    for j in range(1, len(slot_tokens)):
+                        tags[i + j] = f"I-{slot_type}"
+                    break
 
     return tags
 
@@ -228,40 +248,47 @@ class NLUDataset(Dataset):
             truncation=True,
             padding="max_length",
             max_length=self.max_len,
+            return_offsets_mapping=True,
             return_tensors="pt",
         )
 
         input_ids = encoding["input_ids"].squeeze(0)
         attention_mask = encoding["attention_mask"].squeeze(0)
+        offsets = encoding["offset_mapping"].squeeze(0).tolist()
 
         # Intent label
         intent_id = INTENT_TO_ID.get(intent, INTENT_TO_ID["unknown"])
 
-        # Slot labels (BIO tags aligned to subword tokens)
-        word_tokens = text.split()
-        word_tags = annotate_slots(text, slots)
+        # Slot labels (BIO tags aligned to tokenizer character offsets)
+        slot_labels = [-100] * self.max_len
+        for token_idx, (start, end) in enumerate(offsets):
+            if attention_mask[token_idx] and end > start:
+                slot_labels[token_idx] = SLOT_TO_ID["O"]
 
-        # Align word-level tags to subword tokens
-        slot_labels = [SLOT_TO_ID["O"]] * self.max_len
-        word_idx = 0
-        for token_idx in range(self.max_len):
-            if input_ids[token_idx] == 0:  # padding
-                break
-            # Skip special tokens ([CLS], [SEP])
-            if token_idx == 0 or input_ids[token_idx] == self.tokenizer.sep_token_id:
+        lower_text = text.lower()
+        for slot_type, slot_value in slots.items():
+            if slot_type not in {tag[2:] for tag in SLOT_TYPES if tag.startswith("B-")}:
                 continue
-            # Check if this subword starts a new word
-            token_text = self.tokenizer.convert_ids_to_tokens(int(input_ids[token_idx]))
-            if not token_text.startswith("##") and word_idx < len(word_tokens):
-                if word_idx < len(word_tags):
-                    slot_labels[token_idx] = SLOT_TO_ID.get(word_tags[word_idx], SLOT_TO_ID["O"])
-                word_idx += 1
-            elif token_text.startswith("##"):
-                # Continuation of previous word — use I- tag if previous was B- or I-
-                if slot_labels[token_idx - 1] >= SLOT_TO_ID["B-app_name"]:
-                    prev_tag = ID_TO_SLOT.get(int(slot_labels[token_idx - 1]), "O")
-                    if prev_tag.startswith("B-"):
-                        slot_labels[token_idx] = SLOT_TO_ID.get(f"I-{prev_tag[2:]}", SLOT_TO_ID["O"])
+            values = slot_value if isinstance(slot_value, list) else [slot_value]
+            search_start = 0
+            for value in values:
+                value_text = str(value).strip().lower()
+                if not value_text:
+                    continue
+                span_start = lower_text.find(value_text, search_start)
+                if span_start < 0:
+                    span_start = lower_text.find(value_text)
+                if span_start < 0:
+                    continue
+                span_end = span_start + len(value_text)
+                token_indices = [
+                    index for index, (start, end) in enumerate(offsets)
+                    if end > start and start < span_end and end > span_start
+                ]
+                for position, token_idx in enumerate(token_indices):
+                    prefix = "B" if position == 0 else "I"
+                    slot_labels[token_idx] = SLOT_TO_ID[f"{prefix}-{slot_type}"]
+                search_start = span_end
 
         return {
             "input_ids": input_ids,
@@ -359,7 +386,7 @@ def train():
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=50, num_training_steps=total_steps)
 
     intent_loss_fn = nn.CrossEntropyLoss(weight=intent_weights_tensor)
-    slot_loss_fn = nn.CrossEntropyLoss(ignore_index=SLOT_TO_ID["O"])
+    slot_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
     print(f"Training for {EPOCHS} epochs...")
     best_test_acc = 0.0
@@ -423,6 +450,9 @@ def train():
             print(f"    -> saved best model (val_acc={val_acc:.3f})")
 
     # Final evaluation on test set
+    best_model_path = OUTPUT_DIR / "best_model.pt"
+    if best_model_path.exists():
+        model.load_state_dict(torch.load(best_model_path, weights_only=True))
     final_test_acc = 0.0
     if test_loader:
         model.eval()
@@ -442,11 +472,6 @@ def train():
     print(f"\nBest validation accuracy: {best_test_acc:.3f}")
     print(f"Final test accuracy: {final_test_acc:.3f}")
 
-    # Export to ONNX
-    print("Exporting to ONNX...")
-    export_to_onnx(model, tokenizer)
-
-    # Save tokenizer
     tokenizer.save_pretrained(OUTPUT_DIR / "tokenizer")
     print(f"Model saved to {OUTPUT_DIR}")
 
