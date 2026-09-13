@@ -1,13 +1,14 @@
-//! STT proxy — routes to Groq cloud STT (primary) or local faster-whisper (fallback).
+//! STT proxy — routes to Groq cloud STT (primary) or local Moonshine (fallback).
 //!
 //! Primary: Groq Whisper Large v3 Turbo (cloud, ~247ms, $0 free tier)
-//! Fallback: faster-whisper tiny.en (local Python sidecar, ~500ms warm / ~8s cold)
+//! Fallback: Moonshine Small Streaming (local Python sidecar, ~165ms, 7.84% WER)
 //!
 //! The fallback is used when:
 //! - No Groq API key is set in settings
 //! - Groq API is unreachable (network error)
 //! - Groq rate limit is hit (429)
 //! - Groq returns an error
+//! - localSttOnly is true (privacy mode — audio never leaves the device)
 
 use std::sync::Arc;
 use tauri::State;

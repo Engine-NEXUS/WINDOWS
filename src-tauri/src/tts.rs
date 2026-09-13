@@ -143,7 +143,7 @@ pub fn stop_tts() -> Result<(), String> {
 pub async fn speak_text(
     text: String,
     voice: Option<String>,
-    speed: Option<f32>,
+    _speed: Option<f32>,
     state: State<'_, TtsState>,
     meeting: State<'_, Arc<MeetingState>>,
     app: tauri::AppHandle,
@@ -171,7 +171,11 @@ pub async fn speak_text(
     // Check if stop was requested during synthesis
     if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
         tracing::info!("tts: stop requested during synthesis, skipping playback");
-        meeting.set_tts_playing(false);
+        // Do NOT set tts_playing=false here. A newer TTS call (higher
+        // generation) is already active and has set tts_playing=true.
+        // If we set it false, the wake word detector becomes un-suppressed
+        // during the newer TTS playback, causing false wakes from TTS echo.
+        // Only the current (newest) generation should clear the flag.
         return Ok(());
     }
 
@@ -201,7 +205,49 @@ pub async fn speak_text(
     play_result
 }
 
-/// IPC: Play a pre-cached TTS phrase instantly from memory.
+/// IPC: Preview a specific TTS voice with a short demo phrase.
+/// Used by the settings sidebar voice picker — plays a demo without
+/// saving the voice as the default. Does NOT change system volume.
+#[tauri::command]
+pub async fn preview_voice(
+    voice_id: String,
+    text: Option<String>,
+    state: State<'_, TtsState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let demo_text = text.unwrap_or_else(|| {
+        if voice_id.starts_with("en-US-") {
+            let name = voice_id
+                .strip_prefix("en-US-")
+                .unwrap_or("")
+                .trim_end_matches("Neural");
+            format!("Hello, I'm {}. This is how I sound.", name)
+        } else if voice_id == "piper-amy" {
+            "Hello, I'm Amy. This is the offline voice.".to_string()
+        } else {
+            "Hello, this is a voice preview.".to_string()
+        }
+    });
+
+    tracing::info!("tts: previewing voice '{}' with text '{}'", voice_id, demo_text);
+
+    let my_generation = TTS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+
+    let (audio, sample_rate) = match synthesize_with_fallback(&demo_text, &voice_id, &state).await {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::error!("tts: voice preview failed for '{}': {}", voice_id, e);
+            return Err(e);
+        }
+    };
+
+    if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
+        return Ok(());
+    }
+
+    let _ = app.emit("tts:audio-started", &demo_text);
+    play_audio(audio, sample_rate, my_generation).await
+}
 ///
 /// Falls back to `speak_text` if the phrase is not in the cache.
 #[tauri::command]
@@ -246,7 +292,7 @@ pub async fn speak_cached(
     // Check if stop was requested
     if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
         tracing::info!("tts: stop requested before cached playback, skipping");
-        meeting.set_tts_playing(false);
+        // Do NOT set tts_playing=false — a newer generation is active.
         return Ok(());
     }
 
@@ -285,6 +331,13 @@ async fn synthesize_with_fallback(
     voice: &str,
     state: &TtsState,
 ) -> Result<(Vec<f32>, u32), String> {
+    // If the voice is explicitly the local Piper voice, skip Edge TTS.
+    if voice == "piper-amy" {
+        tracing::info!("tts: using Piper directly (piper-amy voice selected)");
+        crate::tts_network::mark_piper_loaded();
+        return crate::tts_piper::synthesize(&state.piper_engine, text).await;
+    }
+
     // Check network state — if network is down, skip Edge TTS entirely
     // and go straight to Piper (saves ~1-2s of waiting for Edge to fail).
     let network_up = crate::tts_network::check_network_now().await;

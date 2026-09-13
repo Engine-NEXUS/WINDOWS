@@ -1,4 +1,5 @@
 //! TTS network state tracker + Piper lifecycle manager.
+#![allow(dead_code)]
 //!
 //! Design:
 //!   - Edge TTS (cloud) is the PRIMARY engine.

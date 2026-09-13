@@ -3,7 +3,7 @@
 //!
 //! Run with: cargo test --lib pipeline_bench -- --nocapture --test-threads=1
 
-use std::time::Instant;
+#![allow(dead_code)]
 
 fn fmt_ms(d: std::time::Duration) -> String {
     format!("{:.2} ms", d.as_secs_f64() * 1000.0)
@@ -16,6 +16,7 @@ fn fmt_us(d: std::time::Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     // ═══════════════════════════════════════════════════════════════════════
     // STAGE 1: Deterministic Parser — the first thing every command hits
