@@ -59,7 +59,9 @@ function PrCard({ pr, disabled, onMerge, onAnalyse }: {
 export function PrListApp() {
   const { visible, repo, state, prs, loading, actionInProgress, hide, setActionInProgress, removePr } = usePrList();
 
-  // Listen for orchestrator github_result events with PrList data
+  // Listen for orchestrator github_result events with PrList data.
+  // This is the FAST PATH for when the sidebar window is already open
+  // (e.g. user says "show open PRs" while the sidebar is visible).
   useEffect(() => {
     if (!isTauri()) return;
 
@@ -74,16 +76,55 @@ export function PrListApp() {
         const result = payload.result;
         if (!result || typeof result !== "object") return;
 
-        // Check if it's a PrList variant: { "PrList": { ... } }
-        const prListData = result.PrList;
-        if (!prListData) return;
+        // GitHubResult is internally tagged: { type: "pr_list", repo, state, prs }
+        // (Rust uses #[serde(tag = "type")] + #[serde(rename_all = "snake_case")])
+        if (result.type !== "pr_list") return;
 
-        usePrList.getState().showPrList(prListData.repo, prListData.state, prListData.prs);
+        usePrList.getState().showPrList(result.repo, result.state, result.prs);
+      });
+    })();
 
-        // Show the window via Tauri command
-        tauriInvoke("show_pr_list_sidebar").catch((e) =>
-          console.error("[PR List] failed to show sidebar:", e)
-        );
+    return () => { unlisten?.(); };
+  }, []);
+
+  // Fetch pending PR list data on mount — RACE-FREE initialization.
+  // The orchestrator stores the PR list in a Rust static BEFORE creating
+  // this window. We fetch it here so the data is available immediately
+  // after the WebView loads, regardless of how long that takes.
+  // This fixes the bug where the `github_result` event was emitted before
+  // this window existed, causing the event to be lost.
+  useEffect(() => {
+    if (!isTauri()) return;
+
+    (async () => {
+      try {
+        const pending = await tauriInvoke<any>("get_pending_pr_list");
+        if (pending && pending.type === "pr_list") {
+          console.log("[PR List] fetched pending PR list from Rust");
+          usePrList.getState().showPrList(pending.repo, pending.state, pending.prs);
+        }
+      } catch (e) {
+        console.warn("[PR List] failed to fetch pending data:", e);
+      }
+    })();
+  }, []);
+
+  // Listen for sidebar:backdrop events — the Rust side captures the desktop
+  // behind the window, blurs it, and sends it as a data URI. We set it as a
+  // CSS variable on <html> so the ::after layer in pr-list.css can render it.
+  // This is the same mechanism used by the response sidebar and architect sidebar.
+  useEffect(() => {
+    if (!isTauri()) return;
+
+    let unlisten: (() => void) | null = null;
+
+    (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      unlisten = await listen<string>("sidebar:backdrop", (ev) => {
+        const dataUri = ev.payload;
+        if (typeof dataUri === "string" && dataUri.startsWith("data:image/")) {
+          document.documentElement.style.setProperty("--sidebar-backdrop-image", `url("${dataUri}")`);
+        }
       });
     })();
 
@@ -114,7 +155,7 @@ export function PrListApp() {
         dialogContext: null,
       });
       // Remove the PR from the list on success
-      removePr(pr.number);
+      removePr(pr.number, pr.repo);
     } catch (e) {
       console.error("[PR List] merge failed:", e);
     } finally {
@@ -143,8 +184,15 @@ export function PrListApp() {
         <div className="pr-list-title">
           {prs.length} {state} PR{prs.length === 1 ? "" : "s"} in {repo}
         </div>
-        <button className="pr-list-close" onClick={() => { hide(); tauriInvoke("hide_pr_list_sidebar").catch(() => {}); }}>
-          ✕
+        <button
+          className="pr-list-close"
+          onClick={() => tauriInvoke("show_settings_sidebar").catch(() => {})}
+          title="Settings"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
         </button>
       </div>
       {loading && <div className="pr-list-loading">Loading PRs...</div>}
@@ -154,7 +202,7 @@ export function PrListApp() {
       <div className="pr-list-scroll">
         {prs.map((pr) => (
           <PrCard
-            key={pr.number}
+            key={`${pr.repo}#${pr.number}`}
             pr={pr}
             disabled={actionInProgress !== null}
             onMerge={() => handleMerge(pr)}

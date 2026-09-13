@@ -186,6 +186,13 @@ export function setLocalAckGiven(): void {
   localAckGiven = true;
 }
 
+/** Check if a local ack has already been given for this query.
+ *  Used by orchestrator.ts to suppress duplicate ack from the Rust
+ *  orchestrator's Ack event. */
+export function isLocalAckGiven(): boolean {
+  return localAckGiven;
+}
+
 /** Reset the local ack flag — called when a new query starts or when
  *  the result arrives. Also resets the analysis-announced guard. */
 function resetLocalAck(): void {

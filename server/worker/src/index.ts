@@ -100,6 +100,15 @@ function extractText(response: any): string {
   return "";
 }
 
+/**
+ * Detect greetings, thanks, and identity questions so the LLM classifier
+ * doesn't misclassify them as "search" (e.g., "who are you" → LLM says search).
+ */
+function isGreetingOrThanks(transcript: string): boolean {
+  const t = transcript.toLowerCase().trim();
+  return /\b(hello|hi|hey|thanks|thank you|good morning|good evening|good afternoon|how are you|who are you|what can you do|what is your name|bye|goodbye|see you|never mind)\b/.test(t);
+}
+
 async function classifyIntent(transcript: string, env: Env): Promise<string> {
   // Check keyword fallback FIRST for reliable intent detection.
   // The LLM classifier is a secondary signal — keywords are more reliable
@@ -107,6 +116,13 @@ async function classifyIntent(transcript: string, env: Env): Promise<string> {
   const keywordIntent = keywordFallback(transcript);
   if (keywordIntent !== "general") {
     return keywordIntent;
+  }
+
+  // Greetings/thanks were matched by keywordFallback as "general" — but we
+  // don't want the LLM classifier to override them with "search" (e.g.,
+  // "who are you" → LLM says "search"). Short-circuit here.
+  if (isGreetingOrThanks(transcript)) {
+    return "general";
   }
 
   const prompt = `You are an intent classifier. Read the user request and respond with exactly one word from this list:
@@ -213,10 +229,13 @@ function keywordFallback(transcript: string): string {
     return "github_analyse";
   }
 
-  if (/\b(pr|pull request|repo|repository|commit|issue|branch|merge|github|list\s+prs)\b/.test(t)) return "github";
+  if (/\b(pr|pull requests?|repo|repository|commit|issue|branch|merge|github|list\s+prs)\b/.test(t)) return "github";
 
   if (/\b(email|inbox|mail|message|gmail|send to)\b/.test(t)) return "gmail";
   if (/\b(calendar|schedule|meeting|event|appointment)\b/.test(t)) return "calendar";
+  // Greetings / thanks — must be checked BEFORE search so "thank you nexus"
+  // doesn't get misclassified as a search question by the LLM.
+  if (/\b(hello|hi|hey|thanks|thank you|thank you nexus|good morning|good evening|good afternoon|how are you|who are you|what can you do|what is your name|bye|goodbye|see you|never mind)\b/.test(t)) return "general";
   if (/\b(search|google|look up|find|what is|who is|where is|research|look\s*up|tell me about|explain|define)\b/.test(t)) return "search";
   return "general";
 }
@@ -412,13 +431,19 @@ async function handleGitHub(req: NexusRequest, env: Env, token: string): Promise
   // Match on lowercased transcript for keywords, but extract repo from original
   const prMatch = transcriptLower.match(/(?:pr|pull request)\s*#?\s*(\d+)\s*(?:of|in|from)?\s*(?:repo\s+)?([\w\-./]+)?/);
   const listPrMatch = transcriptLower.match(/(?:list|show|open)\s+(?:open\s+)?(?:prs|pull requests?)(?:\s+(?:in|of|from)\s+([\w\-./]+))?/);
+  // "latest PR", "current PR", "newest PR", "most recent PR", "check PR",
+  // "view PR", "see PR", "get PR" — fetch the most recent PR (open or all).
+  // The optional "in/of/from <repo>" group captures the repo.
+  const latestPrMatch = transcriptLower.match(/(?:check|view|see|get|show|look\s+at|latest|current|newest|most\s+recent|recent|last)\s+(?:the\s+)?(?:latest\s+|current\s+|newest\s+|most\s+recent\s+)?(?:pr|pull\s*request)(?:\s+(?:in|of|from)\s+([\w\-./]+))?/);
   const issueMatch = transcriptLower.match(/(?:issue|bug)\s*#?\s*(\d+)\s*(?:in|of|from)?\s*(?:repo\s+)?([\w\-./]+)?/);
 
-  // Extract repo name from the original transcript (preserves case)
-  function extractRepo(lowerMatch: RegExpMatchArray | null): string | null {
-    if (!lowerMatch || !lowerMatch[2]) return null;
+  // Extract repo name from the original transcript (preserves case).
+  // groupIdx: which capture group in the regex holds the repo name.
+  // prMatch uses group 2 (pr number is group 1), listPrMatch uses group 1.
+  function extractRepo(lowerMatch: RegExpMatchArray | null, groupIdx: number = 2): string | null {
+    if (!lowerMatch || !lowerMatch[groupIdx]) return null;
     // Find the repo name in the original transcript at the same position
-    const repoLower = lowerMatch[2];
+    const repoLower = lowerMatch[groupIdx];
     const idx = transcriptLower.indexOf(repoLower);
     if (idx >= 0) return transcriptOrig.substr(idx, repoLower.length);
     return repoLower;
@@ -450,7 +475,7 @@ Changes: +${pr["additions"]} -${pr["deletions"]} across ${pr["changed_files"]} f
     }
 
     if (listPrMatch) {
-      let repo = extractRepo(listPrMatch) || "zync";
+      let repo = extractRepo(listPrMatch, 1) || "zync";
       if (!repo.includes("/")) {
         const resolved = await resolveRepo(token, repo);
         if (resolved.full_name) repo = resolved.full_name;
@@ -466,6 +491,37 @@ Changes: +${pr["additions"]} -${pr["deletions"]} across ${pr["changed_files"]} f
 
       return await summarize(
         `The user asked for open PRs in ${repo}. Summarize this list concisely:\n\n${prList}`,
+        env
+      );
+    }
+
+    if (latestPrMatch) {
+      // Fetch the most recent PR. Default to open state, but if none are open,
+      // fall back to the most recent PR of any state so the user still gets an answer.
+      let repo = extractRepo(latestPrMatch, 1) || "zync";
+      if (!repo.includes("/")) {
+        const resolved = await resolveRepo(token, repo);
+        if (resolved.full_name) repo = resolved.full_name;
+      }
+
+      let resp = await fetch(`https://api.github.com/repos/${repo}/pulls?state=open&sort=created&direction=desc&per_page=1`, { headers });
+      let prs = resp.ok ? (await resp.json() as Array<Record<string, unknown>>) : [];
+      if (prs.length === 0) {
+        // No open PRs — try the most recent PR of any state
+        resp = await fetch(`https://api.github.com/repos/${repo}/pulls?state=all&sort=created&direction=desc&per_page=1`, { headers });
+        prs = resp.ok ? (await resp.json() as Array<Record<string, unknown>>) : [];
+      }
+      if (!resp.ok) return githubErrorMessage(resp.status, `fetch latest PR in ${repo}`);
+      if (prs.length === 0) return `There are no pull requests in ${repo}.`;
+      const pr = prs[0];
+      const prInfo = `PR #${pr["number"]}: ${pr["title"]}
+State: ${pr["state"]}, Mergeable: ${pr["mergeable_state"] || "unknown"}
+Author: ${(pr["user"] as Record<string, string>)?.login || "unknown"}
+Body: ${(pr["body"] as string || "").slice(0, 500)}
+Changes: +${pr["additions"]} -${pr["deletions"]} across ${pr["changed_files"]} files`;
+
+      return await summarize(
+        `Summarize this GitHub PR for the user in 2-3 sentences. Be concise and mention the status, what it changes, and whether it's ready to merge:\n\n${prInfo}`,
         env
       );
     }
@@ -2207,17 +2263,25 @@ async function handleOAuthStatus(
   const userId = url.searchParams.get("user_id") || "";
   if (!userId) return json({ error: "user_id required" }, 400);
 
-  const result = await env.DB.prepare(
-    "SELECT provider, expires_at, scopes FROM oauth_tokens WHERE user_id = ?"
-  ).bind(userId).all();
-
   const connected: Record<string, any> = {};
   const now = Date.now() / 1000;
-  for (const row of result.results || []) {
+  // We need refresh_token to determine if an expired token can be refreshed
+  const refreshResult = await env.DB.prepare(
+    "SELECT provider, expires_at, scopes, refresh_token FROM oauth_tokens WHERE user_id = ?"
+  ).bind(userId).all();
+
+  for (const row of refreshResult.results || []) {
     const expiresAt = row.expires_at as number;
+    const hasRefresh = !!row.refresh_token;
+    // Classic tokens (expires_at = 0) never expire.
+    // GitHub App tokens with a refresh_token can be refreshed even if
+    // expires_at has passed, so they are NOT reported as expired.
+    // Only report expired if the token has expired AND there is no
+    // refresh_token to renew it.
+    const isExpired = expiresAt ? (now > expiresAt && !hasRefresh) : false;
     connected[row.provider as string] = {
       connected: true,
-      expired: expiresAt ? now > expiresAt : false,
+      expired: isExpired,
       scopes: row.scopes as string,
     };
   }
@@ -2328,8 +2392,10 @@ async function handleTranscript(
   let intent = explicitIntent || await classifyIntent(req.task.request, env);
 
   // 1b. If intent is "general" but the transcript looks like a factual question,
-  // route to "search" so it goes through Wikipedia/Wikidata retrieval
-  if (intent === "general" && isSearchQuestion(req.task.request)) {
+  // route to "search" so it goes through Wikipedia/Wikidata retrieval.
+  // But skip this for greetings/identity questions ("who are you", "thank you")
+  // — those should stay "general" and get a conversational response.
+  if (intent === "general" && isSearchQuestion(req.task.request) && !isGreetingOrThanks(req.task.request)) {
     intent = "search";
   }
 
@@ -2504,14 +2570,18 @@ async function handleFastAnalyse(req: NexusRequest, env: Env, token: string): Pr
   const transcript = req.task.request;
   const userId = req.requester.id;
 
-  // Parse repo name from transcript: "analyse owner/repo" or "analyse repo"
-  const analyseMatch = transcript.match(/analy[sz]e\s+([a-zA-Z0-9_.\-]+\/[a-zA-Z0-9_.\-]+)/i);
+  // Parse repo name from transcript: "analyse owner/repo", "analyse repo owner/repo",
+  // "analyse repoName", or "analyse repo repoName"
+  // The optional "repo" word between the verb and the name must be skipped.
+  const analyseMatch = transcript.match(/analy[sz]e\s+(?:repo\s+)?([a-zA-Z0-9_.\-]+\/[a-zA-Z0-9_.\-]+)/i);
   let repoName: string | null = null;
 
   if (analyseMatch) {
     repoName = analyseMatch[1];
   } else {
-    const singleMatch = transcript.match(/analy[sz]e\s+([a-zA-Z0-9_.\-]+)/i);
+    // Single-name fallback: "analyse repoName" or "analyse repo repoName"
+    // Skip the word "repo" if it appears right after "analyse"
+    const singleMatch = transcript.match(/analy[sz]e\s+(?:repo\s+)?([a-zA-Z0-9_.\-]+)/i);
     if (singleMatch) {
       repoName = singleMatch[1];
     }

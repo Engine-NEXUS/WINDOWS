@@ -20,7 +20,7 @@
 import { useAssistant } from "../store/assistant";
 import { speak, stopTts } from "../audio/ttsPlayer";
 import { useSidebar } from "../sidebar/sidebarStore";
-import { clearLongRunningInFlight } from "./wsBridge";
+import { clearLongRunningInFlight, isLocalAckGiven } from "./wsBridge";
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -134,12 +134,28 @@ export async function initOrchestratorListener(): Promise<void> {
         // needs to know the loading state for rendering decisions).
         if (ev.visible !== undefined) {
           store.setLoadingVisible(ev.visible);
+          if (ev.visible) {
+            // Hide the orb shortly after the loading indicator appears.
+            // This keeps the orb visible while "On it sir" is playing,
+            // then transitions to the loading indicator once it's ready.
+            setTimeout(() => useAssistant.getState().setVisible(false), 600);
+          }
         }
         break;
       }
 
       case "ack": {
         // Speak the acknowledgement ("On it sir")
+        // Skip if we've already given a local ack (ackLongRunningQuery in
+        // recorder.ts) to avoid double-speak ("On it sir" said twice).
+        if (isLocalAckGiven()) {
+          console.log("[NEXUS] orchestrator ack suppressed — local ack already given");
+          // Still hide the orb after TTS finishes — the loading indicator
+          // will take over. This is a fallback in case the loading event
+          // hasn't arrived yet.
+          setTimeout(() => useAssistant.getState().setVisible(false), 1500);
+          break;
+        }
         if (ev.text) {
           store.setState("speaking");
           store.addAssistantMessage(ev.text);

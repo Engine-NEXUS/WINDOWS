@@ -10,6 +10,27 @@ import { invoke } from "@tauri-apps/api/core";
  */
 let ttsGeneration = 0;
 
+/**
+ * Tracks whether Rust/rodio TTS is currently playing audio.
+ * This is set to true when speak_text is invoked and cleared when
+ * the invoke resolves (playback complete) or stopTts is called.
+ *
+ * CRITICAL: waitForTtsIdle() checks this flag — NOT speechSynthesis.speaking —
+ * because our TTS plays through Rust/rodio, not the Web Speech API.
+ * The old code only checked speechSynthesis.speaking, which was always false
+ * for Rust TTS, causing waitForTtsIdle() to return immediately while audio
+ * was still playing. This created an echo feedback loop where TTS audio was
+ * captured by the mic before playback finished.
+ */
+let rustTtsPlaying = false;
+
+/**
+ * @returns true if Rust/rodio TTS is currently playing audio.
+ */
+export function isRustTtsPlaying(): boolean {
+  return rustTtsPlaying;
+}
+
 export interface VoiceOption {
   id: string;
   name: string;
@@ -85,9 +106,11 @@ export async function playKokoro(
   }
 
   void emitTtsEvent("tts-started");
+  rustTtsPlaying = true;  // Track that Rust TTS is playing
   try {
     const { invoke } = await import("@tauri-apps/api/core");
     // speak_text handles its own thread for rodio playback
+    // This await resolves when rodio playback completes
     await invoke("speak_text", { text, voice: voiceId, speed });
   } catch (err) {
     // Only fall back to Web Speech if we haven't been barged in
@@ -96,6 +119,7 @@ export async function playKokoro(
       await speakWebSpeech(text, speed);
     }
   } finally {
+    rustTtsPlaying = false;  // Playback complete (or barge-in stopped it)
     void emitTtsEvent("tts-ended");
     // Only fire onEnd if not barged in — prevents stale callbacks
     if (ttsGeneration === myGen) {
@@ -192,14 +216,18 @@ export async function speakCached(phrase: string, onEnd?: () => void): Promise<v
   stopTts();
 
   const myGen = ttsGeneration;
+  rustTtsPlaying = true;
   try {
-    await invoke("speak_cached", { phrase });
+    await invoke("speak_cached", { text: phrase });
     if (ttsGeneration !== myGen) return;
     onEnd?.();
   } catch (e) {
     // Fallback to regular speak if cached phrase not available
     console.warn("[TTS] speak_cached failed, falling back to speak:", e);
+    rustTtsPlaying = false;
     return speak(phrase, onEnd);
+  } finally {
+    rustTtsPlaying = false;
   }
 }
 
@@ -207,6 +235,7 @@ export function stopTts(): void {
   // Increment frontend generation — any in-flight speak() calls will
   // see the mismatch and skip playback / onEnd.
   ttsGeneration++;
+  rustTtsPlaying = false;  // Clear playing flag immediately on barge-in
   // Tell Rust to stop the rodio playback immediately (barge-in).
   // Uses static import for instant invocation — no dynamic import delay.
   void invoke("stop_tts").catch((e: unknown) => console.warn("[TTS] stop_tts failed:", e));
