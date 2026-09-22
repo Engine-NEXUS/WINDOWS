@@ -1,7 +1,6 @@
 import { useAssistant } from "../store/assistant";
 import {
   openSession,
-  closeSession,
   sendTranscript,
   setLongRunningInFlight,
   setLocalAckGiven,
@@ -9,7 +8,7 @@ import {
   isDuplicateLongRunning,
 } from "../net/wsBridge";
 import { transcribeAudio } from "./stt";
-import { speak, speakCached } from "./ttsPlayer";
+import { speak, speakCached, isRustTtsPlaying } from "./ttsPlayer";
 import { parseIntent, type Intent } from "../intent/parser";
 import { processViaOrchestrator, cancelOrchestrator } from "../net/orchestrator";
 
@@ -66,6 +65,41 @@ function isAnalyseIntent(intent: Intent): boolean {
     intent.action === "analyse_pr" ||
     intent.action === "analyse_latest_pr" ||
     intent.action === "check_branch"
+  );
+}
+
+/**
+ * Check if an intent is a local command that should be executed by
+ * command_executor in Rust (e.g. open/close app, media controls, search).
+ */
+function isLocalExecutableIntent(intent: Intent): boolean {
+  switch (intent.action) {
+    case "open_app":
+    case "open_url":
+    case "close_app":
+    case "whatsapp_chat":
+    case "search":
+    case "media_play_pause":
+    case "media_next":
+    case "media_previous":
+    case "media_stop":
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
+ * Check if an intent belongs to a subsystem that performs network/MCP I/O
+ * and may be long-running (requiring ack / loading indicator).
+ */
+function isLongRunningSubsystemIntent(intent: Intent): boolean {
+  return (
+    isAnalyseIntent(intent) ||
+    intent.action === "github_command" ||
+    intent.action === "order_food" ||
+    intent.action === "search_product" ||
+    intent.action === "send_whatsapp_message"
   );
 }
 
@@ -381,15 +415,10 @@ let nativeSampleRate = 48000;
  *  from clearing floatBuffer mid-transcription (race condition fix). */
 let captureInProgress = false;
 
-/** Retry counter for "didn't catch that" — allows up to 3 retries before
- *  giving up and hiding the orb. (AK port) */
-let didntCatchRetryCount = 0;
-const MAX_DIDNT_CATCH_RETRIES = 3;
-
-/** Reset the retry counter — called on successful transcript or new wake. */
-export function resetRetryCount(): void {
-  didntCatchRetryCount = 0;
-}
+// Auto-retry is disabled — the system goes to idle after a single failed
+// capture and waits for explicit user input (hotkey or wake word).
+// This prevents the system from continuously waking up and capturing
+// room noise/hallucinations without user input.
 
 /**
  * Start recording from an EXISTING MediaStream (acquired by the caller).
@@ -532,25 +561,39 @@ function releaseMicStream(): void {
 }
 
 /**
- * Wait until the Web Speech API is no longer speaking.
- * Polls every 100ms (speechSynthesis.speaking is the only reliable API).
- * Times out after 5s as a safety net.
+ * Wait until TTS is no longer playing.
+ *
+ * CRITICAL FIX: This now checks BOTH the Rust/rodio TTS playback state
+ * AND the Web Speech API. Previously it only checked speechSynthesis.speaking,
+ * which was always false for Rust TTS (Edge TTS / Piper via rodio). This caused
+ * waitForTtsIdle() to return immediately while audio was still playing, creating
+ * an echo feedback loop where TTS audio was captured by the mic.
+ *
+ * The rustTtsPlaying flag is set by speak()/speakCached() when invoke("speak_text")
+ * starts and cleared when the invoke resolves (playback complete) or stopTts() is called.
+ *
+ * Polls every 100ms. Times out after 10s as a safety net (Piper cold-load can take ~7s).
  */
 function waitForTtsIdle(): Promise<void> {
   return new Promise((resolve) => {
-    if (typeof speechSynthesis === "undefined" || !speechSynthesis.speaking) {
-      resolve();
-      return;
-    }
-    const start = Date.now();
-    const check = () => {
-      if (!speechSynthesis.speaking || Date.now() - start > 5000) {
+    const checkInitial = () => {
+      const webSpeechPlaying = typeof speechSynthesis !== "undefined" && speechSynthesis.speaking;
+      if (!isRustTtsPlaying() && !webSpeechPlaying) {
         resolve();
         return;
       }
+      const start = Date.now();
+      const check = () => {
+        const webSpeechStillPlaying = typeof speechSynthesis !== "undefined" && speechSynthesis.speaking;
+        if ((!isRustTtsPlaying() && !webSpeechStillPlaying) || Date.now() - start > 10000) {
+          resolve();
+          return;
+        }
+        setTimeout(check, 100);
+      };
       setTimeout(check, 100);
     };
-    setTimeout(check, 100);
+    checkInitial();
   });
 }
 
@@ -564,34 +607,20 @@ function waitForTtsIdle(): Promise<void> {
  */
 export async function processTranscript(transcript: string): Promise<void> {
   if (!transcript) {
-    console.warn("[NEXUS] Rust STT returned empty transcript");
-    didntCatchRetryCount++;
-    if (didntCatchRetryCount <= MAX_DIDNT_CATCH_RETRIES) {
-      console.log(`[NEXUS] didn't catch that (retry ${didntCatchRetryCount}/${MAX_DIDNT_CATCH_RETRIES})`);
-      useAssistant.getState().setState("speaking");
-      useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
-      await speak("Didn't catch that sir");
-      await waitForTtsIdle();
-      useAssistant.getState().setState("listening");
-      // Restart Rust-side capture for retry
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("start_stt_capture").catch(() => {});
-      } catch {}
-    } else {
-      console.log("[NEXUS] didn't catch that — max retries exceeded, hiding");
-      didntCatchRetryCount = 0;
-      useAssistant.getState().setState("speaking");
-      useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
-      await speak("Didn't catch that sir");
-      useAssistant.getState().setVisible(false);
-      setTimeout(() => useAssistant.getState().reset(), 550);
-    }
+    // Failed capture — speak "Didn't catch that" and go back to idle.
+    // Do NOT auto-retry. Wait for explicit user input (hotkey or wake word)
+    // before capturing again. Auto-retry caused the system to keep waking
+    // up and capturing room noise/hallucinations without user input.
+    console.warn("[NEXUS] Rust STT returned empty transcript — going to idle");
+    useAssistant.getState().setState("speaking");
+    useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
+    await speak("Didn't catch that sir");
+    useAssistant.getState().setVisible(false);
+    setTimeout(() => useAssistant.getState().reset(), 550);
     return;
   }
 
-  // Successful transcript — reset retry counter
-  didntCatchRetryCount = 0;
+  // Successful transcript
 
   // 1b. Post-process the transcript to fix common STT mishearings.
   let corrected = correctSttTranscript(transcript);
@@ -654,9 +683,34 @@ export async function processTranscript(transcript: string): Promise<void> {
     return;
   }
 
-  // Analyse intents go to the remote backend
-  if (isAnalyseIntent(intent)) {
-    console.log("[NEXUS] analyse intent detected, sending to backend:", intent);
+  // Special case: open settings sidebar (command center)
+  if (intent.action === "open_settings") {
+    await waitForTtsIdle();
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    useAssistant.getState().setVisible(false);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("show_settings_sidebar");
+    } catch (err) {
+      console.error("[NEXUS] failed to open settings sidebar:", err);
+    }
+    setTimeout(() => useAssistant.getState().reset(), 550);
+    return;
+  }
+
+  if (intent.action === "need_more_info") {
+    useAssistant.getState().setLoadingVisible(false);
+    useAssistant.getState().setVisible(true);
+    const prompt = (intent as { prompt: string }).prompt;
+    console.log("[NEXUS] local need_more_info prompt:", prompt);
+    useAssistant.getState().setState("speaking");
+    useAssistant.getState().addAssistantMessage(prompt);
+    void speak(prompt.replace(/,/g, ""));
+    await waitForTtsIdle();
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    useAssistant.getState().setVisible(false);
+    setTimeout(() => useAssistant.getState().reset(), 550);
+    return;
   } else if (intent.action === "greeting") {
     useAssistant.getState().setLoadingVisible(false);
     useAssistant.getState().setVisible(true);
@@ -670,23 +724,26 @@ export async function processTranscript(transcript: string): Promise<void> {
     useAssistant.getState().setVisible(false);
     setTimeout(() => useAssistant.getState().reset(), 550);
     return;
-  } else if (intent.action !== "unknown") {
+  } else if (isLocalExecutableIntent(intent)) {
     // Known local command — execute it directly.
     useAssistant.getState().setLoadingVisible(false);
     useAssistant.getState().setVisible(true);
     useAssistant.getState().setState("speaking");
-    useAssistant.getState().addAssistantMessage("Ok sir.");
-    void speak("Ok sir.");
+    // No pre-spoken "Ok sir": success is announced only after execution
+    // returns (its message IS "Ok sir." on success). Announcing before
+    // the result lied on every failure — e.g. opening the wrong chat.
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const result = await invoke<{ success: boolean; message: string }>("execute_command", { intent });
       console.log("[NEXUS] local command result:", result);
-      if (result.message && result.message !== "Ok sir.") {
+      if (result.message) {
         useAssistant.getState().addAssistantMessage(result.message);
         void speak(result.message.replace(/,/g, ""));
       }
     } catch (err) {
       console.error("[NEXUS] command execution failed:", err);
+      useAssistant.getState().addAssistantMessage("Couldn't do that, sir.");
+      void speak("Couldn't do that sir.");
     }
     await waitForTtsIdle();
     await new Promise((resolve) => setTimeout(resolve, 800));
@@ -695,15 +752,16 @@ export async function processTranscript(transcript: string): Promise<void> {
     return;
   }
 
-  // 4. Unknown intent (or analyse intent) — route through the CENTRAL ORCHESTRATOR.
+  // 4. Orchestrator-routed intent (MCP, GitHub, Analyse, Ghostwriter, Screen, or general query).
   try {
-    const isLongFinal = isLong || isAnalyseIntent(intent);
+    const isLongFinal = isLong || isLongRunningSubsystemIntent(intent);
     console.log("[NEXUS] processTranscript: intent=", intent.action, "isLongRunning=", isLongFinal, "transcript=", corrected);
 
     if (isLongFinal && !isLongRunningInFlight()) {
       setLongRunningInFlight(corrected, processNextQueuedCommand);
-      await waitForTtsIdle();
-      useAssistant.getState().setVisible(false);
+      // Don't hide the orb here — the orchestrator's loading event
+      // will hide it when the loading indicator appears. This avoids
+      // a gap where neither the orb nor the loading animation is visible.
     }
 
     const result = await processViaOrchestrator(corrected);
@@ -714,7 +772,7 @@ export async function processTranscript(transcript: string): Promise<void> {
     }
     return;
   } catch (err) {
-    console.warn("[NEXUS] orchestrator unavailable for unknown query:", err);
+    console.warn("[NEXUS] orchestrator unavailable for query:", err);
   }
 
   // 5. Neither local intent nor backend available.
@@ -777,30 +835,18 @@ export async function finishCapture(): Promise<void> {
   releaseMicStream();
 
   if (!transcript) {
-    console.warn("STT returned empty transcript");
-    didntCatchRetryCount++;
-    if (didntCatchRetryCount <= MAX_DIDNT_CATCH_RETRIES) {
-      console.log(`[NEXUS] didn't catch that (retry ${didntCatchRetryCount}/${MAX_DIDNT_CATCH_RETRIES}) — staying listening`);
-      useAssistant.getState().setState("speaking");
-      useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
-      await speak("Didn't catch that sir");
-      await waitForTtsIdle();
-      useAssistant.getState().setState("listening");
-      import("./vad").then(({ resumeVad }) => resumeVad()).catch(() => {});
-    } else {
-      console.log("[NEXUS] didn't catch that — max retries exceeded, hiding");
-      didntCatchRetryCount = 0;
-      useAssistant.getState().setState("speaking");
-      useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
-      await speak("Didn't catch that sir");
-      useAssistant.getState().setVisible(false);
-      setTimeout(() => useAssistant.getState().reset(), 550);
-    }
+    // Failed capture — speak "Didn't catch that" and go back to idle.
+    // Do NOT auto-retry. Wait for explicit user input (hotkey or wake word).
+    console.warn("STT returned empty transcript — going to idle");
+    useAssistant.getState().setState("speaking");
+    useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
+    await speak("Didn't catch that sir");
+    useAssistant.getState().setVisible(false);
+    setTimeout(() => useAssistant.getState().reset(), 550);
     captureInProgress = false;
     return;
   }
-  // Successful transcript — reset retry counter
-  didntCatchRetryCount = 0;
+  // Successful transcript
 
   // 1b. Post-process the transcript to fix common STT mishearings.
   transcript = correctSttTranscript(transcript);
@@ -905,10 +951,36 @@ export async function finishCapture(): Promise<void> {
     return;
   }
 
-  // Analyse intents go to the remote backend (they're long-running queries)
-  // but the Rust parser has already extracted the repo/PR data.
-  if (isAnalyseIntent(intent)) {
-    console.log("[NEXUS] analyse intent detected, sending to backend:", intent);
+  // Special case: open settings sidebar (command center)
+  if (intent.action === "open_settings") {
+    await waitForTtsIdle();
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    useAssistant.getState().setVisible(false);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("show_settings_sidebar");
+    } catch (err) {
+      console.error("[NEXUS] failed to open settings sidebar:", err);
+    }
+    setTimeout(() => useAssistant.getState().reset(), 550);
+    captureInProgress = false;
+    return;
+  }
+
+  if (intent.action === "need_more_info") {
+    useAssistant.getState().setLoadingVisible(false);
+    useAssistant.getState().setVisible(true);
+    const prompt = (intent as { prompt: string }).prompt;
+    console.log("[NEXUS] local need_more_info prompt (finishCapture):", prompt);
+    useAssistant.getState().setState("speaking");
+    useAssistant.getState().addAssistantMessage(prompt);
+    void speak(prompt.replace(/,/g, ""));
+    await waitForTtsIdle();
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    useAssistant.getState().setVisible(false);
+    setTimeout(() => useAssistant.getState().reset(), 550);
+    captureInProgress = false;
+    return;
   } else if (intent.action === "greeting") {
     // Roll back loading state — greetings are local, not long-running.
     useAssistant.getState().setLoadingVisible(false);
@@ -928,7 +1000,7 @@ export async function finishCapture(): Promise<void> {
     setTimeout(() => useAssistant.getState().reset(), 550);
     captureInProgress = false;
     return;
-  } else if (intent.action !== "unknown") {
+  } else if (isLocalExecutableIntent(intent)) {
     // Known local command — execute it directly.
     // Roll back loading state — local commands are not long-running.
     useAssistant.getState().setLoadingVisible(false);
@@ -957,25 +1029,23 @@ export async function finishCapture(): Promise<void> {
     return;
   }
 
-  // 4. Unknown intent (or analyse intent) — route through the CENTRAL ORCHESTRATOR.
+  // 4. Orchestrator-routed intent (MCP, GitHub, Analyse, Ghostwriter, Screen, or general query).
   //    The orchestrator (Rust) owns the full lifecycle:
   //      - Parses intent (deterministic, <1ms)
-  //      - Routes to the correct subsystem (LocalCommand, WorkerBackend, Architect)
+  //      - Routes to the correct subsystem (LocalCommand, WorkerBackend, Architect, GitHub, Mcp)
   //      - Emits ack + shows loading indicator (for long-running)
-  //      - Dispatches to the Worker
+  //      - Dispatches to the Worker, GitHub API, or MCP bridges
   //      - Emits result + hides loading
   //    The frontend just calls processViaOrchestrator() and listens for events.
   try {
-    const isLongFinal = isLong || isAnalyseIntent(intent);
+    const isLongFinal = isLong || isLongRunningSubsystemIntent(intent);
     console.log("[NEXUS] finishCapture: intent=", intent.action, "isLongRunning=", isLongFinal, "transcript=", transcript);
 
     if (isLongFinal && !isLongRunningInFlight()) {
       // Track in-flight state for dedup + queue (ack already given above)
       setLongRunningInFlight(transcript, processNextQueuedCommand);
-      // Wait for "On it sir" TTS to finish, then hide orb.
-      // The orchestrator will show the loading indicator from Rust.
-      await waitForTtsIdle();
-      useAssistant.getState().setVisible(false);
+      // Don't hide the orb here — the orchestrator's loading event
+      // will hide it when the loading indicator appears.
     }
     // Release captureInProgress BEFORE dispatch so subsequent voice
     // commands can be processed while the Worker is generating the response.
@@ -1027,8 +1097,11 @@ export async function abortCapture(): Promise<void> {
   await stopRecording();
   floatBuffer = [];
   // Cancel any active orchestrator request (barge-in)
+  // NOTE: Do NOT close the session here — the session is just config data
+  // (worker_url, user_id, device_id) stored in Rust. Closing it on every
+  // barge-in causes "no session open" errors on subsequent orchestrator
+  // calls. The session should persist for the app lifetime.
   void cancelOrchestrator();
-  try { await closeSession(); } catch { /* backend may already be closed */ }
   releaseMicStream();
   useAssistant.getState().reset();
 }
@@ -1127,30 +1200,18 @@ async function _finishCaptureFromVadInner(
   }
 
   if (!transcript) {
-    console.warn("STT returned empty transcript");
-    didntCatchRetryCount++;
-    if (didntCatchRetryCount <= MAX_DIDNT_CATCH_RETRIES) {
-      console.log(`[NEXUS] didn't catch that (retry ${didntCatchRetryCount}/${MAX_DIDNT_CATCH_RETRIES}) — staying listening`);
-      useAssistant.getState().setState("speaking");
-      useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
-      await speak("Didn't catch that sir");
-      await waitForTtsIdle();
-      useAssistant.getState().setState("listening");
-      import("./vad").then(({ resumeVad }) => resumeVad()).catch(() => {});
-    } else {
-      console.log("[NEXUS] didn't catch that — max retries exceeded, hiding");
-      didntCatchRetryCount = 0;
-      useAssistant.getState().setState("speaking");
-      useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
-      await speak("Didn't catch that sir");
-      useAssistant.getState().setVisible(false);
-      setTimeout(() => useAssistant.getState().reset(), 550);
-    }
+    // Failed capture — speak "Didn't catch that" and go back to idle.
+    // Do NOT auto-retry. Wait for explicit user input (hotkey or wake word).
+    console.warn("STT returned empty transcript — going to idle");
+    useAssistant.getState().setState("speaking");
+    useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
+    await speak("Didn't catch that sir");
+    useAssistant.getState().setVisible(false);
+    setTimeout(() => useAssistant.getState().reset(), 550);
     captureInProgress = false;
     return;
   }
-  // Successful transcript — reset retry counter
-  didntCatchRetryCount = 0;
+  // Successful transcript
 
   // 1b. Post-process the transcript to fix common STT mishearings.
   transcript = correctSttTranscript(transcript);
@@ -1255,10 +1316,20 @@ async function _finishCaptureFromVadInner(
     return;
   }
 
-  // Analyse intents go to the remote backend (they're long-running queries)
-  // but the Rust parser has already extracted the repo/PR data.
-  if (isAnalyseIntent(intent)) {
-    console.log("[NEXUS] analyse intent detected (vad), sending to backend:", intent);
+  if (intent.action === "need_more_info") {
+    useAssistant.getState().setLoadingVisible(false);
+    useAssistant.getState().setVisible(true);
+    const prompt = (intent as { prompt: string }).prompt;
+    console.log("[NEXUS] local need_more_info prompt (vad):", prompt);
+    useAssistant.getState().setState("speaking");
+    useAssistant.getState().addAssistantMessage(prompt);
+    void speak(prompt.replace(/,/g, ""));
+    await waitForTtsIdle();
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    useAssistant.getState().setVisible(false);
+    setTimeout(() => useAssistant.getState().reset(), 550);
+    captureInProgress = false;
+    return;
   } else if (intent.action === "greeting") {
     // Roll back loading state — greetings are local, not long-running.
     useAssistant.getState().setLoadingVisible(false);
@@ -1278,7 +1349,7 @@ async function _finishCaptureFromVadInner(
     setTimeout(() => useAssistant.getState().reset(), 550);
     captureInProgress = false;
     return;
-  } else if (intent.action !== "unknown") {
+  } else if (isLocalExecutableIntent(intent)) {
     // Known local command — execute it directly.
     // Roll back loading state — local commands are not long-running.
     useAssistant.getState().setLoadingVisible(false);
@@ -1307,28 +1378,28 @@ async function _finishCaptureFromVadInner(
     return;
   }
 
-  // 4. Unknown intent (or analyse intent) — try the remote backend.
+  // 4. Orchestrator-routed intent (MCP, GitHub, Analyse, Ghostwriter, Screen, or general query).
   try {
     // isLong was already determined above (before intent parsing).
     // If it's long-running, we already gave the instant ack and handled
     // dedup/queue. Here we just need to set the in-flight flag and send.
-    const isLongFinal = isLong || isAnalyseIntent(intent);
+    const isLongFinal = isLong || isLongRunningSubsystemIntent(intent);
     console.log("[NEXUS] finishCaptureFromVad: intent=", intent.action, "isLongRunning=", isLongFinal, "transcript=", transcript);
 
     if (isLongFinal && !isLongRunningInFlight()) {
       // Track in-flight state for dedup + queue (ack already given above)
       setLongRunningInFlight(transcript, processNextQueuedCommand);
     }
-    // Release captureInProgress BEFORE sendTranscript so subsequent voice
+    // Release captureInProgress BEFORE dispatch so subsequent voice
     // commands can be processed while the Worker is generating the response.
-    // The result handler in wsBridge handles the sidebar + TTS when the
+    // The result handler in orchestrator.ts handles the sidebar + TTS when the
     // response arrives, so we don't need to block here.
     captureInProgress = false;
-    await sendTranscript(transcript);
-    console.log("[NEXUS] sendTranscript done");
+    const result = await processViaOrchestrator(transcript);
+    console.log("[NEXUS] orchestrator process result (vad):", result);
     return;
   } catch (err) {
-    console.warn("[NEXUS] backend unavailable for unknown query:", err);
+    console.warn("[NEXUS] orchestrator unavailable for query (vad):", err);
   }
 
   // 5. Neither local intent nor backend available.

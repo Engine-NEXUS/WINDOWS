@@ -16,6 +16,9 @@ mod wakeword_oww;
 mod wakeword {
     pub use crate::wakeword_oww::*;
 }
+// Phase D: Speaker verification module (voice profile enrollment + cosine similarity)
+pub mod voice_profile;
+pub mod acoustic_profile;
 mod network;
 mod tray;
 pub mod commands;
@@ -43,7 +46,8 @@ mod tts_network;
 mod tts_bench;
 mod pipeline_bench;
 mod volume;
-// Verification is not yet wired into wakeword_oww (see AGENTS.md known limitations).
+// Phase D: Speaker verification is now wired via voice_profile module.
+// The OWW engine uses the existing embedding_model.onnx for speaker embeddings.
 mod meeting_detect;
 mod mic_permissions;
 mod mpris;
@@ -54,6 +58,15 @@ mod dyn_windows;
 mod diagnostics;
 pub mod orchestrator;
 pub mod github_cmd;
+pub mod live;
+pub mod router;
+pub mod mcp_client;
+pub mod auth_vault;
+pub mod ghostwriter;
+pub mod screen;
+pub mod telegram;
+pub mod command_center;
+pub mod nlu_update;
 #[cfg(target_os = "windows")]
 mod dwm_corners;
 #[cfg(target_os = "windows")]
@@ -286,6 +299,14 @@ pub fn run() {
             // Handle deep-link redirects on Windows/Linux (passed as CLI arg)
             if let Some(url) = args.iter().find(|a| a.starts_with("nexus://")) {
                 tracing::info!("single-instance: deep-link callback: {}", url);
+                if url == "nexus://settings" {
+                    // Open settings sidebar via deep link
+                    let app_clone = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = crate::commands::show_settings_sidebar(app_clone).await;
+                    });
+                    return;
+                }
                 let _ = app.emit("deep-link://oauth-callback", url.clone());
                 // OAuth callback — just emit the event and return.
                 // Do NOT try to show/wake the main window here; the WebView2
@@ -313,10 +334,11 @@ pub fn run() {
                     let _ = win.set_focus();
                 }
             } else if is_settings {
-                if let Ok(win) = crate::dyn_windows::get_or_create_window(&app, crate::dyn_windows::WindowConfig::settings()) {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+                // Open the settings sidebar (liquid-glass, 720x1000)
+                let app_clone = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = crate::commands::show_settings_sidebar(app_clone).await;
+                });
             } else {
                 // Only wake the main window if we are NOT in the middle of setup
                 let setup_active = app.get_webview_window("setup").is_some();
@@ -344,7 +366,7 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
     }
 
-    let builder = builder.setup(|app| {
+    builder.setup(|app| {
         // macOS: hide from the Dock and Cmd+Tab switcher (accessory/background app).
             // macOS: hide from the Dock and Cmd+Tab switcher (accessory/background app).
             #[cfg(target_os = "macos")]
@@ -667,9 +689,37 @@ pub fn run() {
                 }
             });
 
+            // Telegram remote (owner-only, ₹0 phone control). Starts only
+            // when a bot token is in the vault AND telegramChatId is set —
+            // otherwise logs once and stays off.
+            crate::telegram::spawn_bridge(app.handle().clone());
+
+            // 9Router provider health probe — checks free-tier model menus
+            // (Groq/Gemini/Cerebras IDs die silently; Sept 2026 llama 404).
+            // Non-blocking, logs warnings only. Zero inference cost.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                crate::router::probe_provider_health(&handle).await;
+            });
+
             // Start STT idle monitor — kills the Python STT sidecar after 5 min
             // of inactivity to reclaim ~340 MB RAM.
             crate::lazy_stt::start_idle_monitor();
+
+            // Pre-warm local STT ~20s after boot (background, non-blocking) so
+            // the first voice command answers with zero cold-start delay.
+            // No-op for Groq cloud users (saves RAM).
+            if let Ok(dir) = app.path().app_data_dir() {
+                crate::lazy_stt::spawn_prewarm(dir);
+            }
+
+            // NLU sidecar is on-demand fallback only (never pre-warmed at boot
+            // to enforce strict <150MB RAM limit in online mode).
+
+            // Vault idle monitor: watches credential expiry while the user
+            // is away (90s cadence, edge-triggered). Alerts land in the log
+            // + `vault:changed` event; the Connections tab refreshes itself.
+            crate::auth_vault::spawn_monitor(app.handle().clone());
 
             // Listen for deep-link events (macOS emits these; Windows/Linux use single-instance).
             let handle = app.handle().clone();
@@ -678,6 +728,12 @@ pub fn run() {
                     let url_str = url.as_str();
                     if url_str.starts_with("nexus://oauth/") {
                         let _ = handle.emit("deep-link://oauth-callback", url_str);
+                    } else if url_str == "nexus://settings" {
+                        // Deep link to open settings sidebar
+                        let app_clone = handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let _ = crate::commands::show_settings_sidebar(app_clone).await;
+                        });
                     }
                 }
             });
@@ -736,6 +792,18 @@ pub fn run() {
                     }
                 }
             }
+
+            // NLU model update check — family devices pull admin-trained
+            // BERT-Mini updates from the Worker (R2 + KV manifest).
+            // Runs in background; session was just auto-opened above.
+            // No-op if the Worker has no manifest or R2 is unconfigured.
+            let update_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                // Small delay: let the app finish first-paint before a
+                // potential ~35 MB model download saturates the connection.
+                tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+                nlu_update::spawn_update_check(update_handle);
+            });
 
             if should_open_setup {
                 // Hide the orb during setup — it should not steal focus or
@@ -799,6 +867,7 @@ pub fn run() {
             window_manager::set_click_through,
             window_manager::show_overlay,
             window_manager::hide_overlay,
+            window_manager::set_orb_position,
             network::open_session,
             network::send_transcript,
             network::cancel_session,
@@ -811,6 +880,12 @@ pub fn run() {
             orchestrator::orchestrator_hide_loading,
             orchestrator::orchestrator_github_execute,
             orchestrator::orchestrator_github_clear_token,
+            orchestrator::            orchestrator_mcp_confirm,
+            mcp_client::mcp_status,
+            mcp_client::mcp_connect_state,
+            auth_vault::vault_status,
+            auth_vault::vault_set_token,
+            auth_vault::vault_clear_token,
             commands::open_setup_window,
             commands::close_setup_window,
             commands::save_server_config,
@@ -823,6 +898,8 @@ pub fn run() {
             commands::close_settings_window,
             commands::get_settings,
             commands::save_settings,
+            commands::list_tts_voices,
+            commands::get_pending_settings_backdrop,
             commands::set_autostart,
             commands::is_autostart_enabled,
             commands::check_mic_permission,
@@ -832,20 +909,26 @@ pub fn run() {
             commands::show_sidebar,
             commands::show_sidebar_with_content,
             commands::show_sidebar_with_analysis,
+            commands::show_sidebar_with_confirmation,
             commands::hide_sidebar,
             commands::get_pending_sidebar_content,
             commands::show_loading_indicator,
             commands::hide_loading_indicator,
             commands::show_pr_list_sidebar,
             commands::hide_pr_list_sidebar,
+            commands::get_pending_pr_list,
+            commands::show_settings_sidebar,
+            commands::hide_settings_sidebar,
             commands::pause_wakeword,
             commands::resume_wakeword,
+            commands::mic_self_test,
             commands::start_stt_capture,
             stt::transcribe_audio,
             stt::stt_status,
             tts::speak_text,
             tts::speak_cached,
             tts::stop_tts,
+            tts::preview_voice,
             stt_learning::log_failed_transcript,
             stt_learning::log_successful_transcript,
             stt_learning::get_learned_corrections,
@@ -862,6 +945,25 @@ pub fn run() {
             architect::query_impact,
             architect::enrich_phase1,
             architect::analyze_repo_fast,
+            // Live mode commands
+            live::live_type_text,
+            live::live_press_key,
+            live::live_press_hotkey,
+            live::live_whatsapp_open,
+            live::live_whatsapp_search,
+            live::live_whatsapp_send,
+            live::live_whatsapp_type_message,
+            live::live_browser_new_tab,
+            live::live_browser_navigate,
+            live::live_browser_search,
+            live::live_open_site,
+            live::live_focus_app,
+            live::live_cancel,
+            live::live_get_state,
+            // Phase D: OWW voice profile commands (speaker verification)
+            commands::get_voice_profile_status,
+            commands::enroll_voice,
+            commands::delete_voice_profile,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NEXUS application");

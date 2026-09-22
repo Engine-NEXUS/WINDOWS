@@ -9,6 +9,8 @@
 //!   1. `cargo build --features admin-brain` (compile-time)
 //!   2. `admin.json` with `is_admin: true` (runtime)
 
+#![allow(dead_code)]
+
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::OnceLock;

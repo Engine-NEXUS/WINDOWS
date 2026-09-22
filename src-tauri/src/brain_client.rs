@@ -1,4 +1,5 @@
 //! Brain client — calls the Qwen brain server for advanced intent classification.
+#![allow(dead_code)]
 //!
 //! The brain server is a Python sidecar (like STT 39217 and NLU 39218) on port 39219.
 //! It runs a Qwen2.5-0.5B-Instruct model that can:

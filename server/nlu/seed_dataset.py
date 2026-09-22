@@ -526,19 +526,145 @@ def gen_close_pr():
 def gen_list_prs():
     repos = ["owner/repo", "zync-meet/zync", "eesh264/congi", "myorg/myrepo"]
     examples = []
+    # --- Repository-specific forms ---
     for repo in repos:
         examples.append({"text": f"list prs in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
         examples.append({"text": f"list open prs in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
         examples.append({"text": f"list closed prs in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
         examples.append({"text": f"list all prs in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+        examples.append({"text": f"list merged prs in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
         examples.append({"text": f"show prs in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
         examples.append({"text": f"show open prs in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+        examples.append({"text": f"show closed prs in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
         examples.append({"text": f"show all prs in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+        examples.append({"text": f"show merged prs in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
         examples.append({"text": f"list pull requests in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
         examples.append({"text": f"show pull requests in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
         examples.append({"text": f"get prs in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+        examples.append({"text": f"fetch prs in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+        examples.append({"text": f"display prs in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
         examples.append({"text": f"what prs are open in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
-    return with_fillers(examples, max_variants=2)[:55]
+        examples.append({"text": f"what are the open prs in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+        examples.append({"text": f"open the pr list in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+        examples.append({"text": f"open pr list in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+        examples.append({"text": f"show me the pr list in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+        examples.append({"text": f"view the pr list in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+        examples.append({"text": f"view pr list in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+        examples.append({"text": f"give me the pr list in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+        examples.append({"text": f"pull up the pr list in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+        examples.append({"text": f"bring up the pr list in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+        examples.append({"text": f"latest prs in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+        examples.append({"text": f"active prs in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+        examples.append({"text": f"show live prs in {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+        examples.append({"text": f"for {repo}", "intent": "list_prs", "slots": {"repo": repo}})
+
+    # --- Account-wide / no-repository forms ---
+    # These are critical: "open the pr list" without a repo should still
+    # classify as list_prs, not open_app. The deterministic parser handles
+    # these, but BERT-Mini needs to know them too for fallback.
+    no_repo = [
+        "open the pr list",
+        "open pr list",
+        "show the pr list",
+        "show pr list",
+        "show me the pr list",
+        "show me pr list",
+        "give me the pr list",
+        "give me pr list",
+        "view the pr list",
+        "view pr list",
+        "get the pr list",
+        "get pr list",
+        "pull up the pr list",
+        "pull up pr list",
+        "bring up the pr list",
+        "bring up pr list",
+        "list prs",
+        "list open prs",
+        "list closed prs",
+        "list all prs",
+        "list merged prs",
+        "list pull requests",
+        "list all pull requests",
+        "show prs",
+        "show open prs",
+        "show closed prs",
+        "show all prs",
+        "show merged prs",
+        "show pull requests",
+        "show all pull requests",
+        "get prs",
+        "fetch prs",
+        "display prs",
+        "what prs are open",
+        "what are the open prs",
+        "what prs are closed",
+        "what are the closed prs",
+        "latest prs",
+        "active prs",
+        "show live prs",
+        "give me prs",
+        "tell me the pr list",
+        "tell me pr list",
+        "open the pull request list",
+        "show the pull request list",
+        "view the pull request list",
+    ]
+    for text in no_repo:
+        examples.append({"text": text, "intent": "list_prs", "slots": {"repo": ""}})
+
+    # STT mishearing variants — faster-whisper/Whisper commonly mishears
+    # short technical words like "pr", "prs", and "list". These variants
+    # ensure BERT-Mini recognizes the user's intent even when STT produces
+    # phonetically similar but wrong transcripts.
+    pr_mishearings = {
+        "pr list": [
+            "pee are list", "p r list", "pea arr list", "prr list",
+            "per list", "p are list", "p r l list",
+        ],
+        "prs": [
+            "pee ars", "p r s", "pea arrs", "prrs", "pers",
+            "p r", "pea are", "p are",
+        ],
+        "pull request": [
+            "pull reques", "pool request", "pull re quest",
+            "pull reque", "pool reques",
+        ],
+        "pull requests": [
+            "pull requess", "pool requests", "pull re quests",
+            "pool requess",
+        ],
+        "list prs": [
+            "lis prs", "lass prs", "leest prs",
+            "lis pee ars", "lass pee ars",
+        ],
+        "show prs": [
+            "so prs", "show pers", "show pee ars",
+            "so pee ars", "show p r s",
+        ],
+        "latest prs": [
+            "latest pers", "latest pee ars", "latest p r s",
+            "lates prs", "latest p r",
+        ],
+        "open prs": [
+            "open pers", "open pee ars", "open p r s",
+        ],
+    }
+    for correct, misheard_list in pr_mishearings.items():
+        for misheard in misheard_list:
+            examples.append({
+                "text": misheard,
+                "intent": "list_prs",
+                "slots": {"repo": ""},
+            })
+            # Also add "show me the {misheard}" form
+            examples.append({
+                "text": f"show me the {misheard}",
+                "intent": "list_prs",
+                "slots": {"repo": ""},
+            })
+
+    return with_fillers(examples, max_variants=2)
 
 def gen_get_pr():
     repos = ["owner/repo", "zync-meet/zync", "eesh264/congi", "myorg/myrepo"]

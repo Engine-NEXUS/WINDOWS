@@ -1,4 +1,5 @@
 //! Brain monitor — watches every transcript and auto-trains BERT-Mini.
+#![allow(dead_code)]
 //!
 //! This is the continuous learning loop:
 //!   1. Every transcript passes through the brain (in background, non-blocking)
@@ -162,7 +163,7 @@ async fn monitor_transcript_inner(
         None => return, // brain not available, skip
     };
 
-    let brain_intent_name = format!("{:?}", brain_result.intent);
+    let brain_intent_name = crate::intent_parser::intent_to_label(&brain_result.intent).to_string();
     let brain_confidence = brain_result.confidence;
 
     // 1b. Low-confidence rejection — if the brain classified something

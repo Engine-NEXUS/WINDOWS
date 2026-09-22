@@ -30,13 +30,13 @@
     "targets": "all",
     "resources": [
       "resources/oww/**/*",
-      "resources/sherpa/speaker_model.onnx",
       "resources/espeak-ng-data/**/*",
       "resources/server/stt_server.py",
       "resources/server/nlu_server.py",
       "resources/server/nlu/requirements.txt",
       "resources/server/nlu/model/nexus_nlu.onnx",
       "resources/server/nlu/model/nexus_nlu.onnx.data",
+      "resources/server/nlu/model/labels.json",
       "resources/server/nlu/model/tokenizer/*",
       "resources/piper/en_US-amy-medium.onnx",
       "resources/piper/en_US-amy-medium.onnx.json"

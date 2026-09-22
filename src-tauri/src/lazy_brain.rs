@@ -1,4 +1,5 @@
 //! Lazy brain server manager — starts the Qwen brain server (admin-only).
+#![allow(dead_code)]
 //!
 //! Mirrors lazy_nlu.rs but with key differences:
 //!   - Only starts when is_admin() is true (runtime + compile-time gate)
@@ -133,13 +134,17 @@ fn find_python() -> Option<String> {
 ///
 /// ADMIN-ONLY: returns immediately if is_admin() is false.
 /// NO IDLE TIMEOUT: the brain stays loaded for the entire session.
+/// NON-BLOCKING: spawns the server and a background thread to wait for
+/// readiness. Does NOT block the caller — if the brain isn't ready yet,
+/// the brain_client will fall back to NLU/deterministic. This prevents
+/// the first command from blocking for 12s while Qwen loads.
 pub fn ensure_brain_running() {
     // Admin gate — no-op if not admin
     if !crate::admin_config::is_admin() {
         return;
     }
 
-    // Already running?
+    // Already running (or spawning)?
     if BRAIN_RUNNING.load(Ordering::Relaxed) {
         return;
     }
@@ -191,35 +196,36 @@ pub fn ensure_brain_running() {
                 let mut guard = BRAIN_CHILD.lock().unwrap();
                 *guard = Some(child);
             }
-            tracing::info!("[lazy_brain] brain server spawned (PID {})", pid);
+            // Mark as "running" immediately to prevent re-spawning.
+            // The background thread will clear this if it fails to start.
+            BRAIN_RUNNING.store(true, Ordering::Relaxed);
+            tracing::info!("[lazy_brain] brain server spawned (PID {}) — loading in background", pid);
+
+            // Spawn a background thread to wait for readiness.
+            // This does NOT block the caller — the first command falls back
+            // to NLU/deterministic while the brain loads (~12s).
+            std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                let timeout = std::time::Duration::from_secs(60);
+                while start.elapsed() < timeout {
+                    if is_brain_responsive() {
+                        tracing::info!("[lazy_brain] brain server ready ({:.1}s)", start.elapsed().as_secs_f64());
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                tracing::error!("[lazy_brain] brain server did not become responsive within 60s");
+                // Kill the failed process and clear the running flag
+                BRAIN_RUNNING.store(false, Ordering::Relaxed);
+                let mut guard = BRAIN_CHILD.lock().unwrap();
+                if let Some(mut child) = guard.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            });
         }
         Err(e) => {
             tracing::error!("[lazy_brain] failed to spawn brain server: {}", e);
-            return;
-        }
-    }
-
-    // Wait for the server to be responsive (up to 60 seconds — model load takes time)
-    let port = crate::admin_config::brain_port();
-    tracing::info!("[lazy_brain] waiting for brain server on port {}...", port);
-
-    let start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_secs(60);
-    while start.elapsed() < timeout {
-        if is_brain_responsive() {
-            BRAIN_RUNNING.store(true, Ordering::Relaxed);
-            tracing::info!("[lazy_brain] brain server ready ({:.1}s)", start.elapsed().as_secs_f64());
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
-
-    tracing::error!("[lazy_brain] brain server did not become responsive within 60s");
-    // Kill the failed process
-    {
-        let mut guard = BRAIN_CHILD.lock().unwrap();
-        if let Some(mut child) = guard.take() {
-            let _ = child.kill();
         }
     }
 }

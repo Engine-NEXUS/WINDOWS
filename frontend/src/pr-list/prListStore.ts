@@ -23,7 +23,7 @@ interface PrListState {
   hide: () => void;
   setLoading: (loading: boolean) => void;
   setActionInProgress: (action: { prNumber: number; action: "merge" | "analyse" } | null) => void;
-  removePr: (prNumber: number) => void;
+  removePr: (prNumber: number, repo?: string) => void;
 }
 
 export const usePrList = create<PrListState>((set) => ({
@@ -44,6 +44,10 @@ export const usePrList = create<PrListState>((set) => ({
 
   setActionInProgress: (action) => set({ actionInProgress: action }),
 
-  removePr: (prNumber) =>
-    set((s) => ({ prs: s.prs.filter((p) => p.number !== prNumber) })),
+  removePr: (prNumber, repo) =>
+    set((s) => ({
+      prs: s.prs.filter((p) =>
+        repo ? !(p.number === prNumber && p.repo === repo) : p.number !== prNumber
+      ),
+    })),
 }));
