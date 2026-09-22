@@ -301,9 +301,9 @@ def execute():
     subprocess.run("git branch -D backup-state-20260922", shell=True, text=True, capture_output=True)
     run("git branch backup-state-20260922")
 
-    # 2. Checkout fresh branch from main
-    print("Checking out fresh branch from main...")
-    run("git checkout -B feat/apex-nexus-v3-system main")
+    # 2. Checkout fresh branch from origin/main
+    print("Checking out fresh branch from origin/main...")
+    run("git checkout -B feat/apex-nexus-v3-system origin/main")
 
     # 3. Restore working copy from backup
     print("Restoring all files from backup...")
