@@ -415,6 +415,36 @@ fn cap_ml_window_open(result: &mut crate::intent_parser::ParseResult) -> bool {
         result.confidence = result.confidence.min(0.4);
         return true;
     }
+    // doc 07 P3 finding, measured live against the real 0.5B brain model
+    // (not theoretical): system_click_element/minimize/maximize exist
+    // ONLY in the brain's system prompt text, with zero actual training —
+    // and at 0.5B params it confidently (0.9-1.0) mis-tags unrelated
+    // phrases with them ("click submit" -> screen_analysis@0.9,
+    // "switch to brave" -> start_dictation@1.0 were observed; the
+    // reverse direction, guessing these NEW labels for unrelated speech,
+    // is the same failure mode). NLU (BERT-mini) can't make this mistake
+    // — these three labels aren't in its trained vocabulary at all, so
+    // it can never emit them — this guard is brain-path only by
+    // construction (deterministic/NLU sources already can't trigger it).
+    // The deterministic parser (intent_parser.rs) remains the reliable
+    // path for all three; this just stops an ML guess from executing.
+    if let ParsedIntent::NluResult { intent, .. } = &result.intent {
+        if !result.source.starts_with("deterministic")
+            && matches!(
+                intent.as_str(),
+                "system_click_element" | "system_minimize_window" | "system_maximize_window"
+            )
+        {
+            tracing::warn!(
+                "orchestrator: ML-only {} (source={}, conf={:.2}) capped — unverified brain-only label",
+                intent,
+                result.source,
+                result.confidence
+            );
+            result.confidence = result.confidence.min(0.4);
+            return true;
+        }
+    }
     false
 }
 
@@ -5154,6 +5184,42 @@ mod tests {
             source: "brain".to_string(),
         };
         assert!(!cap_ml_window_open(&mut r3));
+    }
+
+    /// doc 07 P3: the brain-only (never-trained) system_* click/window
+    /// labels are capped the same way, confirmed against real observed
+    /// brain output ("click submit" -> screen_analysis, "switch to brave"
+    /// -> start_dictation, both @ high confidence from Qwen 0.5B).
+    /// Deterministic-sourced and NLU-sourced results are unaffected —
+    /// NLU can't even emit these labels (not in its trained vocabulary).
+    #[test]
+    fn test_cap_ml_unverified_system_labels() {
+        use crate::intent_parser::ParseResult;
+        for label in ["system_click_element", "system_minimize_window", "system_maximize_window"] {
+            let mut r = ParseResult {
+                intent: ParsedIntent::NluResult {
+                    intent: label.to_string(),
+                    slots: serde_json::json!({}),
+                    confidence: 0.95,
+                },
+                confidence: 0.95,
+                source: "brain".to_string(),
+            };
+            assert!(cap_ml_window_open(&mut r), "{label} should be capped from brain source");
+            assert!(r.confidence < 0.5, "{label} confidence should drop below accept line");
+        }
+        // Deterministic source is never capped (Tier-0 is the trusted path).
+        let mut det = ParseResult {
+            intent: ParsedIntent::NluResult {
+                intent: "system_click_element".to_string(),
+                slots: serde_json::json!({ "name": "submit" }),
+                confidence: 0.85,
+            },
+            confidence: 0.85,
+            source: "deterministic".to_string(),
+        };
+        assert!(!cap_ml_window_open(&mut det));
+        assert_eq!(det.confidence, 0.85);
     }
 
     #[test]
