@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { isPlausibleGeminiKey } from "./keyFormat";
 import {
   setSidecarBaseUrl,
   getOAuthStatus,
@@ -42,6 +43,10 @@ interface Settings {
   ttsProvider: string;
   groqApiKey: string;
   edgeTtsVoice: string;
+  // Iconic voice persona key (Feature 83 catalog, e.g. "jarvis")
+  selectedVoice?: string;
+  // Local Piper twin model stem for the selected persona
+  offlineVoiceModel?: string;
   // Orb position + size (Phase 2)
   orbHorizontalPct?: number;
   orbVerticalPct?: number;
@@ -52,8 +57,31 @@ interface Settings {
   cerebrasApiKey?: string;
   // Moonshine STT model (medium_streaming=6.65% WER, small_streaming=7.84%)
   moonshineModel?: string;
+  // TTS voice emotion (auto = heuristics per reply; prosody via rate/pitch)
+  ttsEmotion?: string;
+  // Ghost vision provider order (auto = Groq → Gemini fallback)
+  visionProvider?: string;
+  // Ghost vision strategy (speed = race both providers in parallel)
+  visionRace?: string;
   // Telegram owner chat id (remote bridge; token lives in vault)
   telegramChatId?: string;
+  // Ghost FIFO queue: speak "Queued, sir." once per session at depth 2+ (D5/D6)
+  ghostDepthAck?: boolean;
+  // Ghost FIFO queue: per-step watchdog timeout, ms (D7)
+  ghostStepTimeoutMs?: number;
+  // Ghost FIFO queue: inter-command gap τ, ms (D4)
+  ghostTurnGapMs?: number;
+  // Ghost waves placement (ghost sessions reposition the orb window to this rect)
+  wavesHorizontalPct?: number;
+  wavesVerticalPct?: number;
+  wavesSize?: number;
+  // Loading indicator placement (center-anchored fractions + logical px)
+  loadingHorizontalPct?: number;
+  loadingVerticalPct?: number;
+  loadingSize?: number;
+  // TEMPORARY dev flag (remove before release): auto-open the calibrator
+  // on boot for live cross-checks. Never part of the save flow.
+  calibrationDevPersist?: boolean;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -82,7 +110,20 @@ const DEFAULT_SETTINGS: Settings = {
   geminiApiKey: "",
   cerebrasApiKey: "",
   moonshineModel: "medium_streaming",
+  ttsEmotion: "auto",
+  visionProvider: "auto",
+  visionRace: "sequential",
   telegramChatId: "",
+  ghostDepthAck: true,
+  ghostStepTimeoutMs: 15000,
+  ghostTurnGapMs: 1000,
+  wavesHorizontalPct: 0.5,
+  wavesVerticalPct: 1.0,
+  wavesSize: 200,
+  loadingHorizontalPct: 0.95,
+  loadingVerticalPct: 0.05,
+  loadingSize: 80,
+  calibrationDevPersist: false,
 };
 
 const TABS: { id: Tab; label: string }[] = [
@@ -92,10 +133,32 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "connections", label: "Connections" },
 ];
 
-export function SettingsSidebarApp() {
+export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string) => void }) {
   const [tab, setTab] = useState<Tab>("display");
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [saved, setSaved] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+
+  // Toast from the calibration round-trip (save/cancel re-open the hub).
+  useEffect(() => {
+    let un: (() => void) | null = null;
+    import("@tauri-apps/api/event").then(({ listen }) =>
+      listen<{ message?: string }>("settings:toast", (ev) => {
+        if (ev.payload?.message) setToast(ev.payload.message);
+      })
+    ).then((u) => {
+      un = u;
+    });
+    return () => {
+      un?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3500);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   // Load settings from Rust on mount
   useEffect(() => {
@@ -145,11 +208,12 @@ export function SettingsSidebarApp() {
     return () => { unlisten?.(); };
   }, []);
 
-  // Ctrl+Space to close (same as other sidebars)
+  // Escape closes the settings window. Ctrl+Space must NOT close it:
+  // Ctrl+Space is the global wake hotkey (D3) — it wakes NEXUS even with
+  // settings focused. Window-level listener only, no OS registration.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.code === "Space" && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
+      if (e.key === "Escape") {
         invoke("hide_settings_sidebar").catch(() => {});
       }
     };
@@ -179,24 +243,34 @@ export function SettingsSidebarApp() {
 
   return (
     <div className="settings-container">
-      {/* Header */}
-      <div className="settings-header">
-        <span className="settings-title">NEXUS Settings</span>
-        <span className="settings-hint">Ctrl+Space to close</span>
-      </div>
+      {/* Merged header row: tabs left, dock buttons right, full-width drag region */}
+      <header className="settings-header-row" data-tauri-drag-region>
+        {/* Tabs on the left */}
+        <div className="settings-tabs">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              className={`settings-tab ${tab === t.id ? "settings-tab--active" : ""}`}
+              onClick={() => setTab(t.id)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
 
-      {/* Tab bar */}
-      <div className="settings-tabs">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            className={`settings-tab ${tab === t.id ? "settings-tab--active" : ""}`}
-            onClick={() => setTab(t.id)}
-          >
-            {t.label}
+        {/* Dock controls on the right */}
+        <div className="sidebar-dock-controls">
+          <button type="button" className="sidebar-dock-btn" onClick={() => onDock("left")} title="Dock Left">
+            ◧
           </button>
-        ))}
-      </div>
+          <button type="button" className="sidebar-dock-btn" onClick={() => onDock("right")} title="Dock Right">
+            ◨
+          </button>
+        </div>
+      </header>
+
+      {/* Calibration round-trip toast (save/cancel re-open the hub) */}
+      {toast && <div className="settings-toast">{toast}</div>}
 
       {/* Scrollable content */}
       <div className="settings-scroll">
@@ -227,135 +301,114 @@ function DisplayTab({ settings, update }: {
   settings: Settings;
   update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
 }) {
-  const hPct = settings.orbHorizontalPct ?? 0.5;
-  const vPct = settings.orbVerticalPct ?? 1.0;
-  const orbSize = settings.orbSize ?? 200;
-
-  // Live update — move orb immediately without saving
-  const liveUpdate = (h: number, v: number, size: number) => {
-    invoke("set_orb_position", {
-      horizontalPct: h,
-      verticalPct: v,
-      size,
-    }).catch(() => {});
-  };
+  void settings;
 
   return (
     <>
       <div className="settings-section">
-        <div className="settings-section-title">Orb Position</div>
-
-        {/* Live preview — shows the orb position and breathing animation */}
-        <div className="position-preview">
-          <div
-            className="position-preview-orb"
-            style={{
-              left: `${hPct * 100}%`,
-              top: `${vPct * 100}%`,
-              width: `${Math.min(orbSize / 200 * 40, 50)}px`,
-              height: `${Math.min(orbSize / 200 * 40, 50)}px`,
-            }}
-          />
+        <div className="settings-section-title">Animation Placement &amp; Scaling</div>
+        <div className="setting-desc" style={{ marginBottom: 8 }}>
+          Position the Wakeup Orb, Ghost Waves, and Loading Indicator anywhere
+          on your desktop by simply dragging them with your mouse.
         </div>
-
-        <div className="setting-row">
-          <div>
-            <div className="setting-label">Horizontal</div>
-            <div className="setting-desc">Left ↔ Right</div>
-          </div>
-          <div className="setting-control">
-            <input
-              type="range"
-              className="settings-slider"
-              min={0}
-              max={100}
-              value={Math.round(hPct * 100)}
-              onChange={(e) => {
-                const pct = parseInt(e.target.value) / 100;
-                update("orbHorizontalPct", pct);
-                liveUpdate(pct, vPct, orbSize);
-              }}
-            />
-            <span className="slider-value">{Math.round(hPct * 100)}%</span>
-          </div>
-        </div>
-
-        <div className="setting-row">
-          <div>
-            <div className="setting-label">Vertical</div>
-            <div className="setting-desc">Top ↔ Bottom</div>
-          </div>
-          <div className="setting-control">
-            <input
-              type="range"
-              className="settings-slider"
-              min={0}
-              max={100}
-              value={Math.round(vPct * 100)}
-              onChange={(e) => {
-                const pct = parseInt(e.target.value) / 100;
-                update("orbVerticalPct", pct);
-                liveUpdate(hPct, pct, orbSize);
-              }}
-            />
-            <span className="slider-value">{Math.round(vPct * 100)}%</span>
-          </div>
-        </div>
+        <button
+          className="settings-btn settings-btn--primary"
+          style={{ width: "100%" }}
+          onClick={() => {
+            invoke("show_calibration_hud").catch(() => {});
+            invoke("hide_settings_sidebar").catch(() => {});
+          }}
+        >
+          ✥ Drag &amp; Position on Desktop
+        </button>
+        {/* TEMPORARY dev toggle (remove before release): keeps the
+            calibrator on display across restarts for live cross-checks. */}
+        <button
+          className="settings-btn"
+          style={{ width: "100%", marginTop: 6 }}
+          onClick={() => {
+            const next = !(settings.calibrationDevPersist ?? false);
+            invoke("calibration_dev_persist", { enabled: next })
+              .then(() => update("calibrationDevPersist", next))
+              .catch(() => {});
+          }}
+        >
+          🧪 Dev persist: {settings.calibrationDevPersist ? "ON" : "OFF"}
+        </button>
+        {/* TEMPORARY (remove before release): pop the pill alone (no
+            session) to cross-check its styling lively across rebuilds. */}
+        <button
+          className="settings-btn"
+          style={{ width: "100%", marginTop: 6 }}
+          onClick={() => {
+            invoke("preview_companion_hud").catch(() => {});
+          }}
+        >
+          👁 Preview pill only (no session)
+        </button>
       </div>
 
       <div className="settings-section">
-        <div className="settings-section-title">Orb Size</div>
-        <div className="setting-row">
-          <div>
-            <div className="setting-label">Size</div>
-            <div className="setting-desc">100px ↔ 300px</div>
-          </div>
-          <div className="setting-control">
-            <input
-              type="range"
-              className="settings-slider"
-              min={100}
-              max={300}
-              step={10}
-              value={orbSize}
-              onChange={(e) => {
-                const size = parseInt(e.target.value);
-                update("orbSize", size);
-                liveUpdate(hPct, vPct, size);
-              }}
-            />
-            <span className="slider-value">{orbSize}px</span>
-          </div>
+        <div className="settings-section-title">Sidebar Docking</div>
+        <div className="setting-desc" style={{ marginBottom: 8 }}>
+          Choose where the NEXUS panel is pinned: right edge, left edge, or
+          floating as a centered modal. Works from any tab, any view.
         </div>
-
-        <div className="setting-row">
-          <div className="setting-label">Reset to default</div>
-          <div className="setting-control">
-            <button
-              className="settings-btn"
-              onClick={() => {
-                update("orbHorizontalPct", 0.5);
-                update("orbVerticalPct", 1.0);
-                update("orbSize", 200);
-                liveUpdate(0.5, 1.0, 200);
-              }}
-            >
-              Center-bottom, 200px
-            </button>
-          </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button
+            className="settings-btn settings-btn--glass"
+            style={{ flex: 1 }}
+            onClick={() => {
+              invoke("set_sidebar_dock", { dock: "left" }).catch(() => {});
+            }}
+          >
+            ◧ Dock Left
+          </button>
+          <button
+            className="settings-btn settings-btn--glass"
+            style={{ flex: 1 }}
+            onClick={() => {
+              invoke("set_sidebar_dock", { dock: "right" }).catch(() => {});
+            }}
+          >
+            ◨ Dock Right
+          </button>
         </div>
+        <button
+          className="settings-btn settings-btn--glass"
+          style={{ width: "100%", marginTop: 6 }}
+          onClick={() => {
+            invoke("set_sidebar_dock", { dock: "center" }).catch(() => {});
+          }}
+        >
+          ⧉ Center Floating
+        </button>
       </div>
     </>
   );
 }
 
-// ─── Audio Tab (Phase 4 — TTS volume + voice picker) ──────────────────
-interface TtsVoice {
-  id: string;
+// ─── Audio Tab — iconic voice personas (Feature 83) ─────────────────
+// Persona catalog comes from Rust (list_voice_personas — single source
+// of truth). Cards: preview demo (non-destructive) + click to equip
+// (instant cloud switch + background offline-twin sync).
+interface VoicePersona {
+  key: string;
   name: string;
-  gender: string;
-  provider: string;
-  language: string;
+  persona: string;
+  accentTag: string;
+  avatar: string;
+  cloudId: string;
+  localModel: string;
+  previewPhrase: string;
+  sha256: string | null;
+}
+
+interface VoiceStatus {
+  voice_key: string;
+  cloud_id: string;
+  twin: string;
+  sync_state: "ready" | "cloud_only" | "downloading";
 }
 
 function AudioTab({ settings, update }: {
@@ -363,60 +416,149 @@ function AudioTab({ settings, update }: {
   update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
 }) {
   const volume = settings.ttsVolume ?? 75;
-  const [voices, setVoices] = useState<TtsVoice[]>([]);
+  const [personas, setPersonas] = useState<VoicePersona[]>([]);
   const [previewing, setPreviewing] = useState<string | null>(null);
+  const [equipping, setEquipping] = useState<string | null>(null);
+  const [sync, setSync] = useState<Record<string, { state: "ready" | "cloud_only" | "downloading"; progress?: number }>>({});
+  const [transport, setTransport] = useState<"cloud" | "local">("cloud");
 
-  // Fetch voice list on mount
+  // Fetch persona catalog + current sync state + transport on mount.
   useEffect(() => {
-    invoke<TtsVoice[]>("list_tts_voices")
-      .then(setVoices)
+    invoke<VoicePersona[]>("list_voice_personas")
+      .then(setPersonas)
+      .catch(() => {});
+    invoke<VoiceStatus>("get_voice_status")
+      .then((s) => {
+        if (s?.voice_key) {
+          setSync((m) => ({ ...m, [s.voice_key]: { state: s.sync_state } }));
+        }
+      })
+      .catch(() => {});
+    invoke<{ transport?: string }>("get_voice_transport")
+      .then((t) => {
+        if (t?.transport === "local" || t?.transport === "cloud") {
+          setTransport(t.transport);
+        }
+      })
       .catch(() => {});
   }, []);
 
-  const previewVoice = (voiceId: string) => {
+  // Live sync pill + transport updates from the swap worker /
+  // connectivity watchdog. Any voice:status event also re-reads the
+  // transport flag (cheap sync read) so the dot never lies.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      const { invoke: inv } = await import("@tauri-apps/api/core");
+      unlisten = await listen<{ status?: string; voice_key?: string; progress?: number }>(
+        "voice:status",
+        (ev) => {
+          const key = ev.payload?.voice_key;
+          const status = ev.payload?.status;
+          if (status === "cloud-restored") {
+            setTransport("cloud");
+            return;
+          }
+          if (!key || (status !== "ready" && status !== "cloud_only" && status !== "downloading" && status !== "error")) return;
+          const state = status === "error" ? "cloud_only" : status;
+          setSync((m) => ({ ...m, [key]: { state, progress: ev.payload?.progress } }));
+          inv<{ transport?: string }>("get_voice_transport")
+            .then((t) => {
+              if (t?.transport === "local" || t?.transport === "cloud") {
+                setTransport(t.transport);
+              }
+            })
+            .catch(() => {});
+        },
+      );
+    })().catch(() => {});
+    return () => { unlisten?.(); };
+  }, []);
+
+  const previewVoice = (p: VoicePersona) => {
     if (previewing) return;
-    setPreviewing(voiceId);
-    invoke("preview_voice", { voiceId })
+    setPreviewing(p.key);
+    invoke("preview_voice", { voiceId: p.cloudId, text: p.previewPhrase })
       .catch(() => {})
       .finally(() => setTimeout(() => setPreviewing(null), 500));
   };
 
-  const currentVoice = settings.edgeTtsVoice || "en-US-AvaNeural";
+  const equipVoice = (p: VoicePersona) => {
+    if (equipping) return;
+    setEquipping(p.key);
+    invoke<{ voiceKey: string; cloudId: string; syncState: string }>("set_voice_preference", {
+      voiceKey: p.key,
+    })
+      .then((res) => {
+        // Mirror into local settings state (persists on Save).
+        update("edgeTtsVoice", res.cloudId);
+        update("selectedVoice", res.voiceKey);
+        const st = res.syncState === "ready" ? "ready" : "cloud_only";
+        setSync((m) => ({ ...m, [res.voiceKey]: { state: st } }));
+      })
+      .catch(() => {})
+      .finally(() => setEquipping(null));
+  };
+
+  const activeKey =
+    personas.find((p) => p.cloudId === (settings.edgeTtsVoice || "en-US-AvaNeural"))?.key
+    ?? "nexus";
+
+  const syncPill = (key: string) => {
+    const s = sync[key];
+    if (!s) return null;
+    if (s.state === "ready") return <span className="persona-sync persona-sync--ready">✓ Cloud + Offline Ready</span>;
+    if (s.state === "downloading") {
+      const pct = typeof s.progress === "number" ? ` ${s.progress}%` : "…";
+      return <span className="persona-sync persona-sync--busy">⬇ Syncing Offline Voice{pct}</span>;
+    }
+    return <span className="persona-sync persona-sync--pending">⚡ Cloud Only</span>;
+  };
 
   return (
     <>
       <div className="settings-section">
-        <div className="settings-section-title">Voice Selection</div>
-        <div className="setting-desc" style={{ marginBottom: 8 }}>
-          Tap a voice to hear a demo. Selected voice is used for all NEXUS responses.
+        <div className="settings-section-title">
+          Voice Selection
+          <span
+            className={`transport-dot transport-dot--${transport}`}
+            title={transport === "cloud" ? "Speaking via cloud" : "Speaking via local offline voice"}
+          >
+            ● {transport === "cloud" ? "Cloud" : "Local"}
+          </span>
         </div>
-        <div className="voice-list">
-          {voices.length === 0 && (
+        <div className="setting-desc" style={{ marginBottom: 8 }}>
+          Tap ▶ for a demo. Tap a card to equip it — cloud switches instantly, the offline twin syncs in the background.
+        </div>
+        <div className="persona-grid">
+          {personas.length === 0 && (
             <div className="voice-empty">Loading voices…</div>
           )}
-          {voices.map((v) => (
+          {personas.map((p) => (
             <div
-              key={v.id}
-              className={`voice-row ${currentVoice === v.id ? "voice-row--selected" : ""}`}
-              onClick={() => update("edgeTtsVoice", v.id)}
+              key={p.key}
+              className={`persona-card ${activeKey === p.key ? "persona-card--active" : ""}`}
+              onClick={() => equipVoice(p)}
+              title={p.persona}
             >
-              <div className={`voice-radio ${currentVoice === v.id ? "voice-radio--on" : ""}`} />
-              <div className="voice-info">
-                <span className="voice-name">{v.name}</span>
-                <span className="voice-meta">
-                  <span className={`voice-gender voice-gender--${v.gender.toLowerCase()}`}>{v.gender}</span>
-                  <span className={`voice-provider voice-provider--${v.provider}`}>{v.provider === "edge-tts" ? "Cloud" : "Offline"}</span>
-                </span>
+              <div className="persona-card-top">
+                <span className="persona-avatar" aria-hidden="true">{p.avatar}</span>
+                {activeKey === p.key && <span className="persona-check">✓</span>}
               </div>
+              <div className="persona-name">{p.name}</div>
+              <div className="persona-accent">{p.accentTag}</div>
+              <div className="persona-desc">{p.persona}</div>
+              {activeKey === p.key && syncPill(p.key)}
               <button
-                className="voice-play-btn"
-                disabled={previewing !== null}
+                className="persona-play-btn"
+                disabled={previewing !== null || equipping !== null}
                 onClick={(e) => {
                   e.stopPropagation();
-                  previewVoice(v.id);
+                  previewVoice(p);
                 }}
               >
-                {previewing === v.id ? "⏸" : "▶"}
+                {previewing === p.key ? "⏸ Pause" : "▶ Play Demo"}
               </button>
             </div>
           ))}
@@ -442,6 +584,27 @@ function AudioTab({ settings, update }: {
             <span className="slider-value">{volume}%</span>
           </div>
         </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Voice emotion</div>
+            <div className="setting-desc">Auto picks per reply (errors sad, success cheerful)</div>
+          </div>
+          <div className="setting-control">
+            <select
+              className="settings-input"
+              value={settings.ttsEmotion ?? "auto"}
+              onChange={(e) => update("ttsEmotion", e.target.value)}
+            >
+              <option value="auto">Auto</option>
+              <option value="neutral">Neutral</option>
+              <option value="cheerful">Cheerful</option>
+              <option value="calm">Calm</option>
+              <option value="sad">Sad</option>
+              <option value="urgent">Urgent</option>
+              <option value="whisper">Whisper</option>
+            </select>
+          </div>
+        </div>
       </div>
 
       <div className="settings-section">
@@ -455,6 +618,18 @@ function AudioTab({ settings, update }: {
             <div
               className={`settings-toggle ${settings.localSttOnly ? "settings-toggle--on" : ""}`}
               onClick={() => update("localSttOnly", !settings.localSttOnly)}
+            />
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Speaker verification</div>
+            <div className="setting-desc">Only enrolled voice can wake NEXUS</div>
+          </div>
+          <div className="setting-control">
+            <div
+              className={`settings-toggle ${settings.speakerVerification ? "settings-toggle--on" : ""}`}
+              onClick={() => update("speakerVerification", !settings.speakerVerification)}
             />
           </div>
         </div>
@@ -480,34 +655,99 @@ function AudioTab({ settings, update }: {
   );
 }
 
-// ─── Auth Tab (Phase 3 — OAuth + API keys) ────────────────────────────
+// ─── Auth Tab (Multi-Email Google + Direct OAuth + API keys) ──────────
+interface GoogleAccountProfile {
+  email: string;
+  name: string;
+  picture?: string;
+  is_primary: boolean;
+  added_at_ms: number;
+  scopes: string[];
+}
+
 function AuthTab({ settings, update }: {
   settings: Settings;
   update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
 }) {
   const [oauthStatus, setOauthStatus] = useState<Record<string, OAuthStatus>>({});
+  const [googleAccounts, setGoogleAccounts] = useState<GoogleAccountProfile[]>([]);
   const [connecting, setConnecting] = useState<string | null>(null);
+  const [connectingGoogle, setConnectingGoogle] = useState(false);
+  const [showCustomCreds, setShowCustomCreds] = useState(false);
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  // Set the sidecar base URL and fetch OAuth status on mount
+  const loadGoogleAccounts = useCallback(async () => {
+    try {
+      const accs = await invoke<GoogleAccountProfile[]>("google_get_accounts");
+      setGoogleAccounts(accs);
+    } catch (e) {
+      console.warn("Failed to load google accounts", e);
+    }
+  }, []);
+
   useEffect(() => {
+    loadGoogleAccounts();
     if (settings.serverUrl) {
       setSidecarBaseUrl(settings.serverUrl);
       if (settings.userId) {
         getOAuthStatus(settings.userId).then(setOauthStatus).catch(() => {});
       }
     }
-  }, [settings.serverUrl, settings.userId]);
+  }, [loadGoogleAccounts, settings.serverUrl, settings.userId]);
 
-  const handleConnect = async (provider: "google" | "github") => {
+  const handleConnectGoogleNative = async () => {
     setError(null);
-    setConnecting(provider);
+    setConnectingGoogle(true);
+    try {
+      await invoke("google_connect_account");
+      await loadGoogleAccounts();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setConnectingGoogle(false);
+    }
+  };
+
+  const handleSetPrimaryGoogle = async (email: string) => {
+    try {
+      await invoke("google_set_primary_account", { email });
+      await loadGoogleAccounts();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleDisconnectGoogle = async (email: string) => {
+    try {
+      await invoke("google_disconnect_account", { email });
+      await loadGoogleAccounts();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleSaveCustomCreds = async () => {
+    try {
+      await invoke("google_save_custom_credentials", {
+        clientId,
+        clientSecret: clientSecret || null,
+      });
+      setShowCustomCreds(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleConnectGithub = async () => {
+    setError(null);
+    setConnecting("github");
     try {
       if (!settings.serverUrl) throw new Error("Server URL not configured");
       setSidecarBaseUrl(settings.serverUrl);
-      const success = await connectOAuth(provider, settings.userId || "local-user");
+      const success = await connectOAuth("github", settings.userId || "local-user");
       if (success) {
-        // Refresh status
         const status = await getOAuthStatus(settings.userId || "local-user");
         setOauthStatus(status);
       }
@@ -518,10 +758,10 @@ function AuthTab({ settings, update }: {
     }
   };
 
-  const handleDisconnect = async (provider: "google" | "github") => {
+  const handleDisconnectGithub = async () => {
     setError(null);
     try {
-      await disconnectOAuth(settings.userId || "local-user", provider);
+      await disconnectOAuth(settings.userId || "local-user", "github");
       const status = await getOAuthStatus(settings.userId || "local-user");
       setOauthStatus(status);
     } catch (e) {
@@ -529,7 +769,6 @@ function AuthTab({ settings, update }: {
     }
   };
 
-  const googleConnected = oauthStatus.google?.connected ?? false;
   const githubConnected = oauthStatus.github?.connected ?? false;
 
   return (
@@ -541,32 +780,111 @@ function AuthTab({ settings, update }: {
       )}
 
       <div className="settings-section">
-        <div className="settings-section-title">Connected Accounts</div>
-
-        <div className="auth-card">
-          <div className="auth-card-header">
-            <span className="auth-card-title">Google</span>
-            <span className={`status-badge ${googleConnected ? "status-badge--connected" : "status-badge--disconnected"}`}>
-              {googleConnected ? "Connected" : "Not connected"}
-            </span>
-          </div>
-          <div className="auth-card-actions">
-            {googleConnected ? (
-              <button className="settings-btn settings-btn--danger" onClick={() => handleDisconnect("google")}>
-                Disconnect
-              </button>
-            ) : (
-              <button
-                className="settings-btn settings-btn--primary"
-                disabled={connecting === "google"}
-                onClick={() => handleConnect("google")}
-              >
-                {connecting === "google" ? "Waiting..." : "Connect Google"}
-              </button>
-            )}
-          </div>
+        <div className="settings-section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>Google Accounts</span>
+          <button
+            className="settings-btn settings-btn--primary"
+            style={{ fontSize: 11, padding: "4px 10px" }}
+            disabled={connectingGoogle}
+            onClick={handleConnectGoogleNative}
+          >
+            {connectingGoogle ? "Signing in..." : "+ Add Google Account"}
+          </button>
         </div>
 
+        {googleAccounts.length === 0 ? (
+          <div className="auth-card" style={{ textAlign: "center", padding: "16px" }}>
+            <span style={{ fontSize: 12, color: "rgba(255,255,255,0.6)" }}>
+              No Google accounts connected yet. Connect an account to use Gmail engine, Calendar, Sentinel watch, & Photos.
+            </span>
+          </div>
+        ) : (
+          googleAccounts.map((acc) => (
+            <div key={acc.email} className="auth-card" style={{ marginBottom: 10 }}>
+              <div className="auth-card-header" style={{ alignItems: "center" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  {acc.picture ? (
+                    <img src={acc.picture} alt="" style={{ width: 32, height: 32, borderRadius: "50%" }} />
+                  ) : (
+                    <div style={{ width: 32, height: 32, borderRadius: "50%", background: "rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>
+                      {acc.name.charAt(0).toUpperCase()}
+                    </div>
+                  )}
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>{acc.name}</div>
+                    <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>{acc.email}</div>
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  {acc.is_primary ? (
+                    <span className="status-badge status-badge--connected" style={{ fontSize: 10 }}>
+                      Primary
+                    </span>
+                  ) : (
+                    <button
+                      className="settings-btn"
+                      style={{ fontSize: 10, padding: "2px 6px" }}
+                      onClick={() => handleSetPrimaryGoogle(acc.email)}
+                    >
+                      Make Primary
+                    </button>
+                  )}
+                  <button
+                    className="settings-btn settings-btn--danger"
+                    style={{ fontSize: 10, padding: "2px 6px" }}
+                    onClick={() => handleDisconnectGoogle(acc.email)}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))
+        )}
+
+        <div style={{ marginTop: 8 }}>
+          <button
+            className="settings-btn"
+            style={{ fontSize: 10, opacity: 0.7 }}
+            onClick={() => setShowCustomCreds(!showCustomCreds)}
+          >
+            {showCustomCreds ? "Hide Developer Credentials" : "Custom Developer OAuth Credentials"}
+          </button>
+          {showCustomCreds && (
+            <div className="auth-card" style={{ marginTop: 8, padding: 12 }}>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.7)", marginBottom: 8 }}>
+                Optionally supply your own Google OAuth Client ID & Secret:
+              </div>
+              <input
+                type="text"
+                className="settings-input"
+                placeholder="Client ID (...apps.googleusercontent.com)"
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                style={{ marginBottom: 8, fontSize: 11 }}
+              />
+              <input
+                type="password"
+                className="settings-input"
+                placeholder="Client Secret (optional for PKCE)"
+                value={clientSecret}
+                onChange={(e) => setClientSecret(e.target.value)}
+                style={{ marginBottom: 8, fontSize: 11 }}
+              />
+              <button
+                className="settings-btn settings-btn--primary"
+                style={{ fontSize: 11, width: "100%" }}
+                onClick={handleSaveCustomCreds}
+              >
+                Save Credentials
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">GitHub Account</div>
         <div className="auth-card">
           <div className="auth-card-header">
             <span className="auth-card-title">GitHub</span>
@@ -576,14 +894,14 @@ function AuthTab({ settings, update }: {
           </div>
           <div className="auth-card-actions">
             {githubConnected ? (
-              <button className="settings-btn settings-btn--danger" onClick={() => handleDisconnect("github")}>
+              <button className="settings-btn settings-btn--danger" onClick={() => handleDisconnectGithub()}>
                 Disconnect
               </button>
             ) : (
               <button
                 className="settings-btn settings-btn--primary"
                 disabled={connecting === "github"}
-                onClick={() => handleConnect("github")}
+                onClick={() => handleConnectGithub()}
               >
                 {connecting === "github" ? "Waiting..." : "Connect GitHub"}
               </button>
@@ -598,6 +916,7 @@ function AuthTab({ settings, update }: {
         <div className="auth-card">
           <div className="auth-card-header">
             <span className="auth-card-title">Gemini API Key</span>
+            <GeminiKeyPill />
           </div>
           <input
             type="password"
@@ -606,6 +925,27 @@ function AuthTab({ settings, update }: {
             value={settings.geminiApiKey ?? ""}
             onChange={(e) => update("geminiApiKey", e.target.value)}
           />
+          {(settings.geminiApiKey ?? "").trim() !== "" &&
+            !isPlausibleGeminiKey(settings.geminiApiKey ?? "") && (
+              <div className="setting-desc" style={{ marginTop: 4, color: "#ffd479" }}>
+                Doesn&apos;t look like a Gemini key — should start with AIza… (39 chars). Hit Test to verify.
+              </div>
+            )}
+          <div className="setting-desc" style={{ marginTop: 4 }}>
+            Powers spatial screen analysis + ghost vision grounding. Free tier covers ~500 vision calls/day.{" "}
+            <a
+              href="#"
+              onClick={(e) => {
+                e.preventDefault();
+                import("@tauri-apps/plugin-shell").then(({ open }) => {
+                  open("https://aistudio.google.com/apikey").catch(() => {});
+                });
+              }}
+            >
+              Get a free key
+            </a>
+          </div>
+          <GeminiKeyTest />
         </div>
 
         <div className="auth-card">
@@ -633,8 +973,161 @@ function AuthTab({ settings, update }: {
             onChange={(e) => update("cerebrasApiKey", e.target.value)}
           />
         </div>
+        <div className="setting-desc" style={{ marginTop: 4 }}>
+          Keys stay on this device (OS keychain) — never uploaded, never in Cloudflare.
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Ghost Vision</div>
+        <div className="setting-desc" style={{ marginBottom: 8 }}>
+          Spatial screen analysis (“analyse the screen”) needs a Gemini key — add it under API Keys above.
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Vision provider</div>
+            <div className="setting-desc">Who sees custom buttons UIA can't. Gemini is the sole vision engine (Groq retired vision).</div>
+          </div>
+          <div className="setting-control">
+            <select
+              className="settings-input"
+              value={settings.visionProvider ?? "auto"}
+              onChange={(e) => update("visionProvider", e.target.value)}
+            >
+              <option value="auto">Auto (Gemini)</option>
+              <option value="gemini">Gemini only</option>
+              <option value="groq">Groq only (unavailable)</option>
+            </select>
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Vision speed</div>
+            <div className="setting-desc">Single provider active — sequential only. Racing returns if a second vision engine appears.</div>
+          </div>
+          <div className="setting-control">
+            <select
+              className="settings-input"
+              value={settings.visionRace ?? "sequential"}
+              onChange={(e) => update("visionRace", e.target.value)}
+            >
+              <option value="sequential">Sequential (save quota)</option>
+              <option value="speed" disabled>Race (needs 2 engines)</option>
+            </select>
+          </div>
+        </div>
+        <VisionQuota />
       </div>
     </>
+  );
+}
+
+function GeminiKeyPill() {
+  const [present, setPresent] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    invoke<{ gemini_present?: boolean }>("vision_key_status")
+      .then((s) => setPresent(!!s?.gemini_present))
+      .catch(() => setPresent(null));
+  }, []);
+
+  if (present === null) return null;
+  return present ? (
+    <span className="status-badge status-badge--connected">✓ Saved</span>
+  ) : (
+    <span className="status-badge status-badge--disconnected">○ Missing</span>
+  );
+}
+
+function GeminiKeyTest() {
+  const [state, setState] = useState<"idle" | "testing" | "ok" | "fail">("idle");
+  const [detail, setDetail] = useState<string>("");
+
+  const runTest = () => {
+    setState("testing");
+    setDetail("");
+    invoke<{ ok?: boolean; detail?: string }>("vision_test_key")
+      .then((r) => {
+        if (r?.ok) {
+          setState("ok");
+          setDetail("");
+        } else {
+          setState("fail");
+          setDetail(
+            r?.detail === "no-key"
+              ? "Save a key first, then test."
+              : r?.detail === "quota-exhausted"
+                ? "Key valid but daily quota is spent."
+                : r?.detail === "network-error"
+                  ? "Network unreachable — check connection."
+                  : "Key rejected — check for typos."
+          );
+        }
+      })
+      .catch(() => {
+        setState("fail");
+        setDetail("Test call failed.");
+      });
+  };
+
+  return (
+    <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8 }}>
+      <button
+        className="settings-btn"
+        disabled={state === "testing"}
+        onClick={runTest}
+      >
+        {state === "testing" ? "Testing…" : "Test Key"}
+      </button>
+      {state === "ok" && (
+        <span className="status-badge status-badge--connected">✓ Valid</span>
+      )}
+      {state === "fail" && (
+        <span className="status-badge status-badge--disconnected">
+          ✗ {detail || "Invalid"}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function VisionQuota() {
+  const [quota, setQuota] = useState<{
+    date: string;
+    groq: { used: number; limit: number };
+    gemini: { used: number; limit: number };
+  } | null>(null);
+
+  useEffect(() => {
+    invoke<{
+      date: string;
+      groq: { used: number; limit: number };
+      gemini: { used: number; limit: number };
+    }>("vision_quota_status").then(setQuota).catch(() => {});
+  }, []);
+
+  if (!quota) {
+    return (
+      <div className="setting-row">
+        <div>
+          <div className="setting-label">Daily usage</div>
+          <div className="setting-desc">Loading…</div>
+        </div>
+      </div>
+    );
+  }
+  const pct = (u: number, l: number) => (l > 0 ? Math.min(100, Math.round((u / l) * 100)) : 0);
+  return (
+    <div className="setting-row">
+      <div>
+        <div className="setting-label">Daily usage (resets midnight PT)</div>
+        <div className="setting-desc">
+          Groq {quota.groq.used} / {quota.groq.limit} ({pct(quota.groq.used, quota.groq.limit)}%)
+          {" • "}
+          Gemini {quota.gemini.used} / {quota.gemini.limit} ({pct(quota.gemini.used, quota.gemini.limit)}%)
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -652,6 +1145,24 @@ const VAULT_META: Record<string, { title: string; hint: string; kind: "oauth" | 
   render: { title: "Render", hint: "1. Open Render API keys (button below). 2. Create a key. 3. Paste it here. OAuth preferred — keys are broadly scoped.", kind: "token", tokenUrl: "https://dashboard.render.com/u/keys" },
 };
 
+function statusCell(ok: boolean): React.CSSProperties {
+  return {
+    display: "flex",
+    justifyContent: "space-between",
+    padding: "6px 10px",
+    borderRadius: 4,
+    background: ok ? "rgba(80,200,120,0.08)" : "rgba(255,120,120,0.08)",
+    border: `1px solid ${ok ? "rgba(80,200,120,0.25)" : "rgba(255,120,120,0.25)"}`,
+  };
+}
+
+function formatUptime(sec: number): string {
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
+  return `${Math.floor(sec / 86400)}d ${Math.floor((sec % 86400) / 3600)}h`;
+}
+
 function ConnectionsTab({ settings, update }: {
   settings: Settings;
   update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
@@ -660,6 +1171,15 @@ function ConnectionsTab({ settings, update }: {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [swiggyConnecting, setSwiggyConnecting] = useState(false);
+  const [health, setHealth] = useState<{
+    memoryMb: number;
+    uptimeSec: number;
+    sttPort: boolean;
+    nluPort: boolean;
+    workerReachable: boolean;
+    groqKey: boolean;
+    geminiKey: boolean;
+  } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -672,7 +1192,31 @@ function ConnectionsTab({ settings, update }: {
     }
   }, []);
 
+  const refreshHealth = useCallback(async () => {
+    try {
+      const h = await invoke<{
+        memoryMb: number;
+        uptimeSec: number;
+        sttPort: boolean;
+        nluPort: boolean;
+        workerReachable: boolean;
+        groqKey: boolean;
+        geminiKey: boolean;
+      }>("get_health_status");
+      setHealth(h);
+    } catch {
+      // Health check failed — leave stale data
+    }
+  }, []);
+
   useEffect(() => { refresh().catch(() => {}); }, [refresh]);
+  useEffect(() => { refreshHealth().catch(() => {}); }, [refreshHealth]);
+
+  // Refresh health every 5s while tab is open
+  useEffect(() => {
+    const id = setInterval(() => { refreshHealth().catch(() => {}); }, 5000);
+    return () => clearInterval(id);
+  }, [refreshHealth]);
 
   // Live refresh when the idle vault monitor reports a credential change
   // (expiry/reconnect while the tab is open).
@@ -738,6 +1282,55 @@ function ConnectionsTab({ settings, update }: {
           <span style={{ fontSize: 12, color: "rgba(255,150,150,0.9)" }}>{error}</span>
         </div>
       )}
+
+      <div className="settings-section">
+        <div className="settings-section-title">System Status</div>
+        {health ? (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", fontSize: 12 }}>
+            <div style={statusCell(health.memoryMb > 0)}>
+              <span style={{ opacity: 0.6 }}>Memory</span>
+              <span>{health.memoryMb} MB</span>
+            </div>
+            <div style={statusCell(true)}>
+              <span style={{ opacity: 0.6 }}>Uptime</span>
+              <span>{formatUptime(health.uptimeSec)}</span>
+            </div>
+            <div style={statusCell(health.sttPort)}>
+              <span style={{ opacity: 0.6 }}>STT</span>
+              <span>{health.sttPort ? "Running" : "Idle"}</span>
+            </div>
+            <div style={statusCell(health.nluPort)}>
+              <span style={{ opacity: 0.6 }}>NLU</span>
+              <span>{health.nluPort ? "Running" : "Idle"}</span>
+            </div>
+            <div style={statusCell(health.workerReachable)}>
+              <span style={{ opacity: 0.6 }}>Worker</span>
+              <span>{health.workerReachable ? "Online" : "Offline"}</span>
+            </div>
+            <div style={statusCell(true)}>
+              <span style={{ opacity: 0.6 }}>Wake</span>
+              <span>Active</span>
+            </div>
+            <div style={statusCell(health.groqKey || health.geminiKey)}>
+              <span style={{ opacity: 0.6 }}>Keys</span>
+              <span>Groq {health.groqKey ? "✓" : "✗"} · Gemini {health.geminiKey ? "✓" : "✗"}</span>
+            </div>
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, opacity: 0.5 }}>Loading…</div>
+        )}
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Vision keys</div>
+        <div style={{ fontSize: 12, opacity: 0.65, margin: "4px 0 8px" }}>
+          {health == null
+            ? "Checking…"
+            : health.groqKey || health.geminiKey
+              ? "A vision key is present — ghost clicks can see custom buttons."
+              : "No Groq or Gemini key — add one in the Accounts tab for cloud STT + ghost vision."}
+        </div>
+      </div>
 
       <div className="settings-section">
         <div className="settings-section-title">MCP Connections (vault)</div>

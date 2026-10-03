@@ -1,4 +1,4 @@
-//! Lazy NLU server manager — starts the Python NLU server (BERT-Mini ONNX)
+﻿//! Lazy NLU server manager â€” starts the Python NLU server (BERT-Mini ONNX)
 //! on-demand when the deterministic parser can't handle a command, and kills
 //! it after idle to save RAM.
 //!
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 static NLU_CHILD: Mutex<Option<Child>> = Mutex::new(None);
 static NLU_RUNNING: AtomicBool = AtomicBool::new(false);
 static LAST_REQUEST: Mutex<Option<Instant>> = Mutex::new(None);
-/// Cooldown after a failed NLU startup — don't retry for 60s to avoid
+/// Cooldown after a failed NLU startup â€” don't retry for 60s to avoid
 /// blocking every command that misses the deterministic parser.
 static NLU_LAST_FAILURE: Mutex<Option<Instant>> = Mutex::new(None);
 /// Set once the server has ever become responsive. First-ever spawn gets a
@@ -28,7 +28,7 @@ static NLU_EVER_READY: AtomicBool = AtomicBool::new(false);
 
 const NLU_IDLE_TIMEOUT: Duration = Duration::from_secs(60); // 60s idle timeout
 const NLU_PORT: u16 = 39218;
-/// How long to wait for the NLU server to become responsive (was 30s —
+/// How long to wait for the NLU server to become responsive (was 30s â€”
 /// too long, caused "loading non stop" when the ONNX model was missing).
 /// First-ever spawn gets 40s (cold disk + Defender + ~8s model load exceeds
 /// 15s in the field and caused a permanent dead fallback); once the server
@@ -78,8 +78,8 @@ fn nlu_script_path() -> Option<std::path::PathBuf> {
 }
 
 /// Check if the NLU server is already running (e.g. started externally or by a previous call).
-fn is_nlu_responsive() -> bool {
-    // Use a raw TCP connection — works from any thread (unlike tokio runtime checks)
+pub(crate) fn is_nlu_responsive() -> bool {
+    // Use a raw TCP connection â€” works from any thread (unlike tokio runtime checks)
     use std::net::TcpStream;
     use std::time::Duration as TcpDuration;
     let addr = format!("127.0.0.1:{}", NLU_PORT);
@@ -101,7 +101,7 @@ fn is_nlu_responsive() -> bool {
 /// PrependPath=1, but the PATH update doesn't reach processes spawned
 /// from the installer process (the app is launched immediately after).
 fn find_python() -> Option<String> {
-    // 1. Try PATH-based commands — verify each actually works
+    // 1. Try PATH-based commands â€” verify each actually works
     for cmd in &["python", "python3", "py"] {
         if let Ok(output) = std::process::Command::new(cmd).arg("--version").output() {
             if output.status.success() {
@@ -168,7 +168,7 @@ pub fn ensure_nlu_running() {
         if let Some(t) = *last_fail {
             if t.elapsed() < NLU_FAILURE_COOLDOWN {
                 tracing::debug!(
-                    "[lazy_nlu] skipping startup — in cooldown ({:.0}s remaining)",
+                    "[lazy_nlu] skipping startup â€” in cooldown ({:.0}s remaining)",
                     (NLU_FAILURE_COOLDOWN - t.elapsed()).as_secs_f64()
                 );
                 return;
@@ -186,7 +186,7 @@ pub fn ensure_nlu_running() {
     let script = match nlu_script_path() {
         Some(p) => p,
         None => {
-            tracing::warn!("[lazy_nlu] cannot start NLU server — script not found");
+            tracing::warn!("[lazy_nlu] cannot start NLU server â€” script not found");
             return;
         }
     };
@@ -246,7 +246,7 @@ pub fn ensure_nlu_running() {
             NLU_RUNNING.store(false, Ordering::Relaxed);
             // Record the failure time so we don't retry for 60s
             *NLU_LAST_FAILURE.lock().unwrap() = Some(Instant::now());
-            // Kill the failed child process — then drain its stderr so the
+            // Kill the failed child process â€” then drain its stderr so the
             // actual reason (missing dep, bad model, port clash) lands in
             // our logs instead of vanishing into a piped void. Reading
             // AFTER kill+wait guarantees EOF (no blocking on a live pipe).
@@ -279,23 +279,6 @@ pub fn mark_nlu_request() {
     *LAST_REQUEST.lock().unwrap() = Some(Instant::now());
 }
 
-/// Pre-warm the NLU server shortly after boot so the first unparseable
-/// command doesn't pay the cold-start cost (or worse, hit the 15s budget
-/// and disable the ML fallback for a whole session — the exact failure
-/// seen in the field). Background thread, never blocks startup.
-#[allow(dead_code)]
-pub fn spawn_prewarm() {
-    std::thread::Builder::new()
-        .name("nlu-prewarm".into())
-        .spawn(move || {
-            // Let boot settle (wake engine + first paint win the race).
-            std::thread::sleep(Duration::from_secs(25));
-            tracing::info!("[lazy_nlu] pre-warming NLU server for zero-delay first fallback");
-            ensure_nlu_running();
-        })
-        .ok();
-}
-
 /// Start a background thread that kills the NLU server after idle timeout.
 fn start_idle_killer() {
     std::thread::spawn(move || loop {
@@ -305,7 +288,7 @@ fn start_idle_killer() {
             if let Some(t) = *last {
                 t.elapsed() > NLU_IDLE_TIMEOUT
             } else {
-                // No request ever made — kill after timeout from start
+                // No request ever made â€” kill after timeout from start
                 true
             }
         };

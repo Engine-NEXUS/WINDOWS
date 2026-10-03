@@ -23,15 +23,16 @@ tauri-plugin-store = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-positioner = "2"
 
-tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
+tokio = { version = "1", features = ["rt", "sync", "macros", "time", "fs", "io-util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
 once_cell = "1"
 anyhow = "1"
-walkdir = "2.5"
+# NOTE: `walkdir` was removed (dead dep — file walking uses `ignore::WalkBuilder`).
 ignore = "0.4"
 rayon = "1.10"
 petgraph = "0.6"
@@ -122,6 +123,7 @@ webrtc-vad = "0.4.0"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.36", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
     "Win32_UI_HiDpi",
@@ -133,6 +135,13 @@ windows = { version = "0.36", features = [
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_Graphics_Gdi",
+    # Windows.Media.Ocr — zero-RAM local screen text extraction (Feature 86)
+    "Foundation",
+    "Foundation_Collections",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
+    "Globalization",
 ] }
 # Registry access for App Paths + Uninstall keys (app discovery)
 winreg = "0.55"

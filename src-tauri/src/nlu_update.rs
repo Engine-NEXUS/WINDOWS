@@ -9,7 +9,7 @@
 //!   3. For each file whose sha256 differs: GET /models/nlu/download?name=
 //!   4. Verify sha256 of each downloaded file
 //!   5. Write to app data `nlu_model/` dir
-//!   6. If NLU server is running: POST /reload_model (hot-swap, no restart)
+//!   6. If NLU server is running: POST /reload (hot-swap, no restart)
 //!
 //! Everything is additive and non-blocking: if the Worker has no manifest,
 //! R2 is unconfigured, or the download fails, the bundled model is used
@@ -209,9 +209,11 @@ async fn check_and_update(app: &tauri::AppHandle) -> Result<(), String> {
     tracing::info!("[nlu_update] NLU model updated to {}", manifest.version);
 
     // 5. Hot-swap if the NLU server is already running.
+    // Route is POST /reload (nlu_server.py) — an earlier revision posted
+    // /reload_model which 404'd, silently killing the OTA hot-swap.
     if nlu_server_running() {
         match client
-            .post(format!("http://127.0.0.1:{}/reload_model", NLU_PORT))
+            .post(format!("http://127.0.0.1:{}/reload", NLU_PORT))
             .send()
             .await
         {
@@ -219,10 +221,10 @@ async fn check_and_update(app: &tauri::AppHandle) -> Result<(), String> {
                 tracing::info!("[nlu_update] hot-swapped model in running NLU server");
             }
             Ok(resp) => {
-                tracing::warn!("[nlu_update] reload_model returned {}", resp.status());
+                tracing::warn!("[nlu_update] /reload returned {}", resp.status());
             }
             Err(e) => {
-                tracing::warn!("[nlu_update] reload_model failed: {}", e);
+                tracing::warn!("[nlu_update] /reload failed: {}", e);
             }
         }
     }

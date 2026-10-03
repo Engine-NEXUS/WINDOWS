@@ -227,8 +227,13 @@ pub fn handle_turn(text: &str) -> TurnOutcome {
         return outcome;
     }
     // Ink: append with spacing + sentence capitalization.
+    // Re-check under the lock: another thread (or match_command) may have
+    // exited the session between the is_active() check above and here.
+    // An expect() here would panic → panic="abort" kills the whole app.
     let mut guard = SESSION.lock().unwrap();
-    let s = guard.as_mut().expect("session checked active");
+    let Some(s) = guard.as_mut() else {
+        return TurnOutcome::Replied("Ghostwriter isn't open, sir.".to_string());
+    };
     let piece = text.trim();
     if !piece.is_empty() {
         if s.draft.trim().is_empty() {

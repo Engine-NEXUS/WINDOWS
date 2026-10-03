@@ -30,11 +30,12 @@ function isTauri(): boolean {
 /** Orchestrator event shape (mirrors Rust OrchestratorEvent enum). */
 interface OrchestratorEvent {
   type:
-    | "state"
-    | "loading"
-    | "ack"
-    | "result"
-    | "done"
+  | "state"
+  | "loading"
+  | "ack"
+  | "result"
+  | "clarify"
+  | "done"
     | "error"
     | "confirm"
     | "conflict_report"
@@ -46,6 +47,9 @@ interface OrchestratorEvent {
   visible?: boolean;
   // ack
   text?: string;
+  // clarify
+  expected_slot?: string;
+  timeout_ms?: number;
   // result
   analysis?: unknown;
   dialog_state?: unknown;
@@ -93,12 +97,72 @@ interface GitHubResultPayload {
 let initialized = false;
 let currentRequestId: string | null = null;
 let confirmListeningTimer: ReturnType<typeof setTimeout> | null = null;
+let clarificationRequestId: string | null = null;
+let clarificationTimer: ReturnType<typeof setTimeout> | null = null;
 
 function clearConfirmListeningTimer(): void {
   if (confirmListeningTimer) {
     clearTimeout(confirmListeningTimer);
     confirmListeningTimer = null;
   }
+}
+
+export function clearClarificationRequest(): void {
+  clarificationRequestId = null;
+  if (clarificationTimer) {
+    clearTimeout(clarificationTimer);
+    clarificationTimer = null;
+  }
+}
+
+/**
+ * One bounded automatic relisten after a clarification prompt. Reuses the
+ * hotkey wake path and meeting suppression, but unlike ghost mode it closes
+ * after a single window so background audio cannot hold the mic open.
+ */
+async function openClarificationCapture(requestId: string, timeoutMs: number): Promise<void> {
+  const store = useAssistant.getState();
+  if (store.ghostActive) return;
+  try {
+    const meeting = await invoke<boolean>("meeting_active").catch(() => false);
+    if (meeting) {
+      clearClarificationRequest();
+      store.setAwaitingInput(false);
+      await cancelOrchestrator();
+      return;
+    }
+  } catch {
+    // A failed meeting probe must not wedge clarification; fall through.
+  }
+  store.setVisible(true);
+  store.setState("listening");
+  store.setAwaitingInput(true);
+  try {
+    await invoke("start_stt_capture");
+  } catch (err) {
+    console.warn("[NEXUS] orchestrator: clarification capture failed:", err);
+    clearClarificationRequest();
+    return;
+  }
+  if (clarificationTimer) clearTimeout(clarificationTimer);
+  clarificationTimer = setTimeout(() => {
+    clarificationTimer = null;
+    if (clarificationRequestId !== requestId) return;
+    clearClarificationRequest();
+    void (async () => {
+      try {
+        const hadSpeech = await invoke<boolean>("stt_capture_had_speech").catch(() => false);
+        if (hadSpeech) return;
+      } catch {
+        // Fall through to the legacy close path.
+      }
+      await cancelOrchestrator();
+      const latest = useAssistant.getState();
+      latest.setAwaitingInput(false);
+      latest.setVisible(false);
+      setTimeout(() => useAssistant.getState().reset(), 550);
+    })();
+  }, timeoutMs);
 }
 
 /** Open the 5-second voice approval listening window for pending confirmations. */
@@ -147,11 +211,99 @@ export function finishSpokenResult(spokenFor: string): boolean {
   const store = useAssistant.getState();
   store.setLoadingVisible(false);
   store.setVisible(true); // brief beat, mirrors the `done` handler
+  // Phase 4 cadence: ghost turns reopen the mic at 250ms (the hot-mic
+  // loop owns the gap from here); normal turns keep the 550ms beat.
+  const beat = store.ghostActive ? 250 : 550;
   setTimeout(() => {
-    if (currentRequestId === null) useAssistant.getState().reset();
-  }, 550);
+    if (currentRequestId === null) {
+      // Ghost hot-mic: reopen the mic if the session is still live
+      // BEFORE resetting (the relisten gate reads ghostActive; keep
+      // this order even though reset() preserves it today).
+      // No-op everywhere outside ghost mode.
+      void import("./ghostHotMic").then((m) => m.maybeGhostRelisten());
+      useAssistant.getState().reset();
+    }
+  }, beat);
   void signalOrchestratorDone(spokenFor);
   return true;
+}
+
+/**
+ * Close a non-ghost turn when its closing speech ends. Ghost turns stay open
+ * for the hot-mic loop (the legacy timers / endGhostTurn own those paths) —
+ * this helper returns false there and touches nothing. Pure contract,
+ * unit-tested; used by the result/error/conflict_report handlers so no
+ * request can park the orb in `speaking` forever.
+ */
+export function closeTurnOnSpeechEnd(requestId: string): boolean {
+  if (useAssistant.getState().ghostActive) return false;
+  return finishSpokenResult(requestId);
+}
+
+/**
+ * Main Center UI-director rule (doc 74 P2 / feature 75 P-B): never hide
+ * the orb while it is speaking (the zoom must play fully), never hide
+ * mid-ghost-session, and never steal a new turn's orb. Hides only once
+ * the turn is fully done (idle) — re-arming once per second while TTS is
+ * still playing instead of cutting it off at a fixed delay.
+ *
+ * Replaces the old fixed 600/1500ms hide timers, which fired mid-speech
+ * (the zoom played on a sliding-down orb) and mid-ghost-session.
+ *
+ * Stuck-speaking watchdog (voice-STT plan §5): genuine replies keep TTS
+ * playing and re-arm forever (unchanged). Ten consecutive re-arms with NO
+ * audio playing means onEnd died mid-turn — force the done-handshake so
+ * the zoom doesn't park on a dead orb until the 60s failsafe. Visuals
+ * thus follow audio truth, never just the state flag.
+ */
+let stuckSpeakingTicks = 0;
+const STUCK_SPEAKING_LIMIT = 10;
+
+/** Test hooks for the stuck-speaking watchdog. */
+export function __testStuckTicks(): number {
+  return stuckSpeakingTicks;
+}
+export function __testSetStuckTicks(n: number): void {
+  stuckSpeakingTicks = n;
+}
+
+export function hideOrbAfterSpeech(firstDelayMs: number): void {
+  setTimeout(() => {
+    const s = useAssistant.getState();
+    if (s.ghostActive) {
+      stuckSpeakingTicks = 0;
+      return;
+    }
+    if (s.state === "speaking") {
+      void import("../audio/ttsPlayer").then(({ isRustTtsPlaying }) => {
+        if (useAssistant.getState().state !== "speaking") {
+          stuckSpeakingTicks = 0;
+          return;
+        }
+        if (isRustTtsPlaying()) {
+          stuckSpeakingTicks = 0;
+          hideOrbAfterSpeech(1000);
+          return;
+        }
+        stuckSpeakingTicks += 1;
+        if (stuckSpeakingTicks >= STUCK_SPEAKING_LIMIT) {
+          stuckSpeakingTicks = 0;
+          console.warn(
+            "[NEXUS] stuck-speaking watchdog: silent 10s, forcing turn close"
+          );
+          finishSpokenResult(getCurrentRequestId() ?? "");
+          return;
+        }
+        hideOrbAfterSpeech(1000);
+      }).catch(() => {
+        hideOrbAfterSpeech(1000);
+      });
+      return;
+    }
+    stuckSpeakingTicks = 0;
+    if (s.state !== "idle") return;
+    s.setVisible(false);
+  }, firstDelayMs);
 }
 
 /**
@@ -190,12 +342,14 @@ export async function initOrchestratorListener(): Promise<void> {
         // We just update the store for UI consistency (e.g. if the frontend
         // needs to know the loading state for rendering decisions).
         if (ev.visible !== undefined) {
-          store.setLoadingVisible(ev.visible);
-          if (ev.visible) {
+          const isGhost = useAssistant.getState().ghostActive;
+          store.setLoadingVisible(isGhost ? false : ev.visible);
+          if (ev.visible && !isGhost) {
             // Hide the orb shortly after the loading indicator appears.
             // This keeps the orb visible while "On it sir" is playing,
             // then transitions to the loading indicator once it's ready.
-            setTimeout(() => useAssistant.getState().setVisible(false), 600);
+            // State-aware (never mid-speech, never mid-ghost).
+            hideOrbAfterSpeech(600);
           }
         }
         break;
@@ -207,21 +361,48 @@ export async function initOrchestratorListener(): Promise<void> {
         // recorder.ts) to avoid double-speak ("On it sir" said twice).
         if (isLocalAckGiven()) {
           console.log("[NEXUS] orchestrator ack suppressed — local ack already given");
-          // Still hide the orb after TTS finishes — the loading indicator
-          // will take over. This is a fallback in case the loading event
-          // hasn't arrived yet.
-          setTimeout(() => useAssistant.getState().setVisible(false), 1500);
+          // Still hide the orb after TTS finishes (if not in ghost mode) — the
+          // loading indicator will take over. State-aware, never mid-speech.
+          hideOrbAfterSpeech(1500);
           break;
         }
         if (ev.text) {
           store.setState("speaking");
           store.addAssistantMessage(ev.text);
           void speak(ev.text);
-          // Hide the orb after a short delay (TTS is playing the ack).
-          // The loading indicator is already shown by Rust.
-          setTimeout(() => {
-            useAssistant.getState().setVisible(false);
-          }, 1500);
+          // Hide the orb after TTS actually finishes (if not in ghost
+          // mode) — the zoom plays fully instead of sliding down mid-speech.
+          hideOrbAfterSpeech(1500);
+        }
+        break;
+      }
+
+      case "clarify": {
+        // A clarification prompt keeps the turn open for one bounded reply.
+        // Unlike result turns, this must not call finishSpokenResult: closing
+        // here would require another wake word for the user's repeat.
+        currentRequestId = ev.request_id;
+        clearClarificationRequest();
+        clarificationRequestId = ev.request_id;
+        store.setLoadingVisible(false);
+        store.setVisible(true);
+        store.setState("speaking");
+        store.setAwaitingInput(true);
+        if (ev.prompt) {
+          store.addAssistantMessage(ev.prompt);
+          const captureAfterSpeech = ev.request_id;
+          const captureTimeout = ev.timeout_ms ?? 8000;
+          const beginReplyCapture = () => {
+            if (clarificationRequestId !== captureAfterSpeech) return;
+            if (useAssistant.getState().ghostActive) {
+              void import("./ghostHotMic").then((m) => m.maybeGhostRelisten());
+              return;
+            }
+            void openClarificationCapture(captureAfterSpeech, captureTimeout);
+          };
+          void speak(ev.prompt, beginReplyCapture).catch(beginReplyCapture);
+        } else {
+          void openClarificationCapture(ev.request_id, ev.timeout_ms ?? 8000);
         }
         break;
       }
@@ -261,6 +442,11 @@ export async function initOrchestratorListener(): Promise<void> {
             console.warn("[NEXUS] orchestrator: result TTS failed:", err);
             finishSpokenResult(spokenFor);
           });
+        } else {
+          // Empty result text: no TTS to gate on — close the handshake now
+          // or the orb parks in `speaking` forever (the backend withholds
+          // `done` on success, so nobody else will close it).
+          finishSpokenResult(ev.request_id);
         }
 
         // If there's analysis data, we could show it in the sidebar
@@ -286,7 +472,15 @@ export async function initOrchestratorListener(): Promise<void> {
           openConfirmVoiceWindow();
         } else {
           store.setVisible(true); // Show orb briefly before reset
-          setTimeout(() => store.reset(), 550);
+          // Phase 4 cadence: ghost beat 250ms, normal beat 550ms.
+          const doneBeat = useAssistant.getState().ghostActive ? 250 : 550;
+          setTimeout(() => {
+            // Ghost hot-mic first — the gate reads ghostActive, so
+            // relisten before reset (reset() preserves it today, but
+            // this order must not depend on that).
+            void import("./ghostHotMic").then((m) => m.maybeGhostRelisten());
+            store.reset();
+          }, doneBeat);
         }
         break;
       }
@@ -294,17 +488,28 @@ export async function initOrchestratorListener(): Promise<void> {
       case "error": {
         console.error("[NEXUS] orchestrator: error:", ev.message);
         clearLongRunningInFlight();
+        currentRequestId = ev.request_id;
         store.setLoadingVisible(false);
         store.setVisible(true);
         store.setState("speaking");
         store.setAwaitingInput(false);
         const errMsg = ev.message || "Something went wrong sir.";
         store.addAssistantMessage(`Error: ${errMsg}`);
-        void speak(errMsg);
-        // After speaking the error, reset
+        // Close the turn when the error speech ends (normal mode only —
+        // ghost turns stay open for the hot-mic loop via the timer below).
+        // Without this the orb parks in `speaking` with dead air.
+        void speak(errMsg, () => {
+          closeTurnOnSpeechEnd(ev.request_id);
+        }).catch(() => {
+          closeTurnOnSpeechEnd(ev.request_id);
+        });
+        // After speaking the error, end the turn via the ghost-aware
+        // path: a backend error mid-session must not deafen the loop.
+        // Phase 4 cadence: ghost beat 250ms, normal beat 550ms.
+        const errBeat = useAssistant.getState().ghostActive ? 250 : 550;
         setTimeout(() => {
           currentRequestId = null;
-          setTimeout(() => store.reset(), 550);
+          setTimeout(() => { void import("./ghostHotMic").then((m) => m.endGhostTurn()); }, errBeat);
         }, 3000);
         break;
       }
@@ -341,6 +546,7 @@ export async function initOrchestratorListener(): Promise<void> {
         // Speak the conflict summary and display the conflict panel
         // in the sidebar with copy-paste options.
         clearLongRunningInFlight();
+        currentRequestId = ev.request_id;
         store.setLoadingVisible(false);
         store.setVisible(true);
         store.setState("speaking");
@@ -354,7 +560,13 @@ export async function initOrchestratorListener(): Promise<void> {
         const spoken = `${summary} ${fileCount} file${fileCount !== 1 ? "s" : ""} have conflicts. Please fix the conflicts and push, then try merging again.`;
 
         store.addAssistantMessage(spoken);
-        void speak(spoken);
+        // Close the turn when the summary ends (normal mode only) — the
+        // user fixes conflicts in a fresh turn; nothing else closes this one.
+        void speak(spoken, () => {
+          closeTurnOnSpeechEnd(ev.request_id);
+        }).catch(() => {
+          closeTurnOnSpeechEnd(ev.request_id);
+        });
 
         console.log("[NEXUS] orchestrator: merge conflict", {
           pr_number: prNum,
@@ -401,9 +613,18 @@ export async function initOrchestratorListener(): Promise<void> {
  * The caller does NOT need to manage loading state, ack timing, or TTS —
  * the orchestrator handles all of that.
  */
+export interface TurnProvenance {
+  ownership?: "verified" | "uncertain" | "rejected" | "unenrolled";
+  ownerScore?: number;
+  decoderBias?: string;
+  language?: string;
+  initiation?: "explicit" | "ghost";
+}
+
 export async function processViaOrchestrator(
   transcript: string,
   dialogContext?: unknown,
+  turn?: TurnProvenance,
 ): Promise<{ request_id: string; subsystem: string; handled_locally: boolean } | null> {
   if (!isTauri()) return null;
 
@@ -412,6 +633,14 @@ export async function processViaOrchestrator(
   // the user said "yes"/"approved"/"proceed" (confirm) or "no"/"cancel" (abort).
   const store = useAssistant.getState();
   const pendingCmd = store.pendingGithubCommand;
+  if (turn?.ownership === "rejected" || (turn?.ownership === "uncertain" && pendingCmd)) {
+    console.log("[NEXUS] orchestrator: unowned turn cannot approve a pending command — ambient drop");
+    return {
+      request_id: currentRequestId ?? "ambient-drop",
+      subsystem: "ambient",
+      handled_locally: true,
+    };
+  }
   if (pendingCmd) {
     clearConfirmListeningTimer();
     const lower = transcript.trim().toLowerCase();
@@ -486,7 +715,9 @@ export async function processViaOrchestrator(
       const abortMsg = "Okay, I've cancelled that operation, sir.";
       useAssistant.getState().addAssistantMessage(abortMsg);
       void speak(abortMsg);
-      setTimeout(() => useAssistant.getState().reset(), 2000);
+      // Ghost-aware turn end: declining a confirm mid-session must not
+      // deafen the loop (endGhostTurn no-ops outside ghost mode).
+      setTimeout(() => { void import("./ghostHotMic").then((m) => m.endGhostTurn()); }, 2000);
       return {
         request_id: wasMcp ? "mcp-aborted" : "github-aborted",
         subsystem: wasMcp ? "mcp" : "github",
@@ -507,6 +738,7 @@ export async function processViaOrchestrator(
     }>("orchestrator_process", {
       transcript,
       dialogContext: dialogContext ?? null,
+      turnContext: turn ?? null,
     });
 
     currentRequestId = result.request_id;
@@ -520,6 +752,7 @@ export async function processViaOrchestrator(
 
 /** Cancel the active orchestrator request (barge-in / new wake). */
 export async function cancelOrchestrator(): Promise<void> {
+  clearClarificationRequest();
   if (!isTauri()) return;
   try {
     await invoke("orchestrator_cancel");

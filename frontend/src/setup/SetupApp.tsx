@@ -8,6 +8,7 @@ import {
   type OAuthStatus,
 } from "./oauth";
 import { VoiceEnrollment } from "./VoiceEnrollment";
+import { identityBanner, type IdentityBanner } from "./identityBanner";
 import { CURATED_VOICES, previewVoice, stopTts, type VoiceOption } from "../audio/ttsPlayer";
 
 type Step = 0 | 1 | 2 | 3;
@@ -36,6 +37,9 @@ export function SetupApp() {
   // Accounts
   const [oauthStatus, setOauthStatus] = useState<Record<string, OAuthStatus>>({});
   const [connecting, setConnecting] = useState<string | null>(null);
+  // Feature 88: canonical laptop identity (claim handshake on Accounts step).
+  const [identity, setIdentity] = useState<{ state: string; reason?: string | null } | null>(null);
+  const [claiming, setClaiming] = useState(false);
   // connectingPhase: "opening" → browser is opening
   //                  "waiting" → browser is open, waiting for user to authorize
   //                  "done"    → connected successfully
@@ -99,6 +103,21 @@ export function SetupApp() {
   useEffect(() => {
     if (step === 3) checkServer();
   }, [step, checkServer]);
+
+  // Feature 88: claim the canonical profile when the Accounts step opens.
+  useEffect(() => {
+    if (step !== 3) return;
+    let cancelled = false;
+    setClaiming(true);
+    invoke<{ state: string; reason?: string | null }>("claim_profile")
+      .then((st) => { if (!cancelled) setIdentity(st); })
+      .catch((err) => {
+        console.warn("[NEXUS] setup: claim failed:", err);
+        if (!cancelled) setIdentity({ state: "provisional", reason: "offline" });
+      })
+      .finally(() => { if (!cancelled) setClaiming(false); });
+    return () => { cancelled = true; };
+  }, [step]);
 
   const handleConnect = async (provider: "google" | "github" | "swiggy") => {
     // Fallback: if serverUrl hasn't loaded yet, try loading it now
@@ -633,6 +652,30 @@ export function SetupApp() {
 
                 <div className="installer-title">Connect Integrations</div>
                 <div className="installer-subtitle">Connect your app accounts before you proceed.</div>
+
+                {(() => {
+                  if (claiming && !identity) return null;
+                  const banner: IdentityBanner | null = identity ? identityBanner(identity) : null;
+                  if (!banner) return null;
+                  const colors: Record<IdentityBanner["tone"], { bg: string; border: string; fg: string }> = {
+                    amber: { bg: "rgba(251,191,36,0.10)", border: "rgba(251,191,36,0.45)", fg: "#fbbf24" },
+                    green: { bg: "rgba(34,197,94,0.10)", border: "rgba(34,197,94,0.45)", fg: "#22c55e" },
+                    red: { bg: "rgba(239,68,68,0.10)", border: "rgba(239,68,68,0.45)", fg: "#ef4444" },
+                    dim: { bg: "rgba(148,163,184,0.08)", border: "rgba(148,163,184,0.35)", fg: "#94a3b8" },
+                  };
+                  const c = colors[banner.tone];
+                  return (
+                    <div
+                      style={{
+                        marginTop: 12, padding: "10px 14px", borderRadius: 10, textAlign: "left",
+                        background: c.bg, border: `1px solid ${c.border}`, color: c.fg,
+                      }}
+                    >
+                      <div style={{ fontWeight: 600, fontSize: 13 }}>{banner.title}</div>
+                      <div style={{ fontSize: 12, opacity: 0.85, marginTop: 2 }}>{banner.subtitle}</div>
+                    </div>
+                  );
+                })()}
 
                 <div className="installer-list">
                   <div className="installer-list-item" onClick={() => !oauthStatus.google?.connected && connecting !== "google" && handleConnect("google")}>

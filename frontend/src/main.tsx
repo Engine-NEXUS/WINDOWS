@@ -19,7 +19,7 @@ import "./styles.css";
 
 import { preloadSileroVad, preloadMicVad, stopVad } from "./audio/vad";
 import { abortCapture, processTranscript } from "./audio/recorder";
-import { stopTts } from "./audio/ttsPlayer";
+import { stopTts, isRustTtsPlaying } from "./audio/ttsPlayer";
 import { useAssistant } from "./store/assistant";
 import { setBargedIn, clearBargedIn, clearDialogContext } from "./net/wsBridge";
 
@@ -29,13 +29,22 @@ import { setBargedIn, clearBargedIn, clearDialogContext } from "./net/wsBridge";
 let autoReopenFromFollowup = false;
 
 /** Called by wsBridge when a follow-up question finishes speaking and
- * the mic should auto-reopen without requiring the user to press Ctrl+Space. */
+ *  the mic should auto-reopen without requiring the user to press Ctrl+Space.
+ *  Also the ghost hot-mic loop's listen entry. Showing the orb is NOT
+ *  enough: the Rust cpal capture must be started explicitly, or the orb
+ *  shows "listening" while Rust captures nothing (live bug, doc 44 —
+ *  the confirm window already did this; the shared path didn't). */
 export function triggerFollowupListen(): void {
   autoReopenFromFollowup = true;
   const w = window as any;
   if (w.__NEXUS_WAKE__) {
     w.__NEXUS_WAKE__();
   }
+  import("@tauri-apps/api/core")
+    .then(({ invoke }) => invoke("start_stt_capture"))
+    .catch((e) => {
+      console.warn("[NEXUS] followup listen: Rust capture not started:", e);
+    });
 }
 
 let micStream: MediaStream | null = null;
@@ -108,11 +117,36 @@ async function startListening() {
   const s = useAssistant.getState();
   console.log("[NEXUS] wake →", s.state);
 
-  // Don't re-start if already listening.
+  // Second Ctrl+Space press while listening = cancel the call.
+  // Ask Rust to abort the cpal capture: no voice yet → hide the orb
+  // outright; speech underway → let the in-flight turn finish (never
+  // kill mid-word) and drop any late transcript via the session guard.
   if (s.state === "listening") {
-    console.log("[NEXUS] already listening, ignoring wake");
+    console.log("[NEXUS] second press while listening → aborting capture");
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const res = await invoke<{ had_speech: boolean; elapsed_ms: number }>(
+        "stop_stt_capture"
+      );
+      if (!res.had_speech) {
+        await abortCapture().catch(() => {});
+        useAssistant.getState().reset();
+        useAssistant.getState().setVisible(false);
+      }
+    } catch (err) {
+      console.warn("[NEXUS] stop_stt_capture failed:", err);
+    }
     return;
   }
+
+  // Alexa-style barge-in: ALWAYS cut audio on wake, not only when the
+  // frontend believes it is speaking. stopTts()/stopVad() are idempotent
+  // (generation bump + stateless rodio stop), so stopping silence is
+  // free — while a missed stop talks over the new turn (state drift via
+  // early onEnd, failsafe reset, or generation skew). Turn teardown
+  // below still branches on prior state (abortCapture vs session keep).
+  stopTts();
+  stopVad();
 
   // If NEXUS is speaking or thinking, cancel the current turn before
   // starting a new one. This prevents the TTS 'interrupted' error and
@@ -216,6 +250,7 @@ async function startListening() {
     console.log("[NEXUS] first-run greeting done — hiding orb");
     s.setState("idle");
     s.setVisible(false);
+    // turn-end:keep-raw (first-run greeting — no session exists yet)
     setTimeout(() => s.reset(), 550);
   });
 
@@ -280,14 +315,21 @@ async function setupCommandDetectionListener() {
         s.addAssistantMessage("On it sir");
         void speak("On it sir");
 
-        // Wait for TTS to finish before recording (so we don't capture TTS audio)
+        // Wait for TTS to finish before recording (so we don't capture TTS audio).
+        // Primary TTS is Rust-side (rodio): speechSynthesis.speaking is only
+        // ever true on the web-speech fallback, so the Rust flag is checked
+        // first — checking speechSynthesis alone resolved immediately while
+        // the prompt was still playing (audit H2).
         await new Promise<void>((resolve) => {
-          if (typeof speechSynthesis === "undefined" || !speechSynthesis.speaking) {
+          const idle = () =>
+            !isRustTtsPlaying() &&
+            (typeof speechSynthesis === "undefined" || !speechSynthesis.speaking);
+          if (idle()) {
             resolve();
             return;
           }
           const check = () => {
-            if (!speechSynthesis.speaking) {
+            if (idle()) {
               resolve();
               return;
             }
@@ -332,8 +374,12 @@ async function setupCommandDetectionListener() {
         }
 
         setTimeout(() => {
-          useAssistant.getState().setVisible(false);
-          setTimeout(() => useAssistant.getState().reset(), 550);
+          // Main Center UI-director rule (doc 74 P2): never hide mid-ghost-session.
+          if (!useAssistant.getState().ghostActive) {
+            useAssistant.getState().setVisible(false);
+          }
+          // Ghost-aware turn end (no-op outside ghost mode).
+          setTimeout(() => { void import("./net/ghostHotMic").then((m) => m.endGhostTurn()); }, 550);
         }, 800);
         return;
       }
@@ -358,8 +404,12 @@ async function setupCommandDetectionListener() {
 
       // Hide after a short delay
       setTimeout(() => {
-        useAssistant.getState().setVisible(false);
-        setTimeout(() => useAssistant.getState().reset(), 550);
+        // Main Center UI-director rule (doc 74 P2): never hide mid-ghost-session.
+        if (!useAssistant.getState().ghostActive) {
+          useAssistant.getState().setVisible(false);
+        }
+        // Ghost-aware turn end (no-op outside ghost mode).
+        setTimeout(() => { void import("./net/ghostHotMic").then((m) => m.endGhostTurn()); }, 550);
       }, 800);
     });
     console.log("[NEXUS] Tier 3 command detection listener registered");
@@ -372,6 +422,19 @@ async function setupCommandDetectionListener() {
 // Register the listener at startup (non-blocking, non-fatal)
 void setupCommandDetectionListener();
 
+export type SttTurnOwnership = "verified" | "uncertain" | "rejected" | "unenrolled";
+
+export interface SttTranscriptTurn {
+  session?: number;
+  text?: string;
+  ownership?: SttTurnOwnership;
+  owner_score?: number;
+  decoder_bias?: string;
+  language?: string;
+}
+
+export type SttTranscriptPayload = string | SttTranscriptTurn;
+
 // ─── Rust-side STT transcript listener ─────────────────────────────────
 // The Rust cpal stream captures audio and transcribes it (Groq or local
 // faster-whisper). When the transcript is ready, Rust emits "stt:transcript".
@@ -379,11 +442,22 @@ void setupCommandDetectionListener();
 async function setupSttTranscriptListener() {
   try {
     const { listen } = await import("@tauri-apps/api/event");
-    await listen<string>("stt:transcript", async (event) => {
-      const transcript = event.payload;
+    await listen<SttTranscriptPayload>("stt:transcript", async (event) => {
+      const payload = event.payload;
+      const transcript = typeof payload === "string" ? payload : payload.text ?? "";
+      const turn =
+        typeof payload === "string"
+          ? undefined
+          : {
+              ownership: payload.ownership ?? "unenrolled",
+              ownerScore: payload.owner_score ?? 1,
+              decoderBias: payload.decoder_bias ?? "owner",
+              language: payload.language ?? "en",
+              initiation: useAssistant.getState().ghostActive ? ("ghost" as const) : ("explicit" as const),
+            };
       console.log(`[NEXUS] stt:transcript event received: "${transcript}"`);
       // Process the transcript using the same logic as finishCapture()
-      await processTranscript(transcript);
+      await processTranscript(transcript, turn);
     });
     console.log("[NEXUS] stt:transcript listener registered");
   } catch (err) {
@@ -391,35 +465,134 @@ async function setupSttTranscriptListener() {
   }
 }
 
-// Register at startup
+// Register the listener at startup (non-blocking, non-fatal)
 void setupSttTranscriptListener();
 
-/** Called from Rust to cancel the current session. */
-(window as any).__NEXUS_CANCEL__ = async () => {
-  console.log("[NEXUS] cancel");
-  // Stop TTS first so we don't hear the rest of the speech.
-  stopTts();
-  // Stop VAD so it doesn't trigger finishCapture during cleanup.
-  stopVad();
-  // Then abort recording and close the session.
-  await abortCapture();
-  // Hot mic: don't release the stream, just disable tracks
-  if (micStream) {
-    micStream.getTracks().forEach((t) => (t.enabled = false));
+interface TurnStats {
+  session: number;
+  rms_max: number;
+  rms_mean: number;
+  voiced_chunks: number;
+  total_chunks: number;
+  endpoint: string;
+  stt_path: string;
+  filter: string;
+  owner?: string;
+  owner_score?: number;
+  decoder_bias?: string;
+  stt_language?: string;
+}
+
+// ─── Turn packet listener (approach A: instrument-first) ─────────────
+// Every transcript — including every empty one — arrives with its cause
+// attached (mic energy seen, endpoint branch, STT path, filter verdict).
+// Logged to console + debug_trace so the next miss is data, not mystery.
+// Read-only: never touches orb state or the transcript flow.
+async function setupTurnStatsListener() {
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    await listen<TurnStats>("stt:turn_stats", async (event) => {
+      const p = event.payload;
+      console.info(
+        `[NEXUS] stt:turn_stats session=${p.session} ` +
+          `rms_max=${Number(p.rms_max).toFixed(4)} rms_mean=${Number(p.rms_mean).toFixed(5)} ` +
+          `voiced=${p.voiced_chunks}/${p.total_chunks} endpoint=${p.endpoint} ` +
+          `path=${p.stt_path} filter=${p.filter} owner=${p.owner ?? "unknown"}`
+      );
+      const { invoke } = await import("@tauri-apps/api/core");
+      void invoke("debug_trace", {
+        msg:
+          `turn session=${p.session} rms_max=${Number(p.rms_max).toFixed(4)} ` +
+          `voiced=${p.voiced_chunks}/${p.total_chunks} endpoint=${p.endpoint} ` +
+          `path=${p.stt_path} filter=${p.filter} owner=${p.owner ?? "unknown"}`,
+      }).catch(() => {});
+    });
+    console.log("[NEXUS] stt:turn_stats listener registered");
+  } catch (err) {
+    console.warn("[NEXUS] Failed to register stt:turn_stats listener:", err);
   }
-  // Hide the loading indicator if it was showing.
-  useAssistant.getState().setLoadingVisible(false);
-  useAssistant.getState().reset();
-  useAssistant.getState().setVisible(false);
-};
+}
+
+// Register at startup
+void setupTurnStatsListener();
+
+// ─── Rust ghost-watchdog relisten ──────────────────────────────────
+// The P1 relisten watchdog (ghost.rs) emits `ghost:relisten` when a
+// session is live but idle past the window (a dropped turn-end
+// relisten). Answer with the GUARDED path — echo + meeting checks —
+// never a blind capture.
+async function setupGhostRelistenListener() {
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    await listen("ghost:relisten", () => {
+      console.log("[NEXUS] ghost:relisten from watchdog — guarded relisten");
+      import("./net/ghostHotMic").then((m) => m.maybeGhostRelisten()).catch(() => {});
+    });
+    console.log("[NEXUS] ghost:relisten listener registered");
+  } catch (err) {
+    console.warn("[NEXUS] Failed to register ghost:relisten listener:", err);
+  }
+}
+
+// Register at startup
+void setupGhostRelistenListener();
+
+// ─── Rust capture level meter ──────────────────────────────────────
+// The cpal loop emits `audio:level` {level: 0..1} ~6Hz during STT capture
+// (+ final 0 on stop). Drives the speech-synced ghost waves. Cheap:
+// one clamped number into the store, no re-render storm (Avatar reads it
+// in a rAF loop via getState, not via subscription).
+async function setupAudioLevelListener() {
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    await listen<{ level?: unknown }>("audio:level", (event) => {
+      const raw = event.payload?.level;
+      const level = typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
+      useAssistant.getState().setMicLevel(level);
+    });
+    console.log("[NEXUS] audio:level listener registered");
+  } catch (err) {
+    console.warn("[NEXUS] Failed to register audio:level listener:", err);
+  }
+}
+
+// Register at startup
+void setupAudioLevelListener();
+
+// Open the backend session at startup (fire-and-forget): the long-running
+// command queue drains through sendTranscript(), which throws while no
+// session is open. openSession() is config-only (no network), retries ×5
+// internally, and degrades to local-only mode on failure — never blocks boot.
+void (async () => {
+  try {
+    const { ensureSessionOpen } = await import("./net/wsBridge");
+    void ensureSessionOpen();
+  } catch (e) {
+    console.warn("[NEXUS] session pre-open failed:", e);
+  }
+})();
+
+// NOTE: __NEXUS_CANCEL__ was deleted (audit H4) — assigned but never
+// called from Rust eval or frontend code. Cancellation flows through
+// abortCapture() + the orchestrator's ACTIVE_REQUEST guard instead.
 
 /** Called by finishCapture/abortCapture cleanup to release the mic stream.
  *  With hot mic, we DON'T release the stream — we keep it warm for the next wake.
  *  The stream tracks are disabled by VAD's pauseStream callback instead. */
+// Holder id for the shared frontend stream (approach C audit). The release
+// path below is the single funnel: paramCapture, recorder cleanup, and the
+// 8s no-speech timer all land here.
+let sharedMicHolder: string | null = null;
 (window as any).__NEXUS_RELEASE_MIC__ = () => {
   // Hot mic: keep the stream alive, just disable the tracks
   if (micStream) {
     micStream.getTracks().forEach((t) => (t.enabled = false));
+  }
+  if (sharedMicHolder !== null) {
+    void import("./audio/micHolders").then(({ micRelease }) => {
+      if (sharedMicHolder !== null) micRelease(sharedMicHolder);
+      sharedMicHolder = null;
+    }).catch(() => {});
   }
   // THE BATON PASS: Tell Rust to resume wake-word detection now that
   // the frontend is done with the mic. Without this, the wake-word
@@ -434,13 +607,24 @@ void setupSttTranscriptListener();
 (window as any).__NEXUS_GET_MIC_STREAM__ = async (): Promise<MediaStream> => {
   if (micStream) return micStream;
   // If no existing stream, get a new one
-  return await navigator.mediaDevices.getUserMedia({
+  const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
       channelCount: 1,
       echoCancellation: true,
       noiseSuppression: true,
     },
   });
+  micStream = stream;
+  // Approach C: record the opener. A second concurrent opener reuses this
+  // stream with a warning instead of opening a rival one (Intel SST
+  // starves cpal while ANY WebView2 stream is live).
+  if (sharedMicHolder === null) {
+    const { micAcquire } = await import("./audio/micHolders");
+    sharedMicHolder = micAcquire("frontend-stream");
+  } else {
+    console.warn("[NEXUS] mic: second opener reused live stream (no double-open)");
+  }
+  return stream;
 };
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

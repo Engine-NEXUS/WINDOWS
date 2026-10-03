@@ -153,6 +153,36 @@ pub fn mark_piper_unloaded() {
     PIPER_LOADED.store(false, Ordering::Relaxed);
 }
 
+/// Watchdog re-probe decision (Feature 83 P4): only while flagged down,
+/// at most every NETWORK_CHECK_INTERVAL. While up, per-turn checks +
+/// failure paths own the up→down direction — the watchdog only heals.
+/// Pure over injected clock values (unit-tested, no statics touched).
+pub fn probe_due_for(
+    last_check: Option<Instant>,
+    up: bool,
+    now: Instant,
+) -> bool {
+    if up {
+        return false;
+    }
+    match last_check {
+        None => true,
+        Some(t) => now.duration_since(t) >= NETWORK_CHECK_INTERVAL,
+    }
+}
+
+/// Live view of the watchdog decision against process state.
+pub fn probe_due() -> bool {
+    let last = LAST_NETWORK_CHECK.lock().unwrap().clone();
+    probe_due_for(last, is_network_up(), Instant::now())
+}
+
+/// `voice:status` payload emitted when the watchdog detects restoration.
+/// Shape pinned by unit test (frontend validator must accept it).
+pub fn cloud_restored_payload() -> serde_json::Value {
+    serde_json::json!({ "status": "cloud-restored" })
+}
+
 /// Check if Piper should be unloaded (network has been up for 10+ minutes).
 ///
 /// Returns true if:
@@ -177,11 +207,28 @@ pub fn should_unload_piper() -> bool {
 /// unloads Piper after 10 minutes of stable network.
 ///
 /// This runs forever (until the process exits). It checks every 60 seconds.
-pub fn start_network_monitor() {
+pub fn start_network_monitor(app: tauri::AppHandle) {
     std::thread::spawn(move || {
-        tracing::info!("[tts_net] network monitor started (60s interval)");
+        tracing::info!("[tts_net] network monitor started (30s while down / 60s while up)");
         loop {
-            std::thread::sleep(Duration::from_secs(60));
+            // P4 watchdog: while flagged down, actively re-probe so cloud
+            // restoration is detected WITHOUT waiting for the next utterance.
+            // The flip is silent — no speech interrupted; the next synthesis
+            // goes Edge automatically via tts_engine_for, and the hub pill
+            // updates live through the cloud-restored event.
+            if probe_due() {
+                let app_clone = app.clone();
+                let handle = tauri::async_runtime::handle();
+                let _ = handle.spawn(async move {
+                    use tauri::Emitter;
+                    if check_network_now().await && is_network_up() {
+                        let _ = app_clone.emit("voice:status", cloud_restored_payload());
+                        tracing::info!(
+                            "[tts_net] watchdog: cloud restored — next synthesis goes Edge"
+                        );
+                    }
+                });
+            }
 
             // Check if it's time to unload Piper
             if should_unload_piper() {
@@ -198,6 +245,14 @@ pub fn start_network_monitor() {
                 *recovered = None;
                 tracing::info!("[tts_net] Piper unloaded — network stable, ~80 MB RAM freed");
             }
+
+            // Sleep cadence follows the flag: aggressive while down (fast
+            // restore detection), relaxed while up (per-turn probes cover it).
+            std::thread::sleep(if is_network_up() {
+                Duration::from_secs(60)
+            } else {
+                Duration::from_secs(30)
+            });
         }
     });
 }
@@ -217,6 +272,30 @@ mod tests {
         mark_piper_unloaded();
         *NETWORK_RECOVERED_AT.lock().unwrap() = None;
         *LAST_NETWORK_CHECK.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn test_probe_due_matrix() {
+        // Pure over injected clock — no statics touched, no lock needed.
+        let now = Instant::now();
+        let stale = now - Duration::from_secs(31);
+        let fresh = now - Duration::from_secs(5);
+        // Down + never checked → probe immediately.
+        assert!(probe_due_for(None, false, now));
+        // Down + stale check → probe.
+        assert!(probe_due_for(Some(stale), false, now));
+        // Down + fresh check → wait (throttle).
+        assert!(!probe_due_for(Some(fresh), false, now));
+        // Up → never (per-turn checks + failure paths own down-transitions).
+        assert!(!probe_due_for(None, true, now));
+        assert!(!probe_due_for(Some(stale), true, now));
+    }
+
+    #[test]
+    fn test_cloud_restored_payload_shape() {
+        // The hub validator must accept exactly this shape.
+        let v = cloud_restored_payload();
+        assert_eq!(v["status"], "cloud-restored");
     }
 
     #[test]

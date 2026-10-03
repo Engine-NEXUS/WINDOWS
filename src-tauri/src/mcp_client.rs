@@ -374,7 +374,11 @@ async fn call_tool_inner(
     let resp = match req_builder.send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!("mcp: {} request failed: {}", server_name, e);
+            if tool == "pairing_status" || (server == McpServer::WhatsApp && e.is_connect()) {
+                tracing::debug!("mcp: {} probe unavailable (bridge offline): {}", server_name, e);
+            } else {
+                tracing::warn!("mcp: {} request failed: {}", server_name, e);
+            }
             return McpCallResult {
                 ok: false,
                 data: serde_json::Value::Null,

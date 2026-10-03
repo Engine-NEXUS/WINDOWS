@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-cap",
-  "description": "Capabilities for the NEXUS app (main + setup windows)",
-  "windows": ["main", "setup", "loading", "loading-indicator"],
+  "description": "Capabilities for the NEXUS app (main + setup + settings windows)",
+  "windows": ["main", "setup", "settings", "loading", "loading-indicator"],
   "permissions": [
     "core:default",
     "core:window:allow-set-ignore-cursor-events",

@@ -71,7 +71,9 @@ pub async fn parse_via_nlu(transcript: &str) -> Option<ParseResult> {
     }
 
     // Convert NLU response to ParsedIntent
-    let intent = nlu_to_parsed_intent(&nlu.intent, &nlu.slots)?;
+    let Some(intent) = nlu_to_parsed_intent(&nlu.intent, &nlu.slots, transcript) else {
+        return None;
+    };
 
     Some(ParseResult {
         intent,
@@ -89,8 +91,20 @@ fn repo_slot(slots: &serde_json::Value) -> String {
 }
 
 /// Convert NLU server response to ParsedIntent.
-/// Handles all 46 intent labels (ParsedIntent + GitHubCommand variants).
-pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<ParsedIntent> {    match intent {
+/// Handles all intent labels (ParsedIntent + GitHubCommand variants).
+/// `raw` is the original transcript — used for whole-text prompt slots
+/// (screen_analysis) where the NLU does no slot extraction.
+pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value, raw: &str) -> Option<ParsedIntent> {
+    match intent {
+        // ─── Feature 86: spatial screen analysis ───
+        "screen_analysis" => {
+            // The whole transcript IS the prompt (no slot extraction).
+            Some(ParsedIntent::NluResult {
+                intent: "screen_analysis".to_string(),
+                slots: serde_json::json!({ "prompt": raw.trim() }),
+                confidence: 1.0,
+            })
+        }
         // ─── Local commands ───
         "open_app" => {
             let target = slots.get("app_name").and_then(|v| v.as_str()).unwrap_or("");
@@ -456,23 +470,5 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
 
         // unknown or unrecognized
         _ => None,
-    }
-}
-
-/// Check if the NLU server is running.
-#[allow(dead_code)]
-pub async fn is_nlu_available() -> bool {
-    let url = format!("http://127.0.0.1:{}/health", NLU_PORT);
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_millis(200))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-
-    match client.get(&url).send().await {
-        Ok(resp) => resp.status().is_success(),
-        Err(_) => false,
     }
 }

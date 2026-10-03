@@ -27,10 +27,6 @@ export function setSidecarBaseUrl(url: string): void {
   workerBaseUrl = url.replace(/\/+$/, "");
 }
 
-export function getSidecarBaseUrl(): string {
-  return workerBaseUrl;
-}
-
 // ---- PKCE utilities ----
 
 /** Generate a cryptographically random PKCE code verifier (43-128 chars). */
@@ -255,40 +251,8 @@ async function handleOAuthRedirect(rawUrl: string): Promise<void> {
 }
 
 // ---- API key management ----
-
-/** Store an API key for a third-party service (Claude, Devin, etc.). */
-export async function addApiKey(userId: string, provider: string, apiKey: string): Promise<void> {
-  if (!workerBaseUrl) throw new Error("Server URL not configured");
-  const resp = await fetch(`${workerBaseUrl}/apikeys/add`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: userId, provider, api_key: apiKey }),
-  });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    throw new Error(err.error || `Failed to store API key (${resp.status})`);
-  }
-}
-
-/** Remove a stored API key. */
-export async function removeApiKey(userId: string, provider: string): Promise<void> {
-  if (!workerBaseUrl) throw new Error("Server URL not configured");
-  const resp = await fetch(`${workerBaseUrl}/apikeys/remove`, {
-    method: "DELETE",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: userId, provider }),
-  });
-  if (!resp.ok) throw new Error(`Failed to remove API key (${resp.status})`);
-}
-
-/** List which API key providers are stored (does NOT return the keys). */
-export async function listApiKeys(userId: string): Promise<string[]> {
-  if (!workerBaseUrl) return [];
-  const resp = await fetch(`${workerBaseUrl}/apikeys/list?user_id=${encodeURIComponent(userId)}`);
-  if (!resp.ok) return [];
-  const data = await resp.json();
-  return data.providers || [];
-}
+// NOTE: addApiKey / removeApiKey / listApiKeys were deleted (audit M5) —
+// zero callers. The Worker /apikeys/* routes they hit are still live.
 
 // ---- OAuth status ----
 
@@ -317,8 +281,4 @@ export async function disconnectOAuth(userId: string, provider: string): Promise
   });
   if (!resp.ok) throw new Error(`Failed to disconnect (${resp.status})`);
 }
-
-/** Open a URL in the system browser. */
-export async function openInBrowser(url: string): Promise<void> {
-  await open(url);
-}
+// NOTE: openInBrowser was deleted (audit M5) — zero callers.

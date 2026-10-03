@@ -49,6 +49,8 @@ export type Intent =
   | { action: "screen_click"; ordinal: number }
   | { action: "screen_read"; ordinal: number }
   | { action: "browser_tab"; index: number }
+  | { action: "browser_new_tab" }
+  | { action: "browser_close_tab"; index?: number }
   | { action: "greeting"; reply: string }
   | { action: "nlu_result"; intent: string; slots: unknown; confidence: number }
   | { action: "unknown"; raw: string };
@@ -596,6 +598,35 @@ export function parseIntent(transcript: string): Intent {
   //          "fire up chrome", "bring up notepad", "show calculator"
   // All "open" commands go through the 3-tier resolution in Rust:
   //   running → installed → browser fallback → not found
+
+  // --- "new tab" guard — MUST precede the open catch-all: "open a new tab"
+  // would otherwise become open_app{target:"a new tab"} and Windows-search
+  // for it (Rust has the real Ctrl+T path).
+  const newTabMatch = text.match(
+    /^(?:(?:can|could|would)\s+you\s+|please\s+|just\s+)?(?:open|create|make|start)\s+(?:a\s+|the\s+)?(?:new\s+)?tab$/i,
+  ) || /^(?:a\s+)?new\s+tab$/i.test(text) || /^open\s+(?:a\s+|the\s+)?tab$/i.test(text);
+  if (newTabMatch) {
+    return { action: "browser_new_tab" };
+  }
+
+  // --- "close/delete (this/the/Nth) tab" guard — MUST precede the close
+  // catch-all: "close tab 5" would otherwise taskkill an app named "tab 5".
+  const closeTabMatch = text.match(
+    /^(?:close|delete)\s+(?:(?:this|the|current|active)\s+)?tab$/i,
+  );
+  if (closeTabMatch) {
+    return { action: "browser_close_tab" };
+  }
+  const closeTabNumMatch = text.match(
+    /^(?:close|delete)\s+(?:(?:this|the|current|active)\s+)?tab\s+(\d+)$/i,
+  );
+  if (closeTabNumMatch) {
+    const n = parseInt(closeTabNumMatch[1], 10);
+    if (n >= 1 && n <= 9) {
+      return { action: "browser_close_tab", index: n };
+    }
+  }
+
   const openMatch = text.match(
     /^(?:open|launch|start|run|fire\s+up|bring\s+up|show|pull\s+up|go\s+to|visit|browse\s+to|navigate\s+to)\s+(.+)$/i,
   );

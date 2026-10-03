@@ -14,8 +14,10 @@ import { resolve } from "path";
 //   main      index.html    ->  main
 //   setup     setup.html    ->  setup
 //   settings  settings.html ->  settings
-//   sidebar   sidebar.html  ->  sidebar
+//   sidebar   sidebar.html  ->  sidebar  (unified: Assistant + Command Hub
+//                            + Architect + PR List views in one window)
 //   loading   loading.html  ->  loading
+//   stage     stage.html    ->  stage   (fullscreen single-stage shell)
 //
 // Silero VAD files (model + worklet) live in public/ so Vite serves them
 // as-is without any transformation. ONNX WASM runtime is loaded from CDN
@@ -42,10 +44,9 @@ export default defineConfig({
         setup: resolve(__dirname, "setup.html"),
         settings: resolve(__dirname, "settings.html"),
         sidebar: resolve(__dirname, "sidebar.html"),
-        architect: resolve(__dirname, "architect.html"),
         loading: resolve(__dirname, "loading.html"),
-        prList: resolve(__dirname, "pr-list.html"),
-        settingsSidebar: resolve(__dirname, "settings-sidebar.html"),
+        stage: resolve(__dirname, "stage.html"),
+        companionHud: resolve(__dirname, "companion-hud.html"),
       },
     },
   },

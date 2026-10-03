@@ -24,6 +24,11 @@ server/nlu/data/downloads/
 # Used as reference only — never commit, never ship.
 reference_startmenu_themes/
 
+# Clone staging for agent-subsystem integration (doc 79 plan).
+# Shallow clones of mcp-agent, agent-memory, Memento, agent-workflow-mcp.
+# Extract allowlisted files only, then delete. Never commit, never ship.
+.staging/
+
 # Brain debug output
 brain_stdout.txt
 brain_stderr.txt
@@ -149,6 +154,9 @@ scripts/collect_wake_samples.py
 # Kaggle training output (machine-specific)
 kaggle_nexus_v2/
 
+# Ad-hoc local wake-word test recordings (machine-specific, not source)
+/wake_test_recordings/
+
 # Backup model files
 src-tauri/resources/oww/*.backup
 
@@ -161,6 +169,11 @@ src-tauri/src/test_wda.rs
 server/nlu/model/best_model.pt
 server/nlu/model/*.pt
 server/nlu/model/*.ckpt
+# NLU dev/training binaries (regenerable via server/nlu/train.py; the canonical
+# production copy lives in src-tauri/resources/server/nlu/model/ and is synced
+# by syncNluModel() on every build — see docs/cleanup-plan.md Phase 4).
+server/nlu/model/nexus_nlu.onnx
+server/nlu/model/nexus_nlu.onnx.data
 # Phase 3 candidate experiment artifacts (never promoted to production automatically).
 server/nlu/model/candidate/
 server/nlu/data/candidate_dataset.json

@@ -287,29 +287,29 @@ function installLinux() {
 
 // ─── Commands ────────────────────────────────────────────────────────────────
 
-/// Verify faster-whisper Python package is installed.
-/// The STT server (server/stt_server.py) uses faster-whisper tiny.en
-/// which auto-downloads the model from HuggingFace on first transcription.
-function checkFasterWhisper() {
-  const result = spawnSync(IS_WIN ? "python" : "python3", ["-c", "import faster_whisper; print('ok')"], {
+/// Verify the Moonshine STT Python package is installed.
+/// The STT server (server/stt_server.py) uses Moonshine Streaming
+/// (ONNX Runtime; auto-downloads the model on first transcription).
+function checkMoonshine() {
+  const result = spawnSync(IS_WIN ? "python" : "python3", ["-c", "import moonshine_voice; print('ok')"], {
     stdio: "pipe",
     encoding: "utf-8",
     shell: IS_WIN,
   });
 
   if (result.status === 0 && result.stdout?.trim() === "ok") {
-    ok("faster-whisper installed (STT server ready)");
+    ok("moonshine-voice installed (STT server ready)");
   } else {
-    warn("faster-whisper not installed — installing now...");
+    warn("moonshine-voice not installed — installing now...");
     try {
-      execSync(`${IS_WIN ? "python" : "python3"} -m pip install faster-whisper fastapi uvicorn python-multipart`, {
+      execSync(`${IS_WIN ? "python" : "python3"} -m pip install moonshine-voice fastapi uvicorn python-multipart`, {
         stdio: "inherit",
         encoding: "utf-8",
         shell: IS_WIN,
       });
-      ok("faster-whisper installed successfully");
+      ok("moonshine-voice installed successfully");
     } catch {
-      warn("Failed to install faster-whisper — STT will not work. Run: pip install faster-whisper fastapi uvicorn python-multipart");
+      warn("Failed to install moonshine-voice — STT will not work. Run: pip install moonshine-voice fastapi uvicorn python-multipart");
     }
   }
 }
@@ -371,8 +371,8 @@ function cmdSetup() {
     warn("NLU model not found — NLU server will fail. Run: cd server/nlu && python train.py && python export_onnx.py");
   }
 
-  // 7. Verify faster-whisper is installed (STT server dependency)
-  checkFasterWhisper();
+  // 7. Verify moonshine-voice is installed (STT server dependency)
+  checkMoonshine();
 
   // 8. Build
   info("Building NEXUS...");
@@ -542,6 +542,27 @@ function syncNluModel() {
   }
 }
 
+/// Sync the server entrypoints (nlu_server.py, stt_server.py) from server/
+/// into src-tauri/resources/server/. The installer and production lazy_* loaders
+/// run the resources/ copies — without this sync they silently shipped stale
+/// pre-Moonshine/pre-OTA code (audit C3). Called before every build alongside
+/// syncNluModel().
+function syncServerScripts() {
+  const files = ["nlu_server.py", "stt_server.py"];
+  let synced = 0;
+  for (const f of files) {
+    const src = join(ROOT, "server", f);
+    const dst = join(ROOT, "src-tauri", "resources", "server", f);
+    if (existsSync(src)) {
+      copyFileSync(src, dst);
+      synced++;
+    }
+  }
+  if (synced > 0) {
+    ok(`Server scripts synced to resources (${synced} file(s))`);
+  }
+}
+
 function cmdBuild() {
   // Kill any running instance first — cargo can't replace a running binary
   killRunningNexus();
@@ -550,6 +571,9 @@ function cmdBuild() {
   // This ensures the installer always bundles the latest trained model.
   // The NLU server reads from resources/ in production (no server/ dir in installed builds).
   syncNluModel();
+  // Also sync the server entrypoints so production never ships stale
+  // nlu_server.py / stt_server.py copies (audit: OTA + Moonshine never reached prod).
+  syncServerScripts();
 
   info("Building frontend (Vite)...");
   run("npm", ["--prefix", "frontend", "install"], { allowFail: true, stdio: "ignore" });
@@ -608,6 +632,9 @@ function cmdRun() {
       if (process.argv.includes("--build") || process.argv.includes("-Build")) {
         psArgs.push("-Build");
       }
+      if (process.argv.includes("--verbose") || process.argv.includes("-Verbose") || process.argv.includes("-v") || process.argv.includes("--watch-debug")) {
+        psArgs.push("-VerboseLogs");
+      }
       run("pwsh", psArgs, { shell: false });
       return;
     }
@@ -661,6 +688,29 @@ function cmdCheck() {
 
   // Wake word model
   check("Wake word ONNX model", () => existsSync(join(ROOT, "src-tauri", "resources", "oww", "nexus.onnx")));
+
+  // MCP bridges (P3.3): live probe of the local bridges + hosted servers
+  // via the existing read-only checker. Bridge DOWN lines carry the fix
+  // command. Doesn't fail the tool check (bridges are optional) —
+  // reported separately below.
+  if (hasPython()) {
+    const probe = spawnSync(pythonCmd(), [join(ROOT, "scripts", "mcp_check.py")], {
+      encoding: "utf-8",
+      timeout: 60000,
+    });
+    const out = (probe.stdout || "").trim();
+    if (out) {
+      console.log(out);
+      const down = (out.match(/DOWN/g) || []).length;
+      if (down > 0) {
+        console.log(`${C.yellow}  ${down} bridge/server(s) down — fix hints above. Optional: run 'nexus mcp check' for the full end-to-end probe.${C.reset}`);
+      }
+    } else {
+      warn("MCP bridge probe produced no output (run: nexus mcp check)");
+    }
+  } else {
+    warn("Python missing — skipped MCP bridge probe (run: nexus mcp check)");
+  }
 
   console.log(`\n${C.bold}${pass > 0 && fail === 0 ? C.green : C.yellow}${pass} passed, ${fail} failed${C.reset}\n`);
   if (fail > 0) process.exit(1);
@@ -831,6 +881,26 @@ function cmdMcpCheck() {
   run(py, [checkScript], { cwd: ROOT });
 }
 
+/// TEMPORARY ghost voice-entry tracer (delete after the fix lands).
+/// Shows every pipeline stage and pinpoints the missing link — statically
+/// (is the code there?) and from a real run log (did each stage fire?).
+/// Read-only: touches no app code, no settings, no devices.
+/// Contributors run: nexus trace-ghost [--log run.log]
+function cmdTraceGhost() {
+  const traceScript = join(ROOT, "scripts", "trace_ghost.py");
+  if (!existsSync(traceScript)) {
+    err("Trace script not found: " + traceScript);
+    process.exit(1);
+  }
+  const py = pythonCmd();
+  if (!py) {
+    err("Python not found. Install Python 3.12+ and add it to PATH.");
+    process.exit(1);
+  }
+  // Pass through --log <file> (and nothing else executes anything).
+  run(py, [traceScript, ...process.argv.slice(3)], { cwd: ROOT });
+}
+
 /// Inspect training dataset category coverage, voice sample health, and targeted recommendations.
 /// Contributors run: nexus stats
 function cmdStats() {
@@ -896,6 +966,18 @@ function cmdWake() {
     return;
   }
 
+  if (sub === "compare" || (sub === "test" && process.argv.slice(4).includes("--compare"))) {
+    const compareScript = join(ROOT, "scripts", "test_wake_compare.py");
+    if (!existsSync(compareScript)) {
+      err("Compare script not found: " + compareScript);
+      process.exit(1);
+    }
+    const cleanArgs = process.argv.slice(4).filter(a => a !== "--compare");
+    info("Starting simultaneous wake word & live ASR comparison...");
+    run(py, [compareScript, ...cleanArgs], { cwd: ROOT });
+    return;
+  }
+
   if (sub === "test" || sub === "live" || sub === "benchmark" || sub === "devices") {
     const testScript = join(ROOT, "scripts", "test_wake_live.py");
     if (!existsSync(testScript)) {
@@ -922,6 +1004,18 @@ function cmdWake() {
     }
     info("Starting wake word neural classifier training...");
     run(py, [trainScript], { cwd: ROOT });
+    return;
+  }
+
+  if (sub === "synth" || sub === "synthesize") {
+    const synthScript = join(ROOT, "scripts", "synthesize_wake_accents.py");
+    if (!existsSync(synthScript)) {
+      err("Synth script not found: " + synthScript);
+      process.exit(1);
+    }
+    const synthArgs = process.argv.slice(4);
+    info("Starting multi-accent synthetic wake word generator (Alexa/Google standard)...");
+    run(py, [synthScript, ...synthArgs], { cwd: ROOT });
     return;
   }
 
@@ -956,9 +1050,11 @@ function cmdWake() {
     info("Usage:");
     info("  nexus wake probe                 (probe microphone hardware & calibrate acoustic profile)");
     info("  nexus wake test                  (real-time live microphone listening test)");
+    info("  nexus wake test --compare        (simultaneous wake test & live speech transcription comparison)");
     info("  nexus wake test --batch          (benchmark model against all 3,000 dataset WAVs)");
     info("  nexus wake test --devices        (benchmark model across 5 hardware microphone profiles)");
     info("  nexus wake train                 (train device-invariant wake neural model)");
+    info("  nexus wake synth                 (synthesize multi-accent training samples via neural TTS)");
     info("  nexus wake ingest                (ingest & screen open-source noise corpora)");
     info("  nexus wake record 300            (record 300 positive wake words)");
     info("  nexus wake record negative 100   (record 100 negative soundalikes)");
@@ -1055,11 +1151,17 @@ ${C.cyan}Environment:${C.reset}
   NEXUS_STT_PORT     STT port override (default: 39217)
 
 ${C.cyan}Notes:${C.reset}
-  • STT uses faster-whisper tiny.en (lazy-started Python sidecar on port 39217)
+  • STT uses Moonshine Streaming local fallback + Groq Whisper cloud primary (lazy Python sidecar on port 39217)
   • NLU server is lazy-started Python (BERT-Mini, model committed in repo)
-  • TTS uses Fish Audio (set API key in Settings) with Web Speech fallback
+  • TTS uses edge-tts (cloud) with local Piper fallback
   • Wake word uses openWakeWord (ONNX, pure Rust, model in repo)
 `);
+}
+
+function cmdTestWatch() {
+  const script = join(ROOT, "scripts", "test_watch_live.ps1");
+  const args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, ...process.argv.slice(3)];
+  run("pwsh", args, { shell: false });
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -1073,6 +1175,7 @@ switch (command) {
   case "dev":     cmdDev(); break;
   case "start":
   case "run":     cmdRun(); break;
+  case "test-watch": cmdTestWatch(); break;
   case "check":   cmdCheck(); break;
   case "clean":   cmdClean(); break;
   case "worker":  cmdWorker(); break;
@@ -1080,6 +1183,8 @@ switch (command) {
   case "audit":   cmdAudit(); break;
   case "collect": cmdCollect(); break;
   case "wake":    cmdWake(); break;
+  // TEMPORARY: ghost voice-entry tracer (see cmdTraceGhost).
+  case "trace-ghost": cmdTraceGhost(); break;
   case "stats":
   case "status":
   case "coverage":

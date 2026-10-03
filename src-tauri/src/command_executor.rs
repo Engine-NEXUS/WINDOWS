@@ -702,6 +702,24 @@ fn browser_key(keys: &str, label: &str) -> Result<CommandResult, String> {
     })
 }
 
+/// Voice-driven browser hotkeys (orchestrator path). The deterministic
+/// parser produced `browser_new_tab` at 1.0 confidence but it routed to
+/// the Worker as chat while these sat unused — now reachable.
+pub fn browser_new_tab_cmd() -> Result<CommandResult, String> {
+    browser_key("ctrl+t", "new tab")
+}
+
+/// Close a browser tab (Ctrl+W). An index switches to that tab first
+/// (Ctrl+N) so "delete tab 5" closes the 5th, not the active one.
+pub fn browser_close_tab_cmd(index: Option<u32>) -> Result<CommandResult, String> {
+    if let Some(n) = index {
+        // Switch first; if the switch fails, do NOT close the active tab
+        // (it would close the wrong one).
+        crate::screen::switch_browser_tab(n)?;
+    }
+    browser_key("ctrl+w", "tab closed")
+}
+
 // ─── App Resolution (focus-first → launch-new → URL fallback) ──────────────
 //
 // Priority order (what the user asked for):
@@ -710,8 +728,7 @@ fn browser_key(keys: &str, label: &str) -> Result<CommandResult, String> {
 //   3. If app is a known web service → OPEN as URL in browser
 //   4. If nothing found → "Didn't find that, sir."
 
-fn resolve_and_open_app(target: &str) -> Result<CommandResult, String> {
-    let start = std::time::Instant::now();
+pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String> {    let start = std::time::Instant::now();
     tracing::info!("resolving app: {}", target);
 
     // Registry lookup (O(1) HashMap + fuzzy match, ~0.1ms)

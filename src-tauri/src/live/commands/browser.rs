@@ -57,6 +57,14 @@ pub fn search(query: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Focus the address bar / search bar in the current browser tab (Ctrl+L).
+pub fn focus_search_bar() -> Result<(), String> {
+    tracing::info!("live: browser focus search bar");
+    keyboard::press_hotkey(&["ctrl", "l"])?;
+    thread::sleep(Duration::from_millis(200));
+    Ok(())
+}
+
 /// Open a specific website by name (e.g., "wikipedia", "github").
 /// Maps common site names to their URLs.
 pub fn open_site(site: &str) -> Result<(), String> {

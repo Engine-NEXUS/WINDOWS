@@ -141,9 +141,9 @@ async function speakWebSpeech(text: string, speed: number = 1.15): Promise<void>
     utterance.rate = speed;
     utterance.pitch = 1.0;
     utterance.volume = 1.0;
-    // Try to use a male voice for "sir" persona
+    // Try to use a female voice to match Ava
     const voices = window.speechSynthesis.getVoices();
-    const preferred = voices.find(v => v.name.includes("David") || v.name.includes("Mark") || v.name.includes("George"))
+    const preferred = voices.find(v => v.name.includes("Ava") || v.name.includes("Zira") || v.name.includes("Jenny") || v.name.includes("Natural"))
       || voices.find(v => v.lang.startsWith("en"));
     if (preferred) utterance.voice = preferred;
     utterance.onend = () => resolve();
@@ -171,6 +171,18 @@ export async function speak(text: string, onEnd?: () => void): Promise<void> {
     console.log("[TTS] Suppressed — meeting mode active");
     onEnd?.();
     return;
+  }
+
+  // Particle-generated text (Feature 88): short spoken lines form from the
+  // orb's OWN particles (VoiceOrb listens in every window). Long replies,
+  // multi-line text, and meeting-muted speech never trigger it.
+  if (text.trim().length <= 22 && !text.includes("\n")) {
+    try {
+      const { emit } = await import("@tauri-apps/api/event");
+      await emit("orb:show_text", { text: text.trim() });
+    } catch {
+      // Outside Tauri — no-op
+    }
   }
 
   // Stop any currently-playing TTS before starting new playback.
@@ -244,7 +256,7 @@ export function splitForSpeech(text: string): string[] {
 /**
  * Speak a pre-cached TTS phrase instantly from memory.
  * Falls back to `speak` if the phrase is not cached.
- * Emits `tts:audio-started` event before playback starts.
+ * Emits `tts-started` (heard by Rust) before playback starts.
  */
 export async function speakCached(phrase: string, onEnd?: () => void): Promise<void> {
   const meeting = await isMeetingActive();
@@ -252,6 +264,17 @@ export async function speakCached(phrase: string, onEnd?: () => void): Promise<v
     console.log("[TTS] Suppressed — meeting mode active");
     onEnd?.();
     return;
+  }
+
+  // Particle-generated text (Feature 88) — same gate as speak(): acks like
+  // "Ok sir." flow through here, so they form in particles too.
+  if (phrase.trim().length <= 22 && !phrase.includes("\n")) {
+    try {
+      const { emit } = await import("@tauri-apps/api/event");
+      await emit("orb:show_text", { text: phrase.trim() });
+    } catch {
+      // Outside Tauri — no-op
+    }
   }
 
   // Stop any currently-playing TTS before starting new playback.
@@ -290,8 +313,4 @@ export function stopTts(): void {
   }
   void emitTtsEvent("tts-ended");
   useAssistant.getState().setSpeakSeq(null);
-}
-
-export function ttsAvailable(): boolean {
-  return true;
 }

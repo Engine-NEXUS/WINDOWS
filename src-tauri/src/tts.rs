@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tauri::{Emitter, State};
+use tauri::State;
 
 /// Global Piper engine reference — set at TtsState creation.
 /// Allows the network monitor to unload Piper without accessing TtsState.
@@ -75,6 +75,10 @@ const CACHED_PHRASES: &[&str] = &[
     "Didn't catch that sir",
     "Here is the analysis, sir",
     "Ok sir",
+    "Ready to search, sir",
+    "Stopped typing, sir",
+    "Opening Command Hub, sir",
+    "Annotation ready, sir",
 ];
 
 /// Pre-synthesize cached phrases using edge-tts at boot.
@@ -168,6 +172,8 @@ pub async fn speak_text(
     let edge_voice = crate::commands::read_edge_tts_voice(&app);
     let voice_id = voice.unwrap_or_else(|| edge_voice.clone());
     let tts_volume_pct = read_tts_volume(&app);
+    // B3: emotional prosody (settings override or auto heuristics).
+    let emotion = resolve_emotion(&app, &text);
 
     // Fast path: exact-match cache (<5ms, no network, no synthesis).
     // Acks like "Ok sir." were pre-generated at boot — replay them instead
@@ -177,13 +183,57 @@ pub async fn speak_text(
         tracing::info!("tts: cache hit for '{}'", text);
         (hit.samples, hit.sample_rate)
     } else {
-        // Try to synthesize using the 2-tier fallback chain
-        match synthesize_with_fallback(&text, &voice_id, &state).await {
-            Ok(result) => result,
-            Err(e) => {
-                tracing::error!("tts: all TTS engines failed: {}", e);
-                meeting.set_tts_playing(false);
-                return Err(e);
+        // B2 streaming: long multi-sentence replies play chunk 0
+        // immediately while the rest synthesizes. Short texts keep the
+        // legacy single-shot path (zero behavior change, Piper fallback).
+        // Piper voices also stay single-shot: local ~40ms synthesis needs
+        // no streaming, and chunked edge-tts would mix voices mid-reply.
+        let sentences = split_sentences(&text);
+        let use_streaming = text.chars().count() >= STREAM_MIN_CHARS
+            && sentences.len() > 1
+            && crate::tts_piper::voice_stem(&voice_id).is_none();
+        if use_streaming {
+            // Set volume BEFORE playback (same as legacy path).
+            let stream_volume_changed = if tts_volume_pct > 0 {
+                let target = tts_volume_pct as f32 / 100.0;
+                crate::volume::save_and_set_volume(target)
+            } else {
+                false
+            };
+            match speak_streaming(sentences, &voice_id, &state, my_generation, emotion).await {
+                Ok(()) => {
+                    if stream_volume_changed {
+                        crate::volume::restore_volume();
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    meeting.set_tts_playing(false);
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!("tts: streaming failed ({}), falling back to single-shot", e);
+                    if stream_volume_changed {
+                        crate::volume::restore_volume();
+                    }
+                    // Fall through to legacy single-shot synthesis below.
+                    match synthesize_with_fallback(&text, &voice_id, &state, emotion).await {
+                        Ok(result) => result,
+                        Err(e) => {
+                            tracing::error!("tts: all TTS engines failed: {}", e);
+                            meeting.set_tts_playing(false);
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+        } else {
+            // Try to synthesize using the 2-tier fallback chain
+            match synthesize_with_fallback(&text, &voice_id, &state, emotion).await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!("tts: all TTS engines failed: {}", e);
+                    meeting.set_tts_playing(false);
+                    return Err(e);
+                }
             }
         }
     };
@@ -206,9 +256,6 @@ pub async fn speak_text(
     } else {
         false
     };
-
-    // Emit audio-started event
-    let _ = app.emit("tts:audio-started", &text);
 
     // Play audio
     let play_result = play_audio(audio, sample_rate, my_generation).await;
@@ -233,7 +280,7 @@ pub async fn preview_voice(
     voice_id: String,
     text: Option<String>,
     state: State<'_, TtsState>,
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
 ) -> Result<(), String> {
     let demo_text = text.unwrap_or_else(|| {
         if voice_id.starts_with("en-US-") {
@@ -253,7 +300,7 @@ pub async fn preview_voice(
 
     let my_generation = TTS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
-    let (audio, sample_rate) = match synthesize_with_fallback(&demo_text, &voice_id, &state).await {
+    let (audio, sample_rate) = match synthesize_with_fallback(&demo_text, &voice_id, &state, crate::tts_edge::TtsEmotion::Neutral).await {
         Ok(result) => result,
         Err(e) => {
             tracing::error!("tts: voice preview failed for '{}': {}", voice_id, e);
@@ -265,8 +312,159 @@ pub async fn preview_voice(
         return Ok(());
     }
 
-    let _ = app.emit("tts:audio-started", &demo_text);
     play_audio(audio, sample_rate, my_generation).await
+}
+
+/// Feature 83 — equip result returned synchronously by set_voice_preference
+/// so the hub can update the card without waiting for the status event.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceEquipResult {
+    pub voice_key: String,
+    pub cloud_id: String,
+    pub sync_state: crate::voice_catalog::VoiceSyncState,
+}
+
+/// IPC: Equip an iconic voice persona (Feature 83).
+/// Validates the key against the voice catalog, writes selected_voice +
+/// edge_tts_voice + offline_voice_model to settings.json (instant cloud
+/// switch — next utterance speaks in the new voice), kicks a background
+/// Fast-ACK cache re-synthesis, and emits `voice:status` (ready when the
+/// local twin is already in the single slot, cloud-only otherwise — the
+/// P3 swap worker fills the download in).
+#[tauri::command]
+pub async fn set_voice_preference(
+    voice_key: String,
+    state: State<'_, TtsState>,
+    app: tauri::AppHandle,
+) -> Result<VoiceEquipResult, String> {
+    use tauri::{Emitter, Manager};
+    let persona = crate::voice_catalog::find_by_key(&voice_key)
+        .ok_or_else(|| format!("Unknown voice '{voice_key}'"))?;
+
+    // Persist the selection (same write path as save_settings, identity-safe:
+    // only the three voice fields change).
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("settings.json");
+    let mut settings: crate::commands::NexusSettings = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default();
+    settings.selected_voice = persona.key.to_string();
+    settings.edge_tts_voice = persona.cloud_id.to_string();
+    settings.offline_voice_model = persona.local_model.to_string();
+    let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    tracing::info!(
+        "tts: voice equipped '{}' (cloud={}, twin={})",
+        persona.key,
+        persona.cloud_id,
+        persona.local_model
+    );
+
+    // Fast-ACK re-synthesis in the background (new voice, ~350ms).
+    {
+        let cache = state.cache.clone();
+        let cloud_id = persona.cloud_id.to_string();
+        tokio::spawn(async move {
+            pregenerate_cache(&cache, &cloud_id).await;
+        });
+    }
+
+    // Sync state of the local twin. Twin present → ready now; missing →
+    // emit downloading(0) and spawn the P3 swap worker (progress + final
+    // ready/error events land as the download proceeds).
+    let sync_state = crate::voice_catalog::sync_state_for(persona.key);
+    if sync_state == crate::voice_catalog::VoiceSyncState::Ready {
+        let _ = app.emit(
+            "voice:status",
+            serde_json::json!({ "status": sync_state, "voice_key": persona.key }),
+        );
+    } else {
+        let engine = state.piper_engine.clone();
+        let app_clone = app.clone();
+        let key = persona.key.to_string();
+        tokio::spawn(async move {
+            crate::tts_swap::run_swap(app_clone, key, engine).await;
+        });
+    }
+
+    Ok(VoiceEquipResult {
+        voice_key: persona.key.to_string(),
+        cloud_id: persona.cloud_id.to_string(),
+        sync_state,
+    })
+}
+
+#[cfg(test)]
+mod voice_preference_tests {
+    use super::*;
+
+    #[test]
+    fn test_equip_result_serializes_camel_case() {
+        let r = VoiceEquipResult {
+            voice_key: "jarvis".into(),
+            cloud_id: "en-GB-RyanNeural".into(),
+            sync_state: crate::voice_catalog::VoiceSyncState::Ready,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["voiceKey"], "jarvis");
+        assert_eq!(v["cloudId"], "en-GB-RyanNeural");
+        assert_eq!(v["syncState"], "ready");
+    }
+
+    #[test]
+    fn test_sync_state_serializes_cloud_only() {
+        let v = serde_json::to_value(crate::voice_catalog::VoiceSyncState::CloudOnly).unwrap();
+        assert_eq!(v, "cloud_only");
+    }
+}
+
+/// IPC: List the iconic voice catalog for the hub grid (single source of
+/// truth lives in voice_catalog.rs — the frontend never hardcodes it).
+#[tauri::command]
+pub fn list_voice_personas() -> Result<Vec<crate::voice_catalog::VoicePersona>, String> {
+    Ok(crate::voice_catalog::VOICE_CATALOG.to_vec())
+}
+
+/// IPC: Current synthesis transport for the hub header dot
+/// ("cloud" = next utterance goes Edge, "local" = next goes Piper).
+/// Reads the live network flag — no probe, no cost.
+#[tauri::command]
+pub fn get_voice_transport() -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({
+        "transport": if crate::tts_network::is_network_up() { "cloud" } else { "local" },
+    }))
+}
+
+/// IPC: Sync state of the currently selected persona's offline twin
+/// (hub reads this on mount for the card pill: ready vs cloud-only).
+/// Reports "downloading" truthfully while the swap worker runs.
+#[tauri::command]
+pub fn get_voice_status<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<serde_json::Value, String> {
+    let key = crate::commands::read_selected_voice(&app);
+    let persona = crate::voice_catalog::find_by_key(&key);
+    let downloading = crate::tts_swap::swap_target().as_deref() == Some(key.as_str());
+    let sync_state = if downloading {
+        "downloading"
+    } else {
+        match crate::voice_catalog::sync_state_for(&key) {
+            crate::voice_catalog::VoiceSyncState::Ready => "ready",
+            crate::voice_catalog::VoiceSyncState::CloudOnly => "cloud_only",
+        }
+    };
+    Ok(serde_json::json!({
+        "voice_key": key,
+        "cloud_id": persona.map(|p| p.cloud_id).unwrap_or(""),
+        "twin": persona.map(|p| p.local_model).unwrap_or(""),
+        "sync_state": sync_state,
+    }))
 }
 ///
 /// Falls back to `speak_text` if the phrase is not in the cache.
@@ -298,7 +496,7 @@ pub async fn speak_cached(
             // Cache miss — synthesize on demand
             tracing::info!("tts: cache miss for '{}', synthesizing on demand", text);
             let edge_voice = crate::commands::read_edge_tts_voice(&app);
-            match synthesize_with_fallback(&text, &edge_voice, &state).await {
+            match synthesize_with_fallback(&text, &edge_voice, &state, crate::tts_edge::TtsEmotion::Neutral).await {
                 Ok(result) => result,
                 Err(e) => {
                     tracing::error!("tts: synthesis failed for cached phrase: {}", e);
@@ -325,9 +523,6 @@ pub async fn speak_cached(
         false
     };
 
-    // Emit event
-    let _ = app.emit("tts:audio-started", &text);
-
     // Play
     let play_result = play_audio(audio, sample_rate, my_generation).await;
 
@@ -350,30 +545,36 @@ async fn synthesize_with_fallback(
     text: &str,
     voice: &str,
     state: &TtsState,
+    emotion: crate::tts_edge::TtsEmotion,
 ) -> Result<(Vec<f32>, u32), String> {
-    // If the voice is explicitly the local Piper voice, skip Edge TTS.
-    if voice == "piper-amy" {
-        tracing::info!("tts: using Piper directly (piper-amy voice selected)");
+    // Piper voices (local): `piper-amy` legacy + any `piper-<stem>`
+    // with model files present (bundled, cache, or user drop-in dir).
+    if let Some(stem) = crate::tts_piper::voice_stem(voice) {
+        tracing::info!("tts: using Piper voice '{stem}' (local)");
         crate::tts_network::mark_piper_loaded();
-        return crate::tts_piper::synthesize(&state.piper_engine, text).await;
+        return crate::tts_piper::synthesize_with_voice(&state.piper_engine, text, &stem).await;
     }
 
-    // Check network state — if network is down, skip Edge TTS entirely
-    // and go straight to Piper (saves ~1-2s of waiting for Edge to fail).
+    // Upfront engine policy (Main Center TTS director, doc 74 P3): explicit
+    // Piper voice handled above; network-down skips Edge entirely (saves
+    // ~1-2s of waiting for Edge to fail). Identical branches to before —
+    // the policy is now pinned + tested in `center::tts_engine_for`.
     //
     // NOTE: this is the CACHED flag only (maintained by the background
     // monitor + synthesis outcomes below). We used to run a live HTTPS
     // probe here on every call — it lied (reported down while Groq worked)
     // and added up to 5s before synthesis even started. The Edge attempt
     // itself, raced with a timeout, is the only honest connectivity check.
-    if !crate::tts_network::is_network_up() {
+    if crate::center::tts_engine_for(false, crate::tts_network::is_network_up())
+        == crate::center::TtsEngine::Piper
+    {
         tracing::info!("tts: network down (cached) — using Piper directly (skipping Edge TTS)");
     } else {
         // Tier 1: edge-tts (cloud, ~200ms, best quality, 0 MB RAM),
         // raced with a timeout so a hanging endpoint can't stall speech.
         match tokio::time::timeout(
             std::time::Duration::from_secs(8),
-            crate::tts_edge::synthesize_to_pcm(text, voice),
+            crate::tts_edge::synthesize_to_pcm_with_emotion(text, voice, emotion),
         )
         .await
         {
@@ -458,9 +659,47 @@ async fn play_audio(
     })
 }
 
+/// Read the TTS emotion setting from settings.json.
+/// Returns "auto" (default), "neutral", "cheerful", "calm", "sad",
+/// "urgent", or "whisper". "auto" picks per-text heuristics.
+fn read_tts_emotion_setting(app: &tauri::AppHandle) -> String {
+    use tauri::Manager;
+    let dir = match app.path().app_data_dir() {
+        Ok(d) => d,
+        Err(_) => return "auto".to_string(),
+    };
+    let path = dir.join("settings.json");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return "neutral".to_string(),
+    };
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+        if let Some(e) = json.get("ttsEmotion").and_then(|v| v.as_str()) {
+            return e.to_string();
+        }
+        if let Some(e) = json.get("tts_emotion").and_then(|v| v.as_str()) {
+            return e.to_string();
+        }
+    }
+    "neutral".to_string()
+}
+
+/// Resolve the effective emotion: explicit setting wins, defaults to Neutral (Ava Neutral).
+fn resolve_emotion(app: &tauri::AppHandle, text: &str) -> crate::tts_edge::TtsEmotion {
+    let setting = read_tts_emotion_setting(app);
+    if setting.eq_ignore_ascii_case("auto") {
+        return crate::tts_edge::pick_emotion(text);
+    }
+    if setting.is_empty() || setting.eq_ignore_ascii_case("neutral") {
+        return crate::tts_edge::TtsEmotion::Neutral;
+    }
+    crate::tts_edge::TtsEmotion::parse_label(&setting)
+}
+
 /// Read the TTS volume setting from settings.json.
 /// Returns 0-100. 0 means "disabled" (don't adjust system volume).
 fn read_tts_volume(app: &tauri::AppHandle) -> u8 {
+
     use tauri::Manager;
     let dir = match app.path().app_data_dir() {
         Ok(d) => d,
@@ -483,4 +722,217 @@ fn read_tts_volume(app: &tauri::AppHandle) -> u8 {
         }
     }
     75
+}
+
+/// Sentence-chunked streaming TTS (B2): split long replies into sentences,
+/// synthesize + play the first chunk immediately, synthesize the rest while
+/// it plays. First-audio latency ≈ one sentence instead of the full reply.
+///
+/// Short/single-sentence texts use the legacy single-shot path (zero
+/// behavior change for the common case).
+const STREAM_MIN_CHARS: usize = 150;
+
+/// Split text into sentence chunks (keeps delimiters). Pure + unit-tested.
+pub fn split_sentences(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut cur = String::new();
+    for ch in text.chars() {
+        cur.push(ch);
+        if matches!(ch, '.' | '!' | '?' | '\n') {
+            let s = cur.trim().to_string();
+            if !s.is_empty() {
+                out.push(s);
+            }
+            cur.clear();
+        }
+    }
+    let tail = cur.trim().to_string();
+    if !tail.is_empty() {
+        out.push(tail);
+    }
+    if out.is_empty() {
+        out.push(text.to_string());
+    }
+    out
+}
+
+/// Synthesize one chunk: per-sentence cache check, then the 2-tier fallback.
+async fn synthesize_chunk(
+    sentence: &str,
+    voice_id: &str,
+    state: &TtsState,
+    emotion: crate::tts_edge::TtsEmotion,
+) -> Result<(Vec<f32>, u32), String> {
+    if let Some(hit) = state.cache.lock().await.get(sentence).cloned() {
+        return Ok((hit.samples, hit.sample_rate));
+    }
+    synthesize_with_fallback(sentence, voice_id, state, emotion).await
+}
+
+/// Streaming playback: chunk 0 is already synthesized (plays immediately);
+/// remaining chunks are synthesized while earlier audio plays. Barge-in
+/// checked before each synthesis + append, and during the drain poll.
+async fn speak_streaming(
+    sentences: Vec<String>,
+    voice_id: &str,
+    state: &TtsState,
+    my_generation: usize,
+    emotion: crate::tts_edge::TtsEmotion,
+) -> Result<(), String> {
+    // Chunk 0 first — this defines first-audio latency.
+    if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
+        return Ok(());
+    }
+    let (first_audio, first_sr) = synthesize_chunk(&sentences[0], voice_id, state, emotion).await?;
+
+    let (stream_tx, stream_rx) =
+        std::sync::mpsc::channel::<Option<(Vec<f32>, u32)>>();
+    // Producer: synthesize remaining chunks while chunk 0 plays.
+    let rest: Vec<String> = sentences.into_iter().skip(1).collect();
+    let voice_owned = voice_id.to_string();
+    let state_ref = TtsStateRef {
+        cache: state.cache.clone(),
+    };
+    let gen = my_generation;
+    tokio::spawn(async move {
+        // Re-resolve Piper engine via the global (spawned task can't borrow state).
+        for s in rest {
+            if TTS_GENERATION.load(Ordering::SeqCst) > gen {
+                break;
+            }
+            let res = synthesize_chunk_owned(&s, &voice_owned, &state_ref, emotion).await;
+            match res {
+                Ok(pair) => {
+                    if stream_tx.send(Some(pair)).is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("tts: streaming chunk failed ({}), playing what we have", e);
+                    break;
+                }
+            }
+        }
+        let _ = stream_tx.send(None);
+    });
+
+    // Consumer: single rodio Sink, append chunks as they arrive.
+    let first = Some((first_audio, first_sr));
+    play_audio_streamed(first, stream_rx, my_generation).await
+}
+
+/// Minimal shared refs for the streaming producer task.
+struct TtsStateRef {
+    cache: Arc<Mutex<HashMap<String, CachedAudio>>>,
+}
+
+async fn synthesize_chunk_owned(
+    sentence: &str,
+    voice_id: &str,
+    state: &TtsStateRef,
+    emotion: crate::tts_edge::TtsEmotion,
+) -> Result<(Vec<f32>, u32), String> {
+    if let Some(hit) = state.cache.lock().await.get(sentence).cloned() {
+        return Ok((hit.samples, hit.sample_rate));
+    }
+    // Piper engine lives in TtsState (not Send-shareable here); the fallback
+    // chain needs it — route through edge-tts directly, Piper on failure
+    // is handled by the caller falling back to legacy path on chunk-0 error.
+    // For chunks 1+, edge-tts failure ends the stream gracefully (we play
+    // what we have) instead of blocking on Piper load.
+    let pcm = crate::tts_edge::synthesize_to_pcm_with_emotion(sentence, voice_id, emotion).await?;
+    Ok(pcm)
+}
+
+/// Play chunk 0 immediately, then append streamed chunks as they arrive.
+async fn play_audio_streamed(
+    first: Option<(Vec<f32>, u32)>,
+    rx: std::sync::mpsc::Receiver<Option<(Vec<f32>, u32)>>,
+    my_generation: usize,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        match OutputStream::try_default() {
+            Ok((_stream, handle)) => match Sink::try_new(&handle) {
+                Ok(sink) => {
+                    let mut first_sr = 24000;
+                    if let Some((audio, sr)) = first {
+                        first_sr = sr;
+                        sink.append(SamplesBuffer::new(1, sr, audio));
+                    }
+                    let _ = first_sr;
+                    // Drain the producer channel (blocking recv is fine here —
+                    // we're on a blocking thread, audio plays async).
+                    while let Ok(msg) = rx.recv() {
+                        if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
+                            sink.stop();
+                            tracing::info!("tts: streaming stopped by user (barge-in)");
+                            return Ok(());
+                        }
+                        match msg {
+                            Some((audio, sr)) => {
+                                sink.append(SamplesBuffer::new(1, sr, audio));
+                            }
+                            None => break,
+                        }
+                    }
+                    while !sink.empty() {
+                        if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
+                            sink.stop();
+                            tracing::info!("tts: playback stopped by user (barge-in)");
+                            return Ok(());
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    tracing::info!("tts: streaming playback completed");
+                    Ok(())
+                }
+                Err(e) => Err(format!("Failed to create audio sink: {}", e)),
+            },
+            Err(e) => Err(format!("Failed to get audio output stream: {}", e)),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        tracing::error!("tts: streaming audio thread panicked");
+        Err("Audio thread panicked".to_string())
+    })
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+
+    #[test]
+    fn test_split_single_sentence() {
+        assert_eq!(split_sentences("Hello sir."), vec!["Hello sir."]);
+    }
+
+    #[test]
+    fn test_split_multi_sentence() {
+        let out = split_sentences("First. Second! Third?");
+        assert_eq!(out, vec!["First.", "Second!", "Third?"]);
+    }
+
+    #[test]
+    fn test_split_newlines() {
+        let out = split_sentences("Line one\nLine two");
+        assert_eq!(out, vec!["Line one", "Line two"]);
+    }
+
+    #[test]
+    fn test_split_no_delimiter() {
+        assert_eq!(split_sentences("hello"), vec!["hello"]);
+    }
+
+    #[test]
+    fn test_split_empty_tail_ignored() {
+        let out = split_sentences("Done. ");
+        assert_eq!(out, vec!["Done."]);
+    }
+
+    #[test]
+    fn test_split_unicode_safe() {
+        let out = split_sentences("の test. Second.");
+        assert_eq!(out.len(), 2);
+    }
 }

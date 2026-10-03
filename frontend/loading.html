@@ -21,6 +21,7 @@
         display: flex;
         align-items: center;
         justify-content: center;
+        position: relative;
       }
       #lottie-container {
         width: 60px;
@@ -31,11 +32,55 @@
         height: 100% !important;
         display: block;
       }
+      /* Calibration mode (task §2/§4): grab cursor + size badge pill. */
+      body.calibrating {
+        cursor: grab;
+      }
+      body.calibrating:active {
+        cursor: grabbing;
+      }
+      /* Hit-catcher: transparent pixels never receive mouse events, so the
+         mostly-empty loading window is draggable only on its painted art.
+         ~1%-alpha wash makes the whole window hittable, invisibly. */
+      #hitcatcher {
+        position: absolute;
+        inset: 0;
+        background: rgba(255, 255, 255, 0.012);
+        display: none;
+      }
+      /* Target-switch pulse (plan 04 §4): brief highlight so the switch
+         reads even when rects are identical. Toggled per entry only. */
+      body.preview-pulse #lottie-container {
+        animation: loading-pulse 220ms ease-out;
+      }
+      @keyframes loading-pulse {
+        0% { transform: scale(1); }
+        50% { transform: scale(1.14); }
+        100% { transform: scale(1); }
+      }
+      #calibration-badge {
+        position: absolute;
+        bottom: -4px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: none;
+        padding: 2px 9px;
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.85);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        color: rgba(233, 240, 250, 0.92);
+        font-size: 10px;
+        font-weight: 600;
+        white-space: nowrap;
+        pointer-events: none;
+      }
     </style>
   </head>
   <body>
     <div id="root">
+      <div id="hitcatcher"></div>
       <div id="lottie-container"></div>
+      <div id="calibration-badge"></div>
     </div>
     <script type="module">
       import lottie from "lottie-web";
@@ -52,6 +97,120 @@
           });
         })
         .catch((err) => console.error("Loading: failed to load lottie:", err));
+
+      // ─── Animation calibration (drag + wheel) ─────────────────────────
+      // When the companion HUD targets "loading", the window becomes
+      // interactive: pointer-down starts the native OS drag, the debounced
+      // onMoved reports the settled position, wheel reports ±10px steps.
+      // Pure math mirrors calibration/geometry.ts (center-anchored inverse).
+      // NOTE: all listeners register ONCE at module scope (below) — enable/
+      // disable only flip the badge/cursor, so repeated target switches can
+      // never stack duplicate handlers (that bug caused multi-fire drags).
+      let size = 80;
+      let calibrating = false;
+      let unMoved = null;
+      let debounce = null;
+
+      async function reportPosition() {
+        try {
+          const [{ getCurrentWebviewWindow }, { invoke }] = await Promise.all([
+            import("@tauri-apps/api/webviewWindow"),
+            import("@tauri-apps/api/core"),
+          ]);
+          const win = getCurrentWebviewWindow();
+          const [mon, pos] = await Promise.all([
+            win.currentMonitor(),
+            win.outerPosition(),
+          ]);
+          if (!mon || !pos) return;
+          const sw = mon.size.width, sh = mon.size.height;
+          const phys = Math.round(size * mon.scaleFactor);
+          let h = (pos.x + phys / 2) / sw;
+          let v = (pos.y + phys / 2) / sh;
+          if (Math.abs(h * sw - sw / 2) <= 20 * mon.scaleFactor) h = 0.5;
+          if (sh - (pos.y + phys) <= 20 * mon.scaleFactor) v = 1.0;
+          h = Math.min(1, Math.max(0, h));
+          v = Math.min(1, Math.max(0, v));
+          // TEMP-DIAG (calibration drag hunt): proves the report path fires.
+          console.log("[CALIB-DIAG] loading report", { h: +h.toFixed(3), v: +v.toFixed(3), size });
+          await invoke("calibration_report_position", { hPct: h, vPct: v });
+        } catch (err) {
+          // best-effort — next onMoved retries
+          console.log("[CALIB-DIAG] loading report failed", String(err));
+        }
+      }
+
+      function enableCalibration() {
+        calibrating = true;
+        document.body.style.cursor = "grab";
+        document.getElementById("hitcatcher").style.display = "block";
+        document.getElementById("calibration-badge").style.display = "block";
+        document.getElementById("calibration-badge").textContent = size + " px";
+      }
+
+      function disableCalibration() {
+        calibrating = false;
+        document.body.style.cursor = "";
+        document.getElementById("hitcatcher").style.display = "none";
+        document.getElementById("calibration-badge").style.display = "none";
+      }
+
+      // Single registration (module scope): pointer/wheel/onMoved are gated
+      // on `calibrating` at fire time instead of add/remove churn.
+      (async () => {
+        const [{ getCurrentWebviewWindow }, { invoke }, { listen }] =
+          await Promise.all([
+            import("@tauri-apps/api/webviewWindow"),
+            import("@tauri-apps/api/core"),
+            import("@tauri-apps/api/event"),
+          ]);
+        const win = getCurrentWebviewWindow();
+        document.body.addEventListener("pointerdown", (e) => {
+          if (!calibrating) return;
+          e.preventDefault();
+          console.log("[CALIB-DIAG] loading pointerdown → startDragging");
+          win.startDragging().then(
+            () => console.log("[CALIB-DIAG] loading startDragging ok"),
+            (err) => console.log("[CALIB-DIAG] loading startDragging FAILED", String(err))
+          );
+        });
+        document.body.addEventListener("wheel", (e) => {
+          if (!calibrating) return;
+          e.preventDefault();
+          const [min, max] = [40, 160];
+          size = e.deltaY < 0 ? Math.min(max, size + 10) : Math.max(min, size - 10);
+          const badge = document.getElementById("calibration-badge");
+          badge.textContent = size + " px";
+          invoke("calibration_report_size", { size }).catch(() => {});
+        }, { passive: false });
+        unMoved = await win.onMoved(() => {
+          if (!calibrating) return;
+          if (debounce) clearTimeout(debounce);
+          debounce = setTimeout(() => void reportPosition(), 150);
+        });
+      })().catch((e) => console.log("[CALIB-DIAG] loading init failed", String(e)));
+
+      // Mirror the Rust session: activate on loading target, clean on end.
+      // Pulse only on entry (not every move event — those fire per drag).
+      (async () => {
+        const { listen } = await import("@tauri-apps/api/event");
+        listen("calibration:state", (ev) => {
+          const p = ev.payload ?? {};
+          if (p.active && p.target === "loading") {
+            const entering = !calibrating;
+            size = p.size ?? 80;
+            enableCalibration();
+            if (entering) {
+              document.body.classList.remove("preview-pulse");
+              void document.body.offsetWidth;
+              document.body.classList.add("preview-pulse");
+            }
+          } else if (p.active === false) {
+            disableCalibration();
+            document.body.classList.remove("preview-pulse");
+          }
+        }).catch(() => {});
+      })();
     </script>
   </body>
 </html>

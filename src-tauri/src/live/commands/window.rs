@@ -12,6 +12,21 @@
 //! This is the same pattern used by ghost-hands, nuphus-mcp, and many
 //! other Windows automation tools.
 
+/// Pure UIPI gate: Some(reason) when a click must not be attempted —
+/// target elevated, sender not. Returned verbatim as the spoken error
+/// (reroute, never a blind retry into the void). Shared by all platforms.
+pub fn elevated_block_reason(target_elevated: bool, self_elevated: bool) -> Option<String> {
+    if target_elevated && !self_elevated {
+        Some(
+            "that's an admin window, sir — Windows blocks my clicks there. \
+             Click it yourself, or restart NEXUS as admin."
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub use windows_impl::*;
 
@@ -106,6 +121,74 @@ mod windows_impl {
             false
         }
     }
+
+    /// True if OUR process runs elevated (admin). Clicks from a
+    /// non-elevated sender into an elevated window are silently eaten by
+    /// UIPI — detect first, reroute with speech instead.
+    pub fn our_process_elevated() -> bool {
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+        use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        unsafe {
+            let mut token: HANDLE = HANDLE(0);
+            if !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).as_bool() {
+                return false;
+            }
+            let mut elev: TOKEN_ELEVATION = std::mem::zeroed();
+            let mut ret_len = 0u32;
+            let ok = GetTokenInformation(
+                token,
+                TokenElevation,
+                &mut elev as *mut _ as *mut std::ffi::c_void,
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut ret_len,
+            )
+            .as_bool();
+            ok && elev.TokenIsElevated != 0
+        }
+    }
+
+    fn process_token_elevated(proc: windows::Win32::Foundation::HANDLE) -> bool {
+        use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+        use windows::Win32::System::Threading::OpenProcessToken;
+        unsafe {
+            let mut token: windows::Win32::Foundation::HANDLE =
+                windows::Win32::Foundation::HANDLE(0);
+            if !OpenProcessToken(proc, TOKEN_QUERY, &mut token).as_bool() {
+                return false;
+            }
+            let mut elev: TOKEN_ELEVATION = std::mem::zeroed();
+            let mut ret_len = 0u32;
+            GetTokenInformation(
+                token,
+                TokenElevation,
+                &mut elev as *mut _ as *mut std::ffi::c_void,
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut ret_len,
+            )
+            .as_bool()
+                && elev.TokenIsElevated != 0
+        }
+    }
+
+    /// True if the process owning `hwnd` runs elevated (admin).
+    pub fn window_process_elevated(hwnd: HWND) -> bool {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        unsafe {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid as *mut u32);
+            if pid == 0 {
+                return false;
+            }
+            let Ok(proc) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+                return false;
+            };
+            let elevated = process_token_elevated(proc);
+            let _ = CloseHandle(proc);
+            elevated
+        }
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -117,12 +200,38 @@ mod unix_impl {
         tracing::warn!("live: window focus not implemented on this platform");
         true
     }
+
+    /// No UAC/UIPI concept — never elevated-blocked.
+    pub fn our_process_elevated() -> bool {
+        false
+    }
+
+    /// No UAC/UIPI concept — never elevated-blocked.
+    pub fn window_process_elevated(_hwnd: ()) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::elevated_block_reason;
+
     #[test]
-    fn test_module_loads() {
-        // Just verify the module compiles
+    fn test_elevated_gate_truth_table() {
+        // Unelevated sender vs elevated target: blocked with guidance.
+        let reason = elevated_block_reason(true, false);
+        assert!(reason.is_some());
+        let text = reason.unwrap().to_lowercase();
+        assert!(text.contains("admin"));
+        // All other combinations: no block.
+        assert!(elevated_block_reason(false, false).is_none());
+        assert!(elevated_block_reason(true, true).is_none());
+        assert!(elevated_block_reason(false, true).is_none());
+    }
+
+    #[test]
+    fn test_own_elevation_check_runs() {
+        // Must never panic; value depends on how the test runner launched.
+        let _ = super::our_process_elevated();
     }
 }

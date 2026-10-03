@@ -2,7 +2,6 @@
  * NEXUS Cloudflare Worker — fully serverless. No sidecar, no server needed.
  *
  * Handles everything:
- *   - User/device registration (POST /api/register)
  *   - OAuth authorization URL generation (GET /oauth/auth-url)
  *   - OAuth code exchange (POST /oauth/exchange)
  *   - OAuth status (GET /oauth/status)
@@ -20,24 +19,32 @@
  *   npx wrangler d1 execute nexus-db --file=schema.sql  --remote  # creates tables
  *   npx wrangler secret put GOOGLE_CLIENT_ID
  *   npx wrangler secret put GOOGLE_CLIENT_SECRET
- *   npx wrangler secret put GITHUB_CLIENT_ID
- *   npx wrangler secret put GITHUB_CLIENT_SECRET
- *   npx wrangler secret put NEXUS_ENCRYPTION_KEY  # Fernet key for API keys
- *   npx wrangler deploy
+  *   npx wrangler secret put GITHUB_CLIENT_ID
+  *   npx wrangler secret put GITHUB_CLIENT_SECRET
+  *   npx wrangler deploy
  */
 
 // ---- Module imports ----
-import { checkQuota, incrementUsage, getUsage, type UsageRow } from "./quota";
+import { checkQuota, incrementUsage } from "./quota";
+import { buildHealthBody, withProtocolVersion } from "./protocol";
 import { cacheGet, cacheSet, contentHash, prAnalysisKey, searchKey } from "./cache";
-import { retrieve, retrieveCascade, buildSearchSynthesisPrompt, isSearchQuestion, searchWikipedia, type SearchResult } from "./research";
+import { retrieveCascade, buildSearchSynthesisPrompt, isSearchQuestion, searchWikipedia } from "./research";
 import { synthesizeWithCascade, callGroq, callGemini } from "./external_llm";
-import { dedupeSources, stripInjection, buildResponse, extractCaveats } from "./clean";
+import { dedupeSources } from "./clean";
 import {
-  ANALYSIS_FALLBACK_CHAIN, DEEP_ANALYSIS_FALLBACK_CHAIN, SUMMARY_FALLBACK_CHAIN,
-  SEARCH_SYNTHESIS_FALLBACK_CHAIN, CHEAP_FALLBACK_MODEL,
-  selectAnalysisModel, selectSearchModel, selectSummaryModel,
-  truncateContext, FLASH_CONTEXT_LIMIT_CHARS,
-} from "./models";
+  d1Store, claimProfile, resolveProfile, rotateDeviceToken, selfRevokeDevice,
+  type ClaimBody, type MigrationMode,
+} from "./identity";
+import {
+  gateTranscript, recordDenial, denialStatus, DENIAL_ERROR,
+} from "./entitlement";
+import {
+  adminAuth, listPendingProfiles, listProfiles, approveProfile, suspendProfile,
+  revokeProfileCascade, revokeDevice, setEntitlement, listProfileEvents,
+  type AdminBody,
+} from "./admin";
+// NOTE: ./models was deleted (audit M3) — it was imported but every symbol
+// was shadowed by local consts below, so edits to it silently did nothing.
 
 // ---- Types ----
 
@@ -53,8 +60,9 @@ interface Env {
   GITHUB_CLIENT_SECRET: string;
   SWIGGY_CLIENT_ID: string;
   SWIGGY_CLIENT_SECRET: string;
-  NEXUS_ENCRYPTION_KEY: string;
   NEXUS_ADMIN_TOKEN?: string;  // gates POST /models/nlu/publish
+  NEXUS_ADMIN_IDENTITY_TOKEN?: string;  // gates /v1/admin/* (Feature 88, W2)
+  MIGRATION_MODE?: string;     // identity migration: off | strict | revoke-legacy (Feature 88)
 }
 
 // ---- OAuth configuration ----
@@ -86,12 +94,15 @@ const SWIGGY_SCOPES = "read write";
 // three Swiggy MCP endpoints (food/im/dineout).
 const SWIGGY_RESOURCE = "https://mcp.swiggy.com";
 
-// ---- Model constants (re-exported from models.ts for backward compat) ----
+// ---- Model constants (single source of truth — ./models.ts was deleted,
+// it shadowed these and edits to it silently did nothing) ----
 const INTENT_MODEL = "@cf/meta/llama-3.2-1b-instruct";
 const SUMMARY_MODEL = "@cf/mistral/mistral-small-3.1-24b-instruct";
 const SMALL_SUMMARY_MODEL = "@cf/meta/llama-3.2-3b-instruct";
 const ANALYSIS_MODEL = "@cf/zai-org/glm-4.7-flash";
 const DEEP_ANALYSIS_MODEL = "@cf/zai-org/glm-5.3-flash";
+// GLM-flash context ceiling: requests larger than this are truncated.
+const FLASH_CONTEXT_LIMIT_CHARS = 520000;
 
 // Track recent analyses to detect re-evaluation requests
 // Maps "user_id:repo:prNumber" → timestamp of last analysis
@@ -291,26 +302,8 @@ function githubErrorMessage(status: number, context: string): string {
   }
   return `GitHub API error: ${status}`;
 }
-
-async function getCredentialsFromD1(env: Env, userId: string): Promise<{
-  google?: { access_token: string; scopes: string; refresh_token?: string; expires_at?: number };
-  github?: { access_token: string };
-}> {
-  const result = await env.DB.prepare(
-    "SELECT provider, access_token, refresh_token, expires_at, scopes FROM oauth_tokens WHERE user_id = ?"
-  ).bind(userId).all();
-
-  const creds: Record<string, any> = {};
-  for (const row of result.results || []) {
-    creds[row.provider as string] = {
-      access_token: row.access_token as string,
-      refresh_token: row.refresh_token as string | undefined,
-      expires_at: row.expires_at as number | undefined,
-      scopes: row.scopes as string | undefined,
-    };
-  }
-  return creds;
-}
+// NOTE: getCredentialsFromD1 was deleted (audit M4) — defined but zero
+// call-sites. Token reads go through getValidGoogleToken / vault paths.
 
 async function refreshGoogleToken(env: Env, refreshToken: string): Promise<{ access_token: string; expires_in: number }> {
   const resp = await fetch(GOOGLE_TOKEN_URL, {
@@ -1706,7 +1699,6 @@ async function handleCalendar(req: NexusRequest, env: Env, token: string): Promi
 
 async function handleSearch(req: NexusRequest, env: Env): Promise<string> {
   const query = req.task.request;
-  const userId = req.requester.id;
 
   // Check cache first
   const cacheK = searchKey("en", query);
@@ -1720,13 +1712,13 @@ async function handleSearch(req: NexusRequest, env: Env): Promise<string> {
   const deduped = dedupeSources(retrievalResult.results);
 
   if (deduped.length === 0) {
-    // No sources found — fall back to LLM with honest framing
-    const fallback = await summarize(
+    // No sources found — fall back to LLM with honest framing.
+    // Quota is charged ONCE by handleTranscript after this returns —
+    // incrementing here as well double-counted every search (audit H1).
+    return await summarize(
       `Answer this question concisely. If you're not confident in the answer, say so:\n\n${query}`,
       env
     );
-    await incrementUsage(env, userId, { requests: 1, ai_neurons: 50, search_calls: 1 });
-    return fallback;
   }
 
   // Build synthesis prompt with sources + prompt-injection guard
@@ -1786,9 +1778,8 @@ async function handleSearch(req: NexusRequest, env: Env): Promise<string> {
   // Cache for 24 hours
   await cacheSet(env, cacheK, fullReply, 86400);
 
-  // Track usage
-  await incrementUsage(env, userId, { requests: 1, ai_neurons: 100, search_calls: 1 });
-
+  // Quota is charged ONCE by handleTranscript after this returns —
+  // incrementing here as well double-counted every search (audit H1).
   return fullReply;
 }
 
@@ -1811,6 +1802,20 @@ interface NexusRequest {
   request_id: string;
   requester: { id: string; device_id: string };
   task: { type: string; request: string; dialog_context?: DialogContext };
+}
+
+/** Extract the device token from an Authorization: Bearer header. */
+function bearerToken(request: Request): string | null {
+  const header = request.headers.get("Authorization");
+  if (!header) return null;
+  const m = header.match(/^Bearer\s+(\S+)$/i);
+  return m ? m[1] : null;
+}
+
+/** Read the identity migration mode (Feature 88). Default: off. */
+function migrationMode(env: Env): MigrationMode {
+  const mode = (env.MIGRATION_MODE || "off").toLowerCase();
+  return mode === "strict" ? "strict" : mode === "revoke-legacy" ? "revoke-legacy" : "off";
 }
 
 /** Dialog context sent by the client on a follow-up turn. */
@@ -1854,14 +1859,153 @@ export default {
 
     // ---- Health ----
     if (path === "/health" && method === "GET") {
-      return json({ ok: true, service: "NEXUS Worker", protocol: "text-only", serverless: true });
+      return json(buildHealthBody());
+    }
+
+    // ---- Feature 88: canonical laptop identity (claim handshake) ----
+    // Claim is the bootstrap — no prior auth, but rate-limited + pending-cap.
+    if (path === "/v1/profiles/claim" && method === "POST") {
+      let body: ClaimBody;
+      try {
+        body = await request.json() as ClaimBody;
+      } catch {
+        return json({ error: "invalid body" }, 400);
+      }
+      const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+      const result = await claimProfile(d1Store(env), body, ip, Date.now());
+      if (!result.ok) {
+        const status = result.code === "rate_limited" || result.code === "pending_cap" ? 429 : 401;
+        return json({ error: result.code }, status);
+      }
+      return json(withProtocolVersion(result as unknown as Record<string, unknown>));
+    }
+
+    // ---- Feature 88: profile status (Bearer device token) ----
+    if (path === "/v1/profiles/me" && method === "GET") {
+      const store = d1Store(env);
+      const result = await resolveProfile(store, {
+        profileId: url.searchParams.get("profile_id") || undefined,
+        deviceId: url.searchParams.get("device_id") || undefined,
+        authHeader: request.headers.get("Authorization"),
+        mode: migrationMode(env),
+      }, Date.now());
+      if (!result.ok) return json({ error: result.code, code: result.code, status: result.status }, 403);
+      const entitlements = await store.listEntitlements(result.profileId);
+      return json(withProtocolVersion({
+        profile_id: result.profileId,
+        device_id: result.deviceId,
+        status: "approved",
+        quota_tier: result.quotaTier,
+        entitlements: entitlements.map(e => ({ scope: e.scope, allowed: e.allowed, expires_at: e.expires_at })),
+      } as Record<string, unknown>));
+    }
+
+    // ---- Feature 88: rotate device token ----
+    if (path === "/v1/devices/rotate-token" && method === "POST") {
+      let body: { profile_id?: string; device_id?: string };
+      try {
+        body = await request.json() as typeof body;
+      } catch {
+        return json({ error: "invalid body" }, 400);
+      }
+      if (!body.profile_id || !body.device_id) return json({ error: "profile_id and device_id required" }, 400);
+      const token = bearerToken(request);
+      if (!token) return json({ error: "device token required" }, 401);
+      const result = await rotateDeviceToken(d1Store(env), body.profile_id, body.device_id, token, Date.now());
+      if (!result.ok) return json({ error: result.code }, 401);
+      return json(withProtocolVersion({ device_token: result.device_token } as Record<string, unknown>));
+    }
+
+    // ---- Feature 88: self-revoke current device (reinstall path) ----
+    if (path === "/v1/devices/current" && method === "DELETE") {
+      let body: { profile_id?: string; device_id?: string };
+      try {
+        body = await request.json() as typeof body;
+      } catch {
+        return json({ error: "invalid body" }, 400);
+      }
+      if (!body.profile_id || !body.device_id) return json({ error: "profile_id and device_id required" }, 400);
+      const token = bearerToken(request);
+      if (!token) return json({ error: "device token required" }, 401);
+      const result = await selfRevokeDevice(d1Store(env), body.profile_id, body.device_id, token, Date.now());
+      if (!result.ok) return json({ error: result.code }, 401);
+      return json(withProtocolVersion({ revoked: true } as Record<string, unknown>));
+    }
+
+    // ---- Feature 88: admin control plane (Phase 1: CLI only) ----
+    if (path.startsWith("/v1/admin/")) {
+      if (!adminAuth(request, env)) return json({ error: "admin auth required" }, 401);
+      const store = d1Store(env);
+      const adminRead = async () => {
+        let body: AdminBody = {};
+        if (method === "POST") {
+          try { body = await request.json() as AdminBody; } catch { return null; }
+        }
+        return body;
+      };
+
+      if (path === "/v1/admin/profiles/pending" && method === "GET") {
+        const r = await listPendingProfiles(store);
+        if (!r.ok) return json({ error: r.error }, r.status);
+        return json(r.data.map(p => ({
+          profile_id: p.profile_id, status: p.status, quota_tier: p.quota_tier,
+          created_at: p.created_at, provision_hint: p.provision_hint,
+        })));
+      }
+      if (path === "/v1/admin/profiles/list" && method === "GET") {
+        const r = await listProfiles(store, url.searchParams.get("status") || undefined);
+        if (!r.ok) return json({ error: r.error }, r.status);
+        return json(r.data.map(p => ({
+          profile_id: p.profile_id, status: p.status, quota_tier: p.quota_tier,
+          created_at: p.created_at, approved_at: p.approved_at, expires_at: p.expires_at,
+        })));
+      }
+      if (path === "/v1/admin/profiles/approve" && method === "POST") {
+        const body = await adminRead();
+        if (!body) return json({ error: "invalid body" }, 400);
+        const r = await approveProfile(store, body, Date.now());
+        if (!r.ok) return json({ error: r.error }, r.status);
+        return json(withProtocolVersion(r.data as unknown as Record<string, unknown>));
+      }
+      if (path === "/v1/admin/profiles/suspend" && method === "POST") {
+        const body = await adminRead();
+        if (!body) return json({ error: "invalid body" }, 400);
+        const r = await suspendProfile(store, body, Date.now());
+        if (!r.ok) return json({ error: r.error }, r.status);
+        return json(withProtocolVersion(r.data as unknown as Record<string, unknown>));
+      }
+      if (path === "/v1/admin/profiles/revoke" && method === "POST") {
+        const body = await adminRead();
+        if (!body) return json({ error: "invalid body" }, 400);
+        const r = await revokeProfileCascade(store, env.DB, body, Date.now());
+        if (!r.ok) return json({ error: r.error }, r.status);
+        return json(withProtocolVersion(r.data as unknown as Record<string, unknown>));
+      }
+      if (path === "/v1/admin/devices/revoke" && method === "POST") {
+        const body = await adminRead();
+        if (!body) return json({ error: "invalid body" }, 400);
+        const r = await revokeDevice(store, body, Date.now());
+        if (!r.ok) return json({ error: r.error }, r.status);
+        return json(withProtocolVersion(r.data as unknown as Record<string, unknown>));
+      }
+      if (path === "/v1/admin/entitlements/set" && method === "POST") {
+        const body = await adminRead();
+        if (!body) return json({ error: "invalid body" }, 400);
+        const r = await setEntitlement(store, body, Date.now());
+        if (!r.ok) return json({ error: r.error }, r.status);
+        return json(withProtocolVersion(r.data as unknown as Record<string, unknown>));
+      }
+      if (path === "/v1/admin/profiles/events" && method === "GET") {
+        const profileId = url.searchParams.get("profile_id") || "";
+        if (!profileId) return json({ error: "profile_id required" }, 400);
+        const r = await listProfileEvents(store, profileId);
+        if (!r.ok) return json({ error: r.error }, r.status);
+        return json(r.data);
+      }
+      return json({ error: "not found" }, 404);
     }
 
     // ---- User registration ----
-    if (path === "/api/register" && method === "POST") {
-      return handleRegister(request, env, json);
-    }
-
     // ---- OAuth: get auth URL ----
     if (path === "/oauth/auth-url" && method === "GET") {
       return handleAuthUrl(url, env, json);
@@ -1930,16 +2074,6 @@ export default {
       return handleListApiKeys(url, env, json);
     }
 
-    // ---- Config check ----
-    if (path === "/config/check" && method === "GET") {
-      return json({
-        google: { configured: !!env.GOOGLE_CLIENT_ID, scopes: GOOGLE_SCOPES },
-        github: { configured: !!env.GITHUB_CLIENT_ID, scopes: GITHUB_SCOPES },
-        swiggy: { configured: !!env.SWIGGY_CLIENT_ID, scopes: SWIGGY_SCOPES },
-        redirect_uri: OAUTH_REDIRECT_URI,
-      });
-    }
-
     // ---- NLU model distribution (family devices) ----
     // Admin retrains BERT-Mini locally, uploads files to R2 via
     // `wrangler r2 object put`, then POSTs the manifest here. Family
@@ -2000,25 +2134,6 @@ export default {
       }
     }
 
-    // ---- STT: Transcribe audio via Workers AI Whisper ----
-    if (path === "/api/transcribe" && method === "POST") {
-      try {
-        const body = await request.json() as { audio_base64?: string };
-        if (!body.audio_base64) return json({ error: "missing audio_base64" }, 400);
-        const binaryStr = atob(body.audio_base64);
-        const bytes = new Uint8Array(binaryStr.length);
-        for (let i = 0; i < binaryStr.length; i++) {
-          bytes[i] = binaryStr.charCodeAt(i);
-        }
-        const whisperResp = await env.AI.run("@cf/openai/whisper", {
-          audio: [...bytes],
-        });
-        return json({ text: (whisperResp as any)?.text || "" });
-      } catch (e) {
-        return json({ error: (e as Error).message, text: "" }, 500);
-      }
-    }
-
     // ---- Main: process transcript ----
     if (path === "/" && method === "POST") {
       return handleTranscript(request, env, json);
@@ -2027,40 +2142,6 @@ export default {
     return json({ error: "not found" }, 404);
   },
 };
-
-// ---- Registration handler ----
-
-async function handleRegister(
-  request: Request,
-  env: Env,
-  json: (d: unknown, s?: number) => Response,
-): Promise<Response> {
-  let body: any;
-  try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
-
-  const userId = body.user_id || "";
-  const deviceId = body.device_id || "";
-  if (!userId || !deviceId) return json({ error: "user_id and device_id required" }, 400);
-
-  const now = Date.now() / 1000;
-  await env.DB.prepare(
-    "INSERT OR REPLACE INTO user_devices (user_id, device_id, device_name, os, device_token, created_at) VALUES (?, ?, ?, ?, ?, ?)"
-  ).bind(userId, deviceId, body.device_name || "", body.os || "", body.device_token || null, now).run();
-
-  return json({
-    ok: true,
-    user_id: userId,
-    device_id: deviceId,
-    server_config: {
-      worker_url: new URL(request.url).origin,
-      ws_url: "",  // no WebSocket — HTTP only
-    },
-    providers: {
-      google: { configured: !!env.GOOGLE_CLIENT_ID, scopes: GOOGLE_SCOPES },
-      github: { configured: !!env.GITHUB_CLIENT_ID, scopes: GITHUB_SCOPES },
-    },
-  });
-}
 
 // ---- OAuth auth URL handler ----
 
@@ -2565,12 +2646,14 @@ async function handleAddApiKey(
   const apiKey = body.api_key || "";
   if (!userId || !provider || !apiKey) return json({ error: "missing required fields" }, 400);
 
-  // Simple obfuscation (not real encryption in Worker — D1 is already encrypted at rest)
-  const encrypted = btoa(apiKey);
+  // Base64 obfuscation only (NOT encryption — Worker has no Fernet; D1 is
+  // already encrypted at rest, which is the actual protection). The
+  // NEXUS_ENCRYPTION_KEY secret was removed: it was declared but never read.
+  const obfuscated = btoa(apiKey);
   const now = Date.now() / 1000;
   await env.DB.prepare(
     "INSERT OR REPLACE INTO api_keys (user_id, provider, key_encrypted, created_at) VALUES (?, ?, ?, ?)"
-  ).bind(userId, provider, encrypted, now).run();
+  ).bind(userId, provider, obfuscated, now).run();
 
   return json({ ok: true, provider, stored: true });
 }
@@ -2618,6 +2701,27 @@ async function handleTranscript(
   const userId = req.requester?.id || "";
   if (!userId) return json({ error: "missing requester.id" }, 400);
 
+  // ─── Feature 88: AI entitlement gate (MUST run before any AI path) ──
+  // Deny exits here: zero env.AI.run calls, zero external-LLM calls,
+  // zero usage increments. Fail-closed on lookup errors.
+  const gate = await gateTranscript(d1Store(env), {
+    profileId: (req.requester as any)?.profile_id,
+    deviceId: (req.requester as any)?.device_id && req.requester.device_id,
+    authHeader: request.headers.get("Authorization"),
+    legacyUserId: userId,
+    mode: migrationMode(env),
+  }, Date.now());
+  if (!gate.ok) {
+    await recordDenial(d1Store(env), gate.code === "unknown_profile" ? (userId || "unknown") : userId, req.requester?.device_id || null, gate.code, Date.now());
+    return json({
+      error: DENIAL_ERROR,
+      code: gate.code,
+      status: gate.status,
+      request_id: req.request_id,
+    }, denialStatus(gate.code));
+  }
+  const credentialKey = gate.legacy ? userId : gate.profileId;
+
   // ─── Dialog context follow-up ──────────────────────────────────────
   // If the client sent a dialog_context (from a previous follow-up question),
   // combine the original request with the new input so the intent classifier
@@ -2630,7 +2734,7 @@ async function handleTranscript(
   }
 
   // 1. Classify intent — but allow explicit intent override from the task
-  // (e.g. architect sidebar sends intent="impact_narration" directly)
+  // (e.g. architect sidebar sends intent="phase1_enrich" directly)
   const explicitIntent = (req.task as any)?.intent;
   let intent = explicitIntent || await classifyIntent(req.task.request, env);
 
@@ -2645,14 +2749,14 @@ async function handleTranscript(
   // 1c. Quota check — reject if user has exceeded daily limits
   const isDeep = intent === "github_analyse" || intent === "deep_analyse";
   const isSearch = intent === "search";
-  const quota = await checkQuota(env, userId, isDeep, isSearch);
+  const quota = await checkQuota(env, credentialKey, isDeep, isSearch);
   if (!quota.allowed) {
-    return json({
+    return json(withProtocolVersion({
       request_id: req.request_id,
       reply_text: quota.reason || "Daily limit reached.",
       intent,
       quota_exceeded: true,
-    });
+    }));
   }
 
   // 2. Get credentials from D1 based on intent
@@ -2664,7 +2768,7 @@ async function handleTranscript(
     if (intent === "analyze_repo") {
       replyText = await handleAnalyzeRepo(req, env);
     } else if (intent === "fast_analyse") {
-      const token = await getValidGithubToken(env, userId);
+      const token = await getValidGithubToken(env, credentialKey);
       if (!token) {
         replyText = "You haven't connected your GitHub account yet. Please connect it in the NEXUS setup to analyse repositories.";
       } else {
@@ -2692,10 +2796,8 @@ async function handleTranscript(
       replyText = "Opening the architecture mapper for a deep scan, sir. This will clone the repository and build a full dependency graph. It may take 30 to 60 seconds.";
     } else if (intent === "phase1_enrich") {
       replyText = await handlePhase1Enrich(req, env);
-    } else if (intent === "impact_narration") {
-      replyText = await handleImpactNarration(req, env);
     } else if (intent === "github_analyse") {
-      const token = await getValidGithubToken(env, userId);
+      const token = await getValidGithubToken(env, credentialKey);
       if (!token) {
         replyText = "You haven't connected your GitHub account yet. Please connect it in the NEXUS setup to analyse PRs.";
       } else {
@@ -2715,28 +2817,28 @@ async function handleTranscript(
         }
       }
     } else if (intent === "github") {
-      const token = await getValidGithubToken(env, userId);
+      const token = await getValidGithubToken(env, credentialKey);
       if (!token) {
         replyText = "You haven't connected your GitHub account yet. Please connect it in the NEXUS setup.";
       } else {
         replyText = await handleGitHub(req, env, token);
       }
     } else if (intent === "github_write") {
-      const token = await getValidGithubToken(env, userId);
+      const token = await getValidGithubToken(env, credentialKey);
       if (!token) {
         replyText = "You haven't connected your GitHub account yet. Please connect it in the NEXUS setup.";
       } else {
         replyText = await handleGitHubWrite(req, env, token);
       }
     } else if (intent === "gmail") {
-      const token = await getValidGoogleToken(env, userId);
+      const token = await getValidGoogleToken(env, credentialKey);
       if (!token) {
         replyText = "You haven't connected your Google account yet. Please connect it in the NEXUS setup.";
       } else {
         replyText = await handleGmail(req, env, token);
       }
     } else if (intent === "calendar") {
-      const token = await getValidGoogleToken(env, userId);
+      const token = await getValidGoogleToken(env, credentialKey);
       if (!token) {
         replyText = "You haven't connected your Google account yet. Please connect it in the NEXUS setup.";
       } else {
@@ -2754,7 +2856,7 @@ async function handleTranscript(
   // Track usage (non-blocking — don't fail the request if tracking fails)
   try {
     const neurons = isDeep ? 500 : isSearch ? 100 : 50;
-    await incrementUsage(env, userId, {
+    await incrementUsage(env, credentialKey, {
       requests: 1,
       ai_neurons: neurons,
       deep_calls: isDeep ? 1 : 0,
@@ -2763,11 +2865,11 @@ async function handleTranscript(
   } catch { /* quota tracking is best-effort */ }
 
   if (analysisData) {
-    const resp: any = { request_id: req.request_id, reply_text: replyText, intent, analysis: analysisData };
+    const resp: any = withProtocolVersion({ request_id: req.request_id, reply_text: replyText, intent, analysis: analysisData });
     if (dialogState) resp.dialog_state = dialogState;
     return json(resp);
   }
-  const resp: any = { request_id: req.request_id, reply_text: replyText, intent };
+  const resp: any = withProtocolVersion({ request_id: req.request_id, reply_text: replyText, intent });
   if (dialogState) resp.dialog_state = dialogState;
   return json(resp);
 }
@@ -3336,51 +3438,7 @@ Return STRICT JSON only, no markdown fences:
     return JSON.stringify({ summary: "", layers: [] });
   }
 }
-
-// ---- Architecture Mapper: LLM Impact Narration ----
-// Called by the architect sidebar to get an LLM explanation of a reverse BFS
-// impact result. The graph algorithm discovers affected files + paths; the
-// LLM narrates WHY each path matters in plain English.
-
-async function handleImpactNarration(req: NexusRequest, env: Env): Promise<string> {
-  const payload = req.task as any;
-  const target_file: string = payload.target_file || "unknown";
-  const affected_files: string[] = Array.isArray(payload.affected_files) ? payload.affected_files : [];
-  const dependency_paths: string[][] = Array.isArray(payload.dependency_paths)
-    ? payload.dependency_paths.map((p: any) => Array.isArray(p) ? p.map(String) : [String(p)])
-    : [];
-  const direct_count: number = payload.direct_count || 0;
-  const transitive_count: number = payload.transitive_count || 0;
-  const test_files: string[] = Array.isArray(payload.test_files) ? payload.test_files : [];
-  const repo: string = payload.repo || "unknown";
-
-  const pathsStr = dependency_paths.slice(0, 5).map((p) => p.join(" → ")).join("\n  ");
-  const affectedStr = affected_files.slice(0, 10).join(", ");
-
-  const prompt = `You are a senior software architect analyzing the impact of changing a file in the ${repo} repository.
-
-The static dependency graph analysis found:
-- Target file: ${target_file}
-- Direct dependents (depth 1): ${direct_count}
-- Transitive dependents (depth 2+): ${transitive_count}
-- Test files affected: ${test_files.length}
-- Critical dependency paths (target → root):
-  ${pathsStr}
-- Affected files: ${affectedStr}
-
-Explain in plain English (under 150 words) what the developer should be careful about.
-Focus on PRODUCTION RISK, not file count. Be specific about the most dangerous path.
-If there are test files, note whether they provide adequate coverage.
-Do NOT list every file — focus on the highest-risk path and why it matters.`;
-
-  // Try free external providers first (Gemini → Groq → Cloudflare cascade)
-  const synth = await synthesizeWithCascade(prompt, env,
-    "You are a senior software architect. Explain production risk concisely.", 300);
-  if (synth) {
-    console.log(`[architect] Impact narration via ${synth.provider} (${synth.model})`);
-    return synth.text;
-  }
-  // Last resort: Cloudflare summarize()
-  return await summarize(prompt, env);
-}
+// NOTE: handleImpactNarration was deleted (audit M1) — it narrated the
+// reverse-BFS impact engine whose Rust half (query_impact) was dead IPC
+// and has also been removed. The file ends here.
 

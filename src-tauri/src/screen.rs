@@ -41,9 +41,22 @@ pub fn pick_ordinal(sorted: &[UiElement], n: u32) -> Option<&UiElement> {
     sorted.get((n - 1) as usize)
 }
 
-/// Parse "3rd", "2nd", "1st", "4th", "12th" (and bare "3") into a number.
+/// Parse "3rd", "2nd", "1st", "4th", "12th", bare "3", and word ordinals ("first", "second", "one", "two") into a number.
 pub fn parse_ordinal(text: &str) -> Option<u32> {
     let t = text.trim().to_lowercase();
+    match t.as_str() {
+        "first" | "one" => return Some(1),
+        "second" | "two" => return Some(2),
+        "third" | "three" => return Some(3),
+        "fourth" | "four" => return Some(4),
+        "fifth" | "five" => return Some(5),
+        "sixth" | "six" => return Some(6),
+        "seventh" | "seven" => return Some(7),
+        "eighth" | "eight" => return Some(8),
+        "ninth" | "nine" => return Some(9),
+        "tenth" | "ten" => return Some(10),
+        _ => {}
+    }
     let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() {
         return None;
@@ -153,6 +166,29 @@ mod win {
 #[cfg(target_os = "windows")]
 pub use win::{click_element, list_actionables};
 
+#[cfg(target_os = "windows")]
+mod win_extra {
+    /// Primary monitor size in physical px (matches GetWindowRect space,
+    /// so fullscreen detection compares apples to apples).
+    pub fn primary_monitor_size() -> Option<(i32, i32)> {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+        };
+        unsafe {
+            let w = GetSystemMetrics(SM_CXSCREEN);
+            let h = GetSystemMetrics(SM_CYSCREEN);
+            if w > 0 && h > 0 {
+                Some((w, h))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub use win_extra::primary_monitor_size;
+
 /// Switch browser tab by index (1-based): Ctrl+1..8, Ctrl+9 = last.
 /// Hotkeys beat grounding for tabs — 100% reliable, instant.
 pub fn switch_browser_tab(index: u32) -> Result<String, String> {
@@ -223,6 +259,9 @@ mod tests {
         assert_eq!(parse_ordinal("2nd"), Some(2));
         assert_eq!(parse_ordinal("12th"), Some(12));
         assert_eq!(parse_ordinal("4"), Some(4));
+        assert_eq!(parse_ordinal("first"), Some(1));
+        assert_eq!(parse_ordinal("second"), Some(2));
+        assert_eq!(parse_ordinal("two"), Some(2));
         assert_eq!(parse_ordinal("option"), None);
         assert_eq!(parse_ordinal("3x"), None);
     }
