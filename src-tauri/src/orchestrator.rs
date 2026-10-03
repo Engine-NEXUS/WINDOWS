@@ -827,6 +827,30 @@ pub async fn process_transcript<R: Runtime>(
             let text = slots.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
             return run_type_text(app, text).await;
         }
+        // Local system control (doc 07 P2): these previously had no
+        // dispatch arm at all, so a classified "focus_app"/"system_*"
+        // intent silently defaulted to Subsystem::WorkerBackend — the
+        // classifier ran instantly and locally, then its answer was
+        // thrown away for a cloud round-trip that couldn't act on it.
+        ParsedIntent::NluResult { intent, slots, .. } if intent == "focus_app" => {
+            let target = slots.get("target").and_then(|v| v.as_str())
+                .or_else(|| slots.get("app").and_then(|v| v.as_str()))
+                .or_else(|| slots.get("title").and_then(|v| v.as_str()))
+                .unwrap_or("").to_string();
+            return run_focus_app(app, target).await;
+        }
+        ParsedIntent::NluResult { intent, .. } if intent == "system_minimize_window" => {
+            return run_minimize_window(app).await;
+        }
+        ParsedIntent::NluResult { intent, .. } if intent == "system_maximize_window" => {
+            return run_maximize_window(app).await;
+        }
+        ParsedIntent::NluResult { intent, slots, .. } if intent == "system_click_element" || intent == "click_element" => {
+            let name = slots.get("name").and_then(|v| v.as_str())
+                .or_else(|| slots.get("element").and_then(|v| v.as_str()))
+                .unwrap_or("").to_string();
+            return run_click_element(app, name).await;
+        }
         ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_analysis" => {
             let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("analyze the screen").to_string();
             return run_screen_analysis(app, prompt).await;
@@ -1024,6 +1048,25 @@ pub async fn process_transcript<R: Runtime>(
             ParsedIntent::NluResult { intent, slots, .. } if intent == "type_text" => {
                 let text = slots.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 return run_type_text(app, text).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "focus_app" => {
+                let target = slots.get("target").and_then(|v| v.as_str())
+                    .or_else(|| slots.get("app").and_then(|v| v.as_str()))
+                    .or_else(|| slots.get("title").and_then(|v| v.as_str()))
+                    .unwrap_or("").to_string();
+                return run_focus_app(app, target).await;
+            }
+            ParsedIntent::NluResult { intent, .. } if intent == "system_minimize_window" => {
+                return run_minimize_window(app).await;
+            }
+            ParsedIntent::NluResult { intent, .. } if intent == "system_maximize_window" => {
+                return run_maximize_window(app).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "system_click_element" || intent == "click_element" => {
+                let name = slots.get("name").and_then(|v| v.as_str())
+                    .or_else(|| slots.get("element").and_then(|v| v.as_str()))
+                    .unwrap_or("").to_string();
+                return run_click_element(app, name).await;
             }
             ParsedIntent::StartDictation => {
                 set_dictation_active(true);
@@ -3728,6 +3771,134 @@ async fn run_type_text<R: Runtime>(
         subsystem: Subsystem::LocalCommand,
         handled_locally: true,
     })
+}
+
+/// Focus an already-running app/window by (partial, case-insensitive)
+/// title. Local, instant, no network — see doc 07 P2.
+async fn run_focus_app<R: Runtime>(app: AppHandle<R>, target: String) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if target.trim().is_empty() {
+        speak_line(&app, "Which app should I focus, sir?".to_string(), &request_id);
+    } else {
+        let target_clone = target.clone();
+        let found = tokio::task::spawn_blocking(move || {
+            crate::live::commands::window::focus_app_by_title(&target_clone)
+        })
+        .await
+        .unwrap_or(false);
+        let reply = if found {
+            "Ok sir.".to_string()
+        } else {
+            format!("Couldn't find {target} running, sir.")
+        };
+        speak_line(&app, reply, &request_id);
+    }
+    clear_active_request(&request_id);
+    Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true })
+}
+
+/// Minimize the foreground window. Local, instant, no network.
+async fn run_minimize_window<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let ok = tokio::task::spawn_blocking(crate::live::commands::window::minimize_foreground_window)
+        .await
+        .unwrap_or(false);
+    let reply = if ok { "Minimized, sir." } else { "Nothing to minimize, sir." };
+    speak_line(&app, reply.to_string(), &request_id);
+    clear_active_request(&request_id);
+    Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true })
+}
+
+/// Maximize the foreground window. Local, instant, no network.
+async fn run_maximize_window<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let ok = tokio::task::spawn_blocking(crate::live::commands::window::maximize_foreground_window)
+        .await
+        .unwrap_or(false);
+    let reply = if ok { "Maximized, sir." } else { "Nothing to maximize, sir." };
+    speak_line(&app, reply.to_string(), &request_id);
+    clear_active_request(&request_id);
+    Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true })
+}
+
+/// Click an on-screen element by name, OUTSIDE a ghost session: a single
+/// confirmed action, not a driving session (no ring, no Esc-arming). UIA
+/// bounds first (exact, free, ~ms) — reuses the exact resolver Ghost Mode
+/// uses; vision only on miss, same daily-quota-aware fallback as
+/// `live::commands::mouse::ghost_click`. Local-first by construction: the
+/// network is only ever touched when UIA genuinely can't see the element.
+async fn run_click_element<R: Runtime>(app: AppHandle<R>, name: String) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if name.trim().is_empty() {
+        speak_line(&app, "Which button or element should I click, sir?".to_string(), &request_id);
+        clear_active_request(&request_id);
+        return Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        speak_line(&app, "Clicking by name isn't available on this platform, sir.".to_string(), &request_id);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let name_clone = name.clone();
+        let resolved = tokio::task::spawn_blocking(move || {
+            crate::live::commands::mouse::resolve_element(&name_clone)
+        })
+        .await
+        .unwrap_or(None);
+
+        let el = match resolved {
+            Some(el) => Some(el),
+            None => {
+                let groq_key = crate::commands::read_groq_api_key(&app);
+                let gemini_key = crate::commands::read_api_key(&app, "gemini");
+                if groq_key.is_empty() && gemini_key.is_empty() {
+                    None
+                } else {
+                    let usage_dir = app
+                        .path()
+                        .app_data_dir()
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let order = crate::vision::read_vision_provider(&usage_dir);
+                    match reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(25))
+                        .build()
+                    {
+                        Ok(client) => crate::vision::locate_with_fallback(
+                            &name, &groq_key, &gemini_key, &order, &usage_dir, &client,
+                        )
+                        .await
+                        .map(|t| t.el),
+                        Err(_) => None,
+                    }
+                }
+            }
+        };
+
+        match el {
+            Some(el) => {
+                let (cx, cy) = crate::live::commands::mouse::element_center(&el);
+                let clicked = tokio::task::spawn_blocking(move || {
+                    crate::live::commands::mouse::click_at(cx, cy, || false)
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+                let reply = match clicked {
+                    Ok(()) => format!("Clicked {name}, sir."),
+                    Err(e) => e,
+                };
+                speak_line(&app, reply, &request_id);
+            }
+            None => {
+                speak_line(&app, format!("Couldn't find '{name}' on screen, sir."), &request_id);
+            }
+        }
+    }
+
+    clear_active_request(&request_id);
+    Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true })
 }
 
 /// Open the NEXUS Command Hub sidebar.

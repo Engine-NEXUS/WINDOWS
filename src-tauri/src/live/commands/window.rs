@@ -40,7 +40,8 @@ mod windows_impl {
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindowTextW,
-        GetWindowThreadProcessId, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE,
+        GetWindowThreadProcessId, IsIconic, SetForegroundWindow, ShowWindow, SW_MAXIMIZE,
+        SW_MINIMIZE, SW_RESTORE,
     };
 
     // Thread-local storage for the search target and result.
@@ -122,6 +123,34 @@ mod windows_impl {
         }
     }
 
+    /// Minimize the current foreground window. `ShowWindow`'s return value
+    /// reports the window's PRIOR visibility, not call success, so it's
+    /// discarded (same convention as the `SW_RESTORE` call above) — this
+    /// returns whether a foreground window existed to act on at all.
+    pub fn minimize_foreground_window() -> bool {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.0 == 0 {
+                return false;
+            }
+            let _ = ShowWindow(hwnd, SW_MINIMIZE);
+            true
+        }
+    }
+
+    /// Maximize the current foreground window. Same fire-and-forget
+    /// convention as `minimize_foreground_window`.
+    pub fn maximize_foreground_window() -> bool {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.0 == 0 {
+                return false;
+            }
+            let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+            true
+        }
+    }
+
     /// True if OUR process runs elevated (admin). Clicks from a
     /// non-elevated sender into an elevated window are silently eaten by
     /// UIPI — detect first, reroute with speech instead.
@@ -199,6 +228,16 @@ mod unix_impl {
     pub fn focus_app_by_title(_partial_title: &str) -> bool {
         tracing::warn!("live: window focus not implemented on this platform");
         true
+    }
+
+    /// Not implemented on this platform — always reports "nothing to act on".
+    pub fn minimize_foreground_window() -> bool {
+        false
+    }
+
+    /// Not implemented on this platform — always reports "nothing to act on".
+    pub fn maximize_foreground_window() -> bool {
+        false
     }
 
     /// No UAC/UIPI concept — never elevated-blocked.

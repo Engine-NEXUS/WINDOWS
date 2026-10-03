@@ -3258,6 +3258,85 @@ fn parse_screen_command(text: &str) -> Option<ParseResult> {
             }
         }
     }
+
+    // Window control: "minimize (this/the window)" / "maximize (this/the
+    // window)" / "full screen this". Bare commands, no slot — act on
+    // whatever currently owns the foreground. Zero model cost, instant.
+    if matches!(
+        text,
+        "minimize" | "minimize window" | "minimize this" | "minimize it"
+            | "minimize the window" | "minimize this window"
+    ) {
+        return Some(ParseResult {
+            intent: ParsedIntent::NluResult {
+                intent: "system_minimize_window".to_string(),
+                slots: serde_json::json!({}),
+                confidence: 0.95,
+            },
+            confidence: 0.95,
+            source: "deterministic".to_string(),
+        });
+    }
+    if matches!(
+        text,
+        "maximize" | "maximize window" | "maximize this" | "maximize it"
+            | "maximize the window" | "maximize this window" | "full screen this"
+            | "full screen this window" | "make this full screen"
+    ) {
+        return Some(ParseResult {
+            intent: ParsedIntent::NluResult {
+                intent: "system_maximize_window".to_string(),
+                slots: serde_json::json!({}),
+                confidence: 0.95,
+            },
+            confidence: 0.95,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    // Click a named on-screen element: "click <name>" / "click on <name>".
+    // Distinct from the ordinal loop above (tried first, claims numeric/
+    // ordinal targets). Bare "click " is unambiguous (no other deterministic
+    // parser owns that verb). "press " is deliberately NOT included here,
+    // bare — `parse_live_command`'s "press <key>"/"press ctrl a" key-press
+    // patterns own that verb, and a bare prefix here would have shadowed
+    // them (caught by test_parse_live_press_key/_hotkey). Only accept
+    // "press" when explicitly button-qualified ("press the X button"),
+    // which no key name ever is.
+    for prefix in ["click on the ", "click on ", "click the ", "click "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            let name = rest.trim().trim_end_matches(['.', ',', '!', '?']).trim_end_matches(" button").trim();
+            if !name.is_empty() && name.len() <= 60 {
+                return Some(ParseResult {
+                    intent: ParsedIntent::NluResult {
+                        intent: "system_click_element".to_string(),
+                        slots: serde_json::json!({ "name": name }),
+                        confidence: 0.85,
+                    },
+                    confidence: 0.85,
+                    source: "deterministic".to_string(),
+                });
+            }
+        }
+    }
+    for prefix in ["press the ", "press "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            if let Some(name) = rest.trim().trim_end_matches(['.', ',', '!', '?']).strip_suffix(" button") {
+                let name = name.trim();
+                if !name.is_empty() && name.len() <= 60 {
+                    return Some(ParseResult {
+                        intent: ParsedIntent::NluResult {
+                            intent: "system_click_element".to_string(),
+                            slots: serde_json::json!({ "name": name }),
+                            confidence: 0.85,
+                        },
+                        confidence: 0.85,
+                        source: "deterministic".to_string(),
+                    });
+                }
+            }
+        }
+    }
     None
 }
 
@@ -7333,6 +7412,62 @@ mod tests {
         let bare = parse_deterministic("type");
         assert!(bare.is_some());
         assert!(matches!(bare.unwrap().intent, ParsedIntent::StartDictation));
+    }
+
+    /// Doc 07 P2: window control + named-element click are deterministic,
+    /// zero-model-cost, bare commands — never fall through to NLU/Worker.
+    #[test]
+    fn test_window_control_phrases_are_deterministic() {
+        for phrase in ["minimize", "minimize the window", "minimize this window", "minimize it"] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "'{phrase}' should match");
+            let r = res.unwrap();
+            assert_eq!(r.source, "deterministic");
+            match r.intent {
+                ParsedIntent::NluResult { intent, .. } => assert_eq!(intent, "system_minimize_window"),
+                other => panic!("'{phrase}' expected system_minimize_window, got {other:?}"),
+            }
+        }
+        for phrase in ["maximize", "maximize the window", "full screen this", "make this full screen"] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "'{phrase}' should match");
+            match res.unwrap().intent {
+                ParsedIntent::NluResult { intent, .. } => assert_eq!(intent, "system_maximize_window"),
+                other => panic!("'{phrase}' expected system_maximize_window, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_click_element_by_name_is_deterministic() {
+        for (phrase, expected_name) in [
+            ("click submit", "submit"),
+            ("click on submit", "submit"),
+            ("click the save button", "save"),
+            ("press the ok button", "ok"),
+            ("press the cancel button", "cancel"),
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "'{phrase}' should match");
+            let r = res.unwrap();
+            assert_eq!(r.source, "deterministic");
+            match r.intent {
+                ParsedIntent::NluResult { intent, slots, .. } => {
+                    assert_eq!(intent, "system_click_element");
+                    assert_eq!(slots["name"], expected_name, "for phrase '{phrase}'");
+                }
+                other => panic!("'{phrase}' expected system_click_element, got {other:?}"),
+            }
+        }
+    }
+
+    /// Ordinal click phrasing must still win over the named-element
+    /// fallback — the ordinal loop runs first in parse_screen_command.
+    #[test]
+    fn test_click_ordinal_not_shadowed_by_named_click() {
+        let res = parse_deterministic("click the 3rd option");
+        assert!(res.is_some());
+        assert!(matches!(res.unwrap().intent, ParsedIntent::ScreenClick { ordinal: 3 }));
     }
 
     #[test]
