@@ -296,3 +296,36 @@
   color: var(--ink-primary);
   font: inherit;
 }
+
+/* Response caption (plan Phase 3) — the spoken reply growing word-by-word
+   above the orb. Pure indicator: pointer-events none (never intercepts
+   clicks), opacity-only transition (position is set directly from the
+   orb rect each render, so it must never fight a CSS transform tween). */
+.response-caption {
+  text-align: center;
+  pointer-events: none;
+  transition: opacity 220ms ease;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ink-primary);
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.65), 0 0 2px rgba(0, 0, 0, 0.5);
+  z-index: 10000;
+}
+
+.response-caption-word {
+  display: inline-block;
+  animation: response-caption-word-in 260ms ease-out both;
+}
+
+@keyframes response-caption-word-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

@@ -110,7 +110,7 @@ mod tests {
         let elapsed = start.elapsed();
 
         match &result {
-            Ok((samples, sr)) => {
+            Ok((samples, sr, _boundaries)) => {
                 let audio_dur_ms = samples.len() as u64 * 1000 / *sr as u64;
                 println!("┌─────────────────────────────────────────────────────────┐");
                 println!("│ bench_edge_tts_pcm_decode (full pipeline)               │");

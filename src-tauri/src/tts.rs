@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tauri::State;
+use tauri::{Emitter, State};
 
 /// Global Piper engine reference — set at TtsState creation.
 /// Allows the network monitor to unload Piper without accessing TtsState.
@@ -29,11 +29,76 @@ pub struct TtsState {
     pub cache: Arc<Mutex<HashMap<String, CachedAudio>>>,
 }
 
-/// Cached audio: PCM samples + sample rate for rodio playback.
+/// Cached audio: PCM samples + sample rate for rodio playback, plus the
+/// response caption to emit alongside it (so cache-hit playback — the
+/// instant <5ms path — gets a caption exactly like every other path).
 #[derive(Clone)]
 pub struct CachedAudio {
     pub samples: Vec<f32>,
     pub sample_rate: u32,
+    pub caption: CaptionTrack,
+}
+
+/// One word's reveal timing for the response caption (plan Phase 3).
+/// `start_ms`/`duration_ms` are milliseconds from the start of the overall
+/// utterance (for a streamed multi-chunk reply, chunk N's words already
+/// have chunk 0..N-1's cumulative audio duration baked in — see
+/// `play_audio_streamed`'s `cumulative_ms` — so the frontend never needs
+/// to know chunking happened).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub struct CaptionWord {
+    pub text: String,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+}
+
+/// One utterance's (or one streamed chunk's) full caption track, emitted
+/// as the `tts:caption` event right as its audio is appended to the sink.
+/// `estimated` is true for the Piper fallback path (no real word-boundary
+/// data — timings are evenly distributed across the known PCM duration).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CaptionTrack {
+    pub words: Vec<CaptionWord>,
+    pub total_ms: u64,
+    pub estimated: bool,
+}
+
+/// Evenly distribute `text`'s whitespace-split words across `total_ms` of
+/// known audio duration. Used for the Piper fallback (local VITS ONNX has
+/// no word-boundary events) so the frontend caption scheduler never needs
+/// to special-case which engine spoke. Pure + unit-tested.
+pub fn estimate_words(text: &str, total_ms: u64) -> Vec<CaptionWord> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let per = total_ms / words.len() as u64;
+    words
+        .iter()
+        .enumerate()
+        .map(|(i, w)| CaptionWord {
+            text: (*w).to_string(),
+            start_ms: i as u64 * per,
+            duration_ms: per,
+        })
+        .collect()
+}
+
+/// Convert edge-tts's real word-boundary events (100ns ticks) into
+/// `CaptionWord`s, offset by `cumulative_ms` (non-zero for chunk 2+ of a
+/// streamed reply — see `play_audio_streamed`). Pure + unit-tested.
+pub fn boundaries_to_words(
+    boundaries: &[edge_tts_rust::BoundaryEvent],
+    cumulative_ms: u64,
+) -> Vec<CaptionWord> {
+    boundaries
+        .iter()
+        .map(|b| CaptionWord {
+            text: b.text.clone(),
+            start_ms: cumulative_ms + b.offset_ticks / 10_000,
+            duration_ms: b.duration_ticks / 10_000,
+        })
+        .collect()
 }
 
 /// Truncate text to at most `max_chars` CHARACTERS for log lines.
@@ -97,10 +162,12 @@ pub async fn pregenerate_cache(
     tracing::info!("tts: pre-generating cache with edge-tts (voice={})", voice);
     for phrase in CACHED_PHRASES {
         match crate::tts_edge::synthesize_to_pcm(phrase, voice).await {
-                Ok((samples, sr)) => {
+                Ok((samples, sr, boundaries)) => {
+                    let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
+                    let words = boundaries_to_words(&boundaries, 0);
                     cache_arc.lock().await.insert(
                         phrase.to_string(),
-                        CachedAudio { samples, sample_rate: sr },
+                        CachedAudio { samples, sample_rate: sr, caption: CaptionTrack { words, total_ms, estimated: false } },
                     );
                     cached_count += 1;
                 }
@@ -118,9 +185,11 @@ pub async fn pregenerate_cache(
         for phrase in CACHED_PHRASES {
             match crate::tts_piper::synthesize(&piper_engine, phrase).await {
                 Ok((samples, sr)) => {
+                    let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
+                    let words = estimate_words(phrase, total_ms);
                     cache_arc.lock().await.insert(
                         phrase.to_string(),
-                        CachedAudio { samples, sample_rate: sr },
+                        CachedAudio { samples, sample_rate: sr, caption: CaptionTrack { words, total_ms, estimated: true } },
                     );
                     cached_count += 1;
                 }
@@ -179,9 +248,9 @@ pub async fn speak_text(
     // Acks like "Ok sir." were pre-generated at boot — replay them instead
     // of re-synthesizing (which previously paid a probe + cold-engine cost).
     // Falls through to synthesis on miss.
-    let (audio, sample_rate) = if let Some(hit) = state.cache.lock().await.get(&text).cloned() {
+    let (audio, sample_rate, caption) = if let Some(hit) = state.cache.lock().await.get(&text).cloned() {
         tracing::info!("tts: cache hit for '{}'", text);
-        (hit.samples, hit.sample_rate)
+        (hit.samples, hit.sample_rate, hit.caption)
     } else {
         // B2 streaming: long multi-sentence replies play chunk 0
         // immediately while the rest synthesizes. Short texts keep the
@@ -200,7 +269,7 @@ pub async fn speak_text(
             } else {
                 false
             };
-            match speak_streaming(sentences, &voice_id, &state, my_generation, emotion).await {
+            match speak_streaming(sentences, &voice_id, &state, my_generation, emotion, app.clone()).await {
                 Ok(()) => {
                     if stream_volume_changed {
                         crate::volume::restore_volume();
@@ -258,7 +327,7 @@ pub async fn speak_text(
     };
 
     // Play audio
-    let play_result = play_audio(audio, sample_rate, my_generation).await;
+    let play_result = play_audio(audio, sample_rate, my_generation, caption, app.clone()).await;
 
     // Restore volume
     if volume_changed {
@@ -280,7 +349,7 @@ pub async fn preview_voice(
     voice_id: String,
     text: Option<String>,
     state: State<'_, TtsState>,
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     let demo_text = text.unwrap_or_else(|| {
         if voice_id.starts_with("en-US-") {
@@ -300,7 +369,7 @@ pub async fn preview_voice(
 
     let my_generation = TTS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
-    let (audio, sample_rate) = match synthesize_with_fallback(&demo_text, &voice_id, &state, crate::tts_edge::TtsEmotion::Neutral).await {
+    let (audio, sample_rate, caption) = match synthesize_with_fallback(&demo_text, &voice_id, &state, crate::tts_edge::TtsEmotion::Neutral).await {
         Ok(result) => result,
         Err(e) => {
             tracing::error!("tts: voice preview failed for '{}': {}", voice_id, e);
@@ -312,7 +381,7 @@ pub async fn preview_voice(
         return Ok(());
     }
 
-    play_audio(audio, sample_rate, my_generation).await
+    play_audio(audio, sample_rate, my_generation, caption, app).await
 }
 
 /// Feature 83 — equip result returned synchronously by set_voice_preference
@@ -487,10 +556,10 @@ pub async fn speak_cached(
         cache.get(&text).cloned()
     };
 
-    let (audio, sample_rate) = match cached_audio {
+    let (audio, sample_rate, caption) = match cached_audio {
         Some(ca) => {
             tracing::info!("tts: cache hit for '{}'", text);
-            (ca.samples, ca.sample_rate)
+            (ca.samples, ca.sample_rate, ca.caption)
         }
         None => {
             // Cache miss — synthesize on demand
@@ -524,7 +593,7 @@ pub async fn speak_cached(
     };
 
     // Play
-    let play_result = play_audio(audio, sample_rate, my_generation).await;
+    let play_result = play_audio(audio, sample_rate, my_generation, caption, app.clone()).await;
 
     // Restore volume
     if volume_changed {
@@ -540,19 +609,24 @@ pub async fn speak_cached(
 
 /// 2-tier synthesis fallback: edge-tts → Piper.
 ///
-/// Returns (f32 PCM samples, sample_rate) on success.
+/// Returns (f32 PCM samples, sample_rate, response caption) on success.
+/// The caption is `estimated: true` for every Piper path (no real
+/// word-boundary data), `false` for edge-tts (real boundaries).
 async fn synthesize_with_fallback(
     text: &str,
     voice: &str,
     state: &TtsState,
     emotion: crate::tts_edge::TtsEmotion,
-) -> Result<(Vec<f32>, u32), String> {
+) -> Result<(Vec<f32>, u32, CaptionTrack), String> {
     // Piper voices (local): `piper-amy` legacy + any `piper-<stem>`
     // with model files present (bundled, cache, or user drop-in dir).
     if let Some(stem) = crate::tts_piper::voice_stem(voice) {
         tracing::info!("tts: using Piper voice '{stem}' (local)");
         crate::tts_network::mark_piper_loaded();
-        return crate::tts_piper::synthesize_with_voice(&state.piper_engine, text, &stem).await;
+        let (samples, sr) = crate::tts_piper::synthesize_with_voice(&state.piper_engine, text, &stem).await?;
+        let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
+        let words = estimate_words(text, total_ms);
+        return Ok((samples, sr, CaptionTrack { words, total_ms, estimated: true }));
     }
 
     // Upfront engine policy (Main Center TTS director, doc 74 P3): explicit
@@ -578,10 +652,12 @@ async fn synthesize_with_fallback(
         )
         .await
         {
-            Ok(Ok((samples, sr))) => {
+            Ok(Ok((samples, sr, boundaries))) => {
                 tracing::info!("tts: edge-tts synthesis OK (cloud)");
                 crate::tts_network::set_network_up();
-                return Ok((samples, sr));
+                let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
+                let words = boundaries_to_words(&boundaries, 0);
+                return Ok((samples, sr, CaptionTrack { words, total_ms, estimated: false }));
             }
             Err(_elapsed) => {
                 // Timeout = genuine transport failure → mark down so the
@@ -605,7 +681,9 @@ async fn synthesize_with_fallback(
     match crate::tts_piper::synthesize(&state.piper_engine, text).await {
         Ok((samples, sr)) => {
             tracing::info!("tts: piper fallback synthesis OK (local)");
-            return Ok((samples, sr));
+            let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
+            let words = estimate_words(text, total_ms);
+            return Ok((samples, sr, CaptionTrack { words, total_ms, estimated: true }));
         }
         Err(e) => {
             tracing::error!("tts: piper fallback also failed: {}", e);
@@ -614,17 +692,25 @@ async fn synthesize_with_fallback(
     }
 }
 
-/// Play f32 PCM audio through rodio with barge-in support.
+/// Play f32 PCM audio through rodio with barge-in support. Emits
+/// `tts:caption` right as the audio is appended to the sink (plan Phase 3)
+/// — skipped if a barge-in already superseded this generation, so a
+/// stale reply's caption never flashes on screen.
 async fn play_audio(
     audio: Vec<f32>,
     sample_rate: u32,
     my_generation: usize,
+    caption: CaptionTrack,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         match OutputStream::try_default() {
             Ok((_stream, handle)) => {
                 match Sink::try_new(&handle) {
                     Ok(sink) => {
+                        if TTS_GENERATION.load(Ordering::SeqCst) <= my_generation {
+                            let _ = app.emit("tts:caption", &caption);
+                        }
                         let source = SamplesBuffer::new(1, sample_rate, audio);
                         sink.append(source);
 
@@ -762,9 +848,9 @@ async fn synthesize_chunk(
     voice_id: &str,
     state: &TtsState,
     emotion: crate::tts_edge::TtsEmotion,
-) -> Result<(Vec<f32>, u32), String> {
+) -> Result<(Vec<f32>, u32, CaptionTrack), String> {
     if let Some(hit) = state.cache.lock().await.get(sentence).cloned() {
-        return Ok((hit.samples, hit.sample_rate));
+        return Ok((hit.samples, hit.sample_rate, hit.caption));
     }
     synthesize_with_fallback(sentence, voice_id, state, emotion).await
 }
@@ -778,15 +864,16 @@ async fn speak_streaming(
     state: &TtsState,
     my_generation: usize,
     emotion: crate::tts_edge::TtsEmotion,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     // Chunk 0 first — this defines first-audio latency.
     if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
         return Ok(());
     }
-    let (first_audio, first_sr) = synthesize_chunk(&sentences[0], voice_id, state, emotion).await?;
+    let (first_audio, first_sr, first_caption) = synthesize_chunk(&sentences[0], voice_id, state, emotion).await?;
 
     let (stream_tx, stream_rx) =
-        std::sync::mpsc::channel::<Option<(Vec<f32>, u32)>>();
+        std::sync::mpsc::channel::<Option<(Vec<f32>, u32, CaptionTrack)>>();
     // Producer: synthesize remaining chunks while chunk 0 plays.
     let rest: Vec<String> = sentences.into_iter().skip(1).collect();
     let voice_owned = voice_id.to_string();
@@ -802,8 +889,8 @@ async fn speak_streaming(
             }
             let res = synthesize_chunk_owned(&s, &voice_owned, &state_ref, emotion).await;
             match res {
-                Ok(pair) => {
-                    if stream_tx.send(Some(pair)).is_err() {
+                Ok(triple) => {
+                    if stream_tx.send(Some(triple)).is_err() {
                         break;
                     }
                 }
@@ -817,8 +904,8 @@ async fn speak_streaming(
     });
 
     // Consumer: single rodio Sink, append chunks as they arrive.
-    let first = Some((first_audio, first_sr));
-    play_audio_streamed(first, stream_rx, my_generation).await
+    let first = Some((first_audio, first_sr, first_caption));
+    play_audio_streamed(first, stream_rx, my_generation, app).await
 }
 
 /// Minimal shared refs for the streaming producer task.
@@ -831,35 +918,50 @@ async fn synthesize_chunk_owned(
     voice_id: &str,
     state: &TtsStateRef,
     emotion: crate::tts_edge::TtsEmotion,
-) -> Result<(Vec<f32>, u32), String> {
+) -> Result<(Vec<f32>, u32, CaptionTrack), String> {
     if let Some(hit) = state.cache.lock().await.get(sentence).cloned() {
-        return Ok((hit.samples, hit.sample_rate));
+        return Ok((hit.samples, hit.sample_rate, hit.caption));
     }
     // Piper engine lives in TtsState (not Send-shareable here); the fallback
     // chain needs it — route through edge-tts directly, Piper on failure
     // is handled by the caller falling back to legacy path on chunk-0 error.
     // For chunks 1+, edge-tts failure ends the stream gracefully (we play
     // what we have) instead of blocking on Piper load.
-    let pcm = crate::tts_edge::synthesize_to_pcm_with_emotion(sentence, voice_id, emotion).await?;
-    Ok(pcm)
+    let (samples, sr, boundaries) =
+        crate::tts_edge::synthesize_to_pcm_with_emotion(sentence, voice_id, emotion).await?;
+    // cumulative_ms is applied by the consumer (play_audio_streamed), which
+    // is the only place that knows how much audio has already been queued —
+    // the producer races ahead of playback and has no visibility into it.
+    let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
+    let words = boundaries_to_words(&boundaries, 0);
+    Ok((samples, sr, CaptionTrack { words, total_ms, estimated: false }))
 }
 
 /// Play chunk 0 immediately, then append streamed chunks as they arrive.
+/// Each chunk's `tts:caption` is emitted right as it's appended to the
+/// sink, with its word `start_ms` offset by `cumulative_ms` — the *actual
+/// decoded PCM duration* of every previously-queued chunk (not any
+/// engine-reported duration), so the frontend never needs to know
+/// streaming happened at all: it just sees one utterance's words arrive
+/// in a few batches, all already on one absolute timeline.
 async fn play_audio_streamed(
-    first: Option<(Vec<f32>, u32)>,
-    rx: std::sync::mpsc::Receiver<Option<(Vec<f32>, u32)>>,
+    first: Option<(Vec<f32>, u32, CaptionTrack)>,
+    rx: std::sync::mpsc::Receiver<Option<(Vec<f32>, u32, CaptionTrack)>>,
     my_generation: usize,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         match OutputStream::try_default() {
             Ok((_stream, handle)) => match Sink::try_new(&handle) {
                 Ok(sink) => {
-                    let mut first_sr = 24000;
-                    if let Some((audio, sr)) = first {
-                        first_sr = sr;
+                    let mut cumulative_ms: u64 = 0;
+                    if let Some((audio, sr, caption)) = first {
+                        if TTS_GENERATION.load(Ordering::SeqCst) <= my_generation {
+                            let _ = app.emit("tts:caption", &caption);
+                        }
+                        cumulative_ms += caption.total_ms;
                         sink.append(SamplesBuffer::new(1, sr, audio));
                     }
-                    let _ = first_sr;
                     // Drain the producer channel (blocking recv is fine here —
                     // we're on a blocking thread, audio plays async).
                     while let Ok(msg) = rx.recv() {
@@ -869,7 +971,12 @@ async fn play_audio_streamed(
                             return Ok(());
                         }
                         match msg {
-                            Some((audio, sr)) => {
+                            Some((audio, sr, mut caption)) => {
+                                for w in caption.words.iter_mut() {
+                                    w.start_ms += cumulative_ms;
+                                }
+                                let _ = app.emit("tts:caption", &caption);
+                                cumulative_ms += caption.total_ms;
                                 sink.append(SamplesBuffer::new(1, sr, audio));
                             }
                             None => break,
@@ -934,5 +1041,64 @@ mod streaming_tests {
     fn test_split_unicode_safe() {
         let out = split_sentences("の test. Second.");
         assert_eq!(out.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod caption_tests {
+    use super::*;
+    use edge_tts_rust::{Boundary, BoundaryEvent};
+
+    #[test]
+    fn test_estimate_words_empty_text() {
+        assert_eq!(estimate_words("   ", 1000), Vec::new());
+        assert_eq!(estimate_words("", 1000), Vec::new());
+    }
+
+    #[test]
+    fn test_estimate_words_single_word_gets_full_duration() {
+        let words = estimate_words("Hello", 500);
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0].text, "Hello");
+        assert_eq!(words[0].start_ms, 0);
+        assert_eq!(words[0].duration_ms, 500);
+    }
+
+    #[test]
+    fn test_estimate_words_evenly_distributed() {
+        let words = estimate_words("one two three four", 800);
+        assert_eq!(words.len(), 4);
+        assert_eq!(words[0].start_ms, 0);
+        assert_eq!(words[1].start_ms, 200);
+        assert_eq!(words[2].start_ms, 400);
+        assert_eq!(words[3].start_ms, 600);
+        assert!(words.iter().all(|w| w.duration_ms == 200));
+    }
+
+    #[test]
+    fn test_boundaries_to_words_converts_ticks_to_ms() {
+        // 10_000_000 ticks/sec -> 10_000 ticks/ms.
+        let boundaries = vec![
+            BoundaryEvent { kind: Boundary::Word, offset_ticks: 0, duration_ticks: 30_000, text: "Hi".into() },
+            BoundaryEvent { kind: Boundary::Word, offset_ticks: 50_000, duration_ticks: 40_000, text: "there".into() },
+        ];
+        let words = boundaries_to_words(&boundaries, 0);
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0], CaptionWord { text: "Hi".into(), start_ms: 0, duration_ms: 3 });
+        assert_eq!(words[1], CaptionWord { text: "there".into(), start_ms: 5, duration_ms: 4 });
+    }
+
+    #[test]
+    fn test_boundaries_to_words_applies_cumulative_offset() {
+        // Streaming chunk 2+: its own boundaries start at 0, but the
+        // consumer must offset them by everything already queued.
+        let boundaries = vec![BoundaryEvent {
+            kind: Boundary::Word,
+            offset_ticks: 0,
+            duration_ticks: 10_000,
+            text: "second".into(),
+        }];
+        let words = boundaries_to_words(&boundaries, 1500);
+        assert_eq!(words[0].start_ms, 1500);
     }
 }

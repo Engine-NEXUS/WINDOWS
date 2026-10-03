@@ -5,6 +5,7 @@ import "../styles.css";
 import AnnotationCanvas from "./AnnotationCanvas";
 import { OrbFrame } from "./OrbFrame";
 import { LoadingIndicator } from "./LoadingIndicator";
+import { ResponseCaption } from "./ResponseCaption";
 
 async function invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
   const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
@@ -300,6 +301,7 @@ function StageApp() {
       <AnnotationCanvas />
       <OrbFrame />
       <LoadingIndicator />
+      <ResponseCaption />
     </div>
   );
 }

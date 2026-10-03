@@ -312,5 +312,8 @@ export function stopTts(): void {
     window.speechSynthesis.cancel();
   }
   void emitTtsEvent("tts-ended");
+  // Response caption (plan Phase 3): cancel every pending word-reveal so a
+  // barge-in never leaves a stale caption's words trickling in afterward.
+  void import("./captionScheduler").then(({ clearCaptionSchedule }) => clearCaptionSchedule());
   useAssistant.getState().setSpeakSeq(null);
 }

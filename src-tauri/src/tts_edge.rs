@@ -67,6 +67,61 @@ pub fn pick_emotion(text: &str) -> TtsEmotion {
     TtsEmotion::Neutral
 }
 
+/// Internal: synthesize + return the full edge-tts result (audio bytes +
+/// word-boundary timing events). `synthesize_to_mp3`/`_with_emotion` below
+/// (unchanged external shape, still used by the TTS benchmarks) wrap this
+/// and discard `.boundaries`; `synthesize_to_pcm`/`_with_emotion` thread
+/// them through for the response-caption feature (plan Phase 3).
+///
+/// Always requests `Boundary::Word` (not `Sentence` — mutually exclusive
+/// per call in this crate): nothing in this codebase reads sentence
+/// boundaries, and word-level timing is what per-word caption reveal needs.
+async fn synthesize_raw(
+    text: &str,
+    voice: &str,
+    emotion: Option<TtsEmotion>,
+) -> Result<edge_tts_rust::SynthesisResult, String> {
+    if text.is_empty() {
+        return Err("Empty text".to_string());
+    }
+
+    let client = EdgeTtsClient::new()
+        .map_err(|e| format!("edge-tts client init failed: {}", e))?;
+
+    let options = if let Some(emotion) = emotion {
+        let (rate, volume, pitch) = emotion.prosody();
+        SpeakOptions {
+            voice: voice.to_string(),
+            rate: rate.to_string(),
+            volume: volume.to_string(),
+            pitch: pitch.to_string(),
+            boundary: Boundary::Word,
+        }
+    } else {
+        SpeakOptions {
+            voice: voice.to_string(),
+            boundary: Boundary::Word,
+            ..SpeakOptions::default()
+        }
+    };
+
+    let result = client
+        .synthesize(text, options)
+        .await
+        .map_err(|e| format!("edge-tts synthesis failed: {}", e))?;
+
+    tracing::info!(
+        "tts-edge: synthesized '{}' ({} bytes MP3, {} word boundaries, voice={}, emotion={:?})",
+        crate::tts::truncate_for_log(text, 50),
+        result.audio.len(),
+        result.boundaries.len(),
+        voice,
+        emotion
+    );
+
+    Ok(result)
+}
+
 /// Synthesize text to MP3 bytes using edge-tts.
 ///
 /// Returns raw MP3 audio bytes on success. The caller is responsible for
@@ -79,33 +134,7 @@ pub async fn synthesize_to_mp3(
     text: &str,
     voice: &str,
 ) -> Result<Vec<u8>, String> {
-    if text.is_empty() {
-        return Err("Empty text".to_string());
-    }
-
-    let client = EdgeTtsClient::new()
-        .map_err(|e| format!("edge-tts client init failed: {}", e))?;
-
-    let result = client
-        .synthesize(
-            text,
-            SpeakOptions {
-                voice: voice.to_string(),
-                boundary: Boundary::Sentence,
-                ..SpeakOptions::default()
-            },
-        )
-        .await
-        .map_err(|e| format!("edge-tts synthesis failed: {}", e))?;
-
-    tracing::info!(
-        "tts-edge: synthesized '{}' ({} bytes MP3, voice={})",
-        crate::tts::truncate_for_log(text, 50),
-        result.audio.len(),
-        voice
-    );
-
-    Ok(result.audio)
+    Ok(synthesize_raw(text, voice, None).await?.audio)
 }
 
 /// Synthesize with emotional prosody (rate/pitch/volume per emotion).
@@ -114,50 +143,12 @@ pub async fn synthesize_to_mp3_with_emotion(
     voice: &str,
     emotion: TtsEmotion,
 ) -> Result<Vec<u8>, String> {
-    if text.is_empty() {
-        return Err("Empty text".to_string());
-    }
-
-    let client = EdgeTtsClient::new()
-        .map_err(|e| format!("edge-tts client init failed: {}", e))?;
-
-    let (rate, volume, pitch) = emotion.prosody();
-    let result = client
-        .synthesize(
-            text,
-            SpeakOptions {
-                voice: voice.to_string(),
-                rate: rate.to_string(),
-                volume: volume.to_string(),
-                pitch: pitch.to_string(),
-                boundary: Boundary::Sentence,
-            },
-        )
-        .await
-        .map_err(|e| format!("edge-tts synthesis failed: {}", e))?;
-
-    tracing::info!(
-        "tts-edge: synthesized '{}' ({} bytes MP3, voice={}, emotion={:?})",
-        crate::tts::truncate_for_log(text, 50),
-        result.audio.len(),
-        voice,
-        emotion
-    );
-
-    Ok(result.audio)
+    Ok(synthesize_raw(text, voice, Some(emotion)).await?.audio)
 }
 
-/// Synthesize text and decode MP3 to f32 PCM samples at the native sample rate.
-///
-/// Returns (samples, sample_rate) for direct rodio playback.
-/// Uses rodio's Decoder for MP3 decoding.
-pub async fn synthesize_to_pcm(
-    text: &str,
-    voice: &str,
-) -> Result<(Vec<f32>, u32), String> {
-    let mp3_bytes = synthesize_to_mp3(text, voice).await?;
-
-    // Decode MP3 to f32 samples using rodio's decoder
+/// Decode MP3 bytes to f32 PCM samples at the native sample rate (shared by
+/// both PCM synthesis variants below).
+fn decode_mp3_to_pcm(mp3_bytes: Vec<u8>) -> Result<(Vec<f32>, u32), String> {
     let cursor = std::io::Cursor::new(mp3_bytes);
     let source = rodio::Decoder::new(cursor)
         .map_err(|e| format!("MP3 decode failed: {}", e))?;
@@ -168,13 +159,28 @@ pub async fn synthesize_to_pcm(
         .map(|s: i16| s as f32 / i16::MAX as f32)
         .collect();
 
+    Ok((samples, sample_rate))
+}
+
+/// Synthesize text and decode MP3 to f32 PCM samples at the native sample rate.
+///
+/// Returns (samples, sample_rate, word-boundary events) for direct rodio
+/// playback plus response-caption scheduling (ticks are 100ns units — see
+/// `tts::boundaries_to_words`).
+pub async fn synthesize_to_pcm(
+    text: &str,
+    voice: &str,
+) -> Result<(Vec<f32>, u32, Vec<edge_tts_rust::BoundaryEvent>), String> {
+    let result = synthesize_raw(text, voice, None).await?;
+    let (samples, sample_rate) = decode_mp3_to_pcm(result.audio)?;
+
     tracing::info!(
         "tts-edge: decoded {} PCM samples ({}ms audio)",
         samples.len(),
         samples.len() as u64 * 1000 / sample_rate as u64
     );
 
-    Ok((samples, sample_rate))
+    Ok((samples, sample_rate, result.boundaries))
 }
 
 /// PCM variant with emotional prosody.
@@ -182,19 +188,10 @@ pub async fn synthesize_to_pcm_with_emotion(
     text: &str,
     voice: &str,
     emotion: TtsEmotion,
-) -> Result<(Vec<f32>, u32), String> {
-    let mp3_bytes = synthesize_to_mp3_with_emotion(text, voice, emotion).await?;
-
-    let cursor = std::io::Cursor::new(mp3_bytes);
-    let source = rodio::Decoder::new(cursor)
-        .map_err(|e| format!("MP3 decode failed: {}", e))?;
-
-    let sample_rate = 24000;
-    let samples: Vec<f32> = source
-        .map(|s: i16| s as f32 / i16::MAX as f32)
-        .collect();
-
-    Ok((samples, sample_rate))
+) -> Result<(Vec<f32>, u32, Vec<edge_tts_rust::BoundaryEvent>), String> {
+    let result = synthesize_raw(text, voice, Some(emotion)).await?;
+    let (samples, sample_rate) = decode_mp3_to_pcm(result.audio)?;
+    Ok((samples, sample_rate, result.boundaries))
 }
 
 #[cfg(test)]
