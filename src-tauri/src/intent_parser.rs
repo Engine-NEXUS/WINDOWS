@@ -4144,9 +4144,10 @@ pub fn normalize_phonetic_mishearings(text: &str) -> String {
 
         "open note pad" | "open not pad" => return "open notepad".to_string(),
 
-        "stand down" | "stop it now" => return "stop".to_string(),
+        "stand down" | "stop it now" | "stahp" | "stopp" | "staup" => return "stop".to_string(),
 
-        "cancel action" | "cancel task" | "cancel that" => return "cancel".to_string(),
+        "cancel action" | "cancel task" | "cancel that"
+        | "concel" | "cancle" | "cansel" | "consul" => return "cancel".to_string(),
 
         "open command center" | "nexus settings" | "nexus preferences"
         | "nexus config" => return "open settings".to_string(),
@@ -7570,6 +7571,25 @@ mod tests {
             } else {
                 panic!("Expected ScreenClick for '{}'", phrase);
             }
+        }
+    }
+
+    /// Doc 07 P5: STT noise on "stop"/"cancel" normalizes before the
+    /// ghost drill's stop-word intercept checks it (orchestrator.rs ORs
+    /// the raw and normalized transcript against is_stop_phrase).
+    #[test]
+    fn test_phonetic_stop_cancel_variants() {
+        for (heard, expected) in [
+            ("stahp", "stop"),
+            ("stopp", "stop"),
+            ("staup", "stop"),
+            ("concel", "cancel"),
+            ("cancle", "cancel"),
+            ("cansel", "cancel"),
+            ("consul", "cancel"),
+        ] {
+            assert_eq!(normalize_phonetic_mishearings(heard), expected, "for '{heard}'");
+            assert!(crate::ghost::is_stop_phrase(&normalize_phonetic_mishearings(heard)), "'{heard}' should normalize to a stop phrase");
         }
     }
 
