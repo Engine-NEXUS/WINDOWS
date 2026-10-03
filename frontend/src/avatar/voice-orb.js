@@ -3,10 +3,10 @@
   if (typeof window === 'undefined' || typeof customElements === 'undefined' || customElements.get('voice-orb')) return;
   const STATES = ['idle', 'listening', 'thinking', 'speaking', 'text'];
   // State-based color palettes (Feature 89): idle warm grey, listening
-  // calm gold, thinking blue-violet, speaking vibrant magenta. The 5th
-  // (text) entry is a fallback — real text inherits the STATE palette via
-  // the dominant-state tint (see _paint stateTint / uniform textTint).
-  const PALETTE = [[.80,.78,.76], [1.0,.85,.58], [.62,.55,1.0], [1.0,.45,.85], [1.0,.9,.80]];
+  // warm amber/brown, thinking blue-violet, speaking vibrant magenta. The
+  // 5th (text) entry is a fallback — real text inherits the STATE palette
+  // via the dominant-state tint (see _paint stateTint / uniform textTint).
+  const PALETTE = [[.80,.78,.76], [.82,.55,.26], [.62,.55,1.0], [1.0,.45,.85], [1.0,.9,.80]];
   const mediaSources = new WeakMap();
   const clamp = (v, lo=0, hi=1) => Math.max(lo, Math.min(hi, Number.isFinite(+v) ? +v : lo));
   const weightsFor = state => STATES.map(s => +(s === state));
@@ -31,6 +31,8 @@
     const g=hash3(xi,yi+1,zi+1), h=hash3(xi+1,yi+1,zi+1);
     return mixNum(mixNum(mixNum(a,b,xf),mixNum(c,d,xf),yf),mixNum(mixNum(e,f,xf),mixNum(g,h,xf),yf),zf)*2.0-1.0;
   };
+  const normalize3 = (x, y, z) => { const l = Math.hypot(x,y,z)||1; return [x/l,y/l,z/l]; };
+  const cross3 = (ax,ay,az,bx,by,bz) => [ay*bz-az*by, az*bx-ax*bz, ax*by-ay*bx];
   const sphere = count => {
     const data = new Float32Array(count*4);
     const jitter = .55 / Math.sqrt(count);
@@ -52,25 +54,6 @@
       data.set([r*Math.cos(a), (seeded(i+97)-.5)*2.6, r*Math.sin(a)], i*3);
     }
     return data;
-  };
-  // TTS lattice: an exact meridian/parallel scaffold. At the production
-  // budget this is 100 strands by 50 samples; other counts use the nearest
-  // rectangular grid so the fallback renderer preserves the wireframe.
-  const ttsLatticeOf = count => {
-    const cols = count === 5000 ? 100 : Math.max(16, Math.round(Math.sqrt(count*2)));
-    const rows = count === 5000 ? 50 : Math.max(8, Math.ceil(count/cols));
-    const lattice = new Float32Array(count*3);
-    const grid = new Float32Array(count*2);
-    for (let i=0; i<count; i++) {
-      const col = i%cols;
-      const row = Math.floor(i/cols)%rows;
-      const lon = (col+.5)/cols*6.2831853;
-      const lat = -1.5708+(row+.5)/rows*3.14159;
-      const ring = Math.cos(lat);
-      lattice.set([ring*Math.cos(lon), Math.sin(lat), ring*Math.sin(lon)], i*3);
-      grid.set([col/(cols-1), row/(rows-1)], i*2);
-    }
-    return { lattice, grid };
   };
   // ─── Particle-generated text (Feature 88) ─────────────────────────
   // Rasterize the text on an offscreen 2D canvas, sample glyph pixels,
@@ -135,10 +118,9 @@
   precision highp float;
   attribute vec4 seed;
   attribute vec3 scatter;
-  attribute vec3 lattice;
-  attribute vec2 grid;
   attribute vec4 textPos;
   uniform float time, pixels, density, onset, reduced, assemble, tw, textProg, thinkIn;
+  uniform mediump float glitch;
   uniform vec4 weights;
   uniform vec3 bands;
   uniform vec3 textTint;
@@ -175,35 +157,68 @@
     float pulse=1.0+0.05*sin(t*2.5+pid*6.2831);
     float listenReact=(.018+.06*mid)*inward+.020*high*grain;
     float listenR=pulseOn?(pulse+listenReact):(1.0+.012*sin(t*1.7+pid*6.2831)+.03*low*bass);
-    // Speaking: dotted meridian/latitude wireframe. The static lattice
-    // supplies the visible strands; deformation and rotation keep the
-    // structure moving without smoothing it into a solid clay blob.
-    vec3 L=lattice;
-    float lon=grid.x*6.2831;
-    float lat=grid.y*3.14159-1.5708;
-    float baseSlow=noise(L*1.25+vec3(0.0,t*0.45,seed.w*0.35));
-    float strandRow=sin(lat*9.0-t*1.6+baseSlow*1.5);
-    float strandCol=sin(lon*7.0+t*1.15+baseSlow*1.8);
+    // Speaking: dense, bumpy blob. Low-frequency 3D noise displaces the
+    // base sphere into an irregular, lobed silhouette (never a perfect
+    // circle — see reference video), with the existing high-frequency
+    // grain layered on top for surface sparkle. Replaces the old lat/lon
+    // wireframe lattice (too sparse to read as a solid "speaking"
+    // presence).
+    float lobeNoise=noise(n*1.5+vec3(t*.22,-t*.17,t*.13));
+    float lobeNoise2=noise(n*0.85+vec3(-t*.10,t*.14,-t*.09));
     float energy=.35+.65*max(low,mid);
     float rad=1.0
-      +.035*sin(t*.9+seed.w*6.2831)
-      +.045*baseSlow
-      +energy*(.045*strandRow+.035*strandCol)
-      +high*.020*grain
-      +.10*onset;
-    vec3 P=L*rad;
-    vec3 speakV=turn(P,t*.30+.04*sin(t*.22));
-    // Thinking: braided toroidal knot — 3 strand-turns x 8 twists form
-    // flowing ribbon streams that twist and intertwine. thinkIn drives the
-    // entry: the sphere contracts inward first, then the knot stretches
-    // out. Never a crossfade — the same particles travel there.
+      +.26*lobeNoise
+      +.16*lobeNoise2
+      +energy*.05*sin(angle*5.0+t*1.4+drift*1.2)
+      +high*.022*grain
+      +.12*onset;
+    vec3 speakV=turn(n,t*.24+.04*sin(t*.22))*rad;
+    // Thinking: open, flowing multi-strand wisp formation — curl-noise
+    // tendrils that reach outward from a dense core and taper to a fine
+    // point, never closing into a loop (replaces the old braided-knot,
+    // which read as a solid ring, not loose smoke — see reference video).
+    // u (seed.w) is a continuous 0..1 ramp across ALL particles
+    // (sphere()'s index/count); partitioned into STRANDS contiguous
+    // blocks so every particle knows which tendril it belongs to
+    // (strandIdx) and how far along it it sits (sAlong, 0=core, 1=tip).
+    // thinkIn drives the entry: strands are a short contracted stub at 0,
+    // fully extended at 1 — never a crossfade, the same particles travel.
     float u=seed.w;
-    float kth=3.0*6.2831853*u+0.57*t;
-    float kph=8.0*6.2831853*u-0.48*t;
-    float rt=0.7135+0.2135*cos(kph)+0.125*sin(t*1.1+u*6.2831);
-    rt*=mix(0.58,1.0,thinkIn);
-    vec3 kb=vec3(cos(kth)*rt,sin(kth)*rt,0.2135*sin(kph));
-    vec3 thought=vec3(kb.x,0.77*kb.y-0.52*kb.z,0.52*kb.y+0.77*kb.z);
+    const float STRANDS=6.0;
+    float su=u*STRANDS;
+    float strandIdx=floor(su);
+    float sAlong=fract(su);
+    // Strand directions are spread evenly on a sphere (golden-angle
+    // Fibonacci lattice, same formula as sphere() in JS) rather than
+    // independently randomized — random per-strand hashes occasionally
+    // clump 2-3 directions close together, which reads as a single
+    // blob instead of distinct separated tendrils.
+    float sy=1.0-2.0*(strandIdx+0.5)/STRANDS;
+    float sr=sqrt(max(0.0,1.0-sy*sy));
+    float sang=strandIdx*2.399963229728653;
+    vec3 strandDir=vec3(sr*cos(sang),sy,sr*sin(sang));
+    vec3 perp1=normalize(cross(strandDir,vec3(0.0,1.0,0.0))+0.0001);
+    vec3 perp2=cross(strandDir,perp1);
+    float sh1=hash(vec3(strandIdx*7.13,11.0,0.0));
+    float sh2=hash(vec3(strandIdx*7.13,23.0,0.0));
+    float sh4=hash(vec3(strandIdx*7.13,53.0,0.0));
+    float strandPhase=sh4*6.2831;
+    float strandFreq=1.6+sh2*1.4;
+    float strandCurl=0.55+sh1*0.5;
+    // Ease-in reach (sAlong^1.7): particles bunch near the dense core
+    // (slow initial growth) and spread out fast toward the tip.
+    float reach=pow(sAlong,1.7);
+    // Ribbon cross-section shrinks toward the tip so it reads as a point.
+    float tipTaper=1.0-smoothstep(0.55,1.0,sAlong)*0.85;
+    float bend1=sin(sAlong*strandFreq*4.0+strandPhase+t*0.55)*strandCurl;
+    float bend2=cos(sAlong*strandFreq*2.6-strandPhase+t*0.42)*strandCurl*0.7;
+    vec3 axis=strandDir*reach*1.9+perp1*bend1*(0.5+0.5*reach)+perp2*bend2*(0.4+0.6*reach);
+    float ribbonAngle=hash(n*3.1+vec3(strandIdx,0.0,0.0))*6.2831;
+    float ribbonR=(0.13+0.04*sin(t*1.3+strandIdx*2.1))*tipTaper;
+    vec3 ribbonOff=(perp1*cos(ribbonAngle)+perp2*sin(ribbonAngle))*ribbonR;
+    // Slow whole-formation spin ("twist and intertwine") on top of each
+    // strand's own internal wiggle.
+    vec3 thought=turn((axis+ribbonOff)*mix(0.42,1.0,thinkIn),t*0.12);
     // Cloud position in the CURRENT base state (weights renormalized in JS
     // to sum 1 across the four base states; the text weight is separate).
     vec3 cloudPos=turn(n,t*.11)*idleR*weights.x
@@ -234,6 +249,17 @@
     float ae=ap*ap*(3.0-2.0*ap);
     vec3 swirl=vec3(sin(t*3.0+stag*6.2831),cos(t*2.6+stag*6.2831),0.0)*0.35*(1.0-ae);
     vec3 flight=mix(scatter+swirl,pos,ae);
+    // Glitch transition: a brief (~220ms) burst of large high-frequency
+    // jitter when the dominant state changes (glitch 0→1→0, driven from
+    // JS _tick). Decorrelated from the calm ambient drift/grain noise —
+    // much faster time coefficients — so it reads as a sudden tear, not
+    // part of the normal idle motion.
+    vec3 glitchJitter=vec3(
+      noise(n*35.0+vec3(t*40.0,0.0,0.0)),
+      noise(n*31.0+vec3(0.0,t*42.0,0.0)),
+      noise(n*29.0+vec3(0.0,0.0,t*38.0))
+    )*glitch*0.18;
+    flight+=glitchJitter;
     float flow=pow(.5+.5*sin(angle*13.0+(weights.y-weights.w)*t*5.8+drift*2.0),7.0);
     float depth=clamp((flight.z+1.35)/2.7,0.0,1.0);
     float perspective=3.8/(3.8-flight.z*.60);
@@ -243,16 +269,19 @@
     point+=active*high*pop*1.8;
     gl_PointSize=max(1.8,point*pixels/720.0);
     float cool=.5+.5*sin(n.y*2.1+n.x*1.6+drift*.65);
-    float speakFace=clamp(L.z*.5+.5,0.0,1.0);
-    float speakWire=.78+.22*sin(lon*3.0+t*2.2+seed.w*6.2831);
+    float speakFace=clamp(n.z*.5+.5,0.0,1.0);
+    float speakBump=clamp(.5+.5*lobeNoise,0.0,1.0);
     // ─── State palettes (Feature 89) ──────────────────────────────
-    // Listening: calm gold (palette-driven). Thinking: the hue TRAVELS
-    // through the strands along the twist phase (violet ↔ electric blue).
-    // Speaking: vibrant magenta body with white front highlights.
+    // Listening: warm amber/brown (palette-driven). Thinking: the hue
+    // TRAVELS along each strand (violet core → electric-blue → near-white
+    // at the reaching tips). Speaking: vibrant magenta body with white
+    // front highlights.
     vec3 ci=vec3(.80,.78,.76);
-    vec3 cl=vec3(1.0,.85,.58);
-    vec3 ctt=mix(vec3(.62,.55,1.0),vec3(.45,.72,1.0),.5+.5*sin(kph-t*1.2));
-    vec3 cs=mix(vec3(1.0,.45,.85),vec3(1.0,1.0,1.0),clamp(speakFace*.55+.35*speakWire,0.0,1.0));
+    vec3 cl=vec3(.82,.55,.26);
+    float thinkPhase=strandIdx*2.1+sAlong*3.0-t*1.2;
+    vec3 ctt=mix(vec3(.62,.55,1.0),vec3(.45,.72,1.0),.5+.5*sin(thinkPhase));
+    ctt=mix(ctt,vec3(1.0),smoothstep(0.55,1.0,sAlong)*0.55);
+    vec3 cs=mix(vec3(1.0,.45,.85),vec3(1.0,1.0,1.0),clamp(speakFace*.55+.35*speakBump,0.0,1.0));
     vec3 blendT=ci*weights.x+cl*weights.y+ctt*weights.z+cs*weights.w+textTint*tw;
     // Per-particle color lag: mid-transition some particles still lean
     // toward the old color while others already shifted (gold → gold/purple
@@ -266,8 +295,10 @@
     tint=mix(blendT,domC,mixAmt);
     tint*=mix(1.0,.30,ambF);
     crisp=max(weights.w,tw);
-    // knotSpark: specular white sparks travelling along the front strands.
-    float knotSpark=pow(max(0.0,sin(u*40.0-t*2.8)),14.0)*step(0.65,depth);
+    sparkTint=vec3(1.0,1.0,1.0);
+    // knotSpark: specular white sparks travelling along each strand's
+    // length (sAlong), front-facing strands only.
+    float knotSpark=pow(max(0.0,sin(sAlong*22.0-t*2.8+strandIdx*2.1)),14.0)*step(0.5,depth);
     // Energy hierarchy: listening calm/subtle → thinking medium-high →
     // speaking highest. Speaking brightness is synchronized with the
     // radial breathing (expands brighter, contracts dimmer).
@@ -275,7 +306,7 @@
     strength+=weights.y*(mid*flow*.40+onset*rim*.45);
     strength+=weights.w*(mid*flow*.95+onset*rim*.9);
     strength+=weights.z*(0.35+0.65*depth+knotSpark*1.8);
-    strength+=weights.w*(speakFace*.55+speakWire*.50);
+    strength+=weights.w*(speakFace*.55+speakBump*.50);
     strength+=tw*(.40+.40*depth);
     strength+=weights.w*.10*sin(t*.9+seed.w*6.2831);
     strength*=mix(1.0,0.70,weights.y);
@@ -290,6 +321,7 @@
   varying float strength, spark;
   varying vec3 sparkTint;
   varying float crisp;
+  uniform mediump float glitch;
   void main() {
     float r=length(gl_PointCoord-.5)*2.0;
     if(r>1.0)discard;
@@ -298,6 +330,20 @@
     float halo=mix(exp(-r*r*4.0)*.24,exp(-r*r*8.0)*.12,crisp)*(1.0-smoothstep(.75,1.0,r));
     float a=(core+halo)*strength;
     vec3 color=tint*a+sparkTint*spark*core;
+    // Glitch transition: per-particle RGB-channel decorrelation flicker
+    // (a point-sprite approximation of chromatic-aberration/VHS-tear —
+    // true screen-space channel splitting needs a post-process pass,
+    // out of reach of this per-point architecture). Paired with the
+    // vertex-shader's positional jitter burst (see glitchJitter above).
+    if(glitch>0.001) {
+      float gr=fract(sin(dot(gl_PointCoord,vec2(12.9898,78.233)))*43758.5453);
+      vec3 rgbShift=vec3(
+        0.5+0.5*sin(gr*31.0+tint.r*7.0),
+        0.5+0.5*sin(gr*37.0+tint.g*7.0+2.1),
+        0.5+0.5*sin(gr*41.0+tint.b*7.0+4.2)
+      );
+      color=mix(color,color*rgbShift*1.6,glitch);
+    }
     gl_FragColor=vec4(color,min(1.0,a+spark*core));
   }`;
 
@@ -314,6 +360,9 @@
       this._textHold=1600; this._prevState='idle'; this._textPts=null;
       this._textPending=null; this._textPosArr=null;
       this._thinkStart=0; this._thinkIn=1;
+      // Glitch transition: a short burst fired whenever the dominant base
+      // state (idle/listening/thinking/speaking) changes (see _tick).
+      this._lastDom=null; this._glitchStart=0; this._glitchAmt=0;
       this._tick=this._tick.bind(this);
       this._sync=this._sync.bind(this);
     }
@@ -387,18 +436,12 @@
         this._scatterLoc=gl.getAttribLocation(program,'scatter');
         this._scatterBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,this._scatterBuf);
         gl.enableVertexAttribArray(this._scatterLoc);gl.vertexAttribPointer(this._scatterLoc,3,gl.FLOAT,false,0,0);
-        this._latticeLoc=gl.getAttribLocation(program,'lattice');
-        this._latticeBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,this._latticeBuf);
-        gl.enableVertexAttribArray(this._latticeLoc);gl.vertexAttribPointer(this._latticeLoc,3,gl.FLOAT,false,0,0);
-        this._gridLoc=gl.getAttribLocation(program,'grid');
-        this._gridBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,this._gridBuf);
-        gl.enableVertexAttribArray(this._gridLoc);gl.vertexAttribPointer(this._gridLoc,2,gl.FLOAT,false,0,0);
         this._textLoc=gl.getAttribLocation(program,'textPos');
         this._textBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,this._textBuf);
         gl.enableVertexAttribArray(this._textLoc);gl.vertexAttribPointer(this._textLoc,4,gl.FLOAT,false,0,0);
         gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE);gl.disable(gl.DEPTH_TEST);
         this._gl=gl;this._program=program;this._uniforms={};
-        for(const n of ['time','pixels','density','weights','bands','onset','assemble','tw','textProg','thinkIn'])this._uniforms[n]=gl.getUniformLocation(program,n);
+        for(const n of ['time','pixels','density','weights','bands','onset','assemble','tw','textProg','thinkIn','textTint','glitch'])this._uniforms[n]=gl.getUniformLocation(program,n);
         this._auto=matchMedia('(pointer: coarse)').matches?4000:5000;
         if(!this._lossHandler) {
           this._lossHandler=e=>{e.preventDefault();this._lost=true;this._sync();};
@@ -510,6 +553,21 @@
       else if(this._thinkStart)this._thinkStart=0;
       const tp2=this._thinkStart?Math.min(1,(now-this._thinkStart)/700):1;
       this._thinkIn=tp2*tp2*(3-2*tp2);
+      // Glitch transition: fire a short (~220ms) burst whenever the
+      // dominant base-state weight flips (naturally lands mid-blend, when
+      // the new state's weight crosses the old one — not at the instant
+      // the state attribute changes). Suspended during particle-text
+      // (weights[0..3] all decay toward 0 there, which would otherwise
+      // read as spurious flips) and on the very first tick (no glitch at
+      // mount — only on an actual value change).
+      if(this.state!=='text') {
+        let dom4=0;
+        for(let i=1;i<4;i++)if(this._weights[i]>this._weights[dom4])dom4=i;
+        if(this._lastDom!==null&&dom4!==this._lastDom)this._glitchStart=now;
+        this._lastDom=dom4;
+      }
+      const gt=this._glitchStart?(now-this._glitchStart)/220:2;
+      this._glitchAmt=(gt>=0&&gt<=1)?Math.sin(gt*Math.PI):0;
       // Particle-text phase machine: converge (~700ms) → hold → dissolve
       // (~600ms, state reverts so the sphere reforms while particles
       // stream back with a swirl burst) → cleanup.
@@ -542,15 +600,12 @@
       const size=this._canvas.width,count=this.particles;
       if(count!==this._count||this._textPending) {
         this._count=count;this._seeds=sphere(count);this._scat=scatterOf(count);
-        const tts=ttsLatticeOf(count);this._ttsLattice=tts.lattice;this._ttsGrid=tts.grid;
         this._textPosArr=textOf(count,this._textPending||this._textPts);
         this._textPending=null;
         if(this._gl){
           const gl=this._gl;
           gl.bindBuffer(gl.ARRAY_BUFFER,this._buffer);gl.bufferData(gl.ARRAY_BUFFER,this._seeds,gl.STATIC_DRAW);
           gl.bindBuffer(gl.ARRAY_BUFFER,this._scatterBuf);gl.bufferData(gl.ARRAY_BUFFER,this._scat,gl.STATIC_DRAW);
-          gl.bindBuffer(gl.ARRAY_BUFFER,this._latticeBuf);gl.bufferData(gl.ARRAY_BUFFER,this._ttsLattice,gl.STATIC_DRAW);
-          gl.bindBuffer(gl.ARRAY_BUFFER,this._gridBuf);gl.bufferData(gl.ARRAY_BUFFER,this._ttsGrid,gl.STATIC_DRAW);
           gl.bindBuffer(gl.ARRAY_BUFFER,this._textBuf);gl.bufferData(gl.ARRAY_BUFFER,this._textPosArr,gl.STATIC_DRAW);
         }
       }
@@ -561,14 +616,15 @@
       // magenta/white. No separate text color exists.
       const w4=weights[4]||0;
       const inv=w4<0.999?1/(1-w4):1;
+      const wMain=weights.slice(0,4).map(v=>v*inv);
       let dom=0,domV=-1;
-      for(let i=0;i<4;i++){const v=weights[i]*inv;if(v>domV){domV=v;dom=i;}}
+      for(let i=0;i<4;i++){const v=wMain[i];if(v>domV){domV=v;dom=i;}}
       const stateTint=PALETTE[dom];
       const tintRgb=[0,1,2].map(c=>Math.round((PALETTE.reduce((sum,p,i)=>i<4?sum+p[c]*weights[i]:sum,0)*inv+stateTint[c]*w4)*255));
       const h=this._hctx;h.clearRect(0,0,size,size);
       const glow=h.createRadialGradient(size*.5,size*.5,size*.10,size*.5,size*.5,size*.48);
       const energy=(weights[1]+weights[3])*(bands[0]*.025+onset*.035);
-      glow.addColorStop(0,`rgba(${rgb},.012)`);glow.addColorStop(.58,`rgba(${rgb},${.028+energy})`);glow.addColorStop(1,`rgba(${rgb},0)`);
+      glow.addColorStop(0,`rgba(${tintRgb},.012)`);glow.addColorStop(.58,`rgba(${tintRgb},${.028+energy})`);glow.addColorStop(1,`rgba(${tintRgb},0)`);
       h.fillStyle=glow;h.fillRect(0,0,size,size);
       if(this._gl) {
         const gl=this._gl,u=this._uniforms;gl.viewport(0,0,size,size);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);
@@ -578,10 +634,12 @@
         gl.uniform1f(u.tw,w4);
         gl.uniform1f(u.textProg,this._textProg||0);
         gl.uniform1f(u.thinkIn,this._thinkIn==null?1:this._thinkIn);
+        gl.uniform3fv(u.textTint,stateTint);
+        gl.uniform1f(u.glitch,this._glitchAmt||0);
         gl.drawArrays(gl.POINTS,0,count);
-      } else this._paint2D(time,wMain,bands,onset,rgb,size,w4,this._textProg||0,this._thinkIn==null?1:this._thinkIn,this._textPosArr);
+      } else this._paint2D(time,wMain,bands,onset,tintRgb,size,w4,this._textProg||0,this._thinkIn==null?1:this._thinkIn,this._textPosArr,this._glitchAmt||0);
     }
-    _paint2D(t,w,b,onset,rgb,size,tw=0,textProg=0,thinkIn=1,textArr=null) {
+    _paint2D(t,w,b,onset,rgb,size,tw=0,textProg=0,thinkIn=1,textArr=null,glitchAmt=0) {
       const ctx=this._ctx;ctx.clearRect(0,0,size,size);ctx.globalCompositeOperation='lighter';
       ctx.fillStyle=`rgb(${rgb})`;
       for(let i=0;i<this._count;i++) {
@@ -593,42 +651,64 @@
         const active=w[1]+w[3];
         let r=1+.018*drift+active*(b[0]*(.08*drift+.03)+b[1]*wave*.15+b[2]*Math.sin(y*25-t*5)*.035);
         let px=(x*c+z*sn)*r,pz=(z*c-x*sn)*r,py=y*r;
-        let speakFace=0,speakWire=0;
-        if(w[3]>.001&&this._ttsLattice&&this._ttsGrid) {
-          const li=i*3,gi=i*2;
-          const Lx=this._ttsLattice[li],Ly=this._ttsLattice[li+1],Lz=this._ttsLattice[li+2];
-          const gx=this._ttsGrid[gi],gy=this._ttsGrid[gi+1];
-          const lon=gx*6.2831,lat=gy*3.14159-1.5708;
-          const baseSlow=vnoise(Lx*1.25,Ly*1.25+t*.45,Lz*1.25+u*.35);
-          const strandRow=Math.sin(lat*9.0-t*1.6+baseSlow*1.5);
-          const strandCol=Math.sin(lon*7.0+t*1.15+baseSlow*1.8);
+        let speakFace=0,speakBump=0;
+        if(w[3]>.001) {
+          // Dense bumpy blob (parity with the GL path): low-frequency 3D
+          // noise displaces the base sphere point into an irregular,
+          // lobed silhouette; high-frequency grain layers surface sparkle.
+          const lobeNoise=vnoise(x*1.5+t*.22,y*1.5-t*.17,z*1.5+t*.13);
+          const lobeNoise2=vnoise(x*0.85-t*.10,y*0.85+t*.14,z*0.85-t*.09);
           const energy=.35+.65*Math.max(b[0],b[1]);
-          const grain2=vnoise(Lx*17.0+t*1.8,Ly*17.0-t*.7,Lz*17.0+t*1.0);
+          const grain2=vnoise(x*17.0-t*1.8,y*17.0+t*.7,z*17.0+t*1.0);
           const rad=1.0
-            +.035*Math.sin(t*.9+u*6.2831)
-            +.045*baseSlow
-            +energy*(.045*strandRow+.035*strandCol)
-            +b[2]*.020*grain2
-            +.10*onset;
-          const rot=t*.30+.04*Math.sin(t*.22);
+            +.26*lobeNoise
+            +.16*lobeNoise2
+            +energy*.05*Math.sin(angle*5.0+t*1.4+drift*1.2)
+            +b[2]*.022*grain2
+            +.12*onset;
+          const rot=t*.24+.04*Math.sin(t*.22);
           const rc=Math.cos(rot),rs=Math.sin(rot);
-          const sx=Lx*rad,sy=Ly*rad,sz=Lz*rad;
+          const sx=x*rad,sy=y*rad,sz=z*rad;
           const bx=sx*rc+sz*rs,bz=-sx*rs+sz*rc,by=sy;
-          speakFace=Lz;
-          speakWire=.78+.22*Math.sin(lon*3.0+t*2.2+u*6.2831);
+          speakFace=z;
+          speakBump=.5+.5*lobeNoise;
           px=px*(1-w[3])+bx*w[3];
           py=py*(1-w[3])+by*w[3];
           pz=pz*(1-w[3])+bz*w[3];
         }
         if(w[2]>.001) {
-          // Braided toroidal knot (parity with the GL path): 3 strand-turns
-          // x 8 twists, thinkIn entry contraction, 34° tilt.
-          const kth=3.0*6.2831853*u+0.57*t;
-          const kph=8.0*6.2831853*u-0.48*t;
-          let rt=0.7135+0.2135*Math.cos(kph)+0.125*Math.sin(t*1.1+u*6.2831);
-          rt*=mix(0.58,1.0,thinkIn);
-          const kbx=Math.cos(kth)*rt,kby=Math.sin(kth)*rt,kbz=0.2135*Math.sin(kph);
-          const bx=kbx,by=0.77*kby-0.52*kbz,bz=0.52*kby+0.77*kbz;
+          // Open flowing multi-strand wisp (parity with the GL path): u
+          // partitions into STRANDS contiguous blocks, each an
+          // independent tendril reaching outward from a dense core and
+          // tapering to a point — replaces the old braided-knot.
+          const STRANDS=6.0;
+          const su=u*STRANDS,strandIdx=Math.floor(su),sAlong=su-strandIdx;
+          // Evenly spread strand directions (golden-angle Fibonacci
+          // lattice, parity with the GL path) rather than independently
+          // randomized ones, which occasionally clump into a blob.
+          const sy=1.0-2.0*(strandIdx+0.5)/STRANDS;
+          const sr=Math.sqrt(Math.max(0,1.0-sy*sy));
+          const sang=strandIdx*2.399963229728653;
+          const dx=sr*Math.cos(sang),dy=sy,dz=sr*Math.sin(sang);
+          const [p1x,p1y,p1z]=normalize3(...cross3(dx,dy,dz,0,1,0));
+          const [p2x,p2y,p2z]=cross3(dx,dy,dz,p1x,p1y,p1z);
+          const sh1=hash3(strandIdx*7.13,11.0,0.0),sh2=hash3(strandIdx*7.13,23.0,0.0);
+          const sh4=hash3(strandIdx*7.13,53.0,0.0);
+          const strandPhase=sh4*6.2831,strandFreq=1.6+sh2*1.4,strandCurl=0.55+sh1*0.5;
+          const reach=Math.pow(sAlong,1.7);
+          const tipTaper=1.0-smooth01(clamp((sAlong-0.55)/0.45))*0.85;
+          const bend1=Math.sin(sAlong*strandFreq*4.0+strandPhase+t*0.55)*strandCurl;
+          const bend2=Math.cos(sAlong*strandFreq*2.6-strandPhase+t*0.42)*strandCurl*0.7;
+          const bw1=0.5+0.5*reach,bw2=0.4+0.6*reach;
+          const ribbonAngle=seeded(i+601+strandIdx*997)*6.2831;
+          const ribbonR=(0.13+0.04*Math.sin(t*1.3+strandIdx*2.1))*tipTaper;
+          const ca=Math.cos(ribbonAngle),sa=Math.sin(ribbonAngle);
+          const scale=mixNum(0.42,1.0,thinkIn);
+          const tx0=(dx*reach*1.9+p1x*bend1*bw1+p2x*bend2*bw2+(p1x*ca+p2x*sa)*ribbonR)*scale;
+          const ty0=(dy*reach*1.9+p1y*bend1*bw1+p2y*bend2*bw2+(p1y*ca+p2y*sa)*ribbonR)*scale;
+          const tz0=(dz*reach*1.9+p1z*bend1*bw1+p2z*bend2*bw2+(p1z*ca+p2z*sa)*ribbonR)*scale;
+          const rot=t*0.12,rc2=Math.cos(rot),rs2=Math.sin(rot);
+          const bx=tx0*rc2+tz0*rs2,by=ty0,bz=-tx0*rs2+tz0*rc2;
           px=px*(1-w[2])+bx*w[2];
           py=py*(1-w[2])+by*w[2];
           pz=pz*(1-w[2])+bz*w[2];
@@ -662,9 +742,18 @@
           py=py*ae+(this._scat[i*3+1]+swy)*(1-ae);
           pz=pz*ae+this._scat[i*3+2]*(1-ae);
         }
+        if(glitchAmt>0.001) {
+          // Glitch transition (parity with the GL path): fast-changing
+          // per-particle jitter burst, quantized to ~90Hz so it reads as
+          // flickery digital noise rather than smooth drift.
+          const gq=Math.floor(t*90);
+          px+=(hash3(i,gq,1)-.5)*glitchAmt*0.18;
+          py+=(hash3(i,gq,2)-.5)*glitchAmt*0.18;
+          pz+=(hash3(i,gq,3)-.5)*glitchAmt*0.18;
+        }
         const perspective=3.8/(3.8-pz*.6),rim=Math.pow(1-Math.abs(z),2);
-        const dot=size/720*(.7+.3*(pz+1)+rim*.6)*(1-.28*w[3])*mix(1.0,.62,ambF);
-        ctx.globalAlpha=clamp((.20+.24*(pz+1)+rim*.3+w[2]*.4+w[3]*(speakFace*.22+speakWire*.15)+tw*(.30+.25*(pz+1)))*mix(1.0,.32,ambF));
+        const dot=size/720*(.7+.3*(pz+1)+rim*.6)*(1-.28*w[3])*mixNum(1.0,.62,ambF);
+        ctx.globalAlpha=clamp((.20+.24*(pz+1)+rim*.3+w[2]*.4+w[3]*(speakFace*.22+speakBump*.15)+tw*(.30+.25*(pz+1)))*mixNum(1.0,.32,ambF));
         ctx.beginPath();ctx.arc(size*(.5+px*perspective*.305),size*(.5-py*perspective*.305),dot,0,Math.PI*2);ctx.fill();
       }
       ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';

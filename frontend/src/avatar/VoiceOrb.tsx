@@ -53,12 +53,16 @@ declare global {
  * High-performance WebGL 3D Voice Orb Component (Ship Notes)
  *
  * ONE continuous particle simulation morphing across 5 states:
- * - 'idle': Calm, breathing lilac/purple sphere
- * - 'listening': Turquoise inward-pulling wave, voice-reactive
- * - 'thinking': Braided toroidal knot (contract → stretch → intertwine)
- * - 'speaking': Radiant pink/violet outward blast with audio reactivity
+ * - 'idle': Calm, breathing grey sphere
+ * - 'listening': Grainy warm amber/brown sphere, calm and voice-reactive
+ * - 'thinking': Open flowing multi-strand violet/blue wisps — curl-noise
+ *   tendrils reaching outward from a dense core, tapering to a point
+ *   (contract → extend on entry; never a closed loop)
+ * - 'speaking': Dense bumpy magenta/white blob, irregular lobed silhouette,
+ *   audio-reactive with particle sparks
  * - 'text': The SAME particles detach, converge into readable glyphs,
  *   hold, then dissolve back into the previous state
+ * A brief glitch/tear burst plays whenever the dominant state changes.
  */
 export const VoiceOrb: React.FC<VoiceOrbProps> = ({
   state,

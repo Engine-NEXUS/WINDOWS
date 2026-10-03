@@ -8,11 +8,15 @@ import { VoiceOrb } from "./VoiceOrb";
  *
  * The Lottie era (wakeup.json choreography, waves bars, phase machine) is
  * RETIRED: the animation JSON files stay on disk unused (kept for future
- * use), but nothing loads them anymore. Every state is now particle-driven:
+ * use), but nothing loads them anymore. Every state is now particle-driven
+ * (shapes redesigned per the reference-video plan, voice-orb.js Phase 2):
  *   idle      : grey breathing sphere
- *   listening : 50% particles pulse + 50% frozen (STT mic-reactive)
- *   thinking  : grey starburst (hub + radiating dotted rays)
-  *   speaking  : neutral-white dotted meridian wireframe (audio-reactive)
+ *   listening : grainy warm amber/brown sphere, calm (STT mic-reactive)
+ *   thinking  : open flowing multi-strand violet/blue wisps (curl-noise
+ *               tendrils reaching from a dense core, never a closed loop)
+ *   speaking  : dense bumpy magenta/white blob (audio-reactive, irregular
+ *               lobed silhouette, particle sparks)
+ * A brief glitch/tear burst plays whenever the dominant state changes.
  * Ghost mode : the orb IS the always-on display — assemble() flight on entry.
  *
  * The exported pure functions below (resolveAvatarAnim, ghostWaveBars,
