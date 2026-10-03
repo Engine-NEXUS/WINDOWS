@@ -1,12 +1,64 @@
-//! Window management: transparent frameless always-on-top overlay with click-through control.
-//!
-//! The overlay starts hidden and click-through. On wake, Rust shows the window and
-//! disables click-through. When the assistant goes idle, the frontend re-enables
-//! click-through and eventually hides the window.
+//! Orb/loading-indicator placement — the voice orb and loading spinner
+//! live as positioned `<div>`s inside the always-on `stage` fullscreen
+//! overlay (see `frontend/src/stage/OrbFrame.tsx`), not as their own OS
+//! windows. This module computes WHERE they should sit (pure, unit-tested
+//! pct->physical-px math, unchanged since the single-window days) and
+//! emits that rect to the stage frontend over Tauri events — it no longer
+//! owns an OS window to show/hide/position directly.
 
-use tauri::{AppHandle, Manager, Runtime, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-const WIN: &str = "main";
+/// Last-emitted rects, for the stage frontend to pull on mount (race-free
+/// delivery pattern already used elsewhere in this codebase for
+/// dynamically-created windows, e.g. `PENDING_SIDEBAR` /
+/// `get_pending_sidebar_content` — an event fired before React has
+/// mounted its listener is simply lost, so a pull-based fallback is
+/// needed). Stage is created once at boot, but its first paint can still
+/// lag the first `emit_orb_rect`/`emit_loading_rect` call by a frame or
+/// two.
+static LAST_ORB_RECT: once_cell::sync::Lazy<parking_lot::Mutex<Option<RectPayload>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
+static LAST_LOADING_RECT: once_cell::sync::Lazy<parking_lot::Mutex<Option<RectPayload>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
+
+/// Record a rect computed elsewhere (calibration.rs's preview path) so the
+/// pending-pull cache stays correct even when the emit didn't go through
+/// `emit_orb_rect`/`emit_loading_rect` directly.
+pub fn note_orb_rect(rect: RectPayload) {
+    *LAST_ORB_RECT.lock() = Some(rect);
+}
+pub fn note_loading_rect(rect: RectPayload) {
+    *LAST_LOADING_RECT.lock() = Some(rect);
+}
+
+/// IPC: pull the last-computed orb rect (race-free mount fallback).
+#[tauri::command]
+pub fn get_pending_orb_rect<R: Runtime>(app: AppHandle<R>) -> Option<RectPayload> {
+    let cached = *LAST_ORB_RECT.lock();
+    cached.or_else(|| Some(orb_rect(&app)))
+}
+
+/// IPC: pull the last-computed loading-indicator rect (race-free mount
+/// fallback).
+#[tauri::command]
+pub fn get_pending_loading_rect<R: Runtime>(app: AppHandle<R>) -> RectPayload {
+    let cached = *LAST_LOADING_RECT.lock();
+    cached.unwrap_or_else(|| {
+        let (h, v, size) = read_loading_settings(&app);
+        rect_for(&app, h, v, size)
+    })
+}
+
+/// Physical-px rect sent to the stage frontend. Same shape as
+/// `stage::StageRect` by convention (kept as a separate type so this
+/// module doesn't need to depend on `stage`'s internal hitbox type).
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct RectPayload {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
 
 /// Read orb position + size from settings.json.
 /// Falls back to defaults (center-bottom, 200px) if the file is missing,
@@ -55,8 +107,8 @@ fn read_size_key(json: &serde_json::Value, key: &str, fallback: u32, min: u32, m
 }
 
 /// Read waves placement from settings.json (ghost-session rect for the
-/// waves visual inside the orb window). Defaults = the wakeup defaults
-/// (user invariant: waves live where the wakeup orb lives).
+/// waves visual inside the orb's stage rect). Defaults = the wakeup
+/// defaults (user invariant: waves live where the wakeup orb lives).
 pub fn read_waves_settings<R: Runtime>(app: &AppHandle<R>) -> (f64, f64, u32) {
     let fallback = (0.5f64, 1.0f64, 200u32);
     let dir = match app.path().app_data_dir() {
@@ -95,26 +147,6 @@ pub fn read_loading_settings<R: Runtime>(app: &AppHandle<R>) -> (f64, f64, u32) 
         read_pct_key(&json, "loadingVerticalPct", 0.05),
         read_size_key(&json, "loadingSize", 80, 40, 160),
     )
-}
-
-/// Position the loading-indicator window from saved settings. Used by both
-/// show paths (orchestrator show_loading + commands show_loading_indicator)
-/// so the user-calibrated placement is what actually shows at runtime.
-pub fn position_loading<R: Runtime>(win: &WebviewWindow<R>) -> Result<(), String> {
-    if let Ok(Some(monitor)) = win.current_monitor() {
-        let (h, v, size) = read_loading_settings(win.app_handle());
-        let (x, y) = overlay_xy(
-            h,
-            v,
-            size,
-            monitor.size().width as i32,
-            monitor.size().height as i32,
-            monitor.scale_factor(),
-        );
-        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
-        let _ = win.set_size(tauri::PhysicalSize::new(size, size));
-    }
-    Ok(())
 }
 
 /// Pure overlay placement math (unit-tested): center-anchored pct →
@@ -160,119 +192,127 @@ pub fn overlay_nudge(
     (h, v)
 }
 
-/// Position the orb based on saved settings (orbHorizontalPct, orbVerticalPct, orbSize).
-/// Falls back to center-bottom, 200px if settings are missing or invalid.
-/// Called at startup, on every wake, on every hotkey press, and on show_overlay.
-/// During a ghost session the WAVES placement is applied instead (the waves
-/// own the visual then — same window, different saved rect), and during
-/// animation calibration repositioning is suppressed entirely (the drag
-/// owns the window).
-pub fn position_orb<R: Runtime>(win: &WebviewWindow<R>) -> Result<(), String> {
-    use tauri::PhysicalPosition;
+/// Resolve the primary monitor's (width, height, scale) in physical px
+/// without needing a window reference — neither the orb nor the loading
+/// indicator are their own window anymore. Falls back to the `stage`
+/// window's own monitor info (covers the brief pre-`primary_monitor`-ready
+/// window at cold boot on some multi-monitor setups), then to a safe
+/// 1920x1080x1.0 default so a rect is always produced rather than skipped.
+pub fn monitor_info<R: Runtime>(app: &AppHandle<R>) -> (i32, i32, f64) {
+    if let Ok(Some(m)) = app.primary_monitor() {
+        return (m.size().width as i32, m.size().height as i32, m.scale_factor());
+    }
+    if let Some(win) = app.get_webview_window("stage") {
+        if let Ok(Some(m)) = win.current_monitor() {
+            return (m.size().width as i32, m.size().height as i32, m.scale_factor());
+        }
+    }
+    (1920, 1080, 1.0)
+}
+
+/// Compute a physical-px rect for arbitrary (h, v, size) — shared by
+/// `orb_rect`, the calibration preview, and `set_orb_position`'s
+/// live-preview path.
+pub fn rect_for<R: Runtime>(app: &AppHandle<R>, h_pct: f64, v_pct: f64, size: u32) -> RectPayload {
+    let (sw, sh, scale) = monitor_info(app);
+    let (x, y) = overlay_xy(h_pct, v_pct, size, sw, sh, scale);
+    let phys = (size as f64 * scale) as i32;
+    RectPayload { x, y, w: phys, h: phys }
+}
+
+/// Compute the orb's current rect: waves placement during a ghost
+/// session, orb placement otherwise. Calibration owns the preview rect
+/// while a session is open (see `calibration::is_active`) — callers that
+/// aren't calibration should route through `emit_orb_rect`, which skips
+/// emitting during an active session rather than fighting the preview.
+pub fn orb_rect<R: Runtime>(app: &AppHandle<R>) -> RectPayload {
+    let (h_pct, v_pct, size) = if crate::ghost::session_active() {
+        read_waves_settings(app)
+    } else {
+        read_orb_settings(app)
+    };
+    rect_for(app, h_pct, v_pct, size)
+}
+
+/// Register the orb's current rect as an interactive stage hitbox (so
+/// pointer events reach it instead of passing through to the desktop).
+fn set_orb_hitbox_interactive<R: Runtime>(app: &AppHandle<R>, rect: RectPayload) {
+    crate::stage::set_hitbox_source(
+        "orb",
+        vec![crate::stage::StageRect { x: rect.x, y: rect.y, w: rect.w, h: rect.h }],
+    );
+}
+
+/// Emit the orb's rect to the stage frontend (`stage:orb_rect`). Skipped
+/// while animation calibration owns the preview (its own apply_main/
+/// apply_loading in calibration.rs emit their own rects instead — this
+/// avoids the two fighting over the same event).
+pub fn emit_orb_rect<R: Runtime>(app: &AppHandle<R>) {
     if crate::calibration::is_active() {
-        tracing::debug!("position_orb: calibration active — leaving preview placement alone");
-        return Ok(());
+        tracing::debug!("emit_orb_rect: calibration active — leaving preview rect alone");
+        return;
     }
-    if let Ok(Some(monitor)) = win.current_monitor() {
-        let scale = monitor.scale_factor();
-        let screen = monitor.size();
+    let rect = orb_rect(app);
+    *LAST_ORB_RECT.lock() = Some(rect);
+    let _ = app.emit("stage:orb_rect", rect);
+}
 
-        let (h_pct, v_pct, orb_size) = if crate::ghost::session_active() {
-            read_waves_settings(win.app_handle())
-        } else {
-            read_orb_settings(win.app_handle())
-        };
-        let (x, y) = overlay_xy(
-            h_pct,
-            v_pct,
-            orb_size,
-            screen.width as i32,
-            screen.height as i32,
-            scale,
-        );
-
-        let _ = win.set_position(PhysicalPosition::new(x, y));
-        let _ = win.set_size(tauri::PhysicalSize::new(orb_size, orb_size));
-        tracing::debug!("orb positioned at ({}, {}) size {}px [h={}, v={}, scale={}]",
-            x, y, orb_size, h_pct, v_pct, scale);
+/// Emit the loading-indicator's rect (`stage:loading_rect`). Same
+/// calibration-ownership skip as `emit_orb_rect`.
+pub fn emit_loading_rect<R: Runtime>(app: &AppHandle<R>) {
+    if crate::calibration::is_active() {
+        return;
     }
-    Ok(())
+    let (h, v, size) = read_loading_settings(app);
+    let rect = rect_for(app, h, v, size);
+    *LAST_LOADING_RECT.lock() = Some(rect);
+    let _ = app.emit("stage:loading_rect", rect);
 }
 
-/// Configure window as a non-activating floating overlay (does not steal keyboard focus from active apps)
-pub fn configure_non_activating_overlay<R: Runtime>(win: &WebviewWindow<R>) -> Result<(), String> {
-    let _ = position_orb(win);
-    win.set_always_on_top(true).map_err(|e| e.to_string())?;
-    let _ = win.set_focusable(false);
-    Ok(())
+/// Show the orb and make it interactive (rect + visible + hitbox). Does
+/// NOT trigger the frontend's wake sequence — callers that want that call
+/// `wake_orb` instead; Tier-3 command-detection shows+interacts but emits
+/// its OWN `command-detected` event rather than a normal wake.
+pub fn show_orb_interactive<R: Runtime>(app: &AppHandle<R>) {
+    let rect = orb_rect(app);
+    *LAST_ORB_RECT.lock() = Some(rect);
+    let _ = app.emit("stage:orb_rect", rect);
+    let _ = app.emit("stage:orb_visible", true);
+    set_orb_hitbox_interactive(app, rect);
 }
 
-pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    let win = app
-        .get_webview_window(WIN)
-        .ok_or_else(|| "main window not found".to_string())?;
-
-    configure_non_activating_overlay(&win)?;
-    // Start with click-through OFF so the user can interact with the window.
-    win.set_ignore_cursor_events(false).map_err(|e| e.to_string())?;
-    Ok(())
+/// Full wake sequence: show + interactive + tell the stage frontend to
+/// run its wake handler. Replaces the old `win.show()` +
+/// `configure_non_activating_overlay()` + `set_ignore_cursor_events(false)`
+/// + `win.eval("window.__NEXUS_WAKE__...")` 4-step dance every wake call
+/// site (hotkey, wake-word, tray, single-instance relaunch) repeated
+/// against the standalone `main` window — now a single function call,
+/// and the frontend listens for a real Tauri event instead of an eval.
+pub fn wake_orb<R: Runtime>(app: &AppHandle<R>) {
+    show_orb_interactive(app);
+    let _ = app.emit("orb:wake", ());
 }
 
-/// IPC: `invoke('set_click_through', { ignore: bool })`.
+/// IPC: orb interactivity (replaces `set_click_through`). The orb is a
+/// div inside the always-click-through `stage` overlay; "interactive"
+/// means its current rect becomes a stage hitbox so pointer events reach
+/// it — everywhere else on the fullscreen overlay stays click-through.
 #[tauri::command]
-pub fn set_click_through<R: Runtime>(
-    app: AppHandle<R>,
-    ignore: bool,
-) -> Result<(), String> {
-    let win = app
-        .get_webview_window(WIN)
-        .ok_or_else(|| "main window not found".to_string())?;
-    win.set_ignore_cursor_events(ignore).map_err(|e| e.to_string())?;
-    if !ignore {
-        let _ = win.set_always_on_top(true);
+pub fn set_orb_interactive<R: Runtime>(app: AppHandle<R>, interactive: bool) -> Result<(), String> {
+    if interactive {
+        let rect = orb_rect(&app);
+        set_orb_hitbox_interactive(&app, rect);
+    } else {
+        crate::stage::set_hitbox_source("orb", Vec::new());
     }
     Ok(())
 }
 
-/// Convenience: re-apply overlay state (called after show).
-#[allow(dead_code)]
-pub fn refresh_overlay<R: Runtime>(win: &WebviewWindow<R>) -> Result<(), String> {
-    let _ = position_orb(win);
-    win.set_always_on_top(true).map_err(|e| e.to_string())?;
-    win.set_ignore_cursor_events(true).map_err(|e| e.to_string())
-}
-
-/// IPC: `invoke('show_overlay')`.
-/// Shows the native overlay window. Used by the frontend when `visible` becomes true.
-/// CSS opacity/transform alone can't reliably hide WebView2 transparent windows after
-/// content has been rendered (GPU compositing caches the last frame), so we use
-/// native show/hide for reliable visibility control.
-#[tauri::command]
-pub fn show_overlay<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    let win = app
-        .get_webview_window(WIN)
-        .ok_or_else(|| "main window not found".to_string())?;
-    win.show().map_err(|e| e.to_string())?;
-    configure_non_activating_overlay(&win)?;
-    win.set_ignore_cursor_events(false).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-/// IPC: `invoke('hide_overlay')`.
-/// Hides the native overlay window. Used by the frontend when `visible` becomes false.
-#[tauri::command]
-pub fn hide_overlay<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    let win = app
-        .get_webview_window(WIN)
-        .ok_or_else(|| "main window not found".to_string())?;
-    win.hide().map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-/// IPC: `invoke('set_orb_position', { horizontalPct, verticalPct, size })`.
-/// Live-updates the orb position and size without restarting.
-/// Does NOT save to settings — the frontend should call save_settings separately.
-/// Used by the settings sidebar sliders for real-time preview.
+/// IPC: live calibration preview rect for arbitrary (h, v, size) — used
+/// by the settings sidebar sliders for real-time preview. Does NOT save
+/// to settings.json; the frontend calls `save_settings` separately.
+/// Bypasses the calibration-session skip in `emit_orb_rect` by design:
+/// this command IS an explicit "show this exact rect now" request.
 #[tauri::command]
 pub fn set_orb_position<R: Runtime>(
     app: AppHandle<R>,
@@ -280,25 +320,13 @@ pub fn set_orb_position<R: Runtime>(
     vertical_pct: f64,
     size: u32,
 ) -> Result<(), String> {
-    let win = app
-        .get_webview_window(WIN)
-        .ok_or_else(|| "main window not found".to_string())?;
-
-    // Clamp inputs to safe ranges
     let h = horizontal_pct.max(0.0).min(1.0);
     let v = vertical_pct.max(0.0).min(1.0);
-    let orb = size.max(100).min(300) as i32;
-
-    if let Ok(Some(monitor)) = win.current_monitor() {
-        let scale = monitor.scale_factor();
-        let screen = monitor.size();
-
-        let (x, y) = overlay_xy(h, v, size, screen.width as i32, screen.height as i32, scale);
-        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
-        let _ = win.set_size(tauri::PhysicalSize::new(orb, orb));
-        tracing::debug!("set_orb_position: ({}, {}) size {}px [h={}, v={}]",
-            x, y, orb, h, v);
-    }
+    let s = size.max(100).min(300);
+    let rect = rect_for(&app, h, v, s);
+    *LAST_ORB_RECT.lock() = Some(rect);
+    let _ = app.emit("stage:orb_rect", rect);
+    tracing::debug!("set_orb_position: emitted rect {:?} [h={h}, v={v}]", rect);
     Ok(())
 }
 
@@ -361,5 +389,16 @@ mod tests {
         let (h2, v2) = overlay_nudge(h1, v1, 200, -37, 12, SW, SH, 1.0);
         assert!((h2 - 0.5).abs() < 1e-9);
         assert!((v2 - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_rect_for_matches_overlay_xy() {
+        let (x, y) = overlay_xy(0.5, 1.0, 200, SW, SH, 1.0);
+        // rect_for needs an AppHandle for monitor_info's primary_monitor()
+        // fallback chain, which isn't available in a unit test — the
+        // overlay_xy/overlay_nudge coverage above is the real contract
+        // this module promises; rect_for is a thin, untestable-without-app
+        // wrapper over it. This test just pins the arithmetic it wraps.
+        assert_eq!((x, y), (860, 880));
     }
 }

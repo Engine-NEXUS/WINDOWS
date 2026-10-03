@@ -7,7 +7,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 const triggerFollowupListenMock = vi.fn();
-vi.mock("../main", () => ({
+vi.mock("../stage/orbRuntime", () => ({
   triggerFollowupListen: (...args: unknown[]) => triggerFollowupListenMock(...args),
 }));
 

@@ -1,10 +1,18 @@
 //! Single fullscreen stage window + blackout watchdog.
 //!
-//! Step 1 of the single-stage plan: the stage exists as an EMPTY,
-//! parallel-run shell. No visuals move into it until later steps — it
-//! proves windowing (fullscreen transparent overlay, hitbox
-//! click-through, video-safe toolwindow flag) and resilience (heartbeat,
-//! blackout auto-shutdown, background auto-fix) first.
+//! Step 1 (2026-09-25) proved the shell empty and parallel-run: windowing
+//! (fullscreen transparent overlay, hitbox click-through, video-safe
+//! toolwindow flag) and resilience (heartbeat, blackout auto-shutdown,
+//! background auto-fix) first, before anything depended on it.
+//!
+//! Step 2 (this pass) moves the voice orb and loading indicator in as
+//! positioned divs (see `window_manager.rs`'s orb_rect/emit_loading_rect
+//! + the frontend's OrbFrame/LoadingIndicator components) — `stage` is
+//! now shown at boot and stays up for the life of the app, instead of the
+//! old on-demand/ghost-session-only model. A blackout now briefly hides
+//! the orb + captions too, not just the ghost ring; the existing
+//! auto-fix watchdog below is unchanged and still recovers within
+//! seconds — this tradeoff was discussed and accepted.
 //!
 //! Blackout policy (user requirement: never a full blackout):
 //! - DETECT: window missing OR renderer heartbeat stale >6s while marked
@@ -46,8 +54,28 @@ impl StageRect {
     }
 }
 
-static HITBOXES: once_cell::sync::Lazy<parking_lot::Mutex<Vec<StageRect>>> =
-    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(Vec::new()));
+/// Hitboxes keyed by source so independent consumers (the orb, the
+/// loading indicator, spatial annotations) can register/clear their own
+/// interactive rects without clobbering each other. `stage_set_hitboxes`
+/// (frontend-facing, legacy single-source callers) writes under the
+/// "legacy" key; `set_hitbox_source` (Rust-internal, window_manager.rs /
+/// calibration.rs) writes under a named key.
+static HITBOXES: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::HashMap<String, Vec<StageRect>>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+/// Rust-internal: replace one named source's hitbox rects. Empty = that
+/// source has nothing interactive right now (does not affect other
+/// sources). Used by window_manager.rs (orb) and calibration.rs (orb +
+/// loading preview, both interactive for drag during a calibration
+/// session).
+pub fn set_hitbox_source(source: &str, rects: Vec<StageRect>) {
+    let mut map = HITBOXES.lock();
+    if rects.is_empty() {
+        map.remove(source);
+    } else {
+        map.insert(source.to_string(), rects);
+    }
+}
 
 static LAST_BEAT: once_cell::sync::Lazy<parking_lot::Mutex<Option<std::time::Instant>>> =
     once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
@@ -79,14 +107,16 @@ fn ensure_stage<R: Runtime>(app: &AppHandle<R>) -> Result<tauri::WebviewWindow<R
     Ok(win)
 }
 
-/// IPC: show the stage (parallel-run testing only in step 1).
-/// Clears kill-switch disable + fail counter — an explicit show is a
-/// deliberate re-arm.
-#[tauri::command]
-pub async fn stage_show<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+/// Synchronous core of `stage_show` — no actual `.await` happens in this
+/// logic (window creation/show/cursor-events are all sync Tauri calls), so
+/// it's split out as a plain fn callable from `lib.rs`'s setup hook, which
+/// must create+show the stage BEFORE `mic_permissions::init` looks it up
+/// by label — an `async_runtime::spawn`'d call wouldn't have run yet by
+/// that point in the same synchronous setup closure.
+pub fn stage_show_sync<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     DISABLED.store(false, std::sync::atomic::Ordering::Relaxed);
     FAILS.store(0, std::sync::atomic::Ordering::Relaxed);
-    let win = ensure_stage(&app)?;
+    let win = ensure_stage(app)?;
     win.show().map_err(|e| format!("stage show: {e}"))?;
     // Re-assert on every show: a recreated window resets to the default
     // (cursor-intercepting) state — the fullscreen overlay must be
@@ -95,8 +125,15 @@ pub async fn stage_show<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         .map_err(|e| format!("stage click-through: {e}"))?;
     VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
     *SHOWN_AT.lock() = Some(std::time::Instant::now());
-    tracing::info!("stage: shown (parallel-run, empty shell, click-through enforced)");
+    tracing::info!("stage: shown (click-through enforced)");
     Ok(())
+}
+
+/// IPC: show the stage. Clears kill-switch disable + fail counter — an
+/// explicit show is a deliberate re-arm.
+#[tauri::command]
+pub async fn stage_show<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    stage_show_sync(&app)
 }
 
 /// IPC: hide the stage (destroy — frees the WebView2 tree like all windows).
@@ -131,11 +168,12 @@ pub fn stage_heartbeat(client: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
-/// IPC: replace the interactive hitbox set (physical px). Empty = fully
-/// click-through (step-1 default: the shell has no content).
+/// IPC: replace the interactive hitbox set (physical px) for ONE named
+/// source (e.g. "spatial" for screen-annotation pins). Other sources'
+/// hitboxes (orb, loading) are untouched — see `set_hitbox_source`.
 #[tauri::command]
-pub fn stage_set_hitboxes(rects: Vec<StageRect>) -> Result<(), String> {
-    *HITBOXES.lock() = rects;
+pub fn stage_set_hitboxes(source: String, rects: Vec<StageRect>) -> Result<(), String> {
+    set_hitbox_source(&source, rects);
     Ok(())
 }
 
@@ -195,7 +233,7 @@ pub fn spawn_hitbox_loop<R: Runtime>(app: AppHandle<R>) {
                 crate::ghost::observe_cursor(crate::ghost::ghost_wry::g_wry_ref(&app), pos);
                 let inside = match pos {
                     Some((x, y)) => {
-                        HITBOXES.lock().iter().any(|r| r.contains(x, y))
+                        HITBOXES.lock().values().flatten().any(|r| r.contains(x, y))
                             || crate::live_glass::is_cursor_inside_hitbox(x, y)
                     }
                     // No cursor API on this platform: stay fully click-through.

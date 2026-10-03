@@ -74,7 +74,7 @@ pub fn register_glass_hitboxes(rects: Vec<crate::stage::StageRect>) -> Result<()
             h: h.h,
         })
         .collect();
-    crate::stage::stage_set_hitboxes(stage_rects)?;
+    crate::stage::stage_set_hitboxes("live-glass".to_string(), stage_rects)?;
     Ok(())
 }
 

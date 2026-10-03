@@ -1,10 +1,12 @@
 //! Dynamic window creation — windows are created on-demand instead of at
 //! startup to save RAM. Each WebView2 window spawns ~7 processes (~250 MB),
-//! so creating 4 invisible windows at startup wastes ~1 GB.
+//! so creating invisible windows at startup wastes RAM for nothing.
 //!
-//! Only the `main` (orb) window is created at startup (via tauri.conf.json).
-//! All other windows (setup, settings, sidebar, architect) are created here
-//! when first needed, and destroyed (not hidden) when closed.
+//! Only `stage` is created at startup (single-stage migration — it hosts
+//! the always-on orb + loading indicator as positioned divs, see
+//! `window_manager.rs`). All other windows (setup, settings, sidebar,
+//! calibrate-toolbar) are created here when first needed, and destroyed
+//! (not hidden) when closed.
 
 use tauri::{Manager, Runtime, WebviewWindowBuilder, WebviewUrl};
 
@@ -31,30 +33,11 @@ pub struct WindowConfig {
 }
 
 impl WindowConfig {
-    pub fn main() -> Self {
-        Self {
-            label: "main", title: "NEXUS", url: "index.html",
-            width: 200., height: 200., min_width: Some(100.), min_height: Some(100.),
-            resizable: true, decorations: false, transparent: true,
-            always_on_top: true, skip_taskbar: true, shadow: false,
-            focus: false, center: true, hidden_title: true,
-        }
-    }
-
-    /// Loading indicator — small 80x80 transparent window at the
-    /// top-right corner of the screen, below where a close button would be.
-    /// Shows a Lottie loading animation while a long-running command is
-    /// being processed by the Worker. Created on-demand and destroyed when
-    /// the result arrives.
-    pub fn loading_indicator() -> Self {
-        Self {
-            label: "loading-indicator", title: "NEXUS Loading", url: "loading.html",
-            width: 80., height: 80., min_width: None, min_height: None,
-            resizable: false, decorations: false, transparent: true,
-            always_on_top: true, skip_taskbar: true, shadow: false,
-            focus: false, center: false, hidden_title: true,
-        }
-    }
+    // `main` (orb) and `loading-indicator` were retired in the single-stage
+    // migration — both now render as positioned divs inside `stage()`
+    // below (see window_manager.rs's orb_rect/emit_loading_rect + the
+    // frontend's OrbFrame/LoadingIndicator components), not their own OS
+    // windows.
 
     pub fn setup() -> Self {
         Self {
@@ -89,9 +72,10 @@ impl WindowConfig {
         }
     }
 
-    /// Stage shell — fullscreen transparent overlay (parallel-run only).
-    /// Hosts the ghost ring + stage notices. WS_EX_TOOLWINDOW so fullscreen
-    /// video underneath keeps playing; NOT capture-excluded.
+    /// Stage shell — fullscreen transparent overlay, always-on (single-
+    /// stage migration). Hosts the voice orb, the loading indicator, the
+    /// ghost ring, and stage notices/annotations. WS_EX_TOOLWINDOW so
+    /// fullscreen video underneath keeps playing; NOT capture-excluded.
     pub fn stage() -> Self {
         Self {
             label: "stage", title: "NEXUS Stage", url: "stage.html",

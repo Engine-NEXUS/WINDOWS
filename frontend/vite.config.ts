@@ -11,13 +11,15 @@ import { resolve } from "path";
 // file on demand, so a missing rollup input only breaks production.)
 //
 //   tauri.conf.json window  ->  rollup input
-//   main      index.html    ->  main
 //   setup     setup.html    ->  setup
 //   settings  settings.html ->  settings
 //   sidebar   sidebar.html  ->  sidebar  (unified: Assistant + Command Hub
 //                            + Architect + PR List views in one window)
-//   loading   loading.html  ->  loading
-//   stage     stage.html    ->  stage   (fullscreen single-stage shell)
+//   stage     stage.html    ->  stage   (fullscreen single-stage shell —
+//                            hosts the voice orb + loading indicator too,
+//                            see stage/OrbFrame.tsx + stage/LoadingIndicator.tsx;
+//                            the old `main`/`loading` windows + their
+//                            index.html/loading.html entries are retired)
 //
 // Silero VAD files (model + worklet) live in public/ so Vite serves them
 // as-is without any transformation. ONNX WASM runtime is loaded from CDN
@@ -40,11 +42,9 @@ export default defineConfig({
     sourcemap: false,
     rollupOptions: {
       input: {
-        main: resolve(__dirname, "index.html"),
         setup: resolve(__dirname, "setup.html"),
         settings: resolve(__dirname, "settings.html"),
         sidebar: resolve(__dirname, "sidebar.html"),
-        loading: resolve(__dirname, "loading.html"),
         stage: resolve(__dirname, "stage.html"),
         companionHud: resolve(__dirname, "companion-hud.html"),
       },

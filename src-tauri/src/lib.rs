@@ -367,14 +367,10 @@ pub fn run() {
                     let _ = crate::commands::show_settings_sidebar(app_clone).await;
                 });
             } else {
-                // Only wake the main window if we are NOT in the middle of setup
+                // Only wake the orb if we are NOT in the middle of setup
                 let setup_active = app.get_webview_window("setup").is_some();
                 if !setup_active {
-                    if let Some(main_win) = app.get_webview_window("main") {
-                        let _ = main_win.show();
-                        let _ = crate::window_manager::configure_non_activating_overlay(&main_win);
-                        let _ = main_win.eval("window.__NEXUS_WAKE__ && window.__NEXUS_WAKE__()");
-                    }
+                    crate::window_manager::wake_orb(app);
                 }
             }
         }))
@@ -399,10 +395,18 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // Create the main window on-demand (only in the primary instance).
-            // Removing it from tauri.conf.json prevents the single-instance
-            // secondary launch from flashing a blank window before exiting.
-            let _ = crate::dyn_windows::get_or_create_window(app.handle(), crate::dyn_windows::WindowConfig::main());
+            // ─── Stage: the always-on home for the orb + loading indicator ──
+            // Single-Stage Shell step 2 (AGENTS.md 2026-09-25 planned this,
+            // never executed until now): the voice orb and loading spinner
+            // no longer get their own small OS windows ("main",
+            // "loading-indicator") — they're positioned divs inside the one
+            // fullscreen `stage` overlay, which must therefore be shown at
+            // boot instead of the old on-demand/ghost-only model. Called
+            // synchronously (not spawned) so the window exists in time for
+            // `mic_permissions::init` to find it by label a few lines down.
+            if let Err(e) = crate::stage::stage_show_sync(app.handle()) {
+                tracing::error!("stage: failed to show at boot: {e}");
+            }
 
             // ─── Stage hitbox loop + blackout watchdog ──────────────────
             // Both loops are permanent and self-guard (they idle while the
@@ -626,9 +630,6 @@ pub fn run() {
                 });
             }
 
-            // Window overlay + click-through.
-            window_manager::init(app.handle())?;
-
             // NOTE: Sidebar/setup/settings/architect windows are NO LONGER created
             // at startup. They are created on-demand by dyn_windows.rs when first
             // needed, and destroyed when closed. This saves ~1 GB of RAM at idle
@@ -641,10 +642,11 @@ pub fn run() {
             // own app origins so the permission dialog never re-appears.
             mic_permissions::init(app);
 
-            // Position the orb at bottom-center, just above the taskbar/dock.
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = window_manager::position_orb(&win);
-            }
+            // Compute + cache the orb's bottom-center rect (just above the
+            // taskbar/dock) so the stage frontend's pending-pull fallback
+            // has something correct even if it mounts before this emit
+            // reaches a live listener.
+            window_manager::emit_orb_rect(app.handle());
 
             // Pre-index installed apps for instant launch (background thread).
             app_registry::init();
@@ -879,11 +881,11 @@ pub fn run() {
             }
 
             if should_open_setup {
-                // Hide the orb during setup — it should not steal focus or
-                // appear behind the setup wizard on first launch.
-                if let Some(main_win) = app.get_webview_window("main") {
-                    let _ = main_win.hide();
-                }
+                // The orb starts hidden by default (frontend `visible`
+                // state defaults to false) — nothing to hide here now that
+                // it's a stage-hosted div instead of its own window; it
+                // simply never shows itself during setup since nothing
+                // tells it to wake.
                 if let Ok(win) = crate::dyn_windows::get_or_create_window(app.handle(), crate::dyn_windows::WindowConfig::setup()) {
                     let _ = win.show();
                     let _ = win.set_focus();
@@ -892,15 +894,13 @@ pub fn run() {
                 // ─── --background flag: silent tray-only startup ────────
                 //
                 // When launched by the scheduled task (auto-start), the app
-                // passes --background. In this mode, the main orb window stays
-                // hidden and the app runs silently in the system tray.
-                // The user activates it via wake word, hotkey, or tray click.
+                // passes --background. The orb stays hidden (default
+                // frontend state) and the app runs silently in the system
+                // tray. The user activates it via wake word, hotkey, or
+                // tray click.
                 let is_background = std::env::args().any(|arg| arg == "--background");
                 if is_background {
                     tracing::info!("startup: --background mode — orb hidden, tray only");
-                    if let Some(main_win) = app.get_webview_window("main") {
-                        let _ = main_win.hide();
-                    }
                 }
             }
 
@@ -941,10 +941,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            window_manager::set_click_through,
-            window_manager::show_overlay,
-            window_manager::hide_overlay,
+            window_manager::set_orb_interactive,
             window_manager::set_orb_position,
+            window_manager::get_pending_orb_rect,
+            window_manager::get_pending_loading_rect,
             network::open_session,
             network::send_transcript,
             network::cancel_session,
@@ -1029,8 +1029,6 @@ pub fn run() {
             commands::get_pending_sidebar_view,
             commands::get_pending_spatial,
             commands::get_pending_annotation,
-            commands::show_loading_indicator,
-            commands::hide_loading_indicator,
             commands::show_pr_list_sidebar,
             commands::hide_pr_list_sidebar,
             commands::get_pending_pr_list,

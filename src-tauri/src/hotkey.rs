@@ -106,12 +106,7 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                         ))
                         .await;
                         crate::wakeword_oww::start_stt_capture();
-                        if let Some(win) = handle_clone.get_webview_window("main") {
-                            let _ = win.show();
-                            let _ = crate::window_manager::configure_non_activating_overlay(&win);
-                            let _ = win.set_ignore_cursor_events(false);
-                            let _ = win.eval("window.__NEXUS_WAKE__ && window.__NEXUS_WAKE__()");
-                        }
+                        crate::window_manager::wake_orb(&handle_clone);
                     });
                     return;
                 }
@@ -121,6 +116,12 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                 // If so, close it and do NOT wake NEXUS.
                 // (The four panel views — Assistant, Command Hub, Architect,
                 // PR List — all live inside the ONE unified "sidebar" window.)
+                // NOTE: `stage` is no longer part of this check — since it
+                // hosts the always-on orb now (single-stage migration), its
+                // own visibility is permanent infrastructure, not a
+                // closeable "window" state. A live ghost session is handled
+                // separately above (session_active() check, before this
+                // point) and never reaches here.
                 let sidebar_visible = handle
                     .get_webview_window("sidebar")
                     .and_then(|w| w.is_visible().ok())
@@ -133,27 +134,16 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                     .get_webview_window("setup")
                     .and_then(|w| w.is_visible().ok())
                     .unwrap_or(false);
-                let stage_visible = handle
-                    .get_webview_window("stage")
-                    .and_then(|w| w.is_visible().ok())
-                    .unwrap_or(false);
 
                 // Ctrl+Space → close any visible window AND wake NEXUS (D3).
                 // Window closing moved to Escape at the frontend layer, so
                 // the hotkey is uniformly "talk to NEXUS" in every state.
-                if sidebar_visible || settings_visible || setup_visible || stage_visible {
+                if sidebar_visible || settings_visible || setup_visible {
                     // A window is visible → destroy it to free ~250 MB each.
                     tracing::info!("hotkey ({}) → window visible, closing window(s) then waking", hk);
                     let _ = crate::dyn_windows::destroy_window(&handle, "sidebar");
                     let _ = crate::dyn_windows::destroy_window(&handle, "settings");
                     let _ = crate::dyn_windows::destroy_window(&handle, "setup");
-                    // Stage goes through stage_hide (not raw destroy) so the
-                    // watchdog's VISIBLE flag clears — otherwise it would
-                    // read the missing window as a blackout and rebuild it.
-                    let handle_clone = handle.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let _ = crate::stage::stage_hide(handle_clone).await;
-                    });
                 }
                 // Wake NEXUS in all cases (windows were closed above, if any).
                 {
@@ -174,15 +164,7 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                     // Start Rust-side STT capture (same as wake word path).
                     // Captures audio from the cpal stream — no getUserMedia needed.
                     crate::wakeword_oww::start_stt_capture();
-
-                    if let Some(win) = handle.get_webview_window("main") {
-                        let _ = win.show();
-                        let _ = crate::window_manager::configure_non_activating_overlay(&win);
-                        let _ = win.set_ignore_cursor_events(false);
-
-                        // Call the frontend wake handler directly.
-                        let _ = win.eval("window.__NEXUS_WAKE__ && window.__NEXUS_WAKE__()");
-                    }
+                    crate::window_manager::wake_orb(&handle);
                 }
             }
         }) {

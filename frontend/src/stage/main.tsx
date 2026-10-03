@@ -1,7 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import "./ghost.css";
+import "../styles.css";
 import AnnotationCanvas from "./AnnotationCanvas";
+import { OrbFrame } from "./OrbFrame";
+import { LoadingIndicator } from "./LoadingIndicator";
 
 async function invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
   const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
@@ -295,6 +298,8 @@ function StageApp() {
       </div>
       <SpatialAnnotationLayer />
       <AnnotationCanvas />
+      <OrbFrame />
+      <LoadingIndicator />
     </div>
   );
 }

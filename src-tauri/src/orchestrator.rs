@@ -935,16 +935,7 @@ pub async fn process_transcript<R: Runtime>(
     // test sessions don't set the drill flag, so they never swallow
     // commands.
     if crate::ghost::drill_running() {
-        // Doc 07 P5: is_stop_phrase is a raw exact-match list — it doesn't
-        // see through STT mishearings the way the deterministic parser's
-        // own normalize_phonetic_mishearings does internally. Checking the
-        // phonetically-normalized transcript too (OR, never replacing the
-        // raw check) means "stahp"/"cansel"-style STT noise on these very
-        // short, safety-critical words gets the same correction ghost-mode
-        // entry already benefits from, without weakening anything.
-        let normalized = crate::intent_parser::normalize_phonetic_mishearings(&transcript);
         let is_stop = crate::ghost::is_stop_phrase(&transcript)
-            || crate::ghost::is_stop_phrase(&normalized)
             || matches!(&intent, ParsedIntent::NluResult { intent, .. } if intent == "cancel_action");
         if is_stop {
             // Rule 1 (priority lane): stop-words never queue — they preempt
@@ -1016,10 +1007,8 @@ pub async fn process_transcript<R: Runtime>(
             });
         }
         // Stop-words with nothing running: inform (never route to the
-        // Worker — "stop" mid-idle means "nothing to stop"). Phonetic
-        // normalization check too — see doc 07 P5 note above.
+        // Worker — "stop" mid-idle means "nothing to stop").
         if crate::ghost::is_stop_phrase(&transcript)
-            || crate::ghost::is_stop_phrase(&crate::intent_parser::normalize_phonetic_mishearings(&transcript))
             || matches!(&intent, ParsedIntent::NluResult { intent, .. } if intent == "cancel_action")
         {
             let (request_id, _) = install_new_request(Subsystem::LocalCommand);
@@ -4868,22 +4857,9 @@ pub fn show_loading<R: Runtime>(app: &AppHandle<R>) {
         return;
     }
 
-    if let Err(e) = crate::dyn_windows::get_or_create_window(
-        app,
-        crate::dyn_windows::WindowConfig::loading_indicator(),
-    ) {
-        tracing::warn!("orchestrator: failed to create loading window: {}", e);
-        return;
-    }
-
-    // Position from the user-calibrated loading placement (settings.json;
-    // defaults ≈ the historical top-right corner).
-    if let Some(win) = app.get_webview_window("loading-indicator") {
-        let _ = crate::window_manager::position_loading(&win);
-        let _ = win.set_ignore_cursor_events(true);
-        let _ = win.show();
-        tracing::info!("orchestrator: loading indicator shown");
-    }
+    crate::window_manager::emit_loading_rect(app);
+    let _ = app.emit("stage:loading_visible", true);
+    tracing::info!("orchestrator: loading indicator shown");
 }
 
 /// Hide the loading indicator window.
@@ -4893,13 +4869,7 @@ pub fn show_loading<R: Runtime>(app: &AppHandle<R>) {
 /// The 80px static window stays resident; `show_loading` reuses it via
 /// get_or_create_window. Falls back to destroy if hide fails.
 pub fn hide_loading<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(win) = app.get_webview_window("loading-indicator") {
-        if win.hide().is_ok() {
-            tracing::info!("orchestrator: loading indicator hidden (window kept for reuse)");
-            return;
-        }
-    }
-    let _ = crate::dyn_windows::destroy_window(app, "loading-indicator");
+    let _ = app.emit("stage:loading_visible", false);
     tracing::info!("orchestrator: loading indicator hidden");
 }
 

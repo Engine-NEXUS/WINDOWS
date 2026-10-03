@@ -25,6 +25,8 @@ export interface VoiceOrbProps {
   visible?: boolean;
   /** Ghost enter: particles snap scattered then assemble into the circle. */
   entered?: boolean;
+  /** No-slide exit (plan §1.3): particles scatter outward instead of a CSS slide-away. */
+  dispersing?: boolean;
   /** Particle-generated text (overrides the state visual until it dissolves). */
   text?: string | null;
   className?: string;
@@ -64,6 +66,7 @@ export const VoiceOrb: React.FC<VoiceOrbProps> = ({
   level = 0,
   visible = true,
   entered = false,
+  dispersing = false,
   text,
   className,
   style,
@@ -94,6 +97,12 @@ export const VoiceOrb: React.FC<VoiceOrbProps> = ({
       orbRef.current.assemble();
     }
   }, [entered]);
+
+  useEffect(() => {
+    if (dispersing && orbRef.current) {
+      orbRef.current.disperse();
+    }
+  }, [dispersing]);
 
   useEffect(() => {
     if (orbRef.current && typeof level === "number" && level > 0) {

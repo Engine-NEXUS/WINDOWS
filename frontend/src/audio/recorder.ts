@@ -720,7 +720,7 @@ export async function processTranscript(
       const misses = recordSilentMiss();
       if (misses < GHOST_SILENT_CAP) {
         console.log(`[NEXUS] ghost hot-mic: silent (${misses}/${GHOST_SILENT_CAP}) — re-listening quietly`);
-        const { triggerFollowupListen } = await import("../main");
+        const { triggerFollowupListen } = await import("../stage/orbRuntime");
         triggerFollowupListen();
         return;
       }
@@ -738,7 +738,7 @@ export async function processTranscript(
       // guard — without this the relisten below reads as a cancel), then
       // re-wake. Orb stays visible: continuous listening, no flicker.
       useAssistant.getState().reset();
-      const { triggerFollowupListen } = await import("../main");
+      const { triggerFollowupListen } = await import("../stage/orbRuntime");
       triggerFollowupListen();
       return;
     }

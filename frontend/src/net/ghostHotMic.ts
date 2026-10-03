@@ -89,7 +89,7 @@ export async function maybeGhostRelisten(): Promise<boolean> {
   }
   if (!useAssistant.getState().ghostActive) return false;
   try {
-    const { triggerFollowupListen } = await import("../main");
+    const { triggerFollowupListen } = await import("../stage/orbRuntime");
     triggerFollowupListen();
     return true;
   } catch {

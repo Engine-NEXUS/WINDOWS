@@ -10,11 +10,18 @@
 //! survive); Cancel restores the pre-calibration snapshot. Both end paths
 //! destroy the HUD and re-open the Command Hub.
 //!
-//! Waves runtime note: the waves render inside the `main` orb window
-//! (Avatar `ghost-waves`, absolute inset-0). The saved waves rect is
-//! applied to that same window during ghost sessions — `position_orb`
-//! branches on `ghost::session_active()` — so `waves_*` settings have real
-//! runtime meaning without a second runtime window (RAM law).
+//! Waves runtime note: the waves render inside the orb's stage-hosted
+//! rect (Avatar `ghost-waves`, absolute inset-0 of its OrbFrame div). The
+//! saved waves rect is applied to that same rect during ghost sessions —
+//! `window_manager::orb_rect` branches on `ghost::session_active()` — so
+//! `waves_*` settings have real runtime meaning without a second runtime
+//! window (RAM law).
+//!
+//! Preview windows (single-stage migration): Wakeup/Waves/Loading
+//! previews all render as positioned divs inside the one `stage`
+//! fullscreen overlay now, not separate OS windows. `apply_main`/
+//! `apply_loading` below emit rects + register stage hitboxes (so the
+//! user can grab and drag them) instead of moving/showing real windows.
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -128,53 +135,31 @@ fn set_draft(target: Target, d: Draft) {
 
 // ─── Apply (Rust owns every window mutation) ────────────────────────────
 
-/// Apply a draft to the main orb window (Wakeup/Waves previews) — position
-/// + size, visible, interactive (drag target).
+/// Apply a draft to the orb's stage-hosted preview (Wakeup/Waves) —
+/// emit its rect and register it as an interactive stage hitbox (drag
+/// target) for the duration of the calibration session.
 fn apply_main<R: Runtime>(app: &AppHandle<R>, d: Draft) {
-    let Some(win) = app.get_webview_window("main") else {
-        return;
-    };
-    if let Ok(Some(monitor)) = win.current_monitor() {
-        let (x, y) = crate::window_manager::overlay_xy(
-            d.h,
-            d.v,
-            d.size,
-            monitor.size().width as i32,
-            monitor.size().height as i32,
-            monitor.scale_factor(),
-        );
-        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
-    }
-    let _ = win.set_size(tauri::PhysicalSize::new(d.size, d.size));
-    let _ = win.set_ignore_cursor_events(false);
-    let _ = win.set_always_on_top(true);
-    let _ = win.show();
+    let rect = crate::window_manager::rect_for(app, d.h, d.v, d.size);
+    crate::window_manager::note_orb_rect(rect);
+    let _ = app.emit("stage:orb_rect", rect);
+    let _ = app.emit("stage:orb_visible", true);
+    crate::stage::set_hitbox_source(
+        "orb",
+        vec![crate::stage::StageRect { x: rect.x, y: rect.y, w: rect.w, h: rect.h }],
+    );
 }
 
-/// Apply a draft to the loading window (Loading preview) — created on
-/// demand, interactive during calibration, click-through restored at end.
+/// Apply a draft to the loading indicator's stage-hosted preview —
+/// emit its rect and register it as an interactive stage hitbox.
 fn apply_loading<R: Runtime>(app: &AppHandle<R>, d: Draft) {
-    let Ok(win) = crate::dyn_windows::get_or_create_window(
-        app,
-        crate::dyn_windows::WindowConfig::loading_indicator(),
-    ) else {
-        return;
-    };
-    if let Ok(Some(monitor)) = win.current_monitor() {
-        let (x, y) = crate::window_manager::overlay_xy(
-            d.h,
-            d.v,
-            d.size,
-            monitor.size().width as i32,
-            monitor.size().height as i32,
-            monitor.scale_factor(),
-        );
-        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
-    }
-    let _ = win.set_size(tauri::PhysicalSize::new(d.size, d.size));
-    let _ = win.set_ignore_cursor_events(false);
-    let _ = win.set_always_on_top(true);
-    let _ = win.show();
+    let rect = crate::window_manager::rect_for(app, d.h, d.v, d.size);
+    crate::window_manager::note_loading_rect(rect);
+    let _ = app.emit("stage:loading_rect", rect);
+    let _ = app.emit("stage:loading_visible", true);
+    crate::stage::set_hitbox_source(
+        "loading",
+        vec![crate::stage::StageRect { x: rect.x, y: rect.y, w: rect.w, h: rect.h }],
+    );
 }
 
 /// Apply the active target's draft to its preview window and broadcast
@@ -255,17 +240,21 @@ pub fn save_toast(dirty: [bool; 3]) -> String {
 /// written the new values, so save and cancel share this restore path),
 /// destroy the HUD, re-open the Command Hub, toast the outcome.
 fn end_session<R: Runtime>(app: &AppHandle<R>, toast: &str) {
-    // Restore main to the SAVED orb placement (position_orb reads disk).
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.set_ignore_cursor_events(true);
-        let _ = crate::window_manager::position_orb(&win);
-        let _ = win.hide();
-    }
-    // Loading preview was calibration-only — destroy (RAM law).
-    let _ = crate::dyn_windows::destroy_window(app, "loading-indicator");
+    // Drop both preview hitboxes — neither should stay grabbable once the
+    // session ends — and restore the orb to its SAVED placement (CALIBRATION
+    // is cleared further down, so emit_orb_rect's is_active() check passes
+    // and it reads disk, which by now holds whatever Save/Cancel settled on).
+    crate::stage::set_hitbox_source("orb", Vec::new());
+    crate::stage::set_hitbox_source("loading", Vec::new());
+    let _ = app.emit("stage:loading_visible", false);
     // Destroy the HUD.
     let _ = crate::dyn_windows::destroy_window(app, "calibrate-toolbar");
     *CALIBRATION.lock() = None;
+    // Now that is_active() is false, emit_orb_rect reads the SAVED
+    // placement from disk (save() already wrote it; cancel() never did,
+    // so disk still holds the pre-session values — the same restore
+    // either way) and restores normal wake-time positioning.
+    crate::window_manager::emit_orb_rect(app);
     // Broadcast session end so preview windows clean up badges/state.
     let _ = app.emit(
         "calibration:state",
@@ -347,17 +336,17 @@ pub async fn calibration_set_target<R: Runtime>(
         };
         s.target = t;
     }
-    // One preview at a time: hide whichever window is not the target.
+    // One preview at a time: hide whichever stage-hosted preview is not
+    // the target (and drop its drag hitbox — a hidden preview shouldn't
+    // still be grabbable).
     match t {
         Target::Wakeup | Target::Waves => {
-            if let Some(win) = app.get_webview_window("loading-indicator") {
-                let _ = win.hide();
-            }
+            let _ = app.emit("stage:loading_visible", false);
+            crate::stage::set_hitbox_source("loading", Vec::new());
         }
         Target::Loading => {
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.hide();
-            }
+            let _ = app.emit("stage:orb_visible", false);
+            crate::stage::set_hitbox_source("orb", Vec::new());
         }
     }
     apply_active(&app);
@@ -448,15 +437,7 @@ pub async fn calibration_nudge<R: Runtime>(
     dy_px: i32,
 ) -> Result<(), String> {
     let Some(target) = session_target() else { return Ok(()) };
-    let label = match target {
-        Target::Wakeup | Target::Waves => "main",
-        Target::Loading => "loading-indicator",
-    };
-    let Some(win) = app.get_webview_window(label) else { return Ok(()) };
-    let (sw, sh, scale) = match win.current_monitor() {
-        Ok(Some(m)) => (m.size().width as i32, m.size().height as i32, m.scale_factor()),
-        _ => return Ok(()),
-    };
+    let (sw, sh, scale) = crate::window_manager::monitor_info(&app);
     let (h, v, size) = match draft_for(target) {
         Some(d) => (d.h, d.v, d.size),
         None => return Ok(()),

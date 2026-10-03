@@ -3271,12 +3271,8 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     "Tier 3: emitting command-detected event → action={}, target={}, needs_param={}",
                     intent.action, intent.target, intent.needs_param
                 );
-                if let Some(win) = app_for_commands.get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = crate::window_manager::configure_non_activating_overlay(&win);
-                    let _ = win.set_ignore_cursor_events(false);
-                    let _ = app_for_commands.emit("command-detected", &intent);
-                }
+                crate::window_manager::show_orb_interactive(&app_for_commands);
+                let _ = app_for_commands.emit("command-detected", &intent);
             }
         })
         .ok();
@@ -3650,12 +3646,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                 crate::orchestrator::BARGE_DAC_DRAIN_MS,
             ))
             .await;
-            if let Some(win) = app_for_wake.get_webview_window("main") {
-                let _ = win.show();
-                let _ = crate::window_manager::configure_non_activating_overlay(&win);
-                let _ = win.set_ignore_cursor_events(false);
-                let _ = win.eval("window.__NEXUS_WAKE__ && window.__NEXUS_WAKE__()");
-            }
+            crate::window_manager::wake_orb(&app_for_wake);
         });
     }
     Ok(())

@@ -570,8 +570,8 @@ async function handle(ev: ServerEvent): Promise<void> {
             if (expectsFollowup && !bargedIn) {
               // Follow-up expected: auto-reopen the mic for the user's response
               console.log("[NEXUS] follow-up: auto-reopening mic after TTS");
-              // Import and call triggerFollowupListen from main.tsx
-              import("../main").then(({ triggerFollowupListen }) => {
+              // Import and call triggerFollowupListen from stage/orbRuntime
+              import("../stage/orbRuntime").then(({ triggerFollowupListen }) => {
                 triggerFollowupListen();
               }).catch((e) => {
                 console.warn("[NEXUS] failed to trigger follow-up listen:", e);

@@ -43,14 +43,7 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> Result<(), tauri::Error> {
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, id| match id.id().as_ref() {
             "show" => {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = crate::window_manager::configure_non_activating_overlay(&w);
-                    let _ = w.set_ignore_cursor_events(false);
-                    // Only use direct eval — frontend listens to __NEXUS_WAKE__
-                    // and also to Tauri events, so emitting both causes double wake.
-                    let _ = w.eval("window.__NEXUS_WAKE__ && window.__NEXUS_WAKE__()");
-                }
+                crate::window_manager::wake_orb(app);
             }
             "pause" => {
                 // Toggle manual pause via meeting state
@@ -165,10 +158,7 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> Result<(), tauri::Error> {
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
                 let app = tray.app_handle();
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.eval("window.__NEXUS_WAKE__ && window.__NEXUS_WAKE__()");
-                }
+                crate::window_manager::wake_orb(app);
             }
         })
         .build(app)?;

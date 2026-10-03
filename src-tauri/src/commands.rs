@@ -86,17 +86,11 @@ pub fn close_setup_window<R: Runtime>(
     first_run: Option<bool>,
 ) -> Result<(), String> {
     let _ = crate::dyn_windows::destroy_window(&app, "setup");
-    if let Some(main_win) = app.get_webview_window("main") {
-        let _ = main_win.show();
-        let _ = crate::window_manager::configure_non_activating_overlay(&main_win);
-        let _ = main_win.set_ignore_cursor_events(false);
-        if first_run.unwrap_or(false) {
-            let _ = main_win.eval(
-                "window.__NEXUS_FIRST_RUN_GREETING__ && window.__NEXUS_FIRST_RUN_GREETING__()",
-            );
-        } else {
-            let _ = main_win.eval("window.__NEXUS_WAKE__ && window.__NEXUS_WAKE__()");
-        }
+    crate::window_manager::show_orb_interactive(&app);
+    if first_run.unwrap_or(false) {
+        let _ = tauri::Emitter::emit(&app, "orb:first_run_greeting", ());
+    } else {
+        let _ = tauri::Emitter::emit(&app, "orb:wake", ());
     }
     Ok(())
 }
@@ -1424,54 +1418,8 @@ pub fn get_pending_settings_backdrop() -> Result<Option<String>, String> {
     Ok(pending.take())
 }
 
-// ─── Loading indicator window ────────────────────────────────────────
-
-/// IPC: Show the loading indicator window.
-/// Creates a small 80x80 transparent click-through window at the
-/// top-right corner of the screen. Shows the loading.json Lottie
-/// animation while NEXUS is processing a request (after "On it sir").
-/// The window is permanently click-through — mouse events pass through
-/// to whatever is behind it.
-///
-/// IMPORTANT: This command is async so it runs on a thread pool, NOT the
-/// main thread. A synchronous command would block the main thread during
-/// WebView2 window creation, which prevents Tauri events (like the Worker
-/// "result" event) from being delivered to the frontend — causing the
-/// response to never appear.
-#[tauri::command]
-pub async fn show_loading_indicator<R: Runtime>(
-    app: tauri::AppHandle<R>,
-) -> Result<(), String> {
-    // Create the window — WebviewWindowBuilder::build() dispatches to the
-    // main thread internally, so this is safe to call from a thread pool.
-    let win = crate::dyn_windows::get_or_create_window(
-        &app,
-        crate::dyn_windows::WindowConfig::loading_indicator(),
-    )?;
-
-    // Position from the user-calibrated loading placement (settings.json;
-    // defaults ≈ the historical top-right corner — 7px/9px inset).
-    if let Err(e) = crate::window_manager::position_loading(&win) {
-        tracing::warn!("loading-indicator positioning failed: {e}");
-    }
-
-    // Permanently click-through — mouse events pass through to windows behind.
-    win.set_ignore_cursor_events(true).map_err(|e| e.to_string())?;
-    win.show().map_err(|e| e.to_string())?;
-    tracing::info!("loading-indicator window shown");
-    Ok(())
-}
-
-/// IPC: Hide/destroy the loading indicator window.
-/// Called when the Worker response arrives. Destroys the window to
-/// free ~250 MB of WebView2 processes.
-#[tauri::command]
-pub async fn hide_loading_indicator<R: Runtime>(
-    app: tauri::AppHandle<R>,
-) -> Result<(), String> {
-    let _ = crate::dyn_windows::destroy_window(&app, "loading-indicator");
-    Ok(())
-}
+// ─── Loading indicator (stage-hosted, see orchestrator::show_loading/
+// hide_loading and window_manager::emit_loading_rect) ──────────────────
 
 // ─── Settings window + persistence ───────────────────────────────────
 

@@ -254,7 +254,18 @@ export function easeScrubFrame(current: number, target: number, factor = 0.3): n
   return current + (target - current) * factor;
 }
 
-export function Avatar() {
+export interface AvatarProps {
+  /** One-shot: fires voice-orb.js's assemble() particle-burst entrance.
+   *  OrbFrame triggers this on every visible false→true transition now
+   *  (not just ghost sessions — plan §1.3, no-slide entrance). */
+  entered?: boolean;
+  /** True while the exit disperse() tween is still playing — OrbFrame
+   *  keeps rendering the orb during this window so the particles can
+   *  finish flying apart instead of the host div unmounting mid-tween. */
+  dispersing?: boolean;
+}
+
+export function Avatar({ entered: enteredProp = false, dispersing = false }: AvatarProps = {}) {
   const state = useAssistant((s) => s.state);
   const visible = useAssistant((s) => s.visible);
   const ttsActive = useAssistant((s) => s.ttsActive);
@@ -293,86 +304,81 @@ export function Avatar() {
   }, [state, ghostActive]);
 
   // ─── Animation calibration (drag + wheel) ────────────────────────────
-  // While the calibration HUD targets the orb window (Wakeup/Waves), the
-  // window is interactive: pointer-down starts the NATIVE OS window drag
-  // (startDragging — DWM moves at display refresh rate, zero lag), the
-  // debounced onMoved reports the settled position, and the wheel reports
-  // ±10px size steps. Pure math lives in calibration/geometry.ts; Rust
-  // clamps + applies + persists.
-  useEffect(() => {
-    if (!calibrationTarget || calibrationTarget === "loading") return;
-    let unMoved: (() => void) | null = null;
-    let debounce: ReturnType<typeof setTimeout> | null = null;
-    (async () => {
-      const [{ getCurrentWebviewWindow }, { invoke }, { currentMonitor }] =
-        await Promise.all([
-          import("@tauri-apps/api/webviewWindow"),
-          import("@tauri-apps/api/core"),
-          import("@tauri-apps/api/window"),
-        ]);
-      const win = getCurrentWebviewWindow();
-      // TEMP-DIAG (calibration drag hunt): proves the moved-listener armed.
-      console.log("[CALIB-DIAG] orb moved-listener armed for", calibrationTarget);
-      const report = async () => {
-        const size = useAssistant.getState().calibrationSize ?? 200;
-        try {
-          const [mon, pos] = await Promise.all([
-            currentMonitor(),
-            win.outerPosition(),
-          ]);
-          if (!mon || !pos) {
-            console.log("[CALIB-DIAG] orb report skipped (no monitor/pos)");
-            return;
-          }
-          const physWin = Math.round(size * mon.scaleFactor);
-          const { h, v } = positionToPct(
-            pos.x,
-            pos.y,
-            physWin,
-            physWin,
-            mon.size.width,
-            mon.size.height,
-            20 * mon.scaleFactor
-          );
-          console.log("[CALIB-DIAG] orb report", {
-            h: +h.toFixed(3),
-            v: +v.toFixed(3),
-            size,
-          });
-          await invoke("calibration_report_position", { hPct: h, vPct: v });
-        } catch (err) {
-          // best-effort — next onMoved retries
-          console.log("[CALIB-DIAG] orb report failed", String(err));
-        }
-      };
-      // Debounced trailing report: onMoved fires continuously during the
-      // native drag; only the settled position matters.
-      unMoved = await win.onMoved(() => {
-        if (debounce) clearTimeout(debounce);
-        debounce = setTimeout(() => void report(), 150);
-      });
-    })().catch(() => {});
-    return () => {
-      if (debounce) clearTimeout(debounce);
-      unMoved?.();
-    };
-  }, [calibrationTarget]);
-
+  // Single-stage migration (plan §1.5): the orb is a div inside the
+  // always-fullscreen `stage` window now, not its own OS window, so
+  // `startDragging()` would drag the whole stage instead of just the
+  // preview. Reimplemented as in-page pointer tracking: since `stage`
+  // covers the entire primary monitor at a fixed (0,0) origin, a
+  // PointerEvent's clientX/clientY IS the screen position (× dpr for
+  // physical px) — no native window-move listener needed at all, the
+  // math is simpler than the old cross-window version. `calibration/
+  // geometry.ts`'s `positionToPct` (same pure function as before) still
+  // owns the pct conversion; Rust still clamps + applies + persists.
   const handleCalibrationPointerDown = (e: React.PointerEvent) => {
     if (!calibrationTarget || calibrationTarget === "loading") return;
     e.preventDefault();
-    // TEMP-DIAG (calibration drag hunt): proves the gesture reached us.
-    console.log("[CALIB-DIAG] orb pointerdown", { target: calibrationTarget });
-    void import("@tauri-apps/api/webviewWindow").then(
-      ({ getCurrentWebviewWindow }) =>
-        getCurrentWebviewWindow()
-          .startDragging()
-          .then(
-            () => console.log("[CALIB-DIAG] orb startDragging ok"),
-            (err) =>
-              console.log("[CALIB-DIAG] orb startDragging FAILED", String(err))
-          )
-    );
+    const hostEl = (e.currentTarget as HTMLElement).closest("#orb-frame") as HTMLElement | null;
+    const hostRect = (hostEl ?? (e.currentTarget as HTMLElement)).getBoundingClientRect();
+    const offsetX = e.clientX - hostRect.left;
+    const offsetY = e.clientY - hostRect.top;
+
+    void (async () => {
+      const [{ invoke }, { currentMonitor }] = await Promise.all([
+        import("@tauri-apps/api/core"),
+        import("@tauri-apps/api/window"),
+      ]);
+      const mon = await currentMonitor();
+      if (!mon) return;
+      const dpr = mon.scaleFactor;
+      let pending: { h: number; v: number } | null = null;
+      let reportTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const compute = (clientX: number, clientY: number) => {
+        const size = useAssistant.getState().calibrationSize ?? 200;
+        const physWin = Math.round(size * dpr);
+        const topLeftCssX = clientX - offsetX;
+        const topLeftCssY = clientY - offsetY;
+        return positionToPct(
+          Math.round(topLeftCssX * dpr),
+          Math.round(topLeftCssY * dpr),
+          physWin,
+          physWin,
+          mon.size.width,
+          mon.size.height,
+          20 * dpr
+        );
+      };
+
+      const flush = () => {
+        if (!pending) return;
+        const { h, v } = pending;
+        pending = null;
+        void invoke("calibration_report_position", { hPct: h, vPct: v }).catch(() => {});
+      };
+
+      const handleMove = (ev: PointerEvent) => {
+        pending = compute(ev.clientX, ev.clientY);
+        // Light throttle (~60fps) — dragging reports continuously, only
+        // the latest matters each frame.
+        if (reportTimer) return;
+        reportTimer = setTimeout(() => {
+          reportTimer = null;
+          flush();
+        }, 16);
+      };
+      const handleUp = (ev: PointerEvent) => {
+        window.removeEventListener("pointermove", handleMove);
+        window.removeEventListener("pointerup", handleUp);
+        if (reportTimer) {
+          clearTimeout(reportTimer);
+          reportTimer = null;
+        }
+        pending = compute(ev.clientX, ev.clientY);
+        flush();
+      };
+      window.addEventListener("pointermove", handleMove);
+      window.addEventListener("pointerup", handleUp);
+    })();
   };
 
   const handleCalibrationWheel = (e: React.WheelEvent) => {
@@ -429,9 +435,10 @@ export function Avatar() {
         >
           <VoiceOrb
             state={ghostDisplay ? displayState : state}
-            visible={visible}
+            visible={visible || dispersing}
             particles={5000}
-            entered={ghostActive}
+            entered={ghostActive || enteredProp}
+            dispersing={dispersing}
             level={
               displayState === "speaking"
                 ? (ttsActive ? Math.max(0.4, audioVolume) : 0)

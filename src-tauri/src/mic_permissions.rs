@@ -38,7 +38,7 @@ const ALLOWED_ORIGIN_PREFIXES: &[&str] = &[
 pub fn init<R: Runtime>(_app: &tauri::App<R>) {
     #[cfg(target_os = "windows")]
     {
-        for label in ["main", "setup"] {
+        for label in ["stage", "setup"] {
             let Some(win) = _app.get_webview_window(label) else {
                 continue;
             };
