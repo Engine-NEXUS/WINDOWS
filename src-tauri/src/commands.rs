@@ -2571,7 +2571,12 @@ pub async fn get_health_status<R: Runtime>(app: AppHandle<R>) -> HealthStatus {
         .map(|b| b.elapsed().as_secs())
         .unwrap_or(0);
     let stt_port = crate::lazy_stt::is_stt_responsive();
-    let nlu_port = crate::lazy_nlu::is_nlu_responsive();
+    // In-process model now (nlu_local.rs) — "responsive" means "loaded",
+    // not "sidecar port open". First call may load from disk, so run it
+    // off the async executor thread like any other blocking I/O here.
+    let nlu_port = tokio::task::spawn_blocking(crate::nlu_local::is_loaded)
+        .await
+        .unwrap_or(false);
     let worker_reachable = crate::tts_network::check_network().await;
     let groq_key = !read_groq_api_key(&app).is_empty() || !read_api_key(&app, "groq").is_empty();
     let gemini_key = !read_api_key(&app, "gemini").is_empty();

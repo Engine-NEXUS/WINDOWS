@@ -26,7 +26,7 @@ mod command_executor;
 mod app_registry;
 pub mod intent_parser;
 mod nlu_client;
-mod lazy_nlu;
+mod nlu_local;
 mod admin_config;
 #[cfg(feature = "admin-brain")]
 mod brain_client;
@@ -989,6 +989,7 @@ pub fn run() {
             commands::claim_profile,
             commands::get_identity_status,
             commands::refresh_identity_status,
+            commands::disconnect_device,
             commands::meeting_active,
             commands::is_nexus_paused,
             commands::meeting_status,

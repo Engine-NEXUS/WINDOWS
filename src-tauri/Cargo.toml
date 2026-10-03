@@ -50,6 +50,16 @@ cpal = "0.15"
 # Used for openWakeWord KWS pipeline: melspectrogram → embedding → classifier
 tract-onnx = "0.23"
 circular-buffer = "1.2"
+# In-process NLU tokenization (BERT-Mini WordPiece) — loads tokenizer.json
+# directly, no Python/HTTP. Pairs with tract-onnx above to run the NLU
+# classifier fully in-process (see nlu_local.rs).
+# default-features off: "esaxx_fast" (C++ suffix-array build, only needed
+# for training Unigram/SentencePiece tokenizers — we only load+encode a
+# pre-trained WordPiece tokenizer) statically links its CRT as /MT, which
+# conflicts with /MD-linked onnxruntime pulled in elsewhere (piper-rs) —
+# LNK2038 RuntimeLibrary mismatch. "progressbar" is dev/training UX, unused
+# here. "onig" (pure encode/decode regex) is kept; it doesn't conflict.
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 # HTTP client for diagnostics
 reqwest = { version = "0.12", features = ["json", "multipart"] }
 chrono = { version = "0.4.45", features = ["serde"] }
