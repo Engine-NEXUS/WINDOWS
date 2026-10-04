@@ -1,5 +1,55 @@
 # NEXUS — Project Notes
 
+## Wakeup Orb Redesign — Single-Stage Shell Migration Complete (2026-10-04)
+
+Closes out the "Single-Stage Shell" migration first planned in the
+2026-09-25 entry below ("Next: step 2 orb moves in (pixel-compare), then
+loading layer, then panels one by one") — that step was never executed
+until this 5-phase arc. All 5 phases are done and committed
+(`ff42fa7`, `a89fa82`, `3cbcef3`, `461fc46`, plus this cleanup commit).
+
+- **Phase 1 — window consolidation** ([doc 73](docs/changes/73-window-consolidation-orb-into-stage.md)): the voice orb and the
+  top-right loading spinner no longer own OS windows (`main`,
+  `loading-indicator` — both deleted from `dyn_windows.rs`). Both are now
+  positioned `<div>`s inside the one always-on `stage` overlay, driven by
+  `stage:orb_rect`/`stage:loading_rect` events from `window_manager.rs`
+  instead of native window show/hide/position calls. The entire voice
+  runtime (wake globals, mic warmup, every `stt:*`/`ghost:*`/`audio:*`
+  listener) moved from the retired `main.tsx`/`App.tsx` into
+  `stage/orbRuntime.ts`; calibration drag/resize became in-page pointer
+  tracking (a `<div>` can't `startDragging()` the whole stage window).
+- **Phase 2 — shape/color/glitch redesign** ([doc 74](docs/changes/74-orb-shape-color-and-glitch-redesign.md)), grounded directly
+  against the user's reference video (frames re-extracted and read, not
+  worked from memory): listening shifted from pale gold to grainy
+  amber/brown; thinking's closed braided-toroidal-knot became an open
+  6-strand wisp formation (evenly-spread golden-angle directions — random
+  per-strand directions first clumped into a blob, caught by actually
+  rendering it); speaking's sparse lat/lon wireframe lattice became a
+  dense noise-displaced bumpy blob. New glitch transition: a ~220ms
+  position-jitter + color-flicker burst on every dominant-state change.
+- **Phase 3 — response caption** ([doc 75](docs/changes/75-response-caption-word-by-word-above-orb.md)): the spoken reply grows
+  word-by-word above the orb, timed off edge-tts's real word-boundary
+  events (`Boundary::Word`, not `Sentence`) or evenly-estimated timing for
+  the Piper fallback. Emitted at playback start (not synthesis) so cache
+  hits, edge-tts, Piper, and streamed chunks all go through one path.
+- **Phase 4 — live-speech caption** ([doc 76](docs/changes/76-live-speech-caption-streaming-stt.md)): the user's own words grow
+  above the orb while they're still talking, via a new best-effort
+  `/stream` WebSocket endpoint on the local Moonshine STT server —
+  entirely parallel to the existing batch `/transcribe` pipeline, which
+  intent parsing/NLU/brain still exclusively depend on. Verified live
+  (real synthesized speech through the real server, then the server
+  killed outright) rather than assumed.
+- **Phase 5 — cleanup**: removed the dead `.transcript, .caption {
+  display: none; }` rule and the rest of `styles.css`'s now-unreferenced
+  `main`/`#app`-window-era CSS (confirmed zero remaining usages by
+  grepping every class name against the actual JSX before deleting
+  anything) — the retired slide-up/down transitions, the CSS-fallback
+  `.orb` + its pulse keyframes, `.avatar-section`, and three
+  already-orphaned ghost-waves modifier classes found the same way.
+  `styles.css` is now exclusively the orb/calibration/ghost-waves styles
+  `stage/main.tsx` actually uses; `stage.html` already owns the base
+  transparent-fullscreen reset, so that duplicate was dropped too.
+
 ## Braided Toroidal Knot Ribbon for Thinking State (2026-10-02)
 
 - **Problem & Motivation**: User requested upgrading the `thinking` state avatar animation to match the 3D braided toroidal knot ribbon from Ship Notes `signal-orb` / `speaking-orb` (replacing the squished sphere with belts).

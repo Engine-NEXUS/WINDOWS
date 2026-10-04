@@ -1,70 +1,27 @@
-/* Transparent background for floating orb */
-html, body, #root {
-  margin: 0;
-  padding: 0;
-  width: 100vw;
-  height: 100vh;
-  overflow: hidden;
-  background: transparent !important;
-  -webkit-user-select: none;
-  user-select: none;
-  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
-}
-
-/* Small floating orb container - transparent window, only orb is visible */
-#app {
-  width: 100vw;
-  height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  background: transparent !important;
-  /* Default state: hidden below screen */
-  transform: translateY(100vh);
-  opacity: 0;
-  overflow: visible;
-}
-
-/* With transparent: false, the window has a solid bg. Make it match the orb area. */
-html, body {
-  background: transparent !important;
-}
-
-/* Slide UP: bouncy spring overshoot — fast and neat */
-#app.app--visible {
-  transform: translateY(0);
-  opacity: 1;
-  transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.3s ease;
-}
-
-/* Slide DOWN: smooth gravity ease-in, opacity fades only at the very end */
-#app.app--hidden {
-  transform: translateY(100vh);
-  opacity: 0;
-  pointer-events: none;
-  transition: transform 0.5s cubic-bezier(0.4, 0, 0.7, 1), opacity 0.15s ease 0.35s;
-}
-
-/* Ghost always-on display: NO slide-up. The window appears instantly and
-   the particles do the entrance — scattered rim burst → assemble into the
-   circle (the orb's own assemble() tween, driven by the entered prop). */
-#app.app--ghost.app--visible {
-  transform: translateY(0);
-  transition: none;
-}
+/* Avatar/calibration/ghost-waves styles for the orb hosted inside the
+ * `stage` fullscreen overlay (see stage/OrbFrame.tsx). Only imported by
+ * stage/main.tsx — stage.html already owns the base html/body/#root
+ * transparent-fullscreen reset, so it isn't duplicated here.
+ *
+ * Phase 5 cleanup (wakeup-orb redesign plan): this file used to also
+ * style the retired `main`/`#app` OS window (slide-up/down transitions,
+ * a `#root` reset, a CSS-fallback `.orb` with its own pulse keyframes,
+ * `.avatar-section`, the dead `.transcript`/`.caption` display:none rule)
+ * — all removed, confirmed zero remaining references after main.tsx/
+ * App.tsx were deleted in Phase 1 (window consolidation).
+ */
 
 /* Avatar wrapper - transparent, only Lottie strokes are visible */
 .avatar-wrap {
   transition: transform 0.3s ease, filter 0.3s ease;
   cursor: pointer;
   background: transparent;
+  position: relative;
 }
 
 /* Zoom is owned by the rAF frame-locked driver (zoomForFrame in Avatar.tsx),
    never by wall-clock CSS pulses — same tempo is not the same phase. These
-   rules explicitly clear any pulse so state classes can't reintroduce drift.
-   (.orb--* fallback keeps its own pulses; pulse-listen keyframes stay for it.) */
+   rules explicitly clear any pulse so state classes can't reintroduce drift. */
 .avatar-wrap--listening,
 .avatar-wrap--thinking,
 .avatar-wrap--speaking {
@@ -84,11 +41,6 @@ html, body {
    Ghost enter uses the orb's own assemble() particle flight, not CSS. */
 .avatar-wrap--ghost {
   animation: none;
-}
-
-/* Ghost transition: smile pinches flat, then live waves grow in. */
-.avatar-wrap {
-  position: relative;
 }
 
 /* Calibration mode: grab cursor + subtle halo ring so the element reads
@@ -114,24 +66,6 @@ html, body {
   }
   100% {
     filter: drop-shadow(0 0 22px rgba(37, 158, 214, 0.55));
-  }
-}
-
-/* Rest-dot shimmer in calibration preview only (ghost drive loop owns
-   the transform in real sessions — this class never exists there). */
-.rest-dot--preview {
-  animation: rest-dot-shimmer 2.2s ease-in-out infinite;
-}
-
-@keyframes rest-dot-shimmer {
-  0%,
-  100% {
-    transform: translate(-50%, -50%) scale(1);
-    opacity: 0.75;
-  }
-  50% {
-    transform: translate(-50%, -50%) scale(1.35);
-    opacity: 1;
   }
 }
 
@@ -161,13 +95,6 @@ html, body {
   pointer-events: none;
 }
 
-.avatar-lottie-pinched {
-  transform: scaleX(0.12);
-  opacity: 0;
-  transition: transform 220ms ease-in, opacity 200ms ease-in;
-  transform-origin: center;
-}
-
 .ghost-waves {
   position: absolute;
   inset: 0;
@@ -191,100 +118,9 @@ html, body {
   box-shadow: 0 0 14px rgba(255, 255, 255, 0.12);
 }
 
-/* Reactive bars: the rAF drive loop owns transform (speech-synced), so
-   the free-running CSS loop must not fight it. Applied always in the
-   waves phase; the plain .ghost-bar loop remains as the no-JS fallback. */
-.ghost-bar--reactive {
-  animation: none;
-}
-
-/* Entrance bloom (first ~650ms of the waves phase): opacity + rise per
-   bar with stagger delays. Uses `translate`/opacity only — scaleY stays
-   owned by the rAF loop, so entrance and audio-drive never fight. */
-.ghost-bar--entering {
-  animation: ghost-enter-rise 320ms ease-out both;
-}
-
-@keyframes ghost-enter-rise {
-  from { opacity: 0; translate: 0 10px; }
-  to { opacity: 1; translate: 0 0; }
-}
-
-/* Exit beat (Esc / session end): the whole trio shrinks and fades before
-   the smile returns. rAF is already stopped (leaving phase), so the CSS
-   transition owns the visual uncontested. */
-.ghost-waves--leaving {
-  opacity: 0;
-  transform: scale(0.85);
-  transition: opacity 180ms ease-in, transform 180ms ease-in;
-}
-
-/* Optional ghost-waves.json Lottie layer behind the bars. Playback and
-   opacity are gated by the drive loop (motion only with speech). */
-.ghost-waves-lottie {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
-  transition: opacity 180ms ease;
-}
-.ghost-waves-lottie svg {
-  width: 100% !important;
-  height: 100% !important;
-}
-
 @keyframes ghost-wave {
   0%, 100% { transform: scaleY(0.55); }
   50% { transform: scaleY(1); }
-}
-
-@keyframes pulse-speak {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.10); }
-}
-
-/* Listening zoom: same language as speaking but slower + shallower, so the
-   two states stay distinguishable at a glance. One definition only — a second
-   pulse-listen down here (1.12) used to win via CSS last-wins and made
-   listening deeper than speaking. Also backs the .orb--listening fallback. */
-@keyframes pulse-listen {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.07); }
-}
-
-/* CSS fallback orb */
-.orb {
-  width: 80px;
-  height: 80px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 35% 30%, #6aa8ff, #1d3b8f 60%, #0a1330);
-  box-shadow:
-    0 0 40px rgba(70, 130, 255, 0.5) inset,
-    0 0 30px rgba(70, 130, 255, 0.4);
-  animation: breathe 3s ease-in-out infinite;
-}
-
-.orb--listening { animation: pulse-listen 1s ease-in-out infinite; }
-.orb--thinking  { animation: spin 1.2s linear infinite; }
-.orb--speaking  { animation: pulse-speak 0.4s ease-in-out infinite; }
-
-@keyframes breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.06); } }
-@keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
-
-/* Hide transcript and caption for small orb mode */
-.transcript, .caption {
-  display: none;
-}
-
-.avatar-section {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent !important;
 }
 
 .avatar-voice-orb-container {
@@ -293,11 +129,4 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-}
-
-/* Force Lottie SVG to fill its container */
-.avatar-section svg {
-  width: 100% !important;
-  height: 100% !important;
-  display: block;
 }
