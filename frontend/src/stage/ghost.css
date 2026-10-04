@@ -329,3 +329,14 @@
     transform: translateY(0);
   }
 }
+
+/* Live caption (plan Phase 4) — the user's OWN words, growing while they
+   still talk. Shares .response-caption's position/font/shadow; a touch
+   dimmer than the assistant's reply so the two read as distinct even
+   though they occupy the same screen slot (never shown at the same time —
+   one is listening-only, the other speaking-only). No per-word animation:
+   the whole line replaces wholesale on each partial (Moonshine's own
+   semantics), so an animate-in-per-word would fight itself every update. */
+.live-caption {
+  opacity: 0.82;
+}

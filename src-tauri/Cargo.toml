@@ -74,6 +74,13 @@ edge-tts-rust = "0.1"
 piper-rs = "0.2"
 rodio = "0.19"
 
+# Live-caption WebSocket client (plan Phase 4) — connects to the local STT
+# server's /stream endpoint. Both are already locked transitive deps of
+# edge-tts-rust (its own WSS client to Microsoft's endpoint), so declaring
+# them directly adds zero new download/compile surface.
+tokio-tungstenite = "0.28"
+futures-util = "0.3"
+
 # Cross-platform app/URL launching (open::that, open::with)
 open = "5"
 

@@ -1,0 +1,91 @@
+import { useEffect, useState } from "react";
+
+interface OrbRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * LiveCaption — the user's OWN words, growing while they're still talking
+ * (plan Phase 4). Entirely best-effort: driven by Rust's `stt:partial`
+ * event (itself fed by the Python STT server's optional `/stream`
+ * WebSocket — see `server/stt_server.py` and `stt_stream.rs`), which may
+ * simply never arrive if the stream failed to start. In that case this
+ * component just never renders anything — the real transcript still
+ * arrives normally via the existing batch `stt:transcript` path.
+ *
+ * Same family/positioning as `ResponseCaption` (a fixed gap above the
+ * orb) — the two are temporally mutually exclusive (this one only has
+ * text while listening; ResponseCaption only has text while speaking),
+ * so sharing the same screen slot never conflicts.
+ */
+export function LiveCaption() {
+  const [rect, setRect] = useState<OrbRect | null>(null);
+  const [text, setText] = useState("");
+
+  useEffect(() => {
+    let unlistenPartial: (() => void) | null = null;
+    let unlistenFinal: (() => void) | null = null;
+    void (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      // Moonshine's LineTextChanged gives the full growing line each time,
+      // not a delta — a wholesale replace is correct here.
+      unlistenPartial = await listen<{ text?: string }>("stt:partial", (event) => {
+        const t = event.payload?.text;
+        if (typeof t === "string") setText(t);
+      });
+      // Turn end: the real batch transcript arrived (or came back empty) —
+      // clear so the NEXT turn's listening phase starts from blank instead
+      // of flashing this turn's last words.
+      unlistenFinal = await listen("stt:transcript", () => setText(""));
+    })();
+    return () => {
+      unlistenPartial?.();
+      unlistenFinal?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      unlisten = await listen<OrbRect>("stage:orb_rect", (event) => {
+        if (event.payload) setRect(event.payload);
+      });
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const pending = await invoke<OrbRect | null>("get_pending_orb_rect");
+        if (pending) setRect(pending);
+      } catch {
+        /* non-Tauri (tests) — no-op */
+      }
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  if (!rect || !text.trim()) return null;
+
+  const dpr = window.devicePixelRatio || 1;
+  const centerX = rect.x / dpr + rect.w / dpr / 2;
+  const topY = rect.y / dpr;
+  const gap = 28;
+
+  return (
+    <div
+      className="response-caption live-caption"
+      style={{
+        position: "fixed",
+        left: 0,
+        top: 0,
+        width: 520,
+        transform: `translate(${centerX - 260}px, ${topY - gap}px) translateY(-100%)`,
+      }}
+    >
+      {text}
+    </div>
+  );
+}

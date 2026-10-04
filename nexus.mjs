@@ -302,14 +302,41 @@ function checkMoonshine() {
   } else {
     warn("moonshine-voice not installed — installing now...");
     try {
-      execSync(`${IS_WIN ? "python" : "python3"} -m pip install moonshine-voice fastapi uvicorn python-multipart`, {
+      execSync(`${IS_WIN ? "python" : "python3"} -m pip install moonshine-voice fastapi uvicorn python-multipart websockets`, {
         stdio: "inherit",
         encoding: "utf-8",
         shell: IS_WIN,
       });
       ok("moonshine-voice installed successfully");
     } catch {
-      warn("Failed to install moonshine-voice — STT will not work. Run: pip install moonshine-voice fastapi uvicorn python-multipart");
+      warn("Failed to install moonshine-voice — STT will not work. Run: pip install moonshine-voice fastapi uvicorn python-multipart websockets");
+    }
+  }
+
+  // `websockets` (or `wsproto`) is uvicorn's actual WebSocket implementation
+  // — neither fastapi nor uvicorn depends on it directly, so an existing
+  // install (moonshine_voice already present, the branch above skipped)
+  // can still be missing it. Needed for the Phase 4 live-caption /stream
+  // endpoint only — its absence degrades silently (no live caption), but
+  // check for it separately so a fresh `nexus setup` actually enables it.
+  const wsResult = spawnSync(IS_WIN ? "python" : "python3", ["-c", "import websockets; print('ok')"], {
+    stdio: "pipe",
+    encoding: "utf-8",
+    shell: IS_WIN,
+  });
+  if (wsResult.status === 0 && wsResult.stdout?.trim() === "ok") {
+    ok("websockets installed (live caption stream ready)");
+  } else {
+    warn("websockets not installed — installing now (live caption stream)...");
+    try {
+      execSync(`${IS_WIN ? "python" : "python3"} -m pip install websockets`, {
+        stdio: "inherit",
+        encoding: "utf-8",
+        shell: IS_WIN,
+      });
+      ok("websockets installed successfully");
+    } catch {
+      warn("Failed to install websockets — live caption will stay disabled (batch STT unaffected). Run: pip install websockets");
     }
   }
 }

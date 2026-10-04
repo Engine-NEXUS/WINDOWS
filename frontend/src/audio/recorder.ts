@@ -461,6 +461,14 @@ export async function startRecording(stream: MediaStream): Promise<void> {
 
   floatBuffer = []; // reset buffer for new turn
 
+  // Live caption (plan Phase 4): open the live-partial-transcript stream
+  // for this turn, bracketing the same window as the batch capture below.
+  // Fire-and-forget — a connection failure just leaves the live caption
+  // silent for this turn; the batch path never waits on this.
+  void import("@tauri-apps/api/core")
+    .then(({ invoke }) => invoke("stt_stream_start"))
+    .catch(() => {});
+
   // Use native sample rate — don't force 16kHz. This avoids resampling issues
   // in WebView2's audio pipeline. We downsample to 16kHz after recording.
   audioCtx = new AudioContext();
@@ -487,6 +495,15 @@ export async function startRecording(stream: MediaStream): Promise<void> {
     if (frameCount === 1) {
       console.log(`[NEXUS] first audio frame received (${input.length} samples @ ${nativeSampleRate}Hz)`);
     }
+    // Live caption (plan Phase 4) — a SECOND, non-blocking push of this
+    // same chunk to the live-partial-transcript stream. Purely additive:
+    // never touches floatBuffer (the batch path above is untouched), and
+    // any failure here (stream not started, server unreachable) is
+    // swallowed — the live caption just silently stays empty.
+    const livePcm = downsampleAndConvert(new Float32Array(input), nativeSampleRate, 16000);
+    void import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke("stt_stream_push_chunk", { samples: Array.from(livePcm) }))
+      .catch(() => {});
   };
 
   // CRITICAL: Connect source → node → destination DIRECTLY.
@@ -501,6 +518,11 @@ export async function startRecording(stream: MediaStream): Promise<void> {
 }
 
 export async function stopRecording(): Promise<void> {
+  // Live caption (plan Phase 4): close the live-partial-transcript stream.
+  // Fire-and-forget, same tolerance as the start() call above.
+  void import("@tauri-apps/api/core")
+    .then(({ invoke }) => invoke("stt_stream_stop"))
+    .catch(() => {});
   if (scriptNode) {
     scriptNode.disconnect();
     scriptNode.onaudioprocess = null;

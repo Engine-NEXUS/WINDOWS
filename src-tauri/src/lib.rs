@@ -38,6 +38,7 @@ mod lazy_stt;
 mod stt;
 pub mod stt_groq;
 mod stt_learning;
+mod stt_stream;
 mod tts;
 pub mod tts_edge;
 pub mod tts_piper;
@@ -1048,6 +1049,9 @@ pub fn run() {
             commands::google_save_custom_credentials,
             stt::transcribe_audio,
             stt::stt_filter_stats,
+            stt_stream::stt_stream_start,
+            stt_stream::stt_stream_push_chunk,
+            stt_stream::stt_stream_stop,
             tts::speak_text,
             tts::speak_cached,
             tts::stop_tts,
