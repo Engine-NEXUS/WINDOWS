@@ -11,8 +11,23 @@
  * App.tsx were deleted in Phase 1 (window consolidation).
  */
 
-/* Avatar wrapper - transparent, only Lottie strokes are visible */
+/* Avatar wrapper - transparent, only Lottie strokes are visible.
+ * Sizing/layout lives here (a real stylesheet rule) rather than as a
+ * React inline `style` prop: the stage window's CSP injects a per-load
+ * nonce into style-src for Tauri's own IPC init script, which per the
+ * CSP spec makes 'unsafe-inline' inert for the WHOLE directive — any
+ * dynamically-applied inline style is silently dropped, collapsing this
+ * element (and everything inside it, since children size off its 100%
+ * height) to zero size. Live bug, 2026-10-04 — see OrbFrame.tsx's
+ * matching note for the orb-frame positioning side of the same fix. */
 .avatar-wrap {
+  width: 100%;
+  height: 100%;
+  min-width: 140px;
+  min-height: 140px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   transition: transform 0.3s ease, filter 0.3s ease;
   cursor: pointer;
   background: transparent;
@@ -46,6 +61,7 @@
 /* Calibration mode: grab cursor + subtle halo ring so the element reads
    as "pick me up and drag me" while the companion HUD is open. */
 .avatar-wrap--calibrating {
+  cursor: grab;
   filter: drop-shadow(0 0 22px rgba(37, 158, 214, 0.55));
 }
 
@@ -129,4 +145,16 @@
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+/* The <voice-orb> custom element's own base sizing — moved from a React
+ * inline `style` prop (VoiceOrb.tsx) for the same CSP reason as above. */
+.voice-orb-el {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 120px;
+  min-height: 120px;
+  aspect-ratio: 1;
+  contain: layout paint;
 }

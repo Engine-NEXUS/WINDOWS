@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface OrbRect {
   x: number;
@@ -67,22 +67,32 @@ export function LiveCaption() {
     };
   }, []);
 
-  if (!rect || !text.trim()) return null;
+  // Position applied via direct DOM mutation, not React's `style` prop —
+  // the stage window's CSP makes inline styles a silent no-op (see
+  // OrbFrame.tsx's note). Static layout lives in the shared
+  // `.response-caption` CSS class; only the per-render transform is
+  // genuinely dynamic.
+  const applyPosition = (el: HTMLDivElement | null) => {
+    if (!el || !rect) return;
+    const dpr = window.devicePixelRatio || 1;
+    const centerX = rect.x / dpr + rect.w / dpr / 2;
+    const topY = rect.y / dpr;
+    const gap = 28;
+    el.style.transform = `translate(${centerX - 260}px, ${topY - gap}px) translateY(-100%)`;
+  };
+  const captionRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    applyPosition(captionRef.current);
+  }, [rect]);
 
-  const dpr = window.devicePixelRatio || 1;
-  const centerX = rect.x / dpr + rect.w / dpr / 2;
-  const topY = rect.y / dpr;
-  const gap = 28;
+  if (!rect || !text.trim()) return null;
 
   return (
     <div
       className="response-caption live-caption"
-      style={{
-        position: "fixed",
-        left: 0,
-        top: 0,
-        width: 520,
-        transform: `translate(${centerX - 260}px, ${topY - gap}px) translateY(-100%)`,
+      ref={(el) => {
+        captionRef.current = el;
+        applyPosition(el);
       }}
     >
       {text}

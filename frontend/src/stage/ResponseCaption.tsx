@@ -69,23 +69,33 @@ export function ResponseCaption() {
     };
   }, []);
 
-  if (!rect || words.length === 0) return null;
+  // Position/opacity applied via direct DOM mutation, not React's `style`
+  // prop — the stage window's CSP makes inline styles a silent no-op (see
+  // OrbFrame.tsx's note). Static layout (position/left/top/width) lives in
+  // the `.response-caption` CSS class instead; only the genuinely dynamic
+  // transform/opacity are set imperatively here.
+  const applyPosition = (el: HTMLDivElement | null) => {
+    if (!el || !rect) return;
+    const dpr = window.devicePixelRatio || 1;
+    const centerX = rect.x / dpr + rect.w / dpr / 2;
+    const topY = rect.y / dpr;
+    const gap = 28;
+    el.style.transform = `translate(${centerX - 260}px, ${topY - gap}px) translateY(-100%)`;
+    el.style.opacity = visible ? "1" : "0";
+  };
+  const captionRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    applyPosition(captionRef.current);
+  }, [rect, visible]);
 
-  const dpr = window.devicePixelRatio || 1;
-  const centerX = rect.x / dpr + rect.w / dpr / 2;
-  const topY = rect.y / dpr;
-  const gap = 28;
+  if (!rect || words.length === 0) return null;
 
   return (
     <div
       className="response-caption"
-      style={{
-        position: "fixed",
-        left: 0,
-        top: 0,
-        width: 520,
-        transform: `translate(${centerX - 260}px, ${topY - gap}px) translateY(-100%)`,
-        opacity: visible ? 1 : 0,
+      ref={(el) => {
+        captionRef.current = el;
+        applyPosition(el);
       }}
     >
       {words.map((w, i) => (

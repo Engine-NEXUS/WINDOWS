@@ -3,6 +3,7 @@ import { Avatar } from "../avatar/Avatar";
 import { useAssistant } from "../store/assistant";
 import { initOrchestratorListener, hideOrbAfterSpeech } from "../net/orchestrator";
 import { initOrbRuntime } from "./orbRuntime";
+import { EntranceBurst } from "./EntranceBurst";
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -288,12 +289,18 @@ export function OrbFrame() {
   const wasVisibleRef = useRef(false);
   const [entered, setEntered] = useState(false);
   const [dispersing, setDispersing] = useState(false);
+  // Screen-wide gather (sub-phase A): a monotonic counter, bumped once per
+  // false→true transition, same edge as `entered` below but independent
+  // of its 50ms one-shot reset — EntranceBurst runs its own ~900ms burst
+  // keyed off the value changing, not off `entered` staying true.
+  const [burstSeq, setBurstSeq] = useState(0);
   useEffect(() => {
     const was = wasVisibleRef.current;
     wasVisibleRef.current = visible;
     if (!was && visible) {
       setDispersing(false);
       setEntered(true);
+      setBurstSeq((n) => n + 1);
       // Reset the one-shot trigger next tick so a later show re-fires it.
       const t = setTimeout(() => setEntered(false), 50);
       return () => clearTimeout(t);
@@ -305,26 +312,49 @@ export function OrbFrame() {
     }
   }, [visible, ghostActive]);
 
-  if (!rect) return null;
+  // Positioning is applied via DIRECT DOM mutation (ref callback + effect),
+  // never React's `style` prop: the stage window's CSP injects a per-load
+  // nonce into style-src for Tauri's own IPC init script, which per the
+  // CSP spec makes 'unsafe-inline' inert for the WHOLE directive — silently
+  // dropping every React-rendered inline style and collapsing this div to
+  // zero size (live bug, 2026-10-04: orb invisible, captions still showed
+  // since text has non-zero intrinsic height even unpositioned). The
+  // existing ghost-ring/ghost-pointer elements elsewhere in this same file
+  // already use this exact ref + `el.style.x = ...` pattern and are
+  // unaffected — direct CSSOM property assignment isn't inline-style
+  // text parsing, so it isn't subject to this restriction.
+  const applyRect = (el: HTMLDivElement | null, r: OrbRect | null) => {
+    if (!el || !r) return;
+    const dpr = window.devicePixelRatio || 1;
+    el.style.position = "fixed";
+    el.style.left = "0";
+    el.style.top = "0";
+    el.style.width = `${r.w / dpr}px`;
+    el.style.height = `${r.h / dpr}px`;
+    el.style.transform = `translate(${r.x / dpr}px, ${r.y / dpr}px)`;
+  };
+  const frameRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    applyRect(frameRef.current, rect);
+  }, [rect]);
 
-  const dpr = window.devicePixelRatio || 1;
+  if (!rect) return null;
   const cssVisible = visible || dispersing;
   if (!cssVisible) return null;
 
   return (
-    <div
-      id="orb-frame"
-      data-interactive
-      style={{
-        position: "fixed",
-        left: 0,
-        top: 0,
-        width: rect.w / dpr,
-        height: rect.h / dpr,
-        transform: `translate(${rect.x / dpr}px, ${rect.y / dpr}px)`,
-      }}
-    >
-      <Avatar entered={entered} dispersing={dispersing} />
-    </div>
+    <>
+      <div
+        id="orb-frame"
+        data-interactive
+        ref={(el) => {
+          frameRef.current = el;
+          applyRect(el, rect);
+        }}
+      >
+        <Avatar entered={entered} dispersing={dispersing} />
+      </div>
+      <EntranceBurst burstSeq={burstSeq} targetRect={rect} />
+    </>
   );
 }

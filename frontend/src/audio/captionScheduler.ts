@@ -17,6 +17,21 @@ export interface CaptionTrack {
   words: CaptionWord[];
   total_ms: number;
   estimated: boolean;
+  /** TTS amplitude envelope (sub-phase C2) — real voice loudness per
+   *  `frame_ms`-spaced frame, 0..1 normalized to the loudest frame in the
+   *  track. Empty when Rust couldn't compute one (degrade silently —
+   *  the orb's speaking "beat" falls back to the mic-proxy level). */
+  envelope: number[];
+  frame_ms: number;
+  /** Same cumulative-offset convention as each word's `start_ms` — rides
+   *  the SAME absolute utterance timeline across streamed chunks. */
+  envelope_start_ms: number;
+}
+
+interface EnvelopeSegment {
+  startMs: number;
+  frameMs: number;
+  values: number[];
 }
 
 type Listener = (revealed: string[], done: boolean) => void;
@@ -25,6 +40,7 @@ let anchorMs: number | null = null;
 let timers: ReturnType<typeof setTimeout>[] = [];
 let doneTimer: ReturnType<typeof setTimeout> | null = null;
 let revealed: string[] = [];
+let segments: EnvelopeSegment[] = [];
 const listeners = new Set<Listener>();
 
 function notify(done: boolean): void {
@@ -48,16 +64,49 @@ export function clearCaptionSchedule(): void {
   }
   anchorMs = null;
   revealed = [];
+  segments = [];
   notify(true);
 }
 
+/**
+ * Current real TTS voice amplitude, 0..1, interpolated between the two
+ * nearest envelope frames — or `null` when no envelope has arrived yet
+ * (no utterance speaking, or this chunk's engine couldn't produce one).
+ * Callers (VoiceOrb.tsx) fall back to the mic-proxy level on `null`.
+ */
+export function getEnvelopeLevel(): number | null {
+  if (anchorMs === null || !segments.length) return null;
+  const elapsed = performance.now() - anchorMs;
+  for (const seg of segments) {
+    if (!seg.values.length) continue;
+    const segEnd = seg.startMs + seg.values.length * seg.frameMs;
+    if (elapsed >= seg.startMs && elapsed < segEnd) {
+      const idxF = (elapsed - seg.startMs) / seg.frameMs;
+      const i0 = Math.max(0, Math.floor(idxF));
+      const i1 = Math.min(seg.values.length - 1, i0 + 1);
+      const frac = idxF - i0;
+      return seg.values[i0] + (seg.values[i1] - seg.values[i0]) * frac;
+    }
+  }
+  // Elapsed is past every known segment (more audio still synthesizing,
+  // or this was the final chunk and we're in its tail) — hold the last
+  // known value instead of snapping to 0 (a flat silent gap would look
+  // like the beat died rather than just outrunning known data).
+  const last = segments[segments.length - 1];
+  return last.values.length ? last.values[last.values.length - 1] : null;
+}
+
 function scheduleChunk(track: CaptionTrack): void {
-  if (!track.words.length) return;
   const isFirstChunk = anchorMs === null;
   if (isFirstChunk) {
     anchorMs = performance.now();
     revealed = [];
+    segments = [];
   }
+  if (track.envelope?.length && track.frame_ms > 0) {
+    segments.push({ startMs: track.envelope_start_ms ?? 0, frameMs: track.frame_ms, values: track.envelope });
+  }
+  if (!track.words.length) return;
   const anchor = anchorMs as number;
   for (const w of track.words) {
     const delay = Math.max(0, w.start_ms - (performance.now() - anchor));

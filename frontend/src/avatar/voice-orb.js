@@ -3,10 +3,10 @@
   if (typeof window === 'undefined' || typeof customElements === 'undefined' || customElements.get('voice-orb')) return;
   const STATES = ['idle', 'listening', 'thinking', 'speaking', 'text'];
   // State-based color palettes (Feature 89): idle warm grey, listening
-  // warm amber/brown, thinking blue-violet, speaking vibrant magenta. The
+  // warm amber/brown, thinking vibrant electric purple/magenta, speaking vibrant magenta. The
   // 5th (text) entry is a fallback — real text inherits the STATE palette
   // via the dominant-state tint (see _paint stateTint / uniform textTint).
-  const PALETTE = [[.80,.78,.76], [.82,.55,.26], [.62,.55,1.0], [1.0,.45,.85], [1.0,.9,.80]];
+  const PALETTE = [[.80,.78,.76], [.82,.55,.26], [.82,.15,.96], [1.0,.45,.85], [1.0,.9,.80]];
   const mediaSources = new WeakMap();
   const clamp = (v, lo=0, hi=1) => Math.max(lo, Math.min(hi, Number.isFinite(+v) ? +v : lo));
   const weightsFor = state => STATES.map(s => +(s === state));
@@ -71,7 +71,18 @@
     ctx.fillStyle = '#fff';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.font = 'bold 84px "Segoe UI", system-ui, sans-serif';
+    // Fit the text to the canvas instead of a fixed size: at a flat 84px
+    // bold, anything past ~5-6 characters overflowed the 360px canvas and
+    // got silently clipped at BOTH edges (text is center-anchored), e.g.
+    // "Right away." rendered as "ght awa" — only the surviving middle
+    // slice. Measure at the reference size, then scale down (never up) so
+    // the full phrase — up to the 16-char cap above — stays on-canvas.
+    const refSize = 84;
+    ctx.font = `bold ${refSize}px "Segoe UI", system-ui, sans-serif`;
+    const measured = ctx.measureText(t).width;
+    const maxWidth = W * 0.92;
+    const fontSize = measured > maxWidth ? Math.max(26, Math.floor(refSize * (maxWidth / measured))) : refSize;
+    ctx.font = `bold ${fontSize}px "Segoe UI", system-ui, sans-serif`;
     ctx.fillText(t, W/2, H/2 + 4);
     const img = ctx.getImageData(0, 0, W, H).data;
     const pts = [];
@@ -138,6 +149,12 @@
     return mix(mix(a,b,f.y),mix(c,d,f.y),f.z)*2.0-1.0;
   }
   vec3 turn(vec3 p,float a) { float c=cos(a),s=sin(a);return vec3(c*p.x+s*p.z,p.y,c*p.z-s*p.x); }
+  vec3 rotate3D(vec3 p,float yaw,float pitch) {
+    float cy=cos(yaw),sy=sin(yaw);
+    float cp=cos(pitch),sp=sin(pitch);
+    vec3 p1=vec3(cy*p.x+sy*p.z,p.y,cy*p.z-sy*p.x);
+    return vec3(p1.x,cp*p1.y-sp*p1.z,cp*p1.z+sp*p1.y);
+  }
   void main() {
     float t=time;
     vec3 n=seed.xyz;
@@ -157,68 +174,71 @@
     float pulse=1.0+0.05*sin(t*2.5+pid*6.2831);
     float listenReact=(.018+.06*mid)*inward+.020*high*grain;
     float listenR=pulseOn?(pulse+listenReact):(1.0+.012*sin(t*1.7+pid*6.2831)+.03*low*bass);
-    // Speaking: dense, bumpy blob. Low-frequency 3D noise displaces the
-    // base sphere into an irregular, lobed silhouette (never a perfect
-    // circle — see reference video), with the existing high-frequency
-    // grain layered on top for surface sparkle. Replaces the old lat/lon
-    // wireframe lattice (too sparse to read as a solid "speaking"
-    // presence).
-    float lobeNoise=noise(n*1.5+vec3(t*.22,-t*.17,t*.13));
+    // Speaking: dense, irregular potato/pebble blob. A lower-frequency,
+    // higher-amplitude noise octave dominates the silhouette (fewer,
+    // bigger, more irregular/faceted lobes than the old smoother layered
+    // bumps — see reference image), with a smaller secondary octave and
+    // the existing high-frequency grain for surface sparkle. Replaces the
+    // old lat/lon wireframe lattice (too sparse to read as a solid
+    // "speaking" presence).
+    float lobeNoise=noise(n*0.65+vec3(t*.22,-t*.17,t*.13));
     float lobeNoise2=noise(n*0.85+vec3(-t*.10,t*.14,-t*.09));
     float energy=.35+.65*max(low,mid);
+    // Beat-driven mold (sub-phase C2, real TTS-audio onset — see JS
+    // _readAudio): a transient visibly lurches the whole irregular
+    // silhouette (lobe amplitude itself scales with onset, not just a
+    // flat additive bump). Damped by textProg so a beat never jitters
+    // glyphs mid-convergence — fades back to full intensity once text
+    // dissolves (textProg 0).
+    float textDamp=1.0-0.75*textProg;
     float rad=1.0
-      +.26*lobeNoise
-      +.16*lobeNoise2
+      +.40*lobeNoise*(1.0+.4*onset)*textDamp
+      +.10*lobeNoise2
       +energy*.05*sin(angle*5.0+t*1.4+drift*1.2)
       +high*.022*grain
-      +.12*onset;
+      +.22*onset*textDamp;
     vec3 speakV=turn(n,t*.24+.04*sin(t*.22))*rad;
-    // Thinking: open, flowing multi-strand wisp formation — curl-noise
-    // tendrils that reach outward from a dense core and taper to a fine
-    // point, never closing into a loop (replaces the old braided-knot,
-    // which read as a solid ring, not loose smoke — see reference video).
-    // u (seed.w) is a continuous 0..1 ramp across ALL particles
-    // (sphere()'s index/count); partitioned into STRANDS contiguous
-    // blocks so every particle knows which tendril it belongs to
-    // (strandIdx) and how far along it it sits (sAlong, 0=core, 1=tip).
-    // thinkIn drives the entry: strands are a short contracted stub at 0,
-    // fully extended at 1 — never a crossfade, the same particles travel.
+    // Thinking: 3D rotating purple starburst with dense white-magenta nucleus
+    // and 64 straight radial beaded rays radiating in 3D (reference media_1791105468869.png).
+    // Partitioned into STRANDS=64 rays evenly distributed via spherical Fibonacci.
+    // Core particles (sAlong < 0.14) form the intense glowing nucleus at center;
+    // spoke particles (sAlong >= 0.14) align in 15 concentric beaded steps along
+    // laser-straight radial lines with narrow needle beam thickness.
+    // Dynamic motion: continuous 3D rotation (yaw t*0.45, pitch t*0.28) and an
+    // outward-propagating energy ripple so purple particles are alive and rotating.
     float u=seed.w;
-    const float STRANDS=6.0;
+    const float STRANDS=64.0;
     float su=u*STRANDS;
     float strandIdx=floor(su);
     float sAlong=fract(su);
-    // Strand directions are spread evenly on a sphere (golden-angle
-    // Fibonacci lattice, same formula as sphere() in JS) rather than
-    // independently randomized — random per-strand hashes occasionally
-    // clump 2-3 directions close together, which reads as a single
-    // blob instead of distinct separated tendrils.
     float sy=1.0-2.0*(strandIdx+0.5)/STRANDS;
     float sr=sqrt(max(0.0,1.0-sy*sy));
     float sang=strandIdx*2.399963229728653;
     vec3 strandDir=vec3(sr*cos(sang),sy,sr*sin(sang));
     vec3 perp1=normalize(cross(strandDir,vec3(0.0,1.0,0.0))+0.0001);
     vec3 perp2=cross(strandDir,perp1);
-    float sh1=hash(vec3(strandIdx*7.13,11.0,0.0));
-    float sh2=hash(vec3(strandIdx*7.13,23.0,0.0));
-    float sh4=hash(vec3(strandIdx*7.13,53.0,0.0));
-    float strandPhase=sh4*6.2831;
-    float strandFreq=1.6+sh2*1.4;
-    float strandCurl=0.55+sh1*0.5;
-    // Ease-in reach (sAlong^1.7): particles bunch near the dense core
-    // (slow initial growth) and spread out fast toward the tip.
-    float reach=pow(sAlong,1.7);
-    // Ribbon cross-section shrinks toward the tip so it reads as a point.
-    float tipTaper=1.0-smoothstep(0.55,1.0,sAlong)*0.85;
-    float bend1=sin(sAlong*strandFreq*4.0+strandPhase+t*0.55)*strandCurl;
-    float bend2=cos(sAlong*strandFreq*2.6-strandPhase+t*0.42)*strandCurl*0.7;
-    vec3 axis=strandDir*reach*1.9+perp1*bend1*(0.5+0.5*reach)+perp2*bend2*(0.4+0.6*reach);
-    float ribbonAngle=hash(n*3.1+vec3(strandIdx,0.0,0.0))*6.2831;
-    float ribbonR=(0.13+0.04*sin(t*1.3+strandIdx*2.1))*tipTaper;
-    vec3 ribbonOff=(perp1*cos(ribbonAngle)+perp2*sin(ribbonAngle))*ribbonR;
-    // Slow whole-formation spin ("twist and intertwine") on top of each
-    // strand's own internal wiggle.
-    vec3 thought=turn((axis+ribbonOff)*mix(0.42,1.0,thinkIn),t*0.12);
+    float thinkRNorm=0.0;
+    vec3 spokePos=vec3(0.0);
+    if(sAlong<0.14) {
+      float cFrac=sAlong/0.14;
+      thinkRNorm=cFrac*0.14;
+      float cAngle=hash(n*7.3+vec3(strandIdx,0.0,0.0))*6.2831;
+      float cJitter=(0.02+0.04*hash(n*13.1+vec3(0.0,strandIdx,0.0)))*(1.0-cFrac*0.5);
+      spokePos=strandDir*(cFrac*0.13)+(perp1*cos(cAngle)+perp2*sin(cAngle))*cJitter;
+    } else {
+      float tRay=(sAlong-0.14)/0.86;
+      float beadIdx=floor(tRay*15.0);
+      thinkRNorm=(beadIdx+0.5)/15.0;
+      float rReach=0.14+pow(thinkRNorm,1.08)*0.91;
+      float pulse=sin(thinkRNorm*18.0-t*3.5);
+      rReach+=pulse*0.015;
+      float beamWidth=(0.007+0.005*thinkRNorm)*(1.0+0.3*sin(tRay*31.0));
+      float bAngle=hash(n*5.7+vec3(strandIdx,beadIdx,0.0))*6.2831;
+      vec3 beamOff=(perp1*cos(bAngle)+perp2*sin(bAngle))*beamWidth;
+      spokePos=strandDir*rReach+beamOff;
+    }
+    // Continuous 3D tumbling rotation around yaw and pitch so purple starburst rotates in 3D
+    vec3 thought=rotate3D(spokePos,t*0.45,t*0.28)*mix(0.42,1.0,thinkIn);
     // Cloud position in the CURRENT base state (weights renormalized in JS
     // to sum 1 across the four base states; the text weight is separate).
     vec3 cloudPos=turn(n,t*.11)*idleR*weights.x
@@ -272,15 +292,22 @@
     float speakFace=clamp(n.z*.5+.5,0.0,1.0);
     float speakBump=clamp(.5+.5*lobeNoise,0.0,1.0);
     // ─── State palettes (Feature 89) ──────────────────────────────
-    // Listening: warm amber/brown (palette-driven). Thinking: the hue
-    // TRAVELS along each strand (violet core → electric-blue → near-white
-    // at the reaching tips). Speaking: vibrant magenta body with white
-    // front highlights.
+    // Listening: warm amber/brown (palette-driven). Thinking: vibrant
+    // electric purple starburst with blazing white core (reference media_1791105468869.png).
+    // Gradient: pure white/hot-pink core -> neon magenta -> electric purple -> deep purple tips.
+    // Speaking: vibrant magenta body with white front highlights.
     vec3 ci=vec3(.80,.78,.76);
     vec3 cl=vec3(.82,.55,.26);
-    float thinkPhase=strandIdx*2.1+sAlong*3.0-t*1.2;
-    vec3 ctt=mix(vec3(.62,.55,1.0),vec3(.45,.72,1.0),.5+.5*sin(thinkPhase));
-    ctt=mix(ctt,vec3(1.0),smoothstep(0.55,1.0,sAlong)*0.55);
+    vec3 ctt;
+    if(thinkRNorm<0.14) {
+      ctt=mix(vec3(1.0,1.0,1.0),vec3(1.0,0.70,0.98),thinkRNorm/0.14);
+    } else if(thinkRNorm<0.45) {
+      ctt=mix(vec3(1.0,0.70,0.98),vec3(0.90,0.15,0.98),(thinkRNorm-0.14)/0.31);
+    } else if(thinkRNorm<0.75) {
+      ctt=mix(vec3(0.90,0.15,0.98),vec3(0.72,0.18,0.98),(thinkRNorm-0.45)/0.30);
+    } else {
+      ctt=mix(vec3(0.72,0.18,0.98),vec3(0.55,0.10,0.88),clamp((thinkRNorm-0.75)/0.25,0.0,1.0));
+    }
     vec3 cs=mix(vec3(1.0,.45,.85),vec3(1.0,1.0,1.0),clamp(speakFace*.55+.35*speakBump,0.0,1.0));
     vec3 blendT=ci*weights.x+cl*weights.y+ctt*weights.z+cs*weights.w+textTint*tw;
     // Per-particle color lag: mid-transition some particles still lean
@@ -296,16 +323,16 @@
     tint*=mix(1.0,.30,ambF);
     crisp=max(weights.w,tw);
     sparkTint=vec3(1.0,1.0,1.0);
-    // knotSpark: specular white sparks travelling along each strand's
-    // length (sAlong), front-facing strands only.
-    float knotSpark=pow(max(0.0,sin(sAlong*22.0-t*2.8+strandIdx*2.1)),14.0)*step(0.5,depth);
+    // knotSpark: specular white sparks travelling along each spoke outward from the core
+    float knotSpark=pow(max(0.0,sin(thinkRNorm*22.0-t*3.8+strandIdx*0.5)),14.0)*step(0.4,depth);
+    float coreBoost=step(sAlong,0.14)*1.4;
     // Energy hierarchy: listening calm/subtle → thinking medium-high →
     // speaking highest. Speaking brightness is synchronized with the
     // radial breathing (expands brighter, contracts dimmer).
     strength=(.22+.45*depth+.70*rim)*(.65+.35*fract(sin(seed.w*912.7+31.4)*43758.5));
     strength+=weights.y*(mid*flow*.40+onset*rim*.45);
     strength+=weights.w*(mid*flow*.95+onset*rim*.9);
-    strength+=weights.z*(0.35+0.65*depth+knotSpark*1.8);
+    strength+=weights.z*(0.35+0.65*depth+coreBoost+knotSpark*1.8);
     strength+=weights.w*(speakFace*.55+speakBump*.50);
     strength+=tw*(.40+.40*depth);
     strength+=weights.w*.10*sin(t*.9+seed.w*6.2831);
@@ -313,7 +340,7 @@
     strength*=mix(1.0,1.02,weights.z);
     strength*=mix(1.0,1.18,weights.w);
     strength*=mix(1.0,.32,ambF);
-    spark=active*(high*pop*.8+onset*rim*.22)+weights.z*(knotSpark*1.1+step(0.85,depth)*0.15);
+    spark=active*(high*pop*.8+onset*rim*.22)+weights.z*(step(sAlong,0.14)*0.85+knotSpark*1.2+step(0.85,depth)*0.15);
   }`;
   const FS = `
   precision mediump float;
@@ -368,10 +395,34 @@
     }
     connectedCallback() {
       if (!this.shadowRoot) {
-        this.attachShadow({mode:'open'}).innerHTML=`<style>
-          :host{display:block;position:relative;width:100%;height:100%;aspect-ratio:1;contain:layout paint;pointer-events:none}
-          canvas{display:block;position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
-        </style><canvas aria-hidden="true"></canvas><canvas aria-hidden="true"></canvas>`;
+        const root=this.attachShadow({mode:'open'});
+        // Constructed stylesheet (adoptedStyleSheets), not a parsed <style>
+        // tag: the stage window's CSP injects a per-load nonce into
+        // style-src for Tauri's own IPC init script, which per the CSP
+        // spec makes 'unsafe-inline' inert for the WHOLE directive —
+        // silently dropping any inline <style> content the same way it
+        // drops inline style="" attributes. CSSStyleSheet.replaceSync is a
+        // programmatic API, not inline-style text parsing, so it isn't
+        // subject to this restriction (live bug, 2026-10-04).
+        try {
+          const sheet=new CSSStyleSheet();
+          sheet.replaceSync(`:host{display:block;position:relative;width:100%;height:100%;aspect-ratio:1;contain:layout paint;pointer-events:none}
+canvas{display:block;position:absolute;inset:0;width:100%;height:100%;pointer-events:none}`);
+          root.adoptedStyleSheets=[sheet];
+        } catch(e) {
+          // Older engines without adoptedStyleSheets: fall back to a plain
+          // <style> tag (works fine under a permissive/no-nonce CSP).
+          const style=document.createElement('style');
+          style.textContent=`:host{display:block;position:relative;width:100%;height:100%;aspect-ratio:1;contain:layout paint;pointer-events:none}
+canvas{display:block;position:absolute;inset:0;width:100%;height:100%;pointer-events:none}`;
+          root.appendChild(style);
+        }
+        // appendChild, not `innerHTML +=`: the latter re-serializes the
+        // whole shadow root (including the fallback <style> tag above)
+        // back to a string and re-parses it, hitting the exact same
+        // CSP block a second time.
+        root.appendChild(document.createElement('canvas')).setAttribute('aria-hidden','true');
+        root.appendChild(document.createElement('canvas')).setAttribute('aria-hidden','true');
         [this._halo,this._canvas]=this.shadowRoot.querySelectorAll('canvas');
         this._hctx=this._halo.getContext('2d');
         this._setupRenderer();
@@ -653,19 +704,23 @@
         let px=(x*c+z*sn)*r,pz=(z*c-x*sn)*r,py=y*r;
         let speakFace=0,speakBump=0;
         if(w[3]>.001) {
-          // Dense bumpy blob (parity with the GL path): low-frequency 3D
-          // noise displaces the base sphere point into an irregular,
-          // lobed silhouette; high-frequency grain layers surface sparkle.
-          const lobeNoise=vnoise(x*1.5+t*.22,y*1.5-t*.17,z*1.5+t*.13);
+          // Dense irregular potato/pebble blob (parity with the GL path):
+          // a dominant low-frequency noise octave produces fewer, bigger,
+          // more irregular lobes; a smaller secondary octave plus
+          // high-frequency grain add surface sparkle.
+          const lobeNoise=vnoise(x*0.65+t*.22,y*0.65-t*.17,z*0.65+t*.13);
           const lobeNoise2=vnoise(x*0.85-t*.10,y*0.85+t*.14,z*0.85-t*.09);
           const energy=.35+.65*Math.max(b[0],b[1]);
           const grain2=vnoise(x*17.0-t*1.8,y*17.0+t*.7,z*17.0+t*1.0);
+          // Beat-driven mold + text-legibility damping (parity with the
+          // GL path).
+          const textDamp=1.0-0.75*textProg;
           const rad=1.0
-            +.26*lobeNoise
-            +.16*lobeNoise2
+            +.40*lobeNoise*(1.0+.4*onset)*textDamp
+            +.10*lobeNoise2
             +energy*.05*Math.sin(angle*5.0+t*1.4+drift*1.2)
             +b[2]*.022*grain2
-            +.12*onset;
+            +.22*onset*textDamp;
           const rot=t*.24+.04*Math.sin(t*.22);
           const rc=Math.cos(rot),rs=Math.sin(rot);
           const sx=x*rad,sy=y*rad,sz=z*rad;
@@ -677,38 +732,51 @@
           pz=pz*(1-w[3])+bz*w[3];
         }
         if(w[2]>.001) {
-          // Open flowing multi-strand wisp (parity with the GL path): u
-          // partitions into STRANDS contiguous blocks, each an
-          // independent tendril reaching outward from a dense core and
-          // tapering to a point — replaces the old braided-knot.
-          const STRANDS=6.0;
+          // 3D rotating purple starburst (parity with GL path): 64 rays,
+          // dense glowing nucleus, 15 concentric beaded steps, dual-axis 3D rotation.
+          const STRANDS=64.0;
           const su=u*STRANDS,strandIdx=Math.floor(su),sAlong=su-strandIdx;
-          // Evenly spread strand directions (golden-angle Fibonacci
-          // lattice, parity with the GL path) rather than independently
-          // randomized ones, which occasionally clump into a blob.
           const sy=1.0-2.0*(strandIdx+0.5)/STRANDS;
           const sr=Math.sqrt(Math.max(0,1.0-sy*sy));
           const sang=strandIdx*2.399963229728653;
           const dx=sr*Math.cos(sang),dy=sy,dz=sr*Math.sin(sang);
           const [p1x,p1y,p1z]=normalize3(...cross3(dx,dy,dz,0,1,0));
           const [p2x,p2y,p2z]=cross3(dx,dy,dz,p1x,p1y,p1z);
-          const sh1=hash3(strandIdx*7.13,11.0,0.0),sh2=hash3(strandIdx*7.13,23.0,0.0);
-          const sh4=hash3(strandIdx*7.13,53.0,0.0);
-          const strandPhase=sh4*6.2831,strandFreq=1.6+sh2*1.4,strandCurl=0.55+sh1*0.5;
-          const reach=Math.pow(sAlong,1.7);
-          const tipTaper=1.0-smooth01(clamp((sAlong-0.55)/0.45))*0.85;
-          const bend1=Math.sin(sAlong*strandFreq*4.0+strandPhase+t*0.55)*strandCurl;
-          const bend2=Math.cos(sAlong*strandFreq*2.6-strandPhase+t*0.42)*strandCurl*0.7;
-          const bw1=0.5+0.5*reach,bw2=0.4+0.6*reach;
-          const ribbonAngle=seeded(i+601+strandIdx*997)*6.2831;
-          const ribbonR=(0.13+0.04*Math.sin(t*1.3+strandIdx*2.1))*tipTaper;
-          const ca=Math.cos(ribbonAngle),sa=Math.sin(ribbonAngle);
+          let sx0,sy0,sz0;
+          if(sAlong<0.14) {
+            const cFrac=sAlong/0.14;
+            const cAngle=seeded(i*13+strandIdx*19)*6.2831;
+            const cJitter=(0.02+0.04*seeded(i*29+strandIdx*37))*(1.0-cFrac*0.5);
+            sx0=dx*(cFrac*0.13)+(p1x*Math.cos(cAngle)+p2x*Math.sin(cAngle))*cJitter;
+            sy0=dy*(cFrac*0.13)+(p1y*Math.cos(cAngle)+p2y*Math.sin(cAngle))*cJitter;
+            sz0=dz*(cFrac*0.13)+(p1z*Math.cos(cAngle)+p2z*Math.sin(cAngle))*cJitter;
+          } else {
+            const tRay=(sAlong-0.14)/0.86;
+            const beadIdx=Math.floor(tRay*15.0);
+            const rNorm=(beadIdx+0.5)/15.0;
+            let rReach=0.14+Math.pow(rNorm,1.08)*0.91;
+            const pulse=Math.sin(rNorm*18.0-t*3.5);
+            rReach+=pulse*0.015;
+            const beamWidth=(0.007+0.005*rNorm)*(1.0+0.3*Math.sin(tRay*31.0));
+            const bAngle=seeded(i*17+strandIdx*23+beadIdx*41)*6.2831;
+            const bx=(p1x*Math.cos(bAngle)+p2x*Math.sin(bAngle))*beamWidth;
+            const by=(p1y*Math.cos(bAngle)+p2y*Math.sin(bAngle))*beamWidth;
+            const bz=(p1z*Math.cos(bAngle)+p2z*Math.sin(bAngle))*beamWidth;
+            sx0=dx*rReach+bx;
+            sy0=dy*rReach+by;
+            sz0=dz*rReach+bz;
+          }
+          // Continuous 3D rotation: yaw (t * 0.45) and pitch (t * 0.28)
+          const yaw=t*0.45,cy=Math.cos(yaw),sy_rot=Math.sin(yaw);
+          const pitch=t*0.28,cp=Math.cos(pitch),sp_rot=Math.sin(pitch);
+          const x1=cy*sx0+sy_rot*sz0;
+          const y1=sy0;
+          const z1=cy*sz0-sy_rot*sx0;
+          const tx0=x1;
+          const ty0=cp*y1-sp_rot*z1;
+          const tz0=cp*z1+sp_rot*y1;
           const scale=mixNum(0.42,1.0,thinkIn);
-          const tx0=(dx*reach*1.9+p1x*bend1*bw1+p2x*bend2*bw2+(p1x*ca+p2x*sa)*ribbonR)*scale;
-          const ty0=(dy*reach*1.9+p1y*bend1*bw1+p2y*bend2*bw2+(p1y*ca+p2y*sa)*ribbonR)*scale;
-          const tz0=(dz*reach*1.9+p1z*bend1*bw1+p2z*bend2*bw2+(p1z*ca+p2z*sa)*ribbonR)*scale;
-          const rot=t*0.12,rc2=Math.cos(rot),rs2=Math.sin(rot);
-          const bx=tx0*rc2+tz0*rs2,by=ty0,bz=-tx0*rs2+tz0*rc2;
+          const bx=tx0*scale,by=ty0*scale,bz=tz0*scale;
           px=px*(1-w[2])+bx*w[2];
           py=py*(1-w[2])+by*w[2];
           pz=pz*(1-w[2])+bz*w[2];

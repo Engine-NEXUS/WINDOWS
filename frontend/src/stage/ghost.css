@@ -299,9 +299,16 @@
 
 /* Response caption (plan Phase 3) — the spoken reply growing word-by-word
    above the orb. Pure indicator: pointer-events none (never intercepts
-   clicks), opacity-only transition (position is set directly from the
-   orb rect each render, so it must never fight a CSS transform tween). */
+   clicks), opacity-only transition (the transform is applied imperatively
+   per-render — see ResponseCaption.tsx's note — so it must never fight a
+   CSS transform tween). Static layout lives here rather than as a React
+   inline style, for the same CSP reason documented on OrbFrame.tsx. */
 .response-caption {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 520px;
+  opacity: 0;
   text-align: center;
   pointer-events: none;
   transition: opacity 220ms ease;
@@ -339,4 +346,54 @@
    semantics), so an animate-in-per-word would fight itself every update. */
 .live-caption {
   opacity: 0.82;
+}
+
+/* Loading indicator (plan §1.6) — the top-right Lottie spinner, retired
+ * from its own OS window into a positioned div inside `stage`. Static
+ * layout lives here rather than as a React inline style, for the same
+ * CSP reason documented on OrbFrame.tsx (position/width/height/transform
+ * are still applied imperatively per-render, since they're genuinely
+ * dynamic — see LoadingIndicator.tsx). */
+.loading-indicator {
+  position: fixed;
+  left: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.loading-indicator--calibrating {
+  cursor: grab;
+}
+
+.loading-indicator-lottie {
+  width: 60px;
+  height: 60px;
+}
+
+.loading-indicator-pulse {
+  animation: loading-indicator-pulse 220ms ease-out;
+}
+
+@keyframes loading-indicator-pulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.14); }
+  100% { transform: scale(1); }
+}
+
+.loading-indicator-badge {
+  position: absolute;
+  bottom: -4px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: rgba(233, 240, 250, 0.92);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
 }

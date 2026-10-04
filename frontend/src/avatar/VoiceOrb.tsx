@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from "react";
 import "./voice-orb.js";
+import { getEnvelopeLevel } from "../audio/captionScheduler";
 
 export type VoiceOrbState = "idle" | "listening" | "thinking" | "speaking" | "text";
 
@@ -55,11 +56,11 @@ declare global {
  * ONE continuous particle simulation morphing across 5 states:
  * - 'idle': Calm, breathing grey sphere
  * - 'listening': Grainy warm amber/brown sphere, calm and voice-reactive
- * - 'thinking': Open flowing multi-strand violet/blue wisps — curl-noise
- *   tendrils reaching outward from a dense core, tapering to a point
- *   (contract → extend on entry; never a closed loop)
- * - 'speaking': Dense bumpy magenta/white blob, irregular lobed silhouette,
- *   audio-reactive with particle sparks
+ * - 'thinking': 3D rotating purple beaded starburst — 64 radial rays with
+ *   dense white-magenta nucleus, concentric beaded steps, dual-axis 3D
+ *   tumbling rotation, and dynamic outward energy waves
+ * - 'speaking': Dense irregular potato/pebble blob, molded by NEXUS's
+ *   real voice-amplitude beat (sub-phase C2), with particle sparks
  * - 'text': The SAME particles detach, converge into readable glyphs,
  *   hold, then dissolve back into the previous state
  * A brief glitch/tear burst plays whenever the dominant state changes.
@@ -114,6 +115,28 @@ export const VoiceOrb: React.FC<VoiceOrbProps> = ({
     }
   }, [level]);
 
+  // Real TTS-audio beat sync (sub-phase C2): while speaking, pump NEXUS's
+  // own voice-amplitude envelope (Rust's `tts:caption.envelope`, scheduled
+  // by captionScheduler.ts) into setLevel() every frame — this takes
+  // priority over the `level` prop's mic-volume-proxy effect above
+  // whenever a real envelope value is available for the current instant.
+  // Falls back to doing nothing (letting the `level` prop keep driving)
+  // the moment no envelope is available, so speaking visuals never go
+  // flat just because this signal is momentarily missing.
+  useEffect(() => {
+    if (state !== "speaking") return;
+    let raf = 0;
+    const pump = () => {
+      const v = getEnvelopeLevel();
+      if (v !== null && orbRef.current) orbRef.current.setLevel(v);
+      raf = requestAnimationFrame(pump);
+    };
+    raf = requestAnimationFrame(pump);
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [state]);
+
   // Particle text via prop (static callers).
   useEffect(() => {
     if (orbRef.current && typeof text === "string" && text.trim()) {
@@ -143,20 +166,21 @@ export const VoiceOrb: React.FC<VoiceOrbProps> = ({
 
   return (
     <voice-orb
-      ref={orbRef as React.RefObject<HTMLElement>}
+      ref={(el: VoiceOrbElement | null) => {
+        orbRef.current = el;
+        // Base sizing lives in the `.voice-orb-el` CSS class (styles.css),
+        // not here, for the same reason as Avatar.tsx's wrapper: the stage
+        // window's CSP makes React's `style` prop a no-op (see OrbFrame.tsx's
+        // note). Any caller-supplied `style` override (no current caller
+        // passes one, but it's part of this component's public props) is
+        // still honored, applied imperatively instead.
+        if (el && style) {
+          Object.assign(el.style, style);
+        }
+      }}
       state={state}
       particles={particles}
-      className={className}
-      style={{
-        display: "block",
-        width: "100%",
-        height: "100%",
-        minWidth: "120px",
-        minHeight: "120px",
-        aspectRatio: "1",
-        contain: "layout paint",
-        ...style,
-      }}
+      className={`voice-orb-el${className ? ` ${className}` : ""}`}
     />
   );
 };

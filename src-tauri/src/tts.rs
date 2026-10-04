@@ -56,11 +56,23 @@ pub struct CaptionWord {
 /// as the `tts:caption` event right as its audio is appended to the sink.
 /// `estimated` is true for the Piper fallback path (no real word-boundary
 /// data — timings are evenly distributed across the known PCM duration).
+///
+/// `envelope`/`frame_ms`/`envelope_start_ms` (sub-phase C2) carry NEXUS's
+/// own voice amplitude to the frontend so the speaking-state orb's "beat"
+/// deformation reacts to the actual TTS audio instead of the microphone's
+/// volume reused as a stand-in. `envelope_start_ms` mirrors the same
+/// cumulative-offset bookkeeping `CaptionWord.start_ms` already uses for a
+/// streamed multi-chunk reply (see `play_audio_streamed`) — both ride the
+/// SAME absolute utterance timeline, so the frontend never special-cases
+/// chunking for either one.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct CaptionTrack {
     pub words: Vec<CaptionWord>,
     pub total_ms: u64,
     pub estimated: bool,
+    pub envelope: Vec<f32>,
+    pub frame_ms: u64,
+    pub envelope_start_ms: u64,
 }
 
 /// Evenly distribute `text`'s whitespace-split words across `total_ms` of
@@ -99,6 +111,36 @@ pub fn boundaries_to_words(
             duration_ms: b.duration_ticks / 10_000,
         })
         .collect()
+}
+
+/// Frame size for the TTS amplitude envelope (sub-phase C2): short enough
+/// to track syllable-level energy changes, long enough to stay cheap to
+/// compute and transmit over IPC.
+pub const ENVELOPE_FRAME_MS: u64 = 20;
+
+/// Per-frame RMS envelope of `samples`, normalized so the loudest frame in
+/// the track reads as 1.0 — absolute amplitude varies a lot between
+/// engines/voices, so a fixed reference level would make quiet voices
+/// barely move the orb and loud ones clip at 1.0 with no headroom. Silent
+/// input returns an all-zero envelope rather than dividing by zero.
+/// Pure + unit-tested.
+pub fn compute_envelope(samples: &[f32], sample_rate: u32, frame_ms: u64) -> Vec<f32> {
+    if samples.is_empty() || sample_rate == 0 || frame_ms == 0 {
+        return Vec::new();
+    }
+    let frame_len = ((sample_rate as u64 * frame_ms) / 1000).max(1) as usize;
+    let mut raw: Vec<f32> = Vec::with_capacity(samples.len() / frame_len + 1);
+    let mut peak = 0.0f32;
+    for chunk in samples.chunks(frame_len) {
+        let sum_sq: f32 = chunk.iter().map(|s| s * s).sum();
+        let rms = (sum_sq / chunk.len() as f32).sqrt();
+        peak = peak.max(rms);
+        raw.push(rms);
+    }
+    if peak <= 1e-6 {
+        return raw.iter().map(|_| 0.0).collect();
+    }
+    raw.into_iter().map(|v| (v / peak).clamp(0.0, 1.0)).collect()
 }
 
 /// Truncate text to at most `max_chars` CHARACTERS for log lines.
@@ -165,9 +207,10 @@ pub async fn pregenerate_cache(
                 Ok((samples, sr, boundaries)) => {
                     let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
                     let words = boundaries_to_words(&boundaries, 0);
+                    let envelope = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
                     cache_arc.lock().await.insert(
                         phrase.to_string(),
-                        CachedAudio { samples, sample_rate: sr, caption: CaptionTrack { words, total_ms, estimated: false } },
+                        CachedAudio { samples, sample_rate: sr, caption: CaptionTrack { words, total_ms, estimated: false, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0 } },
                     );
                     cached_count += 1;
                 }
@@ -187,9 +230,10 @@ pub async fn pregenerate_cache(
                 Ok((samples, sr)) => {
                     let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
                     let words = estimate_words(phrase, total_ms);
+                    let envelope = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
                     cache_arc.lock().await.insert(
                         phrase.to_string(),
-                        CachedAudio { samples, sample_rate: sr, caption: CaptionTrack { words, total_ms, estimated: true } },
+                        CachedAudio { samples, sample_rate: sr, caption: CaptionTrack { words, total_ms, estimated: true, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0 } },
                     );
                     cached_count += 1;
                 }
@@ -626,7 +670,8 @@ async fn synthesize_with_fallback(
         let (samples, sr) = crate::tts_piper::synthesize_with_voice(&state.piper_engine, text, &stem).await?;
         let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
         let words = estimate_words(text, total_ms);
-        return Ok((samples, sr, CaptionTrack { words, total_ms, estimated: true }));
+        let envelope = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
+        return Ok((samples, sr, CaptionTrack { words, total_ms, estimated: true, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0 }));
     }
 
     // Upfront engine policy (Main Center TTS director, doc 74 P3): explicit
@@ -657,7 +702,8 @@ async fn synthesize_with_fallback(
                 crate::tts_network::set_network_up();
                 let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
                 let words = boundaries_to_words(&boundaries, 0);
-                return Ok((samples, sr, CaptionTrack { words, total_ms, estimated: false }));
+                let envelope = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
+                return Ok((samples, sr, CaptionTrack { words, total_ms, estimated: false, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0 }));
             }
             Err(_elapsed) => {
                 // Timeout = genuine transport failure → mark down so the
@@ -683,7 +729,8 @@ async fn synthesize_with_fallback(
             tracing::info!("tts: piper fallback synthesis OK (local)");
             let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
             let words = estimate_words(text, total_ms);
-            return Ok((samples, sr, CaptionTrack { words, total_ms, estimated: true }));
+            let envelope = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
+            return Ok((samples, sr, CaptionTrack { words, total_ms, estimated: true, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0 }));
         }
         Err(e) => {
             tracing::error!("tts: piper fallback also failed: {}", e);
@@ -934,7 +981,8 @@ async fn synthesize_chunk_owned(
     // the producer races ahead of playback and has no visibility into it.
     let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
     let words = boundaries_to_words(&boundaries, 0);
-    Ok((samples, sr, CaptionTrack { words, total_ms, estimated: false }))
+    let envelope = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
+    Ok((samples, sr, CaptionTrack { words, total_ms, estimated: false, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0 }))
 }
 
 /// Play chunk 0 immediately, then append streamed chunks as they arrive.
@@ -955,7 +1003,8 @@ async fn play_audio_streamed(
             Ok((_stream, handle)) => match Sink::try_new(&handle) {
                 Ok(sink) => {
                     let mut cumulative_ms: u64 = 0;
-                    if let Some((audio, sr, caption)) = first {
+                    if let Some((audio, sr, mut caption)) = first {
+                        caption.envelope_start_ms = cumulative_ms;
                         if TTS_GENERATION.load(Ordering::SeqCst) <= my_generation {
                             let _ = app.emit("tts:caption", &caption);
                         }
@@ -975,6 +1024,7 @@ async fn play_audio_streamed(
                                 for w in caption.words.iter_mut() {
                                     w.start_ms += cumulative_ms;
                                 }
+                                caption.envelope_start_ms = cumulative_ms;
                                 let _ = app.emit("tts:caption", &caption);
                                 cumulative_ms += caption.total_ms;
                                 sink.append(SamplesBuffer::new(1, sr, audio));
@@ -1100,5 +1150,43 @@ mod caption_tests {
         }];
         let words = boundaries_to_words(&boundaries, 1500);
         assert_eq!(words[0].start_ms, 1500);
+    }
+
+    #[test]
+    fn test_compute_envelope_empty_input() {
+        assert!(compute_envelope(&[], 24000, ENVELOPE_FRAME_MS).is_empty());
+        assert!(compute_envelope(&[0.1, 0.2], 0, ENVELOPE_FRAME_MS).is_empty());
+    }
+
+    #[test]
+    fn test_compute_envelope_silence_is_all_zero() {
+        let samples = vec![0.0f32; 24000]; // 1s of silence at 24kHz
+        let env = compute_envelope(&samples, 24000, ENVELOPE_FRAME_MS);
+        assert!(!env.is_empty());
+        assert!(env.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn test_compute_envelope_normalizes_to_loudest_frame() {
+        // Two 20ms frames at 1000Hz sample rate: frame 0 quiet, frame 1 loud.
+        let sr = 1000u32;
+        let frame_len = (sr as u64 * ENVELOPE_FRAME_MS / 1000) as usize; // 20 samples
+        let mut samples = vec![0.1f32; frame_len];
+        samples.extend(vec![0.5f32; frame_len]);
+        let env = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
+        assert_eq!(env.len(), 2);
+        // Loudest frame normalizes to exactly 1.0; the quiet frame is
+        // proportionally smaller, never negative, never above 1.0.
+        assert!((env[1] - 1.0).abs() < 1e-5);
+        assert!(env[0] > 0.0 && env[0] < env[1]);
+    }
+
+    #[test]
+    fn test_compute_envelope_frame_count_matches_duration() {
+        let sr = 24000u32;
+        let samples = vec![0.3f32; sr as usize]; // exactly 1000ms
+        let env = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
+        // 1000ms / 20ms per frame = 50 frames.
+        assert_eq!(env.len(), 50);
     }
 }

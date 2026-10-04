@@ -12,10 +12,10 @@ import { VoiceOrb } from "./VoiceOrb";
  * (shapes redesigned per the reference-video plan, voice-orb.js Phase 2):
  *   idle      : grey breathing sphere
  *   listening : grainy warm amber/brown sphere, calm (STT mic-reactive)
- *   thinking  : open flowing multi-strand violet/blue wisps (curl-noise
- *               tendrils reaching from a dense core, never a closed loop)
- *   speaking  : dense bumpy magenta/white blob (audio-reactive, irregular
- *               lobed silhouette, particle sparks)
+ *   thinking  : 3D rotating purple beaded starburst — 64 radial rays,
+ *               dense glowing nucleus, concentric beaded steps, 3D rotation
+ *   speaking  : dense irregular potato/pebble blob (real TTS-audio beat
+ *               molds the silhouette, particle sparks)
  * A brief glitch/tear burst plays whenever the dominant state changes.
  * Ghost mode : the orb IS the always-on display — assemble() flight on entry.
  *
@@ -407,17 +407,6 @@ export function Avatar({ entered: enteredProp = false, dispersing = false }: Ava
     <div
       data-interactive
       className={`avatar-wrap ${ghostDisplay ? "avatar-wrap--ghost" : `avatar-wrap--${displayState}`}${waiting && !ghostDisplay ? " avatar-wrap--waiting" : ""}${calibrating ? " avatar-wrap--calibrating" : ""}${pulseClass}`}
-      style={{
-        width: "100%",
-        height: "100%",
-        minWidth: 140,
-        minHeight: 140,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: "transparent",
-        cursor: calibrating ? "grab" : undefined,
-      }}
       onPointerDown={calibrating ? handleCalibrationPointerDown : undefined}
       onWheel={calibrating ? handleCalibrationWheel : undefined}
     >
@@ -427,16 +416,7 @@ export function Avatar({ entered: enteredProp = false, dispersing = false }: Ava
           whole window hittable with zero visual change. */}
       {calibrating && <div className="calibration-hitcatcher" aria-hidden />}
       {!wavesPreview && (
-        <div
-          className="avatar-voice-orb-container"
-          style={{
-            width: "100%",
-            height: "100%",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
+        <div className="avatar-voice-orb-container">
           <VoiceOrb
             state={ghostDisplay ? displayState : state}
             visible={visible || dispersing}
@@ -457,10 +437,15 @@ export function Avatar({ entered: enteredProp = false, dispersing = false }: Ava
             <div
               key={bar.color}
               className="ghost-bar"
-              style={{
-                background: bar.color,
-                height: bar.height,
-                transform: "scaleY(0.15)",
+              ref={(el) => {
+                // Per-bar dynamic styling (color/height genuinely vary per
+                // bar, so this can't be a single static CSS class) applied
+                // via direct DOM mutation, not React's `style` prop — see
+                // the CSP note on the main wrapper div above/OrbFrame.tsx.
+                if (!el) return;
+                el.style.background = bar.color;
+                el.style.height = `${bar.height}px`;
+                el.style.transform = "scaleY(0.15)";
               }}
             />
           ))}

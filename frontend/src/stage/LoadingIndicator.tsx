@@ -197,60 +197,45 @@ export function LoadingIndicator() {
     void tauriInvoke("calibration_report_size", { size: next }).catch(() => {});
   };
 
-  if (!rect || !(visible || calibrating)) return null;
+  // Position/size applied via direct DOM mutation, not React's `style`
+  // prop — the stage window's CSP makes inline styles a silent no-op (see
+  // OrbFrame.tsx's note). Static layout lives in the `.loading-indicator`
+  // CSS class; only the per-render rect-derived values are genuinely
+  // dynamic. `cursor` during calibration is handled by the
+  // `.loading-indicator--calibrating` modifier class instead of JS.
+  const applyRect = (el: HTMLDivElement | null) => {
+    if (!el || !rect) return;
+    const dpr = window.devicePixelRatio || 1;
+    el.style.width = `${rect.w / dpr}px`;
+    el.style.height = `${rect.h / dpr}px`;
+    el.style.transform = `translate(${rect.x / dpr}px, ${rect.y / dpr}px)`;
+  };
+  const frameRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    applyRect(frameRef.current);
+  }, [rect]);
 
-  const dpr = window.devicePixelRatio || 1;
+  if (!rect || !(visible || calibrating)) return null;
 
   return (
     <div
       data-interactive
+      className={`loading-indicator${calibrating ? " loading-indicator--calibrating" : ""}`}
       onPointerDown={handlePointerDown}
       onWheel={handleWheel}
-      style={{
-        position: "fixed",
-        left: 0,
-        top: 0,
-        width: rect.w / dpr,
-        height: rect.h / dpr,
-        transform: `translate(${rect.x / dpr}px, ${rect.y / dpr}px)`,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        cursor: calibrating ? "grab" : undefined,
+      ref={(el) => {
+        frameRef.current = el;
+        applyRect(el);
       }}
     >
-      {calibrating && (
-        <div
-          aria-hidden
-          style={{ position: "absolute", inset: 0, background: "rgba(255,255,255,0.012)" }}
-        />
-      )}
+      {calibrating && <div className="calibration-hitcatcher" aria-hidden />}
       <div
         key={pulseKey}
         ref={containerRef}
-        className={calibrating ? "loading-indicator-pulse" : undefined}
-        style={{ width: "60px", height: "60px" }}
+        className={`loading-indicator-lottie${calibrating ? " loading-indicator-pulse" : ""}`}
       />
       {calibrating && (
-        <div
-          style={{
-            position: "absolute",
-            bottom: -4,
-            left: "50%",
-            transform: "translateX(-50%)",
-            padding: "2px 9px",
-            borderRadius: 999,
-            background: "rgba(15, 23, 42, 0.85)",
-            border: "1px solid rgba(255, 255, 255, 0.16)",
-            color: "rgba(233, 240, 250, 0.92)",
-            fontSize: 10,
-            fontWeight: 600,
-            whiteSpace: "nowrap",
-            pointerEvents: "none",
-          }}
-        >
-          {calibSize} px
-        </div>
+        <div className="loading-indicator-badge">{calibSize} px</div>
       )}
     </div>
   );
