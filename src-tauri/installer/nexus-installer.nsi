@@ -659,7 +659,7 @@ SectionEnd
 
 ; ─── NEXUS: Python installation function ──────────────────────────────────
 ; Downloads and installs Python 3.12 silently if not already present,
-; then installs faster-whisper + NLU pip packages.
+; then installs moonshine-voice + NLU pip packages.
 Var PythonExe
 Function InstallPythonAndDeps
   StrCpy $PythonExe ""
@@ -765,12 +765,12 @@ Function InstallPythonAndDeps
       ${EndIf}
     ${Else}
       DetailPrint "Python installation failed (exit code $1) — STT/NLU will not work"
-      MessageBox MB_ICONEXCLAMATION|MB_OK "Python installation failed.$\r$\n$\r$\nSTT and NLU features will not work.$\r$\nPlease install Python 3.12+ manually from python.org and run:$\r$\n  pip install faster-whisper fastapi uvicorn python-multipart$\r$\n  pip install numpy onnxruntime fastapi uvicorn pydantic transformers"
+      MessageBox MB_ICONEXCLAMATION|MB_OK "Python installation failed.$\r$\n$\r$\nSTT and NLU features will not work.$\r$\nPlease install Python 3.12+ manually from python.org and run:$\r$\n  pip install moonshine-voice fastapi uvicorn python-multipart$\r$\n  pip install numpy onnxruntime fastapi uvicorn pydantic transformers"
       Return
     ${EndIf}
   ${Else}
     DetailPrint "Failed to download Python installer — STT/NLU will not work"
-    MessageBox MB_ICONEXCLAMATION|MB_OK "Could not download Python.$\r$\n$\r$\nSTT and NLU features will not work.$\r$\nPlease install Python 3.12+ manually from python.org and run:$\r$\n  pip install faster-whisper fastapi uvicorn python-multipart$\r$\n  pip install numpy onnxruntime fastapi uvicorn pydantic transformers"
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Could not download Python.$\r$\n$\r$\nSTT and NLU features will not work.$\r$\nPlease install Python 3.12+ manually from python.org and run:$\r$\n  pip install moonshine-voice fastapi uvicorn python-multipart$\r$\n  pip install numpy onnxruntime fastapi uvicorn pydantic transformers"
     Return
   ${EndIf}
 
@@ -787,8 +787,8 @@ Function InstallPythonAndDeps
   ExecWait '"$PythonExe" -m pip install --upgrade pip --quiet' $1
 
   ; Install STT dependencies
-  DetailPrint "  Installing faster-whisper, fastapi, uvicorn, python-multipart..."
-  ExecWait '"$PythonExe" -m pip install --quiet faster-whisper fastapi uvicorn python-multipart' $1
+  DetailPrint "  Installing moonshine-voice, fastapi, uvicorn, python-multipart..."
+  ExecWait '"$PythonExe" -m pip install --quiet moonshine-voice fastapi uvicorn python-multipart' $1
   ${If} $1 == 0
     DetailPrint "  STT dependencies installed"
   ${Else}
@@ -876,7 +876,7 @@ Section Install
 
   ; ─── NEXUS: Install Python + pip packages for STT/NLU servers ───────────
   ; Checks if Python is available; if not, downloads and installs Python 3.12
-  ; silently, then installs faster-whisper and NLU dependencies.
+  ; silently, then installs moonshine-voice and NLU dependencies.
   Call InstallPythonAndDeps
 
   ; ─── NEXUS: Pre-cache Kokoro TTS voice model ────────────────────────────

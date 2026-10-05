@@ -1,0 +1,541 @@
+//! Mouse ghost — eased motion, clicks, scroll, drag, restore.
+//!
+//! Windows-only for now (Ghost plan Phase 2). Every motion is eased
+//! (teleports break hover menus and look possessed), abort-checked per
+//! step, and wrapped in the ghost suppress window so the takeover
+//! detector never mistakes our own glide for a human hand.
+//!
+//! Grounding order (unchanged): UIA bounds first (exact, free), vision
+//! only where UIA is blind. This module moves; `screen.rs` resolves.
+
+/// Cosine-eased interpolation from `from` to `to` in `n` steps.
+/// Pure — unit-tested. Ease-in-out reads as intentional motion and gives
+/// the abort poll time to fire mid-glide.
+pub fn eased_steps(from: (i32, i32), to: (i32, i32), n: usize) -> Vec<(i32, i32)> {
+    let n = n.max(2);
+    (0..=n)
+        .map(|i| {
+            let t = i as f64 / n as f64;
+            let e = 0.5 - 0.5 * (std::f64::consts::PI * t).cos();
+            (
+                (from.0 as f64 + (to.0 - from.0) as f64 * e).round() as i32,
+                (from.1 as f64 + (to.1 - from.1) as f64 * e).round() as i32,
+            )
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+pub use windows_impl::*;
+
+#[cfg(target_os = "windows")]
+mod windows_impl {
+    use super::eased_steps;
+    use enigo::{Axis, Button, Coordinate, Direction, Enigo, Mouse, Settings};
+    use std::thread;
+    use std::time::Duration;
+    use tauri::Manager;
+
+    /// Current cursor position (physical px). None when unreadable.
+    pub fn current_pos() -> Option<(i32, i32)> {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut pt = POINT { x: 0, y: 0 };
+        if unsafe { GetCursorPos(&mut pt).as_bool() } {
+            Some((pt.x, pt.y))
+        } else {
+            None
+        }
+    }
+
+    fn enigo() -> Result<Enigo, String> {
+        Enigo::new(&Settings::default()).map_err(|e| format!("enigo init: {e}"))
+    }
+
+    /// Eased glide to a point. `should_stop` is polled every ~25ms step —
+    /// voice stop / mouse grab / Esc aborts mid-glide, never mid-click.
+    /// Registers the suppress window so takeover detection stays quiet.
+    pub fn move_eased(x: i32, y: i32, ms: u64, should_stop: impl Fn() -> bool) -> Result<(), String> {
+        if x < 0 || y < 0 {
+            return Err("move_eased: negative coordinates".to_string());
+        }
+        let from = current_pos().unwrap_or((x, y));
+        let steps = eased_steps(from, (x, y), ((ms / 25).max(2)) as usize);
+        // Suppress window covers motion + easing tail (see ghost.rs).
+        crate::ghost::note_expected((x, y), ms + 150);
+        let mut enigo = enigo()?;
+        for (sx, sy) in steps {
+            if should_stop() {
+                crate::ghost::note_idle();
+                return Err("Stopped, sir.".to_string());
+            }
+            enigo
+                .move_mouse(sx, sy, Coordinate::Abs)
+                .map_err(|e| format!("mouse move: {e}"))?;
+            thread::sleep(Duration::from_millis(25));
+        }
+        crate::ghost::note_idle();
+        Ok(())
+    }
+
+    /// Move (eased) then left-click. Atomic at the click: abort applies
+    /// between steps, never mid-click — half-clicks don't exist.
+    pub fn click_at(x: i32, y: i32, should_stop: impl Fn() -> bool) -> Result<(), String> {
+        move_eased(x, y, 300, &should_stop)?;
+        if should_stop() {
+            return Err("Stopped, sir.".to_string());
+        }
+        enigo()?
+            .button(Button::Left, Direction::Click)
+            .map_err(|e| format!("mouse click: {e}"))
+    }
+
+    /// Double-click at a point (eased move first).
+    pub fn double_click_at(x: i32, y: i32, should_stop: impl Fn() -> bool) -> Result<(), String> {
+        move_eased(x, y, 300, &should_stop)?;
+        if should_stop() {
+            return Err("Stopped, sir.".to_string());
+        }
+        let mut e = enigo()?;
+        e.button(Button::Left, Direction::Click)
+            .map_err(|e| format!("double-click 1: {e}"))?;
+        thread::sleep(Duration::from_millis(80));
+        e.button(Button::Left, Direction::Click)
+            .map_err(|e| format!("double-click 2: {e}"))
+    }
+
+    /// Vertical scroll by lines (positive = down). No cursor motion —
+    /// takeover-safe by construction.
+    pub fn scroll(lines: i32) -> Result<(), String> {
+        enigo()?
+            .scroll(lines, Axis::Vertical)
+            .map_err(|e| format!("mouse scroll: {e}"))
+    }
+
+    /// Drag from current position to a point (press → eased glide → release).
+    pub fn drag_to(x: i32, y: i32, should_stop: impl Fn() -> bool) -> Result<(), String> {
+        if x < 0 || y < 0 {
+            return Err("drag_to: negative coordinates".to_string());
+        }
+        let mut e = enigo()?;
+        e.button(Button::Left, Direction::Press)
+            .map_err(|e| format!("drag press: {e}"))?;
+        let from = current_pos().unwrap_or((x, y));
+        crate::ghost::note_expected((x, y), 550);
+        let steps = eased_steps(from, (x, y), 12);
+        for (sx, sy) in steps {
+            if should_stop() {
+                let _ = e.button(Button::Left, Direction::Release);
+                crate::ghost::note_idle();
+                return Err("Stopped, sir.".to_string());
+            }
+            e.move_mouse(sx, sy, Coordinate::Abs)
+                .map_err(|e| format!("drag move: {e}"))?;
+            thread::sleep(Duration::from_millis(25));
+        }
+        e.button(Button::Left, Direction::Release)
+            .map_err(|e| format!("drag release: {e}"))?;
+        crate::ghost::note_idle();
+        Ok(())
+    }
+
+    /// Glide back to a saved position (session restore on exit).
+    pub fn restore(pos: (i32, i32)) -> Result<(), String> {
+        crate::ghost::note_expected(pos, 450);
+        let from = current_pos().unwrap_or(pos);
+        let mut e = enigo()?;
+        for (sx, sy) in super::eased_steps(from, pos, 10) {
+            e.move_mouse(sx, sy, Coordinate::Abs)
+                .map_err(|e| format!("restore move: {e}"))?;
+            thread::sleep(Duration::from_millis(25));
+        }
+        crate::ghost::note_idle();
+        Ok(())
+    }
+
+    /// Resolve an element name to a click point via UIA bounds (exact,
+    /// free, millisecond latency). Scoring: exact match beats
+    /// starts-with beats contains. Password/secure fields never resolve
+    /// (screen.rs skips them upstream — defense in depth, not the only
+    /// layer: safety denylist + confirm gates still apply).
+    pub fn resolve_element(name: &str) -> Option<crate::screen::UiElement> {
+        let want = name.trim();
+        if want.is_empty() {
+            return None;
+        }
+        let els = crate::screen::list_actionables();
+        let mut best: Option<(u8, crate::screen::UiElement)> = None;
+        for el in els {
+            let Some(score) = score_name(&el.name, want) else {
+                continue;
+            };
+            if best.as_ref().map(|(s, _)| *s >= score).unwrap_or(false) {
+                continue;
+            }
+            best = Some((score, el));
+        }
+        best.map(|(_, el)| el)
+    }
+
+    /// Center point of an element for clicking.
+    pub fn element_center(el: &crate::screen::UiElement) -> (i32, i32) {
+        (el.x + el.w / 2, el.y + el.h / 2)
+    }
+
+    /// Pure name scorer for UIA resolution (unit-tested): exact (3) >
+    /// starts-with (2) > contains (1) > no match (None). Empty never matches.
+    pub fn score_name(element_name: &str, want: &str) -> Option<u8> {
+        let lower = element_name.trim().to_lowercase();
+        let w = want.trim().to_lowercase();
+        if w.is_empty() || lower.is_empty() {
+            return None;
+        }
+        if lower == w {
+            Some(3)
+        } else if lower.starts_with(&w) {
+            Some(2)
+        } else if lower.contains(&w) {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
+    /// True when the foreground window is exclusive-fullscreen (its rect
+    /// covers the whole monitor): games and some players swallow synthetic
+    /// input or sit above the overlay. Ghost acts pause with a spoken
+    /// message instead of clicking into the void.
+    pub fn is_foreground_fullscreen() -> bool {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect};
+        unsafe {
+            let fg = GetForegroundWindow();
+            if fg.0 == 0 {
+                return false;
+            }
+            let mut r = RECT::default();
+            if GetWindowRect(fg, &mut r).as_bool() {
+                if let Some(monitor) = crate::screen::primary_monitor_size() {
+                    return r.left <= 0
+                        && r.top <= 0
+                        && r.right >= monitor.0
+                        && r.bottom >= monitor.1;
+                }
+            }
+            false
+        }
+    }
+
+    /// Calibration probe: glide to grid points and read back landing
+    /// error. Reports max/mean deviation in physical px — the number the
+    /// DPI math lives or dies by. Fails honestly when unreadable.
+    /// Aborts on `should_stop` (voice stop / takeover / Esc).
+    pub fn calibration_probe(should_stop: impl Fn() -> bool) -> Result<CalibrationReport, String> {
+        let monitor = crate::screen::primary_monitor_size()
+            .ok_or_else(|| "calibration: no monitor size".to_string())?;
+        let (mw, mh) = monitor;
+        let points = vec![
+            (mw / 4, mh / 4),
+            (mw * 3 / 4, mh / 4),
+            (mw / 2, mh / 2),
+            (mw / 4, mh * 3 / 4),
+            (mw * 3 / 4, mh * 3 / 4),
+        ];
+        let mut deviations = Vec::new();
+        let mut e = enigo()?;
+        for (tx, ty) in &points {
+            for (sx, sy) in eased_steps(current_pos().unwrap_or((*tx, *ty)), (*tx, *ty), 8) {
+                if should_stop() {
+                    crate::ghost::note_idle();
+                    return Err("Stopped, sir.".to_string());
+                }
+                e.move_mouse(sx, sy, Coordinate::Abs)
+                    .map_err(|e| format!("calibration move: {e}"))?;
+                thread::sleep(Duration::from_millis(15));
+            }
+            thread::sleep(Duration::from_millis(120));
+            match current_pos() {
+                Some((ax, ay)) => deviations.push(((ax - tx).abs() + (ay - ty).abs()) as u32),
+                None => return Err("calibration: cursor unreadable".to_string()),
+            }
+        }
+        let max = *deviations.iter().max().unwrap_or(&0);
+        let mean = if deviations.is_empty() {
+            0
+        } else {
+            deviations.iter().sum::<u32>() / deviations.len() as u32
+        };
+        Ok(CalibrationReport {
+            points: points.len() as u32,
+            max_deviation_px: max,
+            mean_deviation_px: mean,
+            monitor_w: mw,
+            monitor_h: mh,
+        })
+    }
+
+    /// Per-machine calibration numbers (serialized to the caller).
+    #[derive(Debug, Clone, serde::Serialize)]
+    pub struct CalibrationReport {
+        pub points: u32,
+        pub max_deviation_px: u32,
+        pub mean_deviation_px: u32,
+        pub monitor_w: i32,
+        pub monitor_h: i32,
+    }
+
+    /// Some(reason) when ghost acts must pause: an exclusive-fullscreen
+    /// foreground (games, some players) swallows synthetic input or sits
+    /// above the overlay. Acting anyway clicks into the void — pause with
+    /// a spoken message instead. Non-Windows: never blocks.
+    pub fn foreground_blocked() -> Option<String> {
+        #[cfg(target_os = "windows")]
+        if is_foreground_fullscreen() {
+            return Some("paused — a fullscreen app is in front, sir.".to_string());
+        }
+        None
+    }
+
+    /// Ghost click: full session-wrapped UIA click with verify + restore.
+    /// Focus app → resolve element → eased glide → click → verify still
+    /// foreground → glide home → exit. Any guard trip aborts at the next
+    /// step boundary; the session always exits with narration.
+    pub async fn ghost_click<R: tauri::Runtime>(
+        app: tauri::AppHandle<R>,
+        app_title: &str,
+        element: &str,
+    ) -> Result<String, String> {
+        fn stop() -> bool {
+            crate::ghost::stop_requested()
+                || !crate::ghost::session_active()
+                || foreground_blocked().is_some()
+        }
+        let home = current_pos();
+
+        crate::ghost::ghost_enter(crate::ghost::ghost_wry::g_wry(app.clone())).await?;
+        crate::ghost::drill_begin();
+        crate::ghost::announce(crate::ghost::ghost_wry::g_wry_ref(&app), "Taking the mouse, sir. Tap Esc any time to cancel.");
+
+        let run = async {
+            if stop() {
+                return Err("Stopped, sir.".to_string());
+            }
+            // Fullscreen foreground pauses (not aborts): acting would
+            // click into the void, so say so instead.
+            if let Some(reason) = foreground_blocked() {
+                return Err(reason);
+            }
+            // 1. Focus the app (verify — never click blind).
+            if !super::super::window::focus_app_by_title(app_title) {
+                return Err(format!("couldn't find {app_title} running, sir."));
+            }
+            // 1b. UIPI elevation gate: an elevated target silently eats
+            // clicks from our unelevated process — reroute with speech
+            // instead of clicking into the void.
+            if let Some(hwnd) = super::super::window::find_window(app_title) {
+                let target_elevated =
+                    super::super::window::window_process_elevated(hwnd);
+                if let Some(reason) = super::super::window::elevated_block_reason(
+                    target_elevated,
+                    super::super::window::our_process_elevated(),
+                ) {
+                    return Err(reason);
+                }
+            }
+            if stop() {
+                return Err("Stopped, sir.".to_string());
+            }
+            // 2. Resolve the element: UIA bounds first (exact, free),
+            // vision models on miss (gridded screenshot, provider order
+            // + daily quotas). Quota switches are announced.
+            let el = match resolve_element(element) {
+                Some(el) => el,
+                None => {
+                    let groq_key = crate::commands::read_groq_api_key(&app);
+                    let gemini_key = crate::commands::read_api_key(&app, "gemini");
+                    if groq_key.is_empty() && gemini_key.is_empty() {
+                        return Err(format!(
+                            "couldn't find '{element}' in {app_title}, sir — and I have no vision key. Add a Groq or Gemini key in Settings, Accounts, so I can see custom buttons."
+                        ));
+                    }
+                    let usage_dir = app
+                        .path()
+                        .app_data_dir()
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let order = crate::vision::read_vision_provider(&usage_dir);
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(25))
+                        .build()
+                        .map_err(|e| format!("vision http client: {e}"))?;
+                    crate::ghost::announce(
+                        crate::ghost::ghost_wry::g_wry_ref(&app),
+                        "Not in the accessibility tree — looking visually, sir.",
+                    );
+                    match crate::vision::locate_with_fallback(
+                        element,
+                        &groq_key,
+                        &gemini_key,
+                        &order,
+                        &usage_dir,
+                        &client,
+                    )
+                    .await
+                    {
+                        Some(target) => {
+                            // Vision took seconds — the user may have grabbed
+                            // the mouse mid-call. Re-check before acting.
+                            if stop() {
+                                return Err("Stopped, sir.".to_string());
+                            }
+                            // Quota fallback is spoken: the user asked to
+                            // always hear which daily limit gave way.
+                            if let Some(hit) = target.quota_hit {
+                                let serving =
+                                    if target.provider == "groq" { "Groq" } else { "Gemini" };
+                                let hit_name =
+                                    if hit == "groq" { "Groq" } else { "Gemini" };
+                                crate::ghost::announce(
+                                    crate::ghost::ghost_wry::g_wry_ref(&app),
+                                    &format!(
+                                        "Daily {} limit reached, sir — falling back to {}.",
+                                        hit_name, serving
+                                    ),
+                                );
+                            }
+                            target.el
+                        }
+                        None => {
+                            return Err(format!(
+                                "couldn't find '{element}' in {app_title}, sir — my daily vision limits are spent. Try tomorrow, or click it yourself."
+                            ))
+                        }
+                    }
+                }
+            };
+            let (cx, cy) = element_center(&el);
+            // 3. Eased glide + click (atomic at the click).
+            click_at(cx, cy, stop)?;
+            // 4. Verify: the app must still own the foreground — a stolen
+            // focus means the click may have landed elsewhere; report it
+            // instead of clicking twice.
+            if !super::super::window::focus_app_by_title(app_title) {
+                return Err(format!("clicked, but {app_title} lost focus, sir."));
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+
+        // Restore pre-act position — but NEVER after a stop/takeover:
+        // gliding home into the user's hands fights them for the cursor.
+        // A failed glide home is reported, never silent.
+        let mut restore_note = String::new();
+        let calm = !stop();
+        if calm {
+            if let Some(h) = home {
+                if restore(h).is_err() {
+                    restore_note = " (couldn't glide back)".to_string();
+                }
+            }
+        }
+
+        let clean =
+            run.is_ok() && calm && crate::ghost::session_active();
+        crate::ghost::drill_end();
+
+        // Always leave the session — success, stop, takeover, or error.
+        let _ = crate::ghost::ghost_exit(crate::ghost::ghost_wry::g_wry(app.clone())).await;
+
+        match run {
+            Ok(()) => {
+                let done = format!("Clicked {element}{restore_note}.");
+                crate::ghost::announce(crate::ghost::ghost_wry::g_wry_ref(&app), "Done, sir.");
+                if clean {
+                    // Boxed-spawn: this path returns into process_transcript,
+                    // so an inline await makes the future self-referential.
+                    let drain_app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        crate::orchestrator::drain_ghost_followups(&drain_app).await;
+                    });
+                } else {
+                    crate::ghost::drop_followups();
+                }
+                Ok(done)
+            }
+            Err(e) => {
+                crate::ghost::drop_followups();
+                crate::ghost::announce(crate::ghost::ghost_wry::g_wry_ref(&app), &e);
+                Err(e)
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+mod unix_stub {
+    /// Non-Windows: mouse ghost is Windows-only for now (Ghost plan).
+    pub fn current_pos() -> Option<(i32, i32)> {
+        None
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub use unix_stub::current_pos;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_eased_steps_endpoints_and_count() {
+        let pts = eased_steps((0, 0), (100, 50), 10);
+        assert_eq!(pts.len(), 11);
+        assert_eq!(pts[0], (0, 0));
+        assert_eq!(pts[10], (100, 50));
+    }
+
+    #[test]
+    fn test_eased_steps_monotonic_and_eased() {
+        let pts = eased_steps((0, 0), (100, 0), 10);
+        for w in pts.windows(2) {
+            assert!(w[1].0 >= w[0].0, "must never move backwards");
+        }
+        // Ease-in-out: first step smaller than a middle step.
+        let first = pts[1].0 - pts[0].0;
+        let mid = pts[6].0 - pts[5].0;
+        assert!(first <= mid, "easing shape broken");
+    }
+
+    #[test]
+    fn test_eased_steps_minimum_two() {
+        assert_eq!(eased_steps((5, 5), (9, 9), 0).len(), 3);
+        assert_eq!(eased_steps((5, 5), (9, 9), 1).len(), 3);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_score_name_ranking() {
+        assert_eq!(score_name("Save", "save"), Some(3));
+        assert_eq!(score_name("Save As", "save"), Some(2));
+        assert_eq!(score_name("AutoSave File", "save"), Some(1));
+        assert_eq!(score_name("Open", "save"), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_score_name_normalizes_and_rejects_empty() {
+        assert_eq!(score_name("  SAVE  ", "save"), Some(3));
+        assert_eq!(score_name("Save", "  "), None);
+        assert_eq!(score_name("", "save"), None);
+        assert_eq!(score_name("Save", ""), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_score_name_password_shaped_names_still_score() {
+        // Scoring is dumb on purpose: password EXCLUSION lives in
+        // screen.rs listing (skipped upstream) + the safety denylist.
+        // This test pins that the scorer itself doesn't special-case,
+        // so exclusion can't silently migrate here and rot.
+        assert_eq!(score_name("Password", "password"), Some(3));
+    }
+}

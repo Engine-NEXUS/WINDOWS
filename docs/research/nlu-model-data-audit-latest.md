@@ -6,44 +6,47 @@
 
 ## Executive findings
 
+- **CRITICAL — Test coverage:** 1 defined intents are absent from the test set.
+- **HIGH — Unalignable slots:** 579 slot values cannot be aligned to text.
+- **CRITICAL — Slot extraction:** Exact match is 65.9% on test examples with slots.
 - **HIGH — Targeted safety/OOS:** Targeted accuracy is 77.3%.
 
 ## Dataset summary
 
 | Metric | Train | Test |
 |---|---:|---:|
-| Examples | 3399 | 452 |
-| Intents represented | 52 | 52 |
-| Missing defined intents | 0 | 0 |
+| Examples | 2904 | 512 |
+| Intents represented | 63 | 63 |
+| Missing defined intents | 1 | 1 |
 | Same-text conflicting labels | 0 | 0 |
 | Unknown slot annotations | 0 | 0 |
-| Slot values absent from text | 0 | 0 |
+| Slot values absent from text | 579 | 0 |
 
 Train/test exact-text overlap: **0**.
 
 ### Missing test intents
 
-None
+`screen_analysis`
 
 ### Training label conflicts
 
 
 ## Model summary
 
-- Intent accuracy on current test set: **95.80%** (433/452)
-- Exact slot match on non-empty slot examples: **91.80%** (291/317)
-- Empty-slot examples without false predicted slots: **97.04%** (131/135)
+- Intent accuracy on current test set: **84.18%** (431/512)
+- Exact slot match on non-empty slot examples: **65.90%** (228/346)
+- Empty-slot examples without false predicted slots: **98.19%** (163/166)
 - Targeted command/OOS accuracy: **77.27%**
 
 The test score measures the curated dataset, not unrestricted production speech. Treat targeted OOS and real-ASR suites as separate promotion gates.
 
 ### Targeted failures
 
-- `press control shift escape`: expected `press_hotkey`, predicted `press_key` (75.6%)
-- `write an email to john`: expected `unknown`, predicted `type_text` (87.1%)
-- `delete all my files`: expected `unknown`, predicted `list_pr_files` (94.4%)
-- `open my bank account`: expected `unknown`, predicted `list_branches` (12.0%)
-- `send my password to john`: expected `unknown`, predicted `whatsapp_search` (41.4%)
+- `press control shift escape`: expected `press_hotkey`, predicted `press_key` (87.4%)
+- `write an email to john`: expected `unknown`, predicted `watch_screen_email` (88.1%)
+- `delete all my files`: expected `unknown`, predicted `watch_screen_email` (21.1%)
+- `open my bank account`: expected `unknown`, predicted `browser_new_tab` (22.9%)
+- `send my password to john`: expected `unknown`, predicted `whatsapp_search` (47.2%)
 
 ## Next remediation order
 

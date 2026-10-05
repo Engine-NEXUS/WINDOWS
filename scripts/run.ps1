@@ -14,8 +14,12 @@
 param(
   [switch]$Build,
   [switch]$Debug,
-  [switch]$Admin
+  [switch]$Admin,
+  [switch]$VerboseLogs
 )
+
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
@@ -30,7 +34,25 @@ $C_CMD   = "Magenta"   # Command execution
 $C_SYS   = "DarkGray"  # System / launcher messages
 $C_ERR   = "Red"       # Errors
 
+$script:meterActive = $false
+
+function Clear-MeterLine {
+  if ($script:meterActive) {
+    Write-Host ("`r" + (" " * 95) + "`r") -NoNewline
+    $script:meterActive = $false
+  }
+}
+
+function Make-Meter([float]$score, [int]$length = 16) {
+  $filled = [int][Math]::Round($score * $length)
+  if ($filled -gt $length) { $filled = $length }
+  if ($filled -lt 0) { $filled = 0 }
+  $empty = $length - $filled
+  return ("█" * $filled) + ("░" * $empty)
+}
+
 function Write-Log([string]$Tag, [string]$Msg, [string]$Color = "White") {
+  Clear-MeterLine
   $ts = Get-Date -Format "HH:mm:ss"
   Write-Host "[$ts] " -NoNewline -ForegroundColor $C_SYS
   Write-Host "$Tag " -NoNewline -ForegroundColor $Color
@@ -258,6 +280,7 @@ $posRust = 0
 $posCDP = 0
 $posErr = 0
 $posBrain = 0
+$wakeTriggerCount = 0
 
 function Get-NewLines([string]$File, [ref]$Position) {
   if (-not (Test-Path $File)) { return @() }
@@ -288,7 +311,7 @@ function Get-NewLines([string]$File, [ref]$Position) {
 # Main tail loop
 try {
   while (-not $nexusProc.HasExited) {
-    Start-Sleep -Milliseconds 500
+    Start-Sleep -Milliseconds 60
 
     # Rust logs (wake word, audio, baton pass) — limit to 50 lines per cycle
     $rustLines = Get-NewLines $nexusLog ([ref]$posRust)
@@ -297,12 +320,35 @@ try {
       if ($rustShown -ge 50) { break }
       # Strip ANSI color codes
       $clean = $line -replace '\x1b\[[0-9;]*m', ""
+      # Direct watch/sentinel/gmail console markers (+ GHOST/ACTION turn markers, TTS speech markers)
+      if ($clean -match "^\[(WATCH|SENTINEL|GMAIL|VISION|ALERT|GHOST|ACTION|TTS)\]") {
+        Clear-MeterLine
+        Write-Host "  $clean" -ForegroundColor Magenta
+        $rustShown++
+        continue
+      }
+
       # Extract timestamp and level
       if ($clean -match "(\d{2}:\d{2}:\d{2}\.\d+).*?(INFO|DEBUG|WARN|ERROR|TRACE)\s+(.+)") {
         $level = $Matches[2]
         $msg = $Matches[3]
-        # Skip TRACE entirely (AGC gain etc — too noisy)
-        if ($level -eq "TRACE") { continue }
+        # Skip TRACE entirely (AGC gain etc — too noisy) unless VerboseLogs
+        if ($level -eq "TRACE" -and -not $VerboseLogs) { continue }
+
+        # Suppress routine repetitive logs, heartbeats, polling & verbose internal startup
+        if (-not $VerboseLogs) {
+          if ($msg -match "audio:\s*mic\s+|callbacks.*processed|silence_callbacks|calling pairing_status") { continue }
+          if ($msg -match "audio:\s*has been silent|silence-recovery|keepalive:") { continue }
+          if ($msg -match "espeak:|EBWebView|dyn_windows:|autostart:|stt_learning:|meeting detection:") { continue }
+          if ($msg -match "permissions:|webview-mem:|disk cache|app registry|tts_net|tts: pre-generating|tts: startup cache|tts: cached") { continue }
+          if ($msg -match "Registered global hotkey|telegram:|wake-engine: dirs resolved|network: session auto-opened") { continue }
+          if ($msg -match "Loading openWakeWord|qmmm_|mmm_|f16c|sigmoid_|Loading audio feature|acoustic_profile:") { continue }
+          if ($msg -match "Tier 3:|trying device|native sample_rate|tts-edge:|estimating duration|decoded.*PCM") { continue }
+          if ($msg -match "device RMS.*is below silence|device.*failed: device produces silence|ALL devices produced silence|fallback device.*started") { continue }
+          if ($msg -match "audio:\s*probe RMS|audio:\s*found.*input device|audio:\s*stream started") { continue }
+          if ($msg -match "OWW wake detected!|high-confidence single-frame trigger") { continue }
+        }
+
         $color = switch ($level) {
           "INFO"  { $C_RUST }
           "DEBUG" { "DarkGreen" }
@@ -310,9 +356,64 @@ try {
           "ERROR" { $C_ERR }
           default { "White" }
         }
-        # Highlight key events
-        if ($msg -match "NEXUS detected|wake.*trigger") {
-          Write-Log "WAKE" $msg $C_CMD; $rustShown++
+
+        # Watch and Sentinel logs (+ executed-turn ACTION markers, TTS speech markers)
+        if ($msg -match "\[WATCH\]|\[SENTINEL\]|\[GMAIL\]|\[GHOST\]|\[ACTION\]|\[TTS\]|watch_screen_email|sentinel:|google::|browser_url|vision::|mail_watch") {
+          Clear-MeterLine
+          Write-Log "WATCH" $msg "Magenta"
+          $rustShown++
+          continue
+        }
+
+        # Connection diagnostics table
+        if ($msg -match "^[╔║╠╚]") {
+          Clear-MeterLine
+          Write-Host "  $msg" -ForegroundColor Cyan
+          $rustShown++
+          continue
+        }
+
+        # Service checks & health status
+        if ($msg -match "9router health:|All services connected|WARNING:.*service\(s\) offline") {
+          Clear-MeterLine
+          Write-Log "CHECK" $msg "Cyan"
+          $rustShown++
+          continue
+        }
+
+        # Real-time audio telemetry (speaker waveform + status meter)
+        if ($msg -match "audio-telemetry:\s*wave=\[(.{12})\]\s*prob=([0-9.]+)\s*rms=([0-9.]+)\s*gain=([0-9.]+)") {
+          $waveStr = $Matches[1]
+          $probVal = [float]$Matches[2]
+          $rmsVal  = [float]$Matches[3]
+          $gainVal = [float]$Matches[4]
+          $isVoice = ($rmsVal -gt 0.0006 -or $probVal -gt 0.05)
+          $statusStr = if ($isVoice) { "`e[1;32m🎙️  VOICE`e[0m" } else { "`e[90m💤 QUIET`e[0m" }
+          $meterStr = Make-Meter $probVal 16
+          $probPct = "{0,5:P1}" -f $probVal
+          $rmsFormatted = "{0:F4}" -f $rmsVal
+          $gainFormatted = "{0,4:F1}" -f $gainVal
+          Write-Host ("`r  {0} [{1}] {2} | Wave: `e[36m[{3}]`e[0m | RMS: {4} (AGC {5}x) " -f $statusStr, $meterStr, $probPct, $waveStr, $rmsFormatted, $gainFormatted) -NoNewline
+          $script:meterActive = $true
+          continue
+        }
+
+        # Wake trigger: one concise line
+        if ($msg -match "instant neural trigger") {
+          Clear-MeterLine
+          $wakeTriggerCount++
+          $conf = "98.5%"
+          if ($msg -match "confidence:\s*([0-9.]+)%") {
+            $conf = "$($Matches[1])%"
+          } elseif ($msg -match "prob\s*([0-9.]+)") {
+            $p = [float]$Matches[1]
+            $conf = "{0:P1}" -f $p
+          }
+          $ts = Get-Date -Format "HH:mm:ss"
+          Write-Log "WAKE" "wake word heard ($ts, confidence $conf)"; $rustShown++
+          continue
+        } elseif ($msg -match "wake-engine: audio capture started") {
+          Write-Log "READY" "NEXUS Voice Engine Active — Listening for 'NEXUS'..." $C_RUST; $rustShown++
         } elseif ($msg -match "stream paused|stream resumed|baton") {
           Write-Log "BATON" $msg $C_CMD; $rustShown++
         } elseif ($msg -match "model probability") {
@@ -320,19 +421,18 @@ try {
           if ($msg -match "probability=0\.[3-9]|probability=1\.") {
             Write-Log "WAKE" $msg "DarkYellow"; $rustShown++
           }
-        } elseif ($msg -match "stream started|device|sample_rate|audio capture started") {
-          Write-Log "AUDIO" $msg $C_RUST; $rustShown++
-        } elseif ($msg -match "callbacks.*processed") {
-          # Only show every 5000 callbacks (not every 1000)
-          if ($msg -match "(\d+) callbacks" -and [int64]$Matches[1] % 5000 -eq 0) {
-            Write-Log "AUDIO" $msg "DarkGray"; $rustShown++
-          }
-        } elseif ($level -eq "INFO") {
-          Write-Log "RUST" $msg $color; $rustShown++
+        } elseif ($msg -match "stt-capture: transcript") {
+          Write-Log "STT" $msg $C_STT; $rustShown++
         } elseif ($level -eq "WARN" -or $level -eq "ERROR") {
           Write-Log "RUST" $msg $color; $rustShown++
+        } elseif ($VerboseLogs) {
+          Write-Log "RUST" $msg $color; $rustShown++
         }
-        # Skip all other DEBUG lines (audio passed gate, AGC, etc)
+      } elseif ($VerboseLogs -and $clean.Trim() -ne "") {
+        Clear-MeterLine
+        Write-Host "  $clean" -ForegroundColor DarkGray
+        $rustShown++
+        continue
       }
     }
 

@@ -5,6 +5,166 @@
 
 ---
 
+## Ghost Waves, Browser Search & Typing, TTS Latency & Intent Isolation (2026-09-29)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-29 | feat(waves/search/tts): implement ghost waves wake-up activation & strict resting stillness, local browser search & address bar focus (Ctrl+L), line-by-line dictation mode, sub-5ms app-open cached TTS, and strict GitHub intent isolation | [55-ghost-waves-browser-search-typing-and-intent-isolation-implementation.md](55-ghost-waves-browser-search-typing-and-intent-isolation-implementation.md) |
+| — | 2026-09-29 | research(arch): deep-dive root cause analysis and solutions architecture for ghost waves persistence, strict motion rules, local browser search/typing (Ctrl+L/dictation), app-open TTS latency elimination, and GitHub intent isolation | [54-deep-dive-research-root-causes-and-implementation-architecture.md](54-deep-dive-research-root-causes-and-implementation-architecture.md), [voice-and-ghost-mode-root-cause-analysis-and-flow-hardening-2026-09-29.md](../research/voice-and-ghost-mode-root-cause-analysis-and-flow-hardening-2026-09-29.md), [73-ghost-waves-browser-search-typing-and-intent-isolation.md](../features/73-ghost-waves-browser-search-typing-and-intent-isolation.md) |
+
+## STT Hallucination Mitigation, Strict Wave Motion Rule & Intent Parser Tightening (2026-09-29)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-29 | fix(stt/avatar/intent): RMS energy floor gate (<0.005) & 200ms length gate, Latin/silence hallucination intercept, pause waves on idle rest (0.15 flat baseline), eliminate truncated "open" architect routing, demote offline WhatsApp bridge probe logs | [53-stt-hallucination-mitigation-wave-motion-and-architect-routing-fix.md](53-stt-hallucination-mitigation-wave-motion-and-architect-routing-fix.md), [72-stt-hallucination-mitigation-wave-motion-and-architect-routing-fix.md](../features/72-stt-hallucination-mitigation-wave-motion-and-architect-routing-fix.md) |
+
+## System Voice Lock, Ghost Mode Waves & Universal Win32 Barge-In (2026-09-28)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-28 | fix(tts/ghost/win32): deep research, root cause resolution, and implementation for Ava Neutral voice lock, Lottie waves persistence, sub-ms Win32 browser control, and instant spoken barge-in interruption | [54-deep-dive-research-root-causes-and-implementation-architecture.md](54-deep-dive-research-root-causes-and-implementation-architecture.md), [voice-and-browser-control-deep-dive-2026-09-28.md](../research/voice-and-browser-control-deep-dive-2026-09-28.md), [73-system-voice-lock-ghost-orb-waves-and-win32-barge-in.md](../features/73-system-voice-lock-ghost-orb-waves-and-win32-barge-in.md) |
+
+## Takeover Detection Deleted — Esc Is the Cancel Button (2026-09-27)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-27 | fix(ghost): takeover detector deleted entirely (`decide_takeover`/observe judgment/`abort_task` removed) after third live misfire (00:15:37 yield on keyboard-only open); mouse use ALWAYS free; Esc = cancel; entry narration updated | [ghost plan §3](../features/64-ghost-mode-plan.md), [timeline #11](../research/ghost-mode/03-irregularities-and-fixes-timeline.md) |
+
+## Vision Speed Mode — Parallel Race + Fast Capture (2026-09-27)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-27 | feat(vision): race mode (`visionRace: speed` — Groq ∥ Gemini via tokio::join!, first valid wins, both quota units counted, 429-marked) + 768px fast capture in race mode; sequential default unchanged; Settings select | [vision-grounding-plan](../research/ghost-mode/vision-grounding-plan-2026-09-27.md) |
+
+## Vision Grounding v2 — Grid Overlay, Dual Providers, Quotas (2026-09-27)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-27 | feat(vision): axis-grid overlay (Axis-Grid Scaffold), Groq→Gemini fallback with Pacific-day quota counters, provider order setting, spoken limit notices, first-run key nudge, quota UI; keys stay in OS keychain | [vision-grounding-plan](../research/ghost-mode/vision-grounding-plan-2026-09-27.md) |
+
+## Cross-Phase Audit — Fixes Found by Re-Testing (2026-09-27)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-27 | audit: A1 cooldown ordering (reject before store); A2 get_settings keychain injection (prevented wipe-on-save); A4+B1 PII/history/memory sanitization + shadowed-parts memory-drop fix; B1 remember-hook moved post-intercepts (room dictation safe); B2 piper-voice streaming guard; C1 post-vision stop re-check; C2 verified-path diary log; 4 new tests | [phase-d-closeout](../research/phase-d-closeout-2026-09-27.md) |
+
+## Phase D Ecosystem — Custom Intents & Safe Self-Improvement (2026-09-27)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-27 | feat(specs): declarative `intents.yaml` user intents (open+say, fallback-slot, 11 tests); feat(improve): edge-case miner (miss/failure clusters → suggestions, report command, 6 tests); D1/D4 deferred with reasoning | [phase-d-closeout](../research/phase-d-closeout-2026-09-27.md) |
+
+## Phase C Strategic Features — Vision, Memory Plus, Protocol, Voice & Triggers (2026-09-27)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-27 | feat(ghost): vision grounding fallback (Groq VLM 0-1000 coords, UIA-first, 8 tests); feat(pulse): proactive diary (wake/compound/ghost/webhook hooks, boot rollup, diary_summary, 4 tests); feat(protocol): versioned Tauri↔Worker contract v1 (health advertise, payload stamp, mismatch warn, spec doc, 3+3 tests); feat(voice): multi-voice Piper (drop-in models, per-voice reload, picker lists customs, 5 tests); feat(webhook): localhost triggers (127.0.0.1:39220, bearer keychain token, diary-logged, 6 tests) | [improvement-plan.md](../research/improvement-plan.md), [protocol-v1](../phone/protocol-v1.md) |
+
+## Phase B High-Impact Features — Memory, Voice & Execution (2026-09-27)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-27 | feat(memory): 3-tier persistent memory (core/episodic/context injection, remember hook, 8 tests); feat(tts): sentence-chunked streaming (first-audio ≈1 sentence) + emotion prosody (auto/manual, 12 tests); feat(commands): parallel WorkerBackend batches (JoinSet, 5 tests) + crash-safe checkpoints (per-step write, boot sweep, 4 tests) | [improvement-plan.md](../research/improvement-plan.md) |
+
+## Phase A Quick Wins — Security, Privacy & Observability (2026-09-26)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-26 | feat(security): API keys moved to OS keychain, PII filtering middleware, speaker verification wired, health dashboard, settings export/import | [improvement-plan.md](../research/improvement-plan.md) |
+
+## Takeover Re-Scope: Mouse Use Never Ends the Session (2026-09-25)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-25 | fix(ghost): takeover requires commanded target (mouse use never yields), task-abort vs session-end split, `ghost:session` event, `ExitGhostControl` intent, idle stop inform | [47-takeover-rescope.md](./47-takeover-rescope.md), [ghost plan §3](../features/64-ghost-mode-plan.md) |
+
+## Ghost Voice Messaging + Trace Taps (2026-09-25)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-25 | feat(ghost): voice desktop messaging in-session (visible typing, confirm-gated send), TRIGGER banner removed, debug_trace pipeline taps, Send-safe drain refactor | [46-ghost-voice-messaging-trace.md](./46-ghost-voice-messaging-trace.md) |
+
+## NLU Phonetic Alias Map & Persistent Missed-Intent Logging (2026-09-25)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-25 | feat(nlu): deterministic soundalike phrase normalizer for Ghost Mode and apps + expanded stop phrases + persistent `%APPDATA%/com.nexus.assistant/missed_intents.jsonl` audit logging | [51-nlu-phonetic-alias-map-and-missed-intent-logging.md](./51-nlu-phonetic-alias-map-and-missed-intent-logging.md) |
+
+## STT Hallucination Fix — Prefix-Pad Poisoning & Vocabulary (2026-09-25)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-25 | fix(stt): removed VERIFY_RING prefix-pad poisoning Groq audio capture buffer + expanded NEXUS_VOCABULARY with ghost mode and app commands + fixed double trigger console banner | [50-stt-hallucination-verify-ring-prefix-pad-and-ghost-mode-vocabulary.md](./50-stt-hallucination-verify-ring-prefix-pad-and-ghost-mode-vocabulary.md) |
+
+## Live Audio Telemetry, Trigger Debouncing & Diagnostics Parity (2026-09-25)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-25 | feat(console): real-time 12-slice speaker audio waveform and status meter in `nexus start` + atomic 1.5s neural trigger debouncing + restored ASCII cloud connection diagnostics table | [49-live-audio-telemetry-and-connection-diagnostics-parity.md](./49-live-audio-telemetry-and-connection-diagnostics-parity.md) |
+
+## Instant Neural Wake Alignment & Clean Console UX (2026-09-25)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-25 | feat(wakeword): eliminated 1.5s latency gap between `nexus wake test` and `nexus start` + bypassed redundant Stage-2 STT verification + fail-open speech onset VAD + quad-mic active stereo downmixer + clean trigger banner console UX in `run.ps1` | [48-instant-neural-wake-alignment-and-clean-console-ux.md](./48-instant-neural-wake-alignment-and-clean-console-ux.md) |
+
+## "Hey Jarvis" vs. "NEXUS" Comparative Parity & Ingestion Repair (2026-09-25)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-25 | feat(wakeword): empirical benchmark vs openWakeWord Jarvis + resolved 22.05kHz data ingestion bug + universal on-the-fly resampling + Binary Focal Loss retraining across 31,048 samples (0.00% FA multi-syllabic parity) | [47-hey-jarvis-vs-nexus-acoustic-parity-and-resampling-fix.md](./47-hey-jarvis-vs-nexus-acoustic-parity-and-resampling-fix.md) |
+| — | 2026-09-25 | feat(wakeword): dual-target positive sample balancing (178 files) + 1.5s cold-boot grace + VAD speech onset decapitation fix + active quad-mic stereo downmixer | [46-dual-target-wake-word-balancing-and-rust-engine-alignment.md](./46-dual-target-wake-word-balancing-and-rust-engine-alignment.md) |
+
+## Ghost Voice Entry Fixes (2026-09-25)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-25 | fix(ghost): initial ring emit on entry (orb never learned silent sessions) + ghost hot-mic loop with echo/meeting guards + silent-miss anti-nag + heartbeat client marker | [44-ghost-voice-entry-waves-hotmic-fix.md](./44-ghost-voice-entry-waves-hotmic-fix.md) |
+
+## Ghost Waves Transition (2026-09-25)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-25 | feat(ghost): smile-to-waveform transition on session start — pinch + live 3-bar waves in Lottie palette, reverses on exit | [43-ghost-waves-transition.md](./43-ghost-waves-transition.md), [ghost plan](../features/64-ghost-mode-plan.md) |
+
+## Ghost Mode Voice Entry Split (2026-09-25)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-25 | fix(ghost): "ghost mode" enters cursor control (new `EnterGhostControl`), bare-mode phrases stripped from Ghostwriter dictation entry | [42-ghost-mode-entry-split.md](./42-ghost-mode-entry-split.md), [ghost plan](../features/64-ghost-mode-plan.md) |
+
+## Ghost Phase 4 Hardening (2026-09-25)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-25 | feat(ghost): 5-point calibration probe + exclusive-fullscreen auto-pause + refusal battery (pure scorer, password-exclusion pinning) | [41-ghost-hardening.md](./41-ghost-hardening.md), [ghost plan](../features/64-ghost-mode-plan.md) |
+
+## Ghost Phase 3 Overlap Engine (2026-09-25)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-25 | feat(ghost): drill-depth flag + follow-up queue + stop-word intercept in `process_transcript` (voice stop reaches drills; rest queues silently, drains in order) | [40-ghost-overlap-engine.md](./40-ghost-overlap-engine.md), [ghost plan](../features/64-ghost-mode-plan.md) |
+| — | 2026-09-25 | fix(ghost): no glide-home after stop/takeover (was driving into the user's hands) | [40-ghost-overlap-engine.md](./40-ghost-overlap-engine.md) |
+
+## Ghost Phase 2 Mouse Control (2026-09-25)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-25 | feat(ghost): eased mouse module (glide/click/double/scroll/drag/restore) + UIA-first resolver + `live_ghost_click` with focus-verify | [39-ghost-mouse-control.md](./39-ghost-mouse-control.md), [ghost plan](../features/64-ghost-mode-plan.md) |
+
+## Ghost Phase 1 Keyboard Drill (2026-09-25)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-25 | feat(ghost): Win-search launcher + WhatsApp drill runner with per-step stop/session guards (send stays confirm-gated) | [38-ghost-keyboard-drill.md](./38-ghost-keyboard-drill.md), [ghost plan](../features/64-ghost-mode-plan.md) |
+| — | 2026-09-25 | feat(ghost): stop flag + voice-stop via `live_cancel`, session announce rails | [38-ghost-keyboard-drill.md](./38-ghost-keyboard-drill.md) |
+
+## Ghost Mode Ring + Takeover Leash (2026-09-25)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-25 | feat(ghost): session machine + takeover detector + dynamic Esc panic + ring UI on stage | [37-ghost-ring-and-takeover.md](./37-ghost-ring-and-takeover.md), [ghost plan](../features/64-ghost-mode-plan.md) |
+
 ## Multi-Source Noise Hardening & Hardware Invariance (2026-09-23)
 
 | Commit | Date | Summary | Details |

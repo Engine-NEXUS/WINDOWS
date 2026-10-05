@@ -1,8 +1,9 @@
 //! Global hotkey (Ctrl/Cmd+Space) → state-dependent action.
 //!
 //! On press:
-//!   - If any window (sidebar, architect-sidebar, pr-list-sidebar, settings,
-//!     setup) is visible → close it only (do NOT wake).
+//!   - If any window (the unified sidebar hosting Assistant/Command
+//!     Hub/Architect/PR-List, settings, setup) is visible → close it
+//!     only (do NOT wake).
 //!   - If no window is visible → wake the assistant (do NOT touch windows).
 //!   - If the assistant is speaking → barge-in: the frontend wake handler
 //!     stops TTS and starts listening (handled in main.tsx startListening).
@@ -26,6 +27,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 const HOTKEYS: &[&str] = &[
     "CommandOrControl+Space",
     "CommandOrControl+Shift+S",
+    "CommandOrControl+Alt+X",
 ];
 
 pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
@@ -51,23 +53,77 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                     return;
                 }
 
+                // Ctrl+Alt+X → stage kill-switch: destroy + disable the
+                // fullscreen overlay for the session (blackout escape hatch
+                // even if the renderer is wedged and can't hear IPC).
+                if hk == "CommandOrControl+Alt+X" {
+                    tracing::warn!("hotkey ({}) → stage kill-switch", hk);
+                    let app_clone = handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = crate::stage::stage_hide_kill(app_clone).await;
+                    });
+                    return;
+                }
+
+                // Ctrl+Space → ghost session live: end it (same path as
+                // Esc / voice exit) + spoken confirm. Checked FIRST so a
+                // ghost session never falls through to wake/close-window
+                // behavior below. TTS is stopped first so the exit line
+                // isn't talked over.
+                if crate::ghost::session_active() {
+                    tracing::info!("hotkey ({}) → ghost session live, ending it", hk);
+                    let _ = crate::tts::stop_tts();
+                    crate::orchestrator::cancel_active();
+                    if let Some(ms) = handle.try_state::<std::sync::Arc<crate::meeting_detect::MeetingState>>() {
+                        ms.set_tts_playing(false);
+                    }
+                    // The exit line is spoken by abort_session itself, so all
+                    // abort paths (Esc, here, API) say the identical line.
+                    let app_clone = handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = crate::ghost::ghost_abort(app_clone).await;
+                    });
+                    return;
+                }
+
+                // Ctrl+Space → if TTS is playing, stop speech immediately AND
+                // start listening (barge-listen): cut the audio, flush the
+                // 150ms DAC/room tail so it can't leak into the new capture,
+                // then run the identical wake sequence as the idle branch.
+                let is_speaking = handle.try_state::<std::sync::Arc<crate::meeting_detect::MeetingState>>()
+                    .map(|ms| ms.tts_playing.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(false);
+                if is_speaking {
+                    tracing::info!("hotkey ({}) → TTS playing, stopping speech and starting barge-listen", hk);
+                    // Single choke point (order: audio → turn → flag → queue).
+                    crate::orchestrator::request_barge_in("hotkey-tts");
+                    let handle_clone = handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        // DAC drain: the sound card + room reverb tail
+                        // outlives stop_tts() and would poison the capture.
+                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                            crate::orchestrator::BARGE_DAC_DRAIN_MS,
+                        ))
+                        .await;
+                        crate::wakeword_oww::start_stt_capture();
+                        crate::window_manager::wake_orb(&handle_clone);
+                    });
+                    return;
+                }
+
                 // Ctrl+Space → close any visible window, or wake NEXUS
                 // Check if any sidebar/window is currently visible.
                 // If so, close it and do NOT wake NEXUS.
+                // (The four panel views — Assistant, Command Hub, Architect,
+                // PR List — all live inside the ONE unified "sidebar" window.)
+                // NOTE: `stage` is no longer part of this check — since it
+                // hosts the always-on orb now (single-stage migration), its
+                // own visibility is permanent infrastructure, not a
+                // closeable "window" state. A live ghost session is handled
+                // separately above (session_active() check, before this
+                // point) and never reaches here.
                 let sidebar_visible = handle
                     .get_webview_window("sidebar")
-                    .and_then(|w| w.is_visible().ok())
-                    .unwrap_or(false);
-                let architect_visible = handle
-                    .get_webview_window("architect-sidebar")
-                    .and_then(|w| w.is_visible().ok())
-                    .unwrap_or(false);
-                let pr_list_visible = handle
-                    .get_webview_window("pr-list-sidebar")
-                    .and_then(|w| w.is_visible().ok())
-                    .unwrap_or(false);
-                let settings_sidebar_visible = handle
-                    .get_webview_window("settings-sidebar")
                     .and_then(|w| w.is_visible().ok())
                     .unwrap_or(false);
                 let settings_visible = handle
@@ -79,19 +135,19 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                     .and_then(|w| w.is_visible().ok())
                     .unwrap_or(false);
 
-                if sidebar_visible || architect_visible || pr_list_visible || settings_sidebar_visible || settings_visible || setup_visible {
-                    // A window is visible → close it only, do NOT wake NEXUS.
-                    tracing::info!("hotkey ({}) → window visible, closing window(s) only", hk);
-                    // Destroy whichever window(s) are open to free ~250 MB each.
+                // Ctrl+Space → close any visible window AND wake NEXUS (D3).
+                // Window closing moved to Escape at the frontend layer, so
+                // the hotkey is uniformly "talk to NEXUS" in every state.
+                if sidebar_visible || settings_visible || setup_visible {
+                    // A window is visible → destroy it to free ~250 MB each.
+                    tracing::info!("hotkey ({}) → window visible, closing window(s) then waking", hk);
                     let _ = crate::dyn_windows::destroy_window(&handle, "sidebar");
-                    let _ = crate::dyn_windows::destroy_window(&handle, "architect-sidebar");
-                    let _ = crate::dyn_windows::destroy_window(&handle, "pr-list-sidebar");
-                    let _ = crate::dyn_windows::destroy_window(&handle, "settings-sidebar");
                     let _ = crate::dyn_windows::destroy_window(&handle, "settings");
                     let _ = crate::dyn_windows::destroy_window(&handle, "setup");
-                } else {
-                    // Sidebar is hidden → wake NEXUS, do NOT touch sidebar.
-                    tracing::info!("hotkey ({}) → sidebar hidden, waking NEXUS", hk);
+                }
+                // Wake NEXUS in all cases (windows were closed above, if any).
+                {
+                    tracing::info!("hotkey ({}) → waking NEXUS", hk);
 
                     // Only pre-start local STT sidecar if cloud STT won't be used
                     // (saves ~340 MB RAM when Groq cloud STT is active).
@@ -108,15 +164,7 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                     // Start Rust-side STT capture (same as wake word path).
                     // Captures audio from the cpal stream — no getUserMedia needed.
                     crate::wakeword_oww::start_stt_capture();
-
-                    if let Some(win) = handle.get_webview_window("main") {
-                        let _ = win.show();
-                        let _ = crate::window_manager::configure_non_activating_overlay(&win);
-                        let _ = win.set_ignore_cursor_events(false);
-
-                        // Call the frontend wake handler directly.
-                        let _ = win.eval("window.__NEXUS_WAKE__ && window.__NEXUS_WAKE__()");
-                    }
+                    crate::window_manager::wake_orb(&handle);
                 }
             }
         }) {

@@ -26,7 +26,7 @@ mod command_executor;
 mod app_registry;
 pub mod intent_parser;
 mod nlu_client;
-mod lazy_nlu;
+mod nlu_local;
 mod admin_config;
 #[cfg(feature = "admin-brain")]
 mod brain_client;
@@ -38,10 +38,13 @@ mod lazy_stt;
 mod stt;
 pub mod stt_groq;
 mod stt_learning;
+mod stt_stream;
 mod tts;
 pub mod tts_edge;
 pub mod tts_piper;
 mod tts_network;
+pub mod tts_swap;
+pub mod voice_catalog;
 #[cfg(test)]
 mod tts_bench;
 mod pipeline_bench;
@@ -62,15 +65,40 @@ pub mod live;
 pub mod router;
 pub mod mcp_client;
 pub mod auth_vault;
+pub mod identity_state;
 pub mod ghostwriter;
 pub mod screen;
 pub mod telegram;
 pub mod command_center;
 pub mod nlu_update;
+// ── Phase B–D modules (recovered after a stale lib.rs rewrite) ──────────
+mod agent_specs;
+mod conversation;
+mod browser_center;
+pub mod center;
+pub mod diary;
+pub mod ghost;
+pub mod google;
+mod improve;
+pub mod memory;
+mod missed_intent_logger;
+mod pii_filter;
+pub mod stage;
+mod system_center;
+mod vision;
+mod webhook;
+mod youtube_center;
+// Windows.Media.Ocr — zero-RAM local screen text extraction (Feature 86).
+#[cfg(target_os = "windows")]
+pub mod ocr;
+// Animation calibration (drag + scroll-wheel placement designer).
+pub mod calibration;
 #[cfg(target_os = "windows")]
 mod dwm_corners;
 #[cfg(target_os = "windows")]
 mod sidebar_backdrop;
+pub mod live_glass;
+pub mod luminance_probe;
 
 use tauri::{Emitter, Listener, Manager};
 #[cfg(not(target_os = "windows"))]
@@ -340,14 +368,10 @@ pub fn run() {
                     let _ = crate::commands::show_settings_sidebar(app_clone).await;
                 });
             } else {
-                // Only wake the main window if we are NOT in the middle of setup
+                // Only wake the orb if we are NOT in the middle of setup
                 let setup_active = app.get_webview_window("setup").is_some();
                 if !setup_active {
-                    if let Some(main_win) = app.get_webview_window("main") {
-                        let _ = main_win.show();
-                        let _ = crate::window_manager::configure_non_activating_overlay(&main_win);
-                        let _ = main_win.eval("window.__NEXUS_WAKE__ && window.__NEXUS_WAKE__()");
-                    }
+                    crate::window_manager::wake_orb(app);
                 }
             }
         }))
@@ -372,10 +396,29 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // Create the main window on-demand (only in the primary instance).
-            // Removing it from tauri.conf.json prevents the single-instance
-            // secondary launch from flashing a blank window before exiting.
-            let _ = crate::dyn_windows::get_or_create_window(app.handle(), crate::dyn_windows::WindowConfig::main());
+            // ─── Stage: the always-on home for the orb + loading indicator ──
+            // Single-Stage Shell step 2 (AGENTS.md 2026-09-25 planned this,
+            // never executed until now): the voice orb and loading spinner
+            // no longer get their own small OS windows ("main",
+            // "loading-indicator") — they're positioned divs inside the one
+            // fullscreen `stage` overlay, which must therefore be shown at
+            // boot instead of the old on-demand/ghost-only model. Called
+            // synchronously (not spawned) so the window exists in time for
+            // `mic_permissions::init` to find it by label a few lines down.
+            if let Err(e) = crate::stage::stage_show_sync(app.handle()) {
+                tracing::error!("stage: failed to show at boot: {e}");
+            }
+
+            // ─── Stage hitbox loop + blackout watchdog ──────────────────
+            // Both loops are permanent and self-guard (they idle while the
+            // stage is hidden/disabled and re-arm on stage_show). Spawning
+            // them once here wires:
+            //   • click-through holes over registered hitboxes (without
+            //     this the fullscreen stage swallows ALL desktop clicks)
+            //   • ghost ring cursor ride-along (observe_cursor share)
+            //   • blackout detection → destroy → auto-fix backoff
+            crate::stage::spawn_hitbox_loop(app.handle().clone());
+            crate::stage::spawn_stage_watchdog(app.handle().clone());
 
             // WebView2 profile cleanup is done BEFORE tauri::Builder::default()
             // in run() — see cleanup_webview2_profile() above. Doing it here
@@ -588,9 +631,6 @@ pub fn run() {
                 });
             }
 
-            // Window overlay + click-through.
-            window_manager::init(app.handle())?;
-
             // NOTE: Sidebar/setup/settings/architect windows are NO LONGER created
             // at startup. They are created on-demand by dyn_windows.rs when first
             // needed, and destroyed when closed. This saves ~1 GB of RAM at idle
@@ -603,10 +643,11 @@ pub fn run() {
             // own app origins so the permission dialog never re-appears.
             mic_permissions::init(app);
 
-            // Position the orb at bottom-center, just above the taskbar/dock.
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = window_manager::position_orb(&win);
-            }
+            // Compute + cache the orb's bottom-center rect (just above the
+            // taskbar/dock) so the stage frontend's pending-pull fallback
+            // has something correct even if it mounts before this emit
+            // reaches a live listener.
+            window_manager::emit_orb_rect(app.handle());
 
             // Pre-index installed apps for instant launch (background thread).
             app_registry::init();
@@ -616,6 +657,22 @@ pub fn run() {
             // `get_active_repo_url()` can detect the user's browser/GitHub
             // app even after the NEXUS orb steals focus during STT.
             architect::start_foreground_tracker();
+
+            // Boot-time housekeeping (Phase B–D modules).
+            commands::note_boot();
+            if let Ok(app_data) = app.path().app_data_dir() {
+                diary::log_boot_rollup(&app_data);
+                agent_specs::ensure_example(&app_data);
+                let improve_dir = app_data.clone();
+                std::thread::spawn(move || {
+                    let clusters = improve::run_miner(&improve_dir);
+                    if !clusters.is_empty() {
+                        tracing::info!("improve: boot miner found {} cluster(s)", clusters.len());
+                    }
+                });
+            }
+            webhook::spawn_listener(app.handle().clone());
+            google::sentinel::start_sentinel_poller(app.handle().clone());
 
             // ─── Pre-warm TTS + STT + NLU at startup (Phase 1) ──────────
             // Eliminates ~31.7s of cold-start latency on the first voice command.
@@ -639,9 +696,10 @@ pub fn run() {
                 tracing::info!("tts: startup cache pre-generation complete — ack phrases ready");
             });
 
-            // Start TTS network monitor — checks Edge TTS availability every 60s
-            // and unloads Piper after 10 minutes of stable network.
-            tts_network::start_network_monitor();
+            // Start TTS network monitor — re-probes every 30s while down
+            // (cloud-restored watchdog, P4), every 60s while up, and
+            // unloads Piper after 10 minutes of stable network.
+            tts_network::start_network_monitor(app.handle().clone());
 
             // STT pre-warm removed in Phase 2.
             // Primary STT is now Groq cloud (0 MB RAM, ~247ms latency).
@@ -757,10 +815,14 @@ pub fn run() {
                     let device_id = format!("device_{}", network::uuid_v4());
                     let server_url = option_env!("NEXUS_SERVER_URL")
                         .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev");
+                    // Feature 88: client UUIDs are PROVISIONAL hints. The
+                    // canonical profile_id is issued by the Worker claim
+                    // handshake (setup Accounts step) — never here.
                     let default_config = serde_json::json!({
                         "serverUrl": server_url,
                         "userId": user_id,
                         "deviceId": device_id,
+                        "identity": "provisional",
                     });
                     let _ = std::fs::create_dir_all(&dir);
                     let _ = std::fs::write(&config_path, default_config.to_string());
@@ -805,12 +867,26 @@ pub fn run() {
                 nlu_update::spawn_update_check(update_handle);
             });
 
+            // TEMPORARY dev-persist (remove before release): if the user
+            // enabled "keep calibrator open", auto-open the calibration
+            // HUD + wakeup preview shortly after boot so live cross-checks
+            // survive rebuilds/restarts. Session Cancel still closes it.
+            if calibration::dev_persist_enabled(app.handle()) {
+                let persist_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    if let Err(e) = calibration::show_calibration_hud(persist_handle).await {
+                        tracing::warn!("calibration: dev-persist auto-open failed: {e}");
+                    }
+                });
+            }
+
             if should_open_setup {
-                // Hide the orb during setup — it should not steal focus or
-                // appear behind the setup wizard on first launch.
-                if let Some(main_win) = app.get_webview_window("main") {
-                    let _ = main_win.hide();
-                }
+                // The orb starts hidden by default (frontend `visible`
+                // state defaults to false) — nothing to hide here now that
+                // it's a stage-hosted div instead of its own window; it
+                // simply never shows itself during setup since nothing
+                // tells it to wake.
                 if let Ok(win) = crate::dyn_windows::get_or_create_window(app.handle(), crate::dyn_windows::WindowConfig::setup()) {
                     let _ = win.show();
                     let _ = win.set_focus();
@@ -819,21 +895,23 @@ pub fn run() {
                 // ─── --background flag: silent tray-only startup ────────
                 //
                 // When launched by the scheduled task (auto-start), the app
-                // passes --background. In this mode, the main orb window stays
-                // hidden and the app runs silently in the system tray.
-                // The user activates it via wake word, hotkey, or tray click.
+                // passes --background. The orb stays hidden (default
+                // frontend state) and the app runs silently in the system
+                // tray. The user activates it via wake word, hotkey, or
+                // tray click.
                 let is_background = std::env::args().any(|arg| arg == "--background");
                 if is_background {
                     tracing::info!("startup: --background mode — orb hidden, tray only");
-                    if let Some(main_win) = app.get_webview_window("main") {
-                        let _ = main_win.hide();
-                    }
                 }
             }
 
             // Run connection diagnostics on startup.
             // This checks STT, TTS, Cloudflare Worker, GitHub, and Google
             // and logs a formatted status table to stdout.
+            // Compute the data dir BEFORE the spawn — capturing the generic
+            // AppHandle in a plain thread closure drags non-Send wry
+            // internals across the boundary; an owned PathBuf is Send.
+            let diag_data_dir = app.path().app_data_dir().ok();
             std::thread::spawn(move || {
                 // Wait 5s for the network session to be established.
                 std::thread::sleep(std::time::Duration::from_secs(5));
@@ -858,16 +936,16 @@ pub fn run() {
                         }
                     }
                 };
-                diagnostics::log_diagnostics(&worker_url, &user_id);
+                diagnostics::log_diagnostics(&worker_url, &user_id, diag_data_dir.as_deref());
             });
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            window_manager::set_click_through,
-            window_manager::show_overlay,
-            window_manager::hide_overlay,
+            window_manager::set_orb_interactive,
             window_manager::set_orb_position,
+            window_manager::get_pending_orb_rect,
+            window_manager::get_pending_loading_rect,
             network::open_session,
             network::send_transcript,
             network::cancel_session,
@@ -880,9 +958,28 @@ pub fn run() {
             orchestrator::orchestrator_hide_loading,
             orchestrator::orchestrator_github_execute,
             orchestrator::orchestrator_github_clear_token,
-            orchestrator::            orchestrator_mcp_confirm,
+            orchestrator::orchestrator_mcp_confirm,
             mcp_client::mcp_status,
             mcp_client::mcp_connect_state,
+            stage::stage_show,
+            stage::stage_hide,
+            stage::stage_heartbeat,
+            stage::stage_set_hitboxes,
+            stage::stage_hide_kill,
+            ghost::ghost_enter,
+            ghost::ghost_exit,
+            ghost::ghost_abort,
+            calibration::show_calibration_hud,
+            calibration::preview_companion_hud,
+            calibration::calibration_set_target,
+            calibration::calibration_report_position,
+            calibration::calibration_report_size,
+            calibration::calibration_nudge,
+            calibration::calibration_apply_drafts,
+            calibration::calibration_default_target,
+            calibration::calibration_save,
+            calibration::calibration_cancel,
+            calibration::calibration_dev_persist,
             auth_vault::vault_status,
             auth_vault::vault_set_token,
             auth_vault::vault_clear_token,
@@ -890,6 +987,10 @@ pub fn run() {
             commands::close_setup_window,
             commands::save_server_config,
             commands::get_server_config,
+            commands::claim_profile,
+            commands::get_identity_status,
+            commands::refresh_identity_status,
+            commands::disconnect_device,
             commands::meeting_active,
             commands::is_nexus_paused,
             commands::meeting_status,
@@ -898,6 +999,18 @@ pub fn run() {
             commands::close_settings_window,
             commands::get_settings,
             commands::save_settings,
+            commands::get_health_status,
+            commands::export_settings,
+            commands::import_settings,
+            commands::memory_recall,
+            commands::memory_forget,
+            commands::diary_summary,
+            commands::webhook_token,
+            commands::webhook_rotate_token,
+            commands::improvement_report,
+            commands::vision_quota_status,
+            commands::vision_key_status,
+            commands::vision_test_key,
             commands::list_tts_voices,
             commands::get_pending_settings_backdrop,
             commands::set_autostart,
@@ -912,39 +1025,55 @@ pub fn run() {
             commands::show_sidebar_with_confirmation,
             commands::hide_sidebar,
             commands::get_pending_sidebar_content,
-            commands::show_loading_indicator,
-            commands::hide_loading_indicator,
+            commands::show_sidebar_view,
+            commands::set_sidebar_dock,
+            commands::get_pending_sidebar_view,
+            commands::get_pending_spatial,
+            commands::get_pending_annotation,
             commands::show_pr_list_sidebar,
             commands::hide_pr_list_sidebar,
             commands::get_pending_pr_list,
+            commands::debug_trace,
             commands::show_settings_sidebar,
             commands::hide_settings_sidebar,
             commands::pause_wakeword,
             commands::resume_wakeword,
             commands::mic_self_test,
             commands::start_stt_capture,
+            commands::stop_stt_capture,
+            commands::stt_capture_had_speech,
+            commands::google_get_accounts,
+            commands::google_connect_account,
+            commands::google_set_primary_account,
+            commands::google_disconnect_account,
+            commands::google_save_custom_credentials,
             stt::transcribe_audio,
-            stt::stt_status,
+            stt::stt_filter_stats,
+            stt_stream::stt_stream_start,
+            stt_stream::stt_stream_push_chunk,
+            stt_stream::stt_stream_stop,
             tts::speak_text,
             tts::speak_cached,
             tts::stop_tts,
             tts::preview_voice,
+            tts::set_voice_preference,
+            tts::list_voice_personas,
+            tts::get_voice_status,
+            tts::get_voice_transport,
             stt_learning::log_failed_transcript,
             stt_learning::log_successful_transcript,
             stt_learning::get_learned_corrections,
-            diagnostics::nexus_diagnostics,
+            missed_intent_logger::get_missed_intents,
             command_executor::execute_command,
             intent_parser::parse_transcript,
             architect::get_active_repo_url,
             architect::open_architect_window,
             architect::open_architect_with_auto_detect,
             architect::get_pending_architect_repo,
-            architect::cancel_architect_analysis,
             architect::analyze_repo_phase1,
             architect::analyze_repo_deep,
-            architect::query_impact,
-            architect::enrich_phase1,
             architect::analyze_repo_fast,
+            architect::enrich_phase1,
             // Live mode commands
             live::live_type_text,
             live::live_press_key,
@@ -960,10 +1089,18 @@ pub fn run() {
             live::live_focus_app,
             live::live_cancel,
             live::live_get_state,
+            // Ghost desktop drill commands
+            live::live_ghost_whatsapp,
+            live::live_ghost_click,
+            live::live_ghost_calibrate,
             // Phase D: OWW voice profile commands (speaker verification)
             commands::get_voice_profile_status,
             commands::enroll_voice,
             commands::delete_voice_profile,
+            // Selective hitbox registry (live_glass) & Adaptive Luminance commands.
+            // NOTE: the DWM Acrylic path was removed per ADR-05 (docs/architecture/06).
+            live_glass::register_glass_hitboxes,
+            luminance_probe::get_screen_luminance,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NEXUS application");

@@ -37,13 +37,10 @@ use tokio::sync::RwLock;
 static GITHUB_TOKEN: once_cell::sync::Lazy<Arc<RwLock<Option<CachedToken>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(None)));
 
-#[allow(dead_code)]
 struct CachedToken {
     token: String,
     /// When the token expires (unix timestamp). 0 = no expiry (classic OAuth).
     expires_at: f64,
-    /// When we fetched the token (unix timestamp).
-    fetched_at: f64,
 }
 
 impl CachedToken {
@@ -129,7 +126,6 @@ pub async fn get_github_token(worker_url: &str, user_id: &str) -> Result<String,
         *guard = Some(CachedToken {
             token: token.clone(),
             expires_at: now + 3600.0, // 1 hour
-            fetched_at: now,
         });
     }
 
@@ -1119,30 +1115,6 @@ async fn execute_list_prs_account_wide(
         state: state.to_string(),
         prs: all_prs,
     }
-}
-
-/// Extract "owner/repo" from a GitHub API repository_url.
-/// Input: "https://api.github.com/repos/owner/repo"
-/// Output: "owner/repo"
-#[allow(dead_code)]
-fn extract_repo_from_url(url: &str) -> String {
-    // Parse the URL string to extract the path after /repos/
-    // URL format: https://api.github.com/repos/{owner}/{repo}
-    if let Some(pos) = url.find("/repos/") {
-        let after_repos = &url[pos + 7..]; // skip "/repos/"
-        // after_repos = "owner/repo" (possibly with trailing slash or query)
-        // Take everything up to the first '?' or end
-        let repo_part = after_repos.split('?').next().unwrap_or(after_repos);
-        // Remove trailing slash
-        let repo_part = repo_part.trim_end_matches('/');
-        // Now we have "owner/repo" — take the first two path segments
-        let parts: Vec<&str> = repo_part.splitn(3, '/').collect();
-        if parts.len() >= 2 {
-            return format!("{}/{}", parts[0], parts[1]);
-        }
-    }
-    // Fallback: use the full URL as the repo identifier
-    url.to_string()
 }
 
 async fn execute_list_prs(
@@ -2477,7 +2449,6 @@ mod tests {
         let classic = CachedToken {
             token: "abc".into(),
             expires_at: 0.0,
-            fetched_at: now,
         };
         assert!(classic.is_valid());
 
@@ -2485,7 +2456,6 @@ mod tests {
         let valid = CachedToken {
             token: "abc".into(),
             expires_at: now + 3600.0,
-            fetched_at: now,
         };
         assert!(valid.is_valid());
 
@@ -2493,7 +2463,6 @@ mod tests {
         let expired = CachedToken {
             token: "abc".into(),
             expires_at: now - 600.0,
-            fetched_at: now - 4200.0,
         };
         assert!(!expired.is_valid());
 
@@ -2501,7 +2470,6 @@ mod tests {
         let soon_expire = CachedToken {
             token: "abc".into(),
             expires_at: now + 180.0,
-            fetched_at: now - 3420.0,
         };
         assert!(!soon_expire.is_valid());
     }

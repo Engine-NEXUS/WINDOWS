@@ -1,16 +1,17 @@
 //! Dynamic window creation — windows are created on-demand instead of at
 //! startup to save RAM. Each WebView2 window spawns ~7 processes (~250 MB),
-//! so creating 4 invisible windows at startup wastes ~1 GB.
+//! so creating invisible windows at startup wastes RAM for nothing.
 //!
-//! Only the `main` (orb) window is created at startup (via tauri.conf.json).
-//! All other windows (setup, settings, sidebar, architect) are created here
-//! when first needed, and destroyed (not hidden) when closed.
+//! Only `stage` is created at startup (single-stage migration — it hosts
+//! the always-on orb + loading indicator as positioned divs, see
+//! `window_manager.rs`). All other windows (setup, settings, sidebar,
+//! calibrate-toolbar) are created here when first needed, and destroyed
+//! (not hidden) when closed.
 
 use tauri::{Manager, Runtime, WebviewWindowBuilder, WebviewUrl};
 
 /// Window configs — mirrors the old tauri.conf.json entries.
 /// Kept here so the window attributes are in one place.
-
 pub struct WindowConfig {
     pub label: &'static str,
     pub title: &'static str,
@@ -32,30 +33,11 @@ pub struct WindowConfig {
 }
 
 impl WindowConfig {
-    pub fn main() -> Self {
-        Self {
-            label: "main", title: "NEXUS", url: "index.html",
-            width: 200., height: 200., min_width: Some(100.), min_height: Some(100.),
-            resizable: true, decorations: false, transparent: true,
-            always_on_top: true, skip_taskbar: true, shadow: false,
-            focus: false, center: true, hidden_title: true,
-        }
-    }
-
-    /// Loading indicator — small 80x80 transparent window at the
-    /// top-right corner of the screen, below where a close button would be.
-    /// Shows a Lottie loading animation while a long-running command is
-    /// being processed by the Worker. Created on-demand and destroyed when
-    /// the result arrives.
-    pub fn loading_indicator() -> Self {
-        Self {
-            label: "loading-indicator", title: "NEXUS Loading", url: "loading.html",
-            width: 80., height: 80., min_width: None, min_height: None,
-            resizable: false, decorations: false, transparent: true,
-            always_on_top: true, skip_taskbar: true, shadow: false,
-            focus: false, center: false, hidden_title: true,
-        }
-    }
+    // `main` (orb) and `loading-indicator` were retired in the single-stage
+    // migration — both now render as positioned divs inside `stage()`
+    // below (see window_manager.rs's orb_rect/emit_loading_rect + the
+    // frontend's OrbFrame/LoadingIndicator components), not their own OS
+    // windows.
 
     pub fn setup() -> Self {
         Self {
@@ -75,54 +57,45 @@ impl WindowConfig {
             focus: true, center: true, hidden_title: false,
         }
     }
+    /// Unified dynamic sidebar — ONE window hosting every panel view
+    /// (Assistant, Command Hub, Architect, PR List) switched in React
+    /// without creating/destroying HWNDs. Base geometry is the right-dock
+    /// default; `show_sidebar_view` re-sizes/re-positions per view
+    /// (520×980 dock / 740×900 center modal / 960×950 architect).
     pub fn sidebar() -> Self {
         Self {
             label: "sidebar", title: "NEXUS Response", url: "sidebar.html",
-            width: 400., height: 1000., min_width: Some(400.), min_height: Some(1000.),
+            width: 520., height: 980., min_width: None, min_height: None,
             resizable: false, decorations: false, transparent: true,
             always_on_top: true, skip_taskbar: true, shadow: false,
             focus: false, center: false, hidden_title: true,
         }
     }
-    /// Architect sidebar — 900px wide, transparent, undecorated, always-on-top.
-    /// Same liquid-glass styling as the response sidebar but wider, used for
-    /// the Architecture Mapper (Phase 1 layers, Phase 2 dependency graph,
-    /// hotspots, cycles, blast radius).
-    pub fn architect_sidebar() -> Self {
+
+    /// Stage shell — fullscreen transparent overlay, always-on (single-
+    /// stage migration). Hosts the voice orb, the loading indicator, the
+    /// ghost ring, and stage notices/annotations. WS_EX_TOOLWINDOW so
+    /// fullscreen video underneath keeps playing; NOT capture-excluded.
+    pub fn stage() -> Self {
         Self {
-            label: "architect-sidebar", title: "NEXUS Architecture Mapper", url: "architect.html",
-            width: 900., height: 1000., min_width: Some(900.), min_height: Some(1000.),
+            label: "stage", title: "NEXUS Stage", url: "stage.html",
+            width: 1920., height: 1080., min_width: None, min_height: None,
             resizable: false, decorations: false, transparent: true,
             always_on_top: true, skip_taskbar: true, shadow: false,
             focus: false, center: false, hidden_title: true,
         }
     }
-    /// PR List sidebar — 500px wide, transparent, undecorated, always-on-top.
-    /// Shows a vertical list of PRs with Merge and Analyse buttons.
-    /// Narrower than the response sidebar (600px) because PR cards are compact.
-    /// Same height (1000px) as the other sidebars for visual consistency.
-    /// Carbon copy of the response/architect sidebar: transparent, blurred
-    /// backdrop, DWM rounded corners, capture exclusion, non-resizable.
-    pub fn pr_list_sidebar() -> Self {
+
+    /// Animation-calibration companion pill — 540×92 floating HUD at the
+    /// top-center of the primary display (task §2). Created only while the
+    /// calibration session is live, destroyed on save/cancel.
+    pub fn calibrate_toolbar() -> Self {
         Self {
-            label: "pr-list-sidebar", title: "NEXUS PR List", url: "pr-list.html",
-            width: 500., height: 1000., min_width: Some(500.), min_height: Some(1000.),
+            label: "calibrate-toolbar", title: "NEXUS Calibrator", url: "companion-hud.html",
+            width: 540., height: 92., min_width: None, min_height: None,
             resizable: false, decorations: false, transparent: true,
-            always_on_top: true, skip_taskbar: true, shadow: false,
-            focus: false, center: false, hidden_title: true,
-        }
-    }
-    /// Settings sidebar — 520px wide, transparent, undecorated, always-on-top.
-    /// Same height (1000px) as all other sidebars.
-    /// Liquid-glass styling: transparent window, screenshot-blur backdrop,
-    /// DWM rounded corners, capture exclusion, non-activating.
-    pub fn settings_sidebar() -> Self {
-        Self {
-            label: "settings-sidebar", title: "NEXUS Settings", url: "settings-sidebar.html",
-            width: 520., height: 1000., min_width: Some(520.), min_height: Some(1000.),
-            resizable: false, decorations: false, transparent: true,
-            always_on_top: true, skip_taskbar: true, shadow: false,
-            focus: false, center: false, hidden_title: true,
+            always_on_top: true, skip_taskbar: true, shadow: true,
+            focus: true, center: false, hidden_title: true,
         }
     }
 }
@@ -173,7 +146,20 @@ pub fn get_or_create_window<R: Runtime>(
     // Apply platform-specific effects
     #[cfg(target_os = "windows")]
     {
-        if config.label == "sidebar" || config.label == "architect-sidebar" || config.label == "pr-list-sidebar" || config.label == "settings-sidebar" {
+        // Compact glass windows get DWM rounded corners + capture exclusion only.
+        // ADR-05 (docs/architecture/06-liquid-glass-screenshot-blur.md, Option A
+        // rejection): DWM material backdrops (DWMSBT_TRANSIENTWINDOW / Acrylic /
+        // ACCENT_ENABLE_BLURBEHIND) are NEVER applied to these non-activating
+        // windows — DWM renders a SOLID OPAQUE FALLBACK for inactive windows and
+        // the material API overrides tao's transparency, turning the whole
+        // window pitch black (the 2026-10-01 blackout root cause). The blur
+        // comes from the ADR-05 screenshot-capture pipeline instead
+        // (sidebar_backdrop.rs -> `sidebar:backdrop` -> `.sidebar-card::after`).
+        let is_glass_window = matches!(
+            config.label,
+            "sidebar" | "calibrate-toolbar"
+        );
+        if is_glass_window {
             crate::dwm_corners::round_corners(&win);
 
             if let Ok(hwnd) = win.hwnd() {
@@ -184,12 +170,18 @@ pub fn get_or_create_window<R: Runtime>(
                     let _ = SetWindowDisplayAffinity(HWND(hwnd.0 as _), WINDOW_DISPLAY_AFFINITY(17));
                 }
             }
+        } else {
+            // Forensic line: proves at runtime which windows skipped DWM
+            // glass (fullscreen-blackout investigations start here — if a
+            // blackout window shows an "applied" line above, the exclusion
+            // regressed; if it shows this line, glass is innocent).
+            tracing::info!("live_glass: skipped for '{}' (compact-windows-only policy)", config.label);
         }
     }
 
     #[cfg(target_os = "macos")]
     {
-        if config.label == "sidebar" || config.label == "architect-sidebar" || config.label == "pr-list-sidebar" || config.label == "settings-sidebar" {
+        if config.label == "sidebar" {
             // NOTE: loading-indicator deliberately does NOT get vibrancy —
             // it must be fully transparent with no blur (per user spec).
             use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
@@ -209,10 +201,24 @@ pub fn get_or_create_window<R: Runtime>(
 /// Destroy a window and its WebView2 process tree.
 /// This is the RAM-saving alternative to `hide()` — hide() keeps the
 /// WebView2 processes alive (~250 MB per window), destroy() kills them.
+///
+/// TEMPORARY DEV MODE: `DEV_KEEP_WINDOWS_ALIVE` keeps the unified sidebar
+/// panel resident (hide instead of destroy) so UI changes can be
+/// cross-checked live without rebuilding + relaunching nexus. FLIP TO
+/// FALSE BEFORE ANY RELEASE BUILD.
+const DEV_KEEP_WINDOWS_ALIVE: bool = true;
+
 pub fn destroy_window<R: Runtime>(
     app: &tauri::AppHandle<R>,
     label: &str,
 ) -> Result<(), String> {
+    if DEV_KEEP_WINDOWS_ALIVE && label == "sidebar" {
+        if let Some(win) = app.get_webview_window(label) {
+            tracing::info!("dyn_windows: DEV keep-alive — hiding '{}' instead of destroying", label);
+            let _ = win.hide();
+        }
+        return Ok(());
+    }
     if let Some(win) = app.get_webview_window(label) {
         tracing::info!("dyn_windows: destroying '{}' window (freeing ~250 MB)", label);
         let result: Result<(), tauri::Error> = win.destroy();

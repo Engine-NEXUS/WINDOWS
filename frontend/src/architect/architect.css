@@ -40,18 +40,15 @@ html, body, #root {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* ── Liquid Glass Card ────────────────────────────────────────────
-   Same mechanism as the response sidebar: the window is genuinely
-   transparent (transparent: true in Tauri), and Rust captures the
-   desktop region behind it into a blurred PNG data URI before
-   showing the window. The CSS renders this as the ::after backdrop
-   layer. The ::before layer provides the specular edge sheen. */
+/* ── Solid-black card ───────────────────────────────────────────
+   The blurred desktop backdrop is intentionally disabled: even blurred
+   captured text must not appear inside the panel. */
 .architect-app {
   width: 100vw;
   height: 100vh;
   display: flex;
   flex-direction: column;
-  /* Liquid glass card — same styling as .sidebar-card */
+  /* Solid black card — blurred desktop text must never show through. */
   position: relative;
   background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, transparent 40%);
   background-color: rgba(255, 255, 255, 0.05);
@@ -68,14 +65,14 @@ html, body, #root {
   isolation: isolate;
 }
 
-/* Blurred backdrop layer — renders the live-capture PNG behind content */
+/* Solid black backdrop layer — blurred desktop text must never show through. */
 .architect-app::after {
   content: "";
   position: absolute;
   inset: 0;
   border-radius: 18px;
   background-image:
-    linear-gradient(180deg, rgba(8, 8, 10, 0.50) 0%, rgba(8, 8, 10, 0.30) 100%),
+    linear-gradient(180deg, rgba(8, 8, 10, 0.65) 0%, rgba(8, 8, 10, 0.45) 100%),
     var(--sidebar-backdrop-image, none);
   background-size: cover;
   background-position: center;

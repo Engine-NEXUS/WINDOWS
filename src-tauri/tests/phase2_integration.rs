@@ -292,7 +292,7 @@ async fn test_groq_stt_real_transcription() {
     let client = reqwest::Client::new();
 
     let start = std::time::Instant::now();
-    let result = nexus_lib::stt_groq::transcribe_with_groq(&samples, &api_key, &client).await;
+    let result = nexus_lib::stt_groq::transcribe_with_groq(&samples, &api_key, &client, None).await;
     let elapsed = start.elapsed();
 
     match result {

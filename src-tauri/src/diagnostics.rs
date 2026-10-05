@@ -1,14 +1,13 @@
 //! Connection diagnostics — checks all NEXUS services and logs status.
 //!
 //! Services checked:
-//!   1. STT (faster-whisper tiny.en on port 39217 — lazy-started)
-//!   2. TTS (in-process Kokoro engine readiness)
+//!   1. STT (Moonshine Streaming on port 39217 — lazy-started)
+//!   2. TTS (edge-tts cloud + local Piper fallback readiness)
 //!   3. Cloudflare Worker (HTTP GET to /health)
 //!   4. GitHub OAuth (via Worker /oauth/status)
 //!   5. Google OAuth (via Worker /oauth/status)
 //!
 //! Usage:
-//!   - `nexus_diagnostics` Tauri command → returns JSON status to frontend
 //!   - `log_diagnostics()` → logs a formatted table to stdout
 //!   - Automatically called on startup after wake engine init
 
@@ -16,7 +15,6 @@ use serde::Serialize;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
-use tauri::Manager;
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -171,12 +169,28 @@ fn check_worker(worker_url: &str) -> ServiceStatus {
     let health_url = format!("{}/health", worker_url.trim_end_matches('/'));
 
     match http_get(&health_url, 10000) {
-        Ok((status, _body)) if status >= 200 && status < 400 => {
+        Ok((status, body)) if status >= 200 && status < 400 => {
             let latency = get_last_latency().unwrap_or(0);
+            // C3: warn on protocol mismatch, fail-open (old Workers still serve).
+            let detail = match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(v) => match v.get("protocol_version").and_then(|x| x.as_str()) {
+                    Some(v) if v == crate::orchestrator::PROTOCOL_VERSION => {
+                        format!("Worker reachable at {} (protocol v{})", worker_url, v)
+                    }
+                    Some(v) => format!(
+                        "Worker reachable at {} (protocol v{} vs client v{} — update available?)",
+                        worker_url,
+                        v,
+                        crate::orchestrator::PROTOCOL_VERSION
+                    ),
+                    None => format!("Worker reachable at {} (legacy, no version)", worker_url),
+                },
+                Err(_) => format!("Worker reachable at {}", worker_url),
+            };
             ServiceStatus {
                 name: "Cloudflare Worker".into(),
                 connected: true,
-                detail: format!("Worker reachable at {}", worker_url),
+                detail,
                 latency_ms: Some(latency),
             }
         }
@@ -358,7 +372,11 @@ fn check_tts() -> ServiceStatus {
 }
 
 /// Run all diagnostics and return a report.
-pub fn run_diagnostics(worker_url: &str, user_id: &str) -> DiagnosticsReport {
+pub fn run_diagnostics(
+    worker_url: &str,
+    user_id: &str,
+    app_data_dir: Option<&std::path::Path>,
+) -> DiagnosticsReport {
     let mut services = Vec::new();
 
     // 1. STT
@@ -375,6 +393,10 @@ pub fn run_diagnostics(worker_url: &str, user_id: &str) -> DiagnosticsReport {
     services.push(github);
     services.push(google);
 
+    // 5. API keys (informational — NEVER flips all_connected: local-STT
+    // users legitimately have no keys. Missing keys get guided fixes.)
+    services.push(check_api_keys(app_data_dir));
+
     let all_connected = services.iter().all(|s| s.connected);
 
     DiagnosticsReport {
@@ -384,9 +406,66 @@ pub fn run_diagnostics(worker_url: &str, user_id: &str) -> DiagnosticsReport {
     }
 }
 
+/// Keychain-first + settings.json fallback (same read path as
+/// commands::read_api_key, dir-based — diagnostics has no AppHandle).
+fn api_key_present(app_data_dir: Option<&std::path::Path>, service: &str) -> bool {
+    if crate::auth_vault::get_api_key(service).is_some() {
+        return true;
+    }
+    let Some(dir) = app_data_dir else {
+        return false;
+    };
+    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    let camel = format!("{service}ApiKey");
+    let snake = format!("{service}_api_key");
+    json.get(&camel)
+        .or_else(|| json.get(&snake))
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
+}
+
+/// Pure summary builder (unit-tested): (all_optional_ok, detail).
+/// `connected` is always true — this row informs, never alarms.
+pub fn api_keys_summary(groq: bool, gemini: bool, cerebras: bool) -> (bool, String) {
+    let mark = |present: bool| if present { "present" } else { "missing" };
+    let mut detail = format!("Groq {}, Gemini {}", mark(groq), mark(gemini));
+    if !groq && !gemini {
+        detail.push_str(" — add one in Settings, Accounts for cloud STT + ghost vision");
+    }
+    detail.push_str(&format!("; Cerebras {}", mark(cerebras)));
+    if !cerebras {
+        detail.push_str(" (optional, fastest 9Router lane)");
+    }
+    (true, detail)
+}
+
+/// API-key self-test row for the boot diagnostics box.
+fn check_api_keys(app_data_dir: Option<&std::path::Path>) -> ServiceStatus {
+    let groq = api_key_present(app_data_dir, "groq");
+    let gemini = api_key_present(app_data_dir, "gemini");
+    let cerebras = api_key_present(app_data_dir, "cerebras");
+    let (connected, detail) = api_keys_summary(groq, gemini, cerebras);
+    ServiceStatus {
+        name: "API keys (Groq/Gemini/Cerebras)".into(),
+        connected,
+        detail,
+        latency_ms: Some(0),
+    }
+}
+
 /// Log a formatted diagnostics table to stdout.
-pub fn log_diagnostics(worker_url: &str, user_id: &str) {
-    let report = run_diagnostics(worker_url, user_id);
+pub fn log_diagnostics(
+    worker_url: &str,
+    user_id: &str,
+    app_data_dir: Option<&std::path::Path>,
+) {
+    let report = run_diagnostics(worker_url, user_id, app_data_dir);
 
     tracing::info!("╔══════════════════════════════════════════════════════════════╗");
     tracing::info!("║           NEXUS Connection Diagnostics                       ║");
@@ -425,41 +504,6 @@ pub fn log_diagnostics(worker_url: &str, user_id: &str) {
     tracing::info!("╚══════════════════════════════════════════════════════════════╝");
 }
 
-/// Tauri command: get diagnostics as JSON for the frontend.
-#[tauri::command]
-pub fn nexus_diagnostics(
-    app: tauri::AppHandle,
-) -> Result<serde_json::Value, String> {
-    // Try the active session first
-    let (worker_url, user_id) = match crate::network::get_session_info() {
-        Some((url, uid, _)) => (url, uid),
-        None => {
-            // Fallback: read from config file so diagnostics works
-            // even before the user has spoken their first command
-            let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-            let config_path = dir.join("nexus-config.json");
-            match std::fs::read_to_string(&config_path) {
-                Ok(content) => {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                        let default_url = option_env!("NEXUS_SERVER_URL")
-                            .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev");
-                        let url = json["serverUrl"].as_str().unwrap_or(default_url);
-                        let url = if url.is_empty() { default_url.to_string() } else { url.to_string() };
-                        let uid = json["userId"].as_str().unwrap_or("").to_string();
-                        (url, uid)
-                    } else {
-                        (String::new(), String::new())
-                    }
-                }
-                Err(_) => (String::new(), String::new()),
-            }
-        }
-    };
-
-    let report = run_diagnostics(&worker_url, &user_id);
-    serde_json::to_value(&report).map_err(|e| e.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,5 +520,29 @@ mod tests {
         let body = r#"{"user_id":"u","providers":{"google":{"connected":true}}}"#;
         assert!(!provider_expired(body, "google"));
         assert!(!provider_expired(body, "unknown"));
+    }
+
+    #[test]
+    fn test_api_keys_summary_never_alarms() {
+        // The keys row informs — all_connected must survive missing keys
+        // (local-STT users legitimately have none).
+        for (g, m, c) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, true),
+        ] {
+            let (connected, _) = api_keys_summary(g, m, c);
+            assert!(connected, "keys row must never alarm: {g} {m} {c}");
+        }
+    }
+
+    #[test]
+    fn test_api_keys_summary_guides_keyless_users() {
+        let (_, detail) = api_keys_summary(false, false, false);
+        assert!(detail.contains("Settings"), "must name the fix location: {detail}");
+        assert!(detail.contains("Groq") && detail.contains("Gemini"));
+        let (_, detail) = api_keys_summary(true, false, true);
+        assert!(!detail.contains("Settings"), "no guidance when covered: {detail}");
     }
 }

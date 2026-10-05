@@ -23,15 +23,16 @@ tauri-plugin-store = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-positioner = "2"
 
-tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
+tokio = { version = "1", features = ["rt", "sync", "macros", "time", "fs", "io-util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
 once_cell = "1"
 anyhow = "1"
-walkdir = "2.5"
+# NOTE: `walkdir` was removed (dead dep — file walking uses `ignore::WalkBuilder`).
 ignore = "0.4"
 rayon = "1.10"
 petgraph = "0.6"
@@ -49,6 +50,16 @@ cpal = "0.15"
 # Used for openWakeWord KWS pipeline: melspectrogram → embedding → classifier
 tract-onnx = "0.23"
 circular-buffer = "1.2"
+# In-process NLU tokenization (BERT-Mini WordPiece) — loads tokenizer.json
+# directly, no Python/HTTP. Pairs with tract-onnx above to run the NLU
+# classifier fully in-process (see nlu_local.rs).
+# default-features off: "esaxx_fast" (C++ suffix-array build, only needed
+# for training Unigram/SentencePiece tokenizers — we only load+encode a
+# pre-trained WordPiece tokenizer) statically links its CRT as /MT, which
+# conflicts with /MD-linked onnxruntime pulled in elsewhere (piper-rs) —
+# LNK2038 RuntimeLibrary mismatch. "progressbar" is dev/training UX, unused
+# here. "onig" (pure encode/decode regex) is kept; it doesn't conflict.
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 # HTTP client for diagnostics
 reqwest = { version = "0.12", features = ["json", "multipart"] }
 chrono = { version = "0.4.45", features = ["serde"] }
@@ -62,6 +73,13 @@ chrono = { version = "0.4.45", features = ["serde"] }
 edge-tts-rust = "0.1"
 piper-rs = "0.2"
 rodio = "0.19"
+
+# Live-caption WebSocket client (plan Phase 4) — connects to the local STT
+# server's /stream endpoint. Both are already locked transitive deps of
+# edge-tts-rust (its own WSS client to Microsoft's endpoint), so declaring
+# them directly adds zero new download/compile surface.
+tokio-tungstenite = "0.28"
+futures-util = "0.3"
 
 # Cross-platform app/URL launching (open::that, open::with)
 open = "5"
@@ -122,6 +140,7 @@ webrtc-vad = "0.4.0"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.36", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
     "Win32_UI_HiDpi",
@@ -133,6 +152,13 @@ windows = { version = "0.36", features = [
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_Graphics_Gdi",
+    # Windows.Media.Ocr — zero-RAM local screen text extraction (Feature 86)
+    "Foundation",
+    "Foundation_Collections",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
+    "Globalization",
 ] }
 # Registry access for App Paths + Uninstall keys (app discovery)
 winreg = "0.55"

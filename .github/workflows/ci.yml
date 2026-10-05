@@ -33,6 +33,9 @@ jobs:
       - name: Run frontend tests
         run: npm test
 
+      - name: Turn-end choke-point gate (ghost hot-mic loop)
+        run: node ../scripts/check-turn-ends.mjs
+
   windows-installer:
     runs-on: windows-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/phase-1')

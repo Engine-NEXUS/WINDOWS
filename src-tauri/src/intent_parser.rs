@@ -120,8 +120,18 @@ pub enum ParsedIntent {
     /// Enter the Ghostwriter dictation room (persistent session).
     /// "ghostwriter", "take a letter", "write this down for mom".
     /// Contact is optional — asked inside the room if missing.
+    /// NOTE: bare "ghost mode" is NOT here — it enters cursor-control
+    /// Ghost Mode (EnterGhostControl). Dictation needs a "writer" word.
     #[serde(rename = "enter_ghostwriter")]
     EnterGhostwriter { contact: Option<String> },
+    /// Enter cursor-control Ghost Mode (the AI drives your real cursor).
+    /// "ghost mode", "take the mouse", "control my cursor".
+    #[serde(rename = "enter_ghost_control")]
+    EnterGhostControl,
+    /// Leave cursor-control Ghost Mode ("exit/close/turn off ghost mode").
+    /// Distinct from dictation exits (those live in ghostwriter.rs).
+    #[serde(rename = "exit_ghost_control")]
+    ExitGhostControl,
     /// Click the Nth on-screen actionable (1-based reading order).
     /// "click the 3rd option" → ScreenClick { ordinal: 3 }.
     #[serde(rename = "screen_click")]
@@ -132,6 +142,25 @@ pub enum ParsedIntent {
     /// Switch browser tab ("move to the 4th tab" → Ctrl+4).
     #[serde(rename = "browser_tab")]
     BrowserTab { index: u32 },
+    /// Close/delete browser tab ("close the 3rd tab" → Ctrl+3 then Ctrl+W;
+    /// no index → Ctrl+W on the active tab).
+    #[serde(rename = "browser_close_tab")]
+    BrowserCloseTab { index: Option<u32> },
+    /// Search in active browser (Ctrl+L -> type -> Enter).
+    #[serde(rename = "browser_search")]
+    BrowserSearch { query: String },
+    /// Focus active browser search/address bar (Ctrl+L).
+    #[serde(rename = "browser_search_focus")]
+    BrowserSearchFocus,
+    /// Start line-by-line dictation mode.
+    #[serde(rename = "start_dictation")]
+    StartDictation,
+    /// Stop line-by-line dictation mode.
+    #[serde(rename = "stop_dictation")]
+    StopDictation,
+    /// Watch an email on screen for deadline changes or updates.
+    #[serde(rename = "watch_screen_email")]
+    WatchScreenEmail,
     #[serde(rename = "unknown")]
     Unknown { raw: String },
 }
@@ -181,9 +210,17 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::SendWhatsAppMessage { .. } => "send_whatsapp_message",
         ParsedIntent::NeedMoreInfo { .. } => "need_more_info",
         ParsedIntent::EnterGhostwriter { .. } => "enter_ghostwriter",
+        ParsedIntent::EnterGhostControl => "enter_ghost_control",
+        ParsedIntent::ExitGhostControl => "exit_ghost_control",
         ParsedIntent::ScreenClick { .. } => "screen_click",
         ParsedIntent::ScreenRead { .. } => "screen_read",
         ParsedIntent::BrowserTab { .. } => "browser_tab",
+        ParsedIntent::BrowserCloseTab { .. } => "browser_close_tab",
+        ParsedIntent::BrowserSearch { .. } => "browser_search",
+        ParsedIntent::BrowserSearchFocus => "browser_search_focus",
+        ParsedIntent::StartDictation => "start_dictation",
+        ParsedIntent::StopDictation => "stop_dictation",
+        ParsedIntent::WatchScreenEmail => "watch_screen_email",
         ParsedIntent::GitHubCommand { command } => match command {
             GitHubCommand::MergePr { .. } => "merge_pr",
             GitHubCommand::ApprovePr { .. } => "approve_pr",
@@ -228,7 +265,87 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
 /// - "open architecture mapper"
 /// - Media controls (pause, next, previous, stop)
 /// - "open <url>" (direct URL)
+/// Strip one leading wake prefix ("hey/hello/hi/ok/okay nexus",
+/// "nexus"). Hot-mic captures include the wake word verbatim (KWS is
+/// skipped during capture), so muscle-memory "NEXUS open chrome" lands
+/// whole in the transcript. Returns None when there is no prefix or
+/// nothing remains — bare "hey nexus" stays a greeting, never strips
+/// to empty. Longest prefixes first; word-boundary required.
+fn strip_wake_prefix(text: &str) -> Option<String> {
+    const PREFIXES: &[&str] = &[
+        "hello nexus",
+        "okay nexus",
+        "hey nexus",
+        "ok nexus",
+        "hi nexus",
+        "nexus",
+    ];
+    let mut current = text.trim();
+    let mut stripped_any = false;
+
+    loop {
+        let mut found = false;
+        for prefix in PREFIXES {
+            if let Some(rest) = current.strip_prefix(prefix) {
+                // Word boundary check: string ended, whitespace, or punctuation (. , ! ? : - ;)
+                let after = rest.as_bytes().first().copied();
+                if after.is_none()
+                    || matches!(
+                        after,
+                        Some(b' ')
+                            | Some(b'\t')
+                            | Some(b'.')
+                            | Some(b',')
+                            | Some(b'!')
+                            | Some(b'?')
+                            | Some(b':')
+                            | Some(b'-')
+                            | Some(b';')
+                    )
+                {
+                    let cleaned = rest
+                        .trim_start_matches(|c: char| {
+                            matches!(c, '.' | ',' | '!' | '?' | ':' | '-' | ';' | ' ' | '\t')
+                        })
+                        .trim();
+                    if !cleaned.is_empty() {
+                        current = cleaned;
+                        stripped_any = true;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !found {
+            break;
+        }
+    }
+
+    if stripped_any && !current.is_empty() {
+        Some(current.to_string())
+    } else {
+        None
+    }
+}
+
 pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
+    if let Some(result) = parse_deterministic_inner(transcript) {
+        return Some(result);
+    }
+    // Retry: strip one wake prefix and re-run the FULL pipeline
+    // (fillers + phonetics + all arms — inner re-normalizes, so just
+    // hand it the remainder). Zero regression by construction: only
+    // fires when the first pass returned None, and strip never yields
+    // empty (bare wake words keep their first-pass result).
+    let lowered = transcript.trim().to_lowercase();
+    if let Some(stripped) = strip_wake_prefix(&lowered) {
+        return parse_deterministic_inner(&stripped);
+    }
+    None
+}
+
+fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
     let text = transcript.trim().to_lowercase();
     let text = normalize_whitespace(&text);
     // Strip trailing punctuation that STT often appends (e.g. "Open the PR list."
@@ -236,6 +353,7 @@ pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
     // ListPrs pattern) fail to match and the permissive OpenApp fallback
     // catches the phrase — "the pr list." resolved to a cached app target.
     let text = strip_trailing_punctuation(&text);
+    let text = strip_leading_stray_punctuation(&text);
 
     if text.is_empty() {
         return None;
@@ -246,6 +364,10 @@ pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
     // These conversational connectors are not part of the command and cause
     // every starts_with() check below to fail.
     let text = strip_leading_filler(&text);
+
+    // Normalize common STT phonetic mishearings and soundalike phrases
+    // (e.g. "goes to mode" -> "ghost mode", "open what's up" -> "open whatsapp")
+    let text = normalize_phonetic_mishearings(&text);
 
     // --- Open Architecture Mapper ---
     if is_architect_command(&text) {
@@ -279,6 +401,17 @@ pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
         });
     }
 
+    // --- Ghost cursor-control entry ---
+    // BEFORE ghostwriter: the bare mode word belongs to cursor control.
+    // A miss here must not fall through to dictation (strict exact match
+    // inside parse_ghost_control_entry returns None on trailing words).
+    if let Some(result) = parse_ghost_control_entry(&text) {
+        return Some(result);
+    }
+    if let Some(result) = parse_ghost_control_exit(&text) {
+        return Some(result);
+    }
+
     // --- Ghostwriter room entry ---
     // Must precede greeting/media: "write this down" is dictation, not chat.
     if let Some(result) = parse_ghostwriter_entry(&text) {
@@ -303,6 +436,28 @@ pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
 
     // --- Greetings / conversational replies (local, no Worker round-trip) ---
     if let Some(result) = parse_greeting(&text) {
+        return Some(result);
+    }
+
+    // --- Direct In-App Typing & Chat Dictation (Unbreakable) ---
+    // "type so it analysis for the servx right send it to as soon as possible"
+    // Must precede analyse/github commands so text payloads containing "analysis",
+    // "servx", "send", "pr" never misfire as repo or action commands.
+    if let Some(result) = parse_type_dictation_command(&text) {
+        return Some(result);
+    }
+
+    // --- Screen Analysis & Visual Research ---
+    // "nexus analyse the screen", "analyse the screen", "explain what is on my screen"
+    // Must precede parse_analyse_command so "analyse the screen" is not treated as a repo.
+    if let Some(result) = parse_screen_analysis_command(&text) {
+        return Some(result);
+    }
+
+    // --- Screen Annotation & Architecture Drawing (Feature 87) ---
+    // "annotate my screen", "draw on the screen", "create architecture diagram"
+    // Must precede parse_analyse_command so "draw architecture..." stays local.
+    if let Some(result) = parse_screen_annotation_command(&text) {
         return Some(result);
     }
 
@@ -365,6 +520,25 @@ pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
         return Some(result);
     }
 
+    // --- Dictation mode commands ---
+    // "start typing", "type whatever i say", "type line by line", "stop typing"
+    if let Some(result) = parse_dictation_command(&text) {
+        return Some(result);
+    }
+
+    // --- Browser Search / Search bar focus ---
+    // "search", "search bar", "focus address bar", "search in browser <query>"
+    if let Some(result) = parse_browser_search_command(&text) {
+        return Some(result);
+    }
+
+    // --- Screen Email Watcher ---
+    // "update me whenever there is any update on the deadline or anything for this email"
+    // "watch this email for deadline changes", "track this email"
+    if let Some(result) = parse_watch_screen_email_command(&text) {
+        return Some(result);
+    }
+
     // --- Live mode commands ---
     // "type hello world", "press enter", "press ctrl a"
     // "send", "new tab", "open new tab"
@@ -384,6 +558,12 @@ pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
     // --- Close app ---
     // "close whatsapp", "quit chrome", "exit notepad"
     if let Some(result) = parse_close_command(&text) {
+        return Some(result);
+    }
+
+    // --- YouTube & Video Journal ---
+    // "search youtube for...", "summarize this video", "add this video to my journal"
+    if let Some(result) = parse_youtube_command(&text) {
         return Some(result);
     }
 
@@ -1428,17 +1608,116 @@ fn parse_whatsapp_command(text: &str) -> Option<ParseResult> {
     None
 }
 
-// ΓöÇΓöÇΓöÇ Search command ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ─── YouTube & Video Journal commands ──────────────────────────────────────
+
+fn parse_youtube_command(text: &str) -> Option<ParseResult> {
+    let lower = text.trim().to_lowercase();
+
+    // 1. YouTube Journal & Summarization commands
+    if lower == "summarize this video"
+        || lower == "summarize video"
+        || lower == "summarize youtube video"
+        || lower == "journal this video"
+        || lower == "add this video to my journal"
+        || lower == "add to journal"
+        || lower == "take notes on this video"
+        || lower == "youtube journal"
+    {
+        return Some(ParseResult {
+            intent: ParsedIntent::NluResult {
+                intent: "youtube_journal".to_string(),
+                slots: serde_json::json!({ "url": "" }),
+                confidence: 1.0,
+            },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    if let Some(target) = lower.strip_prefix("summarize video ")
+        .or_else(|| lower.strip_prefix("summarize youtube video "))
+        .or_else(|| lower.strip_prefix("journal video "))
+    {
+        let t = target.trim();
+        if !t.is_empty() {
+            return Some(ParseResult {
+                intent: ParsedIntent::NluResult {
+                    intent: "youtube_journal".to_string(),
+                    slots: serde_json::json!({ "url": t }),
+                    confidence: 1.0,
+                },
+                confidence: 1.0,
+                source: "deterministic".to_string(),
+            });
+        }
+    }
+
+    // 2. YouTube Search commands
+    let prefixes = [
+        "search youtube for ",
+        "search on youtube for ",
+        "search on youtube ",
+        "search youtube ",
+        "youtube search for ",
+        "youtube search ",
+        "find on youtube ",
+        "look up on youtube ",
+    ];
+
+    for prefix in prefixes {
+        if lower.starts_with(prefix) {
+            let query = text[prefix.len()..].trim();
+            if !query.is_empty() {
+                return Some(ParseResult {
+                    intent: ParsedIntent::NluResult {
+                        intent: "youtube_search".to_string(),
+                        slots: serde_json::json!({ "query": query }),
+                        confidence: 1.0,
+                    },
+                    confidence: 1.0,
+                    source: "deterministic".to_string(),
+                });
+            }
+        }
+    }
+
+    // "search <query> on youtube"
+    if let Some(pos) = lower.find(" on youtube") {
+        let before = text[..pos].trim();
+        for verb in &["search for ", "search ", "find ", "look up "] {
+            if before.to_lowercase().starts_with(verb) {
+                let query = before[verb.len()..].trim();
+                if !query.is_empty() {
+                    return Some(ParseResult {
+                        intent: ParsedIntent::NluResult {
+                            intent: "youtube_search".to_string(),
+                            slots: serde_json::json!({ "query": query }),
+                            confidence: 1.0,
+                        },
+                        confidence: 1.0,
+                        source: "deterministic".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    None
+}
+
+// ─── Search command ──────────────────────────────────────────────────────────
 
 const SEARCH_VERBS: &[&str] = &[
     "search for", "search", "google", "look up", "find me", "find", "look for",
+    "so it's for", "so its for", "so it is for", "it's for", "its for", "it is for",
+    "search that on", "search on",
 ];
 
 fn parse_search_command(text: &str) -> Option<ParseResult> {
     for verb in SEARCH_VERBS {
         let prefix = format!("{} ", verb);
         if text.starts_with(&prefix) {
-            let query = text[prefix.len()..].trim();
+            let query = text[prefix.len()..].trim().trim_end_matches(['.', ',', '!', '?']).trim();
             if !query.is_empty() {
                 return Some(ParseResult {
                     intent: ParsedIntent::Search {
@@ -1451,6 +1730,283 @@ fn parse_search_command(text: &str) -> Option<ParseResult> {
         }
     }
     None
+}
+
+/// Parse direct in-app typing payloads:
+/// e.g. "type so it analysis for the servx right send it to as soon as possible"
+/// Extracts everything after "type " verbatim without risking command collisions.
+fn parse_type_dictation_command(text: &str) -> Option<ParseResult> {
+    // If it's a dictation mode command ("start typing", "type whatever i say", "type line by line", "stop typing"),
+    // let parse_dictation_command handle it!
+    if let Some(cmd) = parse_dictation_command(text) {
+        return Some(cmd);
+    }
+
+    let t = text.trim();
+    let lower = t.to_lowercase();
+    let trimmed_lower = lower.trim_end_matches(['.', ',', '!', '?']).trim();
+    if trimmed_lower == "type" {
+        return Some(ParseResult {
+            intent: ParsedIntent::StartDictation,
+            confidence: 1.0,
+            source: "deterministic-dictation".to_string(),
+        });
+    }
+
+    let prefixes = [
+        "type: ",
+        "type, ",
+        "type message ",
+        "type out ",
+        "type this ",
+        "type ",
+    ];
+
+    for prefix in prefixes {
+        if lower.starts_with(prefix) {
+            let raw_payload = t[prefix.len()..].trim();
+            if !raw_payload.is_empty() {
+                return Some(ParseResult {
+                    intent: ParsedIntent::NluResult {
+                        intent: "type_text".to_string(),
+                        slots: serde_json::json!({ "text": raw_payload }),
+                        confidence: 1.0,
+                    },
+                    confidence: 1.0,
+                    source: "deterministic-dictation".to_string(),
+                });
+            }
+        }
+    }
+
+    None
+}
+
+/// Parse screen analysis and visual research commands (Phase 1 expanded
+/// triggers, 2026-10-01): analyse/analyze + screen, "what's on my screen",
+/// "what do I see", "explain what I see", describe/read/scan/check +
+/// screen, and research anchored to this/screen.
+///
+/// Anchoring rules (misfire guards):
+/// - The analyse family MUST contain "screen" — "analyse servx" and
+///   "analyse pr 5 in zync" still route to the repo analyzer.
+/// - The research family MUST contain "this"/"screen" — general research
+///   ("research quantum computing") still routes to the Worker.
+/// - The what/see families are inherently screen queries (no anchor needed).
+fn parse_screen_analysis_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase();
+    let trimmed = t.trim_end_matches(['.', ',', '!', '?']).trim();
+
+    // 1. Screen-anchored verb family: "analyse the screen", "analyze my
+    //    screen", "read the screen", "scan my screen", "check the screen",
+    //    "describe my screen" — screen REQUIRED so repo/PR analyse never fires.
+    if regex_captures(trimmed, r"^(?:analyse|analyze|analysis|describe|read|scan|check)\b[^;]*\bscreen\b.*$")
+        .is_some()
+    {
+        return Some(ParseResult::screen_analysis_result(text));
+    }
+    // 2. "What is on my screen?" family.
+    if regex_captures(
+        trimmed,
+        r"^what(?:'s| is)\s+(?:on|in|of)?\s*(?:my|the|this)?\s*screen\b.*$",
+    )
+    .is_some()
+    {
+        return Some(ParseResult::screen_analysis_result(text));
+    }
+    // 3. "What do I see / what am I looking at / explain what I see" family.
+    if regex_captures(
+        trimmed,
+        r"^(?:what\s+(?:do|can|am)\s+i\s+(?:see|looking\s+at)|explain\s+what\s+i\s+(?:see|am\s+looking\s+at)|tell\s+me\s+what\s+i\s+(?:see|am\s+looking\s+at))$",
+    )
+    .is_some()
+    {
+        return Some(ParseResult::screen_analysis_result(text));
+    }
+    // 4. Research family — this/screen REQUIRED (general research → Worker).
+    if regex_captures(trimmed, r"^research\b.*(?:\bthis\b|\bscreen\b).*$").is_some() {
+        return Some(ParseResult::screen_analysis_result(text));
+    }
+
+    None
+}
+
+/// Screen annotation & live architecture drawing (Feature 87):
+/// "annotate my screen", "draw on the screen", "add an arrow to the screen",
+/// "create an architecture diagram".
+///
+/// Anchoring rules (misfire guards):
+/// - The annotate/draw family MUST contain "screen"/"display"/"this" —
+///   "draw the curtains" still falls through.
+fn parse_screen_annotation_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase();
+    let trimmed = t.trim_end_matches(['.', ',', '!', '?']).trim();
+
+    // 1. Annotate/draw family: "annotate my screen", "draw on the screen",
+    //    "mark up this display", "sketch on the screen" — screen/display/this REQUIRED.
+    if regex_captures(
+        trimmed,
+        r"^(?:annotate|draw|mark\s*up|markup|sketch)\b[^;]*\b(?:screen|display|this)\b.*$",
+    )
+    .is_some()
+    {
+        return Some(ParseResult::screen_annotation_result(text));
+    }
+    // 2. Architecture family: "create an architecture diagram",
+    //    "make an arch diagram", "build a diagram of this" — architecture/arch/diagram REQUIRED.
+    if regex_captures(
+        trimmed,
+        r"^(?:create|make|build|draw)\b[^;]*\b(?:architecture|arch|diagram)\b.*$",
+    )
+    .is_some()
+    {
+        return Some(ParseResult::screen_annotation_result(text));
+    }
+    // 3. Element-adding family: "add an arrow to the screen",
+    //    "add a checkbox on this", "add text to my screen" — element + anchor REQUIRED.
+    if regex_captures(
+        trimmed,
+        r"^add\b[^;]*\b(?:arrow|text|checkbox|note|pointer)\b[^;]*\b(?:screen|display|this)\b.*$",
+    )
+    .is_some()
+    {
+        return Some(ParseResult::screen_annotation_result(text));
+    }
+
+    None
+}
+
+impl ParseResult {
+    fn screen_analysis_result(text: &str) -> Self {
+        Self {
+            intent: ParsedIntent::NluResult {
+                intent: "screen_analysis".to_string(),
+                slots: serde_json::json!({ "prompt": text.trim() }),
+                confidence: 1.0,
+            },
+            confidence: 1.0,
+            source: "deterministic-screen-analysis".to_string(),
+        }
+    }
+
+    fn screen_annotation_result(text: &str) -> Self {
+        Self {
+            intent: ParsedIntent::NluResult {
+                intent: "screen_annotation".to_string(),
+                slots: serde_json::json!({ "prompt": text.trim() }),
+                confidence: 1.0,
+            },
+            confidence: 1.0,
+            source: "deterministic-screen-annotation".to_string(),
+        }
+    }
+}
+
+fn parse_dictation_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase();
+    if t == "start typing"
+        || t == "type whatever i say"
+        || t == "type whatever i am saying"
+        || t == "type what i say"
+        || t == "type line by line"
+        || t == "start dictation"
+        || t == "begin typing"
+        || t == "enable typing"
+    {
+        return Some(ParseResult {
+            intent: ParsedIntent::StartDictation,
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    if t == "stop typing"
+        || t == "stop dictation"
+        || t == "done typing"
+        || t == "end typing"
+        || t == "finish typing"
+        || t == "exit dictation"
+    {
+        return Some(ParseResult {
+            intent: ParsedIntent::StopDictation,
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    None
+}
+
+fn parse_browser_search_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase();
+    if t == "search"
+        || t == "search bar"
+        || t == "focus search"
+        || t == "focus search bar"
+        || t == "focus address bar"
+        || t == "address bar"
+        || t == "open search"
+        || t == "open search bar"
+        || t == "go to search bar"
+        || t == "go to address bar"
+    {
+        return Some(ParseResult {
+            intent: ParsedIntent::BrowserSearchFocus,
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    let browser_prefixes = [
+        "search in browser ",
+        "browser search ",
+        "search in brave ",
+        "search in chrome ",
+    ];
+    for prefix in browser_prefixes {
+        if t.starts_with(prefix) {
+            let query = text.trim()[prefix.len()..].trim();
+            if !query.is_empty() {
+                return Some(ParseResult {
+                    intent: ParsedIntent::BrowserSearch {
+                        query: query.to_string(),
+                    },
+                    confidence: 1.0,
+                    source: "deterministic".to_string(),
+                });
+            }
+        }
+    }
+
+    None
+}
+
+fn parse_watch_screen_email_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase();
+    let is_watch_verb = t.contains("update me")
+        || t.contains("notify me")
+        || t.contains("watch this")
+        || t.contains("watch email")
+        || t.contains("track this")
+        || t.contains("track email")
+        || t.contains("keep an eye on this");
+
+    let is_email_or_deadline = t.contains("email")
+        || t.contains("deadline")
+        || t.contains("submission")
+        || t.contains("due date")
+        || t.contains("this thread")
+        || t.contains("this message");
+
+    if is_watch_verb && is_email_or_deadline {
+        Some(ParseResult {
+            intent: ParsedIntent::WatchScreenEmail,
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        })
+    } else {
+        None
+    }
 }
 
 // ─── GitHub command parsing ───────────────────────────────────────────
@@ -2365,11 +2921,12 @@ fn parse_search_product(text: &str) -> Option<ParseResult> {
 fn parse_ghostwriter_entry(text: &str) -> Option<ParseResult> {
     // Ordered longest-first: "ghostwriter mode" must match before the
     // "ghostwriter" prefix leaves a stray " mode" tail (which rejects).
+    // NOTE: bare-"ghost mode" family lives in parse_ghost_control_entry
+    // (cursor control), NOT here. Dictation requires a writer word.
     const TRIGGERS: &[&str] = &[
         "open the ghostwriter mode",
         "open ghostwriter mode",
         "open the ghostwriter",
-        "open the ghost mode",
         "take a letter",
         "write this down",
         "take dictation",
@@ -2379,15 +2936,11 @@ fn parse_ghostwriter_entry(text: &str) -> Option<ParseResult> {
         "start ghostwriter",
         "enable ghostwriter",
         "open ghostwriter",
-        "start ghost mode",
-        "open ghost mode",
         "go ghostwriter",
-        "go ghost mode",
         "start writing",
         "ghostwriter on",
         "ghostwriter",
         "ghost writer",
-        "ghost mode",
         "type for me",
         "scribe mode",
         "scribe",
@@ -2420,25 +2973,149 @@ fn parse_ghostwriter_entry(text: &str) -> Option<ParseResult> {
     None
 }
 
+// ─── Ghost cursor-control entry ──────────────────────────────────────
+
+/// Enter cursor-control Ghost Mode (the AI drives your real cursor).
+///
+/// Triggers: "ghost mode", "take the mouse", "control my cursor",
+/// "ghost cursor", "take control". Strict exact match (after trim) —
+/// a bare mode word must never swallow sentences like "ghost mode is…".
+/// Checked BEFORE parse_ghostwriter_entry so the mode word can never
+/// fall through to dictation.
+fn parse_ghost_control_entry(text: &str) -> Option<ParseResult> {
+    // Ordered longest-first for prefix discipline.
+    const TRIGGERS: &[&str] = &[
+        "open the ghost mode",
+        "the ghost mode",
+        "the post mode",
+        "the host mode",
+        "the coast mode",
+        "control my cursor",
+        "control the cursor",
+        "activate ghost mode",
+        "activate ghost",
+        "turn on ghost mode",
+        "turn on ghost",
+        "enable ghost control",
+        "enable ghost mode",
+        "start ghost control",
+        "start ghost mode",
+        "open ghost mode",
+        "take the mouse",
+        "take control",
+        "ghost cursor",
+        "go ghost mode",
+        "ghost mode",
+        // Direct STT soundalike triggers
+        "goes to mode",
+        "goes to mold",
+        "go to mode",
+        "post mode",
+        "post modern",
+        "postmodern",
+        "coast mode",
+        "gold mode",
+        "toast mode",
+        "host mode",
+        "dose mode",
+        "close mode",
+        "ghost mood",
+        "ghost node",
+        "ghost mod",
+    ];
+    for trigger in TRIGGERS {
+        if let Some(rest) = text.strip_prefix(trigger) {
+            if rest.trim().is_empty() {
+                return Some(ParseResult {
+                    intent: ParsedIntent::EnterGhostControl,
+                    confidence: 0.95,
+                    source: "deterministic".to_string(),
+                });
+            }
+            // Trailing words → not an entry ("ghost mode is confusing").
+            return None;
+        }
+    }
+    None
+}
+
+/// Leave cursor-control Ghost Mode.
+///
+/// Triggers: "exit/close/turn off/stop ghost mode", "exit ghost",
+/// "ghost mode off", "leave ghost mode", "stand down" + STT soundalikes.
+/// Exact match (or trailing-empty prefix); strict like the entry.
+fn parse_ghost_control_exit(text: &str) -> Option<ParseResult> {
+    const TRIGGERS: &[&str] = &[
+        "turn off the ghost mode",
+        "exit the ghost mode",
+        "close the ghost mode",
+        "stop the ghost mode",
+        "leave the ghost mode",
+        "turn off ghost mode",
+        "exit ghost mode",
+        "close ghost mode",
+        "stop ghost mode",
+        "quit ghost mode",
+        "leave ghost mode",
+        "exit ghost",
+        "stop ghost",
+        "ghost mode off",
+        "ghost off",
+        "stand down",
+    ];
+    for trigger in TRIGGERS {
+        if let Some(rest) = text.strip_prefix(trigger) {
+            if rest.trim().is_empty() {
+                return Some(ParseResult {
+                    intent: ParsedIntent::ExitGhostControl,
+                    confidence: 0.95,
+                    source: "deterministic".to_string(),
+                });
+            }
+            return None;
+        }
+    }
+    None
+}
+
 // ─── Screen control (ordinal click, tab switch, read-back) ──────────
 
 /// "click on the 3rd option", "press the 2nd button", "choose 1st",
 /// "move to the 4th tab", "what's the 2nd link".
 fn parse_screen_command(text: &str) -> Option<ParseResult> {
-    // Tab switch: "move|go|switch|open to the Nth tab", "tab N".
+    // Tab switch: "move|go|switch|shift|open to the Nth tab", "tab N".
+    // ("shift to" added — live miss: users say "shift to tab 3".)
     for prefix in [
         "move to the ",
         "move to ",
+        "move ",
         "go to the ",
         "go to ",
+        "go ",
         "switch to the ",
         "switch to ",
+        "switch ",
+        "jump to the ",
+        "jump to ",
+        "shift to the ",
+        "shift to ",
         "open ",
     ] {
         if let Some(rest) = text.strip_prefix(prefix) {
-            // rest like "4th tab" / "4 tab"
+            // "4th tab" (number before tab) or "tab 4" (number after).
             if let Some(num_part) = rest.strip_suffix(" tab") {
                 if let Some(n) = crate::screen::parse_ordinal(num_part) {
+                    if (1..=9).contains(&n) {
+                        return Some(ParseResult {
+                            intent: ParsedIntent::BrowserTab { index: n },
+                            confidence: 0.95,
+                            source: "deterministic".to_string(),
+                        });
+                    }
+                }
+            }
+            if let Some(num_rest) = rest.strip_prefix("tab ") {
+                if let Some(n) = crate::screen::parse_ordinal(num_rest.trim()) {
                     if (1..=9).contains(&n) {
                         return Some(ParseResult {
                             intent: ParsedIntent::BrowserTab { index: n },
@@ -2462,6 +3139,48 @@ fn parse_screen_command(text: &str) -> Option<ParseResult> {
         }
     }
 
+    // Close/delete tab: "close the 3rd tab" / "delete tab 5" → Ctrl+3 then
+    // Ctrl+W; bare "close (this/the) tab" → Ctrl+W on the active tab.
+    // (BrowserCloseTab existed in the executor but no parse ever produced it
+    // — "delete tab 5" drifted to the Worker as a chat question.)
+    for prefix in ["close the ", "close this ", "close ", "delete the ", "delete this ", "delete "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            // "close tab 5" / "delete the 5th tab"
+            if let Some(num_part) = rest.strip_suffix(" tab") {
+                if let Some(n) = crate::screen::parse_ordinal(num_part) {
+                    if (1..=9).contains(&n) {
+                        return Some(ParseResult {
+                            intent: ParsedIntent::BrowserCloseTab { index: Some(n) },
+                            confidence: 0.95,
+                            source: "deterministic".to_string(),
+                        });
+                    }
+                }
+            }
+            if let Some(num_rest) = rest.strip_prefix("tab ") {
+                if let Some(n) = crate::screen::parse_ordinal(num_rest.trim()) {
+                    if (1..=9).contains(&n) {
+                        return Some(ParseResult {
+                            intent: ParsedIntent::BrowserCloseTab { index: Some(n) },
+                            confidence: 0.95,
+                            source: "deterministic".to_string(),
+                        });
+                    }
+                }
+            }
+            if matches!(
+                rest.trim(),
+                "tab" | "this tab" | "the tab" | "current tab" | "active tab"
+            ) {
+                return Some(ParseResult {
+                    intent: ParsedIntent::BrowserCloseTab { index: None },
+                    confidence: 0.95,
+                    source: "deterministic".to_string(),
+                });
+            }
+        }
+    }
+
     // Read-back: "what's the 3rd option/button/link".
     for prefix in ["what's the ", "what is the ", "which is the ", "read the "] {
         if let Some(rest) = text.strip_prefix(prefix) {
@@ -2479,11 +3198,44 @@ fn parse_screen_command(text: &str) -> Option<ParseResult> {
         }
     }
 
-    // Click: "click|press|choose|tap|select [on] [the] <ordinal> [noun]".
-    for verb in ["click on the ", "click on ", "click the ", "click ", "press the ", "press ",
-                 "choose the ", "choose ", "tap the ", "tap ", "select the ", "select "] {
+    // Direct result patterns: "open result 2", "click result 2", "open link 3"
+    for prefix in [
+        "open result ",
+        "open the result ",
+        "click result ",
+        "choose result ",
+        "select result ",
+        "result ",
+        "open link ",
+        "click link ",
+    ] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            let clean = rest.trim().trim_end_matches(['.', ',', '!', '?']).trim();
+            if let Some(n) = crate::screen::parse_ordinal(clean) {
+                return Some(ParseResult {
+                    intent: ParsedIntent::ScreenClick { ordinal: n },
+                    confidence: 0.95,
+                    source: "deterministic".to_string(),
+                });
+            }
+        }
+    }
+
+    // Click: "click|press|choose|tap|select|open [on] [the] <ordinal> [noun]".
+    for verb in [
+        "click on the ", "click on ", "click the ", "click ",
+        "press the ", "press ",
+        "choose the ", "choose ",
+        "tap the ", "tap ",
+        "select the ", "select ",
+        "open on the ", "open on ", "open the ", "open ",
+    ] {
         if let Some(rest) = text.strip_prefix(verb) {
-            for noun in ["option", "button", "link", "tab", "item", "choice", "one"] {
+            for noun in [
+                "option", "button", "link", "tab", "item", "choice", "one",
+                "result", "results", "search result", "search results",
+                "in the result", "in the results", "in result", "in search",
+            ] {
                 let num_part = rest
                     .strip_suffix(&format!(" {noun}"))
                     .unwrap_or(rest)
@@ -2502,6 +3254,85 @@ fn parse_screen_command(text: &str) -> Option<ParseResult> {
                             source: "deterministic".to_string(),
                         });
                     }
+                }
+            }
+        }
+    }
+
+    // Window control: "minimize (this/the window)" / "maximize (this/the
+    // window)" / "full screen this". Bare commands, no slot — act on
+    // whatever currently owns the foreground. Zero model cost, instant.
+    if matches!(
+        text,
+        "minimize" | "minimize window" | "minimize this" | "minimize it"
+            | "minimize the window" | "minimize this window"
+    ) {
+        return Some(ParseResult {
+            intent: ParsedIntent::NluResult {
+                intent: "system_minimize_window".to_string(),
+                slots: serde_json::json!({}),
+                confidence: 0.95,
+            },
+            confidence: 0.95,
+            source: "deterministic".to_string(),
+        });
+    }
+    if matches!(
+        text,
+        "maximize" | "maximize window" | "maximize this" | "maximize it"
+            | "maximize the window" | "maximize this window" | "full screen this"
+            | "full screen this window" | "make this full screen"
+    ) {
+        return Some(ParseResult {
+            intent: ParsedIntent::NluResult {
+                intent: "system_maximize_window".to_string(),
+                slots: serde_json::json!({}),
+                confidence: 0.95,
+            },
+            confidence: 0.95,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    // Click a named on-screen element: "click <name>" / "click on <name>".
+    // Distinct from the ordinal loop above (tried first, claims numeric/
+    // ordinal targets). Bare "click " is unambiguous (no other deterministic
+    // parser owns that verb). "press " is deliberately NOT included here,
+    // bare — `parse_live_command`'s "press <key>"/"press ctrl a" key-press
+    // patterns own that verb, and a bare prefix here would have shadowed
+    // them (caught by test_parse_live_press_key/_hotkey). Only accept
+    // "press" when explicitly button-qualified ("press the X button"),
+    // which no key name ever is.
+    for prefix in ["click on the ", "click on ", "click the ", "click "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            let name = rest.trim().trim_end_matches(['.', ',', '!', '?']).trim_end_matches(" button").trim();
+            if !name.is_empty() && name.len() <= 60 {
+                return Some(ParseResult {
+                    intent: ParsedIntent::NluResult {
+                        intent: "system_click_element".to_string(),
+                        slots: serde_json::json!({ "name": name }),
+                        confidence: 0.85,
+                    },
+                    confidence: 0.85,
+                    source: "deterministic".to_string(),
+                });
+            }
+        }
+    }
+    for prefix in ["press the ", "press "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            if let Some(name) = rest.trim().trim_end_matches(['.', ',', '!', '?']).strip_suffix(" button") {
+                let name = name.trim();
+                if !name.is_empty() && name.len() <= 60 {
+                    return Some(ParseResult {
+                        intent: ParsedIntent::NluResult {
+                            intent: "system_click_element".to_string(),
+                            slots: serde_json::json!({ "name": name }),
+                            confidence: 0.85,
+                        },
+                        confidence: 0.85,
+                        source: "deterministic".to_string(),
+                    });
                 }
             }
         }
@@ -2947,14 +3778,6 @@ fn parse_media(text: &str) -> Option<ParsedIntent> {
 ///   "open codebase mapper"
 ///   "open dependency mapper"
 fn is_architect_command(text: &str) -> bool {
-    // Truncated "open-" or "open" — Intel SST mic silence cuts the utterance
-    // mid-word. STT returns "open-" or "open" instead of "open architecture mapper".
-    // In this app's context, "open" almost always means "open architecture mapper".
-    let trimmed = text.trim().to_lowercase();
-    if trimmed == "open-" || trimmed == "open" {
-        tracing::info!("[intent_parser] truncated '{}' → open_architect (mic silence recovery)", trimmed);
-        return true;
-    }
     regex_match(
         text,
         r"^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?(?:architecture|architect|codebase|dependency)(?:\s+(?:mapper|map|window|mapper\s+window|viewer|diagram|graph|explorer))?$",
@@ -2990,53 +3813,94 @@ fn is_architect_command(text: &str) -> bool {
 fn is_settings_command(text: &str) -> bool {
     let t = text.trim().to_lowercase();
 
-    // Bare words — Intel SST mic silence cuts the utterance mid-word.
-    // "settings" alone almost always means "open settings".
-    if t == "settings" || t == "preferences" || t == "config" || t == "configuration" {
-        return true;
-    }
-
-    // (open|launch|start|show|bring up|pull up|give me|show me) + (the)? + settings/setting
-    if regex_match(
-        text,
-        r"^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?settings?$",
+    // 1. Direct standalone phrases & noun phrases
+    if matches!(
+        t.as_str(),
+        "command hub"
+            | "the command hub"
+            | "nexus command hub"
+            | "the nexus command hub"
+            | "command hub sidebar"
+            | "command hub window"
+            | "nexus hub"
+            | "the nexus hub"
+            | "hub"
+            | "the hub"
+            | "command center"
+            | "the command center"
+            | "nexus command center"
+            | "the nexus command center"
+            | "comment hub"
+            | "the comment hub"
+            | "nexus comment hub"
+            | "the nexus comment hub"
+            | "common hub"
+            | "comma hub"
+            | "comment center"
+            | "common center"
+            | "control hub"
+            | "the control hub"
+            | "nexus control hub"
+            | "control center"
+            | "the control center"
+            | "nexus control center"
+            | "settings"
+            | "the settings"
+            | "nexus settings"
+            | "settings sidebar"
+            | "settings window"
+            | "preferences"
+            | "the preferences"
+            | "nexus preferences"
+            | "config"
+            | "configuration"
+            | "nexus config"
     ) {
         return true;
     }
 
-    // (open|show|launch) + (the)? + command center
+    // 2. Action verbs with hub / center
+    // (open|launch|start|show|bring up|pull up|give me|show me|display|view|access|go to) + (the)? + (nexus)? + (command|comment|common|control)? + (hub|center)
     if regex_match(
         text,
-        r"^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?command\s+center$",
+        r"^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me|display|view|access|go\s+to)\s+(?:me\s+)?(?:the\s+)?(?:nexus\s+)?(?:command\s+|comment\s+|common\s+|control\s+)?(?:hub|center)(?:\s+(?:sidebar|window|please))?$",
     ) {
         return true;
     }
 
-    // (open|show) + (the)? + preferences? / preference
+    // 3. Suffix variations: (the)? (nexus)? (command|comment|control)? (hub|center) (sidebar|window|please|now)
     if regex_match(
         text,
-        r"^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?preferences?$",
+        r"^(?:the\s+)?(?:nexus\s+)?(?:command\s+|comment\s+|common\s+|control\s+)?(?:hub|center)\s+(?:sidebar|window|please|now)$",
     ) {
         return true;
     }
 
-    // (open|show) + (the)? + config / configuration
+    // 4. (open|launch|start|show|bring up|pull up|give me|show me|display|view|access|go to) + (the)? + settings/setting
     if regex_match(
         text,
-        r"^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?(?:config|configuration)$",
+        r"^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me|display|view|access|go\s+to)\s+(?:me\s+)?(?:the\s+)?(?:nexus\s+)?settings?(?:\s+(?:sidebar|window|please))?$",
     ) {
         return true;
     }
 
-    // "configure NEXUS" / "configure nexus"
+    // 5. (open|show) + (the)? + preferences / config / configuration
+    if regex_match(
+        text,
+        r"^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me|display|view|access|go\s+to)\s+(?:me\s+)?(?:the\s+)?(?:nexus\s+)?(?:preferences?|config|configuration)(?:\s+(?:sidebar|window|please))?$",
+    ) {
+        return true;
+    }
+
+    // 6. "configure NEXUS" / "configure nexus"
     if regex_match(text, r"^configure\s+nexus$") {
         return true;
     }
 
-    // "NEXUS settings" / "NEXUS config" / "NEXUS preferences" / "NEXUS command center"
+    // 7. "NEXUS ..." prefix variants
     if regex_match(
         text,
-        r"^nexus\s+(?:settings?|config|configuration|preferences?|command\s+center)$",
+        r"^nexus\s+(?:settings?|config|configuration|preferences?|command\s+center|command\s+hub|comment\s+hub|common\s+hub|control\s+center|control\s+hub)(?:\s+(?:sidebar|window|please))?$",
     ) {
         return true;
     }
@@ -3075,63 +3939,70 @@ fn is_architect_fuzzy(text: &str) -> bool {
         return false;
     }
 
-    // Pattern 1: ends with "mapper"/"map"/"diagram"/"graph"/"viewer"/"explorer"
-    // (strong signal ΓÇö these are rare words in NEXUS context)
-    if t.ends_with("mapper")
-        || t.ends_with("map")
-        || t.ends_with("mapper window")
-        || t.ends_with("map window")
-        || t.ends_with("diagram")
-        || t.ends_with("graph")
-        || t.ends_with("viewer")
-        || t.ends_with("explorer")
-    {
-        return true;
-    }
-
-    // Pattern 2: contains "arch" or "architect" (medium signal)
-    if t.contains("arch") || t.contains("architect") {
-        return true;
-    }
-
-    // Pattern 3: contains "codebase" or "dependency" (NEXUS-specific architecture words)
+    // Pattern 1: Explicit codebase/dependency mapper terms
     if t.contains("codebase") || t.contains("dependency") || t.contains("dependencies") {
+        if t.ends_with("mapper")
+            || t.ends_with("map")
+            || t.ends_with("diagram")
+            || t.ends_with("graph")
+            || t.ends_with("window")
+            || t == "open codebase"
+        {
+            return true;
+        }
+    }
+
+    // Pattern 2: Short forms from tests ("open map", "open the map", "show map", "show the map")
+    if t == "open map" || t == "open the map" || t == "show map" || t == "show the map" {
         return true;
     }
 
-    // Pattern 4: "open" + 2-5 words that could be misheard "architecture mapper"
-    // Common mishearings of "architecture":
-    //   "are cat", "our cat", "ark", "art", "octach", "arcade", "arc", "are"
-    // Common mishearings of "mapper":
-    //   "remember", "member", "december", "map", "mac", "mad", "matter", "master"
+    // Pattern 3: Specific known severe STT mishearings of "open architecture mapper"
+    const EXACT_MISHEARINGS: &[&str] = &[
+        "open up and remember",
+        "open up and member",
+        "open up and december",
+    ];
+    for m in EXACT_MISHEARINGS {
+        if t == *m {
+            return true;
+        }
+    }
+
+    // Pattern 4: STT acoustic mishearings of "architecture mapper"
+    // Requires BOTH an architecture soundalike AND a mapper soundalike.
+    // e.g. "open octach at mapper", "open arcade mapper", "open are cat map", "open ark mapper"
     let words: Vec<&str> = t.split_whitespace().collect();
     if words.len() >= 2 && words.len() <= 6 {
-        // Words that sound like "architecture"
         let has_arch_like = words.iter().any(|w| {
-            w.starts_with("arch") || w.starts_with("oct") || w.starts_with("arc")
-            || w.starts_with("art") || w.starts_with("ark") || w.starts_with("are")
-            || w.starts_with("our") || *w == "are" || *w == "our"
-            || *w == "art" || *w == "ark" || *w == "arc"
-        });
-        // Words that sound like "mapper"
+            *w == "architecture" || *w == "architect" || *w == "arch" || *w == "arcade"
+                || *w == "octach" || *w == "ark" || *w == "acat" || *w == "ocat"
+                || *w == "are" || *w == "our" || *w == "art" || *w == "arc"
+                || *w == "cat"
+        }) || t.contains("a cat") || t.contains("are cat") || t.contains("our cat");
         let has_mapper_like = words.iter().any(|w| {
-            w.starts_with("map") || w.starts_with("mem") || w.starts_with("rem")
-            || w.starts_with("mac") || w.starts_with("mad") || w.starts_with("mat")
-            || w.starts_with("mas")
-            || *w == "remember" || *w == "member" || *w == "december"
-            || *w == "map" || *w == "mac" || *w == "mad" || *w == "matter"
-            || *w == "master" || *w == "manner"
+            *w == "mapper" || *w == "map" || *w == "member" || *w == "remember"
+                || *w == "december" || *w == "mac" || *w == "mad" || *w == "matter"
+                || *w == "master" || *w == "manner"
         });
-        // Need at least one arch-like OR one mapper-like word
-        // (for 2-word phrases like "open map" we only need mapper-like)
-        if words.len() <= 3 && has_mapper_like {
-            return true;
+
+        // If it has "architecture" or "architect", it matches if accompanied by mapper-like or window/diagram
+        if t.contains("architecture") || t.contains("architect") {
+            if has_mapper_like
+                || t.ends_with("mapper")
+                || t.ends_with("map")
+                || t.ends_with("diagram")
+                || t.ends_with("graph")
+                || t.ends_with("viewer")
+                || t.ends_with("explorer")
+                || t.ends_with("window")
+            {
+                return true;
+            }
         }
-        // For longer phrases, need both signals OR just arch-like
-        if has_arch_like {
-            return true;
-        }
-        if has_mapper_like && words.len() >= 3 {
+
+        // For misheard words, BOTH arch-like AND mapper-like must be present!
+        if has_arch_like && has_mapper_like {
             return true;
         }
     }
@@ -3241,7 +4112,193 @@ fn parse_browser_force(text: &str) -> Option<ParseResult> {
     None
 }
 
-// ΓöÇΓöÇΓöÇ Helpers ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ─── Helpers ─────────────────────────────────────────────────────────
+
+/// Normalize common STT phonetic mishearings and soundalike phrases before
+/// deterministic intent parsing. Maps dialect variations and speech-recognition
+/// confabulations to canonical NEXUS command forms.
+pub fn normalize_phonetic_mishearings(text: &str) -> String {
+    let lower = text.to_lowercase();
+    let trimmed = lower.trim();
+
+    // 1. Full-phrase exact matches (fast path for common short utterances)
+    match trimmed {
+        "goes to mode" | "goes to mold" | "go to mode" | "post mode"
+        | "post modern" | "postmodern" | "coast mode" | "gold mode"
+        | "toast mode" | "host mode" | "dose mode" | "close mode"
+        | "ghost mood" | "ghost node" | "ghost mod"
+        | "the post mode" | "the ghost mode" | "the host mode" | "the coast mode" | "the gold mode" => return "ghost mode".to_string(),
+
+        "open what's up" | "open whats up" | "open what sap" | "open what app"
+        | "open watch app" | "open watts app" => return "open whatsapp".to_string(),
+
+        "open vs coat" | "open vs chord" | "open vs cord"
+        | "open visual studio coat" => return "open vs code".to_string(),
+
+        "open spot if I" | "open spot a file" | "open spotty fy"
+        | "open spot ify" => return "open spotify".to_string(),
+
+        "open this cord" | "open dis cord" => return "open discord".to_string(),
+
+        "open u tube" | "open you tube" => return "open youtube".to_string(),
+
+        "open note pad" | "open not pad" => return "open notepad".to_string(),
+
+        "stand down" | "stop it now" | "stahp" | "stopp" | "staup" => return "stop".to_string(),
+
+        "cancel action" | "cancel task" | "cancel that"
+        | "concel" | "cancle" | "cansel" | "consul" => return "cancel".to_string(),
+
+        "open command center" | "nexus settings" | "nexus preferences"
+        | "nexus config" => return "open settings".to_string(),
+
+        "comment hub" | "common hub" | "comma hub" | "comment center" | "common center" => return "command hub".to_string(),
+        "open comment hub" | "open common hub" | "open comment center" | "open common center" => return "open command hub".to_string(),
+
+        "open mute up" | "open new tablet" | "open new table" | "open new tap"
+        | "open neat tab" | "open mute tab" | "mute up" | "new tablet" => return "open new tab".to_string(),
+
+        "roo top two" | "two top two" | "to top two" | "tabletop" | "table top two" => return "tab 2".to_string(),
+
+        _ => {}
+    }
+
+    // 2. Substring & phrase-level contextual replacements
+    let mut out = lower;
+
+    // Browser tab phonetic mishearings (longest first to avoid partial substring collisions)
+    let tab_phrases = [
+        ("open new tablet", "open new tab"),
+        ("open new table", "open new tab"),
+        ("switch to top two", "switch to tab 2"),
+        ("move to top two", "move to tab 2"),
+        ("open mute tab", "open new tab"),
+        ("open neat tab", "open new tab"),
+        ("open mute up", "open new tab"),
+        ("open new tap", "open new tab"),
+        ("table top two", "tab 2"),
+        ("two top three", "tab 3"),
+        ("to top three", "tab 3"),
+        ("go to top two", "go to tab 2"),
+        ("two top one", "tab 1"),
+        ("two top two", "tab 2"),
+        ("to top one", "tab 1"),
+        ("to top two", "tab 2"),
+        ("roo top two", "tab 2"),
+        ("new tablet", "new tab"),
+        ("roo top 1", "tab 1"),
+        ("roo top 2", "tab 2"),
+        ("roo top 3", "tab 3"),
+        ("roo top 4", "tab 4"),
+        ("two top 1", "tab 1"),
+        ("two top 2", "tab 2"),
+        ("two top 3", "tab 3"),
+        ("two top 4", "tab 4"),
+        ("to top 1", "tab 1"),
+        ("to top 2", "tab 2"),
+        ("to top 3", "tab 3"),
+        ("to top 4", "tab 4"),
+        ("tabletop", "tab 2"),
+        ("mute up", "new tab"),
+    ];
+    for (from, to) in tab_phrases {
+        if out.contains(from) {
+            out = out.replace(from, to);
+        }
+    }
+
+    // Ghost mode soundalike phrase replacements
+    let ghost_phrases = [
+        ("the post mode", "ghost mode"),
+        ("the ghost mode", "ghost mode"),
+        ("the host mode", "ghost mode"),
+        ("the coast mode", "ghost mode"),
+        ("the gold mode", "ghost mode"),
+        ("goes to mode", "ghost mode"),
+        ("goes to mold", "ghost mode"),
+        ("go to mode", "ghost mode"),
+        ("post modern", "ghost mode"),
+        ("postmodern", "ghost mode"),
+        ("post mode", "ghost mode"),
+        ("coast mode", "ghost mode"),
+        ("gold mode", "ghost mode"),
+        ("toast mode", "ghost mode"),
+        ("dose mode", "ghost mode"),
+        ("close mode", "ghost mode"),
+        ("ghost mood", "ghost mode"),
+        ("ghost node", "ghost mode"),
+    ];
+    for (from, to) in ghost_phrases {
+        if out.contains(from) {
+            out = out.replace(from, to);
+        }
+    }
+
+    // Command hub phonetic mishearings
+    let command_hub_phrases = [
+        ("comment hub", "command hub"),
+        ("common hub", "command hub"),
+        ("comma hub", "command hub"),
+        ("comment center", "command center"),
+        ("common center", "command center"),
+    ];
+    for (from, to) in command_hub_phrases {
+        if out.contains(from) {
+            out = out.replace(from, to);
+        }
+    }
+
+    // Common app names in commands (e.g. "open what's up", "message mom on what's up")
+    let app_replacements = [
+        ("what's up", "whatsapp"),
+        ("whats up", "whatsapp"),
+        ("what sap", "whatsapp"),
+        ("what app", "whatsapp"),
+        ("watch app", "whatsapp"),
+        ("watts app", "whatsapp"),
+        ("vs coat", "vs code"),
+        ("vs chord", "vs code"),
+        ("spot if i", "spotify"),
+        ("spot a file", "spotify"),
+        ("this cord", "discord"),
+        ("dis cord", "discord"),
+        ("u tube", "youtube"),
+        ("you tube", "youtube"),
+        ("note pad", "notepad"),
+    ];
+
+    for (from, to) in app_replacements {
+        if out.starts_with(&format!("open {}", from))
+            || out.starts_with(&format!("launch {}", from))
+            || out.starts_with(&format!("start {}", from))
+            || out.starts_with(&format!("close {}", from))
+            || out.contains(&format!("on {}", from))
+            || out.contains(&format!("in {}", from))
+            || out.contains(&format!("to {}", from))
+            || out.contains(&format!("via {}", from))
+        {
+            out = out.replace(from, to);
+        }
+    }
+
+    // Search soundalike phrase replacements (e.g. "so it's for almonds" -> "search for almonds")
+    let search_phrases = [
+        ("so it's for ", "search for "),
+        ("so its for ", "search for "),
+        ("so it is for ", "search for "),
+        ("it's for ", "search for "),
+        ("its for ", "search for "),
+        ("it is for ", "search for "),
+        ("search that on ", "search for "),
+    ];
+    for (from, to) in search_phrases {
+        if out.starts_with(from) {
+            out = format!("{}{}", to, &out[from.len()..]);
+        }
+    }
+
+    out
+}
 
 fn normalize_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -3258,6 +4315,28 @@ fn strip_trailing_punctuation(s: &str) -> String {
         matches!(c, '.' | ',' | '?' | '!' | ';' | ':' | '"' | '\'' | ')' | ']' | '…')
     });
     trimmed.to_string()
+}
+
+/// Strip leading punctuation and orphaned single-letter prefixes that STT
+/// engines frequently output on whisper/silence onset (e.g. "S. Ghost mode." -> "ghost mode",
+/// "- open chrome" -> "open chrome", ". open whatsapp" -> "open whatsapp").
+fn strip_leading_stray_punctuation(s: &str) -> String {
+    let trimmed = s.trim_start_matches(|c: char| {
+        matches!(c, '.' | ',' | '?' | '!' | ';' | ':' | '"' | '\'' | '(' | '[' | '-' | '_' | '…' | '~')
+    });
+    let s_clean = trimmed.trim();
+    if s_clean.len() >= 3 {
+        let mut chars = s_clean.chars();
+        let c1 = chars.next().unwrap();
+        let c2 = chars.next().unwrap();
+        if c1.is_ascii_alphabetic() && (c2 == '.' || c2 == ' ') {
+            // Stray prefix like "s. " or "s " or "d. "
+            if c2 == '.' || matches!(c1, 's' | 'z' | 'd' | 'b' | 'c' | 'f' | 'g' | 'j' | 'k' | 'p' | 'q' | 'r' | 't' | 'v' | 'w' | 'x' | 'y') {
+                return s_clean[2..].trim_start_matches(|c: char| matches!(c, '.' | ',' | ' ')).to_string();
+            }
+        }
+    }
+    s_clean.to_string()
 }
 
 /// Leading filler words that STT often inserts before the actual command.
@@ -3576,7 +4655,10 @@ fn parse_live_command(text: &str) -> Option<ParseResult> {
     // greeting parser (they return "Very well, sir." which is appropriate).
     // In live mode, the orchestrator should also reset the state machine
     // when it sees a Greeting that is actually a cancel.
-    if text == "stop" {
+    // "stop please" included: STOP_PHRASES claims it (ghost drill
+    // intercept), so the parser must agree — previously None (P0
+    // fixture miss). Safe: the media arm matches exact "stop" only.
+    if text == "stop" || text == "stop please" {
         return Some(ParseResult {
             intent: ParsedIntent::NluResult {
                 intent: "cancel_action".to_string(),
@@ -3589,7 +4671,42 @@ fn parse_live_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- New tab ---
-    if text == "new tab" || text == "open new tab" || text == "open a new tab" {
+    // Verbs users actually say: "new tab", "open ...", "create ..." —
+    // a missed verb here routes a 1.0-confidence local action into the
+    // NLU/Worker lottery (live miss: "create a new tab" → silence).
+    // Also tolerates filler-prefixed/multi-sentence captures
+    // ("open tab. create a new tab." → last segment is the command).
+    const NEW_TAB_OPENERS: &[&str] = &[
+        "open", "open a", "open the", "create", "create a", "create the",
+        "make", "make a", "start", "start a", "get", "get me", "get me a",
+        "give", "give me", "give me a", "please open", "please create",
+        "can you open", "can you create", "could you open", "could you create",
+    ];
+    // Strip polite prefixes once ("can you open a new tab" → "open a new tab").
+    let mut clean: &str = &text;
+    for polite in ["can you ", "could you ", "would you ", "please ", "just "] {
+        if let Some(rest) = clean.strip_prefix(polite) {
+            clean = rest;
+            break;
+        }
+    }
+    let is_new_tab = clean == "new tab"
+        || clean == "tab"
+        || clean == "open tab"
+        || clean == "open a tab"
+        || NEW_TAB_OPENERS.iter().any(|o| {
+            clean == format!("{o} new tab") || clean == format!("{o} tab")
+        });
+    // Multi-sentence capture: the LAST ". " segment is the command
+    // ("Open tab. Create a new tab." → "create a new tab").
+    let is_new_tab = is_new_tab || text.rfind(". ").map_or(false, |idx| {
+        let last = &text[idx + 2..];
+        last == "new tab" || last == "tab"
+            || NEW_TAB_OPENERS.iter().any(|o| {
+                last == format!("{o} new tab") || last == format!("{o} tab")
+            })
+    });
+    if is_new_tab {
         return Some(ParseResult {
             intent: ParsedIntent::NluResult {
                 intent: "browser_new_tab".to_string(),
@@ -3642,6 +4759,54 @@ mod tests {
         assert!(result.is_some());
         let r = result.unwrap();
         assert!(matches!(r.intent, ParsedIntent::OpenSettings));
+    }
+
+    #[test]
+    fn test_open_command_hub() {
+        let r1 = parse_deterministic("open command hub").unwrap();
+        assert!(matches!(r1.intent, ParsedIntent::OpenSettings));
+
+        let r2 = parse_deterministic("open the nexus hub").unwrap();
+        assert!(matches!(r2.intent, ParsedIntent::OpenSettings));
+
+        let r3 = parse_deterministic("command hub").unwrap();
+        assert!(matches!(r3.intent, ParsedIntent::OpenSettings));
+
+        let r4 = parse_deterministic("NEXUS comment hub.").unwrap();
+        assert!(matches!(r4.intent, ParsedIntent::OpenSettings));
+
+        let r5 = parse_deterministic("comment hub").unwrap();
+        assert!(matches!(r5.intent, ParsedIntent::OpenSettings));
+
+        let r6 = parse_deterministic("open comment hub").unwrap();
+        assert!(matches!(r6.intent, ParsedIntent::OpenSettings));
+
+        let r7 = parse_deterministic("Nexus. Nexus command hub.").unwrap();
+        assert!(matches!(r7.intent, ParsedIntent::OpenSettings));
+
+        let r8 = parse_deterministic("the nexus command hub").unwrap();
+        assert!(matches!(r8.intent, ParsedIntent::OpenSettings));
+
+        let r9 = parse_deterministic("the command hub").unwrap();
+        assert!(matches!(r9.intent, ParsedIntent::OpenSettings));
+
+        let r10 = parse_deterministic("nexus command hub").unwrap();
+        assert!(matches!(r10.intent, ParsedIntent::OpenSettings));
+
+        let r11 = parse_deterministic("show command hub").unwrap();
+        assert!(matches!(r11.intent, ParsedIntent::OpenSettings));
+
+        let r12 = parse_deterministic("bring up the command hub").unwrap();
+        assert!(matches!(r12.intent, ParsedIntent::OpenSettings));
+
+        let r13 = parse_deterministic("command hub please").unwrap();
+        assert!(matches!(r13.intent, ParsedIntent::OpenSettings));
+
+        let r14 = parse_deterministic("nexus control hub").unwrap();
+        assert!(matches!(r14.intent, ParsedIntent::OpenSettings));
+
+        let r15 = parse_deterministic("open control hub").unwrap();
+        assert!(matches!(r15.intent, ParsedIntent::OpenSettings));
     }
 
     #[test]
@@ -3906,6 +5071,41 @@ mod tests {
         assert!(result.is_some());
         let r = result.unwrap();
         assert!(matches!(r.intent, ParsedIntent::MediaNext));
+    }
+
+    #[test]
+    fn test_architect_false_positives_rejected() {
+        // "open" or "open-" alone must NEVER match open_architect
+        assert!(!is_architect_command("open"));
+        assert!(!is_architect_command("open-"));
+        assert!(!is_architect_fuzzy("open"));
+        assert!(!is_architect_fuzzy("open-"));
+
+        // Conversational/other commands starting with "open" must not match open_architect
+        assert!(!is_architect_fuzzy("open our project"));
+        assert!(!is_architect_fuzzy("open are you listening"));
+        assert!(!is_architect_fuzzy("open article"));
+        assert!(!is_architect_fuzzy("open archive"));
+        assert!(!is_architect_fuzzy("open mac"));
+        assert!(!is_architect_fuzzy("open master"));
+        assert!(!is_architect_fuzzy("open drift"));
+        assert!(!is_architect_fuzzy("open breath"));
+    }
+
+    #[test]
+    fn test_ghost_mode_stray_punctuation() {
+        // Whisper often prefixes stray single letters or punctuation on silence onset
+        let r1 = parse_deterministic("S. Ghost mode.");
+        assert!(r1.is_some(), "S. Ghost mode. should match EnterGhostControl");
+        assert!(matches!(r1.unwrap().intent, ParsedIntent::EnterGhostControl));
+
+        let r2 = parse_deterministic(". ghost mode");
+        assert!(r2.is_some(), ". ghost mode should match EnterGhostControl");
+        assert!(matches!(r2.unwrap().intent, ParsedIntent::EnterGhostControl));
+
+        let r3 = parse_deterministic("- ghost mode");
+        assert!(r3.is_some(), "- ghost mode should match EnterGhostControl");
+        assert!(matches!(r3.unwrap().intent, ParsedIntent::EnterGhostControl));
     }
 
     #[test]
@@ -5255,6 +6455,94 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_live_create_new_tab_verbs() {
+        // Live miss 2026-09-28: "create a new tab" fell through to NLU.
+        for p in ["create a new tab", "create new tab", "open a new tab"] {
+            let result = parse_deterministic(p);
+            assert!(result.is_some(), "no parse for {p}");
+            if let ParsedIntent::NluResult { intent, .. } = result.unwrap().intent {
+                assert_eq!(intent, "browser_new_tab", "wrong intent for {p}");
+            } else {
+                panic!("expected NluResult for {p}");
+            }
+        }
+    }
+
+    /// Tolerant forms: bare "open tab"/"open a tab" and multi-sentence
+    /// captures ("Open tab. Create a new tab." → last segment wins).
+    #[test]
+    fn test_parse_live_new_tab_tolerant_forms() {
+        for p in [
+            "open tab",
+            "open a tab",
+            "make a new tab",
+            "can you open a new tab",
+            "Open tab. Create a new tab.",
+            "and then the. open a new tab.",
+        ] {
+            let result = parse_deterministic(p);
+            assert!(result.is_some(), "no parse for {p}");
+            if let ParsedIntent::NluResult { intent, .. } = result.unwrap().intent {
+                assert_eq!(intent, "browser_new_tab", "wrong intent for {p}");
+            } else {
+                panic!("expected NluResult for {p}");
+            }
+        }
+    }
+
+    /// Resolve like the E2E fixture: inner intent for wrapped results,
+    /// snake label otherwise, "none" for no-parse.
+    fn wake_matrix_label(transcript: &str) -> String {
+        match parse_deterministic(transcript) {
+            None => "none".to_string(),
+            Some(r) => match &r.intent {
+                ParsedIntent::NluResult { intent, .. } => intent.clone(),
+                other => intent_to_label(other).to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn test_wake_prefix_retry_matrix() {
+        // Hot-mic captures include the wake word verbatim (KWS skipped
+        // during capture). Every row failed with None before the retry.
+        for (phrase, expected) in [
+            ("nexus open chrome", "open_app"),
+            ("hey nexus open chrome", "open_app"),
+            ("nexus open whatsapp", "open_app"),
+            ("nexus search for cats", "search"),
+            ("nexus ghost mode", "enter_ghost_control"),
+            ("nexus exit ghost mode", "exit_ghost_control"),
+            ("nexus command center", "open_settings"),
+            ("nexus settings", "open_settings"),
+            // Truth, not ideal: bare "stop" hits the media arm, so the
+            // prefixed form agrees with it (drill intercept owns in-session).
+            ("ok nexus stop", "media_stop"),
+        ] {
+            assert_eq!(wake_matrix_label(phrase), expected, "phrase={phrase}");
+        }
+        // Worker-owned remainders still fall through (None → NLU/brain),
+        // and bare wake words keep their first-pass result (never stripped
+        // to empty, never re-routed).
+        assert_eq!(wake_matrix_label("nexus what's the weather"), "none");
+        assert_eq!(wake_matrix_label("hey nexus what time is it"), "none");
+        assert_eq!(wake_matrix_label("hey nexus"), "greeting");
+    }
+
+    #[test]
+    fn test_strip_wake_prefix_guards() {
+        assert_eq!(strip_wake_prefix("nexus open chrome"), Some("open chrome".to_string()));
+        assert_eq!(strip_wake_prefix("hey nexus open chrome"), Some("open chrome".to_string()));
+        assert_eq!(strip_wake_prefix("ok nexus stop"), Some("stop".to_string()));
+        // No prefix / not a boundary / nothing remains → None.
+        assert_eq!(strip_wake_prefix("open chrome"), None);
+        assert_eq!(strip_wake_prefix("nexus5"), None);
+        assert_eq!(strip_wake_prefix("nexus"), None);
+        assert_eq!(strip_wake_prefix("hey nexus"), None);
+        assert_eq!(strip_wake_prefix(""), None);
+    }
+
+    #[test]
     fn test_parse_live_does_not_interfere_with_open() {
         // "open whatsapp" should still be OpenApp, not a live command
         let result = parse_deterministic("open whatsapp");
@@ -5754,14 +7042,10 @@ mod tests {
         for phrase in [
             "ghostwriter",
             "ghost writer",
-            "ghost mode",
-            "go ghost mode",
             "ghostwriter mode",
             "open ghostwriter",
             "open ghostwriter mode",
             "open the ghostwriter mode",
-            "open ghost mode",
-            "open the ghost mode",
             "take a letter",
             "write this down",
             "scribe",
@@ -5774,6 +7058,41 @@ mod tests {
                 ParsedIntent::EnterGhostwriter { .. }
             ));
         }
+    }
+
+    #[test]
+    fn test_ghost_mode_means_cursor_control_not_dictation() {
+        // The reported collision: "ghost mode" opened the Ghostwriter
+        // dictation room. It must enter cursor-control Ghost Mode.
+        for phrase in [
+            "ghost mode",
+            "go ghost mode",
+            "open ghost mode",
+            "open the ghost mode",
+            "start ghost mode",
+            "take the mouse",
+            "control my cursor",
+            "control the cursor",
+            "ghost cursor",
+            "take control",
+        ] {
+            let result = parse_deterministic(phrase);
+            assert!(result.is_some(), "{phrase} should enter Ghost Mode");
+            assert!(
+                matches!(result.unwrap().intent, ParsedIntent::EnterGhostControl),
+                "{phrase} must NOT enter Ghostwriter"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ghost_mode_with_trailing_words_is_not_an_entry() {
+        // Strict exact match: sentences about ghost mode must not enter.
+        assert!(parse_deterministic("ghost mode is confusing").is_none()
+            || !matches!(
+                parse_deterministic("ghost mode is confusing").unwrap().intent,
+                ParsedIntent::EnterGhostControl | ParsedIntent::EnterGhostwriter { .. }
+            ));
     }
 
     #[test]
@@ -5814,6 +7133,8 @@ mod tests {
             ("move to the 4th tab", 4u32),
             ("go to 2nd tab", 2),
             ("switch to the 1st tab", 1),
+            ("shift to tab 3", 3),
+            ("shift to the 3rd tab", 3),
             ("tab 3", 3),
         ] {
             let result = parse_deterministic(phrase);
@@ -5824,6 +7145,37 @@ mod tests {
                 panic!("expected BrowserTab for {phrase}");
             }
         }
+    }
+
+    /// "shift to" was a live miss ("shift to tab 3" → Unknown → Worker chat).
+    #[test]
+    fn test_browser_close_tab_forms() {
+        for (phrase, want) in [
+            ("close tab 5", Some(5u32)),
+            ("delete the 5th tab", Some(5)),
+            ("delete tab 2", Some(2)),
+            ("close this tab", None),
+            ("close tab", None),
+            ("delete the tab", None),
+        ] {
+            let result = parse_deterministic(phrase);
+            assert!(result.is_some(), "{phrase} should parse");
+            if let ParsedIntent::BrowserCloseTab { index } = result.unwrap().intent {
+                assert_eq!(index, want, "{phrase}");
+            } else {
+                panic!("expected BrowserCloseTab for {phrase}");
+            }
+        }
+    }
+
+    /// "close chrome" must still be CloseApp, not a close-tab false hit.
+    #[test]
+    fn test_close_app_not_close_tab() {
+        let result = parse_deterministic("close chrome");
+        assert!(matches!(
+            result.unwrap().intent,
+            ParsedIntent::CloseApp { .. }
+        ));
     }
 
     #[test]
@@ -5858,5 +7210,405 @@ mod tests {
             }),
             "send_whatsapp_message"
         );
+        assert_eq!(
+            intent_to_label(&ParsedIntent::BrowserSearch {
+                query: "dribble".to_string(),
+            }),
+            "browser_search"
+        );
+        assert_eq!(
+            intent_to_label(&ParsedIntent::BrowserSearchFocus),
+            "browser_search_focus"
+        );
+        assert_eq!(
+            intent_to_label(&ParsedIntent::StartDictation),
+            "start_dictation"
+        );
+        assert_eq!(
+            intent_to_label(&ParsedIntent::StopDictation),
+            "stop_dictation"
+        );
+    }
+
+    #[test]
+    fn test_browser_search_and_dictation() {
+        for phrase in ["search", "search bar", "focus search", "focus address bar", "address bar"] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "expected match for '{phrase}'");
+            assert!(matches!(res.unwrap().intent, ParsedIntent::BrowserSearchFocus));
+        }
+
+        let res = parse_deterministic("search in browser dribble");
+        assert!(res.is_some());
+        if let ParsedIntent::BrowserSearch { query } = res.unwrap().intent {
+            assert_eq!(query, "dribble");
+        } else {
+            panic!("expected BrowserSearch for 'search in browser dribble'");
+        }
+
+        for phrase in [
+            "start typing",
+            "type whatever i say",
+            "type whatever i am saying",
+            "type line by line",
+            "start dictation",
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "expected match for '{phrase}'");
+            assert!(matches!(res.unwrap().intent, ParsedIntent::StartDictation));
+        }
+
+        for phrase in [
+            "stop typing",
+            "stop dictation",
+            "done typing",
+            "exit dictation",
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "expected match for '{phrase}'");
+            assert!(matches!(res.unwrap().intent, ParsedIntent::StopDictation));
+        }
+    }
+
+    #[test]
+    fn test_ghost_mode_phonetic_soundalikes() {
+        for phrase in [
+            "goes to mode",
+            "goes to mold",
+            "go to mode",
+            "post mode",
+            "the post mode",
+            "the ghost mode",
+            "post modern",
+            "postmodern",
+            "coast mode",
+            "gold mode",
+            "toast mode",
+            "host mode",
+            "dose mode",
+            "close mode",
+            "ghost mood",
+            "ghost node",
+            "ghost mod",
+            "activate ghost mode",
+            "activate ghost",
+            "turn on ghost mode",
+            "open ghost mode",
+            "start ghost mode",
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(
+                res.is_some(),
+                "Expected ghost control match for misheard phrase: '{}'",
+                phrase
+            );
+            assert!(
+                matches!(res.unwrap().intent, ParsedIntent::EnterGhostControl),
+                "Expected EnterGhostControl for phrase: '{}'",
+                phrase
+            );
+        }
+    }
+
+    #[test]
+    fn test_app_phonetic_mishearings() {
+        let res = parse_deterministic("open what's up");
+        assert!(res.is_some());
+        assert!(matches!(res.unwrap().intent, ParsedIntent::OpenApp { ref target } if target == "whatsapp"));
+
+        let res = parse_deterministic("open vs coat");
+        assert!(res.is_some());
+        assert!(matches!(res.unwrap().intent, ParsedIntent::OpenApp { ref target } if target == "visual studio code" || target == "vs code"));
+
+        let res = parse_deterministic("open spot if I");
+        assert!(res.is_some());
+        assert!(matches!(res.unwrap().intent, ParsedIntent::OpenApp { ref target } if target == "spotify"));
+    }
+
+    #[test]
+    fn test_watch_screen_email_command() {
+        for phrase in [
+            "update me whenever there is any update on the deadline or anything for this email",
+            "update me whenever there is an update on this email",
+            "watch this email for deadline changes",
+            "track this email and notify me if anything changes",
+            "keep an eye on this email",
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(
+                res.is_some(),
+                "Expected watch screen email match for phrase: '{}'",
+                phrase
+            );
+            assert!(
+                matches!(res.unwrap().intent, ParsedIntent::WatchScreenEmail),
+                "Expected WatchScreenEmail for phrase: '{}'",
+                phrase
+            );
+        }
+    }
+
+    #[test]
+    fn test_tab_phonetic_mishearings() {
+        for phrase in [
+            "open mute up",
+            "open new tablet",
+            "open new table",
+            "open new tap",
+            "open neat tab",
+            "open mute tab",
+            "mute up",
+            "new tablet",
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(
+                res.is_some(),
+                "Expected new tab match for misheard phrase: '{}'",
+                phrase
+            );
+            if let ParsedIntent::NluResult { intent, .. } = res.unwrap().intent {
+                assert_eq!(intent, "browser_new_tab", "Expected browser_new_tab for '{}'", phrase);
+            } else {
+                panic!("Expected NluResult(browser_new_tab) for '{}'", phrase);
+            }
+        }
+
+        for phrase in [
+            "tab 2",
+            "roo top two",
+            "two top two",
+            "to top two",
+            "tabletop",
+            "table top two",
+            "move to top two",
+            "switch to top two",
+            "go to top two",
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(
+                res.is_some(),
+                "Expected browser tab match for misheard phrase: '{}'",
+                phrase
+            );
+            if let ParsedIntent::BrowserTab { index } = res.unwrap().intent {
+                assert_eq!(index, 2, "Expected tab 2 for '{}'", phrase);
+            } else {
+                panic!("Expected BrowserTab {{ index: 2 }} for '{}'", phrase);
+            }
+        }
+    }
+
+    #[test]
+    fn test_unbreakable_type_dictation_payload() {
+        let res = parse_deterministic("type so it analysis for the servx right send it to as soon as possible");
+        assert!(res.is_some(), "Expected type_text match");
+        let parsed = res.unwrap();
+        if let ParsedIntent::NluResult { intent, slots, .. } = parsed.intent {
+            assert_eq!(intent, "type_text");
+            assert_eq!(slots["text"], "so it analysis for the servx right send it to as soon as possible");
+        } else {
+            panic!("Expected NluResult(type_text)");
+        }
+
+        let bare = parse_deterministic("type");
+        assert!(bare.is_some());
+        assert!(matches!(bare.unwrap().intent, ParsedIntent::StartDictation));
+    }
+
+    /// Doc 07 P2: window control + named-element click are deterministic,
+    /// zero-model-cost, bare commands — never fall through to NLU/Worker.
+    #[test]
+    fn test_window_control_phrases_are_deterministic() {
+        for phrase in ["minimize", "minimize the window", "minimize this window", "minimize it"] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "'{phrase}' should match");
+            let r = res.unwrap();
+            assert_eq!(r.source, "deterministic");
+            match r.intent {
+                ParsedIntent::NluResult { intent, .. } => assert_eq!(intent, "system_minimize_window"),
+                other => panic!("'{phrase}' expected system_minimize_window, got {other:?}"),
+            }
+        }
+        for phrase in ["maximize", "maximize the window", "full screen this", "make this full screen"] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "'{phrase}' should match");
+            match res.unwrap().intent {
+                ParsedIntent::NluResult { intent, .. } => assert_eq!(intent, "system_maximize_window"),
+                other => panic!("'{phrase}' expected system_maximize_window, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_click_element_by_name_is_deterministic() {
+        for (phrase, expected_name) in [
+            ("click submit", "submit"),
+            ("click on submit", "submit"),
+            ("click the save button", "save"),
+            ("press the ok button", "ok"),
+            ("press the cancel button", "cancel"),
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "'{phrase}' should match");
+            let r = res.unwrap();
+            assert_eq!(r.source, "deterministic");
+            match r.intent {
+                ParsedIntent::NluResult { intent, slots, .. } => {
+                    assert_eq!(intent, "system_click_element");
+                    assert_eq!(slots["name"], expected_name, "for phrase '{phrase}'");
+                }
+                other => panic!("'{phrase}' expected system_click_element, got {other:?}"),
+            }
+        }
+    }
+
+    /// Ordinal click phrasing must still win over the named-element
+    /// fallback — the ordinal loop runs first in parse_screen_command.
+    #[test]
+    fn test_click_ordinal_not_shadowed_by_named_click() {
+        let res = parse_deterministic("click the 3rd option");
+        assert!(res.is_some());
+        assert!(matches!(res.unwrap().intent, ParsedIntent::ScreenClick { ordinal: 3 }));
+    }
+
+    #[test]
+    fn test_screen_analysis_phrases() {
+        // Phase 1 expanded triggers (2026-10-01): analyse + screen, what's
+        // on screen, what do I see, describe/read/scan/check + screen, and
+        // research anchored to this/screen.
+        for phrase in [
+            "analyse the screen",
+            "analyze the screen",
+            "analyse my screen for me",
+            "analyze the screen for me",
+            "what's on my screen",
+            "what is on the screen",
+            "what do i see",
+            "explain what i see",
+            "describe my screen",
+            "read my screen",
+            "scan my screen",
+            "check my screen",
+            "research on this for me",
+            "research this screen",
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "Expected screen_analysis for '{}'", phrase);
+            if let ParsedIntent::NluResult { intent, .. } = res.unwrap().intent {
+                assert_eq!(intent, "screen_analysis");
+            } else {
+                panic!("Expected screen_analysis for '{}'", phrase);
+            }
+        }
+        // Misfire guards: repo analyse, PR analyse, and general research
+        // must NOT trigger screen_analysis.
+        for phrase in [
+            "analyse servx",
+            "analyze pr 5 in zync",
+            "research quantum computing",
+        ] {
+            let res = parse_deterministic(phrase);
+            if let Some(ParsedIntent::NluResult { intent, .. }) = res.map(|r| r.intent) {
+                assert_ne!(intent, "screen_analysis", "'{}' must not trigger screen_analysis", phrase);
+            }
+        }
+    }
+
+    #[test]
+    fn test_screen_annotation_phrases() {
+        // Feature 87 triggers: annotate/draw + screen anchor, architecture
+        // family, and element-adding family.
+        for phrase in [
+            "annotate my screen",
+            "draw on the screen",
+            "mark up this display",
+            "sketch on the screen",
+            "create an architecture diagram",
+            "make an arch diagram",
+            "build a diagram of this",
+            "add an arrow to the screen",
+            "add a checkbox on this",
+            "add text to my screen",
+            "add a note to the display",
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "Expected screen_annotation for '{}'", phrase);
+            if let ParsedIntent::NluResult { intent, .. } = res.unwrap().intent {
+                assert_eq!(intent, "screen_annotation");
+            } else {
+                panic!("Expected screen_annotation for '{}'", phrase);
+            }
+        }
+        // Misfire guards: non-screen draw, repo analyse, and general nouns
+        // must NOT trigger screen_annotation.
+        for phrase in [
+            "draw the curtains",
+            "analyse servx",
+            "research quantum computing",
+            "open architecture mapper",
+        ] {
+            let res = parse_deterministic(phrase);
+            if let Some(ParsedIntent::NluResult { intent, .. }) = res.map(|r| r.intent) {
+                assert_ne!(intent, "screen_annotation", "'{}' must not trigger screen_annotation", phrase);
+            }
+        }
+    }
+
+    #[test]
+    fn test_screen_click_results() {
+        for (phrase, expected) in [
+            ("open the 2 in the result", 2),
+            ("open the 2nd result", 2),
+            ("open result 2", 2),
+            ("click the second result", 2),
+            ("click result 3", 3),
+            ("open the 1st result", 1),
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "Expected ScreenClick for '{}'", phrase);
+            if let ParsedIntent::ScreenClick { ordinal } = res.unwrap().intent {
+                assert_eq!(ordinal, expected, "Mismatch for '{}'", phrase);
+            } else {
+                panic!("Expected ScreenClick for '{}'", phrase);
+            }
+        }
+    }
+
+    /// Doc 07 P5: STT noise on "stop"/"cancel" normalizes before the
+    /// ghost drill's stop-word intercept checks it (orchestrator.rs ORs
+    /// the raw and normalized transcript against is_stop_phrase).
+    #[test]
+    fn test_phonetic_stop_cancel_variants() {
+        for (heard, expected) in [
+            ("stahp", "stop"),
+            ("stopp", "stop"),
+            ("staup", "stop"),
+            ("concel", "cancel"),
+            ("cancle", "cancel"),
+            ("cansel", "cancel"),
+            ("consul", "cancel"),
+        ] {
+            assert_eq!(normalize_phonetic_mishearings(heard), expected, "for '{heard}'");
+            assert!(crate::ghost::is_stop_phrase(&normalize_phonetic_mishearings(heard)), "'{heard}' should normalize to a stop phrase");
+        }
+    }
+
+    #[test]
+    fn test_phonetic_search_almonds() {
+        for phrase in [
+            "search for almonds",
+            "so it's for almonds.",
+            "so it is for almonds",
+            "search that on almonds",
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "Expected Search for '{}'", phrase);
+            if let ParsedIntent::Search { query } = res.unwrap().intent {
+                assert_eq!(query, "almonds", "Expected query almonds for '{}'", phrase);
+            } else {
+                panic!("Expected Search for '{}'", phrase);
+            }
+        }
     }
 }
+

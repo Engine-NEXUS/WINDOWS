@@ -26,7 +26,91 @@ const GROQ_MODEL: &str = "whisper-large-v3-turbo";
 /// The alias map (`canonical_repo_name`) and heard-text NLU rows stay as
 /// the downstream safety net — prompt biasing reduces errors, it never
 /// eliminates them.
-pub const NEXUS_VOCABULARY: &str = "Analyse the Servx repo. Show me the pull requests in Zync. Check Eesha's PR in Servx. List all open pull requests and tell me about them. Message Prem on WhatsApp. Merge the pull request. NEXUS GitHub Supabase Tailscale Ollama Qwen GLM n8n Meet Congi Shopkart Ledger Lakshya architect workflow release branch";
+pub const NEXUS_VOCABULARY: &str = "Activate ghost mode. Open ghost mode. Start ghost mode. Exit ghost mode. Open WhatsApp. Open Chrome. Open VS Code. Open Spotify. Open Discord. Open browser. Open settings. Open architecture mapper. List pull requests. Merge pull request. Servx Zync Eesha Prem Lakshya Congi Shopkart GitHub Supabase NEXUS open close stop cancel navigate settings search.";
+
+/// Neutral English decoder instruction used when a turn has not been
+/// owner-verified. Unlike the owner vocabulary, it does not bias Whisper
+/// toward NEXUS commands or known entities.
+pub const NEUTRAL_DECODER_PROMPT: &str = "Transcribe this English audio exactly as spoken.";
+
+/// Locked English-only Groq transcription contract. Every STT upload must use
+/// these decoder settings; language support is a routing concern, not a
+/// per-call option.
+pub const STT_LANGUAGE: &str = "en";
+pub const STT_TEMPERATURE: &str = "0";
+pub const STT_RESPONSE_FORMAT: &str = "json";
+pub const STT_VERBOSE_RESPONSE_FORMAT: &str = "verbose_json";
+
+/// Decoder bias selected from turn ownership. Owner-verified captures may use
+/// the NEXUS vocabulary; all other captures use the neutral English prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecoderBias {
+    OwnerCommand,
+    Neutral,
+}
+
+/// Pure Groq multipart fields. Centralizing these values prevents one STT path
+/// from accidentally permitting another language, temperature, or format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GroqTranscriptionFields {
+    pub model: &'static str,
+    pub language: &'static str,
+    pub temperature: &'static str,
+    pub response_format: &'static str,
+    pub prompt: &'static str,
+    pub file_name: String,
+    pub mime: String,
+}
+
+pub(crate) fn decoder_prompt(prompt: Option<&'static str>) -> &'static str {
+    prompt.unwrap_or(NEUTRAL_DECODER_PROMPT)
+}
+
+pub(crate) fn decoder_bias_prompt(bias: DecoderBias) -> &'static str {
+    match bias {
+        DecoderBias::OwnerCommand => NEXUS_VOCABULARY,
+        DecoderBias::Neutral => NEUTRAL_DECODER_PROMPT,
+    }
+}
+
+pub(crate) fn transcription_fields(
+    file_name: &str,
+    mime: &str,
+    prompt: Option<&'static str>,
+    verbose: bool,
+) -> GroqTranscriptionFields {
+    GroqTranscriptionFields {
+        model: GROQ_MODEL,
+        language: STT_LANGUAGE,
+        temperature: STT_TEMPERATURE,
+        response_format: if verbose {
+            STT_VERBOSE_RESPONSE_FORMAT
+        } else {
+            STT_RESPONSE_FORMAT
+        },
+        prompt: decoder_prompt(prompt),
+        file_name: file_name.to_string(),
+        mime: mime.to_string(),
+    }
+}
+
+fn groq_transcription_form(
+    file_bytes: Vec<u8>,
+    fields: &GroqTranscriptionFields,
+) -> Result<reqwest::multipart::Form, String> {
+    let part = reqwest::multipart::Part::bytes(file_bytes)
+        .file_name(fields.file_name.clone())
+        .mime_str(&fields.mime)
+        .map_err(|e| format!("MIME error: {}", e))?;
+
+    Ok(reqwest::multipart::Form::new()
+        .text("model", fields.model.to_string())
+        .text("language", fields.language.to_string())
+        .text("temperature", fields.temperature.to_string())
+        .text("response_format", fields.response_format.to_string())
+        .text("prompt", fields.prompt.to_string())
+        .part("file", part))
+}
 
 /// Transcribe audio using Groq's Whisper Large v3 Turbo model.
 ///
@@ -43,7 +127,7 @@ pub async fn transcribe_with_groq(
     samples: &[i16],
     api_key: &str,
     client: &Client,
-    prompt: Option<&str>,
+    prompt: Option<&'static str>,
 ) -> Result<String, String> {
     if api_key.is_empty() {
         return Err("No Groq API key provided".to_string());
@@ -56,19 +140,8 @@ pub async fn transcribe_with_groq(
         samples.len() / 16
     );
 
-    let part = reqwest::multipart::Part::bytes(wav_bytes)
-        .file_name("audio.wav")
-        .mime_str("audio/wav")
-        .map_err(|e| format!("MIME error: {}", e))?;
-
-    let mut form = reqwest::multipart::Form::new()
-        .text("model", GROQ_MODEL.to_string())
-        .text("language", "en".to_string())
-        .text("response_format", "json".to_string())
-        .part("file", part);
-    if let Some(p) = prompt {
-        form = form.text("prompt", p.to_string());
-    }
+    let fields = transcription_fields("audio.wav", "audio/wav", prompt, false);
+    let form = groq_transcription_form(wav_bytes, &fields)?;
 
     let start = std::time::Instant::now();
 
@@ -122,6 +195,7 @@ pub async fn transcribe_bytes_with_groq(
     mime: &str,
     api_key: &str,
     client: &Client,
+    prompt: Option<&'static str>,
 ) -> Result<String, String> {
     if api_key.is_empty() {
         return Err("No Groq API key provided".to_string());
@@ -130,16 +204,8 @@ pub async fn transcribe_bytes_with_groq(
         return Err("Empty audio".to_string());
     }
 
-    let part = reqwest::multipart::Part::bytes(audio.to_vec())
-        .file_name(filename.to_string())
-        .mime_str(mime)
-        .map_err(|e| format!("MIME error: {}", e))?;
-
-    let form = reqwest::multipart::Form::new()
-        .text("model", GROQ_MODEL.to_string())
-        .text("language", "en".to_string())
-        .text("response_format", "json".to_string())
-        .part("file", part);
+    let fields = transcription_fields(filename, mime, prompt, false);
+    let form = groq_transcription_form(audio.to_vec(), &fields)?;
 
     let start = std::time::Instant::now();
 
@@ -207,7 +273,7 @@ pub async fn transcribe_with_groq_verbose(
     samples: &[i16],
     api_key: &str,
     client: &Client,
-    prompt: Option<&str>,
+    prompt: Option<&'static str>,
 ) -> Result<(String, Vec<GroqSegment>), String> {
     if api_key.is_empty() {
         return Err("No Groq API key provided".to_string());
@@ -215,20 +281,8 @@ pub async fn transcribe_with_groq_verbose(
 
     let wav_bytes = pcm_to_wav(samples, 16000);
 
-    let part = reqwest::multipart::Part::bytes(wav_bytes)
-        .file_name("audio.wav")
-        .mime_str("audio/wav")
-        .map_err(|e| format!("MIME error: {}", e))?;
-
-    let mut form = reqwest::multipart::Form::new()
-        .text("model", GROQ_MODEL.to_string())
-        .text("language", "en".to_string())
-        .text("response_format", "verbose_json".to_string())
-        .text("temperature", "0".to_string())
-        .part("file", part);
-    if let Some(p) = prompt {
-        form = form.text("prompt", p.to_string());
-    }
+    let fields = transcription_fields("audio.wav", "audio/wav", prompt, true);
+    let form = groq_transcription_form(wav_bytes, &fields)?;
 
     let resp = client
         .post(GROQ_STT_URL)
@@ -369,6 +423,30 @@ mod tests {
                 "vocabulary missing: {term}"
             );
         }
+    }
+
+    #[test]
+    fn test_english_transcription_contract_is_locked() {
+        for verbose in [false, true] {
+            let fields = transcription_fields("audio.wav", "audio/wav", None, verbose);
+            assert_eq!(fields.model, GROQ_MODEL);
+            assert_eq!(fields.language, "en");
+            assert_eq!(fields.temperature, "0");
+            assert_eq!(fields.prompt, NEUTRAL_DECODER_PROMPT);
+            assert_eq!(
+                fields.response_format,
+                if verbose {
+                    STT_VERBOSE_RESPONSE_FORMAT
+                } else {
+                    STT_RESPONSE_FORMAT
+                }
+            );
+        }
+
+        let owner = transcription_fields("audio.wav", "audio/wav", Some(NEXUS_VOCABULARY), false);
+        assert_eq!(owner.prompt, NEXUS_VOCABULARY);
+        assert_eq!(decoder_bias_prompt(DecoderBias::OwnerCommand), NEXUS_VOCABULARY);
+        assert_eq!(decoder_bias_prompt(DecoderBias::Neutral), NEUTRAL_DECODER_PROMPT);
     }
 
     #[test]

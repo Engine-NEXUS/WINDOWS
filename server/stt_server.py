@@ -40,8 +40,10 @@ import time
 import io
 import struct
 import wave
+import array
+import json
 
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 log = logging.getLogger("NEXUS.stt")
@@ -204,6 +206,89 @@ async def transcribe(audio: UploadFile = File(...)) -> JSONResponse:
         len(audio_data), len(text), _elapsed, text,
     )
     return JSONResponse({"text": text})
+
+
+@app.websocket("/stream")
+async def stream(websocket: WebSocket) -> None:
+    """Live partial-transcript stream (plan Phase 4 — additive, best-effort).
+
+    Runs ENTIRELY PARALLEL to /transcribe: this is for the on-screen live
+    caption only (the user's own words growing while they still talk) and
+    never feeds intent parsing/NLU/brain — that stays the batch /transcribe
+    path, untouched. A dropped or failed connection here must never affect
+    command execution; the Rust client treats every error as a silent no-op.
+
+    Protocol: client sends raw 16-bit LE mono PCM @ 16kHz binary frames
+    (same convention as /transcribe's raw-PCM branch); server pushes
+    {"text": "<growing line>"} whenever Moonshine's LineTextChanged fires
+    (the full current line, not a delta — Moonshine's own semantics).
+    A text frame {"cmd": "stop"} or a client disconnect ends the stream.
+
+    Uses a FRESH `Stream` per connection (one per NEXUS turn) off the
+    existing global transcriber (reuses the already-loaded model — never
+    loads a second one), so no text state bleeds between turns.
+    """
+    await websocket.accept()
+    transcriber = _get_transcriber()
+    stream_handle = transcriber.create_stream()
+    pending_texts: list[str] = []
+
+    def _on_event(event) -> None:
+        from moonshine_voice import LineTextChanged
+        if isinstance(event, LineTextChanged):
+            pending_texts.append(event.line.text)
+
+    stream_handle.add_listener(_on_event)
+    stream_handle.start()
+    log.info("stream: client connected")
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            audio_bytes = message.get("bytes")
+            if audio_bytes:
+                try:
+                    samples = array.array("h", audio_bytes)
+                    float_samples = [s / 32768.0 for s in samples]
+                    stream_handle.add_audio(float_samples, sample_rate=16000)
+                except Exception as e:
+                    log.warning("stream: add_audio failed — %s", e)
+                for text in pending_texts:
+                    await websocket.send_json({"text": text})
+                pending_texts.clear()
+                continue
+            text_msg = message.get("text")
+            if text_msg:
+                try:
+                    payload = json.loads(text_msg)
+                except Exception:
+                    payload = {}
+                if payload.get("cmd") == "stop":
+                    break
+    except WebSocketDisconnect:
+        log.info("stream: client disconnected")
+    except Exception as e:
+        log.warning("stream: unexpected error — %s", e)
+    finally:
+        try:
+            # stop() transcribes whatever audio is left and fires the final
+            # LineTextChanged/LineCompleted events into pending_texts via
+            # _on_event — without flushing those here, the LAST (often most
+            # complete) partial would be silently dropped.
+            stream_handle.stop()
+        except Exception:
+            pass
+        try:
+            for text in pending_texts:
+                await websocket.send_json({"text": text})
+        except Exception:
+            pass
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+        log.info("stream: closed")
 
 
 def _wav_to_float_samples(wav_bytes: bytes):

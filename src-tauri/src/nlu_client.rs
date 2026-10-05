@@ -1,65 +1,32 @@
-//! NLU client — calls the Python NLU server (BERT-Mini) for intent classification.
+//! NLU client — in-process BERT-Mini intent classification (see nlu_local.rs).
 //!
-//! The NLU server is a lazy-started Python sidecar (like the STT server).
-//! It loads a BERT-Mini ONNX model and provides a /parse endpoint that
-//! returns intent + slots + confidence.
+//! Through 2026-10-02 this called a lazy-started Python sidecar over HTTP.
+//! That added a process-spawn + network round-trip (and up to 15s of cold
+//! start) to every transcript the deterministic parser missed — the actual
+//! mechanism behind "it always thinks instead of executing" for anything
+//! not matching an exact literal phrase (docs/research/ghost-mode/07).
+//! `nlu_local::parse_local` runs the same ONNX model + tokenizer in-process
+//! via tract-onnx: no subprocess, no network, single-digit milliseconds.
 //!
-//! If the NLU server is not running or unavailable, this module returns None
-//! and the caller falls back to the deterministic parser or unknown intent.
+//! If the model files aren't present (e.g. a fresh dev checkout with no
+//! trained model yet) this module returns None and the caller falls back
+//! to the deterministic parser or unknown intent, exactly as it did when
+//! the old sidecar was unreachable.
 
 use crate::intent_parser::{ParseResult, ParsedIntent};
-use serde::Deserialize;
-use std::time::Duration;
 
-/// NLU server port (separate from the old STT sidecar port).
-const NLU_PORT: u16 = 39218;
-
-/// NLU server response format.
-#[derive(Debug, Deserialize)]
-struct NluResponse {
-    intent: String,
-    slots: serde_json::Value,
-    confidence: f32,
-}
-
-/// Parse a transcript via the NLU server.
+/// Parse a transcript via the in-process NLU model.
 ///
-/// Returns None if the server is not running or the request fails.
-/// Returns Some(ParseResult) if the server returns a valid classification.
+/// Returns None if the model isn't loaded or confidence is too low.
+/// Returns Some(ParseResult) if a valid classification is produced.
 pub async fn parse_via_nlu(transcript: &str) -> Option<ParseResult> {
-    // Ensure the NLU server is running (lazy-start).
-    // Use spawn_blocking because ensure_nlu_running() does std::thread::sleep
-    // in a loop (up to 15s) which would block the Tokio worker thread.
-    tokio::task::spawn_blocking(|| {
-        crate::lazy_nlu::ensure_nlu_running();
-    })
-    .await
-    .ok()?;
-
-    let url = format!("http://127.0.0.1:{}/parse", NLU_PORT);
-
-    // Short timeout — if NLU is slow, fall back to deterministic
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(500))
-        .build()
-        .ok()?;
-
-    let response = client
-        .post(&url)
-        .json(&serde_json::json!({ "text": transcript }))
-        .send()
+    let text = transcript.to_string();
+    // Inference is CPU-bound (ONNX forward pass) — run it off the async
+    // executor thread so a slow classification never stalls other turns.
+    let nlu = tokio::task::spawn_blocking(move || crate::nlu_local::parse_local(&text))
         .await
-        .ok()?;
-
-    if !response.status().is_success() {
-        tracing::debug!("[nlu_client] server returned non-success status");
-        return None;
-    }
-
-    let nlu: NluResponse = response.json().await.ok()?;
-
-    // Mark that a request was made (resets idle timer)
-    crate::lazy_nlu::mark_nlu_request();
+        .ok()
+        .flatten()?;
 
     if nlu.confidence < 0.85 {
         tracing::info!(
@@ -71,7 +38,9 @@ pub async fn parse_via_nlu(transcript: &str) -> Option<ParseResult> {
     }
 
     // Convert NLU response to ParsedIntent
-    let intent = nlu_to_parsed_intent(&nlu.intent, &nlu.slots)?;
+    let Some(intent) = nlu_to_parsed_intent(&nlu.intent, &nlu.slots, transcript) else {
+        return None;
+    };
 
     Some(ParseResult {
         intent,
@@ -89,8 +58,20 @@ fn repo_slot(slots: &serde_json::Value) -> String {
 }
 
 /// Convert NLU server response to ParsedIntent.
-/// Handles all 46 intent labels (ParsedIntent + GitHubCommand variants).
-pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<ParsedIntent> {    match intent {
+/// Handles all intent labels (ParsedIntent + GitHubCommand variants).
+/// `raw` is the original transcript — used for whole-text prompt slots
+/// (screen_analysis) where the NLU does no slot extraction.
+pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value, raw: &str) -> Option<ParsedIntent> {
+    match intent {
+        // ─── Feature 86: spatial screen analysis ───
+        "screen_analysis" => {
+            // The whole transcript IS the prompt (no slot extraction).
+            Some(ParsedIntent::NluResult {
+                intent: "screen_analysis".to_string(),
+                slots: serde_json::json!({ "prompt": raw.trim() }),
+                confidence: 1.0,
+            })
+        }
         // ─── Local commands ───
         "open_app" => {
             let target = slots.get("app_name").and_then(|v| v.as_str()).unwrap_or("");
@@ -456,23 +437,5 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
 
         // unknown or unrecognized
         _ => None,
-    }
-}
-
-/// Check if the NLU server is running.
-#[allow(dead_code)]
-pub async fn is_nlu_available() -> bool {
-    let url = format!("http://127.0.0.1:{}/health", NLU_PORT);
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_millis(200))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-
-    match client.get(&url).send().await {
-        Ok(resp) => resp.status().is_success(),
-        Err(_) => false,
     }
 }

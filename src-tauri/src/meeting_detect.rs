@@ -503,6 +503,11 @@ unsafe fn wasapi_check_inner() -> bool {
             "explorer.exe",               // Windows Explorer
             "TextInputHost.exe",          // Text input (touch keyboard, etc.)
             "WindowsInternal.ComposableShell.Experiences.TextInput.InputApp.exe",
+            "python.exe",                 // Python scripts (testers, STT sidecar)
+            "python3.exe",
+            "pythonw.exe",
+            "nexus.exe",                  // Self
+            "node.exe",                   // Node runner
         ];
         if SYSTEM_PROCESS_EXCLUSIONS.iter().any(|s| proc_name.eq_ignore_ascii_case(s)) {
             continue;

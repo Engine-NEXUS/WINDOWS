@@ -10,6 +10,118 @@
 
 use edge_tts_rust::{EdgeTtsClient, SpeakOptions, Boundary};
 
+/// Emotional prosody for TTS (B3). The edge-tts-rust crate exposes
+/// rate/volume/pitch (no mstts express-as), so emotions map to prosody.
+/// Pure + unit-tested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TtsEmotion {
+    Neutral,
+    Cheerful,
+    Calm,
+    Sad,
+    Urgent,
+    Whisper,
+}
+
+impl TtsEmotion {
+    /// Parse from settings string ("auto" handled by caller).
+    pub fn parse_label(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "cheerful" => TtsEmotion::Cheerful,
+            "calm" => TtsEmotion::Calm,
+            "sad" => TtsEmotion::Sad,
+            "urgent" => TtsEmotion::Urgent,
+            "whisper" => TtsEmotion::Whisper,
+            _ => TtsEmotion::Neutral,
+        }
+    }
+
+    /// (rate, volume, pitch) for SpeakOptions.
+    pub fn prosody(&self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            TtsEmotion::Neutral => ("+0%", "+0%", "+0Hz"),
+            TtsEmotion::Cheerful => ("+10%", "+0%", "+30Hz"),
+            TtsEmotion::Calm => ("-10%", "+0%", "-10Hz"),
+            TtsEmotion::Sad => ("-15%", "+0%", "-20Hz"),
+            TtsEmotion::Urgent => ("+20%", "+0%", "+20Hz"),
+            TtsEmotion::Whisper => ("-5%", "-30%", "+0Hz"),
+        }
+    }
+}
+
+/// Auto-pick an emotion from text heuristics. Pure + unit-tested.
+/// Errors/apologies → Sad; success/confirmations → Cheerful;
+/// warnings/stops → Urgent; quiet hours → Whisper (late night).
+pub fn pick_emotion(text: &str) -> TtsEmotion {
+    let lower = text.to_lowercase();
+    let has_any = |words: &[&str]| words.iter().any(|w| lower.contains(w));
+    if has_any(&["sorry", "failed", "couldn't", "could not", "error", "unable to"]) {
+        return TtsEmotion::Sad;
+    }
+    if has_any(&["warning", "stop", "careful", "abort", "emergency"]) {
+        return TtsEmotion::Urgent;
+    }
+    if has_any(&["done", "complete", "ready", "connected", "remembered", "on it", "got it"]) {
+        return TtsEmotion::Cheerful;
+    }
+    TtsEmotion::Neutral
+}
+
+/// Internal: synthesize + return the full edge-tts result (audio bytes +
+/// word-boundary timing events). `synthesize_to_mp3`/`_with_emotion` below
+/// (unchanged external shape, still used by the TTS benchmarks) wrap this
+/// and discard `.boundaries`; `synthesize_to_pcm`/`_with_emotion` thread
+/// them through for the response-caption feature (plan Phase 3).
+///
+/// Always requests `Boundary::Word` (not `Sentence` — mutually exclusive
+/// per call in this crate): nothing in this codebase reads sentence
+/// boundaries, and word-level timing is what per-word caption reveal needs.
+async fn synthesize_raw(
+    text: &str,
+    voice: &str,
+    emotion: Option<TtsEmotion>,
+) -> Result<edge_tts_rust::SynthesisResult, String> {
+    if text.is_empty() {
+        return Err("Empty text".to_string());
+    }
+
+    let client = EdgeTtsClient::new()
+        .map_err(|e| format!("edge-tts client init failed: {}", e))?;
+
+    let options = if let Some(emotion) = emotion {
+        let (rate, volume, pitch) = emotion.prosody();
+        SpeakOptions {
+            voice: voice.to_string(),
+            rate: rate.to_string(),
+            volume: volume.to_string(),
+            pitch: pitch.to_string(),
+            boundary: Boundary::Word,
+        }
+    } else {
+        SpeakOptions {
+            voice: voice.to_string(),
+            boundary: Boundary::Word,
+            ..SpeakOptions::default()
+        }
+    };
+
+    let result = client
+        .synthesize(text, options)
+        .await
+        .map_err(|e| format!("edge-tts synthesis failed: {}", e))?;
+
+    tracing::info!(
+        "tts-edge: synthesized '{}' ({} bytes MP3, {} word boundaries, voice={}, emotion={:?})",
+        crate::tts::truncate_for_log(text, 50),
+        result.audio.len(),
+        result.boundaries.len(),
+        voice,
+        emotion
+    );
+
+    Ok(result)
+}
+
 /// Synthesize text to MP3 bytes using edge-tts.
 ///
 /// Returns raw MP3 audio bytes on success. The caller is responsible for
@@ -22,46 +134,21 @@ pub async fn synthesize_to_mp3(
     text: &str,
     voice: &str,
 ) -> Result<Vec<u8>, String> {
-    if text.is_empty() {
-        return Err("Empty text".to_string());
-    }
-
-    let client = EdgeTtsClient::new()
-        .map_err(|e| format!("edge-tts client init failed: {}", e))?;
-
-    let result = client
-        .synthesize(
-            text,
-            SpeakOptions {
-                voice: voice.to_string(),
-                boundary: Boundary::Sentence,
-                ..SpeakOptions::default()
-            },
-        )
-        .await
-        .map_err(|e| format!("edge-tts synthesis failed: {}", e))?;
-
-    tracing::info!(
-        "tts-edge: synthesized '{}' ({} bytes MP3, voice={})",
-        crate::tts::truncate_for_log(text, 50),
-        result.audio.len(),
-        voice
-    );
-
-    Ok(result.audio)
+    Ok(synthesize_raw(text, voice, None).await?.audio)
 }
 
-/// Synthesize text and decode MP3 to f32 PCM samples at the native sample rate.
-///
-/// Returns (samples, sample_rate) for direct rodio playback.
-/// Uses rodio's Decoder for MP3 decoding.
-pub async fn synthesize_to_pcm(
+/// Synthesize with emotional prosody (rate/pitch/volume per emotion).
+pub async fn synthesize_to_mp3_with_emotion(
     text: &str,
     voice: &str,
-) -> Result<(Vec<f32>, u32), String> {
-    let mp3_bytes = synthesize_to_mp3(text, voice).await?;
+    emotion: TtsEmotion,
+) -> Result<Vec<u8>, String> {
+    Ok(synthesize_raw(text, voice, Some(emotion)).await?.audio)
+}
 
-    // Decode MP3 to f32 samples using rodio's decoder
+/// Decode MP3 bytes to f32 PCM samples at the native sample rate (shared by
+/// both PCM synthesis variants below).
+fn decode_mp3_to_pcm(mp3_bytes: Vec<u8>) -> Result<(Vec<f32>, u32), String> {
     let cursor = std::io::Cursor::new(mp3_bytes);
     let source = rodio::Decoder::new(cursor)
         .map_err(|e| format!("MP3 decode failed: {}", e))?;
@@ -72,13 +159,81 @@ pub async fn synthesize_to_pcm(
         .map(|s: i16| s as f32 / i16::MAX as f32)
         .collect();
 
+    Ok((samples, sample_rate))
+}
+
+/// Synthesize text and decode MP3 to f32 PCM samples at the native sample rate.
+///
+/// Returns (samples, sample_rate, word-boundary events) for direct rodio
+/// playback plus response-caption scheduling (ticks are 100ns units — see
+/// `tts::boundaries_to_words`).
+pub async fn synthesize_to_pcm(
+    text: &str,
+    voice: &str,
+) -> Result<(Vec<f32>, u32, Vec<edge_tts_rust::BoundaryEvent>), String> {
+    let result = synthesize_raw(text, voice, None).await?;
+    let (samples, sample_rate) = decode_mp3_to_pcm(result.audio)?;
+
     tracing::info!(
         "tts-edge: decoded {} PCM samples ({}ms audio)",
         samples.len(),
         samples.len() as u64 * 1000 / sample_rate as u64
     );
 
-    Ok((samples, sample_rate))
+    Ok((samples, sample_rate, result.boundaries))
+}
+
+/// PCM variant with emotional prosody.
+pub async fn synthesize_to_pcm_with_emotion(
+    text: &str,
+    voice: &str,
+    emotion: TtsEmotion,
+) -> Result<(Vec<f32>, u32, Vec<edge_tts_rust::BoundaryEvent>), String> {
+    let result = synthesize_raw(text, voice, Some(emotion)).await?;
+    let (samples, sample_rate) = decode_mp3_to_pcm(result.audio)?;
+    Ok((samples, sample_rate, result.boundaries))
+}
+
+#[cfg(test)]
+mod emotion_tests {
+    use super::*;
+
+    #[test]
+    fn test_emotion_from_str() {
+        assert_eq!(TtsEmotion::parse_label("cheerful"), TtsEmotion::Cheerful);
+        assert_eq!(TtsEmotion::parse_label("CALM"), TtsEmotion::Calm);
+        assert_eq!(TtsEmotion::parse_label("unknown"), TtsEmotion::Neutral);
+        assert_eq!(TtsEmotion::parse_label("auto"), TtsEmotion::Neutral);
+    }
+
+    #[test]
+    fn test_prosody_table() {
+        assert_eq!(TtsEmotion::Neutral.prosody(), ("+0%", "+0%", "+0Hz"));
+        assert_eq!(TtsEmotion::Cheerful.prosody(), ("+10%", "+0%", "+30Hz"));
+        assert_eq!(TtsEmotion::Whisper.prosody(), ("-5%", "-30%", "+0Hz"));
+    }
+
+    #[test]
+    fn test_pick_emotion_sad() {
+        assert_eq!(pick_emotion("Sorry, that failed."), TtsEmotion::Sad);
+        assert_eq!(pick_emotion("Unable to connect."), TtsEmotion::Sad);
+    }
+
+    #[test]
+    fn test_pick_emotion_urgent() {
+        assert_eq!(pick_emotion("Stop! Warning."), TtsEmotion::Urgent);
+    }
+
+    #[test]
+    fn test_pick_emotion_cheerful() {
+        assert_eq!(pick_emotion("Done, sir. Task complete."), TtsEmotion::Cheerful);
+        assert_eq!(pick_emotion("Remembered dog as Bruno."), TtsEmotion::Cheerful);
+    }
+
+    #[test]
+    fn test_pick_emotion_neutral() {
+        assert_eq!(pick_emotion("The weather is cloudy."), TtsEmotion::Neutral);
+    }
 }
 
 /// Check if edge-tts is reachable (network test).

@@ -34,10 +34,36 @@ interface AssistantStore {
    *  steady "waiting" glow instead of a frozen loop or a dead orb. */
   awaitingInput: boolean;
   setAwaitingInput: (v: boolean) => void;
+  /** True while a ghost cursor session is live (mic hot, waves on). */
+  ghostActive: boolean;
+  setGhostActive: (v: boolean) => void;
+  /** Animation-calibration preview target (null = not calibrating).
+   *  When set, the orb window shows the selected target and accepts
+   *  native drag + wheel-resize (task: drag & scroll calibration). */
+  calibrationTarget: "wakeup" | "waves" | "loading" | null;
+  /** Live calibration size badge value (px) — mirrored from the Rust
+   *  `calibration:state` event so the pill under the element stays true. */
+  calibrationSize: number | null;
+  setCalibration: (
+    target: "wakeup" | "waves" | "loading" | null,
+    size: number | null
+  ) => void;
+  /** Target-switch pulse counter (calibration preview readability): bumped
+   *  whenever the active target changes so the desktop preview plays a
+   *  220ms highlight even when both rects are identical. Render-only. */
+  calibrationPulse: number;
+  bumpCalibrationPulse: () => void;
   /** Index of the TTS chunk currently playing (for avatar mouth animation). */
   speakSeq: number | null;
   /** Current microphone audio volume (RMS, 0.0 - ~1.0) for avatar reactivity. */
   audioVolume: number;
+  /** Live mic level 0..1 from the Rust capture loop (`audio:level`,
+   *  ~6 Hz during STT capture + final 0 on stop). Drives the
+   *  speech-synced ghost waves. Unlike `audioVolume` (browser-VAD
+   *  path, dormant under Rust capture) this is live in every mode
+   *  that uses cpal capture. Reset to 0 by reset(). */
+  micLevel: number;
+  setMicLevel: (v: number) => void;
   setState: (s: AssistantState) => void;
   setVisible: (v: boolean) => void;
   setLoadingVisible: (v: boolean) => void;
@@ -67,10 +93,23 @@ export const useAssistant = create<AssistantStore>((set) => ({
   transcript: [],
   speakSeq: null,
   audioVolume: 0,
+  micLevel: 0,
   ttsActive: false,
   awaitingInput: false,
-  setState: (s) => set({ state: s }),
-  setVisible: (v) => set({ visible: v }),
+  ghostActive: false,
+  calibrationTarget: null,
+  calibrationPulse: 0,
+  calibrationSize: null,
+  setState: (s) => {
+      return set((st) => {
+        console.log(`[ORB] state ${st.state} → ${s}`);
+        return { state: s };
+      });
+    },
+  setVisible: (v) => set((st) => {
+      console.log(`[ORB] setVisible(${v}) from:${st.visible} ghostActive:${st.ghostActive} state:${st.state}`);
+      return { visible: st.ghostActive ? true : v };
+    }),
   setLoadingVisible: (v) => {
     const now = Date.now();
     const prev = loadingSnap;
@@ -100,6 +139,7 @@ export const useAssistant = create<AssistantStore>((set) => ({
     );
   },
   setAudioVolume: (v) => set({ audioVolume: v }),
+  setMicLevel: (v) => set({ micLevel: Math.max(0, Math.min(1, v)) }),
   addUserMessage: (text) =>
     set((st) => ({
       transcript: [...st.transcript, { role: "user", text, timestamp: Date.now() }],
@@ -111,7 +151,14 @@ export const useAssistant = create<AssistantStore>((set) => ({
   setSpeakSeq: (n) => set({ speakSeq: n }),
   setTtsActive: (v) => set({ ttsActive: v }),
   setAwaitingInput: (v) => set({ awaitingInput: v }),
-  reset: () => set({ state: "idle", speakSeq: null, audioVolume: 0, ttsActive: false, awaitingInput: false }),
+  setGhostActive: (v) => set((st) => {
+      console.log(`[ORB] setGhostActive(${v}) from:${st.ghostActive} visible:${st.visible} state:${st.state}`);
+      return { ghostActive: v, visible: v ? true : st.visible };
+    }),
+  setCalibration: (target, size) =>
+    set({ calibrationTarget: target, calibrationSize: size }),
+  bumpCalibrationPulse: () => set((st) => ({ calibrationPulse: st.calibrationPulse + 1 })),
+  reset: () => set({ state: "idle", speakSeq: null, audioVolume: 0, micLevel: 0, ttsActive: false, awaitingInput: false }),
   clearTranscript: () => set({ transcript: [] }),
   pendingGithubCommand: null,
   setPendingGithubCommand: (cmd) => set({ pendingGithubCommand: cmd }),
