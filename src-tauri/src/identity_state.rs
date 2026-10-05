@@ -357,9 +357,6 @@ fn reset_identity_config(dir: &std::path::Path) -> Result<(), String> {
     std::fs::write(&path, serde_json::Value::Object(obj).to_string()).map_err(|e| e.to_string())
 }
 
-const POLL_INTERVAL_SECS: u64 = 600; // 10 min
-const POLLS_PER_SESSION: u32 = 18;   // ~3h cap, then stop silently
-
 /// Bounded poll loop: while the profile is pending, refresh every 10 min.
 /// Stops once approved/denied (the transcript 403 path also triggers a
 /// refresh on demand). Never nags — the frontend owns the UI.

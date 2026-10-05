@@ -81,6 +81,9 @@ pub mod ghost;
 pub mod google;
 mod improve;
 pub mod memory;
+pub mod profile;
+pub mod habits;
+pub mod memory_ipc;
 mod missed_intent_logger;
 mod pii_filter;
 pub mod stage;
@@ -420,6 +423,12 @@ pub fn run() {
             crate::stage::spawn_hitbox_loop(app.handle().clone());
             crate::stage::spawn_stage_watchdog(app.handle().clone());
 
+            // Ghost relisten watchdog: bounded self-heal (3 pokes/session)
+            // for a live ghost session whose hot-mic loop died. It had zero
+            // callers (lost in the lib.rs recovery), so a missed turn-end
+            // left the orb "live" and the mic deaf with nothing to recover it.
+            ghost::spawn_relisten_watchdog(app.handle().clone());
+
             // WebView2 profile cleanup is done BEFORE tauri::Builder::default()
             // in run() — see cleanup_webview2_profile() above. Doing it here
             // in .setup() is too late: Tauri has already created WebView2
@@ -642,6 +651,14 @@ pub fn run() {
             // WebView2 permission handler — auto-approves mic/camera for our
             // own app origins so the permission dialog never re-appears.
             mic_permissions::init(app);
+
+            // Keep the OS keychain in step with settings.json before anything
+            // reads a key. `migrate_api_keys_to_keychain` had no caller, so the
+            // keychain (read FIRST by commands::read_api_key) could hold a stale
+            // key that overrode the one the user last typed in Settings.
+            if let Ok(dir) = app.path().app_data_dir() {
+                crate::auth_vault::migrate_api_keys_to_keychain(&dir);
+            }
 
             // Compute + cache the orb's bottom-center rect (just above the
             // taskbar/dock) so the stage frontend's pending-pull fallback
@@ -1004,6 +1021,12 @@ pub fn run() {
             commands::import_settings,
             commands::memory_recall,
             commands::memory_forget,
+            memory_ipc::memory_overview,
+            memory_ipc::memory_profile_add,
+            memory_ipc::memory_profile_remove,
+            memory_ipc::memory_fact_set,
+            memory_ipc::memory_habit_dismiss,
+            memory_ipc::memory_clear,
             commands::diary_summary,
             commands::webhook_token,
             commands::webhook_rotate_token,

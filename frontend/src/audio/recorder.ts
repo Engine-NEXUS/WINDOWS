@@ -1,4 +1,5 @@
 import { useAssistant } from "../store/assistant";
+import { normalizeLearnedCorrections } from "./learnedCorrections";
 import {
   openSession,
   ensureSessionOpen,
@@ -362,8 +363,9 @@ let learnedCorrections: Array<{ from: string; to: string }> = [];
 async function loadLearnedCorrections(): Promise<void> {
   try {
     const { invoke } = await import("@tauri-apps/api/core");
-    const result = await invoke<[string, string][]>("get_learned_corrections");
-    learnedCorrections = result.map(([from, to]) => ({ from, to }));
+    // Rust returns objects ({ from, to, … }); see learnedCorrections.ts.
+    const result = await invoke<unknown>("get_learned_corrections");
+    learnedCorrections = normalizeLearnedCorrections(result);
     if (learnedCorrections.length > 0) {
       console.log(`[NEXUS] Loaded ${learnedCorrections.length} learned STT corrections`);
     }

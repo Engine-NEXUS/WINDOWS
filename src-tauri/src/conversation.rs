@@ -29,6 +29,13 @@ const MAX_LIVE_TURNS: usize = 6;
 const MAX_LIVE_CHARS: usize = 1_500;
 const MAX_BRIEF_CHARS: usize = 400;
 const COMPACT_RAW_CHARS: usize = 3_000;
+/// "Recent" turns older than this are not replayed into prompts (a session
+/// boundary): last week's chatter was surfacing as "Recent" forever.
+const RECENT_MAX_AGE_SECS: i64 = 48 * 3600;
+/// Unresolved follow-ups stay relevant a bit longer.
+const UNRESOLVED_MAX_AGE_SECS: i64 = 7 * 24 * 3600;
+/// A conversation brief not refreshed for this long is dropped from prompts.
+const BRIEF_MAX_AGE_SECS: i64 = 14 * 24 * 3600;
 
 static TURN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -81,6 +88,10 @@ pub struct ConversationBrief {
     pub last_outcome: String,
     #[serde(default)]
     pub source_turns: Vec<String>,
+    /// Unix seconds of the last compaction that refreshed this brief
+    /// (0 = legacy file written before this field existed — never aged out).
+    #[serde(default)]
+    pub updated_at: i64,
 }
 
 fn conversation_path(dir: &Path) -> PathBuf {
@@ -183,7 +194,7 @@ fn write_turns(dir: &Path, turns: &[ConversationTurn]) {
             content.push('\n');
         }
     }
-    let _ = std::fs::write(conversation_path(dir), content);
+    crate::memory::write_text_atomic(&conversation_path(dir), &content);
 }
 
 fn read_brief(dir: &Path) -> Option<ConversationBrief> {
@@ -194,7 +205,7 @@ fn read_brief(dir: &Path) -> Option<ConversationBrief> {
 fn write_brief(dir: &Path, brief: &ConversationBrief) {
     let _ = std::fs::create_dir_all(dir);
     if let Ok(content) = serde_json::to_string_pretty(brief) {
-        let _ = std::fs::write(brief_path(dir), content);
+        crate::memory::write_text_atomic(&brief_path(dir), &content);
     }
 }
 
@@ -280,6 +291,14 @@ fn summarize_thread(turns: &[ConversationTurn]) -> ConversationBrief {
     brief
 }
 
+/// Keep only the last `n` items (drop from the front).
+fn keep_last<T>(items: &mut Vec<T>, n: usize) {
+    if items.len() > n {
+        let excess = items.len() - n;
+        items.drain(..excess);
+    }
+}
+
 fn merge_briefs(previous: Option<&ConversationBrief>, next: &ConversationBrief) -> ConversationBrief {
     let mut merged = ConversationBrief {
         goal: next.goal.clone(),
@@ -288,6 +307,7 @@ fn merge_briefs(previous: Option<&ConversationBrief>, next: &ConversationBrief) 
         key_points: Vec::new(),
         last_outcome: next.last_outcome.clone(),
         source_turns: Vec::new(),
+        updated_at: chrono::Utc::now().timestamp(),
     };
     if let Some(previous) = previous {
         if merged.goal.trim().is_empty() {
@@ -313,9 +333,12 @@ fn merge_briefs(previous: Option<&ConversationBrief>, next: &ConversationBrief) 
         merged.key_points = next.key_points.clone();
         merged.source_turns = next.source_turns.clone();
     }
-    merged.unresolved.truncate(8);
-    merged.key_points.truncate(5);
-    merged.source_turns.truncate(12);
+    // Keep the NEWEST entries. The lists are built oldest-first
+    // (previous, then next), so `truncate(5)` kept the five OLDEST key points
+    // and froze the brief once it filled: later compactions never showed up.
+    keep_last(&mut merged.unresolved, 8);
+    keep_last(&mut merged.key_points, 5);
+    keep_last(&mut merged.source_turns, 12);
     merged.goal = truncate_text(&merged.goal, MAX_BRIEF_CHARS);
     merged.active_task = truncate_text(&merged.active_task, MAX_BRIEF_CHARS);
     merged.last_outcome = truncate_text(&merged.last_outcome, MAX_BRIEF_CHARS);
@@ -382,8 +405,24 @@ pub fn unresolved_from_dialog_state(dialog_state: Option<&serde_json::Value>) ->
 /// Build the bounded prompt block used for cloud reasoning: a durable brief
 /// plus the highest-signal recent turns. PII is redacted before return.
 pub fn conversation_prompt(dir: &Path) -> Option<String> {
-    let turns = read_turns(dir);
-    let brief = read_brief(dir);
+    conversation_prompt_at(dir, chrono::Utc::now().timestamp())
+}
+
+/// Turns still worth replaying at `now`: recent ones, plus unresolved
+/// follow-ups for a little longer. Pure.
+fn fresh_turns(turns: Vec<ConversationTurn>, now: i64) -> Vec<ConversationTurn> {
+    turns
+        .into_iter()
+        .filter(|t| {
+            let age = now - t.ts;
+            age <= RECENT_MAX_AGE_SECS || (!t.unresolved.is_empty() && age <= UNRESOLVED_MAX_AGE_SECS)
+        })
+        .collect()
+}
+
+fn conversation_prompt_at(dir: &Path, now: i64) -> Option<String> {
+    let turns = fresh_turns(read_turns(dir), now);
+    let brief = read_brief(dir).filter(|b| b.updated_at == 0 || now - b.updated_at <= BRIEF_MAX_AGE_SECS);
     let live = live_thread(&turns);
     if live.is_empty() && brief.as_ref().map_or(true, is_empty_brief) {
         return None;
@@ -418,6 +457,24 @@ pub fn conversation_prompt(dir: &Path) -> Option<String> {
         return None;
     }
     Some(truncate_text(&clean, MAX_LIVE_CHARS))
+}
+
+/// Number of stored raw turns (Memory panel).
+pub fn turn_count(dir: &Path) -> usize {
+    read_turns(dir).len()
+}
+
+/// Delete the stored conversation (raw turns + brief). Returns true when
+/// nothing is left. Backs "Clear conversation history" — which previously
+/// called a no-op and left every transcript on disk.
+pub fn clear_all(dir: &Path) -> bool {
+    let mut ok = true;
+    for path in [conversation_path(dir), brief_path(dir)] {
+        if path.exists() && std::fs::remove_file(&path).is_err() {
+            ok = false;
+        }
+    }
+    ok
 }
 
 fn is_empty_brief(brief: &ConversationBrief) -> bool {
@@ -535,6 +592,74 @@ mod tests {
         let brief = brief.expect("long thread must compact");
         assert!(!brief.goal.is_empty());
         assert!(brief.source_turns.len() <= 12);
+    }
+
+    /// Regression: `truncate(5)` kept the OLDEST key points, so after the
+    /// brief filled, new compactions never appeared in it.
+    #[test]
+    fn test_merge_briefs_keeps_newest_entries() {
+        let previous = ConversationBrief {
+            key_points: (1..=5).map(|i| format!("old{i}")).collect(),
+            unresolved: (1..=8).map(|i| format!("slot-old{i}")).collect(),
+            ..Default::default()
+        };
+        let next = ConversationBrief {
+            goal: "fresh goal".to_string(),
+            key_points: vec!["new1".to_string(), "new2".to_string()],
+            unresolved: vec!["slot-new".to_string()],
+            ..Default::default()
+        };
+        let merged = merge_briefs(Some(&previous), &next);
+        assert_eq!(merged.key_points.len(), 5);
+        assert!(merged.key_points.contains(&"new1".to_string()));
+        assert!(merged.key_points.contains(&"new2".to_string()));
+        assert!(!merged.key_points.contains(&"old1".to_string()), "oldest dropped");
+        assert!(merged.unresolved.contains(&"slot-new".to_string()));
+        assert!(merged.updated_at > 0);
+    }
+
+    #[test]
+    fn test_prompt_drops_stale_turns_and_stale_brief() {
+        let dir = tempdir("age");
+        let now = chrono::Utc::now().timestamp();
+        let mut old_turn = turn("last week's chatter", "old answer", ConversationOutcome::Completed, &[], TurnOwnership::Verified);
+        old_turn.ts = now - 10 * 24 * 3600;
+        old_turn.relevance = 70;
+        let mut stale_unresolved = turn("which repo", "", ConversationOutcome::Clarification, &["repo"], TurnOwnership::Verified);
+        stale_unresolved.ts = now - 3 * 24 * 3600; // beyond 48h, within 7d
+        stale_unresolved.relevance = 100;
+        let mut fresh = turn("fresh question today", "fresh answer", ConversationOutcome::Completed, &[], TurnOwnership::Verified);
+        fresh.ts = now - 60;
+        fresh.relevance = 70;
+        write_turns(&dir, &[old_turn, stale_unresolved, fresh]);
+        write_brief(
+            &dir,
+            &ConversationBrief {
+                goal: "a stale goal".to_string(),
+                updated_at: now - 30 * 24 * 3600,
+                ..Default::default()
+            },
+        );
+        let prompt = conversation_prompt_at(&dir, now).expect("prompt");
+        assert!(prompt.contains("fresh question today"));
+        assert!(prompt.contains("which repo"), "unresolved follow-up survives 48h");
+        assert!(!prompt.contains("last week's chatter"));
+        assert!(!prompt.contains("a stale goal"), "month-old brief must not be injected");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_legacy_brief_without_timestamp_is_kept_and_clear_all_wipes() {
+        let dir = tempdir("legacy");
+        write_brief(&dir, &ConversationBrief { goal: "legacy goal".to_string(), ..Default::default() });
+        let prompt = conversation_prompt_at(&dir, chrono::Utc::now().timestamp()).expect("prompt");
+        assert!(prompt.contains("legacy goal"));
+        write_turns(&dir, &[turn("hello", "hi", ConversationOutcome::Completed, &[], TurnOwnership::Verified)]);
+        assert!(clear_all(&dir));
+        assert!(read_turns(&dir).is_empty());
+        assert!(read_brief(&dir).is_none());
+        assert!(clear_all(&dir), "idempotent");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

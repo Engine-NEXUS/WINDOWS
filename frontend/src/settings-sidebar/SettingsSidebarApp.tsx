@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { isPlausibleGeminiKey } from "./keyFormat";
+import { MemoryTab } from "./MemoryTab";
 import {
   setSidecarBaseUrl,
   getOAuthStatus,
@@ -21,7 +22,7 @@ import {
  * Overwrites on each save (std::fs::write).
  */
 
-type Tab = "display" | "audio" | "auth" | "connections";
+type Tab = "display" | "audio" | "auth" | "connections" | "memory";
 
 interface Settings {
   autostart: boolean;
@@ -131,6 +132,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "audio", label: "Audio" },
   { id: "auth", label: "Accounts" },
   { id: "connections", label: "Connections" },
+  { id: "memory", label: "Memory" },
 ];
 
 export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string) => void }) {
@@ -278,6 +280,7 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
         {tab === "audio" && <AudioTab settings={settings} update={update} />}
         {tab === "auth" && <AuthTab settings={settings} update={update} />}
         {tab === "connections" && <ConnectionsTab settings={settings} update={update} />}
+        {tab === "memory" && <MemoryTab />}
       </div>
 
       {/* Footer */}

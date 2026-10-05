@@ -280,6 +280,17 @@ fn clear_stop() {
     GHOST_CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Start of a fresh ghost turn: a stop issued for an earlier (now finished)
+/// drill must not poison this one. Before this, `GHOST_CANCEL` was only reset
+/// by `ghost_enter`, so after one voice "stop" every later ghost action
+/// answered "Stopped, sir." until the session was re-entered. No-op while a
+/// drill is still running (that stop is still in flight) or outside a session.
+pub fn clear_stale_stop() {
+    if session_active() && !drill_running() {
+        clear_stop();
+    }
+}
+
 /// True while a ghost drill's main steps execute (queue + intercept
 /// follow-ups). Bare test sessions don't set this — nothing drains them.
 pub fn drill_running() -> bool {
@@ -822,6 +833,33 @@ mod tests {
         assert!(!is_active());
         *SESSION.lock() = Session::Idle;
         assert!(!is_active());
+    }
+
+    /// Regression: one voice "stop" used to poison every later ghost action
+    /// ("Stopped, sir.") because only `ghost_enter` reset the flag.
+    #[test]
+    fn test_stale_stop_cleared_on_fresh_turn_not_mid_drill() {
+        *SESSION.lock() = Session::Active;
+        GHOST_BUSY.store(0, std::sync::atomic::Ordering::Relaxed);
+        request_stop();
+        assert!(stop_requested());
+
+        // Mid-drill: the stop is still in flight and must survive.
+        drill_begin();
+        clear_stale_stop();
+        assert!(stop_requested());
+        drill_end();
+
+        // Fresh turn after the drill finished: stale stop is dropped.
+        clear_stale_stop();
+        assert!(!stop_requested());
+
+        // Outside a session the flag is left alone.
+        *SESSION.lock() = Session::Idle;
+        request_stop();
+        clear_stale_stop();
+        assert!(stop_requested());
+        clear_stop();
     }
 
     #[test]

@@ -181,8 +181,13 @@ pub fn clear_api_key(service: &str) {
     }
 }
 
-/// One-time migration: move API keys from settings.json to OS keychain.
-/// Runs on startup. Idempotent — skips services already in keychain.
+/// Sync API keys from settings.json into the OS keychain. Runs on startup.
+/// Idempotent. A non-empty settings.json key is what the user last typed in
+/// Settings (before `save_settings` also wrote the keychain, it was the ONLY
+/// store the UI wrote), so it wins over a differing keychain copy — otherwise a
+/// stale keychain value (read first by `commands::read_api_key`) would keep
+/// overriding the corrected key. An empty/stripped settings.json key (after a
+/// settings import) leaves the keychain untouched.
 pub fn migrate_api_keys_to_keychain(app_data_dir: &std::path::Path) {
     let path = app_data_dir.join("settings.json");
     let Ok(content) = std::fs::read_to_string(&path) else {
@@ -192,22 +197,22 @@ pub fn migrate_api_keys_to_keychain(app_data_dir: &std::path::Path) {
         return;
     };
     for service in ["groq", "gemini", "cerebras"] {
-        // Skip if already in keychain
-        if get_api_key(service).is_some() {
-            continue;
-        }
         let camel = format!("{service}ApiKey");
         let snake = format!("{service}_api_key");
-        if let Some(key) = json
+        let Some(key) = json
             .get(&camel)
             .or_else(|| json.get(&snake))
             .and_then(|v| v.as_str())
-        {
-            if !key.is_empty() {
-                set_api_key(service, key);
-                tracing::info!("vault: migrated {service} API key to keychain");
-            }
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+        else {
+            continue;
+        };
+        if get_api_key(service).as_deref().map(str::trim) == Some(key) {
+            continue;
         }
+        set_api_key(service, key);
+        tracing::info!("vault: synced {service} API key to keychain");
     }
 }
 
@@ -756,5 +761,35 @@ mod tests {
         remove_google_account("user1@gmail.com").unwrap();
         remove_google_account("user2@gmail.com").unwrap();
         assert!(get_google_accounts().is_empty());
+    }
+
+    /// Regression: the keychain is read FIRST, but Settings used to write only
+    /// settings.json — a stale keychain key silently overrode a corrected one.
+    /// Boot sync makes the (trimmed) settings.json key win when they differ,
+    /// and leaves the keychain alone when settings.json has no key.
+    #[test]
+    fn test_api_key_sync_settings_json_wins_and_trims() {
+        let dir = std::env::temp_dir().join(format!("nexus-keysync-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        set_api_key("groq", "stale-old-key");
+        set_api_key("gemini", "keychain-only-key");
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"groqApiKey":"  fresh-new-key \n","geminiApiKey":""}"#,
+        )
+        .unwrap();
+
+        migrate_api_keys_to_keychain(&dir);
+
+        assert_eq!(get_api_key("groq").as_deref(), Some("fresh-new-key"));
+        assert_eq!(
+            get_api_key("gemini").as_deref(),
+            Some("keychain-only-key"),
+            "an emptied/stripped settings.json key must not wipe the keychain"
+        );
+        for svc in ["groq", "gemini", "cerebras"] {
+            clear_api_key(svc);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

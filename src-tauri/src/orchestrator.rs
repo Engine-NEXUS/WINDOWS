@@ -274,6 +274,24 @@ fn emit<R: Runtime>(app: &AppHandle<R>, event: &OrchestratorEvent) {
     tracing::debug!("orchestrator: emitted {:?}", event);
 }
 
+/// Close a turn that was silently dropped as ambient speech while a ghost
+/// session is live. A dropped turn emits nothing, but the ghost mic is
+/// single-shot and the 8s no-input timeout is skipped in ghost mode, so the
+/// orb stayed "listening" with no capture running (deaf until the watchdog).
+/// `Done` makes the frontend reopen the mic silently (`maybeGhostRelisten`).
+/// Skipped mid-drill (the drill ends its own turn) and outside ghost.
+fn close_dropped_ghost_turn<R: Runtime>(app: &AppHandle<R>) {
+    if !crate::ghost::session_active() || crate::ghost::drill_running() {
+        return;
+    }
+    emit(
+        app,
+        &OrchestratorEvent::Done {
+            request_id: new_request_id(),
+        },
+    );
+}
+
 /// Cancel any active request and install a new one.
 /// Returns the new request's ID and its cancel flag.
 /// `pub(crate)` for the global-hotkey ghost-exit path (same turn semantics
@@ -687,6 +705,7 @@ pub async fn process_transcript<R: Runtime>(
             turn.session,
             turn.owner_score
         );
+        close_dropped_ghost_turn(&app);
         return Ok(ProcessResult {
             request_id: new_request_id(),
             subsystem: Subsystem::None,
@@ -698,15 +717,25 @@ pub async fn process_transcript<R: Runtime>(
         .as_ref()
         .map(|result| result.source.as_str())
         .unwrap_or("none");
+    let ghost_live = crate::ghost::session_active();
+    // A stop-word during a ghost session must never be eaten by the ambient
+    // gate (it parses as `Unknown`, i.e. no evidence): "halt"/"abort"/
+    // "stand down" are handled by the ghost stop branches below. Rejected
+    // (not the owner's voice) turns are still dropped.
+    let ghost_stop_word = ghost_live
+        && turn.ownership != crate::voice_profile::TurnOwnership::Rejected
+        && crate::ghost::is_stop_phrase(&transcript);
     match crate::center::action_disposition(
         &intent,
         &transcript,
         source,
         turn.ownership,
-        crate::ghost::session_active(),
+        ghost_live,
     ) {
+        crate::center::ActionDisposition::AmbientDrop if ghost_stop_word => {}
         crate::center::ActionDisposition::AmbientDrop => {
             tracing::info!("orchestrator: ambient drop (weak evidence, auto session)");
+            close_dropped_ghost_turn(&app);
             return Ok(ProcessResult {
                 request_id: new_request_id(),
                 subsystem: Subsystem::None,
@@ -925,6 +954,11 @@ pub async fn process_transcript<R: Runtime>(
     if crate::ghostwriter::is_active() {
         return run_ghostwriter_turn(app, transcript).await;
     }
+
+    // A previous drill's stop must not leak into this fresh turn (the flag
+    // was only reset on session entry → every action after one "stop" said
+    // "Stopped, sir."). Mid-drill turns keep it: that stop is still in flight.
+    crate::ghost::clear_stale_stop();
 
     // ─── Ghost drill overlap: stop-words + follow-up queue ──────────
     // While a ghost drill runs, mid-drill speech must not route normally
@@ -1201,6 +1235,14 @@ pub async fn process_transcript<R: Runtime>(
     // Same slot (Unknown only, post-intercepts) so in-room dictation like
     // "remember that we need milk" stays in the room.
     if matches!(&intent, ParsedIntent::Unknown { .. }) {
+        // About-me profile: "my priority is …", "remember that I am …",
+        // "what do you know about me", "forget my priority …". Narrow grammar
+        // (see profile.rs) so ordinary speech never writes memory.
+        if let Ok(dir) = app.path().app_data_dir() {
+            if let Some(reply) = crate::profile::handle(&dir, &transcript) {
+                return Ok(local_reply(&app, reply));
+            }
+        }
         if let Some((key, value)) = crate::memory::parse_remember(&transcript) {
             if let Ok(dir) = app.path().app_data_dir() {
                 if crate::memory::remember(&dir, &key, &value) {
@@ -1318,6 +1360,10 @@ pub async fn process_transcript<R: Runtime>(
                 let intent_name = crate::intent_parser::intent_to_label(&intent).to_string();
                 crate::brain_monitor::report_execution_success(&transcript, &intent_name);
             }
+
+            // Local commands used to leave no trace: record a privacy-safe
+            // turn (conversation memory) + a habit counter (self-learning).
+            record_local_turn(&app, &transcript, &intent, &turn);
 
             emit(
                 &app,
@@ -2121,6 +2167,94 @@ fn record_worker_turn<R: Runtime>(
                 owner: turn.ownership,
             },
         );
+    }
+}
+
+/// Speak a one-line reply for a locally handled turn: `Result` (the frontend
+/// speaks it) then `Done` (turn end → hot-mic relisten in ghost mode).
+fn local_reply<R: Runtime>(app: &AppHandle<R>, text: String) -> ProcessResult {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    emit(
+        app,
+        &OrchestratorEvent::Result {
+            text,
+            request_id: request_id.clone(),
+            analysis: None,
+            dialog_state: None,
+        },
+    );
+    emit(
+        app,
+        &OrchestratorEvent::Done {
+            request_id: request_id.clone(),
+        },
+    );
+    clear_active_request(&request_id);
+    ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    }
+}
+
+/// Privacy-safe summary of a LOCAL command for the conversation record and the
+/// habit counters. Returns `(spoken-style summary, habit key)`; `None` = do not
+/// record. Whitelist only: dictated text, search queries, message bodies and
+/// contact names are never recorded. Pure + unit-tested.
+pub(crate) fn local_turn_summary(intent: &ParsedIntent) -> Option<(String, Option<String>)> {
+    match intent {
+        ParsedIntent::OpenApp { target } if !target.trim().is_empty() => Some((
+            format!("Opened {}.", target.trim()),
+            Some(format!("app:{}", target.trim().to_lowercase())),
+        )),
+        ParsedIntent::CloseApp { target } if !target.trim().is_empty() => {
+            Some((format!("Closed {}.", target.trim()), None))
+        }
+        ParsedIntent::OpenUrl { target, .. } if !target.trim().is_empty() => Some((
+            format!("Opened {}.", target.trim()),
+            Some(format!("site:{}", target.trim().to_lowercase())),
+        )),
+        ParsedIntent::MediaPlayPause
+        | ParsedIntent::MediaNext
+        | ParsedIntent::MediaPrevious
+        | ParsedIntent::MediaStop => Some(("Controlled media playback.".to_string(), Some("media".to_string()))),
+        ParsedIntent::OpenArchitect => Some((
+            "Opened the architecture mapper.".to_string(),
+            Some("feature:architect".to_string()),
+        )),
+        ParsedIntent::OpenSettings => Some(("Opened the Command Hub.".to_string(), None)),
+        _ => None,
+    }
+}
+
+/// Record a handled local command: one conversation turn (so "what did I just
+/// ask you to open?" is answerable) + a habit counter (self-learning).
+fn record_local_turn<R: Runtime>(
+    app: &AppHandle<R>,
+    transcript: &str,
+    intent: &ParsedIntent,
+    turn: &crate::center::TurnContext,
+) {
+    let Some((summary, habit)) = local_turn_summary(intent) else {
+        return;
+    };
+    let Ok(dir) = app.path().app_data_dir() else {
+        return;
+    };
+    crate::conversation::record_conversation_turn(
+        &dir,
+        crate::conversation::ConversationTurnInput {
+            agent: "local".to_string(),
+            intent: crate::intent_parser::intent_to_label(intent).to_string(),
+            transcript: transcript.to_string(),
+            response: summary,
+            outcome: crate::conversation::ConversationOutcome::Completed,
+            unresolved: Vec::new(),
+            owner: turn.ownership,
+        },
+    );
+    if let Some(key) = habit {
+        crate::habits::record_now(&dir, &key);
     }
 }
 
@@ -3198,6 +3332,19 @@ pub fn classify_screen_query(prompt: &str) -> ScreenQueryTier {
     }
 }
 
+/// Pure: does a `ReadOnly` screen query explicitly ask for the screen's TEXT
+/// ("read my screen", "scan…", "list the text on my screen")? Those are best
+/// served by free local OCR even when a vision key is usable. Descriptive
+/// ones ("what's on my screen", "show me my screen", "tell me what I see")
+/// deserve the VLM when it is available — they used to be answered with
+/// "87 text lines, starting with: …" even with a valid Gemini key.
+pub fn screen_query_wants_ocr(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    ["read", "scan", "text", "transcrib", "copy", "list"]
+        .iter()
+        .any(|k| lower.contains(k))
+}
+
 /// LOCAL OCR answer attempt (Feature 86, zero-RAM, keyless+offline).
 /// Runs Windows.Media.Ocr on a blocking thread (WinRT async), speaks a
 /// text summary, and shows the extracted text in the assistant panel via
@@ -3211,6 +3358,7 @@ async fn try_ocr_answer<R: Runtime>(
     app: &AppHandle<R>,
     prompt: &str,
     request_id: &str,
+    downgrade_reason: Option<&str>,
 ) -> Option<ProcessResult> {
     match tokio::task::spawn_blocking(crate::ocr::capture_screen_text).await {
         Ok(Some((text, rects))) => {
@@ -3224,7 +3372,10 @@ async fn try_ocr_answer<R: Runtime>(
                 .ok()
                 .map(|d| crate::vision::exhausted(&d, "gemini"))
                 .unwrap_or(false);
-            let prefix = screen_key_guidance(has_key, exhausted)
+            // A concrete reason (key rejected, rate limited, timed out)
+            // outranks the generic keyless/quota guidance.
+            let prefix = downgrade_reason
+                .or_else(|| screen_key_guidance(has_key, exhausted))
                 .map(|s| format!("{s} "))
                 .unwrap_or_default();
             speak_line(
@@ -3235,14 +3386,22 @@ async fn try_ocr_answer<R: Runtime>(
                 ),
                 request_id,
             );
-            crate::commands::set_pending_sidebar_text(
-                prompt.to_string(),
-                format!(
-                    "## Screen Text (OCR)\n\n```\n{}\n```",
-                    text.chars().take(3000).collect::<String>()
-                ),
+            let sidebar_text = format!(
+                "## Screen Text (OCR)\n\n```\n{}\n```",
+                text.chars().take(3000).collect::<String>()
             );
+            crate::commands::set_pending_sidebar_text(prompt.to_string(), sidebar_text.clone());
             let _ = crate::commands::unified_show_sidebar(app, "assistant", None).await;
+            // The sidebar window is kept warm after first use, and a mounted
+            // SidebarApp only fetches the pending content once (on mount).
+            // `unified_show_sidebar` just flips the view, so without this the
+            // spoken "full text is in the sidebar" pointed at a blank/stale
+            // card on every use after the first. Same payload the other
+            // show paths emit when the window already exists.
+            let _ = app.emit(
+                "sidebar:show",
+                serde_json::json!({ "query": prompt, "text": sidebar_text }),
+            );
             tracing::info!(
                 "ocr: screen text extracted ({} lines, {} rects)",
                 line_count,
@@ -3328,22 +3487,56 @@ async fn run_screen_analysis<R: Runtime>(
     prompt: String,
 ) -> Result<ProcessResult, String> {
     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-    speak_line(&app, "Analyzing the screen, sir.".to_string(), &request_id);
+
+    // Why the VLM path was skipped/failed — spoken once, folded into the
+    // fallback line instead of a silent downgrade.
+    #[cfg(target_os = "windows")]
+    let mut downgrade_reason: Option<&'static str> = None;
+    #[cfg(target_os = "windows")]
+    let mut skip_plain_text = false;
 
     #[cfg(target_os = "windows")]
     {
-        // ── Phase 5 cost pre-filter: transcription queries ("read my
-        // screen", "what's on my screen") skip BOTH VLM paths and go
-        // straight to free local OCR. Visual queries keep VLM-first.
-        if classify_screen_query(&prompt) == ScreenQueryTier::ReadOnly {
-            if let Some(result) = try_ocr_answer(&app, &prompt, &request_id).await {
+        // ── Cost pre-filter: queries that ask for the screen's TEXT
+        // ("read/scan my screen", "list the text…") go to free local OCR.
+        // Descriptive ones ("what's on my screen") use the VLM whenever it is
+        // usable and only fall to OCR when there is no key / quota / cooldown.
+        let vlm_ready = !crate::commands::read_api_key(&app, "gemini").is_empty()
+            && !app
+                .path()
+                .app_data_dir()
+                .ok()
+                .map(|d| crate::vision::unavailable(&d, "gemini"))
+                .unwrap_or(false);
+        if classify_screen_query(&prompt) == ScreenQueryTier::ReadOnly
+            && (screen_query_wants_ocr(&prompt) || !vlm_ready)
+        {
+            if let Some(result) = try_ocr_answer(&app, &prompt, &request_id, None).await {
                 return Ok(result);
             }
             tracing::info!("ocr: empty for a ReadOnly query — continuing to VLM chain");
         }
 
+        // Drop pins from a previous analysis BEFORE the screenshot: the stage
+        // overlay is not capture-excluded, so NEXUS used to photograph its own
+        // old boxes and describe them.
+        let _ = app.emit(
+            "stage:spatial_annotations",
+            serde_json::json!({ "title": "", "pins": [] }),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
         // ── Primary path: spatial decomposition (Gemini → Groq) ──────
-        match crate::vision::analyze_screen_spatial(&app, &prompt).await {
+        // "Analyzing…" is spoken once the screenshot exists (see
+        // `analyze_screen_spatial`'s `on_captured`), so its caption/orb are
+        // never in the capture.
+        let analyzing_app = app.clone();
+        let analyzing_id = request_id.clone();
+        match crate::vision::analyze_screen_spatial(&app, &prompt, move || {
+            speak_line(&analyzing_app, "Analyzing the screen, sir.".to_string(), &analyzing_id)
+        })
+        .await
+        {
             Ok(payload) => {
                 // 1. Ensure the stage overlay is on screen (click-through;
                 //    ghost ring coexists when a session is live).
@@ -3403,7 +3596,11 @@ async fn run_screen_analysis<R: Runtime>(
                 });
             }
             Err(e) => {
-                tracing::warn!("spatial analysis unavailable: {e} — falling back to plain-text VLM");
+                tracing::warn!("spatial analysis unavailable: {e}");
+                // A rejected key / quota / rate limit / timeout would fail the
+                // plain-text retry the same way and only add dead air.
+                skip_plain_text = !e.plain_text_retry_worthwhile();
+                downgrade_reason = e.spoken_reason();
             }
         }
 
@@ -3411,7 +3608,7 @@ async fn run_screen_analysis<R: Runtime>(
         // 2026-10-01: Groq decommissioned all vision models (404) — this
         // fallback now runs on Gemini Flash-Lite.
         let gemini_key = crate::commands::read_api_key(&app, "gemini");
-        if !gemini_key.is_empty() {
+        if !gemini_key.is_empty() && !skip_plain_text {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(12))
                 .build()
@@ -3481,13 +3678,32 @@ async fn run_screen_analysis<R: Runtime>(
     // API keys and zero network.
     #[cfg(target_os = "windows")]
     {
-        if let Some(result) = try_ocr_answer(&app, &prompt, &request_id).await {
+        if let Some(result) = try_ocr_answer(&app, &prompt, &request_id, downgrade_reason).await {
             return Ok(result);
         }
 
         // ── Fallback 3: UIA actionable-element count ─────────────────
+        // Keep the real reason audible — the bare count used to mask a
+        // rejected key / missing key behind "I see N actionable elements".
         let els = crate::screen::list_actionables();
-        speak_line(&app, format!("I see {} actionable elements on the screen, sir.", els.len()), &request_id);
+        let lead = downgrade_reason
+            .or_else(|| {
+                let has_key = !crate::commands::read_api_key(&app, "gemini").is_empty();
+                let exhausted = app
+                    .path()
+                    .app_data_dir()
+                    .ok()
+                    .map(|d| crate::vision::exhausted(&d, "gemini"))
+                    .unwrap_or(false);
+                screen_key_guidance(has_key, exhausted)
+            })
+            .map(|s| format!("{s} "))
+            .unwrap_or_default();
+        speak_line(
+            &app,
+            format!("{lead}I see {} actionable elements on the screen, sir.", els.len()),
+            &request_id,
+        );
     }
 
     clear_active_request(&request_id);
@@ -4934,6 +5150,45 @@ mod tests {
             "diagnose the screen",
         ] {
             assert_eq!(classify_screen_query(q), Visual, "query: {q}");
+        }
+    }
+
+    #[test]
+    fn test_local_turn_summary_is_a_privacy_whitelist() {
+        // Recorded: app/site opens (with a habit key), media, features.
+        assert_eq!(
+            local_turn_summary(&ParsedIntent::OpenApp { target: "Chrome".into() }),
+            Some(("Opened Chrome.".to_string(), Some("app:chrome".to_string())))
+        );
+        assert_eq!(
+            local_turn_summary(&ParsedIntent::MediaNext).map(|(_, h)| h),
+            Some(Some("media".to_string()))
+        );
+        assert_eq!(
+            local_turn_summary(&ParsedIntent::CloseApp { target: "Chrome".into() }),
+            Some(("Closed Chrome.".to_string(), None))
+        );
+        // Never recorded: dictation, searches, messages, contacts, unknown.
+        for intent in [
+            ParsedIntent::Search { query: "my medical report".into() },
+            ParsedIntent::BrowserSearch { query: "bank login".into() },
+            ParsedIntent::StartDictation,
+            ParsedIntent::WhatsappChat { contact: "mom".into() },
+            ParsedIntent::SendWhatsAppMessage { contact: "mom".into(), message: "secret".into() },
+            ParsedIntent::Unknown { raw: "hello there".into() },
+            ParsedIntent::OpenApp { target: "  ".into() },
+        ] {
+            assert_eq!(local_turn_summary(&intent), None, "{intent:?}");
+        }
+    }
+
+    #[test]
+    fn test_screen_query_wants_ocr_only_for_text_requests() {
+        for q in ["read my screen", "scan my screen", "list the text on my screen"] {
+            assert!(screen_query_wants_ocr(q), "should OCR: {q}");
+        }
+        for q in ["what's on my screen", "what is on the screen", "show me my screen", "tell me what i see"] {
+            assert!(!screen_query_wants_ocr(q), "should use VLM when available: {q}");
         }
     }
 

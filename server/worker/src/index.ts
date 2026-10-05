@@ -30,6 +30,7 @@ import { buildHealthBody, withProtocolVersion } from "./protocol";
 import { cacheGet, cacheSet, contentHash, prAnalysisKey, searchKey } from "./cache";
 import { retrieveCascade, buildSearchSynthesisPrompt, isSearchQuestion, searchWikipedia } from "./research";
 import { synthesizeWithCascade, callGroq, callGemini } from "./external_llm";
+import { buildGeneralPrompt } from "./general_prompt";
 import { dedupeSources } from "./clean";
 import {
   d1Store, claimProfile, resolveProfile, rotateDeviceToken, selfRevokeDevice,
@@ -1784,13 +1785,10 @@ async function handleSearch(req: NexusRequest, env: Env): Promise<string> {
 }
 
 async function handleGeneral(req: NexusRequest, env: Env): Promise<string> {
-  const prompt = `You are NEXUS, a helpful personal assistant. Answer the user's request concisely and naturally, as if speaking aloud:\n\n${req.task.request}`;
-  const llmResult = await synthesizeWithCascade(
-    prompt,
-    env,
-    "You are NEXUS, a helpful personal assistant. Answer concisely and naturally, as if speaking aloud. Never show reasoning steps.",
-    500,
-  );
+  // The client's persistent memory rides in dialog_context.memory (see
+  // general_prompt.ts) — without it the Worker fallback forgot the user.
+  const { prompt, system } = buildGeneralPrompt(req.task.request, req.task.dialog_context?.memory);
+  const llmResult = await synthesizeWithCascade(prompt, env, system, 500);
   if (llmResult) return llmResult.text;
   // Fallback to Cloudflare summarize if cascade failed
   return await summarize(prompt, env);
@@ -1823,6 +1821,8 @@ interface DialogContext {
   pending_intent: string;
   original_request: string;
   missing: string[];
+  /** Local persistent memory (profile + facts + conversation brief). Optional. */
+  memory?: string;
 }
 
 /** Dialog state returned to the client when more info is needed. */

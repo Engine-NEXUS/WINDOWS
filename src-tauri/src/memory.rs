@@ -1,9 +1,13 @@
-//! 3-tier persistent memory: core facts + episodic log + semantic recall.
+//! Persistent memory: core facts (+ the about-me profile in `profile.rs` and
+//! learned habits in `habits.rs`).
 //!
 //! File-based (no native deps): memory/ under app data dir.
 //!   core.json      — persistent key-value facts ("name" -> "Lakshya")
-//!   episodes.jsonl — rolling 30-day conversation log (transcript + response)
-//!   facts.json     — extracted semantic facts [{key, value, updated_at}]
+//!   profile.json   — who the user is / what they can do / need / prioritise
+//!   habits.json    — local usage counters (self-learning, no LLM)
+//!   episodes.jsonl — optional rolling 30-day log (`log_episode`; not wired to
+//!                    any caller today — conversation history lives in
+//!                    `conversation.rs`)
 //!
 //! Recall is substring-based (no embeddings) — fast, local, deterministic.
 
@@ -17,57 +21,142 @@ pub fn resolve_memory_dir(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("memory")
 }
 
-fn read_json(path: &Path) -> serde_json::Value {
+pub(crate) fn read_json(path: &Path) -> serde_json::Value {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|c| serde_json::from_str(&c).ok())
         .unwrap_or(serde_json::Value::Null)
 }
 
-fn write_json(path: &Path, v: &serde_json::Value) -> bool {
+/// Read a JSON file for a read-modify-write. A file that EXISTS but does not
+/// parse is first copied to `<name>.corrupt` so the next write can't silently
+/// replace every stored fact with `{}` (the old behavior after a crash
+/// mid-write).
+pub(crate) fn read_json_for_update(path: &Path) -> serde_json::Value {
+    match std::fs::read_to_string(path) {
+        Ok(c) => match serde_json::from_str(&c) {
+            Ok(v) => v,
+            Err(_) => {
+                if !c.trim().is_empty() {
+                    let mut backup = path.as_os_str().to_owned();
+                    backup.push(".corrupt");
+                    let _ = std::fs::write(PathBuf::from(backup), c);
+                }
+                serde_json::Value::Null
+            }
+        },
+        Err(_) => serde_json::Value::Null,
+    }
+}
+
+/// Atomic write: temp file + rename, so a crash can't leave a half-written
+/// (unparseable) file behind.
+pub(crate) fn write_json(path: &Path, v: &serde_json::Value) -> bool {
+    match serde_json::to_string_pretty(v) {
+        Ok(text) => write_text_atomic(path, &text),
+        Err(_) => false,
+    }
+}
+
+/// Atomic text write (temp file + rename) — shared by every memory-side file.
+pub(crate) fn write_text_atomic(path: &Path, text: &str) -> bool {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    serde_json::to_string_pretty(v)
-        .map(|s| std::fs::write(path, s).is_ok())
-        .unwrap_or(false)
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    if std::fs::write(&tmp, text).is_err() {
+        return false;
+    }
+    if std::fs::rename(&tmp, path).is_ok() {
+        return true;
+    }
+    // Windows can refuse to rename over an existing file that another process
+    // holds open; fall back to remove + rename, then to a plain overwrite.
+    let _ = std::fs::remove_file(path);
+    if std::fs::rename(&tmp, path).is_ok() {
+        return true;
+    }
+    let ok = std::fs::copy(&tmp, path).is_ok();
+    let _ = std::fs::remove_file(&tmp);
+    ok
+}
+
+/// Truncate to at most `max` CHARACTERS (never bytes — `String::truncate`
+/// panics when the byte index lands inside a multibyte character, e.g. Hindi
+/// or accented text in a stored fact).
+pub(crate) fn truncate_chars(s: &mut String, max: usize) {
+    if let Some((idx, _)) = s.char_indices().nth(max) {
+        s.truncate(idx);
+    }
+}
+
+/// Personal attributes the bare "my X is Y" shorthand may store. Without this
+/// gate any complaint ("my mic is not working", "my screen is dim") became a
+/// permanent fact. Explicit "remember …" commands accept any key.
+fn is_personal_attribute(key: &str) -> bool {
+    const ATTRS: &[&str] = &[
+        "name", "nickname", "age", "birthday", "birthdate", "birth_date", "email",
+        "phone", "number", "address", "city", "location", "hometown", "country",
+        "job", "profession", "role", "title", "company", "employer", "college",
+        "university", "school", "major", "course", "degree", "branch", "year",
+        "wife", "husband", "partner", "girlfriend", "boyfriend", "mom", "mother",
+        "dad", "father", "brother", "sister", "son", "daughter", "friend", "boss",
+        "dog", "cat", "pet", "hobby", "goal", "language", "timezone", "diet",
+        "birth_city", "pronouns",
+    ];
+    if ATTRS.contains(&key) {
+        return true;
+    }
+    key.starts_with("favorite_")
+        || key.starts_with("favourite_")
+        || key.ends_with("_name")
+        || key.ends_with("_birthday")
+        || key.ends_with("_email")
+        || key.ends_with("_number")
 }
 
 /// Parse "remember that X is Y" / "remember X is Y" / "my X is Y".
 /// Returns (key, value). All lowercase keys, original-case values.
 pub fn parse_remember(transcript: &str) -> Option<(String, String)> {
     let t = transcript.trim();
-    let lower = t.to_lowercase();
+    // ASCII-lowercase keeps byte offsets identical to `t` (Unicode lowercasing
+    // can change byte lengths and made the slicing below land mid-character).
+    let lower = t.to_ascii_lowercase();
     // Explicit remember commands
     for prefix in ["remember that ", "remember ", "note that "] {
-        if let Some(rest) = lower.strip_prefix(prefix) {
-            // rest is lowercase; recover original-case value by slicing original
-            let orig_rest = &t[prefix.len().min(t.len())..];
+        if lower.starts_with(prefix) {
+            let orig_rest = t.get(prefix.len()..).unwrap_or("");
             if let Some((k, v)) = split_is(orig_rest) {
-                return Some((normalize_key(k), v.trim().to_string()));
+                let key = normalize_key(k);
+                if !key.is_empty() && !v.trim().is_empty() {
+                    return Some((key, v.trim().to_string()));
+                }
             }
-            let _ = rest;
         }
     }
-    // "my X is Y" shorthand
-    if let Some(rest) = lower.strip_prefix("my ") {
-        let orig_rest = &t[3.min(t.len())..];
+    // "my X is Y" shorthand — personal attributes only
+    if lower.starts_with("my ") {
+        let orig_rest = t.get(3..).unwrap_or("");
         if let Some((k, v)) = split_is(orig_rest) {
-            let _ = rest;
-            return Some((normalize_key(k), v.trim().to_string()));
+            let key = normalize_key(k);
+            if is_personal_attribute(&key) && !v.trim().is_empty() {
+                return Some((key, v.trim().to_string()));
+            }
         }
     }
     None
 }
 
 fn split_is(s: &str) -> Option<(&str, &str)> {
-    let lower = s.to_lowercase();
-    // find " is " (case-insensitive via lower, same byte indices for ASCII " is ")
+    // ASCII-lowercase: same byte indices as `s`, so slicing is always safe.
+    let lower = s.to_ascii_lowercase();
     let idx = lower.find(" is ")?;
     Some((s[..idx].trim(), s[idx + 4..].trim()))
 }
 
-fn normalize_key(k: &str) -> String {
+pub(crate) fn normalize_key(k: &str) -> String {
     k.to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
@@ -82,7 +171,7 @@ fn normalize_key(k: &str) -> String {
 pub fn remember(app_data_dir: &Path, key: &str, value: &str) -> bool {
     let dir = resolve_memory_dir(app_data_dir);
     let path = dir.join("core.json");
-    let mut map = read_json(&path);
+    let mut map = read_json_for_update(&path);
     if !map.is_object() {
         map = serde_json::json!({});
     }
@@ -94,7 +183,7 @@ pub fn remember(app_data_dir: &Path, key: &str, value: &str) -> bool {
 pub fn forget(app_data_dir: &Path, key: &str) -> bool {
     let dir = resolve_memory_dir(app_data_dir);
     let path = dir.join("core.json");
-    let mut map = read_json(&path);
+    let mut map = read_json_for_update(&path);
     let obj = match map.as_object_mut() {
         Some(o) => o,
         None => return false,
@@ -104,6 +193,27 @@ pub fn forget(app_data_dir: &Path, key: &str) -> bool {
         write_json(&path, &map);
     }
     removed
+}
+
+/// Every stored core fact, sorted by key (Memory panel — `recall` caps at 10).
+pub fn all_facts(app_data_dir: &Path) -> Vec<(String, String)> {
+    let map = read_json(&resolve_memory_dir(app_data_dir).join("core.json"));
+    let mut out: Vec<(String, String)> = map
+        .as_object()
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out
+}
+
+/// Delete every core fact (privacy "clear everything").
+pub fn clear_facts(app_data_dir: &Path) -> bool {
+    let path = resolve_memory_dir(app_data_dir).join("core.json");
+    !path.exists() || std::fs::remove_file(path).is_ok()
 }
 
 /// Recall facts matching query tokens (substring, case-insensitive).
@@ -176,11 +286,23 @@ fn prune_episodes(path: &Path, now: i64) {
 }
 
 /// Build a compact memory context block for prompt injection.
-/// Core facts matching the transcript + up to 3 recent episodes.
+/// The about-me profile (always) + core facts matching the transcript + up to
+/// 3 recent episodes.
 pub fn get_memory_context(app_data_dir: &Path, transcript: &str) -> Option<String> {
     let mut parts: Vec<String> = vec![];
 
-    let facts = recall(app_data_dir, transcript);
+    // The profile is injected on EVERY turn (not query-gated): a question like
+    // "what should I work on today?" shares no token with "priority: …".
+    if let Some(block) = crate::profile::prompt_block(app_data_dir) {
+        parts.push(block);
+    }
+
+    // Facts containing PII (phone, e-mail, card, …) stay local: injecting them
+    // only for the router to redact (and the Worker path to leak) helped nobody.
+    let facts: Vec<(String, String)> = recall(app_data_dir, transcript)
+        .into_iter()
+        .filter(|(_, v)| crate::pii_filter::sanitize(v) == *v)
+        .collect();
     if !facts.is_empty() {
         let lines: Vec<String> = facts
             .iter()
@@ -214,9 +336,7 @@ pub fn get_memory_context(app_data_dir: &Path, transcript: &str) -> Option<Strin
         return None;
     }
     let mut ctx = parts.join("\n");
-    if ctx.len() > MAX_CONTEXT_CHARS {
-        ctx.truncate(MAX_CONTEXT_CHARS);
-    }
+    truncate_chars(&mut ctx, MAX_CONTEXT_CHARS);
     Some(ctx)
 }
 
@@ -302,6 +422,84 @@ mod tests {
         assert_eq!(parse_remember("remember"), None);
     }
 
+    /// Regression: any "my X is Y" complaint used to become a permanent fact.
+    #[test]
+    fn test_parse_remember_my_shorthand_ignores_complaints() {
+        for t in [
+            "my mic is not working",
+            "my screen is too dim",
+            "my laptop is slow today",
+            "my internet is down",
+        ] {
+            assert_eq!(parse_remember(t), None, "{t}");
+        }
+        assert_eq!(
+            parse_remember("my name is Lakshya"),
+            Some(("name".to_string(), "Lakshya".to_string()))
+        );
+        assert_eq!(
+            parse_remember("my best friend name is Asha"),
+            Some(("best_friend_name".to_string(), "Asha".to_string()))
+        );
+        // Explicit remember still accepts anything.
+        assert_eq!(
+            parse_remember("remember that my laptop is a Dell"),
+            Some(("my_laptop".to_string(), "a Dell".to_string()))
+        );
+    }
+
+    /// Regression: byte-offset slicing of a Unicode-lowercased copy could land
+    /// mid-character and panic on non-ASCII input.
+    #[test]
+    fn test_parse_remember_non_ascii_never_panics() {
+        for t in [
+            "remember İstanbul is my city",
+            "my İsim is Ahmet",
+            "remember that मेरा शहर is दिल्ली",
+            "remember that my café is Blue Tokai",
+        ] {
+            let _ = parse_remember(t);
+        }
+        assert_eq!(
+            parse_remember("remember that my café is Blue Tokai"),
+            Some(("my_café".to_string(), "Blue Tokai".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_truncate_chars_is_utf8_safe() {
+        let mut s = "é".repeat(500); // 2 bytes per char; byte 800 is mid-char
+        truncate_chars(&mut s, 400);
+        assert_eq!(s.chars().count(), 400);
+        let mut short = "abc".to_string();
+        truncate_chars(&mut short, 400);
+        assert_eq!(short, "abc");
+    }
+
+    #[test]
+    fn test_context_with_multibyte_facts_does_not_panic() {
+        let d = tmpdir("utf8ctx");
+        for i in 0..8 {
+            remember(&d, &format!("fact_{i}"), &"दिल्ली".repeat(40));
+        }
+        let ctx = get_memory_context(&d, "").expect("context");
+        assert!(ctx.chars().count() <= MAX_CONTEXT_CHARS);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn test_corrupt_core_is_backed_up_not_silently_wiped() {
+        let d = tmpdir("corrupt");
+        let dir = resolve_memory_dir(&d);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("core.json"), "{\"name\": \"Lakshya\", ").unwrap();
+        assert!(remember(&d, "city", "Delhi"));
+        let backup = std::fs::read_to_string(dir.join("core.json.corrupt")).unwrap();
+        assert!(backup.contains("Lakshya"), "corrupt original must be preserved");
+        assert!(!dir.join("core.json.tmp").exists(), "no temp file left behind");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn test_remember_recall_forget() {
         let d = tmpdir("rrf");
@@ -329,6 +527,22 @@ mod tests {
         let ctx = get_memory_context(&d, "dog name");
         assert!(ctx.is_some());
         assert!(ctx.unwrap().contains("Bruno"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn test_context_always_includes_profile_and_skips_pii_facts() {
+        let d = tmpdir("ctxprof");
+        crate::profile::add(&d, crate::profile::PRIORITIES, "ship the ghost mode fixes");
+        remember(&d, "phone", "9876543210");
+        remember(&d, "city", "Delhi");
+        // Query shares no token with the profile or the facts.
+        let ctx = get_memory_context(&d, "what should we tackle next").unwrap();
+        assert!(ctx.contains("About the user"), "{ctx}");
+        assert!(ctx.contains("ship the ghost mode fixes"), "{ctx}");
+        assert!(!ctx.contains("9876543210"), "PII fact must stay local: {ctx}");
+        let ctx = get_memory_context(&d, "which city").unwrap();
+        assert!(ctx.contains("Delhi"), "{ctx}");
         let _ = std::fs::remove_dir_all(&d);
     }
 

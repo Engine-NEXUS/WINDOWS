@@ -1822,8 +1822,21 @@ pub fn get_settings<R: Runtime>(
 #[tauri::command]
 pub fn save_settings<R: Runtime>(
     app: tauri::AppHandle<R>,
-    settings: NexusSettings,
+    mut settings: NexusSettings,
 ) -> Result<(), String> {
+    // Keys are pasted by hand: a trailing space/newline makes every provider
+    // answer 401 while the Settings card still looks configured.
+    settings.groq_api_key = settings.groq_api_key.trim().to_string();
+    settings.gemini_api_key = settings.gemini_api_key.trim().to_string();
+    settings.cerebras_api_key = settings.cerebras_api_key.trim().to_string();
+    // The keychain wins on read (`read_api_key`), but Settings only ever wrote
+    // settings.json — so a stale keychain copy (from a heal-forward / import)
+    // silently overrode a corrected key and made "Test key" report the OLD
+    // key's result. Every save now updates both stores (an emptied field
+    // clears the credential).
+    crate::auth_vault::set_api_key("groq", &settings.groq_api_key);
+    crate::auth_vault::set_api_key("gemini", &settings.gemini_api_key);
+    crate::auth_vault::set_api_key("cerebras", &settings.cerebras_api_key);
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("settings.json");
@@ -1866,31 +1879,29 @@ pub fn save_settings<R: Runtime>(
         (url, settings.user_id.clone(), settings.device_id.clone())
     };
 
-    let config = serde_json::json!({
-        "serverUrl": server_url,
-        "userId": user_id,
-        "deviceId": device_id,
-    });
-    std::fs::write(&config_path, config.to_string()).map_err(|e| e.to_string())?;
+    // Update ONLY the three fields this command owns. The file also carries
+    // the identity record (identity / profileId / lastKnownStatus / …) written
+    // by identity_state; rebuilding it from scratch here dropped those on
+    // every Settings save and silently reverted a claimed profile.
+    let mut config = existing
+        .as_ref()
+        .and_then(|e| e.as_object().cloned())
+        .unwrap_or_default();
+    config.insert("serverUrl".into(), serde_json::Value::String(server_url));
+    config.insert("userId".into(), serde_json::Value::String(user_id));
+    config.insert("deviceId".into(), serde_json::Value::String(device_id));
+    std::fs::write(&config_path, serde_json::Value::Object(config).to_string())
+        .map_err(|e| e.to_string())?;
     tracing::info!("settings saved to {:?}", path);
     Ok(())
 }
 
-/// Read the Groq API key from settings.json (non-IPC helper for stt.rs).
-/// Returns empty string if no key is set or settings file doesn't exist.
+/// Read the Groq API key (non-IPC helper for stt.rs and the vision gates).
+/// Delegates to `read_api_key` (keychain first, settings.json fallback) so a
+/// keychain-only key — e.g. after a settings import, which strips keys from
+/// the file — is honored by cloud STT too. Returns empty string if no key.
 pub fn read_groq_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
-    let dir = app.path().app_data_dir();
-    let Ok(dir) = dir else { return String::new(); };
-    let path = dir.join("settings.json");
-    let Ok(content) = std::fs::read_to_string(&path) else { return String::new(); };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return String::new(); };
-    // Read groqApiKey (frontend camelCase) with fallback to groq_api_key
-    // (snake_case, used by manual settings.json edits or older versions).
-    json.get("groqApiKey")
-        .or_else(|| json.get("groq_api_key"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
+    read_api_key(app, "groq")
 }
 
 /// Read the localSttOnly flag from settings.json (non-IPC helper for stt.rs).
@@ -1913,6 +1924,7 @@ pub fn read_local_stt_only<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool
 /// vault service id ("groq" | "gemini" | "cerebras").
 pub fn read_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>, service: &str) -> String {
     if let Some(k) = crate::auth_vault::get_api_key(service) {
+        let k = k.trim().to_string();
         if !k.is_empty() {
             return k;
         }
@@ -1939,6 +1951,7 @@ pub fn read_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>, service: &str)
         .or_else(|| json.get(snake))
         .and_then(|v| v.as_str())
         .unwrap_or("")
+        .trim()
         .to_string()
 }
 
@@ -2231,13 +2244,20 @@ pub fn open_mic_settings() -> Result<(), String> {
     Ok(())
 }
 
-/// IPC: Clear the conversation transcript (frontend store).
-/// This is a no-op on the Rust side — the frontend handles it.
-/// The command exists so the settings UI can call it via IPC.
+/// IPC: Clear the stored conversation. This used to be a no-op ("the frontend
+/// handles it") while the Settings label promised "Remove all stored
+/// transcripts" — `conversation.jsonl`, the conversation brief and the episodic
+/// log stayed on disk. It now deletes them (profile/facts are separate:
+/// `memory_clear`).
 #[tauri::command]
-pub fn clear_transcript() -> Result<(), String> {
-    tracing::info!("transcript cleared (frontend-side)");
-    Ok(())
+pub fn clear_transcript<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    if crate::memory_ipc::clear_conversation(&dir) {
+        tracing::info!("stored conversation cleared");
+        Ok(())
+    } else {
+        Err("couldn't remove every stored transcript file".to_string())
+    }
 }
 
 /// Force a manual app registry refresh (e.g. after installing a new app).

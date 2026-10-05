@@ -49,7 +49,19 @@ fn owner_repo_token(text: &str) -> bool {
 }
 
 fn source_strength(source: &str) -> u8 {
-    if source == "deterministic" {
+    // The hand-written regex parsers (live control, dictation, screen
+    // analysis/annotation) are exactly as explicit as plain "deterministic";
+    // scoring them 0 made every ghost-session "new tab" / "type …" / "click …"
+    // read as "no evidence" and get dropped as ambient speech.
+    if source == "deterministic"
+        || matches!(
+            source,
+            "deterministic-live"
+                | "deterministic-dictation"
+                | "deterministic-screen-analysis"
+                | "deterministic-screen-annotation"
+        )
+    {
         3
     } else if source == "nlu" || source == "brain" {
         2
@@ -186,9 +198,12 @@ pub fn action_disposition(
 
     match (evidence, ownership) {
         (CommandEvidence::Strong, TurnOwnership::Verified) => ActionDisposition::Allow,
-        (CommandEvidence::Strong, TurnOwnership::Unenrolled) if !ghost_active => {
-            ActionDisposition::Allow
-        }
+        // Speaker verification is off by default, so every turn is
+        // `Unenrolled`. An explicit (Strong) command must still run inside a
+        // ghost session; otherwise ghost mode can only ever execute for an
+        // enrolled speaker and silently drops everything for everyone else.
+        // Weaker (ML-guessed) evidence still needs a verified owner there.
+        (CommandEvidence::Strong, TurnOwnership::Unenrolled) => ActionDisposition::Allow,
         (CommandEvidence::Medium, TurnOwnership::Verified) => ActionDisposition::Allow,
         (_, _) if ghost_active => ActionDisposition::AmbientDrop,
         _ => ActionDisposition::Clarify,
@@ -645,6 +660,71 @@ mod director_tests {
                 true
             ),
             ActionDisposition::Allow
+        );
+    }
+
+    fn live(intent: &str) -> ParsedIntent {
+        ParsedIntent::NluResult {
+            intent: intent.to_string(),
+            slots: serde_json::json!({}),
+            confidence: 1.0,
+        }
+    }
+
+    /// Regression: with speaker verification off (every turn `Unenrolled`) an
+    /// explicit ghost-session command must run, not be dropped as ambient.
+    #[test]
+    fn test_ghost_unenrolled_explicit_commands_are_allowed() {
+        for source in [
+            "deterministic",
+            "deterministic-live",
+            "deterministic-dictation",
+            "deterministic-screen-analysis",
+        ] {
+            assert_eq!(
+                action_disposition(
+                    &live("browser_new_tab"),
+                    "new tab",
+                    source,
+                    TurnOwnership::Unenrolled,
+                    true
+                ),
+                ActionDisposition::Allow,
+                "source {source}"
+            );
+        }
+    }
+
+    /// The ghost mic is hot: unenrolled narrative and ML guesses stay ambient.
+    #[test]
+    fn test_ghost_unenrolled_narrative_and_weak_evidence_still_dropped() {
+        let unknown = ParsedIntent::Unknown {
+            raw: "we should probably leave soon".to_string(),
+        };
+        assert_eq!(
+            action_disposition(&unknown, "we should probably leave soon", "none", TurnOwnership::Unenrolled, true),
+            ActionDisposition::AmbientDrop
+        );
+        assert_eq!(
+            action_disposition(&live("type_text"), "type hi", "nlu", TurnOwnership::Unenrolled, true),
+            ActionDisposition::AmbientDrop
+        );
+        assert_eq!(
+            action_disposition(&live("type_text"), "type hi", "deterministic-live", TurnOwnership::Rejected, true),
+            ActionDisposition::AmbientDrop
+        );
+    }
+
+    /// Outside ghost the original behavior is unchanged.
+    #[test]
+    fn test_non_ghost_unenrolled_unchanged() {
+        assert_eq!(
+            action_disposition(&live("browser_new_tab"), "new tab", "deterministic-live", TurnOwnership::Unenrolled, false),
+            ActionDisposition::Allow
+        );
+        assert_eq!(
+            action_disposition(&live("type_text"), "type hi", "nlu", TurnOwnership::Unenrolled, false),
+            ActionDisposition::Clarify
         );
     }
 }
