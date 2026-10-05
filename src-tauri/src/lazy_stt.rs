@@ -370,10 +370,15 @@ pub fn spawn_prewarm(app_data_dir: std::path::PathBuf) {
         .ok();
 }
 
+/// Default local STT model. `small_streaming` (123M params, 7.84% WER,
+/// ~300 MB) is what fits NEXUS's 600–700 MB local-usage budget alongside the
+/// WebView2 stage and the wake engine; `medium_streaming` (245M, 6.65% WER,
+/// ~400 MB) is an explicit opt-in for machines with RAM to spare, and
+/// `tiny_streaming` (34M, 12% WER, ~100 MB) the ultra-low-RAM choice.
+pub const DEFAULT_MOONSHINE_MODEL: &str = "small_streaming";
+
 /// Read the Moonshine model name from settings.json. Falls back to
-/// "medium_streaming" (245M, 6.65% WER) for admin accuracy. Family
-/// members with 8GB laptops can set "small_streaming" (123M, 7.84% WER)
-/// in Settings to reduce RAM usage.
+/// `DEFAULT_MOONSHINE_MODEL`; a user's explicit choice always wins.
 fn read_moonshine_model() -> String {
     // Try %APPDATA%/com.nexus.assistant/settings.json
     let path = if let Ok(appdata) = std::env::var("APPDATA") {
@@ -386,20 +391,20 @@ fn read_moonshine_model() -> String {
             .join("com.nexus.assistant")
             .join("settings.json")
     } else {
-        return "medium_streaming".to_string();
+        return DEFAULT_MOONSHINE_MODEL.to_string();
     };
 
     let Ok(content) = std::fs::read_to_string(&path) else {
-        return "medium_streaming".to_string();
+        return DEFAULT_MOONSHINE_MODEL.to_string();
     };
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return "medium_streaming".to_string();
+        return DEFAULT_MOONSHINE_MODEL.to_string();
     };
 
     json.get("moonshineModel")
         .or_else(|| json.get("moonshine_model"))
         .and_then(|v| v.as_str())
-        .unwrap_or("medium_streaming")
+        .unwrap_or(DEFAULT_MOONSHINE_MODEL)
         .to_string()
 }
 
@@ -407,6 +412,13 @@ fn read_moonshine_model() -> String {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// The local-STT default must stay inside the 600–700 MB budget.
+    #[test]
+    fn test_default_moonshine_model_is_ram_friendly() {
+        assert_eq!(DEFAULT_MOONSHINE_MODEL, "small_streaming");
+        assert_eq!(crate::commands::NexusSettings::default().moonshine_model, DEFAULT_MOONSHINE_MODEL);
+    }
 
     #[test]
     fn test_local_child_locks_english_model() {

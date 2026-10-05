@@ -1512,9 +1512,9 @@ pub struct NexusSettings {
     pub cerebras_api_key: String,
     /// Moonshine STT model architecture.
     /// Options: "small_streaming" (123M, 7.84% WER, default for family),
-    ///          "medium_streaming" (245M, 6.65% WER, recommended for admin),
+    ///          "medium_streaming" (245M, 6.65% WER, ~400 MB — opt-in),
     ///          "tiny_streaming" (34M, 12% WER, ultra-low RAM).
-    /// Default: "medium_streaming" (better accuracy, admin has RAM).
+    /// Default: "small_streaming" — fits the 600–700 MB local-usage budget.
     #[serde(default = "default_moonshine_model")]
     pub moonshine_model: String,
     /// Stage-2 wake-word verifier: on a stage-1 (acoustic) candidate, run the
@@ -1601,7 +1601,7 @@ fn default_orb_size() -> u32 {
 }
 
 fn default_moonshine_model() -> String {
-    "medium_streaming".to_string()
+    crate::lazy_stt::DEFAULT_MOONSHINE_MODEL.to_string()
 }
 
 fn default_verify_wake() -> bool {
@@ -1695,7 +1695,7 @@ impl Default for NexusSettings {
             orb_size: 200,
             gemini_api_key: String::new(),
             cerebras_api_key: String::new(),
-            moonshine_model: "medium_streaming".to_string(),
+            moonshine_model: crate::lazy_stt::DEFAULT_MOONSHINE_MODEL.to_string(),
             tts_emotion: "auto".to_string(),
             vision_provider: "auto".to_string(),
             vision_race: "sequential".to_string(),

@@ -237,8 +237,13 @@ impl MailService {
             return None;
         }
 
-        // Inspect each new message that arrived since the watch was created
-        for msg in &current_messages[watch.message_count..] {
+        let new_messages = &current_messages[watch.message_count..];
+
+        // A deadline change anywhere in the new messages outranks a plain
+        // reply. The loop used to `return` on the FIRST new message, so when a
+        // chatty reply arrived in the same poll as the extension, the
+        // deadline change was never reported.
+        for msg in new_messages {
             if let Some(dl) = Self::parse_deadline_update(&msg.body_text) {
                 if Some(&dl.new_deadline_raw) != watch.initial_deadline_raw.as_ref() {
                     return Some(ThreadUpdateEvent::DeadlineChanged {
@@ -248,14 +253,14 @@ impl MailService {
                     });
                 }
             }
-
-            return Some(ThreadUpdateEvent::NewReply {
-                sender: msg.from.clone(),
-                snippet: msg.body_text.chars().take(120).collect(),
-            });
         }
 
-        None
+        // Otherwise report the NEWEST reply.
+        let msg = new_messages.last()?;
+        Some(ThreadUpdateEvent::NewReply {
+            sender: msg.from.clone(),
+            snippet: msg.body_text.chars().take(120).collect(),
+        })
     }
 }
 
@@ -332,6 +337,44 @@ mod tests {
                 assert!(snippet.contains("Office hours"));
             }
             _ => panic!("Expected NewReply event"),
+        }
+    }
+
+    /// Regression: a plain reply arriving in the same poll as a deadline
+    /// extension used to hide the extension (first new message won).
+    #[test]
+    fn test_diff_prefers_deadline_change_over_earlier_reply() {
+        let base = MailMessage {
+            id: "m1".into(),
+            thread_id: "t1".into(),
+            from: "prof@university.edu".into(),
+            to: "me@nexus.internal".into(),
+            subject: "Project".into(),
+            body_text: "Due date is Friday 3 PM.".into(),
+            timestamp_ms: 1,
+        };
+        let watch = MailService::create_thread_watch(
+            "w".into(), "t1".into(), None, "prof@university.edu".into(),
+            "Project".into(), &[base.clone()], None,
+        );
+        let chatter = MailMessage {
+            id: "m2".into(), from: "ta@university.edu".into(), timestamp_ms: 2,
+            body_text: "Good luck everyone!".into(), ..base.clone()
+        };
+        let extension = MailMessage {
+            id: "m3".into(), timestamp_ms: 3,
+            body_text: "Due to server issues, deadline is extended to Monday 9 AM.".into(), ..base.clone()
+        };
+        match MailService::diff_thread_state(&watch, &[base.clone(), chatter.clone(), extension]).unwrap() {
+            ThreadUpdateEvent::DeadlineChanged { new_deadline, .. } => assert_eq!(new_deadline, "Monday 9 AM"),
+            other => panic!("expected the deadline change, got {other:?}"),
+        }
+        // Two plain replies → the NEWEST is reported.
+        let later = MailMessage { id: "m4".into(), from: "ta2@university.edu".into(), timestamp_ms: 4,
+            body_text: "Office hours moved to the lab.".into(), ..base.clone() };
+        match MailService::diff_thread_state(&watch, &[base, chatter, later]).unwrap() {
+            ThreadUpdateEvent::NewReply { sender, .. } => assert_eq!(sender, "ta2@university.edu"),
+            other => panic!("expected NewReply, got {other:?}"),
         }
     }
 

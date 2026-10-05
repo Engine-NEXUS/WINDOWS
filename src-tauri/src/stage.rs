@@ -34,7 +34,11 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 const LABEL: &str = "stage";
 const HEARTBEAT_STALE_SECS: u64 = 6;
-const SHOW_GRACE_SECS: u64 = 8;
+/// Cold-boot grace before a missing/stale heartbeat counts as a blackout. It was
+/// tuned (8s) for the empty step-1 stage; the stage now loads React, the VAD
+/// preload, a WebGL orb and the entrance canvas, so a slow machine could be
+/// declared dead — and destroyed — while it was still mounting.
+const SHOW_GRACE_SECS: u64 = 20;
 const MAX_AUTO_FIXES: u32 = 3;
 
 /// Interactive rect in PHYSICAL pixels (frontend multiplies CSS px by
@@ -152,7 +156,7 @@ pub async fn stage_hide<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 /// us (logged once per incarnation) — answers "is the current UI even in
 /// this binary?" without devtools.
 #[tauri::command]
-pub fn stage_heartbeat(client: Option<String>) -> Result<(), String> {
+pub fn stage_heartbeat<R: Runtime>(app: AppHandle<R>, client: Option<String>) -> Result<(), String> {
     let mut beat = LAST_BEAT.lock();
     let first_or_stale = beat
         .map(|t| t.elapsed().as_secs() > HEARTBEAT_STALE_SECS)
@@ -164,6 +168,16 @@ pub fn stage_heartbeat(client: Option<String>) -> Result<(), String> {
             "stage: frontend alive (client={})",
             client.as_deref().unwrap_or("unknown")
         );
+    }
+    // A freshly (re)created stage starts with `ghostActive = false`:
+    // `ghost:session` fires only on enter/exit, so after a watchdog rebuild the
+    // overlay never learned that a session was still live — no waves, no
+    // hot-mic loop — while Rust stayed Active with Esc armed. Re-announce the
+    // live session on every beat: the frontend listener is idempotent
+    // (it only acts when `ghostActive` changes), and doing it per beat (2s)
+    // also covers the first beat racing ahead of the listener's registration.
+    if crate::ghost::session_active() {
+        let _ = app.emit("ghost:session", serde_json::json!({ "active": true }));
     }
     Ok(())
 }

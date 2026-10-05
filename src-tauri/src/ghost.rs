@@ -395,13 +395,14 @@ pub fn dequeue_command() -> Option<QueuedCmd> {
 
 /// Rule 3: re-verify grounding at dequeue time, never execute blind.
 /// Browser-targeted steps require a browser to actually hold the
-/// foreground (a URL read proves it); anything else re-verifies inside
-/// its own runner (focus-verify before+after). Err = skip with one
-/// spoken line, queue continues.
+/// foreground (checked by process name — an address-bar URL read is empty on
+/// a fresh new tab, which skipped "search …" right after "new tab");
+/// anything else re-verifies inside its own runner (focus-verify
+/// before+after). Err = skip with one spoken line, queue continues.
 pub fn verify_grounding(cmd: &QueuedCmd) -> Result<(), String> {
     match cmd.slot {
         SlotClass::BrowserAction | SlotClass::Navigate => {
-            if crate::browser_url::get_active_browser_url().is_none() {
+            if !crate::browser_url::foreground_is_browser() {
                 return Err("Target browser window lost focus".into());
             }
         }
@@ -783,11 +784,18 @@ pub mod ghost_wry {
     /// (R::Handle is dependently-sized; a direct transmute is rejected).
     /// Lives in ONE place (here), not scattered through every caller.
     pub fn g_wry<R: tauri::Runtime>(app: AppHandle<R>) -> AppHandle<tauri::Wry> {
+        // Ownership MOVES into the returned handle. The previous version did a
+        // bare `ptr::read` and then let `app` drop at scope end — two owners of
+        // the same Arcs, one decrement too many on every call (each owning
+        // call site: ghost drills, voice exit, abort). Over enough ghost
+        // enter/exit cycles that underflows the refcounts (use-after-free).
+        // `ManuallyDrop` suppresses the original's destructor.
+        let app = std::mem::ManuallyDrop::new(app);
         unsafe {
             // Same memory, reinterpreted under the Wry marker — field
             // offsets are identical (Handle is a unit marker struct in
             // every runtime used).
-            let raw = &app as *const AppHandle<R> as *const AppHandle<tauri::Wry>;
+            let raw = &*app as *const AppHandle<R> as *const AppHandle<tauri::Wry>;
             std::ptr::read(raw)
         }
     }

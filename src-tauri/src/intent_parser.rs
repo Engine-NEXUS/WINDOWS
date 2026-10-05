@@ -1794,8 +1794,26 @@ fn parse_type_dictation_command(text: &str) -> Option<ParseResult> {
 ///   ("research quantum computing") still routes to the Worker.
 /// - The what/see families are inherently screen queries (no anchor needed).
 fn parse_screen_analysis_command(text: &str) -> Option<ParseResult> {
-    let t = text.trim().to_lowercase();
+    // STT often returns a curly apostrophe ("what’s"), and people say
+    // "can you …" / "please …" — none of which the anchored regexes allowed.
+    let t = text.trim().to_lowercase().replace(['\u{2019}', '\u{2018}'], "'");
     let trimmed = t.trim_end_matches(['.', ',', '!', '?']).trim();
+    let trimmed = regex_captures(
+        trimmed,
+        r"^(?:(?:hey|ok|okay)\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:i\s+(?:want|need)\s+you\s+to\s+)?(.*)$",
+    )
+    .and_then(|c| c.get(1).map(|m| m.as_str().trim()))
+    .unwrap_or(trimmed);
+
+    // Settings-like phrases that merely contain "screen" are not analysis.
+    if regex_captures(
+        trimmed,
+        r"\bscreen\s+(?:time|saver|recording|record|share|sharing|brightness|resolution|lock|reader|capture)\b",
+    )
+    .is_some()
+    {
+        return None;
+    }
 
     // 1. Screen-anchored verb family: "analyse the screen", "analyze my
     //    screen", "read the screen", "scan my screen", "check the screen",
@@ -1805,10 +1823,20 @@ fn parse_screen_analysis_command(text: &str) -> Option<ParseResult> {
     {
         return Some(ParseResult::screen_analysis_result(text));
     }
-    // 2. "What is on my screen?" family.
+    // 1b. "look at my screen" / "show me my screen" / "tell me about the screen".
     if regex_captures(
         trimmed,
-        r"^what(?:'s| is)\s+(?:on|in|of)?\s*(?:my|the|this)?\s*screen\b.*$",
+        r"^(?:look\s+at|have\s+a\s+look\s+at|take\s+a\s+look\s+at|show\s+me|tell\s+me\s+about)\s+(?:my|the|this)\s+screen\b.*$",
+    )
+    .is_some()
+    {
+        return Some(ParseResult::screen_analysis_result(text));
+    }
+    // 2. "What is on my screen?" family ("whats" / "what's" / "what is";
+    //    screen or display).
+    if regex_captures(
+        trimmed,
+        r"^what(?:'s|s| is)\s+(?:on|in|of)?\s*(?:my|the|this)?\s*(?:screen|display)\b.*$",
     )
     .is_some()
     {
@@ -7491,6 +7519,16 @@ mod tests {
             "check my screen",
             "research on this for me",
             "research this screen",
+            // STT / phrasing variants
+            "whats on my screen",
+            "what\u{2019}s on my screen",
+            "what's on my display",
+            "can you analyse my screen",
+            "could you please read the screen",
+            "please describe my screen",
+            "i need you to check my screen",
+            "look at my screen",
+            "show me my screen",
         ] {
             let res = parse_deterministic(phrase);
             assert!(res.is_some(), "Expected screen_analysis for '{}'", phrase);
@@ -7506,6 +7544,10 @@ mod tests {
             "analyse servx",
             "analyze pr 5 in zync",
             "research quantum computing",
+            "check my screen time",
+            "show me my screen time",
+            "read my screen reader settings",
+            "can you analyse servx",
         ] {
             let res = parse_deterministic(phrase);
             if let Some(ParsedIntent::NluResult { intent, .. }) = res.map(|r| r.intent) {

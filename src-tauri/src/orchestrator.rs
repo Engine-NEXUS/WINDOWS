@@ -846,104 +846,113 @@ pub async fn process_transcript<R: Runtime>(
     // ─── Screen control (ordinal click / read-back / tab switch) ────
     // Executes inline (UIA grounding is local, ~50-500ms) with spoken
     // results. Nothing here touches the network.
-    match &intent {
-        ParsedIntent::ScreenClick { ordinal } => {
-            return run_screen_click(app, *ordinal).await;
+    //
+    // While a ghost drill is running, mid-drill speech must go to the FIFO
+    // block below (stop-words preempt, everything else queues in arrival
+    // order) instead of executing here immediately — an inline click / type /
+    // tab action would fight the drill for the mouse and keyboard, and the
+    // queue's ordering/superseding rules would never see it.
+    let queue_mid_drill = crate::ghost::session_active() && crate::ghost::drill_running();
+    if !queue_mid_drill {
+        match &intent {
+            ParsedIntent::ScreenClick { ordinal } => {
+                return run_screen_click(app, *ordinal).await;
+            }
+            ParsedIntent::ScreenRead { ordinal } => {
+                return run_screen_read(app, *ordinal).await;
+            }
+            ParsedIntent::BrowserTab { index } => {
+                return run_browser_tab(app, *index).await;
+            }
+            ParsedIntent::BrowserCloseTab { index } => {
+                return run_browser_close(app, *index).await;
+            }
+            ParsedIntent::NluResult { intent, .. } if intent == "browser_new_tab" => {
+                // Live browser hotkeys: local, visible keyboard action. Routing
+                // this to WorkerBackend sent "open a new tab" to the cloud chat
+                // while ctrl+t sat unused in the executor (audit).
+                return run_browser_new_tab(app).await;
+            }
+            ParsedIntent::BrowserSearch { query } => {
+                return run_browser_search(app, query.clone()).await;
+            }
+            ParsedIntent::BrowserSearchFocus => {
+                return run_browser_search_focus(app).await;
+            }
+            ParsedIntent::WatchScreenEmail => {
+                return run_watch_screen_email(app).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "youtube_search" => {
+                let query = slots.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                return run_youtube_search(app, query).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "youtube_journal" => {
+                let url = slots.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                return run_youtube_journal(app, url).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "type_text" => {
+                let text = slots.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                return run_type_text(app, text).await;
+            }
+            // Local system control (doc 07 P2): these previously had no
+            // dispatch arm at all, so a classified "focus_app"/"system_*"
+            // intent silently defaulted to Subsystem::WorkerBackend — the
+            // classifier ran instantly and locally, then its answer was
+            // thrown away for a cloud round-trip that couldn't act on it.
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "focus_app" => {
+                let target = slots.get("target").and_then(|v| v.as_str())
+                    .or_else(|| slots.get("app").and_then(|v| v.as_str()))
+                    .or_else(|| slots.get("title").and_then(|v| v.as_str()))
+                    .unwrap_or("").to_string();
+                return run_focus_app(app, target).await;
+            }
+            ParsedIntent::NluResult { intent, .. } if intent == "system_minimize_window" => {
+                return run_minimize_window(app).await;
+            }
+            ParsedIntent::NluResult { intent, .. } if intent == "system_maximize_window" => {
+                return run_maximize_window(app).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "system_click_element" || intent == "click_element" => {
+                let name = slots.get("name").and_then(|v| v.as_str())
+                    .or_else(|| slots.get("element").and_then(|v| v.as_str()))
+                    .unwrap_or("").to_string();
+                return run_click_element(app, name).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_analysis" => {
+                let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("analyze the screen").to_string();
+                return run_screen_analysis(app, prompt).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_annotation" => {
+                let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("annotate the screen").to_string();
+                return run_screen_annotation(app, prompt).await;
+            }
+            ParsedIntent::StartDictation => {
+                set_dictation_active(true);
+                let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                speak_line(&app, "Dictation started, sir. Speak line by line.".to_string(), &request_id);
+                clear_active_request(&request_id);
+                return Ok(ProcessResult {
+                    request_id,
+                    subsystem: Subsystem::LocalCommand,
+                    handled_locally: true,
+                });
+            }
+            ParsedIntent::StopDictation => {
+                set_dictation_active(false);
+                let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                speak_line(&app, "Stopped typing, sir.".to_string(), &request_id);
+                clear_active_request(&request_id);
+                return Ok(ProcessResult {
+                    request_id,
+                    subsystem: Subsystem::LocalCommand,
+                    handled_locally: true,
+                });
+            }
+            ParsedIntent::OpenSettings => {
+                return run_open_settings(app).await;
+            }
+            _ => {}
         }
-        ParsedIntent::ScreenRead { ordinal } => {
-            return run_screen_read(app, *ordinal).await;
-        }
-        ParsedIntent::BrowserTab { index } => {
-            return run_browser_tab(app, *index).await;
-        }
-        ParsedIntent::BrowserCloseTab { index } => {
-            return run_browser_close(app, *index).await;
-        }
-        ParsedIntent::NluResult { intent, .. } if intent == "browser_new_tab" => {
-            // Live browser hotkeys: local, visible keyboard action. Routing
-            // this to WorkerBackend sent "open a new tab" to the cloud chat
-            // while ctrl+t sat unused in the executor (audit).
-            return run_browser_new_tab(app).await;
-        }
-        ParsedIntent::BrowserSearch { query } => {
-            return run_browser_search(app, query.clone()).await;
-        }
-        ParsedIntent::BrowserSearchFocus => {
-            return run_browser_search_focus(app).await;
-        }
-        ParsedIntent::WatchScreenEmail => {
-            return run_watch_screen_email(app).await;
-        }
-        ParsedIntent::NluResult { intent, slots, .. } if intent == "youtube_search" => {
-            let query = slots.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            return run_youtube_search(app, query).await;
-        }
-        ParsedIntent::NluResult { intent, slots, .. } if intent == "youtube_journal" => {
-            let url = slots.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            return run_youtube_journal(app, url).await;
-        }
-        ParsedIntent::NluResult { intent, slots, .. } if intent == "type_text" => {
-            let text = slots.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            return run_type_text(app, text).await;
-        }
-        // Local system control (doc 07 P2): these previously had no
-        // dispatch arm at all, so a classified "focus_app"/"system_*"
-        // intent silently defaulted to Subsystem::WorkerBackend — the
-        // classifier ran instantly and locally, then its answer was
-        // thrown away for a cloud round-trip that couldn't act on it.
-        ParsedIntent::NluResult { intent, slots, .. } if intent == "focus_app" => {
-            let target = slots.get("target").and_then(|v| v.as_str())
-                .or_else(|| slots.get("app").and_then(|v| v.as_str()))
-                .or_else(|| slots.get("title").and_then(|v| v.as_str()))
-                .unwrap_or("").to_string();
-            return run_focus_app(app, target).await;
-        }
-        ParsedIntent::NluResult { intent, .. } if intent == "system_minimize_window" => {
-            return run_minimize_window(app).await;
-        }
-        ParsedIntent::NluResult { intent, .. } if intent == "system_maximize_window" => {
-            return run_maximize_window(app).await;
-        }
-        ParsedIntent::NluResult { intent, slots, .. } if intent == "system_click_element" || intent == "click_element" => {
-            let name = slots.get("name").and_then(|v| v.as_str())
-                .or_else(|| slots.get("element").and_then(|v| v.as_str()))
-                .unwrap_or("").to_string();
-            return run_click_element(app, name).await;
-        }
-        ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_analysis" => {
-            let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("analyze the screen").to_string();
-            return run_screen_analysis(app, prompt).await;
-        }
-        ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_annotation" => {
-            let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("annotate the screen").to_string();
-            return run_screen_annotation(app, prompt).await;
-        }
-        ParsedIntent::StartDictation => {
-            set_dictation_active(true);
-            let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-            speak_line(&app, "Dictation started, sir. Speak line by line.".to_string(), &request_id);
-            clear_active_request(&request_id);
-            return Ok(ProcessResult {
-                request_id,
-                subsystem: Subsystem::LocalCommand,
-                handled_locally: true,
-            });
-        }
-        ParsedIntent::StopDictation => {
-            set_dictation_active(false);
-            let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-            speak_line(&app, "Stopped typing, sir.".to_string(), &request_id);
-            clear_active_request(&request_id);
-            return Ok(ProcessResult {
-                request_id,
-                subsystem: Subsystem::LocalCommand,
-                handled_locally: true,
-            });
-        }
-        ParsedIntent::OpenSettings => {
-            return run_open_settings(app).await;
-        }
-        _ => {}
     }
 
     // ─── Ghostwriter session intercept ──────────────────────────────
@@ -2132,7 +2141,7 @@ pub fn denial_spoken_line(body: &str) -> Option<String> {
         return None;
     }
     let line = match json["code"].as_str().unwrap_or("") {
-        "pending" => "Cloud access is awaiting approval from your administrator, sir. Everything local still works meanwhile.",
+        "pending" => "Cloud access is awaiting approval from your administrator, sir. Everything local still works meanwhile — or add a free Groq or Gemini key in Command Hub, Accounts, and I'll answer on my own.",
         "suspended" => "Cloud access has been suspended, sir. Please contact your administrator.",
         "revoked" => "This device's cloud access has been revoked, sir.",
         "expired" => "This device's cloud access grant has expired, sir. Please ask your administrator to renew it.",
@@ -3490,9 +3499,14 @@ async fn run_screen_analysis<R: Runtime>(
 
     // Why the VLM path was skipped/failed — spoken once, folded into the
     // fallback line instead of a silent downgrade.
+    // (Initialised for the paths that reach the fallbacks without the spatial
+    // attempt failing; the spatial `Ok` arm returns, so the compiler can't see
+    // a read of the initial value.)
     #[cfg(target_os = "windows")]
+    #[allow(unused_assignments)]
     let mut downgrade_reason: Option<&'static str> = None;
     #[cfg(target_os = "windows")]
+    #[allow(unused_assignments)]
     let mut skip_plain_text = false;
 
     #[cfg(target_os = "windows")]
@@ -4100,14 +4114,14 @@ async fn run_click_element<R: Runtime>(app: AppHandle<R>, name: String) -> Resul
             None => {
                 let groq_key = crate::commands::read_groq_api_key(&app);
                 let gemini_key = crate::commands::read_api_key(&app, "gemini");
-                if groq_key.is_empty() && gemini_key.is_empty() {
+                let usage_dir = app
+                    .path()
+                    .app_data_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let order = crate::vision::read_vision_provider(&usage_dir);
+                if !crate::vision::has_usable_vision_key(&order, &groq_key, &gemini_key) {
                     None
                 } else {
-                    let usage_dir = app
-                        .path()
-                        .app_data_dir()
-                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
-                    let order = crate::vision::read_vision_provider(&usage_dir);
                     match reqwest::Client::builder()
                         .timeout(std::time::Duration::from_secs(25))
                         .build()
@@ -4383,14 +4397,18 @@ async fn run_ghost_open<R: Runtime>(
     let outcome = {
         let _guard = crate::ghost::GhostDrillGuard::new();
         match crate::command_executor::resolve_and_open_app(&target) {
-            Ok(_) => {
+            // Only a REAL success counts. `resolve_and_open_app` returns
+            // `Ok(CommandResult { success: false, "Didn't find that" })` for an
+            // unknown app; matching bare `Ok(_)` spoke "Ok sir." after opening
+            // nothing and never reached the Win-search fallback below.
+            Ok(r) if r.success => {
                 #[cfg(target_os = "windows")]
                 {
                     let _ = crate::live::commands::window::focus_app_by_title(&target);
                 }
                 "Ok sir.".to_string()
             }
-            Err(_) => match crate::live::commands::launcher::open_app_via_search(&target) {
+            _ => match crate::live::commands::launcher::open_app_via_search(&target) {
                 Ok(()) => "Ok sir.".to_string(),
                 Err(e) => e,
             },
@@ -5245,7 +5263,7 @@ mod tests {
         };
         assert_eq!(
             denial_spoken_line(&mk("pending")).unwrap(),
-            "Cloud access is awaiting approval from your administrator, sir. Everything local still works meanwhile."
+            "Cloud access is awaiting approval from your administrator, sir. Everything local still works meanwhile — or add a free Groq or Gemini key in Command Hub, Accounts, and I'll answer on my own."
         );
         assert_eq!(
             denial_spoken_line(&mk("suspended")).unwrap(),

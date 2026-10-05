@@ -353,16 +353,19 @@ mod windows_impl {
                 None => {
                     let groq_key = crate::commands::read_groq_api_key(&app);
                     let gemini_key = crate::commands::read_api_key(&app, "gemini");
-                    if groq_key.is_empty() && gemini_key.is_empty() {
-                        return Err(format!(
-                            "couldn't find '{element}' in {app_title}, sir — and I have no vision key. Add a Groq or Gemini key in Settings, Accounts, so I can see custom buttons."
-                        ));
-                    }
                     let usage_dir = app
                         .path()
                         .app_data_dir()
                         .unwrap_or_else(|_| std::path::PathBuf::from("."));
                     let order = crate::vision::read_vision_provider(&usage_dir);
+                    // Gate on a key for a provider that will actually be tried
+                    // (Gemini-only in auto mode) — a Groq-only user used to
+                    // pass this and then hear "daily vision limits are spent".
+                    if !crate::vision::has_usable_vision_key(&order, &groq_key, &gemini_key) {
+                        return Err(format!(
+                            "couldn't find '{element}' in {app_title}, sir — and I have no Gemini key for vision. Add a free one in Settings, Accounts, so I can see custom buttons."
+                        ));
+                    }
                     let client = reqwest::Client::builder()
                         .timeout(std::time::Duration::from_secs(25))
                         .build()

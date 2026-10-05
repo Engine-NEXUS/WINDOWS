@@ -41,17 +41,26 @@ pub fn build_locate_prompt(description: &str) -> String {
 /// Parse a 0-1000 coordinate pair from VLM text, scale to pixels.
 /// Accepts {"x":N,"y":M}, [N,M], or bare N,M. Pure + unit-tested.
 pub fn parse_coords(text: &str, w: i32, h: i32) -> Option<(i32, i32)> {
-    let nums: Vec<i64> = {
+    // Numbers may be decimals ("512.5, 300.2"): the old integer-only tokenizer
+    // split them into four numbers and returned (512, 5).
+    let nums: Vec<f64> = {
         let mut out = vec![];
         let mut cur = String::new();
         let mut neg = false;
-        for ch in text.chars().chain(std::iter::once(' ')) {
+        let chars: Vec<char> = text.chars().chain(std::iter::once(' ')).collect();
+        for (i, &ch) in chars.iter().enumerate() {
             if ch == '-' && cur.is_empty() {
                 neg = true;
             } else if ch.is_ascii_digit() {
                 cur.push(ch);
+            } else if ch == '.'
+                && !cur.is_empty()
+                && !cur.contains('.')
+                && chars.get(i + 1).map_or(false, |c| c.is_ascii_digit())
+            {
+                cur.push('.');
             } else if !cur.is_empty() {
-                let mut n: i64 = cur.parse().ok()?;
+                let mut n: f64 = cur.parse().ok()?;
                 if neg {
                     n = -n;
                 }
@@ -68,9 +77,10 @@ pub fn parse_coords(text: &str, w: i32, h: i32) -> Option<(i32, i32)> {
         return None;
     }
     let (x, y) = (nums[0], nums[1]);
-    if x < 0 || y < 0 || x > 1000 || y > 1000 {
+    if x < 0.0 || y < 0.0 || x > 1000.0 || y > 1000.0 {
         return None;
     }
+    let (x, y) = (x.round() as i64, y.round() as i64);
     Some(((x * w as i64 / 1000) as i32, (y * h as i64 / 1000) as i32))
 }
 
@@ -738,6 +748,18 @@ async fn locate_gemini_with_image(
     }
 }
 
+/// Is there a key for a provider that the given order will ACTUALLY try?
+/// The gates used to check "any key at all" — but Groq vision is gone, so
+/// `provider_order("auto")` is Gemini-only and a Groq-only user passed the gate,
+/// had the screenshot captured and then heard "my daily vision limits are
+/// spent" (a lie: no call was ever made). Pure.
+pub fn has_usable_vision_key(order_setting: &str, groq_key: &str, gemini_key: &str) -> bool {
+    provider_order(order_setting).iter().any(|p| match *p {
+        "groq" => !groq_key.is_empty(),
+        _ => !gemini_key.is_empty(),
+    })
+}
+
 /// Located target + which provider served it + quota context for speech.
 /// `quota_hit` names a provider skipped for exhaustion (announce it even
 /// when the serving provider succeeded first try). `raced` = parallel
@@ -809,7 +831,6 @@ pub async fn locate_with_fallback(
             _ => None,
         };
         let q1 = matches!(r1, LocateStep::Quota(_));
-        let q2 = matches!(r2, LocateStep::Quota(_));
         if let LocateStep::Quota(kind) = r1 {
             apply_rate_limit(usage_dir, "groq", kind);
         }
@@ -902,6 +923,16 @@ mod tests {
     #[test]
     fn test_parse_coords_json() {
         assert_eq!(parse_coords(r#"{"x": 500, "y": 250}"#, 2000, 1000), Some((1000, 250)));
+    }
+
+    #[test]
+    fn test_parse_coords_decimals_are_one_number_each() {
+        assert_eq!(parse_coords("512.5, 300.2", 1000, 1000), Some((513, 300)));
+        assert_eq!(parse_coords("[250.0, 750.4]", 2000, 1000), Some((500, 750)));
+        assert_eq!(parse_coords("{\"x\": 100.5, \"y\": 200.5}", 1000, 1000), Some((101, 201)));
+        // A trailing sentence period is not a decimal point.
+        assert_eq!(parse_coords("It is at 400, 600.", 1000, 1000), Some((400, 600)));
+        assert_eq!(parse_coords("1000.7, 5", 1000, 1000), None);
     }
 
     #[test]
@@ -1771,6 +1802,18 @@ pub async fn analyze_screen_spatial<R: Runtime>(
 #[cfg(test)]
 mod spatial_tests {
     use super::*;
+
+    #[test]
+    fn test_has_usable_vision_key_follows_provider_order() {
+        // auto / gemini: only a Gemini key counts (Groq vision is gone).
+        assert!(has_usable_vision_key("auto", "", "g-key"));
+        assert!(!has_usable_vision_key("auto", "groq-key", ""));
+        assert!(!has_usable_vision_key("gemini", "groq-key", ""));
+        assert!(!has_usable_vision_key("auto", "", ""));
+        // Explicit groq setting still uses the Groq key.
+        assert!(has_usable_vision_key("groq", "groq-key", ""));
+        assert!(!has_usable_vision_key("groq", "", "g-key"));
+    }
 
     #[test]
     fn test_classify_429_daily_vs_rate() {

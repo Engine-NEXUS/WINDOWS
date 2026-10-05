@@ -88,6 +88,24 @@ mod win {
         ControlType::SplitButton,
     ];
 
+    /// UIA element for the foreground WINDOW (not the focused leaf).
+    ///
+    /// `UIMatcher::from(el)` only searches `el`'s DESCENDANTS. Rooting at
+    /// `get_focused_element()` meant a focused leaf — the omnibox after Ctrl+T,
+    /// a text box, a button — has no children, so "click X" / "read the 2nd
+    /// result" found nothing (and fell to paid vision) whenever focus sat on
+    /// anything but a container.
+    pub fn foreground_window_element(automation: &UIAutomation) -> Option<uiautomation::UIElement> {
+        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.0 == 0 {
+            return None;
+        }
+        automation
+            .element_from_handle(uiautomation::types::Handle::from(hwnd.0))
+            .ok()
+    }
+
     /// List actionable elements in the foreground window via UIA.
     /// Best-effort: any failing element is skipped, never fatal.
     pub fn list_actionables() -> Vec<UiElement> {
@@ -95,9 +113,12 @@ mod win {
             Ok(a) => a,
             Err(_) => return Vec::new(),
         };
-        let focused = match automation.get_focused_element() {
-            Ok(e) => e,
-            Err(_) => return Vec::new(),
+        // Foreground window first; the focused element is only a fallback.
+        let focused = match foreground_window_element(&automation)
+            .or_else(|| automation.get_focused_element().ok())
+        {
+            Some(e) => e,
+            None => return Vec::new(),
         };
         let mut out = Vec::new();
         for ct in CLICKABLE {
@@ -164,7 +185,7 @@ mod win {
 }
 
 #[cfg(target_os = "windows")]
-pub use win::{click_element, list_actionables};
+pub use win::{click_element, foreground_window_element, list_actionables};
 
 #[cfg(target_os = "windows")]
 mod win_extra {

@@ -9,6 +9,7 @@ import {
 } from "./oauth";
 import { VoiceEnrollment } from "./VoiceEnrollment";
 import { identityBanner, type IdentityBanner } from "./identityBanner";
+import { applySetupKeys } from "./setupKeys";
 import { CURATED_VOICES, previewVoice, stopTts, type VoiceOption } from "../audio/ttsPlayer";
 
 type Step = 0 | 1 | 2 | 3;
@@ -25,6 +26,9 @@ export function SetupApp() {
   const [hotkey] = useState("Ctrl+Space");
   const [wakeWordEnabled, setWakeWordEnabled] = useState(true);
   const [autostart, setAutostart] = useState(true);
+  // Optional free cloud keys (BYOK). Both can stay empty — NEXUS still works.
+  const [groqKey, setGroqKey] = useState("");
+  const [geminiKey, setGeminiKey] = useState("");
   const [ttsVolume, setTtsVolume] = useState(75);
 
   // Mic permission
@@ -291,14 +295,17 @@ export function SetupApp() {
   const saveAllSettings = async () => {
     try {
       const current = (await invoke<any>("get_settings").catch(() => ({}))) || {};
-      const updated = {
-        ...current,
-        ttsVoice: selectedVoice,
-        hotkey,
-        wakeWordEnabled,
-        autostart,
-        ttsVolume,
-      };
+      const updated = applySetupKeys(
+        {
+          ...current,
+          ttsVoice: selectedVoice,
+          hotkey,
+          wakeWordEnabled,
+          autostart,
+          ttsVolume,
+        },
+        { groq: groqKey, gemini: geminiKey },
+      );
       await invoke("save_settings", { settings: updated });
     } catch (e) {
       console.warn("Failed to persist settings:", e);
@@ -607,6 +614,45 @@ export function SetupApp() {
                         style={{ width: "120px", accentColor: "var(--nx-accent-blue)" }}
                       />
                       <span style={{ fontSize: "var(--nx-text-sm)", fontWeight: 600, minWidth: "36px", textAlign: "right" }}>{ttsVolume}%</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: "var(--nx-space-5)" }}>
+                  <h3 style={{ fontSize: "var(--nx-text-sm)", marginBottom: "var(--nx-space-2)" }}>Free AI Keys (Optional)</h3>
+                  <p style={{ marginBottom: "var(--nx-space-3)", color: "var(--nx-text-secondary)", fontSize: "var(--nx-text-xs)" }}>
+                    NEXUS is free to run: cloud features use <em>your own</em> free keys, stored only on this PC.
+                    Skip both and NEXUS still works — wake word, local speech recognition, voice replies and local commands.
+                  </p>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "var(--nx-space-3)" }}>
+                    <div style={{ padding: "12px", border: "1px solid var(--nx-border)", borderRadius: "8px" }}>
+                      <div style={{ fontWeight: 600, fontSize: "var(--nx-text-sm)" }}>Groq — fast chat + cloud speech</div>
+                      <input
+                        type="password"
+                        placeholder="gsk_…"
+                        value={groqKey}
+                        onChange={(e) => setGroqKey(e.target.value)}
+                        style={{ width: "100%", marginTop: "6px", padding: "8px", boxSizing: "border-box" }}
+                      />
+                      <div style={{ fontSize: "var(--nx-text-xs)", color: "var(--nx-text-secondary)", marginTop: "4px" }}>
+                        Entering a Groq key switches speech recognition to Groq&apos;s cloud (your audio leaves this PC).
+                        Leave it empty to stay fully local.{" "}
+                        <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">Get a free key</a>
+                      </div>
+                    </div>
+                    <div style={{ padding: "12px", border: "1px solid var(--nx-border)", borderRadius: "8px" }}>
+                      <div style={{ fontWeight: 600, fontSize: "var(--nx-text-sm)" }}>Gemini — screen analysis + ghost vision</div>
+                      <input
+                        type="password"
+                        placeholder="AIza…"
+                        value={geminiKey}
+                        onChange={(e) => setGeminiKey(e.target.value)}
+                        style={{ width: "100%", marginTop: "6px", padding: "8px", boxSizing: "border-box" }}
+                      />
+                      <div style={{ fontSize: "var(--nx-text-xs)", color: "var(--nx-text-secondary)", marginTop: "4px" }}>
+                        Lets NEXUS look at your screen. About 500 free vision calls a day.{" "}
+                        <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Get a free key</a>
+                      </div>
                     </div>
                   </div>
                 </div>

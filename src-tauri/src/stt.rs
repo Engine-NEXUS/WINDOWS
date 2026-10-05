@@ -224,9 +224,41 @@ pub async fn transcribe_samples<R: tauri::Runtime>(
         Ok(text) => Ok(text),
         Err(e) => {
             mark_path(7);
+            // Without this the user got silence: an empty transcript and a
+            // "didn't catch that" loop with no hint that no speech engine was
+            // running at all (no Python sidecar, no cloud key).
+            if let Some(app) = app {
+                note_stt_unavailable(app);
+            }
             Err(e)
         }
     }
+}
+
+/// What to tell the user when NO speech engine could transcribe. Pure.
+///   * no Groq key: the free cloud key is the easy fix;
+///   * key present but "Local STT only" on: the toggle is the fix;
+///   * key present and cloud mode: Groq AND local both failed → connectivity.
+pub fn stt_unavailable_guidance(has_groq_key: bool, local_only: bool) -> &'static str {
+    if !has_groq_key {
+        "I can't turn your speech into text, sir — my local speech engine isn't running. Add a free Groq key in Command Hub, Accounts, or install Python with the Moonshine package for offline speech."
+    } else if local_only {
+        "I can't turn your speech into text, sir — speech is set to local only and the local engine isn't running. Turn off Local STT only in Command Hub to use Groq, or install Python with the Moonshine package."
+    } else {
+        "I can't reach any speech engine right now, sir. Check your internet connection."
+    }
+}
+
+static STT_GUIDE_SPOKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Speak the "no speech engine" guide ONCE per run (never nag every utterance).
+fn note_stt_unavailable<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if STT_GUIDE_SPOKEN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let has_key = !crate::commands::read_groq_api_key(app).is_empty();
+    let local_only = crate::commands::read_local_stt_only(app);
+    crate::orchestrator::speak_proactive_alert(app, stt_unavailable_guidance(has_key, local_only).to_string());
 }
 
 /// Verbose variant for the wake-word verifier (v3 confidence gate).
@@ -638,6 +670,17 @@ fn apply_hallucination_filter(text: &str) -> String {
 mod tests {
     use super::apply_hallucination_filter;
     use super::{filter_transcript_counted, hallucination_stats};
+    use super::stt_unavailable_guidance;
+
+    #[test]
+    fn test_stt_unavailable_guidance_names_the_right_fix() {
+        assert!(stt_unavailable_guidance(false, true).contains("free Groq key"));
+        assert!(stt_unavailable_guidance(false, false).contains("free Groq key"));
+        assert!(stt_unavailable_guidance(true, true).contains("Local STT only"));
+        assert!(stt_unavailable_guidance(true, false).contains("internet"));
+        // Never blames the network when the real cause is a missing engine/key.
+        assert!(!stt_unavailable_guidance(false, true).contains("internet"));
+    }
 
     /// Counted wrapper preserves filter semantics and moves the SLO
     /// counters exactly once per turn (empty → hit, speech → total only).

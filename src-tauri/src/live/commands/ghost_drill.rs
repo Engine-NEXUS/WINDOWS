@@ -88,13 +88,15 @@ pub async fn whatsapp_drill<R: Runtime>(
             // gets 1s to appear; focus still unconfirmed after that is a
             // warning, not a failure (the OS is still opening it).
             match crate::command_executor::resolve_and_open_app("WhatsApp") {
-                Ok(_) => {
+                // A not-found result is `Ok(success: false)` — fall to the
+                // Win-search drill like an error, don't pretend it launched.
+                Ok(r) if r.success => {
                     thread::sleep(Duration::from_millis(1000));
                     if !super::window::focus_app_by_title("WhatsApp") {
                         tracing::warn!("ghost drill: WhatsApp launched but focus unconfirmed — continuing");
                     }
                 }
-                Err(_) => {
+                _ => {
                     super::launcher::open_app_via_search("WhatsApp")?;
                 }
             }

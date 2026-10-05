@@ -374,6 +374,32 @@ pub fn add_mail_watch(app_data_dir: &Path, watch: ThreadWatchTarget) -> bool {
     save_mail_watches(app_data_dir, &watches)
 }
 
+/// Advance a watch's baseline after an alert so the same change is not
+/// re-reported on every poll. The sentinel polls every 15s and compared the
+/// live thread against the baseline captured when the watch was created; with
+/// nothing ever written back, ONE new reply (or deadline extension) was
+/// re-announced forever. The watch stays `Active` — the user asked for "any
+/// update", so later changes must still alert. Returns true if saved.
+pub fn advance_mail_watch(
+    app_data_dir: &Path,
+    watch_id: &str,
+    message_count: usize,
+    new_deadline: Option<&str>,
+    now_ms: u64,
+) -> bool {
+    let mut watches = load_mail_watches(app_data_dir);
+    let Some(w) = watches.iter_mut().find(|w| w.watch_id == watch_id) else {
+        return false;
+    };
+    // Never move the baseline backwards (a poll that parsed fewer messages).
+    w.message_count = w.message_count.max(message_count);
+    if let Some(d) = new_deadline {
+        w.initial_deadline_raw = Some(d.to_string());
+    }
+    w.last_checked_ms = now_ms;
+    save_mail_watches(app_data_dir, &watches)
+}
+
 /// Update the status of a specific thread watch.
 pub fn update_mail_watch_status(app_data_dir: &Path, watch_id: &str, status: WatchStatus) -> bool {
     let mut watches = load_mail_watches(app_data_dir);
@@ -587,6 +613,17 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].watch_id, "w_123");
         assert_eq!(loaded[0].status, WatchStatus::Active);
+
+        // Baseline advances after an alert and never moves backwards.
+        assert!(advance_mail_watch(&d, "w_123", 3, Some("Monday 9 AM"), 5000));
+        let adv = load_mail_watches(&d);
+        assert_eq!(adv[0].message_count, 3);
+        assert_eq!(adv[0].initial_deadline_raw.as_deref(), Some("Monday 9 AM"));
+        assert_eq!(adv[0].last_checked_ms, 5000);
+        assert_eq!(adv[0].status, WatchStatus::Active, "stays active for later updates");
+        assert!(advance_mail_watch(&d, "w_123", 1, None, 6000));
+        assert_eq!(load_mail_watches(&d)[0].message_count, 3);
+        assert!(!advance_mail_watch(&d, "missing", 9, None, 1));
 
         // Update status to Triggered
         assert!(update_mail_watch_status(&d, "w_123", WatchStatus::Triggered));

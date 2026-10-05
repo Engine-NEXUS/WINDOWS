@@ -131,24 +131,26 @@ fn get_last_latency() -> Option<u64> {
 }
 
 /// Check if the STT engine is ready.
-/// Phase 2: Groq cloud STT is primary (0 MB RAM, ~247ms).
-/// Local faster-whisper on port 39217 is the fallback (lazy-started).
+/// NEXUS is BYOK/free: cloud STT (Groq) is used only when the user has added
+/// their own key AND turned "Local STT only" off; otherwise speech runs on the
+/// local Moonshine server on port 39217 (lazy-started). This row used to say
+/// "Groq cloud primary" regardless, which was wrong for every keyless user.
 fn check_stt() -> ServiceStatus {
-    // Check if the local faster-whisper fallback STT server is reachable
+    // Check if the local STT server is reachable
     match http_get("http://127.0.0.1:39217/health", 3000) {
         Ok((status, _body)) if status >= 200 && status < 400 => {
             ServiceStatus {
-                name: "STT (Groq cloud + local fallback)".into(),
+                name: "STT (local Moonshine + optional Groq cloud)".into(),
                 connected: true,
-                detail: "Groq primary + faster-whisper fallback ready on port 39217".into(),
+                detail: "Local speech engine ready on port 39217 (Groq cloud speech needs your free key)".into(),
                 latency_ms: get_last_latency(),
             }
         }
         _ => {
             ServiceStatus {
-                name: "STT (Groq cloud + local fallback)".into(),
-                connected: true, // Not an error — Groq is cloud, local is lazy
-                detail: "Groq cloud primary — local fallback lazy-starts on first wake".into(),
+                name: "STT (local Moonshine + optional Groq cloud)".into(),
+                connected: true, // Not an error — the local engine lazy-starts on first wake
+                detail: "Local speech engine lazy-starts on first wake; Groq cloud speech is optional (free key in Settings, Accounts)".into(),
                 latency_ms: Some(0),
             }
         }

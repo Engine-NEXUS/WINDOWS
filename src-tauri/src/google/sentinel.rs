@@ -357,6 +357,23 @@ pub async fn poll_sentinel_targets<R: Runtime>(app: &AppHandle<R>) {
                             .unwrap_or_default();
 
                         let diff = crate::google::mail::MailService::diff_thread_state(&watch, &messages);
+                        // Advance the baseline NOW so this change is reported
+                        // once, not on every 15s poll forever.
+                        if let Some(event) = &diff {
+                            let new_deadline = match event {
+                                crate::google::types::ThreadUpdateEvent::DeadlineChanged { new_deadline, .. } => {
+                                    Some(new_deadline.as_str())
+                                }
+                                _ => None,
+                            };
+                            crate::memory::advance_mail_watch(
+                                &app_data_dir,
+                                &watch.watch_id,
+                                messages.len(),
+                                new_deadline,
+                                chrono::Utc::now().timestamp_millis().max(0) as u64,
+                            );
+                        }
                         match diff {
                             Some(crate::google::types::ThreadUpdateEvent::DeadlineChanged { old_deadline, new_deadline, snippet }) => {
                                 println!("[SENTINEL-ALERT] DEADLINE CHANGE DETECTED!");
