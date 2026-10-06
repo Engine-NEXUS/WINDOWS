@@ -7,8 +7,10 @@ function isTauri(): boolean {
 
 async function tauriInvoke(cmd: string, args?: Record<string, unknown>): Promise<any> {
   if (!isTauri()) return;
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke(cmd, args);
+  // Logged boundary (log-completeness P2): calibration report failures
+  // must surface instead of failing silently.
+  const { invokeLogged } = await import("../ipc");
+  return invokeLogged(cmd, args);
 }
 
 interface LoadingRect {

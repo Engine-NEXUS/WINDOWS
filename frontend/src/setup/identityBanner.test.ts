@@ -2,6 +2,8 @@
  * Feature 88 (C2) — identity banner derivation tests.
  */
 
+import { describe, expect, test } from "vitest";
+
 import { identityBanner } from "./identityBanner";
 
 describe("identityBanner", () => {
@@ -27,7 +29,7 @@ describe("identityBanner", () => {
   test("provisional → dim retry note; rate_limited variant names the cause", () => {
     const b = identityBanner({ state: "provisional" });
     expect(b.tone).toBe("dim");
-    expect(b.subtitle).toContain("retry automatically");
+    expect(b.subtitle).toContain("retry connecting automatically");
     const rl = identityBanner({ state: "provisional", reason: "rate_limited" });
     expect(rl.subtitle).toContain("Too many registration attempts");
   });

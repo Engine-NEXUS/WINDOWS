@@ -8,8 +8,11 @@ function isTauri(): boolean {
 }
 
 async function emit(event: string, payload?: Record<string, unknown>): Promise<void> {
-  const { emit: tauriEmit } = await import("@tauri-apps/api/event");
-  await tauriEmit(event, payload ?? {}).catch(() => {});
+  // Logged boundary (log-completeness P2): canvas control events
+  // (tool_change, commit_request, begin/append) lost silently strand the
+  // ink canvas — failures must surface.
+  const { emitLogged } = await import("../ipc");
+  await emitLogged(event, payload ?? {}).catch(() => {});
 }
 
 const TOOLS: Array<{ id: AnnotTool; label: string; hint: string }> = [

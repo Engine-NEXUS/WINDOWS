@@ -302,6 +302,12 @@ export function hideOrbAfterSpeech(firstDelayMs: number): void {
     }
     stuckSpeakingTicks = 0;
     if (s.state !== "idle") return;
+    if (s.captionActive) {
+      console.log("[ORB] hideOrbAfterSpeech: caption is still active on screen, holding orb visible for sync");
+      hideOrbAfterSpeech(350);
+      return;
+    }
+    console.log("[ORB] hideOrbAfterSpeech: speech and caption finished, setting visible=false");
     s.setVisible(false);
   }, firstDelayMs);
 }

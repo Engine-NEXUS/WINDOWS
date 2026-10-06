@@ -1,0 +1,89 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  partitionIntoLines,
+  CaptionWord,
+  clearCaptionSchedule,
+  suppressNextCaption,
+} from "./captionScheduler";
+import { useAssistant } from "../store/assistant";
+
+describe("captionScheduler line partitioning and lifecycle", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    clearCaptionSchedule();
+  });
+
+  afterEach(() => {
+    clearCaptionSchedule();
+    vi.useRealTimers();
+  });
+
+  it("partitions words into clean 5-word clauses and sentence boundaries", () => {
+    // "hi lakshya i am nexus. how can i help u today? this is the analyssi result"
+    const words: CaptionWord[] = [
+      { text: "hi", start_ms: 0, duration_ms: 200 },
+      { text: "lakshya", start_ms: 220, duration_ms: 300 },
+      { text: "i", start_ms: 540, duration_ms: 150 },
+      { text: "am", start_ms: 700, duration_ms: 150 },
+      { text: "nexus.", start_ms: 860, duration_ms: 300 },
+      { text: "how", start_ms: 1200, duration_ms: 200 },
+      { text: "can", start_ms: 1420, duration_ms: 180 },
+      { text: "i", start_ms: 1620, duration_ms: 150 },
+      { text: "help", start_ms: 1780, duration_ms: 200 },
+      { text: "u", start_ms: 2000, duration_ms: 150 },
+      { text: "today?", start_ms: 2160, duration_ms: 300 },
+      { text: "this", start_ms: 2500, duration_ms: 200 },
+      { text: "is", start_ms: 2710, duration_ms: 180 },
+      { text: "the", start_ms: 2900, duration_ms: 150 },
+      { text: "analyssi", start_ms: 3060, duration_ms: 350 },
+      { text: "result", start_ms: 3420, duration_ms: 300 },
+    ];
+
+    const lines = partitionIntoLines(words);
+    expect(lines.length).toBe(3);
+    expect(lines[0].text).toBe("hi lakshya i am nexus.");
+    expect(lines[1].text).toBe("how can i help u today?");
+    expect(lines[2].text).toBe("this is the analyssi result");
+  });
+
+  it("partitions by 10-word limit even without punctuation", () => {
+    const words: CaptionWord[] = [
+      { text: "one", start_ms: 0, duration_ms: 100 },
+      { text: "two", start_ms: 120, duration_ms: 100 },
+      { text: "three", start_ms: 240, duration_ms: 100 },
+      { text: "four", start_ms: 360, duration_ms: 100 },
+      { text: "five", start_ms: 480, duration_ms: 100 },
+      { text: "six", start_ms: 600, duration_ms: 100 },
+      { text: "seven", start_ms: 720, duration_ms: 100 },
+      { text: "eight", start_ms: 840, duration_ms: 100 },
+      { text: "nine", start_ms: 960, duration_ms: 100 },
+      { text: "ten", start_ms: 1080, duration_ms: 100 },
+      { text: "eleven", start_ms: 1200, duration_ms: 100 },
+    ];
+
+    const lines = partitionIntoLines(words);
+    expect(lines.length).toBe(2);
+    expect(lines[0].text).toBe("one two three four five six seven eight nine ten");
+    expect(lines[1].text).toBe("eleven");
+  });
+
+  it("suppressNextCaption cancels the next scheduleChunk and resets", () => {
+    suppressNextCaption();
+    // clearCaptionSchedule resets suppress flag
+    clearCaptionSchedule();
+    expect(useAssistant.getState().captionActive).toBe(false);
+  });
+
+  it("unescapes SSML/XML entities like didn&apos;t during partition as a complete sentence", () => {
+    const words: CaptionWord[] = [
+      { text: "i", start_ms: 0, duration_ms: 100 },
+      { text: "didn&apos;t", start_ms: 110, duration_ms: 150 },
+      { text: "hear", start_ms: 270, duration_ms: 120 },
+      { text: "you,", start_ms: 400, duration_ms: 130 },
+      { text: "sir.", start_ms: 540, duration_ms: 200 },
+    ];
+    const lines = partitionIntoLines(words);
+    expect(lines.length).toBe(1);
+    expect(lines[0].text).toBe("i didn't hear you, sir.");
+  });
+});

@@ -55,7 +55,7 @@ export function loadingRect(): StageRect {
   };
 }
 
-/** Orb rect from user settings pct/size (mirrors position_orb clamping). */
+/** Orb rect from user settings pct/size (mirrors position_orb clamping: 100–400). */
 export function orbRect(
   hPct: number,
   vPct: number,
@@ -65,7 +65,7 @@ export function orbRect(
 ): StageRect {
   const h = Math.max(0, Math.min(1, hPct));
   const v = Math.max(0, Math.min(1, vPct));
-  const size = Math.max(100, Math.min(300, Math.round(sizePx)));
+  const size = Math.max(100, Math.min(400, Math.round(sizePx)));
   const rawX = screenW * h - size / 2;
   const rawY = screenH * v - size / 2;
   return {

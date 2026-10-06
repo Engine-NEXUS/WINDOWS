@@ -1,5 +1,6 @@
 import { useAssistant } from "../store/assistant";
 import { invoke } from "@tauri-apps/api/core";
+import { suppressNextCaption } from "./captionScheduler";
 
 /**
  * Frontend TTS generation counter — mirrors the Rust TTS_GENERATION counter.
@@ -29,6 +30,16 @@ let rustTtsPlaying = false;
  */
 export function isRustTtsPlaying(): boolean {
   return rustTtsPlaying;
+}
+
+/**
+ * The narrated screen tour plays audio from Rust directly (`tts::narrate`),
+ * not through `speak()`, so the frontend never sees a speak_text start/end.
+ * The tour handlers flag it here so the echo guards, ghost hot-mic and the
+ * stuck-speaking watchdog treat narration as live playback.
+ */
+export function setNarrationPlaying(v: boolean): void {
+  rustTtsPlaying = v;
 }
 
 export interface VoiceOption {
@@ -160,7 +171,7 @@ export async function previewVoice(
 ): Promise<void> {
   stopTts();
   // All voices now go through the Rust speak_text command which tries
-  // Edge TTS (cloud) first, then Piper (local) fallback.
+  // Edge TTS (cloud) first, then the local Kokoro voice (offline only).
   // The voice.id should be a valid Edge TTS voice (e.g. "en-US-AvaNeural").
   return playKokoro(voice.sampleText, voice.id, speed ?? 1.15, ttsGeneration, onEnd);
 }
@@ -173,10 +184,29 @@ export async function speak(text: string, onEnd?: () => void): Promise<void> {
     return;
   }
 
+  // Stop any currently-playing TTS before starting new playback.
+  // This prevents overlapping audio when the server ack and result
+  // arrive in quick succession (especially during first-load when
+  // the Kokoro engine takes ~7s to initialize).
+  stopTts();
+
   // Particle-generated text (Feature 88): short spoken lines form from the
   // orb's OWN particles (VoiceOrb listens in every window). Long replies,
   // multi-line text, and meeting-muted speech never trigger it.
+  //
+  // MUST run after stopTts() above, not before: stopTts() unconditionally
+  // calls clearCaptionSchedule(), which resets suppressNextCaption()'s
+  // one-shot flag. Arming the flag before stopTts() meant stopTts() wiped
+  // it moments later, before the real tts:caption for THIS utterance ever
+  // arrived — so the suppression silently never took effect (live bug,
+  // 2026-10-04, found via user report after the first attempt at this fix
+  // didn't work).
   if (text.trim().length <= 22 && !text.includes("\n")) {
+    // Skip the DOM response caption for this same utterance — otherwise
+    // the particle-formed text and the word-by-word caption both show
+    // the same short reply at once. Still armed before the playback
+    // invoke below, so it's set before Rust can possibly emit `tts:caption`.
+    suppressNextCaption();
     try {
       const { emit } = await import("@tauri-apps/api/event");
       await emit("orb:show_text", { text: text.trim() });
@@ -184,12 +214,6 @@ export async function speak(text: string, onEnd?: () => void): Promise<void> {
       // Outside Tauri — no-op
     }
   }
-
-  // Stop any currently-playing TTS before starting new playback.
-  // This prevents overlapping audio when the server ack and result
-  // arrive in quick succession (especially during first-load when
-  // the Kokoro engine takes ~7s to initialize).
-  stopTts();
 
   // Capture generation after stopTts — any in-flight speak() calls
   // from a previous turn will see the mismatch and skip playback.
@@ -204,7 +228,7 @@ export async function speak(text: string, onEnd?: () => void): Promise<void> {
 
   // Use Edge TTS voice (cloud) — this is the primary engine.
   // The old default "af_sky" was a Kokoro voice ID that Edge TTS rejects,
-  // causing every speak() to silently fall back to Piper (local).
+  // causing every speak() to silently fall back to the local voice.
   const voiceId = settings?.edgeTtsVoice || "en-US-AvaNeural";
   const speed = settings?.speechRate ?? 1.15;
 
@@ -266,9 +290,15 @@ export async function speakCached(phrase: string, onEnd?: () => void): Promise<v
     return;
   }
 
+  // Stop any currently-playing TTS before starting new playback.
+  stopTts();
+
   // Particle-generated text (Feature 88) — same gate as speak(): acks like
-  // "Ok sir." flow through here, so they form in particles too.
+  // "Ok sir." flow through here, so they form in particles too. Must run
+  // after stopTts() above — see the detailed comment in speak() for why.
   if (phrase.trim().length <= 22 && !phrase.includes("\n")) {
+    // Same duplicate-caption suppression as speak() above.
+    suppressNextCaption();
     try {
       const { emit } = await import("@tauri-apps/api/event");
       await emit("orb:show_text", { text: phrase.trim() });
@@ -276,9 +306,6 @@ export async function speakCached(phrase: string, onEnd?: () => void): Promise<v
       // Outside Tauri — no-op
     }
   }
-
-  // Stop any currently-playing TTS before starting new playback.
-  stopTts();
 
   const myGen = ttsGeneration;
   rustTtsPlaying = true;
@@ -316,4 +343,18 @@ export function stopTts(): void {
   // barge-in never leaves a stale caption's words trickling in afterward.
   void import("./captionScheduler").then(({ clearCaptionSchedule }) => clearCaptionSchedule());
   useAssistant.getState().setSpeakSeq(null);
+}
+
+// Global listener for Rust-initiated barge-in / stop requests
+if (typeof window !== "undefined") {
+  void (async () => {
+    try {
+      const { listen } = await import("@tauri-apps/api/event");
+      await listen("tts:stop", () => {
+        stopTts();
+      });
+    } catch {
+      // Outside Tauri environment (e.g. headless unit tests)
+    }
+  })();
 }

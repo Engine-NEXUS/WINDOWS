@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+// Logged boundary (log-completeness P2): every invoke here is a
+// calibration command — silent failure strands the calibrator, so
+// failures warn (callers keep their `.catch` control flow).
+import { invokeLogged as invoke } from "../ipc";
 import { listen } from "@tauri-apps/api/event";
 import { resolveCalibrationKey } from "./calibrationKeys";
 import { pxToSlider, sliderToPx } from "../calibration/geometry";

@@ -90,7 +90,7 @@ export async function maybeGhostRelisten(): Promise<boolean> {
   if (!useAssistant.getState().ghostActive) return false;
   try {
     const { triggerFollowupListen } = await import("../stage/orbRuntime");
-    triggerFollowupListen();
+    triggerFollowupListen(true); // hot-mic origin: Phase 8 gate applies to the next turn
     return true;
   } catch {
     return false;

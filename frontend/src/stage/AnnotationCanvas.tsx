@@ -9,8 +9,10 @@ import {
 } from "./annotationTypes";
 
 async function invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
-  const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
-  return tauriInvoke(cmd, args);
+  // Logged boundary (log-completeness P2): hitbox registration failure
+  // means dead click regions with no other signal — it must surface.
+  const { invokeLogged } = await import("../ipc");
+  return invokeLogged(cmd, args);
 }
 
 const phys = (client: number) => client * (window.devicePixelRatio || 1);
@@ -38,7 +40,7 @@ export default function AnnotationCanvas() {
   useEffect(() => {
     let unlisteners: (() => void)[] = [];
     void (async () => {
-      const { listen, emit } = await import("@tauri-apps/api/event");
+      const { listen } = await import("@tauri-apps/api/event");
 
       const u1 = await listen<{ active?: boolean }>("stage:annotation_mode", (e) => {
         dispatch({ type: "mode", active: e.payload?.active !== false });
@@ -56,7 +58,10 @@ export default function AnnotationCanvas() {
       });
       const u4 = await listen("stage:annotation_clear", () => dispatch({ type: "clear" }));
       const u5 = await listen("stage:annotation_commit_request", () => {
-        void emit("stage:annotation_commit", { elements: stateRef.current.elements }).catch(() => {});
+        // Commit loss = user's drawing vanishes silently — must surface.
+        void import("../ipc").then(({ emitLogged }) =>
+          emitLogged("stage:annotation_commit", { elements: stateRef.current.elements }).catch(() => {}),
+        );
       });
       const u6 = await listen("stage:annotation_done", () => dispatch({ type: "mode", active: false }));
       const u7 = await listen("stage:annotation_undo", () => dispatch({ type: "undo" }));
@@ -86,10 +91,9 @@ export default function AnnotationCanvas() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         dispatch({ type: "mode", active: false });
-        void (async () => {
-          const { emit } = await import("@tauri-apps/api/event");
-          await emit("stage:annotation_done", {}).catch(() => {});
-        })();
+        void import("../ipc").then(({ emitLogged }) =>
+          emitLogged("stage:annotation_done", {}).catch(() => {}),
+        );
       }
     };
     window.addEventListener("keydown", onKey);

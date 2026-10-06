@@ -7,6 +7,7 @@ import { OrbFrame } from "./OrbFrame";
 import { LoadingIndicator } from "./LoadingIndicator";
 import { ResponseCaption } from "./ResponseCaption";
 import { LiveCaption } from "./LiveCaption";
+import { TourOverlay } from "./TourOverlay";
 
 async function invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
   const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
@@ -84,10 +85,10 @@ function SpatialAnnotationLayer() {
 
   // Pin click → activate the matching card in the sidebar.
   const handlePinClick = (id: number) => {
-    void (async () => {
-      const { emit } = await import("@tauri-apps/api/event");
-      await emit("sidebar:focus_spatial_card", { id }).catch(() => {});
-    })();
+    // A lost focus event = dead pin with no other signal — must surface.
+    void import("../ipc").then(({ emitLogged }) =>
+      emitLogged("sidebar:focus_spatial_card", { id }).catch(() => {}),
+    );
     setActiveId(id);
   };
 
@@ -166,6 +167,9 @@ function StageApp() {
   const autoHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
+    console.log(
+      `[ANIM] Stage overlay mounted: ${window.innerWidth}x${window.innerHeight} (DPR: ${window.devicePixelRatio || 1})`
+    );
     let alive = true;
     let timer: ReturnType<typeof setInterval> | null = null;
     const start = setTimeout(() => {
@@ -299,6 +303,7 @@ function StageApp() {
         {guideLabel}
       </div>
       <SpatialAnnotationLayer />
+      <TourOverlay />
       <AnnotationCanvas />
       <OrbFrame />
       <LoadingIndicator />
