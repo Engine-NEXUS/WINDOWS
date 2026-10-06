@@ -85,10 +85,10 @@ The following 9 keys are supported in `NexusSettings`:
 |---|---|---|---|---|
 | `orbHorizontalPct` | `orb_horizontal_pct` | `f64` | `0.5` | Wakeup orb horizontal percentage (0.0 = left, 1.0 = right) |
 | `orbVerticalPct` | `orb_vertical_pct` | `f64` | `1.0` | Wakeup orb vertical percentage (0.0 = top, 1.0 = bottom) |
-| `orbSize` | `orb_size` | `u32` | `200` | Wakeup orb window and visual diameter in pixels (100–300) |
+| `orbSize` | `orb_size` | `u32` | `200` | Wakeup orb window and visual diameter in pixels (100–400; raised 2026-10-04 for the fullscreen-era orb) |
 | `wavesHorizontalPct` | `waves_horizontal_pct` | `f64` | `0.5` | Ghost waves horizontal percentage (0.0 = left, 1.0 = right) |
 | `wavesVerticalPct` | `waves_vertical_pct` | `f64` | `1.0` | Ghost waves vertical percentage (0.0 = top, 1.0 = bottom) |
-| `wavesSize` | `waves_size` | `u32` | `200` | Ghost waves width and scale in pixels (100–300) |
+| `wavesSize` | `waves_size` | `u32` | `200` | Ghost waves width and scale in pixels (100–400; raised 2026-10-04) |
 | `loadingHorizontalPct` | `loading_horizontal_pct` | `f64` | `0.95` | Loading indicator horizontal percentage (0.0 = left, 1.0 = right) |
 | `loadingVerticalPct` | `loading_vertical_pct` | `f64` | `0.02` | Loading indicator vertical percentage (0.0 = top, 1.0 = bottom) |
 | `loadingSize` | `loading_size` | `u32` | `80` | Loading indicator width/height in pixels (40–160) |

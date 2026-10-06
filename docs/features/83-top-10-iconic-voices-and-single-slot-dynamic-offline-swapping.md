@@ -7,6 +7,10 @@
 
 ---
 
+> **REVISION 2026-10-05 — offline engine is now Kokoro-82M, not Piper.** Piper's espeak-ng is GPL-3 (licence audit, doc 02). The single slot is now **one shared model (`kokoro_model.onnx`, ~88 MB, downloaded once) + exactly one voice file (`active_voice.bin`, 0.5 MB)**; the "≤ 65 MB / one `.onnx`" invariant in §4.2/§6 no longer applies (≈ 89 MB). Changing voice downloads only the 0.5 MB voice file; the latest request wins; downloads are pinned to an immutable revision with SHA-256 verification. Online remains first priority; the local voice is used only while the internet is down and NEXUS flips back automatically when it returns. Details: `docs/changes/81-kokoro-local-tts-replaces-piper.md` and `docs/research/jarvis-landscape/09-…`. The Piper-specific text below is historical.
+
+---
+
 ## 1. Feature Summary
 
 Feature 83 modernizes the speech synthesis system of NEXUS by introducing a curated lineup of **10 iconic AI voice personalities** (JARVIS, FRIDAY, NEXUS Classic, Siri, Alexa, Google, Cortana, Samantha, Alfred, Emergency Offline) in the Command Hub. 

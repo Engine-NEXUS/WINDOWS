@@ -97,6 +97,7 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                     tracing::info!("hotkey ({}) → TTS playing, stopping speech and starting barge-listen", hk);
                     // Single choke point (order: audio → turn → flag → queue).
                     crate::orchestrator::request_barge_in("hotkey-tts");
+                    let _ = tauri::Emitter::emit(&handle, "tts:stop", ());
                     let handle_clone = handle.clone();
                     tauri::async_runtime::spawn(async move {
                         // DAC drain: the sound card + room reverb tail
@@ -148,6 +149,12 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                 // Wake NEXUS in all cases (windows were closed above, if any).
                 {
                     tracing::info!("hotkey ({}) → waking NEXUS", hk);
+                    println!("[ORB-HOTKEY] Hotkey ({hk}) → cancelling active request, flushing DAC, waking orb to listening");
+                    // Cancel any in-flight request (especially while thinking) so late completions
+                    // cannot stomp on the new turn and hide the orb.
+                    crate::orchestrator::request_barge_in("hotkey-wake");
+                    let _ = tauri::Emitter::emit(&handle, "tts:stop", ());
+                    let _ = crate::tts::stop_tts();
 
                     // Only pre-start local STT sidecar if cloud STT won't be used
                     // (saves ~340 MB RAM when Groq cloud STT is active).

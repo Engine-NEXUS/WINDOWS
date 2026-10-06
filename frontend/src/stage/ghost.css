@@ -337,6 +337,40 @@
   }
 }
 
+/* Line-by-Line Clause Replacement — Serene Sentence Cross-Dissolve */
+.caption-line {
+  display: block;
+  opacity: 0;
+  transform: translateY(4px);
+  filter: blur(2px);
+  transition:
+    opacity 400ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 400ms cubic-bezier(0.16, 1, 0.3, 1),
+    filter 400ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: opacity, transform, filter;
+}
+
+.caption-line--active {
+  opacity: 1;
+  transform: translateY(0);
+  filter: blur(0px);
+}
+
+.caption-line--prev {
+  opacity: 0.72;
+  font-size: 18px;
+  line-height: 1.35;
+  margin-bottom: 6px;
+  transform: translateY(0);
+  filter: blur(0px);
+}
+
+.caption-line--fading {
+  opacity: 0;
+  transform: translateY(-4px);
+  filter: blur(2px);
+}
+
 /* Live caption (plan Phase 4) — the user's OWN words, growing while they
    still talk. Shares .response-caption's position/font/shadow; a touch
    dimmer than the assistant's reply so the two read as distinct even

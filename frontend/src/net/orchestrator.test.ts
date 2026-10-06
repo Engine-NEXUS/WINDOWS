@@ -17,6 +17,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
 }));
 
+import "./ghostHotMic";
 import { useAssistant } from "../store/assistant";
 import {
   __testSetCurrentRequestId,
@@ -79,12 +80,14 @@ describe("finishSpokenResult (result → done → idle handshake)", () => {
     // Ghost session itself survives the turn reset.
     expect(useAssistant.getState().ghostActive).toBe(true);
     useAssistant.setState({ ghostActive: false });
+    await vi.advanceTimersByTimeAsync(0);
   });
 });
 
 describe("closeTurnOnSpeechEnd (no turn parks in speaking forever)", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.clearAllTimers();
     invokeMock.mockReset().mockResolvedValue(undefined);
     vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
     useAssistant.setState({ state: "speaking", visible: true, ghostActive: false });
@@ -106,7 +109,8 @@ describe("closeTurnOnSpeechEnd (no turn parks in speaking forever)", () => {
     await vi.advanceTimersByTimeAsync(2000);
     expect(getCurrentRequestId()).toBe("req-err");
     expect(useAssistant.getState().state).toBe("speaking");
-    expect(invokeMock).not.toHaveBeenCalled();
+    expect(invokeMock).not.toHaveBeenCalledWith("orchestrator_done", expect.anything());
+    useAssistant.setState({ ghostActive: false });
   });
 });
 

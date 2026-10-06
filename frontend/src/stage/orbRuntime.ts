@@ -28,14 +28,16 @@ let autoReopenFromFollowup = false;
  *  enough: the Rust cpal capture must be started explicitly, or the orb
  *  shows "listening" while Rust captures nothing (live bug, doc 44 —
  *  the confirm window already did this; the shared path didn't). */
-export function triggerFollowupListen(): void {
+export function triggerFollowupListen(hotMic = false): void {
   autoReopenFromFollowup = true;
   const w = window as any;
   if (w.__NEXUS_WAKE__) {
     w.__NEXUS_WAKE__();
   }
   import("@tauri-apps/api/core")
-    .then(({ invoke }) => invoke("start_stt_capture"))
+    // origin: "hot_mic" = the ghost hot-mic loop re-opened the mic by itself, so the Phase 8
+    // directed-speech gate applies to what it hears; every other caller is an explicit turn.
+    .then(({ invoke }) => invoke("start_stt_capture", { origin: hotMic ? "hot_mic" : "direct" }))
     .catch((e) => {
       console.warn("[NEXUS] followup listen: Rust capture not started:", e);
     });
@@ -90,7 +92,7 @@ async function startListening() {
         "stop_stt_capture"
       );
       if (!res.had_speech) {
-        await abortCapture().catch(() => {});
+        await abortCapture().catch((e) => console.warn("[NEXUS] abortCapture failed:", e));
         useAssistant.getState().reset();
         useAssistant.getState().setVisible(false);
       }
@@ -126,7 +128,7 @@ async function startListening() {
       console.log("[NEXUS] barge-in/turn-transition: cancelling current turn");
       stopTts();
       stopVad();
-      await abortCapture().catch(() => {});
+      await abortCapture().catch((e) => console.warn("[NEXUS] barge-in abortCapture failed:", e));
     }
     if (wasSpeaking && !isAutoReopen) {
       await new Promise((r) => setTimeout(r, 300));
@@ -482,5 +484,34 @@ export function initOrbRuntime(): void {
     } catch (e) {
       console.warn("[NEXUS] session pre-open failed:", e);
     }
+  })();
+
+  // Sync persisted orbColor & orbPosition and listen for live updates from Command Hub
+  void (async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const s = await invoke<{ orbColor?: string; orbPosition?: "top" | "bottom" }>("get_settings");
+      if (s?.orbColor) {
+        useAssistant.getState().setOrbColor(s.orbColor);
+      }
+      if (s?.orbPosition) {
+        useAssistant.getState().setOrbPosition(s.orbPosition);
+      }
+    } catch (_) {}
+
+    try {
+      const { listen } = await import("@tauri-apps/api/event");
+      await listen<{ color: string }>("orb:color", (e) => {
+        if (e.payload?.color) {
+          useAssistant.getState().setOrbColor(e.payload.color);
+        }
+      });
+      await listen<string>("stage:orb_position", (e) => {
+        const p = e.payload as "top" | "bottom";
+        if (p === "top" || p === "bottom") {
+          useAssistant.getState().setOrbPosition(p);
+        }
+      });
+    } catch (_) {}
   })();
 }

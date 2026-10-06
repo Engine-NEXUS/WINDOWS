@@ -27,7 +27,7 @@ describe("stage geometry mirrors legacy window placement", () => {
 
   it("clamps orb pct/size to the Rust ranges and keeps it on-screen", () => {
     const r = orbRect(9, -2, 9999, 1920, 1080);
-    expect(r.w).toBe(300);
+    expect(r.w).toBe(400);
     expect(r.x).toBeGreaterThanOrEqual(0);
     expect(r.y).toBeGreaterThanOrEqual(0);
     expect(r.x + r.w).toBeLessThanOrEqual(1920);

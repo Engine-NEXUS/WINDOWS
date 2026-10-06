@@ -149,7 +149,7 @@ pub fn spawn_relisten_watchdog<R: Runtime>(app: AppHandle<R>) {
                 tracing::warn!(
                     "ghost: watchdog poke — session live but idle, re-emitting listen"
                 );
-                let _ = app.emit("ghost:relisten", serde_json::json!({ "reason": "watchdog" }));
+                crate::commands::emit_logged(&app, "ghost:relisten", serde_json::json!({ "reason": "watchdog" }));
             }
         })
         .ok();
@@ -419,7 +419,9 @@ pub fn session_active() -> bool {
 /// (same rails as abort notices). Used for session entry/exit narration.
 /// Wry-typed (Send reason same as abort_session).
 pub fn announce(app: &tauri::AppHandle<tauri::Wry>, text: &str) {
-    let _ = app.emit(
+    // A lost notice = a missed spoken alert with no other signal.
+    crate::commands::emit_logged(
+        app,
         "stage:notice",
         serde_json::json!({ "text": text }),
     );
@@ -560,7 +562,7 @@ pub fn point_off<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 /// fires on enter/exit/stand-down only, never per turn.
 /// Routed through Main Center `direct_ui(Session(..))` — call that, not this.
 pub(crate) fn emit_session(app: &tauri::AppHandle<tauri::Wry>, active: bool) {
-    let _ = app.emit("ghost:session", serde_json::json!({ "active": active }));
+    crate::commands::emit_logged(app, "ghost:session", serde_json::json!({ "active": active }));
 }
 
 /// End the session (explicit exits only: Esc panic, "exit ghost mode",

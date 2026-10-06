@@ -101,6 +101,7 @@ pub fn read_page_markdown(url: &str) -> Result<String, String> {
 
 /// Canonical adapter: family (action, slots) → `ParsedIntent`. `None` =
 /// not a browser action (caller fails closed).
+#[allow(dead_code)]
 fn to_intent(action: &str, slots: &Value) -> Option<ParsedIntent> {
     match action {
         "browser_tab" => Some(ParsedIntent::BrowserTab {
@@ -144,6 +145,7 @@ impl SubCenter for BrowserCenter {
                     prompt: "I can only switch to tabs 1 to 9, sir.".to_string(),
                 };
             }
+            return Validity::Ok;
         }
         if action == "browser_close_tab" {
             if let Some(n) = slots.get("index").and_then(|v| v.as_u64()) {
@@ -154,8 +156,22 @@ impl SubCenter for BrowserCenter {
                     };
                 }
             }
+            return Validity::Ok;
         }
-        if action == "browser_read_page" || action == "browser_extract_elements" {
+        if action == "browser_search" {
+            let query = slot_str(slots, "query");
+            if query.trim().is_empty() {
+                return Validity::NeedSlot {
+                    slot: "query",
+                    prompt: "What should I search for in the browser, sir?".to_string(),
+                };
+            }
+            return Validity::Ok;
+        }
+        if action == "browser_search_focus" || action == "browser_new_tab" {
+            return Validity::Ok;
+        }
+        if action == "browser_navigate" || action == "browser_read_page" || action == "browser_extract_elements" {
             let url = slot_str(slots, "url");
             if url.trim().is_empty() {
                 return Validity::NeedSlot {
@@ -165,13 +181,9 @@ impl SubCenter for BrowserCenter {
             }
             return Validity::Ok;
         }
-        match to_intent(action, slots) {
-            // Transcript/context are irrelevant to slot rules — pass neutrals.
-            Some(intent) => crate::center::validate(&intent, "browser action", false),
-            None => Validity::Invalid {
-                reason: "not a browser action",
-                prompt: "That's not a browser action, sir.".to_string(),
-            },
+        Validity::Invalid {
+            reason: "not a browser action",
+            prompt: "That's not a browser action, sir.".to_string(),
         }
     }
 

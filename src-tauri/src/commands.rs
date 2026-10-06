@@ -1484,9 +1484,8 @@ pub struct NexusSettings {
     /// Default: "nexus". Written by set_voice_preference.
     #[serde(default = "default_selected_voice")]
     pub selected_voice: String,
-    /// Local Piper twin model stem for the selected persona
-    /// (e.g. "en_GB-alan-medium"). Default: bundled Amy twin.
-    /// Written by set_voice_preference; resolved by the swap worker.
+    /// Local Kokoro voice name for the selected persona (e.g. "bm_george").
+    /// Default: af_heart. Written by set_voice_preference; resolved by the swap worker.
     #[serde(default = "default_offline_voice_model")]
     pub offline_voice_model: String,
     /// Orb horizontal position as percentage (0.0 = left, 0.5 = center, 1.0 = right).
@@ -1497,10 +1496,18 @@ pub struct NexusSettings {
     /// Default 1.0 (bottom). Saved to settings.json, persists across restarts.
     #[serde(default = "default_orb_vertical_pct")]
     pub orb_vertical_pct: f64,
-    /// Orb window size in pixels (100-300).
+    /// Orb window size in pixels (100-400).
     /// Default 200. Saved to settings.json, persists across restarts.
     #[serde(default = "default_orb_size")]
     pub orb_size: u32,
+    /// Orb color theme (hex string, e.g. "#f2b859").
+    /// Default: "#f2b859" (golden amber).
+    #[serde(default = "default_orb_color")]
+    pub orb_color: String,
+    /// Orb fixed position: "top" or "bottom".
+    /// Default: "top".
+    #[serde(default = "default_orb_position")]
+    pub orb_position: String,
     /// Gemini API key for Google Gemini models.
     /// When empty, Gemini features are unavailable.
     #[serde(default)]
@@ -1574,6 +1581,30 @@ pub struct NexusSettings {
     pub loading_vertical_pct: f64,
     #[serde(default = "default_loading_size")]
     pub loading_size: u32,
+    /// Narrated screen tour ("analyse my screen"): pointers + callouts synced
+    /// to TTS. Default true; false = legacy spatial/OCR chain only. Must live
+    /// in this struct — `save_settings` rewrites settings.json from it, so a
+    /// hand-added key outside the struct would be erased on the next save.
+    #[serde(default = "default_screen_tour")]
+    pub screen_tour: bool,
+    /// Vision model for the screen tour (empty = built-in ladder:
+    /// gemini-3.8-flash → gemini-3.5-flash → gemini-3.5-flash-lite → 2.5).
+    #[serde(default)]
+    pub tour_model: String,
+    /// Daily Gemini vision request cap NEXUS enforces for itself (shared by
+    /// ghost clicks, spatial analysis and the tour). Google's real per-model
+    /// free limits are only visible in AI Studio (aistudio.google.com/rate-limit);
+    /// enter that figure here. Default 500.
+    #[serde(default = "default_gemini_vision_daily_limit")]
+    pub gemini_vision_daily_limit: u32,
+}
+
+fn default_screen_tour() -> bool {
+    true
+}
+
+fn default_gemini_vision_daily_limit() -> u32 {
+    crate::vision::GEMINI_VISION_RPD
 }
 
 fn default_tts_provider() -> String {
@@ -1593,7 +1624,7 @@ fn default_orb_horizontal_pct() -> f64 {
 }
 
 fn default_orb_vertical_pct() -> f64 {
-    1.0
+    0.0
 }
 
 fn default_orb_size() -> u32 {
@@ -1621,7 +1652,7 @@ fn default_selected_voice() -> String {
 }
 
 fn default_offline_voice_model() -> String {
-    "en_US-amy-medium".to_string()
+    crate::voice_catalog::FALLBACK_KOKORO_VOICE.to_string()
 }
 
 fn default_vision_provider() -> String {
@@ -1645,7 +1676,7 @@ fn default_ghost_turn_gap_ms() -> u64 {
 }
 
 fn default_waves_vertical_pct() -> f64 {
-    1.0
+    0.0
 }
 
 fn default_waves_size() -> u32 {
@@ -1662,6 +1693,14 @@ fn default_loading_vertical_pct() -> f64 {
 
 fn default_loading_size() -> u32 {
     80
+}
+
+fn default_orb_color() -> String {
+    "#f2b859".to_string()
+}
+
+fn default_orb_position() -> String {
+    "top".to_string()
 }
 
 impl Default for NexusSettings {
@@ -1691,8 +1730,10 @@ impl Default for NexusSettings {
             selected_voice: default_selected_voice(),
             offline_voice_model: default_offline_voice_model(),
             orb_horizontal_pct: 0.5,
-            orb_vertical_pct: 1.0,
+            orb_vertical_pct: 0.0,
             orb_size: 200,
+            orb_color: default_orb_color(),
+            orb_position: default_orb_position(),
             gemini_api_key: String::new(),
             cerebras_api_key: String::new(),
             moonshine_model: "medium_streaming".to_string(),
@@ -1711,6 +1752,9 @@ impl Default for NexusSettings {
             loading_horizontal_pct: 0.95,
             loading_vertical_pct: 0.05,
             loading_size: 80,
+            screen_tour: true,
+            tour_model: String::new(),
+            gemini_vision_daily_limit: default_gemini_vision_daily_limit(),
         }
     }
 }
@@ -1726,7 +1770,8 @@ pub struct TtsVoiceInfo {
     pub language: String,
 }
 
-/// IPC: List all available TTS voices (Edge TTS cloud + Piper local).
+/// IPC: List the cloud TTS voices (Edge TTS). The offline Kokoro voice follows the equipped persona
+/// (Feature 83), so it is not a separate picker entry.
 /// Returns a curated list of en-US voices. The full Edge TTS catalog has
 /// 400+ voices across 140+ locales — we surface the most useful en-US ones
 /// to keep the settings UI manageable.
@@ -1759,7 +1804,7 @@ pub fn list_tts_voices() -> Result<Vec<TtsVoiceInfo>, String> {
         ("en-US-SoniaNeural",      "Sonia",     "Female"),
     ];
 
-    let mut voices: Vec<TtsVoiceInfo> = edge_voices
+    let voices: Vec<TtsVoiceInfo> = edge_voices
         .iter()
         .map(|(id, name, gender)| TtsVoiceInfo {
             id: id.to_string(),
@@ -1769,15 +1814,6 @@ pub fn list_tts_voices() -> Result<Vec<TtsVoiceInfo>, String> {
             language: "en-US".to_string(),
         })
         .collect();
-
-    // Add local Piper voice (always available offline)
-    voices.push(TtsVoiceInfo {
-        id: "piper-amy".to_string(),
-        name: "Amy (Offline)".to_string(),
-        gender: "Female".to_string(),
-        provider: "piper".to_string(),
-        language: "en-US".to_string(),
-    });
 
     Ok(voices)
 }
@@ -1958,6 +1994,43 @@ pub fn read_verify_wake<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
         .unwrap_or(true)
 }
 
+/// Read the vadSilero flag from settings.json (non-IPC helper for wakeword_oww.rs).
+/// Neural (Silero v4) voice gate for the STT capture loop. Defaults to FALSE — the RMS gate is
+/// the proven path; flip to true only after the evaluation in docs/research/jarvis-landscape/07.
+pub fn read_vad_silero<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return false; };
+    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else { return false; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return false; };
+    json.get("vadSilero")
+        .or_else(|| json.get("vad_silero"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Read the smartTurn flag from settings.json (non-IPC helper for wakeword_oww.rs).
+/// Smart Turn v3.2 end-of-turn model for the STT capture loop. Defaults to FALSE (unproven).
+pub fn read_smart_turn<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return false; };
+    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else { return false; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return false; };
+    json.get("smartTurn")
+        .or_else(|| json.get("smart_turn"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Read turnEagerness ("low" | "medium" | "high") from settings.json. Unknown -> "medium".
+pub fn read_turn_eagerness<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
+    let Ok(dir) = app.path().app_data_dir() else { return "medium".into(); };
+    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else { return "medium".into(); };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return "medium".into(); };
+    json.get("turnEagerness")
+        .or_else(|| json.get("turn_eagerness"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("medium")
+        .to_string()
+}
+
 /// Read the micKeepAlive flag from settings.json (non-IPC helper for wakeword_oww.rs).
 /// Keep-alive render: inaudible output stream holds the Intel DSP awake.
 /// Defaults to TRUE. Set `"micKeepAlive": false` to disable.
@@ -1994,7 +2067,7 @@ pub fn read_selected_voice<R: Runtime>(app: &tauri::AppHandle<R>) -> String {
 
 /// Read the edge-tts voice from settings.json (non-IPC helper for tts.rs).
 /// Returns default voice if not set.
-pub fn read_edge_tts_voice(app: &tauri::AppHandle) -> String {
+pub fn read_edge_tts_voice<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
     let dir = app.path().app_data_dir();
     let Ok(dir) = dir else { return "en-US-AvaNeural".to_string(); };
     let path = dir.join("settings.json");
@@ -2282,8 +2355,11 @@ pub fn mic_self_test() -> Result<crate::wakeword_oww::MicSelfTestReport, String>
 /// no getUserMedia, no baton pass. This fixes the Intel SST driver issue
 /// where getUserMedia returns silence but cpal is still working.
 #[tauri::command]
-pub fn start_stt_capture() -> Result<(), String> {
-    crate::wakeword_oww::start_stt_capture();
+pub fn start_stt_capture(origin: Option<String>) -> Result<(), String> {
+    // `origin: "hot_mic"` = the ghost hot-mic loop re-opened the mic (Phase 8 gate applies);
+    // anything else (confirm window, clarification, follow-up question) is an explicit turn.
+    let origin = crate::directed::Origin::parse(origin.as_deref().unwrap_or("direct"));
+    crate::wakeword_oww::start_stt_capture_with_origin(origin);
     Ok(())
 }
 
@@ -2364,6 +2440,19 @@ pub fn debug_trace(msg: String) -> Result<(), String> {
     println!("[TRACE] {msg}");
     tracing::info!("debug_trace: {msg}");
     Ok(())
+}
+
+/// Checked emit (log-completeness P3): turn-critical events log their
+/// emission at debug level (file-complete for cross-check grep,
+/// console-quiet by default) so a missing frontend reaction is
+/// distinguishable from a never-sent event. Backend emit failures
+/// surface as warn. Use for turn-critical events only — never for
+/// per-frame hot paths (audio:level etc).
+pub fn emit_logged<R: Runtime, S: serde::Serialize + Clone>(app: &AppHandle<R>, event: &str, payload: S) {
+    tracing::debug!("emit: {event}");
+    if let Err(e) = app.emit(event, payload) {
+        tracing::warn!("emit: '{event}' backend failure ({e})");
+    }
 }
 
 // ─── Google multi-account commands ──────────────────────────────────────

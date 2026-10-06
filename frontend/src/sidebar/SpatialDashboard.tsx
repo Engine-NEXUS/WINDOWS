@@ -105,10 +105,10 @@ export function SpatialDashboard({ data }: { data: SpatialData }) {
   }, []);
 
   const hoverCard = useCallback((id: number | null) => {
-    void (async () => {
-      const { emit } = await import("@tauri-apps/api/event");
-      await emit("stage:highlight_item", { id }).catch(() => {});
-    })();
+    // A lost highlight = dead hover-sync with no other signal.
+    void import("../ipc").then(({ emitLogged }) =>
+      emitLogged("stage:highlight_item", { id }).catch(() => {}),
+    );
   }, []);
 
   return (

@@ -45,14 +45,14 @@ pub fn pick_ordinal(sorted: &[UiElement], n: u32) -> Option<&UiElement> {
 pub fn parse_ordinal(text: &str) -> Option<u32> {
     let t = text.trim().to_lowercase();
     match t.as_str() {
-        "first" | "one" => return Some(1),
-        "second" | "two" => return Some(2),
+        "first" | "one" | "won" => return Some(1),
+        "second" | "two" | "to" | "too" => return Some(2),
         "third" | "three" => return Some(3),
-        "fourth" | "four" => return Some(4),
+        "fourth" | "four" | "for" => return Some(4),
         "fifth" | "five" => return Some(5),
         "sixth" | "six" => return Some(6),
         "seventh" | "seven" => return Some(7),
-        "eighth" | "eight" => return Some(8),
+        "eighth" | "eight" | "ate" => return Some(8),
         "ninth" | "nine" => return Some(9),
         "tenth" | "ten" => return Some(10),
         _ => {}

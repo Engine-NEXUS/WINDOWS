@@ -153,7 +153,7 @@ foreach ($f in @($nexusLog, $nexusErr, $cdpLog, $cdpErr)) {
 # STT is lazy-started by Rust (faster-whisper on port 39217) — no external server needed at boot.
 Write-Log "INIT" "Starting NEXUS desktop app..." $C_RUST
 
-$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = if ($Debug) { "--remote-debugging-port=9222" } else { "" }
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
 
 $nexusProc = Start-Process -FilePath "$ProjectRoot\src-tauri\target\release\nexus.exe" `
   -RedirectStandardOutput $nexusLog `
@@ -247,7 +247,7 @@ if ($Admin) {
 
 # ─── Start CDP monitor (frontend console logs) ────────────────────────────
 $cdpScript = "$ProjectRoot\scripts\cdp_monitor.js"
-if ($Debug -and (Test-Path $cdpScript)) {
+if (Test-Path $cdpScript) {
   Write-Log "INIT" "Starting CDP console monitor..." $C_FRONT
   $cdpProc = Start-Process -FilePath "node" `
     -ArgumentList $cdpScript `
@@ -437,11 +437,22 @@ try {
     }
 
     # Frontend CDP logs
-    if ($Debug -and (Test-Path "$LogDir\cdp_unified.log")) {
+    if (Test-Path "$LogDir\cdp_unified.log") {
       $cdpLines = Get-NewLines "$LogDir\cdp_unified.log" ([ref]$posCDP)
       foreach ($line in $cdpLines) {
         $clean = $line -replace '\x1b\[[0-9;]*m', ""
-        if ($clean -match "\[log\]\s*(.+)") {
+        if ($clean -match "^\[(ANIM|FRONT|ORB|ORB-FRAME|STAGE|CAPTION|AVATAR|NEXUS|VOICE-ORB)\]") {
+          Clear-MeterLine
+          if ($clean -match "\[error\]") {
+            Write-Host "  $clean" -ForegroundColor Red
+          } elseif ($clean -match "\[(ORB|ORB-FRAME|STAGE|AVATAR|VOICE-ORB)\]") {
+            Write-Host "  $clean" -ForegroundColor Cyan
+          } elseif ($clean -match "\[CAPTION\]") {
+            Write-Host "  $clean" -ForegroundColor Green
+          } else {
+            Write-Host "  $clean" -ForegroundColor Yellow
+          }
+        } elseif ($clean -match "\[log\]\s*(.+)") {
           $msg = $Matches[1]
           if ($msg -match "baton pass|pause_wakeword|resume_wakeword") {
             Write-Log "BATON" $msg $C_CMD
@@ -463,6 +474,12 @@ try {
           } else {
             Write-Log "UI" $msg $C_FRONT
           }
+        } elseif ($clean -match "\[error\]\s*(.+)") {
+          Clear-MeterLine
+          Write-Host "  [FRONT-ERR] $($Matches[1])" -ForegroundColor Red
+        } elseif ($clean.Trim() -ne "") {
+          Clear-MeterLine
+          Write-Host "  [FRONT] $clean" -ForegroundColor DarkYellow
         }
       }
     }

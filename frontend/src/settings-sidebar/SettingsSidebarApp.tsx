@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { isPlausibleGeminiKey } from "./keyFormat";
+import { identityBanner, type IdentityBanner } from "../setup/identityBanner";
 import {
   setSidecarBaseUrl,
   getOAuthStatus,
@@ -8,6 +9,7 @@ import {
   disconnectOAuth,
   type OAuthStatus,
 } from "../setup/oauth";
+import { useAssistant } from "../store/assistant";
 
 /**
  * NEXUS Settings Sidebar
@@ -45,7 +47,7 @@ interface Settings {
   edgeTtsVoice: string;
   // Iconic voice persona key (Feature 83 catalog, e.g. "jarvis")
   selectedVoice?: string;
-  // Local Piper twin model stem for the selected persona
+  // Local Kokoro voice name for the selected persona (e.g. "bm_george")
   offlineVoiceModel?: string;
   // Orb position + size (Phase 2)
   orbHorizontalPct?: number;
@@ -79,6 +81,10 @@ interface Settings {
   loadingHorizontalPct?: number;
   loadingVerticalPct?: number;
   loadingSize?: number;
+  // Orb color theme (e.g. "#f2b859")
+  orbColor?: string;
+  // Orb fixed position ("top" | "bottom")
+  orbPosition?: "top" | "bottom";
   // TEMPORARY dev flag (remove before release): auto-open the calibrator
   // on boot for live cross-checks. Never part of the save flow.
   calibrationDevPersist?: boolean;
@@ -105,7 +111,8 @@ const DEFAULT_SETTINGS: Settings = {
   groqApiKey: "",
   edgeTtsVoice: "en-US-AvaNeural",
   orbHorizontalPct: 0.5,
-  orbVerticalPct: 1.0,
+  orbVerticalPct: 0.0,
+  orbPosition: "top",
   orbSize: 200,
   geminiApiKey: "",
   cerebrasApiKey: "",
@@ -123,6 +130,7 @@ const DEFAULT_SETTINGS: Settings = {
   loadingHorizontalPct: 0.95,
   loadingVerticalPct: 0.05,
   loadingSize: 80,
+  orbColor: "#f2b859",
   calibrationDevPersist: false,
 };
 
@@ -296,56 +304,182 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
   );
 }
 
+const COLOR_PRESETS = [
+  { name: "Golden Amber (Default)", hex: "#f2b859" },
+  { name: "Electric Cyan", hex: "#00e5ff" },
+  { name: "Neon Emerald", hex: "#10b981" },
+  { name: "Crimson Ruby", hex: "#ef4444" },
+  { name: "Royal Azure", hex: "#3b82f6" },
+  { name: "Amethyst Violet", hex: "#a855f7" },
+  { name: "Silver Pearl", hex: "#e2e8f0" },
+];
+
 // ─── Display Tab (Phase 2 — orb position + size) ──────────────────────
 function DisplayTab({ settings, update }: {
   settings: Settings;
   update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
 }) {
-  void settings;
+  const currentColor = settings.orbColor || "#f2b859";
+
+  const onColorSelect = (hex: string) => {
+    update("orbColor", hex);
+    try {
+      localStorage.setItem("nexus:orb_color", hex);
+    } catch {}
+    import("@tauri-apps/api/event").then(({ emit }) => {
+      emit("orb:color", { color: hex }).catch(() => {});
+    }).catch(() => {});
+  };
+
+  const currentPos = settings.orbPosition || "top";
+
+  const onPositionSelect = (pos: "top" | "bottom") => {
+    update("orbPosition", pos);
+    try {
+      localStorage.setItem("nexus:orb_position", pos);
+    } catch {}
+    useAssistant.getState().setOrbPosition(pos);
+    import("@tauri-apps/api/core").then(({ invoke }) => {
+      const vPct = pos === "bottom" ? 1.0 : 0.0;
+      invoke("set_orb_position", {
+        horizontalPct: 0.5,
+        verticalPct: vPct,
+        size: settings.orbSize || 200,
+      }).catch(() => {});
+    }).catch(() => {});
+  };
 
   return (
     <>
       <div className="settings-section">
-        <div className="settings-section-title">Animation Placement &amp; Scaling</div>
-        <div className="setting-desc" style={{ marginBottom: 8 }}>
-          Position the Wakeup Orb, Ghost Waves, and Loading Indicator anywhere
-          on your desktop by simply dragging them with your mouse.
+        <div className="settings-section-title">Orb Color Theme</div>
+        <div className="setting-desc" style={{ marginBottom: 10 }}>
+          Customize your visual aura for listening and idle states. The thinking state remains its iconic electric purple starburst.
         </div>
-        <button
-          className="settings-btn settings-btn--primary"
-          style={{ width: "100%" }}
-          onClick={() => {
-            invoke("show_calibration_hud").catch(() => {});
-            invoke("hide_settings_sidebar").catch(() => {});
-          }}
-        >
-          ✥ Drag &amp; Position on Desktop
-        </button>
-        {/* TEMPORARY dev toggle (remove before release): keeps the
-            calibrator on display across restarts for live cross-checks. */}
-        <button
-          className="settings-btn"
-          style={{ width: "100%", marginTop: 6 }}
-          onClick={() => {
-            const next = !(settings.calibrationDevPersist ?? false);
-            invoke("calibration_dev_persist", { enabled: next })
-              .then(() => update("calibrationDevPersist", next))
-              .catch(() => {});
-          }}
-        >
-          🧪 Dev persist: {settings.calibrationDevPersist ? "ON" : "OFF"}
-        </button>
-        {/* TEMPORARY (remove before release): pop the pill alone (no
-            session) to cross-check its styling lively across rebuilds. */}
-        <button
-          className="settings-btn"
-          style={{ width: "100%", marginTop: 6 }}
-          onClick={() => {
-            invoke("preview_companion_hud").catch(() => {});
-          }}
-        >
-          👁 Preview pill only (no session)
-        </button>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 8, marginBottom: 12 }}>
+          {COLOR_PRESETS.map((p) => {
+            const isSelected = currentColor.toLowerCase() === p.hex.toLowerCase();
+            return (
+              <button
+                key={p.hex}
+                type="button"
+                className={`settings-btn ${isSelected ? "settings-btn--primary" : "settings-btn--glass"}`}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "8px 10px",
+                  borderRadius: 8,
+                  border: isSelected ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
+                  background: isSelected ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
+                  cursor: "pointer",
+                  color: "#fff",
+                  fontSize: 12,
+                  fontWeight: isSelected ? 600 : 400,
+                  transition: "all 0.15s ease",
+                }}
+                onClick={() => onColorSelect(p.hex)}
+                title={p.name}
+              >
+                <span
+                  style={{
+                    width: 14,
+                    height: 14,
+                    borderRadius: "50%",
+                    background: p.hex,
+                    boxShadow: `0 0 8px ${p.hex}99`,
+                    flexShrink: 0,
+                    display: "inline-block",
+                  }}
+                />
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {p.name.split(" ")[0]}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="setting-row" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <div className="setting-label">Custom Hex Color</div>
+            <div className="setting-desc">Enter or pick any bespoke color value</div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="color"
+              value={currentColor}
+              onChange={(e) => onColorSelect(e.target.value)}
+              style={{
+                width: 32,
+                height: 32,
+                borderRadius: 6,
+                border: "1px solid rgba(255,255,255,0.2)",
+                cursor: "pointer",
+                background: "transparent",
+              }}
+            />
+            <input
+              type="text"
+              className="settings-input"
+              style={{ width: 85, textAlign: "center", fontFamily: "monospace" }}
+              value={currentColor}
+              onChange={(e) => onColorSelect(e.target.value)}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Orb Screen Position</div>
+        <div className="setting-desc" style={{ marginBottom: 12 }}>
+          Choose where NEXUS appears. The sleek black slider smoothly glides into view from your chosen screen edge.
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <button
+            type="button"
+            className={`settings-btn ${currentPos === "top" ? "settings-btn--primary" : "settings-btn--glass"}`}
+            style={{
+              padding: "12px 14px",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 6,
+              borderRadius: 10,
+              cursor: "pointer",
+              border: currentPos === "top" ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
+              background: currentPos === "top" ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
+              color: "#fff",
+              transition: "all 0.15s ease",
+            }}
+            onClick={() => onPositionSelect("top")}
+          >
+            <span style={{ fontSize: 18 }}>⬒</span>
+            <span style={{ fontWeight: 600, fontSize: 13 }}>Top (Default)</span>
+            <span style={{ fontSize: 11, opacity: 0.7 }}>Slides down from top edge</span>
+          </button>
+          <button
+            type="button"
+            className={`settings-btn ${currentPos === "bottom" ? "settings-btn--primary" : "settings-btn--glass"}`}
+            style={{
+              padding: "12px 14px",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 6,
+              borderRadius: 10,
+              cursor: "pointer",
+              border: currentPos === "bottom" ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
+              background: currentPos === "bottom" ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
+              color: "#fff",
+              transition: "all 0.15s ease",
+            }}
+            onClick={() => onPositionSelect("bottom")}
+          >
+            <span style={{ fontSize: 18 }}>⬓</span>
+            <span style={{ fontWeight: 600, fontSize: 13 }}>Bottom</span>
+            <span style={{ fontSize: 11, opacity: 0.7 }}>Slides up from taskbar</span>
+          </button>
+        </div>
       </div>
 
       <div className="settings-section">
@@ -399,9 +533,8 @@ interface VoicePersona {
   accentTag: string;
   avatar: string;
   cloudId: string;
-  localModel: string;
+  kokoroVoice: string;
   previewPhrase: string;
-  sha256: string | null;
 }
 
 interface VoiceStatus {
@@ -419,7 +552,7 @@ function AudioTab({ settings, update }: {
   const [personas, setPersonas] = useState<VoicePersona[]>([]);
   const [previewing, setPreviewing] = useState<string | null>(null);
   const [equipping, setEquipping] = useState<string | null>(null);
-  const [sync, setSync] = useState<Record<string, { state: "ready" | "cloud_only" | "downloading"; progress?: number }>>({});
+  const [sync, setSync] = useState<Record<string, { state: "ready" | "cloud_only" | "downloading"; progress?: number; phase?: string }>>({});
   const [transport, setTransport] = useState<"cloud" | "local">("cloud");
 
   // Fetch persona catalog + current sync state + transport on mount.
@@ -451,7 +584,7 @@ function AudioTab({ settings, update }: {
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
       const { invoke: inv } = await import("@tauri-apps/api/core");
-      unlisten = await listen<{ status?: string; voice_key?: string; progress?: number }>(
+      unlisten = await listen<{ status?: string; voice_key?: string; progress?: number; phase?: string }>(
         "voice:status",
         (ev) => {
           const key = ev.payload?.voice_key;
@@ -462,7 +595,7 @@ function AudioTab({ settings, update }: {
           }
           if (!key || (status !== "ready" && status !== "cloud_only" && status !== "downloading" && status !== "error")) return;
           const state = status === "error" ? "cloud_only" : status;
-          setSync((m) => ({ ...m, [key]: { state, progress: ev.payload?.progress } }));
+          setSync((m) => ({ ...m, [key]: { state, progress: ev.payload?.progress, phase: ev.payload?.phase } }));
           inv<{ transport?: string }>("get_voice_transport")
             .then((t) => {
               if (t?.transport === "local" || t?.transport === "cloud") {
@@ -511,7 +644,9 @@ function AudioTab({ settings, update }: {
     if (s.state === "ready") return <span className="persona-sync persona-sync--ready">✓ Cloud + Offline Ready</span>;
     if (s.state === "downloading") {
       const pct = typeof s.progress === "number" ? ` ${s.progress}%` : "…";
-      return <span className="persona-sync persona-sync--busy">⬇ Syncing Offline Voice{pct}</span>;
+      // phase "base" = the one-time shared offline engine (~88 MB); "voice" = the 0.5 MB voice file
+      const label = s.phase === "base" ? "Downloading offline engine (one-time)" : "Syncing Offline Voice";
+      return <span className="persona-sync persona-sync--busy">⬇ {label}{pct}</span>;
     }
     return <span className="persona-sync persona-sync--pending">⚡ Cloud Only</span>;
   };
@@ -1180,6 +1315,18 @@ function ConnectionsTab({ settings, update }: {
     groqKey: boolean;
     geminiKey: boolean;
   } | null>(null);
+  // Feature 88: canonical laptop identity state.
+  const [identityState, setIdentityState] = useState<{
+    state: string;
+    profileId?: string;
+    deviceName?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    invoke<{ state: string; profileId?: string; deviceName?: string }>("get_identity_status")
+      .then((st) => setIdentityState(st))
+      .catch(() => setIdentityState({ state: "unknown_profile" }));
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -1282,6 +1429,49 @@ function ConnectionsTab({ settings, update }: {
           <span style={{ fontSize: 12, color: "rgba(255,150,150,0.9)" }}>{error}</span>
         </div>
       )}
+
+      <div className="settings-section">
+        <div className="settings-section-title">Identity</div>
+        {(() => {
+          if (identityState == null) {
+            return <div style={{ fontSize: 12, opacity: 0.5 }}>Loading…</div>;
+          }
+          const banner = identityBanner(identityState);
+          const colors: Record<IdentityBanner["tone"], string> = {
+            amber: "#fbbf24", green: "#22c55e", red: "#ef4444", dim: "#94a3b8",
+          };
+          return (
+            <div className="auth-card">
+              <div className="auth-card-header">
+                <span className="auth-card-title">{banner.title}</span>
+                <span style={{ fontSize: 11, color: colors[banner.tone] }}>{identityState.state}</span>
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.65, margin: "4px 0 8px" }}>{banner.subtitle}</div>
+              {identityState.profileId ? (
+                <div style={{ fontSize: 11, opacity: 0.45, marginBottom: 8 }}>
+                  device: {identityState.deviceName || "unknown"} · profile …{identityState.profileId.slice(-6)}
+                </div>
+              ) : null}
+              {identityState.state === "approved" && (
+                <button
+                  className="settings-btn"
+                  onClick={async () => {
+                    if (!window.confirm("Disconnect this device from the NEXUS cloud? Cloud features will be disabled until re-approval.")) return;
+                    try {
+                      await invoke("disconnect_device");
+                      setIdentityState({ state: "provisional" });
+                    } catch (err) {
+                      console.warn("[NEXUS] disconnect failed:", err);
+                    }
+                  }}
+                >
+                  Disconnect this device
+                </button>
+              )}
+            </div>
+          );
+        })()}
+      </div>
 
       <div className="settings-section">
         <div className="settings-section-title">System Status</div>

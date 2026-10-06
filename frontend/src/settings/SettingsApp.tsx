@@ -39,6 +39,7 @@ interface Settings {
   googleCloudApiKey?: string;
   groqApiKey?: string;
   edgeTtsVoice?: string;
+  orbPosition?: "top" | "bottom";
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -61,6 +62,7 @@ const DEFAULT_SETTINGS: Settings = {
   ttsProvider: "kokoro",
   groqApiKey: "",
   edgeTtsVoice: "en-US-AvaNeural",
+  orbPosition: "top",
 };
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
@@ -233,6 +235,32 @@ function GeneralTab({ settings, update }: { settings: Settings; update: <K exten
           />
         </div>
       </section>
+
+      <section className="nx-section">
+        <div className="nx-section-title">Orb Screen Position</div>
+        <div className="nx-row">
+          <div className="nx-row-label">
+            <span className="nx-row-name">Screen Placement</span>
+            <span className="nx-row-hint">Position the black slider capsule at the top or bottom of the screen</span>
+          </div>
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button
+              type="button"
+              className={`nx-btn ${settings.orbPosition !== "bottom" ? "nx-btn--primary" : ""}`}
+              onClick={() => update("orbPosition", "top")}
+            >
+              Top (Default)
+            </button>
+            <button
+              type="button"
+              className={`nx-btn ${settings.orbPosition === "bottom" ? "nx-btn--primary" : ""}`}
+              onClick={() => update("orbPosition", "bottom")}
+            >
+              Bottom
+            </button>
+          </div>
+        </div>
+      </section>
     </>
   );
 }
@@ -280,7 +308,7 @@ function AudioTab({ settings, update }: { settings: Settings; update: <K extends
         <div className="nx-row">
           <div className="nx-row-label">
             <span className="nx-row-name">Assistant Voice</span>
-            <span className="nx-row-hint">Cloud TTS (Edge TTS) — free, 0 MB RAM. Falls back to Piper (local) when network is down.</span>
+            <span className="nx-row-hint">Cloud TTS (Edge TTS) — free, 0 MB RAM. Falls back to the local Kokoro voice when the network is down; returns to cloud automatically.</span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <select
@@ -558,7 +586,7 @@ function BackendTab({ settings, update, connected }: { settings: Settings; updat
         <div className="nx-row">
           <div className="nx-row-label">
             <span className="nx-row-name">Fallback Engine</span>
-            <span className="nx-row-hint">Piper (local ONNX, ~80 MB RAM) — used when network is down, unloaded after 10 min recovery</span>
+            <span className="nx-row-hint">Kokoro (local ONNX, ~260-370 MB RAM while loaded) — used only when the network is down, unloaded after 10 min of recovery</span>
           </div>
           <span className="nx-status-indicator">
             <span className="nx-status-dot nx-status-dot--ok" />

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { initCaptionListener, onCaptionUpdate } from "../audio/captionScheduler";
+import { initCaptionListener, onCaptionLineUpdate, CaptionLineEvent } from "../audio/captionScheduler";
 
 interface OrbRect {
   x: number;
@@ -9,43 +9,24 @@ interface OrbRect {
 }
 
 /**
- * ResponseCaption — the spoken reply's text, growing word-by-word above
- * the orb (plan Phase 3). Anchored a fixed gap above `stage:orb_rect` —
- * the SAME rect OrbFrame listens to (single source of truth for "above
- * the orb"), listened to independently here rather than threaded through
- * props, matching this file's existing pattern of self-contained stage
- * components (SpatialAnnotationLayer/AnnotationCanvas each own their
- * listeners too).
+ * ResponseCaption — the spoken reply's text, appearing line-by-line / clause-by-clause
+ * outside the black capsule (top dock: below the capsule; bottom dock: above the capsule).
+ * Synchronized with the Voice Orb: holds the orb alive until the final line clears.
  */
 export function ResponseCaption() {
   const [rect, setRect] = useState<OrbRect | null>(null);
-  const [words, setWords] = useState<string[]>([]);
-  const [visible, setVisible] = useState(false);
-  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [lineEvent, setLineEvent] = useState<CaptionLineEvent | null>(null);
 
   useEffect(() => {
     initCaptionListener();
-    const unsub = onCaptionUpdate((revealed, done) => {
-      if (hideTimer.current) {
-        clearTimeout(hideTimer.current);
-        hideTimer.current = null;
-      }
-      if (revealed.length === 0) {
-        setVisible(false);
-        return;
-      }
-      setWords(revealed);
-      setVisible(true);
-      if (done) {
-        // Linger briefly after the last word finishes so it's readable,
-        // then fade — barge-in (clearCaptionSchedule) hides it immediately
-        // via the revealed.length===0 branch above instead of this timer.
-        hideTimer.current = setTimeout(() => setVisible(false), 1400);
+    const unsub = onCaptionLineUpdate((event, done) => {
+      setLineEvent(event);
+      if (done && event.phase === "cleared") {
+        setLineEvent(null);
       }
     });
     return () => {
       unsub();
-      if (hideTimer.current) clearTimeout(hideTimer.current);
     };
   }, []);
 
@@ -70,25 +51,37 @@ export function ResponseCaption() {
   }, []);
 
   // Position/opacity applied via direct DOM mutation, not React's `style`
-  // prop — the stage window's CSP makes inline styles a silent no-op (see
-  // OrbFrame.tsx's note). Static layout (position/left/top/width) lives in
-  // the `.response-caption` CSS class instead; only the genuinely dynamic
-  // transform/opacity are set imperatively here.
+  // prop — the stage window's CSP makes inline styles a silent no-op.
   const applyPosition = (el: HTMLDivElement | null) => {
     if (!el || !rect) return;
     const dpr = window.devicePixelRatio || 1;
-    const centerX = rect.x / dpr + rect.w / dpr / 2;
+    const centerX = typeof window !== "undefined" ? window.innerWidth / 2 : rect.x / dpr + rect.w / dpr / 2;
     const topY = rect.y / dpr;
-    const gap = 28;
-    el.style.transform = `translate(${centerX - 260}px, ${topY - gap}px) translateY(-100%)`;
-    el.style.opacity = visible ? "1" : "0";
+    const bottomY = (rect.y + rect.h) / dpr;
+    const gap = 24;
+    const isTop = topY < (typeof window !== "undefined" ? window.innerHeight / 2 : 540);
+
+    if (isTop) {
+      el.style.transform = `translate(${centerX - 260}px, ${bottomY + gap}px)`;
+    } else {
+      el.style.transform = `translate(${centerX - 260}px, ${topY - gap}px) translateY(-100%)`;
+    }
+    el.style.opacity = lineEvent && lineEvent.phase !== "cleared" ? "1" : "0";
   };
+
   const captionRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     applyPosition(captionRef.current);
-  }, [rect, visible]);
+  }, [rect, lineEvent]);
 
-  if (!rect || words.length === 0) return null;
+  if (!rect || !lineEvent || !lineEvent.text.trim() || lineEvent.phase === "cleared") return null;
+
+  const phaseClass =
+    lineEvent.phase === "active"
+      ? "caption-line--active"
+      : lineEvent.phase === "fading"
+      ? "caption-line--fading"
+      : "";
 
   return (
     <div
@@ -98,12 +91,11 @@ export function ResponseCaption() {
         applyPosition(el);
       }}
     >
-      {words.map((w, i) => (
-        <span className="response-caption-word" key={i}>
-          {w}
-          {i < words.length - 1 ? " " : ""}
-        </span>
-      ))}
+      {lineEvent.previousText && (
+        <span className="caption-line caption-line--prev">{lineEvent.previousText}</span>
+      )}
+      <span className={`caption-line ${phaseClass}`}>{lineEvent.text}</span>
     </div>
   );
 }
+

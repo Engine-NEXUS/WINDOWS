@@ -30,11 +30,15 @@ export function LiveCaption() {
     let unlistenFinal: (() => void) | null = null;
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
-      // Moonshine's LineTextChanged gives the full growing line each time,
-      // not a delta — a wholesale replace is correct here.
+      // Moonshine's LineTextChanged gives the full growing line each time.
+      // Format as 5-word sliding FIFO window for clean display.
       unlistenPartial = await listen<{ text?: string }>("stt:partial", (event) => {
         const t = event.payload?.text;
-        if (typeof t === "string") setText(t);
+        if (typeof t === "string") {
+          const words = t.trim().split(/\s+/).filter(Boolean);
+          const windowed = words.length > 5 ? words.slice(-5).join(" ") : t;
+          setText(windowed);
+        }
       });
       // Turn end: the real batch transcript arrived (or came back empty) —
       // clear so the NEXT turn's listening phase starts from blank instead
@@ -75,10 +79,17 @@ export function LiveCaption() {
   const applyPosition = (el: HTMLDivElement | null) => {
     if (!el || !rect) return;
     const dpr = window.devicePixelRatio || 1;
-    const centerX = rect.x / dpr + rect.w / dpr / 2;
+    const centerX = typeof window !== "undefined" ? window.innerWidth / 2 : rect.x / dpr + rect.w / dpr / 2;
     const topY = rect.y / dpr;
-    const gap = 28;
-    el.style.transform = `translate(${centerX - 260}px, ${topY - gap}px) translateY(-100%)`;
+    const bottomY = (rect.y + rect.h) / dpr;
+    const gap = 24;
+    const isTop = topY < (typeof window !== "undefined" ? window.innerHeight / 2 : 540);
+
+    if (isTop) {
+      el.style.transform = `translate(${centerX - 260}px, ${bottomY + gap}px)`;
+    } else {
+      el.style.transform = `translate(${centerX - 260}px, ${topY - gap}px) translateY(-100%)`;
+    }
   };
   const captionRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {

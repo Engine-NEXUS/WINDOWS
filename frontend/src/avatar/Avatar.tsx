@@ -280,6 +280,7 @@ export function Avatar({ entered: enteredProp = false, dispersing = false }: Ava
   const calibrationTarget = useAssistant((s) => s.calibrationTarget);
   const calibrationSize = useAssistant((s) => s.calibrationSize);
   const calibrationPulse = useAssistant((s) => s.calibrationPulse);
+  const orbColor = useAssistant((s) => s.orbColor);
 
   // Turn-gap pin (ghost always-on plan): in ghost mode an idle arriving
   // within 1.2s of the last active state (hot-mic relisten churn) holds the
@@ -400,6 +401,8 @@ export function Avatar({ entered: enteredProp = false, dispersing = false }: Ava
   const wavesPreview = calibrationTarget === "waves";
   // Ghost always-on display: the WebGL orb replaces the waves bars.
   const ghostDisplay = shouldShowGhostParticles(visible, ghostActive);
+  const isOrbVisible = Boolean(enteredProp || visible || ghostActive || dispersing);
+  console.log(`[AVATAR] render: orbVisible=${isOrbVisible} state=${displayState} (entered=${enteredProp}, storeVisible=${visible}, ghost=${ghostActive})`);
   // Target-switch pulse (plan 04 §4): toggling suffix restarts the CSS
   // animation, so identical rects still read as switched.
   const pulseClass = calibrating ? ` calib-pulse-${calibrationPulse % 2}` : "";
@@ -419,7 +422,8 @@ export function Avatar({ entered: enteredProp = false, dispersing = false }: Ava
         <div className="avatar-voice-orb-container">
           <VoiceOrb
             state={ghostDisplay ? displayState : state}
-            visible={visible || dispersing}
+            color={orbColor}
+            visible={isOrbVisible}
             particles={5000}
             entered={ghostActive || enteredProp}
             dispersing={dispersing}

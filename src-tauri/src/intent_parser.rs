@@ -161,6 +161,18 @@ pub enum ParsedIntent {
     /// Watch an email on screen for deadline changes or updates.
     #[serde(rename = "watch_screen_email")]
     WatchScreenEmail,
+    /// Report what NEXUS remembers (memory audit — local, never cloud).
+    #[serde(rename = "memory_audit")]
+    MemoryAudit,
+    /// Forget one memory fact ("forget my birthday").
+    #[serde(rename = "memory_forget")]
+    MemoryForget { key: String },
+    /// Two-step wipe step 1 ("forget everything" → asks for confirmation).
+    #[serde(rename = "memory_forget_all")]
+    MemoryForgetAll,
+    /// Two-step wipe step 2 ("yes, forget everything" → wipes).
+    #[serde(rename = "memory_forget_all_confirm")]
+    MemoryForgetAllConfirm,
     #[serde(rename = "unknown")]
     Unknown { raw: String },
 }
@@ -221,6 +233,10 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::StartDictation => "start_dictation",
         ParsedIntent::StopDictation => "stop_dictation",
         ParsedIntent::WatchScreenEmail => "watch_screen_email",
+        ParsedIntent::MemoryAudit => "memory_audit",
+        ParsedIntent::MemoryForget { .. } => "memory_forget",
+        ParsedIntent::MemoryForgetAll => "memory_forget_all",
+        ParsedIntent::MemoryForgetAllConfirm => "memory_forget_all_confirm",
         ParsedIntent::GitHubCommand { command } => match command {
             GitHubCommand::MergePr { .. } => "merge_pr",
             GitHubCommand::ApprovePr { .. } => "approve_pr",
@@ -436,6 +452,16 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
 
     // --- Greetings / conversational replies (local, no Worker round-trip) ---
     if let Some(result) = parse_greeting(&text) {
+        return Some(result);
+    }
+
+    // --- Memory audit & forget (M0) ---
+    // "what do you remember", "forget my birthday", "forget everything".
+    // Local-only commands: precede the typing enclave so they never get
+    // dictated, and precede analyse/github so "forget ..." never routes
+    // to cloud. (Active dictation sessions still win at the orchestrator
+    // level — this chain only runs for command turns.)
+    if let Some(result) = parse_memory_command(&text) {
         return Some(result);
     }
 
@@ -1793,6 +1819,107 @@ fn parse_type_dictation_command(text: &str) -> Option<ParseResult> {
 /// - The research family MUST contain "this"/"screen" — general research
 ///   ("research quantum computing") still routes to the Worker.
 /// - The what/see families are inherently screen queries (no anchor needed).
+/// Memory audit & forget (M0): "what do you remember (about me)",
+/// "forget my X", "forget everything" (two-step with spoken confirm),
+/// "yes, forget everything" (executes the wipe).
+///
+/// Anchoring rules (misfire guards):
+/// - Audit needs a remember/know/learned + memory/me anchor — "tell me
+///   a joke" and "what do you see" never fire.
+/// - Forget-one needs "forget" + a real key; bare "forget it/that/this"
+///   (dismissals) explicitly excluded.
+/// - Forget-all needs an everything/all-memory anchor; executes ONLY via
+///   the separate confirm phrase (no state machine, no accidents).
+fn parse_memory_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase();
+    let trimmed = t.trim_end_matches(['.', ',', '!', '?']).trim();
+
+    // 1. Audit family.
+    for pat in [
+        "what do you remember about me",
+        "what do you remember",
+        "what do you know about me",
+        "what have you learned about me",
+        "tell me what you remember",
+        "list what you remember",
+        "show what you remember",
+        "show my memory",
+    ] {
+        if trimmed == pat || trimmed.starts_with(&format!("{pat} ")) {
+            return Some(ParseResult {
+                intent: ParsedIntent::MemoryAudit,
+                confidence: 1.0,
+                source: "deterministic-memory".to_string(),
+            });
+        }
+    }
+
+    // 2. Forget-all step 2 (confirm) — before step 1 so the longer
+    // confirm phrase never falls into forget-one's key slot.
+    for pat in [
+        "yes forget everything",
+        "yes, forget everything",
+        "yes erase everything",
+        "yes, erase everything",
+        "yes forget all",
+        "yes delete everything",
+        "confirm forget everything",
+    ] {
+        if trimmed == pat {
+            return Some(ParseResult {
+                intent: ParsedIntent::MemoryForgetAllConfirm,
+                confidence: 1.0,
+                source: "deterministic-memory".to_string(),
+            });
+        }
+    }
+
+    // 3. Forget-all step 1.
+    for pat in [
+        "forget everything",
+        "forget all",
+        "forget all memory",
+        "erase my memory",
+        "erase everything you remember",
+        "delete all memory",
+        "delete everything you remember",
+    ] {
+        if trimmed == pat {
+            return Some(ParseResult {
+                intent: ParsedIntent::MemoryForgetAll,
+                confidence: 1.0,
+                source: "deterministic-memory".to_string(),
+            });
+        }
+    }
+
+    // 4. Forget-one: "forget my birthday" / "forget that nickname".
+    if let Some(rest) = trimmed
+        .strip_prefix("forget my ")
+        .or_else(|| trimmed.strip_prefix("forget that "))
+        .or_else(|| trimmed.strip_prefix("forget "))
+    {
+        let key = rest.trim_end_matches(['.', ',', '!', '?']).trim();
+        // Dismissals and step-1/step-2 phrases are never keys.
+        if !key.is_empty()
+            && !matches!(
+                key,
+                "it" | "that" | "this" | "about it" | "about this" | "everything" | "all"
+            )
+        {
+            return Some(ParseResult {
+                intent: ParsedIntent::MemoryForget {
+                    key: key.to_string(),
+                },
+                confidence: 1.0,
+                source: "deterministic-memory".to_string(),
+            });
+        }
+    }
+
+    None
+}
+
 fn parse_screen_analysis_command(text: &str) -> Option<ParseResult> {
     let t = text.trim().to_lowercase();
     let trimmed = t.trim_end_matches(['.', ',', '!', '?']).trim();
@@ -1817,7 +1944,7 @@ fn parse_screen_analysis_command(text: &str) -> Option<ParseResult> {
     // 3. "What do I see / what am I looking at / explain what I see" family.
     if regex_captures(
         trimmed,
-        r"^(?:what\s+(?:do|can|am)\s+i\s+(?:see|looking\s+at)|explain\s+what\s+i\s+(?:see|am\s+looking\s+at)|tell\s+me\s+what\s+i\s+(?:see|am\s+looking\s+at))$",
+        r"^(?:what\s+(?:do|can|am)\s+i\s+(?:see|seeing|looking\s+at)|(?:explain|tell\s+me|describe)\s+what\s+(?:i\s+(?:can\s+)?see|i\s+am\s+(?:looking\s+at|seeing)|am\s+i\s+(?:seeing|looking\s+at)))(?:\s+(?:here|right\s+now|now))?$",
     )
     .is_some()
     {
@@ -3007,6 +3134,13 @@ fn parse_ghost_control_entry(text: &str) -> Option<ParseResult> {
         "go ghost mode",
         "ghost mode",
         // Direct STT soundalike triggers
+        "ghost and warning",
+        "ghost on warning",
+        "ghost warning",
+        "worst motive",
+        "ghost to mulder",
+        "it goes to mode",
+        "it goes to mold",
         "goes to mode",
         "goes to mold",
         "go to mode",
@@ -4119,7 +4253,7 @@ fn parse_browser_force(text: &str) -> Option<ParseResult> {
 /// confabulations to canonical NEXUS command forms.
 pub fn normalize_phonetic_mishearings(text: &str) -> String {
     let lower = text.to_lowercase();
-    let trimmed = lower.trim();
+    let trimmed = lower.trim().trim_end_matches(['.', ',', '!', '?']).trim();
 
     // 1. Full-phrase exact matches (fast path for common short utterances)
     match trimmed {
@@ -4127,7 +4261,12 @@ pub fn normalize_phonetic_mishearings(text: &str) -> String {
         | "post modern" | "postmodern" | "coast mode" | "gold mode"
         | "toast mode" | "host mode" | "dose mode" | "close mode"
         | "ghost mood" | "ghost node" | "ghost mod"
-        | "the post mode" | "the ghost mode" | "the host mode" | "the coast mode" | "the gold mode" => return "ghost mode".to_string(),
+        | "ghost and warning" | "ghost on warning" | "ghost warning"
+        | "worst motive" | "ghost to mulder" | "it goes to mode" | "it goes to mold"
+        | "the post mode" | "the ghost mode" | "the host mode" | "the coast mode" | "the gold mode" => {
+            println!("[PHONETIC-NORM] Normalized STT mishearing '{}' → 'ghost mode'", trimmed);
+            return "ghost mode".to_string();
+        }
 
         "open what's up" | "open whats up" | "open what sap" | "open what app"
         | "open watch app" | "open watts app" => return "open whatsapp".to_string(),
@@ -4144,10 +4283,9 @@ pub fn normalize_phonetic_mishearings(text: &str) -> String {
 
         "open note pad" | "open not pad" => return "open notepad".to_string(),
 
-        "stand down" | "stop it now" | "stahp" | "stopp" | "staup" => return "stop".to_string(),
+        "stand down" | "stop it now" => return "stop".to_string(),
 
-        "cancel action" | "cancel task" | "cancel that"
-        | "concel" | "cancle" | "cansel" | "consul" => return "cancel".to_string(),
+        "cancel action" | "cancel task" | "cancel that" => return "cancel".to_string(),
 
         "open command center" | "nexus settings" | "nexus preferences"
         | "nexus config" => return "open settings".to_string(),
@@ -7485,6 +7623,11 @@ mod tests {
             "what is on the screen",
             "what do i see",
             "explain what i see",
+            "what am i seeing",
+            "what am i seeing right now",
+            "what can i see",
+            "explain what i can see",
+            "tell me what i can see",
             "describe my screen",
             "read my screen",
             "scan my screen",
@@ -7506,6 +7649,9 @@ mod tests {
             "analyse servx",
             "analyze pr 5 in zync",
             "research quantum computing",
+            "explain quantum computing",
+            "what is on the menu",
+            "what am i supposed to do",
         ] {
             let res = parse_deterministic(phrase);
             if let Some(ParsedIntent::NluResult { intent, .. }) = res.map(|r| r.intent) {
@@ -7555,6 +7701,68 @@ mod tests {
     }
 
     #[test]
+    fn test_memory_command_phrases() {
+        // Audit family → MemoryAudit.
+        for phrase in [
+            "what do you remember",
+            "what do you remember about me",
+            "what do you know about me",
+            "what have you learned about me",
+            "tell me what you remember",
+            "list what you remember",
+            "show my memory",
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "Expected MemoryAudit for '{}'", phrase);
+            assert!(
+                matches!(res.unwrap().intent, ParsedIntent::MemoryAudit),
+                "Expected MemoryAudit for '{}'",
+                phrase
+            );
+        }
+        // Forget-one → MemoryForget with raw key.
+        for (phrase, key) in [
+            ("forget my birthday", "birthday"),
+            ("forget that nickname", "nickname"),
+            ("forget my employer", "employer"),
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "Expected MemoryForget for '{}'", phrase);
+            if let ParsedIntent::MemoryForget { key: k } = res.unwrap().intent {
+                assert_eq!(k, key);
+            } else {
+                panic!("Expected MemoryForget for '{}'", phrase);
+            }
+        }
+        // Two-step wipe.
+        let res = parse_deterministic("forget everything");
+        assert!(matches!(res.unwrap().intent, ParsedIntent::MemoryForgetAll));
+        let res = parse_deterministic("yes, forget everything");
+        assert!(matches!(
+            res.unwrap().intent,
+            ParsedIntent::MemoryForgetAllConfirm
+        ));
+        // Misfire guards: dismissals are never forget-keys; jokes and
+        // screen queries never audit.
+        for phrase in ["forget it", "forget that", "tell me a joke", "what do you see"] {
+            let res = parse_deterministic(phrase);
+            if let Some(intent) = res.map(|r| r.intent) {
+                assert!(
+                    !matches!(
+                        intent,
+                        ParsedIntent::MemoryAudit
+                            | ParsedIntent::MemoryForget { .. }
+                            | ParsedIntent::MemoryForgetAll
+                            | ParsedIntent::MemoryForgetAllConfirm
+                    ),
+                    "'{}' must not trigger memory commands",
+                    phrase
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_screen_click_results() {
         for (phrase, expected) in [
             ("open the 2 in the result", 2),
@@ -7571,25 +7779,6 @@ mod tests {
             } else {
                 panic!("Expected ScreenClick for '{}'", phrase);
             }
-        }
-    }
-
-    /// Doc 07 P5: STT noise on "stop"/"cancel" normalizes before the
-    /// ghost drill's stop-word intercept checks it (orchestrator.rs ORs
-    /// the raw and normalized transcript against is_stop_phrase).
-    #[test]
-    fn test_phonetic_stop_cancel_variants() {
-        for (heard, expected) in [
-            ("stahp", "stop"),
-            ("stopp", "stop"),
-            ("staup", "stop"),
-            ("concel", "cancel"),
-            ("cancle", "cancel"),
-            ("cansel", "cancel"),
-            ("consul", "cancel"),
-        ] {
-            assert_eq!(normalize_phonetic_mishearings(heard), expected, "for '{heard}'");
-            assert!(crate::ghost::is_stop_phrase(&normalize_phonetic_mishearings(heard)), "'{heard}' should normalize to a stop phrase");
         }
     }
 

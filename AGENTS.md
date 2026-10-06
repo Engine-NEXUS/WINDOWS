@@ -1,5 +1,241 @@
 # NEXUS — Project Notes
 
+## 1.0s Thinking Dwell, 2-Line Subtitle Stack & Screen Tour Resilience (2026-10-06)
+
+- **Problem & Motivation**:
+  1. The continuous 3D woven luminous violet ribbon knot was morphing into speech almost instantaneously (<200ms) on quick responses, preventing the user from seeing the knot unfurl and rotate in 3D space.
+  2. Captions disappeared too fast to read when broken into small 3-5 word fragments; the user could not comfortably read replies.
+  3. "Analyze my screen" required immediate natural voice acknowledgment ("On it, sir.", "Ok, sir.", "Sure, sir.") and graceful resilience if the vision model returned HTTP 503 or 429.
+- **Root Cause & Fixes**:
+  - `frontend/src/store/assistant.ts`: Added `THINKING_MIN_DWELL_MS = 1000` with dwell lock preventing instant transition to speaking until the continuous 3D woven luminous violet ribbon knot has completed its 700ms expansion and at least 300ms of visible 3D spatial rotation. Handled delayed transitions via `thinkingPendingTimer` and clean reset in `clearThinkingDwell()`.
+  - `frontend/src/audio/captionScheduler.ts`: Sentence partitioning updated to break strictly on natural terminal punctuation (`[.?!]`) or speech gaps (>650ms). Readability dwell floor enforced: intermediate sentences dwell for $\ge 2,500$ms, final sentences dwell for $\ge 3,500$ms. Added `previousText` tracking.
+  - `frontend/src/stage/ResponseCaption.tsx` & `frontend/src/stage/ghost.css`: Implemented 2-line subtitle stack (`.caption-line--prev` with 72% opacity, 18px font size, and 400ms cross-dissolve with blur).
+  - `frontend/src/avatar/voice-orb.js`: Locked exact color palette parity with `v2.mp4` (Listening: warm champagne gold; Thinking: luminous violet to electric magenta; Speaking: cohesive plum droplet with warm pink shimmer; Captions: silver-lavender stardust `#d8d0ea`).
+  - `src-tauri/src/screen_tour.rs` & `src-tauri/src/orchestrator.rs`: Added natural spoken acknowledgments immediately upon trigger, and handled 503/429 upstream errors with polite spoken notice and automatic fallback to local Windows OCR.
+- **Verify**: Double-pass verification executed:
+  - Pass 1: `npx tsc --noEmit` clean, `npm test -- --run` 189/189 pass, `cargo check` clean, `cargo test --lib -- --test-threads=1` 997/997 pass.
+  - Pass 2: `npx tsc --noEmit` clean, `npm test -- --run` 189/189 pass, `cargo test --lib -- --test-threads=1` 997/997 pass.
+  - Production build: `npm run build` clean; `cargo build --release` completed.
+- **Docs**: `docs/changes/93-thinking-dwell-caption-stack-and-screen-resilience.md`.
+
+## 1:1 v2.mp4 Orb Morphology, Sentinel Poller Guard, XML Unescaping & Wake Default (2026-10-06)
+
+- **Problem & Motivation**:
+  1. Terminal repeatedly spammed every 15s: `[SENTINEL] watch 'screen_thread_1790701281' ('Current Screen Email'): checking…` and `[WATCH] Skipping poll: no Google token.` due to a stale synthetic screen-email watch in `%APPDATA%\com.nexus.assistant\memory\mail_watches.json`.
+  2. Edge TTS emitted raw XML entity `&apos;` (`didn&apos;t`), displayed unescaped in captions.
+  3. False wake triggers occurred on ambient sound because `read_verify_wake` defaulted to `false`, allowing unconfirmed openWakeWord probabilities $\ge 0.30$ to instant-fire; consecutive empty STT chunks subsequently spoke "I didn't hear you, sir." unprompted.
+  4. The Voice Orb visual morphology did not match `v2.mp4`:
+     - Thinking state was a radial starburst rather than a continuous 3D woven luminous violet ribbon knot (`frame_03.png`).
+     - Speaking state was a faceted pebble rather than an organic fluid surface-tension droplet (`frame_04.png`, `frame_08.png`).
+     - Caption text formation did not have particles physically cascading downward from the south pole like falling sand (`frame_05.png`, `frame_08.png`).
+  5. The release binary was stale, causing `nexus start` to run older code where the orb had vanished.
+- **Root Cause & Fixes**:
+  - `src-tauri/src/google/sentinel.rs`: Purged stale `mail_watches.json`. Added check in `poll_sentinel_targets`: if no Google account is connected, the poller prints the configuration notice once and sleeps silently (zero 15-second spam). Added 2-hour auto-expiration for synthetic `screen_thread_*` targets.
+  - `src-tauri/src/tts.rs`: Added `unescape_ssml_entities()` decoding `&apos;` $\to$ `'`, `&quot;` $\to$ `"`, `&amp;` $\to$ `&`, `&lt;` $\to$ `<`, `&gt;` $\to$ `>` in `boundaries_to_words()`. Added unit test.
+  - `frontend/src/audio/captionScheduler.ts`: Added `unescapeXml()` in line partitioner and word reveals. Removed unused imports in `captionScheduler.test.ts` (cleaning `tsc`).
+  - `src-tauri/src/commands.rs`: In `read_verify_wake`, defaulted fallback to `true` (`unwrap_or(true)`), restoring mandatory Stage-2 acoustic verification before wake word fire.
+  - `frontend/src/avatar/voice-orb.js`:
+    - **Thinking State**: Replaced 64-radial-spoke starburst with 3D continuous woven violet ribbon knot based on parametric $(p=2, q=3)$ torus space curve with ribbon normal/binormal width expansion ($W=0.26, H=0.04$) and 3D yaw/pitch precession (`ctt` gradient `vec3(0.72, 0.14, 0.98)` to `vec3(0.92, 0.28, 0.95)`).
+    - **Speaking State**: Replaced faceted pebble with organic fluid droplet using 3D Simplex noise surface tension, lower-hemisphere teardrop sag, and audio amplitude/onset bulging (`cs` warm pink shimmer).
+    - **Caption Sandfall**: Configured particles to stream downward from the south pole $(0, -1.02, 0)$ with downward gravity arc and turbulence into target 2D glyph points, dissolving clause-by-clause before each new phrase.
+    - 1:1 parity in `_paint2D` CPU fallback.
+  - **Release Binary**: Compiled fresh release binary to `src-tauri/target/release/nexus.exe` (88.0 MB) bundling all frontend and backend updates.
+- **Verify**: `npx tsc --noEmit` clean; `npx vitest run` 189/189 pass; `cargo check` clean; `cargo test --lib -- --test-threads=1` 997/997 pass (6 ignored dev benches); release binary compiled cleanly.
+- **Docs**: `docs/changes/92-v2-orb-morphology-sentinel-silence-and-entity-unescaping.md`.
+
+## Screen Tour v2 — Explain the Main Content, With Context & a Stronger Model (2026-10-06)
+
+- **Problem & Motivation**: live test of the narrated tour: on a "healthiest nuts" article it explained the tab strip / URL bar and only said "this is the kinds of nuts"; on a YouTube video it said "this is the person / the product" without saying who, what, or what the video is about. Causes: whole-screen capture (browser chrome in the image), no context (tab title/URL never sent), word caps that forced labels not answers (overview ≤20, spoken ≤17), weakest model (3.5-flash-lite), and no stance on people (a vision model must not identify faces — only text evidence).
+- **Implementation**: `screen_context.rs` (new, pure + thin glue) gathers app, tab title, privacy-trimmed URL, YouTube title/channel via public oEmbed, and chooses the capture region (browser `Document` rect via UI Automation → window rect minus toolbar inset → full screen); `vision::capture_region_jpeg_base64`; `TourScript.region` + `callout_json` map boxes back to screen pixels. Prompt is answer-first (names all items of a list, says what a video is about, never identifies faces, ignores browser/OS chrome); budgets overview 35 / spoken 22 / callout 24 / total 120 words + `answer` field → sidebar overview; 8192 output tokens. Model ladder `gemini-3.8-flash → 3.5-flash → 3.5-flash-lite → 2.5-flash`, 404/429 advance, quota marked only if every failure was a 429. `geminiVisionDailyLimit` (default 500 — **our assumption**; Google publishes no per-model free numbers, see AI Studio rate-limit page) now drives the quota ledger. `screenTour`, `tourModel`, `geminiVisionDailyLimit` added to `NexusSettings` (settings.json is rewritten from that struct on save). Sensitive windows (`live::safety::is_target_blocked`) are refused, nothing captured.
+- **Verify**: Rust 996/996 (6 ignored dev helpers; +25), vitest 188/188; `tsc` shows 2 errors in `audio/captionScheduler.test.ts` from another session's in-progress caption work (untouched here). **Not run (live)**: UIA `Document` exposure on Brave, whether the 3.8/3.5 Flash ids accept the request on this project, answer quality on the nuts page / a YouTube video, crop alignment at 125–150 % scaling, oEmbed reachability. No Settings UI for `tourModel` / `geminiVisionDailyLimit` yet.
+- **Docs**: `docs/changes/91-screen-tour-main-content-and-context.md`.
+
+## Master Volume Restoration, Orb Disappearance Fix, Pure Black Capsule & Line-by-Line Captions (2026-10-06)
+
+- **Problem & Motivation**:
+  1. System Master Volume remained trapped at 70% after speech instead of restoring to the initial baseline (e.g. 20–30%).
+  2. Voice Orb disappeared inside the black slider capsule while the black box remained active, and vanished in Ghost Mode while captions continued. Captions and the orb were out of sync.
+  3. `scripts/run.ps1` silently dropped `[ORB]` logs due to missing regex matchers and lack of an `else` fallback.
+  4. User requested removing any pillar bars inside the black capsule: strictly the Voice Orb inside an obsidian black capsule with 10px minimalist corners.
+  5. Captions must replace line-by-line / clause-by-clause (*"hi lakshya i am nexus"* $\to$ dissolves $\to$ *"how can i help u today"* $\to$ dissolves $\to$ *"this is the analyssi result"*) rather than showing full paragraphs or overflowing. User live speech must show a 5-word FIFO moving window.
+  6. Strict constraint: Screen Analysis / Screen Tour (`screen_tour.rs`, `TourOverlay.tsx`, `tourGeometry.ts`, `vision.rs`) must remain 100% untouched.
+- **Root Cause & Fixes**:
+  - `src-tauri/src/volume.rs` & `src-tauri/src/tts.rs`: Implemented RAII `TtsVolumeLease` with reference-counted `ACTIVE_TTS_COUNT`, locked baseline invariant on `0 -> 1` transition, and 15-second safety watchdog. Instant restoration in `stop_tts()`. Verified via `cargo test --lib test_save_and_restore`.
+  - `scripts/run.ps1`: Added `--remote-debugging-port=9222` by default, launched CDP monitor by default, added regex matchers for `[ORB]`, `[ORB-FRAME]`, `[STAGE]`, `[AVATAR]`, `[VOICE-ORB]` (Cyan), and `[CAPTION]` (Green), and added a catch-all fallback so no frontend log is ever dropped.
+  - `frontend/src/avatar/Avatar.tsx`: Computed `isOrbVisible = Boolean(enteredProp || visible || ghostActive || dispersing)` and passed `visible={isOrbVisible}` to `<VoiceOrb>` so the WebGL loop never pauses inside an onscreen container.
+  - `frontend/src/avatar/VoiceOrb.tsx`: Added `color` prop support and `[VOICE-ORB]` WebGL loop resume/pause lifecycle logging.
+  - `frontend/src/stage/OrbFrame.tsx`: Wrapped strictly `<Avatar>` inside `.orb-sphere-wrapper` within `.orb-capsule` and `.orb-slider` (zero pillar bars, 10px corners, obsidian black `#000000 !important`). Added `[ORB-FRAME]` state logging.
+  - `frontend/src/net/orchestrator.ts`: In `hideOrbAfterSpeech`, gated hiding with `if (s.captionActive) { hideOrbAfterSpeech(350); return; }`, synchronizing the Voice Orb to remain active until the final caption clause completely finishes dissolving.
+  - `frontend/src/audio/captionScheduler.ts`: Exported `suppressNextCaption`. Implemented `partitionIntoLines()` and line-by-line phase scheduling (`active` $\to$ `fading` $\to$ `cleared`).
+  - `frontend/src/stage/ResponseCaption.tsx`: Connected to `onCaptionLineUpdate` to render discrete active and fading lines. Handled adaptive top/bottom docking coordinates.
+  - `frontend/src/stage/LiveCaption.tsx`: Implemented 5-word FIFO moving window for user input.
+  - `frontend/src/stage/ghost.css`: Added `.caption-line`, `.caption-line--active`, and `.caption-line--fading` transitions.
+  - `.gitignore`: Confirmed `frontend/public/v2*` is ignored.
+- **Verify**: `cargo check` clean; `npx tsc --noEmit` clean; `npx vitest run` 188/188 pass; `cargo test --lib -- --test-threads=1` 971/971 pass (6 ignored dev benches).
+- **Docs**: `docs/changes/90-volume-restoration-orb-observability-and-line-by-line-captions.md`.
+
+## Intact Orb Sphere, Black Slider Capsule & Top/Bottom Screen Edge Docking (2026-10-06)
+
+- **Problem & Motivation**:
+  1. The user requested: "remove the particles come together to form a spaher make it simple sliding up and spher change the form to thinking and all perfectly and lishting and spekang dont make any changes and plan it perfectly i dont want any more make like a slider black slider positon it from top to bottom remove that position and dragging option only two option top or bottom postiotn only and i want it to be positon at the top slide from top to bottom with black bacground top to bottom a small bot just enough space between the gap of sphere and the inside the balck box spher should be there plan it only".
+  2. The particle scattering effect (`EntranceBurst` and shader flight interpolation `mix(scatter, pos, ae)`) caused perceived visual glitches and unnecessary outward particle flight. The sphere must always remain intact, formed, and solid.
+  3. Freeform desktop drag calibration and wheel resizing introduced unwanted drift and floating UI artifacts. Restrict strictly to two discrete dock positions: **Top** (Default) or **Bottom**.
+  4. Encapsulate the orb in an obsidian black slider capsule (Apple Dynamic Island style) with just enough padding around the sphere perimeter, sliding smoothly in and out from the screen edge.
+  5. Strict constraint: Screen Analysis / Screen Tour (`screen_tour.rs`, `TourOverlay.tsx`, `tourGeometry.ts`, `vision.rs`) must remain 100% untouched.
+- **Root Cause & Fixes**:
+  - `voice-orb.js`: In vertex shader `VS`, replaced `vec3 flight = mix(scatter+swirl, pos, ae);` with `vec3 flight = pos;`. Particles stay intact in their compact spherical form at all times without scattering or converging from outside. `assemble()` and `disperse()` converted to instant zero-drift operations.
+  - `EntranceBurst.tsx`: Replaced with an inert component returning `null` (zero screen-wide particle bursts).
+  - `styles.css`: Added `.orb-slider`, `.orb-capsule`, and `.orb-sphere-wrapper` with 100% solid black inside fill (`background: #000000 !important`), blunt minimalist corner radii (`0 0 10px 10px` for top, `10px 10px 0 0` for bottom), border `1px solid rgba(255, 255, 255, 0.16)` on exposed edges, and deep ambient drop shadow.
+  - `voice-orb.js`: Removed `glitch` jitter noise and RGB chromatic tear so morphs between listening, thinking, and speaking are completely serene, smooth, and clean.
+  - `OrbFrame.tsx`: Replaced snappy transitions with a slow, neat, deliberate slide: `0.72s cubic-bezier(0.22, 1, 0.36, 1)` with `translate3d` hardware acceleration. Solid physical opacity throughout (zero mid-air ghost fading). Added `hasMountedRef` to eliminate cold-mount flash. Top docking rests flush directly below the webcam/camera at `y = 0`, sliding smoothly down from `-hCss - 24px`.
+  - `stage.rs`: Added Win32 taskbar z-ordering via `FindWindowW(Shell_TrayWnd)` and `SetWindowPos`, placing the stage overlay immediately behind the Windows taskbar while remaining above all normal desktop application windows.
+  - `ResponseCaption.tsx` & `LiveCaption.tsx`: Added adaptive top/bottom layout awareness. When positioned at Top, captions render below the black slider (`bottomY + gap`); when at Bottom, captions render above (`topY - gap`, `translateY(-100%)`).
+  - `commands.rs`, `window_manager.rs`, `lib.rs`: Added `orb_position: String` (`"top"` | `"bottom"`, default `"top"`) to `NexusSettings`. Updated `read_orb_settings` to parse discrete edge docks (`h = 0.5, v = 0.0` for top; `h = 0.5, v = 1.0` for bottom). Added `get_pending_orb_position` command and registered physical slider hitbox (`set_orb_hitbox_interactive`).
+  - `assistant.ts` & `orbRuntime.ts`: Bound `orbPosition` in Zustand store and synchronized live updates via `stage:orb_position`.
+  - `SettingsSidebarApp.tsx` & `SettingsApp.tsx`: Replaced legacy desktop drag slider with two-option segmented controls: `Top (Default)` and `Bottom`.
+- **Verify**: `cargo check` clean in `src-tauri`; `npx tsc --noEmit` clean in `frontend`; `npx vitest run` 182/182 pass; `cargo test --lib -- --test-threads=1` 969/969 pass (6 ignored dev benches); release binary compiled cleanly to `src-tauri/target/release/nexus.exe` (86.4 MB).
+- **Docs**: Artifact `nexus_command_center_and_orb_slider_plan.md`.
+
+## Ghost Mode Hardening, Directed Gate Vocabulary & Orb Convergence Fix (2026-10-06)
+
+- **Problem & Motivation**:
+  1. The user reported that during Ghost Mode, saying "Shift to tab two" (transcribed as `"Shift to Tab to"`) and `"You'll talk."` vanished silently without any feedback or logs, and the hot-mic subsequently stopped responding.
+  2. The Voice Orb screen-wide particle convergence animation was re-triggering repeatedly into a sphere every time NEXUS entered `thinking` and between consecutive Ghost Mode turns, instead of strictly on initial wake.
+  3. Particle density and sizing needed recalibration (+20% count, -40% point size).
+  4. Clarification requested regarding whether the Assistant sidebar and the Stage orb share an OS window.
+  5. Strict constraint: Screen Analysis / Screen Tour (`screen_tour.rs`, `TourOverlay.tsx`, `tourGeometry.ts`, `vision.rs`) must remain 100% untouched.
+- **Root Cause & Fixes**:
+  - `directed.rs`: Gated turns evaluated `'Shift to Tab to'` as non-command because `STARTERS` lacked `"shift"`, `"tab"`, `"alt"`, `"ctrl"`, etc., and `DOMAIN_CUES` lacked UI navigation nouns (`"tab"`, `"window"`, `"screen"`, `"cursor"`, etc.). Added explicit starters/cues and surfaced dropped turns directly to stdout via `[DROP] Directed speech gate: IGNORED ({reason}) transcript: '{transcript}'`.
+  - `screen.rs`: Added homophone support in `parse_ordinal` for Whisper mishearings: `"to"` / `"too"` $\to$ 2, `"for"` $\to$ 4, `"won"` $\to$ 1, `"ate"` $\to$ 8.
+  - `intent_parser.rs`: Added phonetic and soundalike normalization for `"it goes to mode"`, `"ghost and warning"`, `"ghost on warning"`, `"worst motive"`, and `"ghost to mulder"`. Verified live.
+  - `center.rs`: Allowed `(CommandEvidence::Strong, TurnOwnership::Unenrolled)` execution during Ghost Mode so un-enrolled voices can operate commands like "open Brave browser" or "open Antigravity".
+  - `frontend/src/stage/OrbFrame.tsx`: Removed `thinkBurstSeq` and the redundant thinking `<EntranceBurst />`. `EntranceBurst` now triggers strictly on rising edge of visibility (`!wasVisible && visible`), preventing particle convergence loops during thinking or repeating turns.
+  - `voice-orb.js`: Scaled particles by +20% (6,240 on desktop, 5,040 on mobile) and reduced particle diameter by 40% (point base 1.14, floor 1.6, dot 0.8) for sharper, crisper dust beads.
+  - Sidebar Architecture: Clarified that `"stage"` is a fullscreen transparent click-through overlay window, while `"sidebar"` is a completely separate native Win32 window (420px width).
+- **Verify**: `cargo check` clean; `npx tsc --noEmit` clean; `npx vitest run` 182/182 pass; `cargo test --lib -- --test-threads=1` 969/969 pass (6 ignored dev benches); release binary compiled cleanly to `src-tauri/target/release/nexus.exe` (86.4 MB).
+- **Docs**: `docs/changes/88-orb-command-center-coordination-and-ghost-mode-hardening.md`.
+
+
+## Startup Diagnostics & Subcenter Observability Matrix (2026-10-06)
+
+- **Problem & Motivation**: User requested: "in the nexus start i want u to plan somwthing i need to know where is the codbease being broken or the execution being failed, i want every single loop hole details and cross check in the entire codebase to be shown in the nexus start logs, no detaied should be missed include the anaimation froented, main commandceter validation an sendingto sub center And sub center process".
+- **Implementation**:
+  - `diagnostics.rs`: Added `run_full_system_audit(app_data_dir)` running during Tauri setup: 5 preflight audit layers (Layer 1 Audio & Neural Models, Layer 2 Frontend Overlay & CDP, Layer 3 Main Command Center, Layer 4 All 15 Sub-Centers, Layer 5 System & External Tools).
+  - `center.rs`: Connected validation for `YouTubeCenter`, `SystemCenter`, and `BrowserCenter` into `center::validate` for `NluResult` intents; exported `ALL_SUB_CENTERS` (15 sub-centers).
+  - `browser_center.rs`: Refactored `BrowserCenter::validate` to be self-contained, resolving recursive stack-overflow.
+  - `youtube_center.rs`: Added `resolve_youtube_engine_path() -> Option<PathBuf>` to resolve engine path robustly.
+  - `app_registry.rs`: Added `cached_app_count() -> usize`.
+  - `orchestrator.rs`: Added detailed `[MAIN-CMD]`, `[DROP]`, `[SUB-ROUTE]`, and `[SUB-PROC]` telemetry across all turn states.
+  - `voice-orb.js` & `stage/main.tsx`: Added `[ANIM]` WebGL context logs, shader compilation reporting, state transition tags, and stage mount metrics.
+  - `run.ps1` & `cdp_monitor.js`: Always enable `--remote-debugging-port=9222`; stream frontend logs by default; unsuppress hardware silence drops and permissions; colorize `[PREFLIGHT]` (Cyan), `[MAIN-CMD]` (Green), `[SUB-ROUTE]` (Cyan), `[SUB-PROC]` (Magenta), `[DROP]` (Red), and `[ANIM]`/`[FRONT]` (Yellow).
+- **Verify**: `cargo check` clean; `npx tsc --noEmit` clean; `npx vitest run` 182/182 pass; `cargo test --lib -- --test-threads=1` 968/968 pass (6 ignored dev benches).
+- **Docs**: `docs/changes/87-startup-diagnostics-and-subcenter-observability.md`.
+
+## Command Hub Orb Color Control & Theme Presets (2026-10-05)
+
+- **Problem & Motivation**: User requested: 1) "color should be same" (default remains warm golden-amber `#f2b859`), 2) "user can control the color he wants in the command hub", 3) "thinking center should be as always" (thinking state strictly invariant as electric purple starburst with solid white/magenta nucleus), 4) "merge the pr in the windows nexus-egine" (PR #29 merged on `Engine-NEXUS/WINDOWS`).
+- **Implementation**:
+  - `commands.rs`: Added `orb_color: String` to `NexusSettings` with default `#f2b859`.
+  - `assistant.ts`: Added `orbColor` and `setOrbColor` with `localStorage` fallback and persistence.
+  - `orbRuntime.ts`: Syncs `orbColor` from `get_settings` on mount and listens for live `"orb:color"` events.
+  - `Avatar.tsx` / `VoiceOrb.tsx`: Passes `color={orbColor}` down to `<voice-orb>`.
+  - `voice-orb.js`: Added `'color'` attribute observer; uniform `vec3 userTint` applied to `clFixed`, `clDyn`, and `ci` (idle/listening); `ctt` strictly locked to electric purple gradient with white nucleus (`isCore`); 1:1 parity in `_paint2D`.
+  - `SettingsSidebarApp.tsx`: Added "Orb Color Theme" in Display tab with 7 preset chips (Amber, Cyan, Emerald, Ruby, Azure, Amethyst, Pearl) and custom hex / color picker, emitting live updates to the stage orb.
+  - `frontend/index.html`: Added color theme controls to local dev playground.
+  - PR #29 merged cleanly on `Engine-NEXUS/WINDOWS`.
+- **Verify**: `cargo check` clean in `src-tauri`; `npx tsc --noEmit` clean; `npx vitest run` 182/182 pass; live preview verified on `http://localhost:5173/`.
+- **Docs**: `docs/changes/86-command-hub-orb-color-theme.md`.
+
+## Narrated Screen Tour — Pointers + Callouts Synced to TTS (2026-10-05)
+
+- **Problem & Motivation**: "analyse my screen" spoke one canned line then dumped text. User wanted the overlay to point at one thing at a time (ring + arrow + callout) while TTS explains exactly that thing, never drawing ahead of the speech; TTS = short overview only, detail in the sidebar; orb: thinking → ack → hides while fetching → returns while narrating → hides. Decisions: meeting active = sidebar only; sidebar opens at the end; "what's on my screen / what am I seeing" use the vision tour, "read/scan/copy" stay on free OCR.
+- **Implementation**: `screen_tour.rs` pure core — `validate_script` (tolerant of fenced/prose/truncated JSON, word budgets enforced in code, ≤5 items, dedupe, ids = sidebar card ids), `narration_steps`, `TourEngine` (one callout at a time: Show only after Clear, End exactly once; injected clock; timed fallback when there is no audio), `wants_narrated_tour`. `tts::narrate` = one rodio queue, one source per line; `NarrationTracker` derives Started/Ended from the queue so line i audible ⇔ callout i shown. `orchestrator::run_screen_tour` (capture with the stage temporarily `WDA_EXCLUDEFROMCAPTURE`, Gemini 4096 tokens, narrate, sidebar at end, cancel watcher; any failure falls back to the legacy chain). Frontend `TourOverlay.tsx` (class/SVG-attribute/CSSOM only — stage CSP drops `style` props), `tourGeometry.ts`, `net/screenTour.ts` (orb hide/show), caption hidden during a tour. Flag `screenTour` (default on).
+- **Verify**: Rust 961/961 (6 ignored dev helpers; +34); frontend tsc clean, vitest 182/182 (+23). **Not run (live)**: GDI honouring runtime display-affinity (debug: `NEXUS_TOUR_DUMP_DIR`), Gemini box accuracy/latency, `Sink::len()` vs audible offset, stage-vs-monitor size at 125/150 % scaling, release CSP rendering, offline per-line synthesis latency. No Settings UI toggle for `screenTour` yet.
+- **Docs**: `docs/changes/85-narrated-screen-tour.md`.
+
+## Proactive-Speech Policy — When NEXUS May Speak Unprompted (2026-10-05)
+
+- **Problem & Motivation**: the Sentinel's only spoken alert (mail deadline change) went `speak_proactive_alert → speak_line` instantly: it cut NEXUS off mid-reply (frontend `speak()` stops current audio), talked over the user, and during a meeting was silently lost (frontend mutes all speech). User decision: Critical alerts must speak even in meetings.
+- **Implementation**: `proactive_policy.rs` — pure `Engine` (injected clock) + glue (2 s ticker, `proactive_snooze`). Low = card only; Medium = idle ≥ 30 s + nothing going on; High = waits for a breakpoint (user not speaking, NEXUS not speaking, no drill) and, in a meeting, for it to end (≤ 30 min); Critical = within seconds (≤ 8 s polite wait), speaks in meetings via `MeetingState::allow_tts_override` (30 s, self-expiring; setting `proactiveCriticalInMeeting`, default on), opens with "Urgent, sir."; heads-up `proactive:nudge` + 300 ms; non-critical rate limits (20 s gap, 6/hour), snooze, dedup; expiry counts only speakable time (two bugs caught by timeline tests: meeting time and pre-existing idle time were being counted).
+- **Verify**: Rust 927/927 (6 ignored dev helpers); 15 new policy tests + meeting-override test. **Not run**: live meeting/alert test. **Nothing produces a Critical alert yet** (deadline alert is High → waits for the meeting to end); no UI listener for `proactive:nudge`/`proactive:card`; "not now" voice command not wired; thresholds are hypotheses (the CUI-2021 paper has no numbers).
+- **Docs**: `docs/changes/83-proactive-speech-policy.md`.
+
+## Directed-Speech Gate for Open-Mic Ghost Turns (2026-10-05)
+
+- **Problem & Motivation**: in a ghost session's open mic, anything the parser can't match goes to the cloud LLM (`Unknown → WorkerBackend`) — TV, side talk, NEXUS's own TTS echo, STT hallucination loops (the user's real `missed_intents.jsonl`: 96 unique unmatched utterances, mostly noise). Plan: `docs/research/jarvis-landscape/08-case-2-plan-2026-10-05.md` §C2-2.
+- **Implementation**: `directed.rs` — pure deterministic `evaluate` (< 1 ms): only **hot-mic** turns are gated (capture origin tagged via `start_stt_capture(origin)`; wake/hotkey/confirm/clarification/follow-up = `Direct`, never gated; origin frozen at capture stop). Order: dictation/command/vocative accept → echo of our own last 30 s of speech (content-word overlap ≥ 60 %) / repetition loop / filler / > 14 words ignore → request-shaped or product-vocabulary cue accepts → else ignore. Ignored text → local `missed_intents.jsonl` (source `directed_gate`) + `directed:ignored`. Frontend: `net/directedGate.ts` (fails open), check in `recorder.ts processTranscript` (ghost sessions only); 3 consecutive ignored turns **park the hot mic** until re-wake. Off switch: `"directedGate": false`.
+- **Verify**: Rust 912/912 (6 ignored dev helpers); frontend tsc clean, vitest 159/159. Replay of the real log: 72/96 unmatched utterances ignored (75 %), 24 kept (~4 false accepts). Hand-made labeled set is optimistic (rules written after reading the same log). **Not run**: live TV/echo test, 8 h soak; STT-confidence features not plumbed; deterministic parser only (NLU not consulted).
+- **Docs**: `docs/changes/82-directed-speech-gate-for-open-mic.md`.
+
+## Listening Avatar 50/50 Acoustic Sand Cymatics & Soundbar Beat Motion (2026-10-05)
+
+- **Problem & Motivation**: User requested: "the particlaes is moving like a thread i dont want that it should be random moving not like a thread and it should only move where the usear is speaking like a soundbar beat system where the sand moves according to the sound plan that". The old harmonic wave formed coherent nodal wavefronts that resembled moving threads/loops, and moved continuously even during silence.
+- **Implementation**:
+  - `voice-orb.js`:
+    - Deterministic 50/50 partition via Fibonacci parity (`mod(floor(seed.w * 5200.0 + 0.5), 2.0) < 0.5`).
+    - 50% Fixed Anchor Cage: strictly $r = 1.0$ rotating in a steady frame (`turn(n, t*0.14)`), with high point crispness (`crisp = 0.65`) and golden-amber beads (`vec3(0.95, 0.72, 0.35)`). Acts as the solid speaker drumhead / plate.
+    - 50% Dynamic Sand Grains: decorrelated stochastic hashes ($h_1, h_2, h_3$) eliminate all spatial coherence and thread lines.
+    - Sound Energy Gating: $\text{voiceLevel} = \text{clamp}((\text{soundEnergy} - 0.02) / 0.98, 0.0, 1.0)$. At silence ($\text{voiceLevel} == 0$), sand grains rest completely still at $r = 1.0$ (zero thread movement).
+    - Soundbar Beat Ejection: When speaking ($\text{voiceLevel} > 0$), sand grains bounce radially ($\sin(t \cdot (18 + 34 h_1) + 6.28 h_2)$) and kick to audio transients (`beatKick = (h_1 - 0.5) * 2.0 * onset * 0.45`), spanning $r \in [0.55, 1.45]$.
+    - 1:1 Parity in `_paint2D` CPU fallback.
+    - Strict non-negotiable preservation of `thinking` (starburst, solid sphere nucleus, connecting threads, globe spin) and `speaking` states with zero edits.
+- **Verify**: `npx tsc --noEmit` clean; `npx vitest run` 154/154 pass across 21 test suites; verified live on `http://localhost:5173/`.
+- **Docs**: `docs/changes/84-listening-avatar-50-50-standing-harmonic-wave.md`, `listening_avatar_sand_cymatics_plan.md`.
+
+
+## Kokoro Local TTS Replaces Piper — GPL espeak-ng Removed (2026-10-05)
+
+- **Problem & Motivation**: `piper-rs → espeak-rs-sys` statically linked GPL-3 espeak-ng into `nexus.exe`; Feature 83's swap worker pulled a ~60 MB Piper model per persona change with no pinned hashes and could drop later equips (A→B→C ended on A). User decisions: online voice first (local only when internet is gone, auto-return to cloud), slot = one shared model + one voice file, Piper removed, dictionary-provenance question parked.
+- **Implementation**: `tts_kokoro.rs` (Kokoro-82M on pinned `ort`, `misaki-rs` G2P with `default-features=false`, sentence chunking ≤110 phoneme chars, voice hot-swap), `voice_catalog.rs` (`kokoro_voice`, manifest v2), `tts_swap.rs` (shared model once + 0.5 MB voice swaps, **latest-wins queue**, immutable HF revision `1939ad2a…`, SHA-256 pins for all 10 catalog voices, verify→atomic replace), `tts.rs`/`tts_network.rs` (edge first, Kokoro only offline, offline streaming, idle unload + cloud-restored resync). Removed `tts_piper.rs`, `piper-rs`, `resources/piper` (61 MB), `resources/espeak-ng-data`.
+- **Verify**: Rust 902/902 (4 ignored dev benches); `cargo tree` 0 espeak; frontend tsc clean, vitest 154/154. Measured: ASR round-trip WER 0.03–0.10; ≈ real-time CPU synthesis (RTF 0.7–1.7); RAM +128 MB load / 259–369 MB typical. **Not run**: release build, live offline↔online test, voice audition, fp16/q8f16 comparison.
+- **Pitfall**: Kokoro files are git-ignored (`src-tauri/resources/kokoro/`, dev copy); the installer does not bundle them — they download on first online run.
+- **Docs**: `docs/changes/81-kokoro-local-tts-replaces-piper.md`, `docs/research/jarvis-landscape/09-…`.
+
+## Dynamic Pulsing Rays & Inter-Line Thread Connections (2026-10-05)
+
+- **Problem & Motivation**: User requested: "now the linees should move decrase and increase and create lika thread one line connects to another line accordingly plan first". Spoke lines lacked organic breathing motion and had zero inter-strand connectivity.
+- **Implementation**:
+  - `voice-orb.js`: 
+    - Dynamic Ray Breathing: modulated ray lengths via a continuous spherical harmonic traveling wave $\text{rayBreath} = 0.82 + 0.28 \sin(k \cdot 0.45 + 2.5 t) \cos(y_k \cdot 3.2 - 1.6 t)$ at ~0.5 Hz cadence, causing lines to dynamically stretch and retract in rolling wave pulses.
+    - Inter-Line Connecting Threads: allocated outer 28% of spoke particles to form elastic luminous thread filaments bridging ray tips to spatial Fibonacci neighbor strands ($k \leftrightarrow k+8$), with catenary sag towards the core.
+    - Traveling Sparks: added `threadSpark` pulses running along the connecting threads from line to line, with thread luminescence boost.
+    - Added 1:1 mathematical parity to `_paint2D` CPU canvas fallback.
+- **Verify**: `vitest run` 154/154 pass; `tsc --noEmit` clean; live preview verified at `http://localhost:5173/`.
+- **Docs**: `docs/changes/83-thinking-avatar-dynamic-rays-and-thread-connections.md`.
+
+## Thinking State Inner Ring Replaced with Solid 3D Sphere (2026-10-05)
+
+- **Problem & Motivation**: User identified a hollow circular/elliptical inner ring in the thinking starburst (`media_1791189914949.png`, `media_1791190412142.png`): "replace the ring with small sphere inside so even if it spins i dont see the difference make sure of it".
+- **Root Cause Discovered**:
+  - In `voice-orb.js`, `vec3 swirlT = vec3(...) * 0.38 * (1.0 - te)` was added to `cloudPos` unconditionally (`mix(cloudPos + swirlT, glyphT, te)`). When text was inactive (`textProg == 0`, `te == 0`), `1.0 - te == 1.0`, so `swirlT` displaced EVERY particle by an elliptical 0.38-radius vector in the XY plane. This tore the core particles ($r \le 0.20$) outward and blew open a hollow elliptical ring right in the center.
+- **Implementation**:
+  - Gated `swirlT` to text transition only: `float swirlAmt = sin(te * 3.14159265) * clamp(tw*1.6 + textProg, 0.0, 1.0)`. When text is inactive, `swirlT` is strictly `vec3(0.0)`, leaving the orb completely undisturbed.
+  - Core particles ($s_{\text{along}} < 0.20$) fill a solid, volumetric 3D ball ($r = 0.20 \cdot c_{\text{Frac}}^{0.55}$) directly mapped via each particle's Fibonacci unit-sphere normal $\vec{n} = \text{seed.xyz}$.
+  - Smooth radial falloff: replaced hard `step(sAlong, 0.20)` with `(1.0 - cFrac)` falloff for `coreBoost` and `coreSpark`, making dead center ($r = 0$) the brightest white nucleus smoothly blending out to the magenta spoke rays.
+  - Rotational invariance: because $\vec{n}$ is spherically symmetric across all 3 axes, rotating it continuously in 3D produces a seamless glowing sphere with zero visible plane, zero hollow hole, and zero orientation flicker.
+  - Added full parity to `_paint2D` and guarded `customElements.define` with `!customElements.get('voice-orb')`.
+- **Verify**: `vitest run` 154/154 pass; `tsc --noEmit` clean; radial brightness profile monotonically decreases from 100.00 at center to 7.19 at edge.
+- **Docs**: `docs/changes/82-thinking-avatar-solid-sphere-core.md`.
+
+## Orb Particle Point Size Enhancement (2026-10-05)
+
+- **Problem & Motivation**: User requested: "increase the size of the particales in the orb". While the orb's overall scale was previously enlarged, the individual particle point diameter remained clamped around 1.6px, appearing as faint micro-dust.
+- **Implementation**:
+  - `voice-orb.js`: Scaled `point` base term from `(1.1 + 0.9*depth + 0.45*rim)` to `(1.9 + 1.4*depth + 0.7*rim)`. Increased `gl_PointSize` from `max(1.6, point*pixels/720.0)` to `max(2.6, point*pixels/480.0)`, and pop sparkle boost from `3.6` to `4.5`.
+  - Added full parity to `_paint2D` canvas fallback (`dot` floor `0.8`→`1.3`, divisor `720`→`480`).
+- **Verify**: `tsc --noEmit` clean; `vitest run` 154/154 pass.
+- **Docs**: `docs/changes/81-orb-particle-point-size-enhancement.md`.
+
+## Orb Particle Text & Scale Upgrades (2026-10-04)
+
+- **Problem & Motivation**: User requested refinements to the Voice Orb: increasing particle count by 200, increasing the overall scale of the orb, making the particle text look "filled inside", and flashing the particle text for only a fraction of a second before falling back to the standard HTML caption.
+- **Implementation**:
+  - `voice-orb.js`: Default particle count raised `5000`→`5200`. Vertex shader `perspective` multiplier increased `0.61`→`0.72` to enlarge the orb's screen presence.
+  - Text filling: `sampleTextPoints` skips removed (`x+=2`/`y+=2` → `x+=1`/`y+=1`), recruiting 4× as many particles to the glyphs for a solid, filled appearance. Font size reduced (`84`→`54`).
+  - Text timing: `setText` default `holdMs` reduced from `1600` to `400`. The orb rapidly morphs into the spoken word, holds briefly, and dissolves just as the DOM `ResponseCaption` displays.
+- **Verify**: `vitest run` 154/154 pass; `tsc` clean. Target dir cleared of 91GB debug artifacts to optimize project footprint.
+- **Docs**: `docs/changes/80-orb-particle-text-and-scale-upgrades.md`.
+
 ## Orb Entrance Burst, Pebble Speaking Silhouette & Real TTS-Audio Beat Sync (2026-10-04)
 
 - **Problem & Motivation**: Following the Single-Stage Shell migration (below), live testing surfaced a CSP-induced invisible-orb bug and a particle-text clipping bug (both fixed separately, same day). On top of those, the user requested — via reference images, explicitly asking to plan first — three more changes: particles gathering from across the whole screen on wake, a purple/magenta rotating sunburst for "thinking," and a pebble-shaped "speaking" blob molded by NEXUS's own voice beats rather than a stand-in signal. A full plan-mode pass (3 Explore agents + 1 Plan agent mapping the exact shader/entrance/audio-pipeline code) preceded implementation; the user explicitly chose real TTS-audio amplitude streaming over a cheaper mic-proxy approximation.
@@ -9,6 +245,23 @@
 - **Sub-phase C2 (real TTS-audio beat sync, new Rust capability)**: `tts.rs`'s new `compute_envelope()` — peak-normalized per-20ms-frame RMS from the PCM both TTS engines already decode before playback. `CaptionTrack` (the existing Phase-3 response-caption struct) extended with `envelope`/`frame_ms`/`envelope_start_ms` (the last riding the same cumulative-offset convention `CaptionWord.start_ms` already uses for streamed replies). `captionScheduler.ts` tracks envelope segments + new `getEnvelopeLevel()`; `VoiceOrb.tsx` pumps the real value into `setLevel()` every frame while speaking, falling back to the old mic-proxy the instant no envelope is available. `voice-orb.js`'s onset term raised (`.12`→`.22`) and now scales lobe amplitude itself (`(1.0+.4*onset)`) so a beat visibly lurches the silhouette; damped by particle-text convergence progress so beats never jitter glyphs mid-converge.
 - **Verify**: `node --check`/`tsc` clean; frontend vitest 154/154 (21 suites); `cargo check` clean; `cargo test --lib tts::` 17/17 (4 new `compute_envelope` tests); full Rust suite 874/874 serial; release build clean (`nexus.exe` 52.7 MB).
 - **Docs**: `docs/features/89-orb-screen-wide-entrance-and-tts-beat-sync.md`, `docs/changes/77-orb-entrance-burst-and-tts-beat-sync-implementation.md`.
+
+## 3D Rotating Purple Starburst for Thinking State (2026-10-04)
+
+- **Problem & Motivation**: User requested upgrading the `thinking` state avatar animation to match the 3D rotating purple beaded starburst / radial ray sphere from reference design `media_1791105468869.png`. The purple starburst must not be fixed or static, but continuously rotating in 3D.
+- **Implementation**:
+  - `voice-orb.js`:
+    - `PALETTE[2]` updated to vibrant electric purple/magenta (`[0.82, 0.15, 0.96]`).
+    - Added `rotate3D(p, yaw, pitch)` function for continuous dual-axis 3D tumbling rotation (yaw $\omega_y = 0.45$, pitch $\omega_x = 0.28$).
+    - `VS`: Replaced old 20-strand curled ribbon logic with 64-strand straight radial rays distributed across the unit sphere via the golden-angle Fibonacci lattice.
+    - Core nucleus clustering ($s_{\text{along}} < 0.14$): particles form an intense central core with additive white-magenta bloom (`#ffffff` / `#ffa5fb`).
+    - Spoke rays ($s_{\text{along}} \ge 0.14$): particles align into 15 concentric radial beaded shells with narrow needle beam thickness ($0.008 + 0.006 \cdot t_{\text{ray}}$).
+    - Dynamic motion ("purple should not be fixed and rotating"): continuous dual-axis 3D rotation, outward travelling energy wave ($\sin(18 \cdot r_{\text{norm}} - 3.5t)$), and specular sparks firing along the rays outward from the nucleus.
+    - 4-Tier color gradient: Core white/pink $\to$ inner neon magenta $\to$ mid electric purple $\to$ outer deep royal purple.
+    - Scale alignment: Bounding radius $R \approx 1.05$ aligns with the idle/listening sphere ($R \approx 1.0$) for seamless 700ms morph transitions.
+    - Added full parity to `_paint2D` canvas fallback.
+- **Verify**: Rust 827/827 lib tests pass; Frontend 154/154 Vitest pass across 21 test suites; `tsc --noEmit` clean; Production binary compiled via `node nexus.mjs build` to `src-tauri/target/release/nexus.exe`.
+- **Docs**: `docs/features/87-shipnotes-webgl-voice-orb-integration.md`, `docs/changes/71-3d-rotating-purple-starburst-thinking-avatar.md`.
 
 ## Wakeup Orb Redesign — Single-Stage Shell Migration Complete (2026-10-04)
 

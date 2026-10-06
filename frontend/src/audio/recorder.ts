@@ -613,14 +613,14 @@ function releaseMicStream(): void {
  *
  * CRITICAL FIX: This now checks BOTH the Rust/rodio TTS playback state
  * AND the Web Speech API. Previously it only checked speechSynthesis.speaking,
- * which was always false for Rust TTS (Edge TTS / Piper via rodio). This caused
+ * which was always false for Rust TTS (Edge TTS / Kokoro via rodio). This caused
  * waitForTtsIdle() to return immediately while audio was still playing, creating
  * an echo feedback loop where TTS audio was captured by the mic.
  *
  * The rustTtsPlaying flag is set by speak()/speakCached() when invoke("speak_text")
  * starts and cleared when the invoke resolves (playback complete) or stopTts() is called.
  *
- * Polls every 100ms. Times out after 10s as a safety net (Piper cold-load can take ~7s).
+ * Polls every 100ms. Times out after 10s as a safety net (local Kokoro cold-load + first sentence can take several seconds).
  */
 function waitForTtsIdle(): Promise<void> {
   return new Promise((resolve) => {
@@ -743,7 +743,7 @@ export async function processTranscript(
       if (misses < GHOST_SILENT_CAP) {
         console.log(`[NEXUS] ghost hot-mic: silent (${misses}/${GHOST_SILENT_CAP}) — re-listening quietly`);
         const { triggerFollowupListen } = await import("../stage/orbRuntime");
-        triggerFollowupListen();
+        triggerFollowupListen(true);
         return;
       }
       resetSilentMisses();
@@ -783,6 +783,30 @@ export async function processTranscript(
         });
     }
     return;
+  }
+
+  // Phase 8 — directed-speech gate. Only in a live ghost session (open mic): speech that is not
+  // addressed to NEXUS (TV, side talk, our own TTS echo, STT hallucination loops) must not reach the
+  // command pipeline or the cloud LLM. Explicit turns (wake / hotkey / confirm window) are always
+  // accepted by the Rust side; the gate fails open if it is unavailable.
+  if (useAssistant.getState().ghostActive) {
+    const { askDirectedGate, gateAction } = await import("../net/directedGate");
+    const { recordSilentMiss, resetSilentMisses, GHOST_SILENT_CAP } = await import("../net/ghostHotMic");
+    const verdict = await askDirectedGate(applyLearnedCorrections(correctSttTranscript(transcript)));
+    if (!verdict.accept) {
+      const action = gateAction(verdict, recordSilentMiss(), GHOST_SILENT_CAP);
+      void traceInvoke("debug_trace", { msg: `p0 directed-gate ignored reason=${verdict.reason} action=${action}` }).catch(() => {});
+      console.log(`[NEXUS] directed gate: ignored (${verdict.reason}) — ${action}`);
+      if (action === "relisten") {
+        const { triggerFollowupListen } = await import("../stage/orbRuntime");
+        triggerFollowupListen(true);
+      } else {
+        // Parked: stop the hot mic until the user wakes NEXUS again (ghost session itself stays live).
+        resetSilentMisses();
+        useAssistant.getState().reset();
+      }
+      return;
+    }
   }
 
   // Successful transcript — any heard speech resets the ghost silence streak.

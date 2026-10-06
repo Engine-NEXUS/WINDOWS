@@ -9,6 +9,7 @@
 //!
 //! This saves ~340 MB of RAM at idle (the vast majority of the time).
 
+use std::io::BufRead;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -244,8 +245,33 @@ pub fn ensure_stt_running() {
         .spawn();
 
     match child {
-        Ok(c) => {
+        Ok(mut c) => {
             let pid = c.id();
+            // Drain the child's stderr on a dedicated thread: the pipe is
+            // otherwise never read (Moonshine/uvicorn tracebacks lost) and
+            // a filled 64KB pipe can block the child mid-transcription with
+            // zero log evidence. Lines surface as [STT-PY] in the unified
+            // console; traceback/error lines escalate to warn.
+            if let Some(stderr) = c.stderr.take() {
+                std::thread::Builder::new()
+                    .name("stt-stderr-drain".into())
+                    .spawn(move || {
+                        for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
+                            let msg = format!("[STT-PY] {line}");
+                            let low = line.to_lowercase();
+                            if low.contains("traceback")
+                                || low.contains("error")
+                                || low.contains("exception")
+                                || low.contains("warn")
+                            {
+                                tracing::warn!("{msg}");
+                            } else {
+                                tracing::info!("{msg}");
+                            }
+                        }
+                    })
+                    .ok();
+            }
             *STT_CHILD.lock().unwrap() = Some(c);
             STT_RUNNING.store(true, Ordering::Relaxed);
             STT_STARTING.store(false, Ordering::SeqCst);

@@ -240,6 +240,11 @@ pub fn init() {
     init_window_cache();
 }
 
+/// Returns the number of cached app entries.
+pub fn cached_app_count() -> usize {
+    REGISTRY.cache.read().len()
+}
+
 /// Look up an app by name. Returns the best match or None.
 /// This is the hot path — must be <1ms.
 ///
