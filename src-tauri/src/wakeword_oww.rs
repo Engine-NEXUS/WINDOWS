@@ -1599,12 +1599,10 @@ mod engine {
                     }
 
                     let underway = super::STT_SPEECH_DETECTED.load(Ordering::Relaxed);
-                    let thresh = if underway {
-                        super::STT_SILENCE_RMS_THRESHOLD
-                    } else {
-                        super::STT_SPEECH_RMS_THRESHOLD
-                    };
-                    if rms > thresh {
+                    // Neural VAD when loaded (vadSilero), else the RMS hysteresis — see chunk_voice_flags.
+                    let (cont_voice, start_voice) =
+                        super::chunk_voice_flags(rms, super::silero_chunk_prob(&chunk));
+                    if if underway { cont_voice } else { start_voice } {
                         // Speech resumed after a real pause (2+ silent chunks)?
                         // Count it — hesitant speakers get a patient endpoint.
                         if underway
@@ -1616,7 +1614,7 @@ mod engine {
                         super::STT_SILENCE_CHUNKS.store(0, Ordering::Relaxed);
                         // TRUE voice energy (above the speech threshold, not the
                         // hysteresis band): arms the silence endpoint (F1).
-                        if rms > super::STT_SPEECH_RMS_THRESHOLD {
+                        if start_voice {
                             super::STT_VOICED_CHUNKS.fetch_add(1, Ordering::Relaxed);
                         }
                     } else if underway {
@@ -1642,13 +1640,18 @@ mod engine {
                     // 2. Max capture: STT_MAX_CHUNKS chunks (~10s)
                     // 3. No speech timeout: STT_NO_SPEECH_CHUNK_LIMIT chunks (~8s)
                     let voiced = super::STT_VOICED_CHUNKS.load(Ordering::Relaxed);
-                    let should_stop = super::should_stop_capture(
-                        speech_detected,
-                        voiced,
-                        silence,
-                        silence_limit,
-                        total,
-                    );
+                    // Smart Turn (off unless `smartTurn`): may end the turn earlier, or hold it open
+                    // longer when the model says the speaker is not finished. Off => unchanged.
+                    let (smart_end, silence_limit) =
+                        super::smart_turn_poll(speech_detected, voiced, silence, silence_limit);
+                    let should_stop = smart_end
+                        || super::should_stop_capture(
+                            speech_detected,
+                            voiced,
+                            silence,
+                            silence_limit,
+                            total,
+                        );
 
                     if should_stop {
                         super::STT_CAPTURING.store(false, Ordering::Relaxed);
@@ -1673,6 +1676,7 @@ mod engine {
                         // the receiver can drop it if an abort lands in flight.
                         // Snapshot the turn packet here: counters reset below
                         // and a new capture may start before transcription ends.
+                        crate::directed::snapshot_turn_origin(); // Phase 8: who opened THIS capture
                         let session = super::CAPTURE_SESSION_ID.load(std::sync::atomic::Ordering::Relaxed);
                         let (rms_max, rms_mean) = super::buffer_rms_stats(&buffer);
                         let stats = super::TurnStats {
@@ -1681,13 +1685,17 @@ mod engine {
                             rms_mean,
                             voiced_chunks: voiced,
                             total_chunks: total,
-                            endpoint: super::endpoint_reason(
-                                speech_detected,
-                                voiced,
-                                silence,
-                                silence_limit,
-                                total,
-                            ),
+                            endpoint: if smart_end {
+                                "smart_turn"
+                            } else {
+                                super::endpoint_reason(
+                                    speech_detected,
+                                    voiced,
+                                    silence,
+                                    silence_limit,
+                                    total,
+                                )
+                            },
                             stt_path: "pending",
                             filter: "pending",
                             owner: "pending",
@@ -2551,6 +2559,185 @@ static STT_PAUSE_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::Atomic
 /// that" loop). Hysteresis-band chunks (0.006-0.01) never count.
 static STT_VOICED_CHUNKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// Silero neural VAD for the capture loop. `None` = not loaded (flag `vadSilero` off, model
+/// missing, or load error) → the RMS gate below stays in charge, byte-for-byte as before.
+static SILERO_VAD: once_cell::sync::Lazy<parking_lot::Mutex<Option<crate::vad::SileroVad>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
+
+/// Even with Silero active, chunks below this RMS are never voice: the model is trained on real
+/// audio and must not be asked about digital silence (same reason as the wake engine's 0.002 gate).
+const SILERO_RMS_FLOOR: f32 = 0.002;
+
+/// Locate the bundled Silero model (production / alt layout / dev tree), mirroring `resolve_oww_dir`.
+fn resolve_vad_model(res: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut cands = vec![
+        res.join("resources").join("vad").join("silero_vad_v4.onnx"),
+        res.join("vad").join("silero_vad_v4.onnx"),
+    ];
+    if let Some(m) = option_env!("CARGO_MANIFEST_DIR") {
+        cands.push(std::path::PathBuf::from(m).join("resources").join("vad").join("silero_vad_v4.onnx"));
+    }
+    cands.into_iter().find(|p| p.exists())
+}
+
+/// Load Silero if `"vadSilero": true` (default off). Called once at engine start; changing the
+/// flag needs an app restart. Never fails the engine — on any problem the RMS gate keeps working.
+fn configure_silero_vad<R: Runtime>(app: &AppHandle<R>) {
+    if !crate::commands::read_vad_silero(app) {
+        tracing::info!("vad: Silero disabled (settings.vadSilero not true) — RMS gate active");
+        return;
+    }
+    let Ok(res) = app.path().resource_dir() else { return };
+    match resolve_vad_model(&res).map(|p| crate::vad::SileroVad::load(&p)) {
+        Some(Ok(v)) => {
+            *SILERO_VAD.lock() = Some(v);
+            tracing::info!("vad: Silero VAD v4 loaded — neural voice gate active");
+        }
+        Some(Err(e)) => tracing::warn!("vad: Silero load failed ({e}) — RMS gate stays active"),
+        None => tracing::warn!("vad: silero_vad_v4.onnx not found — RMS gate stays active"),
+    }
+}
+
+/// Score one 80 ms chunk with Silero. `None` = VAD not active/available this chunk (never blocks:
+/// `try_lock`; an inference error unloads the VAD so the RMS gate takes over for good).
+fn silero_chunk_prob(chunk: &[f32]) -> Option<f32> {
+    let mut guard = SILERO_VAD.try_lock()?;
+    let vad = guard.as_mut()?;
+    match vad.push(chunk) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            tracing::warn!("vad: Silero inference failed ({e}) — falling back to RMS gate");
+            *guard = None;
+            None
+        }
+    }
+}
+
+// ── Smart Turn (flag `smartTurn`, default off) ─────────────────────────────────
+// The model never runs in the audio callback: the callback ships a snapshot of the last <=8 s to a
+// worker thread and reads the latest verdict. A verdict is only valid for the silence run it was
+// computed for (`SMART_TURN_RUN` is bumped on every voiced chunk). Any failure => legacy rule.
+static SMART_TURN_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SMART_TURN_POLICY: once_cell::sync::Lazy<parking_lot::Mutex<crate::turn_detect::TurnPolicy>> =
+    once_cell::sync::Lazy::new(|| {
+        parking_lot::Mutex::new(crate::turn_detect::policy_for(crate::turn_detect::Eagerness::Medium))
+    });
+static SMART_TURN_TX: once_cell::sync::OnceCell<std::sync::mpsc::SyncSender<(u64, Vec<f32>)>> =
+    once_cell::sync::OnceCell::new();
+static SMART_TURN_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SMART_TURN_VERDICT: once_cell::sync::Lazy<parking_lot::Mutex<(u64, f32)>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new((u64::MAX, 0.0)));
+static SMART_TURN_LAST_REQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static SMART_TURN_INFLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn resolve_smart_turn_model(res: &std::path::Path) -> Option<std::path::PathBuf> {
+    let f = "smart-turn-v3.2-cpu.onnx";
+    let mut cands = vec![
+        res.join("resources").join("smart_turn").join(f),
+        res.join("smart_turn").join(f),
+    ];
+    if let Some(m) = option_env!("CARGO_MANIFEST_DIR") {
+        cands.push(std::path::PathBuf::from(m).join("resources").join("smart_turn").join(f));
+    }
+    cands.into_iter().find(|p| p.exists())
+}
+
+/// Load Smart Turn if `"smartTurn": true` and start its worker thread. Needs an app restart to change.
+fn configure_smart_turn<R: Runtime>(app: &AppHandle<R>) {
+    if !crate::commands::read_smart_turn(app) {
+        tracing::info!("smart-turn: disabled (settings.smartTurn not true) — silence rule active");
+        return;
+    }
+    let Ok(res) = app.path().resource_dir() else { return };
+    let Some(path) = resolve_smart_turn_model(&res) else {
+        tracing::warn!("smart-turn: model not found — silence rule stays active");
+        return;
+    };
+    let det = match crate::turn_detect::TurnDetector::load(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("smart-turn: {e} — silence rule stays active");
+            return;
+        }
+    };
+    let eagerness = crate::turn_detect::Eagerness::parse(&crate::commands::read_turn_eagerness(app));
+    *SMART_TURN_POLICY.lock() = crate::turn_detect::policy_for(eagerness);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(u64, Vec<f32>)>(1);
+    let spawned = std::thread::Builder::new().name("smart-turn".into()).spawn(move || {
+        while let Ok((run, samples)) = rx.recv() {
+            let t0 = std::time::Instant::now();
+            match det.predict(&samples) {
+                Ok(p) => {
+                    *SMART_TURN_VERDICT.lock() = (run, p);
+                    tracing::debug!("smart-turn: p(complete)={:.3} in {} ms", p, t0.elapsed().as_millis());
+                }
+                Err(e) => tracing::warn!("smart-turn: predict failed ({e})"),
+            }
+            SMART_TURN_INFLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    if spawned.is_ok() && SMART_TURN_TX.set(tx).is_ok() {
+        SMART_TURN_ON.store(true, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!("smart-turn: loaded — end-of-turn model active (eagerness {:?})", eagerness);
+    }
+}
+
+/// Per-chunk Smart Turn step for the capture loop. Returns `(end_now, silence_limit)`.
+/// Never blocks: snapshot + `try_send`; verdict read via `try_lock`. Off/unavailable => `(false, base)`.
+fn smart_turn_poll(speech_detected: bool, voiced: u32, silence: u32, base_limit: u32) -> (bool, u32) {
+    use std::sync::atomic::Ordering::{Relaxed, SeqCst};
+    if !SMART_TURN_ON.load(Relaxed) || !speech_detected || voiced < STT_MIN_VOICED_CHUNKS {
+        return (false, base_limit);
+    }
+    if silence == 0 {
+        // speech (re)started: older verdicts no longer describe the current silence run
+        SMART_TURN_RUN.fetch_add(1, Relaxed);
+        SMART_TURN_LAST_REQ.store(0, Relaxed);
+        return (false, base_limit);
+    }
+    let pol = *SMART_TURN_POLICY.lock();
+    let run = SMART_TURN_RUN.load(Relaxed);
+    let last = SMART_TURN_LAST_REQ.load(Relaxed);
+    if silence >= pol.min_silence_chunks
+        && (last == 0 || silence >= last + 3)
+        && !SMART_TURN_INFLIGHT.load(SeqCst)
+    {
+        if let Some(tx) = SMART_TURN_TX.get() {
+            let snap: Vec<f32> = {
+                let b = STT_CAPTURE_BUFFER.lock();
+                let n = b.len().min(crate::turn_detect::WINDOW_SAMPLES);
+                b[b.len() - n..].to_vec()
+            };
+            if tx.try_send((run, snap)).is_ok() {
+                SMART_TURN_INFLIGHT.store(true, SeqCst);
+                SMART_TURN_LAST_REQ.store(silence, Relaxed);
+            }
+        }
+    }
+    let prob = SMART_TURN_VERDICT
+        .try_lock()
+        .and_then(|g| if g.0 == run { Some(g.1) } else { None });
+    (
+        crate::turn_detect::smart_end(silence, &pol, prob),
+        crate::turn_detect::extended_limit(base_limit, &pol, prob),
+    )
+}
+
+/// Classify one capture chunk → `(continues_turn, starts_turn)`.
+/// * Energy mode (`prob == None`) — exactly the pre-existing hysteresis: continue above
+///   `STT_SILENCE_RMS_THRESHOLD`, start above `STT_SPEECH_RMS_THRESHOLD`.
+/// * Neural mode — continue at `CONTINUE_PROB`, start at `START_PROB`, both gated by
+///   `SILERO_RMS_FLOOR` (no model verdicts on digital silence).
+fn chunk_voice_flags(rms: f32, prob: Option<f32>) -> (bool, bool) {
+    match prob {
+        None => (rms > STT_SILENCE_RMS_THRESHOLD, rms > STT_SPEECH_RMS_THRESHOLD),
+        Some(p) => {
+            let live = rms > SILERO_RMS_FLOOR;
+            (live && p >= crate::vad::CONTINUE_PROB, live && p >= crate::vad::START_PROB)
+        }
+    }
+}
+
 /// Global AppHandle for emitting "stt:transcript" events from the capture thread.
 /// We use a channel instead of storing the AppHandle directly (which has a generic
 /// type parameter R that can't be stored in a static).
@@ -2586,15 +2773,15 @@ const STT_SPEECH_RMS_THRESHOLD: f32 = 0.01;
 const STT_SILENCE_RMS_THRESHOLD: f32 = 0.006;
 
 /// Fast endpoint: silent chunks after speech before stopping capture.
-/// 5 chunks = 400ms (was 30 = 2.4s of dead air per turn). The silence
-/// counter resets on every speech chunk, so continued speech extends the
-/// turn automatically — this only cuts the tail.
-const STT_SILENCE_CHUNK_LIMIT: u32 = 5;
+/// 10 chunks = 800ms (was 5 = 400ms, which prematurely cut off natural speech pauses).
+/// The silence counter resets on every speech chunk, so continued speech extends the
+/// turn automatically — this cuts cleanly after natural phrase completion.
+const STT_SILENCE_CHUNK_LIMIT: u32 = 10;
 
 /// Patient endpoint for hesitant speakers: if the capture already survived
-/// 2+ mid-turn pauses, the speaker pauses a lot — allow ~1s (12 chunks)
-/// before committing, instead of cutting them off mid-thought.
-const STT_SILENCE_CHUNK_LIMIT_PATIENT: u32 = 12;
+/// 2+ mid-turn pauses, allow ~1.2s (15 chunks) before committing, instead of
+/// cutting them off mid-thought.
+const STT_SILENCE_CHUNK_LIMIT_PATIENT: u32 = 15;
 
 
 /// Maximum capture duration in chunks. 125 chunks = 10s.
@@ -2739,11 +2926,33 @@ pub fn stt_capturing() -> bool {
     false
 }
 
+/// Mic open AND voice detected in this capture (mid-sentence). The proactive-speech policy uses this
+/// to avoid talking over the user — a ghost hot-mic is "capturing" almost always, but only
+/// "speaking" while someone actually talks.
+#[cfg(not(feature = "mock-wake"))]
+pub fn stt_user_speaking() -> bool {
+    STT_CAPTURING.load(std::sync::atomic::Ordering::Relaxed)
+        && STT_SPEECH_DETECTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+#[cfg(feature = "mock-wake")]
+pub fn stt_user_speaking() -> bool {
+    false
+}
+
 /// Called on wake word detection or hotkey press.
 /// Does NOT pause the cpal stream — the stream keeps running and
 /// the audio callback buffers 16kHz samples for transcription.
 #[cfg(not(feature = "mock-wake"))]
 pub fn start_stt_capture() {
+    start_stt_capture_with_origin(crate::directed::Origin::Direct);
+}
+
+/// Start a capture and record WHO opened the mic (`HotMic` = the ghost hot-mic loop re-opened it by
+/// itself; everything else is an explicit user turn). Phase 8 directed-speech gate reads this.
+#[cfg(not(feature = "mock-wake"))]
+pub fn start_stt_capture_with_origin(origin: crate::directed::Origin) {
+    crate::directed::set_capture_origin(origin);
+    crate::proactive_policy::note_user_activity(); // idle signal for proactive speech (Phase 9)
     {
         let mut buf = STT_CAPTURE_BUFFER.lock();
         buf.clear();
@@ -2765,6 +2974,11 @@ pub fn start_stt_capture() {
     STT_TOTAL_CHUNKS.store(0, std::sync::atomic::Ordering::Relaxed);
     STT_VOICED_CHUNKS.store(0, std::sync::atomic::Ordering::Relaxed);
     STT_PAUSE_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+    if let Some(v) = SILERO_VAD.lock().as_mut() {
+        v.reset(); // new turn must not inherit the previous turn's LSTM state
+    }
+    SMART_TURN_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    SMART_TURN_LAST_REQ.store(0, std::sync::atomic::Ordering::Relaxed);
     // A fresh capture is turn progress: reset the ghost watchdog budget
     // (a live hot-mic loop never lets the watchdog spend a poke).
     crate::ghost::note_ghost_activity();
@@ -2911,6 +3125,8 @@ pub fn reset_grace_period() {
 #[cfg(feature = "mock-wake")]
 pub fn start_stt_capture() {}
 #[cfg(feature = "mock-wake")]
+pub fn start_stt_capture_with_origin(_origin: crate::directed::Origin) {}
+#[cfg(feature = "mock-wake")]
 pub fn abort_stt_capture() -> SttAbortResult {
     SttAbortResult {
         had_speech: false,
@@ -2973,6 +3189,9 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         "wake-engine: ONNX models loaded in {:.1}s — KWS ready",
         t1.elapsed().as_secs_f64()
     );
+
+    configure_silero_vad(&app);
+    configure_smart_turn(&app);
 
     // Create command channel for Tier 3 command classifiers
     let (cmd_tx, cmd_rx) =
@@ -3337,14 +3556,14 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     );
                     stats.endpoint = "aborted";
                     stats.filter = "stale_session";
-                    let _ = app_for_stt.emit("stt:turn_stats", &stats);
+                    crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
                     continue;
                 }
                 if buffer.is_empty() {
                     tracing::warn!("stt-capture: empty buffer received");
-                    let _ = app_for_stt.emit("stt:transcript", "");
+                    crate::commands::emit_logged(&app_for_stt, "stt:transcript", "");
                     stats.endpoint = "empty_buffer";
-                    let _ = app_for_stt.emit("stt:turn_stats", &stats);
+                    crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
                     continue;
                 }
 
@@ -3359,10 +3578,10 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                         buffer.len(),
                         STT_MIN_VOICED_CHUNKS
                     );
-                    let _ = app_for_stt.emit("stt:transcript", "");
+                    crate::commands::emit_logged(&app_for_stt, "stt:transcript", "");
                     stats.filter = "phantom";
                     stats.stt_path = "skipped";
-                    let _ = app_for_stt.emit("stt:turn_stats", &stats);
+                    crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
                     continue;
                 }
 
@@ -3378,7 +3597,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                 // (created in process_transcript); the frontend applies
                 // bare state events directly, and the transcript flow
                 // re-syncs everything on arrival ( ack → loading → result).
-                let _ = app_for_stt.emit(
+                crate::commands::emit_logged(&app_for_stt, 
                     "orchestrator:event",
                     &crate::orchestrator::OrchestratorEvent::State {
                         state: crate::orchestrator::OrchestratorState::Thinking,
@@ -3405,7 +3624,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                         "stt-capture: non-owner audio (score {:.3}) — ambient drop, no transcription",
                         owner_score
                     );
-                    let _ = app_for_stt.emit(
+                    crate::commands::emit_logged(&app_for_stt, 
                         "stt:transcript",
                         &SttTranscript {
                             session,
@@ -3418,7 +3637,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     );
                     stats.stt_path = "owner_hold";
                     stats.filter = "non_owner";
-                    let _ = app_for_stt.emit("stt:turn_stats", &stats);
+                    crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
                     continue;
                 }
 
@@ -3441,9 +3660,9 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     Ok(rt) => rt,
                     Err(e) => {
                         tracing::error!("stt-capture: failed to create tokio runtime: {}", e);
-                        let _ = app_for_stt.emit("stt:transcript", "");
+                        crate::commands::emit_logged(&app_for_stt, "stt:transcript", "");
                         stats.stt_path = "runtime_fail";
-                        let _ = app_for_stt.emit("stt:turn_stats", &stats);
+                        crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
                         continue;
                     }
                 };
@@ -3471,7 +3690,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 
                     let text = transcript.unwrap_or_default();
                     tracing::info!("stt-capture: transcript = '{}'", text);
-                    let _ = app_for_stt.emit(
+                    crate::commands::emit_logged(&app_for_stt, 
                         "stt:transcript",
                         &SttTranscript {
                             session,
@@ -3484,7 +3703,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     );
                     stats.stt_path = crate::stt::last_stt_path_str();
                     stats.filter = crate::stt::last_filter_str();
-                    let _ = app_for_stt.emit("stt:turn_stats", &stats);
+                    crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
                 });
             }
         })
@@ -3591,6 +3810,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         // the hotkey branch) — otherwise the old reply talks over the
         // new turn. Idempotent when idle: safe on every fire.
         crate::orchestrator::request_barge_in("wake-fire");
+        let _ = tauri::Emitter::emit(&app, "tts:stop", ());
 
         // Start Rust-side STT capture immediately.
         // The cpal stream is already running and just detected the wake word,
@@ -3794,6 +4014,29 @@ fn should_instant_fire(verify_wake: bool, prob: f32) -> bool {
     !verify_wake && prob >= 0.3
 }
 
+/// Extra TTS-interrupt phrases beyond `ghost::STOP_PHRASES` (whole-utterance matches only).
+const BARGE_STOP_EXTRA: &[&str] = &["stop talking", "be quiet", "that's enough", "thats enough"];
+
+/// Instant "stop" for barge-in (Phase 1.4). A barge-in candidate (prob 0.0 — sustained speech while
+/// TTS is playing, no neural wake evidence) whose transcript is *exactly* a stop phrase cuts speech
+/// and cancels the turn WITHOUT requiring "nexus". Whole-utterance match only: TTS echo of our own
+/// sentences ("Stopped typing, sir.") is a different string and can never self-interrupt.
+/// Real wake candidates (prob ≥ 0.01) never take this path. Ghost exit phrases are excluded.
+fn barge_stop_decision(prob: f32, transcript: &str) -> bool {
+    if prob >= 0.01 {
+        return false;
+    }
+    let cleaned: String = transcript
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace() || *c == '\'')
+        .collect();
+    let t = cleaned.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    if t.is_empty() || t.contains("ghost") {
+        return false;
+    }
+    crate::ghost::is_stop_phrase(&t) || BARGE_STOP_EXTRA.contains(&t.as_str())
+}
+
 fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32) {    // Signal the main loop to fire (consumed once via swap).
     let fire = || {
         VERIFIED_BYPASS.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -3892,6 +4135,11 @@ fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32) 
                         VERIFY_NOSPEECH_VETO
                     );
                 }
+            }
+            Ok(Ok((text, _))) if barge_stop_decision(prob, &text) => {
+                tracing::info!("verify: barge-in stop phrase '{}' → cutting speech (no wake)", text);
+                crate::orchestrator::request_barge_in("barge-stop");
+                let _ = tauri::Emitter::emit(app, "tts:stop", ());
             }
             Ok(Ok((text, _))) => {
                 // v4 verify-retry: identical audio often decodes differently
@@ -4467,6 +4715,91 @@ mod tests {
     use std::path::PathBuf;
 
     use super::level_from_rms;
+
+    /// Smart Turn glue: flag off must be byte-identical to the legacy rule, and a verdict is only
+    /// valid for the silence run it was computed for.
+    #[test]
+    fn smart_turn_poll_off_and_run_invalidation() {
+        use std::sync::atomic::Ordering::SeqCst;
+        // OFF (default): never ends a turn, never changes the limit.
+        super::SMART_TURN_ON.store(false, SeqCst);
+        assert_eq!(super::smart_turn_poll(true, 10, 9, 10), (false, 10));
+        assert_eq!(super::smart_turn_poll(true, 10, 0, 10), (false, 10));
+
+        // ON, with a hand-planted verdict (no worker needed: TX unset => no requests are made).
+        super::SMART_TURN_ON.store(true, SeqCst);
+        let run = super::SMART_TURN_RUN.load(SeqCst);
+        *super::SMART_TURN_VERDICT.lock() = (run, 0.9);
+        // < STT_MIN_VOICED_CHUNKS voiced: Smart Turn stays out of it
+        assert_eq!(super::smart_turn_poll(true, 1, 6, 10), (false, 10));
+        // medium policy (min 5 chunks, thr 0.5): 4 chunks of silence is too early
+        assert_eq!(super::smart_turn_poll(true, 10, 4, 10), (false, 10));
+        // 5 chunks + verdict 0.9 for this run => end now, limit untouched
+        assert_eq!(super::smart_turn_poll(true, 10, 5, 10), (true, 10));
+        // "not finished" verdict holds the turn open (limit 10 -> 15), does not end it
+        *super::SMART_TURN_VERDICT.lock() = (run, 0.1);
+        assert_eq!(super::smart_turn_poll(true, 10, 9, 10), (false, 15));
+        // speech resumes (silence == 0) => run bumps, old verdict is void for the next silence run
+        assert_eq!(super::smart_turn_poll(true, 10, 0, 10), (false, 10));
+        *super::SMART_TURN_VERDICT.lock() = (run, 0.9);
+        assert_eq!(super::smart_turn_poll(true, 10, 6, 10), (false, 10));
+
+        super::SMART_TURN_ON.store(false, SeqCst); // leave global state as found
+    }
+
+    /// Phase 1.4: instant "stop" during TTS — whole-utterance only, barge-in candidates only.
+    #[test]
+    fn barge_stop_decision_table() {
+        use super::barge_stop_decision as d;
+        // exact stop phrases (punctuation/case from STT are normalised)
+        assert!(d(0.0, "Stop."));
+        assert!(d(0.0, "  stop it! "));
+        assert!(d(0.0, "Cancel"));
+        assert!(d(0.0, "Stop talking."));
+        assert!(d(0.0, "That's enough."));
+        assert!(d(0.0, "Be quiet"));
+        // our own TTS echoing back must NOT self-interrupt
+        assert!(!d(0.0, "Stopped typing, sir."));
+        assert!(!d(0.0, "I'll stop when you say so"));
+        assert!(!d(0.0, "stop the music and open whatsapp"));
+        // empty / noise
+        assert!(!d(0.0, ""));
+        assert!(!d(0.0, "..."));
+        // real wake candidates are never stop commands
+        assert!(!d(0.9, "stop"));
+        assert!(!d(0.3, "cancel"));
+        // ghost exits keep their own path
+        assert!(!d(0.0, "exit ghost mode"));
+        assert!(!d(0.0, "stop ghost"));
+    }
+
+    /// `chunk_voice_flags` contract — energy mode must stay byte-identical to the legacy RMS
+    /// hysteresis (cont > 0.006, start > 0.010); neural mode gates on probability + RMS floor.
+    #[test]
+    fn chunk_voice_flags_energy_mode_is_legacy_hysteresis() {
+        use super::chunk_voice_flags as f;
+        assert_eq!(f(0.0, None), (false, false));
+        assert_eq!(f(0.006, None), (false, false)); // strict >
+        assert_eq!(f(0.008, None), (true, false)); // hysteresis band: continues, never starts
+        assert_eq!(f(0.010, None), (true, false));
+        assert_eq!(f(0.011, None), (true, true));
+        assert_eq!(f(0.2, None), (true, true));
+    }
+
+    #[test]
+    fn chunk_voice_flags_neural_mode() {
+        use super::chunk_voice_flags as f;
+        // loud noise the model rejects must NOT count as voice (the RMS gate would have)
+        assert_eq!(f(0.2, Some(0.05)), (false, false));
+        // quiet-but-real speech the RMS gate misses (rms 0.004 < 0.006) is voice
+        assert_eq!(f(0.004, Some(0.9)), (true, true));
+        // hysteresis: 0.4 continues a turn but cannot start one
+        assert_eq!(f(0.05, Some(0.4)), (true, false));
+        assert_eq!(f(0.05, Some(0.5)), (true, true));
+        // digital silence is never voice, whatever the model says
+        assert_eq!(f(0.0, Some(0.99)), (false, false));
+        assert_eq!(f(0.001, Some(0.99)), (false, false));
+    }
 
     /// UI level map contract for speech-synced visuals (`audio:level`).
     /// Silence/dead input → 0 (never NaN over the bridge); speech band
