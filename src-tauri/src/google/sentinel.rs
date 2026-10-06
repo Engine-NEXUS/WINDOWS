@@ -296,12 +296,40 @@ pub async fn poll_sentinel_targets<R: Runtime>(app: &AppHandle<R>) {
         .unwrap_or_else(|_| std::path::PathBuf::from("com.nexus.assistant"));
 
     let watches = crate::memory::load_mail_watches(&app_data_dir);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
     let active_watches: Vec<_> = watches
         .into_iter()
-        .filter(|w| w.status == crate::google::types::WatchStatus::Active)
+        .filter(|w| {
+            if w.status != crate::google::types::WatchStatus::Active {
+                return false;
+            }
+            // Synthetic local screen thread targets expire after 2 hours
+            if w.thread_id.starts_with("screen_thread_") && now_ms.saturating_sub(w.created_at_ms) > 2 * 3600 * 1000 {
+                return false;
+            }
+            true
+        })
         .collect();
 
     if active_watches.is_empty() {
+        return;
+    }
+
+    // If no Google auth is available, don't spam poll cycle lines every 15 seconds
+    let has_any_token = crate::auth_vault::get_token_for_google_account(None).is_some()
+        || crate::google::auth::GoogleAuth::get_access_token().is_ok()
+        || !crate::auth_vault::get_google_accounts().is_empty();
+
+    if !has_any_token {
+        static NOTED_NO_AUTH: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !NOTED_NO_AUTH.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            println!("[SENTINEL] Note: Google account not authenticated yet. Add token in Settings or set GOOGLE_ACCESS_TOKEN. (Poller idle until connected.)");
+        }
         return;
     }
 
@@ -385,7 +413,7 @@ pub async fn poll_sentinel_targets<R: Runtime>(app: &AppHandle<R>) {
                                 );
                                 let _ = app.emit("orchestrator:sentinel-alert", &payload);
                                 println!("[SENTINEL-ALERT] emitted event id='{}' (deadline motion, will speak)", payload.alert_id);
-                                crate::orchestrator::speak_proactive_alert(app, spoken);
+                                crate::orchestrator::speak_proactive_alert(app, spoken, AlertUrgency::High, payload.alert_id.clone());
                             }
                             Some(crate::google::types::ThreadUpdateEvent::NewReply {
                                 sender,

@@ -68,10 +68,11 @@ impl Target {
     }
 }
 
-/// Per-target size clamp rails (task §4).
+/// Per-target size clamp rails (task §4; orb/waves max raised 300→400
+/// for the fullscreen-era orb so the particle sphere can breathe).
 pub fn clamp_size(target: Target, size: u32) -> u32 {
     let (min, max) = match target {
-        Target::Wakeup | Target::Waves => (100, 300),
+        Target::Wakeup | Target::Waves => (100, 400),
         Target::Loading => (40, 160),
     };
     size.max(min).min(max)
@@ -611,12 +612,13 @@ mod tests {
 
     #[test]
     fn test_clamp_size_rails() {
-        // Wakeup/Waves: 100–300.
+        // Wakeup/Waves: 100–400.
         assert_eq!(clamp_size(Target::Wakeup, 50), 100);
         assert_eq!(clamp_size(Target::Wakeup, 200), 200);
-        assert_eq!(clamp_size(Target::Wakeup, 500), 300);
+        assert_eq!(clamp_size(Target::Wakeup, 500), 400);
         assert_eq!(clamp_size(Target::Waves, 40), 100);
-        assert_eq!(clamp_size(Target::Waves, 310), 300);
+        assert_eq!(clamp_size(Target::Waves, 310), 310);
+        assert_eq!(clamp_size(Target::Waves, 450), 400);
         // Loading: 40–160.
         assert_eq!(clamp_size(Target::Loading, 10), 40);
         assert_eq!(clamp_size(Target::Loading, 80), 80);
