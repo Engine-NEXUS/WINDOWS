@@ -78,6 +78,15 @@ interface AssistantStore {
   /** Pending GitHub command awaiting user confirmation (destructive ops). */
   pendingGithubCommand: unknown | null;
   setPendingGithubCommand: (cmd: unknown | null) => void;
+  /** User-configured orb color theme (hex string, e.g. "#f2b859"). */
+  orbColor: string;
+  setOrbColor: (color: string) => void;
+  /** Orb fixed position: "top" or "bottom". Default: "top". */
+  orbPosition: "top" | "bottom";
+  setOrbPosition: (pos: "top" | "bottom") => void;
+  /** True while speech captions are actively rendering/lingering on screen. */
+  captionActive: boolean;
+  setCaptionActive: (v: boolean) => void;
 }
 
 /** Single owner for the loading indicator (see loadingMachine.ts).
@@ -85,6 +94,21 @@ interface AssistantStore {
  * 120s failsafe (a lost hide can never wedge the spinner), transition log. */
 let loadingSnap: LoadingSnapshot = LOADING_HIDDEN;
 let loadingTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Guaranteed 1.0s minimum dwell for thinking state (1000ms).
+ * Ensures the 3D continuous woven violet ribbon knot is fully visible
+ * and completes its opening expansion and rotation before morphing into speech. */
+export const THINKING_MIN_DWELL_MS = 1000;
+let thinkingEnteredAt: number | null = null;
+let thinkingPendingTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function clearThinkingDwell(): void {
+  if (thinkingPendingTimer) {
+    clearTimeout(thinkingPendingTimer);
+    thinkingPendingTimer = null;
+  }
+  thinkingEnteredAt = null;
+}
 
 export const useAssistant = create<AssistantStore>((set) => ({
   state: "idle",
@@ -101,11 +125,43 @@ export const useAssistant = create<AssistantStore>((set) => ({
   calibrationPulse: 0,
   calibrationSize: null,
   setState: (s) => {
-      return set((st) => {
-        console.log(`[ORB] state ${st.state} → ${s}`);
-        return { state: s };
-      });
-    },
+    return set((st) => {
+      const now = performance.now();
+      if (s === "thinking") {
+        thinkingEnteredAt = now;
+        if (thinkingPendingTimer) {
+          clearTimeout(thinkingPendingTimer);
+          thinkingPendingTimer = null;
+        }
+        console.log(`[ORB] state ${st.state} → thinking (1.0s dwell armed)`);
+        return { state: "thinking" };
+      }
+
+      // If currently thinking and requesting a state change (e.g. to speaking or idle), enforce 1.0s minimum
+      if (st.state === "thinking" && thinkingEnteredAt !== null) {
+        const elapsed = now - thinkingEnteredAt;
+        const remaining = THINKING_MIN_DWELL_MS - elapsed;
+        if (remaining > 0) {
+          console.log(`[ORB] state thinking holding for remaining ${Math.round(remaining)}ms (dwell floor 1000ms)`);
+          if (thinkingPendingTimer) clearTimeout(thinkingPendingTimer);
+          thinkingPendingTimer = setTimeout(() => {
+            thinkingPendingTimer = null;
+            thinkingEnteredAt = null;
+            useAssistant.setState({ state: s });
+          }, remaining);
+          return st; // Hold current thinking state!
+        }
+      }
+
+      if (thinkingPendingTimer) {
+        clearTimeout(thinkingPendingTimer);
+        thinkingPendingTimer = null;
+      }
+      thinkingEnteredAt = null;
+      console.log(`[ORB] state ${st.state} → ${s}`);
+      return { state: s };
+    });
+  },
   setVisible: (v) => set((st) => {
       console.log(`[ORB] setVisible(${v}) from:${st.visible} ghostActive:${st.ghostActive} state:${st.state}`);
       return { visible: st.ghostActive ? true : v };
@@ -158,10 +214,36 @@ export const useAssistant = create<AssistantStore>((set) => ({
   setCalibration: (target, size) =>
     set({ calibrationTarget: target, calibrationSize: size }),
   bumpCalibrationPulse: () => set((st) => ({ calibrationPulse: st.calibrationPulse + 1 })),
-  reset: () => set({ state: "idle", speakSeq: null, audioVolume: 0, micLevel: 0, ttsActive: false, awaitingInput: false }),
+  reset: () => {
+    clearThinkingDwell();
+    return set((st) => ({
+      state: "idle",
+      speakSeq: null,
+      audioVolume: 0,
+      micLevel: 0,
+      ttsActive: false,
+      awaitingInput: false,
+      visible: st.ghostActive ? true : st.visible,
+    }));
+  },
   clearTranscript: () => set({ transcript: [] }),
   pendingGithubCommand: null,
   setPendingGithubCommand: (cmd) => set({ pendingGithubCommand: cmd }),
+  orbColor: typeof localStorage !== "undefined" ? (localStorage.getItem("nexus:orb_color") || "#f2b859") : "#f2b859",
+  setOrbColor: (c) => {
+    try { localStorage.setItem("nexus:orb_color", c); } catch (_) {}
+    set({ orbColor: c });
+  },
+  orbPosition: typeof localStorage !== "undefined" ? ((localStorage.getItem("nexus:orb_position") as "top" | "bottom") || "top") : "top",
+  setOrbPosition: (p) => {
+    try { localStorage.setItem("nexus:orb_position", p); } catch (_) {}
+    set({ orbPosition: p });
+  },
+  captionActive: false,
+  setCaptionActive: (v) => set((st) => {
+    console.log(`[ORB] setCaptionActive(${v}) (was:${st.captionActive})`);
+    return { captionActive: v };
+  }),
 }));
 
 /**

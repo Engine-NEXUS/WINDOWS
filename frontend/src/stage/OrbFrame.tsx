@@ -3,7 +3,6 @@ import { Avatar } from "../avatar/Avatar";
 import { useAssistant } from "../store/assistant";
 import { initOrchestratorListener, hideOrbAfterSpeech } from "../net/orchestrator";
 import { initOrbRuntime } from "./orbRuntime";
-import { EntranceBurst } from "./EntranceBurst";
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -40,6 +39,7 @@ export function OrbFrame() {
   const state = useAssistant((s) => s.state);
   const loadingVisible = useAssistant((s) => s.loadingVisible);
   const ghostActive = useAssistant((s) => s.ghostActive);
+  const orbPosition = useAssistant((s) => s.orbPosition || "top");
 
   const [rect, setRect] = useState<OrbRect | null>(null);
   // Calibration can force the orb hidden (Loading target active) or shown
@@ -48,6 +48,7 @@ export function OrbFrame() {
   // means "no override — follow assistantVisible".
   const [stageOverride, setStageOverride] = useState<boolean | null>(null);
   const visible = stageOverride ?? assistantVisible;
+  const isShown = Boolean(visible || ghostActive);
 
   // One-time bootstrap: voice runtime + orchestrator/tts-activity listeners
   // (previously wired in main.tsx / App.tsx's mount effect).
@@ -289,18 +290,12 @@ export function OrbFrame() {
   const wasVisibleRef = useRef(false);
   const [entered, setEntered] = useState(false);
   const [dispersing, setDispersing] = useState(false);
-  // Screen-wide gather (sub-phase A): a monotonic counter, bumped once per
-  // false→true transition, same edge as `entered` below but independent
-  // of its 50ms one-shot reset — EntranceBurst runs its own ~900ms burst
-  // keyed off the value changing, not off `entered` staying true.
-  const [burstSeq, setBurstSeq] = useState(0);
   useEffect(() => {
     const was = wasVisibleRef.current;
     wasVisibleRef.current = visible;
     if (!was && visible) {
       setDispersing(false);
       setEntered(true);
-      setBurstSeq((n) => n + 1);
       // Reset the one-shot trigger next tick so a later show re-fires it.
       const t = setTimeout(() => setEntered(false), 50);
       return () => clearTimeout(t);
@@ -323,38 +318,55 @@ export function OrbFrame() {
   // already use this exact ref + `el.style.x = ...` pattern and are
   // unaffected — direct CSSOM property assignment isn't inline-style
   // text parsing, so it isn't subject to this restriction.
-  const applyRect = (el: HTMLDivElement | null, r: OrbRect | null) => {
+  const applyRect = (el: HTMLDivElement | null, r: OrbRect | null, shown: boolean, pos: string) => {
     if (!el || !r) return;
     const dpr = window.devicePixelRatio || 1;
+    const wCss = r.w / dpr;
+    const hCss = r.h / dpr;
+    const xCss = r.x / dpr;
+    const yCss = r.y / dpr;
+
     el.style.position = "fixed";
     el.style.left = "0";
     el.style.top = "0";
-    el.style.width = `${r.w / dpr}px`;
-    el.style.height = `${r.h / dpr}px`;
-    el.style.transform = `translate(${r.x / dpr}px, ${r.y / dpr}px)`;
+    el.style.width = `${wCss}px`;
+    el.style.height = `${hCss}px`;
+    el.style.transition = "transform 0.72s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.5s ease";
+
+    if (pos === "top") {
+      const targetY = shown ? yCss : -hCss - 24;
+      el.style.transform = `translate3d(${xCss}px, ${targetY}px, 0)`;
+    } else {
+      const screenH = typeof window !== "undefined" ? window.innerHeight : 1080;
+      const targetY = shown ? yCss : screenH + 24;
+      el.style.transform = `translate3d(${xCss}px, ${targetY}px, 0)`;
+    }
+    el.style.opacity = shown ? "1" : "0";
+    el.style.pointerEvents = shown ? "auto" : "none";
   };
   const frameRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    applyRect(frameRef.current, rect);
-  }, [rect]);
+    console.log(`[ORB-FRAME] state: isShown=${isShown} pos=${orbPosition} (assistantVisible=${assistantVisible}, ghost=${ghostActive}, stageOverride=${stageOverride})`);
+    applyRect(frameRef.current, rect, isShown, orbPosition);
+  }, [rect, isShown, orbPosition, assistantVisible, ghostActive, stageOverride]);
 
   if (!rect) return null;
-  const cssVisible = visible || dispersing;
-  if (!cssVisible) return null;
 
   return (
-    <>
-      <div
-        id="orb-frame"
-        data-interactive
-        ref={(el) => {
-          frameRef.current = el;
-          applyRect(el, rect);
-        }}
-      >
-        <Avatar entered={entered} dispersing={dispersing} />
+    <div
+      id="orb-frame"
+      data-interactive={isShown ? "true" : undefined}
+      className={`orb-slider orb-slider--${orbPosition}`}
+      ref={(el) => {
+        frameRef.current = el;
+        applyRect(el, rect, isShown, orbPosition);
+      }}
+    >
+      <div className="orb-capsule">
+        <div className="orb-sphere-wrapper">
+          <Avatar entered={entered} dispersing={dispersing} />
+        </div>
       </div>
-      <EntranceBurst burstSeq={burstSeq} targetRect={rect} />
-    </>
+    </div>
   );
 }
