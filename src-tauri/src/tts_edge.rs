@@ -308,7 +308,7 @@ mod tests {
 
     /// Test that Edge TTS FAILS with a Kokoro voice ID ("af_sky").
     /// This proves the bug: the frontend sends "af_sky" to Edge TTS,
-    /// which fails and silently falls back to Piper (local).
+    /// which fails and silently falls back to the local Kokoro voice.
     #[tokio::test]
     async fn test_edge_tts_invalid_kokoro_voice() {
         let result = synthesize_to_mp3("Hello world", "af_sky").await;
