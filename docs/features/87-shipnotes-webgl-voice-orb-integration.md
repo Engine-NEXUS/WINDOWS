@@ -23,7 +23,7 @@ The orb smoothly interpolates over **700ms** between 4 distinct states matching 
 | :--- | :--- | :--- |
 | **`idle`** | Soft Lilac (`#9e99de`) | Calm breathing sphere, slow organic drift (0.85 Hz). |
 | **`listening`** | Vibrant Turquoise (`#29e8b5`) | Radial suction waves pulling points inward toward the center. Reacts to user speech volume. |
-| **`thinking`** | Radiant Lavender (`#b297ff`) | 3D braided toroidal knot ribbon with continuous looping particle streams and travelling white sparkles. |
+| **`thinking`** | Electric Purple / Magenta (`#d946ef` / `#c026d3`) | 3D rotating purple beaded starburst: 64 radial rays, intense white-magenta central nucleus, 15 concentric beaded steps, dual-axis 3D rotation, and outward wave pulse. |
 | **`speaking`** | Pink & Violet (`#f5459e`) | Outward wave blast with bass deformation and transient sparks ejected on vocal peaks. |
 
 ---

@@ -1180,7 +1180,7 @@ ${C.cyan}Environment:${C.reset}
 ${C.cyan}Notes:${C.reset}
   • STT uses Moonshine Streaming local fallback + Groq Whisper cloud primary (lazy Python sidecar on port 39217)
   • NLU server is lazy-started Python (BERT-Mini, model committed in repo)
-  • TTS uses edge-tts (cloud) with local Piper fallback
+  • TTS uses edge-tts (cloud) with local Kokoro fallback
   • Wake word uses openWakeWord (ONNX, pure Rust, model in repo)
 `);
 }

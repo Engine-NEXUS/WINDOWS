@@ -56,7 +56,7 @@ circular-buffer = "1.2"
 # default-features off: "esaxx_fast" (C++ suffix-array build, only needed
 # for training Unigram/SentencePiece tokenizers — we only load+encode a
 # pre-trained WordPiece tokenizer) statically links its CRT as /MT, which
-# conflicts with /MD-linked onnxruntime pulled in elsewhere (piper-rs) —
+# conflicts with /MD-linked onnxruntime pulled in elsewhere (ort) —
 # LNK2038 RuntimeLibrary mismatch. "progressbar" is dev/training UX, unused
 # here. "onig" (pure encode/decode regex) is kept; it doesn't conflict.
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
@@ -67,11 +67,14 @@ chrono = { version = "0.4.45", features = ["serde"] }
 # TTS engines:
 # - edge-tts-rust: Microsoft Edge Neural TTS (cloud, free, no API key, 400+ voices)
 #   Primary TTS — 0 MB local RAM, ~200ms latency, broadcast-quality voices.
-# - piper-rs: Piper VITS ONNX (local fallback, 80 MB RAM, 60 MB model, 40ms latency)
-#   Fallback when internet is unavailable.
+# - Kokoro-82M (tts_kokoro.rs): local fallback when internet is unavailable. Runs on `ort` + misaki-rs
+#   (~260-370 MB RAM while loaded, ~real-time on CPU). Piper was removed: its espeak-ng is GPL-3.
 # - rodio: audio playback (shared by both engines)
 edge-tts-rust = "0.1"
-piper-rs = "0.2"
+# ONNX Runtime: Smart Turn, Silero VAD and Kokoro TTS (pinned; was previously shared with piper-rs)
+ort = "=2.0.0-rc.12"
+# English G2P for Kokoro TTS (MIT). default-features=false drops the espeak fallback => no GPL espeak-ng.
+misaki-rs = { version = "0.6", default-features = false }
 rodio = "0.19"
 
 # Live-caption WebSocket client (plan Phase 4) — connects to the local STT
