@@ -123,33 +123,43 @@ pub fn denormalize_computer_use_coord(
 /// Capture the full primary monitor, downscale to VISION_MAX_W, JPEG q60,
 /// base64. Returns (base64_jpeg, width, height). None on any failure.
 pub fn capture_primary_jpeg_base64() -> Option<(String, i32, i32)> {
+    capture_plain_jpeg_base64_w(VISION_MAX_W)
+}
+
+/// Un-gridded capture at an explicit width (the narrated screen tour sends
+/// a clean screenshot — the red axis grid is only needed for click
+/// grounding, and it can occlude small text). Returns
+/// (base64_jpeg, screen_w, screen_h). None on any failure.
+pub fn capture_plain_jpeg_base64_w(max_w: u32) -> Option<(String, i32, i32)> {
     let (mw, mh) = crate::screen::primary_monitor_size()?;
     if mw <= 0 || mh <= 0 {
         return None;
     }
-    let bgra = crate::sidebar_backdrop::capture_region_bgra_public(0, 0, mw, mh)?;
-    let img = image::RgbaImage::from_raw(mw as u32, mh as u32, bgra_to_rgba(bgra))?;
-    let scale = (VISION_MAX_W as f32 / mw as f32).min(1.0);
+    let b64 = capture_region_jpeg_base64(0, 0, mw, mh, max_w)?;
+    Some((b64, mw, mh))
+}
+
+/// Capture one screen rectangle (physical px), downscale to `max_w`, JPEG,
+/// base64. The narrated tour sends only the page-content region (no browser
+/// tabs / URL bar / taskbar) at higher effective resolution. None on failure.
+pub fn capture_region_jpeg_base64(x: i32, y: i32, w: i32, h: i32, max_w: u32) -> Option<String> {
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let bgra = crate::sidebar_backdrop::capture_region_bgra_public(x, y, w, h)?;
+    let img = image::RgbaImage::from_raw(w as u32, h as u32, bgra_to_rgba(bgra))?;
+    let scale = (max_w as f32 / w as f32).min(1.0);
     let (tw, th) = (
-        ((mw as f32 * scale) as u32).max(1),
-        ((mh as f32 * scale) as u32).max(1),
+        ((w as f32 * scale) as u32).max(1),
+        ((h as f32 * scale) as u32).max(1),
     );
-    let small = image::imageops::resize(
-        &img,
-        tw,
-        th,
-        image::imageops::FilterType::Triangle,
-    );
+    let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
     let mut jpeg = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 60)
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 70)
         .encode_image(&image::DynamicImage::ImageRgba8(small))
         .ok()?;
     use base64::Engine;
-    Some((
-        base64::engine::general_purpose::STANDARD.encode(&jpeg),
-        mw,
-        mh,
-    ))
+    Some(base64::engine::general_purpose::STANDARD.encode(&jpeg))
 }
 
 fn bgra_to_rgba(mut bgra: Vec<u8>) -> Vec<u8> {
@@ -462,12 +472,31 @@ pub fn record_use(app_data_dir: &std::path::Path, provider: &str) {
     save_usage(app_data_dir, &u);
 }
 
+/// Daily Gemini vision cap NEXUS enforces: the `geminiVisionDailyLimit`
+/// setting (the figure shown in AI Studio's rate-limit page — Google does
+/// not publish per-model free numbers in its docs) or the built-in default.
+pub fn gemini_daily_limit(app_data_dir: &std::path::Path) -> u32 {
+    let text = std::fs::read_to_string(app_data_dir.join("settings.json")).ok();
+    parse_daily_limit(text.as_deref())
+}
+
+/// Pure: `geminiVisionDailyLimit` from settings JSON text; invalid/zero →
+/// default. Clamped to a sane range.
+pub fn parse_daily_limit(settings_json: Option<&str>) -> u32 {
+    settings_json
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get("geminiVisionDailyLimit").and_then(|n| n.as_u64()))
+        .filter(|n| *n > 0)
+        .map(|n| n.min(1_000_000) as u32)
+        .unwrap_or(GEMINI_VISION_RPD)
+}
+
 /// Mark a provider exhausted NOW (e.g. HTTP 429 mid-day).
 pub fn mark_exhausted(app_data_dir: &std::path::Path, provider: &str) {
     let mut u = load_usage(app_data_dir);
     match provider {
         "groq" => u.groq = GROQ_VISION_RPD,
-        "gemini" => u.gemini = GEMINI_VISION_RPD,
+        "gemini" => u.gemini = u.gemini.max(gemini_daily_limit(app_data_dir)),
         _ => return,
     }
     save_usage(app_data_dir, &u);
@@ -478,7 +507,7 @@ pub fn exhausted(app_data_dir: &std::path::Path, provider: &str) -> bool {
     let u = load_usage(app_data_dir);
     match provider {
         "groq" => u.groq >= GROQ_VISION_RPD,
-        "gemini" => u.gemini >= GEMINI_VISION_RPD,
+        "gemini" => u.gemini >= gemini_daily_limit(app_data_dir),
         _ => true,
     }
 }
@@ -489,7 +518,7 @@ pub fn quota_status(app_data_dir: &std::path::Path) -> serde_json::Value {
     serde_json::json!({
         "date": u.date,
         "groq": {"used": u.groq, "limit": GROQ_VISION_RPD},
-        "gemini": {"used": u.gemini, "limit": GEMINI_VISION_RPD},
+        "gemini": {"used": u.gemini, "limit": gemini_daily_limit(app_data_dir)},
     })
 }
 
@@ -1130,7 +1159,7 @@ Reply with ONLY a raw JSON object:\n\
 }
 
 /// Strip markdown fences / prose around a JSON payload. Pure.
-fn strip_json_fences(text: &str) -> &str {
+pub(crate) fn strip_json_fences(text: &str) -> &str {
     let clean = text.trim();
     if let Some(stripped) = clean.strip_prefix("```json") {
         stripped.strip_suffix("```").unwrap_or(stripped).trim()
@@ -1147,7 +1176,7 @@ fn strip_json_fences(text: &str) -> &str {
 
 /// Validate/normalize one box: clamp into 0-1000, fix inverted edges,
 /// reject degenerate boxes. Returns None when degenerate. Pure.
-fn normalize_box(v: &serde_json::Value) -> Option<SpatialBoundingBox> {
+pub(crate) fn normalize_box(v: &serde_json::Value) -> Option<SpatialBoundingBox> {
     // Accept [ymin, xmin, ymax, xmax] array or named object.
     let (ymin, xmin, ymax, xmax) = if let Some(arr) = v.as_array() {
         if arr.len() < 4 {
@@ -1376,6 +1405,82 @@ async fn spatial_gemini_with_image(
     api_key: &str,
     client: &reqwest::Client,
 ) -> SpatialStep {
+    let models = default_vision_models();
+    match gemini_json_with_image(prompt, b64, api_key, client, 2048, &models, parse_spatial_json).await {
+        JsonStep::Found(mut p) => {
+            p.provider_used = "gemini".to_string();
+            SpatialStep::Found(p)
+        }
+        JsonStep::Quota => SpatialStep::Quota,
+        JsonStep::Miss => SpatialStep::Miss,
+    }
+}
+
+/// Outcome of a generic Gemini JSON-vision call.
+pub(crate) enum JsonStep<T> {
+    Found(T),
+    Miss,
+    Quota,
+}
+
+/// The long-standing spatial/grounding ladder: lite model, then fallbacks.
+pub(crate) fn default_vision_models() -> Vec<String> {
+    [GEMINI_VISION_MODEL]
+        .into_iter()
+        .chain(GEMINI_VISION_FALLBACKS.iter().copied())
+        .map(String::from)
+        .collect()
+}
+
+/// Narrated-tour ladder: an explicit `tourModel` first (if set), then the
+/// strongest Flash models, ending on the lite model that always worked. IDs
+/// churn — a 404 just advances the ladder. Pure.
+pub(crate) fn tour_model_ladder(override_model: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |m: &str| {
+        let m = m.trim();
+        if !m.is_empty() && !out.iter().any(|x| x == m) {
+            out.push(m.to_string());
+        }
+    };
+    if let Some(m) = override_model {
+        push(m);
+    }
+    for m in [
+        "gemini-3.8-flash",
+        "gemini-3.5-flash",
+        GEMINI_VISION_MODEL, // gemini-3.5-flash-lite
+        "gemini-2.5-flash",
+    ] {
+        push(m);
+    }
+    out
+}
+
+/// How a walk down the model ladder ended. Quota only when at least one
+/// model answered 429 and NO other model failed for another reason (a wrong
+/// model id 404-ing must not mark the whole provider exhausted for the day).
+/// Pure.
+pub(crate) fn ladder_end(n_429: usize, n_other_fail: usize) -> bool {
+    n_429 > 0 && n_other_fail == 0
+}
+
+/// Generic Gemini vision pass: generateContent with the JSON response mime
+/// type, walking `models` in order. A 404 (unknown id) advances silently; a
+/// 429 advances to the next model (Google limits per model per project, so
+/// the next model often still has quota); transport/parse failures advance.
+/// `parse` turns the model text into the caller's type — returning None makes
+/// the ladder try the next model. Shared by spatial analysis and the
+/// narrated screen tour.
+pub(crate) async fn gemini_json_with_image<T>(
+    prompt: &str,
+    b64: &str,
+    api_key: &str,
+    client: &reqwest::Client,
+    max_output_tokens: u32,
+    models: &[String],
+    parse: impl Fn(&str) -> Option<T>,
+) -> JsonStep<T> {
     let body = serde_json::json!({
         "contents": [{
             "parts": [
@@ -1385,11 +1490,12 @@ async fn spatial_gemini_with_image(
         }],
         "generationConfig": {
             "temperature": 0.2,
-            "maxOutputTokens": 2048,
+            "maxOutputTokens": max_output_tokens,
             "response_mime_type": "application/json",
         },
     });
-    for model in [GEMINI_VISION_MODEL].into_iter().chain(GEMINI_VISION_FALLBACKS.iter().copied()) {
+    let (mut n_429, mut n_other) = (0usize, 0usize);
+    for model in models {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         );
@@ -1401,17 +1507,32 @@ async fn spatial_gemini_with_image(
             .await
         {
             Ok(r) => r,
-            Err(_) => continue,
+            Err(_) => {
+                n_other += 1;
+                continue;
+            }
         };
-        if resp.status().as_u16() == 429 {
-            return SpatialStep::Quota;
+        let status = resp.status().as_u16();
+        if status == 429 {
+            tracing::warn!("vision: {model} rate-limited (429) — trying the next model");
+            n_429 += 1;
+            continue;
+        }
+        if status == 404 {
+            tracing::warn!("vision: model id {model} not found (404) — trying the next model");
+            continue;
         }
         if !resp.status().is_success() {
+            tracing::warn!("vision: {model} HTTP {status} — trying the next model");
+            n_other += 1;
             continue;
         }
         let json: serde_json::Value = match resp.json().await {
             Ok(j) => j,
-            Err(_) => continue,
+            Err(_) => {
+                n_other += 1;
+                continue;
+            }
         };
         let text: String = json["candidates"][0]["content"]["parts"]
             .as_array()
@@ -1423,15 +1544,18 @@ async fn spatial_gemini_with_image(
                     .join(" ")
             })
             .unwrap_or_default();
-        match parse_spatial_json(&text) {
-            Some(mut p) => {
-                p.provider_used = "gemini".to_string();
-                return SpatialStep::Found(p);
-            }
-            None => continue,
+        if let Some(v) = parse(&text) {
+            tracing::info!("vision: answered by {model}");
+            return JsonStep::Found(v);
         }
+        tracing::warn!("vision: {model} returned an unusable answer — trying the next model");
+        n_other += 1;
     }
-    SpatialStep::Miss
+    if ladder_end(n_429, n_other) {
+        JsonStep::Quota
+    } else {
+        JsonStep::Miss
+    }
 }
 
 /// Spatial screen analysis (Feature 86): capture the gridded screenshot,
@@ -1613,5 +1737,79 @@ mod spatial_tests {
         assert_eq!(spatial_provider_order(""), vec!["gemini"]);
         assert_eq!(spatial_provider_order("GROQ"), vec!["groq"]);
         assert_eq!(spatial_provider_order("gemini"), vec!["gemini"]);
+    }
+}
+
+#[cfg(test)]
+mod tour_ladder_tests {
+    use super::*;
+
+    #[test]
+    fn tour_ladder_is_strongest_first_and_ends_on_the_lite_model() {
+        let l = tour_model_ladder(None);
+        assert_eq!(l[0], "gemini-3.8-flash");
+        assert_eq!(l[1], "gemini-3.5-flash");
+        assert!(l.contains(&GEMINI_VISION_MODEL.to_string())); // lite still reachable
+        assert!(l.iter().position(|m| m == "gemini-3.5-flash") < l.iter().position(|m| m == GEMINI_VISION_MODEL));
+    }
+
+    #[test]
+    fn tour_ladder_honours_an_override_without_duplicates() {
+        let l = tour_model_ladder(Some("gemini-3.7-flash"));
+        assert_eq!(l[0], "gemini-3.7-flash");
+        assert_eq!(l.len(), 5);
+        // Overriding with a model already in the ladder just moves it first.
+        let l2 = tour_model_ladder(Some("gemini-3.5-flash"));
+        assert_eq!(l2[0], "gemini-3.5-flash");
+        assert_eq!(l2.iter().filter(|m| *m == "gemini-3.5-flash").count(), 1);
+        // Blank override is ignored.
+        assert_eq!(tour_model_ladder(Some("  ")), tour_model_ladder(None));
+    }
+
+    #[test]
+    fn default_ladder_is_the_historic_one() {
+        let l = default_vision_models();
+        assert_eq!(l[0], GEMINI_VISION_MODEL);
+        assert_eq!(l.len(), 1 + GEMINI_VISION_FALLBACKS.len());
+    }
+
+    #[test]
+    fn ladder_end_marks_quota_only_when_every_failure_was_a_429() {
+        assert!(ladder_end(1, 0)); // one model rate-limited, the rest 404 → quota
+        assert!(ladder_end(3, 0));
+        assert!(!ladder_end(0, 0)); // nothing answered at all → plain miss
+        assert!(!ladder_end(2, 1)); // a real failure mixed in → don't burn the day's quota
+        assert!(!ladder_end(0, 3));
+    }
+
+    #[test]
+    fn daily_limit_comes_from_settings_with_a_safe_default() {
+        assert_eq!(parse_daily_limit(None), GEMINI_VISION_RPD);
+        assert_eq!(parse_daily_limit(Some("{}")), GEMINI_VISION_RPD);
+        assert_eq!(parse_daily_limit(Some("not json")), GEMINI_VISION_RPD);
+        assert_eq!(parse_daily_limit(Some("{\"geminiVisionDailyLimit\": 0}")), GEMINI_VISION_RPD);
+        assert_eq!(parse_daily_limit(Some("{\"geminiVisionDailyLimit\": 1500}")), 1500);
+        assert_eq!(parse_daily_limit(Some("{\"geminiVisionDailyLimit\": 99999999999}")), 1_000_000);
+        assert_eq!(parse_daily_limit(Some("{\"geminiVisionDailyLimit\": \"x\"}")), GEMINI_VISION_RPD);
+    }
+
+    #[test]
+    fn exhausted_uses_the_configured_limit() {
+        let dir = std::env::temp_dir().join(format!("nexus_vis_limit_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("settings.json"), "{\"geminiVisionDailyLimit\": 3}").unwrap();
+        let _ = std::fs::remove_file(dir.join(USAGE_FILE));
+        for _ in 0..2 {
+            record_use(&dir, "gemini");
+        }
+        assert!(!exhausted(&dir, "gemini"));
+        record_use(&dir, "gemini");
+        assert!(exhausted(&dir, "gemini")); // 3 of 3
+        assert_eq!(quota_status(&dir)["gemini"]["limit"], 3);
+        // mark_exhausted lifts the counter to the configured limit, never below.
+        let _ = std::fs::remove_file(dir.join(USAGE_FILE));
+        mark_exhausted(&dir, "gemini");
+        assert_eq!(quota_status(&dir)["gemini"]["used"], 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

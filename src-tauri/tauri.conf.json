@@ -30,16 +30,15 @@
     "targets": "all",
     "resources": [
       "resources/oww/**/*",
-      "resources/espeak-ng-data/**/*",
+      "resources/vad/*",
+      "resources/smart_turn/*",
       "resources/server/stt_server.py",
       "resources/server/nlu_server.py",
       "resources/server/nlu/requirements.txt",
       "resources/server/nlu/model/nexus_nlu.onnx",
       "resources/server/nlu/model/nexus_nlu.onnx.data",
       "resources/server/nlu/model/labels.json",
-      "resources/server/nlu/model/tokenizer/*",
-      "resources/piper/en_US-amy-medium.onnx",
-      "resources/piper/en_US-amy-medium.onnx.json"
+      "resources/server/nlu/model/tokenizer/*"
     ],
     "icon": [
       "icons/32x32.png",

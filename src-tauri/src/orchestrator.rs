@@ -552,9 +552,15 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         // asked for the missing slot rather than getting a guess/refusal.
         ParsedIntent::NeedMoreInfo { .. } => Subsystem::LocalCommand,
 
+        // Memory intents are handled explicitly in process_transcript
+        // (run_memory_* — local, never cloud); tracked as local.
         // Screen control intents are handled explicitly in
         // process_transcript (run_screen_click/read/tab); tracked as local.
-        ParsedIntent::ScreenClick { .. }
+        ParsedIntent::MemoryAudit
+        | ParsedIntent::MemoryForget { .. }
+        | ParsedIntent::MemoryForgetAll
+        | ParsedIntent::MemoryForgetAllConfirm
+        | ParsedIntent::ScreenClick { .. }
         | ParsedIntent::ScreenRead { .. }
         | ParsedIntent::BrowserTab { .. }
         | ParsedIntent::BrowserCloseTab { .. }
@@ -669,6 +675,10 @@ pub async fn process_transcript<R: Runtime>(
         .as_ref()
         .map(|r| r.intent.clone())
         .unwrap_or_else(|| {
+            println!(
+                "[PARSER-MISS] Deterministic parser miss for '{}' → routing to NLU / Cloud fallback (WorkerBackend)",
+                transcript.chars().take(80).collect::<String>().replace('\n', " ")
+            );
             crate::missed_intent_logger::log_missed_intent(
                 &transcript,
                 "orchestrator",
@@ -679,11 +689,27 @@ pub async fn process_transcript<R: Runtime>(
             }
         });
 
-    tracing::info!("orchestrator: parsed intent: {:?}", intent);
+    let source = parse_result
+        .as_ref()
+        .map(|result| result.source.as_str())
+        .unwrap_or("none");
+    let center_name = crate::center::center_for(&intent);
+    let evidence = crate::center::command_evidence(&intent, &transcript, source);
     let turn = turn_context.unwrap_or_default();
+
+    println!(
+        "[MAIN-CMD] Transcript: '{}' | Intent: {} | Center: {} | Evidence: {:?} | Owner: {:?} (score: {:.3})",
+        transcript.chars().take(80).collect::<String>().replace('\n', " "),
+        crate::intent_parser::intent_to_label(&intent),
+        center_name,
+        evidence,
+        turn.ownership,
+        turn.owner_score
+    );
+
     if turn.ownership == crate::voice_profile::TurnOwnership::Rejected {
-        tracing::info!(
-            "orchestrator: ambient drop (session={}, score={:.3})",
+        println!(
+            "[DROP] Turn ownership REJECTED (session={}, score={:.3}) — dropped by owner gate",
             turn.session,
             turn.owner_score
         );
@@ -694,10 +720,6 @@ pub async fn process_transcript<R: Runtime>(
         });
     }
 
-    let source = parse_result
-        .as_ref()
-        .map(|result| result.source.as_str())
-        .unwrap_or("none");
     match crate::center::action_disposition(
         &intent,
         &transcript,
@@ -706,7 +728,13 @@ pub async fn process_transcript<R: Runtime>(
         crate::ghost::session_active(),
     ) {
         crate::center::ActionDisposition::AmbientDrop => {
-            tracing::info!("orchestrator: ambient drop (weak evidence, auto session)");
+            println!(
+                "[DROP] Ambient drop: evidence={:?}, ownership={:?}, ghost_active={} — dropped transcript: '{}'",
+                evidence,
+                turn.ownership,
+                crate::ghost::session_active(),
+                transcript.chars().take(80).collect::<String>().replace('\n', " ")
+            );
             return Ok(ProcessResult {
                 request_id: new_request_id(),
                 subsystem: Subsystem::None,
@@ -715,6 +743,7 @@ pub async fn process_transcript<R: Runtime>(
         }
         crate::center::ActionDisposition::Clarify => {
             let (prompt, slot) = clarification_for(&intent);
+            println!("[MAIN-CMD] Clarification needed for slot '{}': \"{}\"", slot, prompt);
             return speak_prompt_and_hold(&app, prompt, slot).await;
         }
         crate::center::ActionDisposition::Allow => {}
@@ -725,7 +754,7 @@ pub async fn process_transcript<R: Runtime>(
     tracing::info!(
         "main-center: {:?} → sub-center {}",
         intent,
-        crate::center::center_for(&intent)
+        center_name
     );
 
     // Main Center validity gate (doc 74, P1): garbage / missing slots /
@@ -741,15 +770,15 @@ pub async fn process_transcript<R: Runtime>(
         match crate::center::validate(&intent, &transcript, dialog_context.is_some()) {
             crate::center::Validity::Ok => {}
             crate::center::Validity::Unheard { prompt } => {
-                println!("[ACTION] validity: Unheard → \"{prompt}\"");
+                println!("[MAIN-CMD] Validity: Unheard → \"{prompt}\"");
                 return speak_prompt_and_hold(&app, prompt, "repeat".to_string()).await;
             }
             crate::center::Validity::NeedSlot { slot, prompt } => {
-                println!("[ACTION] validity: NeedSlot({slot}) → \"{prompt}\"");
+                println!("[MAIN-CMD] Validity: NeedSlot({slot}) → \"{prompt}\"");
                 return speak_prompt_and_hold(&app, prompt, slot.to_string()).await;
             }
             crate::center::Validity::Invalid { reason, prompt } => {
-                println!("[ACTION] validity: Invalid({reason}) → \"{prompt}\"");
+                println!("[MAIN-CMD] Validity: Invalid({reason}) → \"{prompt}\"");
                 return speak_prompt_and_hold(&app, prompt, "repeat".to_string()).await;
             }
         }
@@ -888,6 +917,18 @@ pub async fn process_transcript<R: Runtime>(
         ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_annotation" => {
             let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("annotate the screen").to_string();
             return run_screen_annotation(app, prompt).await;
+        }
+        ParsedIntent::MemoryAudit => {
+            return run_memory_audit(app).await;
+        }
+        ParsedIntent::MemoryForget { key } => {
+            return run_memory_forget(app, key.clone()).await;
+        }
+        ParsedIntent::MemoryForgetAll => {
+            return run_memory_forget_all(app).await;
+        }
+        ParsedIntent::MemoryForgetAllConfirm => {
+            return run_memory_forget_all_confirm(app).await;
         }
         ParsedIntent::StartDictation => {
             set_dictation_active(true);
@@ -1075,6 +1116,18 @@ pub async fn process_transcript<R: Runtime>(
                 let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("annotate the screen").to_string();
                 return run_screen_annotation(app, prompt).await;
             }
+            ParsedIntent::MemoryAudit => {
+                return run_memory_audit(app).await;
+            }
+            ParsedIntent::MemoryForget { key } => {
+                return run_memory_forget(app, key.clone()).await;
+            }
+            ParsedIntent::MemoryForgetAll => {
+                return run_memory_forget_all(app).await;
+            }
+            ParsedIntent::MemoryForgetAllConfirm => {
+                return run_memory_forget_all_confirm(app).await;
+            }
             ParsedIntent::NluResult { intent, slots, .. } if intent == "type_text" => {
                 let text = slots.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 return run_type_text(app, text).await;
@@ -1178,6 +1231,13 @@ pub async fn process_transcript<R: Runtime>(
 
     // 2. Route to subsystem
     let subsystem = route_intent(&intent);
+
+    println!(
+        "[SUB-ROUTE] SubCenter: {} | Subsystem: {:?} | Action: {}",
+        center_name,
+        subsystem,
+        crate::intent_parser::intent_to_label(&intent)
+    );
 
     // Console tracking (one line per turn): transcript → intent → subsystem.
     // INFO-level routing detail stays hidden; this is the trackable shape
@@ -1283,6 +1343,11 @@ pub async fn process_transcript<R: Runtime>(
             // Local commands are instant — no ack, no loading indicator.
             // The frontend handles these directly (open app, media, etc).
             // We just emit done immediately.
+            println!(
+                "[SUB-PROC] SubCenter {} executing local command: {}",
+                center_name,
+                crate::intent_parser::intent_to_label(&intent)
+            );
 
             // Clarification prompts (partial MCP commands) are spoken as a
             // Result event — same channel the frontend already speaks — so
@@ -1358,6 +1423,10 @@ pub async fn process_transcript<R: Runtime>(
             show_loading(&app);
 
             // Dispatch to Worker backend
+            println!(
+                "[SUB-PROC] SubCenter Knowledge routing to 9Router / Cloudflare Worker (request_id={})",
+                request_id
+            );
             let result = dispatch_to_worker(
                 app.clone(),
                 transcript.clone(),
@@ -1368,6 +1437,22 @@ pub async fn process_transcript<R: Runtime>(
                 crate::intent_parser::intent_to_label(&intent),
             )
             .await;
+
+            match &result {
+                Ok((t, _, _)) => {
+                    println!(
+                        "[SUB-PROC] SubCenter Knowledge received response ({} chars, request_id={})",
+                        t.len(),
+                        request_id
+                    );
+                }
+                Err(e) => {
+                    println!(
+                        "[SUB-PROC] SubCenter Knowledge request failed: {} (request_id={})",
+                        e, request_id
+                    );
+                }
+            }
 
             // Hide loading indicator
             emit(
@@ -1869,7 +1954,35 @@ pub async fn process_transcript<R: Runtime>(
                 show_loading(&app);
             }
 
+            println!(
+                "[SUB-PROC] SubCenter Message/Commerce executing MCP intent: {} (request_id={})",
+                crate::intent_parser::intent_to_label(&intent),
+                request_id
+            );
+
             let mcp_outcome = dispatch_to_mcp(&app, &intent, &transcript, &request_id).await;
+
+            match &mcp_outcome {
+                Ok(Some(t)) => {
+                    println!(
+                        "[SUB-PROC] SubCenter Message/Commerce tool finished ({} chars, request_id={})",
+                        t.len(),
+                        request_id
+                    );
+                }
+                Ok(None) => {
+                    println!(
+                        "[SUB-PROC] SubCenter Message/Commerce confirmation prompt pending (request_id={})",
+                        request_id
+                    );
+                }
+                Err(e) => {
+                    println!(
+                        "[SUB-PROC] SubCenter Message/Commerce failed: {} (request_id={})",
+                        e, request_id
+                    );
+                }
+            }
 
             if !is_write_intent {
                 emit(
@@ -1979,9 +2092,9 @@ pub async fn process_transcript<R: Runtime>(
 
 /// DAC/room-reverb tail drain after cutting TTS before fresh capture (ms).
 /// Single owner — every barge path sleeps this after `request_barge_in`.
-/// Matches the hotkey branch's measured 150 ms (sound card + room tail
-/// outlive `stop_tts()` and would otherwise poison the new capture).
-pub(crate) const BARGE_DAC_DRAIN_MS: u64 = 150;
+/// 250 ms ensures sound card buffers + room reverb tails completely drain
+/// before opening the mic, preventing speaker audio from bleeding into STT capture.
+pub(crate) const BARGE_DAC_DRAIN_MS: u64 = 250;
 
 /// Alexa-style barge-in choke point: cut speech mid-sentence, cancel the
 /// active turn, clear the TTS flag, purge queued follow-ups — in that
@@ -2962,6 +3075,7 @@ pub(crate) async fn drain_ghost_followups<R: Runtime>(app: &AppHandle<R>) {
     let mut done = 0usize;
     loop {
         if crate::ghost::stop_requested() {
+            tracing::info!("ghost: drain aborted at loop top (stop requested, {done} steps done)");
             crate::ghost::drop_followups();
             break;
         }
@@ -2970,13 +3084,22 @@ pub(crate) async fn drain_ghost_followups<R: Runtime>(app: &AppHandle<R>) {
             None => break,
         };
         if done >= crate::ghost::DRAIN_CAP {
+            tracing::warn!("ghost: drain cap reached ({done} steps), purging remainder");
             crate::ghost::drop_followups();
             break;
         }
+        // Structured step line (log-completeness P4): index, queue id,
+        // slot class, transcript — every step provable in the log.
+        tracing::info!(
+            "ghost: drain step #{done} id={} slot={:?} '{}'",
+            cmd.id,
+            cmd.slot,
+            cmd.transcript
+        );
         // Rule 3: re-verify grounding at dequeue time — never execute
         // blind against a window the user has since left (F4).
         if let Err(e) = crate::ghost::verify_grounding(&cmd) {
-            tracing::warn!("ghost: grounding failed for '{}': {}", cmd.transcript, e);
+            tracing::warn!("ghost: drain step #{done} id={} grounding failed: {}", cmd.id, e);
             let (req_id, _) = install_new_request(Subsystem::LocalCommand);
             speak_line(app, "Target window lost, sir — skipping.".to_string(), &req_id);
             clear_active_request(&req_id);
@@ -2987,10 +3110,10 @@ pub(crate) async fn drain_ghost_followups<R: Runtime>(app: &AppHandle<R>) {
         tokio::time::sleep(tokio::time::Duration::from_millis(gap_ms)).await;
         // A stop that landed during the gap still wins (F1/F2).
         if crate::ghost::stop_requested() {
+            tracing::info!("ghost: drain aborted during gap (stop requested, {done} steps done)");
             crate::ghost::drop_followups();
             break;
         }
-        tracing::info!("ghost: executing dequeued follow-up #{} ({done}): '{}'", cmd.id, cmd.transcript);
         // Boxed: process_transcript → drill → drain forms a cycle;
         // the boxed future breaks the infinite-size recursion.
         // Clone the label first: the transcript moves into the future
@@ -2999,12 +3122,21 @@ pub(crate) async fn drain_ghost_followups<R: Runtime>(app: &AppHandle<R>) {
                 let fut = Box::pin(process_transcript(app.clone(), cmd.transcript, None, None));
         // Rule 4: per-step watchdog — a poisoned step (hung UIA lookup,
         // 60s analysis) must not wedge the queue behind it (F6).
+        let step_start = std::time::Instant::now();
         match tokio::time::timeout(std::time::Duration::from_millis(step_timeout_ms), fut).await {
-            Ok(_) => {}
+            Ok(_) => {
+                tracing::info!(
+                    "ghost: drain step #{done} id={} done in {}ms",
+                    cmd.id,
+                    step_start.elapsed().as_millis()
+                );
+            }
             Err(_) => {
                 tracing::warn!(
-                    "ghost: step watchdog ({}ms) expired, skipping queued '{}'",
+                    "ghost: drain step #{done} id={} watchdog ({}ms) expired after {}ms, skipping queued '{}'",
+                    cmd.id,
                     step_timeout_ms,
+                    step_start.elapsed().as_millis(),
                     label
                 );
                 let (req_id, _) = install_new_request(Subsystem::LocalCommand);
@@ -3308,7 +3440,7 @@ async fn run_screen_annotation<R: Runtime>(
     if let Err(e) = crate::commands::unified_show_sidebar(&app, "annotate", None).await {
         tracing::warn!("annotate: sidebar show failed: {e}");
     }
-    let _ = app.emit("sidebar:show_annotation", seed);
+    crate::commands::emit_logged(&app, "sidebar:show_annotation", seed);
     // 3. Cached spoken confirmation (<5ms, see tts::CACHED_PHRASES).
     speak_line(&app, "Annotation ready, sir.".to_string(), &request_id);
     clear_active_request(&request_id);
@@ -3319,16 +3451,515 @@ async fn run_screen_annotation<R: Runtime>(
     })
 }
 
+// ─── Narrated screen tour ──────────────────────────────────────────────
+//
+// "Nexus, analyse my screen": STT → thinking → short ack → orb hides while
+// we capture + ask the VLM (spinner) → the orb returns and NEXUS narrates an
+// OVERVIEW while the stage overlay points at one thing at a time (ring +
+// callout, strictly synced to the audible line by `tts::narrate`) → overlay
+// clears, the full breakdown opens in the sidebar. Pure logic (script
+// validation, state machine) lives in `screen_tour.rs`.
+
+/// Outcome of a narrated-tour attempt.
+enum TourRun {
+    Done(ProcessResult),
+    /// Tour unavailable (no key/quota/capture failure/unusable script) — the
+    /// legacy chain continues. `acked` = an ack was already spoken.
+    Fallback { acked: bool },
+}
+
+fn tour_end_reason_label(r: crate::screen_tour::EndReason) -> &'static str {
+    match r {
+        crate::screen_tour::EndReason::Done => "done",
+        crate::screen_tour::EndReason::Cancelled => "cancelled",
+        crate::screen_tour::EndReason::Failed => "failed",
+    }
+}
+
+/// Translate engine actions into overlay events. Only the CURRENT callout is
+/// ever sent — the frontend never holds future items.
+fn apply_tour_actions<R: Runtime>(
+    app: &AppHandle<R>,
+    request_id: &str,
+    script: &crate::screen_tour::TourScript,
+    actions: Vec<crate::screen_tour::Action>,
+) {
+    use crate::screen_tour::Action;
+    for a in actions {
+        match a {
+            Action::Show(i) => {
+                if let Some(item) = script.items.get(i) {
+                    let _ = app.emit(
+                        "screen:callout",
+                        crate::screen_tour::callout_json(
+                            request_id,
+                            item,
+                            i,
+                            script.items.len(),
+                            script.region,
+                        ),
+                    );
+                }
+            }
+            Action::Clear => {
+                let _ = app.emit(
+                    "screen:callout_clear",
+                    serde_json::json!({ "request_id": request_id }),
+                );
+            }
+            Action::End(reason) => {
+                let _ = app.emit(
+                    "screen:tour_end",
+                    serde_json::json!({
+                        "request_id": request_id,
+                        "reason": tour_end_reason_label(reason),
+                    }),
+                );
+            }
+        }
+    }
+}
+
+fn end_tour_fetch<R: Runtime>(app: &AppHandle<R>, request_id: &str, shown: bool) {
+    if shown {
+        emit(
+            app,
+            &OrchestratorEvent::Loading {
+                visible: false,
+                request_id: request_id.to_string(),
+            },
+        );
+        hide_loading(app);
+    }
+}
+
+/// Tour unavailable: stop the spinner, tell the frontend not to hide the orb
+/// (the legacy chain speaks next), and hand control back.
+fn tour_fallback<R: Runtime>(app: &AppHandle<R>, request_id: &str, spoken: bool) -> TourRun {
+    end_tour_fetch(app, request_id, spoken);
+    let _ = app.emit(
+        "screen:tour_phase",
+        serde_json::json!({ "phase": "fallback", "request_id": request_id }),
+    );
+    TourRun::Fallback { acked: spoken }
+}
+
+async fn show_sidebar_spatial<R: Runtime>(app: &AppHandle<R>, payload: &serde_json::Value) {
+    if let Err(e) = crate::commands::unified_show_sidebar(app, "spatial", None).await {
+        tracing::warn!("screen_tour: sidebar show failed: {e}");
+    }
+    crate::commands::emit_logged(app, "sidebar:show_spatial", payload.clone());
+}
+
+#[cfg(target_os = "windows")]
+async fn run_screen_tour<R: Runtime>(
+    app: &AppHandle<R>,
+    prompt: &str,
+    request_id: &str,
+    cancel_flag: &Arc<AtomicBool>,
+) -> TourRun {
+    use crate::screen_tour as st;
+    let rid = request_id.to_string();
+    let done_result = |rid: &str| ProcessResult {
+        request_id: rid.to_string(),
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    };
+    let meeting = app.try_state::<Arc<crate::meeting_detect::MeetingState>>();
+    // Meeting (screen share / call): the overlay is not hidden from the share
+    // and speech would be muted anyway → sidebar only, no overlay, no ack.
+    let quiet = meeting
+        .as_ref()
+        .map(|m| m.should_suppress_tts())
+        .unwrap_or(false);
+    let spoken = !quiet;
+
+    // 1. thinking → ack → orb hides + spinner while we fetch.
+    if spoken {
+        let ack_text = st::screen_ack(network::uuid_v4().as_bytes()[0]).to_string();
+        emit(
+            app,
+            &OrchestratorEvent::State {
+                state: OrchestratorState::Thinking,
+                request_id: rid.clone(),
+            },
+        );
+        emit(
+            app,
+            &OrchestratorEvent::Ack {
+                text: ack_text.clone(),
+                request_id: rid.clone(),
+            },
+        );
+        speak_line(app, ack_text, &rid);
+        let _ = app.emit(
+            "screen:tour_phase",
+            serde_json::json!({ "phase": "fetching", "request_id": rid }),
+        );
+        emit(
+            app,
+            &OrchestratorEvent::Loading { visible: true, request_id: rid.clone() },
+        );
+        show_loading(app);
+    }
+
+    // 2. what is the user looking at? (app, tab title, trimmed URL, YouTube
+    //    title/channel, page-content region). Gathered while the ack plays;
+    //    the stage never takes focus so the foreground window is still theirs.
+    let (sw, sh) = crate::screen::primary_monitor_size().unwrap_or((1920, 1080));
+    let ctx = crate::screen_context::collect(sw, sh).await;
+    if ctx.sensitive {
+        // Banks / password managers / wallets: nothing is captured or sent.
+        tracing::info!("screen_tour: sensitive window — refusing to analyse");
+        end_tour_fetch(app, &rid, spoken);
+        let _ = app.emit(
+            "screen:tour_phase",
+            serde_json::json!({ "phase": "fallback", "request_id": rid }),
+        );
+        if spoken {
+            speak_line(app, "I won't analyse this window, sir.".to_string(), &rid);
+        } else {
+            emit(app, &OrchestratorEvent::Done { request_id: rid.clone() });
+        }
+        clear_active_request(&rid);
+        return TourRun::Done(done_result(&rid));
+    }
+    if is_cancelled(cancel_flag) {
+        end_tour_fetch(app, &rid, spoken);
+        clear_active_request(&rid);
+        return TourRun::Done(done_result(&rid));
+    }
+
+    // 3. capture the page content only, with the stage excluded (no orb /
+    //    spinner / old pins in the shot; no tabs, URL bar or taskbar either).
+    crate::commands::emit_logged(
+        app,
+        "stage:spatial_annotations",
+        serde_json::json!({ "title": "", "pins": [] }),
+    );
+    let excluded = crate::stage::set_capture_excluded(app, true);
+    if excluded {
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    }
+    let full = crate::screen_context::Region::full(sw, sh);
+    let mut candidates = vec![ctx.region];
+    if ctx.region != full {
+        candidates.push(full); // crop failed to capture → whole screen
+    }
+    let mut cap: Option<(String, crate::screen_context::Region)> = None;
+    for r in candidates {
+        let got = tokio::task::spawn_blocking(move || {
+            crate::vision::capture_region_jpeg_base64(r.x, r.y, r.w, r.h, 1536)
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(b64) = got {
+            cap = Some((b64, r));
+            break;
+        }
+    }
+    if excluded {
+        crate::stage::set_capture_excluded(app, false);
+    }
+    let Some((b64, used_region)) = cap else {
+        tracing::warn!("screen_tour: capture failed — falling back");
+        return tour_fallback(app, &rid, spoken);
+    };
+    let region_tuple = (used_region.x, used_region.y, used_region.w, used_region.h);
+    // The crop failed and we fell back to the whole screen: tell the model so.
+    let mut ctx = ctx;
+    if used_region != ctx.region {
+        ctx.region = used_region;
+        ctx.full_screen = true;
+    }
+    tracing::info!("screen_tour: capturing region {:?} of {sw}x{sh}", region_tuple);
+    if let Some(dir) = std::env::var_os("NEXUS_TOUR_DUMP_DIR") {
+        use base64::Engine;
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&b64) {
+            let _ = std::fs::write(std::path::Path::new(&dir).join("tour_capture.jpg"), bytes);
+        }
+    }
+    if is_cancelled(cancel_flag) {
+        end_tour_fetch(app, &rid, spoken);
+        clear_active_request(&rid);
+        return TourRun::Done(done_result(&rid));
+    }
+
+    // 4. vision → validated script (strong model first, lite fallback).
+    let script = match st::analyze_tour_image(app, prompt, &ctx.prompt_block(), &b64, region_tuple).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("screen_tour: {e} — falling back to local OCR");
+            end_tour_fetch(app, &rid, spoken);
+            let _ = app.emit(
+                "screen:tour_phase",
+                serde_json::json!({ "phase": "fallback", "request_id": rid }),
+            );
+            if spoken {
+                speak_line(app, "I'm having trouble reaching the vision service, sir. Reading the visible text on your screen instead.".to_string(), &rid);
+            }
+            if let Some(res) = try_ocr_answer(app, prompt, &rid).await {
+                clear_active_request(&rid);
+                return TourRun::Done(res);
+            }
+            return tour_fallback(app, &rid, spoken);
+        }
+    };
+    if is_cancelled(cancel_flag) {
+        end_tour_fetch(app, &rid, spoken);
+        clear_active_request(&rid);
+        return TourRun::Done(done_result(&rid));
+    }
+    let payload_json = serde_json::to_value(script.to_payload()).unwrap_or(serde_json::Value::Null);
+    crate::commands::set_pending_spatial(&payload_json);
+
+    // Meeting: detail in the sidebar only.
+    if quiet {
+        println!("[TOUR] meeting active — showing the breakdown in the sidebar only");
+        show_sidebar_spatial(app, &payload_json).await;
+        emit(app, &OrchestratorEvent::Done { request_id: rid.clone() });
+        clear_active_request(&rid);
+        return TourRun::Done(done_result(&rid));
+    }
+
+    // 4. let the ack finish (starting narration would cut it), then bring the
+    //    orb back and start the tour.
+    if let Some(m) = meeting.as_ref() {
+        let t0 = std::time::Instant::now();
+        while m.tts_playing.load(Ordering::Relaxed) && t0.elapsed().as_millis() < 4_000 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+    end_tour_fetch(app, &rid, spoken);
+    if is_cancelled(cancel_flag) {
+        clear_active_request(&rid);
+        return TourRun::Done(done_result(&rid));
+    }
+    let overlay_ok = crate::stage::is_shown();
+    let _ = app.emit(
+        "screen:tour_start",
+        serde_json::json!({
+            "request_id": rid,
+            "title": script.title,
+            "count": script.items.len(),
+            "screen_w": sw,
+            "screen_h": sh,
+            "overlay": overlay_ok,
+        }),
+    );
+
+    // 5. narrate: line i audible ⇔ callout i shown.
+    let mut steps = st::narration_steps(&script);
+    if !overlay_ok {
+        // No overlay → no pointing: speak only the overview + closer.
+        steps.retain(|s| s.item.is_none());
+    }
+    let lines: Vec<String> = steps.iter().map(|s| s.text.clone()).collect();
+    let engine = Arc::new(std::sync::Mutex::new(st::TourEngine::new(&steps)));
+    let script = Arc::new(script);
+
+    let watch_done = Arc::new(AtomicBool::new(false));
+    {
+        let (d, c) = (watch_done.clone(), cancel_flag.clone());
+        tauri::async_runtime::spawn(async move {
+            while !d.load(Ordering::Relaxed) {
+                if c.load(Ordering::Relaxed) {
+                    let _ = crate::tts::stop_tts(); // new request superseded us
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        });
+    }
+
+    let on_event = {
+        let (a, e, s, r) = (app.clone(), engine.clone(), script.clone(), rid.clone());
+        move |ev: crate::tts::NarrationEvent| {
+            let acts = {
+                let mut eng = e.lock().unwrap();
+                match ev {
+                    crate::tts::NarrationEvent::Started(i) => eng.step_started(i),
+                    crate::tts::NarrationEvent::Ended(i) => eng.step_ended(i),
+                }
+            };
+            apply_tour_actions(&a, &r, &s, acts);
+        }
+    };
+    let outcome = crate::tts::narrate(app.clone(), lines, on_event).await;
+    watch_done.store(true, Ordering::Relaxed);
+
+    let reason = match outcome {
+        crate::tts::NarrateOutcome::Completed => st::EndReason::Done,
+        crate::tts::NarrateOutcome::Cancelled => st::EndReason::Cancelled,
+        crate::tts::NarrateOutcome::Unavailable(why) => {
+            // Offline / TTS down: timed silent tour — the callouts carry the text.
+            tracing::warn!("screen_tour: audio unavailable ({why}) — timed callouts");
+            let t0 = std::time::Instant::now();
+            let acts = engine.lock().unwrap().audio_unavailable(0);
+            apply_tour_actions(app, &rid, &script, acts);
+            let mut cancelled = false;
+            loop {
+                if is_cancelled(cancel_flag) {
+                    cancelled = true;
+                    break;
+                }
+                let ended = engine.lock().unwrap().is_ended();
+                if ended {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let acts = engine.lock().unwrap().tick(t0.elapsed().as_millis() as u64);
+                apply_tour_actions(app, &rid, &script, acts);
+            }
+            if cancelled { st::EndReason::Cancelled } else { st::EndReason::Done }
+        }
+    };
+    let acts = engine.lock().unwrap().end(reason); // no-op when already ended
+    apply_tour_actions(app, &rid, &script, acts);
+
+    // 6. detail → sidebar (at the END, so it never covers a target); orb off.
+    if reason != st::EndReason::Cancelled {
+        show_sidebar_spatial(app, &payload_json).await;
+        emit(app, &OrchestratorEvent::Done { request_id: rid.clone() });
+    }
+    clear_active_request(&rid);
+    TourRun::Done(done_result(&rid))
+}
+
+/// Credential hints for the memory profile refresh (M1): primary Google
+/// email + voice enrollment. GitHub login stays None until a successful
+/// authenticated call caches it (M5) — refresh never touches the network.
+fn memory_credential_hints<R: Runtime>(app: &AppHandle<R>) -> (Option<String>, bool) {
+    let accounts = crate::auth_vault::get_google_accounts();
+    let email = accounts
+        .iter()
+        .find(|a| a.is_primary)
+        .or_else(|| accounts.first())
+        .map(|a| a.email.clone());
+    let enrolled = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|dir| {
+            crate::voice_profile::VoiceProfile::load(&crate::voice_profile::resolve_profile_path(&dir))
+                .map(|v| v.is_enrolled())
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    (email, enrolled)
+}
+
+fn local_result(request_id: String, subsystem: Subsystem) -> ProcessResult {
+    ProcessResult {
+        request_id,
+        subsystem,
+        handled_locally: true,
+    }
+}
+
+/// Speak the memory audit summary (M0 — local, never cloud). Refreshes
+/// the unified profile first so the answer is current.
+async fn run_memory_audit<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let summary = match app.path().app_data_dir() {
+        Ok(dir) => {
+            let (email, enrolled) = memory_credential_hints(&app);
+            crate::memory::refresh_user_profile(&dir, email.as_deref(), None, enrolled);
+            crate::memory::memory_audit_summary(&dir)
+        }
+        Err(_) => "I couldn't open my memory, sir.".to_string(),
+    };
+    speak_line(&app, summary, &request_id);
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
+/// Forget one fact (M0). Key normalized exactly like `remember` stores.
+async fn run_memory_forget<R: Runtime>(app: AppHandle<R>, key: String) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let norm = crate::memory::normalize_key(&key);
+    let reply = match app.path().app_data_dir() {
+        Ok(dir) => {
+            if norm.is_empty() {
+                "I didn't catch what to forget, sir.".to_string()
+            } else if crate::memory::forget(&dir, &norm) {
+                format!("Forgot {}, sir.", norm.replace('_', " "))
+            } else {
+                format!("I don't remember {}, sir.", norm.replace('_', " "))
+            }
+        }
+        Err(_) => "I couldn't open my memory, sir.".to_string(),
+    };
+    speak_line(&app, reply, &request_id);
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
+/// Wipe step 1 (M0): warn + demand the confirm phrase. No state machine —
+/// the confirm phrase is its own intent, so nothing can misfire the wipe.
+async fn run_memory_forget_all<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    speak_line(
+        &app,
+        "This erases everything I remember — facts, learned details, and conversations. Say 'yes, forget everything' to confirm, sir.".to_string(),
+        &request_id,
+    );
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
+/// Wipe step 2 (M0): execute + report. Credential islands (Google/GitHub/
+/// voice) are untouched — the profile rebuilds from them on next refresh.
+async fn run_memory_forget_all_confirm<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let reply = match app.path().app_data_dir() {
+        Ok(dir) => {
+            let n = crate::memory::wipe_memory(&dir);
+            if n == 0 {
+                "There was nothing to forget, sir.".to_string()
+            } else {
+                format!("Forgot everything, sir. Removed {} memor{}.", n, if n == 1 { "y" } else { "ies" })
+            }
+        }
+        Err(_) => "I couldn't open my memory, sir.".to_string(),
+    };
+    speak_line(&app, reply, &request_id);
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
 /// Analyze screen contents (Feature 86 spatial flow): Gemini-primary
 /// spatial decomposition → stage overlay pins + sidebar SpatialDashboard.
 /// Graceful degradation chain: spatial VLM → plain-text VLM → UIA count.
 /// Phase 5: ReadOnly queries try free OCR first (cost pre-filter).
+///
+/// Narrated tour first (flag `screenTour`, default on): analyse/explain/
+/// "what am I seeing" prompts get the pointer-and-callout tour; any failure
+/// falls through to the chain below unchanged.
 async fn run_screen_analysis<R: Runtime>(
     app: AppHandle<R>,
     prompt: String,
 ) -> Result<ProcessResult, String> {
-    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-    speak_line(&app, "Analyzing the screen, sir.".to_string(), &request_id);
+    let (request_id, cancel_flag) = install_new_request(Subsystem::LocalCommand);
+    #[allow(unused_mut)]
+    let mut tour_acked = false;
+    #[cfg(target_os = "windows")]
+    {
+        if crate::screen_tour::tour_enabled(&app)
+            && crate::screen_tour::wants_narrated_tour(&prompt)
+        {
+            match run_screen_tour(&app, &prompt, &request_id, &cancel_flag).await {
+                TourRun::Done(result) => return Ok(result),
+                TourRun::Fallback { acked } => tour_acked = acked,
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = &cancel_flag;
+    if !tour_acked {
+        speak_line(&app, "Analyzing the screen, sir.".to_string(), &request_id);
+    }
 
     #[cfg(target_os = "windows")]
     {
@@ -3373,7 +4004,8 @@ async fn run_screen_analysis<R: Runtime>(
                         Vec::new()
                     }
                 };
-                let _ = app.emit(
+                crate::commands::emit_logged(
+                    &app,
                     "stage:spatial_annotations",
                     serde_json::json!({ "title": payload.title, "pins": pins }),
                 );
@@ -3386,7 +4018,7 @@ async fn run_screen_analysis<R: Runtime>(
                 {
                     tracing::warn!("spatial: sidebar show failed: {e}");
                 }
-                let _ = app.emit("sidebar:show_spatial", payload_json);
+                crate::commands::emit_logged(&app, "sidebar:show_spatial", payload_json);
                 // 4. Speak the high-level summary.
                 let n = payload.items.len();
                 let line = format!(
@@ -3971,16 +4603,17 @@ pub fn speak_line<R: Runtime>(app: &AppHandle<R>, text: String, request_id: &str
     );
 }
 
-/// Speak a proactive alert generated in the background by sentinel.
-pub fn speak_proactive_alert<R: Runtime>(app: &AppHandle<R>, text: String) {
-    let req_id = format!(
-        "sentinel_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-    );
-    speak_line(app, text, &req_id);
+/// Speak a proactive alert generated in the background by sentinel — through the proactive-speech
+/// policy (Phase 9): it may be spoken now, deferred to a natural breakpoint (user not speaking, NEXUS
+/// not speaking, no drill, not in a meeting unless Critical), or left as a card. Never "speak
+/// immediately" any more.
+pub fn speak_proactive_alert<R: Runtime>(
+    app: &AppHandle<R>,
+    text: String,
+    urgency: crate::google::types::AlertUrgency,
+    alert_id: String,
+) {
+    crate::proactive_policy::submit(app, alert_id, text, urgency);
 }
 
 /// Watch the current screen email for updates or deadline changes.
@@ -4333,6 +4966,12 @@ async fn run_command_center<R: Runtime>(
     );
     show_loading(&app);
 
+    println!(
+        "[SUB-PROC] CommandCenter executing compound plan ({} steps): '{}'",
+        plan.steps.len(),
+        transcript.chars().take(80).collect::<String>().replace('\n', " ")
+    );
+
     let outcome = crate::command_center::execute_plan(
         &app,
         plan,
@@ -4342,6 +4981,15 @@ async fn run_command_center<R: Runtime>(
         turn,
     )
     .await;
+
+    println!(
+        "[SUB-PROC] CommandCenter plan finished ({}/{} completed, {} failed, {} skipped, awaiting_confirmation: {})",
+        outcome.summary.completed,
+        outcome.summary.total_steps,
+        outcome.summary.failed,
+        outcome.summary.skipped,
+        outcome.summary.awaiting_confirmation,
+    );
 
     emit(
         &app,
@@ -4858,7 +5506,7 @@ pub fn show_loading<R: Runtime>(app: &AppHandle<R>) {
     }
 
     crate::window_manager::emit_loading_rect(app);
-    let _ = app.emit("stage:loading_visible", true);
+    crate::commands::emit_logged(app, "stage:loading_visible", true);
     tracing::info!("orchestrator: loading indicator shown");
 }
 
@@ -4869,7 +5517,7 @@ pub fn show_loading<R: Runtime>(app: &AppHandle<R>) {
 /// The 80px static window stays resident; `show_loading` reuses it via
 /// get_or_create_window. Falls back to destroy if hide fails.
 pub fn hide_loading<R: Runtime>(app: &AppHandle<R>) {
-    let _ = app.emit("stage:loading_visible", false);
+    crate::commands::emit_logged(app, "stage:loading_visible", false);
     tracing::info!("orchestrator: loading indicator hidden");
 }
 

@@ -38,6 +38,17 @@ pub fn get_pending_orb_rect<R: Runtime>(app: AppHandle<R>) -> Option<RectPayload
     cached.or_else(|| Some(orb_rect(&app)))
 }
 
+/// IPC: pull the current orb position ("top" | "bottom").
+#[tauri::command]
+pub fn get_pending_orb_position<R: Runtime>(app: AppHandle<R>) -> String {
+    let (_, v, _) = read_orb_settings(&app);
+    if v > 0.5 {
+        "bottom".to_string()
+    } else {
+        "top".to_string()
+    }
+}
+
 /// IPC: pull the last-computed loading-indicator rect (race-free mount
 /// fallback).
 #[tauri::command]
@@ -66,27 +77,31 @@ pub struct RectPayload {
 pub fn read_orb_settings<R: Runtime>(app: &AppHandle<R>) -> (f64, f64, u32) {
     let dir = match app.path().app_data_dir() {
         Ok(d) => d,
-        Err(_) => return (0.5, 1.0, 200),
+        Err(_) => return (0.5, 0.0, 200),
     };
     let path = dir.join("settings.json");
     if !path.exists() {
-        return (0.5, 1.0, 200);
+        return (0.5, 0.0, 200);
     }
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(_) => return (0.5, 1.0, 200),
+        Err(_) => return (0.5, 0.0, 200),
     };
     let json: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
-        Err(_) => return (0.5, 1.0, 200),
+        Err(_) => return (0.5, 0.0, 200),
     };
-    let h = json.get("orbHorizontalPct").and_then(|v| v.as_f64()).unwrap_or(0.5);
-    let v = json.get("orbVerticalPct").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let pos = json.get("orbPosition").and_then(|v| v.as_str()).unwrap_or("top");
+    let (h, v): (f64, f64) = if pos == "bottom" {
+        (0.5, 1.0)
+    } else {
+        (0.5, 0.0)
+    };
     let size = json.get("orbSize").and_then(|v| v.as_u64()).unwrap_or(200) as u32;
-    // Clamp to safe ranges
+    // Clamp to safe ranges (orb/waves box 180–400 — ensures room for particle sphere).
     let h = h.max(0.0).min(1.0);
     let v = v.max(0.0).min(1.0);
-    let size = size.max(100).min(300);
+    let size = size.max(180).min(400);
     (h, v, size)
 }
 
@@ -110,22 +125,7 @@ fn read_size_key(json: &serde_json::Value, key: &str, fallback: u32, min: u32, m
 /// waves visual inside the orb's stage rect). Defaults = the wakeup
 /// defaults (user invariant: waves live where the wakeup orb lives).
 pub fn read_waves_settings<R: Runtime>(app: &AppHandle<R>) -> (f64, f64, u32) {
-    let fallback = (0.5f64, 1.0f64, 200u32);
-    let dir = match app.path().app_data_dir() {
-        Ok(d) => d,
-        Err(_) => return fallback,
-    };
-    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else {
-        return fallback;
-    };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return fallback;
-    };
-    (
-        read_pct_key(&json, "wavesHorizontalPct", 0.5),
-        read_pct_key(&json, "wavesVerticalPct", 1.0),
-        read_size_key(&json, "wavesSize", 200, 100, 300),
-    )
+    read_orb_settings(app)
 }
 
 /// Read loading-indicator placement from settings.json. Defaults ≈ the
@@ -236,7 +236,7 @@ pub fn orb_rect<R: Runtime>(app: &AppHandle<R>) -> RectPayload {
 
 /// Register the orb's current rect as an interactive stage hitbox (so
 /// pointer events reach it instead of passing through to the desktop).
-fn set_orb_hitbox_interactive<R: Runtime>(app: &AppHandle<R>, rect: RectPayload) {
+fn set_orb_hitbox_interactive<R: Runtime>(_app: &AppHandle<R>, rect: RectPayload) {
     crate::stage::set_hitbox_source(
         "orb",
         vec![crate::stage::StageRect { x: rect.x, y: rect.y, w: rect.w, h: rect.h }],
@@ -254,7 +254,9 @@ pub fn emit_orb_rect<R: Runtime>(app: &AppHandle<R>) {
     }
     let rect = orb_rect(app);
     *LAST_ORB_RECT.lock() = Some(rect);
-    let _ = app.emit("stage:orb_rect", rect);
+    crate::commands::emit_logged(app, "stage:orb_rect", rect);
+    let (_, v, _) = read_orb_settings(app);
+    crate::commands::emit_logged(app, "stage:orb_position", if v > 0.5 { "bottom" } else { "top" });
 }
 
 /// Emit the loading-indicator's rect (`stage:loading_rect`). Same
@@ -266,7 +268,7 @@ pub fn emit_loading_rect<R: Runtime>(app: &AppHandle<R>) {
     let (h, v, size) = read_loading_settings(app);
     let rect = rect_for(app, h, v, size);
     *LAST_LOADING_RECT.lock() = Some(rect);
-    let _ = app.emit("stage:loading_rect", rect);
+    crate::commands::emit_logged(app, "stage:loading_rect", rect);
 }
 
 /// Show the orb and make it interactive (rect + visible + hitbox). Does
@@ -276,8 +278,10 @@ pub fn emit_loading_rect<R: Runtime>(app: &AppHandle<R>) {
 pub fn show_orb_interactive<R: Runtime>(app: &AppHandle<R>) {
     let rect = orb_rect(app);
     *LAST_ORB_RECT.lock() = Some(rect);
-    let _ = app.emit("stage:orb_rect", rect);
-    let _ = app.emit("stage:orb_visible", true);
+    crate::commands::emit_logged(app, "stage:orb_rect", rect);
+    let (_, v, _) = read_orb_settings(app);
+    crate::commands::emit_logged(app, "stage:orb_position", if v > 0.5 { "bottom" } else { "top" });
+    crate::commands::emit_logged(app, "stage:orb_visible", true);
     set_orb_hitbox_interactive(app, rect);
 }
 
@@ -290,7 +294,7 @@ pub fn show_orb_interactive<R: Runtime>(app: &AppHandle<R>) {
 /// and the frontend listens for a real Tauri event instead of an eval.
 pub fn wake_orb<R: Runtime>(app: &AppHandle<R>) {
     show_orb_interactive(app);
-    let _ = app.emit("orb:wake", ());
+    crate::commands::emit_logged(app, "orb:wake", ());
 }
 
 /// IPC: orb interactivity (replaces `set_click_through`). The orb is a
@@ -322,11 +326,14 @@ pub fn set_orb_position<R: Runtime>(
 ) -> Result<(), String> {
     let h = horizontal_pct.max(0.0).min(1.0);
     let v = vertical_pct.max(0.0).min(1.0);
-    let s = size.max(100).min(300);
+    let s = size.max(100).min(400);
     let rect = rect_for(&app, h, v, s);
     *LAST_ORB_RECT.lock() = Some(rect);
-    let _ = app.emit("stage:orb_rect", rect);
-    tracing::debug!("set_orb_position: emitted rect {:?} [h={h}, v={v}]", rect);
+    crate::commands::emit_logged(&app, "stage:orb_rect", rect);
+    let pos_tag = if v > 0.5 { "bottom" } else { "top" };
+    crate::commands::emit_logged(&app, "stage:orb_position", pos_tag);
+    set_orb_hitbox_interactive(&app, rect);
+    tracing::debug!("set_orb_position: emitted rect {:?} [h={h}, v={v}, pos={pos_tag}]", rect);
     Ok(())
 }
 

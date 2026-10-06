@@ -126,6 +126,30 @@ pub fn stage_show_sync<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
     *SHOWN_AT.lock() = Some(std::time::Instant::now());
     tracing::info!("stage: shown (click-through enforced)");
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(hwnd) = win.hwnd() {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                FindWindowW, SetWindowPos, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE,
+            };
+            use windows::core::PCWSTR;
+            unsafe {
+                let class_name: Vec<u16> = "Shell_TrayWnd\0".encode_utf16().collect();
+                let taskbar = FindWindowW(PCWSTR(class_name.as_ptr()), PCWSTR(std::ptr::null()));
+                if taskbar != HWND(0) {
+                    let _ = SetWindowPos(
+                        HWND(hwnd.0 as _),
+                        taskbar,
+                        0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -187,6 +211,45 @@ pub async fn stage_hide_kill<R: Runtime>(app: AppHandle<R>) -> Result<(), String
     crate::dyn_windows::destroy_window(&app, LABEL)?;
     tracing::warn!("stage: kill-switch engaged (disabled for session)");
     Ok(())
+}
+
+/// True while the stage window is up and not kill-switched.
+pub fn is_shown() -> bool {
+    visible() && !disabled()
+}
+
+/// Toggle `WDA_EXCLUDEFROMCAPTURE` on the stage window so our own screen
+/// capture (screen tour / analysis) never contains the orb, spinner or old
+/// annotations. Deliberately temporary: a permanent exclusion would also
+/// hide NEXUS from the user's recordings and screen shares. Returns false
+/// when the window/handle is unavailable. The GDI desktop-DC capture used
+/// by the sidebar backdrop already relies on this affinity being honoured
+/// for the (permanently excluded) sidebar window.
+pub fn set_capture_excluded<R: Runtime>(app: &AppHandle<R>, excluded: bool) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY,
+        };
+        let Some(win) = app.get_webview_window(LABEL) else {
+            return false;
+        };
+        let Ok(hwnd) = win.hwnd() else {
+            return false;
+        };
+        // WDA_EXCLUDEFROMCAPTURE = 0x11, WDA_NONE = 0.
+        let affinity = if excluded { 0x11 } else { 0 };
+        unsafe {
+            let _ = SetWindowDisplayAffinity(HWND(hwnd.0 as _), WINDOW_DISPLAY_AFFINITY(affinity));
+        }
+        true
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, excluded);
+        false
+    }
 }
 
 #[cfg(target_os = "windows")]
