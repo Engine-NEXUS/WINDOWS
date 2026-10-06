@@ -49,7 +49,7 @@ fn owner_repo_token(text: &str) -> bool {
 }
 
 fn source_strength(source: &str) -> u8 {
-    if source == "deterministic" {
+    if source == "deterministic" || source == "deterministic-live" || source == "deterministic-partial" {
         3
     } else if source == "nlu" || source == "brain" {
         2
@@ -181,15 +181,20 @@ pub fn action_disposition(
     }
 
     if !is_side_effect(intent) {
-        return ActionDisposition::Allow;
+        return match ownership {
+            TurnOwnership::Verified | TurnOwnership::Unenrolled => ActionDisposition::Allow,
+            TurnOwnership::Uncertain if !ghost_active => ActionDisposition::Clarify,
+            _ => ActionDisposition::AmbientDrop,
+        };
     }
 
     match (evidence, ownership) {
         (CommandEvidence::Strong, TurnOwnership::Verified) => ActionDisposition::Allow,
-        (CommandEvidence::Strong, TurnOwnership::Unenrolled) if !ghost_active => {
-            ActionDisposition::Allow
-        }
+        (CommandEvidence::Strong, TurnOwnership::Unenrolled) => ActionDisposition::Allow,
         (CommandEvidence::Medium, TurnOwnership::Verified) => ActionDisposition::Allow,
+        (CommandEvidence::Medium, TurnOwnership::Unenrolled) if !ghost_active => {
+            ActionDisposition::Clarify
+        }
         (_, _) if ghost_active => ActionDisposition::AmbientDrop,
         _ => ActionDisposition::Clarify,
     }
@@ -284,6 +289,11 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
 
         ParsedIntent::WatchScreenEmail => "GoogleCenter",
 
+        ParsedIntent::MemoryAudit
+        | ParsedIntent::MemoryForget { .. }
+        | ParsedIntent::MemoryForgetAll
+        | ParsedIntent::MemoryForgetAllConfirm => "MemoryCenter",
+
         ParsedIntent::NluResult { intent: name, .. } => {
             if name.starts_with("youtube_") {
                 "YouTubeCenter"
@@ -297,6 +307,8 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
                 "DictationCenter"
             } else if name == "focus_app" {
                 "AppCenter"
+            } else if name == "screen_analysis" {
+                "GhostCenter"
             } else {
                 "NluCenter"
             }
@@ -372,13 +384,17 @@ pub fn validate(intent: &ParsedIntent, transcript: &str, has_dialog_context: boo
             slot: "more_info",
             prompt: prompt.clone(),
         },
-        ParsedIntent::NluResult { intent: name, slots, .. } if name == "youtube_search" => {
-            let query = slots.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
-            if query.is_empty() {
-                Validity::NeedSlot {
-                    slot: "query",
-                    prompt: "What would you like me to search for on YouTube, sir?".to_string(),
-                }
+        ParsedIntent::NluResult { intent: name, slots, .. } => {
+            if name.starts_with("youtube_") {
+                crate::youtube_center::YouTubeCenter::new().validate(name, slots)
+            } else if name.starts_with("system_")
+                || name == "focus_app"
+                || name == "inspect_window"
+                || name == "click_element"
+            {
+                crate::system_center::SystemCenter::new().validate(name, slots)
+            } else if name.starts_with("browser_") {
+                crate::browser_center::BrowserCenter::new().validate(name, slots)
             } else {
                 Validity::Ok
             }
@@ -386,6 +402,25 @@ pub fn validate(intent: &ParsedIntent, transcript: &str, has_dialog_context: boo
         _ => Validity::Ok,
     }
 }
+
+/// All 15 action sub-centers in the NEXUS Command Center architecture.
+pub const ALL_SUB_CENTERS: &[&str] = &[
+    "AppCenter",
+    "BrowserCenter",
+    "SystemCenter",
+    "MediaCenter",
+    "YouTubeCenter",
+    "MessageCenter",
+    "CommerceCenter",
+    "GitHubCenter",
+    "ArchitectCenter",
+    "GhostCenter",
+    "GoogleCenter",
+    "MemoryCenter",
+    "DictationCenter",
+    "GreetingCenter",
+    "KnowledgeCenter",
+];
 
 // ─── Unit Tests ──────────────────────────────────────────────────────────────
 
@@ -539,15 +574,15 @@ pub fn stt_mute_note(gate: SttGate) -> &'static str {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TtsEngine {
     Edge,
-    Piper,
+    Local,
 }
 
-/// Upfront engine policy: explicit Piper voice always goes local;
+/// Upfront engine policy: explicit local voice always goes local;
 /// network-down skips Edge entirely (saves ~1-2s of failing). Otherwise
-/// Edge is attempted first with Piper as the per-call fallback.
-pub fn tts_engine_for(piper_voice_selected: bool, network_up: bool) -> TtsEngine {
-    if piper_voice_selected || !network_up {
-        TtsEngine::Piper
+/// Edge is attempted first with the local Kokoro voice as the per-call fallback.
+pub fn tts_engine_for(local_voice_selected: bool, network_up: bool) -> TtsEngine {
+    if local_voice_selected || !network_up {
+        TtsEngine::Local
     } else {
         TtsEngine::Edge
     }
@@ -581,8 +616,8 @@ mod director_tests {
 
     #[test]
     fn test_tts_engine_matrix() {
-        assert_eq!(tts_engine_for(true, true), TtsEngine::Piper);
-        assert_eq!(tts_engine_for(false, false), TtsEngine::Piper);
+        assert_eq!(tts_engine_for(true, true), TtsEngine::Local);
+        assert_eq!(tts_engine_for(false, false), TtsEngine::Local);
         assert_eq!(tts_engine_for(false, true), TtsEngine::Edge);
     }
 
@@ -642,6 +677,29 @@ mod director_tests {
                 "analyse zync",
                 "deterministic",
                 TurnOwnership::Verified,
+                true
+            ),
+            ActionDisposition::Allow
+        );
+    }
+
+    #[test]
+    fn test_ghost_mode_unenrolled_strong_command_allowed() {
+        let tab_cmd = ParsedIntent::NluResult {
+            intent: "browser_new_tab".to_string(),
+            slots: serde_json::json!({}),
+            confidence: 0.95,
+        };
+        assert_eq!(
+            command_evidence(&tab_cmd, "create a new tab", "deterministic"),
+            CommandEvidence::Strong
+        );
+        assert_eq!(
+            action_disposition(
+                &tab_cmd,
+                "create a new tab",
+                "deterministic",
+                TurnOwnership::Unenrolled,
                 true
             ),
             ActionDisposition::Allow

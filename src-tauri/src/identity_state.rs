@@ -296,9 +296,6 @@ fn network_device_id(dir: &std::path::Path) -> String {
 
 // ---- Pending-approval poll loop ----
 
-const POLL_INTERVAL_SECS: u64 = 600; // 10 min
-const POLLS_PER_SESSION: u32 = 18;   // ~3h cap, then stop silently
-
 /// Self-revoke the current device (reinstall path). The device token is
 /// invalidated server-side; local canonical identity is reset to
 /// provisional so a later claim can register cleanly.

@@ -7,6 +7,19 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod window_manager;
+// Smart Turn end-of-turn model — standalone prototype, not yet wired into capture.
+#[allow(dead_code)]
+pub mod turn_detect;
+// Silero VAD (Handy-derived) — used by the STT capture loop when "vadSilero" is on.
+pub mod vad;
+// Phase 8: directed-speech gate for open-mic (ghost hot-mic) turns
+pub mod directed;
+// Phase 9: when proactive alerts may speak (breakpoints, urgency, meeting policy)
+pub mod proactive_policy;
+pub mod screen_context;
+pub mod screen_tour;
+// Kokoro-82M local TTS (replaces Piper) — see docs/research/jarvis-landscape/09
+pub mod tts_kokoro;
 #[cfg(not(target_os = "linux"))]
 mod hotkey;
 // wakeword-oww (default): openWakeWord via tract-onnx (pure Rust, no C++ deps)
@@ -41,7 +54,6 @@ mod stt_learning;
 mod stt_stream;
 mod tts;
 pub mod tts_edge;
-pub mod tts_piper;
 mod tts_network;
 pub mod tts_swap;
 pub mod voice_catalog;
@@ -213,91 +225,12 @@ fn cleanup_webview2_profile() {
     }
 }
 
-/// Set the espeak-ng data path environment variables BEFORE any code
-/// triggers espeak initialization. The espeak-rs crate checks
-/// `PIPER_ESPEAKNG_DATA_DIRECTORY` and the C espeak-ng library checks
-/// `ESPEAK_DATA_PATH`. Both must point to the directory that *contains*
-/// the `espeak-ng-data/` folder.
-///
-/// In a bundled app, espeak-ng-data is at `exe_dir/resources/espeak-ng-data/`.
-/// In dev mode, it's at `src-tauri/resources/espeak-ng-data/` (via cwd).
-///
-/// This MUST be called before Kokoro/Piper lazy-init because espeak-rs
-/// uses a `OnceLock` — if initialization fails once, all subsequent
-/// calls return the cached error forever.
-fn setup_espeak_data_path() {
-    // Don't override if the user already set it
-    if std::env::var("PIPER_ESPEAKNG_DATA_DIRECTORY").is_ok() {
-        return;
-    }
-
-    // 1. Check exe_dir/resources/ (bundled app or Tauri dev with resources)
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            let res_dir = exe_dir.join("resources");
-            if res_dir.join("espeak-ng-data").exists() {
-                std::env::set_var("PIPER_ESPEAKNG_DATA_DIRECTORY", &res_dir);
-                // Also set ESPEAK_DATA_PATH for the C library's own fallback
-                std::env::set_var("ESPEAK_DATA_PATH", &res_dir);
-                tracing::info!(
-                    "espeak: data path set to {} (from exe_dir/resources)",
-                    res_dir.display()
-                );
-                return;
-            }
-        }
-    }
-
-    // 2. Check cwd/resources/ (dev mode: running from src-tauri/)
-    if let Ok(cwd) = std::env::current_dir() {
-        let res_dir = cwd.join("resources");
-        if res_dir.join("espeak-ng-data").exists() {
-            std::env::set_var("PIPER_ESPEAKNG_DATA_DIRECTORY", &res_dir);
-            std::env::set_var("ESPEAK_DATA_PATH", &res_dir);
-            tracing::info!(
-                "espeak: data path set to {} (from cwd/resources)",
-                res_dir.display()
-            );
-            return;
-        }
-    }
-
-    // 3. Check cwd/espeak-ng-data/ (running from within the data dir)
-    if let Ok(cwd) = std::env::current_dir() {
-        if cwd.join("espeak-ng-data").exists() {
-            std::env::set_var("PIPER_ESPEAKNG_DATA_DIRECTORY", &cwd);
-            std::env::set_var("ESPEAK_DATA_PATH", &cwd);
-            tracing::info!(
-                "espeak: data path set to {} (from cwd)",
-                cwd.display()
-            );
-            return;
-        }
-    }
-
-    tracing::warn!(
-        "espeak: could not locate espeak-ng-data directory. \
-         Piper/Kokoro TTS fallback may fail with 'phontab: No such file or directory'."
-    );
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,nexus=debug")))
         .with_target(false)
         .init();
-
-    // ─── espeak-ng data path ───────────────────────────────────────────
-    // espeak-rs-sys compiles in a build-time path to espeak-ng-data that
-    // points to target/release/build/espeak-rs-sys-*/out/share/. In a
-    // deployed app that directory doesn't exist. The espeak-rs crate
-    // checks PIPER_ESPEAKNG_DATA_DIRECTORY (and the C library checks
-    // ESPEAK_DATA_PATH) before falling back to the compiled-in path.
-    // We must set these BEFORE any code triggers espeak initialization
-    // (Kokoro/Piper lazy load, ONNX model load, etc.) because espeak-rs
-    // uses a OnceLock — if init fails once, all subsequent calls fail.
-    setup_espeak_data_path();
 
     // ─── WebView2 stale profile cleanup ───────────────────────────────
     //
@@ -391,12 +324,15 @@ pub fn run() {
     }
 
     builder.setup(|app| {
-        // macOS: hide from the Dock and Cmd+Tab switcher (accessory/background app).
-            // macOS: hide from the Dock and Cmd+Tab switcher (accessory/background app).
-            #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+        // Immediate 5-layer preflight system audit — prints health matrix to stdout
+        let audit_dir = app.path().app_data_dir().ok();
+        diagnostics::run_full_system_audit(audit_dir.as_deref());
 
-            // ─── Stage: the always-on home for the orb + loading indicator ──
+        // macOS: hide from the Dock and Cmd+Tab switcher (accessory/background app).
+        #[cfg(target_os = "macos")]
+        app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+        // ─── Stage: the always-on home for the orb + loading indicator ──
             // Single-Stage Shell step 2 (AGENTS.md 2026-09-25 planned this,
             // never executed until now): the voice orb and loading spinner
             // no longer get their own small OS windows ("main",
@@ -562,7 +498,7 @@ pub fn run() {
             let tts_state = tts::TtsState::new();
             let prewarm_cache = tts_state.cache.clone();
             app.manage(tts_state);
-            // Phase 2 TTS: edge-tts (cloud) primary, Piper (local) fallback.
+            // Phase 2 TTS: edge-tts (cloud) primary, Kokoro (local) fallback.
             // No local engine to pre-warm — edge-tts is cloud (0 MB RAM).
             // Only the cached ack phrases are pre-synthesized at boot.
 
@@ -673,6 +609,7 @@ pub fn run() {
             }
             webhook::spawn_listener(app.handle().clone());
             google::sentinel::start_sentinel_poller(app.handle().clone());
+            proactive_policy::start_ticker(app.handle().clone()); // releases deferred alerts at breakpoints
 
             // ─── Pre-warm TTS + STT + NLU at startup (Phase 1) ──────────
             // Eliminates ~31.7s of cold-start latency on the first voice command.
@@ -687,19 +624,40 @@ pub fn run() {
             // TTS pre-warm: pre-synthesize ack phrases using edge-tts (cloud).
             // This generates the 5 cached phrases ("On it sir", etc.) so
             // speak_cached() plays in <5ms. No local engine to load —
-            // edge-tts is cloud (0 MB RAM). Falls back to Piper if offline.
+            // edge-tts is cloud (0 MB RAM). Falls back to the local Kokoro voice if offline.
             let prewarm_cache2 = prewarm_cache.clone();
+            let prewarm_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 tracing::info!("tts: startup cache pre-generation starting...");
-                let voice = "en-US-AvaNeural".to_string(); // default; user can change in settings
+                // the equipped persona's cloud voice (was hardcoded Ava: acks and replies disagreed after a restart)
+                let voice = commands::read_edge_tts_voice(&prewarm_app);
                 tts::pregenerate_cache(&prewarm_cache2, &voice).await;
                 tracing::info!("tts: startup cache pre-generation complete — ack phrases ready");
             });
 
             // Start TTS network monitor — re-probes every 30s while down
             // (cloud-restored watchdog, P4), every 60s while up, and
-            // unloads Piper after 10 minutes of stable network.
+            // unloads Kokoro after 10 minutes of stable network.
             tts_network::start_network_monitor(app.handle().clone());
+
+            // Offline voice (Feature 83): make sure the equipped persona's Kokoro voice is installed.
+            // First run downloads the shared model once (background, cloud keeps speaking meanwhile);
+            // afterwards it is a 0.5 MB voice file. Delayed so it never competes with boot, and only
+            // attempted while online (the network watchdog re-runs it when the cloud returns).
+            {
+                let h = app.handle().clone();
+                if let Some(p) = voice_catalog::find_by_key(&commands::read_selected_voice(&h)) {
+                    tts_kokoro::set_preferred_voice(p.kokoro_voice);
+                }
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                    if tts_network::check_network_now().await {
+                        if let Some(engine) = tts::kokoro_engine_handle() {
+                            tts_swap::sync_selected_voice(&h, engine);
+                        }
+                    }
+                });
+            }
 
             // STT pre-warm removed in Phase 2.
             // Primary STT is now Groq cloud (0 MB RAM, ~247ms latency).
@@ -945,6 +903,7 @@ pub fn run() {
             window_manager::set_orb_interactive,
             window_manager::set_orb_position,
             window_manager::get_pending_orb_rect,
+            window_manager::get_pending_orb_position,
             window_manager::get_pending_loading_rect,
             network::open_session,
             network::send_transcript,
@@ -1040,6 +999,8 @@ pub fn run() {
             commands::resume_wakeword,
             commands::mic_self_test,
             commands::start_stt_capture,
+            directed::directed_gate,
+            proactive_policy::proactive_snooze,
             commands::stop_stt_capture,
             commands::stt_capture_had_speech,
             commands::google_get_accounts,

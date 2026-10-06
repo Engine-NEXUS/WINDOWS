@@ -224,6 +224,74 @@ fn get_foreground_window_title() -> Option<String> {
     }
 }
 
+// ─── Screen-tour context accessors (pub(crate)) ──────────────────────
+
+/// Foreground window title (screen-tour context).
+#[cfg(target_os = "windows")]
+pub(crate) fn foreground_window_title() -> Option<String> {
+    get_foreground_window_title()
+}
+
+/// Foreground process executable name, lower-case (e.g. `brave.exe`).
+#[cfg(target_os = "windows")]
+pub(crate) fn foreground_process_name() -> Option<String> {
+    get_process_name(get_foreground_process_id()?)
+}
+
+/// True for the browsers whose page content we can locate.
+pub(crate) fn is_browser_process(name: &str) -> bool {
+    matches!(
+        name,
+        "chrome.exe" | "brave.exe" | "msedge.exe" | "firefox.exe" | "opera.exe" | "vivaldi.exe"
+    )
+}
+
+/// Foreground window rect in physical px: (x, y, w, h).
+#[cfg(target_os = "windows")]
+pub(crate) fn foreground_window_rect() -> Option<(i32, i32, i32, i32)> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect};
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0 == 0 {
+            return None;
+        }
+        let mut r = RECT::default();
+        if !GetWindowRect(hwnd, &mut r).as_bool() {
+            return None;
+        }
+        Some((r.left, r.top, r.right - r.left, r.bottom - r.top))
+    }
+}
+
+/// Page-content rect of the foreground browser (UI Automation `Document`
+/// control = the web view, i.e. without tab strip / URL bar / bookmarks).
+/// Physical px (x, y, w, h). None when the tree does not expose it (the
+/// caller then falls back to the window rect minus a toolbar inset).
+#[cfg(target_os = "windows")]
+pub(crate) fn browser_document_rect() -> Option<(i32, i32, i32, i32)> {
+    use uiautomation::controls::ControlType;
+    use uiautomation::types::Handle;
+    use uiautomation::UIAutomation;
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0 == 0 {
+        return None;
+    }
+    let automation = UIAutomation::new().ok()?;
+    let window = automation.element_from_handle(Handle::from(hwnd.0 as isize)).ok()?;
+    let doc = automation
+        .create_matcher()
+        .from(window)
+        .timeout(700)
+        .control_type(ControlType::Document)
+        .find_first()
+        .ok()?;
+    let r = doc.get_bounding_rectangle().ok()?;
+    let (x, y) = (r.get_left(), r.get_top());
+    Some((x, y, r.get_right() - x, r.get_bottom() - y))
+}
+
 #[cfg(target_os = "windows")]
 fn get_foreground_process_id() -> Option<u32> {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};

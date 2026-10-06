@@ -114,12 +114,21 @@ impl SubCenter for YouTubeCenter {
     }
 }
 
+/// Locate Python bridge script `server/youtube/engine.py`.
+pub fn resolve_youtube_engine_path() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let candidates = [
+        manifest_dir.join("..").join("server").join("youtube").join("engine.py"),
+        manifest_dir.join("server").join("youtube").join("engine.py"),
+        PathBuf::from("server").join("youtube").join("engine.py"),
+    ];
+    candidates.into_iter().find(|p| p.exists())
+}
+
 /// Executes the local YouTube python engine.
 pub fn execute_engine(action: &str, arg: &str, limit: Option<usize>) -> Result<Value, String> {
-    let script_path = PathBuf::from("server").join("youtube").join("engine.py");
-    if !script_path.exists() {
-        return Err(format!("YouTube engine not found at {:?}", script_path));
-    }
+    let script_path = resolve_youtube_engine_path()
+        .ok_or_else(|| "YouTube engine not found at server/youtube/engine.py".to_string())?;
 
     let mut cmd = Command::new("python");
     cmd.arg(&script_path).arg(action).arg(arg);

@@ -191,3 +191,15 @@ installers/
 scripts/kaggle_kernel/
 *.yaml
 !src-tauri/resources/**/*.yaml
+
+# Kokoro TTS model + voices (downloaded, not committed — see docs/research/jarvis-landscape/09)
+src-tauri/resources/kokoro/
+
+# Local media assets / references (not committed)
+frontend/public/v2*
+frontend/public/*.mp4
+
+# Temporary dev / scratch folders
+.kilo/
+scratch/
+spline-preview/
