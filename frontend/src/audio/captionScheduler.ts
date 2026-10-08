@@ -34,6 +34,8 @@ export interface CaptionLineEvent {
   text: string;
   previousText?: string;
   phase: "active" | "fading" | "cleared";
+  words?: string[];
+  activeWordIndex?: number;
 }
 
 export type LineListener = (line: CaptionLineEvent, done: boolean) => void;
@@ -140,9 +142,9 @@ function unescapeXml(str: string): string {
     .replace(/&gt;/g, ">");
 }
 
-export function partitionIntoLines(words: CaptionWord[]): { text: string; start_ms: number; end_ms: number }[] {
+export function partitionIntoLines(words: CaptionWord[]): { text: string; start_ms: number; end_ms: number; words: CaptionWord[] }[] {
   if (!words.length) return [];
-  const lines: { text: string; start_ms: number; end_ms: number }[] = [];
+  const lines: { text: string; start_ms: number; end_ms: number; words: CaptionWord[] }[] = [];
   let current: CaptionWord[] = [];
 
   for (let i = 0; i < words.length; i++) {
@@ -160,6 +162,7 @@ export function partitionIntoLines(words: CaptionWord[]): { text: string; start_
         text: current.map((c) => unescapeXml(c.text)).join(" "),
         start_ms: current[0].start_ms,
         end_ms: current[current.length - 1].start_ms + current[current.length - 1].duration_ms,
+        words: current.slice(),
       });
       current = [];
     }
@@ -196,7 +199,7 @@ function scheduleChunk(track: CaptionTrack): void {
     );
   }
 
-  // Modern Line-by-line replacement schedule (BBC/cognitive reading dwell + monotonic seq)
+  // Modern Line-by-line progressive stream schedule (strict spoken words only + 2s dwell)
   const lines = partitionIntoLines(track.words);
   for (const l of lines) {
     if (l.end_ms > latestScheduledEndMs) {
@@ -212,30 +215,55 @@ function scheduleChunk(track: CaptionTrack): void {
     const now = performance.now();
     const startDelay = Math.max(0, line.start_ms - (now - anchor));
 
-    const wordCount = line.text.trim().split(/\s+/).length;
+    const wordCount = line.words.length;
     const spokenDuration = Math.max(300, line.end_ms - line.start_ms);
-    // Hard cognitive dwell floor: 2500ms minimum for intermediate lines, 3500ms for final line!
-    const minDwell = isLastInChunk ? Math.max(3500, wordCount * 360) : Math.max(2500, wordCount * 320);
-    const linger = isLastInChunk ? 2000 : 1200;
+    // User choice: 2.0s reading dwell for final sentence, 1.6s for intermediate
+    const minDwell = isLastInChunk ? Math.max(2000, wordCount * 300) : Math.max(1600, wordCount * 260);
+    const linger = isLastInChunk ? 1500 : 1000;
     const displayDuration = Math.max(minDwell, spokenDuration + linger);
 
     const fadeDelay = startDelay + displayDuration;
     const clearDelay = fadeDelay + 450;
 
+    // Line activates
     timers.push(
       setTimeout(() => {
         activeLineSeq = lineSeq;
         useAssistant.getState().setCaptionActive(true);
-        console.log(`[CAPTION] Line ${li + 1}/${lines.length} (seq=${lineSeq}) ACTIVE: "${line.text}" (prev="${prevLineText || ''}")`);
-        notifyLine({ text: line.text, previousText: prevLineText, phase: "active" }, false);
       }, startDelay)
     );
+
+    // Schedule incremental word-by-word reveal inside this active line
+    const lineRevealed: string[] = [];
+    for (let wi = 0; wi < line.words.length; wi++) {
+      const cw = line.words[wi];
+      const wordDelay = Math.max(0, cw.start_ms - (now - anchor));
+      timers.push(
+        setTimeout(() => {
+          if (activeLineSeq === lineSeq) {
+            lineRevealed.push(unescapeXml(cw.text));
+            notifyLine({
+              text: lineRevealed.join(" "),
+              previousText: prevLineText,
+              phase: "active",
+              words: lineRevealed.slice(),
+              activeWordIndex: lineRevealed.length - 1,
+            }, false);
+          }
+        }, wordDelay)
+      );
+    }
 
     timers.push(
       setTimeout(() => {
         if (activeLineSeq === lineSeq) {
-          console.log(`[CAPTION] Line ${li + 1}/${lines.length} (seq=${lineSeq}) FADING: "${line.text}"`);
-          notifyLine({ text: line.text, previousText: prevLineText, phase: "fading" }, false);
+          notifyLine({
+            text: line.text,
+            previousText: prevLineText,
+            phase: "fading",
+            words: line.words.map((c) => unescapeXml(c.text)),
+            activeWordIndex: -1,
+          }, false);
         }
       }, fadeDelay)
     );
@@ -244,11 +272,9 @@ function scheduleChunk(track: CaptionTrack): void {
       setTimeout(() => {
         if (activeLineSeq === lineSeq) {
           const isUtteranceEnd = line.end_ms >= latestScheduledEndMs;
-          console.log(`[CAPTION] Line ${li + 1}/${lines.length} (seq=${lineSeq}) CLEARED (utteranceEnd=${isUtteranceEnd})`);
-          notifyLine({ text: "", previousText: "", phase: "cleared" }, isUtteranceEnd);
+          notifyLine({ text: "", previousText: "", phase: "cleared", words: [] }, isUtteranceEnd);
           if (isUtteranceEnd) {
             useAssistant.getState().setCaptionActive(false);
-            console.log("[CAPTION] All caption lines cleared, captionActive=false");
           }
         }
       }, clearDelay)

@@ -2,6 +2,11 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import "./tour.css";
 import { arrowHead, physToCss, placeCallout, Placement, Rect } from "./tourGeometry";
 
+async function invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
+  const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
+  return tauriInvoke(cmd, args);
+}
+
 /**
  * TourOverlay — the narrated screen tour's pointer + callout, ONE at a time.
  *
@@ -54,23 +59,40 @@ export function TourOverlay() {
   const tourIdRef = useRef<string | null>(null);
   const leaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const cancelLeave = () => {
+    if (leaveTimer.current) {
+      clearTimeout(leaveTimer.current);
+      leaveTimer.current = null;
+    }
+  };
+  const wipe = () => {
+    cancelLeave();
+    setCallout(null);
+    setPlaced(null);
+    setEntered(false);
+    setLeaving(false);
+    void invoke("stage_set_hitboxes", { source: "tour", rects: [] }).catch(() => {});
+  };
+  const handleDismiss = () => {
+    tourIdRef.current = null;
+    wipe();
+    void invoke("orchestrator_cancel").catch(() => {});
+  };
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        handleDismiss();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   useEffect(() => {
     let unlisteners: (() => void)[] = [];
     let alive = true;
     const stale = (id: string) => tourIdRef.current !== null && id !== tourIdRef.current;
-    const cancelLeave = () => {
-      if (leaveTimer.current) {
-        clearTimeout(leaveTimer.current);
-        leaveTimer.current = null;
-      }
-    };
-    const wipe = () => {
-      cancelLeave();
-      setCallout(null);
-      setPlaced(null);
-      setEntered(false);
-      setLeaving(false);
-    };
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
       const subs = await Promise.all([
@@ -123,6 +145,7 @@ export function TourOverlay() {
       alive = false;
       unlisteners.forEach((u) => u());
       cancelLeave();
+      void invoke("stage_set_hitboxes", { source: "tour", rects: [] }).catch(() => {});
     };
   }, []);
 
@@ -144,6 +167,16 @@ export function TourOverlay() {
     );
     el.style.transform = `translate(${p.box.x}px, ${p.box.y}px)`;
     setPlaced({ p, target });
+
+    // Register interactive hitbox for the callout box (physical px)
+    const calloutRect = {
+      x: Math.round(p.box.x * dpr),
+      y: Math.round(p.box.y * dpr),
+      w: Math.round(el.offsetWidth * dpr),
+      h: Math.round(el.offsetHeight * dpr),
+    };
+    void invoke("stage_set_hitboxes", { source: "tour", rects: [calloutRect] }).catch(() => {});
+
     const raf = requestAnimationFrame(() => setEntered(true));
     return () => cancelAnimationFrame(raf);
   }, [callout]);
@@ -191,6 +224,15 @@ export function TourOverlay() {
         key={`box-${callout.idx}`}
         className={`tour-callout${live ? " in" : ""}`}
       >
+        <button
+          type="button"
+          className="tour-callout-close"
+          onClick={handleDismiss}
+          title="Dismiss tour (Esc)"
+          aria-label="Close tour"
+        >
+          ×
+        </button>
         <span className="tour-callout-num">
           {callout.idx + 1}
           <span className="tour-callout-of">/{callout.total}</span>

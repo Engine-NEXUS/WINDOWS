@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invokeMock = vi.fn();
 
@@ -14,13 +14,20 @@ vi.mock("../stage/orbRuntime", () => ({
 import { useAssistant } from "../store/assistant";
 import {
   GHOST_SILENT_CAP,
+  GHOST_STALL_AFTER_MS,
+  __testSetGhostTurnTimes,
   __testSilentMissCount,
+  __testStopGhostWatchdog,
   endGhostTurn,
   maybeGhostRelisten,
+  noteGhostTurnClosed,
+  noteGhostTurnOpened,
   recordSilentMiss,
   resetSilentMisses,
   shouldGhostRelisten,
   shouldGhostRoute,
+  startGhostWatchdog,
+  stopGhostWatchdog,
 } from "./ghostHotMic";
 
 describe("ghostHotMic pure helpers", () => {
@@ -102,5 +109,59 @@ describe("endGhostTurn", () => {
     expect(useAssistant.getState().state).toBe("idle");
     // Session survives the turn — reset() must never clear ghostActive.
     expect(useAssistant.getState().ghostActive).toBe(true);
+  });
+});
+
+describe("ghost stall watchdog (hung turns re-arm the mic)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    triggerFollowupListenMock.mockReset();
+    __testStopGhostWatchdog();
+    useAssistant.setState({ ghostActive: false });
+  });
+
+  afterEach(() => {
+    __testStopGhostWatchdog();
+    vi.useRealTimers();
+  });
+
+  it("re-arms once when a turn stays open past the stall budget", async () => {
+    useAssistant.setState({ ghostActive: true });
+    __testSetGhostTurnTimes(Date.now() - GHOST_STALL_AFTER_MS - 5000, 0);
+    startGhostWatchdog();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(triggerFollowupListenMock).toHaveBeenCalledTimes(1);
+    // Single re-arm per stall: further ticks stay quiet until a new turn.
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(triggerFollowupListenMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays quiet for fresh turns, closed turns, and outside ghost mode", async () => {
+    startGhostWatchdog();
+    // Fresh turn (just opened).
+    useAssistant.setState({ ghostActive: true });
+    noteGhostTurnOpened();
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(triggerFollowupListenMock).not.toHaveBeenCalled();
+    // Closed turn.
+    noteGhostTurnClosed();
+    __testSetGhostTurnTimes(Date.now() - 60000, Date.now() - 50000);
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(triggerFollowupListenMock).not.toHaveBeenCalled();
+    // Outside ghost mode entirely.
+    useAssistant.setState({ ghostActive: false });
+    __testSetGhostTurnTimes(Date.now() - 60000, 0);
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(triggerFollowupListenMock).not.toHaveBeenCalled();
+  });
+
+  it("stop prevents all future firing", async () => {
+    useAssistant.setState({ ghostActive: true });
+    __testSetGhostTurnTimes(Date.now() - 60000, 0);
+    startGhostWatchdog();
+    stopGhostWatchdog();
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(triggerFollowupListenMock).not.toHaveBeenCalled();
   });
 });

@@ -85,5 +85,18 @@ describe("captionScheduler line partitioning and lifecycle", () => {
     const lines = partitionIntoLines(words);
     expect(lines.length).toBe(1);
     expect(lines[0].text).toBe("i didn't hear you, sir.");
+    expect(lines[0].words.length).toBe(5);
+    expect(lines[0].words[1].text).toBe("didn&apos;t");
+  });
+
+  it("stores words array per partitioned line for incremental spoken reveal", () => {
+    const words: CaptionWord[] = [
+      { text: "Good", start_ms: 0, duration_ms: 200 },
+      { text: "morning,", start_ms: 220, duration_ms: 250 },
+      { text: "sir.", start_ms: 480, duration_ms: 300 },
+    ];
+    const lines = partitionIntoLines(words);
+    expect(lines.length).toBe(1);
+    expect(lines[0].words.map((w) => w.text)).toEqual(["Good", "morning,", "sir."]);
   });
 });

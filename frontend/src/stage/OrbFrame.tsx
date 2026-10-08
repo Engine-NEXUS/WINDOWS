@@ -181,10 +181,31 @@ export function OrbFrame() {
           s.setVisible(true);
           if (!v) s.setState("idle");
           console.log(`[ORB] ghost:session active=${v} → visible=true state=${v ? s.state : "idle"}`);
+          // Stall watchdog lifecycle: re-arms capture when a ghost turn
+          // never completes (hung backend, lost result event). Started
+          // on enter, stopped on exit — never runs outside sessions.
+          void import("../net/ghostHotMic").then((m) => {
+            if (v) m.startGhostWatchdog();
+            else m.stopGhostWatchdog();
+          }).catch(() => {});
           if (!v) hideOrbAfterSpeech(3000);
         }
       }).then((fn) => { unlisten = fn; }),
     );
+    // Mount-time sync: check if a ghost session was already armed before mount
+    void tauriInvoke("get_pending_ghost_session")
+      .then((active) => {
+        if (active === true) {
+          const s = useAssistant.getState();
+          s.setGhostActive(true);
+          s.setVisible(true);
+          console.log("[ORB] get_pending_ghost_session active=true → visible=true");
+          void import("../net/ghostHotMic").then((m) => {
+            m.startGhostWatchdog();
+          }).catch(() => {});
+        }
+      })
+      .catch(() => {});
     return () => unlisten?.();
   }, []);
 
@@ -318,6 +339,7 @@ export function OrbFrame() {
   // already use this exact ref + `el.style.x = ...` pattern and are
   // unaffected — direct CSSOM property assignment isn't inline-style
   // text parsing, so it isn't subject to this restriction.
+  const hasPositionedRef = useRef(false);
   const applyRect = (el: HTMLDivElement | null, r: OrbRect | null, shown: boolean, pos: string) => {
     if (!el || !r) return;
     const dpr = window.devicePixelRatio || 1;
@@ -327,20 +349,33 @@ export function OrbFrame() {
     const yCss = r.y / dpr;
 
     el.style.position = "fixed";
-    el.style.left = "0";
+    el.style.left = `${xCss}px`;
     el.style.top = "0";
     el.style.width = `${wCss}px`;
     el.style.height = `${hCss}px`;
-    el.style.transition = "transform 0.72s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.5s ease";
 
-    if (pos === "top") {
-      const targetY = shown ? yCss : -hCss - 24;
-      el.style.transform = `translate3d(${xCss}px, ${targetY}px, 0)`;
-    } else {
-      const screenH = typeof window !== "undefined" ? window.innerHeight : 1080;
-      const targetY = shown ? yCss : screenH + 24;
-      el.style.transform = `translate3d(${xCss}px, ${targetY}px, 0)`;
+    const targetY =
+      pos === "top"
+        ? (shown ? yCss : -hCss - 24)
+        : (shown ? yCss : (typeof window !== "undefined" ? window.innerHeight : 1080) + 24);
+
+    if (!hasPositionedRef.current) {
+      // First mount: instant snap to target without flying from (0, 0)
+      el.style.transition = "none";
+      el.style.transform = `translate3d(0, ${targetY}px, 0)`;
+      el.style.opacity = shown ? "1" : "0";
+      el.style.pointerEvents = shown ? "auto" : "none";
+      hasPositionedRef.current = true;
+      requestAnimationFrame(() => {
+        if (el) {
+          el.style.transition = "transform 0.72s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.5s ease";
+        }
+      });
+      return;
     }
+
+    el.style.transition = "transform 0.72s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.5s ease";
+    el.style.transform = `translate3d(0, ${targetY}px, 0)`;
     el.style.opacity = shown ? "1" : "0";
     el.style.pointerEvents = shown ? "auto" : "none";
   };

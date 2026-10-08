@@ -227,6 +227,35 @@ describe("processViaOrchestrator confirmation approvals", () => {
   });
 });
 
+describe("processViaOrchestrator ghost invoke timeout", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    invokeMock.mockReset();
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    useAssistant.setState({ pendingGithubCommand: null });
+  });
+
+  it("cancels Rust and throws GhostInvokeTimeout when a ghost turn hangs", async () => {
+    const { GhostInvokeTimeout, processViaOrchestrator } = await import("./orchestrator");
+    // Backend hangs forever; cancel resolves instantly.
+    invokeMock.mockImplementation((cmd: string) =>
+      cmd === "orchestrator_process" ? new Promise(() => {}) : Promise.resolve(undefined),
+    );
+    const pending = processViaOrchestrator("shift to tap to", undefined, undefined, { timeoutMs: 12000 });
+    const assertion = expect(pending).rejects.toBeInstanceOf(GhostInvokeTimeout);
+    await vi.advanceTimersByTimeAsync(12000);
+    await assertion;
+    expect(invokeMock).toHaveBeenCalledWith("orchestrator_cancel");
+  });
+
+  it("no timeout by default: slow backends still resolve (long-running safe)", async () => {
+    const { processViaOrchestrator } = await import("./orchestrator");
+    invokeMock.mockResolvedValue({ request_id: "r1", subsystem: "x", handled_locally: true });
+    await expect(processViaOrchestrator("hi")).resolves.toMatchObject({ request_id: "r1" });
+    expect(invokeMock).not.toHaveBeenCalledWith("orchestrator_cancel");
+  });
+});
+
 describe("hideOrbAfterSpeech (Main Center UI-director, feature 75 P-B)", () => {
   beforeEach(() => {
     vi.useFakeTimers();

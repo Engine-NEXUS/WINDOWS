@@ -58,13 +58,13 @@ export function ResponseCaption() {
     const centerX = typeof window !== "undefined" ? window.innerWidth / 2 : rect.x / dpr + rect.w / dpr / 2;
     const topY = rect.y / dpr;
     const bottomY = (rect.y + rect.h) / dpr;
-    const gap = 24;
+    const gap = 20;
     const isTop = topY < (typeof window !== "undefined" ? window.innerHeight / 2 : 540);
 
     if (isTop) {
-      el.style.transform = `translate(${centerX - 260}px, ${bottomY + gap}px)`;
+      el.style.transform = `translate(${centerX}px, ${bottomY + gap}px) translateX(-50%)`;
     } else {
-      el.style.transform = `translate(${centerX - 260}px, ${topY - gap}px) translateY(-100%)`;
+      el.style.transform = `translate(${centerX}px, ${topY - gap}px) translate(-50%, -100%)`;
     }
     el.style.opacity = lineEvent && lineEvent.phase !== "cleared" ? "1" : "0";
   };
@@ -74,27 +74,48 @@ export function ResponseCaption() {
     applyPosition(captionRef.current);
   }, [rect, lineEvent]);
 
-  if (!rect || !lineEvent || !lineEvent.text.trim() || lineEvent.phase === "cleared") return null;
+  if (!rect || !lineEvent || lineEvent.phase === "cleared") return null;
+
+  const words = lineEvent.words && lineEvent.words.length > 0
+    ? lineEvent.words
+    : lineEvent.text?.trim()
+    ? lineEvent.text.trim().split(/\s+/).filter(Boolean)
+    : [];
+
+  if (words.length === 0) return null;
 
   const phaseClass =
     lineEvent.phase === "active"
-      ? "caption-line--active"
+      ? "mercury-pill--active"
       : lineEvent.phase === "fading"
-      ? "caption-line--fading"
+      ? "mercury-pill--fading"
       : "";
+
+  const activeIdx = lineEvent.activeWordIndex ?? (words.length - 1);
 
   return (
     <div
-      className="response-caption"
+      className="response-caption response-caption--mercury"
       ref={(el) => {
         captionRef.current = el;
         applyPosition(el);
       }}
     >
-      {lineEvent.previousText && (
-        <span className="caption-line caption-line--prev">{lineEvent.previousText}</span>
-      )}
-      <span className={`caption-line ${phaseClass}`}>{lineEvent.text}</span>
+      <div className={`mercury-pill ${phaseClass}`}>
+        <div className="mercury-pill-text">
+          {words.map((w, idx) => {
+            const isActive = lineEvent.phase === "active" && idx === activeIdx;
+            return (
+              <span
+                key={`${idx}-${w}`}
+                className={`mercury-word ${isActive ? "mercury-word--active" : "mercury-word--spoken"}`}
+              >
+                {w}
+              </span>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }
