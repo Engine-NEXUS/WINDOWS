@@ -13,6 +13,22 @@
 use std::sync::Arc;
 use tauri::State;
 
+static SHARED_STT_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+/// Global shared reqwest client with persistent HTTP/2 connection pooling
+/// and TCP keep-alive. Reused across all STT capture turns to eliminate cold
+/// TLS handshake latency (~180ms saved per turn).
+pub fn shared_client() -> &'static reqwest::Client {
+    SHARED_STT_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .build()
+            .expect("failed to build shared STT HTTP client")
+    })
+}
+
 pub struct SttState {
     /// Reused HTTP client — avoids building a new reqwest::Client per transcription.
     pub client: Arc<reqwest::Client>,
@@ -20,11 +36,7 @@ pub struct SttState {
 
 impl SttState {
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("failed to build STT HTTP client");
-        Self { client: Arc::new(client) }
+        Self { client: Arc::new(shared_client().clone()) }
     }
 }
 
@@ -54,6 +66,7 @@ pub(crate) fn last_stt_path_str() -> &'static str {
         5 => "short_reject",
         6 => "energy_reject",
         7 => "local_err",
+        8 => "deepgram",
         _ => "unknown",
     }
 }
@@ -187,15 +200,33 @@ pub async fn transcribe_samples<R: tauri::Runtime>(
         return Ok("".to_string());
     }
 
-    // Read Groq API key from settings (if app handle is available)
+    // Read API keys from settings (if app handle is available)
     if let Some(app) = app {
+        let deepgram_key = crate::commands::read_api_key(app, "deepgram");
         let groq_key = crate::commands::read_groq_api_key(app);
         let local_only = crate::commands::read_local_stt_only(app);
 
         if local_only {
             tracing::info!("stt: localSttOnly=true, using local whisper (privacy mode)");
             mark_path(4);
-        } else if !groq_key.is_empty() {
+        } else if !deepgram_key.is_empty() {
+            // Optional Deepgram Nova-2 cloud STT
+            match crate::stt_deepgram::transcribe_with_deepgram(samples, &deepgram_key, client).await {
+                Ok(text) => {
+                    let filtered = filter_transcript_counted(&text);
+                    mark_path(8);
+                    mark_filtered(&text, &filtered);
+                    tracing::info!("stt: deepgram transcript: '{}'", filtered);
+                    return Ok(filtered);
+                }
+                Err(e) => {
+                    tracing::warn!("stt: deepgram failed ({}), falling back to Groq LPU pipeline", e);
+                    // Fall through to Groq below
+                }
+            }
+        }
+        
+        if !groq_key.is_empty() {
             match crate::stt_groq::transcribe_with_groq(samples, &groq_key, client, prompt).await {
                 Ok(text) => {
                     let filtered = filter_transcript_counted(&text);
@@ -213,8 +244,8 @@ pub async fn transcribe_samples<R: tauri::Runtime>(
                     mark_path(2);
                 }
             }
-        } else {
-            tracing::info!("stt: no groq key, using local whisper directly");
+        } else if deepgram_key.is_empty() {
+            tracing::info!("stt: no groq/deepgram key, using local whisper directly");
             mark_path(3);
         }
     }
@@ -368,7 +399,7 @@ pub async fn transcribe_local(samples: &[i16], client: &reqwest::Client) -> Resu
 // (stt.ts sttStatus) was dead code, and the IPC registration with it.
 
 /// Convert raw i16 PCM samples to a WAV file (16-bit, mono, given sample rate).
-fn pcm_to_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
+pub(crate) fn pcm_to_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
     let num_samples = samples.len();
     let data_size = num_samples * 2; // 16-bit = 2 bytes per sample
     let mut wav = Vec::with_capacity(44 + data_size);

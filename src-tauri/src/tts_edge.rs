@@ -88,18 +88,31 @@ async fn synthesize_raw(
     let client = EdgeTtsClient::new()
         .map_err(|e| format!("edge-tts client init failed: {}", e))?;
 
+    let (base_rate, base_pitch) = crate::voice_catalog::persona_prosody(voice);
     let options = if let Some(emotion) = emotion {
-        let (rate, volume, pitch) = emotion.prosody();
-        SpeakOptions {
-            voice: voice.to_string(),
-            rate: rate.to_string(),
-            volume: volume.to_string(),
-            pitch: pitch.to_string(),
-            boundary: Boundary::Word,
+        if emotion == TtsEmotion::Neutral {
+            SpeakOptions {
+                voice: voice.to_string(),
+                rate: base_rate.to_string(),
+                volume: "+0%".to_string(),
+                pitch: base_pitch.to_string(),
+                boundary: Boundary::Word,
+            }
+        } else {
+            let (rate, volume, pitch) = emotion.prosody();
+            SpeakOptions {
+                voice: voice.to_string(),
+                rate: rate.to_string(),
+                volume: volume.to_string(),
+                pitch: pitch.to_string(),
+                boundary: Boundary::Word,
+            }
         }
     } else {
         SpeakOptions {
             voice: voice.to_string(),
+            rate: base_rate.to_string(),
+            pitch: base_pitch.to_string(),
             boundary: Boundary::Word,
             ..SpeakOptions::default()
         }

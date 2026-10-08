@@ -916,12 +916,15 @@ mod engine {
                 for cmd in &mut self.command_classifiers {
                     cmd.detections_buffer.push_back(0.0);
                 }
-                static SILENT_TELEMETRY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                if SILENT_TELEMETRY.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 6 == 0 {
-                    tracing::info!(
-                        "audio-telemetry: wave=[            ] prob=0.000 rms={:.4} gain=1.0",
-                        rms
-                    );
+                #[cfg(debug_assertions)]
+                {
+                    static SILENT_TELEMETRY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    if SILENT_TELEMETRY.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 6 == 0 {
+                        tracing::info!(
+                            "audio-telemetry: wave=[            ] prob=0.000 rms={:.4} gain=1.0",
+                            rms
+                        );
+                    }
                 }
                 return (false, 0.0, None);
             }
@@ -1624,14 +1627,19 @@ mod engine {
                     let total = super::STT_TOTAL_CHUNKS.fetch_add(1, Ordering::Relaxed);
                     let silence = super::STT_SILENCE_CHUNKS.load(Ordering::Relaxed);
                     let speech_detected = super::STT_SPEECH_DETECTED.load(Ordering::Relaxed);
-                    // Adaptive endpoint: fast 400ms normally, ~1s once the
-                    // speaker has shown they pause mid-thought (2+ pauses).
-                    let silence_limit =
-                        if super::STT_PAUSE_COUNT.load(Ordering::Relaxed) >= 2 {
-                            super::STT_SILENCE_CHUNK_LIMIT_PATIENT
+                    // Adaptive endpoint: 240ms in Ghost Mode, 400ms normally,
+                    // relaxing to patient thresholds once mid-turn pauses are detected.
+                    let silence_limit = if crate::ghost::session_active() {
+                        if super::STT_PAUSE_COUNT.load(Ordering::Relaxed) >= 1 {
+                            super::STT_SILENCE_CHUNK_LIMIT_GHOST_PATIENT
                         } else {
-                            super::STT_SILENCE_CHUNK_LIMIT
-                        };
+                            super::STT_SILENCE_CHUNK_LIMIT_GHOST
+                        }
+                    } else if super::STT_PAUSE_COUNT.load(Ordering::Relaxed) >= 2 {
+                        super::STT_SILENCE_CHUNK_LIMIT_PATIENT
+                    } else {
+                        super::STT_SILENCE_CHUNK_LIMIT
+                    };
 
                     // Stop conditions (pure predicate, F1):
                     // 1. Silence after a CONFIRMED turn: adaptive (400ms / ~1s patient).
@@ -2773,15 +2781,22 @@ const STT_SPEECH_RMS_THRESHOLD: f32 = 0.01;
 const STT_SILENCE_RMS_THRESHOLD: f32 = 0.006;
 
 /// Fast endpoint: silent chunks after speech before stopping capture.
-/// 10 chunks = 800ms (was 5 = 400ms, which prematurely cut off natural speech pauses).
+/// 5 chunks = 400ms (cuts 400ms of dead air compared to legacy 10 chunks).
 /// The silence counter resets on every speech chunk, so continued speech extends the
 /// turn automatically — this cuts cleanly after natural phrase completion.
-const STT_SILENCE_CHUNK_LIMIT: u32 = 10;
+const STT_SILENCE_CHUNK_LIMIT: u32 = 5;
 
 /// Patient endpoint for hesitant speakers: if the capture already survived
-/// 2+ mid-turn pauses, allow ~1.2s (15 chunks) before committing, instead of
+/// 2+ mid-turn pauses, allow ~800ms (10 chunks) before committing, instead of
 /// cutting them off mid-thought.
-const STT_SILENCE_CHUNK_LIMIT_PATIENT: u32 = 15;
+const STT_SILENCE_CHUNK_LIMIT_PATIENT: u32 = 10;
+
+/// Ultra-fast Ghost Mode endpoint for short desktop automation commands
+/// ("open whatsapp", "click search", "type message"). 3 chunks = 240ms.
+const STT_SILENCE_CHUNK_LIMIT_GHOST: u32 = 3;
+
+/// Ghost Mode patient endpoint when speaker has paused mid-command: 6 chunks = 480ms.
+const STT_SILENCE_CHUNK_LIMIT_GHOST_PATIENT: u32 = 6;
 
 
 /// Maximum capture duration in chunks. 125 chunks = 10s.
@@ -2868,6 +2883,8 @@ pub struct SttTranscript {
     pub owner_score: f32,
     pub decoder_bias: &'static str,
     pub language: &'static str,
+    pub intent_label: Option<&'static str>,
+    pub pre_parsed: Option<serde_json::Value>,
 }
 
 /// Peak + mean absolute energy of a capture buffer (single pass, computed
@@ -3539,6 +3556,17 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     std::thread::Builder::new()
         .name("stt-capture-rx".into())
         .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!("stt-capture: failed to create persistent tokio runtime: {}", e);
+                    return;
+                }
+            };
+
             while let Ok((session, mut stats, buffer)) = stt_rx.recv() {
                 // Stale-session drop (Gap 3): a second Ctrl+Space press ran
                 // abort_stt_capture() while this buffer was in flight. Emit
@@ -3633,6 +3661,8 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                             owner_score,
                             decoder_bias,
                             language: "en",
+                            intent_label: None,
+                            pre_parsed: None,
                         },
                     );
                     stats.stt_path = "owner_hold";
@@ -3652,26 +3682,8 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     samples.len() / 16
                 );
 
-                // Create a tokio runtime for the async STT call
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        tracing::error!("stt-capture: failed to create tokio runtime: {}", e);
-                        crate::commands::emit_logged(&app_for_stt, "stt:transcript", "");
-                        stats.stt_path = "runtime_fail";
-                        crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
-                        continue;
-                    }
-                };
-
                 rt.block_on(async {
-                    let client = reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(30))
-                        .build()
-                        .unwrap_or_default();
+                    let client = crate::stt::shared_client();
 
                     crate::stt::reset_turn_markers();
                     let bias = if ownership == crate::voice_profile::TurnOwnership::Verified {
@@ -3688,8 +3700,14 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     )
                     .await;
 
-                    let text = transcript.unwrap_or_default();
-                    tracing::info!("stt-capture: transcript = '{}'", text);
+                    let raw_text = transcript.unwrap_or_default();
+                    let normalized = crate::intent_parser::normalize_phonetic_mishearings(&raw_text);
+                    let text = if normalized.is_empty() { raw_text } else { normalized };
+                    let parsed = crate::intent_parser::parse_deterministic(&text);
+                    let intent_label = parsed.as_ref().map(|p| crate::intent_parser::intent_to_label(&p.intent));
+                    let pre_parsed = parsed.as_ref().and_then(|p| serde_json::to_value(p).ok());
+
+                    tracing::info!("stt-capture: transcript = '{}', intent = {:?}", text, intent_label);
                     crate::commands::emit_logged(&app_for_stt, 
                         "stt:transcript",
                         &SttTranscript {
@@ -3699,6 +3717,8 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                             owner_score,
                             decoder_bias,
                             language: "en",
+                            intent_label,
+                            pre_parsed,
                         },
                     );
                     stats.stt_path = crate::stt::last_stt_path_str();
@@ -4096,10 +4116,7 @@ fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32) 
     };
 
     rt.block_on(async {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .unwrap_or_default();
+        let client = crate::stt::shared_client();
 
         let res = tokio::time::timeout(
             std::time::Duration::from_secs(VERIFY_TIMEOUT_SECS),
