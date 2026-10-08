@@ -6,7 +6,7 @@
 //! emits that rect to the stage frontend over Tauri events — it no longer
 //! owns an OS window to show/hide/position directly.
 
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
 /// Last-emitted rects, for the stage frontend to pull on mount (race-free
 /// delivery pattern already used elsewhere in this codebase for

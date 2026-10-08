@@ -86,6 +86,8 @@ mod win {
         ControlType::CheckBox,
         ControlType::RadioButton,
         ControlType::SplitButton,
+        ControlType::Edit,
+        ControlType::ComboBox,
     ];
 
     /// List actionable elements in the foreground window via UIA.

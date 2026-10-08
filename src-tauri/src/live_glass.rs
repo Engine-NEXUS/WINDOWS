@@ -1,4 +1,4 @@
-﻿//! Live Optical Pass-Through Frosted Glass & Selective Cursor Hit-Testing.
+//! Live Optical Pass-Through Frosted Glass & Selective Cursor Hit-Testing.
 //!
 //! Provides:
 //! 1. ~~Hardware DWM blur~~ — REMOVED per ADR-05 (`docs/architecture/06`):
@@ -51,6 +51,11 @@ pub fn is_cursor_inside_hitbox(px: i32, py: i32) -> bool {
     ACTIVE_HITBOXES.lock().iter().any(|hb| hb.contains(px, py))
 }
 
+/// Returns true if any live glass hitboxes are currently active.
+pub fn has_active_hitboxes() -> bool {
+    !ACTIVE_HITBOXES.lock().is_empty()
+}
+
 
 /// Tauri IPC command: registers interactive hitboxes (physical pixels) for the
 /// overlay window. Over these rectangles, the cursor interacts normally
@@ -74,7 +79,7 @@ pub fn register_glass_hitboxes(rects: Vec<crate::stage::StageRect>) -> Result<()
             h: h.h,
         })
         .collect();
-    crate::stage::stage_set_hitboxes("live-glass".to_string(), stage_rects)?;
+    crate::stage::set_hitbox_source("live-glass", stage_rects);
     Ok(())
 }
 

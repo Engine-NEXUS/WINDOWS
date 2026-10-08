@@ -52,7 +52,17 @@ mod windows_impl {
         Enigo::new(&Settings::default()).map_err(|e| format!("enigo init: {e}"))
     }
 
-    /// Eased glide to a point. `should_stop` is polled every ~25ms step —
+    /// Calculate human-visible glide duration based on distance (Fitts's Law).
+    /// Short moves (~200px): ~550ms. Screen-spanning moves (~1500px): ~725ms.
+    pub fn calculate_glide_duration(from: (i32, i32), to: (i32, i32)) -> u64 {
+        let dx = (to.0 - from.0) as f64;
+        let dy = (to.1 - from.1) as f64;
+        let dist = (dx * dx + dy * dy).sqrt();
+        let ms = 500.0 + (dist * 0.15);
+        (ms as u64).clamp(550, 750)
+    }
+
+    /// Eased glide to a point. `should_stop` is polled every ~16ms step (60 FPS) —
     /// voice stop / mouse grab / Esc aborts mid-glide, never mid-click.
     /// Registers the suppress window so takeover detection stays quiet.
     pub fn move_eased(x: i32, y: i32, ms: u64, should_stop: impl Fn() -> bool) -> Result<(), String> {
@@ -60,7 +70,8 @@ mod windows_impl {
             return Err("move_eased: negative coordinates".to_string());
         }
         let from = current_pos().unwrap_or((x, y));
-        let steps = eased_steps(from, (x, y), ((ms / 25).max(2)) as usize);
+        let step_ms = 16u64;
+        let steps = eased_steps(from, (x, y), ((ms / step_ms).max(4)) as usize);
         // Suppress window covers motion + easing tail (see ghost.rs).
         crate::ghost::note_expected((x, y), ms + 150);
         let mut enigo = enigo()?;
@@ -72,7 +83,7 @@ mod windows_impl {
             enigo
                 .move_mouse(sx, sy, Coordinate::Abs)
                 .map_err(|e| format!("mouse move: {e}"))?;
-            thread::sleep(Duration::from_millis(25));
+            thread::sleep(Duration::from_millis(step_ms));
         }
         crate::ghost::note_idle();
         Ok(())
@@ -81,10 +92,14 @@ mod windows_impl {
     /// Move (eased) then left-click. Atomic at the click: abort applies
     /// between steps, never mid-click — half-clicks don't exist.
     pub fn click_at(x: i32, y: i32, should_stop: impl Fn() -> bool) -> Result<(), String> {
-        move_eased(x, y, 300, &should_stop)?;
+        let from = current_pos().unwrap_or((x, y));
+        let duration = calculate_glide_duration(from, (x, y));
+        move_eased(x, y, duration, &should_stop)?;
         if should_stop() {
             return Err("Stopped, sir.".to_string());
         }
+        // Human arrival dwell: pause 100ms before click so the user registers landing
+        thread::sleep(Duration::from_millis(100));
         enigo()?
             .button(Button::Left, Direction::Click)
             .map_err(|e| format!("mouse click: {e}"))
@@ -92,10 +107,13 @@ mod windows_impl {
 
     /// Double-click at a point (eased move first).
     pub fn double_click_at(x: i32, y: i32, should_stop: impl Fn() -> bool) -> Result<(), String> {
-        move_eased(x, y, 300, &should_stop)?;
+        let from = current_pos().unwrap_or((x, y));
+        let duration = calculate_glide_duration(from, (x, y));
+        move_eased(x, y, duration, &should_stop)?;
         if should_stop() {
             return Err("Stopped, sir.".to_string());
         }
+        thread::sleep(Duration::from_millis(100));
         let mut e = enigo()?;
         e.button(Button::Left, Direction::Click)
             .map_err(|e| format!("double-click 1: {e}"))?;
@@ -141,13 +159,15 @@ mod windows_impl {
 
     /// Glide back to a saved position (session restore on exit).
     pub fn restore(pos: (i32, i32)) -> Result<(), String> {
-        crate::ghost::note_expected(pos, 450);
         let from = current_pos().unwrap_or(pos);
+        let ms = calculate_glide_duration(from, pos);
+        crate::ghost::note_expected(pos, ms + 150);
         let mut e = enigo()?;
-        for (sx, sy) in super::eased_steps(from, pos, 10) {
+        let num_steps = ((ms / 16).max(4)) as usize;
+        for (sx, sy) in super::eased_steps(from, pos, num_steps) {
             e.move_mouse(sx, sy, Coordinate::Abs)
                 .map_err(|e| format!("restore move: {e}"))?;
-            thread::sleep(Duration::from_millis(25));
+            thread::sleep(Duration::from_millis(16));
         }
         crate::ghost::note_idle();
         Ok(())
@@ -184,6 +204,8 @@ mod windows_impl {
 
     /// Pure name scorer for UIA resolution (unit-tested): exact (3) >
     /// starts-with (2) > contains (1) > no match (None). Empty never matches.
+    /// Also supports conversational noise-word stripping (e.g. "search bar" -> "search")
+    /// and significant token overlap for natural voice grounding.
     pub fn score_name(element_name: &str, want: &str) -> Option<u8> {
         let lower = element_name.trim().to_lowercase();
         let w = want.trim().to_lowercase();
@@ -191,14 +213,44 @@ mod windows_impl {
             return None;
         }
         if lower == w {
-            Some(3)
+            return Some(3);
         } else if lower.starts_with(&w) {
-            Some(2)
+            return Some(2);
         } else if lower.contains(&w) {
-            Some(1)
-        } else {
-            None
+            return Some(1);
         }
+
+        // Noise-word stripping: "search bar" -> "search", "close button" -> "close"
+        let stripped_w = w
+            .strip_suffix(" bar")
+            .or_else(|| w.strip_suffix(" box"))
+            .or_else(|| w.strip_suffix(" button"))
+            .or_else(|| w.strip_suffix(" field"))
+            .or_else(|| w.strip_suffix(" input"))
+            .map(|s| s.trim())
+            .unwrap_or("");
+
+        if !stripped_w.is_empty() && stripped_w != w {
+            if lower == stripped_w {
+                return Some(2);
+            } else if lower.starts_with(stripped_w) {
+                return Some(2);
+            } else if lower.contains(stripped_w) {
+                return Some(1);
+            }
+        }
+
+        // Significant token matching (>= 3 chars, skipping conversational fillers)
+        for token in w.split_whitespace() {
+            if token.len() >= 3
+                && !matches!(token, "the" | "and" | "bar" | "box" | "btn" | "button" | "for")
+                && lower.contains(token)
+            {
+                return Some(1);
+            }
+        }
+
+        None
     }
 
     /// True when the foreground window is exclusive-fullscreen (its rect
@@ -363,21 +415,18 @@ mod windows_impl {
                         .app_data_dir()
                         .unwrap_or_else(|_| std::path::PathBuf::from("."));
                     let order = crate::vision::read_vision_provider(&usage_dir);
-                    let client = reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(25))
-                        .build()
-                        .map_err(|e| format!("vision http client: {e}"))?;
                     crate::ghost::announce(
                         crate::ghost::ghost_wry::g_wry_ref(&app),
                         "Not in the accessibility tree — looking visually, sir.",
                     );
+                    // Feature 98: pooled keep-alive client (no cold TLS).
                     match crate::vision::locate_with_fallback(
                         element,
                         &groq_key,
                         &gemini_key,
                         &order,
                         &usage_dir,
-                        &client,
+                        &crate::vision::shared_vision_client(),
                     )
                     .await
                     {
@@ -537,5 +586,13 @@ mod tests {
         // This test pins that the scorer itself doesn't special-case,
         // so exclusion can't silently migrate here and rot.
         assert_eq!(score_name("Password", "password"), Some(3));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_score_name_noise_word_stripping() {
+        assert_eq!(score_name("Search", "search bar"), Some(2));
+        assert_eq!(score_name("Search or start new chat", "search bar"), Some(2));
+        assert_eq!(score_name("Close", "close button"), Some(2));
     }
 }
