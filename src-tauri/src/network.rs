@@ -244,6 +244,7 @@ pub async fn send_transcript<R: Runtime>(
         .build()
         .map_err(|e| format!("http client: {e}"))?;
 
+    crate::usage_counter::bump("worker");
     eprintln!("[NEXUS] sending transcript to worker: url={} text={}", worker_url, text.chars().take(80).collect::<String>());
 
     let resp = client

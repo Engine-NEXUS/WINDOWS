@@ -85,6 +85,7 @@ async fn dispatch_text<R: Runtime>(app: &AppHandle<R>, text: &str) -> String {
                 cancel,
                 &crate::center::TurnContext::default(),
                 "telegram",
+                false,
             )
             .await
             {

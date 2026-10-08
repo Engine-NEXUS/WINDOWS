@@ -279,6 +279,10 @@ pub fn directed_gate<R: tauri::Runtime>(transcript: String, app: tauri::AppHandl
     if !gate_enabled(&app) {
         return accept("gate_disabled");
     }
+    // NEXUS just asked a question ("Shall I start?"): a bare "yes" is the answer.
+    if crate::memcore::offer::is_armed() {
+        return accept("offer_reply");
+    }
     let spoken = recent_spoken(Instant::now());
     let verdict = evaluate(&Input {
         transcript: &transcript,

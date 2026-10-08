@@ -947,7 +947,7 @@ pub(crate) fn capture_backdrop<R: Runtime>(
 //
 // Current view geometry (logical px):
 //   assistant / pr-list : 520×min(1040, mh-40), right dock (x=mw-530, y=20)
-//   settings            : 740×min(1040, mh-40), right dock (x=mw-750, y=20)
+//   settings            : 400×min(780, mh-40), right dock (x=mw-410, y=20)
 //   architect           : 960×min(1040, mh-40), centered (y=40)
 // Explicit left/right/center docks override the default anchor per view.
 
@@ -1048,9 +1048,10 @@ pub fn sidebar_geometry(
     };
     match view {
         "settings" => {
-            // Settings: full height (minus 40px top+bottom margin), 740px wide, right-docked
-            let h = (monitor_h - 40.0).min(1080.0).max(400.0);
-            if docked { dock_x(740.0, h) } else { dock_x(740.0, h) }
+            // Command Hub: full vertical span card — 400px wide, covering
+            // from top margin down to screen edge / taskbar, right-docked (or left).
+            let h = (monitor_h - 40.0).min(1040.0).max(400.0);
+            dock_x(400.0, h)
         }
         "architect" => {
             let h = (monitor_h - 40.0).min(1040.0).max(400.0);
@@ -1445,6 +1446,70 @@ pub fn close_settings_window<R: Runtime>(
     Ok(())
 }
 
+/// IPC: Open the Orb Studio customization window.
+/// Spawns directly to the left of the Settings sidebar without closing Settings.
+/// Width is 800px (twice Settings' 400px width).
+#[tauri::command]
+pub async fn open_orb_studio_window<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let win = crate::dyn_windows::get_or_create_window(&app, crate::dyn_windows::WindowConfig::orb_studio())?;
+
+    // Position directly to the left of the settings window
+    if let Ok(monitors) = win.available_monitors() {
+        if let Some(primary) = monitors.first() {
+            let size = primary.size();
+            let scale = primary.scale_factor();
+            let mw = size.width as f64 / scale;
+            let mh = size.height as f64 / scale;
+
+            let h = (mh - 40.0).min(1040.0).max(400.0);
+            let studio_w = 800.0;
+            // Settings right dock x = mw - 400 - 10 = mw - 410.
+            // Studio sits 12px to the left of settings: x = mw - 410 - 800 - 12 = mw - 1222.
+            let studio_x = (mw - 1222.0).max(10.0);
+            let studio_y = 20.0;
+
+            let _ = win.set_size(tauri::LogicalSize::new(studio_w, h));
+            let _ = win.set_position(tauri::LogicalPosition::new(studio_x, studio_y));
+        }
+    }
+
+    win.show().map_err(|e| e.to_string())?;
+    win.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// IPC: Close/destroy the Orb Studio window.
+#[tauri::command]
+pub fn close_orb_studio_window<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let _ = crate::dyn_windows::destroy_window(&app, "orb-studio");
+    Ok(())
+}
+
+/// IPC: Save custom orb morphology selection and broadcast to all windows immediately.
+#[tauri::command]
+pub fn set_orb_morphology<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    think: u32,
+    speak: u32,
+    listen: u32,
+) -> Result<(), String> {
+    let mut settings = get_settings(app.clone())?;
+    settings.orb_think_mode = think;
+    settings.orb_speak_mode = speak;
+    settings.orb_listen_mode = listen;
+    save_settings(app.clone(), settings.clone())?;
+    let _ = app.emit("orb:morphology_changed", serde_json::json!({
+        "think": think,
+        "speak": speak,
+        "listen": listen,
+    }));
+    Ok(())
+}
+
 /// Serialized settings returned by `get_settings` and accepted by `save_settings`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1508,6 +1573,18 @@ pub struct NexusSettings {
     /// Default: "top".
     #[serde(default = "default_orb_position")]
     pub orb_position: String,
+    /// Orb thinking morphology mode (1..12).
+    /// Default: 6 (Trefoil Celtic Helix Cage).
+    #[serde(default = "default_orb_think_mode")]
+    pub orb_think_mode: u32,
+    /// Orb speaking morphology mode (1..6).
+    /// Default: 2 (64-strand Fibonacci Blossom).
+    #[serde(default = "default_orb_speak_mode")]
+    pub orb_speak_mode: u32,
+    /// Orb listening morphology mode (1..4).
+    /// Default: 1 (Acoustic Sand Cymatics & Inward Vortex).
+    #[serde(default = "default_orb_listen_mode")]
+    pub orb_listen_mode: u32,
     /// Gemini API key for Google Gemini models.
     /// When empty, Gemini features are unavailable.
     #[serde(default)]
@@ -1517,6 +1594,10 @@ pub struct NexusSettings {
     /// When empty, Cerebras is skipped in the 9Router cascade.
     #[serde(default)]
     pub cerebras_api_key: String,
+    /// Deepgram API key for Nova-2 cloud streaming STT.
+    /// When empty, NEXUS uses Groq Whisper Large v3 Turbo ($0 free tier).
+    #[serde(default)]
+    pub deepgram_api_key: String,
     /// Moonshine STT model architecture.
     /// Options: "small_streaming" (123M, 7.84% WER, default for family),
     ///          "medium_streaming" (245M, 6.65% WER, recommended for admin),
@@ -1597,6 +1678,60 @@ pub struct NexusSettings {
     /// enter that figure here. Default 500.
     #[serde(default = "default_gemini_vision_daily_limit")]
     pub gemini_vision_daily_limit: u32,
+    /// Personality tone: "butler" (default — formal, "sir") or "friend"
+    /// (first-name, contractions, situational lightness, honest counsel).
+    /// Voice-switchable ("talk like a friend" / "be formal"). Must live
+    /// in this struct — `save_settings` rewrites settings.json from it.
+    #[serde(default = "default_persona_mode")]
+    pub persona_mode: String,
+    /// Command Hub theme: "dark" (default, opaque) or "light" (opaque).
+    /// Transparency is out (user directive) — both themes are solid.
+    /// Must live in this struct — `save_settings` rewrites settings.json.
+    #[serde(default = "default_theme_mode")]
+    pub theme_mode: String,
+    /// Memory Core (SQLite, ranked recall) on/off. Off = legacy JSON files
+    /// only. Must live in this struct — `save_settings` rewrites settings.json.
+    #[serde(default = "default_memcore")]
+    pub memcore: bool,
+    /// Swap locally known people's names for "Person A/B…" in text sent to
+    /// cloud models (and back in replies). Off by default.
+    #[serde(default)]
+    pub memcore_redact_names: bool,
+    /// Record which window the user is working in (30 s samples, local only,
+    /// 7-day ring) so NEXUS can say where they left off. Voice/Memory-page switch.
+    #[serde(default = "default_memcore")]
+    pub memcore_activity: bool,
+    /// Once-a-day spoken "where you left off" shortly after startup.
+    #[serde(default = "default_memcore")]
+    pub memcore_briefing: bool,
+    /// Timetable slot reminders ("It's time for DSA. Shall I start?").
+    #[serde(default = "default_memcore")]
+    pub memcore_timetable: bool,
+    /// Watch Gmail for important mail (exams, hackathons, GitHub, database
+    /// notices, deadlines) and read today's calendar. Runs only while a
+    /// Google account with the right access is connected.
+    #[serde(default = "default_memcore")]
+    pub memcore_mail: bool,
+    /// Read-only WhatsApp watcher (priority people). OFF until the
+    /// read-receipt check in docs/testing/whatsapp-read-receipt-test.md is done.
+    #[serde(default)]
+    pub memcore_whatsapp: bool,
+    /// Speak WhatsApp message text aloud. OFF by default: the voice service is
+    /// a cloud service and would receive the text (the sidebar card is local).
+    #[serde(default)]
+    pub memcore_whatsapp_speak: bool,
+}
+
+fn default_memcore() -> bool {
+    true
+}
+
+fn default_persona_mode() -> String {
+    "butler".to_string()
+}
+
+fn default_theme_mode() -> String {
+    "dark".to_string()
 }
 
 fn default_screen_tour() -> bool {
@@ -1703,6 +1838,18 @@ fn default_orb_position() -> String {
     "top".to_string()
 }
 
+fn default_orb_think_mode() -> u32 {
+    6
+}
+
+fn default_orb_speak_mode() -> u32 {
+    2
+}
+
+fn default_orb_listen_mode() -> u32 {
+    1
+}
+
 impl Default for NexusSettings {
     fn default() -> Self {
         Self {
@@ -1734,8 +1881,12 @@ impl Default for NexusSettings {
             orb_size: 200,
             orb_color: default_orb_color(),
             orb_position: default_orb_position(),
+            orb_think_mode: default_orb_think_mode(),
+            orb_speak_mode: default_orb_speak_mode(),
+            orb_listen_mode: default_orb_listen_mode(),
             gemini_api_key: String::new(),
             cerebras_api_key: String::new(),
+            deepgram_api_key: String::new(),
             moonshine_model: "medium_streaming".to_string(),
             tts_emotion: "auto".to_string(),
             vision_provider: "auto".to_string(),
@@ -1755,6 +1906,16 @@ impl Default for NexusSettings {
             screen_tour: true,
             tour_model: String::new(),
             gemini_vision_daily_limit: default_gemini_vision_daily_limit(),
+            persona_mode: default_persona_mode(),
+            theme_mode: default_theme_mode(),
+            memcore: default_memcore(),
+            memcore_redact_names: false,
+            memcore_activity: default_memcore(),
+            memcore_briefing: default_memcore(),
+            memcore_timetable: default_memcore(),
+            memcore_mail: default_memcore(),
+            memcore_whatsapp: false,
+            memcore_whatsapp_speak: false,
         }
     }
 }
@@ -1858,11 +2019,28 @@ pub fn get_settings<R: Runtime>(
 #[tauri::command]
 pub fn save_settings<R: Runtime>(
     app: tauri::AppHandle<R>,
-    settings: NexusSettings,
+    mut settings: NexusSettings,
 ) -> Result<(), String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("settings.json");
+    // API keys are managed by `api_keys::*`: an EMPTY key in the payload never
+    // wipes what is on disk (and a deleted key cannot be resurrected by a
+    // stale form state — delete clears the disk copy first).
+    let existing = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    settings.groq_api_key = crate::api_keys::merge_key(&existing, "groqApiKey", &settings.groq_api_key);
+    settings.gemini_api_key = crate::api_keys::merge_key(&existing, "geminiApiKey", &settings.gemini_api_key);
+    settings.cerebras_api_key = crate::api_keys::merge_key(&existing, "cerebrasApiKey", &settings.cerebras_api_key);
+    settings.deepgram_api_key = crate::api_keys::merge_key(&existing, "deepgramApiKey", &settings.deepgram_api_key);
+    if !settings.edge_tts_voice.is_empty() {
+        settings.tts_voice = settings.edge_tts_voice.clone();
+        if settings.tts_provider.is_empty() || settings.tts_provider == "kokoro" {
+            settings.tts_provider = "edge".to_string();
+        }
+    }
     let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
 
@@ -1908,6 +2086,12 @@ pub fn save_settings<R: Runtime>(
         "deviceId": device_id,
     });
     std::fs::write(&config_path, config.to_string()).map_err(|e| e.to_string())?;
+    let _ = app.emit("settings:updated", &settings);
+    let _ = app.emit("orb:morphology_changed", serde_json::json!({
+        "think": settings.orb_think_mode,
+        "speak": settings.orb_speak_mode,
+        "listen": settings.orb_listen_mode,
+    }));
     tracing::info!("settings saved to {:?}", path);
     Ok(())
 }
@@ -1915,6 +2099,11 @@ pub fn save_settings<R: Runtime>(
 /// Read the Groq API key from settings.json (non-IPC helper for stt.rs).
 /// Returns empty string if no key is set or settings file doesn't exist.
 pub fn read_groq_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
+    if let Some(k) = crate::auth_vault::get_api_key("groq") {
+        if !k.is_empty() {
+            return k;
+        }
+    }
     let dir = app.path().app_data_dir();
     let Ok(dir) = dir else { return String::new(); };
     let path = dir.join("settings.json");
@@ -1964,11 +2153,13 @@ pub fn read_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>, service: &str)
     let camel = match service {
         "gemini" => "geminiApiKey",
         "cerebras" => "cerebrasApiKey",
+        "deepgram" => "deepgramApiKey",
         _ => "groqApiKey",
     };
     let snake = match service {
         "gemini" => "gemini_api_key",
         "cerebras" => "cerebras_api_key",
+        "deepgram" => "deepgram_api_key",
         _ => "groq_api_key",
     };
     json.get(camel)
@@ -2392,6 +2583,45 @@ pub fn read_ghost_depth_ack<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> boo
         .unwrap_or(true)
 }
 
+/// Read the persona tone mode ("butler" default, "friend" opt-in).
+/// Unknown values fall back to butler — tone must never break on a typo.
+pub fn read_persona_mode<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
+    let dir = app.path().app_data_dir();
+    let Ok(dir) = dir else { return default_persona_mode() };
+    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else {
+        return default_persona_mode();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return default_persona_mode();
+    };
+    match json
+        .get("personaMode")
+        .or_else(|| json.get("persona_mode"))
+        .and_then(|v| v.as_str())
+    {
+        Some("friend") => "friend".to_string(),
+        _ => default_persona_mode(),
+    }
+}
+
+/// Voice-switch the persona tone (read-modify-write — unknown fields survive).
+/// Returns the stored mode ("friend" or "butler").
+pub fn set_persona_mode<R: tauri::Runtime>(app: &tauri::AppHandle<R>, mode: &str) -> String {
+    let stored = if mode == "friend" { "friend" } else { "butler" }.to_string();
+    if let Ok(dir) = app.path().app_data_dir() {
+        let path = dir.join("settings.json");
+        let mut json: serde_json::Value =
+            std::fs::read_to_string(&path).ok().and_then(|c| serde_json::from_str(&c).ok()).unwrap_or(
+                serde_json::json!({}),
+            );
+        if let Some(obj) = json.as_object_mut() {
+            obj.insert("personaMode".to_string(), serde_json::Value::String(stored.clone()));
+            let _ = std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap_or_default());
+        }
+    }
+    stored
+}
+
 /// Read the ghostStepTimeoutMs per-step watchdog value (D7). Floor 1000ms.
 pub fn read_ghost_step_timeout_ms<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u64 {
     let dir = app.path().app_data_dir();
@@ -2469,6 +2699,14 @@ pub async fn google_connect_account() -> Result<crate::google::types::GoogleAcco
     crate::google::accounts::connect_account().await
 }
 
+/// IPC: Progressive re-consent for phone + address (settings "Add phone &
+/// address"). Opens the same loopback flow with 2 extra sensitive scopes
+/// and merges the result into the existing profile. Absence is normal.
+#[tauri::command]
+pub async fn google_connect_extended() -> Result<crate::google::types::GoogleAccountProfile, String> {
+    crate::google::accounts::connect_extended().await
+}
+
 /// IPC: Promote an account to primary (avatar badge + default token).
 #[tauri::command]
 pub fn google_set_primary_account(email: String) -> Result<(), String> {
@@ -2481,14 +2719,42 @@ pub fn google_disconnect_account(email: String) -> Result<(), String> {
     crate::google::accounts::disconnect_account(&email)
 }
 
+/// IPC: Seed identity from the setup installer (Worker-OAuth connect).
+/// Worker-held tokens must NEVER enter the engine registry — this fills
+/// user.json gaps only (name/email/photo), never overwrites confirmed data.
+#[tauri::command]
+pub fn memory_seed_setup_identity<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    name: Option<String>,
+    email: Option<String>,
+    picture: Option<String>,
+) -> Result<bool, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?;
+    Ok(crate::memory::seed_setup_identity(
+        &dir,
+        name.as_deref(),
+        email.as_deref(),
+        picture.as_deref(),
+    ))
+}
+
 /// IPC: Save custom developer Google OAuth credentials (override built-ins).
 #[tauri::command]
 pub fn google_save_custom_credentials(
     client_id: String,
     client_secret: Option<String>,
 ) -> Result<(), String> {
-    crate::google::accounts::save_custom_credentials(&client_id, client_secret.as_deref());
-    Ok(())
+    crate::google::accounts::save_custom_credentials(&client_id, client_secret.as_deref())
+}
+
+/// IPC: Can Google sign-in start? (Client ID + Secret present and well-formed;
+/// never returns the secret.)
+#[tauri::command]
+pub fn google_credentials_status() -> crate::google::oauth::CredentialsStatus {
+    crate::google::accounts::credentials_status()
 }
 
 // ─── Memory / diary / webhook / improvement / health / settings IO ──────
@@ -2498,6 +2764,165 @@ pub fn google_save_custom_credentials(
 pub fn memory_recall<R: Runtime>(app: AppHandle<R>, query: String) -> Vec<(String, String)> {
     let Ok(dir) = app.path().app_data_dir() else { return vec![] };
     crate::memory::recall(&dir, &query)
+}
+
+/// IPC: Memory Core status (enabled, encrypted at rest, counts, egress).
+#[tauri::command]
+pub fn memcore_status<R: Runtime>(app: AppHandle<R>) -> Result<crate::memcore::Status, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::status(&dir))
+}
+
+/// IPC: How long to keep the mic open for the answer to a question NEXUS
+/// just asked ("Shall I start?"). `None` = no question is waiting.
+#[tauri::command]
+pub fn offer_pending() -> Option<u64> {
+    crate::memcore::offer::listen_window_ms()
+}
+
+/// One filed important email for the Memory page.
+#[derive(serde::Serialize)]
+pub struct MailRowOut {
+    pub key: String,
+    #[serde(flatten)]
+    pub mail: crate::memcore::mailtriage::StoredMail,
+}
+
+/// IPC: Important emails the inbox watcher filed (7 days, newest first).
+#[tauri::command]
+pub fn memcore_mail_list<R: Runtime>(app: AppHandle<R>) -> Result<Vec<MailRowOut>, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let rows = crate::memcore::with_store(&dir, |s| {
+        s.recent(crate::memcore::store::Tier::Mail, 60)
+            .into_iter()
+            .filter_map(|h| {
+                serde_json::from_str::<crate::memcore::mailtriage::StoredMail>(&h.value)
+                    .ok()
+                    .map(|mail| MailRowOut { key: h.key, mail })
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    Ok(rows)
+}
+
+/// IPC: Stop alerts from one sender (stored as a visible, forgettable fact).
+#[tauri::command]
+pub fn memcore_mail_mute<R: Runtime>(app: AppHandle<R>, email: String) -> Result<bool, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().timestamp();
+    Ok(crate::memcore::with_store(&dir, |s| crate::memcore::mailwatch::mute_sender(s, &email, now)).unwrap_or(false))
+}
+
+
+/// One learned WhatsApp person for the Memory page.
+#[derive(serde::Serialize)]
+pub struct PersonOut {
+    pub jid: String,
+    pub name: String,
+    pub score: u8,
+    pub why: String,
+    pub vip: bool,
+    pub muted: bool,
+}
+
+/// IPC: People NEXUS has learned from WhatsApp patterns (best first). Counts
+/// and timestamps only — no message text is kept for this list.
+#[tauri::command]
+pub fn memcore_people<R: Runtime>(app: AppHandle<R>) -> Result<Vec<PersonOut>, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().timestamp();
+    Ok(crate::memcore::with_store(&dir, |s| {
+        crate::memcore::people::ranked(&crate::memcore::people::load_all(s), now)
+            .into_iter()
+            .take(40)
+            .map(|(p, sc)| PersonOut { jid: p.jid, name: p.name, score: sc.value, why: sc.why, vip: p.vip, muted: p.muted })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default())
+}
+
+/// IPC: Pin (VIP) or mute a learned person. `kind` = "vip" | "mute".
+#[tauri::command]
+pub fn memcore_person_flag<R: Runtime>(app: AppHandle<R>, jid: String, kind: String, on: bool) -> Result<bool, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().timestamp();
+    let flag = match kind.as_str() {
+        "vip" => crate::memcore::wa::PersonFlag::Vip,
+        "mute" => crate::memcore::wa::PersonFlag::Mute,
+        _ => return Err("kind must be vip or mute".into()),
+    };
+    Ok(crate::memcore::with_store(&dir, |s| match crate::memcore::people::get(s, &jid) {
+        Some(p) => matches!(crate::memcore::wa::set_flag(s, &p.name, flag, on, now), crate::memcore::wa::FlagOutcome::Done(_)) || {
+            // Two people can share a name: fall back to the exact id.
+            let mut p = p;
+            match flag {
+                crate::memcore::wa::PersonFlag::Vip => {
+                    p.vip = on;
+                    if on { p.muted = false; }
+                }
+                crate::memcore::wa::PersonFlag::Mute => {
+                    p.muted = on;
+                    if on { p.vip = false; }
+                }
+            }
+            crate::memcore::people::save_user_choice(s, &p, now);
+            true
+        },
+        None => false,
+    })
+    .unwrap_or(false))
+}
+
+/// IPC: Check the WhatsApp bridge (running? paired? list format understood?
+/// which receipt/presence tools does it offer — NEXUS refuses to call them).
+#[tauri::command]
+pub async fn whatsapp_selftest() -> crate::memcore::wa::SelfTest {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+    crate::memcore::wa::selftest(&client).await
+}
+
+/// IPC: The saved timetable.
+#[tauri::command]
+pub fn memcore_timetable<R: Runtime>(app: AppHandle<R>) -> Result<Vec<crate::memcore::timetable::Slot>, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::with_store(&dir, crate::memcore::timetable::load_slots).unwrap_or_default())
+}
+
+/// IPC: Remove one timetable slot.
+#[tauri::command]
+pub fn memcore_timetable_delete<R: Runtime>(app: AppHandle<R>, id: String) -> Result<bool, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().timestamp();
+    Ok(crate::memcore::with_store(&dir, |s| crate::memcore::timetable::delete_slot(s, &id, now)).unwrap_or(false))
+}
+
+/// IPC: Erase the recorded activity history (resume points) only.
+#[tauri::command]
+pub fn memcore_clear_activity<R: Runtime>(app: AppHandle<R>) -> Result<usize, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::clear_activity(&dir))
+}
+
+/// IPC: Everything NEXUS remembers, with provenance ("what do you remember").
+#[tauri::command]
+pub fn memcore_list<R: Runtime>(app: AppHandle<R>) -> Result<Vec<crate::memcore::store::Row>, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::list_rows(&dir, 500))
+}
+
+/// IPC: The last 7 days of what was sent to cloud models.
+#[tauri::command]
+pub fn memcore_egress_log<R: Runtime>(
+    app: AppHandle<R>,
+    limit: Option<usize>,
+) -> Result<Vec<crate::memcore::store::EgressEntry>, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::egress_log(&dir, limit.unwrap_or(50).min(200)))
 }
 
 /// IPC: Forget a stored memory key.
@@ -2660,7 +3085,7 @@ pub fn export_settings<R: Runtime>(app: AppHandle<R>) -> Result<String, String> 
     let mut json: serde_json::Value =
         serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
     // Secrets live in the keychain — strip any legacy disk copies.
-    for key in ["groqApiKey", "geminiApiKey", "cerebrasApiKey"] {
+    for key in ["groqApiKey", "geminiApiKey", "cerebrasApiKey", "deepgramApiKey"] {
         json[key] = serde_json::json!("");
     }
     serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
@@ -2690,6 +3115,11 @@ pub fn import_settings<R: Runtime>(app: AppHandle<R>, json_str: String) -> Resul
     if let Some(k) = json.get("cerebrasApiKey").and_then(|v| v.as_str()) {
         if !k.is_empty() {
             crate::auth_vault::set_api_key("cerebras", k);
+        }
+    }
+    if let Some(k) = json.get("deepgramApiKey").and_then(|v| v.as_str()) {
+        if !k.is_empty() {
+            crate::auth_vault::set_api_key("deepgram", k);
         }
     }
     Ok(())
@@ -2740,15 +3170,15 @@ mod sidebar_geometry_tests {
 
     #[test]
     fn settings_right_docked() {
-        // h = min(1080, 1080-40) = 1040; x = 1920 - 740 - 10 = 1170; y = 20
+        // h = min(1040, 1080-40) = 1040; x = 1920 - 400 - 10 = 1510; y = 20
         let (x, y, w, h) = sidebar_geometry("settings", None, 1920.0, 1080.0);
-        assert_eq!((x, y, w, h), (1170.0, 20.0, 740.0, 1040.0));
+        assert_eq!((x, y, w, h), (1510.0, 20.0, 400.0, 1040.0));
     }
 
     #[test]
     fn settings_docked_goes_right() {
         let (x, y, w, h) = sidebar_geometry("settings", Some("right"), 1920.0, 1080.0);
-        assert_eq!((x, y, w, h), (1170.0, 20.0, 740.0, 1040.0));
+        assert_eq!((x, y, w, h), (1510.0, 20.0, 400.0, 1040.0));
     }
 
     #[test]
