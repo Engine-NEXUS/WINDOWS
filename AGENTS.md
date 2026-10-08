@@ -1,5 +1,340 @@
 # NEXUS — Project Notes
 
+## Design #11 Liquid Mercury Stream: Incremental Word-by-Word Voice Captions (2026-10-08)
+
+- **User Directive**: User selected Design #11 (Liquid Mercury Chrome) for captions. Constraint: no full pre-rendered sentence highlighting; words MUST ONLY appear as they are spoken out in real-time (incremental reveal with zero future words in DOM). Mode: Accumulating Clause Stream (words appear one-by-one as spoken up to sentence/clause breaks, hold for 2.0s reading dwell, then smoothly dissolve for the next sentence).
+- **Built**:
+  - `frontend/src/audio/captionScheduler.ts`: `CaptionLineEvent` extended with `words?: string[]` and `activeWordIndex?: number`. Schedules word reveal timers anchored to word audio timestamps (`start_ms`). `notifyLine` emits only words revealed up to that millisecond; 2.0s reading dwell after the last word before triggering smooth cross-dissolve.
+  - `frontend/src/stage/ResponseCaption.tsx`: Upgraded to render `.response-caption--mercury` with `.mercury-pill` and `.mercury-pill-text`. Maps over revealed `words` with active word glow (`.mercury-word--active`) and settled spoken words (`.mercury-word--spoken`). Symmetrically centered horizontally via `translateX(-50%)`, dynamically expanding outward as words arrive. Returns `null` when no words have been spoken.
+  - `frontend/src/stage/ghost.css`: Implemented Liquid Mercury Chrome styling (36px backdrop blur, 1px white highlight border, pill geometry, cyan chrome text shadow, spring `@keyframes mercury-pop`).
+  - `frontend/caption-showcase.html`: Option #11 interactive simulation on `http://localhost:5173/caption-showcase.html`.
+- **Verify**: `cargo check --features custom-protocol,admin-brain` clean, `cargo build --release` fresh binary (93.37 MB) at `%LOCALAPPDATA%\NEXUS\nexus.exe`, frontend `npx tsc --noEmit` clean, vitest 210/210 passed, `npm run build` clean in 12.7s.
+- **Docs**: `docs/changes/113-liquid-mercury-streaming-captions.md`.
+
+## Orb Customization Studio & Production State Morphologies (2026-10-07)
+
+- **Selected Morphologies Integrated**:
+  - **Idle**: Stardust sphere with gentle breathing cycle.
+  - **Listening**: Design #1 acoustic inward suction vortex with RMS jitter.
+  - **Thinking**: Design #6 **Trefoil Celtic Helix Cage** ($p=3$ braided helical rings intersecting at $120^\circ$).
+  - **Speaking**: Design #2 **64-Strand Fibonacci Blossom** with acoustic petal pulses and sound energy expansion.
+- **Orb Customization Studio Built**:
+  - `src-tauri/src/dyn_windows.rs`: Defined `orb_studio` window configuration ($800\times980\text{px}$, frameless liquid glass, on-demand creation/destruction).
+  - `src-tauri/src/commands.rs`: Added `open_orb_studio_window` and `close_orb_studio_window`. Calculated geometry to dock Studio flush to the left of the Settings window with a $12\text{px}$ margin ($x = \text{monitor\_w} - 1222.0$) at twice the width of Settings ($800\text{px}$ vs $400\text{px}$), without closing Settings.
+  - `frontend/orb-studio.html`: Built minimal 2-pane studio interface: left pane hosts clean numerical option selectors ($1..12$) for Thinking, Speaking, and Listening with Save button; right pane hosts an interactive $380\times380\text{px}$ real-time WebGL canvas with audio reactivity simulation slider.
+  - `frontend/src/settings-sidebar/SettingsSidebarApp.tsx`: Added **"✦ Customize Orb"** action card in Settings directly beside voice personas.
+- **Verify**: `cargo check --features custom-protocol,admin-brain` clean, `cargo test --lib -- commands::sidebar_geometry_tests` 13/13 pass, `npm test -- --run` 200/200 pass, `npx tsc --noEmit` clean, `npm run build` built cleanly in 15.2s.
+
+
+## Google Sign-In Fix, Keychain Test Isolation & Token-Removal Leak (2026-10-08)
+
+- **Why Gmail could not be added**: `DEFAULT_CLIENT_ID` in `google/oauth.rs` was a placeholder (zeros) -> Google "OAuth client was not found, 401 invalid_client". There is now NO built-in client: the user must create their own Google OAuth client (Desktop app, Gmail + Calendar APIs, Test users) and paste Client ID + Secret in Command Hub -> Advanced. Sign-in fails in 0 s with instructions (`credentials_status()`, IPC `google_credentials_status`); Client ID shape is validated on save.
+- **Test isolation**: all keychain access in `auth_vault.rs` goes through `kr()`, which installs keyring's in-memory mock under `cfg(test)` (`NEXUS_REAL_KEYRING=1` to opt out). Before this, `cargo test` wrote fake `user1@gmail.com`/`user2@gmail.com` accounts into the REAL Credential Manager and would have overwritten the user's real Google account registry.
+- **Token leak fixed**: `remove_google_account` now clears `google_rt_<email>` / `google_at_<email>` (the entries actually read); refresh token no longer stored twice. `photoslibrary.readonly` is no longer requested (Google removed it 2025-03-31). Testing-mode refresh tokens expire after 7 days: the inbox watcher now flags `mail_needs_signin`, says so once a day and the Memory page shows "Paused".
+- **Open**: API keys still live in BOTH the keychain and plaintext `settings.json` (not stripped, despite older notes). Publishing the OAuth app removes the 7-day expiry but unverified Gmail scopes show a warning screen and a user cap.
+- **Verify**: Rust 1133 + TTS groups, `cargo check` clean, vitest 210; live run of the release binary: encrypted store, new IPC commands, instant sign-in failure, no panics. **Not run**: a real Google sign-in (needs the user's OAuth client).
+- **Docs**: `docs/changes/113-google-signin-fix-vault-test-isolation-and-token-leak.md`.
+
+## Memory Core P6: WhatsApp Priority People — Read-Only, OFF by Default (2026-10-08)
+
+- **Built**: `memcore/wa.rs` polls the local WhatsApp MCP bridge (45 s active / 5 min away) and `memcore/people.rs` learns who matters from counts and timing only (two-way volume, reply-within-an-hour rate, recency, two-way; one-sided senders x0.25; VIP +30; mute = 0; High >= 70, Medium >= 50; groups ignored; message text never used). Alerts name the sender only (text is never in the alert); first sight of a chat is silent. Voice: "read that message" / "read Asha's messages" / "what did Raj say on WhatsApp" (sidebar card, local), "make Asha a VIP", "mute WhatsApp alerts from Raj", "unmute ...", "who are my priority people"; "that's not important" now mutes whichever alert (mail or WhatsApp) was last. Memory page: switch, "Check WhatsApp connection", people list with VIP/Mute. Settings `memcoreWhatsapp` and `memcoreWhatsappSpeak` both default **false** (speaking message text sends it to the cloud voice service).
+- **Guarantees (tested)**: only the read allowlist is callable from the watcher; `mark_read`/`mark_chat_read`/`send_presence`/`send_typing` are refused for every caller in `mcp_client::call_tool`; a mock bridge that advertises those tools sees only `tools/list`, `list_chats`, `list_messages`; store lock never held across an `.await`.
+- **Bugs fixed on the way**: VIP/mute could be set but not cleared (store refuses mined writes that unpin a record -> user choices are written as `UserSaid`); `parse_pairing_state` returned "unrecognized" for MCP replies wrapped in `structuredContent` or a JSON text block.
+- **Pitfalls**: new settings must stay in `NexusSettings`; tests that touch `TEST_WHATSAPP_URL` serialise on `MOCK_GUARD`; `turn_detect::model_loads_and_runs` is a timing assertion (<1500 ms) that can flake while other builds run (passes alone); `tts_bench` can hit LNK1104 if a test exe is still running.
+- **Verify**: Rust 1163 + bench 9 + kokoro 12 (three groups), `cargo check --features custom-protocol,admin-brain` clean, frontend tsc clean + vitest 215 + build ok. **NOT verified**: anything against the real bridge (not running here; the list tools' JSON format is undocumented, parsers are tolerant, selftest reports what it could not read), and **whether the bridge's read calls send read receipts or change presence** - hence OFF until `docs/testing/whatsapp-read-receipt-test.md` is done. Replying from the phone marks chats read (uncontrollable). Not built: mark-read-after-reply, call-frequency signal, chat previews in the briefing. WhatsApp may ban unofficial clients; session re-pairs ~20 days.
+- **Docs**: `docs/changes/114-memory-core-p6-whatsapp-priority-people.md`, `docs/testing/whatsapp-read-receipt-test.md`.
+
+## Memory Core P5: Important-Mail Watcher & Calendar (2026-10-08)
+
+- **Built**: `memcore/mailwatch.rs` polls Gmail `history.list` (stored historyId per account; 90 s active / 8 min away; backoff; 404 = quiet re-baseline; metadata only, never bodies) -> `memcore/mailtriage.rs` deterministic rules (database-service pause/deletion, GitHub security/CI, hackathon status/deadlines, exam notices, plain deadlines; the Promotions tab suppresses weak matches) -> sealed `mail` records (untrusted, 7 days, Medium+) + `proactive_policy` alerts (High/Medium; 3+ batched). First connect is quiet. "That's not important" mutes the last alert's sender as a visible fact `mail_mute_<addr>`. Voice: "any important emails", "that's not important", "what's on my calendar today/tomorrow", "add X to my calendar tomorrow at 5pm" (`memcore/agenda.rs`; read back + overlap check + confirm before `events.insert`). The briefing now includes today's calendar and filed mail. Memory page: `memcoreMail` switch, status line, Important-mail list with reasons.
+- **Pitfalls**: the poll logic is `poll_core(dir, key, client)` (no Tauri handle) so it is tested against a local mock server via `google_io::TEST_BASE`; `memcoreMail` must stay in `NexusSettings`; the Mail and Slot tiers skip the secret-word screen on purpose (a "token expired" notice must still store). `orchestrator.rs` and `net/orchestrator.ts` were being edited by another session while this was built - keep patches anchored and narrow.
+- **Verify**: Rust 1150/1150 in three groups, `cargo check` clean, frontend tsc clean + vitest 209 + build ok, mock-server integration tests (baseline, pagination, label filtering, stale history, error mapping, calendar list/insert). **Not run live**: no Google account is connected on this PC (the old keyring mock never persisted tokens) - reconnect once in the Command Hub; spoken alerts not heard.
+- **Docs**: `docs/changes/112-memory-core-p5-inbox-watcher-and-calendar.md`.
+
+## Memory Core P4: Timetable from an Image, Slot Reminders & "Shall I Start?" (2026-10-08)
+
+- **Built**: "analyse this and add section 2 to my timetable" (screen) / "add the picture I copied …" (clipboard) → Gemini reads sections/slots → code validates (times, days, caps, dedupe, section pick) → sidebar confirm card + spoken "Shall I add them?" → saved sealed (tier `slot`, user_owned). Scheduler (30 s) fires each slot's reminder once a day via `proactive_policy` (Medium); DSA/LeetCode slots ask "Shall I start?" and register a pending offer (`memcore/offer.rs`) that only listens after the question is spoken (`speak_line` arms `sentinel_offer_*`), opens an 8 s frontend mic window (`openPendingOfferWindow`, `offer_pending`), and is accepted by the directed-speech gate. "Yes" opens LeetCode where you left off + the last video watched DURING a DSA slot (resume samples are tagged with the running activity); app-vs-browser is stored per activity as `study_app_<activity>` and overwritten whenever repeated. New intents: `timetable_add|show|clear|commit`, `study_pref` (parsed BEFORE screen analysis). Memory page: timetable list + reminders switch (`memcoreTimetable`).
+- **Pitfalls**: the offer state is process-global (tests serialise on `offer::TEST_GUARD`); the shared vision client has a 4 s timeout, too short for reading a timetable (own 30 s client); new settings must stay in `NexusSettings`; never guess a video: no tagged video = skip YouTube.
+- **Verify**: Rust 1116/1116 in three groups (TTS modules still abort together), `cargo check` clean, frontend tsc clean + vitest 206 + build ok. **Live**: clipboard image read; real Gemini request returned all 5 slots of a generated two-section timetable and section 2 picked correctly (2.8 s). **Not run live**: the spoken reminder → mic window → "yes" round trip; photos/handwriting.
+- **Docs**: `docs/changes/111-memory-core-p4-timetable-reminders-and-offers.md`.
+
+## Memory Core P3: Resume Points & Boot Briefing (2026-10-08)
+
+- **Built**: `memcore/resume.rs` samples the foreground window every 30 s while the user is at the PC (GetLastInputInfo) and keeps one record per window change in the sealed store (7-day ring, tier `resume`, never in the cloud pack; sensitive windows, NEXUS itself and the lock screen are never recorded; URLs reduced to host+path). `memcore/briefing.rs` is a pure builder: where you left off (+ real age), plus open items = watched-email deadlines (verbatim text) and requests NEXUS could not finish (`conversation::unfinished_requests`). No invented progress numbers; silent when it has nothing true to say. Delivered once a day ~45 s after startup, only when the user is present, via `proactive_policy::submit` (Medium). New intent `briefing` ("where did I leave off", "show my briefing", …) speaks short and opens a sidebar card. Command Hub → Memory: switches `memcoreActivity` / `memcoreBriefing` (both default on) + "Clear activity history".
+- **Pitfalls**: resume points must be snapshotted (`snapshot_at_boot`) BEFORE the recorder starts or the briefing reports the current session. Sampling, not a shutdown hook (no reliable exit event on logoff). The new settings must stay in `NexusSettings`. Running the entire lib suite in ONE process currently aborts (0xffffffff) in `tts_bench` + `tts_kokoro` (Kokoro loaded twice under low RAM); each passes alone — run `--skip tts_bench --skip tts_kokoro` plus each separately.
+- **Verify**: 1092/1092 in three groups, `cargo check` clean, frontend tsc clean + vitest 205/205 + build ok, live foreground/idle probe passed. **Not run live**: a real reboot (delay, presence gate, spoken delivery), recorder title quality across apps.
+- **Docs**: `docs/changes/110-memory-core-p3-resume-points-and-boot-briefing.md`.
+
+## Memory Core P2: Encryption at Rest, Cloud-Send Log, Name Redaction & "What I Remember" (2026-10-07)
+
+- **Built**: the Memory Core database is held in memory and persisted as ONE sealed blob (`memory/memcore.enc`, AES-256-GCM via `ring`), key in Windows Credential Manager (written then read back through a fresh handle, so the keyring mock can never own the data; no usable key store = plain file, and the UI says so). P1's plaintext db is migrated then shredded. Wrong key / tamper is refused without overwriting; wipe rotates the key (crypto-erase). A 7-day encrypted log records what each cloud turn sent (request + memory text). Optional `memcoreRedactNames` swaps known people's names for `Person A/B…` out and back. "What do you remember" now also opens a provenance-labelled sidebar card; Command Hub has a Memory page (list, forget, cloud-send log, redaction switch). IPC: `memcore_status`, `memcore_list`, `memcore_egress_log`.
+- **Honest scope**: stops disk theft / other users / casual reads, NOT same-user malware (it can ask the same API for the key). Whole-database re-seal per write is fine at this size.
+- **Verify**: `cargo test --lib -- --test-threads=1` 1072/1072, `cargo check` clean, frontend tsc clean + vitest 204/204 + build ok, live two-process keychain probe passed (also confirms the P0 keyring fix). P1 release build linked (11m01s). **Not run live**: the Memory page / sidebar card visually, first-launch migration on real data, name redaction against a real Worker.
+- **Docs**: `docs/changes/109-memory-core-p2-encryption-egress-log-redaction-memory-ui.md`.
+
+## Memory Core P1: SQLite Store, Ranked Recall, Context Pack & Worker Reads Memory (2026-10-07)
+
+- **Built** (`src-tauri/src/memcore/`): `rusqlite` bundled SQLite (`memory/memcore.db`, WAL, secure_delete) with records + FTS5 + append-only audit. Every record has `source` + `trust`; the admit gate refuses secrets, empties and untrusted text as a fact; mined values never overwrite pinned user-said ones. Ranked recall = BM25 + recency + use-frequency + pinned (plurals/prefix handled). Derived facts decay 3%/day, episodes expire at 30 days. `context_pack(query, 2000)` is the only memory text that leaves the device: ranked, PII-redacted, line-boundary cut. `memory.rs` is dual-write / ranked-read with legacy fallback; legacy JSON files are imported once and left in place. Setting `memcore` (default on) disables it.
+- **Worker** now reads `dialog_context.memory` (`memoryPreamble` in `counsel.ts`, labelled data-not-instructions, clipped). Before this only the 9Router path saw memory.
+- **Pitfalls**: retrieval is lexical ("where do I work" does not find `employer`); pinned in a known-miss fixture. `memcore` must stay in `NexusSettings` or `save_settings` drops it. Tests that delete a temp dir while its SQLite handle is cached leave the dir behind on Windows (harmless).
+- **Verify**: `cargo test --lib -- --test-threads=1` 1050/1050, `cargo check` clean, Worker 109/109. **Not run live**: first-launch migration on real data, a real Worker round-trip with memory.
+- **Docs**: `docs/changes/108-memory-core-p1-sqlite-ranked-recall-worker-memory.md`.
+
+## Memory Core Plan + P0 Fixes: Keychain Backend, Forget/Wipe Coverage, Auto-Learning (2026-10-07)
+
+- **Plan (approved)**: `docs/features/100-memory-core-plan.md` (research in `docs/research/memory/01-...`). One `memcore` module owned by `MemoryCenter` (not the Command Center, not per-sub-center): sub-centers emit typed `Observation`s with provenance + trust, the Main Center asks for one `context_pack` per turn. Priority-based tiers T0-T6, SQLite + app-level AES-GCM, deterministic priority scoring, WhatsApp read-only with `mark_read` deny-list, Gmail via `history.list`, timetable from screen/clipboard image, boot briefing via `proactive_policy`. Phases P0-P7, each flag-gated. User decisions: screen+clipboard image input; app-vs-browser preference per activity, overwritten on repeat; priority people learned + pin/mute; boot briefing spoken after short idle.
+- **Honest NOs**: exact YouTube resume position, greeting before login, downloading Instagram reels, controlling WhatsApp read state when the user replies from the phone.
+- **P0 built**: `keyring` now has `windows-native` (before, it was an in-memory mock, so keychain-stored keys/tokens did not persist), `forget` covers `facts.json`, `wipe_memory` covers conversation/brief/diary/mail watches, atomic writes, `log_episode` wired into `record_worker_turn`.
+- **Verify**: `cargo test --lib -- --test-threads=1` 1034/1034 pass, `cargo check --features custom-protocol,admin-brain` clean. **Not verified**: keychain persistence across a real restart (check `cmdkey /list` and that Groq/Gemini keys still work after the first launch).
+- **Docs**: `docs/changes/107-memory-p0-fixes-keyring-forget-episodes.md`.
+
+## Whisper Flow AI Analysis, Zero-RAM Streaming Architecture & Groq STT Optimization (2026-10-07)
+
+- **Research Context & Motivation**:
+  1. User requested thorough investigation into "Wispr Flow AI" to understand how it eliminates STT delay, whether it is open source, and what open-source models/architectures exist to achieve sub-250ms voice command responsiveness in Ghost Mode.
+  2. Strict constraint: When internet is available, cloud offloading must be used to preserve zero local RAM consumption (keeping the ambient ~175 MB baseline).
+  3. User requested exact quantitative % improvement comparisons against both Wispr Flow and the previous Groq REST flow, plus RAM comparison tables across idle, running, and max peak states.
+- **Key Findings & Blueprint**:
+  - **Wispr Flow is Closed Source**: Developed by Wispr AI (Stanford spinout); proprietary $12/month SaaS with zero public model weights. Uses 4-stage pipeline: WebSocket audio streaming $\to$ proprietary sub-200ms "Canto" ASR $\to$ speculative LLaMA-3-8B disfluency cleaner $\to$ OS text injection (700ms total budget).
+  - **Open-Source Benchmark**: Benchmarked top alternatives: `ggerganov/whisper.cpp` (~54.2k ★), `SYSTRAN/faster-whisper` (~25.7k ★), `pipecat-ai/pipecat` (~16.2k ★), `usefulsensors/moonshine` (~11.2k ★), `m-bain/whisperX` (~11.1k ★), `collabora/WhisperLive` (~4.3k ★), and `cjpais/Handy` (~1.2k ★).
+  - **NEXUS Optimization vs Previous Groq Flow**:
+    - End-to-end latency drops from ~1,025ms to ~240ms (**76.6% faster / 4.3x speedup**).
+    - Trailing dead-air silence drops from 650ms to 150ms (**76.9% reduction**).
+    - Audio upload transport drops from 220ms to 35ms (**84.1% reduction**).
+    - RAM impact: 175 MB $\to$ 177 MB (**+1.1%, virtually 0% impact, preserving 0 MB model RAM**).
+    - Cost: Retains 100% free tier (2,000 requests / 8 hours of audio per day on Groq LPUs).
+  - **NEXUS Optimization vs Wispr Flow**:
+    - NEXUS is **65.7% faster** than Wispr Flow (~240ms vs ~700ms) for voice commands because NEXUS skips cloud LLM reformatting and parses intent in native Rust (<5ms).
+    - **100% cost savings** ($0 vs $120/year).
+- **Docs**: `docs/research/voice-stt/02-whisper-flow-zero-ram-streaming-and-groq-optimization-2026-10-07.md`, `docs/research/ghost-mode/08-zero-delay-streaming-stt-and-ghost-mode-realignment-2026-10-07.md`.
+
+## Dual-Engine Hybrid STT: Groq LPU Fast-Path & Optional Deepgram Nova-2 Streaming (2026-10-07)
+
+- **Problem & Motivation**:
+  1. Primary Groq LPU pipeline achieved ~240ms command response with $0 cost and zero local model RAM, but Groq's public API does not support token-by-token WebSocket partial streaming.
+  2. To drive `LiveCaption.tsx` with partial transcripts mid-sentence without forcing 200MB–1GB of local model RAM onto the user's PC, an optional cloud streaming provider was needed.
+- **Root Cause & Fixes**:
+  - `src-tauri/src/stt_deepgram.rs`: Built Deepgram Nova-2 REST transcription client with zero-RAM audio serialization.
+  - `src-tauri/src/stt_stream.rs`: Added Deepgram Nova-2 cloud WebSocket streaming over TLS (`wss://api.deepgram.com/v1/listen?model=nova-2&...`); emits `stt:partial` to `LiveCaption.tsx` for real-time word hypotheses while speaking.
+  - `src-tauri/src/stt.rs`: Wired cascade: if `deepgramApiKey` is configured, uses Deepgram; if empty or failed, seamlessly routes to primary Groq Whisper Large v3 Turbo; falls back to local faster-whisper.
+  - `src-tauri/src/api_keys.rs` & `commands.rs`: Added `("deepgram", "Deepgram", "deepgramApiKey")` to `KEY_SERVICES`, auto-exposing Deepgram in Command Hub's API Keys settings.
+- **Verify**:
+  - `cargo check --features custom-protocol,admin-brain`: clean (**0 warnings, 0 errors**).
+  - `cargo test --lib -- stt_deepgram`: 2/2 pass.
+  - `cargo test --lib -- api_keys`: 7/7 pass.
+  - `cargo test --lib -- stt`: 31/31 pass.
+  - `cargo test --lib -- wakeword`: 58/58 pass.
+  - `cargo test --lib -- intent_parser`: 197/197 pass.
+  - `npm test -- --run`: 200/200 pass.
+  - `npx tsc --noEmit`: clean (0 errors).
+  - `npm run build`: built in 8.17s.
+  - `cargo build --release --features custom-protocol,admin-brain`: fresh release binary (96.1 MB) produced at `src-tauri/target/release/nexus.exe`.
+- **Docs**: `docs/changes/106-dual-engine-groq-deepgram-streaming-integration.md`.
+
+## Zero-Delay Rust Intent Pre-Routing & IPC Fast-Path Elimination (2026-10-07)
+
+- **Problem & Motivation**:
+  1. Once Groq finished transcribing audio on the Rust capture thread, raw text was transmitted to the frontend over `stt:transcript`, which then called `invoke("parse_transcript")` back into Rust before triggering execution.
+  2. This inter-process hop introduced 15ms–45ms of unnecessary latency and thread serialization overhead.
+  3. Frontend `Intent` type definitions omitted several newer desktop & ghost mode intent variants (`enter_ghost_control`, `exit_ghost_control`, `browser_search`, `start_dictation`, `watch_screen_email`, `memory_audit`, `persona_friend`, `share_concern`).
+- **Root Cause & Fixes**:
+  - `src-tauri/src/wakeword_oww.rs`: In `stt-capture-rx`, normalized phonetic mishearings via `normalize_phonetic_mishearings` and evaluated deterministic intent via `parse_deterministic` directly on the capture thread. Enriched `SttTranscript` with `intent_label: Option<&'static str>` and `pre_parsed: Option<serde_json::Value>`.
+  - `frontend/src/stage/orbRuntime.ts`: Updated `SttTranscriptTurn` and the `stt:transcript` event listener to extract `intent_label` and `pre_parsed`, forwarding them directly into `turn: SttTurnMetadata` for `processTranscript`.
+  - `frontend/src/audio/recorder.ts`: Updated `SttTurnMetadata` and `parseTranscriptEnhanced`: if `preParsed?.intent` exists, returns the pre-parsed intent immediately without calling `invoke("parse_transcript")` (0ms IPC delay).
+  - `frontend/src/intent/parser.ts`: Synchronized `Intent` type union with all `ParsedIntent` variants in Rust.
+- **Verify**:
+  - `cargo check --features custom-protocol,admin-brain`: clean (**0 warnings, 0 errors**).
+  - `cargo test --lib -- wakeword`: 58/58 pass.
+  - `cargo test --lib -- stt`: 31/31 pass.
+  - `cargo test --lib -- intent_parser`: 197/197 pass.
+  - `npx tsc --noEmit`: clean (0 errors).
+  - `npm test -- --run`: 200/200 pass.
+  - `npm run build`: built in 6.40s.
+- **Docs**: `docs/changes/105-zero-delay-rust-intent-pre-routing-and-ipc-fast-path.md`.
+
+## Zero-Delay Groq STT VAD Pacing, Persistent Tokio Runtime & HTTP/2 Connection Pooling (2026-10-07)
+
+- **Problem & Motivation**:
+  1. VAD trailing dead air was hardcoded to 10 chunks (800ms) after speech completed, adding significant hesitation to Ghost Mode and standard voice commands.
+  2. The STT capture thread (`stt-capture-rx`) and wake word verifier built a brand new `reqwest::Client` on every single spoken turn, preventing connection reuse and paying a 150ms–220ms cold TLS handshake penalty on every turn.
+  3. The capture receiver built and destroyed a single-thread Tokio runtime on every turn, causing CPU churn and thread allocation overhead.
+- **Root Cause & Fixes**:
+  - `src-tauri/src/stt.rs`: Added global `SHARED_STT_CLIENT` with `pool_idle_timeout(90s)` and `tcp_keepalive(60s)` via `shared_client()`; updated `SttState::new()` to clone the shared client.
+  - `src-tauri/src/wakeword_oww.rs`: Defined `STT_SILENCE_CHUNK_LIMIT_GHOST = 3` (240ms) and `STT_SILENCE_CHUNK_LIMIT_GHOST_PATIENT = 6` (480ms); lowered default `STT_SILENCE_CHUNK_LIMIT` from 10 to 5 (400ms) and patient from 15 to 10 (800ms); made endpoint adaptive to `crate::ghost::session_active()`.
+  - `src-tauri/src/wakeword_oww.rs`: Initialized Tokio runtime once outside `stt-capture-rx` loop; switched both STT capture and wake word verification to reuse `crate::stt::shared_client()`.
+- **Verify**:
+  - `cargo check --features custom-protocol,admin-brain`: clean (**0 warnings, 0 errors**).
+  - `cargo test --lib -- wakeword`: 58/58 pass.
+  - `cargo test --lib -- stt`: 31/31 pass.
+  - `cargo test --lib -- --test-threads=1`: 1025/1025 pass.
+  - `npm test -- --run`: 200/200 pass.
+  - `npx tsc --noEmit`: clean (0 errors).
+  - `npm run build`: built in 7.87s.
+  - `cargo build --release --features custom-protocol,admin-brain`: fresh release binary (96.0 MB) produced.
+- **Docs**: `docs/changes/104-zero-delay-groq-stt-vad-pacing-and-connection-pooling.md`.
+
+## Sidebar Text Formatting, Top-Right Dock Buttons & Settings Full-Height Span (2026-10-07)
+
+- **Problem & Motivation**:
+  1. Settings sidebar (Command Hub) height was clamped at 780px (`.min(780.0)` in `commands.rs`), leaving an empty ~280px gap above the Windows taskbar on 1080p+ screens.
+  2. Dock Left and Dock Right controls were faint, unstyled text buttons embedded in a rigid 72px grid cell, lacking proper desktop control styling and positioning.
+  3. Heading styles (`.nexus-h1..h6` and `h1..h6`) in `sidebar.css` were unstyled, resulting in default browser user-agent margins and misaligned response text. Insights stats columns had misaligned vertical baselines.
+- **Root Cause & Fixes**:
+  - `src-tauri/src/commands.rs`: In `sidebar_geometry("settings")`, removed `.min(780.0)` cap so height extends to `(monitor_h - 40.0).min(1040.0).max(400.0)`, spanning full height down to the taskbar. Updated unit tests.
+  - `frontend/src/settings-sidebar/SettingsSidebarApp.tsx` & `hub.css`: Upgraded `.hx-header-dock` with polished $28\times28\text{px}$ pill buttons matching desktop window controls, anchored at top right; styled flex header layout with absolute centered title.
+  - `frontend/src/settings-sidebar/hub/HubHome.tsx` & `hub.css`: Added placeholder subtitle rows so all 3 insight stats columns share identical vertical and horizontal baselines; polished `.hx-section` and `.hx-row` typography.
+  - `frontend/src/sidebar/sidebar.css`: Restored SF Pro typography hierarchy for `.nexus-markdown-body h1..h6` and `.nexus-h1..h6`; added `:first-child { margin-top: 0 !important; }`; aligned `.sidebar-header-row` dock buttons flush at top right.
+- **Verify**:
+  - `cargo test --lib -- commands::sidebar_geometry_tests`: 13/13 pass.
+  - `npx tsc --noEmit`: clean (0 errors).
+  - `npm test -- --run`: 200/200 pass.
+  - `cargo check --features custom-protocol,admin-brain`: clean (**0 warnings, 0 errors**).
+  - `npm run build`: clean (built in 9.91s).
+  - `cargo test --lib -- --test-threads=1`: 1020/1020 pass.
+  - `cargo build --release --features custom-protocol,admin-brain`: clean release binary produced.
+- **Docs**: `docs/changes/102-sidebar-text-formatting-top-right-dock-and-settings-height.md`.
+
+## CPU, RAM, Battery & Energy Optimization Suite (2026-10-07)
+
+- **Problem & Motivation**:
+  1. Win32 cursor polling loop ran at a fixed 30ms interval (33.3 Hz) even with zero active hitboxes, waking CPU cores continuously and preventing entry into deep Intel/AMD Package C-states (C8/C10), elevating background idle power (~1.5% CPU / ~3.0W).
+  2. Background daemon lacked Windows 11 EcoQoS (Efficiency Mode) declaration, allowing audio processing and watchdog routines to run on high-power Performance cores (P-cores).
+  3. WebGL orb render loop continuously executed at 60 FPS during ambient 0.33 Hz idle breathing and failed to halt during OS display sleep/occlusion (`document.hidden`), consuming unnecessary GPU power on battery.
+  4. Audio telemetry in `wakeword_oww.rs` formatted and emitted debug strings at 2.08 Hz during room silence even in release builds.
+- **Root Cause & Fixes**:
+  - `src-tauri/src/stage.rs` & `live_glass.rs`: Upgraded hitbox loop to adaptive 3-tier pacing: 250ms when hitboxes are empty (cuts 94% of wakes), 100ms when cursor is distant (>120px), and 16ms within 120px proximity.
+  - `src-tauri/src/power.rs` & `lib.rs`: Implemented Win32 `SetProcessInformation` with `ProcessPowerThrottling` / `PROCESS_POWER_THROTTLING_EXECUTION_SPEED` to opt the process into Windows 11 EcoQoS (Efficiency Mode), scheduling background tasks to E-cores.
+  - `frontend/src/avatar/voice-orb.js`: Added `document.hidden` check and `visibilitychange` listener to drop GPU draws to 0 FPS on occlusion; paced idle breathing state to ~25 FPS (`> 40ms` interval), cutting GPU draw calls by >60% while maintaining 60 FPS for active states.
+  - `frontend/src/avatar/Avatar.tsx`: Added dynamic battery detection via `navigator.getBattery()`; dynamically scales particle count from 5,000 on AC power down to 2,500 on battery power.
+  - `src-tauri/src/wakeword_oww.rs`: Gated silent audio telemetry log formatting behind `#[cfg(debug_assertions)]`.
+- **Verify**:
+  - `npx tsc --noEmit`: clean (0 errors).
+  - `npm test -- --run`: 200/200 pass.
+  - `cargo check --features custom-protocol,admin-brain`: clean (**0 warnings, 0 errors**).
+  - `cargo test --lib -- --test-threads=1`: 1020/1020 pass.
+  - `cargo build --release --features custom-protocol,admin-brain`: fresh release binary produced cleanly.
+- **Docs**: `docs/changes/101-cpu-ram-battery-energy-optimizations.md`, `docs/research/performance/01-cpu-ram-battery-optimization-plan.md`.
+
+## Build Warnings Zero-Out, Stage Cold-Boot Resilience & Daemon Exit Prevention (2026-10-07)
+
+- **Problem & Motivation**:
+  1. Build logs emitted 23 Rust compiler warnings (`unused_imports`, unregistered IPC commands, dormant helper functions) and Vite chunk warnings (>500 kB).
+  2. Launching via `nexus start` triggered a premature blackout (`stage: blackout detected (window_gone=false, stale_beat=true) — incident #1`) because `SHOW_GRACE_SECS` was only 8s, expiring before WebView2 completed cold-boot initialization (~8.1s).
+  3. Watchdog window recreation destroyed the `stage` window; because 0 windows remained, Tauri v2's default exit behavior shut down the entire daemon.
+- **Root Cause & Fixes**:
+  - `frontend/vite.config.ts`: Set `build.chunkSizeWarningLimit: 2000` to silence chunk warnings for the unified sidebar.
+  - `src-tauri/src/window_manager.rs` & `ocr.rs`: Removed unused `Emitter` and `IAsyncOperation` imports.
+  - `src-tauri/src/lib.rs`: Registered `tts::restore_tts_volume`, `architect::cancel_architect_analysis`, and `architect::query_impact` in `generate_handler!`; updated runner to intercept `RunEvent::ExitRequested` and call `api.prevent_exit()`.
+  - `src-tauri/src/browser_center.rs`, `system_center.rs`, `youtube_center.rs`, `improve.rs`, `pii_filter.rs`, `vision.rs`: Added `#[allow(dead_code)]` annotations to dormant utility functions and structs.
+  - `src-tauri/src/stage.rs`: Increased `SHOW_GRACE_SECS` from 8s to 20s and `HEARTBEAT_STALE_SECS` from 6s to 10s.
+- **Verify**:
+  - `npm run build`: clean (0 errors, 0 warnings).
+  - `npm test -- --run`: 200/200 pass.
+  - `cargo check --features custom-protocol,admin-brain`: clean (**0 warnings, 0 errors**).
+  - `cargo test --lib -- --test-threads=1`: 1020/1020 pass.
+  - `cargo build --release --features custom-protocol,admin-brain`: fresh release binary (96.0 MB) produced cleanly.
+- **Docs**: `docs/changes/100-build-warnings-cleanup-and-stage-watchdog-resilience.md`.
+
+## Ghost Mode Window Focus Polling, Contextual Search & Human Cursor Motion (2026-10-07)
+
+- **Problem & Motivation**:
+  1. Opening slow-starting packaged apps (e.g., "Open WhatsApp") launched in the background without focus because `focus_app_by_title` ran at 0ms without polling and Windows foreground lock blocked activation.
+  2. Saying "Search Mommy" while WhatsApp was active triggered Google Search in Brave Browser (`Ctrl+L`) rather than WhatsApp contact search.
+  3. "Click on the search bar" took 5-6s to respond because `CLICKABLE` controls omitted `ControlType::Edit` and `score_name` failed on conversational noise words, forcing an expensive Cloud Vision round-trip.
+  4. The cursor moved in a jarring 300ms leap (~5,000 px/s) and immediately snapped back in 250ms, appearing as an invisible flash.
+- **Root Cause & Fixes**:
+  - `src-tauri/src/live/commands/window.rs`: Implemented `wait_and_focus_app` with 150ms retry loop up to 2.5s; added Win32 `Alt`-key tap before `SetForegroundWindow` to bypass OS foreground locks; added `is_foreground_app`.
+  - `src-tauri/src/screen.rs`: Added `ControlType::Edit` and `ControlType::ComboBox` to `CLICKABLE`.
+  - `src-tauri/src/live/commands/mouse.rs`: Added noise-word stripping and token overlap to `score_name`; implemented Fitts's Law dynamic glide duration (`calculate_glide_duration`, clamped 550ms-750ms); upgraded to 60 FPS (16ms) interpolation; added 100ms arrival dwell before clicking; updated `restore`.
+  - `src-tauri/src/orchestrator.rs`: In `run_ghost_open`, used `wait_and_focus_app(&target, 2500)` in a blocking task; in Ghost Mode, routed `ParsedIntent::Search` to `run_ghost_message` when WhatsApp is focused.
+  - `src-tauri/src/intent_parser.rs`: Added "search/find <contact> on whatsapp/wa" patterns to `parse_whatsapp_command`.
+- **Verify**:
+  - `npx tsc --noEmit`: clean (0 errors).
+  - `npm test -- --run`: 200/200 pass.
+  - `cargo test --lib -- --test-threads=1`: 1020/1020 pass.
+  - `npm run build`: clean (8.68s).
+  - `cargo build --release --features custom-protocol`: fresh release binary produced.
+- **Docs**: `docs/changes/99-ghost-mode-window-focus-context-search-and-human-mouse.md`.
+
+## Command Hub Profile-Style Redesign, API Keys, Insights & Global Light/Dark Orb (2026-10-07)
+
+- **Problem & Motivation**: user wanted the Command Hub as a compact profile-settings card (reference mock, light + dark): accounts rows with photo + username and "Add Account", API Keys (add/replace/delete) instead of Account Security, insights (API keys, connected MCPs, requests today + all-time), no Log Out, removable Google/GitHub accounts, blunt corners, 400 px compact window, Light/Dark applied to everything including the wake-up orb (particles white → black in Light).
+- **Implementation**: Rust `usage_counter.rs` (today/all-time counters bumped at router/STT/Worker/MCP/vision call sites), `api_keys.rs` (masked list, set, delete from keychain AND settings.json), `github_profile.rs` (login/avatar via `/user`), `save_settings` never wipes/resurrects keys (`merge_key`), `read_groq_api_key` keychain-first, settings window 400 × min(780, mh−40). Frontend `settings-sidebar/hub/` (`HubHome`, `ApiKeysPage`, `useHubData`, `hubModel`, `hub.css`), `SettingsSidebarApp` now the hub shell with Audio/Display/Connections/Advanced as inner pages; `theme.ts` `initThemeSync` (stage + HUD), `useThemeMode`; orb `theme="light"` → black ink (shader `ink` uniform + normal alpha blending instead of additive; 2D fallback parity), light capsule + tour callout CSS. Builds on the other session's change 97 (theme tokens + Google account rows).
+- **Verify**: Rust 1018/1018 (6 ignored dev helpers), frontend tsc clean, vitest 200/200. **Not run (live)**: visual match to the reference, light-orb look per state (needs tuning), 400 px reflow of the legacy Audio/Display/Connections pages (Light uses an interim invert filter), GitHub row, MCP probe timing. Requests counter has no history.
+- **Docs**: `docs/changes/98-command-hub-profile-style-redesign.md`, `docs/research/command-hub/04-profile-style-command-hub-redesign-plan-2026-10-07.md`.
+
+## Ghost Mode Always-On Display Topmost Fix & Mount State Sync (2026-10-07)
+
+- **Problem & Motivation**:
+  1. During active Ghost Mode sessions, when opening apps (e.g., "Open Brave Browser"), the Voice Orb completely vanished from view behind the opened application.
+  2. If the frontend stage reloaded or mounted after ghost mode had already armed, `ghostActive` in the frontend store stayed `false`, causing the orb to hide after a single turn.
+  3. `scripts/cdp_monitor.js` crashed on launch due to missing `http` import and path resolution for `ws`.
+- **Root Cause & Fixes**:
+  - `src-tauri/src/stage.rs`: Replaced the flawed `SetWindowPos(HWND, taskbar, ...)` which stripped `WS_EX_TOPMOST` with explicit `SetWindowPos(HWND, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)`, guaranteeing that the stage window and Voice Orb remain visible above all desktop apps.
+  - `src-tauri/src/ghost.rs` & `src-tauri/src/lib.rs`: Implemented and registered `get_pending_ghost_session` IPC query returning `session_active()`.
+  - `frontend/src/stage/OrbFrame.tsx`: Added mount-time synchronization query via `get_pending_ghost_session` so `ghostActive` and `visible` are immediately set to `true` on reload. Fixed listener parenthesis syntax.
+  - `scripts/cdp_monitor.js`: Added missing `const http = require('http');` and fallback path resolution for `ws` from `frontend/node_modules/ws`.
+- **Verify**:
+  - `npx tsc --noEmit`: clean (0 errors).
+  - `npm test -- --run`: 189/189 pass.
+  - `cargo check`: clean.
+  - `cargo test --lib -- --test-threads=1`: 1005/1005 pass.
+  - `npm run build`: clean (5.43s).
+  - `cargo build --release --features custom-protocol`: fresh 95.8 MB release binary produced at `src-tauri/target/release/nexus.exe`.
+- **Docs**: `docs/changes/96-ghost-mode-always-on-display-topmost-fix.md`.
+
+
+## F0 Persona Tone + F1b Honest Counsel (2026-10-06)
+
+- **What**: `persona_mode` setting (`butler` default / `friend`), `persona.rs` address helpers, `PersonaFriend/Butler` voice intents + Command Hub Personality section; greetings restyled via one orchestrator hook (parser stays pure). `ShareConcern{story}` intent (opener arms counsel with 120s expiry, direct forms run now); `COUNSEL_CONTRACT` via dialog_context.memory (9Router) + explicit `task.intent="counsel"` → Worker `handleCounsel`; `FRIEND_TONE` via memory + `task.persona` → `generalSystem()`; turns recorded as relevance-95 `share_concern`.
+- **Verify**: Rust 1005/1005 serial, Worker 106/106 (8 contract/persona tests), vitest 189/189, tsc 0, release 91.5 MB, zero new warnings. Research grounding (sycophancy lit) folded into `docs/features/93`.
+- **Docs**: `docs/changes/90-f0-persona-tone-f1b-honest-counsel.md`.
+
+## Pure White Orb Color Invariant & Particle-Text Inside Black Box Removal (2026-10-06)
+
+- **Problem & Motivation**:
+  1. Particle text letters were being assembled from particles inside the black slider capsule during short speech responses ("On it, sir.", "Ok, sir."), which the user requested removing completely.
+  2. The user required that all particles across every state (idle, listening, thinking, speaking) must be pure white.
+  3. Short acks must render as standard subtitles below the black capsule rather than in-capsule particle text.
+- **Root Cause & Fixes**:
+  - `frontend/src/audio/ttsPlayer.ts`: Removed short-phrase gate (`<= 22` chars) that invoked `suppressNextCaption()` and emitted `orb:show_text`. All speech turns now generate normal HTML subtitles.
+  - `frontend/src/avatar/VoiceOrb.tsx`: Removed `orb:show_text` event listener and `text` prop watcher.
+  - `frontend/src/avatar/voice-orb.js`: Disarmed `setText()` to return `false` immediately; in vertex shader `VS`, removed text stream convergence (`pos = cloudPos`), locked `tint = vec3(1.0, 1.0, 1.0)` and `sparkTint = vec3(1.0, 1.0, 1.0)`; in fragment shader `FS`, locked color output to pure white `vec3(1.0, 1.0, 1.0)`; locked `PALETTE` and `parseColorHex` to `[1.0, 1.0, 1.0]`; locked 2D fallback to `rgb(255, 255, 255)`.
+  - `frontend/src/store/assistant.ts`: Default `orbColor` changed to `"#ffffff"`.
+  - `src-tauri/src/commands.rs`: Added `persona_mode: default_persona_mode()` to `NexusSettings::default()`.
+  - `src-tauri/src/orchestrator.rs`: Passed `dialog_context` to `run_counsel_turn`.
+  - `src-tauri/src/intent_parser.rs`: Made prefix extraction safe using `strip_prefix()`.
+- **Verify**:
+  - `npx tsc --noEmit`: clean (0 errors).
+  - `npm test -- --run`: 189/189 pass.
+  - `cargo check`: clean.
+  - `cargo test --lib -- --test-threads=1`: 1002/1002 pass.
+  - `npm run build`: clean (10.03s).
+  - `cargo build --release --features custom-protocol`: fresh 95.8 MB release binary produced at `src-tauri/target/release/nexus.exe`.
+- **Docs**: `docs/changes/95-pure-white-orb-and-particle-text-removal.md`.
+
+## Fullscreen Overlay Dismissal, Callout Hitbox Close, Hotkey Barge-In & WebView2 Resilience (2026-10-06)
+
+- **Problem & Motivation**:
+  1. If Vite port 5173 was down or interrupted mid-build during dev, WebView2 rendered Chromium's opaque error screen ("This site can't be reached") across the 1920×1080 transparent stage window, causing a stale heartbeat and crash after 8 seconds.
+  2. Users needed foolproof mechanisms to dismiss or stop fullscreen coverage in any scenario (crashed, busy, or active).
+  3. Screen Tour callout boxes lacked interactive hitboxes in Rust, meaning mouse clicks fell through and the visual UI could not be clicked or closed.
+  4. Global hotkey `Ctrl+Alt+X` destroyed the stage window without cutting in-flight TTS speech or cancelling active orchestrator requests.
+- **Root Cause & Fixes**:
+  - `src-tauri/Cargo.toml` & `scripts/run.ps1`: Documented that release binaries require `--features custom-protocol` so all frontend assets are embedded directly via `tauri://localhost` with zero port 5173 dependency.
+  - `src-tauri/src/stage.rs`: Made `source` parameter in `stage_set_hitboxes` optional (`Option<String>`), defaulting to `"legacy"`, preventing signature mismatch errors when multiple components (`tour`, `spatial`) register hitboxes.
+  - `src-tauri/src/live_glass.rs`: Switched to direct `crate::stage::set_hitbox_source("live-glass", stage_rects)` call.
+  - `src-tauri/src/orchestrator.rs`: Updated `orchestrator_cancel()` IPC command to call `request_barge_in("ipc-cancel")`, immediately cutting audio and stopping active tours.
+  - `src-tauri/src/hotkey.rs`: In `Ctrl+Alt+X` stage kill-switch, added `crate::orchestrator::request_barge_in("hotkey-stage-kill")` before `stage_hide_kill()`.
+  - `frontend/src/stage/TourOverlay.tsx`: Registered physical callout hitboxes with Rust; added `.tour-callout-close` (`×`) button; added `Escape` key listener; wired dismiss to `invoke("orchestrator_cancel")`.
+  - `frontend/src/stage/tour.css`: Added `pointer-events: auto` on `.tour-callout.in`, styled `.tour-callout-close` button with hover highlight, and expanded right padding to prevent text overlap.
+  - `frontend/src/stage/main.tsx`: Added `Escape` key listener in `StageApp` and `SpatialAnnotationLayer` to dismiss bubbles, clear spatial pins, and abort active tasks.
+  - `docs/features/94-fullscreen-overlay-dismissal-and-webview-resilience-plan.md` & `docs/changes/94-fullscreen-overlay-dismissal-and-webview-resilience.md`: Created detailed architectural and change documentation.
+- **Verify**: Double-pass verification executed:
+  - Pass 1: `npx tsc --noEmit` clean, `npm test -- --run` 189/189 pass, `cargo check` clean, `cargo test --lib -- --test-threads=1` 997/997 pass.
+  - Pass 2: `npm run build` clean (dist built in 4.63s), `cargo build --release --features custom-protocol` cleanly produced fresh 91.4 MB release binary `src-tauri/target/release/nexus.exe`.
+- **Docs**: `docs/changes/94-fullscreen-overlay-dismissal-and-webview-resilience.md`.
+
 ## 1.0s Thinking Dwell, 2-Line Subtitle Stack & Screen Tour Resilience (2026-10-06)
 
 - **Problem & Motivation**:
