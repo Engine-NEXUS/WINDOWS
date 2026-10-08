@@ -234,6 +234,14 @@ export function d1Store(env: { DB: D1Database }): IdentityStore {
         "INSERT OR REPLACE INTO identity_migration (legacy_user_id, profile_id, migrated_at, auto_approved) VALUES (?, ?, ?, ?)"
       ).bind(legacyUserId, profileId, at, autoApproved).run();
     },
+    async __listProfiles(status?: string): Promise<ProfileRow[]> {
+      const q = status
+        ? "SELECT * FROM profiles WHERE status = ? ORDER BY created_at DESC"
+        : "SELECT * FROM profiles ORDER BY created_at DESC";
+      const stmt = status ? env.DB.prepare(q).bind(status) : env.DB.prepare(q);
+      const res = await stmt.all();
+      return (res.results || []) as unknown as ProfileRow[];
+    },
   };
 }
 
