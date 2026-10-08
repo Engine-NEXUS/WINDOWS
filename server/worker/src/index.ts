@@ -1783,14 +1783,20 @@ async function handleSearch(req: NexusRequest, env: Env): Promise<string> {
   return fullReply;
 }
 
+async function handleCounsel(req: NexusRequest, env: Env): Promise<string> {
+  const { buildCounselPrompt, COUNSEL_SYSTEM, memoryPreamble } = await import("./counsel");
+  const prompt = memoryPreamble(req.task.dialog_context?.memory) + buildCounselPrompt(req.task.request);
+  const llmResult = await synthesizeWithCascade(prompt, env, COUNSEL_SYSTEM, 500);
+  if (llmResult) return llmResult.text;
+  // Fallback to Cloudflare summarize if cascade failed
+  return await summarize(prompt, env);
+}
+
 async function handleGeneral(req: NexusRequest, env: Env): Promise<string> {
-  const prompt = `You are NEXUS, a helpful personal assistant. Answer the user's request concisely and naturally, as if speaking aloud:\n\n${req.task.request}`;
-  const llmResult = await synthesizeWithCascade(
-    prompt,
-    env,
-    "You are NEXUS, a helpful personal assistant. Answer concisely and naturally, as if speaking aloud. Never show reasoning steps.",
-    500,
-  );
+  const { generalSystem, memoryPreamble } = await import("./counsel");
+  const persona = (req.task as { persona?: string }).persona;
+  const prompt = `${memoryPreamble(req.task.dialog_context?.memory)}You are NEXUS, a helpful personal assistant. Answer the user's request concisely and naturally, as if speaking aloud:\n\n${req.task.request}`;
+  const llmResult = await synthesizeWithCascade(prompt, env, generalSystem(persona), 500);
   if (llmResult) return llmResult.text;
   // Fallback to Cloudflare summarize if cascade failed
   return await summarize(prompt, env);
@@ -1823,6 +1829,8 @@ interface DialogContext {
   pending_intent: string;
   original_request: string;
   missing: string[];
+  /** Memory Core context pack from the device (facts + recent turns). Optional. */
+  memory?: string;
 }
 
 /** Dialog state returned to the client when more info is needed. */
@@ -2846,6 +2854,8 @@ async function handleTranscript(
       }
     } else if (intent === "search") {
       replyText = await handleSearch(req, env);
+    } else if (intent === "counsel") {
+      replyText = await handleCounsel(req, env);
     } else {
       replyText = await handleGeneral(req, env);
     }

@@ -59,6 +59,10 @@ pub struct ScreenContext {
     /// Title/URL/app matched the sensitive-window denylist (bank, password
     /// manager, wallet…): the tour refuses instead of capturing.
     pub sensitive: bool,
+    /// OCR-visible text lines (compact), injected into the vision prompt as
+    /// ground-truth clues so celebrity/creator recognition can cross-reference
+    /// on-screen text (Feature 88 v2 / P3).
+    pub ocr_lines: Vec<String>,
 }
 
 /// What the OS probes returned, before any interpretation.
@@ -260,7 +264,25 @@ pub fn build_context(
         youtube,
         url,
         region,
+        ocr_lines: Vec::new(),
     }
+}
+
+/// Compact the WinRT OCR text into distinct non-empty lines for the prompt
+/// (bounded — the prompt must stay small). Pure + unit-tested.
+pub fn compact_ocr_lines(text: &str, max_lines: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || out.iter().any(|s| s == line) {
+            continue;
+        }
+        out.push(line.chars().take(90).collect());
+        if out.len() >= max_lines {
+            break;
+        }
+    }
+    out
 }
 
 impl ScreenContext {
@@ -302,6 +324,14 @@ impl ScreenContext {
         } else {
             "- The image shows ONLY the content area (browser tabs, address bar and the taskbar are cropped out).".to_string()
         });
+        // Feature 98: ground-truth text from local OCR — the model can
+        // cross-reference visible names/handles when naming public figures.
+        if !self.ocr_lines.is_empty() {
+            lines.push("[On-Screen Context Clues from OS & OCR]:".to_string());
+            for line in &self.ocr_lines {
+                lines.push(format!("- \"{line}\""));
+            }
+        }
         lines.join("\n")
     }
 }
@@ -394,6 +424,22 @@ pub async fn collect(mw: i32, mh: i32) -> ScreenContext {
         None
     };
     let ctx = build_context(&raw, youtube, mw, mh);
+    // Feature 98 P3: ground-truth text clues from local WinRT OCR (fast,
+    // free, ~25ms) so the vision model can cross-reference on-screen text
+    // (names, handles, chyrons) for public-figure recognition.
+    let ocr = tokio::time::timeout(
+        std::time::Duration::from_millis(1200),
+        tokio::task::spawn_blocking(crate::ocr::capture_screen_text),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .and_then(|r| r);
+    let ocr_lines = match ocr {
+        Some((text, _)) => compact_ocr_lines(&text, 10),
+        None => Vec::new(),
+    };
+    let ctx = ScreenContext { ocr_lines, ..ctx };
     tracing::info!(
         "screen_context: app='{}' kind={:?} region={:?} full={} youtube={} sensitive={}",
         ctx.app,

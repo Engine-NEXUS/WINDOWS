@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Actions this center owns.
+#[allow(dead_code)]
 pub const ACTIONS: &[&str] = &[
     "youtube_search",
     "youtube_transcript",

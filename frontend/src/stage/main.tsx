@@ -8,6 +8,9 @@ import { LoadingIndicator } from "./LoadingIndicator";
 import { ResponseCaption } from "./ResponseCaption";
 import { LiveCaption } from "./LiveCaption";
 import { TourOverlay } from "./TourOverlay";
+import { initThemeSync } from "../sidebar/theme";
+
+initThemeSync(); // Light/Dark follows the Command Hub setting (orb, callouts)
 
 async function invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
   const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
@@ -68,7 +71,7 @@ function SpatialAnnotationLayer() {
             w: Math.round(96 * dpr),
             h: Math.round(26 * dpr),
           }));
-          invoke("stage_set_hitboxes", { rects }).catch(() => {});
+          invoke("stage_set_hitboxes", { source: "spatial", rects }).catch(() => {});
         },
       );
       const u2 = await listen<{ id?: number | null }>("stage:highlight_item", (event) => {
@@ -79,8 +82,20 @@ function SpatialAnnotationLayer() {
     })().catch(() => {});
     return () => {
       unlisteners.forEach((u) => u());
-      invoke("stage_set_hitboxes", { rects: [] }).catch(() => {});
+      invoke("stage_set_hitboxes", { source: "spatial", rects: [] }).catch(() => {});
     };
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setPins([]);
+        setActiveId(null);
+        invoke("stage_set_hitboxes", { source: "spatial", rects: [] }).catch(() => {});
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   // Pin click → activate the matching card in the sidebar.
@@ -119,16 +134,19 @@ function SpatialAnnotationLayer() {
         })}
       </svg>
 
-      {/* Glowing bounding boxes */}
+      {/* Glowing bounding boxes — positioned via CSSOM assignment (CSP drops React style prop) */}
       {pins.map((p) => (
         <div
           key={`box-${p.id}`}
           className={`spatial-box ${activeId === p.id ? "spatial-box--active" : ""}`}
-          style={{
-            left: css(p.x),
-            top: css(p.y),
-            width: css(p.width),
-            height: css(p.height),
+          ref={(el) => {
+            if (el) {
+              el.style.position = "fixed";
+              el.style.left = `${css(p.x)}px`;
+              el.style.top = `${css(p.y)}px`;
+              el.style.width = `${css(p.width)}px`;
+              el.style.height = `${css(p.height)}px`;
+            }
           }}
         />
       ))}
@@ -139,7 +157,13 @@ function SpatialAnnotationLayer() {
           key={`pin-${p.id}`}
           type="button"
           className={`spatial-pin ${activeId === p.id ? "spatial-pin--active" : ""}`}
-          style={{ left: css(p.pin_x), top: css(p.pin_y) }}
+          ref={(el) => {
+            if (el) {
+              el.style.position = "fixed";
+              el.style.left = `${css(p.pin_x)}px`;
+              el.style.top = `${css(p.pin_y)}px`;
+            }
+          }}
           onClick={() => handlePinClick(p.id)}
           title={p.label}
         >
@@ -291,6 +315,19 @@ function StageApp() {
       unlisten?.();
       if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
     };
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (bubbleRef.current) bubbleRef.current.classList.remove("on");
+        if (pointerRef.current) pointerRef.current.classList.remove("on");
+        setGuideLabel("");
+        invoke("orchestrator_cancel").catch(() => {});
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   return (

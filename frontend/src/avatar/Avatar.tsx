@@ -2,6 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import { useAssistant, AssistantState } from "../store/assistant";
 import { positionToPct, wheelResize, type CalibrationTarget } from "../calibration/geometry";
 import { VoiceOrb } from "./VoiceOrb";
+import { useThemeMode } from "../sidebar/useThemeMode";
 
 /**
  * WebGL particle orb avatar — the sole visual in ALL modes (normal + ghost).
@@ -281,6 +282,25 @@ export function Avatar({ entered: enteredProp = false, dispersing = false }: Ava
   const calibrationSize = useAssistant((s) => s.calibrationSize);
   const calibrationPulse = useAssistant((s) => s.calibrationPulse);
   const orbColor = useAssistant((s) => s.orbColor);
+  const orbThinkMode = useAssistant((s) => s.orbThinkMode);
+  const orbSpeakMode = useAssistant((s) => s.orbSpeakMode);
+  const orbListenMode = useAssistant((s) => s.orbListenMode);
+  const themeMode = useThemeMode();
+
+  // Battery-aware power scaling: on battery, scale particles 5000 -> 2500
+  // to halve vertex & fragment shader workloads and extend laptop runtime.
+  const [onBattery, setOnBattery] = useState(false);
+  useEffect(() => {
+    if (typeof navigator !== "undefined" && "getBattery" in navigator) {
+      (navigator as any)
+        .getBattery()
+        .then((b: any) => {
+          setOnBattery(!b.charging);
+          b.addEventListener("chargingchange", () => setOnBattery(!b.charging));
+        })
+        .catch(() => {});
+    }
+  }, []);
 
   // Turn-gap pin (ghost always-on plan): in ghost mode an idle arriving
   // within 1.2s of the last active state (hot-mic relisten churn) holds the
@@ -423,8 +443,12 @@ export function Avatar({ entered: enteredProp = false, dispersing = false }: Ava
           <VoiceOrb
             state={ghostDisplay ? displayState : state}
             color={orbColor}
+            thinkMode={orbThinkMode}
+            speakMode={orbSpeakMode}
+            listenMode={orbListenMode}
+            theme={themeMode}
             visible={isOrbVisible}
-            particles={5000}
+            particles={onBattery ? 2500 : 5000}
             entered={ghostActive || enteredProp}
             dispersing={dispersing}
             level={

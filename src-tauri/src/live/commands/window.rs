@@ -81,7 +81,7 @@ mod windows_impl {
         FOUND_HWND.lock().unwrap().take()
     }
 
-    /// Bring a window to the foreground using the AttachThreadInput trick.
+    /// Bring a window to the foreground using the AttachThreadInput trick and Alt-key tap.
     /// Returns true if the window is now in the foreground.
     pub fn focus_window(hwnd: HWND) -> bool {
         unsafe {
@@ -89,6 +89,12 @@ mod windows_impl {
             if IsIconic(hwnd).as_bool() {
                 let _ = ShowWindow(hwnd, SW_RESTORE);
             }
+
+            let _ = BringWindowToTop(hwnd);
+
+            // Synthesize an Alt key tap to unlock Windows OS foreground lock
+            // (classic Win32 OS input state unlock technique)
+            let _ = super::super::keyboard::press_key("alt");
 
             // AttachThreadInput trick: attach our input queue to the
             // foreground thread's so SetForegroundWindow succeeds.
@@ -121,6 +127,49 @@ mod windows_impl {
         } else {
             false
         }
+    }
+
+    /// Poll for an app window by partial title up to `timeout_ms`,
+    /// bringing it to the foreground once found (essential for slow-starting apps like WhatsApp).
+    pub fn wait_and_focus_app(partial_title: &str, timeout_ms: u64) -> bool {
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        let interval = std::time::Duration::from_millis(150);
+
+        while start.elapsed() < timeout {
+            if focus_app_by_title(partial_title) {
+                return true;
+            }
+            std::thread::sleep(interval);
+        }
+        false
+    }
+
+    /// Get the title of the current foreground window.
+    pub fn get_foreground_window_title() -> Option<String> {
+        unsafe {
+            let fg = GetForegroundWindow();
+            if fg.0 == 0 {
+                return None;
+            }
+            let mut title = [0u16; 512];
+            let len = GetWindowTextW(fg, &mut title);
+            if len <= 0 {
+                return None;
+            }
+            Some(String::from_utf16_lossy(&title[..len as usize]))
+        }
+    }
+
+    /// Check if the current foreground window belongs to the given app name (case-insensitive).
+    pub fn is_foreground_app(partial: &str) -> bool {
+        let want = partial.to_lowercase();
+        if let Some(title) = get_foreground_window_title() {
+            if title.to_lowercase().contains(&want) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Minimize the current foreground window. `ShowWindow`'s return value
@@ -247,6 +296,21 @@ mod unix_impl {
 
     /// No UAC/UIPI concept — never elevated-blocked.
     pub fn window_process_elevated(_hwnd: ()) -> bool {
+        false
+    }
+
+    /// Unix stub: always succeeds.
+    pub fn wait_and_focus_app(_partial_title: &str, _timeout_ms: u64) -> bool {
+        true
+    }
+
+    /// Unix stub: returns None.
+    pub fn get_foreground_window_title() -> Option<String> {
+        None
+    }
+
+    /// Unix stub: returns false.
+    pub fn is_foreground_app(_partial: &str) -> bool {
         false
     }
 }

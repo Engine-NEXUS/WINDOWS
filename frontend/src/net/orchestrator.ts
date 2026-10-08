@@ -187,6 +187,52 @@ export function openConfirmVoiceWindow(): void {
   }
 }
 
+let offerListenTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * After NEXUS speaks a question that needs an answer ("It's time for DSA.
+ * Shall I start?"), open one bounded listening window so a bare "yes" works
+ * without the wake word. Rust decides whether a question is waiting
+ * (`offer_pending` is only non-null once the question was actually spoken);
+ * ghost sessions already reopen the mic themselves and meetings never get it.
+ */
+export async function openPendingOfferWindow(): Promise<void> {
+  const store = useAssistant.getState();
+  if (store.ghostActive) return;
+  let windowMs: number | null | undefined;
+  try {
+    windowMs = await invoke<number | null>("offer_pending");
+  } catch {
+    return;
+  }
+  if (!windowMs) return;
+  const meeting = await invoke<boolean>("meeting_active").catch(() => false);
+  if (meeting) return;
+  store.setVisible(true);
+  store.setState("listening");
+  store.setAwaitingInput(true);
+  try {
+    await invoke("start_stt_capture");
+  } catch (err) {
+    console.warn("[NEXUS] orchestrator: offer capture failed:", err);
+    store.setAwaitingInput(false);
+    return;
+  }
+  if (offerListenTimer) clearTimeout(offerListenTimer);
+  offerListenTimer = setTimeout(() => {
+    offerListenTimer = null;
+    void (async () => {
+      const hadSpeech = await invoke<boolean>("stt_capture_had_speech").catch(() => false);
+      if (hadSpeech) return;
+      await invoke("stop_stt_capture").catch(() => {});
+      const latest = useAssistant.getState();
+      latest.setAwaitingInput(false);
+      latest.setVisible(false);
+      setTimeout(() => useAssistant.getState().reset(), 550);
+    })();
+  }, windowMs);
+}
+
 /** Current request ID (for debugging / diagnostics). */
 export function getCurrentRequestId(): string | null {
   return currentRequestId;
@@ -222,6 +268,8 @@ export function finishSpokenResult(spokenFor: string): boolean {
       // No-op everywhere outside ghost mode.
       void import("./ghostHotMic").then((m) => m.maybeGhostRelisten());
       useAssistant.getState().reset();
+      // A spoken question ("Shall I start?") gets one short listening window.
+      void openPendingOfferWindow();
     }
   }, beat);
   void signalOrchestratorDone(spokenFor);
@@ -414,8 +462,15 @@ export async function initOrchestratorListener(): Promise<void> {
       }
 
       case "result": {
-        // Final result from the subsystem
+        // Final result from the subsystem.
+        // Turn-ID propagation: request_id links this line to the Rust
+        // install/result logs for single-grep turns. Also closes the
+        // ghost stall-watchdog's open turn.
         currentRequestId = ev.request_id;
+        console.log(`[NEXUS] orchestrator: result req=${ev.request_id}`);
+        void import("./ghostHotMic").then(({ noteGhostTurnClosed }) => {
+          noteGhostTurnClosed();
+        }).catch(() => {});
 
         // Clear the long-running in-flight flag so subsequent voice
         // commands aren't incorrectly deduped/queued.
@@ -468,6 +523,10 @@ export async function initOrchestratorListener(): Promise<void> {
 
       case "done": {
         // Request is fully complete (TTS finished speaking)
+        console.log(`[NEXUS] orchestrator: done req=${ev.request_id ?? "unknown"}`);
+        void import("./ghostHotMic").then(({ noteGhostTurnClosed }) => {
+          noteGhostTurnClosed();
+        }).catch(() => {});
         currentRequestId = null;
         clearLongRunningInFlight();
         store.setLoadingVisible(false);
@@ -492,7 +551,10 @@ export async function initOrchestratorListener(): Promise<void> {
       }
 
       case "error": {
-        console.error("[NEXUS] orchestrator: error:", ev.message);
+        console.error("[NEXUS] orchestrator: error:", ev.message, `req=${ev.request_id ?? "unknown"}`);
+        void import("./ghostHotMic").then(({ noteGhostTurnClosed }) => {
+          noteGhostTurnClosed();
+        }).catch(() => {});
         clearLongRunningInFlight();
         currentRequestId = ev.request_id;
         store.setLoadingVisible(false);
@@ -627,10 +689,50 @@ export interface TurnProvenance {
   initiation?: "explicit" | "ghost";
 }
 
+export interface OrchestratorCallOpts {
+  /**
+   * Bound the orchestrator_process round trip. On expiry the Rust side
+   * is cancelled (orchestrator_cancel) and a GhostInvokeTimeout ESCAPES
+   * (caller's catch → fallback speech + relisten) instead of returning
+   * null. Long-running callers (architect analysis, drills) omit this.
+   */
+  timeoutMs?: number;
+}
+
+/** Thrown when a bounded ghost turn exceeds its invoke budget. */
+export class GhostInvokeTimeout extends Error {
+  readonly timeoutMs: number;
+  constructor(ms: number) {
+    super(`ghost orchestrator invoke timed out after ${ms}ms`);
+    this.name = "GhostInvokeTimeout";
+    this.timeoutMs = ms;
+  }
+}
+
+async function invokeWithGhostTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          // Free the Rust side first so a late result can't speak over
+          // the fallback (dispatch discards cancelled results).
+          void invoke("orchestrator_cancel").catch(() => {});
+          reject(new GhostInvokeTimeout(ms));
+        }, ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function processViaOrchestrator(
   transcript: string,
   dialogContext?: unknown,
   turn?: TurnProvenance,
+  opts?: OrchestratorCallOpts,
 ): Promise<{ request_id: string; subsystem: string; handled_locally: boolean } | null> {
   if (!isTauri()) return null;
 
@@ -736,8 +838,18 @@ export async function processViaOrchestrator(
     void invoke("hide_sidebar").catch(() => {});
   }
 
+  // Stall-watchdog tracking: a ghost turn that never completes must
+  // still be visible to the watchdog (opened here, closed on result /
+  // done / error / turn-end). Without this, hung turns wedge the
+  // hot-mic loop with zero feedback.
+  if (useAssistant.getState().ghostActive) {
+    void import("./ghostHotMic").then(({ noteGhostTurnOpened }) => {
+      noteGhostTurnOpened();
+    }).catch(() => {});
+  }
+
   try {
-    const result = await invoke<{
+    const invokePromise = invoke<{
       request_id: string;
       subsystem: string;
       handled_locally: boolean;
@@ -746,11 +858,21 @@ export async function processViaOrchestrator(
       dialogContext: dialogContext ?? null,
       turnContext: turn ?? null,
     });
+    // Ghost turns (never long-running — callers omit the budget there)
+    // must not hang the hot-mic loop: a hung backend wedged live
+    // sessions with zero feedback (29s and 19s dead-air stalls).
+    const result =
+      opts?.timeoutMs && opts.timeoutMs > 0
+        ? await invokeWithGhostTimeout(invokePromise, opts.timeoutMs)
+        : await invokePromise;
 
     currentRequestId = result.request_id;
     console.log("[NEXUS] orchestrator: process result", result);
     return result;
   } catch (err) {
+    // Timeout escapes (caller's catch → fallback speech + relisten);
+    // all other failures keep the legacy null contract.
+    if (err instanceof GhostInvokeTimeout) throw err;
     console.error("[NEXUS] orchestrator: process failed:", err);
     return null;
   }

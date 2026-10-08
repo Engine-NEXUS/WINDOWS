@@ -44,6 +44,7 @@ pub fn sanitize(input: &str) -> String {
 }
 
 /// Count PII hits without redacting (for logging/telemetry).
+#[allow(dead_code)]
 pub fn count_hits(input: &str) -> usize {
     let p = patterns();
     p.email.find_iter(input).count()

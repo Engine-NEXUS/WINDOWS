@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// Actions owned by SystemCenter.
+#[allow(dead_code)]
 pub const ACTIONS: &[&str] = &[
     "system_focus_app",
     "system_minimize_window",
@@ -122,6 +123,7 @@ pub fn resolve_ufo_script_path() -> Option<PathBuf> {
 }
 
 /// Inspect window interactive controls via Python UFO engine bridge.
+#[allow(dead_code)]
 pub fn inspect_window_via_bridge(title: Option<&str>) -> Result<Value, String> {
     let script_path = resolve_ufo_script_path().ok_or_else(|| {
         "UFO UI Automation bridge script not found at server/ufo/uia_engine.py".to_string()
@@ -152,6 +154,7 @@ pub fn inspect_window_via_bridge(title: Option<&str>) -> Result<Value, String> {
 
 /// Native Windows UI Automation control inspection using `uiautomation` crate.
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 pub fn inspect_window_native(title_query: Option<&str>) -> Value {
     use uiautomation::controls::ControlType;
     use uiautomation::UIAutomation;

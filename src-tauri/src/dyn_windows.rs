@@ -98,6 +98,18 @@ impl WindowConfig {
             focus: true, center: false, hidden_title: true,
         }
     }
+
+    /// Orb Customization Studio window — 800px wide (twice Settings width),
+    /// positioned to the left of the Settings sidebar.
+    pub fn orb_studio() -> Self {
+        Self {
+            label: "orb-studio", title: "NEXUS Orb Studio", url: "orb-studio.html",
+            width: 800., height: 980., min_width: Some(720.), min_height: Some(600.),
+            resizable: true, decorations: false, transparent: true,
+            always_on_top: true, skip_taskbar: false, shadow: true,
+            focus: true, center: false, hidden_title: true,
+        }
+    }
 }
 
 /// Get an existing window, or create it on-demand if it doesn't exist.

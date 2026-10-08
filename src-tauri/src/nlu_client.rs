@@ -15,6 +15,26 @@
 
 use crate::intent_parser::{ParseResult, ParsedIntent};
 
+/// Feature 99 P4: semantic-anchor sanity check for high-confidence
+/// classifications. BERT-Mini confidently maps ambient chatter onto
+/// learned intents (e.g. "So you have to list" → media_play_pause @0.90).
+/// For each guarded family the transcript must contain at least one
+/// anchor word, or the classification is rejected (→ None) so the turn
+/// can fall through to the admin brain / Worker instead of misfiring.
+/// Pure + unit-tested.
+pub(crate) fn nlu_sanity_check(intent: &str, transcript: &str) -> bool {
+    let t = transcript.to_lowercase();
+    let anchors: &[&str] = match intent {
+        // Media family — the documented hallucination vector.
+        "media_play_pause" | "media_next" | "media_previous" | "media_stop" => &[
+            "play", "pause", "track", "music", "song", "video", "media", "next",
+            "previous", "spotify", "resume", "last",
+        ],
+        _ => return true, // other families are slot-gated or safe
+    };
+    anchors.iter().any(|a| t.contains(a))
+}
+
 /// Parse a transcript via the in-process NLU model.
 ///
 /// Returns None if the model isn't loaded or confidence is too low.
@@ -33,6 +53,18 @@ pub async fn parse_via_nlu(transcript: &str) -> Option<ParseResult> {
             "[nlu_client] rejected low-confidence intent '{}' ({:.3})",
             nlu.intent,
             nlu.confidence
+        );
+        return None;
+    }
+
+    // Feature 99 P4: confident-hallucination guard — the transcript must
+    // share a semantic anchor with the classified intent family.
+    if !nlu_sanity_check(&nlu.intent, transcript) {
+        tracing::info!(
+            "[nlu_client] sanity guard rejected intent '{}' ({:.3}) — no semantic anchor in {:?}",
+            nlu.intent,
+            nlu.confidence,
+            transcript
         );
         return None;
     }
@@ -437,5 +469,29 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value, raw: &str) 
 
         // unknown or unrecognized
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Feature 99 P4: media-family hallucinations without any media anchor
+    /// are rejected; anchored transcripts pass; non-media intents are never
+    /// gated.
+    #[test]
+    fn nlu_sanity_check_gates_media_family() {
+        // The documented failure: ambient chatter → media_play_pause @0.90.
+        assert!(!nlu_sanity_check("media_play_pause", "So you have to list"));
+        assert!(!nlu_sanity_check("media_next", "what do you think"));
+        assert!(!nlu_sanity_check("media_stop", "and then he goes home"));
+        // Anchored media commands pass.
+        assert!(nlu_sanity_check("media_play_pause", "pause the music"));
+        assert!(nlu_sanity_check("media_next", "next track please"));
+        assert!(nlu_sanity_check("media_play_pause", "play the video"));
+        assert!(nlu_sanity_check("media_stop", "stop the song on spotify"));
+        // Non-media intents are never gated.
+        assert!(nlu_sanity_check("search", "So you have to list"));
+        assert!(nlu_sanity_check("open_app", "anything at all"));
     }
 }

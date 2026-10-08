@@ -25,6 +25,11 @@ export interface VoiceOrbProps {
   level?: number;
   visible?: boolean;
   color?: string;
+  thinkMode?: number;
+  speakMode?: number;
+  listenMode?: number;
+  /** Light = black ink particles on a light capsule; dark = white particles. */
+  theme?: "light" | "dark";
   /** Ghost enter: particles snap scattered then assemble into the circle. */
   entered?: boolean;
   /** No-slide exit (plan §1.3): particles scatter outward instead of a CSS slide-away. */
@@ -45,6 +50,10 @@ declare global {
           particles?: number | string;
           recording?: boolean;
           color?: string;
+          theme?: string;
+          "think-mode"?: number | string;
+          "speak-mode"?: number | string;
+          "listen-mode"?: number | string;
         },
         HTMLElement
       >;
@@ -73,9 +82,13 @@ export const VoiceOrb: React.FC<VoiceOrbProps> = ({
   level = 0,
   visible = true,
   color,
+  thinkMode = 6,
+  speakMode = 2,
+  listenMode = 1,
+  theme = "dark",
   entered = false,
   dispersing = false,
-  text,
+  text: _text,
   className,
   style,
 }) => {
@@ -102,6 +115,28 @@ export const VoiceOrb: React.FC<VoiceOrbProps> = ({
       }
     }
   }, [visible, state]);
+
+  useEffect(() => {
+    orbRef.current?.setAttribute("theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    if (orbRef.current && thinkMode) {
+      orbRef.current.setAttribute("think-mode", String(thinkMode));
+    }
+  }, [thinkMode]);
+
+  useEffect(() => {
+    if (orbRef.current && speakMode) {
+      orbRef.current.setAttribute("speak-mode", String(speakMode));
+    }
+  }, [speakMode]);
+
+  useEffect(() => {
+    if (orbRef.current && listenMode) {
+      orbRef.current.setAttribute("listen-mode", String(listenMode));
+    }
+  }, [listenMode]);
 
   useEffect(() => {
     if (entered && orbRef.current) {
@@ -143,33 +178,6 @@ export const VoiceOrb: React.FC<VoiceOrbProps> = ({
     };
   }, [state]);
 
-  // Particle text via prop (static callers).
-  useEffect(() => {
-    if (orbRef.current && typeof text === "string" && text.trim()) {
-      orbRef.current.setText(text);
-    }
-  }, [text]);
-
-  // Particle text via event (live path): short spoken lines emitted at the
-  // ttsPlayer choke point reach every window's orb.
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    void (async () => {
-      try {
-        const { listen } = await import("@tauri-apps/api/event");
-        unlisten = await listen<{ text?: string }>("orb:show_text", (ev) => {
-          const t = ev.payload?.text;
-          if (t && t.trim()) orbRef.current?.setText(t);
-        });
-      } catch {
-        // Outside Tauri (tests) — no-op
-      }
-    })();
-    return () => {
-      unlisten?.();
-    };
-  }, []);
-
   return (
     <voice-orb
       ref={(el: VoiceOrbElement | null) => {
@@ -187,6 +195,9 @@ export const VoiceOrb: React.FC<VoiceOrbProps> = ({
       state={state}
       particles={particles}
       color={color}
+      think-mode={thinkMode}
+      speak-mode={speakMode}
+      listen-mode={listenMode}
       className={`voice-orb-el${className ? ` ${className}` : ""}`}
     />
   );

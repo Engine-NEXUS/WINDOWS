@@ -2,27 +2,12 @@
 (() => {
   if (typeof window === 'undefined' || typeof customElements === 'undefined' || customElements.get('voice-orb')) return;
   const STATES = ['idle', 'listening', 'thinking', 'speaking', 'text'];
-  // State-based color palettes (Feature 89): idle warm grey, listening
-  // warm amber/brown, thinking vibrant electric purple/magenta, speaking vibrant magenta. The
-  // 5th (text) entry is a fallback — real text inherits the STATE palette
-  // via the dominant-state tint (see _paint stateTint / uniform textTint).
-  const PALETTE = [[.95,.72,.35], [.95,.72,.35], [.58,.16,.92], [.42,.15,.38], [0.92,0.88,0.96]];
+  // All particles pure white across ALL states:
+  const PALETTE = [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]];
   const mediaSources = new WeakMap();
   const clamp = (v, lo=0, hi=1) => Math.max(lo, Math.min(hi, Number.isFinite(+v) ? +v : lo));
   const weightsFor = state => STATES.map(s => +(s === state));
-  const parseColorHex = hex => {
-    if (!hex || typeof hex !== 'string') return [.95, .72, .35];
-    let h = hex.trim();
-    if (h.startsWith('#')) h = h.slice(1);
-    if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
-    if (h.length === 6) {
-      const num = parseInt(h, 16);
-      if (!Number.isNaN(num)) {
-        return [((num >> 16) & 255) / 255, ((num >> 8) & 255) / 255, (num & 255) / 255];
-      }
-    }
-    return [.95, .72, .35];
-  };
+  const parseColorHex = _hex => [1.0, 1.0, 1.0];
   const normalize = w => {
     const a = Array.from({length:5}, (_,i) => clamp(w?.[i]));
     const sum = a.reduce((s,v) => s+v, 0);
@@ -149,6 +134,9 @@
   uniform vec3 bands;
   uniform vec3 textTint;
   uniform vec3 userTint;
+  uniform int u_think_mode;
+  uniform int u_speak_mode;
+  uniform int u_listen_mode;
   varying vec3 tint;
   varying float strength, spark;
   varying vec3 sparkTint;
@@ -193,46 +181,107 @@
     float jitter=(h3-0.5)*0.16*mid;
     float dynR=1.0+voiceLevel*(0.35*bounce+beatKick+jitter);
     float listenR=isFixed?1.0:dynR;
-    // Speaking (v2.mp4 frame_04 & frame_08): organic fluid droplet under surface tension.
-    // Zero-gravity water drop displacement with bottom sag and audio beat reaction.
-    float fluidNoise1=noise(n*0.92+vec3(t*0.20,-t*0.15,t*0.12));
-    float fluidNoise2=noise(n*1.75+vec3(-t*0.10,t*0.16,-t*0.08));
-    float textDamp=1.0-0.75*textProg;
-    float speechBulge=(0.14*max(low,mid)+0.28*onset)*textDamp;
-    float dropSag=-0.11*clamp(-n.y,0.0,1.0)*(1.0-0.4*n.x*n.x);
-    float rad=1.0
-      +0.16*fluidNoise1
-      +0.07*fluidNoise2
-      +speechBulge*fluidNoise1
-      +dropSag;
-    vec3 speakV=turn(n,t*0.16)*rad;
 
-    // Thinking (v2.mp4 frame_03): continuous 3D woven luminous violet ribbon knot.
-    // Closed parametric (p=2, q=3) space curve with ribbon tangent/binormal expansion.
-    // Zero radial spokes, zero solid nucleus. Pure elegant flowing 3D knot.
-    float ku=seed.w*6.2831853;
-    float kv=(seed.y*0.5+0.5)*2.0-1.0;
-    float kw=(seed.z*0.5+0.5)*2.0-1.0;
-    float knotR=0.88*(1.0+0.38*cos(3.0*ku+t*0.40));
-    vec3 knotC=vec3(
-      knotR*cos(2.0*ku+t*0.26),
-      knotR*sin(2.0*ku+t*0.26),
-      -0.54*sin(3.0*ku+t*0.40)
-    );
-    float kuNext=ku+0.015;
-    float knotRNext=0.88*(1.0+0.38*cos(3.0*kuNext+t*0.40));
-    vec3 knotCNext=vec3(
-      knotRNext*cos(2.0*kuNext+t*0.26),
-      knotRNext*sin(2.0*kuNext+t*0.26),
-      -0.54*sin(3.0*kuNext+t*0.40)
-    );
-    vec3 knotT=normalize(knotCNext-knotC);
-    vec3 knotN=normalize(cross(knotT,vec3(0.0,0.0,1.0))+0.0001);
-    vec3 knotB=cross(knotT,knotN);
-    float ribbonWidth=0.26*(0.85+0.15*sin(ku*4.0+t));
-    float ribbonThick=0.04;
-    vec3 ribbonPoint=knotC+knotN*(kv*ribbonWidth)+knotB*(kw*ribbonThick);
-    vec3 thought=rotate3D(ribbonPoint,t*0.42,0.12*sin(t*0.30))*mix(0.70,1.0,thinkIn);
+    // Speaking: Dynamic Morphology (Option #2 = 64-strand Fibonacci Blossom with petal pulses)
+    float fluidNoise1=noise(n*0.92+vec3(t*0.20,-t*0.15,t*0.12));
+    float textDamp=1.0-0.75*textProg;
+    float speechBulge=(0.18*max(low,mid)+0.32*onset)*textDamp;
+    float dropSag=-0.08*clamp(-n.y,0.0,1.0)*(1.0-0.4*n.x*n.x);
+    float bloom = (u_speak_mode == 2 || u_speak_mode == 0) ? (sin(length(n.xy)*6.0 - t*3.0) * 0.22 * soundEnergy) : 0.0;
+    float speakRad=1.0 + 0.12*fluidNoise1 + speechBulge*fluidNoise1 + dropSag + bloom;
+    vec3 speakV=turn(n,t*0.18)*speakRad;
+
+    // Thinking: Dynamic Morphology (Options 1..12, default 6 Trefoil Celtic Helix Cage)
+    vec3 thought = vec3(0.0);
+    if (u_think_mode == 1) {
+      // #1 Torus Knot
+      float ku = seed.w * 6.2831853;
+      float knotR = 0.88 * (1.0 + 0.38*cos(3.0*ku + t*0.40));
+      vec3 knotC = vec3(knotR * cos(2.0*ku + t*0.26), knotR * sin(2.0*ku + t*0.26), -0.54 * sin(3.0*ku + t*0.40));
+      thought = turn(knotC + n*0.08, t*0.4) * mix(0.70, 1.0, thinkIn);
+    } else if (u_think_mode == 2) {
+      // #2 Neural Starburst
+      float sId = floor(seed.w * 64.0);
+      float sAlong = fract(seed.w * 64.0);
+      float sy = 1.0 - 2.0*(sId + 0.5)/64.0;
+      float sr = sqrt(max(0.0, 1.0 - sy*sy));
+      float sang = sId * 2.399963;
+      vec3 sDir = vec3(sr*cos(sang), sy, sr*sin(sang));
+      thought = turn(sDir * pow(sAlong, 1.6) * 1.85 + n*0.08, t*0.35) * mix(0.70, 1.0, thinkIn);
+    } else if (u_think_mode == 3) {
+      // #3 Mobius Infinity
+      float u = seed.w * 12.56637;
+      float scale = 1.25 / (1.0 + sin(u*0.5)*sin(u*0.5));
+      vec3 infC = vec3(scale * cos(u*0.5), scale * sin(u*0.5) * cos(u*0.5), 0.35 * sin(u + t*0.8));
+      thought = turn(infC + n*0.08, t*0.45) * mix(0.70, 1.0, thinkIn);
+    } else if (u_think_mode == 4) {
+      // #4 Quantum Gyro
+      float ring = floor(seed.w * 3.0);
+      float a = fract(seed.w * 3.0) * 6.2831853;
+      vec3 rP = vec3(cos(a), sin(a), (fract(seed.w*123.0)-0.5)*0.10);
+      if (ring == 0.0) rP = vec3(rP.x, rP.y*cos(t*1.2) - rP.z*sin(t*1.2), rP.y*sin(t*1.2) + rP.z*cos(t*1.2));
+      if (ring == 1.0) rP = vec3(rP.x*cos(t*1.5) + rP.z*sin(t*1.5), rP.y, -rP.x*sin(t*1.5) + rP.z*cos(t*1.5));
+      if (ring == 2.0) rP = vec3(rP.x*cos(t*0.9) - rP.y*sin(t*0.9), rP.x*sin(t*0.9) + rP.y*cos(t*0.9), rP.z);
+      thought = turn(rP * 1.15, t*0.2) * mix(0.70, 1.0, thinkIn);
+    } else if (u_think_mode == 5) {
+      // #5 Accretion Vortex
+      float prog = fract(seed.w * 3.0);
+      float sR = pow(prog, 0.65) * 1.55;
+      float sA = prog * 12.566 + floor(seed.w*3.0)*2.094 - t*1.6;
+      vec3 vP = vec3(sR*cos(sA), sR*sin(sA), (prog-0.5)*0.45*cos(sA));
+      thought = turn(vec3(vP.x, vP.y*cos(0.5) - vP.z*sin(0.5), vP.y*sin(0.5) + vP.z*cos(0.5)), t*0.3) * mix(0.70, 1.0, thinkIn);
+    } else if (u_think_mode == 7) {
+      // #7 DNA Helix
+      float strand = floor(seed.w * 2.0);
+      float hZ = (fract(seed.w * 2.0) - 0.5) * 2.4;
+      float hAng = hZ * 3.5 + t*1.5 + strand*3.14159;
+      vec3 hP = vec3(0.65*cos(hAng), hZ, 0.65*sin(hAng));
+      thought = turn(vec3(hP.x, hP.y*cos(0.4) - hP.z*sin(0.4), hP.y*sin(0.4) + hP.z*cos(0.4)), t*0.35) * mix(0.70, 1.0, thinkIn);
+    } else if (u_think_mode == 8) {
+      // #8 4D Tesseract
+      float vId = floor(seed.w * 16.0);
+      float x4 = mod(vId, 2.0)*2.0 - 1.0;
+      float y4 = mod(floor(vId/2.0), 2.0)*2.0 - 1.0;
+      float z4 = mod(floor(vId/4.0), 2.0)*2.0 - 1.0;
+      float w4 = mod(floor(vId/8.0), 2.0)*2.0 - 1.0;
+      float ang4 = t * 0.8;
+      float rx = x4*cos(ang4) - w4*sin(ang4);
+      thought = turn(vec3(rx, y4, z4)*0.6 + n*0.08, t*0.3) * mix(0.70, 1.0, thinkIn);
+    } else if (u_think_mode == 9) {
+      // #9 Hydro Jellyfish
+      float isBell = step(0.35, seed.w);
+      vec3 bellP = vec3(n.x * 1.2, abs(n.y)*0.8, n.z * 1.2);
+      vec3 tentP = vec3(n.x*0.4, -abs(n.y)*1.4 - 0.2, n.z*0.4);
+      thought = turn(mix(tentP, bellP, isBell), t*0.25) * mix(0.70, 1.0, thinkIn);
+    } else if (u_think_mode == 10) {
+      // #10 Magnetic Dynamo
+      float theta = acos(clamp(n.y, -1.0, 1.0));
+      float magR = 1.25 * sin(theta)*sin(theta);
+      thought = turn(vec3(magR*cos(seed.w*6.28 + t*0.8), n.y*1.2, magR*sin(seed.w*6.28 + t*0.8)), t*0.3) * mix(0.70, 1.0, thinkIn);
+    } else if (u_think_mode == 11) {
+      // #11 Geodesic Crystal
+      vec3 fN = normalize(floor(n * 2.5 + 0.5));
+      vec3 cP = fN * 0.9 + n*0.1;
+      thought = turn(vec3(cP.x*cos(t*0.4) - cP.y*sin(t*0.4), cP.x*sin(t*0.4) + cP.y*cos(t*0.4), cP.z), t*0.3) * mix(0.70, 1.0, thinkIn);
+    } else if (u_think_mode == 12) {
+      // #12 Solar Nebula
+      float isRing = step(0.30, seed.w);
+      float rRad = 0.8 + fract(seed.w*7.0)*0.8;
+      float rAng = seed.w*20.0 + t*0.7;
+      vec3 ringP = vec3(rRad*cos(rAng), 0.0, rRad*sin(rAng));
+      ringP = vec3(ringP.x, ringP.y*cos(0.45) - ringP.z*sin(0.45), ringP.y*sin(0.45) + ringP.z*cos(0.45));
+      thought = turn(mix(n*0.45, ringP, isRing), t*0.25) * mix(0.70, 1.0, thinkIn);
+    } else {
+      // #6 Trefoil Celtic Helix Cage (Default & User selection)
+      float tStrand = floor(seed.w * 3.0);
+      float tAng = fract(seed.w * 3.0) * 6.2831853;
+      float tPhase = tStrand * 2.0943951; // 120 degrees
+      float tR = 0.95 + 0.15*cos(3.0*tAng + t*1.2);
+      vec3 tRingPos = vec3(tR*cos(tAng + t*0.5), tR*sin(tAng + t*0.5), 0.35*sin(2.0*tAng + tPhase));
+      if (tStrand == 1.0) tRingPos = vec3(tRingPos.x, tRingPos.y*cos(1.05) - tRingPos.z*sin(1.05), tRingPos.y*sin(1.05) + tRingPos.z*cos(1.05));
+      if (tStrand == 2.0) tRingPos = vec3(tRingPos.x*cos(1.05) - tRingPos.y*sin(1.05), tRingPos.x*sin(1.05) + tRingPos.y*cos(1.05), tRingPos.z);
+      thought = turn(tRingPos + n*0.06, t*0.35) * mix(0.70, 1.0, thinkIn);
+    }
 
     // Cloud position in the CURRENT base state (weights renormalized in JS
     // to sum 1 across the four base states; the text weight is separate).
@@ -240,26 +289,11 @@
       +thought*weights.z
       +speakV*weights.w;
 
-    // Caption Formation (v2.mp4 frame_05 & frame_08):
-    // Particles stream from the south pole downward like cascading sand into text glyphs.
-    bool isGlyph=textPos.w<0.5;
-    float tst=hash(n*3.7+vec3(textPos.w*97.1,0.0,0.0));
-    float te=clamp((textProg-tst*0.25)/0.75,0.0,1.0);
-    te=te*te*(3.0-2.0*te);
-    vec3 southPole=vec3(n.x*0.18,-1.02+n.y*0.06,n.z*0.18);
-    vec3 fallArc=vec3(0.0,-0.28*sin(te*3.14159265),0.0);
-    vec3 streamTurb=vec3(
-      sin(t*3.2+tst*6.28)*0.12,
-      cos(t*2.6+tst*6.28)*0.08,
-      sin(t*2.0+tst*6.28)*0.09
-    )*(1.0-te);
-    vec3 streamPos=mix(southPole,textPos.xyz,te)+fallArc+streamTurb;
-    float swirlAmt=sin(te*3.14159265)*clamp(tw*1.6+textProg,0.0,1.0);
-    vec3 swirlT=vec3(sin(t*3.0+tst*6.2831),cos(t*2.6+tst*6.2831),0.0)*0.22*swirlAmt;
-    vec3 pos=mix(cloudPos,streamPos,te*float(isGlyph))+swirlT;
+    // Intact avatar: all particles remain in their organic morph geometry at all times (zero particle text)
+    vec3 pos=cloudPos;
 
     float active=weights.y+weights.w;
-    float ambF=step(0.5,textPos.w)*clamp(tw*1.6,0.0,1.0);
+    float ambF=0.0;
     float rim=pow(max(0.0,1.0-abs(n.z)),2.2);
     float pop=pow(max(0.0,sin(t*8.0+seed.w*149.0)),18.0)*step(.90,seed.w);
     pos*=1.0+active*high*pop*.17;
@@ -279,34 +313,12 @@
     float speakFace=clamp(n.z*.5+.5,0.0,1.0);
     float speakBump=clamp(.5+.5*fluidNoise1,0.0,1.0);
 
-    // ─── State palettes (Feature 89 & v2.mp4 parity) ──────────────
-    vec3 clFixed=userTint;
-    vec3 clInward=mix(clFixed,vec3(1.0,1.0,1.0),0.65);
-    vec3 clOutward=clFixed*0.75;
-    vec3 clDyn=dynR<1.0?mix(clFixed,clInward,clamp((1.0-dynR)/0.35,0.0,1.0))
-                       :mix(clFixed,clOutward,clamp((dynR-1.0)/0.35,0.0,1.0));
-    vec3 cl=isFixed?clFixed:clDyn;
-    vec3 ci=cl;
-    // Thinking violet ribbon knot gradient (v2.mp4 frame_03)
-    float uAlongKnot=fract(seed.w+t*0.06);
-    vec3 ctt=mix(
-      vec3(0.42,0.12,0.88),
-      vec3(0.88,0.28,0.94),
-      0.5+0.5*sin(uAlongKnot*6.2831853)
-    );
-    vec3 cs=mix(vec3(0.28,0.10,0.26),vec3(0.85,0.44,0.72),clamp(n.z*0.45+0.55+0.25*fluidNoise1,0.0,1.0));
-    vec3 blendT=ci*weights.x+cl*weights.y+ctt*weights.z+cs*weights.w+textTint*tw;
-
-    float lag=hash(n*9.7+vec3(31.7,0.0,0.0));
-    float mw=max(max(weights.x,weights.y),max(weights.z,weights.w));
-    vec3 domC=weights.x>=weights.y?(weights.x>=weights.z?(weights.x>=weights.w?ci:cs):(weights.z>=weights.w?ctt:cs)):(weights.y>=weights.z?(weights.y>=weights.w?cl:cs):(weights.z>=weights.w?ctt:cs));
-    if(tw>mw)domC=textTint;
-    float mixAmt=lag*.55*(1.0-clamp(mw*4.0,0.0,1.0));
-    tint=mix(blendT,domC,mixAmt);
-    tint*=mix(1.0,.30,ambF);
+    // Pure bright white stardust particles across ALL states (idle, listening, thinking, speaking)
+    tint=vec3(1.0,1.0,1.0);
     crisp=max(max(weights.w,tw),(weights.x+weights.y)*(isFixed?0.65:0.10));
     sparkTint=vec3(1.0,1.0,1.0);
 
+    float uAlongKnot=fract(seed.w+t*0.06);
     float ribbonSpark=pow(max(0.0,sin(uAlongKnot*12.566-t*4.0)),10.0)*step(0.35,depth);
     strength=(.24+.45*depth+.70*rim)*(.65+.35*fract(sin(seed.w*912.7+31.4)*43758.5));
     float listenInGlow=(!isFixed)*clamp((1.0-dynR)/0.35,0.0,1.0)*0.55;
@@ -319,7 +331,6 @@
     strength*=mix(1.0,0.95,weights.y);
     strength*=mix(1.0,1.02,weights.z);
     strength*=mix(1.0,1.18,weights.w);
-    strength*=mix(1.0,.32,ambF);
     float listenSpark=(!isFixed)*clamp((1.0-dynR)/0.35,0.0,1.0)*voiceLevel*0.65*(mid+onset);
     spark=active*(high*pop*.8+onset*rim*.22)+weights.z*(ribbonSpark*1.4+step(0.85,depth)*0.15)+(weights.x+weights.y)*listenSpark;
   }`;
@@ -330,6 +341,7 @@
   varying vec3 sparkTint;
   varying float crisp;
   uniform mediump float glitch;
+  uniform float ink;
   void main() {
     float r=length(gl_PointCoord-.5)*2.0;
     if(r>1.0)discard;
@@ -337,12 +349,19 @@
     float core=1.0-smoothstep(mix(.18,.08,crisp),edge,r);
     float halo=mix(exp(-r*r*4.0)*.24,exp(-r*r*8.0)*.12,crisp)*(1.0-smoothstep(.75,1.0,r));
     float a=(core+halo)*strength;
-    vec3 color=tint*a+sparkTint*spark*core;
-    gl_FragColor=vec4(color,min(1.0,a+spark*core));
+    vec3 color=vec3(1.0,1.0,1.0)*a+vec3(1.0,1.0,1.0)*spark*core;
+    if(ink>0.5){
+      // Light theme: black ink. The additive-white intensity becomes coverage
+      // (premultiplied black = vec3(0)), composited with normal alpha blending.
+      float lum=max(color.r,max(color.g,color.b));
+      gl_FragColor=vec4(0.0,0.0,0.0,min(1.0,lum*1.1));
+    } else {
+      gl_FragColor=vec4(color,min(1.0,a+spark*core));
+    }
   }`;
 
   class VoiceOrb extends HTMLElement {
-    static get observedAttributes() { return ['state','particles','recording','color']; }
+    static get observedAttributes() { return ['state','particles','recording','color','theme','think-mode','speak-mode','listen-mode']; }
     get userColor() { return parseColorHex(this.getAttribute('color')); }
     constructor() {
       super();
@@ -358,10 +377,51 @@
       // Glitch transition: a short burst fired whenever the dominant base
       // state (idle/listening/thinking/speaking) changes (see _tick).
       this._lastDom=null; this._glitchStart=0; this._glitchAmt=0;
+      this._thinkMode = 6;
+      this._speakMode = 2;
+      this._listenMode = 1;
+      try {
+        const m = localStorage.getItem('nexus_orb_morphology');
+        if (m) {
+          const parsed = JSON.parse(m);
+          if (parsed.thinking) this._thinkMode = parsed.thinking;
+          if (parsed.speaking) this._speakMode = parsed.speaking;
+          if (parsed.listening) this._listenMode = parsed.listening;
+        }
+      } catch (_) {}
       this._tick=this._tick.bind(this);
       this._sync=this._sync.bind(this);
     }
     connectedCallback() {
+      try {
+        import('@tauri-apps/api/core').then(({ invoke }) => {
+          invoke('get_settings').then((s) => {
+            if (s) {
+              if (s.orbThinkMode) this._thinkMode = Number(s.orbThinkMode);
+              if (s.orbSpeakMode) this._speakMode = Number(s.orbSpeakMode);
+              if (s.orbListenMode) this._listenMode = Number(s.orbListenMode);
+            }
+          }).catch(() => {});
+        }).catch(() => {});
+      } catch (_) {}
+      try {
+        import('@tauri-apps/api/event').then(({ listen }) => {
+          listen('orb:morphology_changed', (ev) => {
+            if (ev.payload) {
+              if (ev.payload.think) this._thinkMode = Number(ev.payload.think);
+              if (ev.payload.speak) this._speakMode = Number(ev.payload.speak);
+              if (ev.payload.listen) this._listenMode = Number(ev.payload.listen);
+            }
+          }).catch(() => {});
+        }).catch(() => {});
+      } catch (_) {}
+      window.addEventListener('nexus:orb_morphology', (ev) => {
+        if (ev.detail) {
+          if (ev.detail.thinking) this._thinkMode = Number(ev.detail.thinking);
+          if (ev.detail.speaking) this._speakMode = Number(ev.detail.speaking);
+          if (ev.detail.listening) this._listenMode = Number(ev.detail.listening);
+        }
+      });
       if (!this.shadowRoot) {
         const root=this.attachShadow({mode:'open'});
         // Constructed stylesheet (adoptedStyleSheets), not a parsed <style>
@@ -399,7 +459,16 @@ canvas{display:block;position:absolute;inset:0;width:100%;height:100%;pointer-ev
       this._motion=matchMedia('(prefers-reduced-motion: reduce)');
       this._weights=weightsFor(this.state);
       this._motion.addEventListener('change',this._sync);
-      document.addEventListener('visibilitychange',this._sync);
+      this._visibilityHandler = () => {
+        if (document.hidden) {
+          cancelAnimationFrame(this._frame);
+          this._frame = 0;
+          this._last = 0;
+        } else {
+          this._sync();
+        }
+      };
+      document.addEventListener('visibilitychange', this._visibilityHandler);
       this._observer=new ResizeObserver(()=>this._resize());
       this._observer.observe(this);
       this._resize();this._sync();this._label();
@@ -408,11 +477,28 @@ canvas{display:block;position:absolute;inset:0;width:100%;height:100%;pointer-ev
       cancelAnimationFrame(this._frame);this._frame=0;this._last=0;
       this._observer?.disconnect();
       this._motion?.removeEventListener('change',this._sync);
-      document.removeEventListener('visibilitychange',this._sync);
+      if (this._visibilityHandler) {
+        document.removeEventListener('visibilitychange', this._visibilityHandler);
+      }
       this.disconnect();
     }
     get state() { return STATES.includes(this.getAttribute('state'))?this.getAttribute('state'):'idle'; }
     set state(value) { this.setAttribute('state',value); }
+    get thinkMode() { return this._thinkMode; }
+    set thinkMode(value) {
+      this._thinkMode = Number(value) || 6;
+      this.setAttribute('think-mode', String(this._thinkMode));
+    }
+    get speakMode() { return this._speakMode; }
+    set speakMode(value) {
+      this._speakMode = Number(value) || 2;
+      this.setAttribute('speak-mode', String(this._speakMode));
+    }
+    get listenMode() { return this._listenMode; }
+    set listenMode(value) {
+      this._listenMode = Number(value) || 1;
+      this.setAttribute('listen-mode', String(this._listenMode));
+    }
     get particles() {
       const fixed=Number(this.getAttribute('particles'));
       const count=this.hasAttribute('particles')&&Number.isFinite(fixed)?Math.round(clamp(fixed,200,20000)):this._auto;
@@ -431,7 +517,19 @@ canvas{display:block;position:absolute;inset:0;width:100%;height:100%;pointer-ev
       }
       if(name==='state') {
         this._label();
-        console.log(`[ANIM] Orb state transition -> ${this.state} (color: ${this.getAttribute('color') || '#f2b859'})`);
+        console.log(`[ANIM] Orb state transition -> ${this.state} (color: ${this.getAttribute('color') || '#ffffff'})`);
+      }
+      if(name==='think-mode') {
+        const tm = Number(this.getAttribute('think-mode'));
+        if (tm) this._thinkMode = tm;
+      }
+      if(name==='speak-mode') {
+        const sm = Number(this.getAttribute('speak-mode'));
+        if (sm) this._speakMode = sm;
+      }
+      if(name==='listen-mode') {
+        const lm = Number(this.getAttribute('listen-mode'));
+        if (lm) this._listenMode = lm;
       }
       if(name==='particles')this._count=0;
       if(name==='recording'||name==='color')this._sync();
@@ -462,7 +560,7 @@ canvas{display:block;position:absolute;inset:0;width:100%;height:100%;pointer-ev
         gl.enableVertexAttribArray(this._textLoc);gl.vertexAttribPointer(this._textLoc,4,gl.FLOAT,false,0,0);
         gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE);gl.disable(gl.DEPTH_TEST);
         this._gl=gl;this._program=program;this._uniforms={};
-        for(const n of ['time','pixels','density','weights','bands','onset','assemble','tw','textProg','thinkIn','textTint','userTint','glitch'])this._uniforms[n]=gl.getUniformLocation(program,n);
+        for(const n of ['time','pixels','density','weights','bands','onset','assemble','tw','textProg','thinkIn','textTint','userTint','glitch','ink','u_think_mode','u_speak_mode','u_listen_mode'])this._uniforms[n]=gl.getUniformLocation(program,n);
         this._auto=matchMedia('(pointer: coarse)').matches?5040:6240;
         if(!this._lossHandler) {
           this._lossHandler=e=>{e.preventDefault();this._lost=true;this._sync();};
@@ -506,32 +604,8 @@ canvas{display:block;position:absolute;inset:0;width:100%;height:100%;pointer-ev
     // hold, then dissolve back into the previous state. No overlay text,
     // no crossfade — one continuous particle simulation.
     // Returns false when the text renders empty (no-canvas graceful path).
-    setText(text, holdMs = 400) {
-      const pts = sampleTextPoints(text);
-      if(!pts)return false;
-      this._prevState = this.state==='text' ? (this._prevState||'idle') : this.state;
-      this._textHold = Math.max(300, holdMs);
-      this._textPts = pts;
-      this._textPending = pts;
-      if(this._motion?.matches) {
-        // Reduced motion: snap the glyphs formed (no travel), hold as a
-        // static frame, then revert via a timeout (the rAF loop is parked).
-        this._textProg=1;this._textPhase='hold';this._textStart=performance.now();
-        this.state='text';
-        this._paint(0,this._weights,[0,0,0],0);
-        setTimeout(()=>{
-          if(this._textPhase==='hold'){
-            this._textPhase=null;this._textProg=0;this._textPts=null;this._textPending=null;
-            if(this.state==='text'){this.state=this._prevState;this._label();}
-            this._sync();
-          }
-        },this._textHold+2000);
-        return true;
-      }
-      this._textProg=0;this._textStart=performance.now();this._textPhase='converge';
-      this.state='text';
-      if(!this._frame)this._sync();
-      return true;
+    setText(_text, _holdMs = 400) {
+      return false;
     }
     _resize() {
       const rect = this.getBoundingClientRect();
@@ -546,11 +620,23 @@ canvas{display:block;position:absolute;inset:0;width:100%;height:100%;pointer-ev
     }
     _sync() {
       cancelAnimationFrame(this._frame);this._frame=0;this._last=0;
-      if(!this.isConnected||this.hasAttribute('recording')||this._paused||this._lost)return;
+      if(!this.isConnected||this.hasAttribute('recording')||this._paused||this._lost||document.hidden)return;
       if(this._motion?.matches) { this._weights=weightsFor(this.state);this._paint(0,this._weights,[0,0,0],0);return; }
       this._frame=requestAnimationFrame(this._tick);
     }
     _tick(now) {
+      if(this._paused || !this.isConnected || document.hidden) return;
+      // Adaptive Frame Pacing: idle breathing is ~0.33Hz, so 25 FPS pacing
+      // cuts GPU power by >60% while staying visually smooth. Active states
+      // (listening, thinking, speaking) run at full monitor refresh rate (60+ FPS).
+      if(this.state === 'idle') {
+        const since = now - (this._lastPaint || 0);
+        if(since < 40) {
+          this._frame = requestAnimationFrame(this._tick);
+          return;
+        }
+      }
+      this._lastPaint = now;
       const elapsed=this._last?(now-this._last)/1000:1/60;
       const dt=Math.min(.08,elapsed);this._last=now;this._time+=dt;
       if(!this.hasAttribute('particles')) {
@@ -658,11 +744,15 @@ canvas{display:block;position:absolute;inset:0;width:100%;height:100%;pointer-ev
         gl.uniform3fv(u.textTint,stateTint);
         gl.uniform3fv(u.userTint,uColor);
         gl.uniform1f(u.glitch,this._glitchAmt||0);
+        gl.uniform1i(u.u_think_mode,this._thinkMode||6);
+        gl.uniform1i(u.u_speak_mode,this._speakMode||2);
+        gl.uniform1i(u.u_listen_mode,this._listenMode||1);
+        {const ink=this.getAttribute('theme')==='light';gl.uniform1f(u.ink,ink?1:0);gl.blendFunc(gl.ONE,ink?gl.ONE_MINUS_SRC_ALPHA:gl.ONE);}
         gl.drawArrays(gl.POINTS,0,count);
       } else this._paint2D(time,wMain,bands,onset,tintRgb,size,w4,this._textProg||0,this._thinkIn==null?1:this._thinkIn,this._textPosArr,this._glitchAmt||0,uColor);
     }
     _paint2D(t,w,b,onset,rgb,size,tw=0,textProg=0,thinkIn=1,textArr=null,glitchAmt=0,userTint=[.95,.72,.35]) {
-      const ctx=this._ctx;ctx.clearRect(0,0,size,size);ctx.globalCompositeOperation='lighter';
+      const ctx=this._ctx;const ink=this.getAttribute('theme')==='light';ctx.clearRect(0,0,size,size);ctx.globalCompositeOperation=ink?'source-over':'lighter';
       const baseFill=`rgb(${rgb})`;
       for(let i=0;i<this._count;i++) {
         const o=i*4,n=this._seeds,x=n[o],y=n[o+1],z=n[o+2],u=n[o+3];
@@ -709,41 +799,75 @@ canvas{display:block;position:absolute;inset:0;width:100%;height:100%;pointer-ev
           pz = pz * (1 - w[3]) + bz * w[3];
         }
         if(w[2] > 0.001) {
-          // 3D woven luminous violet ribbon knot (parity with GL path):
-          const ku = u * 6.2831853;
-          const kv = (y * 0.5 + 0.5) * 2.0 - 1.0;
-          const kw = (z * 0.5 + 0.5) * 2.0 - 1.0;
-          const knotR = 0.88 * (1.0 + 0.38 * Math.cos(3.0 * ku + t * 0.40));
-          const kcx = knotR * Math.cos(2.0 * ku + t * 0.26);
-          const kcy = knotR * Math.sin(2.0 * ku + t * 0.26);
-          const kcz = -0.54 * Math.sin(3.0 * ku + t * 0.40);
+          let bx = 0, by = 0, bz = 0;
+          if ((this._thinkMode || 6) === 6) {
+            // #6 Trefoil Celtic Helix Cage (Default & User selection):
+            const tStrand = Math.floor(u * 3.0);
+            const tAng = (u * 3.0 % 1.0) * 6.2831853;
+            const tPhase = tStrand * 2.0943951;
+            const tR = 0.95 + 0.15 * Math.cos(3.0 * tAng + t * 1.2);
+            let rx = tR * Math.cos(tAng + t * 0.5);
+            let ry = tR * Math.sin(tAng + t * 0.5);
+            let rz = 0.35 * Math.sin(2.0 * tAng + tPhase);
+            if (tStrand === 1) {
+              const cy1 = Math.cos(1.05), sy1 = Math.sin(1.05);
+              const ny = ry * cy1 - rz * sy1;
+              const nz = ry * sy1 + rz * cy1;
+              ry = ny; rz = nz;
+            } else if (tStrand === 2) {
+              const cx1 = Math.cos(1.05), sx1 = Math.sin(1.05);
+              const nx = rx * cx1 - ry * sx1;
+              const ny = rx * sx1 + ry * cx1;
+              rx = nx; ry = ny;
+            }
+            const aRot = t * 0.35;
+            const ca = Math.cos(aRot), sa = Math.sin(aRot);
+            const txRot = ca * (rx + x * 0.06) + sa * (rz + z * 0.06);
+            const tyRot = ry + y * 0.06;
+            const tzRot = ca * (rz + z * 0.06) - sa * (rx + x * 0.06);
+            const scale = mixNum(0.70, 1.0, thinkIn);
+            bx = txRot * scale;
+            by = tyRot * scale;
+            bz = tzRot * scale;
+          } else {
+            // 3D woven luminous violet ribbon knot:
+            const ku = u * 6.2831853;
+            const kv = (y * 0.5 + 0.5) * 2.0 - 1.0;
+            const kw = (z * 0.5 + 0.5) * 2.0 - 1.0;
+            const knotR = 0.88 * (1.0 + 0.38 * Math.cos(3.0 * ku + t * 0.40));
+            const kcx = knotR * Math.cos(2.0 * ku + t * 0.26);
+            const kcy = knotR * Math.sin(2.0 * ku + t * 0.26);
+            const kcz = -0.54 * Math.sin(3.0 * ku + t * 0.40);
 
-          const kuNext = ku + 0.015;
-          const knotRNext = 0.88 * (1.0 + 0.38 * Math.cos(3.0 * kuNext + t * 0.40));
-          const knx = knotRNext * Math.cos(2.0 * kuNext + t * 0.26);
-          const kny = knotRNext * Math.sin(2.0 * kuNext + t * 0.26);
-          const knz = -0.54 * Math.sin(3.0 * kuNext + t * 0.40);
+            const kuNext = ku + 0.015;
+            const knotRNext = 0.88 * (1.0 + 0.38 * Math.cos(3.0 * kuNext + t * 0.40));
+            const knx = knotRNext * Math.cos(2.0 * kuNext + t * 0.26);
+            const kny = knotRNext * Math.sin(2.0 * kuNext + t * 0.26);
+            const knz = -0.54 * Math.sin(3.0 * kuNext + t * 0.40);
 
-          const [tx, ty, tz] = normalize3(knx - kcx, kny - kcy, knz - kcz);
-          const [p1x, p1y, p1z] = normalize3(...cross3(tx, ty, tz, 0, 0, 1));
-          const [p2x, p2y, p2z] = cross3(tx, ty, tz, p1x, p1y, p1z);
+            const [tx, ty, tz] = normalize3(knx - kcx, kny - kcy, knz - kcz);
+            const [p1x, p1y, p1z] = normalize3(...cross3(tx, ty, tz, 0, 0, 1));
+            const [p2x, p2y, p2z] = cross3(tx, ty, tz, p1x, p1y, p1z);
 
-          const ribbonWidth = 0.26 * (0.85 + 0.15 * Math.sin(ku * 4.0 + t));
-          const ribbonThick = 0.04;
-          const sx0 = kcx + p1x * (kv * ribbonWidth) + p2x * (kw * ribbonThick);
-          const sy0 = kcy + p1y * (kv * ribbonWidth) + p2y * (kw * ribbonThick);
-          const sz0 = kcz + p1z * (kv * ribbonWidth) + p2z * (kw * ribbonThick);
+            const ribbonWidth = 0.26 * (0.85 + 0.15 * Math.sin(ku * 4.0 + t));
+            const ribbonThick = 0.04;
+            const sx0 = kcx + p1x * (kv * ribbonWidth) + p2x * (kw * ribbonThick);
+            const sy0 = kcy + p1y * (kv * ribbonWidth) + p2y * (kw * ribbonThick);
+            const sz0 = kcz + p1z * (kv * ribbonWidth) + p2z * (kw * ribbonThick);
 
-          const yaw = t * 0.42, cy = Math.cos(yaw), sy_rot = Math.sin(yaw);
-          const pitch = 0.12 * Math.sin(t * 0.30), cp = Math.cos(pitch), sp_rot = Math.sin(pitch);
-          const x1 = cy * sx0 + sy_rot * sz0;
-          const y1 = sy0;
-          const z1 = cy * sz0 - sy_rot * sx0;
-          const tx0 = x1;
-          const ty0 = cp * y1 - sp_rot * z1;
-          const tz0 = cp * z1 + sp_rot * y1;
-          const scale = mixNum(0.70, 1.0, thinkIn);
-          const bx = tx0 * scale, by = ty0 * scale, bz = tz0 * scale;
+            const yaw = t * 0.42, cy = Math.cos(yaw), sy_rot = Math.sin(yaw);
+            const pitch = 0.12 * Math.sin(t * 0.30), cp = Math.cos(pitch), sp_rot = Math.sin(pitch);
+            const x1 = cy * sx0 + sy_rot * sz0;
+            const y1 = sy0;
+            const z1 = cy * sz0 - sy_rot * sx0;
+            const tx0 = x1;
+            const ty0 = cp * y1 - sp_rot * z1;
+            const tz0 = cp * z1 + sp_rot * y1;
+            const scale = mixNum(0.70, 1.0, thinkIn);
+            bx = tx0 * scale;
+            by = ty0 * scale;
+            bz = tz0 * scale;
+          }
           px = px * (1 - w[2]) + bx * w[2];
           py = py * (1 - w[2]) + by * w[2];
           pz = pz * (1 - w[2]) + bz * w[2];
@@ -772,14 +896,8 @@ canvas{display:block;position:absolute;inset:0;width:100%;height:100%;pointer-ev
         // Dot radius parity with the GL path's point-size fix: scaled by 0.60 (-40%)
         const dot=Math.max(0.8,size/480*(0.66+.24*(pz+1)+rim*.48)*(1-.28*w[3])*mixNum(1.0,.62,ambF));
         ctx.globalAlpha=clamp((.20+.24*(pz+1)+rim*.3+w[2]*.4+w[3]*(speakFace*.22+speakBump*.15)+tw*(.30+.25*(pz+1)))*mixNum(1.0,.32,ambF));
-        const uAlongKnot=(u+t*0.06)%1.0;
-        const ctt=[
-          mixNum(0.72,0.92,0.5+0.5*Math.sin(uAlongKnot*6.2831853)),
-          mixNum(0.14,0.28,0.5+0.5*Math.sin(uAlongKnot*6.2831853)),
-          mixNum(0.98,0.95,0.5+0.5*Math.sin(uAlongKnot*6.2831853)),
-        ];
-        const stateColor=w[2]>0.5?ctt:userTint;
-        ctx.fillStyle=`rgb(${Math.round(stateColor[0]*255)},${Math.round(stateColor[1]*255)},${Math.round(stateColor[2]*255)})`;
+        const stateColor=[1.0, 1.0, 1.0];
+        ctx.fillStyle=ink?`rgb(0,0,0)`:`rgb(255,255,255)`;
         ctx.beginPath();ctx.arc(size*(.5+px*perspective*.305),size*(.5-py*perspective*.305),dot,0,Math.PI*2);ctx.fill();
       }
       ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';

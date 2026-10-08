@@ -60,7 +60,7 @@
   top: 0;
   width: 320px;
   box-sizing: border-box;
-  padding: 14px 16px 14px 52px;
+  padding: 14px 38px 14px 52px;
   border-radius: 16px;
   background: rgba(16, 20, 30, 0.86);
   border: 1px solid rgba(255, 255, 255, 0.2);
@@ -76,6 +76,35 @@
 .tour-callout.in {
   opacity: 1;
   scale: 1;
+  pointer-events: auto;
+}
+
+.tour-callout-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  width: 22px;
+  height: 22px;
+  border-radius: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  margin: 0;
+  pointer-events: auto;
+  transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+  user-select: none;
+}
+.tour-callout-close:hover {
+  background: rgba(239, 68, 68, 0.35);
+  border-color: rgba(239, 68, 68, 0.8);
+  color: #ffffff;
 }
 
 .tour-callout-num {
@@ -121,4 +150,22 @@
   .tour-callout, .tour-ring, .tour-arrow, .tour-dot { transition: none; }
   .tour-svg.in .tour-leader { transition: none; }
   .tour-callout { scale: 1; }
+}
+
+/* Light theme: the tour callout becomes a light card (ring/leader keep the blue accent). */
+:root[data-theme="light"] .tour-callout {
+  background: rgba(250, 250, 250, 0.96);
+  border-color: rgba(60, 60, 67, 0.22);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
+  color: #1c1c1e;
+}
+:root[data-theme="light"] .tour-callout-text {
+  color: rgba(28, 28, 30, 0.78);
+}
+:root[data-theme="light"] .tour-callout-of {
+  opacity: 0.55;
+}
+:root[data-theme="light"] .tour-callout-num {
+  background: rgba(10, 132, 214, 0.14);
+  border-color: rgba(10, 132, 214, 0.6);
 }

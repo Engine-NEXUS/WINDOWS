@@ -164,6 +164,45 @@ pub enum ParsedIntent {
     /// Report what NEXUS remembers (memory audit — local, never cloud).
     #[serde(rename = "memory_audit")]
     MemoryAudit,
+    /// "Where did I leave off" / "show my briefing" (local, never cloud).
+    #[serde(rename = "briefing")]
+    Briefing,
+    /// "Analyse this and add section 2 to my timetable" (screen or clipboard image).
+    #[serde(rename = "timetable_add")]
+    TimetableAdd { source: String, section: Option<usize> },
+    /// "Show my timetable" / "what's next on my timetable".
+    #[serde(rename = "timetable_show")]
+    TimetableShow,
+    /// "Clear my timetable" (asks to confirm).
+    #[serde(rename = "timetable_clear")]
+    TimetableClear,
+    /// "Add those slots" — commit the slots read from the last image.
+    #[serde(rename = "timetable_commit")]
+    TimetableCommit,
+    /// "Use the browser for DSA" — remembered per activity, overwritten on repeat.
+    #[serde(rename = "study_pref")]
+    StudyPref { activity: String, choice: String },
+    /// "Any important emails?" — the inbox watcher's findings.
+    #[serde(rename = "mail_digest")]
+    MailDigest,
+    /// "That's not important" — mute the sender of the last alert.
+    #[serde(rename = "mail_mute")]
+    MailMute,
+    /// "Read that message" / "read Asha's message" - WhatsApp, read-only.
+    #[serde(rename = "whatsapp_read")]
+    WhatsappRead { name: Option<String> },
+    /// "Make Asha a VIP" / "mute WhatsApp alerts from Raj" (`kind` = vip | mute).
+    #[serde(rename = "people_flag")]
+    PeopleFlag { name: String, kind: String, on: bool },
+    /// "Who are my priority people".
+    #[serde(rename = "people_list")]
+    PeopleList,
+    /// "What's on my calendar today/tomorrow".
+    #[serde(rename = "calendar_agenda")]
+    CalendarAgenda { day: String },
+    /// "Add dentist to my calendar tomorrow at 5pm" (raw text; parsed with the clock).
+    #[serde(rename = "calendar_add")]
+    CalendarAdd { text: String },
     /// Forget one memory fact ("forget my birthday").
     #[serde(rename = "memory_forget")]
     MemoryForget { key: String },
@@ -173,6 +212,18 @@ pub enum ParsedIntent {
     /// Two-step wipe step 2 ("yes, forget everything" → wipes).
     #[serde(rename = "memory_forget_all_confirm")]
     MemoryForgetAllConfirm,
+    /// Switch personality tone to friend (opt-in).
+    #[serde(rename = "persona_friend")]
+    PersonaFriend,
+    /// Switch personality tone back to butler (formal default).
+    #[serde(rename = "persona_butler")]
+    PersonaButler,
+    /// User shares something personal and wants honest counsel.
+    /// `story` is None for the opener ("i want to share something" —
+    /// arms counsel mode + invites the story) and Some for direct
+    /// counsel ("was i right to shout at him" — runs counsel now).
+    #[serde(rename = "share_concern")]
+    ShareConcern { story: Option<String> },
     #[serde(rename = "unknown")]
     Unknown { raw: String },
 }
@@ -234,9 +285,25 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::StopDictation => "stop_dictation",
         ParsedIntent::WatchScreenEmail => "watch_screen_email",
         ParsedIntent::MemoryAudit => "memory_audit",
+        ParsedIntent::Briefing => "briefing",
+        ParsedIntent::TimetableAdd { .. } => "timetable_add",
+        ParsedIntent::TimetableShow => "timetable_show",
+        ParsedIntent::TimetableClear => "timetable_clear",
+        ParsedIntent::TimetableCommit => "timetable_commit",
+        ParsedIntent::StudyPref { .. } => "study_pref",
+        ParsedIntent::MailDigest => "mail_digest",
+        ParsedIntent::MailMute => "mail_mute",
+        ParsedIntent::WhatsappRead { .. } => "whatsapp_read",
+        ParsedIntent::PeopleFlag { .. } => "people_flag",
+        ParsedIntent::PeopleList => "people_list",
+        ParsedIntent::CalendarAgenda { .. } => "calendar_agenda",
+        ParsedIntent::CalendarAdd { .. } => "calendar_add",
         ParsedIntent::MemoryForget { .. } => "memory_forget",
         ParsedIntent::MemoryForgetAll => "memory_forget_all",
         ParsedIntent::MemoryForgetAllConfirm => "memory_forget_all_confirm",
+        ParsedIntent::PersonaFriend => "persona_friend",
+        ParsedIntent::PersonaButler => "persona_butler",
+        ParsedIntent::ShareConcern { .. } => "share_concern",
         ParsedIntent::GitHubCommand { command } => match command {
             GitHubCommand::MergePr { .. } => "merge_pr",
             GitHubCommand::ApprovePr { .. } => "approve_pr",
@@ -428,6 +495,23 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
         return Some(result);
     }
 
+    // --- Timetable (P4) ---
+    // BEFORE screen analysis and the typing enclave: "analyse this and add
+    // section 2 to my timetable" is a timetable command, not a screen tour.
+    if let Some(result) = parse_timetable_command(&text) {
+        return Some(result);
+    }
+    // --- Inbox + calendar (P5): "any important emails", "that's not
+    // important", "what's on my calendar", "add X to my calendar …". ---
+    if let Some(result) = parse_mail_calendar_command(&text) {
+        return Some(result);
+    }
+    // --- WhatsApp priority people (P6): "read that message", "make Asha a
+    // VIP", "who are my priority people". Narrow phrases only. ---
+    if let Some(result) = parse_whatsapp_people_command(&text) {
+        return Some(result);
+    }
+
     // --- Ghostwriter room entry ---
     // Must precede greeting/media: "write this down" is dictation, not chat.
     if let Some(result) = parse_ghostwriter_entry(&text) {
@@ -462,6 +546,17 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
     // to cloud. (Active dictation sessions still win at the orchestrator
     // level — this chain only runs for command turns.)
     if let Some(result) = parse_memory_command(&text) {
+        return Some(result);
+    }
+
+    // --- Persona tone switch & honest counsel (F0/F1b) ---
+    // "talk like a friend" / "be formal" / "i want to share something" /
+    // "was i right to ...". Local routing decisions (never cloud): precede
+    // the typing enclave so commands never get dictated.
+    if let Some(result) = parse_persona_command(&text) {
+        return Some(result);
+    }
+    if let Some(result) = parse_share_concern_command(&text) {
         return Some(result);
     }
 
@@ -1631,6 +1726,26 @@ fn parse_whatsapp_command(text: &str) -> Option<ParseResult> {
             }
         }
     }
+    let wa_search_patterns = [
+        "search for ",
+        "search ",
+        "find ",
+    ];
+    for pat in wa_search_patterns {
+        if text.starts_with(pat) {
+            let rest = text[pat.len()..].trim();
+            if let Some(contact) = rest.strip_suffix(" on whatsapp").or_else(|| rest.strip_suffix(" on wa")) {
+                let contact = contact.trim();
+                if !contact.is_empty() {
+                    return Some(ParseResult {
+                        intent: ParsedIntent::WhatsappChat { contact: contact.to_string() },
+                        confidence: 1.0,
+                        source: "deterministic".to_string(),
+                    });
+                }
+            }
+        }
+    }
     None
 }
 
@@ -1830,12 +1945,318 @@ fn parse_type_dictation_command(text: &str) -> Option<ParseResult> {
 ///   (dismissals) explicitly excluded.
 /// - Forget-all needs an everything/all-memory anchor; executes ONLY via
 ///   the separate confirm phrase (no state machine, no accidents).
+/// Study-app preference: "use the browser for dsa", "switch dsa to the app",
+/// "open dsa in the app from now on". Narrow on purpose — plain "open youtube
+/// in the browser" stays a browser command.
+fn parse_study_pref(t: &str) -> Option<ParsedIntent> {
+    let choice = crate::memcore::timetable::parse_choice(t)?;
+    let words: Vec<&str> = t.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let activity_text: String = if let Some(rest) = t
+        .strip_prefix("use the browser for ")
+        .or_else(|| t.strip_prefix("use the app for "))
+        .or_else(|| t.strip_prefix("use browser for "))
+        .or_else(|| t.strip_prefix("use app for "))
+        .or_else(|| t.strip_prefix("prefer the browser for "))
+        .or_else(|| t.strip_prefix("prefer the app for "))
+    {
+        rest.to_string()
+    } else if let Some(rest) = t.strip_prefix("switch ") {
+        let cut = [" to the ", " to "].iter().find_map(|m| rest.find(m))?;
+        rest[..cut].to_string()
+    } else if t.contains("from now on") && (words.first() == Some(&"open") || words.first() == Some(&"start")) {
+        let rest = t.split_once(' ')?.1;
+        let cut = rest.find(" in ")?;
+        rest[..cut].to_string()
+    } else {
+        return None;
+    };
+    let cleaned: Vec<&str> = activity_text
+        .split_whitespace()
+        .filter(|w| !matches!(*w, "the" | "my" | "practice" | "sessions" | "session" | "from" | "now" | "on" | "please"))
+        .collect();
+    if cleaned.is_empty() || cleaned.len() > 3 {
+        return None;
+    }
+    let activity = crate::memcore::timetable::activity_key(&cleaned.join(" "));
+    if activity.is_empty() {
+        return None;
+    }
+    Some(ParsedIntent::StudyPref { activity, choice: choice.as_str().to_string() })
+}
+
+/// WhatsApp priority-people commands (P6). Every arm needs a distinctive
+/// anchor ("message(s)", "vip", "whatsapp ... from <name>", "priority
+/// people") so plain "mute", "read this" and "make a note" keep their meaning.
+fn parse_whatsapp_people_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase();
+    let t = t
+        .trim_end_matches(['.', ',', '!', '?'])
+        .trim()
+        .replace("v.i.p.", "vip")
+        .replace("v.i.p", "vip")
+        .replace("v i p", "vip");
+    let mk = |intent: ParsedIntent| {
+        Some(ParseResult { intent, confidence: 1.0, source: "deterministic-whatsapp-people".to_string() })
+    };
+    // A person's name: 1-3 plain words, never a pronoun or filler.
+    let name_of = |raw: &str| -> Option<String> {
+        let words: Vec<&str> = raw
+            .split_whitespace()
+            .filter(|w| !matches!(*w, "the" | "my" | "a" | "an" | "please"))
+            .collect();
+        if words.is_empty() || words.len() > 3 {
+            return None;
+        }
+        if words.iter().any(|w| {
+            matches!(
+                *w,
+                "me" | "it" | "this" | "that" | "them" | "him" | "her" | "everyone" | "everybody" | "all"
+                    | "whatsapp" | "sound" | "volume" | "mic" | "microphone"
+            )
+        }) {
+            return None;
+        }
+        if !words.iter().all(|w| w.chars().all(|c| c.is_alphabetic() || c == '\'' || c == '-')) {
+            return None;
+        }
+        Some(words.join(" "))
+    };
+    let read = |n: &str| {
+        name_of(n.trim_end_matches(" on whatsapp").trim())
+            .map(|name| ParsedIntent::WhatsappRead { name: Some(name) })
+            .and_then(mk)
+    };
+
+    // who are my priority people
+    if matches!(
+        t.as_str(),
+        "who are my priority people" | "who are my vips" | "who are my important people" | "my priority people"
+            | "whatsapp priority people" | "who is on my vip list" | "who's on my vip list" | "show my vips"
+            | "which whatsapp contacts are important" | "who do you alert me for" | "who do you alert me about"
+            | "who are my priority contacts" | "list my priority people" | "list my vips"
+    ) {
+        return mk(ParsedIntent::PeopleList);
+    }
+
+    // read that message / read the message from X / read X's message(s) / what did X say on whatsapp
+    let msg_tail = |s: &str| matches!(s, "message" | "messages" | "whatsapp message" | "whatsapp messages");
+    if let Some(rest) = t.strip_prefix("read ") {
+        let rest = rest.trim();
+        for lead in [
+            "that ", "the ", "my ", "latest ", "last ", "new ", "the latest ", "the last ", "my latest ", "my last ",
+            "my new ", "the new ",
+        ] {
+            if let Some(tail) = rest.strip_prefix(lead) {
+                if msg_tail(tail.trim()) {
+                    return mk(ParsedIntent::WhatsappRead { name: None });
+                }
+            }
+        }
+        for from in [
+            "the message from ", "the messages from ", "the whatsapp message from ", "the whatsapp messages from ",
+            "that message from ", "message from ", "messages from ",
+        ] {
+            if let Some(n) = rest.strip_prefix(from) {
+                return read(n);
+            }
+        }
+        // "asha's message(s)" / "asha's whatsapp message"
+        if let Some(idx) = rest.find("'s ") {
+            let (who, tail) = (&rest[..idx], rest[idx + 3..].trim());
+            if msg_tail(tail) {
+                return read(who);
+            }
+        }
+    }
+    if let Some(rest) = t.strip_prefix("what did ") {
+        if let Some(who) = rest
+            .strip_suffix(" say on whatsapp")
+            .or_else(|| rest.strip_suffix(" send on whatsapp"))
+            .or_else(|| rest.strip_suffix(" say to me on whatsapp"))
+            .or_else(|| rest.strip_suffix(" send me on whatsapp"))
+        {
+            return read(who);
+        }
+    }
+
+    // VIP: make X a vip / mark X as vip / add X to my vips / remove X from my vips
+    let vip = |name: &str, on: bool| {
+        name_of(name).map(|name| ParsedIntent::PeopleFlag { name, kind: "vip".into(), on }).and_then(mk)
+    };
+    if let Some(rest) = t.strip_prefix("make ") {
+        for end in [" a vip", " a priority contact", " a priority person", " vip"] {
+            if let Some(n) = rest.strip_suffix(end) {
+                return vip(n, true);
+            }
+        }
+    }
+    if let Some(rest) = t.strip_prefix("mark ") {
+        for end in [" as a vip", " as vip", " as a priority contact", " as a priority person"] {
+            if let Some(n) = rest.strip_suffix(end) {
+                return vip(n, true);
+            }
+        }
+    }
+    if let Some(rest) = t.strip_prefix("add ") {
+        for end in [" to my vips", " to my vip list", " to the vip list", " to my priority people", " to my priority contacts"] {
+            if let Some(n) = rest.strip_suffix(end) {
+                return vip(n, true);
+            }
+        }
+    }
+    if let Some(rest) = t.strip_prefix("remove ") {
+        for end in [" from my vips", " from my vip list", " from the vip list", " from my priority people", " from my priority contacts"] {
+            if let Some(n) = rest.strip_suffix(end) {
+                return vip(n, false);
+            }
+        }
+    }
+
+    // Mute / unmute a person's WhatsApp alerts (needs "whatsapp" + a name).
+    let mute = |name: &str, on: bool| {
+        name_of(name).map(|name| ParsedIntent::PeopleFlag { name, kind: "mute".into(), on }).and_then(mk)
+    };
+    for (verb, on) in [("mute ", true), ("stop ", true), ("unmute ", false), ("resume ", false)] {
+        if let Some(rest) = t.strip_prefix(verb) {
+            for lead in [
+                "whatsapp alerts from ", "whatsapp messages from ", "whatsapp notifications from ",
+                "the whatsapp alerts from ",
+            ] {
+                if let Some(n) = rest.strip_prefix(lead) {
+                    return mute(n, on);
+                }
+            }
+            if verb == "mute " || verb == "unmute " {
+                if let Some(n) = rest.strip_suffix(" on whatsapp") {
+                    return mute(n, on);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Inbox digest / mute and calendar agenda / add (P5). Narrow phrases only:
+/// "open google calendar" and ordinary "add ..." commands keep their meaning.
+fn parse_mail_calendar_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase();
+    let t = t.trim_end_matches(['.', ',', '!', '?']).trim().to_string();
+    let mk = |intent: ParsedIntent| {
+        Some(ParseResult { intent, confidence: 1.0, source: "deterministic-mail-calendar".to_string() })
+    };
+    if matches!(
+        t.as_str(),
+        "that's not important" | "thats not important" | "that is not important" | "not important"
+            | "mute that sender" | "ignore that sender" | "mute that" | "stop alerts from that sender"
+            | "stop telling me about these" | "stop telling me about that"
+    ) {
+        return mk(ParsedIntent::MailMute);
+    }
+    if matches!(
+        t.as_str(),
+        "important emails" | "important email" | "any important emails" | "any important email"
+            | "my important emails" | "important mail" | "any important mail" | "email digest"
+            | "what emails are important"
+    ) || t.contains("anything important in my email")
+        || t.contains("anything important in my inbox")
+        || t.contains("anything important in my mail")
+    {
+        return mk(ParsedIntent::MailDigest);
+    }
+    if crate::memcore::agenda::is_calendar_add(&t) {
+        return mk(ParsedIntent::CalendarAdd { text: t });
+    }
+    let words: Vec<&str> = t.split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|w| !w.is_empty()).collect();
+    let has = |w: &str| words.contains(&w);
+    let asks = has("what") || has("what's") || has("whats") || has("tell") || has("read") || has("anything") || has("check") || t.contains("do i have");
+    if t.contains("agenda") || (t.contains("calendar") && asks) {
+        let day = if has("tomorrow") { "tomorrow" } else { "today" };
+        return mk(ParsedIntent::CalendarAgenda { day: day.to_string() });
+    }
+    None
+}
+
+/// Timetable commands (P4). Anchored on the word "timetable"/"time table"
+/// so ordinary "add ..." / "show ..." / "clear ..." phrases never match.
+fn parse_timetable_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase();
+    let t = t.trim_end_matches(['.', ',', '!', '?']).trim().to_string();
+    let words: Vec<&str> = t.split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|w| !w.is_empty()).collect();
+    let has = |w: &str| words.contains(&w);
+    let mk = |intent: ParsedIntent| {
+        Some(ParseResult { intent, confidence: 1.0, source: "deterministic-timetable".to_string() })
+    };
+
+    if let Some(p) = parse_study_pref(&t) {
+        return mk(p);
+    }
+    // Commit the slots read from the last image (no noun needed).
+    if matches!(
+        t.as_str(),
+        "add those" | "add those slots" | "add them" | "save those slots" | "save the slots" | "save those" | "add the slots"
+    ) {
+        return mk(ParsedIntent::TimetableCommit);
+    }
+
+    let noun = t.contains("timetable") || t.contains("time table");
+    if !noun {
+        return None;
+    }
+    let clear = has("clear") || has("delete") || has("erase") || has("reset") || has("wipe");
+    let add = has("add") || has("put") || has("save") || has("import") || has("include") || has("update");
+    let show = has("show") || has("what") || has("what's") || has("whats") || has("read") || has("tell") || has("next") || has("open");
+    if clear {
+        return mk(ParsedIntent::TimetableClear);
+    }
+    if add {
+        if has("them") || has("those") {
+            return mk(ParsedIntent::TimetableCommit);
+        }
+        let source = if has("clipboard") || has("copied") || has("paste") || has("pasted") { "clipboard" } else { "screen" };
+        let section = match crate::memcore::timetable::parse_want(&t) {
+            Some(crate::memcore::timetable::Want::Number(n)) => Some(n),
+            None => None,
+        };
+        return mk(ParsedIntent::TimetableAdd { source: source.to_string(), section });
+    }
+    if show {
+        return mk(ParsedIntent::TimetableShow);
+    }
+    None
+}
+
 fn parse_memory_command(text: &str) -> Option<ParseResult> {
     let t = text.trim().to_lowercase();
     let trimmed = t.trim_end_matches(['.', ',', '!', '?']).trim();
 
+    // 0. Briefing family ("where did I leave off", "show my briefing").
+    for pat in [
+        "where did i leave off",
+        "where did i stop",
+        "where was i",
+        "what was i doing",
+        "what was i working on",
+        "show my briefing",
+        "give me my briefing",
+        "my briefing",
+        "morning briefing",
+        "brief me",
+        "catch me up",
+        "what are my priorities",
+        "what are my priorities today",
+    ] {
+        if trimmed == pat || trimmed.starts_with(&format!("{pat} ")) {
+            return Some(ParseResult {
+                intent: ParsedIntent::Briefing,
+                confidence: 1.0,
+                source: "deterministic-memory".to_string(),
+            });
+        }
+    }
+
     // 1. Audit family.
     for pat in [
+        "memory audit",
         "what do you remember about me",
         "what do you remember",
         "what do you know about me",
@@ -1844,6 +2265,8 @@ fn parse_memory_command(text: &str) -> Option<ParseResult> {
         "list what you remember",
         "show what you remember",
         "show my memory",
+        "audit my memory",
+        "audit memory",
     ] {
         if trimmed == pat || trimmed.starts_with(&format!("{pat} ")) {
             return Some(ParseResult {
@@ -1917,6 +2340,105 @@ fn parse_memory_command(text: &str) -> Option<ParseResult> {
         }
     }
 
+    None
+}
+
+/// Personality tone switch (F0): friend opt-in vs formal default.
+/// No anchors needed — all phrases are unambiguous commands.
+fn parse_persona_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase();
+    let trimmed = t.trim_end_matches(['.', ',', '!', '?']).trim();
+    for pat in [
+        "talk like a friend",
+        "talk to me like a friend",
+        "be my friend",
+        "be friendly",
+        "friend mode",
+    ] {
+        if trimmed == pat {
+            return Some(ParseResult {
+                intent: ParsedIntent::PersonaFriend,
+                confidence: 1.0,
+                source: "deterministic-persona".to_string(),
+            });
+        }
+    }
+    for pat in [
+        "be formal",
+        "talk formally",
+        "talk like a butler",
+        "butler mode",
+        "be professional",
+    ] {
+        if trimmed == pat {
+            return Some(ParseResult {
+                intent: ParsedIntent::PersonaButler,
+                confidence: 1.0,
+                source: "deterministic-persona".to_string(),
+            });
+        }
+    }
+    None
+}
+
+/// Honest counsel (F1b): opener arms counsel mode + invites the story;
+/// direct forms (story included) run counsel immediately.
+/// "tell me honestly" needs a counsel anchor (opinion/right/advice/honest
+/// verdict) so "tell me honestly what you see" stays screen analysis.
+fn parse_share_concern_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase();
+    let trimmed = t.trim_end_matches(['.', ',', '!', '?']).trim();
+    for pat in [
+        "i want to share something with you",
+        "i want to share something",
+        "can i share something with you",
+        "can i share something",
+        "i need to tell you something",
+        "i need your opinion",
+        "i need your advice",
+    ] {
+        if trimmed == pat {
+            return Some(ParseResult {
+                intent: ParsedIntent::ShareConcern { story: None },
+                confidence: 1.0,
+                source: "deterministic-counsel".to_string(),
+            });
+        }
+    }
+    // Direct counsel: story included.
+    let direct_prefixes = [
+        "was i right to ",
+        "was i wrong to ",
+        "did i do the right thing ",
+        "was that the right thing to do",
+        "tell me honestly ",
+    ];
+    for prefix in direct_prefixes {
+        // Prefix form ("was i right to shout") and bare form
+        // ("did i do the right thing").
+        if trimmed.starts_with(prefix) || trimmed == prefix.trim_end() {
+            // "tell me honestly" demands a counsel anchor so screen
+            // queries ("tell me honestly what you see") never fire.
+            if prefix == "tell me honestly " {
+                let rest = trimmed.strip_prefix(prefix).unwrap_or("");
+                if !(rest.contains("right")
+                    || rest.contains("wrong")
+                    || rest.contains("opinion")
+                    || rest.contains("advice")
+                    || rest.contains("should i"))
+                {
+                    continue;
+                }
+            }
+            return Some(ParseResult {
+                intent: ParsedIntent::ShareConcern {
+                    story: Some(text.trim().to_string()),
+                },
+                confidence: 1.0,
+                source: "deterministic-counsel".to_string(),
+            });
+        }
+    }
     None
 }
 
@@ -4309,6 +4831,14 @@ pub fn normalize_phonetic_mishearings(text: &str) -> String {
         ("open new tablet", "open new tab"),
         ("open new table", "open new tab"),
         ("switch to top two", "switch to tab 2"),
+        // Live ghost mishearing 2026-10-07: "switch to tab two" heard as
+        // "shift to tap to" ("shift" for "switch", "tap" for "tab",
+        // trailing "to" for "two"). Without these the turn parses Unknown
+        // and (in ghost) dies silently instead of switching to tab 2.
+        ("shift to tap to", "switch to tab 2"),
+        ("shift to tab to", "switch to tab 2"),
+        ("switch to tap to", "switch to tab 2"),
+        ("switch to tab to", "switch to tab 2"),
         ("move to top two", "move to tab 2"),
         ("open mute tab", "open new tab"),
         ("open neat tab", "open new tab"),
@@ -4365,6 +4895,10 @@ pub fn normalize_phonetic_mishearings(text: &str) -> String {
         ("close mode", "ghost mode"),
         ("ghost mood", "ghost mode"),
         ("ghost node", "ghost mode"),
+        // Feature 99 P3: additional live-usage mishearings.
+        ("ghost right", "ghost mode"),
+        ("goes mode", "ghost mode"),
+        ("ghost and go", "ghost mode"),
     ];
     for (from, to) in ghost_phrases {
         if out.contains(from) {
@@ -4381,6 +4915,30 @@ pub fn normalize_phonetic_mishearings(text: &str) -> String {
         ("common center", "command center"),
     ];
     for (from, to) in command_hub_phrases {
+        if out.contains(from) {
+            out = out.replace(from, to);
+        }
+    }
+
+    // Feature 99 P3: live-usage mishearing families (memory audit, forget
+    // everything, whatsapp message, brave browser, architecture mapper).
+    let phrase_replacements = [
+        ("memory odd it", "memory audit"),
+        ("memory or dit", "memory audit"),
+        ("memory odit", "memory audit"),
+        ("memory order it", "memory audit"),
+        ("forget every thing", "forget everything"),
+        ("forget everthing", "forget everything"),
+        ("what's up message", "whatsapp message"),
+        ("whats up message", "whatsapp message"),
+        ("what sap message", "whatsapp message"),
+        ("what app message", "whatsapp message"),
+        ("open brave browser", "open brave"),
+        ("launch brave browser", "open brave"),
+        ("architecture diagram", "architecture mapper"),
+        ("architecture digger", "architecture mapper"),
+    ];
+    for (from, to) in phrase_replacements {
         if out.contains(from) {
             out = out.replace(from, to);
         }
@@ -6919,6 +7477,33 @@ mod tests {
     }
 
     #[test]
+    fn test_whatsapp_search_contact_parses_as_chat() {
+        let result = parse_deterministic("search mommy on whatsapp");
+        assert!(result.is_some());
+        if let ParsedIntent::WhatsappChat { contact } = result.unwrap().intent {
+            assert_eq!(contact, "mommy");
+        } else {
+            panic!("expected WhatsappChat");
+        }
+
+        let result2 = parse_deterministic("search for mommy on whatsapp");
+        assert!(result2.is_some());
+        if let ParsedIntent::WhatsappChat { contact } = result2.unwrap().intent {
+            assert_eq!(contact, "mommy");
+        } else {
+            panic!("expected WhatsappChat");
+        }
+
+        let result3 = parse_deterministic("find john on wa");
+        assert!(result3.is_some());
+        if let ParsedIntent::WhatsappChat { contact } = result3.unwrap().intent {
+            assert_eq!(contact, "john");
+        } else {
+            panic!("expected WhatsappChat");
+        }
+    }
+
+    #[test]
     fn test_partial_send_asks_for_message() {
         // The exact failure from the field: action + contact, no body.
         // Must ask ("What should I say to mummy?") — never fall to Worker.
@@ -7521,6 +8106,10 @@ mod tests {
             "move to top two",
             "switch to top two",
             "go to top two",
+            "shift to tap to",
+            "shift to tab to",
+            "switch to tap to",
+            "switch to tab to",
         ] {
             let res = parse_deterministic(phrase);
             assert!(
@@ -7701,6 +8290,115 @@ mod tests {
     }
 
     #[test]
+    fn test_whatsapp_people_phrases() {
+        let dbg = |p: &str| format!("{:?}", parse_deterministic(p).map(|r| r.intent));
+        assert_eq!(dbg("read that message"), "Some(WhatsappRead { name: None })");
+        assert_eq!(dbg("Read the latest WhatsApp message."), "Some(WhatsappRead { name: None })");
+        assert_eq!(dbg("read the message from Asha"), r#"Some(WhatsappRead { name: Some("asha") })"#);
+        assert_eq!(dbg("read Asha's messages"), r#"Some(WhatsappRead { name: Some("asha") })"#);
+        assert_eq!(dbg("what did Raj say on WhatsApp"), r#"Some(WhatsappRead { name: Some("raj") })"#);
+        assert_eq!(dbg("make Asha a VIP"), r#"Some(PeopleFlag { name: "asha", kind: "vip", on: true })"#);
+        assert_eq!(dbg("make Mom a V I P"), r#"Some(PeopleFlag { name: "mom", kind: "vip", on: true })"#);
+        assert_eq!(dbg("add Raj to my VIPs"), r#"Some(PeopleFlag { name: "raj", kind: "vip", on: true })"#);
+        assert_eq!(dbg("remove Raj from my vip list"), r#"Some(PeopleFlag { name: "raj", kind: "vip", on: false })"#);
+        assert_eq!(dbg("mute WhatsApp alerts from Raj"), r#"Some(PeopleFlag { name: "raj", kind: "mute", on: true })"#);
+        assert_eq!(dbg("stop whatsapp alerts from Raj"), r#"Some(PeopleFlag { name: "raj", kind: "mute", on: true })"#);
+        assert_eq!(dbg("unmute whatsapp alerts from Raj"), r#"Some(PeopleFlag { name: "raj", kind: "mute", on: false })"#);
+        assert_eq!(dbg("unmute Raj on whatsapp"), r#"Some(PeopleFlag { name: "raj", kind: "mute", on: false })"#);
+        assert_eq!(dbg("who are my priority people"), "Some(PeopleList)");
+        assert_eq!(dbg("who are my VIPs?"), "Some(PeopleList)");
+        // Misfire guards: plain mute/unmute, reading the screen, notes, and other "make" commands stay theirs.
+        for p in [
+            "mute", "unmute", "mute the volume", "unmute the mic", "read this", "read the screen", "read my email",
+            "make a note", "make it louder", "make me a sandwich", "add milk to my shopping list", "stop",
+            "what did einstein say", "mute whatsapp alerts from everyone", "make that a vip", "open whatsapp",
+            "message asha on whatsapp saying hi", "read that",
+        ] {
+            let got = dbg(p);
+            assert!(
+                !(got.contains("WhatsappRead") || got.contains("PeopleFlag") || got.contains("PeopleList")),
+                "'{p}' wrongly parsed as {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mail_calendar_phrases() {
+        let dbg = |p: &str| format!("{:?}", parse_deterministic(p).map(|r| r.intent));
+        assert_eq!(dbg("any important emails"), "Some(MailDigest)");
+        assert_eq!(dbg("Is there anything important in my inbox?"), "Some(MailDigest)");
+        assert_eq!(dbg("that's not important"), "Some(MailMute)");
+        assert_eq!(dbg("mute that sender"), "Some(MailMute)");
+        assert_eq!(dbg("what's on my calendar today"), r#"Some(CalendarAgenda { day: "today" })"#);
+        assert_eq!(dbg("what is on my calendar tomorrow"), r#"Some(CalendarAgenda { day: "tomorrow" })"#);
+        assert_eq!(dbg("what's my agenda"), r#"Some(CalendarAgenda { day: "today" })"#);
+        assert!(dbg("add dentist to my calendar tomorrow at 5pm").starts_with(r#"Some(CalendarAdd { text: "add dentist"#));
+        // Misfire guards.
+        for p in ["open google calendar", "tell me a joke", "add milk to my shopping list", "that is great", "important"] {
+            let got = dbg(p);
+            assert!(
+                !(got.contains("MailDigest") || got.contains("MailMute") || got.contains("CalendarAgenda") || got.contains("CalendarAdd")),
+                "'{p}' wrongly parsed as {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_timetable_phrases() {
+        let intent = |p: &str| parse_deterministic(p).map(|r| r.intent);
+        let dbg = |p: &str| format!("{:?}", intent(p));
+        assert_eq!(dbg("analyse this and add section 2 to my time table"), r#"Some(TimetableAdd { source: "screen", section: Some(2) })"#);
+        assert_eq!(dbg("add this to my timetable"), r#"Some(TimetableAdd { source: "screen", section: None })"#);
+        assert_eq!(dbg("add the picture I copied to my timetable"), r#"Some(TimetableAdd { source: "clipboard", section: None })"#);
+        assert_eq!(dbg("show my timetable"), "Some(TimetableShow)");
+        assert_eq!(dbg("what's next on my timetable"), "Some(TimetableShow)");
+        assert_eq!(dbg("clear my timetable"), "Some(TimetableClear)");
+        assert_eq!(dbg("add those slots"), "Some(TimetableCommit)");
+        assert_eq!(dbg("add them to my timetable"), "Some(TimetableCommit)");
+        assert_eq!(dbg("use the browser for dsa"), r#"Some(StudyPref { activity: "dsa", choice: "browser" })"#);
+        assert_eq!(dbg("switch DSA practice to the app"), r#"Some(StudyPref { activity: "dsa", choice: "app" })"#);
+        assert_eq!(dbg("open dsa in the app from now on"), r#"Some(StudyPref { activity: "dsa", choice: "app" })"#);
+        // Misfire guards: no "timetable" noun -> not ours; plain browser commands stay theirs.
+        for p in ["add milk to my shopping list", "show my screen", "clear the cache", "open youtube in the browser", "what is next"] {
+            let got = dbg(p);
+            assert!(
+                !(got.contains("Timetable") || got.contains("StudyPref")),
+                "'{p}' wrongly parsed as {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_briefing_phrases() {
+        for phrase in [
+            "where did I leave off",
+            "Where was I?",
+            "what was I working on",
+            "show my briefing",
+            "brief me",
+            "catch me up",
+            "what are my priorities today",
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(
+                res.as_ref().map(|r| matches!(r.intent, ParsedIntent::Briefing)).unwrap_or(false),
+                "Expected Briefing for '{}', got {:?}",
+                phrase,
+                res.map(|r| r.intent)
+            );
+        }
+        // Misfire guards: ordinary chat is not a briefing request.
+        for phrase in ["where is the nearest cafe", "what was the score", "tell me a joke"] {
+            let res = parse_deterministic(phrase);
+            assert!(
+                !res.map(|r| matches!(r.intent, ParsedIntent::Briefing)).unwrap_or(false),
+                "'{}' must not be a briefing",
+                phrase
+            );
+        }
+    }
+
+    #[test]
     fn test_memory_command_phrases() {
         // Audit family → MemoryAudit.
         for phrase in [
@@ -7742,6 +8440,84 @@ mod tests {
             res.unwrap().intent,
             ParsedIntent::MemoryForgetAllConfirm
         ));
+    }
+
+    #[test]
+    fn test_persona_and_counsel_phrases() {
+        // Persona switch.
+        for (phrase, friend) in [
+            ("talk like a friend", true),
+            ("be my friend", true),
+            ("friend mode", true),
+            ("be formal", false),
+            ("talk like a butler", false),
+            ("butler mode", false),
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "Expected persona intent for '{}'", phrase);
+            let ok = match res.unwrap().intent {
+                ParsedIntent::PersonaFriend => friend,
+                ParsedIntent::PersonaButler => !friend,
+                _ => false,
+            };
+            assert!(ok, "Wrong persona direction for '{}'", phrase);
+        }
+        // Counsel opener → None story (arms counsel mode, runs nothing).
+        // ("tell me honestly" bare has no anchor — asserted NOT firing
+        // in the misfire guards below.)
+        for phrase in [
+            "i want to share something",
+            "i want to share something with you",
+            "i need your opinion",
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "Expected ShareConcern for '{}'", phrase);
+            if let ParsedIntent::ShareConcern { story } = res.unwrap().intent {
+                assert!(story.is_none(), "'{}' should arm, not run", phrase);
+            } else {
+                panic!("Expected ShareConcern for '{}'", phrase);
+            }
+        }
+        // Direct counsel → Some story (runs now).
+        for phrase in [
+            "was i right to shout at him",
+            "did i do the right thing",
+            "tell me honestly was i wrong",
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "Expected ShareConcern for '{}'", phrase);
+            if let ParsedIntent::ShareConcern { story } = res.unwrap().intent {
+                assert!(story.is_some(), "'{}' should run counsel now", phrase);
+            } else {
+                panic!("Expected ShareConcern for '{}'", phrase);
+            }
+        }
+        // Misfire guards.
+        for phrase in [
+            "tell me honestly",
+            "tell me honestly what you see",
+            "tell me a joke",
+            "what do you see",
+            "be my guest",
+        ] {
+            let res = parse_deterministic(phrase);
+            if let Some(intent) = res.map(|r| r.intent) {
+                assert!(
+                    !matches!(
+                        intent,
+                        ParsedIntent::ShareConcern { .. }
+                            | ParsedIntent::PersonaFriend
+                            | ParsedIntent::PersonaButler
+                    ),
+                    "'{}' must not trigger persona/counsel",
+                    phrase
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_memory_command_phrases_guards() {
         // Misfire guards: dismissals are never forget-keys; jokes and
         // screen queries never audit.
         for phrase in ["forget it", "forget that", "tell me a joke", "what do you see"] {
@@ -7798,6 +8574,54 @@ mod tests {
                 panic!("Expected Search for '{}'", phrase);
             }
         }
+    }
+
+    /// Feature 99 P3: live-usage mishearing families normalize correctly.
+    #[test]
+    fn test_phonetic_norm_feature_99_families() {
+        // Ghost-mode family.
+        for phrase in ["ghost right", "goes mode", "post mode", "ghost and go"] {
+            assert_eq!(normalize_phonetic_mishearings(phrase), "ghost mode", "from '{phrase}'");
+        }
+        // Memory-audit family.
+        for phrase in ["memory odd it", "memory or dit", "memory odit", "memory order it"] {
+            assert_eq!(normalize_phonetic_mishearings(phrase), "memory audit", "from '{phrase}'");
+        }
+        // Forget-everything family.
+        for phrase in ["forget every thing", "forget everthing"] {
+            assert_eq!(normalize_phonetic_mishearings(phrase), "forget everything", "from '{phrase}'");
+        }
+        // WhatsApp-message family (substring inside a command).
+        assert_eq!(
+            normalize_phonetic_mishearings("send mom a what sap message saying hi"),
+            "send mom a whatsapp message saying hi"
+        );
+        assert_eq!(
+            normalize_phonetic_mishearings("send dad a what's up message saying hi"),
+            "send dad a whatsapp message saying hi"
+        );
+        // Brave browser collapse.
+        assert_eq!(normalize_phonetic_mishearings("open brave browser"), "open brave");
+        // Architecture mapper family (keeps surrounding words intact).
+        assert_eq!(
+            normalize_phonetic_mishearings("open the architecture diagram"),
+            "open the architecture mapper"
+        );
+        assert_eq!(
+            normalize_phonetic_mishearings("open architecture digger"),
+            "open architecture mapper"
+        );
+    }
+
+    /// Feature 99 P3 end-to-end: normalized mishearings parse to intents.
+    #[test]
+    fn test_feature_99_mishearings_parse_to_intents() {
+        let res = parse_deterministic("memory odd it");
+        assert!(res.is_some(), "'memory odd it' should parse after normalization");
+        let res = parse_deterministic("ghost right");
+        assert!(res.is_some(), "'ghost right' should parse after normalization");
+        let res = parse_deterministic("open brave browser");
+        assert!(res.is_some(), "'open brave browser' should parse after normalization");
     }
 }
 

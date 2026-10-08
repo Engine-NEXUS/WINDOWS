@@ -13,7 +13,6 @@
 //! Fail-open everywhere: no engine / no language pack / decode fail →
 //! None (caller falls back to the UIA count).
 
-use windows::Foundation::IAsyncOperation;
 use windows::Globalization::Language;
 use windows::Graphics::Imaging::{BitmapDecoder, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;

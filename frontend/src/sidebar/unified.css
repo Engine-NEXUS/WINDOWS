@@ -6,17 +6,53 @@
    No titlebar — dock controls live in each view's header row.
    ═══════════════════════════════════════════════════════════════ */
 
+/* ── Command Hub theme (opaque light/dark only — transparency is out
+   per user directive). iOS grouped-background values; dark matches the
+   previous look, light flips every surface to readable opaque. */
+:root,
+[data-theme="dark"] {
+  --hub-bg: #000000;
+  --hub-card: #1c1c1e;
+  --hub-card-2: #2c2c2e;
+  --hub-text: #ffffff;
+  --hub-text-dim: rgba(255, 255, 255, 0.6);
+  --hub-text-faint: rgba(255, 255, 255, 0.35);
+  --hub-accent: #0a84ff;
+  --hub-border: rgba(255, 255, 255, 0.12);
+  --hub-danger: #ff453a;
+}
+
+[data-theme="light"] {
+  --hub-bg: #f2f2f7;
+  --hub-card: #ffffff;
+  --hub-card-2: #e5e5ea;
+  --hub-text: #000000;
+  --hub-text-dim: rgba(0, 0, 0, 0.6);
+  --hub-text-faint: rgba(0, 0, 0, 0.35);
+  --hub-accent: #007aff;
+  --hub-border: rgba(0, 0, 0, 0.08);
+  --hub-danger: #ff3b30;
+}
+
 .unified-shell {
   width: 100vw;
   height: 100vh;
   display: flex;
   flex-direction: column;
-  /* Transparent shell — the view cards paint the ADR-05 blurred-desktop
-     backdrop (--sidebar-backdrop-image) and must not be veiled by an
-     opaque shell layer. */
-  background: transparent;
+  /* Opaque shell — views inherit readable surfaces from --hub-* vars.
+     The old transparent shell + ADR-05 backdrop stays available to
+     other overlays; the hub no longer uses it. */
+  background: var(--hub-bg);
   overflow: hidden;
-  color: #ffffff;
+  color: var(--hub-text);
+}
+
+/* Phone-width column for card-style views (Accounts carbon copy):
+   centers a max-380px column inside the wider sidebar window. */
+.hub-phone-col {
+  width: 100%;
+  max-width: 380px;
+  margin: 0 auto;
 }
 
 /* ── View host ───────────────────────────────────────────────────── */

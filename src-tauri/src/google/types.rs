@@ -94,6 +94,18 @@ pub struct GoogleAccountProfile {
     pub is_primary: bool,
     pub added_at_ms: u64,
     pub scopes: Vec<String>,
+    /// Phone number from People API (optional progressive scope
+    /// `user.phonenumbers.read`). None = not granted or not saved in the
+    /// Google Account (the common case — never an error).
+    /// `#[serde(default)]` keeps pre-field profiles readable after upgrade
+    /// (without it a missing key fails the whole vec parse and ALL
+    /// accounts vanish from the UI).
+    #[serde(default)]
+    pub phone: Option<String>,
+    /// Street address from People API (optional progressive scope
+    /// `user.addresses.read`). Same absence semantics as phone.
+    #[serde(default)]
+    pub address: Option<String>,
 }
 
 /// A target email thread being actively watched by the Gmail Engine.

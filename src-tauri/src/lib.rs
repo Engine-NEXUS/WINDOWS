@@ -17,6 +17,9 @@ pub mod directed;
 // Phase 9: when proactive alerts may speak (breakpoints, urgency, meeting policy)
 pub mod proactive_policy;
 pub mod screen_context;
+pub mod usage_counter;
+pub mod api_keys;
+pub mod github_profile;
 pub mod screen_tour;
 // Kokoro-82M local TTS (replaces Piper) — see docs/research/jarvis-landscape/09
 pub mod tts_kokoro;
@@ -50,6 +53,7 @@ mod lazy_brain;
 mod lazy_stt;
 mod stt;
 pub mod stt_groq;
+pub mod stt_deepgram;
 mod stt_learning;
 mod stt_stream;
 mod tts;
@@ -83,6 +87,7 @@ pub mod screen;
 pub mod telegram;
 pub mod command_center;
 pub mod nlu_update;
+pub mod power;
 // ── Phase B–D modules (recovered after a stale lib.rs rewrite) ──────────
 mod agent_specs;
 mod conversation;
@@ -92,7 +97,9 @@ pub mod diary;
 pub mod ghost;
 pub mod google;
 mod improve;
+pub mod memcore;
 pub mod memory;
+pub mod persona;
 mod missed_intent_logger;
 mod pii_filter;
 pub mod stage;
@@ -253,6 +260,8 @@ pub fn run() {
     // NEXUS instance that may still hold the directory locked.
     #[cfg(target_os = "windows")]
     cleanup_webview2_profile();
+
+    crate::power::enable_process_ecoqos();
 
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
@@ -597,7 +606,11 @@ pub fn run() {
             // Boot-time housekeeping (Phase B–D modules).
             commands::note_boot();
             if let Ok(app_data) = app.path().app_data_dir() {
+                usage_counter::init(&app_data);
                 diary::log_boot_rollup(&app_data);
+                // Last session's resume points, captured BEFORE the recorder
+                // writes anything for this session (boot briefing reads them).
+                memcore::briefing::snapshot_at_boot(&app_data);
                 agent_specs::ensure_example(&app_data);
                 let improve_dir = app_data.clone();
                 std::thread::spawn(move || {
@@ -610,6 +623,11 @@ pub fn run() {
             webhook::spawn_listener(app.handle().clone());
             google::sentinel::start_sentinel_poller(app.handle().clone());
             proactive_policy::start_ticker(app.handle().clone()); // releases deferred alerts at breakpoints
+            memcore::resume::start_recorder(app.handle().clone()); // 30 s foreground-window resume points
+            memcore::briefing::start_boot_briefing(app.handle().clone()); // once-a-day spoken "where you left off"
+            memcore::scheduler::start(app.handle().clone()); // timetable slot reminders
+            memcore::mailwatch::start(app.handle().clone()); // Gmail history.list watcher (idle until Google is connected)
+            memcore::wa::start(app.handle().clone()); // WhatsApp priority watcher (read-only; off unless memcoreWhatsapp)
 
             // ─── Pre-warm TTS + STT + NLU at startup (Phase 1) ──────────
             // Eliminates ~31.7s of cold-start latency on the first voice command.
@@ -928,6 +946,7 @@ pub fn run() {
             ghost::ghost_enter,
             ghost::ghost_exit,
             ghost::ghost_abort,
+            ghost::get_pending_ghost_session,
             calibration::show_calibration_hud,
             calibration::preview_companion_hud,
             calibration::calibration_set_target,
@@ -956,6 +975,9 @@ pub fn run() {
             commands::set_meeting_detection,
             commands::open_settings_window,
             commands::close_settings_window,
+            commands::open_orb_studio_window,
+            commands::close_orb_studio_window,
+            commands::set_orb_morphology,
             commands::get_settings,
             commands::save_settings,
             commands::get_health_status,
@@ -963,6 +985,18 @@ pub fn run() {
             commands::import_settings,
             commands::memory_recall,
             commands::memory_forget,
+            commands::memcore_status,
+            commands::memcore_list,
+            commands::memcore_egress_log,
+            commands::memcore_clear_activity,
+            commands::offer_pending,
+            commands::memcore_timetable,
+            commands::memcore_timetable_delete,
+            commands::memcore_mail_list,
+            commands::memcore_mail_mute,
+            commands::memcore_people,
+            commands::memcore_person_flag,
+            commands::whatsapp_selftest,
             commands::diary_summary,
             commands::webhook_token,
             commands::webhook_rotate_token,
@@ -1000,14 +1034,24 @@ pub fn run() {
             commands::mic_self_test,
             commands::start_stt_capture,
             directed::directed_gate,
+            usage_counter::get_usage_stats,
+            api_keys::api_keys_list,
+            api_keys::api_key_set,
+            api_keys::api_key_delete,
+            api_keys::api_keys_count,
+            github_profile::github_profile,
+            github_profile::github_profile_clear,
             proactive_policy::proactive_snooze,
             commands::stop_stt_capture,
             commands::stt_capture_had_speech,
             commands::google_get_accounts,
             commands::google_connect_account,
+            commands::google_connect_extended,
             commands::google_set_primary_account,
             commands::google_disconnect_account,
+            commands::memory_seed_setup_identity,
             commands::google_save_custom_credentials,
+            commands::google_credentials_status,
             stt::transcribe_audio,
             stt::stt_filter_stats,
             stt_stream::stt_stream_start,
@@ -1016,6 +1060,7 @@ pub fn run() {
             tts::speak_text,
             tts::speak_cached,
             tts::stop_tts,
+            tts::restore_tts_volume,
             tts::preview_voice,
             tts::set_voice_preference,
             tts::list_voice_personas,
@@ -1035,6 +1080,8 @@ pub fn run() {
             architect::analyze_repo_deep,
             architect::analyze_repo_fast,
             architect::enrich_phase1,
+            architect::cancel_architect_analysis,
+            architect::query_impact,
             // Live mode commands
             live::live_type_text,
             live::live_press_key,
@@ -1063,8 +1110,13 @@ pub fn run() {
             live_glass::register_glass_hitboxes,
             luminance_probe::get_screen_luminance,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running NEXUS application");
+        .build(tauri::generate_context!())
+        .expect("error while building NEXUS application")
+        .run(|_app_handle, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                api.prevent_exit();
+            }
+        });
 }
 
 /// Simple JSON string value extractor (avoids pulling serde_json for one field).

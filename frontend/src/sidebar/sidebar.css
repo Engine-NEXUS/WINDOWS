@@ -150,8 +150,8 @@ html, body, #root {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  padding: 0 4px 8px 4px;
-  margin: -16px -18px 8px -18px; /* negative to sit flush at top edge */
+  padding: 12px 14px 4px 14px;
+  margin: -16px -18px 0 -18px;
   user-select: none;
   -webkit-user-select: none;
   cursor: grab;
@@ -171,7 +171,7 @@ html, body, #root {
 .sidebar-dock-controls {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   pointer-events: auto;
 }
 
@@ -695,13 +695,61 @@ html[data-glass-luminance="light"] .sidebar-card {
   user-select: text;
   -webkit-user-select: text;
   word-wrap: break-word;
+  overflow-wrap: break-word;
   text-shadow:
     0 1px 2px rgba(0, 0, 0, 0.95),
     0 2px 8px rgba(0, 0, 0, 0.7);
 }
 
-/* NOTE: .nexus-h1..h6 rules deleted (audit L1) — markdown renders plain
-   <h1>.. elements; zero nexus-h* class references in markup. */
+.nexus-markdown-body > :first-child {
+  margin-top: 0 !important;
+}
+
+/* Headings — SF Pro typography hierarchy */
+.nexus-markdown-body h1,
+.nexus-markdown-body .nexus-h1 {
+  font-size: var(--sidebar-h1-font, 20px);
+  font-weight: 700;
+  line-height: 1.3;
+  color: #ffffff;
+  margin: 18px 0 8px 0;
+  letter-spacing: -0.015em;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+
+.nexus-markdown-body h2,
+.nexus-markdown-body .nexus-h2 {
+  font-size: 16.5px;
+  font-weight: 650;
+  line-height: 1.35;
+  color: #ffffff;
+  margin: 16px 0 6px 0;
+  letter-spacing: -0.01em;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+}
+
+.nexus-markdown-body h3,
+.nexus-markdown-body .nexus-h3 {
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.95);
+  margin: 14px 0 5px 0;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+}
+
+.nexus-markdown-body h4,
+.nexus-markdown-body .nexus-h4,
+.nexus-markdown-body h5,
+.nexus-markdown-body .nexus-h5,
+.nexus-markdown-body h6,
+.nexus-markdown-body .nexus-h6 {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.9);
+  margin: 12px 0 4px 0;
+}
 
 /* Paragraphs & Spacing */
 .nexus-markdown-body p {

@@ -32,6 +32,7 @@
   z-index: 9998;
   will-change: transform, opacity;
   box-sizing: border-box;
+  opacity: 0;
 }
 
 .orb-capsule {
@@ -212,4 +213,23 @@
   height: 100%;
   aspect-ratio: 1;
   contain: layout paint;
+}
+
+/* ── Light theme: the orb capsule turns light and the particles turn black
+   (voice-orb `theme="light"` = black ink). Dark rules above are untouched. ── */
+:root[data-theme="light"] .orb-capsule {
+  background: #fafafa !important;
+  background-color: #fafafa !important;
+  border-color: rgba(60, 60, 67, 0.22);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.28), 0 4px 14px rgba(0, 0, 0, 0.18);
+}
+:root[data-theme="light"] .orb-slider--top .orb-capsule {
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.28), 0 4px 14px rgba(0, 0, 0, 0.18);
+}
+:root[data-theme="light"] .orb-slider--bottom .orb-capsule {
+  box-shadow: 0 -16px 44px rgba(0, 0, 0, 0.28), 0 -4px 14px rgba(0, 0, 0, 0.18);
+}
+:root[data-theme="light"] .orb-capsule:hover {
+  border-color: rgba(60, 60, 67, 0.34);
+  box-shadow: 0 20px 54px rgba(0, 0, 0, 0.32);
 }

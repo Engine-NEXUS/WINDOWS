@@ -268,6 +268,24 @@ pub fn find_by_kokoro_voice(voice: &str) -> Option<&'static VoicePersona> {
     VOICE_CATALOG.iter().find(|p| p.kokoro_voice == voice)
 }
 
+/// Canonical prosody tuning for each iconic voice persona.
+/// Maps cloud Edge-TTS IDs to signature (rate, pitch) offsets matching the
+/// original character voices (e.g. Paul Bettany for JARVIS, Kerry Condon for FRIDAY,
+/// Scarlett Johansson for SAMANTHA, Michael Caine for ALFRED).
+pub fn persona_prosody(cloud_id: &str) -> (&'static str, &'static str) {
+    match cloud_id {
+        "en-GB-RyanNeural" => ("-5%", "-4Hz"),     // JARVIS (Paul Bettany)
+        "en-IE-EmilyNeural" => ("+5%", "+1Hz"),    // FRIDAY (Kerry Condon)
+        "en-US-SaraNeural" => ("-4%", "-3Hz"),     // SAMANTHA (Scarlett Johansson)
+        "en-GB-OliverNeural" => ("-6%", "-5Hz"),   // ALFRED (Michael Caine)
+        "en-US-JennyNeural" => ("+4%", "+1Hz"),    // SIRI
+        "en-US-AriaNeural" => ("+2%", "+0Hz"),     // ALEXA
+        "en-US-BrianNeural" => ("+2%", "+0Hz"),    // GOOGLE
+        "en-US-MichelleNeural" => ("+3%", "+1Hz"), // CORTANA
+        _ => ("+0%", "+0Hz"),                      // NEXUS (Ava) / Default
+    }
+}
+
 /// Where to load the local engine's files from: `(model, voice_pack, voice_name)`.
 /// 1. the managed slot (what the swap worker maintains);
 /// 2. a bundled/dev copy `<root>/resources/kokoro/{model_quantized.onnx, voices/<voice>.bin}` for

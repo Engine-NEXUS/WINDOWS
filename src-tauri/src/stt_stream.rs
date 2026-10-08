@@ -1,15 +1,11 @@
-//! Live partial-transcript stream client (plan Phase 4) — connects to the
-//! local STT server's `/stream` WebSocket endpoint (see
-//! `server/stt_server.py`) and re-emits Moonshine's growing partial lines
-//! as `stt:partial` events for the on-screen live caption.
+//! Live partial-transcript stream client — connects to Deepgram Nova-2
+//! cloud WebSocket (when configured) or local STT server's `/stream` endpoint.
+//! Re-emits growing partial lines as `stt:partial` events for on-screen live captions.
 //!
 //! Hard constraint: this is PURELY ADDITIVE and runs entirely parallel to
-//! the existing batch STT pipeline (`stt.rs`'s `transcribe_audio` →
-//! Groq/Moonshine → intent parsing/NLU/brain), which this module never
-//! touches. Every operation here swallows its own errors — a dropped or
-//! failed stream (server not running, connection refused, mid-stream
-//! disconnect) must never affect command execution. The frontend degrades
-//! silently to "no live caption, batch transcript arrives normally."
+//! the existing batch STT pipeline (`stt.rs`'s `transcribe_audio` / `transcribe_samples`),
+//! which this module never touches. Every operation here swallows its own errors — a dropped or
+//! failed stream must never affect command execution.
 
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
@@ -17,28 +13,66 @@ use once_cell::sync::Lazy;
 use tauri::Emitter;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-/// Same host/port the batch STT client (`stt.rs::STT_URL`) hardcodes —
-/// both talk to the one local `stt_server.py` process.
+/// Fallback host/port for local STT server.
 const STREAM_URL: &str = "ws://127.0.0.1:39217/stream";
 
 type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 
 /// The live connection's write half, if one is currently open. `None`
-/// means "no stream" — every command below treats that as a silent no-op,
-/// which is also what a connect failure leaves it as.
+/// means "no stream" — every command below treats that as a silent no-op.
 static SINK: Lazy<Mutex<Option<WsSink>>> = Lazy::new(|| Mutex::new(None));
 
-/// IPC: open the live partial-transcript stream for this turn. Brackets
-/// the same window as the existing batch capture (`startRecording()` in
-/// `recorder.ts`). Best-effort: a connection failure (server not running,
-/// `websockets` package missing, etc.) just leaves no stream open —
-/// `stt_stream_push_chunk`/`stt_stream_stop` below silently no-op for the
-/// rest of this turn, and the batch path is completely unaffected.
+/// IPC: open the live partial-transcript stream for this turn.
 #[tauri::command]
 pub async fn stt_stream_start<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    let deepgram_key = crate::commands::read_api_key(&app, "deepgram");
+    if !deepgram_key.is_empty() {
+        let ws_url = "wss://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&encoding=linear16&sample_rate=16000&channels=1&interim_results=true";
+        if let Ok(mut req) = ws_url.into_client_request() {
+            if let Ok(auth_header) = format!("Token {deepgram_key}").parse() {
+                req.headers_mut().insert("Authorization", auth_header);
+                match tokio_tungstenite::connect_async(req).await {
+                    Ok((ws, _)) => {
+                        let (sink, mut read) = ws.split();
+                        *SINK.lock().await = Some(sink);
+                        let app_clone = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            while let Some(msg) = read.next().await {
+                                let Ok(Message::Text(text)) = msg else { continue };
+                                let Ok(payload) = serde_json::from_str::<serde_json::Value>(&text) else {
+                                    continue;
+                                };
+                                if let Some(transcript) = payload
+                                    .get("channel")
+                                    .and_then(|ch| ch.get("alternatives"))
+                                    .and_then(|alts| alts.as_array())
+                                    .and_then(|arr| arr.first())
+                                    .and_then(|alt| alt.get("transcript"))
+                                    .and_then(|t| t.as_str())
+                                {
+                                    let trimmed = transcript.trim();
+                                    if !trimmed.is_empty() {
+                                        let _ = app_clone.emit("stt:partial", serde_json::json!({ "text": trimmed }));
+                                    }
+                                }
+                            }
+                            tracing::debug!("stt_stream: deepgram read loop ended");
+                        });
+                        tracing::debug!("stt_stream: connected to Deepgram Nova-2 stream");
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        tracing::debug!("stt_stream: deepgram connect failed ({e}) — falling back");
+                    }
+                }
+            }
+        }
+    }
+
     match tokio_tungstenite::connect_async(STREAM_URL).await {
         Ok((ws, _response)) => {
             let (sink, mut read) = ws.split();
@@ -55,7 +89,7 @@ pub async fn stt_stream_start<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Re
                 }
                 tracing::debug!("stt_stream: read loop ended");
             });
-            tracing::debug!("stt_stream: connected");
+            tracing::debug!("stt_stream: connected to local stream");
         }
         Err(e) => {
             tracing::debug!("stt_stream: connect failed ({e}) — live caption disabled this turn");
@@ -65,9 +99,7 @@ pub async fn stt_stream_start<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Re
     Ok(())
 }
 
-/// IPC: push one chunk of raw 16-bit LE mono PCM @ 16kHz (the same format
-/// the batch path already downsamples to). Silently does nothing if no
-/// stream is open (never started, or it died earlier this turn).
+/// IPC: push one chunk of raw 16-bit LE mono PCM @ 16kHz.
 #[tauri::command]
 pub async fn stt_stream_push_chunk(samples: Vec<i16>) -> Result<(), String> {
     let mut guard = SINK.lock().await;
@@ -86,11 +118,11 @@ pub async fn stt_stream_push_chunk(samples: Vec<i16>) -> Result<(), String> {
 }
 
 /// IPC: end the live stream (turn finished, aborted, or barge-in).
-/// Best-effort — a failed close is not an error worth surfacing.
 #[tauri::command]
 pub async fn stt_stream_stop() -> Result<(), String> {
     let mut guard = SINK.lock().await;
     if let Some(mut sink) = guard.take() {
+        let _ = sink.send(Message::Binary(vec![].into())).await;
         let _ = sink.send(Message::from(r#"{"cmd":"stop"}"#.to_string())).await;
         let _ = sink.close().await;
     }

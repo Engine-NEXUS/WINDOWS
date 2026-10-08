@@ -12,10 +12,77 @@ use tokio::net::TcpListener;
 
 use super::types::GoogleAccountProfile;
 
-pub const DEFAULT_CLIENT_ID: &str =
-    "1065171708892-v7k7b2f6k526b74499n8k00000000000.apps.googleusercontent.com";
+/// There is deliberately NO built-in Google client. The value that used to
+/// live here was a placeholder (a run of zeros), so every sign-in ended on
+/// Google's "Access blocked: The OAuth client was not found (401
+/// invalid_client)" page. A shipped client would also need Google's app
+/// verification for the Gmail scopes. Each user supplies their own OAuth
+/// client (Desktop app) under Command Hub → Advanced.
+pub const DEFAULT_CLIENT_ID: &str = "";
+
+/// Shown (spoken-friendly, one line) whenever sign-in cannot start yet.
+pub const NOT_CONFIGURED_MSG: &str = "Google sign-in isn't set up yet. In Google Cloud Console create an OAuth client of type Desktop app (enable the Gmail API and Google Calendar API), then paste its Client ID and Client Secret under Command Hub → Advanced → Custom Developer OAuth Credentials.";
 pub const LOOPBACK_PORT: u16 = 49152;
 pub const REDIRECT_URI: &str = "http://127.0.0.1:49152/callback";
+
+/// Does `id` look like a real Google OAuth client id
+/// (`<digits>-<hash>.apps.googleusercontent.com`)? Pure.
+pub fn is_valid_client_id(id: &str) -> bool {
+    let id = id.trim();
+    let Some(prefix) = id.strip_suffix(".apps.googleusercontent.com") else { return false };
+    let Some((project, hash)) = prefix.split_once('-') else { return false };
+    let word = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    project.len() >= 6
+        && project.chars().all(|c| c.is_ascii_digit())
+        && hash.len() >= 8
+        && word(hash)
+        // The old placeholder was the right shape but a run of zeros.
+        && !hash.ends_with("00000000")
+}
+
+/// What sign-in would use, without revealing the secret.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct CredentialsStatus {
+    /// A usable client id AND secret are present.
+    pub configured: bool,
+    pub has_client_id: bool,
+    pub has_secret: bool,
+    /// "saved" (Command Hub), "env" (GOOGLE_CLIENT_ID) or "none".
+    pub source: String,
+    pub message: Option<String>,
+}
+
+fn status_from(id: Option<(String, &'static str)>, secret: bool) -> CredentialsStatus {
+    let (has_client_id, source) = match &id {
+        Some((i, src)) if is_valid_client_id(i) => (true, (*src).to_string()),
+        Some((_, src)) => (false, format!("{src} (invalid)")),
+        None => (false, "none".to_string()),
+    };
+    let configured = has_client_id && secret;
+    let message = if configured {
+        None
+    } else if has_client_id {
+        Some("Add the Client Secret too: Google needs it to finish sign-in for a Desktop client.".to_string())
+    } else if matches!(&id, Some(_)) {
+        Some("That Client ID does not look right. It should end in .apps.googleusercontent.com.".to_string())
+    } else {
+        Some(NOT_CONFIGURED_MSG.to_string())
+    };
+    CredentialsStatus { configured, has_client_id, has_secret: secret, source, message }
+}
+
+pub fn credentials_status() -> CredentialsStatus {
+    let saved = crate::auth_vault::get_api_key("google_client_id").filter(|s| !s.trim().is_empty());
+    let env = std::env::var("GOOGLE_CLIENT_ID").ok().filter(|s| !s.trim().is_empty());
+    let id = match (saved, env) {
+        (Some(s), _) => Some((s, "saved")),
+        (None, Some(e)) => Some((e, "env")),
+        (None, None) => None,
+    };
+    let secret = crate::auth_vault::get_api_key("google_client_secret").map(|s| !s.trim().is_empty()).unwrap_or(false)
+        || std::env::var("GOOGLE_CLIENT_SECRET").map(|s| !s.trim().is_empty()).unwrap_or(false);
+    status_from(id, secret)
+}
 
 /// Retrieve Developer Client ID and Client Secret (custom or fallback).
 pub fn get_client_credentials() -> (String, Option<String>) {
@@ -55,21 +122,57 @@ pub fn generate_pkce() -> (String, String) {
     (verifier, challenge)
 }
 
-/// Start direct native OAuth flow via Tokio TCP listener on 127.0.0.1:49152.
-pub async fn start_loopback_oauth_flow() -> Result<GoogleAccountProfile, String> {
-    let (client_id, client_secret) = get_client_credentials();
-    let (verifier, challenge) = generate_pkce();
-
-    let scopes = [
+/// Base scopes: identity + Gmail + Calendar + Photos. Phone/address are
+/// deliberately EXCLUDED — sensitive scopes requested only via the
+/// optional progressive flow below, so first-run consent stays minimal.
+fn base_scope_list(extended: bool) -> Vec<&'static str> {
+    let mut scopes = vec![
         "https://www.googleapis.com/auth/gmail.readonly",
         "https://www.googleapis.com/auth/gmail.send",
         "https://www.googleapis.com/auth/gmail.modify",
         "https://www.googleapis.com/auth/calendar",
-        "https://www.googleapis.com/auth/photoslibrary.readonly",
+        // `photoslibrary.readonly` is NOT requested: Google removed it from the
+        // Photos Library API on 2025-03-31 (calls now return 403), and asking
+        // for a retired scope only bloats the consent screen.
         "https://www.googleapis.com/auth/userinfo.profile",
         "https://www.googleapis.com/auth/userinfo.email",
-    ]
-    .join(" ");
+    ];
+    if extended {
+        scopes.push("https://www.googleapis.com/auth/user.phonenumbers.read");
+        scopes.push("https://www.googleapis.com/auth/user.addresses.read");
+    }
+    scopes
+}
+
+fn base_scopes(extended: bool) -> String {
+    base_scope_list(extended).join(" ")
+}
+
+/// Start direct native OAuth flow via Tokio TCP listener on 127.0.0.1:49152.
+pub async fn start_loopback_oauth_flow() -> Result<GoogleAccountProfile, String> {
+    start_loopback_oauth_flow_with(false).await
+}
+
+/// Progressive re-consent (settings "Add phone & address"): full loopback
+/// flow with the 2 sensitive scopes, then MERGES phone/address into the
+/// existing profile (primary/added_at/tokens preserved). Never blocks
+/// install — settings-only, user-initiated, absence is not an error.
+pub async fn connect_extended_profile() -> Result<GoogleAccountProfile, String> {
+    start_loopback_oauth_flow_with(true).await
+}
+
+async fn start_loopback_oauth_flow_with(extended: bool) -> Result<GoogleAccountProfile, String> {
+    // Fail HERE, in words, instead of opening a browser tab onto Google's
+    // "OAuth client was not found" error page and then waiting 2 minutes.
+    let status = credentials_status();
+    if !status.configured {
+        return Err(status.message.unwrap_or_else(|| NOT_CONFIGURED_MSG.to_string()));
+    }
+    let (client_id, client_secret) = get_client_credentials();
+    let (verifier, challenge) = generate_pkce();
+
+    let scopes = base_scopes(extended);
+
 
     let auth_url = format!(
         "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256&access_type=offline&prompt=consent",
@@ -90,6 +193,7 @@ pub async fn start_loopback_oauth_flow() -> Result<GoogleAccountProfile, String>
 
     // Wait up to 120s for OAuth authorization callback
     let mut code: Option<String> = None;
+    let mut callback_error: Option<String> = None;
     let timeout = tokio::time::sleep(Duration::from_secs(120));
     tokio::pin!(timeout);
 
@@ -107,8 +211,11 @@ pub async fn start_loopback_oauth_flow() -> Result<GoogleAccountProfile, String>
                             if let Some(query) = path.split_once('?') {
                                 for pair in query.1.split('&') {
                                     if let Some((k, v)) = pair.split_once('=') {
+                                        let v = urlencoding::decode(v).unwrap_or_default().to_string();
                                         if k == "code" {
-                                            code = Some(urlencoding::decode(v).unwrap_or_default().to_string());
+                                            code = Some(v);
+                                        } else if k == "error" {
+                                            callback_error = Some(v);
                                         }
                                     }
                                 }
@@ -129,10 +236,60 @@ pub async fn start_loopback_oauth_flow() -> Result<GoogleAccountProfile, String>
         }
     }
 
+    if let Some(err) = callback_error {
+        return Err(match err.as_str() {
+            "access_denied" => "Google sign-in was cancelled or this Google account is not allowed to use the app yet. While the OAuth consent screen is in Testing mode, add the account under Test users.".to_string(),
+            other => format!("Google sign-in failed: {other}"),
+        });
+    }
     let auth_code = code.ok_or_else(|| "No authorization code received in callback".to_string())?;
 
     // Exchange auth code for tokens
-    exchange_code_and_save(&client_id, client_secret.as_deref(), &auth_code, &verifier).await
+    exchange_code_and_save(&client_id, client_secret.as_deref(), &auth_code, &verifier, extended).await
+}
+
+/// Fetch phone + address via People API. Both None on ANY failure
+/// (scope denied, empty profile, network) — absence is normal, never an
+/// error. Only called when the extended scopes were granted.
+async fn fetch_extended_contact(access_token: &str) -> (Option<String>, Option<String>) {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return (None, None),
+    };
+    let resp = match client
+        .get("https://people.googleapis.com/v1/people/me?personFields=phoneNumbers,addresses")
+        .bearer_auth(access_token)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return (None, None),
+    };
+    if !resp.status().is_success() {
+        return (None, None);
+    }
+    let v: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+    let phone = v
+        .get("phoneNumbers")
+        .and_then(|a| a.as_array())
+        .and_then(|a| a.first())
+        .and_then(|p| p.get("value"))
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    let address = v
+        .get("addresses")
+        .and_then(|a| a.as_array())
+        .and_then(|a| a.first())
+        .and_then(|p| p.get("formattedValue"))
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    (phone, address)
 }
 
 /// Exchange OAuth authorization code for tokens and store account profile.
@@ -141,6 +298,7 @@ async fn exchange_code_and_save(
     client_secret: Option<&str>,
     code: &str,
     verifier: &str,
+    extended: bool,
 ) -> Result<GoogleAccountProfile, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -210,19 +368,43 @@ async fn exchange_code_and_save(
 
     let picture = userinfo["picture"].as_str().map(str::to_string);
 
+    // Progressive contact enrichment: only when the extended scopes were
+    // granted in this flow. Absence (denied/empty) is normal, not an error.
+    let (phone, address) = if extended {
+        fetch_extended_contact(access_token).await
+    } else {
+        (None, None)
+    };
+
+    // Re-consent merge: an existing profile keeps its primary flag,
+    // original added_at, and any previously stored phone/address the new
+    // fetch didn't return (revoked scope must not erase old data).
+    let existing = crate::auth_vault::get_google_accounts()
+        .into_iter()
+        .find(|a| a.email.to_lowercase().trim() == email.to_lowercase().trim());
+    let mut scopes = vec![
+        "gmail.readonly".into(),
+        "gmail.send".into(),
+        "gmail.modify".into(),
+        "calendar".into(),
+        "photos".into(),
+    ];
+    if extended {
+        scopes.push("phone".into());
+        scopes.push("address".into());
+    }
     let profile = GoogleAccountProfile {
         email: email.clone(),
         name,
         picture,
-        is_primary: false,
-        added_at_ms: chrono::Utc::now().timestamp_millis() as u64,
-        scopes: vec![
-            "gmail.readonly".into(),
-            "gmail.send".into(),
-            "gmail.modify".into(),
-            "calendar".into(),
-            "photos".into(),
-        ],
+        is_primary: existing.as_ref().map(|e| e.is_primary).unwrap_or(false),
+        added_at_ms: existing
+            .as_ref()
+            .map(|e| e.added_at_ms)
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() as u64),
+        scopes,
+        phone: phone.or_else(|| existing.as_ref().and_then(|e| e.phone.clone())),
+        address: address.or_else(|| existing.as_ref().and_then(|e| e.address.clone())),
     };
 
     crate::auth_vault::save_google_account(profile.clone(), refresh_token);
@@ -340,11 +522,63 @@ mod tests {
     }
 
     #[test]
+    fn client_id_shape_and_the_old_placeholder() {
+        assert!(is_valid_client_id("1065171708892-v7k7b2f6k526b74499n8k1a2b3c4d5e6.apps.googleusercontent.com"));
+        assert!(is_valid_client_id("  123456789012-abcdefghijklmnop1234567890abcdef.apps.googleusercontent.com "));
+        // The placeholder that shipped before and produced "OAuth client was not found".
+        assert!(!is_valid_client_id("1065171708892-v7k7b2f6k526b74499n8k00000000000.apps.googleusercontent.com"));
+        for bad in ["", "test_client_id_123", "abc.apps.googleusercontent.com", "x-y.apps.googleusercontent.com",
+                    "123456789012-short.apps.googleusercontent.com", "123456789012-abcdefgh12345678.example.com"] {
+            assert!(!is_valid_client_id(bad), "{bad}");
+        }
+        assert_eq!(DEFAULT_CLIENT_ID, "", "no fake client is shipped");
+    }
+
+    #[test]
+    fn credentials_status_explains_what_is_missing() {
+        let good = "123456789012-abcdefghijklmnop1234567890abcdef.apps.googleusercontent.com".to_string();
+        let none = status_from(None, false);
+        assert!(!none.configured && none.message.as_deref() == Some(NOT_CONFIGURED_MSG) && none.source == "none");
+        let id_only = status_from(Some((good.clone(), "saved")), false);
+        assert!(!id_only.configured && id_only.has_client_id && id_only.message.as_deref().unwrap().contains("Client Secret"));
+        let ok = status_from(Some((good, "saved")), true);
+        assert!(ok.configured && ok.message.is_none() && ok.source == "saved");
+        let bad = status_from(Some(("nope".into(), "saved")), true);
+        assert!(!bad.configured && bad.message.as_deref().unwrap().contains("does not look right") && bad.source.contains("invalid"));
+        // A secret alone is not enough.
+        assert!(!status_from(None, true).configured);
+    }
+
+    #[test]
     fn test_urlencoding() {
         let raw = "user@gmail.com & scopes";
         let enc = urlencoding::encode(raw);
         assert!(enc.contains("%20"));
         assert!(enc.contains("%40"));
         assert_eq!(urlencoding::decode(&enc).as_deref(), Some(raw));
+    }
+
+    #[test]
+    fn no_retired_or_unneeded_scopes_are_requested() {
+        for extended in [false, true] {
+            let scopes = base_scope_list(extended);
+            assert!(!scopes.iter().any(|s| s.contains("photoslibrary")), "retired Photos scope requested");
+            // What P5 needs is present: read mail + calendar.
+            assert!(scopes.iter().any(|s| s.ends_with("gmail.readonly")));
+            assert!(scopes.iter().any(|s| s.ends_with("/auth/calendar")));
+        }
+    }
+
+    #[test]
+    fn test_scope_tiers_base_minimal_extended_opt_in() {
+        // Base consent stays minimal (no sensitive scopes at install).
+        let base = base_scope_list(false);
+        assert!(base.iter().all(|s| !s.contains("phonenumbers") && !s.contains("addresses")));
+        assert!(base.iter().any(|s| s.contains("userinfo.email")));
+        // Extended flow adds exactly the 2 sensitive scopes.
+        let ext = base_scope_list(true);
+        assert!(ext.iter().any(|s| s.contains("user.phonenumbers.read")));
+        assert!(ext.iter().any(|s| s.contains("user.addresses.read")));
+        assert_eq!(ext.len(), base.len() + 2);
     }
 }

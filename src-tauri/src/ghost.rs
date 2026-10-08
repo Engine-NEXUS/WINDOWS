@@ -657,6 +657,12 @@ pub fn needs_vision_key_nudge(groq_present: bool, gemini_present: bool) -> bool 
     !groq_present && !gemini_present
 }
 
+/// IPC: Query whether a ghost session is currently active (mount-time sync).
+#[tauri::command]
+pub fn get_pending_ghost_session() -> bool {
+    session_active()
+}
+
 /// IPC: enter a ghost session (test/drill entry in Phase 0).
 /// Ensures the stage is visible (the ring lives on it), arms Esc panic.
 /// Emits the SESSION event (orb waves) — the ring itself stays OFF until

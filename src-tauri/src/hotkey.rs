@@ -60,6 +60,7 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                     tracing::warn!("hotkey ({}) → stage kill-switch", hk);
                     let app_clone = handle.clone();
                     tauri::async_runtime::spawn(async move {
+                        crate::orchestrator::request_barge_in("hotkey-stage-kill");
                         let _ = crate::stage::stage_hide_kill(app_clone).await;
                     });
                     return;

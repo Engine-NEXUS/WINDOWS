@@ -26,7 +26,16 @@ const GROQ_MODEL: &str = "whisper-large-v3-turbo";
 /// The alias map (`canonical_repo_name`) and heard-text NLU rows stay as
 /// the downstream safety net — prompt biasing reduces errors, it never
 /// eliminates them.
-pub const NEXUS_VOCABULARY: &str = "Activate ghost mode. Open ghost mode. Start ghost mode. Exit ghost mode. Open WhatsApp. Open Chrome. Open VS Code. Open Spotify. Open Discord. Open browser. Open settings. Open architecture mapper. List pull requests. Merge pull request. Servx Zync Eesha Prem Lakshya Congi Shopkart GitHub Supabase NEXUS open close stop cancel navigate settings search.";
+pub const NEXUS_VOCABULARY: &str = "Ghost mode. Ghost control. Exit ghost mode. \
+Open WhatsApp. Open Chrome. Open VS Code. Open Spotify. Open Discord. \
+Open Brave. Open YouTube. Open settings. Open architecture mapper. \
+Analyse Servx. Analyse Zync. GitHub pull request. Merge pull request. \
+List pull requests. Search for. Play pause. Next track. Previous track. \
+Memory audit. Forget everything. Take the mouse. Control my cursor. \
+Type this. Press enter. Click the button. Search the web. \
+Ghostwriter. Take a letter. Order food. Send message. \
+Deepgram Groq Supabase Eesha Prem Lakshya Congi Shopkart NEXUS \
+open close stop cancel navigate analyse search type click press scroll.";
 
 /// Neutral English decoder instruction used when a turn has not been
 /// owner-verified. Unlike the owner vocabulary, it does not bias Whisper
@@ -145,6 +154,7 @@ pub async fn transcribe_with_groq(
 
     let start = std::time::Instant::now();
 
+    crate::usage_counter::bump("stt");
     let resp = client
         .post(GROQ_STT_URL)
         .bearer_auth(api_key)
@@ -209,6 +219,7 @@ pub async fn transcribe_bytes_with_groq(
 
     let start = std::time::Instant::now();
 
+    crate::usage_counter::bump("stt");
     let resp = client
         .post(GROQ_STT_URL)
         .bearer_auth(api_key)
@@ -284,6 +295,7 @@ pub async fn transcribe_with_groq_verbose(
     let fields = transcription_fields("audio.wav", "audio/wav", prompt, true);
     let form = groq_transcription_form(wav_bytes, &fields)?;
 
+    crate::usage_counter::bump("stt");
     let resp = client
         .post(GROQ_STT_URL)
         .bearer_auth(api_key)

@@ -87,6 +87,13 @@ interface AssistantStore {
   /** True while speech captions are actively rendering/lingering on screen. */
   captionActive: boolean;
   setCaptionActive: (v: boolean) => void;
+  /** Orb 3D morphology modes: thinking (1..12), speaking (1..6), listening (1..6). */
+  orbThinkMode: number;
+  setOrbThinkMode: (m: number) => void;
+  orbSpeakMode: number;
+  setOrbSpeakMode: (m: number) => void;
+  orbListenMode: number;
+  setOrbListenMode: (m: number) => void;
 }
 
 /** Single owner for the loading indicator (see loadingMachine.ts).
@@ -229,7 +236,7 @@ export const useAssistant = create<AssistantStore>((set) => ({
   clearTranscript: () => set({ transcript: [] }),
   pendingGithubCommand: null,
   setPendingGithubCommand: (cmd) => set({ pendingGithubCommand: cmd }),
-  orbColor: typeof localStorage !== "undefined" ? (localStorage.getItem("nexus:orb_color") || "#f2b859") : "#f2b859",
+  orbColor: typeof localStorage !== "undefined" ? (localStorage.getItem("nexus:orb_color") || "#ffffff") : "#ffffff",
   setOrbColor: (c) => {
     try { localStorage.setItem("nexus:orb_color", c); } catch (_) {}
     set({ orbColor: c });
@@ -244,6 +251,12 @@ export const useAssistant = create<AssistantStore>((set) => ({
     console.log(`[ORB] setCaptionActive(${v}) (was:${st.captionActive})`);
     return { captionActive: v };
   }),
+  orbThinkMode: 6,
+  setOrbThinkMode: (m) => set({ orbThinkMode: m }),
+  orbSpeakMode: 2,
+  setOrbSpeakMode: (m) => set({ orbSpeakMode: m }),
+  orbListenMode: 1,
+  setOrbListenMode: (m) => set({ orbListenMode: m }),
 }));
 
 /**

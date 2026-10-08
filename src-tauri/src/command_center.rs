@@ -579,6 +579,7 @@ pub(crate) async fn execute_step<R: Runtime>(
                 cancel_flag.clone(),
                 turn,
                 crate::intent_parser::intent_to_label(&step.intent),
+                false,
             )
             .await
             {

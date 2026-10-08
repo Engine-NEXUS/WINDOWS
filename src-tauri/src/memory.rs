@@ -17,19 +17,40 @@ pub fn resolve_memory_dir(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("memory")
 }
 
-fn read_json(path: &Path) -> serde_json::Value {
+pub(crate) fn read_json(path: &Path) -> serde_json::Value {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|c| serde_json::from_str(&c).ok())
         .unwrap_or(serde_json::Value::Null)
 }
 
-fn write_json(path: &Path, v: &serde_json::Value) -> bool {
+/// Write via temp file + rename so a crash or a racing writer can never
+/// leave a half-written store behind.
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> bool {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    if std::fs::write(&tmp, bytes).is_err() {
+        return false;
+    }
+    if std::fs::rename(&tmp, path).is_ok() {
+        return true;
+    }
+    // Windows can refuse to rename over a file another handle just opened.
+    let _ = std::fs::remove_file(path);
+    let ok = std::fs::rename(&tmp, path).is_ok();
+    if !ok {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    ok
+}
+
+fn write_json(path: &Path, v: &serde_json::Value) -> bool {
     serde_json::to_string_pretty(v)
-        .map(|s| std::fs::write(path, s).is_ok())
+        .map(|s| atomic_write(path, s.as_bytes()))
         .unwrap_or(false)
 }
 
@@ -86,7 +107,7 @@ const SECRET_MARKERS: &[&str] = &[
     "private_key", "privatekey", "auth", "credential",
 ];
 
-fn is_secret(key: &str, value: &str) -> bool {
+pub(crate) fn is_secret(key: &str, value: &str) -> bool {
     // Word-exact (not substring): "shopping_list" and "favorite_author"
     // must stay learnable while "my_pin" and "api_key" are refused.
     // Owned Strings first — the segments borrow them.
@@ -113,27 +134,53 @@ pub fn remember(app_data_dir: &Path, key: &str, value: &str) -> bool {
         map = serde_json::json!({});
     }
     map[key] = serde_json::Value::String(value.to_string());
-    write_json(&path, &map)
+    let ok = write_json(&path, &map);
+    if ok {
+        crate::memcore::mirror_core_fact(app_data_dir, key, value);
+    }
+    ok
 }
 
-/// Delete a core fact. Returns true if it existed.
+/// Delete a fact by key from BOTH stores: explicit core facts (core.json)
+/// and learned facts (facts.json). Returns true if either held it.
 pub fn forget(app_data_dir: &Path, key: &str) -> bool {
     let dir = resolve_memory_dir(app_data_dir);
-    let path = dir.join("core.json");
-    let mut map = read_json(&path);
-    let obj = match map.as_object_mut() {
-        Some(o) => o,
-        None => return false,
-    };
-    let removed = obj.remove(key).is_some();
-    if removed {
-        write_json(&path, &map);
+    let mut removed = false;
+
+    let core_path = dir.join("core.json");
+    let mut map = read_json(&core_path);
+    if let Some(obj) = map.as_object_mut() {
+        if obj.remove(key).is_some() {
+            write_json(&core_path, &map);
+            removed = true;
+        }
+    }
+
+    let facts_path = dir.join("facts.json");
+    if let serde_json::Value::Array(mut arr) = read_json(&facts_path) {
+        let before = arr.len();
+        arr.retain(|item| item.get("key").and_then(|v| v.as_str()).unwrap_or("") != key);
+        if arr.len() != before {
+            write_json(&facts_path, &serde_json::Value::Array(arr));
+            removed = true;
+        }
+    }
+    // Memory Core copy (ranked store) — same key, every tier.
+    if crate::memcore::forget_key(app_data_dir, key) > 0 {
+        removed = true;
     }
     removed
 }
 
 /// Recall facts matching query tokens (substring, case-insensitive).
 pub fn recall(app_data_dir: &Path, query: &str) -> Vec<(String, String)> {
+    // Ranked (BM25 + recency + frequency + pinned) answer from the Memory
+    // Core first; the substring scan below stays as the fallback for misses.
+    if let Some(hits) = crate::memcore::recall(app_data_dir, query, 10) {
+        if !hits.is_empty() {
+            return hits;
+        }
+    }
     let dir = resolve_memory_dir(app_data_dir);
     let map = read_json(&dir.join("core.json"));
     let tokens: Vec<String> = query
@@ -252,6 +299,16 @@ pub fn save_learned_facts(app_data_dir: &Path, facts: &[(String, String)]) -> bo
         if let Some(pos) = arr.iter().position(|item| {
             item.get("key").and_then(|v| v.as_str()).unwrap_or("") == key
         }) {
+            // Novelty gate (relevance engine): identical value → skip the
+            // write entirely (no timestamp churn — re-learning an old fact
+            // must not make it look fresh). Changed value → UPDATE.
+            let same = arr[pos]
+                .get("value")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if same == value {
+                continue;
+            }
             arr[pos] = serde_json::json!({"key": key, "value": value, "source": "episode", "updated_at": now});
         } else {
             arr.push(serde_json::json!({"key": key, "value": value, "source": "episode", "updated_at": now}));
@@ -260,6 +317,9 @@ pub fn save_learned_facts(app_data_dir: &Path, facts: &[(String, String)]) -> bo
     if arr.len() > MAX_LEARNED_FACTS {
         let drop = arr.len() - MAX_LEARNED_FACTS;
         arr.drain(..drop);
+    }
+    for (key, value) in facts {
+        crate::memcore::mirror_learned_fact(app_data_dir, key, value);
     }
     write_json(&path, &serde_json::Value::Array(arr))
 }
@@ -281,6 +341,7 @@ pub fn log_episode(app_data_dir: &Path, transcript: &str, response: &str) {
         let _ = writeln!(f, "{}", line);
     }
     prune_episodes(&path, now);
+    crate::memcore::mirror_episode(app_data_dir, transcript);
     // M2 auto-learning: mine + persist (bounded, silent, local-only).
     let mined = extract_learned_facts(transcript);
     if !mined.is_empty() {
@@ -308,12 +369,21 @@ fn prune_episodes(path: &Path, now: i64) {
         kept.push(line.to_string());
     }
     kept.reverse();
-    let _ = std::fs::write(path, kept.join("\n") + if kept.is_empty() { "" } else { "\n" });
+    let body = kept.join("\n") + if kept.is_empty() { "" } else { "\n" };
+    atomic_write(path, body.as_bytes());
 }
 
 /// Build a compact memory context block for prompt injection.
 /// Core facts matching the transcript + up to 3 recent episodes.
 pub fn get_memory_context(app_data_dir: &Path, transcript: &str) -> Option<String> {
+    // Memory Core context pack: ranked, PII-redacted, 2000-char budget.
+    if let Some(pack) = crate::memcore::context_pack(
+        app_data_dir,
+        transcript,
+        crate::memcore::DEFAULT_BUDGET,
+    ) {
+        return Some(pack);
+    }
     let mut parts: Vec<String> = vec![];
 
     let facts = recall(app_data_dir, transcript);
@@ -418,6 +488,15 @@ pub struct UserProfile {
     pub voice_enrolled: bool,
     pub people: Vec<String>,
     pub updated_at: i64,
+    /// Phone from Google progressive consent (None = not granted/absent).
+    #[serde(default)]
+    pub phone: Option<String>,
+    /// Address from Google progressive consent. Same absence semantics.
+    #[serde(default)]
+    pub address: Option<String>,
+    /// Profile photo URL (Google picture or setup identity). Display-only.
+    #[serde(default)]
+    pub avatar: Option<String>,
 }
 
 /// Read contact names from the local contacts.json (`{"Name": number}`).
@@ -437,12 +516,17 @@ pub fn read_contact_names(app_data_dir: &Path) -> Vec<String> {
 }
 
 /// Pure builder: core facts + contact names + credential hints → profile.
+/// Phone/address ride from the Google vault profile (progressive consent);
+///
+/// `None` = not granted or absent in the Google Account (normal, not error).
 pub fn build_user_profile(
     core: &serde_json::Value,
     contact_names: &[String],
     primary_email: Option<&str>,
     github_user: Option<&str>,
     voice_enrolled: bool,
+    phone: Option<&str>,
+    address: Option<&str>,
 ) -> UserProfile {
     let name = core
         .get("name")
@@ -460,10 +544,24 @@ pub fn build_user_profile(
         voice_enrolled,
         people,
         updated_at: chrono::Utc::now().timestamp(),
+        phone: phone.map(|s| s.to_string()),
+        address: address.map(|s| s.to_string()),
+        avatar: None,
     }
 }
 
+/// Primary Google vault profile (identity backbone for refresh).
+fn primary_google_profile() -> Option<crate::google::types::GoogleAccountProfile> {
+    let accounts = crate::auth_vault::get_google_accounts();
+    accounts
+        .into_iter()
+        .find(|a| a.is_primary)
+        .or_else(|| crate::auth_vault::get_google_accounts().into_iter().next())
+}
+
 /// Rebuild user.json from current sources. Returns true on success.
+/// Explicit params win; phone/address/email fall back to the primary
+/// Google vault profile (progressive-consent fields included).
 pub fn refresh_user_profile(
     app_data_dir: &Path,
     primary_email: Option<&str>,
@@ -472,9 +570,59 @@ pub fn refresh_user_profile(
 ) -> bool {
     let core = read_json(&resolve_memory_dir(app_data_dir).join("core.json"));
     let contacts = read_contact_names(app_data_dir);
-    let profile = build_user_profile(&core, &contacts, primary_email, github_user, voice_enrolled);
+    let google = primary_google_profile();
+    let email = primary_email
+        .map(|s| s.to_string())
+        .or_else(|| google.as_ref().map(|g| g.email.clone()));
+    let profile = build_user_profile(
+        &core,
+        &contacts,
+        email.as_deref(),
+        github_user,
+        voice_enrolled,
+        google.as_ref().and_then(|g| g.phone.as_deref()),
+        google.as_ref().and_then(|g| g.address.as_deref()),
+    );
     match serde_json::to_value(&profile) {
         Ok(v) => write_json(&resolve_memory_dir(app_data_dir).join("user.json"), &v),
+        Err(_) => false,
+    }
+}
+
+/// Seed identity from the setup installer (Worker-OAuth connect carries
+/// no vault token, so it must NEVER touch the engine registry — this
+/// fills user.json gaps only, never overwrites user-confirmed data).
+/// Returns true if anything was written.
+pub fn seed_setup_identity(
+    app_data_dir: &Path,
+    name: Option<&str>,
+    email: Option<&str>,
+    picture: Option<&str>,
+) -> bool {
+    let dir = resolve_memory_dir(app_data_dir);
+    let mut profile = read_user_profile(app_data_dir).unwrap_or_default();
+    let mut changed = false;
+    let take = |cur: &Option<String>, v: Option<&str>| -> (Option<String>, bool) {
+        match (cur, v) {
+            (None, Some(nv)) if !nv.trim().is_empty() => (Some(nv.trim().to_string()), true),
+            _ => (cur.clone(), false),
+        }
+    };
+    let (name, c) = take(&profile.name, name);
+    profile.name = name;
+    changed |= c;
+    let (email, c) = take(&profile.primary_email, email);
+    profile.primary_email = email;
+    changed |= c;
+    let (avatar, c) = take(&profile.avatar, picture);
+    profile.avatar = avatar;
+    changed |= c;
+    if !changed {
+        return false;
+    }
+    profile.updated_at = chrono::Utc::now().timestamp();
+    match serde_json::to_value(&profile) {
+        Ok(v) => write_json(&dir.join("user.json"), &v),
         Err(_) => false,
     }
 }
@@ -522,6 +670,14 @@ pub fn memory_audit_summary(app_data_dir: &Path) -> String {
         }
     }
     if let Some(p) = profile {
+        // Contact surface from progressive consent (spoken only when present;
+        // absence is normal and stays silent).
+        if p.phone.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
+            parts.push(format!("I have your phone number {}", p.phone.as_deref().unwrap_or("")));
+        }
+        if p.address.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
+            parts.push(format!("I have your address {}", p.address.as_deref().unwrap_or("")));
+        }
         if !p.people.is_empty() {
             let show: Vec<&str> = p.people.iter().take(3).map(|s| s.as_str()).collect();
             parts.push(format!(
@@ -542,17 +698,36 @@ pub fn memory_audit_summary(app_data_dir: &Path) -> String {
     parts.join(". ") + "."
 }
 
-/// Wipe all learned memory (core + learned facts + episodes + profile).
+/// Wipe everything NEXUS remembers about the user: core + learned facts,
+/// episodes, profile, mail watches (memory/), plus the live conversation
+/// thread and its brief, and the activity diary (app data root).
 /// Credential islands (Google/GitHub/voice) are untouched — the profile
 /// rebuilds from them on next refresh. Returns files removed.
 pub fn wipe_memory(app_data_dir: &Path) -> usize {
     let dir = resolve_memory_dir(app_data_dir);
     let mut n = 0;
-    for name in ["core.json", "facts.json", "episodes.jsonl", "user.json"] {
+    for name in [
+        "core.json",
+        "facts.json",
+        "episodes.jsonl",
+        "user.json",
+        "mail_watches.json",
+    ] {
         if std::fs::remove_file(dir.join(name)).is_ok() {
             n += 1;
         }
     }
+    for name in [
+        crate::conversation::CONVERSATION_FILE,
+        crate::conversation::CONVERSATION_BRIEF_FILE,
+        crate::diary::DIARY_FILE,
+    ] {
+        if std::fs::remove_file(app_data_dir.join(name)).is_ok() {
+            n += 1;
+        }
+    }
+    // The SQLite copy: rows, index, audit history, then VACUUM (file stays).
+    crate::memcore::wipe(app_data_dir);
     n
 }
 
@@ -724,7 +899,7 @@ mod tests {
         assert!(remember(&d, "name", "Lakshya"));
         std::fs::write(d.join("contacts.json"), r#"{"Mom": "+9111", "Asha": "+9122"}"#).unwrap();
         let core = read_json(&resolve_memory_dir(&d).join("core.json"));
-        let p = build_user_profile(&core, &["Mom".to_string(), "Asha".to_string()], Some("me@gmail.com"), None, true);
+        let p = build_user_profile(&core, &["Mom".to_string(), "Asha".to_string()], Some("me@gmail.com"), None, true, Some("+9111"), None);
         assert_eq!(p.name.as_deref(), Some("Lakshya"));
         assert_eq!(p.primary_email.as_deref(), Some("me@gmail.com"));
         assert!(p.voice_enrolled);
@@ -738,6 +913,53 @@ mod tests {
     }
 
     #[test]
+    fn test_learned_facts_update_only_on_change() {
+        let d = tmpdir("upsert");
+        // First write stores with timestamp T1.
+        assert!(save_learned_facts(&d, &[("employer".to_string(), "ServX".to_string())]));
+        let path = resolve_memory_dir(&d).join("facts.json");
+        let before = std::fs::read_to_string(&path).unwrap();
+        // Identical re-learn: no write churn (timestamp must not refresh —
+        // re-learning an old fact must not make it look fresh).
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(save_learned_facts(&d, &[("employer".to_string(), "ServX".to_string())]));
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(before, after, "identical re-learn must not rewrite");
+        // Changed value: UPDATE with fresh timestamp.
+        assert!(save_learned_facts(&d, &[("employer".to_string(), "Zync".to_string())]));
+        let updated = std::fs::read_to_string(&path).unwrap();
+        assert_ne!(before, updated);
+        assert!(updated.contains("Zync"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn test_seed_setup_identity_fills_gaps_only() {
+        let d = tmpdir("seed");
+        // Empty profile: fills name/email/avatar.
+        assert!(seed_setup_identity(&d, Some("Lakshya"), Some("me@gmail.com"), Some("http://pic")));
+        let p = read_user_profile(&d).expect("profile written");
+        assert_eq!(p.name.as_deref(), Some("Lakshya"));
+        assert_eq!(p.avatar.as_deref(), Some("http://pic"));
+        // Second seed with different values: user-confirmed data wins.
+        assert!(!seed_setup_identity(&d, Some("Someone"), Some("x@y.z"), None));
+        let p = read_user_profile(&d).expect("profile kept");
+        assert_eq!(p.name.as_deref(), Some("Lakshya"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn test_profile_carries_phone_and_audit_speaks_it() {
+        let d = tmpdir("phone");
+        assert!(remember(&d, "name", "Lakshya"));
+        assert!(refresh_user_profile(&d, Some("me@gmail.com"), None, true));
+        // No vault Google profile in tests → phone absent → silent.
+        let summary = memory_audit_summary(&d);
+        assert!(!summary.contains("phone number"), "{summary}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn test_read_contact_names_and_wipe() {
         let d = tmpdir("contacts");
         std::fs::write(d.join("contacts.json"), r#"{"Mom": "+9111", "Asha": "+9122"}"#).unwrap();
@@ -747,6 +969,59 @@ mod tests {
         assert!(remember(&d, "name", "Lakshya"));
         assert!(wipe_memory(&d) >= 1);
         assert!(read_user_profile(&d).is_none() || memory_audit_summary(&d).contains("don't remember"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn test_log_episode_learns_then_forget_clears_learned_fact() {
+        let d = tmpdir("learn_forget");
+        log_episode(&d, "I work at Acme Robotics", "Noted.");
+        let hits = recall(&d, "employer");
+        assert!(hits.iter().any(|(k, v)| k == "employer" && v == "Acme Robotics"), "{hits:?}");
+        // forget() used to ignore facts.json entirely.
+        assert!(forget(&d, "employer"));
+        assert!(recall(&d, "employer").is_empty());
+        assert!(!forget(&d, "employer"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn test_wipe_removes_conversation_diary_and_watches() {
+        let d = tmpdir("wipe_all");
+        let mem = resolve_memory_dir(&d);
+        std::fs::create_dir_all(&mem).unwrap();
+        for f in ["core.json", "facts.json", "episodes.jsonl", "user.json", "mail_watches.json"] {
+            std::fs::write(mem.join(f), "[]").unwrap();
+        }
+        for f in [
+            crate::conversation::CONVERSATION_FILE,
+            crate::conversation::CONVERSATION_BRIEF_FILE,
+            crate::diary::DIARY_FILE,
+        ] {
+            std::fs::write(d.join(f), "x").unwrap();
+        }
+        assert_eq!(wipe_memory(&d), 8);
+        for f in ["core.json", "facts.json", "episodes.jsonl", "user.json", "mail_watches.json"] {
+            assert!(!mem.join(f).exists(), "{f} survived the wipe");
+        }
+        for f in [
+            crate::conversation::CONVERSATION_FILE,
+            crate::conversation::CONVERSATION_BRIEF_FILE,
+            crate::diary::DIARY_FILE,
+        ] {
+            assert!(!d.join(f).exists(), "{f} survived the wipe");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn test_atomic_write_replaces_without_leftover_tmp() {
+        let d = tmpdir("atomic");
+        let p = d.join("x.json");
+        assert!(atomic_write(&p, b"one"));
+        assert!(atomic_write(&p, b"two"));
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "two");
+        assert!(!d.join("x.json.tmp").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

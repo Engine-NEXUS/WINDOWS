@@ -51,6 +51,33 @@ export type Intent =
   | { action: "browser_tab"; index: number }
   | { action: "browser_new_tab" }
   | { action: "browser_close_tab"; index?: number }
+  | { action: "enter_ghost_control" }
+  | { action: "exit_ghost_control" }
+  | { action: "browser_search"; query: string }
+  | { action: "browser_search_focus" }
+  | { action: "start_dictation" }
+  | { action: "stop_dictation" }
+  | { action: "watch_screen_email" }
+  | { action: "memory_audit" }
+  | { action: "briefing" }
+  | { action: "timetable_add"; source: string; section?: number | null }
+  | { action: "timetable_show" }
+  | { action: "timetable_clear" }
+  | { action: "timetable_commit" }
+  | { action: "study_pref"; activity: string; choice: string }
+  | { action: "mail_digest" }
+  | { action: "mail_mute" }
+  | { action: "whatsapp_read"; name?: string | null }
+  | { action: "people_flag"; name: string; kind: string; on: boolean }
+  | { action: "people_list" }
+  | { action: "calendar_agenda"; day: string }
+  | { action: "calendar_add"; text: string }
+  | { action: "memory_forget"; key: string }
+  | { action: "memory_forget_all" }
+  | { action: "memory_forget_all_confirm" }
+  | { action: "persona_friend" }
+  | { action: "persona_butler" }
+  | { action: "share_concern"; story?: string }
   | { action: "greeting"; reply: string }
   | { action: "nlu_result"; intent: string; slots: unknown; confidence: number }
   | { action: "unknown"; raw: string };

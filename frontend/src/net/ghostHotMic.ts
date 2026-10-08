@@ -107,8 +107,76 @@ export async function maybeGhostRelisten(): Promise<boolean> {
  * an explicit user cancel must stay cancelled.
  */
 export async function endGhostTurn(): Promise<void> {
+  noteGhostTurnClosed();
   await maybeGhostRelisten();
   useAssistant.getState().reset();
+}
+
+// ─── Ghost stall watchdog (P0 insurance) ──────────────────────────
+// Turns that never complete (hung backend, lost result event) wedge the
+// hot-mic loop with zero feedback — the relisten chain only fires on
+// turn END, so a turn that never ends never relistens. The watchdog
+// re-arms capture when a turn stays open too long. Quiet by design:
+// capture-only, no nag speech (the silent-miss path owns nagging);
+// single re-arm per stall; mid-drill speech queues via the FIFO design.
+
+/** Turn older than this with no completion counts as stalled. */
+export const GHOST_STALL_AFTER_MS = 12000;
+/** Watchdog poll cadence (cheap timestamp checks only). */
+export const GHOST_WATCHDOG_POLL_MS = 4000;
+
+let lastTurnOpenedAt = 0;
+let lastTurnClosedAt = 0;
+let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+
+/** A ghost turn started (called when a ghost turn enters the pipeline). */
+export function noteGhostTurnOpened(): void {
+  lastTurnOpenedAt = Date.now();
+}
+
+/** A ghost turn completed (result, done, error, or turn-end reset). */
+export function noteGhostTurnClosed(): void {
+  lastTurnClosedAt = Date.now();
+}
+
+/** Test hooks (do not use in production code). */
+export function __testSetGhostTurnTimes(opened: number, closed: number): void {
+  lastTurnOpenedAt = opened;
+  lastTurnClosedAt = closed;
+}
+export function __testStopGhostWatchdog(): void {
+  if (watchdogTimer) clearInterval(watchdogTimer);
+  watchdogTimer = null;
+}
+
+/** Start the stall watchdog (call on ghost session enter; idempotent). */
+export function startGhostWatchdog(): void {
+  if (watchdogTimer) return;
+  watchdogTimer = setInterval(() => {
+    void watchdogTick().catch(() => {});
+  }, GHOST_WATCHDOG_POLL_MS);
+}
+
+/** Stop the stall watchdog (call on ghost session exit). */
+export function stopGhostWatchdog(): void {
+  if (watchdogTimer) clearInterval(watchdogTimer);
+  watchdogTimer = null;
+}
+
+async function watchdogTick(): Promise<void> {
+  if (!useAssistant.getState().ghostActive) return;
+  if (lastTurnOpenedAt <= lastTurnClosedAt) return; // no open turn
+  if (Date.now() - lastTurnOpenedAt < GHOST_STALL_AFTER_MS) return;
+  // Stall: one quiet re-arm, then mark closed so this stall never
+  // refires (the next transcript re-opens tracking).
+  console.warn("[NEXUS] ghost watchdog: turn open with no completion — re-arming listen");
+  lastTurnClosedAt = Date.now();
+  try {
+    const { triggerFollowupListen } = await import("../stage/orbRuntime");
+    triggerFollowupListen(true);
+  } catch {
+    // A failed re-arm must not wedge the loop either.
+  }
 }
 
 /**

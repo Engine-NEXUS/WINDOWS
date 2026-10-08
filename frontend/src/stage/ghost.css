@@ -14,13 +14,14 @@
     0 0 12px rgba(90, 160, 255, 0.55),
     inset 0 0 8px rgba(90, 160, 255, 0.25);
   pointer-events: none;
-  display: none;
-  animation: ghost-pulse 1.6s ease-in-out infinite;
+  display: none !important;
+  animation: none;
   z-index: 9999;
 }
 
 #ghost-ring.on {
-  display: block;
+  display: block !important;
+  animation: ghost-pulse 1.6s ease-in-out infinite;
 }
 
 /* AI dot at 2 o'clock — "who's driving" at a glance. */
@@ -49,13 +50,13 @@
   left: 0;
   top: 0;
   pointer-events: none;
-  display: none;
+  display: none !important;
   z-index: 99999;
   transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 #ghost-pointer.on {
-  display: block;
+  display: block !important;
 }
 
 #ghost-pointer-arrow {
@@ -65,8 +66,12 @@
   border-right: 10px solid transparent;
   border-bottom: 20px solid #259ed6;
   filter: drop-shadow(0 0 8px rgba(37, 158, 214, 0.8));
-  animation: pointer-bounce 0.8s ease-in-out infinite alternate;
+  animation: none;
   transform-origin: center bottom;
+}
+
+#ghost-pointer.on #ghost-pointer-arrow {
+  animation: pointer-bounce 0.8s ease-in-out infinite alternate;
 }
 
 @keyframes pointer-bounce {
@@ -369,6 +374,95 @@
   opacity: 0;
   transform: translateY(-4px);
   filter: blur(2px);
+}
+
+/* ─── Design #11: Liquid Mercury Stream (Incremental Spoken Reveal) ─── */
+.response-caption--mercury {
+  width: auto;
+  max-width: 680px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.mercury-pill {
+  background: rgba(16, 20, 30, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 9999px;
+  padding: 10px 24px;
+  max-width: 620px;
+  min-height: 48px;
+  backdrop-filter: blur(36px) saturate(200%);
+  -webkit-backdrop-filter: blur(36px) saturate(200%);
+  box-shadow:
+    0 16px 40px rgba(0, 0, 0, 0.65),
+    inset 0 1px 2px rgba(255, 255, 255, 0.35);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    opacity 350ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 350ms cubic-bezier(0.16, 1, 0.3, 1),
+    filter 350ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: opacity, transform, filter;
+}
+
+.mercury-pill--active {
+  opacity: 1;
+  transform: scale(1) translateY(0);
+  filter: blur(0px);
+}
+
+.mercury-pill--fading {
+  opacity: 0;
+  transform: scale(0.96) translateY(-4px);
+  filter: blur(3px);
+}
+
+.mercury-pill-text {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  font-size: 19px;
+  font-weight: 650;
+  letter-spacing: -0.2px;
+  line-height: 1.35;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.mercury-word {
+  display: inline-block;
+  transition: all 0.22s ease-out;
+}
+
+.mercury-word--active {
+  color: #ffffff;
+  font-weight: 850;
+  transform: scale(1.08) translateY(-1px);
+  text-shadow: 0 0 16px #00e5ff, 0 0 28px rgba(0, 229, 255, 0.7);
+  animation: mercury-pop 200ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.mercury-word--spoken {
+  color: #f1f5f9;
+  opacity: 0.9;
+  transform: scale(1) translateY(0);
+}
+
+@keyframes mercury-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.82) translateY(5px);
+    filter: blur(2px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1.08) translateY(-1px);
+    filter: blur(0px);
+  }
 }
 
 /* Live caption (plan Phase 4) — the user's OWN words, growing while they

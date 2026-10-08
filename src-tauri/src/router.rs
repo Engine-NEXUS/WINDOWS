@@ -270,6 +270,7 @@ async fn call_openai_compatible(
         "temperature": 0.3,
     });
 
+    crate::usage_counter::bump("llm");
     let resp = client
         .post(url)
         .header("Authorization", format!("Bearer {}", api_key))
@@ -332,6 +333,7 @@ async fn call_gemini(
         },
     });
 
+    crate::usage_counter::bump("llm");
     let resp = client
         .post(&url)
         .header("Content-Type", "application/json")

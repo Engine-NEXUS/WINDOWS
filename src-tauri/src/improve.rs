@@ -31,6 +31,7 @@ pub const MIN_CLUSTER: usize = 2;
 /// candidates for training data / intents.yaml. `improvement_report`
 /// returns the full ranked list; this is the "what to promote this
 /// week" view. Clusters are pre-sorted by run_miner (count desc).
+#[allow(dead_code)]
 pub const WEEKLY_TOP_N: usize = 10;
 
 /// Top-N promotion candidates. Pure + unit-tested.

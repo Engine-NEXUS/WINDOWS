@@ -1,6 +1,5 @@
 import { useAssistant } from "../store/assistant";
 import { invoke } from "@tauri-apps/api/core";
-import { suppressNextCaption } from "./captionScheduler";
 
 /**
  * Frontend TTS generation counter — mirrors the Rust TTS_GENERATION counter.
@@ -190,31 +189,6 @@ export async function speak(text: string, onEnd?: () => void): Promise<void> {
   // the Kokoro engine takes ~7s to initialize).
   stopTts();
 
-  // Particle-generated text (Feature 88): short spoken lines form from the
-  // orb's OWN particles (VoiceOrb listens in every window). Long replies,
-  // multi-line text, and meeting-muted speech never trigger it.
-  //
-  // MUST run after stopTts() above, not before: stopTts() unconditionally
-  // calls clearCaptionSchedule(), which resets suppressNextCaption()'s
-  // one-shot flag. Arming the flag before stopTts() meant stopTts() wiped
-  // it moments later, before the real tts:caption for THIS utterance ever
-  // arrived — so the suppression silently never took effect (live bug,
-  // 2026-10-04, found via user report after the first attempt at this fix
-  // didn't work).
-  if (text.trim().length <= 22 && !text.includes("\n")) {
-    // Skip the DOM response caption for this same utterance — otherwise
-    // the particle-formed text and the word-by-word caption both show
-    // the same short reply at once. Still armed before the playback
-    // invoke below, so it's set before Rust can possibly emit `tts:caption`.
-    suppressNextCaption();
-    try {
-      const { emit } = await import("@tauri-apps/api/event");
-      await emit("orb:show_text", { text: text.trim() });
-    } catch {
-      // Outside Tauri — no-op
-    }
-  }
-
   // Capture generation after stopTts — any in-flight speak() calls
   // from a previous turn will see the mismatch and skip playback.
   const myGen = ttsGeneration;
@@ -292,20 +266,6 @@ export async function speakCached(phrase: string, onEnd?: () => void): Promise<v
 
   // Stop any currently-playing TTS before starting new playback.
   stopTts();
-
-  // Particle-generated text (Feature 88) — same gate as speak(): acks like
-  // "Ok sir." flow through here, so they form in particles too. Must run
-  // after stopTts() above — see the detailed comment in speak() for why.
-  if (phrase.trim().length <= 22 && !phrase.includes("\n")) {
-    // Same duplicate-caption suppression as speak() above.
-    suppressNextCaption();
-    try {
-      const { emit } = await import("@tauri-apps/api/event");
-      await emit("orb:show_text", { text: phrase.trim() });
-    } catch {
-      // Outside Tauri — no-op
-    }
-  }
 
   const myGen = ttsGeneration;
   rustTtsPlaying = true;

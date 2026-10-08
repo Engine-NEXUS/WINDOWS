@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// Actions this center owns. Mirrors the Browser arms of `center_for`.
+#[allow(dead_code)]
 pub const ACTIONS: &[&str] = &[
     "browser_tab",
     "browser_close_tab",
@@ -70,6 +71,7 @@ pub fn resolve_crawler_script_path() -> Option<PathBuf> {
 }
 
 /// Read URL content as clean markdown via the browser-use crawler engine.
+#[allow(dead_code)]
 pub fn read_page_markdown(url: &str) -> Result<String, String> {
     let script_path = resolve_crawler_script_path().ok_or_else(|| {
         "Crawler bridge script not found at server/crawler/engine.py".to_string()

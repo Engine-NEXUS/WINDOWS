@@ -290,9 +290,26 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::WatchScreenEmail => "GoogleCenter",
 
         ParsedIntent::MemoryAudit
+        | ParsedIntent::Briefing
+        | ParsedIntent::TimetableAdd { .. }
+        | ParsedIntent::TimetableShow
+        | ParsedIntent::TimetableClear
+        | ParsedIntent::TimetableCommit
+        | ParsedIntent::StudyPref { .. }
+        | ParsedIntent::MailDigest
+        | ParsedIntent::MailMute
+        | ParsedIntent::CalendarAgenda { .. }
+        | ParsedIntent::CalendarAdd { .. }
+        | ParsedIntent::WhatsappRead { .. }
+        | ParsedIntent::PeopleFlag { .. }
+        | ParsedIntent::PeopleList
         | ParsedIntent::MemoryForget { .. }
         | ParsedIntent::MemoryForgetAll
         | ParsedIntent::MemoryForgetAllConfirm => "MemoryCenter",
+
+        ParsedIntent::PersonaFriend
+        | ParsedIntent::PersonaButler
+        | ParsedIntent::ShareConcern { .. } => "GreetingCenter",
 
         ParsedIntent::NluResult { intent: name, .. } => {
             if name.starts_with("youtube_") {

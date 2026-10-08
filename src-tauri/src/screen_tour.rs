@@ -117,9 +117,13 @@ read from the screen. For code or an error, say what it does or the likely cause
 person as described by the page) — NEVER the browser, tabs, address bar, taskbar, ads or cookie \
 banners unless one of those is the subject. Order by importance. At most {max_items} items; the \
 overview already names the rest.\n\
-4. People: never identify anyone from their face. Name a person only if the title, channel, \
-caption or on-screen text says so; otherwise call them \"the presenter\" / \"the person\" and say \
-what the title or channel suggests (worded as an inference).\n\
+4. People & Public Figures: Actively identify and NAME any public figures, celebrities, \
+YouTubers, streamers, influencers, politicians, athletes, tech leaders, and notable creators \
+visible on screen (e.g. 'Elon Musk', 'MrBeast', 'Marques Brownlee', 'Joe Rogan', 'Narendra Modi', \
+'Sam Altman'). State their full recognized name in 'label' and 'callout_title', and their role/title \
+in 'summary' and 'details'. Cross-reference visual facial likeness with any on-screen text clues \
+(channel names, video titles, chyrons, interview badges, handles). Only use generic descriptors \
+('an audience member', 'a passerby') for private, non-famous individuals.\n\
 5. Describe only what you can see or what the context above states. If text is unreadable or \
 something is unknown, say so instead of guessing.\n\n\
 Reply with ONLY a raw JSON object:\n\
@@ -668,7 +672,9 @@ pub fn tour_model_setting(settings_json: Option<&str>) -> Option<String> {
 const TOUR_MAX_OUTPUT_TOKENS: u32 = 8192;
 
 /// Whole-ladder wall-clock cap (each request also has its own timeout).
-const TOUR_TOTAL_TIMEOUT_SECS: u64 = 75;
+/// Feature 98: clamped 75s → 6s. A slower answer is worse than the local
+/// OCR fallback — the tour must never hang the turn.
+const TOUR_TOTAL_TIMEOUT_SECS: u64 = 6;
 
 /// Ask Gemini for the tour script for an already-captured image of `region`
 /// (screen px). Strong model first, lite fallback (see
@@ -694,10 +700,8 @@ pub async fn analyze_tour_image<R: Runtime>(
     }
     let settings = std::fs::read_to_string(usage_dir.join("settings.json")).ok();
     let models = crate::vision::tour_model_ladder(tour_model_setting(settings.as_deref()).as_deref());
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(45))
-        .build()
-        .unwrap_or_default();
+    // Feature 98: pooled shared client (Phase 5) + clamped timeout 45s → 4s.
+    let client = crate::vision::shared_vision_client();
     let prompt = build_tour_prompt(user_prompt, context_block);
     let call = crate::vision::gemini_json_with_image(
         &prompt,
@@ -1189,7 +1193,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_is_answer_first_ignores_chrome_and_never_identifies_faces() {
+    fn prompt_is_answer_first_ignores_chrome_and_names_public_figures() {
         let p = build_tour_prompt("what am i seeing", "ctx");
         let lower = p.to_lowercase();
         // Answer the implicit question and enumerate.
@@ -1198,8 +1202,14 @@ mod tests {
         // Not the browser chrome.
         assert!(lower.contains("never the browser"));
         assert!(lower.contains("address bar"));
-        // People: no face identification, only text evidence.
-        assert!(lower.contains("never identify anyone from their face"));
+        // People: public figures are actively NAMED (visual likeness +
+        // on-screen text clues); only private individuals stay generic.
+        assert!(lower.contains("actively identify and name"));
+        assert!(lower.contains("public figures"));
+        assert!(lower.contains("youtubers"));
+        assert!(lower.contains("elon musk"));
+        assert!(lower.contains("cross-reference"));
+        assert!(lower.contains("private, non-famous"));
         assert!(lower.contains("title") && lower.contains("channel"));
         // Budgets are stated numerically.
         assert!(p.contains(&OVERVIEW_MAX_WORDS.to_string()));

@@ -322,6 +322,12 @@ export interface SttTranscriptTurn {
   owner_score?: number;
   decoder_bias?: string;
   language?: string;
+  intent_label?: string;
+  pre_parsed?: {
+    intent: any;
+    confidence: number;
+    source: string;
+  };
 }
 
 export type SttTranscriptPayload = string | SttTranscriptTurn;
@@ -340,9 +346,11 @@ async function setupSttTranscriptListener() {
               ownerScore: payload.owner_score ?? 1,
               decoderBias: payload.decoder_bias ?? "owner",
               language: payload.language ?? "en",
+              intentLabel: payload.intent_label,
+              preParsed: payload.pre_parsed,
               initiation: useAssistant.getState().ghostActive ? ("ghost" as const) : ("explicit" as const),
             };
-      console.log(`[NEXUS] stt:transcript event received: "${transcript}"`);
+      console.log(`[NEXUS] stt:transcript event received: "${transcript}" intent=${typeof payload === "object" ? payload.intent_label : "none"}`);
       await processTranscript(transcript, turn);
     });
     console.log("[NEXUS] stt:transcript listener registered");
@@ -490,12 +498,27 @@ export function initOrbRuntime(): void {
   void (async () => {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const s = await invoke<{ orbColor?: string; orbPosition?: "top" | "bottom" }>("get_settings");
+      const s = await invoke<{
+        orbColor?: string;
+        orbPosition?: "top" | "bottom";
+        orbThinkMode?: number;
+        orbSpeakMode?: number;
+        orbListenMode?: number;
+      }>("get_settings");
       if (s?.orbColor) {
         useAssistant.getState().setOrbColor(s.orbColor);
       }
       if (s?.orbPosition) {
         useAssistant.getState().setOrbPosition(s.orbPosition);
+      }
+      if (s?.orbThinkMode) {
+        useAssistant.getState().setOrbThinkMode(s.orbThinkMode);
+      }
+      if (s?.orbSpeakMode) {
+        useAssistant.getState().setOrbSpeakMode(s.orbSpeakMode);
+      }
+      if (s?.orbListenMode) {
+        useAssistant.getState().setOrbListenMode(s.orbListenMode);
       }
     } catch (_) {}
 
@@ -511,6 +534,11 @@ export function initOrbRuntime(): void {
         if (p === "top" || p === "bottom") {
           useAssistant.getState().setOrbPosition(p);
         }
+      });
+      await listen<{ think?: number; speak?: number; listen?: number }>("orb:morphology_changed", (e) => {
+        if (e.payload?.think) useAssistant.getState().setOrbThinkMode(e.payload.think);
+        if (e.payload?.speak) useAssistant.getState().setOrbSpeakMode(e.payload.speak);
+        if (e.payload?.listen) useAssistant.getState().setOrbListenMode(e.payload.listen);
       });
     } catch (_) {}
   })();

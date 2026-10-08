@@ -241,8 +241,13 @@ pub async fn pregenerate_cache(
                     let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
                     let words = boundaries_to_words(&boundaries, 0);
                     let envelope = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
-                    cache_arc.lock().await.insert(
+                    let mut guard = cache_arc.lock().await;
+                    guard.insert(
                         phrase.to_string(),
+                        CachedAudio { samples: samples.clone(), sample_rate: sr, caption: CaptionTrack { words: words.clone(), total_ms, estimated: false, envelope: envelope.clone(), frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0 } },
+                    );
+                    guard.insert(
+                        format!("{phrase}."),
                         CachedAudio { samples, sample_rate: sr, caption: CaptionTrack { words, total_ms, estimated: false, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0 } },
                     );
                     cached_count += 1;
@@ -336,7 +341,11 @@ pub async fn speak_text(
     // Acks like "Ok sir." were pre-generated at boot — replay them instead
     // of re-synthesizing (which previously paid a probe + cold-engine cost).
     // Falls through to synthesis on miss.
-    let (audio, sample_rate, caption) = if let Some(hit) = state.cache.lock().await.get(&text).cloned() {
+    let trimmed = text.trim().trim_end_matches(['.', '!', '?', ',', ';']).trim();
+    let (audio, sample_rate, caption) = if let Some(hit) = {
+        let guard = state.cache.lock().await;
+        guard.get(&text).or_else(|| guard.get(trimmed)).cloned()
+    } {
         tracing::info!("tts: cache hit for '{}'", text);
         (hit.samples, hit.sample_rate, hit.caption)
     } else {
@@ -504,6 +513,8 @@ pub async fn set_voice_preference(
         .unwrap_or_default();
     settings.selected_voice = persona.key.to_string();
     settings.edge_tts_voice = persona.cloud_id.to_string();
+    settings.tts_voice = persona.cloud_id.to_string();
+    settings.tts_provider = "edge".to_string();
     settings.offline_voice_model = persona.kokoro_voice.to_string();
     crate::tts_kokoro::set_preferred_voice(persona.kokoro_voice);
     let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
@@ -516,8 +527,10 @@ pub async fn set_voice_preference(
     );
 
     // Fast-ACK re-synthesis in the background (new voice, ~350ms).
+    // Clear old cache immediately so no stale voice audio can leak!
     {
         let cache = state.cache.clone();
+        cache.lock().await.clear();
         let cloud_id = persona.cloud_id.to_string();
         tokio::spawn(async move {
             pregenerate_cache(&cache, &cloud_id).await;
@@ -915,7 +928,11 @@ async fn synthesize_chunk(
     state: &TtsState,
     emotion: crate::tts_edge::TtsEmotion,
 ) -> Result<(Vec<f32>, u32, CaptionTrack), String> {
-    if let Some(hit) = state.cache.lock().await.get(sentence).cloned() {
+    let trimmed = sentence.trim().trim_end_matches(['.', '!', '?', ',', ';']).trim();
+    if let Some(hit) = {
+        let guard = state.cache.lock().await;
+        guard.get(sentence).or_else(|| guard.get(trimmed)).cloned()
+    } {
         return Ok((hit.samples, hit.sample_rate, hit.caption));
     }
     synthesize_with_fallback(sentence, voice_id, state, emotion).await

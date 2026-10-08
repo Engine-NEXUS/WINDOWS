@@ -19,6 +19,78 @@ pub const GROQ_VISION_MODELS: &[&str] = &[
 pub const VISION_MAX_W: u32 = 1024;
 pub const VISION_FAST_W: u32 = 768;
 
+// ─── Feature 98 P5: pooled HTTP client (kills cold-TLS tax) ─────────────
+//
+// Every turn used to build a fresh reqwest::Client, paying a 150–400ms
+// cold TLS handshake. One keep-alive client is shared by the tour, the
+// spatial pass, and locate/grounding vision calls.
+static SHARED_VISION_CLIENT: once_cell::sync::Lazy<reqwest::Client> =
+    once_cell::sync::Lazy::new(|| {
+        reqwest::Client::builder()
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .connect_timeout(std::time::Duration::from_secs(3))
+            .timeout(std::time::Duration::from_secs(4))
+            .build()
+            .unwrap_or_default()
+    });
+
+pub fn shared_vision_client() -> reqwest::Client {
+    SHARED_VISION_CLIENT.clone()
+}
+
+// ─── Feature 98 P6: perceptual frame-hash result cache ──────────────────
+//
+// Repeating a visual query on an unchanged screen (identical capture hash
+// within the TTL) replays the last answer in <30ms with 0 quota burn.
+
+struct FrameCacheEntry {
+    hash: u64,
+    at: std::time::Instant,
+    payload: SpatialAnalysisPayload,
+}
+
+static FRAME_CACHE: once_cell::sync::Lazy<std::sync::Mutex<Vec<FrameCacheEntry>>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(Vec::new()));
+const FRAME_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const FRAME_CACHE_MAX: usize = 8;
+
+/// FNV-1a hash of the capture bytes (no allocation, pure).
+pub fn frame_hash(b64: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in b64.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Look up a cached answer for `hash` (60s TTL). Prunes expired entries.
+pub fn frame_cache_get(hash: u64) -> Option<SpatialAnalysisPayload> {
+    let mut cache = FRAME_CACHE.lock().unwrap();
+    cache.retain(|e| e.at.elapsed() < FRAME_CACHE_TTL);
+    let hit = cache
+        .iter()
+        .rev()
+        .find(|e| e.hash == hash)
+        .map(|e| e.payload.clone());
+    hit
+}
+
+/// Store an answer for `hash` (bounded, newest-wins).
+pub fn frame_cache_put(hash: u64, payload: SpatialAnalysisPayload) {
+    let mut cache = FRAME_CACHE.lock().unwrap();
+    cache.retain(|e| e.hash != hash && e.at.elapsed() < FRAME_CACHE_TTL);
+    cache.push(FrameCacheEntry {
+        hash,
+        at: std::time::Instant::now(),
+        payload,
+    });
+    while cache.len() > FRAME_CACHE_MAX {
+        cache.remove(0);
+    }
+}
+
 /// Screenshot width for the current race setting (fast = smaller image).
 pub fn capture_width_for(race: &str) -> u32 {
     if race == "speed" {
@@ -77,6 +149,7 @@ pub fn parse_coords(text: &str, w: i32, h: i32) -> Option<(i32, i32)> {
 /// Clicky-style aspect-ratio matching Computer Use resolution.
 /// Picks the standard Anthropic resolution closest to the actual monitor aspect ratio
 /// to avoid image stretching and X/Y coordinate distortion.
+#[allow(dead_code)]
 pub fn best_computer_use_resolution(width: u32, height: u32) -> (u32, u32) {
     if width == 0 || height == 0 {
         return (1024, 768);
@@ -103,6 +176,7 @@ pub fn best_computer_use_resolution(width: u32, height: u32) -> (u32, u32) {
 
 /// Transform normalized computer use coordinates back into screen points
 /// with strict screen boundary clamping.
+#[allow(dead_code)]
 pub fn denormalize_computer_use_coord(
     coord_x: i32,
     coord_y: i32,
@@ -258,6 +332,7 @@ pub fn capture_gridded_jpeg_base64() -> Option<(String, i32, i32)> {
 /// Ask Groq vision for element coordinates. Tries each vision model in
 /// order; first parseable in-bounds answer wins. None = fall through.
 /// Uses the gridded capture so the model reads off visible anchors.
+#[allow(dead_code)]
 pub async fn locate_via_vision(
     description: &str,
     api_key: &str,
@@ -313,6 +388,7 @@ pub async fn locate_via_vision(
 }
 
 /// UIA first (exact, free), vision on miss. api_key empty → UIA only.
+#[allow(dead_code)]
 pub async fn resolve_named_target(
     name: &str,
     api_key: &str,
@@ -329,10 +405,12 @@ pub async fn resolve_named_target(
 
 // ─── Dual providers + daily quotas ──────────────────────────────
 
-/// Gemini vision model (confirmed live: GA Jul 2026).
+/// Gemini vision model (live-verified 2026-10-07: HTTP 200 in 1.27s).
 pub const GEMINI_VISION_MODEL: &str = "gemini-3.5-flash-lite";
-/// Gemini vision ladder — IDs churn; on 404/miss try these, newest first.
-pub const GEMINI_VISION_FALLBACKS: &[&str] = &["gemini-2.5-flash", "gemini-2.0-flash"];
+/// Gemini vision ladder — live-verified 2026-10-07. The older
+/// gemini-2.5-flash / gemini-2.0-flash ids are 404 (deprecated) and
+/// gemini-3.8-flash was 503 under demand; they are gone from the ladder.
+pub const GEMINI_VISION_FALLBACKS: &[&str] = &["gemini-3.5-flash", "gemini-flash-lite-latest"];
 /// Free-tier daily caps (per project). Conservative vs docs.
 pub const GROQ_VISION_RPD: u32 = 14400;
 pub const GEMINI_VISION_RPD: u32 = 500;
@@ -463,6 +541,7 @@ fn save_usage(app_data_dir: &std::path::Path, u: &UsageFile) {
 
 /// Record one vision call. Best-effort.
 pub fn record_use(app_data_dir: &std::path::Path, provider: &str) {
+    crate::usage_counter::bump("vision");
     let mut u = load_usage(app_data_dir);
     match provider {
         "groq" => u.groq = u.groq.saturating_add(1),
@@ -657,6 +736,7 @@ async fn locate_gemini_with_image(
 /// `quota_hit` names a provider skipped for exhaustion (announce it even
 /// when the serving provider succeeded first try). `raced` = parallel
 /// race fired both providers (2 quota units — announce for honesty).
+#[allow(dead_code)]
 pub struct LocatedTarget {
     pub el: crate::screen::UiElement,
     pub provider: &'static str,
@@ -1016,6 +1096,7 @@ mod tests {
 
 // ─── Semantic Document & Email Extraction ────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct ScreenEmailContext {
     pub is_email_visible: bool,
@@ -1027,6 +1108,7 @@ pub struct ScreenEmailContext {
 }
 
 /// Prompt instructing the VLM to extract email metadata and deadlines from the screen.
+#[allow(dead_code)]
 pub fn build_email_extraction_prompt() -> &'static str {
     "You are an expert OCR and document understanding engine. Inspect the screenshot and find the email client or open email message.\n\
     Extract the following fields into a single JSON object:\n\
@@ -1040,6 +1122,7 @@ pub fn build_email_extraction_prompt() -> &'static str {
 }
 
 /// Parse VLM response text into a typed `ScreenEmailContext`.
+#[allow(dead_code)]
 pub fn parse_screen_email_json(text: &str) -> Option<ScreenEmailContext> {
     let clean = text.trim();
     let json_str = if let Some(stripped) = clean.strip_prefix("```json") {
@@ -1144,12 +1227,15 @@ User request: \"{}\"\n\n\
 Decompose the visible content into up to {} distinct visual elements worth analysing. \
 For EACH element reply with one item containing:\n\
 - id: sequential 1-based number\n\
-- label: short name (e.g. \"Almonds\", \"Submit Button\", \"Revenue Chart\")\n\
+- label: specific name (e.g. \"MrBeast\", \"Elon Musk\", \"Revenue Chart\", \"Submit Button\")\n\
 - category: one of [object, ui_element, text_block, chart, diagram, code, product, food, person, other]\n\
 - box_2d: [ymin, xmin, ymax, xmax] integers 0-1000 framing the element tightly\n\
 - confidence: 0.0-1.0\n\
 - summary: one rich sentence of what it is / its value\n\
 - details: 2-5 rows of deep specifics ({{\"title\": ..., \"value\": ...}}) — nutrition/specs/text snippets/meaning, whatever fits the content\n\n\
+If a person is a recognized public figure, celebrity, YouTuber, streamer, influencer, \
+politician, or athlete, name them by their full recognized name (e.g. \"Marques Brownlee\", \
+\"Joe Rogan\", \"Narendra Modi\") and state their role/title in the summary.\n\n\
 Also reply with a top-level title (one line describing the screen) and overview (1-2 sentences).\n\
 Reply with ONLY a raw JSON object:\n\
 {{\"title\": ..., \"overview\": ..., \"items\": [ ... ]}}",
@@ -1446,11 +1532,14 @@ pub(crate) fn tour_model_ladder(override_model: Option<&str>) -> Vec<String> {
     if let Some(m) = override_model {
         push(m);
     }
+    // Live-verified 2026-10-07 ladder: the fast lite model first (1.27s),
+    // then the stronger flash (2.37s, superior entity recognition), then
+    // the official alias. Dead ids (3.8-flash 503, 2.5/2.0-flash 404)
+    // removed — they burned ~16s of dead air per turn.
     for m in [
-        "gemini-3.8-flash",
-        "gemini-3.5-flash",
-        GEMINI_VISION_MODEL, // gemini-3.5-flash-lite
-        "gemini-2.5-flash",
+        GEMINI_VISION_MODEL, // gemini-3.5-flash-lite (1.27s)
+        "gemini-3.5-flash",  // high entity reasoning (2.37s)
+        "gemini-flash-lite-latest", // official alias (1.37s)
     ] {
         push(m);
     }
@@ -1579,11 +1668,16 @@ pub async fn analyze_screen_spatial<R: Runtime>(
     let Some((b64, _, _)) = capture_gridded_jpeg_base64() else {
         return Err("Screen capture failed".to_string());
     };
+    // Feature 98 P6: identical screen within 60s replays the cached answer
+    // (<30ms, zero quota burn).
+    let hash = frame_hash(&b64);
+    if let Some(cached) = frame_cache_get(hash) {
+        tracing::info!("vision: spatial cache hit (unchanged screen) — 0 quota");
+        return Ok(cached);
+    }
     let prompt = build_spatial_prompt(user_prompt);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .unwrap_or_default();
+    // Feature 98: pooled shared client (Phase 5) + clamped timeout 20s → 4s.
+    let client = shared_vision_client();
 
     let setting = read_vision_provider(&usage_dir);
     for provider in spatial_provider_order(&setting) {
@@ -1601,6 +1695,7 @@ pub async fn analyze_screen_spatial<R: Runtime>(
         match step {
             SpatialStep::Found(payload) => {
                 record_use(&usage_dir, label);
+                frame_cache_put(hash, payload.clone());
                 tracing::info!(
                     "vision: spatial analysis via {} ({} items)",
                     label,
@@ -1745,19 +1840,25 @@ mod tour_ladder_tests {
     use super::*;
 
     #[test]
-    fn tour_ladder_is_strongest_first_and_ends_on_the_lite_model() {
+    fn tour_ladder_leads_with_the_fast_lite_model_and_has_no_dead_ids() {
         let l = tour_model_ladder(None);
-        assert_eq!(l[0], "gemini-3.8-flash");
+        // Live-verified 2026-10-07: the 1.27s lite model leads; the stronger
+        // flash (2.37s) is second; the official alias last.
+        assert_eq!(l[0], GEMINI_VISION_MODEL);
         assert_eq!(l[1], "gemini-3.5-flash");
-        assert!(l.contains(&GEMINI_VISION_MODEL.to_string())); // lite still reachable
-        assert!(l.iter().position(|m| m == "gemini-3.5-flash") < l.iter().position(|m| m == GEMINI_VISION_MODEL));
+        assert_eq!(l[2], "gemini-flash-lite-latest");
+        // Dead models (503/404) must never re-enter the ladder.
+        assert!(!l.iter().any(|m| m == "gemini-3.8-flash"));
+        assert!(!l.iter().any(|m| m == "gemini-2.5-flash"));
+        assert!(!l.iter().any(|m| m == "gemini-2.0-flash"));
+        assert_eq!(l.len(), 3);
     }
 
     #[test]
     fn tour_ladder_honours_an_override_without_duplicates() {
         let l = tour_model_ladder(Some("gemini-3.7-flash"));
         assert_eq!(l[0], "gemini-3.7-flash");
-        assert_eq!(l.len(), 5);
+        assert_eq!(l.len(), 4);
         // Overriding with a model already in the ladder just moves it first.
         let l2 = tour_model_ladder(Some("gemini-3.5-flash"));
         assert_eq!(l2[0], "gemini-3.5-flash");
@@ -1767,9 +1868,11 @@ mod tour_ladder_tests {
     }
 
     #[test]
-    fn default_ladder_is_the_historic_one() {
+    fn default_ladder_is_the_verified_fast_one() {
         let l = default_vision_models();
         assert_eq!(l[0], GEMINI_VISION_MODEL);
+        assert_eq!(l[1], "gemini-3.5-flash");
+        assert_eq!(l[2], "gemini-flash-lite-latest");
         assert_eq!(l.len(), 1 + GEMINI_VISION_FALLBACKS.len());
     }
 

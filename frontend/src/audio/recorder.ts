@@ -36,7 +36,16 @@ import { shouldGhostRoute } from "../net/ghostHotMic";
  */
 async function parseTranscriptEnhanced(
   transcript: string,
+  preParsed?: { intent: Intent; confidence: number; source: string },
 ): Promise<{ intent: Intent; confidence: number; source: string }> {
+  // If Rust already pre-parsed a deterministic intent during STT capture,
+  // consume it directly to eliminate the redundant IPC invoke round-trip.
+  if (preParsed?.intent) {
+    console.log(
+      `[NEXUS] pre-parsed fast-path: action=${preParsed.intent.action}, confidence=${preParsed.confidence}, source=${preParsed.source}`,
+    );
+    return preParsed;
+  }
   // Try Rust parser first
   try {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -703,6 +712,12 @@ export interface SttTurnMetadata {
   decoderBias?: string;
   language?: string;
   initiation?: "explicit" | "ghost";
+  intentLabel?: string;
+  preParsed?: {
+    intent: Intent;
+    confidence: number;
+    source: string;
+  };
 }
 
 export async function processTranscript(
@@ -846,10 +861,12 @@ export async function processTranscript(
     useAssistant.getState().addAssistantMessage("On it sir.");
     setLocalAckGiven();
     void speakCached("On it sir");
+  } else {
+    useAssistant.getState().setState("thinking");
   }
 
-  // 3. LOCAL-FIRST: Parse the intent locally.
-  const { intent } = await parseTranscriptEnhanced(corrected);
+  // 3. LOCAL-FIRST: Parse the intent locally (consumes Rust pre-parsed intent if available).
+  const { intent } = await parseTranscriptEnhanced(corrected, turn.preParsed);
   // TEMPORARY tracer: the parsed action (split Rust-parse vs TS-fallback).
   void traceInvoke("debug_trace", { msg: `p2 action=${intent.action}` }).catch(() => {});
 
@@ -1007,7 +1024,15 @@ export async function processTranscript(
       // a gap where neither the orb nor the loading animation is visible.
     }
 
-    const result = await processViaOrchestrator(corrected, undefined, provenance);
+    // Ghost turns (never long-running here — isLongFinal is false) get a
+    // 12s invoke budget: a hung backend previously wedged the hot-mic
+    // loop with zero feedback. On expiry the Rust side is cancelled and
+    // the throw below falls through to the "Didn't catch that" + relisten
+    // path instead of dying silently.
+    const ghostTurn = useAssistant.getState().ghostActive && !isLongFinal;
+    const result = await processViaOrchestrator(corrected, undefined, provenance, {
+      timeoutMs: ghostTurn ? 12000 : undefined,
+    });
     console.log("[NEXUS] orchestrator process result:", result);
     void traceInvoke("debug_trace", { msg: `p4 orch result=${result ? result.subsystem : "null"}` }).catch(() => {});
 
