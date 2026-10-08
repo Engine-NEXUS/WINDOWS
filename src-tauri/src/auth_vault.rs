@@ -46,6 +46,29 @@ fn keyring_key(service: &str) -> String {
     format!("nexus-mcp-{service}")
 }
 
+/// The ONE place the vault opens an OS credential entry.
+///
+/// Unit tests must never touch the user's real Windows Credential Manager:
+/// since the `windows-native` backend became real (change 107), the vault
+/// tests were writing fake accounts (`user1@gmail.com`, …) and overwriting
+/// the Google account registry in the real store — a `cargo test` after the
+/// user connected Gmail would have wiped their real account list. Under
+/// `cfg(test)` every entry is an in-memory mock instead. Set
+/// `NEXUS_REAL_KEYRING=1` to run an ignored live probe against the real store.
+fn kr(user: &str) -> keyring::Result<keyring::Entry> {
+    #[cfg(test)]
+    {
+        use std::sync::Once;
+        static MOCK: Once = Once::new();
+        MOCK.call_once(|| {
+            if std::env::var("NEXUS_REAL_KEYRING").is_err() {
+                keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+            }
+        });
+    }
+    keyring::Entry::new("com.nexus.assistant", user)
+}
+
 /// Stored keyring payload: "<token>|<expires_at_unix>".
 fn encode(token: &str, expires_at: f64) -> String {
     format!("{token}|{expires_at}")
@@ -71,7 +94,7 @@ pub fn set_token(service: &str, token: &str, expires_in_secs: f64) {
     MEMORY
         .write()
         .insert(service.to_string(), cached.clone());
-    match keyring::Entry::new("com.nexus.assistant", &keyring_key(service)) {
+    match kr(&keyring_key(service)) {
         Ok(entry) => {
             if let Err(e) = entry.set_password(&encode(token, cached.expires_at)) {
                 tracing::warn!("vault: keychain write failed for {service}: {e}");
@@ -101,7 +124,7 @@ pub fn get_token(service: &str) -> Option<String> {
     // below if it holds a fresher copy; otherwise the entry is gone).
     MEMORY.write().remove(service);
     // Fall back to the OS keychain (warm after restart).
-    let entry = keyring::Entry::new("com.nexus.assistant", &keyring_key(service)).ok()?;
+    let entry = kr(&keyring_key(service)).ok()?;
     let payload = entry.get_password().ok()?;
     let (token, expires_at) = decode(&payload)?;
     let cached = CachedToken { token, expires_at };
@@ -121,7 +144,7 @@ pub fn get_token(service: &str) -> Option<String> {
 /// Forget a service (logout / disconnect).
 pub fn clear_token(service: &str) {
     MEMORY.write().remove(service);
-    if let Ok(entry) = keyring::Entry::new("com.nexus.assistant", &keyring_key(service)) {
+    if let Ok(entry) = kr(&keyring_key(service)) {
         if let Err(e) = entry.delete_credential() {
             tracing::debug!("vault: keychain delete for {service}: {e}");
         }
@@ -144,7 +167,7 @@ pub fn set_api_key(service: &str, key: &str) {
         return;
     }
     APIKEY_MEMORY.write().insert(service.to_string(), key.to_string());
-    match keyring::Entry::new("com.nexus.assistant", &apikey_key(service)) {
+    match kr(&apikey_key(service)) {
         Ok(entry) => {
             if let Err(e) = entry.set_password(key) {
                 tracing::warn!("vault: keychain write failed for apikey {service}: {e}");
@@ -161,7 +184,7 @@ pub fn get_api_key(service: &str) -> Option<String> {
             return Some(key.clone());
         }
     }
-    let entry = keyring::Entry::new("com.nexus.assistant", &apikey_key(service)).ok()?;
+    let entry = kr(&apikey_key(service)).ok()?;
     let key = entry.get_password().ok()?;
     if key.is_empty() {
         None
@@ -174,7 +197,7 @@ pub fn get_api_key(service: &str) -> Option<String> {
 /// Delete an API key from memory and OS keychain.
 pub fn clear_api_key(service: &str) {
     APIKEY_MEMORY.write().remove(service);
-    if let Ok(entry) = keyring::Entry::new("com.nexus.assistant", &apikey_key(service)) {
+    if let Ok(entry) = kr(&apikey_key(service)) {
         if let Err(e) = entry.delete_credential() {
             tracing::debug!("vault: keychain delete for apikey {service}: {e}");
         }
@@ -219,7 +242,7 @@ pub fn token_status(service: &str) -> &'static str {
         }
         return "expired";
     }
-    match keyring::Entry::new("com.nexus.assistant", &keyring_key(service)) {
+    match kr(&keyring_key(service)) {
         Ok(entry) => match entry.get_password().ok().and_then(|p| decode(&p)) {
             Some((_, exp)) => {
                 let now = chrono::Utc::now().timestamp() as f64;
@@ -529,7 +552,7 @@ pub fn get_google_accounts() -> Vec<GoogleAccountProfile> {
         return cached.clone();
     }
     let accounts: Vec<GoogleAccountProfile> = (|| {
-        let entry = keyring::Entry::new("com.nexus.assistant", google_accounts_keyring_key()).ok()?;
+        let entry = kr(google_accounts_keyring_key()).ok()?;
         let json_str = entry.get_password().ok()?;
         serde_json::from_str(&json_str).ok()
     })()
@@ -562,17 +585,16 @@ pub fn save_google_account(profile: GoogleAccountProfile, refresh_token: Option<
     *GOOGLE_ACCOUNTS_CACHE.write() = Some(accounts.clone());
 
     if let Ok(json_str) = serde_json::to_string(&accounts) {
-        if let Ok(entry) = keyring::Entry::new("com.nexus.assistant", google_accounts_keyring_key()) {
+        if let Ok(entry) = kr(google_accounts_keyring_key()) {
             let _ = entry.set_password(&json_str);
         }
     }
 
     if let Some(rt) = refresh_token {
         if !rt.trim().is_empty() {
+            // One copy only. (A second plain copy under `nexus-google-rt-…`
+            // used to be written here; nothing ever read it.)
             set_token(&format!("google_rt_{email_lower}"), rt, 365.0 * 86400.0 * 10.0);
-            if let Ok(entry) = keyring::Entry::new("com.nexus.assistant", &google_refresh_token_keyring_key(&email_lower)) {
-                let _ = entry.set_password(rt);
-            }
         }
     }
 }
@@ -595,7 +617,7 @@ pub fn set_primary_google_account(email: &str) -> Result<(), String> {
     }
     *GOOGLE_ACCOUNTS_CACHE.write() = Some(accounts.clone());
     if let Ok(json_str) = serde_json::to_string(&accounts) {
-        if let Ok(entry) = keyring::Entry::new("com.nexus.assistant", google_accounts_keyring_key()) {
+        if let Ok(entry) = kr(google_accounts_keyring_key()) {
             let _ = entry.set_password(&json_str);
         }
     }
@@ -616,15 +638,24 @@ pub fn remove_google_account(email: &str) -> Result<(), String> {
     *GOOGLE_ACCOUNTS_CACHE.write() = Some(accounts.clone());
 
     if let Ok(json_str) = serde_json::to_string(&accounts) {
-        if let Ok(entry) = keyring::Entry::new("com.nexus.assistant", google_accounts_keyring_key()) {
+        if let Ok(entry) = kr(google_accounts_keyring_key()) {
             let _ = entry.set_password(&json_str);
         }
     }
 
-    if let Ok(entry) = keyring::Entry::new("com.nexus.assistant", &google_refresh_token_keyring_key(&email_lower)) {
+    // The refresh/access tokens that `get_google_refresh_token` /
+    // `get_google_access_token` actually read live in the token vault under
+    // `google_rt_<email>` / `google_at_<email>` (keychain `nexus-mcp-…`).
+    // Removing an account used to clear only two OTHER key names, so a
+    // "removed" account's refresh token stayed in Credential Manager and in
+    // memory. `clear_token` wipes both.
+    clear_token(&format!("google_rt_{email_lower}"));
+    clear_token(&format!("google_at_{email_lower}"));
+    // Legacy duplicate keys older builds wrote.
+    if let Ok(entry) = kr(&google_refresh_token_keyring_key(&email_lower)) {
         let _ = entry.delete_credential();
     }
-    if let Ok(entry) = keyring::Entry::new("com.nexus.assistant", &google_access_token_keyring_key(&email_lower)) {
+    if let Ok(entry) = kr(&google_access_token_keyring_key(&email_lower)) {
         let _ = entry.delete_credential();
     }
 
@@ -727,6 +758,8 @@ mod tests {
             is_primary: false,
             added_at_ms: 1000,
             scopes: vec!["email".into()],
+            phone: Some("+9111".into()),
+            address: None,
         };
         let prof2 = GoogleAccountProfile {
             email: "user2@gmail.com".into(),
@@ -735,6 +768,8 @@ mod tests {
             is_primary: false,
             added_at_ms: 2000,
             scopes: vec!["email".into()],
+            phone: None,
+            address: None,
         };
 
         save_google_account(prof1.clone(), Some("rt_user1"));
@@ -753,8 +788,65 @@ mod tests {
         set_google_access_token("user2@gmail.com", "at_user2_valid", 3600.0);
         assert_eq!(get_google_access_token("user2@gmail.com").as_deref(), Some("at_user2_valid"));
 
+        assert_eq!(get_google_refresh_token("user2@gmail.com").as_deref(), Some("rt_user2"));
+
         remove_google_account("user1@gmail.com").unwrap();
         remove_google_account("user2@gmail.com").unwrap();
         assert!(get_google_accounts().is_empty());
+        // Regression: a removed account must not keep a usable refresh or
+        // access token (previously both survived in memory and the keychain).
+        for email in ["user1@gmail.com", "user2@gmail.com"] {
+            assert!(get_google_refresh_token(email).is_none(), "refresh token for {email} survived removal");
+            assert!(get_google_access_token(email).is_none(), "access token for {email} survived removal");
+        }
+    }
+
+    #[test]
+    fn vault_tests_never_touch_the_real_credential_store() {
+        // The default credential builder must be the in-memory mock under
+        // cfg(test): an entry written through the vault is not readable via
+        // a second, independent handle (a real store would return it).
+        let a = kr("nexus-test-isolation-probe").unwrap();
+        a.set_password("probe").unwrap();
+        let b = kr("nexus-test-isolation-probe").unwrap();
+        assert!(b.get_password().is_err(), "vault tests are talking to the REAL credential store");
+    }
+
+    #[test]
+    fn google_profile_phone_address_roundtrip_and_legacy_compat() {
+        // New fields survive the keychain round-trip.
+        let prof = GoogleAccountProfile {
+            email: "user3@gmail.com".into(),
+            name: "User Three".into(),
+            picture: None,
+            is_primary: false,
+            added_at_ms: 3000,
+            scopes: vec!["email".into()],
+            phone: Some("+9133".into()),
+            address: Some("Hyderabad, IN".into()),
+        };
+        save_google_account(prof.clone(), None);
+        let loaded: Vec<GoogleAccountProfile> = get_google_accounts()
+            .into_iter()
+            .filter(|a| a.email == "user3@gmail.com")
+            .collect();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].phone.as_deref(), Some("+9133"));
+        assert_eq!(loaded[0].address.as_deref(), Some("Hyderabad, IN"));
+        let _ = remove_google_account("user3@gmail.com");
+
+        // Pre-field JSON (no phone/address keys) must still parse —
+        // otherwise every existing account vanishes after upgrade.
+        let legacy = serde_json::json!({
+            "email": "old@gmail.com",
+            "name": "Old",
+            "picture": null,
+            "is_primary": false,
+            "added_at_ms": 1,
+            "scopes": []
+        });
+        let parsed: GoogleAccountProfile = serde_json::from_value(legacy).expect("legacy profile parses");
+        assert_eq!(parsed.phone, None);
+        assert_eq!(parsed.address, None);
     }
 }

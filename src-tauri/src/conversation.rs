@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use crate::pii_filter;
 use crate::voice_profile::TurnOwnership;
 
-const CONVERSATION_FILE: &str = "conversation.jsonl";
-const CONVERSATION_BRIEF_FILE: &str = "conversation_brief.json";
+pub(crate) const CONVERSATION_FILE: &str = "conversation.jsonl";
+pub(crate) const CONVERSATION_BRIEF_FILE: &str = "conversation_brief.json";
 const MAX_RAW_TURNS: usize = 24;
 const MAX_LIVE_TURNS: usize = 6;
 const MAX_LIVE_CHARS: usize = 1_500;
@@ -110,6 +110,11 @@ pub fn turn_relevance(turn: &ConversationTurn) -> u8 {
     if turn.outcome != ConversationOutcome::Completed || !turn.unresolved.is_empty() {
         return 100;
     }
+    // Counsel turns (F1b): personal situations + verdicts are follow-up
+    // anchors ("about what I told you yesterday") — retain precisely.
+    if turn.intent == "share_concern" {
+        return 95;
+    }
     let text = format!("{} {}", turn.transcript, turn.response).to_lowercase();
     if text.contains("remember") {
         return 90;
@@ -164,6 +169,32 @@ pub fn record_conversation_turn(dir: &Path, input: ConversationTurnInput) -> Opt
     Some(turn.id)
 }
 
+/// Requests NEXUS could not finish in the last 48 h (failed turns, or turns
+/// still waiting on a missing slot), newest first, de-duplicated, at most 3.
+/// The boot briefing reads these; they are the user's own words.
+pub fn unfinished_requests(dir: &Path, now: i64) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for turn in read_turns(dir).into_iter().rev() {
+        if now - turn.ts > 48 * 3600 {
+            continue;
+        }
+        let unfinished = turn.outcome == ConversationOutcome::Failed
+            || (turn.outcome == ConversationOutcome::Clarification && !turn.unresolved.is_empty());
+        if !unfinished || turn.owner == TurnOwnership::Rejected {
+            continue;
+        }
+        let text = turn.transcript.trim().to_string();
+        if text.is_empty() || out.iter().any(|t| t.eq_ignore_ascii_case(&text)) {
+            continue;
+        }
+        out.push(text);
+        if out.len() == 3 {
+            break;
+        }
+    }
+    out
+}
+
 fn read_turns(dir: &Path) -> Vec<ConversationTurn> {
     let Ok(content) = std::fs::read_to_string(conversation_path(dir)) else {
         return Vec::new();
@@ -183,7 +214,7 @@ fn write_turns(dir: &Path, turns: &[ConversationTurn]) {
             content.push('\n');
         }
     }
-    let _ = std::fs::write(conversation_path(dir), content);
+    crate::memory::atomic_write(&conversation_path(dir), content.as_bytes());
 }
 
 fn read_brief(dir: &Path) -> Option<ConversationBrief> {
@@ -194,7 +225,7 @@ fn read_brief(dir: &Path) -> Option<ConversationBrief> {
 fn write_brief(dir: &Path, brief: &ConversationBrief) {
     let _ = std::fs::create_dir_all(dir);
     if let Ok(content) = serde_json::to_string_pretty(brief) {
-        let _ = std::fs::write(brief_path(dir), content);
+        crate::memory::atomic_write(&brief_path(dir), content.as_bytes());
     }
 }
 
@@ -495,6 +526,20 @@ mod tests {
     }
 
     #[test]
+    fn test_relevance_counsel_turns_stick() {
+        // F1b: shared situations + verdicts are follow-up anchors.
+        let mut counsel = turn(
+            "was i right to shout at him",
+            "No — apologise today.",
+            ConversationOutcome::Completed,
+            &[],
+            TurnOwnership::Verified,
+        );
+        counsel.intent = "share_concern".to_string();
+        assert_eq!(turn_relevance(&counsel), 95);
+    }
+
+    #[test]
     fn test_live_window_caps_long_threads_and_preserves_unresolved() {
         let mut turns = Vec::new();
         for index in 0..10 {
@@ -573,6 +618,31 @@ mod tests {
         assert!(!prompt.contains("jane.doe@example.com"));
         assert!(prompt.contains("[REDACTED:EMAIL]"));
         assert!(prompt.len() <= MAX_LIVE_CHARS);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_unfinished_requests_are_recent_deduped_and_owner_checked() {
+        let dir = tempdir("unfinished");
+        let now = chrono::Utc::now().timestamp();
+        let mk = |t: &str, outcome, unresolved: &[&str]| ConversationTurnInput {
+            agent: "worker".into(),
+            intent: "unknown".into(),
+            transcript: t.into(),
+            response: "r".into(),
+            outcome,
+            unresolved: unresolved.iter().map(|s| s.to_string()).collect(),
+            owner: TurnOwnership::Verified,
+        };
+        record_conversation_turn(&dir, mk("send the report to Asha", ConversationOutcome::Failed, &[]));
+        record_conversation_turn(&dir, mk("open chrome", ConversationOutcome::Completed, &[]));
+        record_conversation_turn(&dir, mk("Send the report to asha", ConversationOutcome::Failed, &[]));
+        record_conversation_turn(&dir, mk("message mom", ConversationOutcome::Clarification, &["message"]));
+        record_conversation_turn(&dir, mk("what time is it", ConversationOutcome::Clarification, &[]));
+        let got = unfinished_requests(&dir, now + 5);
+        assert_eq!(got, vec!["message mom".to_string(), "Send the report to asha".to_string()]);
+        // Older than 48 h → gone.
+        assert!(unfinished_requests(&dir, now + 49 * 3600).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

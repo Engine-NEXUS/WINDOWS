@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-const DIARY_FILE: &str = "diary.jsonl";
+pub(crate) const DIARY_FILE: &str = "diary.jsonl";
 /// Keep the diary bounded: prune beyond this many lines on write.
 const MAX_LINES: usize = 2000;
 
