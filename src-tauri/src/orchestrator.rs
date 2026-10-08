@@ -28,7 +28,7 @@
 //! The frontend listens to these events instead of the old "assistant:server"
 //! channel. This centralizes all state transitions in Rust.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -176,6 +176,33 @@ pub fn is_dictation_active() -> bool {
 
 pub fn set_dictation_active(active: bool) {
     DICTATION_ACTIVE.store(active, Ordering::SeqCst);
+}
+
+// ─── Counsel Mode (F1b) ─────────────────────────────────────────────
+// Armed by the ShareConcern opener ("i want to share something"): the
+// NEXT command turn runs through the counsel contract instead of normal
+// routing, then disarms. Deadline-based (120s) so a stale arm can never
+// hijack an unrelated later turn; a second opener just re-arms.
+static COUNSEL_DEADLINE_MS: AtomicU64 = AtomicU64::new(0);
+const COUNSEL_ARM_TTL_MS: u64 = 120_000;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub fn is_counsel_armed() -> bool {
+    let deadline = COUNSEL_DEADLINE_MS.load(Ordering::SeqCst);
+    deadline > 0 && now_ms() < deadline
+}
+
+pub fn set_counsel_armed(armed: bool) {
+    COUNSEL_DEADLINE_MS.store(
+        if armed { now_ms().saturating_add(COUNSEL_ARM_TTL_MS) } else { 0 },
+        Ordering::SeqCst,
+    );
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────
@@ -557,9 +584,24 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         // Screen control intents are handled explicitly in
         // process_transcript (run_screen_click/read/tab); tracked as local.
         ParsedIntent::MemoryAudit
+        | ParsedIntent::Briefing
+        | ParsedIntent::TimetableAdd { .. }
+        | ParsedIntent::TimetableShow
+        | ParsedIntent::TimetableClear
+        | ParsedIntent::TimetableCommit
+        | ParsedIntent::StudyPref { .. }
+        | ParsedIntent::MailDigest
+        | ParsedIntent::MailMute
+        | ParsedIntent::CalendarAgenda { .. }
+        | ParsedIntent::CalendarAdd { .. }
+        | ParsedIntent::WhatsappRead { .. }
+        | ParsedIntent::PeopleFlag { .. }
+        | ParsedIntent::PeopleList
         | ParsedIntent::MemoryForget { .. }
         | ParsedIntent::MemoryForgetAll
         | ParsedIntent::MemoryForgetAllConfirm
+        | ParsedIntent::PersonaFriend
+        | ParsedIntent::PersonaButler
         | ParsedIntent::ScreenClick { .. }
         | ParsedIntent::ScreenRead { .. }
         | ParsedIntent::BrowserTab { .. }
@@ -569,6 +611,10 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         | ParsedIntent::WatchScreenEmail
         | ParsedIntent::StartDictation
         | ParsedIntent::StopDictation => Subsystem::LocalCommand,
+
+        // Counsel runs through cloud backends (9Router → Worker) with the
+        // counsel contract — handled explicitly in process_transcript.
+        ParsedIntent::ShareConcern { .. } => Subsystem::WorkerBackend,
 
         // Ghostwriter room entry — handled explicitly in process_transcript
         // (session start + sidebar card), tracked as a local request.
@@ -643,6 +689,24 @@ pub async fn process_transcript<R: Runtime>(
         transcript.chars().take(80).collect::<String>()
     );
 
+    // A question NEXUS just asked ("Shall I start?", "App or browser?",
+    // "Add these slots?") owns the next short answer. Anything that is not a
+    // clear answer drops the offer and is handled as a normal command.
+    if crate::memcore::offer::is_armed() {
+        use crate::memcore::offer::{self, Offer, Reply};
+        let reply = offer::classify(&transcript);
+        let has_choice = crate::memcore::timetable::parse_choice(&transcript).is_some();
+        match offer::peek() {
+            Some(o @ Offer::Choose { .. }) if has_choice || reply != Reply::Other => {
+                return run_offer_reply(app, o, reply, &transcript).await;
+            }
+            Some(o) if reply != Reply::Other => {
+                return run_offer_reply(app, o, reply, &transcript).await;
+            }
+            _ => offer::clear(),
+        }
+    }
+
     // 1. Parse intent: deterministic (fast, <1ms) → brain (admin) → NLU → Unknown
     // The full pipeline ensures that phrases trained in BERT-Mini or classified
     // by the Qwen brain are actually used for routing, not just observed.
@@ -671,7 +735,10 @@ pub async fn process_transcript<R: Runtime>(
         }
     };
 
-    let intent = parse_result
+    // Persona tone (F0): friend-mode greetings address by name (or drop
+    // the address) instead of "sir". Single hook covering every greeting
+    // pick-list at once; the parser stays pure (no settings access).
+    let mut intent = parse_result
         .as_ref()
         .map(|r| r.intent.clone())
         .unwrap_or_else(|| {
@@ -688,6 +755,17 @@ pub async fn process_transcript<R: Runtime>(
                 raw: transcript.clone(),
             }
         });
+    if let ParsedIntent::Greeting { reply } = &mut intent {
+        if crate::persona::is_friend(&crate::commands::read_persona_mode(&app)) {
+            let name = app
+                .path()
+                .app_data_dir()
+                .ok()
+                .and_then(|dir| crate::memory::read_user_profile(&dir))
+                .and_then(|p| p.name);
+            *reply = crate::persona::restyle_greeting(reply, name.as_deref());
+        }
+    }
 
     let source = parse_result
         .as_ref()
@@ -843,6 +921,31 @@ pub async fn process_transcript<R: Runtime>(
         return run_ghost_control_enter(app).await;
     }
 
+    // ─── Counsel mode intercept (F1b) ───────────────────────────────
+    // Armed by the ShareConcern opener: the NEXT command turn (including
+    // Unknown — the story rarely parses) runs the counsel contract, then
+    // disarms. Control intents bypass so the user can always steer out.
+    // Ghost-session turns skip this (hot-mic loop owns them; explicit
+    // ShareConcern arms still work there via their own arm below).
+    if is_counsel_armed() && !crate::ghost::session_active() {
+        let passthrough = matches!(
+            &intent,
+            ParsedIntent::ShareConcern { .. }
+                | ParsedIntent::PersonaFriend
+                | ParsedIntent::PersonaButler
+                | ParsedIntent::StartDictation
+                | ParsedIntent::StopDictation
+                | ParsedIntent::ExitGhostControl
+        ) || matches!(
+            &intent,
+            ParsedIntent::NluResult { intent, .. } if intent == "cancel_action"
+        );
+        if !passthrough {
+            set_counsel_armed(false);
+            return run_counsel_turn(app, transcript.clone(), dialog_context).await;
+        }
+    }
+
     // ─── Screen control (ordinal click / read-back / tab switch) ────
     // Executes inline (UIA grounding is local, ~50-500ms) with spoken
     // results. Nothing here touches the network.
@@ -921,6 +1024,45 @@ pub async fn process_transcript<R: Runtime>(
         ParsedIntent::MemoryAudit => {
             return run_memory_audit(app).await;
         }
+        ParsedIntent::Briefing => {
+            return run_briefing(app).await;
+        }
+        ParsedIntent::TimetableAdd { source, section } => {
+            return run_timetable_add(app, source.clone(), *section).await;
+        }
+        ParsedIntent::TimetableShow => {
+            return run_timetable_show(app).await;
+        }
+        ParsedIntent::TimetableClear => {
+            return run_timetable_clear(app).await;
+        }
+        ParsedIntent::TimetableCommit => {
+            return run_timetable_commit(app).await;
+        }
+        ParsedIntent::StudyPref { activity, choice } => {
+            return run_study_pref(app, activity.clone(), choice.clone()).await;
+        }
+        ParsedIntent::MailDigest => {
+            return run_mail_digest(app).await;
+        }
+        ParsedIntent::MailMute => {
+            return run_mail_mute(app).await;
+        }
+        ParsedIntent::WhatsappRead { name } => {
+            return run_whatsapp_read(app, name.clone()).await;
+        }
+        ParsedIntent::PeopleFlag { name, kind, on } => {
+            return run_people_flag(app, name.clone(), kind.clone(), *on).await;
+        }
+        ParsedIntent::PeopleList => {
+            return run_people_list(app).await;
+        }
+        ParsedIntent::CalendarAgenda { day } => {
+            return run_calendar_agenda(app, day.clone()).await;
+        }
+        ParsedIntent::CalendarAdd { text } => {
+            return run_calendar_add(app, text.clone()).await;
+        }
         ParsedIntent::MemoryForget { key } => {
             return run_memory_forget(app, key.clone()).await;
         }
@@ -929,6 +1071,15 @@ pub async fn process_transcript<R: Runtime>(
         }
         ParsedIntent::MemoryForgetAllConfirm => {
             return run_memory_forget_all_confirm(app).await;
+        }
+        ParsedIntent::PersonaFriend => {
+            return run_persona_switch(app, true).await;
+        }
+        ParsedIntent::PersonaButler => {
+            return run_persona_switch(app, false).await;
+        }
+        ParsedIntent::ShareConcern { story } => {
+            return run_share_concern(app, story.clone()).await;
         }
         ParsedIntent::StartDictation => {
             set_dictation_active(true);
@@ -1094,6 +1245,12 @@ pub async fn process_transcript<R: Runtime>(
                 return run_browser_new_tab(app).await;
             }
             ParsedIntent::Search { query } | ParsedIntent::BrowserSearch { query } => {
+                #[cfg(target_os = "windows")]
+                {
+                    if crate::live::commands::window::is_foreground_app("whatsapp") {
+                        return run_ghost_message(app, query.clone(), String::new()).await;
+                    }
+                }
                 return run_browser_search(app, query.clone()).await;
             }
             ParsedIntent::BrowserSearchFocus => {
@@ -1119,6 +1276,45 @@ pub async fn process_transcript<R: Runtime>(
             ParsedIntent::MemoryAudit => {
                 return run_memory_audit(app).await;
             }
+            ParsedIntent::Briefing => {
+                return run_briefing(app).await;
+            }
+            ParsedIntent::TimetableAdd { source, section } => {
+                return run_timetable_add(app, source.clone(), *section).await;
+            }
+            ParsedIntent::TimetableShow => {
+                return run_timetable_show(app).await;
+            }
+            ParsedIntent::TimetableClear => {
+                return run_timetable_clear(app).await;
+            }
+            ParsedIntent::TimetableCommit => {
+                return run_timetable_commit(app).await;
+            }
+            ParsedIntent::StudyPref { activity, choice } => {
+                return run_study_pref(app, activity.clone(), choice.clone()).await;
+            }
+            ParsedIntent::MailDigest => {
+                return run_mail_digest(app).await;
+            }
+            ParsedIntent::MailMute => {
+                return run_mail_mute(app).await;
+            }
+            ParsedIntent::WhatsappRead { name } => {
+                return run_whatsapp_read(app, name.clone()).await;
+            }
+            ParsedIntent::PeopleFlag { name, kind, on } => {
+                return run_people_flag(app, name.clone(), kind.clone(), *on).await;
+            }
+            ParsedIntent::PeopleList => {
+                return run_people_list(app).await;
+            }
+            ParsedIntent::CalendarAgenda { day } => {
+                return run_calendar_agenda(app, day.clone()).await;
+            }
+            ParsedIntent::CalendarAdd { text } => {
+                return run_calendar_add(app, text.clone()).await;
+            }
             ParsedIntent::MemoryForget { key } => {
                 return run_memory_forget(app, key.clone()).await;
             }
@@ -1127,6 +1323,15 @@ pub async fn process_transcript<R: Runtime>(
             }
             ParsedIntent::MemoryForgetAllConfirm => {
                 return run_memory_forget_all_confirm(app).await;
+            }
+            ParsedIntent::PersonaFriend => {
+                return run_persona_switch(app, true).await;
+            }
+            ParsedIntent::PersonaButler => {
+                return run_persona_switch(app, false).await;
+            }
+            ParsedIntent::ShareConcern { story } => {
+                return run_share_concern(app, story.clone()).await;
             }
             ParsedIntent::NluResult { intent, slots, .. } if intent == "type_text" => {
                 let text = slots.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -1175,6 +1380,18 @@ pub async fn process_transcript<R: Runtime>(
             }
             ParsedIntent::OpenSettings => {
                 return run_open_settings(app).await;
+            }
+            ParsedIntent::Unknown { .. } => {
+                // Ghost-unknown never goes to cloud chat: a slow/hung
+                // Worker round trip wedges the hot-mic loop with zero
+                // feedback (observed: 29s and 19s dead-air stalls). Memory
+                // + custom-spec fallbacks first (same as normal 2a slot),
+                // else a short local retry line — speaking re-arms the
+                // hot-mic via the normal TTS-onEnd chain.
+                if let Some(handled) = try_unknown_local_fallbacks(&app, &transcript).await {
+                    return handled;
+                }
+                return run_ghost_unknown_retry(app, &transcript).await;
             }
             _ => {}
         }
@@ -1261,40 +1478,8 @@ pub async fn process_transcript<R: Runtime>(
     // Same slot (Unknown only, post-intercepts) so in-room dictation like
     // "remember that we need milk" stays in the room.
     if matches!(&intent, ParsedIntent::Unknown { .. }) {
-        if let Some((key, value)) = crate::memory::parse_remember(&transcript) {
-            if let Ok(dir) = app.path().app_data_dir() {
-                if crate::memory::remember(&dir, &key, &value) {
-                    let reply = format!("Remembered {} as {}.", key.replace('_', " "), value);
-                    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-                    emit(
-                        &app,
-                        &OrchestratorEvent::Result {
-                            text: reply,
-                            request_id: request_id.clone(),
-                            analysis: None,
-                            dialog_state: None,
-                        },
-                    );
-                    emit(
-                        &app,
-                        &OrchestratorEvent::Done {
-                            request_id: request_id.clone(),
-                        },
-                    );
-                    clear_active_request(&request_id);
-                    return Ok(ProcessResult {
-                        request_id,
-                        subsystem: Subsystem::LocalCommand,
-                        handled_locally: true,
-                    });
-                }
-            }
-        }
-        if let Ok(dir) = app.path().app_data_dir() {
-            let specs = crate::agent_specs::load_specs(&dir);
-            if let Some(custom) = crate::agent_specs::match_spec(&specs, &transcript) {
-                return run_custom_spec(app, custom).await;
-            }
+        if let Some(handled) = try_unknown_local_fallbacks(&app, &transcript).await {
+            return handled;
         }
     }
 
@@ -1435,6 +1620,7 @@ pub async fn process_transcript<R: Runtime>(
                 cancel_flag.clone(),
                 &turn,
                 crate::intent_parser::intent_to_label(&intent),
+                false,
             )
             .await;
 
@@ -1679,6 +1865,7 @@ pub async fn process_transcript<R: Runtime>(
                         cancel_flag.clone(),
                         &turn,
                         crate::intent_parser::intent_to_label(&intent),
+                        false,
                     )
                     .await;
 
@@ -2220,6 +2407,26 @@ fn record_worker_turn<R: Runtime>(
     unresolved: Vec<String>,
 ) {
     if let Ok(dir) = app.path().app_data_dir() {
+        // The cloud may have seen "Person A"; local memory keeps real names.
+        let (transcript, response) = if crate::memcore::names::enabled(&dir) {
+            let roster = crate::memcore::names::roster(&dir);
+            (
+                crate::memcore::names::unredact(transcript, &roster),
+                crate::memcore::names::unredact(response, &roster),
+            )
+        } else {
+            (transcript.to_string(), response.to_string())
+        };
+        let (transcript, response) = (transcript.as_str(), response.as_str());
+        // M2 auto-learning: until now nothing called `log_episode`, so
+        // "I work at X" / "call me Y" were never mined. Completed turns of
+        // a recognised owner only — failed, cancelled or rejected audio
+        // must not teach NEXUS anything.
+        if outcome == crate::conversation::ConversationOutcome::Completed
+            && turn.ownership != crate::voice_profile::TurnOwnership::Rejected
+        {
+            crate::memory::log_episode(&dir, transcript, response);
+        }
         let mut unresolved = unresolved;
         unresolved.extend(crate::conversation::unresolved_from_dialog_state(dialog_state));
         crate::conversation::record_conversation_turn(
@@ -2237,6 +2444,9 @@ fn record_worker_turn<R: Runtime>(
     }
 }
 
+/// Cloud dispatch. With `memcoreRedactNames` on, names NEXUS knows locally
+/// are swapped for stable labels ("Person A") in the transcript that leaves
+/// the device and swapped back in the reply — the cloud never sees them.
 async fn dispatch_to_worker<R: Runtime>(
     app: AppHandle<R>,
     transcript: String,
@@ -2245,6 +2455,38 @@ async fn dispatch_to_worker<R: Runtime>(
     cancel_flag: Arc<AtomicBool>,
     turn: &crate::center::TurnContext,
     intent_label: &str,
+    counsel: bool,
+) -> Result<(String, Option<serde_json::Value>, Option<serde_json::Value>), String> {
+    let roster = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .filter(|dir| crate::memcore::names::enabled(dir))
+        .map(|dir| crate::memcore::names::roster(&dir))
+        .filter(|r| !r.is_empty());
+    let Some(roster) = roster else {
+        return dispatch_to_worker_inner(
+            app, transcript, dialog_context, request_id, cancel_flag, turn, intent_label, counsel,
+        )
+        .await;
+    };
+    let masked = crate::memcore::names::redact(&transcript, &roster);
+    dispatch_to_worker_inner(
+        app, masked, dialog_context, request_id, cancel_flag, turn, intent_label, counsel,
+    )
+    .await
+    .map(|(text, a, b)| (crate::memcore::names::unredact(&text, &roster), a, b))
+}
+
+async fn dispatch_to_worker_inner<R: Runtime>(
+app: AppHandle<R>,
+transcript: String,
+dialog_context: Option<serde_json::Value>,
+request_id: String,
+cancel_flag: Arc<AtomicBool>,
+turn: &crate::center::TurnContext,
+intent_label: &str,
+counsel: bool,
 ) -> Result<(String, Option<serde_json::Value>, Option<serde_json::Value>), String> {
     // Redact PII before the transcript leaves the device.
     let transcript = crate::pii_filter::sanitize(&transcript);
@@ -2254,12 +2496,25 @@ async fn dispatch_to_worker<R: Runtime>(
     let mut dialog_context = dialog_context;
     if let Ok(dir) = app.path().app_data_dir() {
         let mut parts = Vec::new();
+        // Counsel turns lead with the contract (F1b): 9Router's
+        // build_prompt renders dialog_context.memory as "Context:", so
+        // this reaches every provider with zero signature changes.
+        if counsel {
+            parts.push(COUNSEL_CONTRACT.to_string());
+        }
+        // Friend tone (F0): same channel — 9Router replies shift tone.
+        // Worker path uses explicit task.persona (injected at payload).
+        if crate::persona::is_friend(&crate::commands::read_persona_mode(&app)) {
+            parts.push(FRIEND_TONE.to_string());
+        }
         if let Some(mem) = crate::memory::get_memory_context(&dir, transcript) {
             parts.push(mem);
         }
         if let Some(history) = crate::conversation::conversation_prompt(&dir) {
             parts.push(history);
         }
+        // What is about to leave the device (7-day, encrypted, user-visible).
+        crate::memcore::log_egress(&dir, "cloud", transcript, &parts.join("\n"));
         if !parts.is_empty() {
             let mut ctx = dialog_context.unwrap_or(serde_json::json!({}));
             if let Some(obj) = ctx.as_object_mut() {
@@ -2348,7 +2603,7 @@ async fn dispatch_to_worker<R: Runtime>(
         (i.identity == crate::identity_state::IDENTITY_CANONICAL && !i.profile_id.is_empty())
             .then(|| i.profile_id.clone())
     });
-    let payload = build_worker_payload_ident(
+    let mut payload = build_worker_payload_ident(
         &request_id,
         &user_id,
         &device_id,
@@ -2356,6 +2611,18 @@ async fn dispatch_to_worker<R: Runtime>(
         transcript,
         clean_ctx.as_ref(),
     );
+    // Counsel turns carry an explicit task intent (F1b): the Worker reads
+    // task.intent as an explicitIntent override and routes to handleCounsel
+    // instead of re-classifying (which would land on generic chat).
+    if counsel {
+        payload["task"]["intent"] = serde_json::Value::String("counsel".to_string());
+    }
+    // Friend tone (F0): explicit task.persona the Worker reads for its
+    // general-system variant. Butler (default) sends nothing — Worker
+    // behavior byte-identical when the user never opts in.
+    if crate::persona::is_friend(&crate::commands::read_persona_mode(&app)) {
+        payload["task"]["persona"] = serde_json::Value::String("friend".to_string());
+    }
     let device_token = profile_id
         .as_ref()
         .and_then(|_| crate::auth_vault::get_api_key(crate::identity_state::DEVICE_TOKEN_SERVICE));
@@ -2373,9 +2640,12 @@ async fn dispatch_to_worker<R: Runtime>(
         );
     };
 
-    // HTTP POST to the Worker
+    // HTTP POST to the Worker. 30s ceiling (was 120s): a hung Worker
+    // round trip wedged the ghost hot-mic loop with zero feedback
+    // (observed: 29s and 19s dead-air stalls). The frontend additionally
+    // races ghost turns at 12s — this is the backstop, not the UX bound.
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| {
@@ -2479,13 +2749,14 @@ async fn dispatch_to_worker<R: Runtime>(
 
 /// Public wrapper for `dispatch_to_worker` — used by command_center steps.
 pub(crate) async fn dispatch_to_worker_pub<R: Runtime>(
-    app: AppHandle<R>,
-    transcript: String,
-    dialog_context: Option<serde_json::Value>,
-    request_id: String,
-    cancel_flag: Arc<AtomicBool>,
-    turn: &crate::center::TurnContext,
-    intent_label: &str,
+app: AppHandle<R>,
+transcript: String,
+dialog_context: Option<serde_json::Value>,
+request_id: String,
+cancel_flag: Arc<AtomicBool>,
+turn: &crate::center::TurnContext,
+intent_label: &str,
+counsel: bool,
 ) -> Result<(String, Option<serde_json::Value>, Option<serde_json::Value>), String> {
     dispatch_to_worker(
         app,
@@ -2495,6 +2766,7 @@ pub(crate) async fn dispatch_to_worker_pub<R: Runtime>(
         cancel_flag,
         turn,
         intent_label,
+        counsel,
     )
     .await
 }
@@ -3649,7 +3921,12 @@ async fn run_screen_tour<R: Runtime>(
     let mut cap: Option<(String, crate::screen_context::Region)> = None;
     for r in candidates {
         let got = tokio::task::spawn_blocking(move || {
-            crate::vision::capture_region_jpeg_base64(r.x, r.y, r.w, r.h, 1536)
+            // Feature 98 P5: 768px capture (VISION_FAST_W) — 82% smaller
+            // base64 upload (400 KB → ~70 KB). The tour crops to page
+            // content, so 768px keeps text legible for the model.
+            crate::vision::capture_region_jpeg_base64(
+                r.x, r.y, r.w, r.h, crate::vision::VISION_FAST_W,
+            )
         })
         .await
         .ok()
@@ -3866,11 +4143,629 @@ async fn run_memory_audit<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult
         Ok(dir) => {
             let (email, enrolled) = memory_credential_hints(&app);
             crate::memory::refresh_user_profile(&dir, email.as_deref(), None, enrolled);
+            // The full, provenance-labelled list goes to the sidebar; the
+            // spoken answer stays a short summary.
+            let st = crate::memcore::status(&dir);
+            if st.enabled {
+                let rows = crate::memcore::list_rows(&dir, 200);
+                let md = crate::memcore::card_markdown(&rows, &st, chrono::Utc::now().timestamp());
+                if let Err(e) = crate::commands::show_sidebar_with_content(
+                    app.clone(),
+                    "What I remember".to_string(),
+                    md,
+                )
+                .await
+                {
+                    tracing::warn!("memory card: could not open sidebar: {e}");
+                }
+            }
             crate::memory::memory_audit_summary(&dir)
         }
         Err(_) => "I couldn't open my memory, sir.".to_string(),
     };
     speak_line(&app, summary, &request_id);
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
+// ─── Timetable (P4) ───────────────────────────────────────────────────
+
+fn local_week_now() -> (u8, u16) {
+    use chrono::{Datelike, Timelike};
+    let now = chrono::Local::now();
+    (now.weekday().num_days_from_monday() as u8, (now.hour() * 60 + now.minute()) as u16)
+}
+
+fn timetable_slots(dir: &std::path::Path) -> Vec<crate::memcore::timetable::Slot> {
+    crate::memcore::with_store(dir, crate::memcore::timetable::load_slots).unwrap_or_default()
+}
+
+/// Speak `text` for a finished local turn.
+fn say_and_finish<R: Runtime>(app: &AppHandle<R>, request_id: String, text: String) -> Result<ProcessResult, String> {
+    speak_line(app, text, &request_id);
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
+/// "Analyse this and add section 2 to my timetable": read the image (screen
+/// or clipboard), show what was found, and ask before saving anything.
+async fn run_timetable_add<R: Runtime>(
+    app: AppHandle<R>,
+    source: String,
+    section: Option<usize>,
+) -> Result<ProcessResult, String> {
+    use crate::memcore::{offer, timetable, timetable_io};
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+    if !crate::memcore::enabled(&dir) {
+        return say_and_finish(&app, request_id, "My memory is switched off, sir, so I can't keep a timetable.".into());
+    }
+    let from_clipboard = source == "clipboard";
+    let b64 = tauri::async_runtime::spawn_blocking(move || {
+        if from_clipboard { timetable_io::clipboard_image_b64() } else { timetable_io::capture_screen_b64() }
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(b64) = b64 else {
+        let msg = if from_clipboard {
+            "There's no picture on the clipboard, sir. Copy the timetable image, or show it on screen and say add this to my timetable."
+        } else {
+            "I couldn't capture the screen, sir."
+        };
+        return say_and_finish(&app, request_id, msg.to_string());
+    };
+    speak_line(&app, "Reading the timetable, sir.".to_string(), &request_id);
+
+    let want = section.map(timetable::Want::Number);
+    let extracted = match timetable_io::extract(&app, &b64, want.as_ref()).await {
+        Ok(ex) => ex,
+        Err(e) => {
+            let msg = match e {
+                timetable_io::ExtractError::NoKey => "I need a Gemini key to read pictures, sir. You can add one in the Command Hub under API Keys.",
+                timetable_io::ExtractError::Quota => "My picture-reading allowance is used up for today, sir.",
+                timetable_io::ExtractError::Timeout => "That took too long, sir. Please try again.",
+                timetable_io::ExtractError::Unreadable => "I couldn't find a timetable in that image, sir. Make sure it's fully visible and try again.",
+            };
+            return say_and_finish(&app, request_id, msg.to_string());
+        }
+    };
+    let slots = match timetable::select_section(&extracted, want.as_ref()) {
+        Ok(s) => s,
+        Err(msg) => return say_and_finish(&app, request_id, format!("{msg} Sir.")),
+    };
+    let existing: std::collections::HashSet<String> = timetable_slots(&dir).into_iter().map(|s| s.id).collect();
+    let fresh: Vec<timetable::Slot> = slots.iter().filter(|s| !existing.contains(&s.id)).cloned().collect();
+    if fresh.is_empty() {
+        return say_and_finish(&app, request_id, "Those are already on your timetable, sir.".into());
+    }
+    let label = match section {
+        Some(n) => format!("section {n}"),
+        None => "the timetable".to_string(),
+    };
+    let md = timetable::card_markdown(
+        &format!("Found in {label}"),
+        &fresh,
+        "Say *yes* to add these, or *no* to discard them. Nothing is saved until you confirm.",
+    );
+    if let Err(e) = crate::commands::show_sidebar_with_content(app.clone(), "Review timetable".to_string(), md).await {
+        tracing::warn!("timetable card: could not open sidebar: {e}");
+    }
+    let listed: Vec<String> = fresh.iter().take(3).map(timetable::describe).collect();
+    let more = fresh.len().saturating_sub(3);
+    let spoken = format!(
+        "I found {} slot{} in {label}: {}{}. Shall I add {}?",
+        fresh.len(),
+        if fresh.len() == 1 { "" } else { "s" },
+        listed.join("; "),
+        if more > 0 { format!("; and {more} more") } else { String::new() },
+        if fresh.len() == 1 { "it" } else { "them" },
+    );
+    offer::set_draft(fresh.clone(), label.clone());
+    offer::set(offer::Offer::AddSlots { slots: fresh, label }, true);
+    speak_line(&app, spoken, &request_id);
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
+fn save_and_speak<R: Runtime>(app: &AppHandle<R>, slots: &[crate::memcore::timetable::Slot]) -> String {
+    let Ok(dir) = app.path().app_data_dir() else { return "I couldn't open my memory, sir.".into() };
+    let now = chrono::Utc::now().timestamp();
+    let n = crate::memcore::with_store(&dir, |s| {
+        crate::memcore::timetable::save_slots(s, slots, "timetable:image", now)
+    })
+    .unwrap_or(0);
+    if n == 0 {
+        return "I couldn't save those, sir.".into();
+    }
+    let all = timetable_slots(&dir);
+    let (wd, min) = local_week_now();
+    let next = crate::memcore::timetable::next_speech(&all, wd, min).unwrap_or_default();
+    format!("Added {n} slot{} to your timetable, sir. {next}", if n == 1 { "" } else { "s" }).trim().to_string()
+}
+
+async fn run_timetable_commit<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let text = match crate::memcore::offer::take_draft() {
+        Some((slots, _)) => {
+            crate::memcore::offer::clear();
+            save_and_speak(&app, &slots)
+        }
+        None => "I don't have any slots waiting, sir. Show me a timetable and say add this to my timetable.".to_string(),
+    };
+    say_and_finish(&app, request_id, text)
+}
+
+async fn run_timetable_show<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+    let slots = timetable_slots(&dir);
+    if slots.is_empty() {
+        return say_and_finish(
+            &app,
+            request_id,
+            "Your timetable is empty, sir. Show me one and say add this to my timetable.".into(),
+        );
+    }
+    let md = crate::memcore::timetable::card_markdown(
+        "Your timetable",
+        &slots,
+        "Say *clear my timetable* to start over. Manage individual slots in the Command Hub under Memory.",
+    );
+    if let Err(e) = crate::commands::show_sidebar_with_content(app.clone(), "Your timetable".to_string(), md).await {
+        tracing::warn!("timetable card: could not open sidebar: {e}");
+    }
+    let (wd, min) = local_week_now();
+    let text = crate::memcore::timetable::next_speech(&slots, wd, min)
+        .unwrap_or_else(|| format!("You have {} slots on your timetable, sir.", slots.len()));
+    say_and_finish(&app, request_id, text)
+}
+
+async fn run_timetable_clear<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let n = app.path().app_data_dir().map(|d| timetable_slots(&d).len()).unwrap_or(0);
+    if n == 0 {
+        return say_and_finish(&app, request_id, "Your timetable is already empty, sir.".into());
+    }
+    crate::memcore::offer::set(crate::memcore::offer::Offer::ClearTimetable, true);
+    say_and_finish(
+        &app,
+        request_id,
+        format!("That erases all {n} slot{} from your timetable, sir. Shall I?", if n == 1 { "" } else { "s" }),
+    )
+}
+
+async fn run_study_pref<R: Runtime>(app: AppHandle<R>, activity: String, choice: String) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let c = if choice == "app" { crate::memcore::timetable::Choice::App } else { crate::memcore::timetable::Choice::Browser };
+    let now = chrono::Utc::now().timestamp();
+    let saved = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .and_then(|d| crate::memcore::with_store(&d, |s| crate::memcore::timetable::set_pref(s, &activity, c, now)))
+        .is_some();
+    let text = if saved {
+        format!(
+            "Understood, sir. I'll use the {} for {} from now on.",
+            if c == crate::memcore::timetable::Choice::App { "app" } else { "browser" },
+            activity.replace('_', " ")
+        )
+    } else {
+        "I couldn't save that, sir.".to_string()
+    };
+    say_and_finish(&app, request_id, text)
+}
+
+/// Open what an activity needs, the way the user prefers, and say what happened.
+async fn start_activity<R: Runtime>(
+    app: &AppHandle<R>,
+    title: &str,
+    activity: &str,
+    choice: crate::memcore::timetable::Choice,
+) -> String {
+    use crate::memcore::{resume, store::Tier, timetable, timetable_io};
+    let Ok(dir) = app.path().app_data_dir() else { return "I couldn't open my memory, sir.".into() };
+    let entries: Vec<(resume::Sample, i64)> = crate::memcore::with_store(&dir, |s| {
+        s.recent(Tier::Resume, 150)
+            .into_iter()
+            .filter_map(|h| resume::decode(&h.value).map(|sm| (sm, h.last_seen)))
+            .collect()
+    })
+    .unwrap_or_default();
+    let targets = timetable::plan_targets(activity, &entries);
+    let wants_video = timetable::plan_sites(activity).map(|s| s.contains(&"youtube.com")).unwrap_or(false);
+    let youtube_missing = wants_video && !targets.iter().any(|t| t.site == "youtube.com");
+    let mut outcomes: Vec<(String, timetable_io::Opened)> = vec![];
+    for t in &targets {
+        let tc = t.clone();
+        let how = tauri::async_runtime::spawn_blocking(move || timetable_io::open_target(&tc, choice))
+            .await
+            .unwrap_or(timetable_io::Opened::Failed);
+        outcomes.push((t.url.clone(), how));
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+    timetable_io::start_speech(title, &targets, &outcomes, youtube_missing)
+}
+
+/// The user answered a question NEXUS asked (see the intercept in
+/// `process_transcript`).
+async fn run_offer_reply<R: Runtime>(
+    app: AppHandle<R>,
+    offer: crate::memcore::offer::Offer,
+    reply: crate::memcore::offer::Reply,
+    text: &str,
+) -> Result<ProcessResult, String> {
+    use crate::memcore::offer::{self, Offer, Reply};
+    use crate::memcore::timetable;
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    offer::clear();
+    let dir = app.path().app_data_dir().ok();
+    let said_choice = timetable::parse_choice(text);
+    let now = chrono::Utc::now().timestamp();
+    let remember = |activity: &str, c: timetable::Choice| {
+        if let Some(d) = &dir {
+            crate::memcore::with_store(d, |s| timetable::set_pref(s, activity, c, now));
+        }
+    };
+
+    let line = match (offer, reply) {
+        (Offer::Start { title, activity }, Reply::Yes) => {
+            // A choice spoken with the yes ("yes, in the browser") also
+            // overwrites the stored one.
+            if let Some(c) = said_choice {
+                remember(&activity, c);
+            }
+            let stored = said_choice.or_else(|| {
+                dir.as_ref().and_then(|d| crate::memcore::with_store(d, |s| timetable::get_pref(s, &activity)).flatten())
+            });
+            match stored {
+                Some(c) => start_activity(&app, &title, &activity, c).await,
+                None => {
+                    offer::set(Offer::Choose { title: title.clone(), activity }, true);
+                    format!("Should I open {title} in the app or in the browser, sir? I'll remember your answer.")
+                }
+            }
+        }
+        (Offer::Start { title, activity }, Reply::Later) => {
+            crate::memcore::scheduler::snooze_start(&app, title, activity);
+            "Very well, sir. I'll ask again in ten minutes.".to_string()
+        }
+        (Offer::Start { title, .. }, _) => format!("Understood, sir. Skipping {title} for now."),
+        (Offer::Choose { title, activity }, Reply::Yes | Reply::Other) if said_choice.is_some() => {
+            let c = said_choice.unwrap_or(timetable::Choice::Browser);
+            remember(&activity, c);
+            start_activity(&app, &title, &activity, c).await
+        }
+        (Offer::Choose { .. }, _) => "Very well, sir. I won't open anything.".to_string(),
+        (Offer::AddSlots { slots, .. }, Reply::Yes) => {
+            let _ = offer::take_draft();
+            save_and_speak(&app, &slots)
+        }
+        (Offer::AddSlots { .. }, Reply::Later) => {
+            "Very well, sir. Say add those slots whenever you're ready.".to_string()
+        }
+        (Offer::AddSlots { .. }, _) => {
+            let _ = offer::take_draft();
+            "Understood, sir. I won't add them.".to_string()
+        }
+        (Offer::ClearTimetable, Reply::Yes) => {
+            let n = dir
+                .as_ref()
+                .and_then(|d| crate::memcore::with_store(d, |s| timetable::clear_slots(s, now)))
+                .unwrap_or(0);
+            format!("Done, sir. I erased {n} slot{}.", if n == 1 { "" } else { "s" })
+        }
+        (Offer::ClearTimetable, _) => "Understood, sir. Your timetable stays.".to_string(),
+        (Offer::AddEvent { summary, start_iso, end_iso, when }, Reply::Yes) => {
+            let ev = crate::google::types::NewEvent {
+                summary: summary.clone(),
+                description: Some("Added by NEXUS".to_string()),
+                start_iso,
+                end_iso,
+                location: None,
+            };
+            let acct = crate::memcore::google_io::primary_account(crate::memcore::google_io::can_use_calendar);
+            let email = acct.and_then(|a| a.email);
+            let res = crate::memcore::google_io::with_client(email.as_deref(), |c| {
+                let ev = ev.clone();
+                async move { crate::memcore::google_io::calendar_insert(&c, &ev).await }
+            })
+            .await;
+            match res {
+                Ok(_) => format!("Done, sir. {summary} is on your calendar {when}."),
+                Err(_) => "I couldn't save it to your calendar, sir. Please check that Google is connected.".to_string(),
+            }
+        }
+        (Offer::AddEvent { .. }, Reply::Later) => "Very well, sir. Ask me again whenever you're ready.".to_string(),
+        (Offer::AddEvent { .. }, _) => "Understood, sir. I won't add it.".to_string(),
+    };
+    say_and_finish(&app, request_id, line)
+}
+
+// ─── Inbox + calendar (P5) ────────────────────────────────────────────
+
+fn not_connected_line(what: &str) -> String {
+    format!("I'm not connected to your {what} yet, sir. You can connect a Google account in the Command Hub.")
+}
+
+/// "Any important emails?" — what the inbox watcher filed, most urgent first.
+async fn run_mail_digest<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    use crate::memcore::{briefing, google_io};
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+    let items = briefing::important_mail(&dir, chrono::Utc::now().timestamp());
+    if items.is_empty() {
+        let line = if google_io::list_accounts(google_io::can_read_mail).is_empty() {
+            not_connected_line("Gmail")
+        } else if !crate::memcore::flag(&dir, "memcoreMail", true) {
+            "Email alerts are switched off, sir. You can turn them on in the Command Hub under Memory.".to_string()
+        } else {
+            "Nothing important in your inbox right now, sir.".to_string()
+        };
+        return say_and_finish(&app, request_id, line);
+    }
+    let mut md = String::from("## Important email\n\n");
+    for m in &items {
+        md.push_str(&format!("- {}\n", briefing::mail_line(m).replace(['*', '_', '[', ']', '<', '>', '`', '#', '|'], "")));
+    }
+    md.push_str("\n---\nSay *that's not important* right after an alert to stop alerts from that sender.\n");
+    if let Err(e) = crate::commands::show_sidebar_with_content(app.clone(), "Important email".to_string(), md).await {
+        tracing::warn!("mail card: could not open sidebar: {e}");
+    }
+    let first = briefing::mail_line(&items[0]);
+    let line = if items.len() == 1 {
+        format!("You have one important email, sir: {first}.")
+    } else {
+        format!("You have {} important emails, sir. The most urgent is {first}. The rest are in the sidebar.", items.len())
+    };
+    say_and_finish(&app, request_id, line)
+}
+
+/// "That's not important" — mute the sender of the alert just spoken.
+async fn run_mail_mute<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    // "That's not important" refers to whichever alert (mail or WhatsApp) was spoken last.
+    if let Some(wa_age) = crate::memcore::wa::last_alert_age() {
+        let mail_age = crate::memcore::mailwatch::last_alert_age();
+        if mail_age.map(|m| wa_age < m).unwrap_or(true) {
+            return run_whatsapp_mute_last(app).await;
+        }
+    }
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let line = match crate::memcore::mailwatch::last_alert_sender() {
+        None => "I haven't alerted you about any email in the last few minutes, sir.".to_string(),
+        Some((email, label)) => {
+            let now = chrono::Utc::now().timestamp();
+            let done = app
+                .path()
+                .app_data_dir()
+                .ok()
+                .and_then(|d| crate::memcore::with_store(&d, |s| crate::memcore::mailwatch::mute_sender(s, &email, now)))
+                .unwrap_or(false);
+            if done {
+                format!("Understood, sir. I won't alert you about mail from {label} any more. Say forget mail mute {email} to undo it.")
+            } else {
+                "I couldn't save that, sir.".to_string()
+            }
+        }
+    };
+    say_and_finish(&app, request_id, line)
+}
+
+// ─── WhatsApp priority people (P6) ────────────────────────────────────
+
+fn wa_off_line() -> String {
+    "WhatsApp watching is switched off, sir. You can turn it on in the Command Hub under Memory.".to_string()
+}
+
+/// "Read that message" - the conversation goes to the sidebar (local). The
+/// text is only spoken if the user opted in: the voice service is a cloud
+/// service and would receive the message text.
+async fn run_whatsapp_read<R: Runtime>(app: AppHandle<R>, name: Option<String>) -> Result<ProcessResult, String> {
+    use crate::memcore::wa;
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+    if !crate::memcore::flag(&dir, "memcoreWhatsapp", false) {
+        return say_and_finish(&app, request_id, wa_off_line());
+    }
+    let resolved = crate::memcore::with_store(&dir, |s| wa::resolve_chat(s, name.as_deref()))
+        .unwrap_or_else(|| Err("I couldn't open my memory, sir.".to_string()));
+    let (jid, display) = match resolved {
+        Ok(r) => r,
+        Err(e) => return say_and_finish(&app, request_id, e),
+    };
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+    let msgs = match tokio::time::timeout(std::time::Duration::from_secs(20), wa::fetch_chat(&client, &jid)).await {
+        Ok(Ok(m)) => m,
+        Ok(Err(e)) => return say_and_finish(&app, request_id, format!("I couldn't read that chat, sir. {e}")),
+        Err(_) => return say_and_finish(&app, request_id, "WhatsApp took too long to answer, sir.".into()),
+    };
+    let md = wa::card_markdown(&display, &msgs);
+    if let Err(e) = crate::commands::show_sidebar_with_content(app.clone(), format!("WhatsApp - {display}"), md).await {
+        tracing::warn!("whatsapp card: could not open sidebar: {e}");
+    }
+    let line = if crate::memcore::flag(&dir, "memcoreWhatsappSpeak", false) {
+        wa::read_aloud(&display, &msgs)
+    } else if msgs.iter().any(|m| !m.from_me) {
+        format!("I've put {display}'s latest messages in the sidebar, sir. I haven't marked them as read.")
+    } else {
+        format!("I don't see any recent messages from {display}, sir.")
+    };
+    say_and_finish(&app, request_id, line)
+}
+
+/// "Make Asha a VIP" / "mute WhatsApp alerts from Raj".
+async fn run_people_flag<R: Runtime>(app: AppHandle<R>, name: String, kind: String, on: bool) -> Result<ProcessResult, String> {
+    use crate::memcore::wa::{self, FlagOutcome, PersonFlag};
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+    let flag = if kind == "vip" { PersonFlag::Vip } else { PersonFlag::Mute };
+    let now = chrono::Utc::now().timestamp();
+    let outcome = crate::memcore::with_store(&dir, |s| wa::set_flag(s, &name, flag, on, now)).unwrap_or(FlagOutcome::NotFound);
+    let line = match (outcome, flag, on) {
+        (FlagOutcome::Done(n), PersonFlag::Vip, true) => format!("Done, sir. {n} is a priority person - I'll tell you whenever they message."),
+        (FlagOutcome::Done(n), PersonFlag::Vip, false) => format!("Understood, sir. {n} is no longer pinned as a priority person."),
+        (FlagOutcome::Done(n), PersonFlag::Mute, true) => format!("Understood, sir. I won't alert you about WhatsApp messages from {n}."),
+        (FlagOutcome::Done(n), PersonFlag::Mute, false) => format!("Done, sir. I'll alert you about {n} again when it matters."),
+        (FlagOutcome::Ambiguous(v), _, _) => format!("I know more than one {name}, sir: {}. Please say the full name.", v.join(", ")),
+        (FlagOutcome::NotFound, _, _) => format!("I don't know a WhatsApp contact called {name} yet, sir. I learn people from your chats once WhatsApp is connected."),
+    };
+    say_and_finish(&app, request_id, line)
+}
+
+/// "Who are my priority people".
+async fn run_people_list<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    use crate::memcore::{people, wa};
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+    let now = chrono::Utc::now().timestamp();
+    let (line, rows) = crate::memcore::with_store(&dir, |s| {
+        (wa::priority_line(s, now), people::ranked(&people::load_all(s), now))
+    })
+    .unwrap_or_else(|| ("I couldn't open my memory, sir.".to_string(), vec![]));
+    if !rows.is_empty() {
+        let esc = |s: &str| s.replace(['*', '_', '[', ']', '<', '>', '`', '#', '|', '\\'], "");
+        let mut md = String::from("## Priority people on WhatsApp\n\n");
+        for (p, sc) in rows.iter().take(10) {
+            let tag = if p.vip { " (VIP)" } else if p.muted { " (muted)" } else { "" };
+            md.push_str(&format!("- **{}**{} - {}: {}\n", esc(&p.name), tag, sc.value, esc(&sc.why)));
+        }
+        md.push_str("\n---\nLearned from how often you message each other and how fast you reply. Message text is never used. Say *make <name> a VIP* or *mute WhatsApp alerts from <name>* to change this.\n");
+        if let Err(e) = crate::commands::show_sidebar_with_content(app.clone(), "Priority people".to_string(), md).await {
+            tracing::warn!("people card: could not open sidebar: {e}");
+        }
+    }
+    say_and_finish(&app, request_id, line)
+}
+
+/// "That's not important" right after a WhatsApp alert: mute that person.
+async fn run_whatsapp_mute_last<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    use crate::memcore::wa::{self, FlagOutcome, PersonFlag};
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Some((jid, name)) = wa::last_alert_chat() else {
+        return say_and_finish(&app, request_id, "I haven't alerted you about any WhatsApp message lately, sir.".into());
+    };
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+    let now = chrono::Utc::now().timestamp();
+    let done = crate::memcore::with_store(&dir, |s| match crate::memcore::people::get(s, &jid) {
+        Some(mut p) => {
+            p.muted = true;
+            p.vip = false;
+            crate::memcore::people::save_user_choice(s, &p, now);
+            true
+        }
+        None => matches!(wa::set_flag(s, &name, PersonFlag::Mute, true, now), FlagOutcome::Done(_)),
+    })
+    .unwrap_or(false);
+    let line = if done {
+        format!("Understood, sir. I won't alert you about WhatsApp messages from {name} any more. Say unmute WhatsApp alerts from {name} to undo it.")
+    } else {
+        "I couldn't save that, sir.".to_string()
+    };
+    say_and_finish(&app, request_id, line)
+}
+
+/// "What's on my calendar today / tomorrow".
+async fn run_calendar_agenda<R: Runtime>(app: AppHandle<R>, day: String) -> Result<ProcessResult, String> {
+    use crate::memcore::{agenda, google_io};
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if google_io::primary_account(google_io::can_use_calendar).is_none() {
+        return say_and_finish(&app, request_id, not_connected_line("calendar"));
+    }
+    let offset = if day == "tomorrow" { 1 } else { 0 };
+    let items = match tokio::time::timeout(std::time::Duration::from_secs(10), google_io::agenda_for(offset)).await {
+        Ok(Ok(items)) => items,
+        Ok(Err(crate::google::types::GoogleError::AuthRequired)) => {
+            return say_and_finish(&app, request_id, "Google needs you to sign in again before I can read your calendar, sir.".into());
+        }
+        _ => return say_and_finish(&app, request_id, "I couldn't reach your calendar just now, sir.".into()),
+    };
+    let friend = crate::persona::is_friend(&crate::commands::read_persona_mode(&app));
+    let address = crate::persona::address(None, friend).filter(|_| !friend);
+    let md = agenda::card_markdown(&format!("Calendar — {day}"), &items);
+    if let Err(e) = crate::commands::show_sidebar_with_content(app.clone(), "Your calendar".to_string(), md).await {
+        tracing::warn!("agenda card: could not open sidebar: {e}");
+    }
+    say_and_finish(&app, request_id, agenda::agenda_speech(&items, &day, address.as_deref()))
+}
+
+/// "Add dentist to my calendar tomorrow at 5pm" — read it back, then ask.
+async fn run_calendar_add<R: Runtime>(app: AppHandle<R>, text: String) -> Result<ProcessResult, String> {
+    use crate::memcore::{agenda, google_io, offer};
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if google_io::primary_account(google_io::can_use_calendar).is_none() {
+        return say_and_finish(&app, request_id, not_connected_line("calendar"));
+    }
+    let now = chrono::Local::now();
+    let draft = match agenda::parse_event_request(&text, now) {
+        Ok(d) => d,
+        Err(e) => return say_and_finish(&app, request_id, e.message().to_string()),
+    };
+    let offset = (draft.start.date_naive() - now.date_naive()).num_days();
+    let busy = tokio::time::timeout(std::time::Duration::from_secs(8), google_io::agenda_for(offset))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
+    let when = agenda::when_phrase(draft.start, now);
+    let ev = agenda::to_new_event(&draft);
+    let conflict = agenda::conflict_speech(&busy, &draft).map(|c| format!(" {c}")).unwrap_or_default();
+    offer::set(
+        offer::Offer::AddEvent { summary: draft.summary.clone(), start_iso: ev.start_iso, end_iso: ev.end_iso, when: when.clone() },
+        true,
+    );
+    say_and_finish(&app, request_id, format!("Add {} {when} to your calendar?{conflict}", draft.summary))
+}
+
+/// "Where did I leave off / show my briefing" (P3): built from local data,
+/// spoken short, full card in the sidebar. Never calls the cloud.
+async fn run_briefing<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let reply = match app.path().app_data_dir() {
+        Ok(dir) if crate::memcore::enabled(&dir) => match crate::memcore::briefing::on_demand(&app, &dir).await {
+            Some(b) => {
+                if let Err(e) = crate::commands::show_sidebar_with_content(
+                    app.clone(),
+                    "Your briefing".to_string(),
+                    b.card_md.clone(),
+                )
+                .await
+                {
+                    tracing::warn!("briefing card: could not open sidebar: {e}");
+                }
+                b.spoken
+            }
+            None => {
+                let recording = crate::memcore::flag(&dir, "memcoreActivity", true);
+                if recording {
+                    "I don't have anything to report yet, sir. I start remembering where you were once you've been working for a minute or so.".to_string()
+                } else {
+                    "I'm not recording what you work on, sir. You can switch that on in the Command Hub under Memory.".to_string()
+                }
+            }
+        },
+        Ok(_) => "My memory is switched off, sir.".to_string(),
+        Err(_) => "I couldn't open my memory, sir.".to_string(),
+    };
+    speak_line(&app, reply, &request_id);
     clear_active_request(&request_id);
     Ok(local_result(request_id, Subsystem::LocalCommand))
 }
@@ -3902,7 +4797,7 @@ async fn run_memory_forget_all<R: Runtime>(app: AppHandle<R>) -> Result<ProcessR
     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
     speak_line(
         &app,
-        "This erases everything I remember — facts, learned details, and conversations. Say 'yes, forget everything' to confirm, sir.".to_string(),
+        "This erases everything I remember — facts, learned details, conversations, my activity diary and email watches. Say 'yes, forget everything' to confirm, sir.".to_string(),
         &request_id,
     );
     clear_active_request(&request_id);
@@ -3929,6 +4824,132 @@ async fn run_memory_forget_all_confirm<R: Runtime>(app: AppHandle<R>) -> Result<
     Ok(local_result(request_id, Subsystem::LocalCommand))
 }
 
+/// Switch personality tone (F0): persists personaMode + speaks a
+/// mode-appropriate confirm (friend confirm never says "sir").
+async fn run_persona_switch<R: Runtime>(app: AppHandle<R>, friend: bool) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let stored = crate::commands::set_persona_mode(&app, if friend { "friend" } else { "butler" });
+    let reply = if stored == "friend" {
+        let name_part = app
+            .path()
+            .app_data_dir()
+            .ok()
+            .and_then(|dir| crate::memory::read_user_profile(&dir))
+            .and_then(|p| p.name)
+            .map(|n| format!("{n}. "))
+            .unwrap_or_default();
+        format!("Got it, {name_part}I'll talk like a friend now.")
+    } else {
+        "Understood, sir — formal it is.".to_string()
+    };
+    speak_line(&app, reply, &request_id);
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
+/// Counsel contract injected into dialog_context.memory (F1b): honored by
+/// 9Router's build_prompt AND readable by the Worker path. Assumes an
+/// RLHF'd base model (~58% baseline sycophancy): explicit truthfulness
+/// demand (Anthropic non-sycophantic trick) + direct-even-if-critical
+/// fragment (ELEPHANT's strongest mitigation) + assess-don't-comply
+/// verdict structure + memory-agreeableness counter (+45% warning).
+/// Text-only: never stored as a fact, never spoken back.
+pub(crate) const COUNSEL_CONTRACT: &str = concat!(
+    "COUNSEL MODE (user explicitly demands honesty): ",
+    "tell the truth even when it disagrees with the user. ",
+    "Please provide direct advice, even if critical, since it is more helpful. ",
+    "Assess the user's action against what is right — do not mirror their framing. ",
+    "Structure every counsel reply exactly: (1) one-line acknowledgment reflecting what you heard, ",
+    "(2) if the situation is underspecified, ask ONE clarifying question instead of verdicting, ",
+    "(3) verdict first — what was right, what was wrong, said plainly, no hedging, ",
+    "(4) one actionable next step. ",
+    "Disagreement must be respectful and specific. ",
+    "For harm, legal, or medical situations: be careful and non-judgmental, ",
+    "suggest real help, never moralize, never diagnose. ",
+    "Keep it short — this is spoken aloud, 3-5 sentences max. ",
+    "Do not use markdown, headers, or bullet points.",
+);
+
+/// Friend-tone line (F0): appended to dialog_context.memory when persona
+/// mode is friend, so 9Router replies shift tone (name, contractions,
+/// short warmth, no "sir") with zero signature changes. Worker path uses
+/// explicit task.persona (injected below) + generalSystem variant.
+pub(crate) const FRIEND_TONE: &str = concat!(
+    "TONE (user prefers friend mode): use their first name when known, ",
+    "contractions, short warm replies, gentle situational lightness. ",
+    "Never say 'sir'.",
+);
+
+/// ShareConcern opener (F1b): arm counsel mode + invite the story.
+async fn run_share_concern<R: Runtime>(
+    app: AppHandle<R>,
+    story: Option<String>,
+) -> Result<ProcessResult, String> {
+    match story {
+        Some(s) => run_counsel_turn(app, s, None).await,
+        None => {
+            let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+            set_counsel_armed(true);
+            speak_line(
+                &app,
+                "I'm listening — tell me everything, and I'll tell you honestly what I think.".to_string(),
+                &request_id,
+            );
+            clear_active_request(&request_id);
+            Ok(local_result(request_id, Subsystem::LocalCommand))
+        }
+    }
+}
+
+/// Run one counsel turn (F1b): armed story or direct story — both through
+/// the counsel contract (9Router memory injection + Worker explicit
+/// intent), recorded as a high-relevance share_concern turn.
+async fn run_counsel_turn<R: Runtime>(
+    app: AppHandle<R>,
+    story: String,
+    dialog_context: Option<serde_json::Value>,
+) -> Result<ProcessResult, String> {
+    let (request_id, cancel_flag) = install_new_request(Subsystem::WorkerBackend);
+    // turn_context default: counsel turns record without dialog state.
+    let turn = crate::center::TurnContext::default();
+    let result = dispatch_to_worker(
+        app.clone(),
+        story,
+        dialog_context,
+        request_id.clone(),
+        cancel_flag,
+        &turn,
+        "share_concern",
+        true,
+    )
+    .await;
+    match result {
+        Ok((text, analysis, dialog_state)) => {
+            emit(
+                &app,
+                &OrchestratorEvent::Result {
+                    text: text.clone(),
+                    request_id: request_id.clone(),
+                    analysis,
+                    dialog_state,
+                },
+            );
+            clear_active_request(&request_id);
+            Ok(ProcessResult {
+                request_id,
+                subsystem: Subsystem::WorkerBackend,
+                handled_locally: false,
+            })
+        }
+        Err(e) => {
+            hide_loading(&app);
+            speak_line(&app, e.clone(), &request_id);
+            clear_active_request(&request_id);
+            Ok(local_result(request_id, Subsystem::LocalCommand))
+        }
+    }
+}
+
 /// Analyze screen contents (Feature 86 spatial flow): Gemini-primary
 /// spatial decomposition → stage overlay pins + sidebar SpatialDashboard.
 /// Graceful degradation chain: spatial VLM → plain-text VLM → UIA count.
@@ -3951,7 +4972,18 @@ async fn run_screen_analysis<R: Runtime>(
         {
             match run_screen_tour(&app, &prompt, &request_id, &cancel_flag).await {
                 TourRun::Done(result) => return Ok(result),
-                TourRun::Fallback { acked } => tour_acked = acked,
+                TourRun::Fallback { acked } => {
+                    tour_acked = acked;
+                    // Feature 98 P2: kill the 3-engine retry cascade. The tour
+                    // already failed the whole Gemini ladder — a second/third
+                    // cloud upload only buys dead air. The local WinRT OCR
+                    // answer was computed in ~25ms; speak it NOW (≤1.5s
+                    // worst-case failure). Empty OCR (graphical screen) falls
+                    // through to a single spatial attempt below.
+                    if let Some(res) = try_ocr_answer(&app, &prompt, &request_id).await {
+                        return Ok(res);
+                    }
+                }
             }
         }
     }
@@ -4019,14 +5051,23 @@ async fn run_screen_analysis<R: Runtime>(
                     tracing::warn!("spatial: sidebar show failed: {e}");
                 }
                 crate::commands::emit_logged(&app, "sidebar:show_spatial", payload_json);
-                // 4. Speak the high-level summary.
-                let n = payload.items.len();
-                let line = format!(
-                    "I've highlighted {} {} on your screen, sir. Detailed breakdown is in the sidebar.",
-                    n,
-                    if n == 1 { "element" } else { "elements" }
-                );
-                speak_line(&app, line, &request_id);
+                // 4. Speak the high-level summary — the model's overview
+                //    (names public figures/celebrities when recognized),
+                //    falling back to the element count when empty (Feature 98 P4).
+                let spoken_line = if !payload.overview.trim().is_empty() {
+                    format!(
+                        "{}, sir.",
+                        payload.overview.trim().trim_end_matches('.')
+                    )
+                } else {
+                    let n = payload.items.len();
+                    format!(
+                        "I've highlighted {} {} on your screen, sir. Detailed breakdown is in the sidebar.",
+                        n,
+                        if n == 1 { "element" } else { "elements" }
+                    )
+                };
+                speak_line(&app, spoken_line, &request_id);
                 clear_active_request(&request_id);
                 return Ok(ProcessResult {
                     request_id,
@@ -4044,10 +5085,9 @@ async fn run_screen_analysis<R: Runtime>(
         // fallback now runs on Gemini Flash-Lite.
         let gemini_key = crate::commands::read_api_key(&app, "gemini");
         if !gemini_key.is_empty() {
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(12))
-                .build()
-                .unwrap_or_default();
+            // Feature 98: pooled 4s client (was a fresh 12s build — part of
+            // the 30s death spiral).
+            let client = crate::vision::shared_vision_client();
 
             if let Some((b64, _, _)) = crate::vision::capture_gridded_jpeg_base64() {
                 let vlm_prompt = format!("You are NEXUS, an advanced AI desktop assistant. Concisely describe what is visible on the user's screen in 1-2 clear, direct sentences. Focus on the active app and main content: {prompt}");
@@ -4524,17 +5564,13 @@ async fn run_click_element<R: Runtime>(app: AppHandle<R>, name: String) -> Resul
                         .app_data_dir()
                         .unwrap_or_else(|_| std::path::PathBuf::from("."));
                     let order = crate::vision::read_vision_provider(&usage_dir);
-                    match reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(25))
-                        .build()
-                    {
-                        Ok(client) => crate::vision::locate_with_fallback(
-                            &name, &groq_key, &gemini_key, &order, &usage_dir, &client,
-                        )
-                        .await
-                        .map(|t| t.el),
-                        Err(_) => None,
-                    }
+                    // Feature 98: pooled keep-alive client (no cold TLS).
+                    crate::vision::locate_with_fallback(
+                        &name, &groq_key, &gemini_key, &order, &usage_dir,
+                        &crate::vision::shared_vision_client(),
+                    )
+                    .await
+                    .map(|t| t.el)
                 }
             }
         };
@@ -4591,6 +5627,11 @@ pub fn speak_line<R: Runtime>(app: &AppHandle<R>, text: String, request_id: &str
     {
         let preview: String = text.chars().take(80).collect();
         println!("[TTS] speak (req={request_id}): \"{preview}\"");
+    }
+    // A reminder that asks "Shall I start?" starts listening for the answer
+    // only now that the question is being spoken.
+    if request_id.starts_with("sentinel_offer_") {
+        crate::memcore::offer::arm();
     }
     emit(
         app,
@@ -4766,6 +5807,78 @@ async fn run_ghost_control_enter<R: Runtime>(
     })
 }
 
+/// Unknown-transcript local fallbacks shared by the normal pipeline (2a
+/// slot) and the ghost branch: explicit memory writes + declarative
+/// custom specs. Returns Some when handled (caller returns it directly);
+/// None lets the caller continue (cloud Worker in normal mode, local
+/// retry in ghost mode). Takes &app (clones for run_custom_spec) so the
+/// caller keeps ownership either way.
+async fn try_unknown_local_fallbacks<R: Runtime>(
+    app: &AppHandle<R>,
+    transcript: &str,
+) -> Option<Result<ProcessResult, String>> {
+    if let Some((key, value)) = crate::memory::parse_remember(transcript) {
+        if let Ok(dir) = app.path().app_data_dir() {
+            if crate::memory::remember(&dir, &key, &value) {
+                let reply = format!("Remembered {} as {}.", key.replace('_', " "), value);
+                let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                emit(
+                    app,
+                    &OrchestratorEvent::Result {
+                        text: reply,
+                        request_id: request_id.clone(),
+                        analysis: None,
+                        dialog_state: None,
+                    },
+                );
+                emit(
+                    app,
+                    &OrchestratorEvent::Done {
+                        request_id: request_id.clone(),
+                    },
+                );
+                clear_active_request(&request_id);
+                return Some(Ok(ProcessResult {
+                    request_id,
+                    subsystem: Subsystem::LocalCommand,
+                    handled_locally: true,
+                }));
+            }
+        }
+    }
+    if let Ok(dir) = app.path().app_data_dir() {
+        let specs = crate::agent_specs::load_specs(&dir);
+        if let Some(custom) = crate::agent_specs::match_spec(&specs, transcript) {
+            return Some(run_custom_spec(app.clone(), custom).await);
+        }
+    }
+    None
+}
+
+/// Ghost-unknown retry: an unparseable turn inside a live ghost session
+/// NEVER goes to cloud chat (slow + useless for control — a hung Worker
+/// round trip wedges the hot-mic loop with zero feedback). Short local
+/// retry line instead; speaking re-arms the hot-mic via the normal
+/// TTS-onEnd chain, so a mishearing costs ~1s and the session survives.
+async fn run_ghost_unknown_retry<R: Runtime>(
+    app: AppHandle<R>,
+    transcript: &str,
+) -> Result<ProcessResult, String> {
+    crate::missed_intent_logger::log_missed_intent(transcript, "ghost", "unknown_in_session");
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    speak_line(
+        &app,
+        "Didn't catch that, sir — say it again.".to_string(),
+        &request_id,
+    );
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
 /// Ghost open flow: OpenApp while a ghost session is live. Registry fast
 /// path first (focus-or-launch, ~ms), Win-search drill only on miss.
 /// Session guards before acting; the session stays open after (follow-ups
@@ -4799,16 +5912,29 @@ async fn run_ghost_open<R: Runtime>(
     // draining while drill_running() is true would re-queue forever.
     let outcome = {
         let _guard = crate::ghost::GhostDrillGuard::new();
+        let target_clone = target.clone();
         match crate::command_executor::resolve_and_open_app(&target) {
             Ok(_) => {
                 #[cfg(target_os = "windows")]
                 {
-                    let _ = crate::live::commands::window::focus_app_by_title(&target);
+                    let _ = tokio::task::spawn_blocking(move || {
+                        crate::live::commands::window::wait_and_focus_app(&target_clone, 2500);
+                    })
+                    .await;
                 }
                 "Ok sir.".to_string()
             }
             Err(_) => match crate::live::commands::launcher::open_app_via_search(&target) {
-                Ok(()) => "Ok sir.".to_string(),
+                Ok(()) => {
+                    #[cfg(target_os = "windows")]
+                    {
+                        let _ = tokio::task::spawn_blocking(move || {
+                            crate::live::commands::window::wait_and_focus_app(&target_clone, 2500);
+                        })
+                        .await;
+                    }
+                    "Ok sir.".to_string()
+                }
                 Err(e) => e,
             },
         }
@@ -5085,10 +6211,10 @@ pub async fn orchestrator_process<R: Runtime>(
     process_transcript(app, transcript, dialog_context, turn_context).await
 }
 
-/// IPC: Cancel the active orchestrator request (barge-in / new wake).
+/// IPC: Cancel the active orchestrator request (barge-in / new wake / dismiss).
 #[tauri::command]
 pub async fn orchestrator_cancel() -> Result<(), String> {
-    cancel_active();
+    request_barge_in("ipc-cancel");
     Ok(())
 }
 
@@ -5591,6 +6717,38 @@ mod tests {
         assert_eq!(seed.get("tool").and_then(|v| v.as_str()), Some("select"));
         assert_eq!(seed.get("elements").and_then(|v| v.as_array()).map(|a| a.len()), Some(0));
         assert_eq!(seed.get("prompt").and_then(|v| v.as_str()), Some("annotate my screen"));
+    }
+
+    #[test]
+    fn test_friend_tone_fragments() {
+        for fragment in ["first name", "contractions", "Never say 'sir'"] {
+            assert!(
+                FRIEND_TONE.contains(fragment),
+                "FRIEND_TONE lost fragment: '{fragment}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_counsel_contract_fragments() {
+        // The contract IS the mitigation — every research-grounded
+        // fragment must survive any future edit, or sycophancy regresses.
+        for fragment in [
+            "tell the truth even when it disagrees",
+            "direct advice, even if critical",
+            "do not mirror their framing",
+            "ONE clarifying question instead of verdicting",
+            "verdict first",
+            "no hedging",
+            "one actionable next step",
+            "never moralize, never diagnose",
+            "Do not use markdown",
+        ] {
+            assert!(
+                COUNSEL_CONTRACT.contains(fragment),
+                "COUNSEL_CONTRACT lost fragment: '{fragment}'"
+            );
+        }
     }
 
     #[test]
