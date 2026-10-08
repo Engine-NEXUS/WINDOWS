@@ -65,6 +65,19 @@ export function UnifiedSidebar() {
       .catch(() => {});
   }, []);
 
+  // Opaque light/dark theme (no transparency per directive): apply the
+  // stored mode on mount and follow live changes from the settings view.
+  useEffect(() => {
+    void import("./theme").then(({ applyThemeMode, getThemeMode, THEME_EVENT }) => {
+      applyThemeMode(getThemeMode());
+      const onChange = (e: Event) => {
+        const mode = (e as CustomEvent).detail;
+        applyThemeMode(mode === "light" ? "light" : "dark");
+      };
+      window.addEventListener(THEME_EVENT, onChange);
+    }).catch(() => {});
+  }, []);
+
   // Exported for view components to call
   const dock = (d: string) => {
     if (!isTauri()) return;

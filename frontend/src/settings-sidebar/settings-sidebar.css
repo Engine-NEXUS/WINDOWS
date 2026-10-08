@@ -839,3 +839,160 @@ html, body {
   from { opacity: 0; transform: translate(-50%, -6px); }
   to { opacity: 1; transform: translate(-50%, 0); }
 }
+
+/* ── Command Hub Accounts carbon copy (opaque light/dark, no transparency).
+   iOS grouped-list language: 18px cards, full-bleed rows with 1px
+   dividers, blue link actions, chevron affordances. All surfaces use
+   --hub-* vars so both themes stay solid and readable. */
+.hub-card {
+  background: var(--hub-card);
+  border: 1px solid var(--hub-border);
+  border-radius: 18px;
+  padding: 16px;
+  margin-bottom: 12px;
+  color: var(--hub-text);
+}
+
+.hub-profile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 4px;
+}
+
+.hub-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.hub-avatar--lg {
+  width: 56px;
+  height: 56px;
+  font-size: 22px;
+}
+
+.hub-avatar--fallback {
+  background: var(--hub-card-2);
+  color: var(--hub-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.hub-profile-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--hub-text);
+  margin-top: 6px;
+}
+
+.hub-profile-email {
+  font-size: 12px;
+  color: var(--hub-text-dim);
+}
+
+.hub-profile--empty .hub-profile-name {
+  margin-top: 0;
+}
+
+.hub-link {
+  background: none;
+  border: none;
+  padding: 8px 4px 0;
+  color: var(--hub-accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.hub-link:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.hub-link--sm {
+  padding: 2px 0 0;
+  font-size: 11px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.hub-account-contact {
+  font-size: 11px;
+  color: var(--hub-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hub-accounts {
+  padding: 4px 0 4px 16px;
+}
+
+.hub-account-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px 10px 0;
+  border-bottom: 1px solid var(--hub-border);
+  cursor: pointer;
+}
+
+.hub-account-row:last-child {
+  border-bottom: none;
+}
+
+.hub-account-meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.hub-account-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--hub-text);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hub-account-email {
+  font-size: 11px;
+  color: var(--hub-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hub-primary-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--hub-accent);
+  border: 1px solid var(--hub-accent);
+  border-radius: 8px;
+  padding: 1px 6px;
+}
+
+.hub-chevron {
+  color: var(--hub-text-faint);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.hub-remove {
+  background: none;
+  border: none;
+  color: var(--hub-danger);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 0 4px 4px;
+}

@@ -40,6 +40,7 @@ export default defineConfig({
     target: "es2022",
     minify: "esbuild",
     sourcemap: false,
+    chunkSizeWarningLimit: 2000,
     rollupOptions: {
       input: {
         setup: resolve(__dirname, "setup.html"),
@@ -47,6 +48,8 @@ export default defineConfig({
         sidebar: resolve(__dirname, "sidebar.html"),
         stage: resolve(__dirname, "stage.html"),
         companionHud: resolve(__dirname, "companion-hud.html"),
+        orbStudio: resolve(__dirname, "orb-studio.html"),
+        captionShowcase: resolve(__dirname, "caption-showcase.html"),
       },
     },
   },

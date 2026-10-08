@@ -10,6 +10,11 @@ import {
   type OAuthStatus,
 } from "../setup/oauth";
 import { useAssistant } from "../store/assistant";
+import "./hub/hub.css";
+import { HubHome, type HubPage } from "./hub/HubHome";
+import { ApiKeysPage } from "./hub/ApiKeysPage";
+import { MemoryPage } from "./hub/MemoryPage";
+import { useAccounts, useInsights } from "./hub/useHubData";
 
 /**
  * NEXUS Settings Sidebar
@@ -23,7 +28,6 @@ import { useAssistant } from "../store/assistant";
  * Overwrites on each save (std::fs::write).
  */
 
-type Tab = "display" | "audio" | "auth" | "connections";
 
 interface Settings {
   autostart: boolean;
@@ -61,6 +65,19 @@ interface Settings {
   moonshineModel?: string;
   // TTS voice emotion (auto = heuristics per reply; prosody via rate/pitch)
   ttsEmotion?: string;
+  // Personality tone (butler = formal "sir"; friend = name, casual, honest counsel)
+  personaMode?: string;
+  // Memory Core: hide known people's names from cloud models (Memory page toggles it)
+  memcoreRedactNames?: boolean;
+  // Memory Core: record the working window (where-you-left-off) / speak the boot briefing
+  memcoreActivity?: boolean;
+  memcoreBriefing?: boolean;
+  memcoreTimetable?: boolean;
+  memcoreMail?: boolean;
+  memcoreWhatsapp?: boolean;
+  memcoreWhatsappSpeak?: boolean;
+  // Command Hub theme (opaque "dark" default / "light"; no transparency)
+  themeMode?: string;
   // Ghost vision provider order (auto = Groq → Gemini fallback)
   visionProvider?: string;
   // Ghost vision strategy (speed = race both providers in parallel)
@@ -85,6 +102,10 @@ interface Settings {
   orbColor?: string;
   // Orb fixed position ("top" | "bottom")
   orbPosition?: "top" | "bottom";
+  // Orb morphology choices
+  orbThinkMode?: number;
+  orbSpeakMode?: number;
+  orbListenMode?: number;
   // TEMPORARY dev flag (remove before release): auto-open the calibrator
   // on boot for live cross-checks. Never part of the save flow.
   calibrationDevPersist?: boolean;
@@ -104,20 +125,25 @@ const DEFAULT_SETTINGS: Settings = {
   serverUrl: "",
   userId: "",
   deviceId: "",
-  ttsVoice: "af_sky",
+  ttsVoice: "en-US-AvaNeural",
   speechRate: 1.15,
   ttsVolume: 75,
-  ttsProvider: "kokoro",
+  ttsProvider: "edge",
   groqApiKey: "",
   edgeTtsVoice: "en-US-AvaNeural",
   orbHorizontalPct: 0.5,
   orbVerticalPct: 0.0,
   orbPosition: "top",
   orbSize: 200,
+  orbThinkMode: 6,
+  orbSpeakMode: 2,
+  orbListenMode: 1,
   geminiApiKey: "",
   cerebrasApiKey: "",
   moonshineModel: "medium_streaming",
   ttsEmotion: "auto",
+  personaMode: "butler",
+  themeMode: "dark",
   visionProvider: "auto",
   visionRace: "sequential",
   telegramChatId: "",
@@ -134,15 +160,19 @@ const DEFAULT_SETTINGS: Settings = {
   calibrationDevPersist: false,
 };
 
-const TABS: { id: Tab; label: string }[] = [
-  { id: "display", label: "Display" },
-  { id: "audio", label: "Audio" },
-  { id: "auth", label: "Accounts" },
-  { id: "connections", label: "Connections" },
-];
+const PAGE_TITLES: Record<HubPage, string> = {
+  home: "Command Hub",
+  keys: "API Keys",
+  memory: "Memory",
+  audio: "Audio",
+  display: "Display",
+  connections: "Connections",
+  advanced: "Advanced",
+};
 
 export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string) => void }) {
-  const [tab, setTab] = useState<Tab>("display");
+  const [page, setPage] = useState<HubPage>("home");
+  const [insightsKey, setInsightsKey] = useState(0);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [saved, setSaved] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -171,17 +201,19 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
   // Load settings from Rust on mount
   useEffect(() => {
     invoke<Partial<Settings>>("get_settings").then((s) => {
-      if (s) setSettings({ ...DEFAULT_SETTINGS, ...s });
+      // API keys are managed on the API Keys page (keychain); the form never
+      // holds them, so a Save can neither resurrect nor wipe a key.
+      if (s) setSettings({ ...DEFAULT_SETTINGS, ...s, groqApiKey: "", geminiApiKey: "", cerebrasApiKey: "" });
     }).catch(() => {});
   }, []);
 
   // Show the orb window when the Display tab is active so the user can
   // see it move live while dragging the position sliders.
   useEffect(() => {
-    if (tab === "display") {
+    if (page === "display") {
       invoke("show_overlay").catch(() => {});
     }
-  }, [tab]);
+  }, [page]);
 
   // Fetch pending backdrop on mount — handles the fresh-window case where
   // the backdrop was captured before the React app loaded (same pattern as
@@ -249,57 +281,67 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
     setSaved(false);
   };
 
-  return (
-    <div className="settings-container">
-      {/* Merged header row: tabs left, dock buttons right, full-width drag region */}
-      <header className="settings-header-row" data-tauri-drag-region>
-        {/* Tabs on the left */}
-        <div className="settings-tabs">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              className={`settings-tab ${tab === t.id ? "settings-tab--active" : ""}`}
-              onClick={() => setTab(t.id)}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
+  const acc = useAccounts(settings.serverUrl, settings.userId);
+  const insights = useInsights(insightsKey);
+  const themeMode: "light" | "dark" = settings.themeMode === "light" ? "light" : "dark";
 
-        {/* Dock controls on the right */}
-        <div className="sidebar-dock-controls">
-          <button type="button" className="sidebar-dock-btn" onClick={() => onDock("left")} title="Dock Left">
-            ◧
-          </button>
-          <button type="button" className="sidebar-dock-btn" onClick={() => onDock("right")} title="Dock Right">
-            ◨
-          </button>
+  const handleTheme = (m: "light" | "dark") => {
+    update("themeMode", m);
+    void import("../sidebar/theme").then(({ applyThemeMode }) => applyThemeMode(m)).catch(() => {});
+    // Persist immediately: the Command Hub home has no Save button.
+    invoke("save_settings", { settings: { ...settings, themeMode: m } }).catch(() => {});
+  };
+
+  const isLegacyPage = page === "audio" || page === "display" || page === "connections" || page === "advanced";
+
+  return (
+    <div className="hx">
+      <header className="hx-header" data-tauri-drag-region>
+        <div className="hx-header-left" data-tauri-drag-region>
+          {page === "home" ? (
+            <button type="button" className="hx-header-btn" onClick={() => invoke("hide_settings_sidebar").catch(() => {})}>
+              Close
+            </button>
+          ) : (
+            <button type="button" className="hx-header-btn" onClick={() => setPage("home")}>
+              ‹ Back
+            </button>
+          )}
+        </div>
+        <div className="hx-title" data-tauri-drag-region>{PAGE_TITLES[page]}</div>
+        <div className="hx-header-dock" data-tauri-drag-region>
+          <button type="button" onClick={() => onDock("left")} title="Dock Left">◧</button>
+          <button type="button" onClick={() => onDock("right")} title="Dock Right">◨</button>
         </div>
       </header>
 
-      {/* Calibration round-trip toast (save/cancel re-open the hub) */}
-      {toast && <div className="settings-toast">{toast}</div>}
+      {toast && <div className="hx-toast">{toast}</div>}
 
-      {/* Scrollable content */}
-      <div className="settings-scroll">
-        {tab === "display" && <DisplayTab settings={settings} update={update} />}
-        {tab === "audio" && <AudioTab settings={settings} update={update} />}
-        {tab === "auth" && <AuthTab settings={settings} update={update} />}
-        {tab === "connections" && <ConnectionsTab settings={settings} update={update} />}
+      <div className="hx-scroll">
+        {page === "home" && (
+          <HubHome acc={acc} insights={insights} themeMode={themeMode} onTheme={handleTheme} onOpen={setPage} />
+        )}
+        {page === "keys" && <ApiKeysPage onChanged={() => setInsightsKey((k) => k + 1)} />}
+        {page === "memory" && <MemoryPage onFlagChanged={(flag, on) => update(flag, on)} />}
+        {isLegacyPage && (
+          <div className="hx-legacy">
+            {page === "display" && <DisplayTab settings={settings} update={update} />}
+            {page === "audio" && <AudioTab settings={settings} update={update} />}
+            {page === "connections" && <ConnectionsTab settings={settings} update={update} />}
+            {page === "advanced" && <AuthTab settings={settings} update={update} />}
+          </div>
+        )}
       </div>
 
-      {/* Footer */}
-      <div className="settings-footer">
-        <span className={`settings-saved-indicator ${saved ? "settings-saved-indicator--visible" : ""}`}>
-          ✓ Saved
-        </span>
-        <div className="settings-footer-actions">
-          <button className="settings-btn" onClick={handleReset}>Reset</button>
-          <button className="settings-btn settings-btn--primary" onClick={handleSave}>
-            Save
-          </button>
+      {isLegacyPage && (
+        <div className="hx-footer">
+          <span className={`hx-saved ${saved ? "hx-saved--on" : ""}`}>✓ Saved</span>
+          <div className="hx-footer-actions">
+            <button className="hx-btn" onClick={handleReset}>Reset</button>
+            <button className="hx-btn hx-btn--primary" onClick={handleSave}>Save</button>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -354,7 +396,7 @@ function DisplayTab({ settings, update }: {
       <div className="settings-section">
         <div className="settings-section-title">Orb Color Theme</div>
         <div className="setting-desc" style={{ marginBottom: 10 }}>
-          Customize your visual aura for listening and idle states. The thinking state remains its iconic electric purple starburst.
+          Customize your visual aura for listening and idle states. Visual morphologies can be customized in the 3D Studio.
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 8, marginBottom: 12 }}>
           {COLOR_PRESETS.map((p) => {
@@ -516,6 +558,39 @@ function DisplayTab({ settings, update }: {
           }}
         >
           ⧉ Center Floating
+        </button>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Orb 3D Morphology Studio</div>
+        <div className="setting-desc" style={{ marginBottom: 10 }}>
+          Launch the Orb Studio window to configure 3D particle morphologies for Thinking, Speaking, and Listening.
+        </div>
+        <button
+          type="button"
+          className="settings-btn"
+          style={{
+            width: "100%",
+            padding: "10px 14px",
+            background: "linear-gradient(135deg, rgba(168, 85, 247, 0.25), rgba(99, 102, 241, 0.25))",
+            border: "1px solid rgba(168, 85, 247, 0.5)",
+            borderRadius: 10,
+            color: "#f3e8ff",
+            fontWeight: 700,
+            fontSize: 13,
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 8,
+            boxShadow: "0 4px 16px rgba(168, 85, 247, 0.25)",
+            transition: "all 0.15s ease",
+          }}
+          onClick={() => {
+            invoke("open_orb_studio_window").catch(() => {});
+          }}
+        >
+          ✦ Open Orb Customization Studio ›
         </button>
       </div>
     </>
@@ -701,6 +776,53 @@ function AudioTab({ settings, update }: {
       </div>
 
       <div className="settings-section">
+        <div className="settings-section-title">Orb Visual Morphology</div>
+        <div className="setting-row" style={{ alignItems: "center" }}>
+          <div>
+            <div className="setting-label">Orb Animation Customization</div>
+            <div className="setting-desc">Configure particle geometry for thinking, speaking, and listening states.</div>
+          </div>
+          <div className="setting-control">
+            <button
+              className="settings-btn"
+              style={{
+                background: "rgba(168, 85, 247, 0.15)",
+                borderColor: "rgba(168, 85, 247, 0.4)",
+                color: "#c084fc",
+                fontWeight: 600,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px"
+              }}
+              onClick={() => invoke("open_orb_studio_window").catch(() => {})}
+            >
+              ✦ Customize Orb
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Personality</div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Tone mode</div>
+            <div className="setting-desc">Butler is formal ("sir"). Friend uses your name, talks casually, counsels honestly.</div>
+          </div>
+          <div className="setting-control">
+            <select
+              className="settings-input"
+              value={settings.personaMode ?? "butler"}
+              onChange={(e) => update("personaMode", e.target.value)}
+            >
+              <option value="butler">Butler (formal)</option>
+              <option value="friend">Friend (casual)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div className="settings-section">
         <div className="settings-section-title">Speech Volume</div>
         <div className="setting-row">
           <div>
@@ -798,6 +920,8 @@ interface GoogleAccountProfile {
   is_primary: boolean;
   added_at_ms: number;
   scopes: string[];
+  phone?: string | null;
+  address?: string | null;
 }
 
 function AuthTab({ settings, update }: {
@@ -812,6 +936,22 @@ function AuthTab({ settings, update }: {
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [credStatus, setCredStatus] = useState<{ configured: boolean; has_client_id: boolean; has_secret: boolean; message?: string | null } | null>(null);
+  const [credSaved, setCredSaved] = useState(false);
+
+  const loadCredStatus = useCallback(async () => {
+    try {
+      const st = await invoke<{ configured: boolean; has_client_id: boolean; has_secret: boolean; message?: string | null }>("google_credentials_status");
+      setCredStatus(st);
+      // Not set up yet: open the drawer so the missing step is in front of the user.
+      if (!st.configured) setShowCustomCreds(true);
+    } catch {
+      /* status is advisory */
+    }
+  }, []);
+  useEffect(() => {
+    void loadCredStatus();
+  }, [loadCredStatus]);
 
   const loadGoogleAccounts = useCallback(async () => {
     try {
@@ -863,13 +1003,33 @@ function AuthTab({ settings, update }: {
     }
   };
 
+  // Progressive re-consent (optional phone + address scopes). Absence is
+  // normal — the button simply reappears if nothing was granted/saved.
+  const [extendingGoogle, setExtendingGoogle] = useState(false);
+  const handleExtendGoogle = async () => {
+    setError(null);
+    setExtendingGoogle(true);
+    try {
+      await invoke("google_connect_extended");
+      await loadGoogleAccounts();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExtendingGoogle(false);
+    }
+  };
+
   const handleSaveCustomCreds = async () => {
+    setError(null);
+    setCredSaved(false);
     try {
       await invoke("google_save_custom_credentials", {
         clientId,
         clientSecret: clientSecret || null,
       });
-      setShowCustomCreds(false);
+      setClientSecret("");
+      setCredSaved(true);
+      await loadCredStatus();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -906,8 +1066,10 @@ function AuthTab({ settings, update }: {
 
   const githubConnected = oauthStatus.github?.connected ?? false;
 
+  // Phone-width column (carbon copy): the whole Accounts view reads as
+  // a phone-sized card centered in the wider sidebar window.
   return (
-    <>
+    <div className="hub-phone-col">
       {error && (
         <div className="auth-card" style={{ borderColor: "rgba(255,80,80,0.3)" }}>
           <span style={{ fontSize: 12, color: "rgba(255,150,150,0.9)" }}>{error}</span>
@@ -915,67 +1077,113 @@ function AuthTab({ settings, update }: {
       )}
 
       <div className="settings-section">
-        <div className="settings-section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span>Google Accounts</span>
-          <button
-            className="settings-btn settings-btn--primary"
-            style={{ fontSize: 11, padding: "4px 10px" }}
-            disabled={connectingGoogle}
-            onClick={handleConnectGoogleNative}
-          >
-            {connectingGoogle ? "Signing in..." : "+ Add Google Account"}
-          </button>
+        <div className="settings-section-title">Change Theme</div>
+        <div className="setting-desc" style={{ marginBottom: 8 }}>
+          Opaque light or dark — no transparency.
         </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {(["light", "dark"] as const).map((m) => (
+            <button
+              key={m}
+              className={`settings-btn ${((settings.themeMode ?? "dark") === m) ? "settings-btn--primary" : ""}`}
+              style={{ flex: 1, textTransform: "capitalize" }}
+              onClick={() => {
+                update("themeMode", m);
+                void import("../sidebar/theme").then(({ applyThemeMode }) => applyThemeMode(m)).catch(() => {});
+              }}
+            >
+              {m === "light" ? "☀ Light" : "🌙 Dark"}
+            </button>
+          ))}
+        </div>
+      </div>
 
-        {googleAccounts.length === 0 ? (
-          <div className="auth-card" style={{ textAlign: "center", padding: "16px" }}>
-            <span style={{ fontSize: 12, color: "rgba(255,255,255,0.6)" }}>
-              No Google accounts connected yet. Connect an account to use Gmail engine, Calendar, Sentinel watch, & Photos.
-            </span>
-          </div>
-        ) : (
-          googleAccounts.map((acc) => (
-            <div key={acc.email} className="auth-card" style={{ marginBottom: 10 }}>
-              <div className="auth-card-header" style={{ alignItems: "center" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  {acc.picture ? (
-                    <img src={acc.picture} alt="" style={{ width: 32, height: 32, borderRadius: "50%" }} />
-                  ) : (
-                    <div style={{ width: 32, height: 32, borderRadius: "50%", background: "rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>
-                      {acc.name.charAt(0).toUpperCase()}
-                    </div>
-                  )}
-                  <div>
-                    <div style={{ fontWeight: 600, fontSize: 13 }}>{acc.name}</div>
-                    <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>{acc.email}</div>
-                  </div>
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  {acc.is_primary ? (
-                    <span className="status-badge status-badge--connected" style={{ fontSize: 10 }}>
-                      Primary
-                    </span>
-                  ) : (
-                    <button
-                      className="settings-btn"
-                      style={{ fontSize: 10, padding: "2px 6px" }}
-                      onClick={() => handleSetPrimaryGoogle(acc.email)}
-                    >
-                      Make Primary
-                    </button>
-                  )}
-                  <button
-                    className="settings-btn settings-btn--danger"
-                    style={{ fontSize: 10, padding: "2px 6px" }}
-                    onClick={() => handleDisconnectGoogle(acc.email)}
-                  >
-                    Remove
-                  </button>
-                </div>
+      {/* Profile header card (carbon copy): primary/first account, Add Account link */}
+      <div className="hub-card hub-profile">
+        {(() => {
+          const primary = googleAccounts.find((a) => a.is_primary) ?? googleAccounts[0];
+          if (!primary) {
+            return (
+              <div className="hub-profile--empty">
+                <div className="hub-profile-name">No account yet</div>
+                <div className="hub-profile-email">Connect Google for Gmail, Calendar, Sentinel watch, &amp; Photos.</div>
               </div>
+            );
+          }
+          return (
+            <>
+              {primary.picture ? (
+                <img src={primary.picture} alt="" className="hub-avatar hub-avatar--lg" />
+              ) : (
+                <div className="hub-avatar hub-avatar--lg hub-avatar--fallback" aria-hidden="true">
+                  {(primary.name || primary.email).charAt(0).toUpperCase()}
+                </div>
+              )}
+              <div className="hub-profile-name">{primary.name}</div>
+              <div className="hub-profile-email">{primary.email}</div>
+            </>
+          );
+        })()}
+        <button
+          className="hub-link"
+          disabled={connectingGoogle}
+          onClick={handleConnectGoogleNative}
+        >
+          {connectingGoogle ? "Signing in..." : "+ Add Account"}
+        </button>
+      </div>
+
+      {/* Per-account rows: one row per account (photo + name + email). */
+      /* Row tap promotes to primary; Remove stays an explicit control. */}
+      {googleAccounts.length > 0 && (
+        <div className="hub-card hub-accounts" role="list" aria-label="Connected accounts">
+          {googleAccounts.map((acc) => (
+            <div
+              key={acc.email}
+              role="listitem"
+              className={`hub-account-row ${acc.is_primary ? "hub-account-row--primary" : ""}`}
+              onClick={() => { if (!acc.is_primary) void handleSetPrimaryGoogle(acc.email); }}
+              title={acc.is_primary ? "Primary account" : "Tap to make primary"}
+            >
+              {acc.picture ? (
+                <img src={acc.picture} alt="" className="hub-avatar" />
+              ) : (
+                <div className="hub-avatar hub-avatar--fallback" aria-hidden="true">
+                  {(acc.name || acc.email).charAt(0).toUpperCase()}
+                </div>
+              )}
+              <div className="hub-account-meta">
+                <div className="hub-account-name">
+                  {acc.name}
+                  {acc.is_primary && <span className="hub-primary-badge">Primary</span>}
+                </div>
+                <div className="hub-account-email">{acc.email}</div>
+                {(acc.phone || acc.address) ? (
+                  <div className="hub-account-contact">
+                    {[acc.phone, acc.address].filter(Boolean).join(" · ")}
+                  </div>
+                ) : (
+                  <button
+                    className="hub-link hub-link--sm"
+                    title="Re-consent with phone & address scopes (optional, never required)"
+                    onClick={(e) => { e.stopPropagation(); void handleExtendGoogle(); }}
+                  >
+                    {extendingGoogle ? "Opening Google…" : "Add phone & address"}
+                  </button>
+                )}
+              </div>
+              <span className="hub-chevron" aria-hidden="true">›</span>
+              <button
+                className="hub-remove"
+                title={`Remove ${acc.email}`}
+                onClick={(e) => { e.stopPropagation(); void handleDisconnectGoogle(acc.email); }}
+              >
+                Remove
+              </button>
             </div>
-          ))
-        )}
+          ))}
+        </div>
+      )}
 
         <div style={{ marginTop: 8 }}>
           <button
@@ -985,10 +1193,22 @@ function AuthTab({ settings, update }: {
           >
             {showCustomCreds ? "Hide Developer Credentials" : "Custom Developer OAuth Credentials"}
           </button>
+          {credStatus && !credStatus.configured && (
+            <div className="hx-error" style={{ marginTop: 8, fontSize: 11 }}>
+              {credStatus.message}
+            </div>
+          )}
+          {credStatus?.configured && (
+            <div className="hx-note" style={{ marginTop: 8, fontSize: 11 }}>
+              Google sign-in is set up. Click “Add Google Account”.
+            </div>
+          )}
           {showCustomCreds && (
             <div className="auth-card" style={{ marginTop: 8, padding: 12 }}>
               <div style={{ fontSize: 11, color: "rgba(255,255,255,0.7)", marginBottom: 8 }}>
-                Optionally supply your own Google OAuth Client ID & Secret:
+                Required to sign in with Google. In Google Cloud Console: create an OAuth client of type
+                <b> Desktop app</b>, enable the <b>Gmail API</b> and <b>Google Calendar API</b>, add your Gmail address under
+                <b> Test users</b> on the consent screen, then paste the Client ID and Client Secret here:
               </div>
               <input
                 type="text"
@@ -1001,7 +1221,7 @@ function AuthTab({ settings, update }: {
               <input
                 type="password"
                 className="settings-input"
-                placeholder="Client Secret (optional for PKCE)"
+                placeholder="Client Secret (required)"
                 value={clientSecret}
                 onChange={(e) => setClientSecret(e.target.value)}
                 style={{ marginBottom: 8, fontSize: 11 }}
@@ -1013,10 +1233,14 @@ function AuthTab({ settings, update }: {
               >
                 Save Credentials
               </button>
+              {credSaved && (
+                <div className="hx-note" style={{ marginTop: 6, fontSize: 11 }}>
+                  Saved. Now click “Add Google Account”.
+                </div>
+              )}
             </div>
           )}
         </div>
-      </div>
 
       <div className="settings-section">
         <div className="settings-section-title">GitHub Account</div>
@@ -1153,7 +1377,7 @@ function AuthTab({ settings, update }: {
         </div>
         <VisionQuota />
       </div>
-    </>
+    </div>
   );
 }
 
