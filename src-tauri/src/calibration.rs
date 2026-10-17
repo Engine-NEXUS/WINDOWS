@@ -79,6 +79,7 @@ pub fn clamp_size(target: Target, size: u32) -> u32 {
 }
 
 /// Per-target size step for wheel events (+10 / −10).
+#[allow(dead_code)]
 pub fn wheel_step(delta_y: f64) -> i32 {
     if delta_y < 0.0 {
         10

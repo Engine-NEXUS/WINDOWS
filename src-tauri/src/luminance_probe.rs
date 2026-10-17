@@ -22,6 +22,7 @@ pub enum LuminanceMode {
 }
 
 impl LuminanceMode {
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Light => "light",
@@ -71,6 +72,7 @@ impl Default for HysteresisFilter {
 }
 
 impl HysteresisFilter {
+    #[allow(dead_code)]
     pub fn new(initial: LuminanceMode, threshold_low: f64, threshold_high: f64) -> Self {
         Self {
             current_mode: initial,
@@ -95,6 +97,7 @@ impl HysteresisFilter {
         self.current_mode
     }
 
+    #[allow(dead_code)]
     pub fn mode(&self) -> LuminanceMode {
         self.current_mode
     }

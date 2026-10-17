@@ -82,6 +82,7 @@ impl LiveResult {
 /// actions that only make sense in live mode (type, press, send).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "action")]
+#[allow(dead_code)]
 pub enum LiveIntent {
     #[serde(rename = "type_text")]
     TypeText { text: String },

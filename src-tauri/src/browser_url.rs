@@ -238,6 +238,13 @@ pub(crate) fn foreground_process_name() -> Option<String> {
     get_process_name(get_foreground_process_id()?)
 }
 
+/// Full path of the foreground process executable (to open a URL in the SAME browser the user is
+/// looking at instead of whatever the system default is).
+#[cfg(target_os = "windows")]
+pub(crate) fn foreground_process_path() -> Option<std::path::PathBuf> {
+    get_process_path(get_foreground_process_id()?)
+}
+
 /// True for the browsers whose page content we can locate.
 pub(crate) fn is_browser_process(name: &str) -> bool {
     matches!(
@@ -322,6 +329,23 @@ fn get_process_name(pid: u32) -> Option<String> {
             return None;
         }
         Some(String::from_utf16_lossy(&name_buf[..len as usize]).to_lowercase())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn get_process_path(pid: u32) -> Option<std::path::PathBuf> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::ProcessStatus::K32GetModuleFileNameExW;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid).ok()?;
+        let mut buf = vec![0u16; 1024];
+        let len = K32GetModuleFileNameExW(handle, None, &mut buf);
+        let _ = CloseHandle(handle);
+        if len == 0 {
+            return None;
+        }
+        Some(std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])))
     }
 }
 

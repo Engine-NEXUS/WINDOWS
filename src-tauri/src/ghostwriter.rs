@@ -24,6 +24,7 @@ const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 #[derive(Debug, Clone)]
 pub struct GhostSession {
     pub contact: Option<String>,
+    #[allow(dead_code)]
     pub channel: String,
     pub draft: String,
     pub last_active: Instant,

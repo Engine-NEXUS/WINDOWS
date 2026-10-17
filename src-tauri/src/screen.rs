@@ -71,6 +71,26 @@ pub fn parse_ordinal(text: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
+/// Shared acceptance rule for a candidate control (pure, unit-tested). Same as the legacy filter
+/// (enabled, named, not a password field, has bounds) plus **on-screen**: an off-screen control
+/// cannot be clicked, so offering it as "the 3rd option" sends the cursor into the void.
+pub fn accept_actionable(enabled: bool, offscreen: bool, name: &str, w: i32, h: i32) -> bool {
+    if !enabled || offscreen || w <= 0 || h <= 0 {
+        return false;
+    }
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    // Skip password/secure fields by name.
+    !name.to_lowercase().contains("password")
+}
+
+/// Wall-clock budget for the fast lookup. UIA calls block on the target app, so a hung or
+/// enormous tree must not stall the voice pipeline: on expiry the caller gets an empty list
+/// (and falls through to its next tier) instead of waiting seconds.
+pub const FAST_LOOKUP_BUDGET_MS: u64 = 2500;
+
 #[cfg(target_os = "windows")]
 mod win {
     use super::UiElement;
@@ -90,9 +110,135 @@ mod win {
         ControlType::ComboBox,
     ];
 
+    /// Outcome of the fast lookup (the dispatcher decides what each case means).
+    enum Fast {
+        Done(Vec<UiElement>),
+        /// Budget exhausted - the app is slow/hung or the tree is huge. Do NOT retry with the
+        /// legacy path (it is slower still); the caller falls through to its next tier.
+        TimedOut,
+        /// UIA could not be used at all (no foreground window, COM failure...) - legacy may still work.
+        Unavailable(String),
+    }
+
     /// List actionable elements in the foreground window via UIA.
-    /// Best-effort: any failing element is skipped, never fatal.
+    ///
+    /// ONE cached query rooted at the **foreground window** (not the focused element): the old
+    /// path searched under the focused element, so a leaf focus (text box, document) returned
+    /// nothing after ten 500 ms timeouts - measured 5.1 s and 0 controls in Notepad/Calculator,
+    /// versus 18-79 ms and full recall with this query (docs/research/ghost-mode/11-...).
+    /// Set `NEXUS_UIA_LEGACY=1` to force the old behaviour (kill switch).
     pub fn list_actionables() -> Vec<UiElement> {
+        if std::env::var("NEXUS_UIA_LEGACY").map(|v| v == "1").unwrap_or(false) {
+            return list_actionables_legacy();
+        }
+        let t0 = std::time::Instant::now();
+        match fast_with_budget(super::FAST_LOOKUP_BUDGET_MS) {
+            Fast::Done(v) => {
+                tracing::info!(
+                    "[UIA] list_actionables: {} controls in {}ms (window-rooted, cached)",
+                    v.len(),
+                    t0.elapsed().as_millis()
+                );
+                v
+            }
+            Fast::TimedOut => {
+                tracing::warn!(
+                    "[UIA] list_actionables: exceeded {}ms budget - returning empty (caller falls through)",
+                    super::FAST_LOOKUP_BUDGET_MS
+                );
+                Vec::new()
+            }
+            Fast::Unavailable(why) => {
+                tracing::warn!("[UIA] fast lookup unavailable ({why}) - using legacy focused-element query");
+                list_actionables_legacy()
+            }
+        }
+    }
+
+    /// Run the cached query on a worker thread so a blocked UIA call cannot hold the caller past
+    /// the budget (the thread finishes on its own; one stuck call leaks one thread at worst).
+    fn fast_with_budget(budget_ms: u64) -> Fast {
+        let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<UiElement>, String>>();
+        let spawned = std::thread::Builder::new()
+            .name("uia-fast-lookup".into())
+            .spawn(move || {
+                let _ = tx.send(fast_query());
+            });
+        if let Err(e) = spawned {
+            return Fast::Unavailable(format!("thread spawn failed: {e}"));
+        }
+        match rx.recv_timeout(std::time::Duration::from_millis(budget_ms)) {
+            Ok(Ok(v)) => Fast::Done(v),
+            Ok(Err(why)) => Fast::Unavailable(why),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Fast::TimedOut,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Fast::Unavailable("lookup thread ended without a result".into())
+            }
+        }
+    }
+
+    fn fast_query() -> Result<Vec<UiElement>, String> {
+        use uiautomation::types::{Handle, TreeScope, UIProperty};
+        use uiautomation::variants::Variant;
+        let err = |e: uiautomation::errors::Error| e.to_string();
+
+        let automation = UIAutomation::new().map_err(err)?;
+        let hwnd = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+        if hwnd.0 == 0 {
+            return Err("no foreground window".into());
+        }
+        let window = automation.element_from_handle(Handle::from(hwnd.0)).map_err(err)?;
+
+        // Server-side filter: only the clickable control types cross the process boundary
+        // (a Chromium page has thousands of Text/Group nodes we never use).
+        let mut cond = None;
+        for ct in CLICKABLE {
+            let c = automation
+                .create_property_condition(UIProperty::ControlType, Variant::from(*ct as i32), None)
+                .map_err(err)?;
+            cond = Some(match cond {
+                None => c,
+                Some(acc) => automation.create_or_condition(acc, c).map_err(err)?,
+            });
+        }
+        let cond = cond.ok_or_else(|| "no clickable control types configured".to_string())?;
+
+        let cache = automation.create_cache_request().map_err(err)?;
+        for p in [
+            UIProperty::Name,
+            UIProperty::ControlType,
+            UIProperty::BoundingRectangle,
+            UIProperty::IsEnabled,
+            UIProperty::IsOffscreen,
+        ] {
+            cache.add_property(p).map_err(err)?;
+        }
+
+        let found = window
+            .find_all_build_cache(TreeScope::Descendants, &cond, &cache)
+            .map_err(err)?;
+
+        let mut out = Vec::with_capacity(found.len());
+        for el in &found {
+            // Cached reads only - no further cross-process calls. Any failing element is skipped.
+            let Ok(ct) = el.get_cached_control_type() else { continue };
+            let name = el.get_cached_name().unwrap_or_default();
+            let enabled = el.is_cached_enabled().unwrap_or(false);
+            let offscreen = el.is_cached_offscreen().unwrap_or(true);
+            let Ok(r) = el.get_cached_bounding_rectangle() else { continue };
+            let (x, y, w, h) = (r.get_left(), r.get_top(), r.get_width(), r.get_height());
+            if !super::accept_actionable(enabled, offscreen, &name, w, h) {
+                continue;
+            }
+            out.push(UiElement { name, kind: format!("{ct:?}"), x, y, w, h });
+        }
+        Ok(super::sort_reading_order(out))
+    }
+
+    /// The original focused-element-rooted lookup (10 sequential queries). Kept as the explicit
+    /// fallback when the fast path cannot run, and as the kill-switch target. Slow (2.5-5 s) and
+    /// blind when focus is on a leaf element - do not call it directly from new code.
+    pub fn list_actionables_legacy() -> Vec<UiElement> {
         let automation = match UIAutomation::new() {
             Ok(a) => a,
             Err(_) => return Vec::new(),
@@ -166,7 +312,7 @@ mod win {
 }
 
 #[cfg(target_os = "windows")]
-pub use win::{click_element, list_actionables};
+pub use win::{click_element, list_actionables, list_actionables_legacy};
 
 #[cfg(target_os = "windows")]
 mod win_extra {
@@ -196,6 +342,17 @@ pub use win_extra::primary_monitor_size;
 pub fn switch_browser_tab(index: u32) -> Result<String, String> {
     if index == 0 || index > 9 {
         return Err("tab number must be 1-9".to_string());
+    }
+    // Shortcut brain (E1): layout-independent virtual-key chord for the app in front, foreground re-checked
+    // right before sending. Unknown apps keep the legacy Ctrl+digit below.
+    #[cfg(target_os = "windows")]
+    if crate::shortcuts::enabled() {
+        use crate::shortcuts::{Action, Spoken};
+        match crate::shortcuts::do_action_spoken(Action::GotoTab, Some(index), true) {
+            Spoken::Ok(line) => return Ok(line),
+            Spoken::Refused(reason) => return Err(reason),
+            Spoken::Fallback => {} // unknown app -> legacy path below
+        }
     }
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
     let mut enigo =
@@ -243,6 +400,30 @@ mod tests {
         assert_eq!(v[0].name, "a");
         assert_eq!(v[1].name, "b");
         assert_eq!(v[2].name, "c");
+    }
+
+    #[test]
+    fn accept_actionable_rules() {
+        // Happy path.
+        assert!(accept_actionable(true, false, "Submit", 80, 30));
+        assert!(accept_actionable(true, false, "  Save  ", 1, 1));
+        // Each rejection reason on its own.
+        assert!(!accept_actionable(false, false, "Submit", 80, 30), "disabled");
+        assert!(!accept_actionable(true, true, "Submit", 80, 30), "off-screen can't be clicked");
+        assert!(!accept_actionable(true, false, "", 80, 30), "unnamed");
+        assert!(!accept_actionable(true, false, "   ", 80, 30), "blank name");
+        assert!(!accept_actionable(true, false, "Submit", 0, 30), "no width");
+        assert!(!accept_actionable(true, false, "Submit", 80, -1), "no height");
+        // Password fields never resolve, any casing.
+        assert!(!accept_actionable(true, false, "Enter Password", 80, 30));
+        assert!(!accept_actionable(true, false, "PASSWORD", 80, 30));
+    }
+
+    #[test]
+    fn fast_lookup_budget_stays_well_under_the_legacy_cost() {
+        // Legacy burned 10 x 500 ms; the fast path's hard cap must stay below that.
+        assert!(FAST_LOOKUP_BUDGET_MS < 5000);
+        assert!(FAST_LOOKUP_BUDGET_MS >= 1000, "too tight for a cold Chromium tree");
     }
 
     #[test]

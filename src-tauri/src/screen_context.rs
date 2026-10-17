@@ -287,6 +287,7 @@ pub fn compact_ocr_lines(text: &str, max_lines: usize) -> Vec<String> {
 
 impl ScreenContext {
     /// Empty context (probes failed): full screen, nothing known.
+    #[allow(dead_code)]
     pub fn unknown(mw: i32, mh: i32) -> Self {
         build_context(&RawContext::default(), None, mw, mh)
     }

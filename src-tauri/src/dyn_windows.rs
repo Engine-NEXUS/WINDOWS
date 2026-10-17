@@ -43,18 +43,18 @@ impl WindowConfig {
         Self {
             label: "setup", title: "NEXUS Setup", url: "setup.html",
             width: 520., height: 680., min_width: None, min_height: None,
-            resizable: false, decorations: true, transparent: false,
+            resizable: false, decorations: false, transparent: true,
             always_on_top: false, skip_taskbar: false, shadow: true,
-            focus: true, center: true, hidden_title: false,
+            focus: true, center: true, hidden_title: true,
         }
     }
     pub fn settings() -> Self {
         Self {
             label: "settings", title: "NEXUS Settings", url: "settings.html",
             width: 600., height: 720., min_width: None, min_height: None,
-            resizable: false, decorations: true, transparent: false,
+            resizable: false, decorations: false, transparent: true,
             always_on_top: false, skip_taskbar: false, shadow: true,
-            focus: true, center: true, hidden_title: false,
+            focus: true, center: true, hidden_title: true,
         }
     }
     /// Unified dynamic sidebar — ONE window hosting every panel view
@@ -96,6 +96,32 @@ impl WindowConfig {
             resizable: false, decorations: false, transparent: true,
             always_on_top: true, skip_taskbar: true, shadow: true,
             focus: true, center: false, hidden_title: true,
+        }
+    }
+
+    /// Hand mode camera window: a small click-through preview (camera + skeleton + status) in the
+    /// bottom-left corner. It must be VISIBLE (a hidden WebView2 throttles video) and it is the
+    /// on-screen proof that the camera is on. Created when hand mode starts, destroyed when it ends.
+    pub fn hand() -> Self {
+        Self {
+            label: "hand", title: "NEXUS Hand Mode", url: "hand.html",
+            width: 300., height: 250., min_width: None, min_height: None,
+            resizable: false, decorations: false, transparent: false,
+            always_on_top: true, skip_taskbar: true, shadow: true,
+            focus: false, center: false, hidden_title: true,
+        }
+    }
+
+    /// Hand mode's camera page with NO visible preview (the default): an 8x8 transparent click-through
+    /// window in the top-right corner. It must stay "visible" to the OS (a hidden or covered WebView2
+    /// throttles), but nobody should see it. `handShowCamera` swaps in `hand()` for debugging.
+    pub fn hand_hidden() -> Self {
+        Self {
+            label: "hand", title: "NEXUS Hand Mode", url: "hand.html",
+            width: 8., height: 8., min_width: None, min_height: None,
+            resizable: false, decorations: false, transparent: true,
+            always_on_top: true, skip_taskbar: true, shadow: false,
+            focus: false, center: false, hidden_title: true,
         }
     }
 
@@ -169,7 +195,7 @@ pub fn get_or_create_window<R: Runtime>(
         // (sidebar_backdrop.rs -> `sidebar:backdrop` -> `.sidebar-card::after`).
         let is_glass_window = matches!(
             config.label,
-            "sidebar" | "calibrate-toolbar"
+            "sidebar" | "calibrate-toolbar" | "settings" | "setup" | "orb-studio"
         );
         if is_glass_window {
             crate::dwm_corners::round_corners(&win);
@@ -236,5 +262,46 @@ pub fn destroy_window<R: Runtime>(
         let result: Result<(), tauri::Error> = win.destroy();
         result.map_err(|e| format!("Failed to destroy {label} window: {e}"))?;
     }
+    Ok(())
+}
+
+/// Open (or re-point) a window that shows an EXTERNAL web page as a normal
+/// top-level document. Used for Google Maps: google.com refuses to render in an
+/// iframe (X-Frame-Options / frame-ancestors), so the authentic app can only be
+/// shown as a top-level webview. The label is deliberately absent from every
+/// capability file, so the remote page gets no Tauri IPC access.
+/// `geom` = logical (x, y, w, h). Works on WebView2, WKWebView and WebKitGTK.
+pub fn open_external_window<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    label: &str,
+    url: &str,
+    title: &str,
+    geom: (f64, f64, f64, f64),
+) -> Result<(), String> {
+    let parsed: tauri::Url = url.parse().map_err(|e| format!("bad url: {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err("external windows must use https".into());
+    }
+    let (x, y, w, h) = geom;
+    if let Some(win) = app.get_webview_window(label) {
+        // Re-point the existing window (keeps the user's place in the app shell).
+        let js = format!("window.location.replace({})", serde_json::to_string(url).map_err(|e| e.to_string())?);
+        win.eval(&js).map_err(|e| format!("navigate: {e}"))?;
+        let _ = win.set_size(tauri::LogicalSize::new(w, h));
+        let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+        let _ = win.show();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    let win = WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed))
+        .title(title)
+        .inner_size(w, h)
+        .position(x, y)
+        .resizable(true)
+        .decorations(true)
+        .focused(true)
+        .build()
+        .map_err(|e| format!("Failed to create {label} window: {e}"))?;
+    let _ = win.set_focus();
     Ok(())
 }
