@@ -41,6 +41,120 @@ export function setNarrationPlaying(v: boolean): void {
   rustTtsPlaying = v;
 }
 
+export interface VoicePersona {
+  key: string;
+  name: string;
+  persona: string;
+  accentTag: string;
+  avatar: string;
+  cloudId: string;
+  kokoroVoice: string;
+  previewPhrase: string;
+}
+
+export const ICONIC_PERSONAS: VoicePersona[] = [
+  {
+    key: "jarvis",
+    name: "JARVIS",
+    persona: "Calm, intelligent, British baritone with witty refinement",
+    accentTag: "UK · Male",
+    avatar: "🤖",
+    cloudId: "en-GB-RyanNeural",
+    kokoroVoice: "bm_george",
+    previewPhrase: "At your service, sir. All systems operational.",
+  },
+  {
+    key: "friday",
+    name: "FRIDAY",
+    persona: "Sharp tactical companion, fast and precise",
+    accentTag: "Ireland · Female",
+    avatar: "🛡️",
+    cloudId: "en-IE-EmilyNeural",
+    kokoroVoice: "bf_emma",
+    previewPhrase: "Boss, tactical links and neural feeds are live.",
+  },
+  {
+    key: "nexus",
+    name: "NEXUS",
+    persona: "Expressive flagship assistant, warm and clear",
+    accentTag: "US · Female",
+    avatar: "🌟",
+    cloudId: "en-US-AvaNeural",
+    kokoroVoice: "af_heart",
+    previewPhrase: "Hello, I'm NEXUS. What are we building today?",
+  },
+  {
+    key: "siri",
+    name: "SIRI",
+    persona: "Modern, crisp assistant delivery",
+    accentTag: "US · Female",
+    avatar: "📱",
+    cloudId: "en-US-JennyNeural",
+    kokoroVoice: "af_bella",
+    previewPhrase: "Here is what I found for you.",
+  },
+  {
+    key: "alexa",
+    name: "ALEXA",
+    persona: "Confident smart-home lead, steady and direct",
+    accentTag: "US · Female",
+    avatar: "🔵",
+    cloudId: "en-US-AriaNeural",
+    kokoroVoice: "af_nicole",
+    previewPhrase: "Ready. Standing by for your instructions.",
+  },
+  {
+    key: "google",
+    name: "GOOGLE",
+    persona: "Analytical tech specialist, measured and exact",
+    accentTag: "US · Male",
+    avatar: "🎙️",
+    cloudId: "en-US-BrianNeural",
+    kokoroVoice: "am_michael",
+    previewPhrase: "Good day. Let me know what you need analyzed.",
+  },
+  {
+    key: "cortana",
+    name: "CORTANA",
+    persona: "Heroic sci-fi companion, loyal and bold",
+    accentTag: "US · Female",
+    avatar: "💠",
+    cloudId: "en-US-MichelleNeural",
+    kokoroVoice: "af_sarah",
+    previewPhrase: "Chief, telemetry is locked. I'm with you.",
+  },
+  {
+    key: "samantha",
+    name: "SAMANTHA",
+    persona: "Warm, intimate conversationalist",
+    accentTag: "US · Female",
+    avatar: "💫",
+    cloudId: "en-US-SaraNeural",
+    kokoroVoice: "af_sky",
+    previewPhrase: "I'm here. It's really good to hear your voice.",
+  },
+  {
+    key: "alfred",
+    name: "ALFRED",
+    persona: "Master butler, formal and reassuring",
+    accentTag: "UK · Male",
+    avatar: "🎩",
+    cloudId: "en-GB-OliverNeural",
+    kokoroVoice: "bm_fable",
+    previewPhrase: "Very good, sir. I have prepared your workspace.",
+  },
+  {
+    key: "offline_safe",
+    name: "EMERGENCY",
+    persona: "Offline-safe fallback, always available",
+    accentTag: "US · Female",
+    avatar: "🆘",
+    cloudId: "en-US-AvaNeural",
+    kokoroVoice: "af_heart",
+    previewPhrase: "Local speech synthesizer operational.",
+  },
+];
+
 export interface VoiceOption {
   id: string;
   name: string;
@@ -54,20 +168,100 @@ export interface VoiceOption {
 
 export const CURATED_VOICES: VoiceOption[] = [
   {
-    id: "en-US-AvaNeural",
-    name: "Ava (Edge TTS)",
+    id: "en-GB-RyanNeural",
+    name: "JARVIS",
     provider: "edge",
-    accent: "American",
-    description: "Warm, natural female voice. Cloud-powered, free, 0 MB RAM.",
+    accent: "British Male",
+    description: "Calm, intelligent British baritone with witty refinement.",
+    locale: "en-GB",
+    gender: "male",
+    sampleText: "At your service, sir. All systems operational.",
+  },
+  {
+    id: "en-IE-EmilyNeural",
+    name: "FRIDAY",
+    provider: "edge",
+    accent: "Irish Female",
+    description: "Sharp tactical companion, fast and precise.",
+    locale: "en-IE",
+    gender: "female",
+    sampleText: "Boss, tactical links and neural feeds are live.",
+  },
+  {
+    id: "en-US-AvaNeural",
+    name: "NEXUS",
+    provider: "edge",
+    accent: "American Female",
+    description: "Expressive flagship assistant, warm and clear.",
     locale: "en-US",
     gender: "female",
-    sampleText: "Hello, I am Ava. All systems are operational.",
+    sampleText: "Hello, I'm NEXUS. What are we building today?",
+  },
+  {
+    id: "en-US-JennyNeural",
+    name: "SIRI",
+    provider: "edge",
+    accent: "American Female",
+    description: "Modern, crisp assistant delivery.",
+    locale: "en-US",
+    gender: "female",
+    sampleText: "Here is what I found for you.",
+  },
+  {
+    id: "en-US-AriaNeural",
+    name: "ALEXA",
+    provider: "edge",
+    accent: "American Female",
+    description: "Confident smart-home lead, steady and direct.",
+    locale: "en-US",
+    gender: "female",
+    sampleText: "Ready. Standing by for your instructions.",
+  },
+  {
+    id: "en-US-BrianNeural",
+    name: "GOOGLE",
+    provider: "edge",
+    accent: "American Male",
+    description: "Analytical tech specialist, measured and exact.",
+    locale: "en-US",
+    gender: "male",
+    sampleText: "Good day. Let me know what you need analyzed.",
+  },
+  {
+    id: "en-US-MichelleNeural",
+    name: "CORTANA",
+    provider: "edge",
+    accent: "American Female",
+    description: "Heroic sci-fi companion, loyal and bold.",
+    locale: "en-US",
+    gender: "female",
+    sampleText: "Chief, telemetry is locked. I'm with you.",
+  },
+  {
+    id: "en-US-SaraNeural",
+    name: "SAMANTHA",
+    provider: "edge",
+    accent: "American Female",
+    description: "Warm, intimate conversationalist.",
+    locale: "en-US",
+    gender: "female",
+    sampleText: "I'm here. It's really good to hear your voice.",
+  },
+  {
+    id: "en-GB-OliverNeural",
+    name: "ALFRED",
+    provider: "edge",
+    accent: "British Male",
+    description: "Master butler, formal and reassuring.",
+    locale: "en-GB",
+    gender: "male",
+    sampleText: "Very good, sir. I have prepared your workspace.",
   },
   {
     id: "en-US-GuyNeural",
-    name: "Guy (Edge TTS)",
+    name: "GUY",
     provider: "edge",
-    accent: "American",
+    accent: "American Male",
     description: "Deep, clear male voice. Cloud-powered, free, 0 MB RAM.",
     locale: "en-US",
     gender: "male",
@@ -123,43 +317,23 @@ export async function playKokoro(
     // This await resolves when rodio playback completes
     await invoke("speak_text", { text, voice: voiceId, speed });
   } catch (err) {
-    // Only fall back to Web Speech if we haven't been barged in
+    // No browser-voice fallback: a Web Speech voice is a different speaker mid-conversation, and
+    // Rust already falls back cloud -> local (one voice per utterance). Report and stay quiet.
     if (ttsGeneration === myGen) {
-      console.error("[TTS] Kokoro failed, falling back to Web Speech:", err);
-      await speakWebSpeech(text, speed);
+      console.error("[TTS] speak_text failed (no fallback voice by design):", err);
     }
   } finally {
-    rustTtsPlaying = false;  // Playback complete (or barge-in stopped it)
-    void emitTtsEvent("tts-ended");
-    // Only fire onEnd if not barged in — prevents stale callbacks
+    // Only the CURRENT utterance may clear the playing flag. A superseded call (the one-moment ack
+    // that a newer reply stopped) resolves a beat later; before this guard its `finally` cleared the
+    // flag while the new reply was still playing, so the stuck-speaking watchdog thought the audio was
+    // dead and closed the turn ~10 s into an 18 s answer (live log 2026-10-17 02:20). stopTts() has
+    // already cleared the flag and emitted tts-ended for a superseded call.
     if (ttsGeneration === myGen) {
+      rustTtsPlaying = false;  // Playback complete
+      void emitTtsEvent("tts-ended");
       onEnd?.();
     }
   }
-}
-
-/** Web Speech API fallback — uses the browser's built-in speech synthesis. */
-async function speakWebSpeech(text: string, speed: number = 1.15): Promise<void> {
-  return new Promise((resolve) => {
-    if (!("speechSynthesis" in window)) {
-      console.warn("[TTS] Web Speech API not available");
-      resolve();
-      return;
-    }
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = speed;
-    utterance.pitch = 1.0;
-    utterance.volume = 1.0;
-    // Try to use a female voice to match Ava
-    const voices = window.speechSynthesis.getVoices();
-    const preferred = voices.find(v => v.name.includes("Ava") || v.name.includes("Zira") || v.name.includes("Jenny") || v.name.includes("Natural"))
-      || voices.find(v => v.lang.startsWith("en"));
-    if (preferred) utterance.voice = preferred;
-    utterance.onend = () => resolve();
-    utterance.onerror = () => resolve();
-    window.speechSynthesis.speak(utterance);
-  });
 }
 
 export async function previewVoice(
@@ -182,6 +356,16 @@ export async function speak(text: string, onEnd?: () => void): Promise<void> {
     onEnd?.();
     return;
   }
+
+  // Every caller of speak()/speakCached() is expected to show the orb and
+  // mark it speaking before invoking this — but that was convention across
+  // 30+ call sites, not enforced anywhere. Enforce it once, here, at the
+  // single choke point every sound-producing invoke actually passes
+  // through, so a future (or past-unaudited) caller can never let sound
+  // play with the orb hidden.
+  const assistant = useAssistant.getState();
+  assistant.setVisible(true);
+  assistant.setState("speaking");
 
   // Stop any currently-playing TTS before starting new playback.
   // This prevents overlapping audio when the server ack and result
@@ -206,49 +390,11 @@ export async function speak(text: string, onEnd?: () => void): Promise<void> {
   const voiceId = settings?.edgeTtsVoice || "en-US-AvaNeural";
   const speed = settings?.speechRate ?? 1.15;
 
-  // Sentence-streamed speech for long results: synthesize + play the first
-  // sentence while later ones still generate (first audio in ~300ms instead
-  // of after full synthesis). Short texts go direct — identical behavior.
-  // Barge-in safe: playKokoro checks the generation per chunk, so a stop
-  // mid-queue silences the rest. Periods only split on whitespace so
-  // decimals ("3.14") and versions stay whole.
-  const chunks = splitForSpeech(text);
-  if (chunks.length <= 1) {
-    return playKokoro(text, voiceId, speed, myGen, onEnd);
-  }
-  for (let i = 0; i < chunks.length; i++) {
-    if (ttsGeneration !== myGen) {
-      console.log("[TTS] streamed speak stopped — barge-in");
-      return;
-    }
-    const last = i === chunks.length - 1;
-    await playKokoro(chunks[i], voiceId, speed, myGen, last ? onEnd : undefined);
-  }
-}
-
-/**
- * Split long text into speakable sentence chunks. Short text returns
- * a single chunk (no behavior change). Long punctuation-free stretches
- * force-flush at ~400 chars so audio never stalls.
- */
-export function splitForSpeech(text: string): string[] {
-  const trimmed = text.trim();
-  if (trimmed.length < 150) return [trimmed];
-  const parts = trimmed.match(/[^.!?…]+[.!?…]+(\s+|$)|[^.!?…]+$/g);
-  const sentences = (parts ?? [trimmed]).map((s) => s.trim()).filter(Boolean);
-  const chunks: string[] = [];
-  let buf = "";
-  const flush = () => {
-    if (buf.trim()) chunks.push(buf.trim());
-    buf = "";
-  };
-  for (const s of sentences) {
-    if ((buf + " " + s).trim().length > 400) flush();
-    buf = buf ? buf + " " + s : s;
-    if (/[.!?…]$/.test(s.trim())) flush();
-  }
-  flush();
-  return chunks.length ? chunks : [trimmed];
+  // ONE invoke per utterance. Rust's speak_text already streams long replies sentence by sentence
+  // (first audio after one sentence) under a single volume lease and a single voice decision.
+  // Splitting here made each sentence its own lease (volume dipped to the original level between
+  // sentences) and its own engine decision (a failed sentence changed the voice).
+  return playKokoro(text, voiceId, speed, myGen, onEnd);
 }
 
 /**
@@ -264,6 +410,12 @@ export async function speakCached(phrase: string, onEnd?: () => void): Promise<v
     return;
   }
 
+  // Same enforcement as speak() — see its comment. speakCached() is the
+  // other (and only other) function that ever invokes a Rust TTS command.
+  const assistant = useAssistant.getState();
+  assistant.setVisible(true);
+  assistant.setState("speaking");
+
   // Stop any currently-playing TTS before starting new playback.
   stopTts();
 
@@ -275,14 +427,18 @@ export async function speakCached(phrase: string, onEnd?: () => void): Promise<v
     if (ttsGeneration !== myGen) return;
     onEnd?.();
   } catch (e) {
+    // A superseded call must neither clear the newer speech's flag nor speak its stale phrase.
+    if (ttsGeneration !== myGen) return;
     // Fallback to regular speak if cached phrase not available
     console.warn("[TTS] speak_cached failed, falling back to speak:", e);
     rustTtsPlaying = false;
     void emitTtsEvent("tts-ended");
     return speak(phrase, onEnd);
   } finally {
-    rustTtsPlaying = false;
-    void emitTtsEvent("tts-ended");
+    if (ttsGeneration === myGen) {
+      rustTtsPlaying = false;
+      void emitTtsEvent("tts-ended");
+    }
   }
 }
 

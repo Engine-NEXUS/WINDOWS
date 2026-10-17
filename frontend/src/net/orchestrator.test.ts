@@ -20,7 +20,9 @@ vi.mock("@tauri-apps/api/core", () => ({
 import "./ghostHotMic";
 import { useAssistant } from "../store/assistant";
 import {
+  __testPendingSpeechCloseFor,
   __testSetCurrentRequestId,
+  __testSetPendingSpeechCloseFor,
   __testSetStuckTicks,
   __testStuckTicks,
   closeTurnOnSpeechEnd,
@@ -81,6 +83,45 @@ describe("finishSpokenResult (result → done → idle handshake)", () => {
     expect(useAssistant.getState().ghostActive).toBe(true);
     useAssistant.setState({ ghostActive: false });
     await vi.advanceTimersByTimeAsync(0);
+  });
+});
+
+describe("pendingSpeechCloseFor (done/result race — the Gap 1 fix)", () => {
+  // The `done` case inside the internal orchestrator:event listener isn't
+  // separately exported/testable, so this verifies the half of the
+  // mechanism that is: finishSpokenResult (the result/error handlers'
+  // own closure) must release the tracker exactly when it owns this
+  // request id, and leave it untouched otherwise — the done handler
+  // checks the same tracker before deciding to run its own reset.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    invokeMock.mockReset().mockResolvedValue(undefined);
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    useAssistant.setState({ state: "speaking", visible: true, ghostActive: false });
+    __testSetCurrentRequestId("req-1");
+  });
+
+  it("finishSpokenResult releases the tracker for the request it closes", () => {
+    __testSetPendingSpeechCloseFor("req-1");
+    expect(finishSpokenResult("req-1")).toBe(true);
+    expect(__testPendingSpeechCloseFor()).toBeNull();
+  });
+
+  it("a stale onEnd (already barged-in) still releases a tracker set for that id", () => {
+    // Rust's Done can arrive synchronously right after Result for several
+    // turn types — if a barge-in already moved currentRequestId on, this
+    // call returns false (stale), but must still drop its own claim so a
+    // later done for the SAME old id doesn't find a lingering tracker.
+    __testSetCurrentRequestId("req-2");
+    __testSetPendingSpeechCloseFor("req-1");
+    expect(finishSpokenResult("req-1")).toBe(false);
+    expect(__testPendingSpeechCloseFor()).toBeNull();
+  });
+
+  it("does not touch a tracker claimed by a different, unrelated request", () => {
+    __testSetPendingSpeechCloseFor("some-other-req");
+    expect(finishSpokenResult("req-1")).toBe(true);
+    expect(__testPendingSpeechCloseFor()).toBe("some-other-req");
   });
 });
 
@@ -246,6 +287,25 @@ describe("processViaOrchestrator ghost invoke timeout", () => {
     await vi.advanceTimersByTimeAsync(12000);
     await assertion;
     expect(invokeMock).toHaveBeenCalledWith("orchestrator_cancel");
+  });
+
+  it("closes the watchdog turn when the budget expires (so the watchdog can't also fire)", async () => {
+    const { GhostInvokeTimeout, processViaOrchestrator } = await import("./orchestrator");
+    const { __testGetGhostTurnTimes, __testSetGhostTurnTimes } = await import("./ghostHotMic");
+    useAssistant.setState({ ghostActive: true });
+    __testSetGhostTurnTimes(0, 0);
+    invokeMock.mockImplementation((cmd: string) =>
+      cmd === "orchestrator_process" ? new Promise(() => {}) : Promise.resolve(undefined),
+    );
+    const pending = processViaOrchestrator("open the brief", undefined, undefined, { timeoutMs: 12000 });
+    const assertion = expect(pending).rejects.toBeInstanceOf(GhostInvokeTimeout);
+    await vi.advanceTimersByTimeAsync(12000);
+    await assertion;
+    await vi.advanceTimersByTimeAsync(0); // flush the dynamic-import continuation
+    const t = __testGetGhostTurnTimes();
+    expect(t.opened).toBeGreaterThan(0);
+    expect(t.closed).toBeGreaterThanOrEqual(t.opened);
+    useAssistant.setState({ ghostActive: false });
   });
 
   it("no timeout by default: slow backends still resolve (long-running safe)", async () => {

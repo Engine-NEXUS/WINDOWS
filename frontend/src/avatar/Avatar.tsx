@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { useAssistant, AssistantState } from "../store/assistant";
 import { positionToPct, wheelResize, type CalibrationTarget } from "../calibration/geometry";
 import { VoiceOrb } from "./VoiceOrb";
@@ -268,9 +269,12 @@ export interface AvatarProps {
    *  keeps rendering the orb during this window so the particles can
    *  finish flying apart instead of the host div unmounting mid-tween. */
   dispersing?: boolean;
+  /** False while the capsule is hidden (Ghost idle): the WebGL loop pauses
+   *  so a hidden orb costs no GPU. Defaults to true for every other caller. */
+  shown?: boolean;
 }
 
-export function Avatar({ entered: enteredProp = false, dispersing = false }: AvatarProps = {}) {
+export function Avatar({ entered: enteredProp = false, dispersing = false, shown = true }: AvatarProps = {}) {
   const state = useAssistant((s) => s.state);
   const visible = useAssistant((s) => s.visible);
   const ttsActive = useAssistant((s) => s.ttsActive);
@@ -300,6 +304,20 @@ export function Avatar({ entered: enteredProp = false, dispersing = false }: Ava
         })
         .catch(() => {});
     }
+  }, []);
+
+  // GPU-contention power scaling: Hand Mode's pipeline detects sustained contention (another app
+  // competing for the same shared WebView2 GPU process — see `src-tauri/src/hand/mod.rs`) from
+  // real infer-time data and broadcasts it on the same `hand:state` event the hand window itself
+  // listens to. The orb reacts by giving back some of its own GPU draw cost, same mechanism as
+  // the battery cap just above, combined into one ceiling below.
+  const [gpuBusy, setGpuBusy] = useState(false);
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<{ gpu_busy?: boolean }>("hand:state", (e) => setGpuBusy(Boolean(e.payload.gpu_busy))).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
   }, []);
 
   // Turn-gap pin (ghost always-on plan): in ghost mode an idle arriving
@@ -421,8 +439,7 @@ export function Avatar({ entered: enteredProp = false, dispersing = false }: Ava
   const wavesPreview = calibrationTarget === "waves";
   // Ghost always-on display: the WebGL orb replaces the waves bars.
   const ghostDisplay = shouldShowGhostParticles(visible, ghostActive);
-  const isOrbVisible = Boolean(enteredProp || visible || ghostActive || dispersing);
-  console.log(`[AVATAR] render: orbVisible=${isOrbVisible} state=${displayState} (entered=${enteredProp}, storeVisible=${visible}, ghost=${ghostActive})`);
+  const isOrbVisible = Boolean(enteredProp || dispersing || (shown && (visible || ghostActive)));
   // Target-switch pulse (plan 04 §4): toggling suffix restarts the CSS
   // animation, so identical rects still read as switched.
   const pulseClass = calibrating ? ` calib-pulse-${calibrationPulse % 2}` : "";
@@ -448,7 +465,7 @@ export function Avatar({ entered: enteredProp = false, dispersing = false }: Ava
             listenMode={orbListenMode}
             theme={themeMode}
             visible={isOrbVisible}
-            particles={onBattery ? 2500 : 5000}
+            particles={Math.min(onBattery ? 2500 : 5000, gpuBusy ? 2000 : Infinity)}
             entered={ghostActive || enteredProp}
             dispersing={dispersing}
             level={

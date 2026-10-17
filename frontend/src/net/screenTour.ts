@@ -92,6 +92,7 @@ export function handleTourEnd(p: TourEnd): void {
     if (tourId !== null) return;
     const s = useAssistant.getState();
     if (s.state === "speaking" && !isRustTtsPlaying()) {
+      // turn-end:keep-raw tour cancelled or failed: no `done` event follows
       s.reset();
       s.setVisible(false);
     }

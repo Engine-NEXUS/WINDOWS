@@ -14,13 +14,19 @@
 import { preloadSileroVad, preloadMicVad, stopVad } from "../audio/vad";
 import { abortCapture, processTranscript } from "../audio/recorder";
 import { stopTts, isRustTtsPlaying } from "../audio/ttsPlayer";
+import { transcribeAudio } from "../audio/stt";
 import { useAssistant } from "../store/assistant";
 import { setBargedIn, clearBargedIn, clearDialogContext } from "../net/wsBridge";
+import { isDuplicateListen } from "../net/listenDedupe";
 
 /** Set to true when the wake is triggered automatically by a follow-up
  * question (not by the user pressing Ctrl+Space). When true, startListening
  * does NOT set the bargedIn flag — the follow-up response should be heard. */
 let autoReopenFromFollowup = false;
+
+/** Last accepted follow-up/hot-mic re-arm (see isDuplicateListen). */
+let lastFollowupListenAt = 0;
+let lastFollowupListenOrigin: string | null = null;
 
 /** Called by wsBridge when a follow-up question finishes speaking and
  *  the mic should auto-reopen without requiring the user to press Ctrl+Space.
@@ -29,9 +35,24 @@ let autoReopenFromFollowup = false;
  *  shows "listening" while Rust captures nothing (live bug, doc 44 —
  *  the confirm window already did this; the shared path didn't). */
 export function triggerFollowupListen(hotMic = false): void {
+  // Duplicate-listen guard (R3): independent re-arm paths can land together;
+  // the second would restart a live capture and run the wake handler twice.
+  const origin = hotMic ? "hot_mic" : "direct";
+  const nowMs = Date.now();
+  if (isDuplicateListen(nowMs, lastFollowupListenAt, lastFollowupListenOrigin, origin)) {
+    console.log(
+      `[NEXUS] followup listen skipped: duplicate ${origin} re-arm (+${nowMs - lastFollowupListenAt}ms)`,
+    );
+    return;
+  }
+  lastFollowupListenAt = nowMs;
+  lastFollowupListenOrigin = origin;
   autoReopenFromFollowup = true;
   const w = window as any;
   if (w.__NEXUS_WAKE__) {
+    // P2 double-wake audit: followup relistens also funnel through the
+    // wake handler — tag the source so doubles are attributable.
+    (w.__NEXUS_WAKE_SOURCE as string | undefined) = hotMic ? "followup-hotmic" : "followup";
     w.__NEXUS_WAKE__();
   }
   import("@tauri-apps/api/core")
@@ -83,6 +104,13 @@ async function startListening() {
   const s = useAssistant.getState();
   console.log("[NEXUS] wake →", s.state);
 
+  // The mic is opening again (wake word, hotkey or a relisten): it is no longer
+  // parked and the ignored-speech streak starts over.
+  void import("../net/ghostHotMic").then((m) => {
+    m.clearGhostParked();
+    m.resetIgnoredTurns();
+  }).catch(() => {});
+
   // Second Ctrl+Space press while listening = cancel the call.
   if (s.state === "listening") {
     console.log("[NEXUS] second press while listening → aborting capture");
@@ -93,6 +121,7 @@ async function startListening() {
       );
       if (!res.had_speech) {
         await abortCapture().catch((e) => console.warn("[NEXUS] abortCapture failed:", e));
+        // turn-end:keep-raw explicit user cancel (second press while listening)
         useAssistant.getState().reset();
         useAssistant.getState().setVisible(false);
       }
@@ -150,8 +179,19 @@ async function startListening() {
  *  as a global for any other direct caller, and invoked by the "orb:wake"
  *  Tauri event listener below (Rust no longer has a window to `eval()`
  *  against, so it emits a real event instead). */
+let __wakeInvokeCount = 0;
+let __lastWakeAt = 0;
 (window as any).__NEXUS_WAKE__ = () => {
-  console.log("[NEXUS] __NEXUS_WAKE__ invoked");
+  // P2 double-wake audit: counter + gap + source on every invocation so
+  // back-to-back wakes in the log are attributable to their trigger.
+  __wakeInvokeCount += 1;
+  const now = Date.now();
+  const gap = __lastWakeAt ? now - __lastWakeAt : -1;
+  __lastWakeAt = now;
+  const w = window as any;
+  const source = w.__NEXUS_WAKE_SOURCE ?? "unknown";
+  w.__NEXUS_WAKE_SOURCE = undefined;
+  console.log(`[NEXUS] __NEXUS_WAKE__ invoked #${__wakeInvokeCount} (source=${source}, +${gap}ms)`);
   void wakeWithGreeting();
 };
 
@@ -173,6 +213,7 @@ async function startListening() {
     console.log("[NEXUS] first-run greeting done — hiding orb");
     s.setState("idle");
     s.setVisible(false);
+    // turn-end:keep-raw first-run greeting finished
     setTimeout(() => s.reset(), 550);
   });
 
@@ -190,13 +231,27 @@ async function wakeWithGreeting() {
 async function setupOrbWakeListener() {
   try {
     const { listen } = await import("@tauri-apps/api/event");
-    await listen("orb:wake", () => {
+    await listen<{ source?: string }>("orb:wake", (event) => {
+      (window as any).__NEXUS_WAKE_SOURCE = event.payload?.source ?? "orb:wake";
       (window as any).__NEXUS_WAKE__?.();
     });
     await listen("orb:first_run_greeting", () => {
       (window as any).__NEXUS_FIRST_RUN_GREETING__?.();
     });
-    console.log("[NEXUS] orb:wake / orb:first_run_greeting listeners registered");
+    await listen("orb:cancel", async () => {
+      console.log("[NEXUS] orb:cancel received — canceling active agent & resetting orb");
+      stopTts();
+      stopVad();
+      await abortCapture().catch((e) => console.warn("[NEXUS] cancel abortCapture failed:", e));
+      const s = useAssistant.getState();
+      s.setState("idle");
+      s.setVisible(false);
+      s.setLoadingVisible(false);
+      s.setAwaitingInput(false);
+      // turn-end:keep-raw explicit user cancel (Ctrl+Space): the hot mic must not relisten
+      s.reset();
+    });
+    console.log("[NEXUS] orb:wake / orb:first_run_greeting / orb:cancel listeners registered");
   } catch (err) {
     console.warn("[NEXUS] Failed to register orb wake listeners:", err);
   }
@@ -249,7 +304,6 @@ async function setupCommandDetectionListener() {
           const pcm = await captureParameter(3000);
           if (pcm && pcm.length > 0) {
             s.setState("thinking");
-            const { transcribeAudio } = await import("../audio/stt");
             const param = await transcribeAudio(pcm);
             if (param && param.trim().length > 0) {
               console.log(`[NEXUS] Tier 3 parameter: "${param}"`);
@@ -335,8 +389,7 @@ export type SttTranscriptPayload = string | SttTranscriptTurn;
 async function setupSttTranscriptListener() {
   try {
     const { listen } = await import("@tauri-apps/api/event");
-    await listen<SttTranscriptPayload>("stt:transcript", async (event) => {
-      const payload = event.payload;
+    const handleTranscript = async (payload: SttTranscriptPayload) => {
       const transcript = typeof payload === "string" ? payload : payload.text ?? "";
       const turn =
         typeof payload === "string"
@@ -351,9 +404,31 @@ async function setupSttTranscriptListener() {
               initiation: useAssistant.getState().ghostActive ? ("ghost" as const) : ("explicit" as const),
             };
       console.log(`[NEXUS] stt:transcript event received: "${transcript}" intent=${typeof payload === "object" ? payload.intent_label : "none"}`);
-      await processTranscript(transcript, turn);
+      // Ghost turns run in the order they were heard (a fast-path turn must not overtake an older
+      // one that is still being parsed); everything else keeps the direct path.
+      if (turn?.initiation === "ghost") {
+        const { runInTurnOrder } = await import("../net/turnChain");
+        await runInTurnOrder(() => processTranscript(transcript, turn));
+      } else {
+        await processTranscript(transcript, turn);
+      }
+    };
+    await listen<SttTranscriptPayload>("stt:transcript", async (event) => {
+      await handleTranscript(event.payload);
     });
     console.log("[NEXUS] stt:transcript listener registered");
+    // A turn that finished while this stage was down was stashed by Rust (events are
+    // fire-and-forget). Replay it once on mount so the orb never parks on a lost turn.
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const pending = await invoke<SttTranscriptPayload | null>("stage_take_pending_transcript");
+      if (pending) {
+        console.warn("[ORB] replaying a transcript that arrived while the stage was down");
+        await handleTranscript(pending);
+      }
+    } catch {
+      /* outside Tauri / command unavailable */
+    }
   } catch (err) {
     console.warn("[NEXUS] Failed to register stt:transcript listener:", err);
   }
@@ -396,19 +471,6 @@ async function setupTurnStatsListener() {
     console.log("[NEXUS] stt:turn_stats listener registered");
   } catch (err) {
     console.warn("[NEXUS] Failed to register stt:turn_stats listener:", err);
-  }
-}
-
-async function setupGhostRelistenListener() {
-  try {
-    const { listen } = await import("@tauri-apps/api/event");
-    await listen("ghost:relisten", () => {
-      console.log("[NEXUS] ghost:relisten from watchdog — guarded relisten");
-      import("../net/ghostHotMic").then((m) => m.maybeGhostRelisten()).catch(() => {});
-    });
-    console.log("[NEXUS] ghost:relisten listener registered");
-  } catch (err) {
-    console.warn("[NEXUS] Failed to register ghost:relisten listener:", err);
   }
 }
 
@@ -481,7 +543,6 @@ export function initOrbRuntime(): void {
   void setupCommandDetectionListener();
   void setupSttTranscriptListener();
   void setupTurnStatsListener();
-  void setupGhostRelistenListener();
   void setupAudioLevelListener();
 
   // Open the backend session at startup (fire-and-forget).
@@ -501,6 +562,9 @@ export function initOrbRuntime(): void {
       const s = await invoke<{
         orbColor?: string;
         orbPosition?: "top" | "bottom";
+        orbCapsuleStyle?: "classic" | "pebble";
+        orbWakeupMode?: number;
+        orbInteriorGenesis?: number;
         orbThinkMode?: number;
         orbSpeakMode?: number;
         orbListenMode?: number;
@@ -510,6 +574,15 @@ export function initOrbRuntime(): void {
       }
       if (s?.orbPosition) {
         useAssistant.getState().setOrbPosition(s.orbPosition);
+      }
+      if (s?.orbCapsuleStyle) {
+        useAssistant.getState().setOrbCapsuleStyle(s.orbCapsuleStyle as "classic" | "pebble");
+      }
+      if (s?.orbWakeupMode) {
+        useAssistant.getState().setOrbWakeupMode(s.orbWakeupMode);
+      }
+      if (s?.orbInteriorGenesis) {
+        useAssistant.getState().setOrbInteriorGenesis(s.orbInteriorGenesis);
       }
       if (s?.orbThinkMode) {
         useAssistant.getState().setOrbThinkMode(s.orbThinkMode);
@@ -527,6 +600,20 @@ export function initOrbRuntime(): void {
       await listen<{ color: string }>("orb:color", (e) => {
         if (e.payload?.color) {
           useAssistant.getState().setOrbColor(e.payload.color);
+        }
+      });
+      await listen<{ style?: string; mode?: number; genesis?: number } | string>("orb:capsule_style", (e) => {
+        const payload = e.payload;
+        if (typeof payload === "string") {
+          if (payload === "classic" || payload === "pebble") {
+            useAssistant.getState().setOrbCapsuleStyle(payload);
+          }
+        } else if (payload?.style) {
+          if (payload.style === "classic" || payload.style === "pebble") {
+            useAssistant.getState().setOrbCapsuleStyle(payload.style);
+          }
+          if (payload.mode) useAssistant.getState().setOrbWakeupMode(payload.mode);
+          if (payload.genesis) useAssistant.getState().setOrbInteriorGenesis(payload.genesis);
         }
       });
       await listen<string>("stage:orb_position", (e) => {

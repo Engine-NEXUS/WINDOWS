@@ -52,19 +52,25 @@ export function ResponseCaption() {
 
   // Position/opacity applied via direct DOM mutation, not React's `style`
   // prop — the stage window's CSP makes inline styles a silent no-op.
+  // Slot is user-tuned (caption-tuner 2026-10-09: center-x 51.5%,
+  // top 89%): percentages of the fullscreen stage, so they scale from
+  // the tuner's 2133x1056 viewport to any screen size.
   const applyPosition = (el: HTMLDivElement | null) => {
     if (!el || !rect) return;
     const dpr = window.devicePixelRatio || 1;
-    const centerX = typeof window !== "undefined" ? window.innerWidth / 2 : rect.x / dpr + rect.w / dpr / 2;
     const topY = rect.y / dpr;
-    const bottomY = (rect.y + rect.h) / dpr;
-    const gap = 20;
     const isTop = topY < (typeof window !== "undefined" ? window.innerHeight / 2 : 540);
 
     if (isTop) {
-      el.style.transform = `translate(${centerX}px, ${bottomY + gap}px) translateX(-50%)`;
+      const centerX = window.innerWidth * 0.515;
+      const y = window.innerHeight * 0.895;
+      el.style.transform = `translate(${centerX}px, ${y}px) translateX(-50%)`;
     } else {
-      el.style.transform = `translate(${centerX}px, ${topY - gap}px) translate(-50%, -100%)`;
+      // Bottom-dock fallback (untuned): keep the legacy above-orb slot
+      // so the caption never collides with a bottom-docked orb.
+      const centerX = window.innerWidth / 2;
+      const bottomY = (rect.y + rect.h) / dpr;
+      el.style.transform = `translate(${centerX}px, ${bottomY + 20}px) translateX(-50%)`;
     }
     el.style.opacity = lineEvent && lineEvent.phase !== "cleared" ? "1" : "0";
   };
@@ -76,45 +82,26 @@ export function ResponseCaption() {
 
   if (!rect || !lineEvent || lineEvent.phase === "cleared") return null;
 
-  const words = lineEvent.words && lineEvent.words.length > 0
-    ? lineEvent.words
-    : lineEvent.text?.trim()
-    ? lineEvent.text.trim().split(/\s+/).filter(Boolean)
-    : [];
-
-  if (words.length === 0) return null;
+  const currentText = lineEvent.text || "";
+  if (!currentText.trim()) return null;
 
   const phaseClass =
     lineEvent.phase === "active"
-      ? "mercury-pill--active"
+      ? "caption-black-capsule--active"
       : lineEvent.phase === "fading"
-      ? "mercury-pill--fading"
+      ? "caption-black-capsule--fading"
       : "";
-
-  const activeIdx = lineEvent.activeWordIndex ?? (words.length - 1);
 
   return (
     <div
-      className="response-caption response-caption--mercury"
+      className="response-caption response-caption--black"
       ref={(el) => {
         captionRef.current = el;
         applyPosition(el);
       }}
     >
-      <div className={`mercury-pill ${phaseClass}`}>
-        <div className="mercury-pill-text">
-          {words.map((w, idx) => {
-            const isActive = lineEvent.phase === "active" && idx === activeIdx;
-            return (
-              <span
-                key={`${idx}-${w}`}
-                className={`mercury-word ${isActive ? "mercury-word--active" : "mercury-word--spoken"}`}
-              >
-                {w}
-              </span>
-            );
-          })}
-        </div>
+      <div className={`caption-black-capsule ${phaseClass}`}>
+        <span className="caption-black-text">{currentText}</span>
       </div>
     </div>
   );

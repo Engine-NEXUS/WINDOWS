@@ -376,7 +376,8 @@
   filter: blur(2px);
 }
 
-/* ─── Design #11: Liquid Mercury Stream (Incremental Spoken Reveal) ─── */
+/* ─── Pure Black Letter-by-Letter Voice Caption (Matches .orb-capsule) ─── */
+.response-caption--black,
 .response-caption--mercury {
   width: auto;
   max-width: 680px;
@@ -384,85 +385,81 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  pointer-events: none;
+  background: transparent !important;
+  background-color: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: none !important;
+  border: none !important;
 }
 
+.caption-black-capsule,
 .mercury-pill {
-  background: rgba(16, 20, 30, 0.82);
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  border-radius: 9999px;
-  padding: 10px 24px;
+  background: #000000 !important;
+  background-color: #000000 !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  padding: 2px 24px; /* user-tuned via caption-tuner 2026-10-09 */
   max-width: 620px;
-  min-height: 48px;
-  backdrop-filter: blur(36px) saturate(200%);
-  -webkit-backdrop-filter: blur(36px) saturate(200%);
+  min-height: 30px; /* lowered with padding-y so the capsule actually slims */
   box-shadow:
-    0 16px 40px rgba(0, 0, 0, 0.65),
-    inset 0 1px 2px rgba(255, 255, 255, 0.35);
+    0 16px 44px rgba(0, 0, 0, 0.95),
+    0 4px 14px rgba(0, 0, 0, 0.85);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   transition:
-    opacity 350ms cubic-bezier(0.16, 1, 0.3, 1),
-    transform 350ms cubic-bezier(0.16, 1, 0.3, 1),
-    filter 350ms cubic-bezier(0.16, 1, 0.3, 1);
-  will-change: opacity, transform, filter;
+    opacity 300ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 300ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: opacity, transform;
 }
 
+.caption-black-capsule--active,
 .mercury-pill--active {
   opacity: 1;
-  transform: scale(1) translateY(0);
-  filter: blur(0px);
+  transform: translateY(0);
 }
 
+.caption-black-capsule--fading,
 .mercury-pill--fading {
   opacity: 0;
-  transform: scale(0.96) translateY(-4px);
-  filter: blur(3px);
+  transform: translateY(-4px);
 }
 
+.caption-black-text,
 .mercury-pill-text {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
-  font-size: 19px;
-  font-weight: 650;
+  font-size: 16.5px; /* user-tuned via caption-tuner 2026-10-09 */
+  font-weight: 550;
   letter-spacing: -0.2px;
-  line-height: 1.35;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
+  line-height: 1.4;
+  color: #ffffff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-align: center;
+  display: block;
 }
 
 .mercury-word {
-  display: inline-block;
-  transition: all 0.22s ease-out;
+  display: inline;
 }
 
 .mercury-word--active {
   color: #ffffff;
-  font-weight: 850;
-  transform: scale(1.08) translateY(-1px);
-  text-shadow: 0 0 16px #00e5ff, 0 0 28px rgba(0, 229, 255, 0.7);
-  animation: mercury-pop 200ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  font-weight: 550;
+  transform: none;
+  text-shadow: none;
+  animation: none;
 }
 
 .mercury-word--spoken {
-  color: #f1f5f9;
-  opacity: 0.9;
-  transform: scale(1) translateY(0);
-}
-
-@keyframes mercury-pop {
-  0% {
-    opacity: 0;
-    transform: scale(0.82) translateY(5px);
-    filter: blur(2px);
-  }
-  100% {
-    opacity: 1;
-    transform: scale(1.08) translateY(-1px);
-    filter: blur(0px);
-  }
+  color: #ffffff;
+  opacity: 1;
+  transform: none;
 }
 
 /* Live caption (plan Phase 4) — the user's OWN words, growing while they
@@ -474,6 +471,7 @@
    semantics), so an animate-in-per-word would fight itself every update. */
 .live-caption {
   opacity: 0.82;
+  font-size: 16.5px; /* match user-tuned reply caption size (caption-tuner 2026-10-09) */
 }
 
 /* Loading indicator (plan §1.6) — the top-right Lottie spinner, retired

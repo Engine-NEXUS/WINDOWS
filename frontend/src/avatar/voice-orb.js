@@ -321,7 +321,7 @@
     float uAlongKnot=fract(seed.w+t*0.06);
     float ribbonSpark=pow(max(0.0,sin(uAlongKnot*12.566-t*4.0)),10.0)*step(0.35,depth);
     strength=(.24+.45*depth+.70*rim)*(.65+.35*fract(sin(seed.w*912.7+31.4)*43758.5));
-    float listenInGlow=(!isFixed)*clamp((1.0-dynR)/0.35,0.0,1.0)*0.55;
+    float listenInGlow=(isFixed?0.0:1.0)*clamp((1.0-dynR)/0.35,0.0,1.0)*0.55;
     strength+=(weights.x+weights.y)*(listenInGlow+mid*flow*.40+onset*rim*.45);
     strength+=weights.w*(mid*flow*.95+onset*rim*.9);
     strength+=weights.z*(0.65+0.45*depth+ribbonSpark*1.6);
@@ -331,7 +331,7 @@
     strength*=mix(1.0,0.95,weights.y);
     strength*=mix(1.0,1.02,weights.z);
     strength*=mix(1.0,1.18,weights.w);
-    float listenSpark=(!isFixed)*clamp((1.0-dynR)/0.35,0.0,1.0)*voiceLevel*0.65*(mid+onset);
+    float listenSpark=(isFixed?0.0:1.0)*clamp((1.0-dynR)/0.35,0.0,1.0)*voiceLevel*0.65*(mid+onset);
     spark=active*(high*pop*.8+onset*rim*.22)+weights.z*(ribbonSpark*1.4+step(0.85,depth)*0.15)+(weights.x+weights.y)*listenSpark;
   }`;
   const FS = `
@@ -480,6 +480,12 @@ canvas{display:block;position:absolute;inset:0;width:100%;height:100%;pointer-ev
       if (this._visibilityHandler) {
         document.removeEventListener('visibilitychange', this._visibilityHandler);
       }
+      if (this._gl) {
+        try {
+          this._gl.getExtension('WEBGL_lose_context')?.loseContext();
+        } catch (_) {}
+        this._gl = null;
+      }
       this.disconnect();
     }
     get state() { return STATES.includes(this.getAttribute('state'))?this.getAttribute('state'):'idle'; }
@@ -554,10 +560,10 @@ canvas{display:block;position:absolute;inset:0;width:100%;height:100%;pointer-ev
         const attr=gl.getAttribLocation(program,'seed');gl.enableVertexAttribArray(attr);gl.vertexAttribPointer(attr,4,gl.FLOAT,false,0,0);
         this._scatterLoc=gl.getAttribLocation(program,'scatter');
         this._scatterBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,this._scatterBuf);
-        gl.enableVertexAttribArray(this._scatterLoc);gl.vertexAttribPointer(this._scatterLoc,3,gl.FLOAT,false,0,0);
+        if(this._scatterLoc>=0){gl.enableVertexAttribArray(this._scatterLoc);gl.vertexAttribPointer(this._scatterLoc,3,gl.FLOAT,false,0,0);}/* -1 = declared but unused, optimized out by the GLSL compiler */
         this._textLoc=gl.getAttribLocation(program,'textPos');
         this._textBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,this._textBuf);
-        gl.enableVertexAttribArray(this._textLoc);gl.vertexAttribPointer(this._textLoc,4,gl.FLOAT,false,0,0);
+        if(this._textLoc>=0){gl.enableVertexAttribArray(this._textLoc);gl.vertexAttribPointer(this._textLoc,4,gl.FLOAT,false,0,0);}
         gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE);gl.disable(gl.DEPTH_TEST);
         this._gl=gl;this._program=program;this._uniforms={};
         for(const n of ['time','pixels','density','weights','bands','onset','assemble','tw','textProg','thinkIn','textTint','userTint','glitch','ink','u_think_mode','u_speak_mode','u_listen_mode'])this._uniforms[n]=gl.getUniformLocation(program,n);

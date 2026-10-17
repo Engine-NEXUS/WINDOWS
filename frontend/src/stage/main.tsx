@@ -8,6 +8,7 @@ import { LoadingIndicator } from "./LoadingIndicator";
 import { ResponseCaption } from "./ResponseCaption";
 import { LiveCaption } from "./LiveCaption";
 import { TourOverlay } from "./TourOverlay";
+import { HandOverlay } from "./HandOverlay";
 import { initThemeSync } from "../sidebar/theme";
 
 initThemeSync(); // Light/Dark follows the Command Hub setting (orb, callouts)
@@ -341,6 +342,7 @@ function StageApp() {
       </div>
       <SpatialAnnotationLayer />
       <TourOverlay />
+      <HandOverlay />
       <AnnotationCanvas />
       <OrbFrame />
       <LoadingIndicator />

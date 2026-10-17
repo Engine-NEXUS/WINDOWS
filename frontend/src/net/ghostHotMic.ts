@@ -43,6 +43,47 @@ export function __testSilentMissCount(): number {
   return silentMisses;
 }
 
+// ─── Ignored (non-directed) turns ─────────────────────────────────────
+// TV, side talk and echo that the directed gate rejects are NOT silence: they
+// used to share the silent-capture counter, so three sentences from the TV
+// parked the mic silently and the user's next command went nowhere. They now
+// have their own counter that only counts a streak INSIDE a time window, and
+// parking is spoken once and tracked (isGhostParked) so the orb can show it.
+
+/** Consecutive ignored turns inside the window before the mic parks. */
+export const GHOST_IGNORED_CAP = 4;
+/** An ignored turn older than this no longer counts toward a streak. */
+export const GHOST_IGNORED_WINDOW_MS = 60_000;
+
+let ignoredTurnTimes: number[] = [];
+let parked = false;
+
+/** Record one ignored turn at `now`; returns the streak length inside the window. */
+export function recordIgnoredTurn(now: number = Date.now()): number {
+  ignoredTurnTimes = ignoredTurnTimes.filter((t) => now - t <= GHOST_IGNORED_WINDOW_MS);
+  ignoredTurnTimes.push(now);
+  return ignoredTurnTimes.length;
+}
+
+/** A directed turn (or a wake) ends the streak. */
+export function resetIgnoredTurns(): void {
+  ignoredTurnTimes = [];
+}
+
+/** The hot mic stopped re-arming itself; only a wake or hotkey brings it back. */
+export function markGhostParked(): void {
+  parked = true;
+}
+
+/** The mic is open again (wake, hotkey or a relisten). */
+export function clearGhostParked(): void {
+  parked = false;
+}
+
+export function isGhostParked(): boolean {
+  return parked;
+}
+
 function isTauri(): boolean {
   return (
     typeof window !== "undefined" &&
@@ -120,8 +161,17 @@ export async function endGhostTurn(): Promise<void> {
 // capture-only, no nag speech (the silent-miss path owns nagging);
 // single re-arm per stall; mid-drill speech queues via the FIFO design.
 
-/** Turn older than this with no completion counts as stalled. */
-export const GHOST_STALL_AFTER_MS = 12000;
+/** Budget for one ghost orchestrator round trip (recorder passes it as `timeoutMs`). */
+export const GHOST_INVOKE_BUDGET_MS = 12000;
+/**
+ * Turn older than this with no completion counts as stalled. Must stay well
+ * above GHOST_INVOKE_BUDGET_MS + the "Didn't catch that" fallback line: the
+ * invoke timeout owns recovery for hung backends, and this watchdog is only
+ * the backstop for a turn whose completion event was lost. At 12s (equal to
+ * the budget) it raced the timeout recovery and re-armed the mic while the
+ * fallback line was still speaking (double wake + the mic hearing NEXUS).
+ */
+export const GHOST_STALL_AFTER_MS = 20000;
 /** Watchdog poll cadence (cheap timestamp checks only). */
 export const GHOST_WATCHDOG_POLL_MS = 4000;
 
@@ -139,10 +189,33 @@ export function noteGhostTurnClosed(): void {
   lastTurnClosedAt = Date.now();
 }
 
+/** True while the current ghost turn was opened and nothing has closed it yet. */
+export function isGhostTurnOpen(): boolean {
+  return lastTurnOpenedAt > lastTurnClosedAt;
+}
+
+/**
+ * The orchestrator invoke returned `handled_locally`. Rust answers that WITHOUT
+ * any event for ambient drops, unrecognised phrases and queued commands, so
+ * nothing else closes the turn: the mic stayed shut until the stall watchdog
+ * fired (20 s + capture time, the 28 s freeze after "let's go."). If no
+ * result/done/error event closed the turn already, close it now and re-arm the
+ * mic. A turn that DID get a result is speaking; its own end relistens, so it
+ * is left alone. Returns true when it closed the turn.
+ */
+export async function closeHandledLocallyTurn(): Promise<boolean> {
+  if (!useAssistant.getState().ghostActive || !isGhostTurnOpen()) return false;
+  await endGhostTurn();
+  return true;
+}
+
 /** Test hooks (do not use in production code). */
 export function __testSetGhostTurnTimes(opened: number, closed: number): void {
   lastTurnOpenedAt = opened;
   lastTurnClosedAt = closed;
+}
+export function __testGetGhostTurnTimes(): { opened: number; closed: number } {
+  return { opened: lastTurnOpenedAt, closed: lastTurnClosedAt };
 }
 export function __testStopGhostWatchdog(): void {
   if (watchdogTimer) clearInterval(watchdogTimer);
@@ -167,13 +240,24 @@ async function watchdogTick(): Promise<void> {
   if (!useAssistant.getState().ghostActive) return;
   if (lastTurnOpenedAt <= lastTurnClosedAt) return; // no open turn
   if (Date.now() - lastTurnOpenedAt < GHOST_STALL_AFTER_MS) return;
+  // A drill that is still carrying out the command (WhatsApp, a click chain) is progress, not a stall:
+  // re-arming the mic here cancelled it mid-way (2026-10-15 log: "WhatsApp lost focus").
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    if (await invoke<boolean>("ghost_drill_running")) return;
+  } catch {
+    // unknown = treat as stalled (the old behaviour)
+  }
   // Stall: one quiet re-arm, then mark closed so this stall never
   // refires (the next transcript re-opens tracking).
   console.warn("[NEXUS] ghost watchdog: turn open with no completion — re-arming listen");
   lastTurnClosedAt = Date.now();
   try {
-    const { triggerFollowupListen } = await import("../stage/orbRuntime");
-    triggerFollowupListen(true);
+    // Guarded path (ghost still live, no meeting, TTS idle) — the same one
+    // the Rust-side watchdog's `ghost:relisten` uses. A direct
+    // triggerFollowupListen here would open the mic over a speaking
+    // fallback line.
+    await maybeGhostRelisten();
   } catch {
     // A failed re-arm must not wedge the loop either.
   }

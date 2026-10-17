@@ -103,12 +103,9 @@ export const VoiceOrb: React.FC<VoiceOrbProps> = ({
   useEffect(() => {
     if (orbRef.current) {
       if (visible) {
-        console.log(`[VOICE-ORB] WebGL loop RESUMED (play): state=${state}`);
         orbRef.current.play();
       } else {
-        console.log(`[VOICE-ORB] scheduling pause in 500ms: state=${state}`);
         const t = setTimeout(() => {
-          console.log(`[VOICE-ORB] WebGL loop PAUSED (pause): state=${state}`);
           orbRef.current?.pause();
         }, 500);
         return () => clearTimeout(t);

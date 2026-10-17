@@ -52,6 +52,10 @@ export type Intent =
   | { action: "browser_new_tab" }
   | { action: "browser_close_tab"; index?: number }
   | { action: "enter_ghost_control" }
+  | { action: "enter_hand_mode" }
+  | { action: "exit_hand_mode" }
+  | { action: "hand_mouse_live"; live: boolean }
+  | { action: "pointer_click"; kind: string }
   | { action: "exit_ghost_control" }
   | { action: "browser_search"; query: string }
   | { action: "browser_search_focus" }
@@ -60,6 +64,7 @@ export type Intent =
   | { action: "watch_screen_email" }
   | { action: "memory_audit" }
   | { action: "briefing" }
+  | { action: "import_contacts" }
   | { action: "timetable_add"; source: string; section?: number | null }
   | { action: "timetable_show" }
   | { action: "timetable_clear" }
@@ -67,6 +72,8 @@ export type Intent =
   | { action: "study_pref"; activity: string; choice: string }
   | { action: "mail_digest" }
   | { action: "mail_mute" }
+  | { action: "directions"; destination: string; origin?: string | null; mode: string }
+  | { action: "places_search"; query: string; near?: string | null }
   | { action: "whatsapp_read"; name?: string | null }
   | { action: "people_flag"; name: string; kind: string; on: boolean }
   | { action: "people_list" }
@@ -651,6 +658,22 @@ export function parseIntent(transcript: string): Intent {
     const n = parseInt(closeTabNumMatch[1], 10);
     if (n >= 1 && n <= 9) {
       return { action: "browser_close_tab", index: n };
+    }
+  }
+
+  // --- WhatsApp chat OPEN guard - MUST precede the open catch-all: "open chat with mummy"
+  // / "open mummy chat in whatsapp" would otherwise become open_app{target:"chat with mummy"}.
+  // (Chat-open only; anything with "saying" is send-shaped and left to the Rust orchestrator.)
+  if (!/\bsaying\b/i.test(text)) {
+    const waEarly =
+      text.match(/^(?:open|show|go\s+to)\s+(?:my\s+|the\s+)?(?:whatsapp\s+)?chat\s+with\s+(.+?)(?:\s+(?:on|in)\s+(?:the\s+)?whatsapp(?:\s+app)?)?(?:\s+please)?$/i) ||
+      text.match(/^(?:open|show|go\s+to)\s+(?:my\s+)?(.+?)(?:'s)?\s+chat\s+(?:on|in)\s+(?:the\s+)?whatsapp(?:\s+app)?(?:\s+please)?$/i) ||
+      text.match(/^(?:open|show)\s+(?!whatsapp\b)(.+?)\s+(?:on|in)\s+(?:the\s+)?whatsapp(?:\s+app)?(?:\s+please)?$/i);
+    if (waEarly) {
+      const contact = waEarly[1].trim().replace(/^(?:my|the)\s+/i, "");
+      if (contact && !/^(?:web|desktop|app|status|settings)$/i.test(contact)) {
+        return { action: "whatsapp_chat", contact };
+      }
     }
   }
 

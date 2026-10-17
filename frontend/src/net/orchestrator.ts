@@ -17,6 +17,7 @@
  * independent decisions about loading state or ack timing.
  */
 
+import { classifyConfirmReply, isConfirmExpired } from "./confirmReply";
 import { useAssistant } from "../store/assistant";
 import { speak, stopTts } from "../audio/ttsPlayer";
 import { useSidebar } from "../sidebar/sidebarStore";
@@ -96,6 +97,17 @@ interface GitHubResultPayload {
 
 let initialized = false;
 let currentRequestId: string | null = null;
+/**
+ * Request id currently owned by a speak()-gated closure (result/error/
+ * conflict_report handlers, which call finishSpokenResult/closeTurnOnSpeechEnd
+ * only once their own TTS actually ends). Rust emits `done` synchronously
+ * right after `result`/`error` for several turn types (GitHub, Mcp,
+ * CommandCenter, WorkerBackend error) — well before that speech has even
+ * started playing. The `done` handler must defer to this pending closure
+ * instead of independently resetting, or the orb/caption/audio visibly
+ * diverge for the whole remaining duration of the reply.
+ */
+let pendingSpeechCloseFor: string | null = null;
 let confirmListeningTimer: ReturnType<typeof setTimeout> | null = null;
 let clarificationRequestId: string | null = null;
 let clarificationTimer: ReturnType<typeof setTimeout> | null = null;
@@ -160,16 +172,20 @@ async function openClarificationCapture(requestId: string, timeoutMs: number): P
       const latest = useAssistant.getState();
       latest.setAwaitingInput(false);
       latest.setVisible(false);
+      // turn-end:keep-raw clarification window timed out with no speech
       setTimeout(() => useAssistant.getState().reset(), 550);
     })();
   }, timeoutMs);
 }
 
-/** Open the 5-second voice approval listening window for pending confirmations. */
+/** How long a spoken question waits for the answer to START (people need 2-4 s to think). */
+export const QUESTION_WAIT_MS = 10_000;
+
+/** Open the voice approval listening window for pending confirmations. */
 export function openConfirmVoiceWindow(): void {
   const curStore = useAssistant.getState();
   if (curStore.pendingGithubCommand) {
-    console.log("[NEXUS] orchestrator: prompt spoken — opening 5s voice approval window");
+    console.log("[NEXUS] orchestrator: prompt spoken — opening voice approval window");
     curStore.setState("listening");
     import("@tauri-apps/api/core")
       .then(({ invoke }) => invoke("start_stt_capture"))
@@ -180,10 +196,10 @@ export function openConfirmVoiceWindow(): void {
       confirmListeningTimer = null;
       const latest = useAssistant.getState();
       if (latest.state === "listening" && latest.pendingGithubCommand) {
-        console.log("[NEXUS] orchestrator: 5s voice window timed out — mic back to idle, sidebar remains interactive");
+        console.log("[NEXUS] orchestrator: voice window timed out — mic back to idle, sidebar remains interactive");
         latest.setState("idle");
       }
-    }, 5000);
+    }, QUESTION_WAIT_MS);
   }
 }
 
@@ -228,6 +244,7 @@ export async function openPendingOfferWindow(): Promise<void> {
       const latest = useAssistant.getState();
       latest.setAwaitingInput(false);
       latest.setVisible(false);
+      // turn-end:keep-raw offer/confirmation window timed out with no speech
       setTimeout(() => useAssistant.getState().reset(), 550);
     })();
   }, windowMs);
@@ -243,6 +260,17 @@ export function __testSetCurrentRequestId(id: string | null): void {
   currentRequestId = id;
 }
 
+/** Test hook: read/set which request id currently owns a speak()-gated
+ * closure (vitest only) — simulates "the result/error handler already
+ * claimed this turn" without needing the internal orchestrator:event
+ * listener, which isn't separately exported/testable. */
+export function __testPendingSpeechCloseFor(): string | null {
+  return pendingSpeechCloseFor;
+}
+export function __testSetPendingSpeechCloseFor(id: string | null): void {
+  pendingSpeechCloseFor = id;
+}
+
 /**
  * Complete a spoken result turn. Called when result TTS finishes (or fails).
  * Returns true when this turn was still current and the orb was reset;
@@ -250,6 +278,7 @@ export function __testSetCurrentRequestId(id: string | null): void {
  * new turn's state — the cancel flow owns that path).
  */
 export function finishSpokenResult(spokenFor: string): boolean {
+  if (pendingSpeechCloseFor === spokenFor) pendingSpeechCloseFor = null;
   if (currentRequestId !== spokenFor) return false;
   currentRequestId = null;
   clearLongRunningInFlight();
@@ -306,6 +335,8 @@ export function closeTurnOnSpeechEnd(requestId: string): boolean {
  */
 let stuckSpeakingTicks = 0;
 const STUCK_SPEAKING_LIMIT = 10;
+let captionHoldTicks = 0;
+const CAPTION_HOLD_LIMIT = 43; // ~15 s at the 350 ms re-arm
 
 /** Test hooks for the stuck-speaking watchdog. */
 export function __testStuckTicks(): number {
@@ -351,10 +382,17 @@ export function hideOrbAfterSpeech(firstDelayMs: number): void {
     stuckSpeakingTicks = 0;
     if (s.state !== "idle") return;
     if (s.captionActive) {
-      console.log("[ORB] hideOrbAfterSpeech: caption is still active on screen, holding orb visible for sync");
-      hideOrbAfterSpeech(350);
-      return;
+      // Cap the wait: a caption that never reports finished must not hold
+      // the orb forever (15 s = ~43 re-arms at 350 ms).
+      captionHoldTicks += 1;
+      if (captionHoldTicks <= CAPTION_HOLD_LIMIT) {
+        console.log("[ORB] hideOrbAfterSpeech: caption is still active on screen, holding orb visible for sync");
+        hideOrbAfterSpeech(350);
+        return;
+      }
+      console.warn("[ORB] hideOrbAfterSpeech: caption hold limit reached, hiding anyway");
     }
+    captionHoldTicks = 0;
     console.log("[ORB] hideOrbAfterSpeech: speech and caption finished, setting visible=false");
     s.setVisible(false);
   }, firstDelayMs);
@@ -381,7 +419,13 @@ export async function initOrchestratorListener(): Promise<void> {
     const ev = event.payload;
     const store = useAssistant.getState();
 
-    console.log(`[NEXUS] orchestrator: ${ev.type} (req=${ev.request_id})`, ev);
+    // Serialized (not raw object): CDP forwards console args without
+    // remote-object resolution, so raw objects arrive as useless "Object".
+    // State events carry no request_id — print "none", not empty.
+    console.log(
+      `[NEXUS] orchestrator: ${ev.type} (req=${(ev as { request_id?: string }).request_id ?? "none"})`,
+      JSON.stringify(ev)?.slice(0, 200) ?? "",
+    );
 
     switch (ev.type) {
       case "state": {
@@ -445,7 +489,7 @@ export async function initOrchestratorListener(): Promise<void> {
         if (ev.prompt) {
           store.addAssistantMessage(ev.prompt);
           const captureAfterSpeech = ev.request_id;
-          const captureTimeout = ev.timeout_ms ?? 8000;
+          const captureTimeout = ev.timeout_ms ?? QUESTION_WAIT_MS;
           const beginReplyCapture = () => {
             if (clarificationRequestId !== captureAfterSpeech) return;
             if (useAssistant.getState().ghostActive) {
@@ -456,7 +500,7 @@ export async function initOrchestratorListener(): Promise<void> {
           };
           void speak(ev.prompt, beginReplyCapture).catch(beginReplyCapture);
         } else {
-          void openClarificationCapture(ev.request_id, ev.timeout_ms ?? 8000);
+          void openClarificationCapture(ev.request_id, ev.timeout_ms ?? QUESTION_WAIT_MS);
         }
         break;
       }
@@ -497,6 +541,7 @@ export async function initOrchestratorListener(): Promise<void> {
         // turn's state (barge-in abort skips onEnd; the cancel flow owns it).
         if (ev.text) {
           const spokenFor = ev.request_id;
+          pendingSpeechCloseFor = spokenFor;
           speak(ev.text, () => {
             finishSpokenResult(spokenFor);
           }).catch((err) => {
@@ -522,7 +567,27 @@ export async function initOrchestratorListener(): Promise<void> {
       }
 
       case "done": {
-        // Request is fully complete (TTS finished speaking)
+        // Request is fully complete (TTS finished speaking) — UNLESS a
+        // result/error/conflict_report handler already claimed this exact
+        // request id for a speech-gated closure. Rust emits `done`
+        // synchronously right after those events for several turn types
+        // (GitHub, Mcp, CommandCenter, WorkerBackend error) — well before
+        // the frontend has even started speaking the reply, let alone
+        // finished. Resetting here anyway is what made the orb drop back
+        // to idle and stop reacting to audio ~550ms into a much longer
+        // reply while captions and real audio kept going. Only the safe,
+        // idempotent housekeeping runs in that case; the pending closure
+        // (finishSpokenResult/closeTurnOnSpeechEnd) owns the rest.
+        if (pendingSpeechCloseFor === ev.request_id) {
+          console.log(`[NEXUS] orchestrator: done req=${ev.request_id ?? "unknown"} — deferring to in-flight speech closure`);
+          void import("./ghostHotMic").then(({ noteGhostTurnClosed }) => {
+            noteGhostTurnClosed();
+          }).catch(() => {});
+          clearLongRunningInFlight();
+          store.setLoadingVisible(false);
+          store.setAwaitingInput(false);
+          break;
+        }
         console.log(`[NEXUS] orchestrator: done req=${ev.request_id ?? "unknown"}`);
         void import("./ghostHotMic").then(({ noteGhostTurnClosed }) => {
           noteGhostTurnClosed();
@@ -566,6 +631,11 @@ export async function initOrchestratorListener(): Promise<void> {
         // Close the turn when the error speech ends (normal mode only —
         // ghost turns stay open for the hot-mic loop via the timer below).
         // Without this the orb parks in `speaking` with dead air.
+        // closeTurnOnSpeechEnd no-ops in ghost mode (the hot-mic loop owns
+        // closing there), so only claim the `done` handshake when this
+        // speech closure will actually fire — otherwise `done`'s own
+        // reset+relisten must stay the active closer for ghost turns.
+        if (!store.ghostActive) pendingSpeechCloseFor = ev.request_id;
         void speak(errMsg, () => {
           closeTurnOnSpeechEnd(ev.request_id);
         }).catch(() => {
@@ -630,6 +700,8 @@ export async function initOrchestratorListener(): Promise<void> {
         store.addAssistantMessage(spoken);
         // Close the turn when the summary ends (normal mode only) — the
         // user fixes conflicts in a fresh turn; nothing else closes this one.
+        // Same ghost-mode exception as the error handler above.
+        if (!store.ghostActive) pendingSpeechCloseFor = ev.request_id;
         void speak(spoken, () => {
           closeTurnOnSpeechEnd(ev.request_id);
         }).catch(() => {
@@ -740,7 +812,15 @@ export async function processViaOrchestrator(
   // If there's a pending command awaiting confirmation, check if
   // the user said "yes"/"approved"/"proceed" (confirm) or "no"/"cancel" (abort).
   const store = useAssistant.getState();
-  const pendingCmd = store.pendingGithubCommand;
+  let pendingCmd = store.pendingGithubCommand;
+  // A pending confirmation is only answerable by voice for a short while (2 min): a stray "ok ..."
+  // an hour later must never send the message / merge the PR. The on-screen Confirm button still works.
+  if (pendingCmd && isConfirmExpired(store.pendingGithubCommandAt, Date.now())) {
+    console.log("[ASK] pending confirmation expired — voice answer no longer accepted");
+    store.setPendingGithubCommand(null);
+    void invoke("hide_sidebar").catch(() => {});
+    pendingCmd = null;
+  }
   if (turn?.ownership === "rejected" || (turn?.ownership === "uncertain" && pendingCmd)) {
     console.log("[NEXUS] orchestrator: unowned turn cannot approve a pending command — ambient drop");
     return {
@@ -751,9 +831,10 @@ export async function processViaOrchestrator(
   }
   if (pendingCmd) {
     clearConfirmListeningTimer();
-    const lower = transcript.trim().toLowerCase();
-    const isYes = /^(yes|yeah|yep|yup|confirm|ok|okay|sure|go ahead|do it|proceed|approved?|agreed?|approve)\b/i.test(lower);
-    const isNo = /^(no|nope|cancel|abort|stop|don't|dont|never|disapproved?|disapprove)\b/i.test(lower);
+    // Strict: the WHOLE sentence must be an answer ("okay so what's the weather" is a new command).
+    const reply = classifyConfirmReply(transcript);
+    const isYes = reply === "yes";
+    const isNo = reply === "no";
 
     if (isYes) {
       // Clear the pending command first, then re-execute with confirmed=true
@@ -867,12 +948,22 @@ export async function processViaOrchestrator(
         : await invokePromise;
 
     currentRequestId = result.request_id;
-    console.log("[NEXUS] orchestrator: process result", result);
+    // Serialized (not raw object): CDP forwards console args without
+    // remote-object resolution, so raw objects arrive as useless "Object".
+    console.log(
+      "[NEXUS] orchestrator: process result",
+      JSON.stringify(result)?.slice(0, 160) ?? String(result),
+    );
     return result;
   } catch (err) {
     // Timeout escapes (caller's catch → fallback speech + relisten);
     // all other failures keep the legacy null contract.
-    if (err instanceof GhostInvokeTimeout) throw err;
+    if (err instanceof GhostInvokeTimeout) {
+      // The turn is over the moment the budget expires: close it now so the
+      // stall watchdog can't also fire while the fallback line speaks.
+      void import("./ghostHotMic").then((m) => m.noteGhostTurnClosed()).catch(() => {});
+      throw err;
+    }
     console.error("[NEXUS] orchestrator: process failed:", err);
     return null;
   }

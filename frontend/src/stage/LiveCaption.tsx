@@ -16,8 +16,8 @@ interface OrbRect {
  * component just never renders anything — the real transcript still
  * arrives normally via the existing batch `stt:transcript` path.
  *
- * Same family/positioning as `ResponseCaption` (a fixed gap above the
- * orb) — the two are temporally mutually exclusive (this one only has
+ * Same family/positioning as `ResponseCaption` (the user-tuned screen
+ * slot) — the two are temporally mutually exclusive (this one only has
  * text while listening; ResponseCaption only has text while speaking),
  * so sharing the same screen slot never conflicts.
  */
@@ -79,16 +79,18 @@ export function LiveCaption() {
   const applyPosition = (el: HTMLDivElement | null) => {
     if (!el || !rect) return;
     const dpr = window.devicePixelRatio || 1;
-    const centerX = typeof window !== "undefined" ? window.innerWidth / 2 : rect.x / dpr + rect.w / dpr / 2;
     const topY = rect.y / dpr;
-    const bottomY = (rect.y + rect.h) / dpr;
-    const gap = 24;
     const isTop = topY < (typeof window !== "undefined" ? window.innerHeight / 2 : 540);
 
+    // Same user-tuned slot as ResponseCaption (caption-tuner 2026-10-09).
     if (isTop) {
-      el.style.transform = `translate(${centerX - 260}px, ${bottomY + gap}px)`;
+      const centerX = window.innerWidth * 0.515;
+      const y = window.innerHeight * 0.895;
+      el.style.transform = `translate(${centerX - 260}px, ${y}px)`;
     } else {
-      el.style.transform = `translate(${centerX - 260}px, ${topY - gap}px) translateY(-100%)`;
+      const centerX = typeof window !== "undefined" ? window.innerWidth / 2 : rect.x / dpr + rect.w / dpr / 2;
+      const bottomY = (rect.y + rect.h) / dpr;
+      el.style.transform = `translate(${centerX - 260}px, ${bottomY + 24}px)`;
     }
   };
   const captionRef = useRef<HTMLDivElement | null>(null);
