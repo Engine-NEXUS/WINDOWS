@@ -67,6 +67,89 @@ pub fn pick_emotion(text: &str) -> TtsEmotion {
     TtsEmotion::Neutral
 }
 
+// ─── Persistent connection (speed) ──────────────────────────────────────────
+//
+// The old code built a fresh `EdgeTtsClient` for every sentence, so every call paid a new TLS +
+// WebSocket handshake (~0.4-0.6 s of the measured 1.28 s first-audio time). One shared client keeps a
+// warm socket in its pool and replenishes it after each use. A wake word / hotkey press calls
+// `prewarm()` so the socket is open before the answer is ready to be spoken.
+
+/// How long an idle pooled socket is kept before the server/crate drops it.
+const POOL_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(45);
+/// A client whose last use/build is older than this is rebuilt on `prewarm` (its socket is likely stale).
+const PREWARM_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+static SHARED: std::sync::Mutex<Option<(EdgeTtsClient, std::time::Instant)>> = std::sync::Mutex::new(None);
+
+/// Pure rule: is the shared client stale enough that `prewarm` should rebuild it?
+pub(crate) fn needs_rebuild(last_touch: Option<std::time::Duration>) -> bool {
+    match last_touch {
+        None => true,
+        Some(age) => age >= PREWARM_STALE_AFTER,
+    }
+}
+
+fn build_client() -> Result<EdgeTtsClient, String> {
+    EdgeTtsClient::builder()
+        .ws_pool_size(1)
+        .ws_idle_ttl(POOL_IDLE_TTL)
+        .ws_warmup(true)
+        .build()
+        .map_err(|e| format!("edge-tts client init failed: {}", e))
+}
+
+/// The shared client (built on first use). Must be called from inside the async runtime: building it
+/// spawns the warm-up task.
+fn shared_client() -> Result<EdgeTtsClient, String> {
+    let mut g = SHARED.lock().map_err(|_| "edge-tts client lock poisoned".to_string())?;
+    if let Some((c, _)) = g.as_ref() {
+        return Ok(c.clone());
+    }
+    let c = build_client()?;
+    *g = Some((c.clone(), std::time::Instant::now()));
+    Ok(c)
+}
+
+fn touch_client() {
+    if let Ok(mut g) = SHARED.lock() {
+        if let Some((_, t)) = g.as_mut() {
+            *t = std::time::Instant::now();
+        }
+    }
+}
+
+fn reset_client() {
+    if let Ok(mut g) = SHARED.lock() {
+        *g = None;
+    }
+}
+
+/// Open (or keep) a warm connection so the next spoken line does not pay the handshake. Cheap and
+/// non-blocking: safe to call from any thread, does nothing while the cloud voice is known to be down.
+pub fn prewarm() {
+    if !crate::tts_network::is_network_up() || crate::tts_health::edge_degraded() {
+        return;
+    }
+    tauri::async_runtime::spawn(async {
+        let age = SHARED
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|(_, t)| t.elapsed()));
+        if !needs_rebuild(age) {
+            return;
+        }
+        match build_client() {
+            Ok(c) => {
+                if let Ok(mut g) = SHARED.lock() {
+                    *g = Some((c, std::time::Instant::now()));
+                }
+                tracing::info!("[TTS] edge connection pre-warmed");
+            }
+            Err(e) => tracing::debug!("[TTS] pre-warm skipped: {e}"),
+        }
+    });
+}
+
 /// Internal: synthesize + return the full edge-tts result (audio bytes +
 /// word-boundary timing events). `synthesize_to_mp3`/`_with_emotion` below
 /// (unchanged external shape, still used by the TTS benchmarks) wrap this
@@ -85,8 +168,7 @@ async fn synthesize_raw(
         return Err("Empty text".to_string());
     }
 
-    let client = EdgeTtsClient::new()
-        .map_err(|e| format!("edge-tts client init failed: {}", e))?;
+    let client = shared_client()?;
 
     let (base_rate, base_pitch) = crate::voice_catalog::persona_prosody(voice);
     let options = if let Some(emotion) = emotion {
@@ -97,6 +179,8 @@ async fn synthesize_raw(
                 volume: "+0%".to_string(),
                 pitch: base_pitch.to_string(),
                 boundary: Boundary::Word,
+                output_format: MP3_FORMAT.to_string(),
+                ..SpeakOptions::default()
             }
         } else {
             let (rate, volume, pitch) = emotion.prosody();
@@ -106,6 +190,8 @@ async fn synthesize_raw(
                 volume: volume.to_string(),
                 pitch: pitch.to_string(),
                 boundary: Boundary::Word,
+                output_format: MP3_FORMAT.to_string(),
+                ..SpeakOptions::default()
             }
         }
     } else {
@@ -114,14 +200,22 @@ async fn synthesize_raw(
             rate: base_rate.to_string(),
             pitch: base_pitch.to_string(),
             boundary: Boundary::Word,
+            output_format: MP3_FORMAT.to_string(),
             ..SpeakOptions::default()
         }
     };
 
-    let result = client
-        .synthesize(text, options)
-        .await
-        .map_err(|e| format!("edge-tts synthesis failed: {}", e))?;
+    let result = match client.synthesize(text, options).await {
+        Ok(r) => {
+            touch_client();
+            r
+        }
+        Err(e) => {
+            // A failed call may leave a dead socket in the pool; the next call builds a fresh one.
+            reset_client();
+            return Err(format!("edge-tts synthesis failed: {}", e));
+        }
+    };
 
     tracing::info!(
         "tts-edge: synthesized '{}' ({} bytes MP3, {} word boundaries, voice={}, emotion={:?})",
@@ -134,6 +228,9 @@ async fn synthesize_raw(
 
     Ok(result)
 }
+
+/// The app decodes MP3. edge-tts-rust 0.1.6 changed its default to WebM/Opus, so ask for MP3 explicitly.
+const MP3_FORMAT: &str = "audio-24khz-48kbitrate-mono-mp3";
 
 /// Synthesize text to MP3 bytes using edge-tts.
 ///
@@ -347,5 +444,92 @@ mod tests {
         let available = is_available().await;
         println!("test_edge_tts_is_available: {}", available);
         // Don't fail on network issues — just report
+    }
+
+    /// Live probe of the real Edge endpoint (network). Prints the first success or the exact error;
+    /// run with `cargo test --lib tts_edge -- --ignored --nocapture` to see whether the cloud voice works.
+    #[tokio::test]
+    #[ignore = "network: talks to Microsoft's Edge TTS endpoint"]
+    async fn live_edge_probe() {
+        let t0 = std::time::Instant::now();
+        let r = tokio::time::timeout(std::time::Duration::from_secs(10), synthesize_to_pcm("Ok sir", "en-US-AvaNeural")).await;
+        match r {
+            Ok(Ok((samples, sr, b))) => eprintln!("EDGE OK: {} samples @ {sr} Hz, {} boundaries, {} ms", samples.len(), b.len(), t0.elapsed().as_millis()),
+            Ok(Err(e)) => eprintln!("EDGE ERROR after {} ms: {e}", t0.elapsed().as_millis()),
+            Err(_) => eprintln!("EDGE TIMEOUT"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod prewarm_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn rebuild_rule() {
+        assert!(needs_rebuild(None), "no client yet -> build one");
+        assert!(!needs_rebuild(Some(Duration::from_secs(2))), "recent use keeps the warm socket");
+        assert!(!needs_rebuild(Some(Duration::from_secs(29))));
+        assert!(needs_rebuild(Some(Duration::from_secs(30))), "stale -> rebuild");
+        assert!(needs_rebuild(Some(Duration::from_secs(300))));
+    }
+
+    #[test]
+    fn idle_ttl_outlives_the_prewarm_window() {
+        // A socket warmed at wake must still be alive when the answer is ready a few seconds later.
+        assert!(POOL_IDLE_TTL > PREWARM_STALE_AFTER);
+    }
+}
+
+#[cfg(test)]
+mod latency_bench {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    const TEXT: &str = "Right away, sir. I am opening the command hub now.";
+    const VOICE: &str = "en-GB-RyanNeural";
+
+    fn median(mut v: Vec<u128>) -> u128 {
+        v.sort();
+        v[v.len() / 2]
+    }
+
+    /// Speed evidence for the persistent connection (needs internet, run manually):
+    /// `cargo test --release --lib tts_edge::latency_bench -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn shared_vs_fresh_client_first_audio() {
+        // OLD behaviour: a brand-new client (new TLS + WebSocket) for every call.
+        let mut fresh = vec![];
+        for _ in 0..6 {
+            let t0 = Instant::now();
+            let c = EdgeTtsClient::new().expect("client");
+            let opts = SpeakOptions { voice: VOICE.into(), output_format: MP3_FORMAT.into(), boundary: Boundary::Word, ..SpeakOptions::default() };
+            c.synthesize(TEXT, opts).await.expect("fresh synth");
+            fresh.push(t0.elapsed().as_millis());
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        }
+        // NEW behaviour: one shared client, warm socket.
+        reset_client();
+        let _ = synthesize_raw(TEXT, VOICE, None).await.expect("prime"); // first call pays the handshake
+        let mut shared = vec![];
+        for _ in 0..6 {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let t0 = Instant::now();
+            synthesize_raw(TEXT, VOICE, None).await.expect("shared synth");
+            shared.push(t0.elapsed().as_millis());
+        }
+        // Wake-time pre-warm after a long idle (the socket is stale).
+        tokio::time::sleep(Duration::from_secs(50)).await;
+        reset_client();
+        let _ = shared_client();
+        tokio::time::sleep(Duration::from_millis(2500)).await; // user is still speaking
+        let t0 = Instant::now();
+        synthesize_raw(TEXT, VOICE, None).await.expect("prewarmed synth");
+        let prewarmed = t0.elapsed().as_millis();
+        println!("LATBENCH fresh-per-call ms: {fresh:?} median {}", median(fresh.clone()));
+        println!("LATBENCH shared-warm   ms: {shared:?} median {}", median(shared.clone()));
+        println!("LATBENCH after-idle + wake prewarm ms: {prewarmed}");
     }
 }

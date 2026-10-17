@@ -5,24 +5,39 @@
 //! at a consistent volume. After TTS completes, the original volume is
 //! restored.
 //!
+//! The bookkeeping lives in [`Controller`], a small state machine that is
+//! independent of the OS (it talks to a [`VolumeBackend`]) so it is unit-tested:
+//!
+//! - **Epoch leases.** `force_restore`/`defer_restore` bump an epoch; a lease
+//!   from an older epoch is a no-op when dropped, so a barge-in can never let a
+//!   stale speaker decrement the count of the utterance that replaced it.
+//! - **Deferred restore.** The last release restores the original volume only
+//!   after `restore_delay`; any acquire inside that window cancels it, so
+//!   ack -> reply -> next sentence stays at the TTS level with no dip.
+//! - **Heartbeat watchdog.** Playback loops call [`heartbeat`]; a lease that has
+//!   gone silent for `watchdog` (hung/leaked task) is force-released. Long speech
+//!   is never cut off because it keeps beating.
+//! - **Durable baseline.** The original volume is written to `volume_baseline.json`
+//!   and restored at the next start, so a crash/kill while at the TTS level cannot
+//!   make that level the new "original".
+//!
 //! - Windows: Core Audio COM `IAudioEndpointVolume`
 //! - macOS: CoreAudio `AudioObjectGetPropertyData` / `AudioObjectSetPropertyData`
 //! - Linux: `wpctl` → `pactl` → `amixer` shell commands
 
-use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Global saved baseline volume — captured before TTS, restored after.
-/// Stored as bits of an f32 in an AtomicI32.
-/// -1.0 (bits: 0xBF800000) means "no volume saved" (not yet in TTS mode).
-static SAVED_VOLUME: AtomicI32 = AtomicI32::new((-1.0f32).to_bits() as i32);
-
-/// Active concurrent TTS speaker count.
-/// Volume is only restored to the user baseline when this counter drops back to 0.
-static ACTIVE_TTS_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-/// Timestamp in milliseconds of the last volume adjustment.
-static LAST_TTS_TIMESTAMP_MS: AtomicU64 = AtomicU64::new(0);
+/// How long after the last utterance the original volume is restored.
+const RESTORE_DELAY_MS: u64 = 1200;
+/// A lease with no heartbeat for this long is considered leaked.
+const WATCHDOG_MS: u64 = 10_000;
+const WATCHDOG_POLL_MS: u64 = 500;
+/// A baseline file older than this is ignored at startup (the user has likely moved the slider since).
+const BASELINE_MAX_AGE_MS: u64 = 24 * 60 * 60 * 1000;
+const BASELINE_FILE: &str = "volume_baseline.json";
 
 fn now_millis() -> u64 {
     SystemTime::now()
@@ -31,136 +46,308 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-fn load_saved_volume() -> f32 {
-    f32::from_bits(SAVED_VOLUME.load(Ordering::SeqCst) as u32)
+/// OS access, injectable for tests.
+pub trait VolumeBackend: Send + Sync {
+    fn get(&self) -> Result<f32, String>;
+    fn set(&self, level: f32) -> Result<(), String>;
 }
 
-fn store_saved_volume(vol: f32) {
-    SAVED_VOLUME.store(vol.to_bits() as i32, Ordering::SeqCst);
-}
+struct SystemBackend;
 
-/// RAII Lease: Automatically decrements the active speech counter and restores
-/// volume when dropped (e.g. on early task abort, error, or completion).
-pub struct TtsVolumeLease {
-    active: bool,
-}
-
-impl TtsVolumeLease {
-    pub fn new() -> Self {
-        Self { active: true }
+impl VolumeBackend for SystemBackend {
+    fn get(&self) -> Result<f32, String> {
+        get_system_volume()
     }
+    fn set(&self, level: f32) -> Result<(), String> {
+        set_system_volume(level)
+    }
+}
+
+#[derive(Default)]
+struct State {
+    /// Live leases of the current epoch.
+    count: usize,
+    /// Bumped by force/defer restore; leases of an older epoch are stale.
+    epoch: u64,
+    /// The user's volume before we raised/lowered it; `Some` while we own the volume.
+    baseline: Option<f32>,
+    /// Bumped by every acquire and every scheduled restore; a timer only fires if unchanged.
+    restore_gen: u64,
+    watchdog_running: bool,
+}
+
+pub struct Controller {
+    st: Mutex<State>,
+    backend: Arc<dyn VolumeBackend>,
+    baseline_dir: Mutex<Option<PathBuf>>,
+    last_beat: AtomicU64,
+    restore_delay: Duration,
+    watchdog: Duration,
+    watchdog_poll: Duration,
+}
+
+/// RAII lease: releases its speaker slot when dropped, unless a force/defer restore
+/// already ended its epoch.
+pub struct TtsVolumeLease {
+    ctrl: Arc<Controller>,
+    epoch: u64,
+    active: bool,
 }
 
 impl Drop for TtsVolumeLease {
     fn drop(&mut self) {
         if self.active {
             self.active = false;
-            release_volume_lease();
+            self.ctrl.release(self.epoch);
         }
     }
 }
 
-/// Acquire an RAII lease for TTS volume.
-/// Saves the user baseline if transitioning from 0 speakers, sets system volume to `tts_volume`,
-/// and returns an RAII lease that automatically restores volume when dropped.
-pub fn acquire_volume_lease(tts_volume: f32) -> Option<TtsVolumeLease> {
-    let tts_volume = tts_volume.clamp(0.0, 1.0);
+impl Controller {
+    pub fn new(backend: Arc<dyn VolumeBackend>) -> Arc<Self> {
+        Self::with_timing(
+            backend,
+            Duration::from_millis(RESTORE_DELAY_MS),
+            Duration::from_millis(WATCHDOG_MS),
+            Duration::from_millis(WATCHDOG_POLL_MS),
+        )
+    }
 
-    // Watchdog check: if active for >15s without clearing, force-drain first
-    check_volume_watchdog();
+    pub fn with_timing(
+        backend: Arc<dyn VolumeBackend>,
+        restore_delay: Duration,
+        watchdog: Duration,
+        watchdog_poll: Duration,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            st: Mutex::new(State::default()),
+            backend,
+            baseline_dir: Mutex::new(None),
+            last_beat: AtomicU64::new(now_millis()),
+            restore_delay,
+            watchdog,
+            watchdog_poll,
+        })
+    }
 
-    let prev_count = ACTIVE_TTS_COUNT.fetch_add(1, Ordering::SeqCst);
-    LAST_TTS_TIMESTAMP_MS.store(now_millis(), Ordering::SeqCst);
+    pub fn set_baseline_dir(&self, dir: PathBuf) {
+        *self.baseline_dir.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir);
+    }
 
-    if prev_count == 0 {
-        // Transitioning from 0 to 1 active speaker: record baseline volume
-        let current = get_system_volume().unwrap_or(-1.0);
-        let existing_saved = load_saved_volume();
+    fn baseline_path(&self) -> Option<PathBuf> {
+        self.baseline_dir
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|d| d.join(BASELINE_FILE))
+    }
 
-        // Sanity check: If current volume is already at tts_volume (within 2%),
-        // do not overwrite an existing valid saved baseline.
-        let is_already_target = current >= 0.0 && (current - tts_volume).abs() < 0.025;
-        if is_already_target && existing_saved >= 0.0 {
-            tracing::info!(
-                "volume: current volume {:.2} is already target; preserving existing baseline {:.2}",
-                current,
-                existing_saved
-            );
-        } else if current >= 0.0 {
-            store_saved_volume(current);
-            tracing::info!("volume: saved baseline {:.2}, setting to {:.2} for TTS", current, tts_volume);
-        } else if existing_saved < 0.0 {
-            tracing::warn!("volume: failed to read current volume, using fallback baseline 0.30");
-            store_saved_volume(0.30);
+    fn persist_baseline(&self, value: f32) {
+        if let Some(p) = self.baseline_path() {
+            let body = format!("{{\"value\":{value},\"ts\":{}}}", now_millis());
+            if let Err(e) = std::fs::write(&p, body) {
+                tracing::warn!("volume: could not persist baseline: {e}");
+            }
         }
+    }
 
-        if let Err(e) = set_system_volume(tts_volume) {
-            tracing::warn!("volume: failed to set TTS volume: {e}");
-            ACTIVE_TTS_COUNT.fetch_sub(1, Ordering::SeqCst);
+    fn clear_baseline_file(&self) {
+        if let Some(p) = self.baseline_path() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    pub fn heartbeat(&self) {
+        self.last_beat.store(now_millis(), Ordering::Relaxed);
+    }
+
+    /// Restore the original volume and forget the baseline. Caller holds the state lock.
+    fn do_restore(&self, st: &mut State) {
+        if let Some(b) = st.baseline.take() {
+            tracing::info!("[VOL] restoring original volume {:.2}", b);
+            let _ = self.backend.set(b);
+        }
+        self.clear_baseline_file();
+    }
+
+    pub fn acquire(self: &Arc<Self>, tts_volume: f32) -> Option<TtsVolumeLease> {
+        let tts_volume = tts_volume.clamp(0.0, 1.0);
+        let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+        st.restore_gen = st.restore_gen.wrapping_add(1); // cancel any pending restore
+        self.heartbeat();
+
+        if st.baseline.is_none() {
+            match self.backend.get() {
+                Ok(cur) => {
+                    st.baseline = Some(cur);
+                    self.persist_baseline(cur);
+                    tracing::info!("[VOL] saved original {:.2}, setting {:.2} for TTS", cur, tts_volume);
+                }
+                Err(e) => {
+                    // Cannot read => cannot promise to restore => do not touch the volume.
+                    tracing::warn!("[VOL] cannot read current volume ({e}); leaving volume untouched");
+                    return None;
+                }
+            }
+        }
+        if let Err(e) = self.backend.set(tts_volume) {
+            tracing::warn!("[VOL] failed to set TTS volume: {e}");
+            if st.count == 0 {
+                self.do_restore(&mut st);
+            }
             return None;
         }
-    } else {
-        tracing::debug!(
-            "volume: reentrant TTS speaker (active={}), keeping baseline {:.2}",
-            prev_count + 1,
-            load_saved_volume()
-        );
-        let _ = set_system_volume(tts_volume);
-    }
-
-    Some(TtsVolumeLease::new())
-}
-
-/// Release a lease. When the last active speaker finishes, restores the original volume.
-pub fn release_volume_lease() {
-    let prev = ACTIVE_TTS_COUNT.fetch_sub(1, Ordering::SeqCst);
-    if prev <= 1 {
-        // We were the last active speaker: restore to baseline
-        ACTIVE_TTS_COUNT.store(0, Ordering::SeqCst);
-        let saved = load_saved_volume();
-        if saved >= 0.0 {
-            tracing::info!("volume: all TTS finished, restoring to baseline {:.2}", saved);
-            let _ = set_system_volume(saved);
+        st.count += 1;
+        tracing::debug!("[VOL] acquire epoch={} count={}", st.epoch, st.count);
+        let epoch = st.epoch;
+        if !st.watchdog_running {
+            st.watchdog_running = true;
+            let me = Arc::clone(self);
+            std::thread::spawn(move || me.watchdog_loop());
         }
-        store_saved_volume(-1.0);
-    } else {
-        tracing::debug!("volume: utterance completed, {} active speakers remaining", prev - 1);
+        drop(st);
+        Some(TtsVolumeLease { ctrl: Arc::clone(self), epoch, active: true })
+    }
+
+    fn release(self: &Arc<Self>, epoch: u64) {
+        let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+        if epoch != st.epoch {
+            tracing::debug!("[VOL] stale lease (epoch {} != {}) ignored", epoch, st.epoch);
+            return;
+        }
+        st.count = st.count.saturating_sub(1);
+        tracing::debug!("[VOL] release epoch={} count={}", st.epoch, st.count);
+        if st.count == 0 {
+            self.schedule_restore(&mut st);
+        }
+    }
+
+    /// Caller holds the lock; arms a timer that restores unless an acquire intervenes.
+    fn schedule_restore(self: &Arc<Self>, st: &mut State) {
+        st.restore_gen = st.restore_gen.wrapping_add(1);
+        let gen = st.restore_gen;
+        let me = Arc::clone(self);
+        let delay = self.restore_delay;
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            me.fire_deferred(gen);
+        });
+    }
+
+    fn fire_deferred(&self, gen: u64) {
+        let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+        if gen != st.restore_gen || st.count != 0 {
+            return;
+        }
+        self.do_restore(&mut st);
+    }
+
+    /// Immediate restore (explicit stop, exit, watchdog). Existing leases become stale.
+    pub fn force_restore(&self) {
+        let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+        st.epoch = st.epoch.wrapping_add(1);
+        st.count = 0;
+        st.restore_gen = st.restore_gen.wrapping_add(1);
+        self.do_restore(&mut st);
+    }
+
+    /// Barge-in: existing leases become stale now, but the volume is restored only if no new
+    /// utterance claims it within the restore delay (the next `speak()` follows immediately).
+    pub fn defer_restore(self: &Arc<Self>) {
+        let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+        st.epoch = st.epoch.wrapping_add(1);
+        st.count = 0;
+        if st.baseline.is_some() {
+            self.schedule_restore(&mut st);
+        }
+    }
+
+    fn watchdog_loop(self: Arc<Self>) {
+        loop {
+            std::thread::sleep(self.watchdog_poll);
+            let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+            if st.baseline.is_none() {
+                st.watchdog_running = false;
+                return;
+            }
+            if st.count > 0 {
+                let silent = now_millis().saturating_sub(self.last_beat.load(Ordering::Relaxed));
+                if silent as u128 > self.watchdog.as_millis() {
+                    tracing::warn!("[VOL] watchdog: no playback heartbeat for {silent} ms, force-restoring");
+                    st.epoch = st.epoch.wrapping_add(1);
+                    st.count = 0;
+                    st.restore_gen = st.restore_gen.wrapping_add(1);
+                    self.do_restore(&mut st);
+                    st.watchdog_running = false;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Startup: if a previous run died while holding the volume, put it back.
+    pub fn recover_from_crash(&self) {
+        let Some(p) = self.baseline_path() else { return };
+        let Ok(text) = std::fs::read_to_string(&p) else { return };
+        let _ = std::fs::remove_file(&p);
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+        let (Some(value), Some(ts)) = (
+            v.get("value").and_then(|x| x.as_f64()),
+            v.get("ts").and_then(|x| x.as_u64()),
+        ) else {
+            return;
+        };
+        let age = now_millis().saturating_sub(ts);
+        if age > BASELINE_MAX_AGE_MS {
+            tracing::info!("[VOL] ignoring stale baseline file ({} h old)", age / 3_600_000);
+            return;
+        }
+        let value = (value as f32).clamp(0.0, 1.0);
+        tracing::info!("[VOL] previous run did not restore the volume; restoring {:.2}", value);
+        let _ = self.backend.set(value);
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> (usize, u64, Option<f32>) {
+        let st = self.st.lock().unwrap();
+        (st.count, st.epoch, st.baseline)
     }
 }
 
-/// Force immediate volume restoration (used on barge-in, explicit stop, or watchdog expiration).
+// ─── Global instance + stable free-function API ────────────────────────
+
+static CONTROLLER: OnceLock<Arc<Controller>> = OnceLock::new();
+
+fn ctrl() -> &'static Arc<Controller> {
+    CONTROLLER.get_or_init(|| Controller::new(Arc::new(SystemBackend)))
+}
+
+/// Startup hook: enable the durable baseline in `app_data_dir` and recover from a crashed run.
+pub fn init(app_data_dir: PathBuf) {
+    let c = ctrl();
+    c.set_baseline_dir(app_data_dir);
+    c.recover_from_crash();
+}
+
+/// Acquire an RAII lease for TTS volume (sets the system volume to `tts_volume`).
+pub fn acquire_volume_lease(tts_volume: f32) -> Option<TtsVolumeLease> {
+    ctrl().acquire(tts_volume)
+}
+
+/// Playback loops call this (about once a second is plenty) so long speech is never force-restored.
+pub fn heartbeat() {
+    ctrl().heartbeat();
+}
+
+/// Immediate restore: explicit user stop, app exit.
 pub fn force_restore_volume() {
-    ACTIVE_TTS_COUNT.store(0, Ordering::SeqCst);
-    let saved = load_saved_volume();
-    if saved >= 0.0 {
-        tracing::info!("volume: force restoring to baseline {:.2}", saved);
-        let _ = set_system_volume(saved);
-    }
-    store_saved_volume(-1.0);
+    ctrl().force_restore();
 }
 
-/// Failsafe watchdog: If active speech counter has been non-zero for over 15 seconds,
-/// force restore to prevent any perpetual elevation.
-pub fn check_volume_watchdog() {
-    let count = ACTIVE_TTS_COUNT.load(Ordering::SeqCst);
-    if count > 0 {
-        let last_time = LAST_TTS_TIMESTAMP_MS.load(Ordering::SeqCst);
-        let elapsed = now_millis().saturating_sub(last_time);
-        if elapsed > 15_000 {
-            tracing::warn!("volume: watchdog timeout ({}ms), force-draining volume", elapsed);
-            force_restore_volume();
-        }
-    }
-}
-
-/// Backward compatibility: Save system volume and set to `tts_volume`.
-pub fn save_and_set_volume(tts_volume: f32) -> bool {
-    acquire_volume_lease(tts_volume).is_some()
-}
-
-/// Backward compatibility: Restore system volume.
-pub fn restore_volume() {
-    release_volume_lease();
+/// Barge-in restore: stale leases are ended now, the volume returns after a short grace unless
+/// the next utterance claims it first.
+pub fn defer_restore_volume() {
+    ctrl().defer_restore();
 }
 
 // ─── Windows: Core Audio COM IAudioEndpointVolume ──────────────────────
@@ -466,27 +653,233 @@ pub fn set_system_volume(_level: f32) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
-    #[test]
-    fn test_volume_roundtrip() {
-        let vol = get_system_volume();
-        println!("CURRENT SYSTEM VOLUME: {:?}", vol);
-        if let Ok(v) = vol {
-            assert!(v >= 0.0 && v <= 1.0);
+    struct Fake {
+        vol: Mutex<f32>,
+        sets: AtomicUsize,
+    }
+    impl Fake {
+        fn new(v: f32) -> Arc<Self> {
+            Arc::new(Self { vol: Mutex::new(v), sets: AtomicUsize::new(0) })
+        }
+        fn now(&self) -> f32 {
+            *self.vol.lock().unwrap()
+        }
+    }
+    impl VolumeBackend for Fake {
+        fn get(&self) -> Result<f32, String> {
+            Ok(*self.vol.lock().unwrap())
+        }
+        fn set(&self, l: f32) -> Result<(), String> {
+            *self.vol.lock().unwrap() = l;
+            self.sets.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
     }
 
+    fn rig(initial: f32) -> (Arc<Fake>, Arc<Controller>) {
+        let fake = Fake::new(initial);
+        let c = Controller::with_timing(
+            fake.clone(),
+            Duration::from_millis(80),
+            Duration::from_millis(400),
+            Duration::from_millis(40),
+        );
+        (fake, c)
+    }
+
+    fn sleep(ms: u64) {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+
+    fn near(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.001
+    }
+
     #[test]
-    fn test_save_and_restore() {
-        let initial = get_system_volume().expect("get initial volume");
-        println!("Initial: {:.2}", initial);
-        let ok = save_and_set_volume(0.70);
-        println!("save_and_set_volume ok: {}", ok);
-        let during = get_system_volume().expect("get during volume");
-        println!("During: {:.2}", during);
-        restore_volume();
-        let after = get_system_volume().expect("get after volume");
-        println!("After: {:.2}", after);
-        assert!((after - initial).abs() < 0.02, "Volume should be restored to initial! Expected {:.2}, got {:.2}", initial, after);
+    fn sets_tts_level_then_restores_after_delay() {
+        let (fake, c) = rig(0.20);
+        let lease = c.acquire(0.70).expect("lease");
+        assert!(near(fake.now(), 0.70));
+        drop(lease);
+        assert!(near(fake.now(), 0.70), "restore must be deferred, not immediate");
+        sleep(250);
+        assert!(near(fake.now(), 0.20), "original volume must come back");
+        assert_eq!(c.snapshot().2, None);
+    }
+
+    #[test]
+    fn back_to_back_utterances_never_dip() {
+        let (fake, c) = rig(0.20);
+        drop(c.acquire(0.70).unwrap());
+        sleep(30); // inside the restore window
+        let second = c.acquire(0.70).unwrap();
+        sleep(200); // the first timer would have fired by now
+        assert!(near(fake.now(), 0.70), "volume dipped between utterances");
+        drop(second);
+        sleep(250);
+        assert!(near(fake.now(), 0.20));
+    }
+
+    #[test]
+    fn baseline_is_not_overwritten_by_tts_level() {
+        // The old heuristic stored the already-raised level as the "original" on the next speak.
+        let (fake, c) = rig(0.20);
+        drop(c.acquire(0.70).unwrap());
+        sleep(20);
+        let _l = c.acquire(0.70).unwrap();
+        assert_eq!(c.snapshot().2, Some(0.20));
+        drop(_l);
+        sleep(250);
+        assert!(near(fake.now(), 0.20));
+    }
+
+    #[test]
+    fn stale_lease_after_force_restore_is_a_noop() {
+        let (fake, c) = rig(0.20);
+        let old = c.acquire(0.70).unwrap();
+        c.force_restore(); // barge-in
+        assert!(near(fake.now(), 0.20));
+        let new = c.acquire(0.70).unwrap();
+        drop(old); // the cancelled task finally unwinds
+        sleep(200);
+        assert!(near(fake.now(), 0.70), "stale lease restored the volume under the new utterance");
+        assert_eq!(c.snapshot().0, 1, "stale lease changed the live count");
+        drop(new);
+        sleep(250);
+        assert!(near(fake.now(), 0.20));
+    }
+
+    #[test]
+    fn defer_restore_then_next_utterance_keeps_level() {
+        let (fake, c) = rig(0.20);
+        let old = c.acquire(0.70).unwrap();
+        c.defer_restore(); // stopTts() before the next speak()
+        let new = c.acquire(0.70).unwrap();
+        drop(old);
+        sleep(200);
+        assert!(near(fake.now(), 0.70));
+        drop(new);
+        sleep(250);
+        assert!(near(fake.now(), 0.20));
+    }
+
+    #[test]
+    fn defer_restore_with_no_follow_up_restores() {
+        let (fake, c) = rig(0.20);
+        let old = c.acquire(0.70).unwrap();
+        c.defer_restore();
+        drop(old);
+        sleep(250);
+        assert!(near(fake.now(), 0.20));
+    }
+
+    #[test]
+    fn unmatched_release_cannot_underflow_or_steal() {
+        let (_fake, c) = rig(0.20);
+        let a = c.acquire(0.70).unwrap();
+        c.release(c.snapshot().1); // a release with no matching acquire (old narrate bug)
+        c.release(c.snapshot().1);
+        c.release(c.snapshot().1);
+        assert_eq!(c.snapshot().0, 0);
+        drop(a); // its own release saturates at 0
+        assert_eq!(c.snapshot().0, 0);
+    }
+
+    #[test]
+    fn long_lease_with_heartbeat_survives_the_watchdog() {
+        let (fake, c) = rig(0.20);
+        let lease = c.acquire(0.70).unwrap();
+        for _ in 0..20 {
+            sleep(60); // 1.2 s total, three times the 400 ms watchdog
+            c.heartbeat();
+        }
+        assert!(near(fake.now(), 0.70), "long speech was force-restored");
+        drop(lease);
+        sleep(250);
+        assert!(near(fake.now(), 0.20));
+    }
+
+    #[test]
+    fn leaked_lease_is_released_by_the_watchdog() {
+        let (fake, c) = rig(0.20);
+        let lease = c.acquire(0.70).unwrap();
+        std::mem::forget(lease); // a task that died without dropping
+        sleep(900);
+        assert!(near(fake.now(), 0.20), "leaked lease kept the volume raised");
+        assert_eq!(c.snapshot().0, 0);
+    }
+
+    #[test]
+    fn baseline_file_is_written_and_removed() {
+        let dir = std::env::temp_dir().join(format!("nexus_vol_{}", now_millis()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_fake, c) = rig(0.35);
+        c.set_baseline_dir(dir.clone());
+        let lease = c.acquire(0.70).unwrap();
+        assert!(dir.join(BASELINE_FILE).exists());
+        drop(lease);
+        sleep(250);
+        assert!(!dir.join(BASELINE_FILE).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn crash_recovery_restores_the_original() {
+        let dir = std::env::temp_dir().join(format!("nexus_vol_crash_{}", now_millis()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Run 1 dies while speaking at 70%: the baseline file stays behind.
+        {
+            let (fake, c) = rig(0.25);
+            c.set_baseline_dir(dir.clone());
+            let lease = c.acquire(0.70).unwrap();
+            std::mem::forget(lease);
+            assert!(near(fake.now(), 0.70));
+        }
+        // Run 2 starts with the volume still at 70%.
+        let (fake2, c2) = rig(0.70);
+        c2.set_baseline_dir(dir.clone());
+        c2.recover_from_crash();
+        assert!(near(fake2.now(), 0.25), "volume not restored after a crash");
+        assert!(!dir.join(BASELINE_FILE).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_baseline_file_is_ignored() {
+        let dir = std::env::temp_dir().join(format!("nexus_vol_old_{}", now_millis()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old_ts = now_millis() - BASELINE_MAX_AGE_MS - 1000;
+        std::fs::write(dir.join(BASELINE_FILE), format!("{{\"value\":0.1,\"ts\":{old_ts}}}")).unwrap();
+        let (fake, c) = rig(0.60);
+        c.set_baseline_dir(dir.clone());
+        c.recover_from_crash();
+        assert!(near(fake.now(), 0.60));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unreadable_volume_leaves_system_untouched() {
+        struct Broken;
+        impl VolumeBackend for Broken {
+            fn get(&self) -> Result<f32, String> {
+                Err("no device".into())
+            }
+            fn set(&self, _: f32) -> Result<(), String> {
+                panic!("must not set when the original cannot be read")
+            }
+        }
+        let c = Controller::new(Arc::new(Broken));
+        assert!(c.acquire(0.7).is_none());
+    }
+
+    /// Live OS round-trip (touches the real volume briefly; restores it).
+    #[test]
+    fn test_volume_roundtrip() {
+        let vol = get_system_volume();
+        if let Ok(v) = vol {
+            assert!(v >= 0.0 && v <= 1.0);
+        }
     }
 }

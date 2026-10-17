@@ -136,6 +136,7 @@ impl VoiceProfile {
     }
 
     /// Acceptance threshold configured by enrollment.
+    #[allow(dead_code)]
     pub fn acceptance_threshold(&self) -> f32 {
         self.threshold
     }
@@ -155,6 +156,7 @@ impl VoiceProfile {
     }
 
     /// Get the number of enrolled embeddings.
+    #[allow(dead_code)]
     pub fn num_embeddings(&self) -> usize {
         self.embeddings.len()
     }
@@ -301,6 +303,7 @@ impl SpeakerVerifier {
 
     /// Add an accepted embedding to the profile (implicit enrollment).
     /// This grows the profile up to MAX_ENROLLMENT_VECTORS.
+    #[allow(dead_code)]
     pub fn implicit_enroll(&mut self, embedding: Vec<f32>) -> anyhow::Result<()> {
         if let Some(profile) = &mut self.profile {
             profile.add_embedding(embedding);
@@ -310,6 +313,7 @@ impl SpeakerVerifier {
     }
 
     /// Delete the voice profile.
+    #[allow(dead_code)]
     pub fn delete(&mut self) -> anyhow::Result<()> {
         if self.profile_path.exists() {
             std::fs::remove_file(&self.profile_path)?;

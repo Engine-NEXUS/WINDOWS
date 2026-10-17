@@ -213,6 +213,10 @@ const LOCAL_IDLE_UNLOAD: Duration = Duration::from_secs(600); // 10 minutes
 
 /// Live view of the unload policy against process state.
 pub fn should_unload_local() -> bool {
+    // While the cloud voice is broken the local engine IS the voice: keep it warm.
+    if crate::tts_health::edge_degraded() {
+        return false;
+    }
     let recovered_for = NETWORK_RECOVERED_AT.lock().unwrap().map(|t| t.elapsed());
     let idle_for = LOCAL_LAST_USED.lock().ok().and_then(|t| t.map(|i| i.elapsed()));
     unload_due(is_local_loaded(), is_network_up(), recovered_for, idle_for)

@@ -88,6 +88,36 @@ fn mark_filtered(original: &str, filtered: &str) {
     }
 }
 
+/// Worst-case Whisper confidence over a turn's segments: (lowest avg_logprob, highest
+/// no_speech_prob). `None` when the engine returned no segment metadata.
+pub(crate) fn confidence_summary(segments: &[crate::stt_groq::GroqSegment]) -> Option<(f32, f32)> {
+    if segments.is_empty() {
+        return None;
+    }
+    let min_lp = segments.iter().map(|s| s.avg_logprob).fold(f32::INFINITY, f32::min);
+    let max_ns = segments.iter().map(|s| s.no_speech_prob).fold(f32::NEG_INFINITY, f32::max);
+    Some((min_lp, max_ns))
+}
+
+/// One `[STT-CONF]` log line per command turn (P0 measurement; opt-in `sttLogConfidence`).
+/// Picked up by scripts/run.ps1's catch-all and greppable for threshold selection.
+pub(crate) fn format_confidence_line(
+    text: &str,
+    segments: &[crate::stt_groq::GroqSegment],
+    samples: usize,
+) -> String {
+    let dur = samples as f32 / 16000.0;
+    let words = text.split_whitespace().count();
+    match confidence_summary(segments) {
+        Some((lp, ns)) => format!(
+            "[STT-CONF] dur={dur:.2}s words={words} segs={} min_avg_logprob={lp:.3} max_no_speech={ns:.3} text='{}'",
+            segments.len(),
+            text.trim()
+        ),
+        None => format!("[STT-CONF] dur={dur:.2}s words={words} segs=0 (no confidence info) text='{}'", text.trim()),
+    }
+}
+
 /// Transcribe audio — tries Groq cloud first, falls back to local faster-whisper.
 ///
 /// The frontend sends Int16 PCM samples at 16kHz. We route to Groq if an API
@@ -131,7 +161,20 @@ pub async fn transcribe_audio(
     } else if !groq_key.is_empty() {
         // Primary: Groq cloud STT (~247ms, free) — with the NEXUS domain
         // vocabulary so rare entities (Servx, Zync, Eesha) win decoder bets.
-        match crate::stt_groq::transcribe_with_groq(&samples, &groq_key, &state.client, Some(crate::stt_groq::NEXUS_VOCABULARY)).await {
+        // P0 measurement (opt-in `sttLogConfidence`): same request as verbose_json so Whisper's
+        // per-segment confidence can be logged for every command turn. Never changes the result.
+        let groq_result = if crate::commands::read_stt_log_confidence(&app) {
+            match crate::stt_groq::transcribe_with_groq_verbose(&samples, &groq_key, &state.client, Some(crate::stt_groq::NEXUS_VOCABULARY)).await {
+                Ok((text, segments)) => {
+                    tracing::info!("{}", format_confidence_line(&text, &segments, samples.len()));
+                    Ok(text)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            crate::stt_groq::transcribe_with_groq(&samples, &groq_key, &state.client, Some(crate::stt_groq::NEXUS_VOCABULARY)).await
+        };
+        match groq_result {
             Ok(text) => {
                 let filtered = filter_transcript_counted(&text);
                 mark_path(1);
@@ -145,6 +188,7 @@ pub async fn transcribe_audio(
             }
             Err(e) => {
                 tracing::warn!("stt: groq failed ({}), falling back to local whisper", e);
+                println!("[STT-ERR] Groq STT failed, falling back to local (slower, may reorder turns): {e}");
                 mark_path(2);
                 // Fall through to local STT
             }
@@ -226,7 +270,9 @@ pub async fn transcribe_samples<R: tauri::Runtime>(
             }
         }
         
-        if !groq_key.is_empty() {
+        // Privacy mode must never reach the cloud (this used to be a bare
+        // `if`, so localSttOnly=true still sent audio to Groq).
+        if groq_allowed(local_only, groq_key.is_empty()) {
             match crate::stt_groq::transcribe_with_groq(samples, &groq_key, client, prompt).await {
                 Ok(text) => {
                     let filtered = filter_transcript_counted(&text);
@@ -241,10 +287,11 @@ pub async fn transcribe_samples<R: tauri::Runtime>(
                 }
                 Err(e) => {
                     tracing::warn!("stt: groq failed ({}), falling back to local whisper", e);
+                println!("[STT-ERR] Groq STT failed, falling back to local (slower, may reorder turns): {e}");
                     mark_path(2);
                 }
             }
-        } else if deepgram_key.is_empty() {
+        } else if !local_only && deepgram_key.is_empty() {
             tracing::info!("stt: no groq/deepgram key, using local whisper directly");
             mark_path(3);
         }
@@ -299,6 +346,7 @@ pub async fn transcribe_samples_verbose<R: tauri::Runtime>(
                 }
                 Err(e) => {
                     tracing::warn!("stt: groq failed ({}), falling back to local whisper", e);
+                println!("[STT-ERR] Groq STT failed, falling back to local (slower, may reorder turns): {e}");
                     mark_path(2);
                 }
             }
@@ -440,6 +488,12 @@ static FILTER_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 
 /// Filter + count one transcript. Drop-in for `apply_hallucination_filter`
 /// at production call sites (tests keep calling the pure fn directly).
+/// May this audio go to Groq? Privacy mode (`localSttOnly`) never reaches the cloud.
+/// Pure + unit-tested so the routing cannot silently regress again.
+pub fn groq_allowed(local_only: bool, groq_key_empty: bool) -> bool {
+    !local_only && !groq_key_empty
+}
+
 pub fn filter_transcript_counted(text: &str) -> String {
     use std::sync::atomic::Ordering;
     FILTER_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -513,6 +567,12 @@ const COMMON_WORDS: &[&str] = &[
     "will", "would", "could", "should", "please", "thanks", "thank", "hello",
     "hi", "hey", "ok", "okay", "yes", "sir", "i'm", "im", "i've", "don't",
     "dont", "it's", "its", "s", "t",
+    // more pure function words: ordinary statements ("I work at Google as a software
+    // engineer") scored 2/8 on the old list and were blanked as "gibberish".
+    "at", "as", "by", "about", "after", "all", "also", "am", "any", "because", "but", "he",
+    "she", "her", "him", "his", "if", "into", "just", "know", "like", "more", "now", "only",
+    "our", "over", "some", "than", "them", "then", "they", "their", "these", "those", "we",
+    "were", "had", "has", "have", "us", "work", "my", "very", "much", "too", "about",
     // command verbs
     "open", "close", "start", "stop", "play", "pause", "press", "type",
     "send", "search", "create", "delete", "switch", "move", "go", "show",
@@ -574,6 +634,12 @@ fn is_english_compatible_text(text: &str) -> bool {
         return true;
     }
     letters.iter().all(|c| c.is_ascii_alphabetic())
+}
+
+/// True when the STT hallucination filter would blank this text (memory hygiene reuses the
+/// exact same rules instead of keeping a second blocklist).
+pub(crate) fn looks_hallucinated(text: &str) -> bool {
+    !text.trim().is_empty() && apply_hallucination_filter(text).trim().is_empty()
 }
 
 /// Filter common Whisper hallucinations on noisy/silent audio.
@@ -669,6 +735,39 @@ fn apply_hallucination_filter(text: &str) -> String {
 mod tests {
     use super::apply_hallucination_filter;
     use super::{filter_transcript_counted, hallucination_stats};
+
+    #[test]
+    fn privacy_mode_never_reaches_the_cloud() {
+        assert!(!super::groq_allowed(true, false), "localSttOnly must block Groq even with a key");
+        assert!(!super::groq_allowed(true, true));
+        assert!(super::groq_allowed(false, false));
+        assert!(!super::groq_allowed(false, true), "no key => no cloud");
+    }
+
+    #[test]
+    fn confidence_summary_takes_worst_case_across_segments() {
+        use crate::stt_groq::GroqSegment;
+        let seg = |lp: f32, ns: f32| GroqSegment { text: String::new(), avg_logprob: lp, no_speech_prob: ns };
+        assert_eq!(super::confidence_summary(&[]), None);
+        let (lp, ns) = super::confidence_summary(&[seg(-0.2, 0.01), seg(-0.9, 0.05), seg(-0.4, 0.30)]).unwrap();
+        assert!((lp - -0.9).abs() < 1e-6 && (ns - 0.30).abs() < 1e-6);
+    }
+
+    #[test]
+    fn confidence_line_is_greppable_and_handles_missing_segments() {
+        use crate::stt_groq::GroqSegment;
+        let line = super::format_confidence_line(
+            " open chrome ",
+            &[GroqSegment { text: "open chrome".into(), avg_logprob: -0.31, no_speech_prob: 0.02 }],
+            16000,
+        );
+        assert_eq!(
+            line,
+            "[STT-CONF] dur=1.00s words=2 segs=1 min_avg_logprob=-0.310 max_no_speech=0.020 text='open chrome'"
+        );
+        let none = super::format_confidence_line("hello", &[], 8000);
+        assert!(none.contains("segs=0 (no confidence info)") && none.contains("dur=0.50s"));
+    }
 
     /// Counted wrapper preserves filter semantics and moves the SLO
     /// counters exactly once per turn (empty → hit, speech → total only).
