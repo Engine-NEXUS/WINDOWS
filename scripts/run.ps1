@@ -321,7 +321,7 @@ try {
       # Strip ANSI color codes
       $clean = $line -replace '\x1b\[[0-9;]*m', ""
       # Direct watch/sentinel/gmail console markers (+ GHOST/ACTION turn markers, TTS speech markers)
-      if ($clean -match "^\[(WATCH|SENTINEL|GMAIL|VISION|ALERT|GHOST|ACTION|TTS)\]") {
+      if ($clean -match "^\[(WATCH|SENTINEL|GMAIL|VISION|ALERT|GHOST|ACTION|TTS|MAIN-CMD|DROP|DIRECTED-GATE|SUB-ROUTE|SUB-PROC|TURN|DICT|STT-ERR|HAND|BOOT)\]") {
         Clear-MeterLine
         Write-Host "  $clean" -ForegroundColor Magenta
         $rustShown++
@@ -358,7 +358,7 @@ try {
         }
 
         # Watch and Sentinel logs (+ executed-turn ACTION markers, TTS speech markers)
-        if ($msg -match "\[WATCH\]|\[SENTINEL\]|\[GMAIL\]|\[GHOST\]|\[ACTION\]|\[TTS\]|watch_screen_email|sentinel:|google::|browser_url|vision::|mail_watch") {
+        if ($msg -match "\[WATCH\]|\[SENTINEL\]|\[GMAIL\]|\[GHOST\]|\[ACTION\]|\[TTS\]|\[VOL\]|\[MAIN-CMD\]|\[DROP\]|\[DIRECTED-GATE\]|\[TURN\]|\[DICT\]|\[STT-ERR\]|\[HAND\]|tts: edge chunk|watch_screen_email|sentinel:|google::|browser_url|vision::|mail_watch") {
           Clear-MeterLine
           Write-Log "WATCH" $msg "Magenta"
           $rustShown++
