@@ -80,6 +80,10 @@ pub fn note_spoken(text: &str) {
             v.drain(0..n - SPOKEN_KEEP);
         }
     }
+    // The owner usually answers right after we speak: window = speaking time + the configured grace.
+    if engagement_secs() > 0 {
+        engage_for(estimated_speech(t) + Duration::from_secs(engagement_secs()));
+    }
 }
 
 fn recent_spoken(now: Instant) -> Vec<String> {
@@ -92,6 +96,57 @@ fn recent_spoken(now: Instant) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+// ── engagement window ───────────────────────────────────────────────────────────────────────
+/// OPT-IN (`ghostEngagementSecs` > 0): after NEXUS speaks, or accepts a command, the next N seconds of
+/// the open mic count as the owner; outside that window a hot-mic turn needs the word "Nexus".
+/// **Off by default**: Ghost mode is full control, the user never has to say "Nexus" or wait for a
+/// window (live test 2026-10-13: it dropped "open notepad" 16 s after our reply). Protection from a
+/// TV / Echo Dot comes from rejecting other assistants' wake words, our own voice, and (next) the
+/// speaker check, none of which need the owner to change how they speak.
+pub const DEFAULT_ENGAGEMENT_SECS: u64 = 0;
+static ENGAGEMENT_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(DEFAULT_ENGAGEMENT_SECS);
+static ENGAGED_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Configured window length in seconds; 0 disables the rule.
+pub fn set_engagement_secs(secs: u64) {
+    ENGAGEMENT_SECS.store(secs.min(120), std::sync::atomic::Ordering::Relaxed);
+}
+pub fn engagement_secs() -> u64 {
+    ENGAGEMENT_SECS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Keep the window open for at least `extra` more time (never shortens it).
+pub fn engage_for(extra: Duration) {
+    let until = Instant::now() + extra;
+    if let Ok(mut g) = ENGAGED_UNTIL.lock() {
+        if g.map_or(true, |cur| until > cur) {
+            *g = Some(until);
+        }
+    }
+}
+
+/// Open (or extend) the window by the configured length.
+pub fn engage_now() {
+    engage_for(Duration::from_secs(engagement_secs()));
+}
+
+/// Close the window (tests share the process-global state).
+#[cfg(test)]
+pub(crate) fn reset_engagement() {
+    if let Ok(mut g) = ENGAGED_UNTIL.lock() {
+        *g = None;
+    }
+}
+
+pub fn is_engaged(now: Instant) -> bool {
+    ENGAGED_UNTIL.lock().map(|g| g.map_or(false, |u| now < u)).unwrap_or(true)
+}
+
+/// Rough speaking time of a line (so a long reply does not eat the window while it is still talking).
+fn estimated_speech(text: &str) -> Duration {
+    Duration::from_millis(text.split_whitespace().count() as u64 * 400)
 }
 
 // ── the pure decision ───────────────────────────────────────────────────────────────────────
@@ -118,6 +173,10 @@ pub struct Input<'a> {
     pub spoken: &'a [String],
     /// Free-text dictation is on: every utterance is wanted.
     pub dictation_active: bool,
+    /// Inside the engagement window (see `is_engaged`). Ignored when `window_enabled` is false.
+    pub engaged: bool,
+    /// The engagement rule is on (`ghostEngagementSecs` > 0).
+    pub window_enabled: bool,
 }
 
 /// Lowercased alphanumeric tokens (apostrophes kept inside words).
@@ -127,6 +186,16 @@ pub fn tokens(s: &str) -> Vec<String> {
         .map(|t| t.trim_matches('\'').to_string())
         .filter(|t| !t.is_empty())
         .collect()
+}
+
+/// Other assistants' wake words: a TV ad or an Echo Dot in the room. Their commands often parse
+/// as ours ("alexa play music"), so these are rejected before the command check.
+const FOREIGN_WAKE: &[&str] = &[
+    "alexa", "hey google", "ok google", "okay google", "hey siri", "hi siri", "hey cortana", "hey bixby",
+];
+
+fn has_foreign_wake(text_lower: &str) -> bool {
+    FOREIGN_WAKE.iter().any(|w| text_lower.contains(w))
 }
 
 const VOCATIVES: &[&str] = &["nexus", "nexis", "nexxus", "nexes", "next us", "nixes"];
@@ -222,15 +291,32 @@ pub fn evaluate(inp: &Input) -> Verdict {
     if inp.dictation_active {
         return accept("dictation");
     }
+    let lower = inp.transcript.to_lowercase();
+    let t = tokens(inp.transcript);
+    let addressed = has_vocative(&lower);
+    // Other assistants and our own voice never count, even when the words parse as a command
+    // ("alexa play music", our "Opening Command Hub, sir" coming back through the speakers).
+    if !addressed && has_foreign_wake(&lower) {
+        return ignore("foreign_wake");
+    }
+    // A phrase-grammar command only counts as our own voice when it is (nearly) a verbatim replay:
+    // the owner repeating "open the command hub" after we said "Opening Command Hub, sir" shares most
+    // content words with that line but is a real request. Non-commands use the looser threshold.
+    let echo_limit = if inp.parses_as_command { 0.85 } else { 0.6 };
+    if t.len() >= 2 && !addressed && echo_overlap(&t, inp.spoken) >= echo_limit {
+        return ignore("echo");
+    }
+    // Outside the engagement window only a turn that says "Nexus" is for us.
+    if inp.window_enabled && !inp.engaged && !addressed {
+        return ignore("outside_window");
+    }
     if inp.parses_as_command {
         return accept("command");
     }
-    let lower = inp.transcript.to_lowercase();
-    let t = tokens(inp.transcript);
     if t.is_empty() {
         return ignore("empty");
     }
-    if has_vocative(&lower) && !is_repetitive(&t) {
+    if addressed && !is_repetitive(&t) {
         return accept("vocative");
     }
     if t.len() >= 2 && echo_overlap(&t, inp.spoken) >= 0.6 {
@@ -272,6 +358,19 @@ pub fn gate_enabled<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
         .unwrap_or(true)
 }
 
+/// `ghostEngagementSecs` in settings.json (default 15, 0 = rule off, capped at 120).
+pub fn read_engagement_secs<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u64 {
+    use tauri::Manager;
+    let Ok(dir) = app.path().app_data_dir() else { return DEFAULT_ENGAGEMENT_SECS };
+    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else { return DEFAULT_ENGAGEMENT_SECS };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return DEFAULT_ENGAGEMENT_SECS };
+    json.get("ghostEngagementSecs")
+        .or_else(|| json.get("ghost_engagement_secs"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_ENGAGEMENT_SECS)
+        .min(120)
+}
+
 /// Ask whether the transcript of the turn that just ended should be acted on. The origin comes from
 /// the Rust capture that produced it (frozen at capture stop), never from the caller.
 #[tauri::command]
@@ -283,6 +382,7 @@ pub fn directed_gate<R: tauri::Runtime>(transcript: String, app: tauri::AppHandl
     if crate::memcore::offer::is_armed() {
         return accept("offer_reply");
     }
+    set_engagement_secs(read_engagement_secs(&app));
     let spoken = recent_spoken(Instant::now());
     let verdict = evaluate(&Input {
         transcript: &transcript,
@@ -290,7 +390,13 @@ pub fn directed_gate<R: tauri::Runtime>(transcript: String, app: tauri::AppHandl
         parses_as_command: crate::intent_parser::parse_deterministic(&transcript).is_some(),
         spoken: &spoken,
         dictation_active: crate::orchestrator::is_dictation_active(),
+        engaged: is_engaged(Instant::now()),
+        window_enabled: engagement_secs() > 0,
     });
+    if verdict.accept {
+        // An accepted turn is the owner talking: the conversation continues for another window.
+        engage_now();
+    }
     if !verdict.accept {
         println!(
             "[DROP] Directed speech gate: IGNORED ({}) transcript: '{}'",
@@ -317,26 +423,26 @@ mod tests {
     use super::*;
 
     fn hot(t: &str) -> Verdict {
-        evaluate(&Input { transcript: t, origin: Origin::HotMic, parses_as_command: false, spoken: &[], dictation_active: false })
+        evaluate(&Input { transcript: t, origin: Origin::HotMic, parses_as_command: false, spoken: &[], dictation_active: false, engaged: true, window_enabled: true })
     }
     fn hot_with_spoken(t: &str, spoken: &[&str]) -> Verdict {
         let s: Vec<String> = spoken.iter().map(|x| x.to_string()).collect();
-        evaluate(&Input { transcript: t, origin: Origin::HotMic, parses_as_command: false, spoken: &s, dictation_active: false })
+        evaluate(&Input { transcript: t, origin: Origin::HotMic, parses_as_command: false, spoken: &s, dictation_active: false, engaged: true, window_enabled: true })
     }
 
     #[test]
     fn explicit_turns_are_never_gated() {
         for t in ["", "uh", "total strawberry", "I'm gonna say that I'm gonna say that I'm gonna say that"] {
-            let v = evaluate(&Input { transcript: t, origin: Origin::Direct, parses_as_command: false, spoken: &[], dictation_active: false });
+            let v = evaluate(&Input { transcript: t, origin: Origin::Direct, parses_as_command: false, spoken: &[], dictation_active: false, engaged: true, window_enabled: true });
             assert!(v.accept && v.reason == "explicit_turn", "{t:?}");
         }
     }
 
     #[test]
     fn recognised_commands_and_dictation_always_pass() {
-        let c = evaluate(&Input { transcript: "gibberish", origin: Origin::HotMic, parses_as_command: true, spoken: &[], dictation_active: false });
+        let c = evaluate(&Input { transcript: "gibberish", origin: Origin::HotMic, parses_as_command: true, spoken: &[], dictation_active: false, engaged: true, window_enabled: true });
         assert!(c.accept && c.reason == "command");
-        let d = evaluate(&Input { transcript: "so then we went to the market and bought apples", origin: Origin::HotMic, parses_as_command: false, spoken: &[], dictation_active: true });
+        let d = evaluate(&Input { transcript: "so then we went to the market and bought apples", origin: Origin::HotMic, parses_as_command: false, spoken: &[], dictation_active: true, engaged: true, window_enabled: true });
         assert!(d.accept && d.reason == "dictation");
     }
 
@@ -550,5 +656,75 @@ mod tests {
         assert_eq!(tokens("Stopped typing, sir!"), vec!["stopped", "typing", "sir"]);
         assert_eq!(tokens("I'm 'quoted'"), vec!["i'm", "quoted"]);
         assert!(tokens("...").is_empty());
+    }
+
+    fn gate(t: &str, parses: bool, engaged: bool, spoken: &[&str]) -> Verdict {
+        let s: Vec<String> = spoken.iter().map(|x| x.to_string()).collect();
+        evaluate(&Input {
+            transcript: t,
+            origin: Origin::HotMic,
+            parses_as_command: parses,
+            spoken: &s,
+            dictation_active: false,
+            engaged,
+            window_enabled: true,
+        })
+    }
+
+    #[test]
+    fn a_command_outside_the_window_needs_the_word_nexus() {
+        // TV / mum / a call in the room: "open youtube" parses as a command, but nobody engaged us.
+        let v = gate("open youtube", true, false, &[]);
+        assert!(!v.accept && v.reason == "outside_window", "{v:?}");
+        // Addressed to us it passes, window or not.
+        assert!(gate("Nexus, open youtube", true, false, &[]).accept);
+        // Inside the window the same words are the owner's next command.
+        assert!(gate("open youtube", true, true, &[]).accept);
+        // The rule can be switched off.
+        let off = evaluate(&Input {
+            transcript: "open youtube",
+            origin: Origin::HotMic,
+            parses_as_command: true,
+            spoken: &[],
+            dictation_active: false,
+            engaged: false,
+            window_enabled: false,
+        });
+        assert!(off.accept);
+    }
+
+    #[test]
+    fn other_assistants_wake_words_are_never_for_us() {
+        for t in ["alexa play some music", "hey google open youtube", "OK Google, what's the weather", "hey siri set a timer"] {
+            // even when the words happen to parse as one of our commands, and even inside the window
+            let v = gate(t, true, true, &[]);
+            assert!(!v.accept && v.reason == "foreign_wake", "{t}: {v:?}");
+        }
+        // If the owner addresses us by name the sentence is still ours.
+        assert!(gate("nexus ignore alexa and open notepad", true, true, &[]).accept);
+    }
+
+    #[test]
+    fn our_own_voice_coming_back_is_not_a_command() {
+        let spoken = ["Opening Command Hub, sir."];
+        // "opening command hub" parses as an open command, but it is our own line echoed by the speakers.
+        let v = gate("opening command hub sir", true, true, &spoken);
+        assert!(!v.accept && v.reason == "echo", "{v:?}");
+        // The owner genuinely asking for it is different words, so it passes.
+        assert!(gate("open the command hub", true, true, &spoken).accept);
+    }
+
+    #[test]
+    fn the_engagement_window_opens_extends_and_expires() {
+        reset_engagement();
+        assert!(!is_engaged(Instant::now()));
+        engage_for(Duration::from_millis(60));
+        assert!(is_engaged(Instant::now()));
+        std::thread::sleep(Duration::from_millis(90));
+        // Never shortened by a smaller request, extended by a larger one.
+        engage_for(Duration::from_secs(5));
+        engage_for(Duration::from_millis(1));
+        assert!(is_engaged(Instant::now() + Duration::from_secs(4)));
+        assert!(!is_engaged(Instant::now() + Duration::from_secs(6)));
     }
 }

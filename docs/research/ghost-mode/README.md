@@ -1,5 +1,7 @@
 # Ghost Mode Research — Index
 
+Current records: [first Ghost command-center implementation](../../changes/133-ghost-command-center-implementation-deep-dive-2026-10-16.md), [no-vision research with primary sources](13-no-vision-control-evidence-sources-2026-10-16.md), and [release plan](../../features/129-ghost-mode-reliable-desktop-control-implementation-plan.md).
+
 Understand-first docs for the Ghost Mode program (Windows-only AI
 cursor/keyboard control). Implementation record lives in
 `docs/changes/37–46`; the live plan in `docs/features/64`.

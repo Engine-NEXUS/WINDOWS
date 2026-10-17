@@ -10,6 +10,12 @@ pub fn enable_process_ecoqos() {
         PROCESS_POWER_THROTTLING_STATE, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
     };
 
+    // Diagnostic kill switch: `$env:NEXUS_NO_ECOQOS=1; nexus start` to test whether efficiency mode
+    // slows the camera pipeline (hand mode field test 2).
+    if std::env::var("NEXUS_NO_ECOQOS").map(|v| v == "1").unwrap_or(false) {
+        tracing::info!("power: EcoQoS disabled by NEXUS_NO_ECOQOS=1");
+        return;
+    }
     unsafe {
         let mut throttling = PROCESS_POWER_THROTTLING_STATE {
             Version: 1, // PROCESS_POWER_THROTTLING_CURRENT_VERSION

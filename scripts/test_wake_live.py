@@ -399,7 +399,7 @@ def run_batch_test(threshold=DEFAULT_THRESHOLD, model_path=None):
 def main():
     parser = argparse.ArgumentParser(description="NEXUS Wake Word Live & Batch Performance Tester")
     parser.add_argument("--batch", action="store_true", help="Run batch evaluation on dataset files")
-    parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help="Trigger threshold (default: 0.35)")
+    parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help=f"Trigger threshold (default: {DEFAULT_THRESHOLD}). Note: this tool re-implements the pipeline in Python; `nexus wake replay` scores the real Rust engine.")
     parser.add_argument("--model", type=str, default=None, help="Custom .onnx model path")
 
     args = parser.parse_args()

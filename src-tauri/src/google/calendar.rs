@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::types::{CalendarEvent, EventReceipt, GoogleError, NewEvent};
 use chrono::DateTime;
 use serde_json::Value;

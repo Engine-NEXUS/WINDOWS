@@ -60,6 +60,20 @@ pub fn init<R: Runtime>(_app: &tauri::App<R>) {
     }
 }
 
+/// Same auto-allow for a window created later (hand mode's camera window). Own origins only.
+pub fn allow_media_for_window<R: Runtime>(_win: &tauri::WebviewWindow<R>) {
+    #[cfg(target_os = "windows")]
+    {
+        let label = _win.label().to_string();
+        let res = _win.with_webview(move |webview| unsafe {
+            register_media_permission_handler(&webview, &label);
+        });
+        if let Err(e) = res {
+            tracing::warn!("permissions: failed to hook dynamic webview: {e}");
+        }
+    }
+}
+
 /// Register the PermissionRequested handler on the WebView2 instance.
 /// The COM event subscription holds a reference to the handler, so it stays
 /// alive for the lifetime of the webview — no need to store the token.

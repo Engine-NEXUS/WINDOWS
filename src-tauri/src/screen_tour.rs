@@ -446,6 +446,7 @@ pub fn dwell_ms(words: usize) -> u64 {
 pub enum EndReason {
     Done,
     Cancelled,
+    #[allow(dead_code)]
     Failed,
 }
 

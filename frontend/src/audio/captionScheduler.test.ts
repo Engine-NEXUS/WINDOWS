@@ -2,10 +2,17 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   partitionIntoLines,
   CaptionWord,
+  CaptionTrack,
   clearCaptionSchedule,
   suppressNextCaption,
+  __testScheduleChunk,
 } from "./captionScheduler";
 import { useAssistant } from "../store/assistant";
+
+function track(words: CaptionWord[], estimated = false): CaptionTrack {
+  const last = words[words.length - 1];
+  return { words, total_ms: last.start_ms + last.duration_ms, estimated, envelope: [], frame_ms: 0, envelope_start_ms: 0 };
+}
 
 describe("captionScheduler line partitioning and lifecycle", () => {
   beforeEach(() => {
@@ -98,5 +105,82 @@ describe("captionScheduler line partitioning and lifecycle", () => {
     const lines = partitionIntoLines(words);
     expect(lines.length).toBe(1);
     expect(lines[0].words.map((w) => w.text)).toEqual(["Good", "morning,", "sir."]);
+  });
+});
+
+describe("scheduleChunk utterance-end grace window (Part 5 of the sync audit)", () => {
+  // A line's clear-timer can only tell whether it's the last line it KNOWS
+  // about — not whether a later streamed chunk is simply running behind.
+  // Closing captionActive immediately on that guess is the "caption
+  // disappeared before speech ended" bug; the grace window gives a
+  // genuinely-in-flight next chunk a chance to arrive and cancel the close.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    clearCaptionSchedule();
+  });
+
+  afterEach(() => {
+    clearCaptionSchedule();
+    vi.useRealTimers();
+  });
+
+  // One short, complete-sentence line: startDelay=0, displayDuration=2000ms
+  // (the 2000ms minDwell floor dominates), fadeDelay=2000, clearDelay=2450.
+  const chunk1 = track([{ text: "Hi.", start_ms: 0, duration_ms: 200 }]);
+
+  it("a late-arriving next chunk cancels the premature close (never flips captionActive false)", () => {
+    __testScheduleChunk(chunk1);
+    vi.advanceTimersByTime(2450); // chunk1's clear-timer fires, arms the grace timer
+    expect(useAssistant.getState().captionActive).toBe(true);
+
+    vi.advanceTimersByTime(250); // mid-grace — chunk 2 arrives late, but in time
+    __testScheduleChunk(track([{ text: "Still here.", start_ms: 2450, duration_ms: 300 }]));
+
+    vi.advanceTimersByTime(1000); // well past where the cancelled grace timer would have fired
+    expect(useAssistant.getState().captionActive).toBe(true);
+  });
+
+  it("with no next chunk, the caption actually closes after the grace window", () => {
+    __testScheduleChunk(chunk1);
+    vi.advanceTimersByTime(2450); // clear-timer fires, grace timer armed
+    expect(useAssistant.getState().captionActive).toBe(true);
+
+    vi.advanceTimersByTime(499); // just before the 500ms grace elapses
+    expect(useAssistant.getState().captionActive).toBe(true);
+
+    vi.advanceTimersByTime(2); // grace elapses
+    expect(useAssistant.getState().captionActive).toBe(false);
+  });
+
+  it("estimated (local-engine) tracks get a wider safety margin before fading", async () => {
+    const { onCaptionLineUpdate } = await import("./captionScheduler");
+    const realTiming = track([{ text: "Hi.", start_ms: 0, duration_ms: 200 }], false);
+    const estimatedTiming = track([{ text: "Hi.", start_ms: 0, duration_ms: 200 }], true);
+
+    // Real timing (edge-tts): fadeDelay = 0 + max(2000, 300+1500) = 2000ms.
+    let faded = false;
+    let unsub = onCaptionLineUpdate((line) => {
+      if (line.phase === "fading") faded = true;
+    });
+    __testScheduleChunk(realTiming);
+    vi.advanceTimersByTime(1999);
+    expect(faded).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(faded).toBe(true); // fired at exactly 2000ms
+    unsub();
+    clearCaptionSchedule();
+
+    // Estimated (local Kokoro): same math plus the +300ms margin on linger
+    // -> fadeDelay = 0 + max(2000, 300 + 1800) = 2100ms — 100ms later.
+    faded = false;
+    unsub = onCaptionLineUpdate((line) => {
+      if (line.phase === "fading") faded = true;
+    });
+    __testScheduleChunk(estimatedTiming);
+    vi.advanceTimersByTime(2099);
+    expect(faded).toBe(false); // the margin held it open past the real-timing point
+    vi.advanceTimersByTime(1);
+    expect(faded).toBe(true); // fired at exactly 2100ms
+    unsub();
   });
 });

@@ -77,6 +77,8 @@ interface AssistantStore {
   clearTranscript: () => void;
   /** Pending GitHub command awaiting user confirmation (destructive ops). */
   pendingGithubCommand: unknown | null;
+  /** When the pending confirmation was set (ms epoch): voice answers expire after PENDING_CONFIRM_TTL_MS. */
+  pendingGithubCommandAt: number | null;
   setPendingGithubCommand: (cmd: unknown | null) => void;
   /** User-configured orb color theme (hex string, e.g. "#f2b859"). */
   orbColor: string;
@@ -84,6 +86,15 @@ interface AssistantStore {
   /** Orb fixed position: "top" or "bottom". Default: "top". */
   orbPosition: "top" | "bottom";
   setOrbPosition: (pos: "top" | "bottom") => void;
+  /** Orb background capsule style: "classic" or "pebble". Default: "classic". */
+  orbCapsuleStyle: "classic" | "pebble";
+  setOrbCapsuleStyle: (style: "classic" | "pebble") => void;
+  /** Orb wakeup thread animation mode (1..5). Default: 1 (Elastic thread). */
+  orbWakeupMode: number;
+  setOrbWakeupMode: (m: number) => void;
+  /** Orb interior genesis mode (0..3). Default: 2 (Spark burst). */
+  orbInteriorGenesis: number;
+  setOrbInteriorGenesis: (g: number) => void;
   /** True while speech captions are actively rendering/lingering on screen. */
   captionActive: boolean;
   setCaptionActive: (v: boolean) => void;
@@ -170,7 +181,6 @@ export const useAssistant = create<AssistantStore>((set) => ({
     });
   },
   setVisible: (v) => set((st) => {
-      console.log(`[ORB] setVisible(${v}) from:${st.visible} ghostActive:${st.ghostActive} state:${st.state}`);
       return { visible: st.ghostActive ? true : v };
     }),
   setLoadingVisible: (v) => {
@@ -235,7 +245,9 @@ export const useAssistant = create<AssistantStore>((set) => ({
   },
   clearTranscript: () => set({ transcript: [] }),
   pendingGithubCommand: null,
-  setPendingGithubCommand: (cmd) => set({ pendingGithubCommand: cmd }),
+  pendingGithubCommandAt: null,
+  setPendingGithubCommand: (cmd) =>
+    set({ pendingGithubCommand: cmd, pendingGithubCommandAt: cmd ? Date.now() : null }),
   orbColor: typeof localStorage !== "undefined" ? (localStorage.getItem("nexus:orb_color") || "#ffffff") : "#ffffff",
   setOrbColor: (c) => {
     try { localStorage.setItem("nexus:orb_color", c); } catch (_) {}
@@ -245,6 +257,21 @@ export const useAssistant = create<AssistantStore>((set) => ({
   setOrbPosition: (p) => {
     try { localStorage.setItem("nexus:orb_position", p); } catch (_) {}
     set({ orbPosition: p });
+  },
+  orbCapsuleStyle: typeof localStorage !== "undefined" ? ((localStorage.getItem("nexus:orb_capsule_style") as "classic" | "pebble") || "pebble") : "pebble",
+  setOrbCapsuleStyle: (s) => {
+    try { localStorage.setItem("nexus:orb_capsule_style", s); } catch (_) {}
+    set({ orbCapsuleStyle: s });
+  },
+  orbWakeupMode: typeof localStorage !== "undefined" ? Number(localStorage.getItem("nexus:orb_wakeup_mode") || "1") : 1,
+  setOrbWakeupMode: (m) => {
+    try { localStorage.setItem("nexus:orb_wakeup_mode", String(m)); } catch (_) {}
+    set({ orbWakeupMode: m });
+  },
+  orbInteriorGenesis: typeof localStorage !== "undefined" ? Number(localStorage.getItem("nexus:orb_interior_genesis") || "2") : 2,
+  setOrbInteriorGenesis: (g) => {
+    try { localStorage.setItem("nexus:orb_interior_genesis", String(g)); } catch (_) {}
+    set({ orbInteriorGenesis: g });
   },
   captionActive: false,
   setCaptionActive: (v) => set((st) => {

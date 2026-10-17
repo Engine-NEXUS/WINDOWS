@@ -50,6 +50,12 @@ export interface MemoryStatus {
   whatsapp?: boolean;
   /** Message text may be spoken aloud (off: sidebar only). */
   whatsapp_speak?: boolean;
+  /** Leave-by reminders are on. */
+  leave_by?: boolean;
+  /** Remember what is open and offer to reopen it after a restart. */
+  session?: boolean;
+  /** Mention broken connections in the startup greeting. */
+  health?: boolean;
   /** Learned WhatsApp people. */
   people?: number;
 }
@@ -74,6 +80,19 @@ export interface WhatsappSelfTest {
   chats_parsed: number;
   format_ok: boolean;
   note: string;
+}
+
+/** What leave-by reminders still need before they can speak. */
+export function leaveBySummary(
+  st: { leave_by?: boolean; google_connected?: boolean },
+  hasRoutesKey: boolean,
+): string {
+  if (st.leave_by === false) return "Off - NEXUS will not tell you when to leave.";
+  const missing: string[] = [];
+  if (!st.google_connected) missing.push("a connected Google account (calendar)");
+  if (!hasRoutesKey) missing.push("a Google Maps & Routes API key (API Keys)");
+  missing.push('your home address (say "remember that my home is ...")');
+  return `On. Needs: ${missing.join(", ")}. Trips are measured from home, only for events with a street address.`;
 }
 
 /** One-line status of the WhatsApp watcher for the Memory page. */
@@ -115,6 +134,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   github: "GitHub",
   database: "Database",
   deadline: "Deadline",
+  internship: "Internship",
 };
 
 export function categoryLabel(c: string): string {
@@ -154,7 +174,10 @@ export type MemoryFlag =
   | "memcoreTimetable"
   | "memcoreMail"
   | "memcoreWhatsapp"
-  | "memcoreWhatsappSpeak";
+  | "memcoreWhatsappSpeak"
+  | "memcoreLeaveBy"
+  | "memcoreSession"
+  | "memcoreHealth";
 
 const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 

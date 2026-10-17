@@ -195,6 +195,12 @@ scripts/kaggle_kernel/
 # Kokoro TTS model + voices (downloaded, not committed — see docs/research/jarvis-landscape/09)
 src-tauri/resources/kokoro/
 
+# agent-watch sidecar's npm deps (pty-manager + coding-agent-adapters, ~68 MB
+# incl. node-pty's native prebuilt binaries) — installed lazily on first use
+# of the agent-completion watcher, not bundled in the installer.
+src-tauri/resources/agent_watch_sidecar/node_modules/
+src-tauri/resources/agent_watch_sidecar/package-lock.json
+
 # Local media assets / references (not committed)
 frontend/public/v2*
 frontend/public/*.mp4
@@ -203,3 +209,6 @@ frontend/public/*.mp4
 .kilo/
 scratch/
 spline-preview/
+
+# Hand mode assets (copied/downloaded by scripts/sync-hand-assets.mjs, ~17 MB)
+frontend/public/hand/

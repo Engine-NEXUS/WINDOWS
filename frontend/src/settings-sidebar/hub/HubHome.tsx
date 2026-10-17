@@ -5,6 +5,7 @@ export type HubPage = "home" | "keys" | "memory" | "audio" | "display" | "connec
 
 interface AccountsApi {
   accounts: HubAccount[];
+  googleNeedsSignin?: boolean;
   busy: string | null;
   error: string | null;
   dismissError: () => void;
@@ -140,9 +141,27 @@ export function HubHome({ acc, insights, themeMode, onTheme, onOpen }: Props) {
                   {a.name}
                   {a.primary && <span className="hx-badge">Primary</span>}
                   <span className="hx-provider">{a.provider === "google" ? "Google" : "GitHub"}</span>
+                  {a.provider === "google" && acc.googleNeedsSignin && (
+                    <span className="hx-badge" style={{ background: "rgba(239, 68, 68, 0.15)", color: "#ef4444", marginLeft: 4 }}>
+                      Needs Sign-In
+                    </span>
+                  )}
                 </div>
                 <div className="hx-account-handle">{a.handle}</div>
               </div>
+              {a.provider === "google" && acc.googleNeedsSignin && confirm !== key && (
+                <button
+                  className="hx-btn hx-btn--tiny"
+                  style={{ marginRight: 8, background: "rgba(59, 130, 246, 0.15)", color: "var(--nx-accent-blue)", border: "1px solid var(--nx-accent-blue)", whiteSpace: "nowrap" }}
+                  disabled={acc.busy !== null}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    acc.addGoogle();
+                  }}
+                >
+                  {acc.busy === "add-google" ? "Signing in…" : "Re-authenticate"}
+                </button>
+              )}
               {confirm === key ? (
                 <div className="hx-confirm-inline">
                   <button className="hx-btn hx-btn--tiny" onClick={() => setConfirm(null)}>

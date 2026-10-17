@@ -29,12 +29,15 @@ const GROQ_MODEL: &str = "whisper-large-v3-turbo";
 pub const NEXUS_VOCABULARY: &str = "Ghost mode. Ghost control. Exit ghost mode. \
 Open WhatsApp. Open Chrome. Open VS Code. Open Spotify. Open Discord. \
 Open Brave. Open YouTube. Open settings. Open architecture mapper. \
+Open my chat with Mummy in WhatsApp. Chat with Amma. \
 Analyse Servx. Analyse Zync. GitHub pull request. Merge pull request. \
 List pull requests. Search for. Play pause. Next track. Previous track. \
 Memory audit. Forget everything. Take the mouse. Control my cursor. \
 Type this. Press enter. Click the button. Search the web. \
+Remember this button as. Click learned. Forget learned. \
 Ghostwriter. Take a letter. Order food. Send message. \
 Deepgram Groq Supabase Eesha Prem Lakshya Congi Shopkart NEXUS \
+Shut down my laptop. Restart my laptop. Lock my laptop. \
 open close stop cancel navigate analyse search type click press scroll.";
 
 /// Neutral English decoder instruction used when a turn has not been
@@ -73,6 +76,19 @@ pub(crate) struct GroqTranscriptionFields {
 
 pub(crate) fn decoder_prompt(prompt: Option<&'static str>) -> &'static str {
     prompt.unwrap_or(NEUTRAL_DECODER_PROMPT)
+}
+
+/// Which decoder bias a turn gets. The NEXUS vocabulary nudges Whisper toward NEXUS commands,
+/// so it is withheld from a voice that is KNOWN not to be the owner (uncertain, rejected).
+/// With nobody enrolled there is no owner to protect: `Unenrolled` gets the vocabulary too.
+/// Before, every unenrolled turn got the neutral prompt, so "chat with mummy in WhatsApp" was
+/// heard as "chart with mommy and what so".
+pub(crate) fn decoder_bias_for(ownership: crate::voice_profile::TurnOwnership) -> DecoderBias {
+    use crate::voice_profile::TurnOwnership::*;
+    match ownership {
+        Verified | Unenrolled => DecoderBias::OwnerCommand,
+        Uncertain | Rejected => DecoderBias::Neutral,
+    }
 }
 
 pub(crate) fn decoder_bias_prompt(bias: DecoderBias) -> &'static str {
@@ -435,6 +451,24 @@ mod tests {
                 "vocabulary missing: {term}"
             );
         }
+    }
+
+    #[test]
+    fn decoder_bias_follows_ownership() {
+        use crate::voice_profile::TurnOwnership::*;
+        // Nobody enrolled: there is no owner to protect, so the NEXUS vocabulary applies.
+        assert_eq!(decoder_bias_for(Unenrolled), DecoderBias::OwnerCommand);
+        assert_eq!(decoder_bias_for(Verified), DecoderBias::OwnerCommand);
+        // A voice that is (or may be) someone else never gets command biasing.
+        assert_eq!(decoder_bias_for(Uncertain), DecoderBias::Neutral);
+        assert_eq!(decoder_bias_for(Rejected), DecoderBias::Neutral);
+    }
+
+    #[test]
+    fn vocabulary_teaches_the_chat_command_phrasing() {
+        let v = NEXUS_VOCABULARY.to_lowercase();
+        assert!(v.contains("chat with"), "STT heard \"chat with\" as \"chart with\"/\"start with\"");
+        assert!(v.contains("in whatsapp"), "STT heard \"in WhatsApp\" as \"and what so\"");
     }
 
     #[test]

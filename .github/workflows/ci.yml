@@ -36,6 +36,40 @@ jobs:
       - name: Turn-end choke-point gate (ghost hot-mic loop)
         run: node ../scripts/check-turn-ends.mjs
 
+      - name: Repo hygiene gate self-test (secret rules fire on synthetic samples)
+        run: node ../scripts/check-repo-hygiene.mjs --selftest
+
+      - name: Repo hygiene gate (no tracked secrets, databases, logs, key files)
+        run: node ../scripts/check-repo-hygiene.mjs
+
+      # Commands defined/registered/invoked and events emitted/listened must agree;
+      # the one-sided leftovers are frozen in scripts/baselines/ and may only shrink.
+      - name: IPC + event contract gate
+        run: node ../scripts/check-ipc-contract.mjs
+
+  worker-check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server/worker
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/worker/package-lock.json
+
+      - name: Install Worker deps
+        run: npm ci
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: Worker tests
+        run: npm test
+
   windows-installer:
     runs-on: windows-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/phase-1')
@@ -109,6 +143,10 @@ jobs:
       - name: Set LIBCLANG_PATH
         run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
       - name: Cargo check (default)
         working-directory: src-tauri
         run: cargo check
@@ -117,9 +155,23 @@ jobs:
         working-directory: src-tauri
         run: cargo check --features mock-wake
 
-      - name: Cargo test (lib)
+      # The shipped binary is built with these features (nexus build); they were
+      # never compiled in CI before, so breakage there was only found locally.
+      - name: Cargo check (shipped features, ALL targets incl. tests, examples, dev_tools)
         working-directory: src-tauri
-        run: cargo test --lib -- --test-threads=1
+        run: cargo check --all-targets --features custom-protocol,admin-brain
+
+      # rustc --force-warn dead_code sees through #[allow(dead_code)]; lib.rs only
+      # publishes the modules in scripts/baselines/external-api.txt so unused pub
+      # items are visible. New dead code fails; the baseline may only shrink.
+      - name: Dead-code ratchet
+        run: node scripts/dead-code-audit.mjs
+
+      # --tests = lib unit tests + everything in src-tauri/tests (the 50-command
+      # voice fixture, offline commands, user commands). Previously only --lib ran.
+      - name: Cargo test (lib + integration tests)
+        working-directory: src-tauri
+        run: cargo test --tests --features custom-protocol,admin-brain -- --test-threads=1
 
   python-check:
     runs-on: ubuntu-latest
@@ -158,3 +210,9 @@ jobs:
 
       - name: Validate NLU Data Foundation
         run: python server/nlu/data_foundation.py validate
+
+      - name: Agent + memory unit tests
+        working-directory: server
+        run: |
+          pip install pytest -r agent/requirements.txt
+          python -m pytest agent/tests memory/tests -q

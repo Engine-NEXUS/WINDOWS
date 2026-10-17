@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 
 pub const SAMPLE_RATE: u32 = 24_000;
 /// Max phoneme characters per model call (matches the reference KPipeline budget).
+#[allow(dead_code)]
 pub const MAX_PHONEME_CHARS: usize = 510;
 const STYLE_DIM: usize = 256;
 const PACK_ROWS: usize = 510;
@@ -157,6 +158,7 @@ pub fn token_ids(phonemes: &str) -> Vec<i64> {
 }
 
 /// Distinct phoneme characters not in the model vocabulary.
+#[allow(dead_code)]
 pub fn unknown_phonemes(phonemes: &str) -> Vec<char> {
     let mut out: Vec<char> = Vec::new();
     for c in phonemes.chars() {
@@ -773,6 +775,93 @@ mod tests {
                 std::fs::write(format!("{dir}/{voice}_{i}.wav"), wav).unwrap();
             }
         }
+    }
+
+    /// Dev helper (ignored): process memory after each stage of bringing Kokoro up, for the RAM plan
+    /// (docs/features/131). Run once per variant in a fresh process:
+    /// KOKORO_VARIANT = default | t2 | t2_noarena | t4_noarena
+    fn proc_mem_mb() -> (f64, f64) {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+        let pid = sysinfo::get_current_pid().expect("pid");
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::new().with_memory());
+        let p = sys.process(pid).expect("self");
+        (p.memory() as f64 / 1_048_576.0, p.virtual_memory() as f64 / 1_048_576.0)
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn mem_breakdown() {
+        let variant = std::env::var("KOKORO_VARIANT").unwrap_or_else(|_| "default".to_string());
+        let model = res("model_quantized.onnx");
+        let pack = parse_voice_pack(&std::fs::read(res("voices/bm_george.bin")).expect("voice")).expect("pack");
+        let show = |label: &str| {
+            let (ws, commit) = proc_mem_mb();
+            println!("MEM [{variant}] {label:<38} ws={ws:>6.0} MB  virtual={commit:>6.0} MB (virtual size, NOT commit)");
+        };
+        show("0 baseline (test harness)");
+        let g2p = build_g2p(true);
+        show("1 G2P built (GB gold+silver+tagger)");
+        let ps = phonemize(&g2p, "Opening WhatsApp, sir.").expect("phonemize");
+        assert!(!ps.is_empty());
+        show("2 after first phonemize");
+        let mut b = ort::session::Session::builder().expect("builder");
+        b = match variant.as_str() {
+            "t2" => b.with_intra_threads(2).expect("threads"),
+            "t2_noarena" => b
+                .with_intra_threads(2)
+                .expect("threads")
+                .with_memory_pattern(false)
+                .expect("pattern")
+                .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
+                .expect("ep"),
+            "noarena" => b
+                .with_memory_pattern(false)
+                .expect("pattern")
+                .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
+                .expect("ep"),
+            "t4_noarena" => b
+                .with_intra_threads(4)
+                .expect("threads")
+                .with_memory_pattern(false)
+                .expect("pattern")
+                .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
+                .expect("ep"),
+            _ => b,
+        };
+        let session = b.commit_from_file(&model).expect("load model");
+        show("3 ORT session loaded (88 MB int8 file)");
+        let eng = new_engine();
+        *eng.lock().await = Some(Loaded { session, g2p, british: true, pack, voice: "bm_george".to_string() });
+        let sentences = [
+            "Opening WhatsApp, sir.",
+            "You have three new emails and a meeting at two thirty tomorrow.",
+            "Stopped typing, sir.",
+            "The weather in London is seventeen degrees and cloudy.",
+            "Your build finished successfully with no warnings.",
+        ];
+        let (mut audio_s, mut wall_s) = (0.0f32, 0.0f32);
+        for (i, t) in sentences.iter().enumerate() {
+            let t0 = std::time::Instant::now();
+            let (a, sr) = synthesize(&eng, t, 1.0).await.expect("synth");
+            let wall = t0.elapsed().as_secs_f32();
+            audio_s += a.len() as f32 / sr as f32;
+            wall_s += wall;
+            println!(
+                "MEMTTS [{variant}] #{i} {} words: audio {:.2}s, synth wall {:.2}s (RTF {:.2})",
+                t.split_whitespace().count(),
+                a.len() as f32 / sr as f32,
+                wall,
+                wall / (a.len() as f32 / sr as f32)
+            );
+            if i == 0 {
+                show("4 after FIRST synthesis");
+            }
+        }
+        show("5 after 5 syntheses");
+        println!("MEM [{variant}] speed: {audio_s:.1}s audio in {wall_s:.1}s wall = RTF {:.2} (debug build)", wall_s / audio_s);
+        unload(&eng).await;
+        show("6 after unload() (Loaded dropped)");
     }
 
     /// Needs the downloaded model + voice (git-ignored). Skipped when absent.

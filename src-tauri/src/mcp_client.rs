@@ -1231,6 +1231,7 @@ mod tests {
 
     #[test]
     fn test_mcp_server_urls() {
+        *TEST_WHATSAPP_URL.lock().unwrap() = None;
         assert_eq!(McpServer::SwiggyFood.url(), "https://mcp.swiggy.com/food");
         assert_eq!(McpServer::SwiggyInstamart.url(), "https://mcp.swiggy.com/im");
         assert_eq!(McpServer::SwiggyDineout.url(), "https://mcp.swiggy.com/dineout");

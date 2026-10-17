@@ -20,6 +20,7 @@ use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
 
 /// True when an OcrEngine can be created on this machine (language pack
 /// present). Cheap; call once per screen-analysis turn.
+#[allow(dead_code)]
 pub fn is_available() -> bool {
     engine().is_some()
 }
@@ -38,10 +39,15 @@ fn engine() -> Option<OcrEngine> {
 /// None on any failure (capture, engine, decode).
 pub fn capture_screen_text() -> Option<(String, Vec<(i32, i32, i32, i32)>)> {
     let (mw, mh) = crate::screen::primary_monitor_size()?;
+    capture_region_text_rects(0, 0, mw, mh)
+}
+
+/// OCR one screen region (physical px). Rects are relative to the region's top-left corner.
+pub fn capture_region_text_rects(x: i32, y: i32, mw: i32, mh: i32) -> Option<(String, Vec<(i32, i32, i32, i32)>)> {
     if mw <= 0 || mh <= 0 {
         return None;
     }
-    let bgra = crate::sidebar_backdrop::capture_region_bgra_public(0, 0, mw, mh)?;
+    let bgra = crate::sidebar_backdrop::capture_region_bgra_public(x, y, mw, mh)?;
     // BGRA (BitBlt, bottom-up rows? capture_region_bgra is top-down DIB)
     // → RGBA PNG in memory (image crate, already a dependency).
     let mut rgba: Vec<u8> = Vec::with_capacity(bgra.len());
@@ -128,7 +134,13 @@ pub fn capture_screen_text() -> Option<(String, Vec<(i32, i32, i32, i32)>)> {
     Some((lines_out.join("\n"), rects))
 }
 
+/// OCR text of one screen region, no rects.
+pub fn capture_region_text(x: i32, y: i32, w: i32, h: i32) -> Option<String> {
+    capture_region_text_rects(x, y, w, h).map(|(t, _)| t)
+}
+
 /// OCR text only (no rects) — convenience wrapper.
+#[allow(dead_code)]
 pub fn capture_screen_text_only() -> Option<String> {
     capture_screen_text().map(|(t, _)| t)
 }

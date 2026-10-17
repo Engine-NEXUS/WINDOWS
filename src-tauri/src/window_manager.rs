@@ -285,16 +285,14 @@ pub fn show_orb_interactive<R: Runtime>(app: &AppHandle<R>) {
     set_orb_hitbox_interactive(app, rect);
 }
 
-/// Full wake sequence: show + interactive + tell the stage frontend to
-/// run its wake handler. Replaces the old `win.show()` +
-/// `configure_non_activating_overlay()` + `set_ignore_cursor_events(false)`
-/// + `win.eval("window.__NEXUS_WAKE__...")` 4-step dance every wake call
-/// site (hotkey, wake-word, tray, single-instance relaunch) repeated
-/// against the standalone `main` window — now a single function call,
-/// and the frontend listens for a real Tauri event instead of an eval.
-pub fn wake_orb<R: Runtime>(app: &AppHandle<R>) {
+/// Wake source instrumented (P2 double-wake audit): every fire path
+/// names itself so the next live log settles which sources double.
+/// Sources: neural (wake-word engine), barge (v4 exact-verify during
+/// TTS), hotkey-barge, hotkey, tray, relaunch.
+pub fn wake_orb_src<R: Runtime>(app: &AppHandle<R>, source: &str) {
+    tracing::info!("wake: firing orb (source={source})");
     show_orb_interactive(app);
-    crate::commands::emit_logged(app, "orb:wake", ());
+    crate::commands::emit_logged(app, "orb:wake", serde_json::json!({ "source": source }));
 }
 
 /// IPC: orb interactivity (replaces `set_click_through`). The orb is a

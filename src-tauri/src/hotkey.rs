@@ -66,114 +66,77 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                     return;
                 }
 
-                // Ctrl+Space → ghost session live: end it (same path as
-                // Esc / voice exit) + spoken confirm. Checked FIRST so a
-                // ghost session never falls through to wake/close-window
-                // behavior below. TTS is stopped first so the exit line
-                // isn't talked over.
-                if crate::ghost::session_active() {
-                    tracing::info!("hotkey ({}) → ghost session live, ending it", hk);
-                    let _ = crate::tts::stop_tts();
-                    crate::orchestrator::cancel_active();
-                    if let Some(ms) = handle.try_state::<std::sync::Arc<crate::meeting_detect::MeetingState>>() {
-                        ms.set_tts_playing(false);
-                    }
-                    // The exit line is spoken by abort_session itself, so all
-                    // abort paths (Esc, here, API) say the identical line.
-                    let app_clone = handle.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let _ = crate::ghost::ghost_abort(app_clone).await;
-                    });
-                    return;
-                }
-
-                // Ctrl+Space → if TTS is playing, stop speech immediately AND
-                // start listening (barge-listen): cut the audio, flush the
-                // 150ms DAC/room tail so it can't leak into the new capture,
-                // then run the identical wake sequence as the idle branch.
+                // Ctrl+Space → Symmetric Agent Call / Cancel:
+                // If the agent is currently active (capturing, thinking, speaking,
+                // or running a ghost session) → CANCEL the calling agent.
+                // If the agent is idle → CALL the agent (start capture, wake orb).
+                // Windows (settings, sidebar, setup) are discarded by Escape, never Ctrl+Space.
+                let is_capturing = crate::wakeword_oww::stt_capturing();
                 let is_speaking = handle.try_state::<std::sync::Arc<crate::meeting_detect::MeetingState>>()
                     .map(|ms| ms.tts_playing.load(std::sync::atomic::Ordering::Relaxed))
                     .unwrap_or(false);
-                if is_speaking {
-                    tracing::info!("hotkey ({}) → TTS playing, stopping speech and starting barge-listen", hk);
-                    // Single choke point (order: audio → turn → flag → queue).
-                    crate::orchestrator::request_barge_in("hotkey-tts");
+                let has_request = crate::orchestrator::has_active_request();
+                let is_ghost = crate::ghost::session_active();
+
+                let agent_active = is_capturing || is_speaking || has_request || is_ghost;
+
+                if agent_active {
+                    tracing::info!(
+                        "hotkey ({}) → agent is active (capturing={}, speaking={}, thinking={}, ghost={}), CANCELING calling agent",
+                        hk, is_capturing, is_speaking, has_request, is_ghost
+                    );
+
+                    // 1. Stop TTS audio immediately
+                    let _ = crate::tts::stop_tts();
                     let _ = tauri::Emitter::emit(&handle, "tts:stop", ());
-                    let handle_clone = handle.clone();
-                    tauri::async_runtime::spawn(async move {
-                        // DAC drain: the sound card + room reverb tail
-                        // outlives stop_tts() and would poison the capture.
-                        tokio::time::sleep(tokio::time::Duration::from_millis(
-                            crate::orchestrator::BARGE_DAC_DRAIN_MS,
-                        ))
-                        .await;
-                        crate::wakeword_oww::start_stt_capture();
-                        crate::window_manager::wake_orb(&handle_clone);
-                    });
+                    if let Some(ms) = handle.try_state::<std::sync::Arc<crate::meeting_detect::MeetingState>>() {
+                        ms.set_tts_playing(false);
+                    }
+
+                    // 2. Cancel in-flight orchestrator requests
+                    crate::orchestrator::cancel_active();
+
+                    // 3. Abort STT capture
+                    crate::wakeword_oww::abort_stt_capture();
+
+                    // 4. If ghost session was active, abort it
+                    if is_ghost {
+                        let app_clone = handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let _ = crate::ghost::ghost_abort(app_clone).await;
+                        });
+                    }
+
+                    // 5. Emit cancellation event to stage overlay to immediately hide orb & reset to idle
+                    let _ = tauri::Emitter::emit(&handle, "orb:cancel", ());
+
                     return;
                 }
 
-                // Ctrl+Space → close any visible window, or wake NEXUS
-                // Check if any sidebar/window is currently visible.
-                // If so, close it and do NOT wake NEXUS.
-                // (The four panel views — Assistant, Command Hub, Architect,
-                // PR List — all live inside the ONE unified "sidebar" window.)
-                // NOTE: `stage` is no longer part of this check — since it
-                // hosts the always-on orb now (single-stage migration), its
-                // own visibility is permanent infrastructure, not a
-                // closeable "window" state. A live ghost session is handled
-                // separately above (session_active() check, before this
-                // point) and never reaches here.
-                let sidebar_visible = handle
-                    .get_webview_window("sidebar")
-                    .and_then(|w| w.is_visible().ok())
-                    .unwrap_or(false);
-                let settings_visible = handle
-                    .get_webview_window("settings")
-                    .and_then(|w| w.is_visible().ok())
-                    .unwrap_or(false);
-                let setup_visible = handle
-                    .get_webview_window("setup")
-                    .and_then(|w| w.is_visible().ok())
-                    .unwrap_or(false);
+                // Agent is idle → CALL the agent
+                tracing::info!("hotkey ({}) → agent is idle, CALLING agent", hk);
+                println!("[ORB-HOTKEY] Hotkey ({hk}) → agent idle, calling agent & waking orb to listening");
 
-                // Ctrl+Space → close any visible window AND wake NEXUS (D3).
-                // Window closing moved to Escape at the frontend layer, so
-                // the hotkey is uniformly "talk to NEXUS" in every state.
-                if sidebar_visible || settings_visible || setup_visible {
-                    // A window is visible → destroy it to free ~250 MB each.
-                    tracing::info!("hotkey ({}) → window visible, closing window(s) then waking", hk);
-                    let _ = crate::dyn_windows::destroy_window(&handle, "sidebar");
-                    let _ = crate::dyn_windows::destroy_window(&handle, "settings");
-                    let _ = crate::dyn_windows::destroy_window(&handle, "setup");
+                // Cancel any stale request slot just in case
+                crate::orchestrator::request_barge_in("hotkey-wake");
+                let _ = tauri::Emitter::emit(&handle, "tts:stop", ());
+                let _ = crate::tts::stop_tts();
+
+                // Only pre-start local STT sidecar if cloud STT won't be used
+                // (saves ~340 MB RAM when Groq cloud STT is active).
+                let groq_key = crate::commands::read_groq_api_key(&handle);
+                let local_only = crate::commands::read_local_stt_only(&handle);
+                if groq_key.is_empty() || local_only {
+                    std::thread::spawn(|| {
+                        crate::lazy_stt::ensure_stt_running();
+                    });
+                } else {
+                    tracing::info!("hotkey: Groq cloud STT configured, skipping local sidecar pre-start (saves RAM)");
                 }
-                // Wake NEXUS in all cases (windows were closed above, if any).
-                {
-                    tracing::info!("hotkey ({}) → waking NEXUS", hk);
-                    println!("[ORB-HOTKEY] Hotkey ({hk}) → cancelling active request, flushing DAC, waking orb to listening");
-                    // Cancel any in-flight request (especially while thinking) so late completions
-                    // cannot stomp on the new turn and hide the orb.
-                    crate::orchestrator::request_barge_in("hotkey-wake");
-                    let _ = tauri::Emitter::emit(&handle, "tts:stop", ());
-                    let _ = crate::tts::stop_tts();
 
-                    // Only pre-start local STT sidecar if cloud STT won't be used
-                    // (saves ~340 MB RAM when Groq cloud STT is active).
-                    let groq_key = crate::commands::read_groq_api_key(&handle);
-                    let local_only = crate::commands::read_local_stt_only(&handle);
-                    if groq_key.is_empty() || local_only {
-                        std::thread::spawn(|| {
-                            crate::lazy_stt::ensure_stt_running();
-                        });
-                    } else {
-                        tracing::info!("hotkey: Groq cloud STT configured, skipping local sidecar pre-start (saves RAM)");
-                    }
-
-                    // Start Rust-side STT capture (same as wake word path).
-                    // Captures audio from the cpal stream — no getUserMedia needed.
-                    crate::wakeword_oww::start_stt_capture();
-                    crate::window_manager::wake_orb(&handle);
-                }
+                // Start Rust-side STT capture (same as wake word path).
+                crate::wakeword_oww::start_stt_capture();
+                crate::window_manager::wake_orb_src(&handle, "hotkey");
             }
         }) {
             tracing::warn!("Failed to register handler for hotkey '{hk}': {e}");

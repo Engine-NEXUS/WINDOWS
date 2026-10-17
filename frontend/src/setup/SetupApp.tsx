@@ -9,7 +9,8 @@ import {
 } from "./oauth";
 import { VoiceEnrollment } from "./VoiceEnrollment";
 import { identityBanner, type IdentityBanner } from "./identityBanner";
-import { CURATED_VOICES, previewVoice, stopTts, type VoiceOption } from "../audio/ttsPlayer";
+import { CURATED_VOICES, previewVoice, stopTts, type VoiceOption, ICONIC_PERSONAS } from "../audio/ttsPlayer";
+import { initThemeSync } from "../sidebar/theme";
 
 type Step = 0 | 1 | 2 | 3;
 const STEP_LABELS = ["Persona & Voice", "Permissions", "Preferences", "Accounts"];
@@ -18,8 +19,13 @@ export function SetupApp() {
   const [step, setStep] = useState<Step>(0);
   const [serverUrl, setServerUrl] = useState("");
   const [userId, setUserId] = useState("");
-  const [selectedVoice, setSelectedVoice] = useState<string>("af_sky");
+  const [selectedVoice, setSelectedVoice] = useState<string>("en-GB-RyanNeural");
   const [playingVoice, setPlayingVoice] = useState<string | null>(null);
+
+  // Sync theme
+  useEffect(() => {
+    initThemeSync();
+  }, []);
 
   // Settings
   const [hotkey] = useState("Ctrl+Space");
@@ -70,6 +76,17 @@ export function SetupApp() {
         }
       })
       .catch(() => {});
+  }, []);
+
+  // Escape key discards/closes the setup window
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        invoke("close_setup_window", { firstRun: false }).catch(() => {});
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
   }, []);
 
   // Auto-check mic permission when entering the Permissions step
@@ -345,12 +362,17 @@ export function SetupApp() {
       const updated = {
         ...current,
         ttsVoice: selectedVoice,
+        edgeTtsVoice: selectedVoice,
         hotkey,
         wakeWordEnabled,
         autostart,
         ttsVolume,
       };
       await invoke("save_settings", { settings: updated });
+      const persona = ICONIC_PERSONAS.find((p) => p.cloudId === selectedVoice);
+      if (persona) {
+        invoke("set_voice_preference", { voiceKey: persona.key }).catch(() => {});
+      }
     } catch (e) {
       console.warn("Failed to persist settings:", e);
     }
@@ -378,6 +400,28 @@ export function SetupApp() {
 
   return (
     <div className="setup-root">
+      {/* Window Drag Titlebar */}
+      <div data-tauri-drag-region className="setup-window-titlebar">
+        <span style={{ fontSize: "11px", fontWeight: 600, opacity: 0.65, letterSpacing: "0.5px" }}>NEXUS SETUP</span>
+        <button
+          type="button"
+          onClick={() => invoke("close_setup_window", { firstRun: false }).catch(() => {})}
+          style={{
+            background: "none",
+            border: "none",
+            color: "var(--nx-text-secondary)",
+            cursor: "pointer",
+            padding: "4px 8px",
+            fontSize: "14px",
+            lineHeight: 1,
+            borderRadius: "6px",
+          }}
+          title="Close (Esc)"
+        >
+          ✕
+        </button>
+      </div>
+
       {error && <div className="setup-error">{error}</div>}
 
       <div style={{ flex: 1 }}>

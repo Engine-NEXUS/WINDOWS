@@ -39,6 +39,9 @@ pub const MAX_MAIL: usize = 300;
 pub const CHAT_RETENTION_SECS: i64 = 7 * 24 * 3600;
 /// Cap on stored message previews (oldest dropped first).
 pub const MAX_CHAT: usize = 200;
+/// Audit rows are kept this long and capped at `MAX_AUDIT` (it used to grow forever).
+pub const AUDIT_RETENTION_SECS: i64 = 30 * 24 * 3600;
+pub const MAX_AUDIT: usize = 2000;
 /// Derived (mined) facts lose confidence by this factor per unused day.
 pub const DECAY_PER_DAY: f64 = 0.97;
 /// Derived facts below this confidence are forgotten on prune.
@@ -132,6 +135,7 @@ pub enum Admit {
 #[derive(Debug, Clone)]
 pub struct Hit {
     pub id: i64,
+    #[allow(dead_code)]
     pub tier: String,
     pub key: String,
     pub value: String,
@@ -370,7 +374,18 @@ impl Store {
                ts INTEGER NOT NULL,
                route TEXT NOT NULL,
                request TEXT NOT NULL,
-               memory TEXT NOT NULL);",
+               memory TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS action_leases(
+               id TEXT PRIMARY KEY,
+               action_type TEXT NOT NULL,
+               target_name TEXT NOT NULL,
+               platform TEXT NOT NULL,
+               target_identifier TEXT NOT NULL,
+               expires_at INTEGER NOT NULL,
+               created_at INTEGER NOT NULL,
+               status TEXT NOT NULL);
+             CREATE INDEX IF NOT EXISTS idx_action_leases_due
+               ON action_leases(status, expires_at);",
         )?;
         self.conn.execute(
             "INSERT OR IGNORE INTO meta(k, v) VALUES('schema_version', ?1)",
@@ -508,6 +523,7 @@ impl Store {
             .unwrap_or(0) as usize
     }
 
+    #[allow(dead_code)]
     pub fn audit_ops(&self) -> Vec<String> {
         let Ok(mut stmt) = self.conn.prepare("SELECT op FROM audit ORDER BY id") else {
             return vec![];
@@ -654,7 +670,9 @@ impl Store {
             "UPDATE records SET last_seen = ?1 WHERE id = ?2",
             params![now, id],
         );
-        self.flush();
+        // No flush: re-sealing the whole encrypted database every 30 s while the user is at the PC
+        // (~2900 writes a day) bought nothing - a refreshed `last_seen` rides along with the next
+        // real mutation, and losing it on a crash only makes a window look 30 s older.
     }
 
     /// Remove every record of one tier ("clear my activity history").
@@ -774,14 +792,46 @@ impl Store {
     /// Retention + decay. Pinned facts are never decayed. Returns rows removed.
     pub fn prune(&self, now: i64) -> usize {
         let removed = self.prune_inner(now);
+        let audit = self.prune_audit(now);
         let aged = self
             .conn
             .execute("DELETE FROM egress WHERE ts < ?1", params![now - EGRESS_RETENTION_SECS])
             .unwrap_or(0);
-        if removed > 0 || aged > 0 {
+        if removed > 0 || aged > 0 || audit > 0 {
             self.flush();
         }
         removed
+    }
+
+    /// The audit trail used to grow by a row per write, forever. Keep 30 days AND at most
+    /// `MAX_AUDIT` rows, newest first. Returns rows removed.
+    pub fn prune_audit(&self, now: i64) -> usize {
+        self.conn
+            .execute(
+                "DELETE FROM audit WHERE ts < ?1 OR id NOT IN (
+                    SELECT id FROM audit ORDER BY id DESC LIMIT ?2)",
+                params![now - AUDIT_RETENTION_SECS, MAX_AUDIT as i64],
+            )
+            .unwrap_or(0)
+    }
+
+    /// Delete episode records whose text fails `keep` (one-time hygiene cleanup). Returns removed.
+    pub fn purge_episodes_where(&self, keep: impl Fn(&str) -> bool, actor: &str, now: i64) -> usize {
+        let doomed: Vec<i64> = self
+            .recent(Tier::Episode, 100_000)
+            .into_iter()
+            .filter(|h| !keep(&h.value))
+            .map(|h| h.id)
+            .collect();
+        for id in &doomed {
+            let _ = self.conn.execute("DELETE FROM records_fts WHERE rowid = ?1", params![id]);
+            let _ = self.conn.execute("DELETE FROM records WHERE id = ?1", params![id]);
+        }
+        if !doomed.is_empty() {
+            self.audit(now, "hygiene_purge", "episode", "", "", "", actor);
+            self.flush();
+        }
+        doomed.len()
     }
 
     fn prune_inner(&self, now: i64) -> usize {
@@ -839,11 +889,140 @@ impl Store {
         }
         removed
     }
+
+    pub fn create_action_lease(&self, lease: &ActionLease) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO action_leases(id, action_type, target_name, platform, target_identifier, expires_at, created_at, status)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                lease.id,
+                lease.action_type,
+                lease.target_name,
+                lease.platform,
+                lease.target_identifier,
+                lease.expires_at,
+                lease.created_at,
+                lease.status,
+            ],
+        )?;
+        self.dirty.set(true);
+        Ok(())
+    }
+
+    pub fn get_due_action_leases(&self, now_ts: i64) -> rusqlite::Result<Vec<ActionLease>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, action_type, target_name, platform, target_identifier, expires_at, created_at, status
+             FROM action_leases
+             WHERE status = 'active' AND expires_at <= ?1"
+        )?;
+        let rows = stmt.query_map(params![now_ts], |r| {
+            Ok(ActionLease {
+                id: r.get(0)?,
+                action_type: r.get(1)?,
+                target_name: r.get(2)?,
+                platform: r.get(3)?,
+                target_identifier: r.get(4)?,
+                expires_at: r.get(5)?,
+                created_at: r.get(6)?,
+                status: r.get(7)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn mark_action_lease_status(&self, id: &str, status: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE action_leases SET status = ?1 WHERE id = ?2",
+            params![status, id],
+        )?;
+        self.dirty.set(true);
+        Ok(())
+    }
+
+    pub fn list_active_action_leases(&self) -> rusqlite::Result<Vec<ActionLease>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, action_type, target_name, platform, target_identifier, expires_at, created_at, status
+             FROM action_leases
+             WHERE status = 'active' ORDER BY expires_at ASC"
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ActionLease {
+                id: r.get(0)?,
+                action_type: r.get(1)?,
+                target_name: r.get(2)?,
+                platform: r.get(3)?,
+                target_identifier: r.get(4)?,
+                expires_at: r.get(5)?,
+                created_at: r.get(6)?,
+                status: r.get(7)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn cancel_action_leases_for(&self, target_name: &str, platform: &str) -> rusqlite::Result<usize> {
+        let count = self.conn.execute(
+            "UPDATE action_leases SET status = 'cancelled'
+             WHERE target_name = ?1 AND platform = ?2 AND status = 'active'",
+            params![target_name, platform],
+        )?;
+        if count > 0 {
+            self.dirty.set(true);
+        }
+        Ok(count)
+    }
+}
+
+/// An action lease representing a temporary timed operation with automatic expiration.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ActionLease {
+    pub id: String,
+    pub action_type: String,
+    pub target_name: String,
+    pub platform: String,
+    pub target_identifier: String,
+    pub expires_at: i64,
+    pub created_at: i64,
+    pub status: String,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audit_trail_is_capped_and_aged() {
+        let st = Store::open_in_memory().unwrap();
+        let now = 1_000_000_000i64;
+        for i in 0..(MAX_AUDIT + 150) {
+            st.audit(now, "write", "fact", &format!("k{i}"), "test", "user_said", "test");
+        }
+        assert!(st.audit_ops().len() > MAX_AUDIT);
+        let removed = st.prune_audit(now);
+        assert_eq!(removed, 150, "oldest rows beyond the cap go first");
+        assert_eq!(st.audit_ops().len(), MAX_AUDIT);
+        // Rows older than 30 days go regardless of the cap.
+        let removed_old = st.prune_audit(now + AUDIT_RETENTION_SECS + 10);
+        assert_eq!(removed_old, MAX_AUDIT);
+        assert_eq!(st.audit_ops().len(), 0);
+    }
+
+    #[test]
+    fn touch_does_not_reseal_but_still_updates() {
+        let st = Store::open_in_memory().unwrap();
+        let o = Observation {
+            tier: Tier::Resume,
+            key: "w".into(),
+            value: "x".into(),
+            source: "t".into(),
+            trust: Trust::Derived,
+            pinned: false,
+        };
+        st.observe(&o, 100).unwrap();
+        let id = st.recent(Tier::Resume, 1)[0].id;
+        st.touch(id, 5_000);
+        assert_eq!(st.recent(Tier::Resume, 1)[0].last_seen, 5_000);
+    }
 
     fn obs(key: &str, value: &str, trust: Trust, pinned: bool) -> Observation {
         Observation {
@@ -1094,5 +1273,60 @@ mod tests {
         assert_eq!(rows[0].key, "said");
         assert_eq!((rows[0].trust.as_str(), rows[0].pinned), ("user_said", true));
         assert_eq!(rows[1].source, "test");
+    }
+
+    #[test]
+    fn action_leases_lifecycle() {
+        let s = Store::open_in_memory().unwrap();
+        let now = 1_700_000_000i64;
+        let expires_in_5_days = now + 5 * 86_400;
+
+        let lease = ActionLease {
+            id: "lease_test_1".into(),
+            action_type: "unblock".into(),
+            target_name: "Prem Sai".into(),
+            platform: "whatsapp".into(),
+            target_identifier: "prem_sai@s.whatsapp.net".into(),
+            expires_at: expires_in_5_days,
+            created_at: now,
+            status: "active".into(),
+        };
+
+        s.create_action_lease(&lease).unwrap();
+
+        // 1. Check active list
+        let active = s.list_active_action_leases().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].target_name, "Prem Sai");
+
+        // 2. Before expiry: no due leases
+        let due_now = s.get_due_action_leases(now + 86_400).unwrap();
+        assert!(due_now.is_empty());
+
+        // 3. After expiry: lease is due
+        let due_later = s.get_due_action_leases(expires_in_5_days + 1).unwrap();
+        assert_eq!(due_later.len(), 1);
+        assert_eq!(due_later[0].id, "lease_test_1");
+
+        // 4. Mark completed
+        s.mark_action_lease_status("lease_test_1", "completed").unwrap();
+        let due_after = s.get_due_action_leases(expires_in_5_days + 1).unwrap();
+        assert!(due_after.is_empty());
+        assert!(s.list_active_action_leases().unwrap().is_empty());
+
+        // 5. Test cancellation
+        let lease2 = ActionLease {
+            id: "lease_test_2".into(),
+            action_type: "unblock".into(),
+            target_name: "Prem Sai".into(),
+            platform: "instagram".into(),
+            target_identifier: "premsai_ig".into(),
+            expires_at: expires_in_5_days,
+            created_at: now,
+            status: "active".into(),
+        };
+        s.create_action_lease(&lease2).unwrap();
+        assert_eq!(s.cancel_action_leases_for("Prem Sai", "instagram").unwrap(), 1);
+        assert!(s.list_active_action_leases().unwrap().is_empty());
     }
 }

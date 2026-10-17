@@ -11,20 +11,21 @@
 @import "../theme/tokens.css";
 @import "../theme/liquid-glass.css";
 
-:root {
-  /* ── Apple Music Web Design Tokens ──────────────────────────── */
+:root,
+[data-theme="dark"] {
+  /* ── Dark Tokens ──────────────────────────── */
   --apple-text-primary:    #ffffff;
   --apple-text-secondary:  #8e8e93;
   --apple-text-tertiary:   #636366;
   --apple-text-accent:     #fa586a;
   --apple-text-accent-dark:#d60017;
 
-  --apple-surface-base:    #000000;
-  --apple-surface-sidebar: rgba(18, 18, 18, 0.45);
-  --apple-surface-muted:   rgba(28, 28, 30, 0.72);
-  --apple-surface-raised:  rgba(44, 44, 46, 0.75);
-  --apple-surface-strong:  rgba(58, 58, 60, 0.90);
-  --apple-surface-bar:     rgba(22, 22, 24, 0.88);
+  --apple-surface-base:    rgba(12, 12, 16, 0.72);
+  --apple-surface-sidebar: rgba(18, 18, 24, 0.55);
+  --apple-surface-muted:   rgba(28, 28, 34, 0.65);
+  --apple-surface-raised:  rgba(44, 44, 52, 0.75);
+  --apple-surface-strong:  rgba(58, 58, 68, 0.85);
+  --apple-surface-bar:     rgba(22, 22, 28, 0.75);
 
   --apple-diff-easy:       #30d158;
   --apple-diff-medium:     #ff9f0a;
@@ -37,9 +38,36 @@
   --apple-border-strong:   rgba(255, 255, 255, 0.16);
   --apple-focus-ring:      #fa586a;
 
-  /* ── Liquid Glass Parameters (retired) ───────────────────────── */
-  /* The specular sheen + gradient chrome was removed for a flat minimal
-     look (2026-09-18). Params kept as no-ops so old rules don't break. */
+  --lg-sheen-opacity: 0;
+  --lg-rim-width: 0px;
+}
+
+[data-theme="light"] {
+  /* ── Light Tokens ──────────────────────────── */
+  --apple-text-primary:    #111827;
+  --apple-text-secondary:  rgba(0, 0, 0, 0.65);
+  --apple-text-tertiary:   rgba(0, 0, 0, 0.45);
+  --apple-text-accent:     #fa586a;
+  --apple-text-accent-dark:#d60017;
+
+  --apple-surface-base:    rgba(244, 244, 248, 0.75);
+  --apple-surface-sidebar: rgba(255, 255, 255, 0.65);
+  --apple-surface-muted:   rgba(235, 235, 240, 0.70);
+  --apple-surface-raised:  rgba(255, 255, 255, 0.85);
+  --apple-surface-strong:  rgba(255, 255, 255, 0.95);
+  --apple-surface-bar:     rgba(248, 248, 252, 0.80);
+
+  --apple-diff-easy:       #30d158;
+  --apple-diff-medium:     #ff9f0a;
+  --apple-diff-hard:       #ff453a;
+  --apple-accent-blue:     #007aff;
+  --apple-accent-purple:   #af52de;
+  --apple-accent-cyan:     #5ac8fa;
+
+  --apple-border-default:  rgba(0, 0, 0, 0.08);
+  --apple-border-strong:   rgba(0, 0, 0, 0.16);
+  --apple-focus-ring:      #fa586a;
+
   --lg-sheen-opacity: 0;
   --lg-rim-width: 0px;
 }
@@ -127,17 +155,17 @@ html, body, #root {
      occurred when background-image was set directly on .sidebar-card.
      --sidebar-backdrop-image is set on <html> from JS (SidebarApp.tsx)
      when the "sidebar:backdrop" event arrives from Rust. */
-  /* Restored to the verified GitHub surface (working-tree drift removed):
-     translucent dark fill + hairline border. The blur itself still comes
-     from ::after (ADR-05 screenshot capture). */
-  background-color: rgba(20, 20, 22, 0.60);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background-color: var(--apple-surface-base);
+  backdrop-filter: blur(28px) saturate(190%);
+  -webkit-backdrop-filter: blur(28px) saturate(190%);
+  border: 1px solid var(--apple-border-strong);
   border-radius: 18px;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.4);
   padding: 16px 18px 12px 18px;
   gap: 12px;
   overflow: hidden;
   isolation: isolate;
+  color: var(--apple-text-primary);
   transition:
     background-color 0.3s ease,
     border 0.3s ease,
@@ -1180,8 +1208,10 @@ html[data-copy-enabled="false"] .nexus-copy-code-btn {
 }
 
 .analysis-card {
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--apple-surface-muted);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--apple-border-default);
   border-radius: 10px;
   padding: 12px 14px;
 }
@@ -1216,7 +1246,7 @@ html[data-copy-enabled="false"] .nexus-copy-code-btn {
   font-size: 11px;
   padding: 3px 8px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--apple-surface-raised);
   color: var(--apple-text-secondary, #aaa);
   white-space: nowrap;
 }

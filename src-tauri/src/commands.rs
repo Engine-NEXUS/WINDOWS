@@ -1053,7 +1053,7 @@ pub fn sidebar_geometry(
             let h = (monitor_h - 40.0).min(1040.0).max(400.0);
             dock_x(400.0, h)
         }
-        "architect" => {
+        "architect" | "maps" => {
             let h = (monitor_h - 40.0).min(1040.0).max(400.0);
             if docked {
                 dock_x(960.0, h)
@@ -1510,6 +1510,34 @@ pub fn set_orb_morphology<R: Runtime>(
     Ok(())
 }
 
+/// IPC: Save custom orb capsule style ("classic" | "pebble") and broadcast immediately.
+#[tauri::command]
+pub fn set_orb_capsule_style<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    style: String,
+    mode: Option<u32>,
+    genesis: Option<u32>,
+) -> Result<(), String> {
+    let mut settings = get_settings(app.clone())?;
+    settings.orb_capsule_style = style.clone();
+    if let Some(m) = mode { settings.orb_wakeup_mode = m; }
+    if let Some(g) = genesis { settings.orb_interior_genesis = g; }
+    save_settings(app.clone(), settings.clone())?;
+    let _ = app.emit("orb:capsule_style", serde_json::json!({
+        "style": style,
+        "mode": settings.orb_wakeup_mode,
+        "genesis": settings.orb_interior_genesis,
+    }));
+    Ok(())
+}
+
+/// IPC: Trigger test wakeup animation on desktop.
+#[tauri::command]
+pub fn test_wake_orb<R: Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    crate::window_manager::wake_orb_src(&app, "preview-wake");
+    Ok(())
+}
+
 /// Serialized settings returned by `get_settings` and accepted by `save_settings`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1573,6 +1601,34 @@ pub struct NexusSettings {
     /// Default: "top".
     #[serde(default = "default_orb_position")]
     pub orb_position: String,
+    /// Orb background capsule style: "classic" or "pebble".
+    /// Default: "classic".
+    #[serde(default = "default_orb_capsule_style")]
+    pub orb_capsule_style: String,
+    /// Orb wakeup animation mode (1..5): 1=elastic thread, 2=bowstring, 3=liquid meniscus, 4=horizon, 5=acoustic.
+    #[serde(default = "default_orb_wakeup_mode")]
+    pub orb_wakeup_mode: u32,
+    /// Orb interior genesis mode (0..3): 0=bloom, 1=droplet roll, 2=spark burst, 3=helix.
+    #[serde(default = "default_orb_interior_genesis")]
+    pub orb_interior_genesis: u32,
+    /// Scoop width in px.
+    #[serde(default = "default_orb_scoop_width")]
+    pub orb_scoop_width: u32,
+    /// Scoop depth in px.
+    #[serde(default = "default_orb_scoop_height")]
+    pub orb_scoop_height: u32,
+    /// Wing contact highlight opacity (0..100%).
+    #[serde(default = "default_orb_wing_rim_opacity")]
+    pub orb_wing_rim_opacity: u32,
+    /// Perimeter rim base opacity (0..100%).
+    #[serde(default = "default_orb_base_rim_opacity")]
+    pub orb_base_rim_opacity: u32,
+    /// Wing contact glow width in px.
+    #[serde(default = "default_orb_wing_glow_spread")]
+    pub orb_wing_glow_spread: u32,
+    /// Elastic spring stiffness factor * 100.
+    #[serde(default = "default_orb_stiffness")]
+    pub orb_stiffness: u32,
     /// Orb thinking morphology mode (1..12).
     /// Default: 6 (Trefoil Celtic Helix Cage).
     #[serde(default = "default_orb_think_mode")]
@@ -1598,6 +1654,12 @@ pub struct NexusSettings {
     /// When empty, NEXUS uses Groq Whisper Large v3 Turbo ($0 free tier).
     #[serde(default)]
     pub deepgram_api_key: String,
+    /// Google Routes API key (spoken ETA for "directions to ..."). Optional.
+    #[serde(default)]
+    pub routes_api_key: String,
+    /// Google Places API (New) key ("nearest pharmacy"). Optional.
+    #[serde(default)]
+    pub places_api_key: String,
     /// Moonshine STT model architecture.
     /// Options: "small_streaming" (123M, 7.84% WER, default for family),
     ///          "medium_streaming" (245M, 6.65% WER, recommended for admin),
@@ -1646,6 +1708,46 @@ pub struct NexusSettings {
     /// Ghost FIFO queue: inter-command gap τ in ms. Default: 1000. D4.
     #[serde(default = "default_ghost_turn_gap_ms")]
     pub ghost_turn_gap_ms: u64,
+    /// OPT-IN open-mic engagement window in seconds: outside it a Ghost hot-mic turn needs the word
+    /// "Nexus". 0 = off (the default: Ghost mode must not make the user say "Nexus" every time).
+    #[serde(default = "default_ghost_engagement_secs")]
+    pub ghost_engagement_secs: u64,
+    /// Directed-speech gate for the Ghost open mic (default on).
+    #[serde(default = "default_true")]
+    pub directed_gate: bool,
+    /// Hand mode (camera pointer) may be started by voice. The camera is only ever on while the mode is.
+    #[serde(default = "default_true")]
+    pub hand_mode: bool,
+    /// Hand mode is read-only: decisions are only drawn on the overlay and never reach the real mouse.
+    /// Off (default): arming with palm-fist-palm-fist is the confirmation and the cursor follows the hand.
+    /// Voice: "hand mouse preview" / "hand mouse live" (this session only).
+    #[serde(default)]
+    pub hand_mouse_preview: bool,
+    /// Debug: show the camera picture and skeleton in a small window. Off (default): nothing visible.
+    #[serde(default)]
+    pub hand_show_camera: bool,
+    /// Where the hand window gets camera frames: "auto" (track reader if available), "track", "rvfc".
+    #[serde(default = "default_hand_frame_source")]
+    pub hand_frame_source: String,
+    /// Record landmark numbers (no video) to hand_trace.jsonl for tuning.
+    #[serde(default)]
+    pub hand_trace: bool,
+    /// Start hand mode together with Ghost mode (ends with it). Default off.
+    #[serde(default)]
+    pub hand_with_ghost: bool,
+    /// A hand click just outside a control snaps to the nearest control. Default on.
+    #[serde(default = "default_true")]
+    pub hand_snap: bool,
+    /// Touchpad-style gestures with 3 fingers: flick = next/previous tab, flick up = window switcher. Default on.
+    #[serde(default = "default_true")]
+    pub hand_gestures: bool,
+    /// 4 fingers together: virtual desktops, Task View, show desktop. Default off until the finger-spread
+    /// threshold has been checked on the user's own hand (see the `[HAND] pose ... spread=` log).
+    #[serde(default)]
+    pub hand_gestures_desktop: bool,
+    /// Pointer speed multiplier for hand mode. 0 (default) = follow the Windows pointer speed setting.
+    #[serde(default)]
+    pub hand_sensitivity: f64,
     /// Ghost waves placement (ghost sessions reposition the orb window to
     /// this rect — the waves own the visual then). Defaults = orb defaults.
     #[serde(default)]
@@ -1668,6 +1770,12 @@ pub struct NexusSettings {
     /// hand-added key outside the struct would be erased on the next save.
     #[serde(default = "default_screen_tour")]
     pub screen_tour: bool,
+    /// Log Whisper's per-segment confidence (`avg_logprob`, `no_speech_prob`) for every
+    /// command turn as `[STT-CONF]` lines (P0 measurement for docs/features/103). Default off:
+    /// it switches the Groq request to `verbose_json` (same model, larger response).
+    /// Must live in this struct or `save_settings` erases it.
+    #[serde(default)]
+    pub stt_log_confidence: bool,
     /// Vision model for the screen tour (empty = built-in ladder:
     /// gemini-3.8-flash → gemini-3.5-flash → gemini-3.5-flash-lite → 2.5).
     #[serde(default)]
@@ -1720,6 +1828,29 @@ pub struct NexusSettings {
     /// a cloud service and would receive the text (the sidebar card is local).
     #[serde(default)]
     pub memcore_whatsapp_speak: bool,
+    /// "Time to leave for ..." reminders from calendar + traffic + remembered home.
+    #[serde(default = "default_memcore")]
+    pub memcore_leave_by: bool,
+    /// Remember which apps/folders/browser windows are open so NEXUS can offer
+    /// to reopen them after a restart. Must live in this struct (save_settings rewrites the file).
+    #[serde(default = "default_memcore")]
+    pub memcore_session: bool,
+    /// Check the connections NEXUS relies on at startup and mention problems in the greeting.
+    #[serde(default = "default_memcore")]
+    pub memcore_health: bool,
+    /// Voice power commands ("shut down my laptop"). Kill switch.
+    #[serde(default = "default_memcore")]
+    pub power_commands: bool,
+    /// Default music player: "spotify" (default) or "apple_music".
+    #[serde(default = "default_music_player")]
+    pub default_music_player: String,
+    /// Extra unknown settings preserved across saves so frontend/plugins never get wiped.
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+fn default_music_player() -> String {
+    "spotify".to_string()
 }
 
 fn default_memcore() -> bool {
@@ -1751,7 +1882,7 @@ fn default_tts_volume() -> u8 {
 }
 
 fn default_edge_tts_voice() -> String {
-    "en-US-AvaNeural".to_string()
+    "en-GB-RyanNeural".to_string()
 }
 
 fn default_orb_horizontal_pct() -> f64 {
@@ -1810,6 +1941,18 @@ fn default_ghost_turn_gap_ms() -> u64 {
     1000
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_hand_frame_source() -> String {
+    "auto".to_string()
+}
+
+fn default_ghost_engagement_secs() -> u64 {
+    0
+}
+
 fn default_waves_vertical_pct() -> f64 {
     0.0
 }
@@ -1836,6 +1979,42 @@ fn default_orb_color() -> String {
 
 fn default_orb_position() -> String {
     "top".to_string()
+}
+
+fn default_orb_capsule_style() -> String {
+    "classic".to_string()
+}
+
+fn default_orb_wakeup_mode() -> u32 {
+    1
+}
+
+fn default_orb_interior_genesis() -> u32 {
+    2
+}
+
+fn default_orb_scoop_width() -> u32 {
+    301
+}
+
+fn default_orb_scoop_height() -> u32 {
+    105
+}
+
+fn default_orb_wing_rim_opacity() -> u32 {
+    0
+}
+
+fn default_orb_base_rim_opacity() -> u32 {
+    25
+}
+
+fn default_orb_wing_glow_spread() -> u32 {
+    120
+}
+
+fn default_orb_stiffness() -> u32 {
+    103
 }
 
 fn default_orb_think_mode() -> u32 {
@@ -1881,12 +2060,23 @@ impl Default for NexusSettings {
             orb_size: 200,
             orb_color: default_orb_color(),
             orb_position: default_orb_position(),
+            orb_capsule_style: default_orb_capsule_style(),
+            orb_wakeup_mode: default_orb_wakeup_mode(),
+            orb_interior_genesis: default_orb_interior_genesis(),
+            orb_scoop_width: default_orb_scoop_width(),
+            orb_scoop_height: default_orb_scoop_height(),
+            orb_wing_rim_opacity: default_orb_wing_rim_opacity(),
+            orb_base_rim_opacity: default_orb_base_rim_opacity(),
+            orb_wing_glow_spread: default_orb_wing_glow_spread(),
+            orb_stiffness: default_orb_stiffness(),
             orb_think_mode: default_orb_think_mode(),
             orb_speak_mode: default_orb_speak_mode(),
             orb_listen_mode: default_orb_listen_mode(),
             gemini_api_key: String::new(),
             cerebras_api_key: String::new(),
             deepgram_api_key: String::new(),
+            routes_api_key: String::new(),
+            places_api_key: String::new(),
             moonshine_model: "medium_streaming".to_string(),
             tts_emotion: "auto".to_string(),
             vision_provider: "auto".to_string(),
@@ -1897,6 +2087,18 @@ impl Default for NexusSettings {
             ghost_depth_ack: true,
             ghost_step_timeout_ms: 15000,
             ghost_turn_gap_ms: 1000,
+            ghost_engagement_secs: 0,
+            directed_gate: true,
+            hand_mode: true,
+            hand_mouse_preview: false,
+            hand_frame_source: default_hand_frame_source(),
+            hand_show_camera: false,
+            hand_trace: false,
+            hand_with_ghost: false,
+            hand_snap: true,
+            hand_gestures: true,
+            hand_gestures_desktop: false,
+            hand_sensitivity: 0.0,
             waves_horizontal_pct: 0.5,
             waves_vertical_pct: 1.0,
             waves_size: 200,
@@ -1904,6 +2106,7 @@ impl Default for NexusSettings {
             loading_vertical_pct: 0.05,
             loading_size: 80,
             screen_tour: true,
+            stt_log_confidence: false,
             tour_model: String::new(),
             gemini_vision_daily_limit: default_gemini_vision_daily_limit(),
             persona_mode: default_persona_mode(),
@@ -1916,6 +2119,12 @@ impl Default for NexusSettings {
             memcore_mail: default_memcore(),
             memcore_whatsapp: false,
             memcore_whatsapp_speak: false,
+            memcore_leave_by: default_memcore(),
+            memcore_session: default_memcore(),
+            memcore_health: default_memcore(),
+            power_commands: default_memcore(),
+            default_music_player: default_music_player(),
+            extra: std::collections::HashMap::new(),
         }
     }
 }
@@ -2035,6 +2244,9 @@ pub fn save_settings<R: Runtime>(
     settings.gemini_api_key = crate::api_keys::merge_key(&existing, "geminiApiKey", &settings.gemini_api_key);
     settings.cerebras_api_key = crate::api_keys::merge_key(&existing, "cerebrasApiKey", &settings.cerebras_api_key);
     settings.deepgram_api_key = crate::api_keys::merge_key(&existing, "deepgramApiKey", &settings.deepgram_api_key);
+    settings.routes_api_key = crate::api_keys::merge_key(&existing, "routesApiKey", &settings.routes_api_key);
+    settings.places_api_key = crate::api_keys::merge_key(&existing, "placesApiKey", &settings.places_api_key);
+    normalize_voice_fields(&mut settings);
     if !settings.edge_tts_voice.is_empty() {
         settings.tts_voice = settings.edge_tts_voice.clone();
         if settings.tts_provider.is_empty() || settings.tts_provider == "kokoro" {
@@ -2092,8 +2304,113 @@ pub fn save_settings<R: Runtime>(
         "speak": settings.orb_speak_mode,
         "listen": settings.orb_listen_mode,
     }));
+    let _ = app.emit("orb:capsule_style", serde_json::json!({
+        "style": settings.orb_capsule_style,
+        "mode": settings.orb_wakeup_mode,
+        "genesis": settings.orb_interior_genesis,
+    }));
     tracing::info!("settings saved to {:?}", path);
     Ok(())
+}
+
+/// One fact, many fields: the online voice IS the persona. When `edgeTtsVoice` is one of the catalog voices,
+/// `selectedVoice`, `ttsVoice` and `offlineVoiceModel` are derived from it, so a window holding a stale copy of
+/// the other fields can no longer write a mixed record (2026-10-15 23:02:44: the hub saved `bm_george` back over
+/// the freshly equipped `af_heart`). A custom (non-catalog) voice is left exactly as the user set it.
+pub fn normalize_voice_fields(s: &mut NexusSettings) {
+    if let Some(p) = crate::voice_catalog::find_by_cloud_id(&s.edge_tts_voice) {
+        s.selected_voice = p.key.to_string();
+        s.tts_voice = p.cloud_id.to_string();
+        s.offline_voice_model = p.kokoro_voice.to_string();
+    }
+}
+
+/// Merge `patch` (camelCase keys) into the current settings and validate the result as a whole.
+pub fn apply_settings_patch(
+    current: &NexusSettings,
+    patch: &serde_json::Map<String, serde_json::Value>,
+) -> Result<NexusSettings, String> {
+    let mut v = serde_json::to_value(current).map_err(|e| e.to_string())?;
+    let obj = v.as_object_mut().ok_or_else(|| "settings are not an object".to_string())?;
+    for (k, val) in patch {
+        obj.insert(k.clone(), val.clone());
+    }
+    serde_json::from_value(v).map_err(|e| format!("invalid settings patch: {e}"))
+}
+
+/// IPC: change only the given settings (e.g. `{ "themeMode": "light" }`). Unlike `save_settings`, which replaces
+/// the whole file from the caller's possibly stale snapshot, this starts from the CURRENT settings, so a toggle
+/// in one window can never revert something another window or an IPC changed meanwhile.
+#[tauri::command]
+pub fn settings_patch<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    patch: serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let current = get_settings(app.clone())?;
+    let merged = apply_settings_patch(&current, &patch)?;
+    save_settings(app, merged)
+}
+
+#[cfg(test)]
+mod settings_voice_tests {
+    use super::*;
+
+    fn with_voice(edge: &str, selected: &str, offline: &str) -> NexusSettings {
+        let mut s = NexusSettings::default();
+        s.edge_tts_voice = edge.to_string();
+        s.selected_voice = selected.to_string();
+        s.offline_voice_model = offline.to_string();
+        s
+    }
+
+    #[test]
+    fn the_2026_10_15_stale_offline_voice_is_repaired_from_the_online_voice() {
+        // Hub equipped NEXUS (Ava), then saved a snapshot that still held JARVIS's twin.
+        let mut s = with_voice("en-US-AvaNeural", "nexus", "bm_george");
+        normalize_voice_fields(&mut s);
+        assert_eq!(s.offline_voice_model, "af_heart");
+        assert_eq!(s.selected_voice, "nexus");
+        assert_eq!(s.tts_voice, "en-US-AvaNeural");
+    }
+
+    #[test]
+    fn a_stale_persona_key_follows_the_online_voice_not_the_other_way_round() {
+        let mut s = with_voice("en-GB-RyanNeural", "nexus", "af_heart");
+        normalize_voice_fields(&mut s);
+        assert_eq!((s.selected_voice.as_str(), s.offline_voice_model.as_str()), ("jarvis", "bm_george"));
+    }
+
+    #[test]
+    fn a_custom_voice_is_never_overwritten() {
+        let mut s = with_voice("en-IN-NeerjaNeural", "nexus", "af_heart");
+        s.tts_voice = "en-IN-NeerjaNeural".to_string();
+        normalize_voice_fields(&mut s);
+        assert_eq!(s.selected_voice, "nexus");
+        assert_eq!(s.tts_voice, "en-IN-NeerjaNeural");
+        assert_eq!(s.edge_tts_voice, "en-IN-NeerjaNeural");
+    }
+
+    #[test]
+    fn a_patch_changes_only_the_named_fields() {
+        let mut cur = NexusSettings::default();
+        cur.theme_mode = "dark".to_string();
+        cur.edge_tts_voice = "en-US-AvaNeural".to_string();
+        cur.selected_voice = "nexus".to_string();
+        let patch: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"themeMode":"light"}"#).unwrap();
+        let out = apply_settings_patch(&cur, &patch).unwrap();
+        assert_eq!(out.theme_mode, "light");
+        assert_eq!(out.edge_tts_voice, "en-US-AvaNeural", "a theme toggle must not touch the voice");
+        assert_eq!(out.selected_voice, "nexus");
+    }
+
+    #[test]
+    fn a_patch_with_the_wrong_type_is_rejected_whole() {
+        let cur = NexusSettings::default();
+        let patch: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"themeMode":42}"#).unwrap();
+        assert!(apply_settings_patch(&cur, &patch).is_err());
+    }
 }
 
 /// Read the Groq API key from settings.json (non-IPC helper for stt.rs).
@@ -2133,6 +2450,14 @@ pub fn read_local_stt_only<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool
         .unwrap_or(false)
 }
 
+/// Read the sttLogConfidence flag (P0 measurement): log Whisper confidence per command turn.
+pub fn read_stt_log_confidence<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return false; };
+    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else { return false; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return false; };
+    json.get("sttLogConfidence").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
 /// Read an API key by service name: keychain first, settings.json fallback.
 /// Used by ghost.rs (vision keys) and the health panel. `service` is the
 /// vault service id ("groq" | "gemini" | "cerebras").
@@ -2154,12 +2479,16 @@ pub fn read_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>, service: &str)
         "gemini" => "geminiApiKey",
         "cerebras" => "cerebrasApiKey",
         "deepgram" => "deepgramApiKey",
+        "google_maps" => "routesApiKey",
+        "google_places" => "placesApiKey",
         _ => "groqApiKey",
     };
     let snake = match service {
         "gemini" => "gemini_api_key",
         "cerebras" => "cerebras_api_key",
         "deepgram" => "deepgram_api_key",
+        "google_maps" => "routes_api_key",
+        "google_places" => "places_api_key",
         _ => "groq_api_key",
     };
     json.get(camel)
@@ -2298,7 +2627,7 @@ pub fn set_autostart<R: Runtime>(
                 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name;
                 $action = New-ScheduledTaskAction -Execute $exe -Argument '--background';
                 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user;
-                $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Seconds 0);
+                $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -Priority 4 -ExecutionTimeLimit (New-TimeSpan -Seconds 0);
                 $result = Register-ScheduledTask -TaskName 'NEXUS' -Action $action -Trigger $trigger -Settings $settings -User $user -Force;
                 if ($result) {{ Write-Output 'NEXUS_TASK_OK' }} else {{ Write-Output 'NEXUS_TASK_FAIL' }}"#,
                 exe_path
@@ -2886,6 +3215,53 @@ pub async fn whatsapp_selftest() -> crate::memcore::wa::SelfTest {
     crate::memcore::wa::selftest(&client).await
 }
 
+/// Parse a spoken/IPC travel mode ("driving" | "walking" | "bicycling" | "transit"); default driving.
+pub fn parse_travel_mode(mode: Option<&str>) -> crate::google::types::TravelMode {
+    use crate::google::types::TravelMode;
+    match mode.map(|m| m.trim().to_lowercase()).as_deref() {
+        Some("walking") | Some("walk") => TravelMode::Walking,
+        Some("bicycling") | Some("cycling") | Some("bike") => TravelMode::Bicycling,
+        Some("transit") | Some("bus") | Some("train") => TravelMode::Transit,
+        _ => TravelMode::Driving,
+    }
+}
+
+/// Open the real Google Maps app (directions) in its own window, sized and
+/// placed exactly like the Architecture Mapper (960 wide, centered, y = 40).
+pub fn open_maps<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    destination: &str,
+    origin: Option<&str>,
+    mode: crate::google::types::TravelMode,
+) -> Result<(), String> {
+    if destination.trim().is_empty() {
+        return Err("no destination".into());
+    }
+    let url = crate::google::maps::MapsService::build_directions_url(origin, destination, mode);
+    open_maps_url(app, &url)
+}
+
+/// Open any Google Maps https URL in the Architecture-Mapper-sized window.
+pub fn open_maps_url<R: Runtime>(app: &tauri::AppHandle<R>, url: &str) -> Result<(), String> {
+    let (mw, mh) = match app.primary_monitor() {
+        Ok(Some(m)) => (m.size().width as f64 / m.scale_factor(), m.size().height as f64 / m.scale_factor()),
+        _ => (1920.0, 1080.0),
+    };
+    let geom = sidebar_geometry("maps", None, mw, mh);
+    crate::dyn_windows::open_external_window(app, "maps", url, "Google Maps", geom)
+}
+
+/// IPC: open Google Maps directions to `destination` (optionally from `origin`).
+#[tauri::command]
+pub async fn open_maps_window<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    destination: String,
+    origin: Option<String>,
+    mode: Option<String>,
+) -> Result<(), String> {
+    open_maps(&app, &destination, origin.as_deref(), parse_travel_mode(mode.as_deref()))
+}
+
 /// IPC: The saved timetable.
 #[tauri::command]
 pub fn memcore_timetable<R: Runtime>(app: AppHandle<R>) -> Result<Vec<crate::memcore::timetable::Slot>, String> {
@@ -3085,7 +3461,7 @@ pub fn export_settings<R: Runtime>(app: AppHandle<R>) -> Result<String, String> 
     let mut json: serde_json::Value =
         serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
     // Secrets live in the keychain — strip any legacy disk copies.
-    for key in ["groqApiKey", "geminiApiKey", "cerebrasApiKey", "deepgramApiKey"] {
+    for key in ["groqApiKey", "geminiApiKey", "cerebrasApiKey", "deepgramApiKey", "routesApiKey", "placesApiKey"] {
         json[key] = serde_json::json!("");
     }
     serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
@@ -3120,6 +3496,16 @@ pub fn import_settings<R: Runtime>(app: AppHandle<R>, json_str: String) -> Resul
     if let Some(k) = json.get("deepgramApiKey").and_then(|v| v.as_str()) {
         if !k.is_empty() {
             crate::auth_vault::set_api_key("deepgram", k);
+        }
+    }
+    if let Some(k) = json.get("routesApiKey").and_then(|v| v.as_str()) {
+        if !k.is_empty() {
+            crate::auth_vault::set_api_key("google_maps", k);
+        }
+    }
+    if let Some(k) = json.get("placesApiKey").and_then(|v| v.as_str()) {
+        if !k.is_empty() {
+            crate::auth_vault::set_api_key("google_places", k);
         }
     }
     Ok(())
@@ -3197,6 +3583,24 @@ mod sidebar_geometry_tests {
     }
 
     #[test]
+    fn maps_window_matches_architect_geometry() {
+        for (mw, mh) in [(1920.0, 1080.0), (2560.0, 1440.0), (1366.0, 768.0), (500.0, 500.0)] {
+            assert_eq!(sidebar_geometry("maps", None, mw, mh), sidebar_geometry("architect", None, mw, mh));
+        }
+        assert_eq!(sidebar_geometry("maps", None, 1920.0, 1080.0), (480.0, 40.0, 960.0, 1040.0));
+    }
+
+    #[test]
+    fn travel_mode_parsing() {
+        use crate::google::types::TravelMode as T;
+        assert_eq!(super::parse_travel_mode(None), T::Driving);
+        assert_eq!(super::parse_travel_mode(Some("Walking")), T::Walking);
+        assert_eq!(super::parse_travel_mode(Some("bus")), T::Transit);
+        assert_eq!(super::parse_travel_mode(Some("cycling")), T::Bicycling);
+        assert_eq!(super::parse_travel_mode(Some("???")), T::Driving);
+    }
+
+    #[test]
     fn architect_docked_goes_right() {
         // x = 1920 - 960 - 10 = 950; y = 20; h = 1040
         let (x, y, w, h) = sidebar_geometry("architect", Some("right"), 1920.0, 1080.0);
@@ -3224,3 +3628,46 @@ mod sidebar_geometry_tests {
         assert_eq!(x, 0.0);
     }
 }
+
+#[cfg(test)]
+mod nexus_settings_tests {
+    use super::NexusSettings;
+
+    #[test]
+    fn settings_round_trip_preserves_unknown_fields() {
+        let raw = serde_json::json!({
+            "autostart": true,
+            "hotkey": "Ctrl+Space",
+            "autoHideDelay": 8,
+            "wakeWordEnabled": true,
+            "wakePhrase": "NEXUS",
+            "wakeSensitivity": "medium",
+            "speakerVerification": false,
+            "meetingModeAuto": true,
+            "suppressTtsInMeetings": true,
+            "localSttOnly": true,
+            "serverUrl": "https://example.com",
+            "userId": "u123",
+            "deviceId": "d456",
+            "ttsVoice": "af_sky",
+            "speechRate": 1.15,
+            // Unknown keys that must NOT be wiped on save
+            "vadSilero": true,
+            "smartTurn": false,
+            "turnEagerness": 0.85,
+            "directedGate": true,
+            "proactiveCriticalInMeeting": false,
+            "calibrationDevPersist": "custom_val"
+        });
+
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert_eq!(parsed.extra.get("vadSilero"), Some(&serde_json::json!(true)));
+        assert_eq!(parsed.extra.get("calibrationDevPersist"), Some(&serde_json::json!("custom_val")));
+
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("vadSilero"), Some(&serde_json::json!(true)));
+        assert_eq!(reserialized.get("turnEagerness"), Some(&serde_json::json!(0.85)));
+        assert_eq!(reserialized.get("calibrationDevPersist"), Some(&serde_json::json!("custom_val")));
+    }
+}
+

@@ -18,7 +18,6 @@
 //! the independent Rust STT thread, and follow-ups execute after — true
 //! parallel act∥listen lanes are Phase 3, not this file.
 
-use std::{thread, time::Duration};
 use tauri::{AppHandle, Runtime};
 
 /// Step guard: bail with "Stopped" unless the session is live and no
@@ -74,40 +73,101 @@ pub async fn whatsapp_drill<R: Runtime>(
     }
     crate::ghost::drill_begin();
 
-    let run = {
+    let run: Result<(String, bool), String> = {
         // Synchronous task run in a blocking thread — every step is a
         // blocking OS action (enigo, sleeps), never an await. Boxing the
         // closure keeps the async wrapper Send (the enigo/Win32 internals
         // are not Send; live-bug chain found at compile time).
         let contact = contact.to_string();
         let message = message.to_string();
-        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let data_dir = {
+            use tauri::Manager;
+            app.path().app_data_dir().ok()
+        };
+        tauri::async_runtime::spawn_blocking(move || -> Result<(String, bool), String> {
             guard_step()?;
-            // 1. Open WhatsApp — registry fast path first (focus-or-launch,
-            // ~ms, no sleeps), Win-search drill only on miss. A fresh launch
-            // gets 1s to appear; focus still unconfirmed after that is a
-            // warning, not a failure (the OS is still opening it).
-            match crate::command_executor::resolve_and_open_app("WhatsApp") {
-                Ok(_) => {
-                    thread::sleep(Duration::from_millis(1000));
-                    if !super::window::focus_app_by_title("WhatsApp") {
-                        tracing::warn!("ghost drill: WhatsApp launched but focus unconfirmed — continuing");
+            #[allow(unused_assignments)]
+            let mut opened_name = contact.clone();
+            #[allow(unused_assignments)]
+            let mut unverified = false;
+            #[cfg(target_os = "windows")]
+            {
+                use super::wa_open::{self, WaOpen};
+                let learned = data_dir
+                    .as_deref()
+                    .map(|d| wa_open::learned_aliases(d, &contact))
+                    .unwrap_or_default();
+                // 0. A KNOWN NUMBER opens the exact chat by link: no search box, no UI scraping, no focus
+                // tricks (the one deterministic route; numbers come from the contacts book / a saved fact).
+                if let Some(dir) = data_dir.as_deref() {
+                    if let Some(phone) = resolve_phone(dir, &contact, &learned)? {
+                        let _ = open::that(wa_open::deep_link(&phone));
+                        if wa_open::ensure_whatsapp_foreground(8000) {
+                            std::thread::sleep(std::time::Duration::from_millis(400));
+                            guard_step()?;
+                            if !chat_open {
+                                super::whatsapp::type_message(&message)?;
+                            }
+                            return Ok((contact, false));
+                        }
+                        // The link did not bring the app up: fall through to the search route.
                     }
                 }
-                Err(_) => {
-                    super::launcher::open_app_via_search("WhatsApp")?;
+                // 1. WhatsApp must be the FOREGROUND PROCESS before a single key is sent
+                // (it is a Store app that often sits hidden in the tray; the old fixed 1 s
+                // sleep + window-title match typed into whatever else had focus).
+                if !wa_open::ensure_whatsapp_foreground(8000) {
+                    // Last resort: the Win-search drill, then give it a bit longer.
+                    let _ = super::launcher::open_app_via_search("WhatsApp");
+                    if !wa_open::ensure_whatsapp_foreground(5000) {
+                        return Err("I couldn't bring WhatsApp to the front, sir. I didn't type anything.".to_string());
+                    }
+                }
+                guard_step()?;
+                // 2. Verified open: Ctrl+F, type, wait for the matching chat item, click it.
+                match wa_open::open_chat(&wa_open::RealEnv, &contact, &learned) {
+                    WaOpen::Opened { matched } => {
+                        opened_name = wa_open::spoken_name(&matched);
+                        // Learn: remember what this person is saved as, so the next "open <name>" starts
+                        // from the exact saved name instead of guessing synonyms.
+                        if let Some(d) = data_dir.as_deref() {
+                            wa_open::learn_alias(d, &contact, &opened_name);
+                        }
+                    }
+                    WaOpen::Unverified { guess } => {
+                        if !chat_open {
+                            // Never type a message into a chat that could not be confirmed.
+                            return Err(format!(
+                                "I opened a chat, but I couldn't confirm it is {contact}'s, sir. I didn't type anything."
+                            ));
+                        }
+                        opened_name = guess;
+                        unverified = true;
+                    }
+                    WaOpen::NotFound => {
+                        return Err(format!(
+                            "I couldn't find {contact} in WhatsApp, sir. If they are saved under another name, say: remember that wa alias {contact} is, and the saved name."
+                        ));
+                    }
+                    WaOpen::WrongWindow => {
+                        return Err("WhatsApp lost focus, sir. I didn't type anything.".to_string());
+                    }
+                    WaOpen::Stopped => return Err("Stopped, sir.".to_string()),
+                    WaOpen::Failed(e) => return Err(e),
                 }
             }
-            guard_step()?;
-            // 2. Search contact, open chat.
-            super::whatsapp::search_contact(&contact)?;
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = &data_dir;
+                super::whatsapp::search_contact(&contact)?;
+            }
             guard_step()?;
             // 3. Type the message (clipboard paste, visible on screen).
             // Chat-open variant never types.
             if !chat_open {
                 super::whatsapp::type_message(&message)?;
             }
-            Ok(())
+            Ok((opened_name, unverified))
         })
         .await
         .map_err(|e| format!("ghost drill join: {e}"))?
@@ -128,13 +188,19 @@ pub async fn whatsapp_drill<R: Runtime>(
     }
 
     match run {
-        Ok(()) => {
-            let done_msg = if chat_open {
-                format!("{contact} is open, sir. What do you want to send?")
+        Ok((opened_name, unverified)) => {
+            // One spoken line: a voice-initiated run (session already live) is spoken by the
+            // orchestrator from the returned text; announcing here too said everything twice.
+            let done_msg = if chat_open && unverified {
+                format!("I opened a chat for {opened_name}, sir, but I couldn't confirm it's the right one.")
+            } else if chat_open {
+                format!("{opened_name} is open, sir.")
             } else {
                 "Draft ready, sir. Say send when ready.".to_string()
             };
-            crate::ghost::announce(crate::ghost::ghost_wry::g_wry_ref(&app), &done_msg);
+            if !keep_session {
+                crate::ghost::announce(crate::ghost::ghost_wry::g_wry_ref(&app), &done_msg);
+            }
             if clean && !keep_session {
                 // Standalone run: queued mid-drill follow-ups drain now,
                 // in order, through the normal pipeline (Phase 3 overlap).
@@ -165,9 +231,35 @@ pub async fn whatsapp_drill<R: Runtime>(
         }
         Err(e) => {
             crate::ghost::drop_followups();
-            crate::ghost::announce(crate::ghost::ghost_wry::g_wry_ref(&app), &e);
+            if !keep_session {
+                crate::ghost::announce(crate::ghost::ghost_wry::g_wry_ref(&app), &e);
+            }
             Err(e)
         }
+    }
+}
+
+/// The WhatsApp number for a spoken name: a saved `wa_phone_<name>` fact, else the contacts book
+/// (`contacts.json`, filled by "import my contacts") through the learned alias and the usual
+/// kinship synonyms. `Err` = several different people match (the user must say which).
+#[cfg(target_os = "windows")]
+fn resolve_phone(dir: &std::path::Path, contact: &str, learned: &[String]) -> Result<Option<String>, String> {
+    use super::wa_open;
+    use crate::contacts_book::{self, Lookup};
+    if let Some(p) = wa_open::learned_phone(dir, contact) {
+        return Ok(Some(p));
+    }
+    let book = contacts_book::load(dir);
+    if book.is_empty() {
+        return Ok(None);
+    }
+    match contacts_book::lookup(&book, &wa_open::name_candidates(contact, learned)) {
+        Lookup::One { number, .. } => Ok(wa_open::normalize_phone(&number)),
+        Lookup::Ambiguous(names) => Err(format!(
+            "I have more than one {contact} in your contacts, sir: {}. Say the full name.",
+            names.join(", ")
+        )),
+        Lookup::None => Ok(None),
     }
 }
 

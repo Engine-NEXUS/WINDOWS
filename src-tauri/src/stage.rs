@@ -34,7 +34,9 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 const LABEL: &str = "stage";
 const HEARTBEAT_STALE_SECS: u64 = 10;
-const SHOW_GRACE_SECS: u64 = 20;
+/// Cold-boot grace before a silent renderer counts as a blackout. The 2026-10-10 log shows a
+/// cold WebView2 (profile cleared at every start) missing the old 20 s window.
+const SHOW_GRACE_SECS: u64 = 45;
 const MAX_AUTO_FIXES: u32 = 3;
 
 /// Interactive rect in PHYSICAL pixels (frontend multiplies CSS px by
@@ -102,6 +104,14 @@ static LAST_BEAT: once_cell::sync::Lazy<parking_lot::Mutex<Option<std::time::Ins
 
 static SHOWN_AT: once_cell::sync::Lazy<parking_lot::Mutex<Option<std::time::Instant>>> =
     once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
+
+/// A final transcript emitted while no live stage could receive it. Events are fire-and-forget,
+/// so a turn finished during a stage rebuild vanished and left the orb parked. The recreated
+/// stage pulls this on mount (`stage_take_pending_transcript`), like `get_pending_*`.
+static PENDING_TRANSCRIPT: once_cell::sync::Lazy<parking_lot::Mutex<Option<(std::time::Instant, serde_json::Value)>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
+/// How long a stashed transcript stays replayable.
+const PENDING_TRANSCRIPT_TTL_SECS: u64 = 20;
 
 static VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -181,6 +191,7 @@ pub async fn stage_hide<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
     crate::ghost::stand_down(crate::ghost::ghost_wry::g_wry_ref(&app));
     crate::dyn_windows::destroy_window(&app, LABEL)?;
+    note_window_destroyed();
     tracing::info!("stage: hidden");
     Ok(())
 }
@@ -225,6 +236,7 @@ pub async fn stage_hide_kill<R: Runtime>(app: AppHandle<R>) -> Result<(), String
     VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
     crate::ghost::stand_down(crate::ghost::ghost_wry::g_wry_ref(&app));
     crate::dyn_windows::destroy_window(&app, LABEL)?;
+    note_window_destroyed();
     tracing::warn!("stage: kill-switch engaged (disabled for session)");
     Ok(())
 }
@@ -232,6 +244,61 @@ pub async fn stage_hide_kill<R: Runtime>(app: AppHandle<R>) -> Result<(), String
 /// True while the stage window is up and not kill-switched.
 pub fn is_shown() -> bool {
     visible() && !disabled()
+}
+
+/// True when the stage renderer has beaten recently, i.e. events emitted now will be received.
+pub fn is_ready() -> bool {
+    LAST_BEAT
+        .lock()
+        .map(|t| t.elapsed().as_secs() <= HEARTBEAT_STALE_SECS)
+        .unwrap_or(false)
+}
+
+/// Wait (up to `max_ms`) for a live renderer. Used before emitting the wake so the orb events
+/// are not lost to a stage that is being rebuilt. Returns whether it became ready.
+pub async fn wait_until_ready(max_ms: u64) -> bool {
+    let mut waited = 0u64;
+    loop {
+        if is_ready() {
+            return true;
+        }
+        if waited >= max_ms {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        waited += 100;
+    }
+}
+
+/// Forget the heartbeat when the window is destroyed (otherwise `is_ready` stays true for 10 s
+/// after the renderer is gone).
+fn note_window_destroyed() {
+    *LAST_BEAT.lock() = None;
+}
+
+/// Keep a final transcript for the next stage mount when no live stage can receive the event.
+pub fn stash_transcript_if_not_ready(payload: serde_json::Value) {
+    if is_ready() {
+        return;
+    }
+    tracing::warn!("stage: not ready - stashing the transcript for replay on the next mount");
+    *PENDING_TRANSCRIPT.lock() = Some((std::time::Instant::now(), payload));
+}
+
+/// Pure TTL rule (unit-tested).
+pub fn pending_is_fresh(age_secs: u64) -> bool {
+    age_secs <= PENDING_TRANSCRIPT_TTL_SECS
+}
+
+/// IPC: the stage calls this once on mount; returns (and clears) a transcript that arrived while
+/// it was down, if still fresh.
+#[tauri::command]
+pub fn stage_take_pending_transcript() -> Option<serde_json::Value> {
+    let taken = PENDING_TRANSCRIPT.lock().take();
+    match taken {
+        Some((at, v)) if pending_is_fresh(at.elapsed().as_secs()) => Some(v),
+        _ => None,
+    }
 }
 
 /// Toggle `WDA_EXCLUDEFROMCAPTURE` on the stage window so our own screen
@@ -434,12 +501,22 @@ pub fn spawn_stage_watchdog<R: Runtime>(app: AppHandle<R>) {
             VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
             crate::ghost::note_blackout();
             let _ = crate::dyn_windows::destroy_window(&app, LABEL);
+            note_window_destroyed();
 
             if fails > MAX_AUTO_FIXES {
                 // ── GIVE UP: stay hidden, say so once, keep watching ──
+                // A Ghost session cannot outlive its overlay: with no stage
+                // the session UI is gone, yet its global Esc shortcut would
+                // keep swallowing Esc system-wide. End it, and say so.
+                let was_ghost = crate::ghost::session_active();
+                crate::ghost::stand_down(crate::ghost::ghost_wry::g_wry_ref(&app));
                 inform_via_orb(
                     &app,
-                    "Display overlay kept failing, sir. I switched visuals off until restart — voice still works.",
+                    if was_ghost {
+                        "Display overlay kept failing, sir. I switched visuals off until restart and ended Ghost mode — voice still works."
+                    } else {
+                        "Display overlay kept failing, sir. I switched visuals off until restart — voice still works."
+                    },
                 );
                 tracing::error!("stage: auto-fix budget exhausted — staying hidden");
                 continue;
@@ -465,10 +542,10 @@ pub fn spawn_stage_watchdog<R: Runtime>(app: AppHandle<R>) {
                     }
                     VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
                     *SHOWN_AT.lock() = Some(std::time::Instant::now());
-                    // Wait up to 10s for a fresh heartbeat (proves the
+                    // Wait up to 30s for a fresh heartbeat (proves the
                     // renderer is alive, not just the window).
                     let mut healthy = false;
-                    for _ in 0..20 {
+                    for _ in 0..60 {
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         let fresh = LAST_BEAT
                             .lock()
@@ -512,6 +589,35 @@ mod tests {
         assert!(!r.contains(300, 100));
         assert!(!r.contains(99, 100));
         assert!(!r.contains(100, 200));
+    }
+
+    #[test]
+    fn pending_transcript_expires() {
+        assert!(pending_is_fresh(0));
+        assert!(pending_is_fresh(20));
+        assert!(!pending_is_fresh(21));
+    }
+
+    // One test: these three share the process-global heartbeat/stash, so they must not race.
+    #[test]
+    fn readiness_and_stash_follow_the_heartbeat() {
+        note_window_destroyed();
+        assert!(!is_ready(), "no beat => not ready");
+        stage_heartbeat(Some("test".into())).unwrap();
+        assert!(is_ready());
+        note_window_destroyed();
+        assert!(!is_ready(), "a destroyed window must stop counting as ready at once");
+
+        let _ = stage_take_pending_transcript();
+        stash_transcript_if_not_ready(serde_json::json!({"text": "open notepad"}));
+        let got = stage_take_pending_transcript().expect("stashed while down");
+        assert_eq!(got["text"], "open notepad");
+        assert!(stage_take_pending_transcript().is_none(), "take clears it");
+
+        stage_heartbeat(None).unwrap();
+        stash_transcript_if_not_ready(serde_json::json!({"text": "ignored"}));
+        assert!(stage_take_pending_transcript().is_none(), "no stash while the stage is alive");
+        note_window_destroyed();
     }
 
     #[test]

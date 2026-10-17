@@ -604,6 +604,8 @@ function cmdBuild() {
 
   info("Building frontend (Vite)...");
   run("npm", ["--prefix", "frontend", "install"], { allowFail: true, stdio: "ignore" });
+  // Hand mode: MediaPipe wasm + hand model into frontend/public/hand (git-ignored, ~17 MB).
+  run("node", ["scripts/sync-hand-assets.mjs"], { allowFail: true });
   run("npm", ["--prefix", "frontend", "run", "build"]);
 
   info("Building Rust release binary (custom-protocol + admin-brain)...");
@@ -1005,7 +1007,35 @@ function cmdWake() {
     return;
   }
 
-  if (sub === "test" || sub === "live" || sub === "benchmark" || sub === "devices") {
+  if (sub === "replay") {
+    // Source of truth for wake accuracy: the real Rust engine over recordings.
+    if (!hasCargo()) {
+      err("cargo not found: the replay harness runs the Rust wake engine.");
+      process.exit(1);
+    }
+    let replayArgs = process.argv.slice(4);
+    if (!replayArgs.some(a => a === "--manifest" || a === "--pos" || a === "--neg" || a === "--help" || a === "-h")) {
+      replayArgs = ["--manifest", join(ROOT, "wake_word_data", "manifest.jsonl"), ...replayArgs];
+    }
+    info("Scoring the real wake engine over recordings (stage 1)...");
+    run("cargo", ["run", "--release", "--quiet", "--example", "wake_replay", "--", ...replayArgs],
+      { cwd: join(ROOT, "src-tauri") });
+    return;
+  }
+
+  if (sub === "devices") {
+    // test_wake_live.py has no --devices flag; the device benchmark is its own script.
+    const devScript = join(ROOT, "scripts", "test_device_invariance.py");
+    if (!existsSync(devScript)) {
+      err("Device benchmark script not found: " + devScript);
+      process.exit(1);
+    }
+    info("Starting simulated microphone-profile benchmark...");
+    run(py, [devScript, ...process.argv.slice(4)], { cwd: ROOT });
+    return;
+  }
+
+  if (sub === "test" || sub === "live" || sub === "benchmark") {
     const testScript = join(ROOT, "scripts", "test_wake_live.py");
     if (!existsSync(testScript)) {
       err("Test script not found: " + testScript);
@@ -1014,9 +1044,6 @@ function cmdWake() {
     const testArgs = process.argv.slice(4);
     if (sub === "benchmark" && !testArgs.includes("--batch")) {
       testArgs.push("--batch");
-    }
-    if (sub === "devices" && !testArgs.includes("--devices")) {
-      testArgs.push("--devices");
     }
     info("Starting wake word live tester / benchmark...");
     run(py, [testScript, ...testArgs], { cwd: ROOT });
@@ -1079,7 +1106,8 @@ function cmdWake() {
     info("  nexus wake test                  (real-time live microphone listening test)");
     info("  nexus wake test --compare        (simultaneous wake test & live speech transcription comparison)");
     info("  nexus wake test --batch          (benchmark model against all 3,000 dataset WAVs)");
-    info("  nexus wake test --devices        (benchmark model across 5 hardware microphone profiles)");
+    info("  nexus wake devices               (benchmark model across 5 simulated microphone profiles)");
+    info("  nexus wake replay [--split test] (score the REAL Rust engine: recall, false fires/hour, thresholds)");
     info("  nexus wake train                 (train device-invariant wake neural model)");
     info("  nexus wake synth                 (synthesize multi-accent training samples via neural TTS)");
     info("  nexus wake ingest                (ingest & screen open-source noise corpora)");

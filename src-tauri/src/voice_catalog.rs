@@ -145,7 +145,7 @@ pub const VOICE_CATALOG: &[VoicePersona] = &[
 ];
 
 /// Default persona key (ships as the active voice).
-pub const DEFAULT_VOICE_KEY: &str = "nexus";
+pub const DEFAULT_VOICE_KEY: &str = "jarvis";
 
 /// Voice used when nothing else is available (best-graded Kokoro voice).
 pub const FALLBACK_KOKORO_VOICE: &str = "af_heart";
@@ -192,10 +192,27 @@ pub fn write_manifest_at(dir: &std::path::Path, m: &VoiceManifest) -> std::io::R
     std::fs::create_dir_all(dir)?;
     let json = serde_json::to_string_pretty(m)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(dir.join("manifest.json"), json)
+    // Write-then-rename: a crash or full disk never leaves a half-written manifest.
+    let tmp = dir.join("manifest.json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, dir.join("manifest.json")).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// True when the installed voice file is exactly the one the manifest recorded (SHA-256). A crash
+/// between "voice file replaced" and "manifest written" leaves them disagreeing; the slot is then
+/// treated as not ready and the swap worker repairs it. A manifest without a hash (older build) is
+/// accepted. Pure core for tests.
+pub fn manifest_matches_file(manifest: &VoiceManifest, actual_voice_sha256: Option<&str>) -> bool {
+    if manifest.voice_sha256.is_empty() {
+        return true;
+    }
+    actual_voice_sha256.map(|a| a.eq_ignore_ascii_case(&manifest.voice_sha256)).unwrap_or(false)
 }
 
 /// Read the slot manifest. None = empty slot (nothing downloaded yet).
+#[allow(dead_code)]
 pub fn read_manifest() -> Option<VoiceManifest> {
     read_manifest_at(&managed_voices_dir()?)
 }
@@ -219,7 +236,16 @@ pub fn twin_ready_for_paths(voice: &str, manifest: Option<&VoiceManifest>, files
 /// True when the managed slot holds THIS Kokoro voice (reads the live slot).
 pub fn twin_ready_for(voice: &str) -> bool {
     let Some(dir) = managed_voices_dir() else { return false };
-    twin_ready_for_paths(voice, read_manifest_at(&dir).as_ref(), slot_files_present_at(&dir))
+    let manifest = read_manifest_at(&dir);
+    let files_ok = slot_files_present_at(&dir)
+        && manifest
+            .as_ref()
+            .map(|m| {
+                let actual = crate::tts_swap::sha256_file(&dir.join(VOICE_FILE)).ok();
+                manifest_matches_file(m, actual.as_deref())
+            })
+            .unwrap_or(false);
+    twin_ready_for_paths(voice, manifest.as_ref(), files_ok)
 }
 
 /// Remove the 60 MB Piper-era slot files left by older builds. Safe to call repeatedly.
@@ -259,11 +285,13 @@ pub fn find_by_key(key: &str) -> Option<&'static VoicePersona> {
 
 /// Look up a persona by cloud Edge-TTS id. First match wins — twins can share an id (e.g. nexus +
 /// offline_safe both use AvaNeural). Pure.
+#[allow(dead_code)]
 pub fn find_by_cloud_id(cloud_id: &str) -> Option<&'static VoicePersona> {
     VOICE_CATALOG.iter().find(|p| p.cloud_id == cloud_id)
 }
 
 /// Look up a persona by Kokoro voice name. First match wins. Pure.
+#[allow(dead_code)]
 pub fn find_by_kokoro_voice(voice: &str) -> Option<&'static VoicePersona> {
     VOICE_CATALOG.iter().find(|p| p.kokoro_voice == voice)
 }
@@ -564,5 +592,40 @@ mod tests {
                 version: 0,
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod manifest_integrity_tests {
+    use super::*;
+
+    fn manifest(sha: &str) -> VoiceManifest {
+        VoiceManifest {
+            voice_key: "jarvis".into(),
+            kokoro_voice: "bm_george".into(),
+            model_sha256: "m".into(),
+            voice_sha256: sha.into(),
+            version: 2,
+        }
+    }
+
+    #[test]
+    fn matching_hash_is_consistent_mismatch_is_not() {
+        assert!(manifest_matches_file(&manifest("abc123"), Some("ABC123")), "case-insensitive");
+        assert!(!manifest_matches_file(&manifest("abc123"), Some("def456")), "different file");
+        assert!(!manifest_matches_file(&manifest("abc123"), None), "unreadable file");
+        assert!(manifest_matches_file(&manifest(""), None), "older manifest without a hash is accepted");
+    }
+
+    #[test]
+    fn manifest_write_is_atomic_and_leaves_no_temp_file() {
+        let d = std::env::temp_dir().join(format!("nexus_manifest_atomic_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        write_manifest_at(&d, &manifest("aa")).unwrap();
+        write_manifest_at(&d, &manifest("bb")).unwrap(); // replaces an existing manifest
+        assert_eq!(read_manifest_at(&d).unwrap().voice_sha256, "bb");
+        assert!(!d.join("manifest.json.tmp").exists());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

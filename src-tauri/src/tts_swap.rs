@@ -367,8 +367,10 @@ async fn run_one<R: Runtime>(app: &AppHandle<R>, voice_key: &str, engine: &crate
         return;
     }
 
-    // 4. hot-swap the voice in a loaded engine (a not-yet-loaded engine picks it up lazily)
+    // 4. hot-swap the voice in a loaded engine (a not-yet-loaded engine picks it up lazily). Applied
+    // between utterances: a reply that is being spoken right now finishes in its own voice.
     if crate::tts_kokoro::is_loaded(engine).await {
+        wait_for_utterance_boundary().await;
         let pack = dir.join(crate::voice_catalog::VOICE_FILE);
         if let Err(e) = crate::tts_kokoro::set_voice(engine, &pack, voice).await {
             tracing::warn!("tts-swap: engine hot-swap failed for '{voice}': {e}");
@@ -400,6 +402,18 @@ pub fn request_swap<R: Runtime>(app: AppHandle<R>, key: String, engine: crate::t
             }
         }
     });
+}
+
+/// Longest a swap waits for a reply to finish before applying anyway (a stuck flag must not block it).
+const BOUNDARY_WAIT_MAX_MS: u64 = 120_000;
+
+/// Wait until no speech is in flight (bounded). The swap itself is a few microseconds of pointer
+/// replacement under the engine lock, so applying it in the gap between two replies is invisible.
+async fn wait_for_utterance_boundary() {
+    let started = std::time::Instant::now();
+    while crate::tts::speech_active() && (started.elapsed().as_millis() as u64) < BOUNDARY_WAIT_MAX_MS {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 /// Make sure the CURRENTLY SELECTED persona's offline voice is installed (startup, cloud restored).

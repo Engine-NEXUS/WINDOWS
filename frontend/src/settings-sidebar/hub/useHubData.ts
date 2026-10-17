@@ -21,6 +21,7 @@ const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** Accounts card data + actions (Google multi-account + GitHub). */
 export function useAccounts(serverUrl: string, userId: string) {
   const [google, setGoogle] = useState<GoogleAccountProfile[]>([]);
+  const [googleNeedsSignin, setGoogleNeedsSignin] = useState(false);
   const [githubConnected, setGithubConnected] = useState(false);
   const [github, setGithub] = useState<GithubProfile | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -32,6 +33,14 @@ export function useAccounts(serverUrl: string, userId: string) {
       setGoogle(await invoke<GoogleAccountProfile[]>("google_get_accounts"));
     } catch (e) {
       console.warn("google accounts", e);
+    }
+    try {
+      const ms = await invoke<any>("memcore_status");
+      if (ms && typeof ms.google_needs_signin === "boolean") {
+        setGoogleNeedsSignin(ms.google_needs_signin);
+      }
+    } catch {
+      /* memcore optional */
     }
     if (!serverUrl) return;
     setSidecarBaseUrl(serverUrl);
@@ -70,6 +79,7 @@ export function useAccounts(serverUrl: string, userId: string) {
 
   return {
     accounts: buildAccounts(google, githubConnected, github) as HubAccount[],
+    googleNeedsSignin,
     busy,
     error,
     dismissError: () => setError(null),

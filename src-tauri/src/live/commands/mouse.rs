@@ -5,8 +5,8 @@
 //! step, and wrapped in the ghost suppress window so the takeover
 //! detector never mistakes our own glide for a human hand.
 //!
-//! Grounding order (unchanged): UIA bounds first (exact, free), vision
-//! only where UIA is blind. This module moves; `screen.rs` resolves.
+//! Ghost clicks now use the Ghost command center's live accessibility
+//! lookup and hit-test. Inaccessible controls stop without a vision call.
 
 /// Cosine-eased interpolation from `from` to `to` in `n` steps.
 /// Pure — unit-tested. Ease-in-out reads as intentional motion and gives
@@ -23,6 +23,44 @@ pub fn eased_steps(from: (i32, i32), to: (i32, i32), n: usize) -> Vec<(i32, i32)
             )
         })
         .collect()
+}
+
+/// Pure formatter for `PhaseTimer::summary` (unit-tested): `name=12ms name2=30ms ... total=140ms`.
+pub fn format_phase_summary(marks: &[(&str, u64)], total_ms: u64) -> String {
+    let mut parts: Vec<String> = marks.iter().map(|(n, ms)| format!("{n}={ms}ms")).collect();
+    parts.push(format!("total={total_ms}ms"));
+    parts.join(" ")
+}
+
+/// Wall-clock phases of one ghost action (P0 baseline, docs/features/103): where do the
+/// ~seconds of a click actually go? `mark` records the time since the previous mark.
+pub struct PhaseTimer {
+    start: std::time::Instant,
+    last: std::time::Instant,
+    marks: Vec<(&'static str, u64)>,
+}
+
+impl PhaseTimer {
+    pub fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self { start: now, last: now, marks: Vec::new() }
+    }
+
+    pub fn mark(&mut self, name: &'static str) {
+        let now = std::time::Instant::now();
+        self.marks.push((name, now.duration_since(self.last).as_millis() as u64));
+        self.last = now;
+    }
+
+    pub fn summary(&self) -> String {
+        format_phase_summary(&self.marks, self.start.elapsed().as_millis() as u64)
+    }
+}
+
+impl Default for PhaseTimer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -66,9 +104,8 @@ mod windows_impl {
     /// voice stop / mouse grab / Esc aborts mid-glide, never mid-click.
     /// Registers the suppress window so takeover detection stays quiet.
     pub fn move_eased(x: i32, y: i32, ms: u64, should_stop: impl Fn() -> bool) -> Result<(), String> {
-        if x < 0 || y < 0 {
-            return Err("move_eased: negative coordinates".to_string());
-        }
+        // Windows virtual-desktop coordinates can be negative when a monitor
+        // sits left of or above the primary display.
         let from = current_pos().unwrap_or((x, y));
         let step_ms = 16u64;
         let steps = eased_steps(from, (x, y), ((ms / step_ms).max(4)) as usize);
@@ -92,6 +129,17 @@ mod windows_impl {
     /// Move (eased) then left-click. Atomic at the click: abort applies
     /// between steps, never mid-click — half-clicks don't exist.
     pub fn click_at(x: i32, y: i32, should_stop: impl Fn() -> bool) -> Result<(), String> {
+        click_at_checked(x, y, should_stop, || Ok(()))
+    }
+
+    /// Cursor action for GhostCenter: validate the live target again after
+    /// the glide and immediately before the physical click.
+    pub fn click_at_checked(
+        x: i32,
+        y: i32,
+        should_stop: impl Fn() -> bool,
+        validate: impl Fn() -> Result<(), String>,
+    ) -> Result<(), String> {
         let from = current_pos().unwrap_or((x, y));
         let duration = calculate_glide_duration(from, (x, y));
         move_eased(x, y, duration, &should_stop)?;
@@ -100,12 +148,20 @@ mod windows_impl {
         }
         // Human arrival dwell: pause 100ms before click so the user registers landing
         thread::sleep(Duration::from_millis(100));
+        if should_stop() {
+            return Err("Stopped, sir.".to_string());
+        }
+        if current_pos() != Some((x, y)) {
+            return Err("The pointer moved before I could click.".to_string());
+        }
+        validate()?;
         enigo()?
             .button(Button::Left, Direction::Click)
             .map_err(|e| format!("mouse click: {e}"))
     }
 
     /// Double-click at a point (eased move first).
+    #[allow(dead_code)]
     pub fn double_click_at(x: i32, y: i32, should_stop: impl Fn() -> bool) -> Result<(), String> {
         let from = current_pos().unwrap_or((x, y));
         let duration = calculate_glide_duration(from, (x, y));
@@ -124,6 +180,7 @@ mod windows_impl {
 
     /// Vertical scroll by lines (positive = down). No cursor motion —
     /// takeover-safe by construction.
+    #[allow(dead_code)]
     pub fn scroll(lines: i32) -> Result<(), String> {
         enigo()?
             .scroll(lines, Axis::Vertical)
@@ -131,6 +188,7 @@ mod windows_impl {
     }
 
     /// Drag from current position to a point (press → eased glide → release).
+    #[allow(dead_code)]
     pub fn drag_to(x: i32, y: i32, should_stop: impl Fn() -> bool) -> Result<(), String> {
         if x < 0 || y < 0 {
             return Err("drag_to: negative coordinates".to_string());
@@ -363,10 +421,12 @@ mod windows_impl {
                 || foreground_blocked().is_some()
         }
         let home = current_pos();
+        let mut timer = super::PhaseTimer::new();
 
         crate::ghost::ghost_enter(crate::ghost::ghost_wry::g_wry(app.clone())).await?;
         crate::ghost::drill_begin();
         crate::ghost::announce(crate::ghost::ghost_wry::g_wry_ref(&app), "Taking the mouse, sir. Tap Esc any time to cancel.");
+        timer.mark("enter_announce");
 
         let run = async {
             if stop() {
@@ -394,83 +454,33 @@ mod windows_impl {
                     return Err(reason);
                 }
             }
+            timer.mark("focus_checks");
             if stop() {
                 return Err("Stopped, sir.".to_string());
             }
-            // 2. Resolve the element: UIA bounds first (exact, free),
-            // vision models on miss (gridded screenshot, provider order
-            // + daily quotas). Quota switches are announced.
-            let el = match resolve_element(element) {
-                Some(el) => el,
-                None => {
-                    let groq_key = crate::commands::read_groq_api_key(&app);
-                    let gemini_key = crate::commands::read_api_key(&app, "gemini");
-                    if groq_key.is_empty() && gemini_key.is_empty() {
-                        return Err(format!(
-                            "couldn't find '{element}' in {app_title}, sir — and I have no vision key. Add a Groq or Gemini key in Settings, Accounts, so I can see custom buttons."
-                        ));
-                    }
-                    let usage_dir = app
-                        .path()
-                        .app_data_dir()
-                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
-                    let order = crate::vision::read_vision_provider(&usage_dir);
-                    crate::ghost::announce(
-                        crate::ghost::ghost_wry::g_wry_ref(&app),
-                        "Not in the accessibility tree — looking visually, sir.",
-                    );
-                    // Feature 98: pooled keep-alive client (no cold TLS).
-                    match crate::vision::locate_with_fallback(
-                        element,
-                        &groq_key,
-                        &gemini_key,
-                        &order,
-                        &usage_dir,
-                        &crate::vision::shared_vision_client(),
-                    )
-                    .await
-                    {
-                        Some(target) => {
-                            // Vision took seconds — the user may have grabbed
-                            // the mouse mid-call. Re-check before acting.
-                            if stop() {
-                                return Err("Stopped, sir.".to_string());
-                            }
-                            // Quota fallback is spoken: the user asked to
-                            // always hear which daily limit gave way.
-                            if let Some(hit) = target.quota_hit {
-                                let serving =
-                                    if target.provider == "groq" { "Groq" } else { "Gemini" };
-                                let hit_name =
-                                    if hit == "groq" { "Groq" } else { "Gemini" };
-                                crate::ghost::announce(
-                                    crate::ghost::ghost_wry::g_wry_ref(&app),
-                                    &format!(
-                                        "Daily {} limit reached, sir — falling back to {}.",
-                                        hit_name, serving
-                                    ),
-                                );
-                            }
-                            target.el
-                        }
-                        None => {
-                            return Err(format!(
-                                "couldn't find '{element}' in {app_title}, sir — my daily vision limits are spent. Try tomorrow, or click it yourself."
-                            ))
-                        }
-                    }
-                }
+            // The old IPC entry joins the same Ghost sub-center as voice
+            // commands. It cannot use stale list coordinates or a vision
+            // fallback to bypass the new live target checks.
+            let task = crate::ghost_center::GhostTask {
+                steps: vec![crate::ghost_center::GhostStep::AccessibleClick {
+                    name: element.to_string(),
+                }],
             };
-            let (cx, cy) = element_center(&el);
-            // 3. Eased glide + click (atomic at the click).
-            click_at(cx, cy, stop)?;
-            // 4. Verify: the app must still own the foreground — a stolen
-            // focus means the click may have landed elsewhere; report it
-            // instead of clicking twice.
-            if !super::super::window::focus_app_by_title(app_title) {
-                return Err(format!("clicked, but {app_title} lost focus, sir."));
+            let store_dir = app.path().app_data_dir().ok();
+            let receipts = tokio::task::spawn_blocking(move || {
+                crate::ghost_center::execute_with_store(
+                    &task, &std::sync::atomic::AtomicBool::new(false), store_dir.as_deref()
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            timer.mark("ghost_center");
+            let receipt = receipts.into_iter().next()
+                .ok_or_else(|| "Ghost Center returned no action result.".to_string())?;
+            if receipt.outcome != crate::ghost_center::Outcome::Verified {
+                return Err(receipt.spoken());
             }
-            Ok::<(), String>(())
+            Ok::<crate::ghost_center::Receipt, String>(receipt)
         }
         .await;
 
@@ -487,17 +497,25 @@ mod windows_impl {
             }
         }
 
+        timer.mark("restore_home");
         let clean =
             run.is_ok() && calm && crate::ghost::session_active();
         crate::ghost::drill_end();
 
         // Always leave the session — success, stop, takeover, or error.
         let _ = crate::ghost::ghost_exit(crate::ghost::ghost_wry::g_wry(app.clone())).await;
+        timer.mark("exit");
+        tracing::info!(
+            "[GHOST-TIMING] click '{}' ok={} tier=uia {}",
+            element,
+            run.is_ok(),
+            timer.summary()
+        );
 
         match run {
-            Ok(()) => {
-                let done = format!("Clicked {element}{restore_note}.");
-                crate::ghost::announce(crate::ghost::ghost_wry::g_wry_ref(&app), "Done, sir.");
+            Ok(receipt) => {
+                let done = format!("{}{}", receipt.spoken(), restore_note);
+                crate::ghost::announce(crate::ghost::ghost_wry::g_wry_ref(&app), &done);
                 if clean {
                     // Boxed-spawn: this path returns into process_transcript,
                     // so an inline await makes the future self-referential.
@@ -533,6 +551,22 @@ pub use unix_stub::current_pos;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phase_summary_formats_marks_and_total() {
+        let s = format_phase_summary(&[("focus", 30), ("resolve_uia", 85), ("glide_dwell_click", 720)], 900);
+        assert_eq!(s, "focus=30ms resolve_uia=85ms glide_dwell_click=720ms total=900ms");
+        assert_eq!(format_phase_summary(&[], 0), "total=0ms");
+    }
+
+    #[test]
+    fn phase_timer_records_in_order_and_total_covers_marks() {
+        let mut t = PhaseTimer::new();
+        t.mark("a");
+        t.mark("b");
+        let s = t.summary();
+        assert!(s.starts_with("a=") && s.contains(" b=") && s.contains(" total="), "got {s}");
+    }
 
     #[test]
     fn test_eased_steps_endpoints_and_count() {

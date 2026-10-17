@@ -17,7 +17,7 @@ import {
   clearClarificationRequest,
   type TurnProvenance,
 } from "../net/orchestrator";
-import { shouldGhostRoute } from "../net/ghostHotMic";
+import { GHOST_INVOKE_BUDGET_MS, shouldGhostRoute } from "../net/ghostHotMic";
 
 /**
  * Parse a transcript using the Rust-side enhanced intent parser.
@@ -742,6 +742,7 @@ export async function processTranscript(
     if (!useAssistant.getState().ghostActive) {
       missStreak = 0;
       useAssistant.getState().setVisible(false);
+      // turn-end:keep-raw non-ghost ambient drop; ghost sessions return above and keep the hot mic
       setTimeout(() => useAssistant.getState().reset(), 550);
     }
     return;
@@ -757,6 +758,12 @@ export async function processTranscript(
       const misses = recordSilentMiss();
       if (misses < GHOST_SILENT_CAP) {
         console.log(`[NEXUS] ghost hot-mic: silent (${misses}/${GHOST_SILENT_CAP}) — re-listening quietly`);
+        // A phantom capture ends without the orb ever reaching `thinking`, so the state is
+        // still `listening` and the relisten below would read as a second-press CANCEL
+        // (live log: "second press while listening → aborting capture", mic dead).
+        // reset() keeps ghostActive and visibility; it only returns the state to idle.
+        // turn-end:keep-raw reset FIRST so the relisten is not read as a second-press cancel
+        useAssistant.getState().reset();
         const { triggerFollowupListen } = await import("../stage/orbRuntime");
         triggerFollowupListen(true);
         return;
@@ -774,6 +781,7 @@ export async function processTranscript(
       // reset() FIRST (state idle unlocks startListening's second-press
       // guard — without this the relisten below reads as a cancel), then
       // re-wake. Orb stays visible: continuous listening, no flicker.
+      // turn-end:keep-raw reset FIRST so the relisten below is not read as a second-press cancel
       useAssistant.getState().reset();
       const { triggerFollowupListen } = await import("../stage/orbRuntime");
       triggerFollowupListen();
@@ -790,10 +798,12 @@ export async function processTranscript(
       void speak("I didn't hear you, sir.")
         .then(() => {
           hideOrbIfIdle();
+          // turn-end:keep-raw nag turn ends here, then orb closes (non-ghost path)
           useAssistant.getState().reset();
         })
         .catch(() => {
           hideOrbIfIdle();
+          // turn-end:keep-raw nag turn ends here, then orb closes (non-ghost path)
           useAssistant.getState().reset();
         });
     }
@@ -806,27 +816,50 @@ export async function processTranscript(
   // accepted by the Rust side; the gate fails open if it is unavailable.
   if (useAssistant.getState().ghostActive) {
     const { askDirectedGate, gateAction } = await import("../net/directedGate");
-    const { recordSilentMiss, resetSilentMisses, GHOST_SILENT_CAP } = await import("../net/ghostHotMic");
+    const { recordIgnoredTurn, resetIgnoredTurns, markGhostParked, GHOST_IGNORED_CAP } =
+      await import("../net/ghostHotMic");
     const verdict = await askDirectedGate(applyLearnedCorrections(correctSttTranscript(transcript)));
     if (!verdict.accept) {
-      const action = gateAction(verdict, recordSilentMiss(), GHOST_SILENT_CAP);
+      // Ignored speech (TV, side talk, echo) has its OWN streak, windowed in time:
+      // it used to share the silent-capture counter, so three sentences from the TV
+      // parked the mic with no word and the next real command went nowhere.
+      const action = gateAction(verdict, recordIgnoredTurn(), GHOST_IGNORED_CAP);
       void traceInvoke("debug_trace", { msg: `p0 directed-gate ignored reason=${verdict.reason} action=${action}` }).catch(() => {});
       console.log(`[NEXUS] directed gate: ignored (${verdict.reason}) — ${action}`);
       if (action === "relisten") {
+        // Same reason as the silent-miss path: leave `thinking`/`listening` behind first.
+        // turn-end:keep-raw reset FIRST so the relisten is not read as a second-press cancel
+        useAssistant.getState().reset();
         const { triggerFollowupListen } = await import("../stage/orbRuntime");
         triggerFollowupListen(true);
       } else {
-        // Parked: stop the hot mic until the user wakes NEXUS again (ghost session itself stays live).
-        resetSilentMisses();
-        useAssistant.getState().reset();
+        // Parked: the hot mic stops re-arming until the user wakes NEXUS (the ghost session
+        // itself stays live). Say so once instead of going deaf with no explanation.
+        resetIgnoredTurns();
+        markGhostParked();
+        const parkLine = "Pausing the mic, sir. Say Nexus when you need me.";
+        const st = useAssistant.getState();
+        st.setVisible(true);
+        st.setState("speaking");
+        st.addAssistantMessage(parkLine);
+        const { speak } = await import("./ttsPlayer");
+        void speak(parkLine)
+          .catch(() => {})
+          .finally(() => {
+            // turn-end:keep-raw directed-gate park: no relisten until a wake or hotkey; announced once
+            useAssistant.getState().reset();
+          });
       }
       return;
     }
   }
 
-  // Successful transcript — any heard speech resets the ghost silence streak.
-  const { resetSilentMisses: resetGhostSilence } = await import("../net/ghostHotMic");
+  // Successful transcript — any heard speech resets the ghost silence and ignored-turn streaks.
+  const { resetSilentMisses: resetGhostSilence, resetIgnoredTurns: resetGhostIgnored, clearGhostParked: clearParked } =
+    await import("../net/ghostHotMic");
   resetGhostSilence();
+  resetGhostIgnored();
+  clearParked();
   missStreak = 0;
   const provenance: TurnProvenance = {
     ownership: turn.ownership ?? "unenrolled",
@@ -1031,12 +1064,34 @@ export async function processTranscript(
     // path instead of dying silently.
     const ghostTurn = useAssistant.getState().ghostActive && !isLongFinal;
     const result = await processViaOrchestrator(corrected, undefined, provenance, {
-      timeoutMs: ghostTurn ? 12000 : undefined,
+      timeoutMs: ghostTurn ? GHOST_INVOKE_BUDGET_MS : undefined,
     });
-    console.log("[NEXUS] orchestrator process result:", result);
+    // Serialized: CDP forwards console args without remote-object
+    // resolution, so a raw object arrives as useless "Object".
+    console.log(
+      "[NEXUS] orchestrator process result:",
+      JSON.stringify(result)?.slice(0, 160) ?? String(result),
+    );
     void traceInvoke("debug_trace", { msg: `p4 orch result=${result ? result.subsystem : "null"}` }).catch(() => {});
 
     if (result?.handled_locally) {
+      // Rust returns handled_locally WITHOUT any event for rejected turns,
+      // ambient drops, unrecognised phrases and queued commands. Ghost turns
+      // are owned by the hot-mic loop: close one that no event closed, right
+      // now, and re-arm the mic (it used to wait ~28 s for the stall watchdog).
+      const { closeHandledLocallyTurn } = await import("../net/ghostHotMic");
+      if (await closeHandledLocallyTurn()) return;
+      // Non-ghost: if nothing moved the orb within 8 s it is parked in
+      // `thinking` forever; close the turn (long-running work shows the
+      // loading indicator, which also exempts it).
+      setTimeout(() => {
+        const s = useAssistant.getState();
+        if (s.state === "thinking" && !s.ghostActive && !s.loadingVisible && !s.awaitingInput) {
+          console.warn("[ORB] handled_locally turn left the orb in thinking; closing it");
+          // turn-end:keep-raw non-ghost stuck-in-thinking guard; ghost turns are owned by the hot-mic loop
+          s.reset();
+        }
+      }, 8000);
       return;
     }
     return;
@@ -1329,7 +1384,10 @@ export async function finishCapture(): Promise<void> {
     // It emits events on the "orchestrator:event" channel which the
     // frontend listener (net/orchestrator.ts) translates to UI state.
     const result = await processViaOrchestrator(transcript);
-    console.log("[NEXUS] orchestrator process result:", result);
+    console.log(
+      "[NEXUS] orchestrator process result:",
+      JSON.stringify(result)?.slice(0, 160) ?? String(result),
+    );
 
     if (result?.handled_locally) {
       // Local command — orchestrator emitted "done", we're finished.
@@ -1673,7 +1731,10 @@ async function _finishCaptureFromVadInner(
     // response arrives, so we don't need to block here.
     captureInProgress = false;
     const result = await processViaOrchestrator(transcript);
-    console.log("[NEXUS] orchestrator process result (vad):", result);
+    console.log(
+      "[NEXUS] orchestrator process result (vad):",
+      JSON.stringify(result)?.slice(0, 160) ?? String(result),
+    );
     return;
   } catch (err) {
     console.warn("[NEXUS] orchestrator unavailable for query (vad):", err);

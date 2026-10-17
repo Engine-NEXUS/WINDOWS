@@ -149,6 +149,7 @@ pub struct PendingCompound {
     /// The orchestrator request_id this compound belongs to.
     pub request_id: String,
     /// The full original transcript.
+    #[allow(dead_code)]
     pub transcript: String,
     /// Provenance inherited from the turn that created the compound, so
     /// resumed steps keep the original ownership decision.
@@ -176,6 +177,7 @@ pub struct PlanCheckpoint {
 }
 
 /// Checkpoints older than this are swept on boot.
+#[allow(dead_code)]
 pub const CHECKPOINT_STALE_SECS: i64 = 3600;
 
 fn sanitize_task_id(task_id: &str) -> String {
@@ -220,6 +222,7 @@ pub fn clear_checkpoint(app_data_dir: &std::path::Path, task_id: &str) {
 }
 
 /// Read a checkpoint back (roundtrip / future resume UI).
+#[allow(dead_code)]
 pub fn read_checkpoint(
     app_data_dir: &std::path::Path,
     task_id: &str,
@@ -231,6 +234,7 @@ pub fn read_checkpoint(
 /// Delete checkpoints older than CHECKPOINT_STALE_SECS. Returns count.
 /// Called once on boot — a crash never auto-executes, it only leaves a
 /// record that is swept here with a log line.
+#[allow(dead_code)]
 pub fn sweep_stale_checkpoints(app_data_dir: &std::path::Path) -> usize {
     let now = chrono::Utc::now().timestamp();
     let Ok(entries) = std::fs::read_dir(app_data_dir) else {
@@ -625,17 +629,19 @@ pub(crate) async fn execute_step<R: Runtime>(
                     StepOutcome::Done(mk(StepStatus::Succeeded, text, None))
                 }
                 crate::github_cmd::GitHubResult::NeedsConfirmation { prompt, command } => {
-                    // Emit the Confirm event — same shape as the GitHub path.
+                    // Emit the Confirm event — constructed from the real
+                    // enum (not hand-typed JSON) so this can never silently
+                    // drift from the GitHub path's own Confirm shape if the
+                    // enum ever changes.
                     let cmd_json =
                         serde_json::to_value(command).unwrap_or(serde_json::Value::Null);
                     app.emit(
                         "orchestrator:event",
-                        serde_json::json!({
-                            "type": "confirm",
-                            "prompt": prompt,
-                            "request_id": request_id,
-                            "command": cmd_json,
-                        }),
+                        &crate::orchestrator::OrchestratorEvent::Confirm {
+                            prompt: prompt.clone(),
+                            request_id: request_id.to_string(),
+                            command: cmd_json,
+                        },
                     )
                     .ok();
                     StepOutcome::AwaitingConfirmation(mk(

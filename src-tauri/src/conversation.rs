@@ -29,6 +29,8 @@ const MAX_LIVE_TURNS: usize = 6;
 const MAX_LIVE_CHARS: usize = 1_500;
 const MAX_BRIEF_CHARS: usize = 400;
 const COMPACT_RAW_CHARS: usize = 3_000;
+/// Turns newer than this are always part of the live thread, whatever their relevance score.
+const RECENT_SECS: i64 = 15 * 60;
 
 static TURN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -167,6 +169,131 @@ pub fn record_conversation_turn(dir: &Path, input: ConversationTurnInput) -> Opt
         write_brief(dir, &brief);
     }
     Some(turn.id)
+}
+
+// ─── Local turns (doc 124 Q3) ────────────────────────────────────────
+//
+// Only cloud turns used to be recorded, so "open Chrome", "start hand mode" or a shutdown never entered
+// the thread and "do it" / "what did I just ask" had nothing to read. A turn handled locally is armed
+// when it is accepted and recorded with the first line NEXUS speaks for it.
+
+/// A turn handled on-device that is waiting for the line NEXUS speaks for it.
+#[derive(Debug, Clone)]
+pub struct LocalTurn {
+    pub transcript: String,
+    pub intent: String,
+    pub owner: TurnOwnership,
+}
+
+static LOCAL_TURN: std::sync::Mutex<Option<LocalTurn>> = std::sync::Mutex::new(None);
+
+/// A new locally handled turn was accepted; replaces any turn that never got a spoken reply.
+pub fn begin_local_turn(transcript: &str, intent: &str, owner: TurnOwnership) {
+    if owner == TurnOwnership::Rejected {
+        return;
+    }
+    *LOCAL_TURN.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some(LocalTurn { transcript: transcript.to_string(), intent: intent.to_string(), owner });
+}
+
+/// Take the waiting turn (once).
+pub fn take_local_turn() -> Option<LocalTurn> {
+    LOCAL_TURN.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+/// Record a local turn with the line NEXUS answered. Quality-gated like cloud turns.
+pub fn record_local_turn(dir: &Path, turn: LocalTurn, response: &str) -> Option<String> {
+    if crate::memcore::hygiene::admit_conversation_turn(&turn.transcript, response, true).is_err() {
+        return None;
+    }
+    record_conversation_turn(
+        dir,
+        ConversationTurnInput {
+            agent: "local".to_string(),
+            intent: turn.intent,
+            transcript: turn.transcript,
+            response: response.to_string(),
+            outcome: ConversationOutcome::Completed,
+            unresolved: Vec::new(),
+            owner: turn.owner,
+        },
+    )
+}
+
+/// The most recent exchange no older than `within_secs`: (what the user said, what NEXUS answered).
+pub fn last_exchange(dir: &Path, now: i64, within_secs: i64) -> Option<(String, String)> {
+    read_turns(dir)
+        .into_iter()
+        .rev()
+        .find(|t| now - t.ts <= within_secs && t.owner != TurnOwnership::Rejected && !t.response.trim().is_empty())
+        .map(|t| (t.transcript, t.response))
+}
+
+/// A bare "do it" / "go ahead" that is not an answer to anything pending. Strict: the whole sentence.
+pub fn is_bare_do_it(text: &str) -> bool {
+    let t: String = text
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '\'' { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let t = t.strip_prefix("nexus ").unwrap_or(&t);
+    matches!(
+        t,
+        "do it"
+            | "do that"
+            | "go ahead"
+            | "go for it"
+            | "do it now"
+            | "yes do it"
+            | "yes go ahead"
+            | "please do it"
+            | "please go ahead"
+            | "yes please do it"
+            | "okay do it"
+            | "ok do it"
+            | "do it please"
+            | "go ahead please"
+    )
+}
+
+/// What NEXUS says to a bare "do it" with nothing pending, grounded in what it really last said.
+pub fn do_what_line(last: Option<(String, String)>) -> String {
+    match last {
+        Some((_, said)) => {
+            let said = said.trim();
+            let clipped: String = said.chars().take(90).collect();
+            let clipped = if said.chars().count() > 90 { format!("{clipped}...") } else { clipped };
+            format!("Do what, sir? Nothing is waiting for an answer. My last words were: {clipped}")
+        }
+        None => "Do what, sir? Nothing is waiting for an answer.".to_string(),
+    }
+}
+
+/// One-time hygiene cleanup: drop turns that fail the admit gate and delete the (possibly
+/// poisoned) brief, which is rebuilt from the surviving turns. Returns (turns removed, brief deleted).
+pub fn purge_junk(dir: &Path) -> (usize, bool) {
+    let turns = read_turns(dir);
+    let before = turns.len();
+    let kept: Vec<ConversationTurn> = turns
+        .into_iter()
+        .filter(|t| {
+            crate::memcore::hygiene::admit_conversation_turn(
+                &t.transcript,
+                &t.response,
+                t.outcome == ConversationOutcome::Completed,
+            )
+            .is_ok()
+        })
+        .collect();
+    let removed = before - kept.len();
+    if removed > 0 {
+        write_turns(dir, &kept);
+    }
+    let brief_deleted = std::fs::remove_file(brief_path(dir)).is_ok();
+    (removed, brief_deleted)
 }
 
 /// Requests NEXUS could not finish in the last 48 h (failed turns, or turns
@@ -370,7 +497,9 @@ fn compact_thread(
 
     let cutoff = turns.len().saturating_sub(MAX_RAW_TURNS);
     let (archived, live) = turns.split_at(cutoff);
-    let brief = merge_briefs(previous, &summarize_thread(archived));
+    // Local (on-device) turns never go into the durable brief: it is sent to the cloud.
+    let cloud_archived: Vec<ConversationTurn> = archived.iter().filter(|t| t.agent != "local").cloned().collect();
+    let brief = merge_briefs(previous, &summarize_thread(&cloud_archived));
     (live.to_vec(), Some(brief))
 }
 
@@ -413,9 +542,29 @@ pub fn unresolved_from_dialog_state(dialog_state: Option<&serde_json::Value>) ->
 /// Build the bounded prompt block used for cloud reasoning: a durable brief
 /// plus the highest-signal recent turns. PII is redacted before return.
 pub fn conversation_prompt(dir: &Path) -> Option<String> {
-    let turns = read_turns(dir);
-    let brief = read_brief(dir);
-    let live = live_thread(&turns);
+    // On-device turns ("open chrome", a WhatsApp message) stay on the device: they never reach the cloud.
+    let turns: Vec<ConversationTurn> = read_turns(dir).into_iter().filter(|t| t.agent != "local").collect();
+    // A brief built from garbled turns ("I don't know. I don't know...") is worse than none.
+    let brief = read_brief(dir).map(|mut b| {
+        let ok = crate::memcore::hygiene::brief_line_ok;
+        if !ok(&b.goal) {
+            b.goal.clear();
+        }
+        if !ok(&b.active_task) {
+            b.active_task.clear();
+        }
+        b.key_points.retain(|p| ok(p));
+        b
+    });
+    // Low-signal completed turns (intent "unknown", relevance < 40) are the STT-noise tail; they
+    // filled the prompt's free slots and were re-sent on every cloud turn.
+    // The last RECENT_SECS always count (the user's next sentence may refer to them: "do it",
+    // "the second one", "what did I just ask"); only OLDER low-signal turns are pruned.
+    let now = chrono::Utc::now().timestamp();
+    let live: Vec<ConversationTurn> = live_thread(&turns)
+        .into_iter()
+        .filter(|t| t.outcome != ConversationOutcome::Completed || t.relevance >= 40 || now - t.ts <= RECENT_SECS)
+        .collect();
     if live.is_empty() && brief.as_ref().map_or(true, is_empty_brief) {
         return None;
     }
@@ -493,6 +642,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_local_turn_is_recorded_once_with_the_first_spoken_line_and_feeds_last_exchange() {
+        let dir = tempdir("local_turn");
+        begin_local_turn("open chrome and search for rust", "open_app", TurnOwnership::Verified);
+        let turn = take_local_turn().expect("armed");
+        assert!(take_local_turn().is_none(), "a turn is recorded once");
+        let id = record_local_turn(&dir, turn, "Opening Chrome, sir.");
+        assert!(id.is_some());
+        let now = chrono::Utc::now().timestamp();
+        assert_eq!(
+            last_exchange(&dir, now, 600),
+            Some(("open chrome and search for rust".to_string(), "Opening Chrome, sir.".to_string()))
+        );
+        assert!(last_exchange(&dir, now + 3_600, 600).is_none(), "an hour later it is no longer 'just now'");
+        // Rejected audio never arms anything.
+        begin_local_turn("some tv line about weather", "unknown", TurnOwnership::Rejected);
+        assert!(take_local_turn().is_none());
+    }
+
+    #[test]
+    fn recent_low_signal_turns_stay_in_the_cloud_thread_but_old_ones_do_not() {
+        let dir = tempdir("recent_thread");
+        let mut recent = turn("open the pod bay doors please", "I'm afraid I can't do that, sir.", ConversationOutcome::Completed, &[], TurnOwnership::Verified);
+        recent.ts = chrono::Utc::now().timestamp() - 60;
+        recent.relevance = 20;
+        let mut old = recent.clone();
+        old.id = "t-old".into();
+        old.transcript = "tell me about the weather yesterday morning".into();
+        old.ts = chrono::Utc::now().timestamp() - 3 * 3600;
+        write_turns(&dir, &[old, recent]);
+        let prompt = conversation_prompt(&dir).expect("the recent turn is in the thread");
+        assert!(prompt.contains("pod bay doors"), "{prompt}");
+        assert!(!prompt.contains("weather yesterday"), "{prompt}");
+    }
+
+    #[test]
+    fn on_device_turns_never_enter_the_cloud_prompt() {
+        let dir = tempdir("local_not_cloud");
+        begin_local_turn("send mummy a whatsapp saying the secret plan", "send_whatsapp_message", TurnOwnership::Verified);
+        let t = take_local_turn().unwrap();
+        record_local_turn(&dir, t, "Message to mummy is ready, sir.").unwrap();
+        assert!(conversation_prompt(&dir).is_none(), "a purely local thread must not produce any cloud prompt");
+    }
+
+    #[test]
+    fn bare_do_it_is_strict_and_the_reply_quotes_what_was_really_said() {
+        for t in ["do it", "Do it.", "nexus, go ahead", "yes do it", "OK do it!"] {
+            assert!(is_bare_do_it(t), "{t}");
+        }
+        for t in ["do it again tomorrow", "go ahead and open chrome", "what should I do", "yes", "open notepad"] {
+            assert!(!is_bare_do_it(t), "{t}");
+        }
+        assert!(do_what_line(None).starts_with("Do what, sir?"));
+        let line = do_what_line(Some(("q".into(), "Shall I summarise the report?".into())));
+        assert!(line.contains("Shall I summarise the report?"), "{line}");
     }
 
     #[test]
@@ -604,7 +810,8 @@ mod tests {
                 &dir,
                 ConversationTurnInput {
                     agent: "worker".to_string(),
-                    intent: "unknown".to_string(),
+                    // A real intent: "unknown" turns are low-signal and deliberately kept out of the prompt.
+                    intent: "search".to_string(),
                     transcript: format!("owner question {index} from jane.doe@example.com"),
                     response: format!("owner answer {index}"),
                     outcome: ConversationOutcome::Completed,

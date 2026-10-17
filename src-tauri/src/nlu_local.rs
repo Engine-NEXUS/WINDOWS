@@ -193,12 +193,31 @@ fn load_model() -> Option<Arc<NluModel>> {
     Some(Arc::new(NluModel { plan, tokenizer, intents, slots }))
 }
 
+/// Serialises the first load: a parse that arrives while the wake-time prewarm is still loading waits for
+/// it (0.3-0.7 s) instead of seeing "no model" and silently skipping the local classifier for that turn.
+static LOAD_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// Start loading the command model in the background if it is not resident (called when a capture starts, so
+/// the model is ready by the time the transcript exists and the first command pays no load time).
+pub fn prewarm() {
+    if MODEL.read().is_some() || INIT_ATTEMPTED.load(Ordering::SeqCst) {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("nlu-prewarm".into()).spawn(|| {
+        let _ = get_model();
+    });
+}
+
 fn get_model() -> Option<Arc<NluModel>> {
     {
         let guard = MODEL.read();
         if let Some(m) = guard.as_ref() {
             return Some(m.clone());
         }
+    }
+    let _load = LOAD_LOCK.lock();
+    if let Some(m) = MODEL.read().as_ref() {
+        return Some(m.clone()); // another thread finished the load while we waited
     }
     // Only attempt a fresh load once per "model absent" state — avoids
     // re-parsing a missing/broken model on every single transcript.
@@ -531,5 +550,30 @@ mod tests {
         assert_eq!(result.intent, "open_app");
         assert_eq!(result.slots.get("app_name").and_then(|v| v.as_str()), Some("chrome"));
         assert!(result.confidence > 0.5, "confidence suspiciously low: {}", result.confidence);
+    }
+
+    /// Dev helper (ignored): resident memory before / after the in-process NLU model loads and after it
+    /// is dropped (docs/features/132 RAM budget).
+    #[test]
+    #[ignore]
+    fn mem_nlu_load_parse_unload() {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+        let ws = || -> f64 {
+            let pid = sysinfo::get_current_pid().expect("pid");
+            let mut sys = System::new();
+            sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::new().with_memory());
+            sys.process(pid).expect("self").memory() as f64 / 1_048_576.0
+        };
+        println!("MEMNLU 0 baseline                ws={:.0} MB", ws());
+        let t0 = std::time::Instant::now();
+        let first = parse_local("open chrome");
+        println!("MEMNLU 1 after load + 1st parse  ws={:.0} MB  ({} ms) ok={}", ws(), t0.elapsed().as_millis(), first.is_some());
+        let t1 = std::time::Instant::now();
+        for t in ["open notepad", "send a message to mom", "what is the weather", "close brave", "start hand mode"] {
+            let _ = parse_local(t);
+        }
+        println!("MEMNLU 2 after 5 more parses     ws={:.0} MB  ({} ms total)", ws(), t1.elapsed().as_millis());
+        *MODEL.write() = None;
+        println!("MEMNLU 3 after dropping the model ws={:.0} MB", ws());
     }
 }

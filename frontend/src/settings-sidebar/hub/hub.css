@@ -3,14 +3,14 @@
    (sidebar/theme.ts). Corner radii are deliberately small ("blunt"). */
 
 .hx {
-  --hx-bg: #1b1b1c;
-  --hx-card: #262627;
-  --hx-card-2: #313132;
-  --hx-border: rgba(255, 255, 255, 0.09);
+  --hx-bg: rgba(18, 18, 24, 0.65);
+  --hx-card: rgba(30, 30, 38, 0.60);
+  --hx-card-2: rgba(42, 42, 52, 0.70);
+  --hx-border: rgba(255, 255, 255, 0.10);
   --hx-rim: rgba(255, 255, 255, 0.16);
   --hx-text: #f4f4f5;
-  --hx-dim: rgba(255, 255, 255, 0.56);
-  --hx-faint: rgba(255, 255, 255, 0.34);
+  --hx-dim: rgba(255, 255, 255, 0.60);
+  --hx-faint: rgba(255, 255, 255, 0.38);
   --hx-accent: #2b9bf0;
   --hx-danger: #ff5a52;
   --hx-ok: #34c759;
@@ -18,14 +18,14 @@
   --hx-radius-lg: 12px;
 }
 :root[data-theme="light"] .hx {
-  --hx-bg: #ffffff;
-  --hx-card: #fafafa;
-  --hx-card-2: #f0f0f2;
-  --hx-border: #ececee;
-  --hx-rim: rgba(60, 60, 67, 0.22);
+  --hx-bg: rgba(244, 244, 248, 0.72);
+  --hx-card: rgba(255, 255, 255, 0.68);
+  --hx-card-2: rgba(235, 235, 242, 0.75);
+  --hx-border: rgba(0, 0, 0, 0.08);
+  --hx-rim: rgba(0, 0, 0, 0.12);
   --hx-text: #1c1c1e;
-  --hx-dim: #8a8a8e;
-  --hx-faint: #b8b8bd;
+  --hx-dim: rgba(0, 0, 0, 0.60);
+  --hx-faint: rgba(0, 0, 0, 0.40);
   --hx-accent: #0a84d6;
   --hx-danger: #e5372f;
   --hx-ok: #1fa84a;
@@ -37,6 +37,8 @@
   display: flex;
   flex-direction: column;
   background: var(--hx-bg);
+  backdrop-filter: blur(28px) saturate(190%);
+  -webkit-backdrop-filter: blur(28px) saturate(190%);
   color: var(--hx-text);
   border: 1px solid var(--hx-rim);
   border-radius: var(--hx-radius-lg);
@@ -181,6 +183,8 @@
 /* ── Cards ── */
 .hx-card {
   background: var(--hx-card);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   border: 1px solid var(--hx-border);
   border-radius: var(--hx-radius);
 }

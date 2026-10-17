@@ -11,6 +11,7 @@ import {
   categoryLabel,
   fmtDays,
   fmtSlotTime,
+  leaveBySummary,
   mailSummary,
   selftestSummary,
   whatsappSummary,
@@ -36,6 +37,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
   const [mail, setMail] = useState<MailRow[]>([]);
   const [people, setPeople] = useState<PersonRow[]>([]);
   const [selftest, setSelftest] = useState<WhatsappSelfTest | null>(null);
+  const [hasRoutesKey, setHasRoutesKey] = useState(false);
   const [showEgress, setShowEgress] = useState(false);
   const [confirm, setConfirm] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -43,13 +45,14 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
 
   const load = useCallback(async () => {
     try {
-      const [s, r, e, t, m, ppl] = await Promise.all([
+      const [s, r, e, t, m, ppl, keys] = await Promise.all([
         invoke<MemoryStatus>("memcore_status"),
         invoke<MemoryRow[]>("memcore_list"),
         invoke<EgressEntry[]>("memcore_egress_log", { limit: 50 }),
         invoke<TimetableSlot[]>("memcore_timetable"),
         invoke<MailRow[]>("memcore_mail_list"),
         invoke<PersonRow[]>("memcore_people"),
+        invoke<{ service: string; has_key: boolean }[]>("api_keys_list").catch(() => [] as { service: string; has_key: boolean }[]),
       ]);
       setStatus(s);
       setRows(r);
@@ -57,6 +60,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
       setSlots(t);
       setMail(m);
       setPeople(ppl);
+      setHasRoutesKey(keys.some((k) => k.service === "google_maps" && k.has_key));
     } catch (e) {
       setError(String(e));
     }
@@ -292,6 +296,16 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
           </div>
           {selftest && <div className="hx-key-sub">{selftestSummary(selftest)}</div>}
           <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
+            <span className="hx-key-sub">Tell me when to leave for calendar events that have an address (uses live traffic)</span>
+            <input
+              type="checkbox"
+              checked={status.leave_by !== false}
+              disabled={busy}
+              onChange={(e) => setFlag("memcoreLeaveBy", e.target.checked)}
+            />
+          </label>
+          <div className="hx-key-sub">{leaveBySummary(status, hasRoutesKey)}</div>
+          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
             <span className="hx-key-sub">Remind me at my timetable times (“It's time for DSA. Shall I start?”)</span>
             <input
               type="checkbox"
@@ -307,6 +321,26 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
               checked={status.briefing}
               disabled={busy}
               onChange={(e) => setFlag("memcoreBriefing", e.target.checked)}
+            />
+          </label>
+          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
+            <span className="hx-key-sub">
+              Remember which apps, folders and browser windows are open, and offer to reopen them after a restart
+            </span>
+            <input
+              type="checkbox"
+              checked={status.session !== false}
+              disabled={busy}
+              onChange={(e) => setFlag("memcoreSession", e.target.checked)}
+            />
+          </label>
+          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
+            <span className="hx-key-sub">Check my connections at startup and mention anything that is broken</span>
+            <input
+              type="checkbox"
+              checked={status.health !== false}
+              disabled={busy}
+              onChange={(e) => setFlag("memcoreHealth", e.target.checked)}
             />
           </label>
         </div>

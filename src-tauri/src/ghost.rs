@@ -55,106 +55,6 @@ static GHOST_CANCEL: std::sync::atomic::AtomicBool =
 /// bare test session (no queueing — nothing will drain it).
 static GHOST_BUSY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// Relisten watchdog (P1 deployment): heals the Active-but-deaf class.
-/// Frontend turn-ends should relisten via endGhostTurn, but any missed
-/// path leaves a live session nobody listens to. Pokes at most
-/// WATCHDOG_MAX_POKES times per session, 15 s apart: enough to heal a
-/// dropped turn-end, bounded so a deliberately parked session is never
-/// force-listened forever (each poke costs one STT capture).
-pub const WATCHDOG_IDLE_MS: u64 = 15_000;
-pub const WATCHDOG_MAX_POKES: u32 = 3;
-const WATCHDOG_POLL_MS: u64 = 5_000;
-
-struct WatchdogState {
-    last_activity_ms: u64,
-    pokes_this_session: u32,
-    last_poke_ms: u64,
-}
-
-static WATCHDOG: once_cell::sync::Lazy<parking_lot::Mutex<WatchdogState>> =
-    once_cell::sync::Lazy::new(|| {
-        parking_lot::Mutex::new(WatchdogState {
-            last_activity_ms: 0,
-            pokes_this_session: 0,
-            last_poke_ms: 0,
-        })
-    });
-
-fn wall_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-/// Record user-visible turn progress (session enter, capture start,
-/// drill end). Resets the poke budget — a live loop never spends it.
-pub fn note_ghost_activity() {
-    let mut w = WATCHDOG.lock();
-    w.last_activity_ms = wall_ms();
-    w.pokes_this_session = 0;
-}
-
-/// Pure poke decision (unit-tested with fake clocks).
-pub fn should_watchdog_poke(
-    last_activity_ms: u64,
-    pokes_this_session: u32,
-    last_poke_ms: u64,
-    now_ms: u64,
-    session_live: bool,
-    busy: bool,
-) -> bool {
-    if !session_live || busy {
-        return false;
-    }
-    if pokes_this_session >= WATCHDOG_MAX_POKES {
-        return false;
-    }
-    if now_ms.saturating_sub(last_activity_ms) < WATCHDOG_IDLE_MS {
-        return false;
-    }
-    if pokes_this_session > 0 && now_ms.saturating_sub(last_poke_ms) < WATCHDOG_IDLE_MS {
-        return false;
-    }
-    true
-}
-
-fn watchdog_poll(now_ms: u64, session_live: bool, busy: bool) -> bool {
-    let mut w = WATCHDOG.lock();
-    if should_watchdog_poke(
-        w.last_activity_ms,
-        w.pokes_this_session,
-        w.last_poke_ms,
-        now_ms,
-        session_live,
-        busy,
-    ) {
-        w.pokes_this_session += 1;
-        w.last_poke_ms = now_ms;
-        return true;
-    }
-    false
-}
-
-/// Spawn the relisten watchdog thread. Emits `ghost:relisten`, which the
-/// frontend answers with the guarded maybeGhostRelisten (echo + meeting
-/// checks) — Rust never captures blind.
-pub fn spawn_relisten_watchdog<R: Runtime>(app: AppHandle<R>) {
-    std::thread::Builder::new()
-        .name("ghost-watchdog".into())
-        .spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_millis(WATCHDOG_POLL_MS));
-            let busy = drill_running() || crate::wakeword_oww::stt_capturing();
-            if watchdog_poll(wall_ms(), session_active(), busy) {
-                tracing::warn!(
-                    "ghost: watchdog poke — session live but idle, re-emitting listen"
-                );
-                crate::commands::emit_logged(&app, "ghost:relisten", serde_json::json!({ "reason": "watchdog" }));
-            }
-        })
-        .ok();
-}
-
 /// Follow-up commands captured mid-drill, in arrival order (FIFO).
 /// Entries carry their slot class so same-slot pendings can supersede
 /// (Rule 2) instead of double-executing.
@@ -259,10 +159,32 @@ const STOP_PHRASES: &[&str] = &[
     "exit goes to mode",
 ];
 
-/// Pure stop-phrase check (unit-tested).
+/// Words STT/users put around a stop ("Nexus, stop.", "okay stop please").
+const STOP_FILLERS: &[&str] = &["nexus", "hey", "okay", "ok", "please", "now"];
+
+/// Lowercase, drop punctuation (STT ends utterances with "." / "!" / "?"), collapse
+/// whitespace and peel filler words off both ends. Pure.
+fn normalize_stop_text(text: &str) -> String {
+    let cleaned: String = text
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '\'' { c } else { ' ' })
+        .collect();
+    let mut words: Vec<&str> = cleaned.split_whitespace().collect();
+    while words.first().map_or(false, |w| STOP_FILLERS.contains(w)) {
+        words.remove(0);
+    }
+    while words.last().map_or(false, |w| STOP_FILLERS.contains(w)) {
+        words.pop();
+    }
+    words.join(" ")
+}
+
+/// Pure stop-phrase check (unit-tested). Punctuation- and filler-tolerant: "Stop." and
+/// "Nexus, hold on!" count; "stop the music" and "cancel my subscription" do not.
 pub fn is_stop_phrase(text: &str) -> bool {
-    let t = text.trim().to_lowercase();
-    STOP_PHRASES.iter().any(|s| *s == t)
+    let t = normalize_stop_text(text);
+    !t.is_empty() && STOP_PHRASES.iter().any(|s| *s == t)
 }
 
 /// Request cancellation of the running ghost task (voice stop path).
@@ -280,10 +202,26 @@ fn clear_stop() {
     GHOST_CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Drop a stop flag left behind with no drill to consume it (a `live_cancel`
+/// while idle). Called when a new top-level command starts; a stop raised
+/// DURING a drill is left alone (the drill is still observing it).
+pub fn clear_stale_stop() {
+    if !drill_running() {
+        clear_stop();
+    }
+}
+
 /// True while a ghost drill's main steps execute (queue + intercept
 /// follow-ups). Bare test sessions don't set this — nothing drains them.
 pub fn drill_running() -> bool {
     GHOST_BUSY.load(std::sync::atomic::Ordering::Relaxed) > 0
+}
+
+/// IPC: is a drill (an action NEXUS is carrying out on screen) running right now? The frontend's
+/// stall watchdog must NOT re-arm the mic over it: that re-arm used to cancel a WhatsApp drill.
+#[tauri::command]
+pub fn ghost_drill_running() -> bool {
+    drill_running()
 }
 
 /// Mark drill start (called by runners after session entry).
@@ -293,14 +231,18 @@ pub fn drill_begin() {
 
 /// Mark drill end (called by runners before session exit / drain).
 pub fn drill_end() {
-    GHOST_BUSY.fetch_update(
+    let prev = GHOST_BUSY.fetch_update(
         std::sync::atomic::Ordering::Relaxed,
         std::sync::atomic::Ordering::Relaxed,
         |v| Some(v.saturating_sub(1)),
-    ).ok();
-    // A finished turn is progress — but if the frontend loop is dead no
-    // capture follows, and the watchdog must poke after the idle window.
-    note_ghost_activity();
+    );
+    // The last in-flight drill has ended, so every step that could observe the
+    // stop has run: consume it. Before this, a voice "stop" stayed set until
+    // the next `ghost_enter`, and every later runner answered "Stopped, sir."
+    // while the session still said it was on (found in the 2026-10-12 audit).
+    if matches!(prev, Ok(v) if v <= 1) {
+        clear_stop();
+    }
 }
 
 /// RAII drill guard: brackets an unbracketed ghost action so
@@ -581,6 +523,7 @@ fn abort_session(app: &tauri::AppHandle<tauri::Wry>, reason: &str) {
     *EXPECTED.lock() = None;
     unregister_esc(app);
     ring_off(app);
+    crate::hand::stop_if_ghost_started(app);
     crate::center::direct_ui(app, crate::center::UiDirective::Session(false));
     // Every abort path (Esc panic, takeover, API/Ctrl+Space) speaks the
     // same exit line — an exit with no feedback reads as "Esc did nothing".
@@ -671,25 +614,31 @@ pub fn get_pending_ghost_session() -> bool {
 #[tauri::command]
 pub async fn ghost_enter(app: AppHandle<tauri::Wry>) -> Result<(), String> {
     crate::stage::stage_show(app.clone()).await?;
-    *SESSION.lock() = Session::Active;
-    *EXPECTED.lock() = None;
-    *LAST_SEEN.lock() = None;
-    *LAST_RING_SENT.lock() = None;
-    clear_stop();
-    // Fresh session: activity baseline + full poke budget for the
-    // relisten watchdog.
-    note_ghost_activity();
-    // Fresh session: the queue depth-ACK ("Queued, sir.") may fire again.
-    reset_depth_ack();
     // Always unregister first: a previous session that ended via abort_session
     // (Esc panic) sets SESSION=Yielded and may leave a stale Esc shortcut
     // registered. Calling register_esc on top of an existing registration
     // silently fails on some platforms or stacks duplicate handlers.
     // Unregistering first gives a clean slate every time.
+    //
+    // The cancel button is armed BEFORE the session becomes Active: a session
+    // that cannot be cancelled with Esc must never exist (it used to be marked
+    // Active first, so a failed registration left a live session behind an
+    // error the caller dropped).
     #[cfg(not(target_os = "linux"))]
-    unregister_esc(&app);
-    #[cfg(not(target_os = "linux"))]
-    register_esc(&app)?;
+    {
+        unregister_esc(&app);
+        register_esc(&app)?;
+    }
+    *SESSION.lock() = Session::Active;
+    *EXPECTED.lock() = None;
+    *LAST_SEEN.lock() = None;
+    *LAST_RING_SENT.lock() = None;
+    clear_stop();
+    // Fresh session: the queue depth-ACK ("Queued, sir.") may fire again.
+    reset_depth_ack();
+    // The owner just asked for Ghost mode: their next commands are the conversation.
+    crate::directed::set_engagement_secs(crate::directed::read_engagement_secs(&app));
+    crate::directed::engage_now();
     tracing::warn!("ghost: session ACTIVE — use the mouse freely; Esc cancels the session");
     crate::center::direct_ui(&app, crate::center::UiDirective::Session(true));
     if let Ok(dir) = app.path().app_data_dir() {
@@ -843,6 +792,26 @@ mod tests {
         assert!(!is_stop_phrase(""));
     }
 
+    // STT (Groq) ends every utterance with punctuation: "Stop." / "Hold on!".
+    // The exact-match check used to miss all of them, so mid-drill stops only
+    // worked when the parser happened to also produce a cancel_action.
+    #[test]
+    fn test_stop_phrases_survive_stt_punctuation_and_fillers() {
+        for t in [
+            "Stop.", "stop!", "Hold on.", "Never mind.", "Halt!", "Abort.", "Cancel?",
+            "Nexus, stop.", "okay stop", "Please stop.", "stop please.", "Nexus stop it",
+            "hey nexus, hold on",
+        ] {
+            assert!(is_stop_phrase(t), "{t:?} must count as a stop");
+        }
+        for t in [
+            "stop the music", "stop playing", "hold on to that", "cancel my subscription",
+            "stop typing", "open chrome", "nexus", "please", "okay",
+        ] {
+            assert!(!is_stop_phrase(t), "{t:?} must NOT count as a stop");
+        }
+    }
+
     #[test]
     fn test_followup_queue_cap_drops_newest() {
         FOLLOWUP_QUEUE.lock().clear();
@@ -950,56 +919,6 @@ mod tests {
     }
 
     #[test]
-    fn test_watchdog_pokes_live_idle_session() {
-        // Idle past the window, session live, nothing running → poke.
-        assert!(should_watchdog_poke(0, 0, 0, WATCHDOG_IDLE_MS + 1, true, false));
-        // Fresh activity → no poke (healthy loop resets the baseline).
-        assert!(!should_watchdog_poke(
-            WATCHDOG_IDLE_MS + 1,
-            0,
-            0,
-            WATCHDOG_IDLE_MS + 2,
-            true,
-            false
-        ));
-    }
-
-    #[test]
-    fn test_watchdog_never_pokes_dead_or_busy() {
-        // Session idle → never (exits own the mic again).
-        assert!(!should_watchdog_poke(0, 0, 0, 60_000, false, false));
-        // Drill running → never (would double-capture mid-task).
-        assert!(!should_watchdog_poke(0, 0, 0, 60_000, true, true));
-        // Poke spacing: second poke needs its own idle window.
-        assert!(!should_watchdog_poke(
-            0,
-            1,
-            WATCHDOG_IDLE_MS + 1,
-            WATCHDOG_IDLE_MS + 2,
-            true,
-            false
-        ));
-        assert!(should_watchdog_poke(
-            0,
-            1,
-            10,
-            10 + WATCHDOG_IDLE_MS + 1,
-            true,
-            false
-        ));
-    }
-
-    #[test]
-    fn test_watchdog_budget_caps_parked_sessions() {
-        // 3 pokes spent → parked session is left alone (bounded STT cost,
-        // user re-engages with the wake word).
-        assert!(!should_watchdog_poke(0, WATCHDOG_MAX_POKES, 0, 3600_000, true, false));
-        assert!(!should_watchdog_poke(0, WATCHDOG_MAX_POKES + 5, 0, 3600_000, true, false));
-        // Budget below cap still pokes when idle.
-        assert!(should_watchdog_poke(0, WATCHDOG_MAX_POKES - 1, 0, 60_000, true, false));
-    }
-
-    #[test]
     fn test_drill_busy_counter_nests_safely() {
         while drill_running() {
             drill_end();
@@ -1015,6 +934,37 @@ mod tests {
         // Saturating: never underflows.
         drill_end();
         assert!(!drill_running());
+    }
+
+    #[test]
+    fn test_stop_flag_clears_when_the_last_drill_ends() {
+        while drill_running() {
+            drill_end();
+        }
+        clear_stop();
+        drill_begin();
+        drill_begin();
+        request_stop();
+        drill_end();
+        assert!(stop_requested(), "one drill is still in flight and must still see the stop");
+        drill_end();
+        assert!(!stop_requested(), "the stop is consumed when the last drill ends");
+    }
+
+    #[test]
+    fn test_stale_stop_without_a_drill_is_dropped_but_a_live_one_is_kept() {
+        while drill_running() {
+            drill_end();
+        }
+        request_stop();
+        clear_stale_stop();
+        assert!(!stop_requested(), "no drill is running: the flag is stale");
+        drill_begin();
+        request_stop();
+        clear_stale_stop();
+        assert!(stop_requested(), "a drill is running: it is still observing the stop");
+        drill_end();
+        assert!(!stop_requested());
     }
 
     #[test]

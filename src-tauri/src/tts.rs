@@ -22,6 +22,157 @@ use tauri::{Emitter, State};
 static GLOBAL_KOKORO_ENGINE: std::sync::OnceLock<crate::tts_kokoro::KokoroEngine> =
     std::sync::OnceLock::new();
 
+/// Where short voice lines are persisted (set once at start-up).
+static DISK_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Enable the on-disk voice cache under the app data folder.
+pub fn init_disk_cache(app_data: &std::path::Path) {
+    let _ = DISK_DIR.set(crate::tts_cache_disk::dir_for(app_data));
+}
+
+/// Speech calls in flight (speak_text / speak_cached). Background cache rendering waits for 0 so it
+/// never competes with a line the user is waiting for.
+static LIVE_SPEECH: AtomicUsize = AtomicUsize::new(0);
+
+/// True while any speech call is in flight. The voice-swap worker waits for false so a voice change
+/// is applied between utterances, never mid-reply (Feature 83).
+pub fn speech_active() -> bool {
+    LIVE_SPEECH.load(Ordering::SeqCst) > 0
+}
+
+struct LiveSpeech;
+
+impl LiveSpeech {
+    fn begin() -> Self {
+        LIVE_SPEECH.fetch_add(1, Ordering::SeqCst);
+        LiveSpeech
+    }
+}
+
+impl Drop for LiveSpeech {
+    fn drop(&mut self) {
+        LIVE_SPEECH.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// First audio of a line voiced by the local neural voice must be ready within this long, or the
+/// Windows voice speaks it instead (measured: 10-45 ms; the local voice took 6-20 s per line in the
+/// 2026-10-15 logs). A cold local engine never gets the chance: it loads in the background.
+const LOCAL_FIRST_AUDIO_BUDGET_MS: u64 = 2_000;
+
+/// A healthy cloud voice answers in 0.2-0.6 s. Waiting 8 s for one that hangs (then another 2 s for the
+/// local voice) outlasted the orb's 10 s "stuck speaking" watchdog; 4 s keeps the worst case under it.
+const EDGE_FIRST_AUDIO_TIMEOUT_SECS: u64 = 4;
+
+fn words_to_tuples(c: &CaptionTrack) -> Vec<(String, u64, u64)> {
+    c.words.iter().map(|w| (w.text.clone(), w.start_ms, w.duration_ms)).collect()
+}
+
+fn cached_from_loaded(l: crate::tts_cache_disk::Loaded) -> CachedAudio {
+    let words = l
+        .words
+        .iter()
+        .map(|(t, s, d)| CaptionWord { text: t.clone(), start_ms: *s, duration_ms: *d })
+        .collect();
+    let envelope = compute_envelope(&l.samples, l.sample_rate, ENVELOPE_FRAME_MS);
+    CachedAudio {
+        sample_rate: l.sample_rate,
+        caption: CaptionTrack {
+            words,
+            total_ms: l.total_ms,
+            estimated: l.origin == crate::tts_cache_disk::Origin::Local,
+            envelope,
+            frame_ms: ENVELOPE_FRAME_MS,
+            envelope_start_ms: 0,
+            system: false,
+        },
+        samples: l.samples,
+    }
+}
+
+/// Remember a freshly rendered short line on disk (background, best effort). The Windows voice is
+/// never stored: it is a stop-gap, not the persona.
+fn persist_line_bg(text: &str, voice: &str, samples: &[f32], sample_rate: u32, caption: &CaptionTrack) {
+    let Some(dir) = DISK_DIR.get().cloned() else { return };
+    if caption.system || !crate::tts_cache_disk::cacheable(text) {
+        return;
+    }
+    let origin = if caption.estimated {
+        crate::tts_cache_disk::Origin::Local
+    } else {
+        crate::tts_cache_disk::Origin::Edge
+    };
+    let (text, voice) = (text.to_string(), voice.to_string());
+    let samples = samples.to_vec();
+    let words = words_to_tuples(caption);
+    let total_ms = caption.total_ms;
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = crate::tts_cache_disk::save(&dir, &voice, &text, origin, &samples, sample_rate, total_ms, &words) {
+            tracing::debug!("tts: could not persist '{}': {e}", text);
+            return;
+        }
+        if origin == crate::tts_cache_disk::Origin::Edge {
+            crate::tts_cache_disk::forget(&dir, &voice, &text, crate::tts_cache_disk::Origin::Local);
+        }
+    });
+}
+
+/// A line from the on-disk cache (best stored version), if any.
+async fn disk_lookup(text: &str, voice: &str) -> Option<CachedAudio> {
+    let dir = DISK_DIR.get().cloned()?;
+    if !crate::tts_cache_disk::cacheable(text) {
+        return None;
+    }
+    let (text, voice) = (text.to_string(), voice.to_string());
+    tokio::task::spawn_blocking(move || crate::tts_cache_disk::load(&dir, &voice, &text))
+        .await
+        .ok()
+        .flatten()
+        .map(cached_from_loaded)
+}
+
+/// The Windows built-in voice as a full synthesis result (estimated word timings).
+async fn system_voice_line(text: &str, reason: &str) -> Result<(Vec<f32>, u32, CaptionTrack), String> {
+    let t0 = std::time::Instant::now();
+    let (samples, sr) = crate::tts_system::synthesize(text).await?;
+    let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
+    let words = estimate_words(text, total_ms);
+    let envelope = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
+    tracing::info!("[TTS] Windows voice used ({reason}) - ready in {} ms", t0.elapsed().as_millis());
+    Ok((
+        samples,
+        sr,
+        CaptionTrack { words, total_ms, estimated: true, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0, system: true },
+    ))
+}
+
+/// Local-neural voice with a hard first-audio deadline. Cold engine, or one that is slower than
+/// `LOCAL_FIRST_AUDIO_BUDGET_MS`: the line is spoken NOW in the Windows voice while the neural
+/// engine keeps loading/rendering in the background (so the next line can use it).
+async fn synthesize_local_guarded(text: &str) -> Result<(Vec<f32>, u32, CaptionTrack), String> {
+    let owned = text.to_string();
+    let mut job = tokio::spawn(async move { synthesize_local(&owned).await });
+    if !crate::tts_network::is_local_loaded() {
+        return match system_voice_line(text, "local voice still loading").await {
+            Ok(v) => Ok(v),
+            Err(why) => {
+                tracing::warn!("tts: Windows voice unavailable ({why}); waiting for the local voice");
+                job.await.map_err(|e| format!("local voice join: {e}"))?
+            }
+        };
+    }
+    match tokio::time::timeout(std::time::Duration::from_millis(LOCAL_FIRST_AUDIO_BUDGET_MS), &mut job).await {
+        Ok(joined) => joined.map_err(|e| format!("local voice join: {e}"))?,
+        Err(_late) => match system_voice_line(text, "local voice too slow").await {
+            Ok(v) => Ok(v),
+            Err(why) => {
+                tracing::warn!("tts: Windows voice unavailable ({why}); waiting for the local voice");
+                job.await.map_err(|e| format!("local voice join: {e}"))?
+            }
+        },
+    }
+}
+
 pub struct TtsState {
     /// Local (offline) engine: Kokoro, lazy-loaded only when the cloud is unavailable.
     pub kokoro_engine: crate::tts_kokoro::KokoroEngine,
@@ -38,6 +189,35 @@ pub struct CachedAudio {
     pub samples: Vec<f32>,
     pub sample_rate: u32,
     pub caption: CaptionTrack,
+}
+
+static CACHE_REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A cached ack that was voiced by the LOCAL engine (its caption is `estimated`; the cloud path
+/// has real word boundaries) must not be played once the cloud voice is available again - the ack
+/// would sound like a different speaker than the reply that follows. Stale entries are skipped and
+/// the whole cache is re-synthesized once in the background.
+fn cache_entry_usable(
+    hit: &CachedAudio,
+    cache: &Arc<Mutex<HashMap<String, CachedAudio>>>,
+    cloud_voice: &str,
+) -> bool {
+    // A local-voice line is stale when the cloud voice is available.
+    let cloud_available = crate::tts_health::edge_recently_ok()
+        || (crate::tts_network::is_network_up() && !crate::tts_health::edge_degraded());
+    if !(hit.caption.estimated && !hit.caption.system && cloud_available) {
+        return true;
+    }
+    if !CACHE_REFRESHING.swap(true, Ordering::SeqCst) {
+        let cache = cache.clone();
+        let voice = cloud_voice.to_string();
+        tracing::info!("[TTS] cached ack is the local voice but the cloud voice works again; refreshing cache ({voice})");
+        tokio::spawn(async move {
+            pregenerate_cache(&cache, &voice).await;
+            CACHE_REFRESHING.store(false, Ordering::SeqCst);
+        });
+    }
+    false
 }
 
 /// One word's reveal timing for the response caption (plan Phase 3).
@@ -74,6 +254,9 @@ pub struct CaptionTrack {
     pub envelope: Vec<f32>,
     pub frame_ms: u64,
     pub envelope_start_ms: u64,
+    /// Voiced by the Windows built-in voice (the safety net). Internal: never sent to the frontend.
+    #[serde(skip)]
+    pub system: bool,
 }
 
 /// Evenly distribute `text`'s whitespace-split words across `total_ms` of
@@ -202,15 +385,18 @@ async fn synthesize_local(text: &str) -> Result<(Vec<f32>, u32, CaptionTrack), S
     Ok((
         samples,
         sr,
-        CaptionTrack { words, total_ms, estimated: true, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0 },
+        CaptionTrack { words, total_ms, estimated: true, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0, system: false },
     ))
 }
 
-/// Phrases that are pre-synthesized on first TTS load for instant playback.
-/// These are the high-frequency acknowledgment/error phrases that must play
-/// with zero synthesis delay to feel natural.
+/// Stock lines that must play with ZERO synthesis delay. Rendered once, kept on disk
+/// (`tts_cache_disk`), loaded into memory at start-up. Any other short line is persisted
+/// automatically the first time it is synthesised, so frequent replies become instant too.
 const CACHED_PHRASES: &[&str] = &[
     "On it sir",
+    "Right away sir",
+    "Working on it sir",
+    "Let me check that sir",
     "Didn't understand that sir",
     "Didn't catch that sir",
     "Here is the analysis, sir",
@@ -219,75 +405,124 @@ const CACHED_PHRASES: &[&str] = &[
     "Stopped typing, sir",
     "Opening Command Hub, sir",
     "Annotation ready, sir",
+    "One moment sir",
+    "New tab sir",
+    "Hello, sir",
+    "Stopped, sir",
+    "Queued, sir",
+    "Hand mode on, sir",
+    "Hand mode off, sir. The camera is off",
+    "Ghost mode off, sir",
+    "Ghost mode initialized, sir. Tell me what to do",
+    "Muted, sir",
+    "Minimized, sir",
+    "Maximized, sir",
+    "Screenshot taken, sir",
+    "Didn't find that, sir",
+    "Nothing running, sir",
+    "Good morning, sir",
+    "Good afternoon, sir",
+    "Good evening, sir",
+    "Good night, sir",
+    "Shutting down, sir. See you soon",
 ];
 
-/// Pre-synthesize cached phrases using edge-tts at boot.
-/// Falls back to the local Kokoro voice if edge-tts is unavailable.
-/// This runs once at startup so all subsequent speak_cached() calls are instant (<5ms).
+fn insert_cached(map: &mut HashMap<String, CachedAudio>, phrase: &str, audio: CachedAudio) {
+    map.insert(format!("{phrase}."), audio.clone());
+    map.insert(phrase.to_string(), audio);
+}
+
+/// Wait (bounded) until no spoken line is being prepared, so background rendering never delays one.
+async fn wait_for_speech_idle(max: std::time::Duration) {
+    let start = std::time::Instant::now();
+    while LIVE_SPEECH.load(Ordering::SeqCst) > 0 && start.elapsed() < max {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+/// Fill the in-memory cache with the stock lines.
+///
+/// 1. from DISK (instant, nothing is synthesised);
+/// 2. missing lines from the cloud voice, only while the breaker says it is healthy;
+/// 3. still missing: the local persona voice, one line at a time, only while nobody is waiting for speech.
+/// Everything rendered is persisted, so the next start does none of this.
 pub async fn pregenerate_cache(
     cache_arc: &Arc<Mutex<HashMap<String, CachedAudio>>>,
     voice: &str,
 ) {
     let cache_start = std::time::Instant::now();
+    let (mut from_disk, mut from_edge, mut from_local) = (0usize, 0usize, 0usize);
+    // 2026-10-15 log: 29 back-to-back cloud requests drew "429 Too Many Requests", and the throttle then
+    // also hit the user's first real reply. Pace the cloud requests and stop using it for this pass at
+    // the first 429 (the rest are rendered locally and upgraded on a later boot).
+    let mut cloud_throttled = false;
 
-    let mut cached_count = 0;
-
-    // Always try edge-tts first (cloud, best quality).
-    // If it fails, the local Kokoro fallback below kicks in automatically.
-    tracing::info!("tts: pre-generating cache with edge-tts (voice={})", voice);
     for phrase in CACHED_PHRASES {
-        match crate::tts_edge::synthesize_to_pcm(phrase, voice).await {
-                Ok((samples, sr, boundaries)) => {
+        // 1. disk
+        if let Some(audio) = disk_lookup(phrase, voice).await {
+            let cloud_available = crate::tts_health::edge_recently_ok()
+                || (crate::tts_network::is_network_up() && !crate::tts_health::edge_degraded());
+            let stale = audio.caption.estimated && cloud_available;
+            if !stale {
+                insert_cached(&mut *cache_arc.lock().await, phrase, audio);
+                from_disk += 1;
+                continue;
+            }
+        }
+        // 2. cloud voice (skipped while the breaker is open: no 403 storm)
+        if !crate::tts_health::edge_degraded() && !cloud_throttled {
+            // Real user speech outranks stock lines: never compete with it for the cloud voice.
+            wait_for_speech_idle(std::time::Duration::from_secs(30)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                crate::tts_edge::synthesize_to_pcm(phrase, voice),
+            )
+            .await
+            {
+                Ok(Ok((samples, sr, boundaries))) => {
+                    crate::tts_health::edge_note_ok();
                     let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
                     let words = boundaries_to_words(&boundaries, 0);
                     let envelope = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
-                    let mut guard = cache_arc.lock().await;
-                    guard.insert(
-                        phrase.to_string(),
-                        CachedAudio { samples: samples.clone(), sample_rate: sr, caption: CaptionTrack { words: words.clone(), total_ms, estimated: false, envelope: envelope.clone(), frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0 } },
-                    );
-                    guard.insert(
-                        format!("{phrase}."),
-                        CachedAudio { samples, sample_rate: sr, caption: CaptionTrack { words, total_ms, estimated: false, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0 } },
-                    );
-                    cached_count += 1;
+                    let caption = CaptionTrack { words, total_ms, estimated: false, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0, system: false };
+                    persist_line_bg(phrase, voice, &samples, sr, &caption);
+                    insert_cached(&mut *cache_arc.lock().await, phrase, CachedAudio { samples, sample_rate: sr, caption });
+                    from_edge += 1;
+                    continue;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
+                    if e.contains("429") {
+                        cloud_throttled = true;
+                    } else {
+                        crate::tts_health::edge_note_fail(&e);
+                    }
                     tracing::warn!("tts: edge-tts cache failed for '{}': {}", phrase, e);
                 }
-            }
-        }
-
-    // If edge-tts failed, try the local voice for the cache (a temporary engine, freed afterwards)
-    if cached_count == 0 {
-        tracing::info!("tts: falling back to Kokoro for cache generation");
-        let local_engine = crate::tts_kokoro::new_engine();
-        if let Err(e) = crate::tts_kokoro::ensure_loaded(&local_engine).await {
-            tracing::warn!("tts: local cache generation unavailable: {}", e);
-        }
-        for phrase in CACHED_PHRASES {
-            match crate::tts_kokoro::synthesize(&local_engine, phrase, 1.0).await {
-                Ok((samples, sr)) => {
-                    let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
-                    let words = estimate_words(phrase, total_ms);
-                    let envelope = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
-                    cache_arc.lock().await.insert(
-                        phrase.to_string(),
-                        CachedAudio { samples, sample_rate: sr, caption: CaptionTrack { words, total_ms, estimated: true, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0 } },
-                    );
-                    cached_count += 1;
-                }
-                Err(e) => {
-                    tracing::warn!("tts: local cache failed for '{}': {}", phrase, e);
+                Err(_) => {
+                    crate::tts_health::edge_note_fail("timeout");
+                    tracing::warn!("tts: edge-tts cache timed out for '{}'", phrase);
                 }
             }
+        }
+        // 3. local persona voice, politely
+        wait_for_speech_idle(std::time::Duration::from_secs(30)).await;
+        match synthesize_local(phrase).await {
+            Ok((samples, sr, caption)) => {
+                persist_line_bg(phrase, voice, &samples, sr, &caption);
+                insert_cached(&mut *cache_arc.lock().await, phrase, CachedAudio { samples, sample_rate: sr, caption });
+                from_local += 1;
+            }
+            Err(e) => tracing::warn!("tts: local cache failed for '{}': {}", phrase, e),
         }
     }
 
     tracing::info!(
-        "tts: cached {} phrases in {:.2}s",
-        cached_count,
-        cache_start.elapsed().as_secs_f32()
+        "tts: stock lines ready in {:.2}s ({} from disk, {} from the cloud voice, {} rendered locally)",
+        cache_start.elapsed().as_secs_f32(),
+        from_disk,
+        from_edge,
+        from_local
     );
 }
 
@@ -300,7 +535,10 @@ static TTS_GENERATION: AtomicUsize = AtomicUsize::new(0);
 pub fn stop_tts() -> Result<(), String> {
     TTS_GENERATION.fetch_add(1, Ordering::SeqCst);
     tracing::info!("tts: stop requested (generation {})", TTS_GENERATION.load(Ordering::SeqCst));
-    crate::volume::force_restore_volume();
+    // Deferred: the frontend calls stopTts() right before every speak(), so restoring instantly would
+    // dip the volume between the old utterance and the new one. Stale leases end now; the original
+    // volume returns after a short grace unless the next utterance claims it.
+    crate::volume::defer_restore_volume();
     Ok(())
 }
 
@@ -326,6 +564,7 @@ pub async fn speak_text(
 ) -> Result<(), String> {
     tracing::info!("tts: speaking '{}'", text);
     crate::directed::note_spoken(&text); // echo rejection for open-mic turns (Phase 8)
+    let _live = LiveSpeech::begin();
 
     meeting.set_tts_playing(true);
     let my_generation = TTS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
@@ -342,10 +581,18 @@ pub async fn speak_text(
     // of re-synthesizing (which previously paid a probe + cold-engine cost).
     // Falls through to synthesis on miss.
     let trimmed = text.trim().trim_end_matches(['.', '!', '?', ',', ';']).trim();
-    let (audio, sample_rate, caption) = if let Some(hit) = {
+    let mut memory_hit = {
         let guard = state.cache.lock().await;
-        guard.get(&text).or_else(|| guard.get(trimmed)).cloned()
-    } {
+        guard
+            .get(&text)
+            .or_else(|| guard.get(trimmed))
+            .filter(|h| cache_entry_usable(h, &state.cache, &edge_voice))
+            .cloned()
+    };
+    if memory_hit.is_none() {
+        memory_hit = disk_lookup(&text, &edge_voice).await.filter(|h| cache_entry_usable(h, &state.cache, &edge_voice));
+    }
+    let (audio, sample_rate, caption) = if let Some(hit) = memory_hit {
         tracing::info!("tts: cache hit for '{}'", text);
         (hit.samples, hit.sample_rate, hit.caption)
     } else {
@@ -354,7 +601,7 @@ pub async fn speak_text(
         // legacy single-shot path (zero behavior change). While OFFLINE the
         // local engine runs ~real-time, so ANY multi-sentence reply streams
         // (first audio = one sentence, not the whole reply).
-        let sentences = split_sentences(&text);
+        let sentences = plan_chunks(&text);
         let use_streaming = sentences.len() > 1
             && (text.chars().count() >= STREAM_MIN_CHARS || !crate::tts_network::is_network_up());
         if use_streaming {
@@ -365,6 +612,10 @@ pub async fn speak_text(
             } else {
                 None
             };
+            // Kept awake regardless of the volume setting above; released by normal scope-end
+            // drop (slightly later than the manual volume-lease drops below is harmless here —
+            // unlike volume there is no audible defect from releasing a beat late).
+            let _stream_keep_awake_lease = crate::keep_awake::acquire_lease();
             match speak_streaming(sentences, &voice_id, &state, my_generation, emotion, app.clone()).await {
                 Ok(()) => {
                     drop(stream_volume_lease);
@@ -410,6 +661,13 @@ pub async fn speak_text(
         return Ok(());
     }
 
+    tracing::info!(
+        "[TTS] engine={} voice={} volume={}% req={}",
+        if caption.estimated { "local" } else { "edge" },
+        voice_id,
+        tts_volume_pct,
+        my_generation
+    );
     // Save and set system volume with RAII lease
     let volume_lease = if tts_volume_pct > 0 {
         let target = tts_volume_pct as f32 / 100.0;
@@ -417,6 +675,7 @@ pub async fn speak_text(
     } else {
         None
     };
+    let _keep_awake_lease = crate::keep_awake::acquire_lease();
 
     // Play audio
     let play_result = play_audio(audio, sample_rate, my_generation, caption, app.clone()).await;
@@ -599,6 +858,20 @@ pub fn get_voice_transport() -> Result<serde_json::Value, String> {
     }))
 }
 
+/// IPC: Sync state of one persona's offline twin ("ready" / "downloading" / "cloud_only"),
+/// used by the Settings voice cards.
+#[tauri::command]
+pub fn get_voice_sync_state(voice_key: String) -> Result<String, String> {
+    if crate::tts_swap::swap_target().as_deref() == Some(voice_key.as_str()) {
+        return Ok("downloading".to_string());
+    }
+    Ok(match crate::voice_catalog::sync_state_for(&voice_key) {
+        crate::voice_catalog::VoiceSyncState::Ready => "ready",
+        crate::voice_catalog::VoiceSyncState::CloudOnly => "cloud_only",
+    }
+    .to_string())
+}
+
 /// IPC: Sync state of the currently selected persona's offline twin
 /// (hub reads this on mount for the card pill: ready vs cloud-only).
 /// Reports "downloading" truthfully while the swap worker runs.
@@ -635,16 +908,24 @@ pub async fn speak_cached(
 ) -> Result<(), String> {
     tracing::info!("tts: speaking cached '{}'", text);
     crate::directed::note_spoken(&text);
+    let _live = LiveSpeech::begin();
 
     meeting.set_tts_playing(true);
     let my_generation = TTS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
     // Try to get cached audio
     let cache_arc = state.cache.clone();
-    let cached_audio = {
+    let cloud_voice = crate::commands::read_edge_tts_voice(&app);
+    let mut cached_audio = {
         let cache = cache_arc.lock().await;
-        cache.get(&text).cloned()
+        cache
+            .get(&text)
+            .filter(|h| cache_entry_usable(h, &cache_arc, &cloud_voice))
+            .cloned()
     };
+    if cached_audio.is_none() {
+        cached_audio = disk_lookup(&text, &cloud_voice).await.filter(|h| cache_entry_usable(h, &cache_arc, &cloud_voice));
+    }
 
     let (audio, sample_rate, caption) = match cached_audio {
         Some(ca) => {
@@ -681,6 +962,7 @@ pub async fn speak_cached(
     } else {
         None
     };
+    let _keep_awake_lease = crate::keep_awake::acquire_lease();
 
     // Play
     let play_result = play_audio(audio, sample_rate, my_generation, caption, app.clone()).await;
@@ -724,11 +1006,13 @@ async fn synthesize_with_fallback(
         == crate::center::TtsEngine::Local
     {
         tracing::info!("tts: network down (cached) — using local Kokoro directly (skipping Edge TTS)");
+    } else if crate::tts_health::edge_degraded() {
+        tracing::info!("tts: cloud voice marked broken - skipping Edge TTS for this line");
     } else {
         // Tier 1: edge-tts (cloud, ~200ms, best quality, 0 MB RAM),
         // raced with a timeout so a hanging endpoint can't stall speech.
         match tokio::time::timeout(
-            std::time::Duration::from_secs(8),
+            std::time::Duration::from_secs(EDGE_FIRST_AUDIO_TIMEOUT_SECS),
             crate::tts_edge::synthesize_to_pcm_with_emotion(text, voice, emotion),
         )
         .await
@@ -736,16 +1020,20 @@ async fn synthesize_with_fallback(
             Ok(Ok((samples, sr, boundaries))) => {
                 tracing::info!("tts: edge-tts synthesis OK (cloud)");
                 crate::tts_network::set_network_up();
+                crate::tts_health::edge_note_ok();
                 let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
                 let words = boundaries_to_words(&boundaries, 0);
                 let envelope = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
-                return Ok((samples, sr, CaptionTrack { words, total_ms, estimated: false, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0 }));
+                let caption = CaptionTrack { words, total_ms, estimated: false, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0, system: false };
+                persist_line_bg(text, voice, &samples, sr, &caption);
+                return Ok((samples, sr, caption));
             }
             Err(_elapsed) => {
                 // Timeout = genuine transport failure → mark down so the
                 // next call skips Edge (saves 8s per call while offline).
                 tracing::warn!("tts: edge-tts timed out, trying local fallback");
                 crate::tts_network::set_network_down();
+                crate::tts_health::edge_note_fail("timeout");
             }
             Ok(Err(e)) => {
                 // Content/API rejection (bad voice, unsupported script, 4xx)
@@ -754,14 +1042,16 @@ async fn synthesize_with_fallback(
                 // → English voice rejection → "network down" → forced local
                 // voice → panic). Fall through to the local voice for THIS call only.
                 tracing::warn!("tts: edge-tts rejected ({e}), trying local fallback (network flag untouched)");
+                crate::tts_health::edge_note_fail(&e);
             }
         }
     }
 
     // Tier 2: Kokoro (local, ~real-time on CPU, ~260-370 MB RAM while loaded)
-    match synthesize_local(text).await {
+    match synthesize_local_guarded(text).await {
         Ok(result) => {
-            tracing::info!("tts: local Kokoro synthesis OK (offline voice)");
+            tracing::info!("tts: local synthesis OK (offline voice, system={})", result.2.system);
+            persist_line_bg(text, voice, &result.0, result.1, &result.2);
             Ok(result)
         }
         Err(e) => {
@@ -788,6 +1078,7 @@ async fn play_audio(
                 match Sink::try_new(&handle) {
                     Ok(sink) => {
                         if TTS_GENERATION.load(Ordering::SeqCst) <= my_generation {
+                            crate::latency::first_audio();
                             let _ = app.emit("tts:caption", &caption);
                         }
                         let source = SamplesBuffer::new(1, sample_rate, audio);
@@ -795,6 +1086,8 @@ async fn play_audio(
 
                         // Poll for stop request (barge-in)
                         while !sink.empty() {
+                            crate::volume::heartbeat();
+                            crate::keep_awake::heartbeat();
                             if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
                                 sink.stop();
                                 tracing::info!("tts: playback stopped by user (barge-in)");
@@ -895,7 +1188,49 @@ fn read_tts_volume<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u8 {
 ///
 /// Short/single-sentence texts use the legacy single-shot path (zero
 /// behavior change for the common case).
-const STREAM_MIN_CHARS: usize = 150;
+///
+/// Speed first (owner, 2026-10-17): streaming starts from 60 characters instead of 150, so a normal
+/// two-sentence answer speaks its first piece while the second is still being synthesized.
+const STREAM_MIN_CHARS: usize = 60;
+
+/// A first sentence longer than this many words is split at its first clause break so the first
+/// audio arrives sooner (synthesis time grows with text length).
+const FIRST_CLAUSE_MIN_WORDS: usize = 14;
+/// The first piece keeps at least this many words, and the rest of the sentence at least `TAIL_MIN_WORDS`
+/// (a 2-word first piece sounds clipped; a 1-word tail is a wasted request).
+const FIRST_CLAUSE_HEAD_MIN_WORDS: usize = 4;
+const FIRST_CLAUSE_TAIL_MIN_WORDS: usize = 3;
+
+/// Split a long sentence at its first comma/semicolon/colon that leaves a sensible head and tail.
+/// Never splits mid-clause (no comma = no split). Pure + unit-tested.
+pub fn split_first_clause(sentence: &str) -> Option<(String, String)> {
+    let words: Vec<&str> = sentence.split_whitespace().collect();
+    if words.len() < FIRST_CLAUSE_MIN_WORDS {
+        return None;
+    }
+    let last_head_end = words.len().checked_sub(FIRST_CLAUSE_TAIL_MIN_WORDS)?;
+    for i in FIRST_CLAUSE_HEAD_MIN_WORDS..=last_head_end {
+        let w = words[i - 1];
+        if w.ends_with(',') || w.ends_with(';') || w.ends_with(':') {
+            let head = words[..i].join(" ");
+            let tail = words[i..].join(" ");
+            return Some((head, tail));
+        }
+    }
+    None
+}
+
+/// Sentence chunks for streaming, with the first sentence shortened at a clause break when it is long.
+pub fn plan_chunks(text: &str) -> Vec<String> {
+    let mut chunks = split_sentences(text);
+    if let Some(first) = chunks.first().cloned() {
+        if let Some((head, tail)) = split_first_clause(&first) {
+            chunks[0] = head;
+            chunks.insert(1, tail);
+        }
+    }
+    chunks
+}
 
 /// Split text into sentence chunks (keeps delimiters). Pure + unit-tested.
 pub fn split_sentences(text: &str) -> Vec<String> {
@@ -931,7 +1266,11 @@ async fn synthesize_chunk(
     let trimmed = sentence.trim().trim_end_matches(['.', '!', '?', ',', ';']).trim();
     if let Some(hit) = {
         let guard = state.cache.lock().await;
-        guard.get(sentence).or_else(|| guard.get(trimmed)).cloned()
+        guard
+            .get(sentence)
+            .or_else(|| guard.get(trimmed))
+            .filter(|h| cache_entry_usable(h, &state.cache, voice_id))
+            .cloned()
     } {
         return Ok((hit.samples, hit.sample_rate, hit.caption));
     }
@@ -954,7 +1293,16 @@ async fn speak_streaming(
         return Ok(());
     }
     let (first_audio, first_sr, first_caption) = synthesize_chunk(&sentences[0], voice_id, state, emotion).await?;
-
+    // A cached phrase that was voiced locally should NOT force the rest of the reply to use Kokoro
+    // if the network is up and Edge TTS is healthy.
+    let utterance_local = first_caption.estimated && (!crate::tts_network::is_network_up() || crate::tts_health::edge_degraded());
+    let utterance_system = first_caption.system;
+    tracing::info!(
+        "[TTS] streaming reply: engine={} voice={} chunks={}",
+        if utterance_local { "local" } else { "edge" },
+        voice_id,
+        sentences.len()
+    );
     let (stream_tx, stream_rx) =
         std::sync::mpsc::channel::<Option<(Vec<f32>, u32, CaptionTrack)>>();
     // Producer: synthesize remaining chunks while chunk 0 plays.
@@ -965,11 +1313,27 @@ async fn speak_streaming(
     };
     let gen = my_generation;
     tokio::spawn(async move {
+        // If the cloud voice dies MID-reply (2026-10-15 log: chunk 1 failed twice, the rest of the answer
+        // was never spoken and the orb sat silent for 10 s), the remaining sentences are spoken by the
+        // Windows voice. A voice change is better than a half-spoken answer; it only happens on failure.
+        let mut fallback_to_system = false;
         for s in rest {
             if TTS_GENERATION.load(Ordering::SeqCst) > gen {
                 break;
             }
-            let res = synthesize_chunk_owned(&s, &voice_owned, &state_ref, emotion).await;
+            let res = if fallback_to_system {
+                synthesize_chunk_owned(&s, &voice_owned, &state_ref, emotion, true, true).await
+            } else {
+                synthesize_chunk_owned(&s, &voice_owned, &state_ref, emotion, utterance_local, utterance_system).await
+            };
+            let res = match res {
+                Err(e) if !fallback_to_system && !utterance_system => {
+                    tracing::warn!("tts: streaming chunk failed ({e}); finishing the reply with the Windows voice");
+                    fallback_to_system = true;
+                    synthesize_chunk_owned(&s, &voice_owned, &state_ref, emotion, true, true).await
+                }
+                other => other,
+            };
             match res {
                 Ok(triple) => {
                     if stream_tx.send(Some(triple)).is_err() {
@@ -1000,21 +1364,58 @@ async fn synthesize_chunk_owned(
     voice_id: &str,
     state: &TtsStateRef,
     emotion: crate::tts_edge::TtsEmotion,
+    force_local: bool,
+    force_system: bool,
 ) -> Result<(Vec<f32>, u32, CaptionTrack), String> {
-    if let Some(hit) = state.cache.lock().await.get(sentence).cloned() {
+    if let Some(hit) = state
+        .cache
+        .lock()
+        .await
+        .get(sentence)
+        .filter(|h| force_local || cache_entry_usable(h, &state.cache, voice_id))
+        .cloned()
+    {
         return Ok((hit.samples, hit.sample_rate, hit.caption));
     }
-    // Online: edge-tts per sentence; if that fails (or the network is known down) this sentence is
-    // synthesized locally so the reply never goes silent (the voice may change mid-reply — better
-    // than muting). Offline streaming therefore plays chunk 0 as soon as ITS sentence is ready.
-    let edge = if crate::tts_network::is_network_up() {
-        crate::tts_edge::synthesize_to_pcm_with_emotion(sentence, voice_id, emotion).await
-    } else {
-        Err("network down (cached)".to_string())
-    };
-    let (samples, sr, boundaries) = match edge {
-        Ok(v) => v,
-        Err(_) => return synthesize_local(sentence).await,
+    // ONE VOICE PER UTTERANCE. The engine is decided when the utterance starts (`force_local`
+    // carries chunk 0's engine); a later sentence never silently switches to the other voice. The
+    // cloud is retried once; if it still fails the caller plays timed silence / what it has, and
+    // a transport failure flips the cached network flag so the NEXT utterance starts on the local
+    // voice from its first word.
+    if force_system {
+        return system_voice_line(sentence, "same voice as the first sentence").await;
+    }
+    if force_local || !crate::tts_network::is_network_up() || crate::tts_health::edge_degraded() {
+        return synthesize_local(sentence).await;
+    }
+    let mut last_err = String::new();
+    let mut edge_ok = None;
+    for attempt in 1..=2 {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            crate::tts_edge::synthesize_to_pcm_with_emotion(sentence, voice_id, emotion),
+        )
+        .await
+        {
+            Ok(Ok(v)) => {
+                crate::tts_health::edge_note_ok();
+                edge_ok = Some(v);
+                break;
+            }
+            Ok(Err(e)) => {
+                crate::tts_health::edge_note_fail(&e);
+                last_err = e;
+            }
+            Err(_) => {
+                last_err = "edge-tts timed out".to_string();
+                crate::tts_network::set_network_down();
+                crate::tts_health::edge_note_fail("timeout");
+            }
+        }
+        tracing::warn!("tts: edge chunk attempt {attempt}/2 failed ({last_err})");
+    }
+    let Some((samples, sr, boundaries)) = edge_ok else {
+        return Err(format!("edge-tts failed after retry: {last_err}"));
     };
     // cumulative_ms is applied by the consumer (play_audio_streamed), which
     // is the only place that knows how much audio has already been queued —
@@ -1022,7 +1423,7 @@ async fn synthesize_chunk_owned(
     let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
     let words = boundaries_to_words(&boundaries, 0);
     let envelope = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
-    Ok((samples, sr, CaptionTrack { words, total_ms, estimated: false, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0 }))
+    Ok((samples, sr, CaptionTrack { words, total_ms, estimated: false, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0, system: false }))
 }
 
 /// Play chunk 0 immediately, then append streamed chunks as they arrive.
@@ -1046,6 +1447,7 @@ async fn play_audio_streamed(
                     if let Some((audio, sr, mut caption)) = first {
                         caption.envelope_start_ms = cumulative_ms;
                         if TTS_GENERATION.load(Ordering::SeqCst) <= my_generation {
+                            crate::latency::first_audio();
                             let _ = app.emit("tts:caption", &caption);
                         }
                         cumulative_ms += caption.total_ms;
@@ -1053,7 +1455,25 @@ async fn play_audio_streamed(
                     }
                     // Drain the producer channel (blocking recv is fine here —
                     // we're on a blocking thread, audio plays async).
-                    while let Ok(msg) = rx.recv() {
+                    loop {
+                        // Short timeout so the volume heartbeat keeps beating (and a barge-in is
+                        // noticed) while the producer is still synthesizing the next sentence.
+                        let msg = match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                            Ok(m) => m,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                crate::volume::heartbeat();
+                                crate::keep_awake::heartbeat();
+                                if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
+                                    sink.stop();
+                                    tracing::info!("tts: streaming stopped by user (barge-in)");
+                                    return Ok(());
+                                }
+                                continue;
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                        };
+                        crate::volume::heartbeat();
+                        crate::keep_awake::heartbeat();
                         if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
                             sink.stop();
                             tracing::info!("tts: streaming stopped by user (barge-in)");
@@ -1065,6 +1485,7 @@ async fn play_audio_streamed(
                                     w.start_ms += cumulative_ms;
                                 }
                                 caption.envelope_start_ms = cumulative_ms;
+                                crate::latency::first_audio();
                                 let _ = app.emit("tts:caption", &caption);
                                 cumulative_ms += caption.total_ms;
                                 sink.append(SamplesBuffer::new(1, sr, audio));
@@ -1073,6 +1494,8 @@ async fn play_audio_streamed(
                         }
                     }
                     while !sink.empty() {
+                        crate::volume::heartbeat();
+                        crate::keep_awake::heartbeat();
                         if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
                             sink.stop();
                             tracing::info!("tts: playback stopped by user (barge-in)");
@@ -1196,8 +1619,15 @@ where
     let state_ref = TtsStateRef { cache: tts_state.cache.clone() };
     // Line 0 first: its success decides Unavailable vs playing.
     let first = match tokio::time::timeout(
-        std::time::Duration::from_secs(12),
-        synthesize_chunk_owned(&lines[0], &voice_id, &state_ref, emotions[0]),
+        std::time::Duration::from_secs(25),
+        async {
+            // Line 0 may fall back to the local voice (nothing has been heard yet, so no voice
+            // switch is audible); the engine that voices it then voices every later line.
+            match synthesize_chunk_owned(&lines[0], &voice_id, &state_ref, emotions[0], false, false).await {
+                Ok(v) => Ok(v),
+                Err(_) => synthesize_chunk_owned(&lines[0], &voice_id, &state_ref, emotions[0], true, false).await,
+            }
+        },
     )
     .await
     {
@@ -1225,6 +1655,7 @@ where
         .collect();
     let voice_owned = voice_id.clone();
     let rate_hint = first.1;
+    let utterance_local = first.2.estimated;
     tokio::spawn(async move {
         for (text, emotion) in rest {
             if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
@@ -1232,7 +1663,7 @@ where
             }
             let item = match tokio::time::timeout(
                 std::time::Duration::from_secs(12),
-                synthesize_chunk_owned(&text, &voice_owned, &state_ref, emotion),
+                synthesize_chunk_owned(&text, &voice_owned, &state_ref, emotion, utterance_local, false),
             )
             .await
             {
@@ -1253,11 +1684,13 @@ where
         let _ = tx.send(None);
     });
 
-    let volume_changed = if volume_pct > 0 {
-        crate::volume::save_and_set_volume(volume_pct as f32 / 100.0)
+    // Held for the whole narration (the lease restores the volume when it drops).
+    let narrate_volume_lease = if volume_pct > 0 {
+        crate::volume::acquire_volume_lease(volume_pct as f32 / 100.0)
     } else {
-        false
+        None
     };
+    let _narrate_keep_awake_lease = crate::keep_awake::acquire_lease();
 
     let app_for_audio = app.clone();
     let outcome = tokio::task::spawn_blocking(move || {
@@ -1315,6 +1748,8 @@ where
                     }
                 }
             }
+            crate::volume::heartbeat();
+            crate::keep_awake::heartbeat();
             for ev in tracker.update(appended, sink.len()) {
                 on_event(ev);
             }
@@ -1327,9 +1762,7 @@ where
     .await
     .unwrap_or_else(|_| NarrateOutcome::Unavailable("audio thread panicked".to_string()));
 
-    if volume_changed {
-        crate::volume::restore_volume();
-    }
+    drop(narrate_volume_lease);
     if outcome != NarrateOutcome::Cancelled {
         // Same grace as speak_text; a newer generation owns the flag when cancelled.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -1573,5 +2006,110 @@ mod caption_tests {
         let env = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
         // 1000ms / 20ms per frame = 50 frames.
         assert_eq!(env.len(), 50);
+    }
+}
+
+#[cfg(test)]
+mod voice_stack_tests {
+    use super::*;
+
+    fn local_line() -> CachedAudio {
+        CachedAudio {
+            samples: vec![0.0; 16],
+            sample_rate: 24_000,
+            caption: CaptionTrack { estimated: true, ..Default::default() },
+        }
+    }
+
+    /// The 2026-10-15 bug: Edge answered 403 to every request while bing.com was reachable, so the
+    /// instant local-voice acknowledgements were declared "stale" and re-rendered on the live path.
+    #[tokio::test]
+    async fn local_voice_acks_stay_usable_while_the_cloud_voice_is_broken() {
+        crate::tts_health::reset_for_test();
+        CACHE_REFRESHING.store(true, Ordering::SeqCst); // a stale verdict must not start a real re-render here
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        for _ in 0..12 {
+            crate::tts_health::edge_note_fail("HTTP 403");
+        }
+        assert!(cache_entry_usable(&local_line(), &cache, "en-US-AvaNeural"), "403 forever must never make acks stale");
+        crate::tts_health::edge_note_ok();
+        assert!(!cache_entry_usable(&local_line(), &cache, "en-US-AvaNeural"), "stale only once Edge really worked");
+        CACHE_REFRESHING.store(false, Ordering::SeqCst);
+        crate::tts_health::reset_for_test();
+    }
+
+    #[tokio::test]
+    async fn the_windows_voice_line_is_never_persisted_or_called_the_persona() {
+        // A system-voice caption must not be written to the voice cache (it would later be served as "the persona").
+        let dir = std::env::temp_dir().join(format!("nexus_voice_stack_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = DISK_DIR.set(dir.clone());
+        let Some(effective) = DISK_DIR.get().cloned() else { return };
+        let system = CaptionTrack { estimated: true, system: true, ..Default::default() };
+        persist_line_bg("Ok sir", "v", &[0.1; 64], 24_000, &system);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(crate::tts_cache_disk::load(&effective, "v", "Ok sir").is_none());
+        let local = CaptionTrack { estimated: true, system: false, total_ms: 3, ..Default::default() };
+        persist_line_bg("Ok sir", "v", &[0.1; 64], 24_000, &local);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let got = crate::tts_cache_disk::load(&effective, "v", "Ok sir").expect("local persona line is persisted");
+        assert_eq!(got.origin, crate::tts_cache_disk::Origin::Local);
+        let _ = std::fs::remove_dir_all(&effective);
+    }
+
+    /// Live: with the local neural voice not loaded, a line must be audible-ready fast via the Windows voice.
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "needs the Windows voices and the local engine handle; run with --ignored"]
+    async fn a_cold_local_voice_never_delays_a_line() {
+        let _state = TtsState::new(); // installs the global engine handle (not loaded yet)
+        let t0 = std::time::Instant::now();
+        let (samples, _sr, caption) = synthesize_local_guarded("New tab sir.").await.expect("speaks");
+        let ms = t0.elapsed().as_millis();
+        eprintln!("cold local voice -> first audio ready in {ms} ms (system voice: {})", caption.system);
+        assert!(caption.system, "a cold local engine hands over to the Windows voice");
+        assert!(!samples.is_empty());
+        assert!(ms < 1_500, "first audio within 1.5 s, got {ms} ms");
+    }
+}
+
+#[cfg(test)]
+mod first_clause_tests {
+    use super::*;
+
+    #[test]
+    fn short_sentence_is_never_split() {
+        assert_eq!(split_first_clause("Done, sir, the file is saved."), None);
+    }
+
+    #[test]
+    fn long_sentence_splits_at_first_clause_break() {
+        let s = "I checked the three repositories you mentioned yesterday, and the second one has an open pull request waiting for review.";
+        let (head, tail) = split_first_clause(s).expect("should split");
+        assert_eq!(head, "I checked the three repositories you mentioned yesterday,");
+        assert!(tail.starts_with("and the second one"));
+        assert_eq!(format!("{head} {tail}"), s, "no words lost or reordered");
+    }
+
+    #[test]
+    fn no_comma_means_no_split() {
+        let s = "I checked the three repositories you mentioned yesterday and the second one has an open pull request waiting";
+        assert_eq!(split_first_clause(s), None);
+    }
+
+    #[test]
+    fn head_and_tail_keep_a_minimum_size() {
+        // comma after word 2 (head too short) and after the 13th of 14 (tail too short)
+        let s = "Well, I looked through every single folder on the disk, twice.";
+        assert_eq!(split_first_clause(s), None);
+    }
+
+    #[test]
+    fn plan_chunks_keeps_later_sentences() {
+        let text = "I checked the three repositories you mentioned yesterday, and the second one has an open pull request waiting for review. Shall I open it?";
+        let c = plan_chunks(text);
+        assert_eq!(c.len(), 3);
+        assert_eq!(c[2], "Shall I open it?");
+        assert_eq!(plan_chunks("Done, sir."), vec!["Done, sir."]);
     }
 }

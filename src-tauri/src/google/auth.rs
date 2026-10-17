@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::types::GoogleError;
 
 pub const GOOGLE_SCOPES: &[&str] = &[

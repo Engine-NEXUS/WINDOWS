@@ -19,6 +19,7 @@ pub const KEY_LEN: usize = 32;
 pub type Key = [u8; KEY_LEN];
 
 const KEYRING_SERVICE: &str = "com.nexus.assistant";
+#[allow(dead_code)]
 const KEYRING_USER: &str = "memcore_data_key_v1";
 
 pub fn generate_key() -> Option<Key> {
@@ -87,6 +88,7 @@ fn from_hex(s: &str) -> Option<Key> {
     Some(k)
 }
 
+#[allow(dead_code)]
 fn read_keyring() -> Option<Key> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).ok()?;
     from_hex(&entry.get_password().ok()?)
@@ -95,6 +97,7 @@ fn read_keyring() -> Option<Key> {
 /// Store `key` and prove it persisted by reading it back through a FRESH
 /// entry handle. keyring's mock backend (no platform feature) fails this
 /// check, so a non-persistent key store can never silently own your data.
+#[allow(dead_code)]
 fn store_keyring(key: &Key) -> bool {
     let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) else {
         return false;
@@ -108,6 +111,7 @@ fn store_keyring(key: &Key) -> bool {
 /// Existing data key, or a new one that verifiably persisted. `None` means
 /// the OS key store is unusable — callers then keep the database unencrypted
 /// rather than encrypt with a key that could be lost.
+#[allow(dead_code)]
 pub fn load_or_create_key() -> Option<Key> {
     if let Some(k) = read_keyring() {
         return Some(k);
@@ -122,6 +126,7 @@ pub fn load_or_create_key() -> Option<Key> {
 }
 
 /// New data key for crypto-erase on wipe. Returns it only if it persisted.
+#[allow(dead_code)]
 pub fn rotate_key() -> Option<Key> {
     let k = generate_key()?;
     store_keyring(&k).then_some(k)

@@ -57,6 +57,18 @@ let suppressNext = false;
 let latestScheduledEndMs = 0;
 let currentLineSeq = 0;
 let activeLineSeq = 0;
+/**
+ * A line's clear-timer can only tell whether it's the last line it KNOWS
+ * about (`line.end_ms >= latestScheduledEndMs`) — not whether a later
+ * streamed chunk is still mid-flight (synthesis/network delay) and about
+ * to arrive with more. Committing `setCaptionActive(false)`/`done: true`
+ * immediately on that guess closes the caption early whenever a later
+ * chunk is simply running a little behind. This grace timer defers that
+ * commit briefly; any subsequent chunk's `scheduleChunk()` call cancels it,
+ * since that chunk schedules its own, later close.
+ */
+let pendingCloseTimer: ReturnType<typeof setTimeout> | null = null;
+const UTTERANCE_END_GRACE_MS = 500;
 const listeners = new Set<Listener>();
 const lineListeners = new Set<LineListener>();
 
@@ -92,6 +104,10 @@ export function clearCaptionSchedule(): void {
   if (doneTimer) {
     clearTimeout(doneTimer);
     doneTimer = null;
+  }
+  if (pendingCloseTimer) {
+    clearTimeout(pendingCloseTimer);
+    pendingCloseTimer = null;
   }
   anchorMs = null;
   revealed = [];
@@ -171,6 +187,13 @@ export function partitionIntoLines(words: CaptionWord[]): { text: string; start_
 }
 
 function scheduleChunk(track: CaptionTrack): void {
+  // A new chunk just arrived — any earlier line's "this might be the end"
+  // grace timer is now known to be wrong and must not fire. This chunk's
+  // own lines will schedule their own, later close.
+  if (pendingCloseTimer) {
+    clearTimeout(pendingCloseTimer);
+    pendingCloseTimer = null;
+  }
   const isFirstChunk = anchorMs === null;
   if (isFirstChunk) {
     anchorMs = performance.now();
@@ -180,6 +203,15 @@ function scheduleChunk(track: CaptionTrack): void {
   }
   if (track.envelope?.length && track.frame_ms > 0) {
     segments.push({ startMs: track.envelope_start_ms ?? 0, frameMs: track.frame_ms, values: track.envelope });
+  }
+  if (isFirstChunk && track.estimated) {
+    // Kokoro/local synthesis has no real per-word boundary data — every
+    // word's start_ms/duration_ms is evenly estimated from total_ms, which
+    // can drift from the actual decoded audio if Kokoro's real pacing
+    // isn't perfectly even. Nothing previously surfaced this anywhere, so
+    // a live drift report had no way to be diagnosed. Logged once per
+    // utterance (not per chunk) to stay quiet in normal use.
+    console.debug("[CAPTION] estimated timing (local TTS engine, no real word-boundary data)");
   }
   if (suppressNext) {
     suppressNext = false;
@@ -219,7 +251,11 @@ function scheduleChunk(track: CaptionTrack): void {
     const spokenDuration = Math.max(300, line.end_ms - line.start_ms);
     // User choice: 2.0s reading dwell for final sentence, 1.6s for intermediate
     const minDwell = isLastInChunk ? Math.max(2000, wordCount * 300) : Math.max(1600, wordCount * 260);
-    const linger = isLastInChunk ? 1500 : 1000;
+    // Estimated (local-engine) timing has no real per-word boundary data to
+    // verify against — a small fixed margin gives the real audio some room
+    // to run slightly longer than the naive even-distribution guess before
+    // the caption fades/clears ahead of it.
+    const linger = (isLastInChunk ? 1500 : 1000) + (track.estimated ? 300 : 0);
     const displayDuration = Math.max(minDwell, spokenDuration + linger);
 
     const fadeDelay = startDelay + displayDuration;
@@ -233,25 +269,38 @@ function scheduleChunk(track: CaptionTrack): void {
       }, startDelay)
     );
 
-    // Schedule incremental word-by-word reveal inside this active line
-    const lineRevealed: string[] = [];
+    // Schedule incremental letter-by-letter reveal inside this active line
+    let accumulatedText = "";
     for (let wi = 0; wi < line.words.length; wi++) {
       const cw = line.words[wi];
-      const wordDelay = Math.max(0, cw.start_ms - (now - anchor));
-      timers.push(
-        setTimeout(() => {
-          if (activeLineSeq === lineSeq) {
-            lineRevealed.push(unescapeXml(cw.text));
-            notifyLine({
-              text: lineRevealed.join(" "),
-              previousText: prevLineText,
-              phase: "active",
-              words: lineRevealed.slice(),
-              activeWordIndex: lineRevealed.length - 1,
-            }, false);
-          }
-        }, wordDelay)
-      );
+      const cleanWord = unescapeXml(cw.text);
+      if (wi > 0) {
+        accumulatedText += " ";
+      }
+      const wordPrefix = accumulatedText;
+      const charCount = cleanWord.length;
+      const wordDur = Math.max(80, cw.duration_ms);
+
+      for (let ci = 0; ci < charCount; ci++) {
+        const textSnapshot = wordPrefix + cleanWord.slice(0, ci + 1);
+        const charOffset = charCount > 1 ? (ci / charCount) * wordDur : 0;
+        const charDelay = Math.max(0, (cw.start_ms + charOffset) - (now - anchor));
+
+        timers.push(
+          setTimeout(() => {
+            if (activeLineSeq === lineSeq) {
+              notifyLine({
+                text: textSnapshot,
+                previousText: prevLineText,
+                phase: "active",
+                words: textSnapshot.trim().split(/\s+/).filter(Boolean),
+                activeWordIndex: wi,
+              }, false);
+            }
+          }, charDelay)
+        );
+      }
+      accumulatedText += cleanWord;
     }
 
     timers.push(
@@ -271,10 +320,21 @@ function scheduleChunk(track: CaptionTrack): void {
     timers.push(
       setTimeout(() => {
         if (activeLineSeq === lineSeq) {
-          const isUtteranceEnd = line.end_ms >= latestScheduledEndMs;
-          notifyLine({ text: "", previousText: "", phase: "cleared", words: [] }, isUtteranceEnd);
-          if (isUtteranceEnd) {
-            useAssistant.getState().setCaptionActive(false);
+          const looksLikeUtteranceEnd = line.end_ms >= latestScheduledEndMs;
+          notifyLine({ text: "", previousText: "", phase: "cleared", words: [] }, false);
+          if (looksLikeUtteranceEnd) {
+            // This is the last line we currently know about — but a later
+            // streamed chunk may simply be running behind, not finished.
+            // Give it UTTERANCE_END_GRACE_MS to arrive and cancel this
+            // (via scheduleChunk's own pendingCloseTimer clear) before
+            // actually closing the caption.
+            if (pendingCloseTimer) clearTimeout(pendingCloseTimer);
+            pendingCloseTimer = setTimeout(() => {
+              pendingCloseTimer = null;
+              useAssistant.getState().setCaptionActive(false);
+              notify(true);
+              notifyLine({ text: "", previousText: "", phase: "cleared", words: [] }, true);
+            }, UTTERANCE_END_GRACE_MS);
           }
         }
       }, clearDelay)
@@ -292,6 +352,12 @@ function scheduleChunk(track: CaptionTrack): void {
 let initialized = false;
 
 /** Call once (idempotent) to start listening for Rust's `tts:caption` event. */
+/** Test hook: drive scheduleChunk directly (vitest only) — it isn't
+ * otherwise reachable except through the real tts:caption Tauri event. */
+export function __testScheduleChunk(track: CaptionTrack): void {
+  scheduleChunk(track);
+}
+
 export function initCaptionListener(): void {
   if (initialized) return;
   initialized = true;
