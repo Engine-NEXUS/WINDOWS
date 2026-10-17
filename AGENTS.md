@@ -1,5 +1,12 @@
 # NEXUS — Project Notes
 
+## Action Kernel — voice file control, quarantine delete + undo, provenance, safe coding agents (2026-10-17)
+
+- **Built** (doc 140 P0-P6, recommended defaults D1-D5 assumed): `src-tauri/src/action_kernel/` (`paths` canonicaliser, `policy` deny/ask/allow engine, `files` tools, `journal` undo + quarantine, `audit` JSONL, `resolve`, `voice` grammar + replies, `pending` held confirmation, `ipc`). Say "delete the pdfs in downloads" -> read-back + sidebar card -> "yes" -> moved to `<root>\.nexus-trash`; "undo that" restores. Move/copy/rename/create/list/find run at once, never overwrite. "Delete everything / wipe my drive" is claimed and refused locally. Hub page **Actions & Permissions** edits the policy live.
+- **Rules**: no shell strings in the kernel (a test greps for it); a file action never runs inside a compound; only a captured-voice turn (turn context present) may trigger a delete or answer its confirmation; permanent delete is not available from voice; forbidden places are code, not settings.
+- **Real hole fixed**: the agent-watch sidecar started OpenCode with `--dangerously-skip-permissions` (no approval preset set) and had lost its token / parent-exit hardening; now token + Host check + vetted preset only (default `edit`, never `autonomous`).
+- **Verify**: 69 kernel tests, mutation check 20/20 killed (first run had 6 survivors, fixed), sidecar tests 4/4, tsc, vitest 323/323, full Rust lib 1668 pass (2 foreign Spotify failures), turn-end/hygiene OK. **Not run**: anything by real voice / rebuilt app. IPC gate still fails on pre-existing lost-work items (`get_return_review`, `agent_watch_*`, `speech_stage_snapshot`). Record: `docs/changes/135-action-kernel-file-control-and-agent-safety.md`.
+
 ## Voice / Connectivity / RAM Research & Plan — Edge First, Smart Local Standby (2026-10-17)
 
 - **Owner contract**: conversation fast with no perceptible delay, tasks may think; **Edge TTS first**, local only when offline; **Smart** standby (local voice + STT + NLU warm when the link looks unstable, cold after 30 min stable - **never always loaded**); return to online only after proof (OS connected + 3 probes + 1-word canary + 60 s); spoken notices are **reactive only** (when the user calls while offline/slow), "I'm back" only if the user had called during the outage, varied phrases, STILL_OFFLINE from the 4th call. Free/open-source: users bring Groq/Gemini keys.
