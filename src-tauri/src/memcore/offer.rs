@@ -43,6 +43,9 @@ pub enum Offer {
     ReopenSession,
     /// "Shut down your laptop?" (`kind` = power_cmd::PowerKind::as_str)
     Power { kind: String },
+    /// "Move these 3 PDFs to the trash, 14 MB? Say yes." The held plan lives in
+    /// `action_kernel::pending`; this marker only opens the answer window.
+    FileConfirm,
     /// "I couldn't find 'mummy chat' exactly - did you mean Google Chat?"
     /// A guess from the app registry: nothing launches until the user says yes.
     OpenApp { display_name: String, spoken: String },
@@ -52,7 +55,7 @@ impl Offer {
     /// How long this question stays answerable after it was spoken.
     pub fn reply_window(&self) -> Duration {
         match self {
-            Offer::Power { .. } | Offer::ClearTimetable => REPLY_WINDOW_HIGH,
+            Offer::Power { .. } | Offer::ClearTimetable | Offer::FileConfirm => REPLY_WINDOW_HIGH,
             Offer::AddEvent { .. } | Offer::AddSlots { .. } => REPLY_WINDOW_MEDIUM,
             Offer::Start { .. } | Offer::Choose { .. } | Offer::ReopenSession | Offer::OpenApp { .. } => REPLY_WINDOW_LOW,
         }

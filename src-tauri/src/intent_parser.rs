@@ -189,6 +189,16 @@ pub enum ParsedIntent {
     /// "Shut down / restart / sleep / lock my laptop" (`kind` = power_cmd::PowerKind).
     #[serde(rename = "power_action")]
     PowerAction { kind: String },
+    /// "Delete the PDFs in downloads" / "move ... to documents" / "rename ..." / "make a folder ..." /
+    /// "what's in downloads" (Action Kernel, docs/features/140). `verb` = delete, move, copy, rename,
+    /// create_folder, list or find; `object` is the spoken object phrase, `folder` the source folder
+    /// alias, `dest` the destination folder phrase (or the new name for rename). Resolved to real
+    /// files by `action_kernel`, never executed from the spoken text.
+    #[serde(rename = "file_action")]
+    FileAction { verb: String, object: String, folder: Option<String>, dest: Option<String> },
+    /// "Undo that": reverse the newest file action.
+    #[serde(rename = "file_undo")]
+    FileUndo,
     /// "Reopen my session" / "reopen what I had open" (the pending last-session offer).
     #[serde(rename = "reopen_session")]
     ReopenSession,
@@ -375,6 +385,8 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::Briefing => "briefing",
         ParsedIntent::ImportContacts => "import_contacts",
         ParsedIntent::PowerAction { .. } => "power_action",
+        ParsedIntent::FileAction { .. } => "file_action",
+        ParsedIntent::FileUndo => "file_undo",
         ParsedIntent::ReopenSession => "reopen_session",
         ParsedIntent::TimetableAdd { .. } => "timetable_add",
         ParsedIntent::TimetableShow => "timetable_show",
@@ -607,6 +619,13 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
             confidence: 1.0,
             source: "deterministic".to_string(),
         });
+    }
+
+    // --- File actions (Action Kernel): delete/move/copy/rename/create/list/undo ---
+    // Claimed before the open/close parsers; broad wipe phrases are claimed too so they are refused
+    // locally instead of reaching a chat model.
+    if let Some(intent) = crate::action_kernel::voice::parse(&text) {
+        return Some(ParseResult { intent, confidence: 1.0, source: "deterministic".to_string() });
     }
 
     if is_reopen_session_command(&text) {

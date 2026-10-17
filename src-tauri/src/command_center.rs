@@ -366,6 +366,11 @@ pub fn build_plan(transcript: &str, task_id: &str) -> Option<TaskPlan> {
     for (i, part) in parts.iter().enumerate() {
         let parsed = parse_deterministic(part)?;
         let subsystem = route_intent(&parsed.intent);
+        // A file action never runs inside a compound: a delete needs its own read-back and its own yes
+        // (Action Kernel), so the whole line falls back to the single-intent path.
+        if matches!(parsed.intent, ParsedIntent::FileAction { .. } | ParsedIntent::FileUndo) {
+            return None;
+        }
         // Architect is window-managed by the frontend — can't compose.
         if subsystem == Subsystem::Architect || subsystem == Subsystem::None {
             return None;
@@ -1147,6 +1152,18 @@ mod tests {
         // single-intent path (Worker/9Router answers the full text).
         let plan = build_plan("open chrome then gibberish xyzzy foobar", "t3");
         assert!(plan.is_none());
+    }
+
+    #[test]
+    fn test_build_plan_never_hides_a_file_action_inside_a_compound() {
+        for t in [
+            "open chrome then delete the pdfs in downloads",
+            "delete the pdfs in downloads then open chrome",
+            "open chrome then undo that",
+            "open chrome then move my latest screenshot to documents",
+        ] {
+            assert!(build_plan(t, "tf").is_none(), "{t}");
+        }
     }
 
     #[test]

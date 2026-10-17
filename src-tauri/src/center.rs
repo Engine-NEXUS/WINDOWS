@@ -73,6 +73,8 @@ pub fn is_side_effect(intent: &ParsedIntent) -> bool {
     matches!(
         intent,
         ParsedIntent::OpenArchitect
+            | ParsedIntent::FileAction { .. }
+            | ParsedIntent::FileUndo
             | ParsedIntent::GitHubCommand { .. }
             | ParsedIntent::OrderFood { .. }
             | ParsedIntent::SearchProduct { .. }
@@ -330,6 +332,8 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
         | ParsedIntent::ScreenClick { .. }
         | ParsedIntent::ScreenRead { .. } => "GhostCenter",
 
+        ParsedIntent::FileAction { .. } | ParsedIntent::FileUndo => "FileCenter",
+
         ParsedIntent::Greeting { .. }
         | ParsedIntent::NeedMoreInfo { .. } => "GreetingCenter",
 
@@ -480,7 +484,7 @@ pub fn validate(intent: &ParsedIntent, transcript: &str, has_dialog_context: boo
     }
 }
 
-/// All 16 action sub-centers in the NEXUS Command Center architecture.
+/// All 17 action sub-centers in the NEXUS Command Center architecture.
 #[allow(dead_code)]
 pub const ALL_SUB_CENTERS: &[&str] = &[
     "AppCenter",
@@ -496,6 +500,7 @@ pub const ALL_SUB_CENTERS: &[&str] = &[
     "HandCenter",
     "GoogleCenter",
     "MemoryCenter",
+    "FileCenter",
     "DictationCenter",
     "GreetingCenter",
     "KnowledgeCenter",
@@ -647,6 +652,7 @@ mod tests {
             ("HandCenter", ParsedIntent::EnterHandMode),
             ("GoogleCenter", ParsedIntent::WatchScreenEmail),
             ("MemoryCenter", ParsedIntent::MemoryAudit),
+            ("FileCenter", ParsedIntent::FileUndo),
             ("DictationCenter", ParsedIntent::StartDictation),
             ("GreetingCenter", ParsedIntent::Greeting { reply: "x".into() }),
             ("KnowledgeCenter", ParsedIntent::Search { query: "x".into() }),

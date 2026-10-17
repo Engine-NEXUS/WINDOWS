@@ -625,6 +625,8 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         | ParsedIntent::Briefing
         | ParsedIntent::ImportContacts
         | ParsedIntent::PowerAction { .. }
+        | ParsedIntent::FileAction { .. }
+        | ParsedIntent::FileUndo
         | ParsedIntent::ReopenSession
         | ParsedIntent::TimetableAdd { .. }
         | ParsedIntent::TimetableShow
@@ -739,6 +741,10 @@ pub async fn process_transcript<R: Runtime>(
         transcript.chars().take(80).collect::<String>()
     );
 
+    // Where this turn came from: a captured-voice turn carries a context; webhooks, queued follow-ups
+    // and any other caller do not, so text they supply can never confirm or trigger a delete.
+    let origin = crate::action_kernel::Origin::from_turn(turn_context.is_some());
+
     // A power command counting down ("powering off in 10 seconds, say cancel") can be stopped by voice.
     if crate::power_cmd::countdown_active() && crate::power_cmd::is_cancel_phrase(&transcript) {
         let (request_id, _) = install_new_request(Subsystem::LocalCommand);
@@ -755,19 +761,29 @@ pub async fn process_transcript<R: Runtime>(
     // as an ordinary turn, where the ownership gate drops it.
     let offer_owner = turn_context.as_ref().map(|t| t.ownership).unwrap_or_default();
     if crate::memcore::offer::is_armed()
-        && crate::memcore::offer::peek().map_or(true, |o| may_answer_offer(offer_owner, &o))
+        && crate::memcore::offer::peek().map_or(true, |o| {
+            may_answer_offer(offer_owner, &o)
+                && (origin == crate::action_kernel::Origin::UserVoice
+                    || !matches!(o, crate::memcore::offer::Offer::FileConfirm))
+        })
     {
         use crate::memcore::offer::{self, Offer, Reply};
         let reply = offer::classify(&transcript);
         let has_choice = crate::memcore::timetable::parse_choice(&transcript).is_some();
         match offer::peek() {
+            Some(Offer::FileConfirm) if reply != Reply::Other => {
+                return run_file_confirm(app, reply, &transcript, origin).await;
+            }
             Some(o @ Offer::Choose { .. }) if has_choice || reply != Reply::Other => {
                 return run_offer_reply(app, o, reply, &transcript).await;
             }
             Some(o) if reply != Reply::Other => {
                 return run_offer_reply(app, o, reply, &transcript).await;
             }
-            _ => offer::clear(),
+            _ => {
+                offer::clear();
+                crate::action_kernel::pending::clear();
+            }
         }
     }
 
@@ -925,6 +941,31 @@ pub async fn process_transcript<R: Runtime>(
             return speak_prompt_and_hold(&app, prompt, slot).await;
         }
         crate::center::ActionDisposition::Allow => {}
+    }
+
+    // Action Kernel P0: every side-effecting turn leaves one audit line (file actions write their own,
+    // richer lines). Local file only; the phrase never leaves the device.
+    {
+        let risk = crate::action_kernel::risk_of_intent(&intent);
+        if risk >= crate::action_kernel::Risk::Reversible
+            && !matches!(intent, ParsedIntent::FileAction { .. } | ParsedIntent::FileUndo)
+        {
+            if let Ok(dir) = app.path().app_data_dir() {
+                crate::action_kernel::audit::record(
+                    &dir,
+                    &crate::action_kernel::audit::AuditEntry::new(
+                        chrono::Utc::now().timestamp(),
+                        &transcript,
+                        crate::intent_parser::intent_to_label(&intent),
+                        risk.as_str(),
+                        origin.as_str(),
+                        "allow",
+                        "dispatched",
+                        center_name,
+                    ),
+                );
+            }
+        }
     }
 
     // Main Center decision tree (doc 74, P0: classification only — the
@@ -1136,6 +1177,12 @@ pub async fn process_transcript<R: Runtime>(
         }
         ParsedIntent::PowerAction { kind } => {
             return run_power_action(app, kind.clone()).await;
+        }
+        ParsedIntent::FileAction { verb, object, folder, dest } => {
+            return run_file_action(app, &transcript, origin, verb.clone(), object.clone(), folder.clone(), dest.clone()).await;
+        }
+        ParsedIntent::FileUndo => {
+            return run_file_undo(app, &transcript, origin).await;
         }
         ParsedIntent::ReopenSession => {
             return run_reopen_session(app).await;
@@ -1419,6 +1466,12 @@ pub async fn process_transcript<R: Runtime>(
             }
             ParsedIntent::PowerAction { kind } => {
                 return run_power_action(app, kind.clone()).await;
+            }
+            ParsedIntent::FileAction { verb, object, folder, dest } => {
+                return run_file_action(app, &transcript, origin, verb.clone(), object.clone(), folder.clone(), dest.clone()).await;
+            }
+            ParsedIntent::FileUndo => {
+                return run_file_undo(app, &transcript, origin).await;
             }
             ParsedIntent::ReopenSession => {
                 return run_reopen_session(app).await;
@@ -4735,6 +4788,10 @@ async fn run_offer_reply<R: Runtime>(
             }
         }
         (Offer::OpenApp { .. }, _) => "Understood, sir. I won't open anything.".to_string(),
+        (Offer::FileConfirm, _) => {
+            crate::action_kernel::pending::clear();
+            "Understood, sir. I left everything as it was.".to_string()
+        }
     };
     say_and_finish(&app, request_id, line)
 }
@@ -7218,6 +7275,146 @@ async fn try_unknown_local_fallbacks<R: Runtime>(
     None
 }
 
+// ─── File actions (Action Kernel, docs/features/140) ──────────────────
+
+/// Policy + environment + roots for one file action, loaded fresh so Hub edits apply at once.
+fn kernel_world(dir: &std::path::Path) -> (
+    crate::action_kernel::policy::Policy,
+    crate::action_kernel::policy::PolicyEnv,
+    Vec<std::path::PathBuf>,
+) {
+    let policy = crate::action_kernel::policy::load(dir);
+    let env = crate::action_kernel::policy::PolicyEnv::detect(dir);
+    let roots = crate::action_kernel::policy::effective_roots(&policy);
+    (policy, env, roots)
+}
+
+fn show_card<R: Runtime>(app: &AppHandle<R>, title: String, markdown: String) {
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = crate::commands::show_sidebar_with_content(app2, title, markdown).await {
+            tracing::warn!("action kernel: sidebar card failed: {e}");
+        }
+    });
+}
+
+/// Delete / move / copy / rename / create folder / list / find. Reads and undoable actions run at
+/// once; a delete reads back what it resolved and waits for a yes (see `action_kernel::voice`).
+async fn run_file_action<R: Runtime>(
+    app: AppHandle<R>,
+    phrase: &str,
+    origin: crate::action_kernel::Origin,
+    verb: String,
+    object: String,
+    folder: Option<String>,
+    dest: Option<String>,
+) -> Result<ProcessResult, String> {
+    use crate::action_kernel::voice::Reply;
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my data folder, sir.".into());
+    };
+    let phrase = phrase.to_string();
+    let reply = tokio::task::spawn_blocking(move || {
+        let (policy, env, roots) = kernel_world(&dir);
+        if !policy.enabled {
+            return Reply::Say("File commands are switched off in the Command Hub, sir.".into());
+        }
+        let ctx = crate::action_kernel::files::Ctx {
+            dir: &dir,
+            policy: &policy,
+            env: &env,
+            roots: &roots,
+            now: chrono::Utc::now().timestamp(),
+            phrase: &phrase,
+            origin,
+        };
+        crate::action_kernel::voice::handle(&ctx, &verb, &object, folder.as_deref(), dest.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    match reply {
+        Reply::Say(line) => say_and_finish(&app, request_id, line),
+        Reply::Card { spoken, title, markdown } => {
+            show_card(&app, title, markdown);
+            say_and_finish(&app, request_id, spoken)
+        }
+        Reply::Confirm { spoken, markdown, plan } => {
+            crate::action_kernel::pending::hold(*plan);
+            crate::memcore::offer::set(crate::memcore::offer::Offer::FileConfirm, true);
+            show_card(&app, "Please confirm".into(), markdown);
+            say_and_finish(&app, request_id, spoken)
+        }
+    }
+}
+
+/// "Undo that".
+async fn run_file_undo<R: Runtime>(
+    app: AppHandle<R>,
+    phrase: &str,
+    origin: crate::action_kernel::Origin,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my data folder, sir.".into());
+    };
+    let phrase = phrase.to_string();
+    let line = tokio::task::spawn_blocking(move || {
+        let (policy, env, roots) = kernel_world(&dir);
+        let ctx = crate::action_kernel::files::Ctx {
+            dir: &dir,
+            policy: &policy,
+            env: &env,
+            roots: &roots,
+            now: chrono::Utc::now().timestamp(),
+            phrase: &phrase,
+            origin,
+        };
+        crate::action_kernel::voice::undo(&ctx)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    say_and_finish(&app, request_id, line)
+}
+
+/// The yes or no to a delete read-back. Only a captured-voice turn reaches this (see the offer
+/// gate in `process_transcript`), and `voice::confirm` checks the origin again.
+async fn run_file_confirm<R: Runtime>(
+    app: AppHandle<R>,
+    reply: crate::memcore::offer::Reply,
+    phrase: &str,
+    origin: crate::action_kernel::Origin,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    crate::memcore::offer::clear();
+    let Ok(dir) = app.path().app_data_dir() else {
+        crate::action_kernel::pending::clear();
+        return say_and_finish(&app, request_id, "I couldn't open my data folder, sir.".into());
+    };
+    let yes = reply == crate::memcore::offer::Reply::Yes;
+    let phrase = phrase.to_string();
+    let line = tokio::task::spawn_blocking(move || {
+        let (policy, env, roots) = kernel_world(&dir);
+        let ctx = crate::action_kernel::files::Ctx {
+            dir: &dir,
+            policy: &policy,
+            env: &env,
+            roots: &roots,
+            now: chrono::Utc::now().timestamp(),
+            phrase: &phrase,
+            origin,
+        };
+        if yes {
+            crate::action_kernel::voice::confirm(&ctx)
+        } else {
+            crate::action_kernel::voice::decline(&ctx)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    say_and_finish(&app, request_id, line)
+}
+
 /// Unknown-transcript power + how-to handling (docs/features/138). Nothing here reaches the cloud:
 /// * "how do I shut down my laptop" -> a local steps card in the sidebar + one short spoken line;
 /// * a phrase the user already confirmed as "shut down" (learned mishearing) -> the normal shutdown;
@@ -7336,6 +7533,7 @@ fn may_answer_offer(
         Uncertain => !matches!(
             offer,
             Offer::Power { .. }
+                | Offer::FileConfirm
                 | Offer::OpenApp { .. }
                 | Offer::AddEvent { .. }
                 | Offer::ClearTimetable
