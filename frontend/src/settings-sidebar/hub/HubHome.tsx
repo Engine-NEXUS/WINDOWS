@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { formatCount, initialOf, requestsSubtitle, type HubAccount, type UsageStats } from "./hubModel";
 
-export type HubPage = "home" | "keys" | "memory" | "audio" | "display" | "connections" | "advanced";
+export type HubPage = "home" | "keys" | "memory" | "actions" | "audio" | "display" | "connections" | "advanced";
 
 interface AccountsApi {
   accounts: HubAccount[];
@@ -231,6 +231,7 @@ export function HubHome({ acc, insights, themeMode, onTheme, onOpen }: Props) {
       <div className="hx-section">How do you set up NEXUS?</div>
       <Row icon={ICONS.key} title="API Keys" sub="Add, replace or delete your keys" onClick={() => onOpen("keys")} />
       <Row icon={ICONS.chart} title="Memory" sub="What I remember, and what I send to the cloud" onClick={() => onOpen("memory")} />
+      <Row icon={ICONS.chart} title="Actions & Permissions" sub="What I may do to your files, the trash, and undo" onClick={() => onOpen("actions")} />
       <Row
         icon={ICONS.orb}
         title="Customize Voice Orb"
