@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activitySummary, ageLabel, categoryLabel, fmtDays, fmtSlotTime, fmtTime, groupRows, keyLabel, mailSummary, selftestSummary, sourceLabel, whatsappSummary, type MemoryRow, type WhatsappSelfTest } from "./memoryModel";
+import { leaveBySummary, activitySummary, ageLabel, categoryLabel, fmtDays, fmtSlotTime, fmtTime, groupRows, keyLabel, mailSummary, selftestSummary, sourceLabel, whatsappSummary, type MemoryRow, type WhatsappSelfTest } from "./memoryModel";
 
 const row = (over: Partial<MemoryRow>): MemoryRow => ({
   id: 1,
@@ -16,6 +16,18 @@ const row = (over: Partial<MemoryRow>): MemoryRow => ({
 });
 
 describe("memoryModel", () => {
+  it("lists what leave-by reminders still need", () => {
+    expect(leaveBySummary({ leave_by: false, google_connected: true }, true)).toMatch(/^Off/);
+    const all = leaveBySummary({ leave_by: true, google_connected: false }, false);
+    expect(all).toContain("Google account");
+    expect(all).toContain("Routes API key");
+    expect(all).toContain("home address");
+    const some = leaveBySummary({ leave_by: true, google_connected: true }, true);
+    expect(some).not.toContain("Google account");
+    expect(some).not.toContain("Routes API key");
+    expect(some).toContain("from home");
+  });
+
   it("summarises the WhatsApp watcher honestly", () => {
     expect(whatsappSummary({ whatsapp: false, people: 0 })).toMatch(/^Off.*two-phone/);
     expect(whatsappSummary({ whatsapp: undefined, people: undefined })).toMatch(/^Off/);
@@ -89,6 +101,7 @@ describe("memoryModel", () => {
     expect(mailSummary({ mail: true, google_connected: true, mail_items: 4 })).toContain("4 important emails");
     expect(mailSummary({ mail: true, google_connected: true, mail_items: 2, google_needs_signin: true })).toMatch(/^Paused.*sign in again/);
     expect(categoryLabel("database")).toBe("Database");
+    expect(categoryLabel("internship")).toBe("Internship");
     expect(categoryLabel("other")).toBe("other");
   });
 

@@ -10,6 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "0.10.21",
     "@number-flow/react": "^0.6.2",
     "@radix-ui/react-slider": "^1.4.7",
     "@ricky0123/vad-web": "^0.0.30",

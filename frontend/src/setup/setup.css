@@ -14,19 +14,44 @@
 html, body, #root {
   height: 100%;
   font-family: var(--nx-font);
-  background: var(--nx-bg);
+  background: transparent !important;
   color: var(--nx-text-primary);
   -webkit-font-smoothing: antialiased;
+  overflow: hidden;
 }
 
 /* ── Layout ──────────────────────────────────────────────────── */
 .setup-root {
   max-width: 480px;
-  margin: 0 auto;
-  padding: var(--nx-space-8) var(--nx-space-6) 100px;
-  min-height: 100%;
+  margin: 16px auto;
+  padding: 48px var(--nx-space-6) 100px;
+  min-height: calc(100% - 32px);
   display: flex;
   flex-direction: column;
+  background: var(--nx-bg);
+  backdrop-filter: var(--nx-glass-blur);
+  -webkit-backdrop-filter: var(--nx-glass-blur);
+  border: var(--nx-glass-border);
+  border-radius: 14px;
+  box-shadow: var(--nx-glass-shadow);
+  position: relative;
+}
+
+/* ── Window Titlebar Drag Region ────────────────────────────── */
+.setup-window-titlebar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  z-index: 1000;
+  user-select: none;
+  border-bottom: 1px solid var(--nx-border);
+  background: rgba(255, 255, 255, 0.02);
 }
 
 /* ── Welcome step ────────────────────────────────────────────── */

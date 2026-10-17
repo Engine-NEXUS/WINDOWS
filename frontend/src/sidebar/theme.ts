@@ -1,14 +1,14 @@
-/**
- * Command Hub theme (opaque light/dark only — transparency is out per
- * user directive). Single owner for reading + applying so every view
- * agrees. Persists to localStorage for instant paint; settings.json
- * (themeMode) is the durable copy written by the settings save flow.
- */
+import { invoke } from "@tauri-apps/api/core";
+import { emit, listen } from "@tauri-apps/api/event";
 
 export type ThemeMode = "light" | "dark";
 
 export const THEME_STORAGE_KEY = "nexus-theme-mode";
 export const THEME_EVENT = "nexus:theme-change";
+
+function isTauri(): boolean {
+  return typeof window !== "undefined" && typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
+}
 
 /** Normalize any stored/legacy value — unknown always falls back to dark. */
 export function resolveThemeMode(raw: unknown): ThemeMode {
@@ -24,8 +24,8 @@ export function getThemeMode(): ThemeMode {
   }
 }
 
-/** Apply theme to the document + persist + notify other mounted views. */
-export function applyThemeMode(mode: ThemeMode): void {
+/** Apply theme to the document + persist + notify other mounted views and windows. */
+export function applyThemeMode(mode: ThemeMode, broadcast = true): void {
   const next = resolveThemeMode(mode);
   try {
     localStorage.setItem(THEME_STORAGE_KEY, next);
@@ -38,20 +38,53 @@ export function applyThemeMode(mode: ThemeMode): void {
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent(THEME_EVENT, { detail: next }));
   }
+  if (broadcast && isTauri()) {
+    emit(THEME_EVENT, next).catch(() => {});
+  }
 }
 
 /**
- * Keep THIS window's theme in step with the others. Every Command Hub /
- * stage / HUD window shares the same origin, so a theme change in one window
- * fires a `storage` event in all the others; apply the stored mode on load
- * and follow later changes. Safe to call more than once.
+ * Keep THIS window's theme in step with the others.
+ * Syncs with settings.json, localStorage storage events, and cross-window Tauri emits.
  */
 let themeSyncStarted = false;
 export function initThemeSync(): void {
   if (typeof window === "undefined" || themeSyncStarted) return;
   themeSyncStarted = true;
-  applyThemeMode(getThemeMode());
+
+  // Apply immediately from local cache
+  applyThemeMode(getThemeMode(), false);
+
+  // Sync with settings.json on disk if in Tauri
+  if (isTauri()) {
+    invoke<{ themeMode?: string }>("get_settings")
+      .then((s) => {
+        if (s?.themeMode) {
+          applyThemeMode(resolveThemeMode(s.themeMode), false);
+        }
+      })
+      .catch(() => {});
+
+    // Listen for live settings updates from Rust
+    listen<{ themeMode?: string }>("settings:updated", (event) => {
+      if (event.payload?.themeMode) {
+        applyThemeMode(resolveThemeMode(event.payload.themeMode), false);
+      }
+    }).catch(() => {});
+
+    // Listen for cross-window theme broadcast
+    listen<string>(THEME_EVENT, (event) => {
+      if (event.payload) {
+        applyThemeMode(resolveThemeMode(event.payload), false);
+      }
+    }).catch(() => {});
+  }
+
+  // Cross-view storage listener within same origin
   window.addEventListener("storage", (e) => {
-    if (e.key === THEME_STORAGE_KEY) applyThemeMode(resolveThemeMode(e.newValue));
+    if (e.key === THEME_STORAGE_KEY) {
+      applyThemeMode(resolveThemeMode(e.newValue), false);
+    }
   });
 }
+

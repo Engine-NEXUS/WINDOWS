@@ -70,6 +70,76 @@
   box-shadow: 0 20px 54px rgba(0, 0, 0, 1), 0 0 16px rgba(242, 184, 89, 0.25);
 }
 
+/* ─── Feature 106: Pebble Wakeup Design (Organic Contour) ─── */
+.orb-pebble {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000000 !important;
+  background-color: #000000 !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 46px;
+  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.96), 0 4px 16px rgba(0, 0, 0, 0.85);
+  padding: 14px;
+  box-sizing: border-box;
+  overflow: hidden;
+  position: relative;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease, border-radius 0.3s ease;
+}
+
+.orb-slider--top .orb-pebble {
+  border-top: none;
+  border-radius: 0 0 48px 48px;
+  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.96), 0 4px 16px rgba(0, 0, 0, 0.85);
+}
+
+.orb-slider--bottom .orb-pebble {
+  border-bottom: none;
+  border-radius: 48px 48px 0 0;
+  box-shadow: 0 -22px 54px rgba(0, 0, 0, 0.96), 0 -4px 16px rgba(0, 0, 0, 0.85);
+}
+
+.orb-pebble:hover {
+  border-color: rgba(255, 255, 255, 0.28);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 1), 0 0 18px rgba(56, 189, 248, 0.2);
+}
+
+/* ─── Fluid Bezel Scoop & Elastic Thread Stretch Container ─── */
+.pebble-scoop-wrapper {
+  position: relative;
+  width: 301px;
+  height: 105px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  filter: drop-shadow(0 20px 50px rgba(0, 0, 0, 0.98));
+}
+
+.pebble-scoop-svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.orb-cradle-wrapper {
+  position: absolute;
+  width: 100px;
+  height: 100px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  will-change: transform, opacity;
+}
+
 .orb-sphere-wrapper {
   width: 100%;
   height: 100%;
@@ -232,4 +302,12 @@
 :root[data-theme="light"] .orb-capsule:hover {
   border-color: rgba(60, 60, 67, 0.34);
   box-shadow: 0 20px 54px rgba(0, 0, 0, 0.32);
+}
+
+/* Ghost hot mic parked after repeated ambient turns: the orb stays up, dimmed
+   and desaturated, so it is obvious NEXUS stopped listening until a re-wake. */
+.orb-slider[data-parked="true"] .orb-capsule,
+.orb-slider[data-parked="true"] .orb-pebble {
+  opacity: 0.45;
+  filter: grayscale(1);
 }

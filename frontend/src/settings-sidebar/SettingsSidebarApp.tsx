@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
+import { HandModeSection } from "./HandModeSection";
+import { AgentWatchSection } from "./AgentWatchSection";
 import { invoke } from "@tauri-apps/api/core";
 import { isPlausibleGeminiKey } from "./keyFormat";
 import { identityBanner, type IdentityBanner } from "../setup/identityBanner";
@@ -15,6 +17,7 @@ import { HubHome, type HubPage } from "./hub/HubHome";
 import { ApiKeysPage } from "./hub/ApiKeysPage";
 import { MemoryPage } from "./hub/MemoryPage";
 import { useAccounts, useInsights } from "./hub/useHubData";
+import { McpServersPanel } from "./McpServersPanel";
 
 /**
  * NEXUS Settings Sidebar
@@ -76,6 +79,10 @@ interface Settings {
   memcoreMail?: boolean;
   memcoreWhatsapp?: boolean;
   memcoreWhatsappSpeak?: boolean;
+  memcoreLeaveBy?: boolean;
+  memcoreSession?: boolean;
+  memcoreHealth?: boolean;
+  powerCommands?: boolean;
   // Command Hub theme (opaque "dark" default / "light"; no transparency)
   themeMode?: string;
   // Ghost vision provider order (auto = Groq → Gemini fallback)
@@ -90,6 +97,18 @@ interface Settings {
   ghostStepTimeoutMs?: number;
   // Ghost FIFO queue: inter-command gap τ, ms (D4)
   ghostTurnGapMs?: number;
+  ghostEngagementSecs?: number;
+  directedGate?: boolean;
+  handMode?: boolean;
+  handMousePreview?: boolean;
+  handShowCamera?: boolean;
+  handFrameSource?: string;
+  handTrace?: boolean;
+  handWithGhost?: boolean;
+  handSnap?: boolean;
+  handGestures?: boolean;
+  handGesturesDesktop?: boolean;
+  handSensitivity?: number;
   // Ghost waves placement (ghost sessions reposition the orb window to this rect)
   wavesHorizontalPct?: number;
   wavesVerticalPct?: number;
@@ -102,6 +121,11 @@ interface Settings {
   orbColor?: string;
   // Orb fixed position ("top" | "bottom")
   orbPosition?: "top" | "bottom";
+  // Orb background capsule style ("classic" | "pebble")
+  orbCapsuleStyle?: "classic" | "pebble";
+  // Orb wakeup animation mode (1..5) & genesis mode (0..3)
+  orbWakeupMode?: number;
+  orbInteriorGenesis?: number;
   // Orb morphology choices
   orbThinkMode?: number;
   orbSpeakMode?: number;
@@ -134,6 +158,9 @@ const DEFAULT_SETTINGS: Settings = {
   orbHorizontalPct: 0.5,
   orbVerticalPct: 0.0,
   orbPosition: "top",
+  orbCapsuleStyle: "pebble",
+  orbWakeupMode: 1,
+  orbInteriorGenesis: 2,
   orbSize: 200,
   orbThinkMode: 6,
   orbSpeakMode: 2,
@@ -150,6 +177,18 @@ const DEFAULT_SETTINGS: Settings = {
   ghostDepthAck: true,
   ghostStepTimeoutMs: 15000,
   ghostTurnGapMs: 1000,
+  ghostEngagementSecs: 0,
+  directedGate: true,
+  handMode: true,
+  handMousePreview: false,
+  handShowCamera: false,
+  handFrameSource: "auto",
+  handTrace: false,
+  handWithGhost: false,
+  handSnap: true,
+  handGestures: true,
+  handGesturesDesktop: false,
+  handSensitivity: 0,
   wavesHorizontalPct: 0.5,
   wavesVerticalPct: 1.0,
   wavesSize: 200,
@@ -206,14 +245,6 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
       if (s) setSettings({ ...DEFAULT_SETTINGS, ...s, groqApiKey: "", geminiApiKey: "", cerebrasApiKey: "" });
     }).catch(() => {});
   }, []);
-
-  // Show the orb window when the Display tab is active so the user can
-  // see it move live while dragging the position sliders.
-  useEffect(() => {
-    if (page === "display") {
-      invoke("show_overlay").catch(() => {});
-    }
-  }, [page]);
 
   // Fetch pending backdrop on mount — handles the fresh-window case where
   // the backdrop was captured before the React app loaded (same pattern as
@@ -288,11 +319,12 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
   const handleTheme = (m: "light" | "dark") => {
     update("themeMode", m);
     void import("../sidebar/theme").then(({ applyThemeMode }) => applyThemeMode(m)).catch(() => {});
-    // Persist immediately: the Command Hub home has no Save button.
-    invoke("save_settings", { settings: { ...settings, themeMode: m } }).catch(() => {});
+    // Persist immediately: the Command Hub home has no Save button. Patch only the theme: re-saving the whole
+    // (possibly stale) form here used to revert anything another window or IPC had changed.
+    invoke("settings_patch", { patch: { themeMode: m } }).catch(() => {});
   };
 
-  const isLegacyPage = page === "audio" || page === "display" || page === "connections" || page === "advanced";
+  const isLegacyPage = page === "audio" || page === "display" || page === "advanced";
 
   return (
     <div className="hx">
@@ -323,11 +355,16 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
         )}
         {page === "keys" && <ApiKeysPage onChanged={() => setInsightsKey((k) => k + 1)} />}
         {page === "memory" && <MemoryPage onFlagChanged={(flag, on) => update(flag, on)} />}
+        {page === "connections" && (
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", gap: "16px", padding: "12px 14px 24px" }}>
+            <McpServersPanel style={{ flex: 1, minHeight: "560px" }} />
+            <ConnectionsTab settings={settings} update={update} />
+          </div>
+        )}
         {isLegacyPage && (
           <div className="hx-legacy">
             {page === "display" && <DisplayTab settings={settings} update={update} />}
             {page === "audio" && <AudioTab settings={settings} update={update} />}
-            {page === "connections" && <ConnectionsTab settings={settings} update={update} />}
             {page === "advanced" && <AuthTab settings={settings} update={update} />}
           </div>
         )}
@@ -374,6 +411,9 @@ function DisplayTab({ settings, update }: {
   };
 
   const currentPos = settings.orbPosition || "top";
+  const currentCapsuleStyle = settings.orbCapsuleStyle || "classic";
+  const currentWakeupMode = settings.orbWakeupMode ?? 1;
+  const currentInteriorGenesis = settings.orbInteriorGenesis ?? 2;
 
   const onPositionSelect = (pos: "top" | "bottom") => {
     update("orbPosition", pos);
@@ -388,6 +428,25 @@ function DisplayTab({ settings, update }: {
         verticalPct: vPct,
         size: settings.orbSize || 200,
       }).catch(() => {});
+    }).catch(() => {});
+  };
+
+  const onCapsuleStyleSelect = (style: "classic" | "pebble", mode?: number, genesis?: number) => {
+    update("orbCapsuleStyle", style);
+    const m = mode ?? currentWakeupMode;
+    const g = genesis ?? currentInteriorGenesis;
+    if (mode !== undefined) update("orbWakeupMode", m);
+    if (genesis !== undefined) update("orbInteriorGenesis", g);
+    try {
+      localStorage.setItem("nexus:orb_capsule_style", style);
+      localStorage.setItem("nexus:orb_wakeup_mode", String(m));
+      localStorage.setItem("nexus:orb_interior_genesis", String(g));
+    } catch {}
+    useAssistant.getState().setOrbCapsuleStyle(style);
+    useAssistant.getState().setOrbWakeupMode(m);
+    useAssistant.getState().setOrbInteriorGenesis(g);
+    import("@tauri-apps/api/core").then(({ invoke }) => {
+      invoke("set_orb_capsule_style", { style, mode: m, genesis: g }).catch(() => {});
     }).catch(() => {});
   };
 
@@ -525,6 +584,155 @@ function DisplayTab({ settings, update }: {
       </div>
 
       <div className="settings-section">
+        <div className="settings-section-title">Orb Capsule &amp; Scoop Style</div>
+        <div className="setting-desc" style={{ marginBottom: 12 }}>
+          Choose your container geometry. Classic is a solid pitch-black 10px capsule box; Pebble Scoop is an organic catenary curve dropping smoothly from the screen bezel.
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <button
+            type="button"
+            className={`settings-btn ${currentCapsuleStyle === "classic" ? "settings-btn--primary" : "settings-btn--glass"}`}
+            style={{
+              padding: "12px 14px",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 6,
+              borderRadius: 10,
+              cursor: "pointer",
+              border: currentCapsuleStyle === "classic" ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
+              background: currentCapsuleStyle === "classic" ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
+              color: "#fff",
+              transition: "all 0.15s ease",
+            }}
+            onClick={() => onCapsuleStyleSelect("classic")}
+          >
+            <span style={{ fontSize: 18 }}>⬝</span>
+            <span style={{ fontWeight: 600, fontSize: 13 }}>Classic Capsule</span>
+            <span style={{ fontSize: 11, opacity: 0.7 }}>10px pitch-black box</span>
+          </button>
+          <button
+            type="button"
+            className={`settings-btn ${currentCapsuleStyle === "pebble" ? "settings-btn--primary" : "settings-btn--glass"}`}
+            style={{
+              padding: "12px 14px",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 6,
+              borderRadius: 10,
+              cursor: "pointer",
+              border: currentCapsuleStyle === "pebble" ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
+              background: currentCapsuleStyle === "pebble" ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
+              color: "#fff",
+              transition: "all 0.15s ease",
+            }}
+            onClick={() => onCapsuleStyleSelect("pebble")}
+          >
+            <span style={{ fontSize: 18 }}>◗</span>
+            <span style={{ fontWeight: 600, fontSize: 13 }}>Fluid Pebble Scoop</span>
+            <span style={{ fontSize: 11, opacity: 0.7 }}>Catenary bezel scoop</span>
+          </button>
+        </div>
+
+        {currentCapsuleStyle === "pebble" && (
+          <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: "rgba(255,255,255,0.6)" }}>
+              Wakeup Thread Animation Mode
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 6 }}>
+              {[
+                { id: 1, name: "🧵 Elastic Thread Stretch & Snap", desc: "Catenary stretch, harmonic damping (User Choice)" },
+                { id: 2, name: "🏹 Bowstring Pluck & Rebound", desc: "Plunge, sharp overshoot and high-freq ring" },
+                { id: 3, name: "💧 Liquid Meniscus Extrusion", desc: "Critically damped fluid mercury extrusion" },
+                { id: 4, name: "🌅 Horizon Split & Wing Flare", desc: "Expands horizontally with wing specular gleam" },
+                { id: 5, name: "〰️ Acoustic Harmonic Ripple", desc: "Standing acoustic ripples on catenary curve" },
+              ].map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  className={`settings-btn ${currentWakeupMode === m.id ? "settings-btn--primary" : "settings-btn--glass"}`}
+                  style={{
+                    padding: "8px 12px",
+                    textAlign: "left",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 2,
+                    borderRadius: 8,
+                    cursor: "pointer",
+                    border: currentWakeupMode === m.id ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.1)",
+                    background: currentWakeupMode === m.id ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.04)",
+                  }}
+                  onClick={() => onCapsuleStyleSelect("pebble", m.id, currentInteriorGenesis)}
+                >
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "#fff" }}>{m.name}</span>
+                  <span style={{ fontSize: 11, opacity: 0.65 }}>{m.desc}</span>
+                </button>
+              ))}
+            </div>
+
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: "rgba(255,255,255,0.6)", marginTop: 4 }}>
+              Orb Interior Genesis
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+              {[
+                { id: 2, name: "Spark Burst (Selected)" },
+                { id: 0, name: "Core Bloom" },
+                { id: 1, name: "Droplet Roll" },
+                { id: 3, name: "Helix Weave" },
+              ].map((g) => (
+                <button
+                  key={g.id}
+                  type="button"
+                  className={`settings-btn ${currentInteriorGenesis === g.id ? "settings-btn--primary" : "settings-btn--glass"}`}
+                  style={{
+                    padding: "7px 10px",
+                    textAlign: "center",
+                    borderRadius: 8,
+                    fontSize: 11.5,
+                    fontWeight: currentInteriorGenesis === g.id ? 700 : 500,
+                    cursor: "pointer",
+                    border: currentInteriorGenesis === g.id ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.1)",
+                    background: currentInteriorGenesis === g.id ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.04)",
+                  }}
+                  onClick={() => onCapsuleStyleSelect("pebble", currentWakeupMode, g.id)}
+                >
+                  {g.name}
+                </button>
+              ))}
+            </div>
+
+            <button
+              type="button"
+              className="settings-btn settings-btn--glass"
+              style={{
+                marginTop: 6,
+                padding: "10px 14px",
+                borderRadius: 8,
+                fontSize: 12,
+                fontWeight: 600,
+                color: "#38bdf8",
+                borderColor: "rgba(56, 189, 248, 0.4)",
+                background: "rgba(56, 189, 248, 0.08)",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 6,
+              }}
+              onClick={() => {
+                import("@tauri-apps/api/core").then(({ invoke }) => {
+                  invoke("test_wake_orb").catch(() => {});
+                }).catch(() => {});
+              }}
+            >
+              <span>✦ Test Wakeup on Desktop</span>
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="settings-section">
         <div className="settings-section-title">Sidebar Docking</div>
         <div className="setting-desc" style={{ marginBottom: 8 }}>
           Choose where the NEXUS panel is pinned: right edge, left edge, or
@@ -564,27 +772,23 @@ function DisplayTab({ settings, update }: {
       <div className="settings-section">
         <div className="settings-section-title">Orb 3D Morphology Studio</div>
         <div className="setting-desc" style={{ marginBottom: 10 }}>
-          Launch the Orb Studio window to configure 3D particle morphologies for Thinking, Speaking, and Listening.
+          Configure 3D particle morphologies for Thinking, Speaking, and Listening.
         </div>
         <button
           type="button"
-          className="settings-btn"
+          className="settings-btn settings-btn--glass"
           style={{
             width: "100%",
             padding: "10px 14px",
-            background: "linear-gradient(135deg, rgba(168, 85, 247, 0.25), rgba(99, 102, 241, 0.25))",
-            border: "1px solid rgba(168, 85, 247, 0.5)",
             borderRadius: 10,
-            color: "#f3e8ff",
-            fontWeight: 700,
+            color: "#ffffff",
+            fontWeight: 600,
             fontSize: 13,
             cursor: "pointer",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             gap: 8,
-            boxShadow: "0 4px 16px rgba(168, 85, 247, 0.25)",
-            transition: "all 0.15s ease",
           }}
           onClick={() => {
             invoke("open_orb_studio_window").catch(() => {});
@@ -701,7 +905,10 @@ function AudioTab({ settings, update }: {
       .then((res) => {
         // Mirror into local settings state (persists on Save).
         update("edgeTtsVoice", res.cloudId);
+        update("ttsVoice", res.cloudId);
+        update("ttsProvider", "edge");
         update("selectedVoice", res.voiceKey);
+        update("offlineVoiceModel", p.kokoroVoice);
         const st = res.syncState === "ready" ? "ready" : "cloud_only";
         setSync((m) => ({ ...m, [res.voiceKey]: { state: st } }));
       })
@@ -801,6 +1008,8 @@ function AudioTab({ settings, update }: {
           </div>
         </div>
       </div>
+
+      <HandModeSection settings={settings} update={update} />
 
       <div className="settings-section">
         <div className="settings-section-title">Personality</div>
@@ -1077,9 +1286,9 @@ function AuthTab({ settings, update }: {
       )}
 
       <div className="settings-section">
-        <div className="settings-section-title">Change Theme</div>
+        <div className="settings-section-title">Window Theme</div>
         <div className="setting-desc" style={{ marginBottom: 8 }}>
-          Opaque light or dark — no transparency.
+          Liquid frosted glass — dark or light theme across all windows, analyses, and mapper.
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           {(["light", "dark"] as const).map((m) => (
@@ -1090,9 +1299,10 @@ function AuthTab({ settings, update }: {
               onClick={() => {
                 update("themeMode", m);
                 void import("../sidebar/theme").then(({ applyThemeMode }) => applyThemeMode(m)).catch(() => {});
+                invoke("settings_patch", { patch: { themeMode: m } }).catch(() => {});
               }}
             >
-              {m === "light" ? "☀ Light" : "🌙 Dark"}
+              {m === "light" ? "☀ Light (Frosted Glass)" : "🌙 Dark (Liquid Glass)"}
             </button>
           ))}
         </div>
@@ -1653,6 +1863,8 @@ function ConnectionsTab({ settings, update }: {
           <span style={{ fontSize: 12, color: "rgba(255,150,150,0.9)" }}>{error}</span>
         </div>
       )}
+
+      <AgentWatchSection />
 
       <div className="settings-section">
         <div className="settings-section-title">Identity</div>

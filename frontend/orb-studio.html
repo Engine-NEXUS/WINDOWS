@@ -276,6 +276,7 @@
         <button class="state-tab active" onclick="switchTab('thinking')">Thinking</button>
         <button class="state-tab" onclick="switchTab('speaking')">Speaking</button>
         <button class="state-tab" onclick="switchTab('listening')">Listening</button>
+        <button class="state-tab" onclick="switchTab('wakeup')">Wakeup</button>
       </div>
 
       <!-- Option Cards: No names, just clean numbered options -->
@@ -308,11 +309,12 @@
       invoke("close_orb_studio_window").catch(() => window.close());
     };
 
-    // Current selections (Defaults: Think #6, Speak #2, Listen #1)
+    // Current selections (Defaults: Think #6, Speak #2, Listen #1, Wakeup #1)
     const selection = {
       thinking: 6,
       speaking: 2,
-      listening: 1
+      listening: 1,
+      wakeup: 1
     };
 
     // Load saved settings if present
@@ -321,6 +323,10 @@
       if (saved) {
         Object.assign(selection, JSON.parse(saved));
       }
+      const savedWakeup = localStorage.getItem('nexus:orb_wakeup_mode');
+      if (savedWakeup) {
+        selection.wakeup = Number(savedWakeup);
+      }
     } catch (_) {}
 
     invoke("get_settings").then(s => {
@@ -328,6 +334,7 @@
         if (s.orbThinkMode) selection.thinking = s.orbThinkMode;
         if (s.orbSpeakMode) selection.speaking = s.orbSpeakMode;
         if (s.orbListenMode) selection.listening = s.orbListenMode;
+        if (s.orbWakeupMode) selection.wakeup = s.orbWakeupMode;
         renderGrid();
         updateTag();
       }
@@ -345,10 +352,19 @@
       updateTag();
     };
 
+    const WAKEUP_NAMES = {
+      1: "1. Elastic Thread",
+      2: "2. Bowstring Pluck",
+      3: "3. Liquid Meniscus",
+      4: "4. Horizon Split",
+      5: "5. Harmonic Ripple"
+    };
+
     function renderGrid() {
       const grid = document.getElementById('optionsGrid');
       grid.innerHTML = '';
-      for (let i = 1; i <= 12; i++) {
+      const maxOpts = currentTab === 'wakeup' ? 5 : 12;
+      for (let i = 1; i <= maxOpts; i++) {
         const card = document.createElement('div');
         const isSel = selection[currentTab] === i;
         card.className = `opt-card ${isSel ? 'selected' : ''}`;
@@ -360,6 +376,9 @@
           selection[currentTab] = i;
           renderGrid();
           updateTag();
+          if (currentTab === 'wakeup') {
+            invoke("test_wake_orb").catch(() => {});
+          }
         };
         grid.appendChild(card);
       }
@@ -368,7 +387,11 @@
 
     function updateTag() {
       const tag = document.getElementById('stageTag');
-      tag.innerText = `PREVIEW: ${currentTab.toUpperCase()} (OPTION #${selection[currentTab]})`;
+      if (currentTab === 'wakeup') {
+        tag.innerText = `PREVIEW: WAKEUP (${WAKEUP_NAMES[selection.wakeup] || 'OPTION #' + selection.wakeup})`;
+      } else {
+        tag.innerText = `PREVIEW: ${currentTab.toUpperCase()} (OPTION #${selection[currentTab]})`;
+      }
     }
 
     window.updateAudio = (v) => {
@@ -378,6 +401,9 @@
     window.saveConfiguration = async () => {
       try {
         localStorage.setItem('nexus_orb_morphology', JSON.stringify(selection));
+        if (selection.wakeup) {
+          localStorage.setItem('nexus:orb_wakeup_mode', String(selection.wakeup));
+        }
         window.dispatchEvent(new CustomEvent('nexus:orb_morphology', { detail: selection }));
         try {
           await invoke("set_orb_morphology", {
@@ -385,8 +411,15 @@
             speak: selection.speaking,
             listen: selection.listening
           });
+          if (selection.wakeup) {
+            await invoke("set_orb_capsule_style", {
+              style: "pebble",
+              mode: selection.wakeup,
+              genesis: 2
+            });
+          }
         } catch (_) {}
-        alert(`Saved successfully!\n\nThinking: Option #${selection.thinking}\nSpeaking: Option #${selection.speaking}\nListening: Option #${selection.listening}`);
+        alert(`Saved successfully!\n\nThinking: Option #${selection.thinking}\nSpeaking: Option #${selection.speaking}\nListening: Option #${selection.listening}\nWakeup: Option #${selection.wakeup}`);
         window.closeStudio();
       } catch (err) {
         alert("Saved settings: " + err);
