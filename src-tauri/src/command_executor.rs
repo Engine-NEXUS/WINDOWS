@@ -74,6 +74,18 @@ pub enum Intent {
     MediaPrevious,
     #[serde(rename = "media_stop")]
     MediaStop,
+    #[serde(rename = "play_music")]
+    PlayMusic {
+        #[serde(default)]
+        query: Option<String>,
+        #[serde(default)]
+        player: Option<String>,
+    },
+    #[serde(rename = "open_music_player")]
+    OpenMusicPlayer {
+        #[serde(default)]
+        player: Option<String>,
+    },
     /// Local conversational reply (greetings, thanks, etc.)
     #[serde(rename = "greeting")]
     Greeting { reply: String },
@@ -126,6 +138,30 @@ pub async fn execute_command(intent: Intent) -> Result<CommandResult, String> {
         Intent::MediaNext => execute_media_command("next").await,
         Intent::MediaPrevious => execute_media_command("previous").await,
         Intent::MediaStop => execute_media_command("stop").await,
+        Intent::PlayMusic { query, player } => {
+            match crate::media_player::execute_media_action("play", query.as_deref(), player.as_deref()).await {
+                Ok(msg) => Ok(CommandResult {
+                    success: true,
+                    message: msg,
+                }),
+                Err(e) => Ok(CommandResult {
+                    success: false,
+                    message: format!("Couldn't play music: {e}"),
+                }),
+            }
+        }
+        Intent::OpenMusicPlayer { player } => {
+            match crate::media_player::execute_media_action("open", None, player.as_deref()).await {
+                Ok(msg) => Ok(CommandResult {
+                    success: true,
+                    message: msg,
+                }),
+                Err(e) => Ok(CommandResult {
+                    success: false,
+                    message: format!("Couldn't open player: {e}"),
+                }),
+            }
+        }
         Intent::Greeting { reply } => Ok(CommandResult {
             success: true,
             message: reply,
@@ -149,56 +185,81 @@ pub async fn execute_command(intent: Intent) -> Result<CommandResult, String> {
 }
 
 async fn execute_media_command(action: &str) -> Result<CommandResult, String> {
-    #[cfg(target_os = "linux")]
-    {
-        match crate::mpris::send_mpris_command(action).await {
-            Ok(msg) => Ok(CommandResult {
-                success: true,
-                message: msg,
-            }),
-            Err(e) => Ok(CommandResult {
-                success: false,
-                message: format!("Couldn't control media: {e}"),
-            }),
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Ok(CommandResult {
+    match crate::media_player::execute_media_action(action, None, None).await {
+        Ok(msg) => Ok(CommandResult {
             success: true,
-            message: format!("Media {} executed, sir.", action),
-        })
+            message: msg,
+        }),
+        Err(e) => Ok(CommandResult {
+            success: false,
+            message: format!("Couldn't control media: {e}"),
+        }),
     }
 }
 
 // ─── URL + Search ──────────────────────────────────────────────────────────
 
-/// Close an application by name. Uses taskkill on Windows, pkill on Unix.
-fn close_app(target: &str) -> Result<CommandResult, String> {
-    let app_name = app_registry::lookup(target)
-        .map(|a| a.display_name.clone())
-        .unwrap_or_else(|| target.to_string());
+/// Processes that must never be closed by voice: the shell, the compositor and
+/// core Windows services, plus the assistant itself.
+const PROTECTED_PROCESSES: &[&str] = &[
+    "explorer", "dwm", "csrss", "winlogon", "wininit", "services", "lsass", "smss", "svchost",
+    "system", "registry", "sihost", "fontdrvhost", "taskhostw", "nexus",
+];
 
-    // Extract exe filename from the registry launch path if available
-    let exe_name = app_registry::lookup(target)
-        .and_then(|a| match &a.launch {
-            app_registry::LaunchMethod::Exe { path } => {
-                std::path::Path::new(path)
+/// What `close_app` will do for a spoken target. Pure apart from the registry read (unit-tested).
+#[derive(Debug, PartialEq)]
+enum ClosePlan {
+    Close { display: String, exe: String },
+    Refuse(String),
+}
+
+fn plan_close(target: &str) -> ClosePlan {
+    let spoken = target.trim();
+    // Only a strict registry hit may name the app to close. A guess ("chat" inside
+    // "mummy chat") used to be force-killed on the spot.
+    let (display, exe) = match app_registry::lookup_strict(spoken) {
+        Some(entry) => {
+            let exe = match &entry.launch {
+                app_registry::LaunchMethod::Exe { path } => std::path::Path::new(path)
                     .file_name()
                     .and_then(|f| f.to_str())
-                    .map(|s| s.to_string())
+                    .map(|s| s.to_string()),
+                _ => None,
             }
-            _ => None,
-        })
-        .unwrap_or_else(|| format!("{}.exe", target));
+            .unwrap_or_else(|| format!("{}.exe", spoken));
+            (entry.display_name.clone(), exe)
+        }
+        None => {
+            if let Some((entry, _, _)) = app_registry::lookup_with_kind(spoken) {
+                return ClosePlan::Refuse(format!(
+                    "I'm not sure which app '{}' is, sir. Did you mean {}? I haven't closed anything.",
+                    spoken, entry.display_name
+                ));
+            }
+            (spoken.to_string(), format!("{}.exe", spoken))
+        }
+    };
+    let stem = exe.to_lowercase();
+    let stem = stem.trim_end_matches(".exe");
+    if PROTECTED_PROCESSES.contains(&stem) {
+        return ClosePlan::Refuse(format!("I won't close {}, sir.", capitalize(&display)));
+    }
+    ClosePlan::Close { display, exe }
+}
+
+/// Close an application by name. Windows: a polite `taskkill` (WM_CLOSE: the app can ask
+/// to save), never `/F` and never a name-substring kill. Unix: `pkill -x`.
+fn close_app(target: &str) -> Result<CommandResult, String> {
+    let (app_name, exe_name) = match plan_close(target) {
+        ClosePlan::Refuse(message) => return Ok(CommandResult { success: false, message }),
+        ClosePlan::Close { display, exe } => (display, exe),
+    };
 
     #[cfg(target_os = "windows")]
     {
-        // Use taskkill /IM <exe> /F
-        let output = Command::new("taskkill")
-            .args(["/IM", &exe_name, "/F"])
-            .output();
-
+        // Polite close: posts WM_CLOSE to the app's windows, so unsaved work gets its
+        // "save changes?" prompt. (It used to be `/F`, which loses that work.)
+        let output = Command::new("taskkill").args(["/IM", &exe_name]).output();
         match output {
             Ok(o) if o.status.success() => {
                 tracing::info!("closed app '{}' ({})", app_name, exe_name);
@@ -207,34 +268,35 @@ fn close_app(target: &str) -> Result<CommandResult, String> {
                     message: format!("Closed {}, sir.", capitalize(&app_name)),
                 })
             }
-            _ => {
-                // Fallback: try by display name via wmic
-                let wmic_output = Command::new("wmic")
-                    .args(["process", "where", &format!("name like '%{}%'", exe_name.trim_end_matches(".exe")), "call", "terminate"])
-                    .output();
-                match wmic_output {
-                    Ok(o) if o.status.success() => {
-                        tracing::info!("closed app '{}' via wmic", app_name);
-                        Ok(CommandResult {
-                            success: true,
-                            message: format!("Closed {}, sir.", capitalize(&app_name)),
-                        })
-                    }
-                    _ => {
-                        tracing::error!("failed to close app '{}'", app_name);
-                        Ok(CommandResult {
-                            success: false,
-                            message: format!("I couldn't find {} running, sir.", capitalize(&app_name)),
-                        })
-                    }
-                }
+            Ok(o) => {
+                let text = format!(
+                    "{} {}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                )
+                .to_lowercase();
+                tracing::warn!("polite close of '{}' failed: {}", exe_name, text.trim());
+                let message = if text.contains("forcefully") {
+                    format!("{} won't close politely, sir. I haven't forced it.", capitalize(&app_name))
+                } else {
+                    format!("I couldn't find {} running, sir.", capitalize(&app_name))
+                };
+                Ok(CommandResult { success: false, message })
+            }
+            Err(e) => {
+                tracing::error!("failed to run taskkill for '{}': {}", app_name, e);
+                Ok(CommandResult {
+                    success: false,
+                    message: format!("I couldn't close {}, sir.", capitalize(&app_name)),
+                })
             }
         }
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let output = Command::new("pkill").args(["-f", &app_name]).output();
+        let _ = &exe_name;
+        let output = Command::new("pkill").args(["-x", &app_name]).output();
         match output {
             Ok(o) if o.status.success() => {
                 tracing::info!("closed app '{}'", app_name);
@@ -286,7 +348,12 @@ fn whatsapp_chat(contact: &str) -> Result<CommandResult, String> {
     let _ = open::that("whatsapp://");
     Ok(CommandResult {
         success: true,
-        message: format!("I couldn't find {} in your contacts, sir. Opening WhatsApp so you can pick a chat.", capitalize(contact)),
+        // Honest, actionable: this path has no desktop control (that is ghost mode) and no phone
+        // number for the contact, so it can only open the app.
+        message: format!(
+            "I opened WhatsApp, sir, but I can't pick {}'s chat from here. Say ghost mode, then ask me again.",
+            capitalize(contact)
+        ),
     })
 }
 
@@ -652,6 +719,34 @@ fn lock_screen() -> Result<CommandResult, String> {
 
 /// Send a keyboard shortcut to the active window (for browser commands).
 fn browser_key(keys: &str, label: &str) -> Result<CommandResult, String> {
+    // Shortcut brain (E1): resolve the chord from the Shortcut Map for the app that is actually in front,
+    // re-check the foreground right before sending, and send ONE batched SendInput by virtual key - instead
+    // of a detached PowerShell SendKeys that never checked the window and reported success regardless.
+    // Unknown apps (e.g. a browser not in the seed) keep the old behaviour below; known apps without that
+    // shortcut, protected windows and a window change are refused with a spoken reason.
+    #[cfg(target_os = "windows")]
+    if crate::shortcuts::enabled() {
+        use crate::shortcuts::{Action, Spoken};
+        let action = match keys {
+            "ctrl+t" => Some(Action::NewTab),
+            "ctrl+w" => Some(Action::CloseTab),
+            "ctrl+tab" => Some(Action::NextTab),
+            "alt+left" => Some(Action::GoBack),
+            _ => None,
+        };
+        if let Some(action) = action {
+            match crate::shortcuts::do_action_spoken(action, None, true) {
+                // Keep each call site's own wording ("Close tab sir." vs "Tab closed sir.").
+                Spoken::Ok(_) => {
+                    return Ok(CommandResult { success: true, message: format!("{} sir.", capitalize(label)) })
+                }
+                Spoken::Refused(reason) => {
+                    return Ok(CommandResult { success: false, message: format!("{}, sir.", capitalize(&reason)) })
+                }
+                Spoken::Fallback => {} // unknown app -> legacy path below
+            }
+        }
+    }
     #[cfg(target_os = "windows")]
     {
         // Map our key notation to SendKeys notation
@@ -728,11 +823,41 @@ pub fn browser_close_tab_cmd(index: Option<u32>) -> Result<CommandResult, String
 //   3. If app is a known web service → OPEN as URL in browser
 //   4. If nothing found → "Didn't find that, sir."
 
-pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String> {    let start = std::time::Instant::now();
+pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String> {
+    let start = std::time::Instant::now();
     tracing::info!("resolving app: {}", target);
 
-    // Registry lookup (O(1) HashMap + fuzzy match, ~0.1ms)
-    if let Some(entry) = app_registry::lookup(target) {
+    // Match-kind + installer gate: only an exact / resolved / well-covered
+    // prefix match may launch. A guess ("mummy chat" -> Google Chat) is
+    // spoken back as a question and parked as an offer; an installer is
+    // refused. Both return Ok(success: false) with a speakable message —
+    // callers speak it instead of drilling or claiming "Ok sir.". Registry
+    // misses still fall through to the legacy chain below.
+    let assessed = match crate::app_registry::assess_open_target(target) {
+        crate::app_registry::OpenAssessment::Refuse { message } => {
+            return Ok(CommandResult { success: false, message });
+        }
+        crate::app_registry::OpenAssessment::Confirm { entry, message } => {
+            crate::memcore::offer::set(
+                crate::memcore::offer::Offer::OpenApp {
+                    display_name: entry.display_name.clone(),
+                    spoken: target.trim().to_string(),
+                },
+                true,
+            );
+            return Ok(CommandResult { success: false, message });
+        }
+        // Confident match: name it in the trace so the next live log
+        // shows exactly which entry the gate approved before launching.
+        crate::app_registry::OpenAssessment::Proceed(entry) => {
+            tracing::debug!("open gate: confident match '{}'", entry.display_name);
+            Some(entry)
+        }
+        crate::app_registry::OpenAssessment::ProceedLegacy => None,
+    };
+
+    // Registry hit (O(1) HashMap + tiered match, ~0.1ms)
+    if let Some(entry) = assessed {
         tracing::info!(
             "registry hit: '{}' → '{}' ({:?}) in {:.1}ms",
             target,
@@ -750,9 +875,25 @@ pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String
             });
         }
 
+        // A launch a moment ago that has not shown its window yet: wait for it, never start a second
+        // copy (repeating "open notepad" used to open one window per repeat).
+        if app_registry::recently_launched(&entry) {
+            for _ in 0..16 {
+                if app_registry::try_focus_existing(&entry) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            return Ok(CommandResult {
+                success: true,
+                message: "Ok sir.".to_string(),
+            });
+        }
+
         // PRIORITY 2: Launch a new instance (app is not running)
         match app_registry::launch(&entry) {
             Ok(()) => {
+                app_registry::note_launched(&entry);
                 app_registry::record_usage(target);
                 return Ok(CommandResult {
                     success: true,
@@ -1427,5 +1568,70 @@ mod urlencoding {
             }
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod close_plan_tests {
+    use super::*;
+    use crate::app_registry::{test_support, AppEntry, LaunchMethod};
+
+    fn app(display: &str, names: &[&str], path: &str) -> AppEntry {
+        AppEntry {
+            display_name: display.to_string(),
+            search_names: names.iter().map(|s| s.to_string()).collect(),
+            launch: LaunchMethod::Exe { path: path.to_string() },
+            use_count: 0,
+            last_used: 0,
+        }
+    }
+
+    fn registry() -> test_support::Installed {
+        test_support::install(vec![
+            app("Notepad", &["notepad"], r"C:\Windows\notepad.exe"),
+            app("Google Chat", &["google chat", "chat"], r"C:\x\chat.exe"),
+            app("Brave", &["brave"], r"C:\x\brave.exe"),
+            app("Windows Explorer", &["explorer", "file explorer"], r"C:\Windows\explorer.exe"),
+        ])
+    }
+
+    #[test]
+    fn a_named_app_is_closed_by_its_exe() {
+        let _g = registry();
+        assert_eq!(
+            plan_close("notepad"),
+            ClosePlan::Close { display: "Notepad".into(), exe: "notepad.exe".into() }
+        );
+    }
+
+    #[test]
+    fn a_guess_is_never_closed() {
+        let _g = registry();
+        // "chat" is only CONTAINED in the phrase: it used to taskkill /F Google Chat.
+        match plan_close("mummy chat") {
+            ClosePlan::Refuse(m) => {
+                assert!(m.contains("Google Chat") && m.contains("haven't closed anything"), "{m}")
+            }
+            other => panic!("a guess must not close anything: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_shell_and_the_assistant_are_never_closed() {
+        let _g = registry();
+        assert!(matches!(plan_close("explorer"), ClosePlan::Refuse(_)));
+        assert!(matches!(plan_close("file explorer"), ClosePlan::Refuse(_)));
+        assert!(matches!(plan_close("nexus"), ClosePlan::Refuse(_)));
+        assert!(matches!(plan_close("svchost"), ClosePlan::Refuse(_)));
+    }
+
+    #[test]
+    fn unknown_names_become_a_bare_process_name_not_a_substring_kill() {
+        let _g = registry();
+        // Nothing matches: the plan is the exact process name (taskkill /IM matches exactly).
+        assert_eq!(
+            plan_close("zzqqxx"),
+            ClosePlan::Close { display: "zzqqxx".into(), exe: "zzqqxx.exe".into() }
+        );
     }
 }

@@ -10,6 +10,22 @@ rust-version = "1.77"
 name = "nexus_lib"
 crate-type = ["cdylib", "rlib"]
 
+# Read-only UIA measurement tool (docs/research/ghost-mode/11-p0-baseline-report-2026-10-08.md).
+# Lives outside src-tauri/examples/ because that directory is git-ignored.
+[[example]]
+name = "uia_probe"
+path = "dev_tools/uia_probe.rs"
+
+# Live harness for the shortcut brain: sends ONE action only if the foreground exe matches --expect-exe.
+[[example]]
+name = "shortcut_live"
+path = "dev_tools/shortcut_live.rs"
+
+# Offline wake-word replay harness: real engine over recordings (docs/changes/124).
+[[example]]
+name = "wake_replay"
+path = "dev_tools/wake_replay.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -70,7 +86,7 @@ chrono = { version = "0.4.45", features = ["serde"] }
 # - Kokoro-82M (tts_kokoro.rs): local fallback when internet is unavailable. Runs on `ort` + misaki-rs
 #   (~260-370 MB RAM while loaded, ~real-time on CPU). Piper was removed: its espeak-ng is GPL-3.
 # - rodio: audio playback (shared by both engines)
-edge-tts-rust = "0.1"
+edge-tts-rust = "0.1.6" # 0.1.3 was rejected with HTTP 403 on every request (stale client constants)
 # ONNX Runtime: Smart Turn, Silero VAD and Kokoro TTS (pinned; was previously shared with piper-rs)
 ort = "=2.0.0-rc.12"
 # English G2P for Kokoro TTS (MIT). default-features=false drops the espeak fallback => no GPL espeak-ng.
@@ -154,11 +170,14 @@ windows = { version = "0.36", features = [
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse", # GetLastInputInfo: "is the user at the PC" for the activity recorder
     "Win32_System_Threading",
+    "Win32_System_LibraryLoader", # GetModuleHandleW for the session-end hook window
+    "Win32_System_Power", # SetSuspendState ("put my laptop to sleep")
     "Win32_System_SystemInformation", # GetTickCount (with GetLastInputInfo)
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_ProcessStatus",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Diagnostics_Debug", # MessageBeep: arm/disarm cue for hand mode
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_Graphics_Gdi",
@@ -167,6 +186,7 @@ windows = { version = "0.36", features = [
     "Foundation_Collections",
     "Graphics_Imaging",
     "Media_Ocr",
+    "Media_SpeechSynthesis", # the Windows built-in voice: instant safety-net speech
     "Storage_Streams",
     "Globalization",
 ] }

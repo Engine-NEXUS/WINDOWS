@@ -49,11 +49,18 @@ fn owner_repo_token(text: &str) -> bool {
 }
 
 fn source_strength(source: &str) -> u8 {
-    if source == "deterministic" || source == "deterministic-live" || source == "deterministic-partial" {
+    // Every rule-based parser ("deterministic", "-live", "-dictation",
+    // "-directions", "-memory", ...) is a phrase-grammar match. Only the fuzzy
+    // variants are weak. An unlisted `deterministic-*` source used to score 0
+    // and the turn was silently dropped as ambient in a Ghost session (the
+    // "type google meet" turn that produced no reply and a 28 s stall).
+    if source == "deterministic-fuzzy" {
+        1
+    } else if source == "deterministic" || source.starts_with("deterministic-") {
         3
     } else if source == "nlu" || source == "brain" {
         2
-    } else if source == "deterministic-fuzzy" || source == "fuzzy" {
+    } else if source == "fuzzy" {
         1
     } else {
         0
@@ -76,6 +83,7 @@ pub fn is_side_effect(intent: &ParsedIntent) -> bool {
             | ParsedIntent::CheckBranch { .. }
             | ParsedIntent::Search { .. }
             | ParsedIntent::ScreenClick { .. }
+            | ParsedIntent::GhostAction { .. }
             | ParsedIntent::ScreenRead { .. }
             | ParsedIntent::BrowserTab { .. }
             | ParsedIntent::BrowserCloseTab { .. }
@@ -84,6 +92,9 @@ pub fn is_side_effect(intent: &ParsedIntent) -> bool {
             | ParsedIntent::WatchScreenEmail
             | ParsedIntent::StartDictation
             | ParsedIntent::StopDictation
+            | ParsedIntent::EnterHandMode
+            | ParsedIntent::HandMouseLive { .. }
+            | ParsedIntent::PointerClick { .. }
             | ParsedIntent::NluResult { .. }
     )
 }
@@ -192,8 +203,15 @@ pub fn action_disposition(
         (CommandEvidence::Strong, TurnOwnership::Verified) => ActionDisposition::Allow,
         (CommandEvidence::Strong, TurnOwnership::Unenrolled) => ActionDisposition::Allow,
         (CommandEvidence::Medium, TurnOwnership::Verified) => ActionDisposition::Allow,
-        (CommandEvidence::Medium, TurnOwnership::Unenrolled) if !ghost_active => {
-            ActionDisposition::Clarify
+        // Ghost mode is full control: an unenrolled owner's medium-evidence command (the NLU's
+        // classification of "nexus. oco notepad.") runs instead of vanishing with no reply, which
+        // is what the live test of 2026-10-13 did. Outside Ghost it still asks first.
+        (CommandEvidence::Medium, TurnOwnership::Unenrolled) => {
+            if ghost_active {
+                ActionDisposition::Allow
+            } else {
+                ActionDisposition::Clarify
+            }
         }
         (_, _) if ghost_active => ActionDisposition::AmbientDrop,
         _ => ActionDisposition::Clarify,
@@ -202,6 +220,7 @@ pub fn action_disposition(
 
 /// Execution outcome returned by a sub-center.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(dead_code)]
 pub struct Receipt {
     pub ok: bool,
     pub summary: String,
@@ -211,6 +230,7 @@ pub struct Receipt {
 
 /// Confirmation policy before execution (Alexa standard: routine repeat-back vs destructive gate).
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum ConfirmKind {
     None,
     RepeatBack { ack: String },
@@ -227,8 +247,10 @@ pub struct TurnContext {
     #[serde(default)]
     pub owner_score: f32,
     #[serde(default)]
+    #[allow(dead_code)]
     pub decoder_bias: String,
     #[serde(default)]
+    #[allow(dead_code)]
     pub language: String,
     #[serde(default)]
     pub session: u64,
@@ -236,8 +258,19 @@ pub struct TurnContext {
 
 /// Common contract for all action sub-centers (Feature 74 & 75).
 pub trait SubCenter: Send + Sync {
+    #[allow(dead_code)]
     fn name(&self) -> &'static str;
     fn validate(&self, action: &str, slots: &Value) -> Validity;
+    /// Confirmation policy (plan 120 H3 verdict: KEPT but explicitly
+    /// not-yet-wired). The repeat-back/GatePrompt copy in the impls is real,
+    /// reviewed policy — deleting it would destroy work a future confirm flow
+    /// should reuse. But today NO production caller consults this method
+    /// (only unit tests), and `center::validate` does not dispatch to it for
+    /// deterministic intents. Do NOT rely on it for safety until a caller is
+    /// wired; gating decisions live in `is_side_effect` + orchestrator/MCP
+    /// confirm flows. New centers: implement it (keep the policy warm), and
+    /// wire the caller as a separate approved change.
+    #[allow(dead_code)]
     fn confirm_kind(&self, action: &str, slots: &Value) -> ConfirmKind;
 }
 
@@ -257,10 +290,13 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::MediaPlayPause
         | ParsedIntent::MediaNext
         | ParsedIntent::MediaPrevious
-        | ParsedIntent::MediaStop => "MediaCenter",
+        | ParsedIntent::MediaStop
+        | ParsedIntent::PlayMusic { .. }
+        | ParsedIntent::OpenMusicPlayer { .. } => "MediaCenter",
 
         ParsedIntent::WhatsappChat { .. }
-        | ParsedIntent::SendWhatsAppMessage { .. } => "MessageCenter",
+        | ParsedIntent::SendWhatsAppMessage { .. }
+        | ParsedIntent::AnalyseChatDocs { .. } => "MessageCenter",
 
         ParsedIntent::OrderFood { .. }
         | ParsedIntent::SearchProduct { .. } => "CommerceCenter",
@@ -271,7 +307,11 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
         | ParsedIntent::AnalyseRepo { .. }
         | ParsedIntent::AnalysePr { .. }
         | ParsedIntent::AnalyseLatestPr { .. }
-        | ParsedIntent::CheckBranch { .. } => "ArchitectCenter",
+        | ParsedIntent::CheckBranch { .. }
+        | ParsedIntent::RunOnLocalhost
+        | ParsedIntent::CodeProject { .. }
+        | ParsedIntent::CodingAgentTask { .. }
+        | ParsedIntent::WatchAgentTask { .. } => "ArchitectCenter",
 
         ParsedIntent::Search { .. } => "KnowledgeCenter",
 
@@ -279,18 +319,30 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
         | ParsedIntent::StartDictation
         | ParsedIntent::StopDictation => "DictationCenter",
 
+        ParsedIntent::EnterHandMode
+        | ParsedIntent::ExitHandMode
+        | ParsedIntent::HandMouseLive { .. }
+        | ParsedIntent::PointerClick { .. } => "HandCenter",
+
         ParsedIntent::EnterGhostControl
         | ParsedIntent::ExitGhostControl
+        | ParsedIntent::GhostAction { .. }
         | ParsedIntent::ScreenClick { .. }
         | ParsedIntent::ScreenRead { .. } => "GhostCenter",
 
         ParsedIntent::Greeting { .. }
         | ParsedIntent::NeedMoreInfo { .. } => "GreetingCenter",
 
-        ParsedIntent::WatchScreenEmail => "GoogleCenter",
+        ParsedIntent::WatchScreenEmail
+        | ParsedIntent::Directions { .. }
+        | ParsedIntent::PlacesSearch { .. }
+        | ParsedIntent::ScanInternshipEmails => "GoogleCenter",
 
         ParsedIntent::MemoryAudit
         | ParsedIntent::Briefing
+        | ParsedIntent::ImportContacts
+        | ParsedIntent::PowerAction { .. }
+        | ParsedIntent::ReopenSession
         | ParsedIntent::TimetableAdd { .. }
         | ParsedIntent::TimetableShow
         | ParsedIntent::TimetableClear
@@ -305,7 +357,11 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
         | ParsedIntent::PeopleList
         | ParsedIntent::MemoryForget { .. }
         | ParsedIntent::MemoryForgetAll
-        | ParsedIntent::MemoryForgetAllConfirm => "MemoryCenter",
+        | ParsedIntent::MemoryForgetAllConfirm
+        | ParsedIntent::BlockContact { .. }
+        | ParsedIntent::UnblockContact { .. }
+        | ParsedIntent::ListBlockedContacts
+        | ParsedIntent::CreateVoiceReminder { .. } => "MemoryCenter",
 
         ParsedIntent::PersonaFriend
         | ParsedIntent::PersonaButler
@@ -401,6 +457,10 @@ pub fn validate(intent: &ParsedIntent, transcript: &str, has_dialog_context: boo
             slot: "more_info",
             prompt: prompt.clone(),
         },
+        ParsedIntent::GhostAction { task } if !crate::ghost_center::validate(task) => Validity::Invalid {
+            reason: "ghost_task",
+            prompt: "That Ghost command is incomplete or unsafe, sir.".to_string(),
+        },
         ParsedIntent::NluResult { intent: name, slots, .. } => {
             if name.starts_with("youtube_") {
                 crate::youtube_center::YouTubeCenter::new().validate(name, slots)
@@ -420,7 +480,8 @@ pub fn validate(intent: &ParsedIntent, transcript: &str, has_dialog_context: boo
     }
 }
 
-/// All 15 action sub-centers in the NEXUS Command Center architecture.
+/// All 16 action sub-centers in the NEXUS Command Center architecture.
+#[allow(dead_code)]
 pub const ALL_SUB_CENTERS: &[&str] = &[
     "AppCenter",
     "BrowserCenter",
@@ -432,6 +493,7 @@ pub const ALL_SUB_CENTERS: &[&str] = &[
     "GitHubCenter",
     "ArchitectCenter",
     "GhostCenter",
+    "HandCenter",
     "GoogleCenter",
     "MemoryCenter",
     "DictationCenter",
@@ -460,12 +522,14 @@ pub const ALL_SUB_CENTERS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiDirective {
     /// Top-right loading window show/hide.
+    #[allow(dead_code)]
     Loading(bool),
     /// Ghost session enter/exit (orb waves + flag).
     Session(bool),
 }
 
 /// Pure predicate behind the Loading guard — matrix-tested below.
+#[allow(dead_code)]
 pub fn loading_should_show(has_active_request: bool, ghost_session: bool) -> bool {
     has_active_request && !ghost_session
 }
@@ -528,6 +592,140 @@ mod tests {
         assert_eq!(center_for(&ParsedIntent::OpenSettings), "AppCenter");
         assert_eq!(center_for(&ParsedIntent::MediaPlayPause), "MediaCenter");
         assert_eq!(center_for(&ParsedIntent::EnterGhostControl), "GhostCenter");
+        let ghost = ParsedIntent::GhostAction {
+            task: crate::ghost_center::parse("save").unwrap(),
+        };
+        assert_eq!(center_for(&ghost), "GhostCenter");
+        assert!(is_side_effect(&ghost));
+        assert_eq!(validate(&ghost, "save", false), Validity::Ok);
+        assert_eq!(center_for(&ParsedIntent::EnterHandMode), "HandCenter");
+        assert_eq!(center_for(&ParsedIntent::HandMouseLive { live: true }), "HandCenter");
+    }
+
+    /// Plan 120 H1: every `center_for` output must be a registered sub-center.
+    /// Coverage of *variants* is compiler-forced (exhaustive match, no wildcard);
+    /// this pins the *spelling* — a typo'd center name fails here, not silently
+    /// at runtime. One sample intent per center; extend when adding a center.
+    #[test]
+    fn test_center_for_names_are_registered() {
+        let samples: &[(&str, ParsedIntent)] = &[
+            ("AppCenter", ParsedIntent::OpenSettings),
+            ("BrowserCenter", ParsedIntent::BrowserSearch { query: "x".into() }),
+            (
+                "SystemCenter",
+                ParsedIntent::NluResult {
+                    intent: "system_focus_app".into(),
+                    slots: Value::Null,
+                    confidence: 1.0,
+                },
+            ),
+            ("MediaCenter", ParsedIntent::MediaNext),
+            (
+                "YouTubeCenter",
+                ParsedIntent::NluResult {
+                    intent: "youtube_search".into(),
+                    slots: Value::Null,
+                    confidence: 1.0,
+                },
+            ),
+            ("MessageCenter", ParsedIntent::WhatsappChat { contact: "x".into() }),
+            (
+                "CommerceCenter",
+                ParsedIntent::OrderFood { query: "x".into(), restaurant: None },
+            ),
+            (
+                "GitHubCenter",
+                ParsedIntent::GitHubCommand {
+                    command: crate::github_cmd::GitHubCommand::ClosePr {
+                        repo: "o/r".into(),
+                        pr_number: 1,
+                    },
+                },
+            ),
+            ("ArchitectCenter", ParsedIntent::OpenArchitect),
+            ("GhostCenter", ParsedIntent::EnterGhostControl),
+            ("HandCenter", ParsedIntent::EnterHandMode),
+            ("GoogleCenter", ParsedIntent::WatchScreenEmail),
+            ("MemoryCenter", ParsedIntent::MemoryAudit),
+            ("DictationCenter", ParsedIntent::StartDictation),
+            ("GreetingCenter", ParsedIntent::Greeting { reply: "x".into() }),
+            ("KnowledgeCenter", ParsedIntent::Search { query: "x".into() }),
+            ("KnowledgeCenter", ParsedIntent::Unknown { raw: "x".into() }),
+        ];
+        for (expected, intent) in samples {
+            let got = center_for(intent);
+            assert_eq!(got, *expected);
+            assert!(
+                ALL_SUB_CENTERS.contains(&got),
+                "center_for returned unregistered center '{got}'"
+            );
+        }
+        // The registry itself stays clean: no duplicates, no dead entries —
+        // every name must be produced by at least one sample above.
+        let mut seen = std::collections::HashSet::new();
+        for name in ALL_SUB_CENTERS {
+            assert!(seen.insert(name), "duplicate center '{name}' in ALL_SUB_CENTERS");
+            assert!(
+                samples.iter().any(|(e, _)| e == name),
+                "registered center '{name}' has no routing sample (dead entry?)"
+            );
+        }
+    }
+
+    /// Plan 120 H2: the side-effect list is safety-critical. `is_side_effect`
+    /// FAILS OPEN (unlisted = false = Allow for unenrolled voices), so this
+    /// pins the must-gate set in both directions: removing a gated intent, or
+    /// silently relying on the default for a new state-changing runner, forces
+    /// a deliberate test edit. Rule for new intents: if it changes external
+    /// state, spends quota/API, moves the cursor, types, or opens a window
+    /// beyond a plain app-open, list it in `is_side_effect` AND extend this test.
+    #[test]
+    fn test_side_effect_membership_is_pinned() {
+        let must_gate: &[ParsedIntent] = &[
+            ParsedIntent::SendWhatsAppMessage { contact: "x".into(), message: "y".into() },
+            ParsedIntent::OrderFood { query: "x".into(), restaurant: None },
+            ParsedIntent::GitHubCommand {
+                command: crate::github_cmd::GitHubCommand::ClosePr {
+                    repo: "o/r".into(),
+                    pr_number: 1,
+                },
+            },
+            ParsedIntent::ScreenClick { ordinal: 1 },
+            ParsedIntent::StartDictation,
+            ParsedIntent::WatchScreenEmail,
+            ParsedIntent::Search { query: "x".into() },
+        ];
+        // NOTE (H2b, needs product approval — NOT pinned yet): these change
+        // external state/quota by the `is_side_effect` doc definition but are
+        // unlisted, so unenrolled weak-evidence turns Allow them today:
+        // RunOnLocalhost (spawns servers), CloseApp (kills processes),
+        // BlockContact/UnblockContact, MemoryForget/ForgetAll (deletion),
+        // TimetableCommit, CalendarAdd, CreateVoiceReminder, AnalyseChatDocs,
+        // ScanInternshipEmails, Directions/PlacesSearch (API spend, cf. Search
+        // which IS listed), EnterGhostControl/ExitGhostControl (cursor
+        // takeover), CodeProject/CodingAgentTask. OpenApp/OpenUrl are
+        // deliberately unlisted (Ghost Oct-13 directive: unenrolled opens run).
+        // Gating any of these changes live behavior — approve per item first.
+        for intent in must_gate {
+            assert!(
+                is_side_effect(intent),
+                "state-changing intent lost its side-effect gate: {:?}",
+                crate::intent_parser::intent_to_label(intent)
+            );
+        }
+        let pure: &[ParsedIntent] = &[
+            ParsedIntent::Greeting { reply: "x".into() },
+            ParsedIntent::MemoryAudit,
+            ParsedIntent::OpenSettings,
+            ParsedIntent::Unknown { raw: "x".into() },
+        ];
+        for intent in pure {
+            assert!(
+                !is_side_effect(intent),
+                "pure intent wrongly gated as side-effect: {:?}",
+                crate::intent_parser::intent_to_label(intent)
+            );
+        }
     }
 
     /// Loading guard matrix (P2): orphan spinners and ghost-session windows
@@ -720,6 +918,58 @@ mod director_tests {
                 true
             ),
             ActionDisposition::Allow
+        );
+    }
+
+    /// Every phrase-grammar parse is evidence in a Ghost session, whatever its
+    /// `deterministic-*` source label. "type google meet" (source
+    /// `deterministic-dictation`) used to score 0 and vanish without a word.
+    #[test]
+    fn ghost_unenrolled_accepts_every_deterministic_source() {
+        for src in [
+            "deterministic",
+            "deterministic-live",
+            "deterministic-dictation",
+            "deterministic-screen-analysis",
+            "deterministic-directions",
+            "deterministic-memory",
+            "deterministic-persona",
+            "deterministic-places",
+        ] {
+            assert_eq!(crate::center::source_strength(src), 3, "{src}");
+        }
+        assert_eq!(crate::center::source_strength("deterministic-fuzzy"), 1);
+
+        let parsed = crate::intent_parser::parse_deterministic("type google meet.")
+            .expect("'type google meet' must parse");
+        assert_eq!(parsed.source, "deterministic-dictation");
+        assert_eq!(
+            action_disposition(&parsed.intent, "type google meet.", &parsed.source, TurnOwnership::Unenrolled, true),
+            ActionDisposition::Allow
+        );
+    }
+
+    #[test]
+    fn ghost_unenrolled_medium_evidence_runs_instead_of_vanishing() {
+        let nlu = ParsedIntent::NluResult {
+            intent: "open_app".to_string(),
+            slots: serde_json::json!({ "target": "notepad" }),
+            confidence: 0.945,
+        };
+        assert_eq!(command_evidence(&nlu, "nexus. oco notepad.", "nlu"), CommandEvidence::Medium);
+        assert_eq!(
+            action_disposition(&nlu, "nexus. oco notepad.", "nlu", TurnOwnership::Unenrolled, true),
+            ActionDisposition::Allow
+        );
+        // Outside Ghost the same turn is still confirmed first.
+        assert_eq!(
+            action_disposition(&nlu, "nexus. oco notepad.", "nlu", TurnOwnership::Unenrolled, false),
+            ActionDisposition::Clarify
+        );
+        // A voice that is positively NOT the owner is still dropped.
+        assert_eq!(
+            action_disposition(&nlu, "nexus. oco notepad.", "nlu", TurnOwnership::Rejected, true),
+            ActionDisposition::AmbientDrop
         );
     }
 }

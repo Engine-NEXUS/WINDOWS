@@ -676,6 +676,8 @@ pub fn run_full_system_audit(app_data_dir: Option<&std::path::Path>) -> FullSyst
             parses_as_command: true,
             spoken: &[],
             dictation_active: false,
+            engaged: true,
+            window_enabled: true,
         });
         let gate_ok = gate_test.accept;
 

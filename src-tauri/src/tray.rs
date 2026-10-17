@@ -43,7 +43,7 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> Result<(), tauri::Error> {
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, id| match id.id().as_ref() {
             "show" => {
-                crate::window_manager::wake_orb(app);
+                crate::window_manager::wake_orb_src(app, "tray-menu");
             }
             "pause" => {
                 // Toggle manual pause via meeting state
@@ -152,13 +152,16 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> Result<(), tauri::Error> {
                     }
                 }
             }
-            "quit" => app.exit(0),
+            "quit" => {
+                crate::volume::force_restore_volume();
+                app.exit(0)
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
                 let app = tray.app_handle();
-                crate::window_manager::wake_orb(app);
+                crate::window_manager::wake_orb_src(app, "tray-click");
             }
         })
         .build(app)?;

@@ -50,6 +50,12 @@ pub fn log_missed_intent(transcript: &str, source: &str, reason: &str) {
     if text.is_empty() {
         return;
     }
+    // Memory hygiene: this log feeds phrase suggestions and holds the user's own words. Fragments,
+    // hallucinations and ambient chatter ("then the", "love us.") are noise AND needless private
+    // text on disk; log only real, multi-word speech.
+    if crate::memcore::hygiene::transcript_quality(text).is_err() {
+        return;
+    }
 
     let path = get_missed_intents_file_path();
     if let Some(parent) = path.parent() {

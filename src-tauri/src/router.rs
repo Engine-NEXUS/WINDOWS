@@ -62,6 +62,7 @@ pub enum Provider {
     /// card-gated 30-day trial (demoted to last resort, key-only).
     Cerebras,
     /// Worker fallback — uses Workers AI neurons (~500ms, ~100 neurons).
+    #[allow(dead_code)]
     Worker,
 }
 

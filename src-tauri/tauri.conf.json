@@ -38,7 +38,9 @@
       "resources/server/nlu/model/nexus_nlu.onnx",
       "resources/server/nlu/model/nexus_nlu.onnx.data",
       "resources/server/nlu/model/labels.json",
-      "resources/server/nlu/model/tokenizer/*"
+      "resources/server/nlu/model/tokenizer/*",
+      "resources/agent_watch_sidecar/server.cjs",
+      "resources/agent_watch_sidecar/package.json"
     ],
     "icon": [
       "icons/32x32.png",
