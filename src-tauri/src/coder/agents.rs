@@ -119,6 +119,28 @@ pub fn reach(agent: &CodingAgent) -> Reach {
     }
 }
 
+/// Flags that switch off an agent's permission checks. Nothing started from a spoken sentence may carry
+/// one, and a prompt may not smuggle one in by starting with a dash.
+pub const BYPASS_FLAGS: &[&str] = &[
+    "--dangerously-skip-permissions",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--yolo",
+    "--full-auto",
+    "--auto-approve",
+    "--yes-always",
+    "--no-sandbox",
+    "-y",
+];
+
+/// A prompt that starts with `-` could be read as an option by the CLI: give it a plain-text lead-in.
+pub fn safe_prompt(prompt: &str) -> String {
+    if prompt.trim_start().starts_with('-') {
+        format!("Task: {prompt}")
+    } else {
+        prompt.to_string()
+    }
+}
+
 /// Dispatch a prompt to a target coding agent.
 pub fn dispatch_to_agent(
     agent: &CodingAgent,
@@ -127,8 +149,12 @@ pub fn dispatch_to_agent(
 ) -> Result<Dispatch, String> {
     match reach(agent) {
         Reach::Spawn(exe, flag) => {
+            // a table edit must never be able to start an agent with its permission checks off
+            if BYPASS_FLAGS.contains(&exe) || BYPASS_FLAGS.contains(&flag) {
+                return Err(format!("I won't start {} with its safety checks switched off", agent.display_name()));
+            }
             let mut cmd = std::process::Command::new(exe);
-            cmd.arg(flag).arg(prompt);
+            cmd.arg(flag).arg(safe_prompt(prompt));
             if let Some(dir) = project_dir {
                 cmd.current_dir(dir);
             }
@@ -157,6 +183,23 @@ mod tests {
         assert_eq!(CodingAgent::from_str("cursor ide"), CodingAgent::Cursor);
         assert_eq!(CodingAgent::from_str("trae"), CodingAgent::Trae);
         assert_eq!(CodingAgent::from_str("opencode"), CodingAgent::OpenCode);
+    }
+
+    #[test]
+    fn no_spawned_agent_carries_a_bypass_flag_and_prompts_cannot_inject_one() {
+        for a in [CodingAgent::Claude, CodingAgent::Aider] {
+            if let Reach::Spawn(exe, flag) = reach(&a) {
+                for arg in [exe, flag] {
+                    assert!(!BYPASS_FLAGS.contains(&arg), "{arg}");
+                }
+            }
+        }
+        for evil in ["--dangerously-skip-permissions fix it", "  -y do it", "--yolo"] {
+            let p = safe_prompt(evil);
+            assert!(!p.trim_start().starts_with('-'), "{p}");
+            assert!(p.starts_with("Task: "));
+        }
+        assert_eq!(safe_prompt("fix the login bug"), "fix the login bug");
     }
 
     #[test]

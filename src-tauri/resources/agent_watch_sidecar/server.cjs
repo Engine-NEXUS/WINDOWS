@@ -25,7 +25,8 @@
 // (dist/index.js) calls plain `require("node-pty")` and works correctly.
 
 const http = require('node:http');
-const { randomUUID } = require('node:crypto');
+const fs = require('node:fs');
+const { randomUUID, timingSafeEqual } = require('node:crypto');
 const { PTYManager } = require('pty-manager');
 const { ADAPTER_TYPES, createAllAdapters, BaseCodingAdapter } = require('coding-agent-adapters');
 
@@ -63,6 +64,37 @@ const ALL_ADAPTERS = {
 };
 
 const PORT = Number(process.env.AGENT_WATCH_PORT || 39222);
+
+// --- Access control ---------------------------------------------------------
+// This server can start coding agents on the user's machine, so no other local process (or web page
+// talking to localhost) may drive it: every request needs the per-run secret the Rust parent
+// generated, and the Host header must be the loopback address (DNS-rebinding guard).
+const TOKEN = String(process.env.AGENT_WATCH_TOKEN || '');
+if (TOKEN.length < 32) {
+  console.error('[AGENT-WATCH] AGENT_WATCH_TOKEN is missing or too short: refusing to run unauthenticated');
+  process.exit(2);
+}
+function tokenOk(req) {
+  const got = Buffer.from(String(req.headers['x-nexus-token'] || ''));
+  const want = Buffer.from(TOKEN);
+  return got.length === want.length && timingSafeEqual(got, want);
+}
+function hostOk(req) {
+  const h = String(req.headers.host || '').toLowerCase();
+  return h === `127.0.0.1:${PORT}` || h === `localhost:${PORT}`;
+}
+
+// --- Approval presets ---------------------------------------------------------
+// coding-agent-adapters turns an approval preset into each CLI's own flags. With NO preset OpenCode is
+// started with --dangerously-skip-permissions, and "autonomous" does that for every CLI. A task that
+// came from a spoken sentence must never run like that, so the preset is always set here and
+// "autonomous" (or anything unknown) is refused.
+const SAFE_PRESETS = ['readonly', 'standard', 'permissive', 'edit'];
+function approvalPreset(requested) {
+  if (requested === undefined || requested === null || requested === '') return { ok: true, preset: 'edit' };
+  if (SAFE_PRESETS.includes(requested)) return { ok: true, preset: requested };
+  return { ok: false, error: `approval preset "${requested}" is not allowed (use one of ${SAFE_PRESETS.join(', ')})` };
+}
 const OUTPUT_RING_BYTES = 64 * 1024; // keep the last 64KB of PTY output per watch
 
 const manager = new PTYManager();
@@ -162,6 +194,7 @@ function readBody(req) {
 
 const server = http.createServer(async (req, res) => {
   try {
+    if (!hostOk(req) || !tokenOk(req)) return sendJson(res, 403, { error: 'forbidden' });
     const url = new URL(req.url, 'http://127.0.0.1');
     const parts = url.pathname.split('/').filter(Boolean);
 
@@ -185,6 +218,19 @@ const server = http.createServer(async (req, res) => {
           known: Object.keys(ALL_ADAPTERS),
         });
       }
+      const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+      if (!prompt) return sendJson(res, 400, { error: 'a task is required' });
+      if (prompt.length > 20000) return sendJson(res, 400, { error: 'the task is too long' });
+      let workdir;
+      if (body.workdir) {
+        const wd = String(body.workdir);
+        let isDir = false;
+        try { isDir = fs.statSync(wd).isDirectory(); } catch { /* missing */ }
+        if (!isDir) return sendJson(res, 400, { error: 'workdir is not an existing folder' });
+        workdir = wd;
+      }
+      const approval = approvalPreset(body.adapterConfig && body.adapterConfig.approvalPreset);
+      if (!approval.ok) return sendJson(res, 400, { error: approval.error });
       const id = randomUUID();
       const watch = {
         id,
@@ -203,18 +249,15 @@ const server = http.createServer(async (req, res) => {
         const session = await manager.spawn({
           name: `nexus-watch-${id}`,
           type,
-          workdir: body.workdir || undefined,
-          adapterConfig: body.adapterConfig || {},
+          workdir,
+          // only the vetted preset is forwarded: nothing else from the request can change how the CLI is started
+          adapterConfig: { approvalPreset: approval.preset },
         });
         watch.sessionId = session.id;
         watch.status = 'working';
-        if (body.prompt) {
-          // Non-interactive adapters read their task from the initial
-          // input line; interactive ones treat it the same as a user
-          // typing it in. Either way this is the one line the caller
-          // asked the agent to do.
-          manager.send(session.id, `${body.prompt}\n`);
-        }
+        // Non-interactive adapters read their task from the initial input line; interactive ones treat it
+        // the same as a user typing it in. Either way this is the one line the caller asked for.
+        manager.send(session.id, `${prompt}\n`);
       } catch (e) {
         watch.status = 'error';
         watch.error = String(e && e.message ? e.message : e);
@@ -304,3 +347,24 @@ setInterval(() => {
     process.exit(0);
   }
 }, 30_000).unref();
+
+// --- Lifetime ---------------------------------------------------------------
+// The parent (NEXUS) holds our stdin open. When it exits for any reason the pipe closes and we go
+// too, so no agent session or unauthenticated leftover survives it.
+function shutdownNow() {
+  try {
+    Promise.resolve(manager.shutdown()).catch(() => {}).finally(() => process.exit(0));
+    setTimeout(() => process.exit(0), 1500).unref();
+  } catch {
+    process.exit(0);
+  }
+}
+process.stdin.on('end', shutdownNow);
+process.stdin.on('close', shutdownNow);
+process.stdin.resume();
+const parentPid = Number(process.env.NEXUS_PARENT_PID || 0);
+if (parentPid > 0) {
+  setInterval(() => {
+    try { process.kill(parentPid, 0); } catch { shutdownNow(); }
+  }, 5000).unref();
+}
