@@ -230,7 +230,11 @@ impl Engine {
                             actions.push(Action::Card { id: p.alert.id.clone(), reason: "rate_limited" });
                             continue;
                         }
-                        if matches!(self.last_spoken_ms, Some(t) if now_ms.saturating_sub(t) < MIN_GAP_MS) {
+                        // The boot hello and the briefing that follows it are one scripted sequence.
+                        let scripted_boot = p.alert.id.contains("boot_");
+                        if !scripted_boot
+                            && matches!(self.last_spoken_ms, Some(t) if now_ms.saturating_sub(t) < MIN_GAP_MS)
+                        {
                             keep.push(p);
                             continue;
                         }
@@ -331,6 +335,22 @@ fn execute<R: Runtime>(app: &AppHandle<R>, actions: Vec<Action>) {
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(HEADS_UP_MS)).await;
                     let req = format!("sentinel_{id}");
+                    // Register with the main command center like any other
+                    // turn — otherwise has_active_request() can't see this
+                    // utterance as busy while it's speaking, and a second
+                    // proactive/Medium alert could judge it safe to speak
+                    // over the first one. speak_line only emits the Result
+                    // event and returns immediately (no Rust-side playback
+                    // callback exists); the frontend's own
+                    // finishSpokenResult -> signalOrchestratorDone ->
+                    // orchestrator_done IPC already clears ACTIVE_REQUEST
+                    // generically once this speech actually finishes — the
+                    // same handshake every WorkerBackend-success turn
+                    // already relies on, so nothing extra is needed here.
+                    crate::orchestrator::install_new_request_with_id(
+                        req.clone(),
+                        crate::orchestrator::Subsystem::LocalCommand,
+                    );
                     crate::orchestrator::speak_line(&app2, line, &req);
                 });
             }
@@ -397,6 +417,18 @@ mod tests {
     }
     fn cards(a: &[Action]) -> Vec<(String, &'static str)> {
         a.iter().filter_map(|x| if let Action::Card { id, reason } = x { Some((id.clone(), *reason)) } else { None }).collect()
+    }
+
+    #[test]
+    fn the_boot_hello_is_spoken_at_once_even_for_an_active_user_and_the_briefing_follows_without_the_20s_gap() {
+        let mut e = Engine::new();
+        // The user just typed a password: input a moment ago (idle_ms tiny). A Medium alert would wait for 30 s idle.
+        let active = Signals { idle_ms: 500, ..Default::default() };
+        assert_eq!(speaks(&e.submit(alert("boot_hello_1", AlertUrgency::High), 1_000, &active, &CFG)), vec!["boot_hello_1"]);
+        // The scripted briefing right after is not held back by the normal 20 s gap...
+        assert_eq!(speaks(&e.submit(alert("boot_briefing", AlertUrgency::High), 4_000, &active, &CFG)), vec!["boot_briefing"]);
+        // ...but any other alert still is.
+        assert!(e.submit(alert("mail_1", AlertUrgency::High), 5_000, &active, &CFG).is_empty());
     }
 
     #[test]

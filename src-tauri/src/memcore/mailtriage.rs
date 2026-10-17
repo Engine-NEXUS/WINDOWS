@@ -38,6 +38,7 @@ pub enum Category {
     Github,
     Database,
     Deadline,
+    Internship,
 }
 
 impl Category {
@@ -48,6 +49,7 @@ impl Category {
             Category::Github => "github",
             Category::Database => "database",
             Category::Deadline => "deadline",
+            Category::Internship => "internship",
         }
     }
     pub fn from_str(s: &str) -> Option<Self> {
@@ -57,6 +59,7 @@ impl Category {
             "github" => Category::Github,
             "database" => Category::Database,
             "deadline" => Category::Deadline,
+            "internship" => Category::Internship,
             _ => return None,
         })
     }
@@ -68,6 +71,7 @@ impl Category {
             Category::Github => "a GitHub notice",
             Category::Database => "a database service warning",
             Category::Deadline => "a deadline",
+            Category::Internship => "an internship opportunity",
         }
     }
 }
@@ -308,7 +312,17 @@ pub fn classify(m: &MailMeta, muted: &[String]) -> Option<Triage> {
         return Some(tri(Category::Exam, AlertUrgency::High, "exam notice"));
     }
 
-    // 5. Any other real deadline.
+    // 5. College Internships & Campus Placement opportunities.
+    const INTERN_KEYWORDS: &[&str] = &[
+        "internship", "summer intern", "winter intern", "intern role", "placement cell", "campus drive",
+        "stipend", "job opportunity", "hiring intern", "intern application", "offer letter", "selection process",
+        "interview round", "oa link", "online assessment", "pre-placement", "shortlisted for interview",
+    ];
+    if (is_edu(email) || hay.contains("internship") || hay.contains("placement")) && any(&hay, INTERN_KEYWORDS) {
+        return Some(tri(Category::Internship, AlertUrgency::Medium, "internship opportunity from your institution or campus drive"));
+    }
+
+    // 6. Any other real deadline.
     if !promo && (any(&hay, DEADLINE_WORDS) || crate::google::mail::MailService::parse_deadline_update(&hay).is_some()) {
         return Some(tri(Category::Deadline, AlertUrgency::Medium, "mentions a deadline"));
     }

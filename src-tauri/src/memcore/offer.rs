@@ -12,13 +12,18 @@ use std::time::{Duration, Instant};
 
 use super::timetable::Slot;
 
-/// How long an armed offer waits for an answer after its question was spoken.
-pub const REPLY_WINDOW: Duration = Duration::from_secs(90);
+/// How long a spoken question stays answerable after the mic closed, by what a wrong "yes" would cost
+/// (doc 124 rule 3): high-risk (shutdown, erase) 2 min, medium (calendar, timetable) 5 min, low 10 min.
+pub const REPLY_WINDOW_HIGH: Duration = Duration::from_secs(2 * 60);
+pub const REPLY_WINDOW_MEDIUM: Duration = Duration::from_secs(5 * 60);
+pub const REPLY_WINDOW_LOW: Duration = Duration::from_secs(10 * 60);
 /// How long an offer may wait to be spoken (the proactive policy can defer it
 /// through a meeting) before it is dropped.
 pub const SPEAK_WAIT: Duration = Duration::from_secs(15 * 60);
-/// Mic window the frontend opens after the question is spoken.
-pub const LISTEN_WINDOW_MS: u64 = 8_000;
+/// Mic window the frontend opens after the question is spoken: up to this long for the answer to START
+/// (once speech has started the capture is never cut, see `openPendingOfferWindow`). People need 2-4 s
+/// to think, so 8 s was easy to miss.
+pub const LISTEN_WINDOW_MS: u64 = 10_000;
 /// Replies longer than this are never treated as a bare yes/no.
 const MAX_REPLY_WORDS: usize = 9;
 
@@ -34,6 +39,24 @@ pub enum Offer {
     ClearTimetable,
     /// "Add dentist tomorrow at 5 PM to your calendar?"
     AddEvent { summary: String, start_iso: String, end_iso: String, when: String },
+    /// "Shall I reopen everything you had open when you left?" (boot greeting)
+    ReopenSession,
+    /// "Shut down your laptop?" (`kind` = power_cmd::PowerKind::as_str)
+    Power { kind: String },
+    /// "I couldn't find 'mummy chat' exactly - did you mean Google Chat?"
+    /// A guess from the app registry: nothing launches until the user says yes.
+    OpenApp { display_name: String, spoken: String },
+}
+
+impl Offer {
+    /// How long this question stays answerable after it was spoken.
+    pub fn reply_window(&self) -> Duration {
+        match self {
+            Offer::Power { .. } | Offer::ClearTimetable => REPLY_WINDOW_HIGH,
+            Offer::AddEvent { .. } | Offer::AddSlots { .. } => REPLY_WINDOW_MEDIUM,
+            Offer::Start { .. } | Offer::Choose { .. } | Offer::ReopenSession | Offer::OpenApp { .. } => REPLY_WINDOW_LOW,
+        }
+    }
 }
 
 struct State {
@@ -51,7 +74,7 @@ fn lock() -> std::sync::MutexGuard<'static, Option<State>> {
 /// Register an offer. `armed` = its question is being spoken right now;
 /// otherwise it arms when `arm()` is called (the reminder path).
 pub fn set(offer: Offer, armed: bool) {
-    let ttl = if armed { REPLY_WINDOW } else { SPEAK_WAIT };
+    let ttl = if armed { offer.reply_window() } else { SPEAK_WAIT };
     *lock() = Some(State { offer, armed, expires: Instant::now() + ttl });
 }
 
@@ -59,7 +82,7 @@ pub fn set(offer: Offer, armed: bool) {
 pub fn arm() {
     if let Some(s) = lock().as_mut() {
         s.armed = true;
-        s.expires = Instant::now() + REPLY_WINDOW;
+        s.expires = Instant::now() + s.offer.reply_window();
     }
 }
 
@@ -81,6 +104,7 @@ pub fn peek() -> Option<Offer> {
 }
 
 /// Take the live offer (consuming it).
+#[allow(dead_code)]
 pub fn take() -> Option<Offer> {
     let o = peek();
     if o.is_some() {
@@ -124,6 +148,21 @@ fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every word an answer to a pending question may contain. One word outside this set (a content word
+/// such as "chrome", "weather", "music") makes the sentence an ordinary command, not an answer.
+const ANSWER_VOCAB: &[&str] = &[
+    // yes
+    "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "proceed", "confirm", "confirmed", "affirmative",
+    "go", "ahead", "do", "it", "for", "let's", "lets", "start", "begin", "add", "save", "them", "those", "reopen",
+    "everything", "all",
+    // no
+    "no", "nope", "nah", "skip", "cancel", "stop", "don't", "dont", "never", "mind", "not", "today", "leave",
+    // later
+    "later", "remind", "me", "snooze", "few", "minutes", "minute", "in", "a", "bit", "now",
+    // polite filler
+    "please", "sir", "thanks", "thank", "you", "then", "the", "that", "this", "with", "kindly", "and",
+];
+
 /// Strict short-reply classifier. Order matters: "not now" must not read as
 /// "no", and "no thanks" must not read as yes.
 pub fn classify(text: &str) -> Reply {
@@ -132,6 +171,12 @@ pub fn classify(text: &str) -> Reply {
         w.remove(0);
     }
     if w.is_empty() || w.len() > MAX_REPLY_WORDS {
+        return Reply::Other;
+    }
+    // The WHOLE sentence must be an answer. "okay open chrome", "sure what time is it" and "stop the
+    // music" used to be read as yes / no and would have approved a pending shutdown or swallowed a
+    // command (the old test looked for an answer word anywhere in up to nine words).
+    if !w.iter().all(|x| ANSWER_VOCAB.contains(&x.as_str())) {
         return Reply::Other;
     }
     let joined = w.join(" ");
@@ -196,9 +241,29 @@ mod tests {
 
     #[test]
     fn yes_family() {
-        for t in ["yes", "Yes please", "yeah", "sure", "okay", "go ahead", "do it", "start", "let's go", "Nexus yes", "yes, in the browser", "add them"] {
+        for t in ["yes", "Yes please", "yeah", "sure", "okay", "go ahead", "do it", "start", "let's go", "Nexus yes", "add them", "yes reopen them"] {
             assert_eq!(classify(t), Reply::Yes, "{t}");
         }
+    }
+
+    #[test]
+    fn a_sentence_that_merely_contains_an_answer_word_is_not_an_answer() {
+        for t in [
+            "okay open chrome",
+            "ok so what is the weather",
+            "sure what time is it",
+            "stop the music",
+            "yes open chrome",
+            "no I want the other one",
+            "please open notepad",
+            "start spotify",
+            "later tell me a joke",
+        ] {
+            assert_eq!(classify(t), Reply::Other, "{t}");
+        }
+        // "yes, in the browser" answers a Choose offer through parse_choice, not through yes/no.
+        assert_eq!(classify("yes, in the browser"), Reply::Other);
+        assert!(super::super::timetable::parse_choice("yes, in the browser").is_some());
     }
 
     #[test]
@@ -233,6 +298,15 @@ mod tests {
         assert!(take_draft().is_none());
         *DRAFT.lock().unwrap() = Some((vec![slot], "x".into(), Instant::now() - Duration::from_secs(1)));
         assert!(take_draft().is_none(), "stale drafts are dropped");
+    }
+
+    #[test]
+    fn the_answer_window_is_longer_the_cheaper_a_wrong_yes_is() {
+        assert_eq!(Offer::Power { kind: "shutdown".into() }.reply_window(), REPLY_WINDOW_HIGH);
+        assert_eq!(Offer::ClearTimetable.reply_window(), REPLY_WINDOW_HIGH);
+        assert_eq!(Offer::ReopenSession.reply_window(), REPLY_WINDOW_LOW);
+        assert_eq!(Offer::Start { title: "DSA".into(), activity: "dsa".into() }.reply_window(), REPLY_WINDOW_LOW);
+        assert!(REPLY_WINDOW_HIGH < REPLY_WINDOW_MEDIUM && REPLY_WINDOW_MEDIUM < REPLY_WINDOW_LOW);
     }
 
     #[test]

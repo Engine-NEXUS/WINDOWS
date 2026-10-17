@@ -14,6 +14,8 @@ pub const KEY_SERVICES: &[(&str, &str, &str)] = &[
     ("gemini", "Gemini", "geminiApiKey"),
     ("cerebras", "Cerebras", "cerebrasApiKey"),
     ("deepgram", "Deepgram", "deepgramApiKey"),
+    ("google_maps", "Google Maps & Routes", "routesApiKey"),
+    ("google_places", "Google Places", "placesApiKey"),
 ];
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

@@ -35,7 +35,7 @@ const MUTE_WINDOW: Duration = Duration::from_secs(10 * 60);
 pub enum PollError {
     Auth,
     RateLimited,
-    Other(String),
+    Other(#[allow(dead_code)] String),
 }
 
 impl From<GoogleError> for PollError {
@@ -228,7 +228,7 @@ async fn fetch_metas(client: &crate::google::client::GoogleClient, ids: &[String
 pub enum PollOutcome {
     /// First contact (or an expired history id): starting point recorded,
     /// recent important mail filed quietly — nothing to say.
-    Baselined(usize),
+    Baselined(#[allow(dead_code)] usize),
     /// New important mail since the last poll, most urgent first.
     Polled(Vec<(Triage, MailMeta)>),
 }

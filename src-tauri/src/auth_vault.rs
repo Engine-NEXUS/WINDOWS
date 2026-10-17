@@ -21,7 +21,10 @@ use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 
 /// Vault services with token credentials.
-pub const VAULT_SERVICES: &[&str] = &["google", "swiggy", "spotify", "vercel", "render", "telegram"];
+pub const VAULT_SERVICES: &[&str] = &[
+    "google", "swiggy", "spotify", "vercel", "render", "telegram",
+    "figma", "supabase", "stripe", "slack", "netlify", "github",
+];
 
 /// Refresh 5 minutes before expiry (mirrors github_cmd.rs).
 const REFRESH_SKEW_SECS: f64 = 300.0;
@@ -206,6 +209,7 @@ pub fn clear_api_key(service: &str) {
 
 /// One-time migration: move API keys from settings.json to OS keychain.
 /// Runs on startup. Idempotent — skips services already in keychain.
+#[allow(dead_code)]
 pub fn migrate_api_keys_to_keychain(app_data_dir: &std::path::Path) {
     let path = app_data_dir.join("settings.json");
     let Ok(content) = std::fs::read_to_string(&path) else {

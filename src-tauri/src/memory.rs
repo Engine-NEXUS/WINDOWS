@@ -141,6 +141,15 @@ pub fn remember(app_data_dir: &Path, key: &str, value: &str) -> bool {
     ok
 }
 
+/// Read one explicit core fact by exact key (None when absent or not a string).
+pub fn core_value(app_data_dir: &Path, key: &str) -> Option<String> {
+    let map = read_json(&resolve_memory_dir(app_data_dir).join("core.json"));
+    map.get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Delete a fact by key from BOTH stores: explicit core facts (core.json)
 /// and learned facts (facts.json). Returns true if either held it.
 pub fn forget(app_data_dir: &Path, key: &str) -> bool {
@@ -242,6 +251,9 @@ const LEARN_PATTERNS: &[(&str, &str)] = &[
 const GENERIC_VALUES: &[&str] = &[
     "it", "that", "this", "here", "there", "them", "you", "me", "us", "him", "her", "ok", "okay",
     "fine", "good", "tired", "hungry", "busy", "late", "ready", "sure",
+    // "call me later / back / tomorrow" is a request, not a nickname.
+    "later", "back", "now", "today", "tomorrow", "tonight", "soon", "again", "first", "anytime",
+    "when", "if", "maybe", "something", "anything", "everything", "nothing",
 ];
 
 /// Mine learnable facts from one transcript. Pure + unit-tested.
@@ -347,6 +359,40 @@ pub fn log_episode(app_data_dir: &Path, transcript: &str, response: &str) {
     if !mined.is_empty() {
         save_learned_facts(app_data_dir, &mined);
     }
+}
+
+/// One-time hygiene cleanup of the legacy episode log: keep only lines that pass the admit gate.
+/// Returns how many lines were removed. (The caller backs the file up first.)
+pub fn purge_junk_episodes(app_data_dir: &Path) -> usize {
+    let path = resolve_memory_dir(app_data_dir).join("episodes.jsonl");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return 0;
+    };
+    let mut kept: Vec<&str> = Vec::new();
+    let mut removed = 0usize;
+    for line in content.lines() {
+        let ok = serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .map(|v| {
+                let t = v.get("transcript").and_then(|x| x.as_str()).unwrap_or("");
+                let r = v.get("response").and_then(|x| x.as_str()).unwrap_or("");
+                crate::memcore::hygiene::admit_episode(t, r).is_ok()
+            })
+            .unwrap_or(false);
+        if ok {
+            kept.push(line);
+        } else {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        let mut out = kept.join("\n");
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        atomic_write(&path, out.as_bytes());
+    }
+    removed
 }
 
 fn prune_episodes(path: &Path, now: i64) {
@@ -461,6 +507,7 @@ pub fn add_mail_watch(app_data_dir: &Path, watch: ThreadWatchTarget) -> bool {
 }
 
 /// Update the status of a specific thread watch.
+#[allow(dead_code)]
 pub fn update_mail_watch_status(app_data_dir: &Path, watch_id: &str, status: WatchStatus) -> bool {
     let mut watches = load_mail_watches(app_data_dir);
     if let Some(w) = watches.iter_mut().find(|w| w.watch_id == watch_id) {
@@ -726,6 +773,24 @@ pub fn wipe_memory(app_data_dir: &Path) -> usize {
             n += 1;
         }
     }
+    // Derived/auxiliary stores that also hold the user's words: unmatched-command log, the
+    // phrase suggestions mined from it, the MCP audit trail, the hygiene backup (original junk
+    // is still personal text) and the rotating raw-voice debug clips.
+    for name in [
+        "missed_intents.jsonl",
+        "missed_intents.old.jsonl",
+        "suggested_phrases.json",
+        "mcp_audit.jsonl",
+    ] {
+        if std::fs::remove_file(app_data_dir.join(name)).is_ok() {
+            n += 1;
+        }
+    }
+    for sub in [dir.join("_backup_hygiene_v1"), app_data_dir.join("verify_debug")] {
+        if sub.is_dir() && std::fs::remove_dir_all(&sub).is_ok() {
+            n += 1;
+        }
+    }
     // The SQLite copy: rows, index, audit history, then VACUUM (file stays).
     crate::memcore::wipe(app_data_dir);
     n
@@ -733,6 +798,18 @@ pub fn wipe_memory(app_data_dir: &Path) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn call_me_requests_are_not_nicknames() {
+        for t in ["call me later", "please call me back", "call me tomorrow", "call me when you can"] {
+            assert!(
+                !super::extract_learned_facts(t).iter().any(|(k, _)| k == "nickname"),
+                "{t} must not become a nickname"
+            );
+        }
+        assert!(super::extract_learned_facts("call me Lakshya")
+            .contains(&("nickname".to_string(), "Lakshya".to_string())));
+    }
+
     use super::*;
 
     fn tmpdir(name: &str) -> PathBuf {

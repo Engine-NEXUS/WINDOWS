@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::types::{AlertUrgency, CommuteDelay, DeadlineUpdate, MailMessage, ProactiveAlert};
 use std::collections::HashSet;
 use std::sync::Mutex;

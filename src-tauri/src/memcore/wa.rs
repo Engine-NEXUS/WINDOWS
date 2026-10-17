@@ -675,7 +675,7 @@ pub async fn selftest(client: &reqwest::Client) -> SelfTest {
 
 // ─── Glue: the watcher loop ─────────────────────────────────────────
 
-fn speak_address<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+pub(crate) fn speak_address<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
     let friend = crate::persona::is_friend(&crate::commands::read_persona_mode(app));
     let name = app
         .path()

@@ -14,13 +14,19 @@ pub mod agenda;
 pub mod briefing;
 pub mod crypto;
 pub mod google_io;
+pub mod health;
+pub mod hygiene;
 pub mod mailtriage;
 pub mod mailwatch;
 pub mod names;
 pub mod offer;
+pub mod leavewatch;
+pub mod leases;
 pub mod people;
+pub mod restore;
 pub mod resume;
 pub mod scheduler;
+pub mod session;
 pub mod store;
 pub mod timetable;
 pub mod timetable_io;
@@ -292,13 +298,25 @@ pub struct Status {
     pub whatsapp: bool,
     /// Message text may be spoken aloud (off: sidebar only).
     pub whatsapp_speak: bool,
+    /// Leave-by reminders (calendar + traffic + remembered home) are on.
+    pub leave_by: bool,
     /// Learned WhatsApp people.
     pub people: usize,
+    /// "What was open" snapshots (reopen offer after a restart) are on.
+    pub session: bool,
+    /// Startup connection check in the greeting is on.
+    pub health: bool,
 }
 
 /// Erase recorded resume points (activity history) and nothing else.
 pub fn clear_activity(app_data_dir: &Path) -> usize {
-    with_store(app_data_dir, |s| s.clear_tier(Tier::Resume, "user", now_ts())).unwrap_or(0)
+    // The "what was open" snapshots are activity history too.
+    with_store(app_data_dir, |s| {
+        s.meta_set("session_last", "");
+        s.meta_set("session_pending", "");
+        s.clear_tier(Tier::Resume, "user", now_ts())
+    })
+    .unwrap_or(0)
 }
 
 pub fn status(app_data_dir: &Path) -> Status {
@@ -309,6 +327,9 @@ pub fn status(app_data_dir: &Path) -> Status {
     let mail = flag(app_data_dir, "memcoreMail", true);
     let whatsapp = flag(app_data_dir, "memcoreWhatsapp", false);
     let whatsapp_speak = flag(app_data_dir, "memcoreWhatsappSpeak", false);
+    let leave_by = flag(app_data_dir, "memcoreLeaveBy", true);
+    let session = flag(app_data_dir, "memcoreSession", true);
+    let health = flag(app_data_dir, "memcoreHealth", true);
     let google_connected = !google_io::list_accounts(google_io::can_read_mail).is_empty();
     let google_needs_signin = with_store(app_data_dir, |s| s.meta_get("mail_needs_signin").map(|v| !v.is_empty()).unwrap_or(false))
         .unwrap_or(false);
@@ -342,7 +363,10 @@ pub fn status(app_data_dir: &Path) -> Status {
             google_needs_signin,
             whatsapp,
             whatsapp_speak,
+            leave_by,
             people,
+            session,
+            health,
         },
         None => Status {
             enabled: false,
@@ -362,7 +386,10 @@ pub fn status(app_data_dir: &Path) -> Status {
             google_needs_signin,
             whatsapp,
             whatsapp_speak,
+            leave_by,
             people: 0,
+            session,
+            health,
         },
     }
 }
@@ -485,7 +512,15 @@ pub fn context_pack(app_data_dir: &Path, query: &str, budget: usize) -> Option<S
         let facts = s.search(Tier::Fact, query, MAX_PACK_FACTS, now);
         let ids: Vec<i64> = facts.iter().map(|h| h.id).collect();
         s.mark_used(&ids, now);
-        (facts, s.recent(Tier::Episode, MAX_PACK_EPISODES))
+        // Over-fetch, then keep only real speech: junk that predates the admit gate (or slipped
+        // past it) must never be sent to the cloud as "Recent:" context.
+        let recent: Vec<_> = s
+            .recent(Tier::Episode, MAX_PACK_EPISODES * 4)
+            .into_iter()
+            .filter(|h| hygiene::transcript_quality(&h.value).is_ok())
+            .take(MAX_PACK_EPISODES)
+            .collect();
+        (facts, recent)
     })?;
     let mut parts: Vec<String> = vec![];
     if !facts.is_empty() {
@@ -647,14 +682,14 @@ mod tests {
             row("fact", "employer", "Acme", "derived", now - 3 * 86_400),
             row("episode", "ep:1", "open chrome", "derived", now - 86_400),
         ];
-        let st = Status { enabled: true, encrypted: true, facts: 2, episodes: 1, egress_7d: 4, redact_names: false, activity: true, resume_points: 12, briefing: true, timetable: true, slots: 0, mail: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, people: 0 };
+        let st = Status { enabled: true, encrypted: true, facts: 2, episodes: 1, egress_7d: 4, redact_names: false, activity: true, resume_points: 12, briefing: true, timetable: true, slots: 0, mail: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true };
         let md = card_markdown(&rows, &st, now);
         assert!(md.contains("### You told me") && md.contains("**dog name**"), "{md}");
         assert!(md.contains("\\[x\\]\\(http") || md.contains("\\[x\\]("), "markdown must be escaped: {md}");
         assert!(md.contains("### I picked up") && md.contains("last used 3d ago"), "{md}");
         assert!(md.contains("Recent conversations (1)") && md.contains("yesterday"), "{md}");
         assert!(md.contains("encrypted: **yes**") && md.contains("**4** turns"), "{md}");
-        let empty = card_markdown(&[], &Status { enabled: true, encrypted: false, facts: 0, episodes: 0, egress_7d: 0, redact_names: false, activity: true, resume_points: 0, briefing: true, timetable: true, slots: 0, mail: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, people: 0 }, now);
+        let empty = card_markdown(&[], &Status { enabled: true, encrypted: false, facts: 0, episodes: 0, egress_7d: 0, redact_names: false, activity: true, resume_points: 0, briefing: true, timetable: true, slots: 0, mail: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true }, now);
         assert!(empty.contains("Nothing yet"), "{empty}");
     }
 

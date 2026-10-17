@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::types::{AlbumItem, GoogleError, PhotoItem, SemanticPhotoQuery};
 use regex::Regex;
 use serde_json::Value;

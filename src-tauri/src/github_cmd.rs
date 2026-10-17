@@ -498,6 +498,7 @@ pub trait GitHubExecutable {
     fn confirmation_prompt(&self) -> Option<String>;
 
     /// Required OAuth scopes for this command.
+    #[allow(dead_code)]
     fn required_scopes(&self) -> &'static [&'static str] {
         &["repo"]
     }

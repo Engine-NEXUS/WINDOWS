@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::types::{
     DeadlineUpdate, DraftReceipt, GoogleError, MailMessage, MailThread, SendReceipt,
     ThreadUpdateEvent, ThreadWatchTarget, WatchStatus,

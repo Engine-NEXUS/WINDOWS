@@ -76,6 +76,18 @@ pub fn friendly_app(process: &str) -> String {
         "whatsapp.exe" | "whatsapp.root.exe" => "WhatsApp".into(),
         "spotify.exe" => "Spotify".into(),
         "windowsterminal.exe" => "Terminal".into(),
+        // Proper-cased names the "capitalise the stem" fallback would get wrong.
+        "opencode.exe" => "OpenCode".into(),
+        "claude.exe" => "Claude".into(),
+        "notepad.exe" => "Notepad".into(),
+        "devenv.exe" => "Visual Studio".into(),
+        "cursor.exe" => "Cursor".into(),
+        "slack.exe" => "Slack".into(),
+        "discord.exe" => "Discord".into(),
+        "teams.exe" | "ms-teams.exe" => "Teams".into(),
+        "zoom.exe" => "Zoom".into(),
+        "vlc.exe" => "VLC".into(),
+        "postman.exe" => "Postman".into(),
         other => {
             let stem = other.strip_suffix(".exe").unwrap_or(other);
             let mut c = stem.chars();
