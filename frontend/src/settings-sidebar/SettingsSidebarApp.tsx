@@ -16,6 +16,7 @@ import "./hub/hub.css";
 import { HubHome, type HubPage } from "./hub/HubHome";
 import { ApiKeysPage } from "./hub/ApiKeysPage";
 import { MemoryPage } from "./hub/MemoryPage";
+import { ActionsPage } from "./hub/ActionsPage";
 import { useAccounts, useInsights } from "./hub/useHubData";
 import { McpServersPanel } from "./McpServersPanel";
 
@@ -203,6 +204,7 @@ const PAGE_TITLES: Record<HubPage, string> = {
   home: "Command Hub",
   keys: "API Keys",
   memory: "Memory",
+  actions: "Actions & Permissions",
   audio: "Audio",
   display: "Display",
   connections: "Connections",
@@ -355,6 +357,7 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
         )}
         {page === "keys" && <ApiKeysPage onChanged={() => setInsightsKey((k) => k + 1)} />}
         {page === "memory" && <MemoryPage onFlagChanged={(flag, on) => update(flag, on)} />}
+        {page === "actions" && <ActionsPage />}
         {page === "connections" && (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", gap: "16px", padding: "12px 14px 24px" }}>
             <McpServersPanel style={{ flex: 1, minHeight: "560px" }} />

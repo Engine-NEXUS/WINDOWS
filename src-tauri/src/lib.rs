@@ -43,6 +43,7 @@ mod tray;
 pub(crate) mod commands;
 mod command_executor;
 mod app_registry;
+pub(crate) mod action_kernel;
 pub mod intent_parser;
 mod nlu_client;
 mod nlu_local;
@@ -657,6 +658,7 @@ pub fn run() {
                 // snapshots start overwriting the rolling one.
                 memcore::session::at_boot(&app_data, chrono::Utc::now().timestamp());
                 memcore::session::start_recorder(app_data.clone());
+                action_kernel::startup(&app_data); // age purge of the trash, audit prune, folder aliases
                 memcore::session::install_session_end_hook(app_data.clone());
                 agent_specs::ensure_example(&app_data);
                 let improve_dir = app_data.clone();
@@ -1132,6 +1134,12 @@ pub fn run() {
             tts::list_voice_personas,
             tts::get_voice_status,
             tts::get_voice_sync_state,
+            action_kernel::ipc::actions_get_policy,
+            action_kernel::ipc::actions_set_policy,
+            action_kernel::ipc::actions_audit,
+            action_kernel::ipc::actions_trash_list,
+            action_kernel::ipc::actions_restore,
+            action_kernel::ipc::actions_undo,
             tts::get_voice_transport,
             stt_learning::log_failed_transcript,
             stt_learning::log_successful_transcript,
