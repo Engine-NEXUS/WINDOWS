@@ -114,6 +114,8 @@ export interface IdentityStore {
   upsertEntitlement(row: EntitlementRow): Promise<void>;
   getMigration(legacyUserId: string): Promise<{ profile_id: string } | null>;
   insertMigration(legacyUserId: string, profileId: string, at: number, autoApproved: number): Promise<void>;
+  /** Admin-only scan used by admin.ts; optional because in-memory test stores don't implement it. */
+  __listProfiles?(status?: string): Promise<ProfileRow[]>;
 }
 
 // ---- D1 implementation ----
