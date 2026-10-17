@@ -3,7 +3,11 @@
 > All commits in reverse chronological order, organized by feature area.
 > Each entry links to a detailed writeup of what changed and why.
 
----
+## Universal Agent Watcher & Cross-Platform Music Control (2026-10-15)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-10-15 | feat(agent-watch/media): universal agent completion monitoring (Claude, Codex, Antigravity, Cursor, Trae, Windsurf, generic CLI/MCP), active foreground target resolution via GetForegroundWindow, OS keep-awake leasing, proactive voice alerting, and cross-platform native Apple Music & Spotify playback control | [131-universal-agent-watcher-and-cross-platform-music-control.md](131-universal-agent-watcher-and-cross-platform-music-control.md), [126-universal-agent-watcher-and-cross-platform-music-control-plan.md](../features/126-universal-agent-watcher-and-cross-platform-music-control-plan.md), [07-universal-agent-watcher-and-media-engine-research.md](../research/07-universal-agent-watcher-and-media-engine-research.md) |
 
 ## Ghost Waves, Browser Search & Typing, TTS Latency & Intent Isolation (2026-09-29)
 
