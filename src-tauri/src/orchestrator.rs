@@ -676,6 +676,7 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         | ParsedIntent::CodingAgentTask { .. }
         | ParsedIntent::WatchAgentTask { .. }
         | ParsedIntent::WatchThenPower { .. }
+        | ParsedIntent::WatchPlanCommand { .. }
         | ParsedIntent::PlayMusic { .. }
         | ParsedIntent::OpenMusicPlayer { .. }
         | ParsedIntent::ScanInternshipEmails
@@ -1330,6 +1331,9 @@ pub async fn process_transcript<R: Runtime>(
         ParsedIntent::WatchThenPower { agent, kind, require_clean, deadline_mins } => {
             return run_watch_then_power(app, agent.clone(), kind.clone(), *require_clean, *deadline_mins).await;
         }
+        ParsedIntent::WatchPlanCommand { command } => {
+            return run_watch_plan_command(app, command.clone()).await;
+        }
         ParsedIntent::PlayMusic { query, player } => {
             return run_play_music(app, query.clone(), player.clone()).await;
         }
@@ -1649,6 +1653,9 @@ pub async fn process_transcript<R: Runtime>(
             }
             ParsedIntent::WatchThenPower { agent, kind, require_clean, deadline_mins } => {
                 return run_watch_then_power(app, agent.clone(), kind.clone(), *require_clean, *deadline_mins).await;
+            }
+            ParsedIntent::WatchPlanCommand { command } => {
+                return run_watch_plan_command(app, command.clone()).await;
             }
             ParsedIntent::PlayMusic { query, player } => {
                 return run_play_music(app, query.clone(), player.clone()).await;
@@ -5558,9 +5565,21 @@ async fn run_watch_then_power<R: Runtime>(
     };
     let plan = crate::watch_power::WatchPlan { agent, kind: k, require_clean, deadline_mins };
     let speech = format!(
-        "I understood: {}. But automatic power-off after a watch isn't switched on yet, sir, so I haven't armed it and your laptop will stay on. Say watch over this and update me if you want a message when it finishes.",
+        "I understood: {}. But automatic power-off after a watch isn't switched on yet, sir, so I haven't armed it and your laptop will stay on. I've kept the plan; say cancel the shutdown plan to drop it, or what are you watching to hear it again.",
         crate::watch_power::read_back(&plan)
     );
+    crate::power_plan::set(plan);
+    say_and_finish(&app, request_id, speech)
+}
+
+/// "Cancel the shutdown plan" / "what are you watching" / "make it sleep instead" / "just tell me" /
+/// "shut down even if it fails": edits or reports the one plan NEXUS is holding (doc 142, phase W1).
+async fn run_watch_plan_command<R: Runtime>(app: AppHandle<R>, command: String) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let speech = match crate::power_plan::PlanCommand::from_str(&command) {
+        Some(cmd) => crate::power_plan::run(&cmd),
+        None => "I didn't catch what to do with the plan, sir.".to_string(),
+    };
     say_and_finish(&app, request_id, speech)
 }
 

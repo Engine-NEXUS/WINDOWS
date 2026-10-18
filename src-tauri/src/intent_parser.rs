@@ -322,6 +322,10 @@ pub enum ParsedIntent {
         require_clean: bool,
         deadline_mins: Option<u32>,
     },
+    /// "Cancel the shutdown plan", "what are you watching", "make it sleep instead" (`command` =
+    /// power_plan::PlanCommand::as_str). Only about the plan NEXUS is holding; nothing else is claimed.
+    #[serde(rename = "watch_plan_command")]
+    WatchPlanCommand { command: String },
     /// Play music or search for songs on Spotify / Apple Music.
     #[serde(rename = "play_music")]
     PlayMusic {
@@ -438,6 +442,7 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::AnalyseChatDocs { .. } => "analyse_chat_docs",
         ParsedIntent::WatchAgentTask { .. } => "watch_agent_task",
         ParsedIntent::WatchThenPower { .. } => "watch_then_power",
+        ParsedIntent::WatchPlanCommand { .. } => "watch_plan_command",
         ParsedIntent::PlayMusic { .. } => "play_music",
         ParsedIntent::OpenMusicPlayer { .. } => "open_music_player",
         ParsedIntent::GitHubCommand { command } => match command {
@@ -682,6 +687,15 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
                 require_clean: plan.require_clean,
                 deadline_mins: plan.deadline_mins,
             },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    // --- Commands about the held plan ("cancel the shutdown plan", "what are you watching") ---
+    if let Some(cmd) = crate::power_plan::parse_command(&text) {
+        return Some(ParseResult {
+            intent: ParsedIntent::WatchPlanCommand { command: cmd.as_str() },
             confidence: 1.0,
             source: "deterministic".to_string(),
         });

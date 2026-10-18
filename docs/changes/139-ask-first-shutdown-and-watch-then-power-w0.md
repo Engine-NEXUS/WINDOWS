@@ -27,6 +27,10 @@ Date: 2026-10-18. Plan: `docs/features/142-watch-session-then-power-off-plan.md`
 - Full lib run (final): 1811 passed, 3 failed (the PR-list tests below). The dead-code gate shows 4 new items (`center_for`, `tts::read_tts_emotion_setting`, `vision` fields `provider` / `quota_hit`), all from other sessions' in-progress refactors; none are in the power or watch files. The 4 `offer.rs` power items it flagged before are now used.
 - NOT run: anything spoken, a rebuilt app, the ask-first round trip with a real microphone, a real shutdown.
 
+## W1 (same day, second commit): the held plan
+
+`power_plan.rs` + `ParsedIntent::WatchPlanCommand`. `run_watch_then_power` now stores the plan; cancel / status / "just tell me" / "even if it fails" / "make it sleep instead" edit or report it. Everything said still states that nothing is armed (`ARMED_SUPPORTED = false`). Strict whole-sentence vocabularies per command; 7 tests and 7 killed mutations.
+
 ## Known unrelated failures
 
 3 `intent_parser` PR-list tests ("open pr list" now parses as `OpenGitHubDashboard`) and a flaky `auth_vault` keyring test under parallel runs. The dead-code gate also lists items from other in-progress work (`center_for`, `tts::read_tts_emotion_setting`, `vision` fields).
