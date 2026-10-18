@@ -158,6 +158,9 @@ const ANSWER_VOCAB: &[&str] = &[
     "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "proceed", "confirm", "confirmed", "affirmative",
     "go", "ahead", "do", "it", "for", "let's", "lets", "start", "begin", "add", "save", "them", "those", "reopen",
     "everything", "all",
+    // more ways to say yes ("absolutely", "sounds good", "by all means", "that would be great", "make it so")
+    "absolutely", "definitely", "certainly", "of", "course", "sounds", "good", "alright", "correct", "agreed", "thing",
+    "would", "be", "great", "by", "means", "make", "so", "why", "on", "right", "that's", "thats", "i", "do", "fine",
     // no
     "no", "nope", "nah", "skip", "cancel", "stop", "don't", "dont", "never", "mind", "not", "today", "leave",
     // later
@@ -182,14 +185,18 @@ pub fn classify(text: &str) -> Reply {
     if !w.iter().all(|x| ANSWER_VOCAB.contains(&x.as_str())) {
         return Reply::Other;
     }
-    let joined = w.join(" ");
+    // "why not" is a yes whose "not" is not a negation.
+    let joined = w.join(" ").replace("why not", "whynot");
+    let w: Vec<String> = joined.split_whitespace().map(String::from).collect();
     let has = |needle: &str| joined.contains(needle);
     let has_word = |cands: &[&str]| w.iter().any(|x| cands.contains(&x.as_str()));
 
     if has("not now") || has("later") || has("remind me") || has("snooze") || has("few minutes") || has("in a bit") {
         return Reply::Later;
     }
-    if has_word(&["no", "nope", "nah", "skip", "cancel", "stop"])
+    // Any negation wins over a yes word: "absolutely not", "not sure", "of course not", "definitely not".
+    if has_word(&["no", "nope", "nah", "skip", "cancel", "stop", "not", "never"])
+        || w.iter().any(|x| x.ends_with("n't"))
         || has("don't")
         || has("do not")
         || has("never mind")
@@ -198,8 +205,24 @@ pub fn classify(text: &str) -> Reply {
     {
         return Reply::No;
     }
-    if has_word(&["yes", "yeah", "yep", "yup", "sure", "ok", "okay", "proceed", "confirm", "confirmed", "affirmative"])
+    if has_word(&[
+        "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "proceed", "confirm", "confirmed", "affirmative",
+        "absolutely", "definitely", "certainly", "alright", "agreed", "correct",
+    ])
         || has("go ahead")
+        || has("go on")
+        || has("of course")
+        || has("sounds good")
+        || has("by all means")
+        || has("whynot")
+        || has("make it so")
+        || has("please do")
+        || has("do that")
+        || has("that would be great")
+        || has("that would be good")
+        || has("that's right")
+        || has("thats right")
+        || has("i do")
         || has("do it")
         || has("go for it")
         || has("let's go")
@@ -214,6 +237,65 @@ pub fn classify(text: &str) -> Reply {
         return Reply::Yes;
     }
     Reply::Other
+}
+
+/// Extra words a spoken answer to a POWER question may contain ("shut it down", "yes power off",
+/// "good night"). Only used for `Offer::Power`, so "shut down" cannot approve any other question.
+const POWER_VOCAB: &[&str] = &[
+    "shut", "down", "off", "power", "turn", "switch", "restart", "reboot", "sleep", "lock", "sign", "out", "log",
+    "me", "laptop", "computer", "pc", "system", "good", "night", "goodnight", "tonight", "put", "to", "my", "up",
+];
+
+fn power_action_phrases(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "shutdown" => &[
+            "shut down", "shutdown", "shut it down", "shut off", "power off", "power it off", "power down",
+            "turn it off", "turn off", "switch it off", "switch off", "good night", "goodnight", "night night",
+        ],
+        "restart" => &["restart", "reboot"],
+        "sleep" => &["sleep", "put it to sleep", "suspend"],
+        "lock" => &["lock", "lock it"],
+        "signout" => &["sign out", "sign me out", "log out", "log me out", "log off"],
+        _ => &[],
+    }
+}
+
+/// Answers to a power question: the generic yes/no/later words PLUS the action itself, so "shut it down",
+/// "yes, power off" and "good night" all say yes to "Shut down your laptop?". A negation anywhere wins
+/// ("no don't shut down"). A different action ("restart it" to a shutdown question) is not an answer.
+fn classify_power(kind: &str, text: &str) -> Reply {
+    let mut w = words(text);
+    if w.first().map(|x| x == "nexus").unwrap_or(false) {
+        w.remove(0);
+    }
+    if w.is_empty() || w.len() > MAX_REPLY_WORDS {
+        return Reply::Other;
+    }
+    if !w.iter().all(|x| ANSWER_VOCAB.contains(&x.as_str()) || POWER_VOCAB.contains(&x.as_str())) {
+        return Reply::Other;
+    }
+    let joined = w.join(" ");
+    if w.iter().any(|x| matches!(x.as_str(), "no" | "nope" | "nah" | "don't" | "dont" | "not" | "never" | "cancel" | "stop" | "skip"))
+        || joined.contains("do not")
+    {
+        return Reply::No;
+    }
+    if power_action_phrases(kind).iter().any(|p| joined.contains(p)) {
+        return Reply::Yes;
+    }
+    Reply::Other
+}
+
+/// Classify an answer to the question that is waiting. Power questions also accept the action itself.
+pub fn classify_for(offer: &Offer, text: &str) -> Reply {
+    let base = classify(text);
+    if base != Reply::Other {
+        return base;
+    }
+    match offer {
+        Offer::Power { kind } => classify_power(kind, text),
+        _ => Reply::Other,
+    }
 }
 
 /// Slots read from an image but not yet confirmed. Kept for 10 minutes so
@@ -247,6 +329,48 @@ mod tests {
         for t in ["yes", "Yes please", "yeah", "sure", "okay", "go ahead", "do it", "start", "let's go", "Nexus yes", "add them", "yes reopen them"] {
             assert_eq!(classify(t), Reply::Yes, "{t}");
         }
+    }
+
+    #[test]
+    fn many_more_ways_to_say_yes() {
+        for t in [
+            "yup", "yep", "yeah sure", "absolutely", "definitely", "certainly", "of course", "sounds good", "alright",
+            "agreed", "correct", "that's right", "please do", "do that", "go on", "by all means", "sure thing",
+            "why not", "make it so", "that would be great", "yes sir", "yes please do", "okay do it", "sure go ahead",
+            "yeah go ahead", "affirmative", "confirmed", "i do", "Nexus, absolutely", "yes, of course",
+        ] {
+            assert_eq!(classify(t), Reply::Yes, "{t}");
+        }
+        // and the refusals still win
+        for t in ["no way", "absolutely not", "of course not", "not sure", "no thanks sir", "definitely not"] {
+            assert_ne!(classify(t), Reply::Yes, "{t}");
+        }
+    }
+
+    #[test]
+    fn a_power_question_also_accepts_the_action_itself() {
+        let off = Offer::Power { kind: "shutdown".into() };
+        for t in [
+            "shut it down", "shut down", "yes shut down", "yes, shut it down", "power off", "turn it off", "switch it off",
+            "go ahead and shut down", "do it shut down", "good night", "yes good night", "shut down the laptop", "Nexus shut it down",
+            "yup", "sure", "absolutely",
+        ] {
+            assert_eq!(classify_for(&off, t), Reply::Yes, "{t}");
+        }
+        for t in ["don't shut down", "no don't shut it down", "cancel", "not tonight", "stop", "never mind"] {
+            assert_eq!(classify_for(&off, t), Reply::No, "{t}");
+        }
+        // a different action or an unrelated sentence is not an answer
+        for t in ["restart it", "sleep", "shut down notepad", "open chrome", "turn off the lights", "good morning"] {
+            assert_eq!(classify_for(&off, t), Reply::Other, "{t}");
+        }
+        // "shut down" must not approve any other question
+        assert_eq!(classify_for(&Offer::ClearTimetable, "shut down"), Reply::Other);
+        assert_eq!(classify_for(&Offer::ReopenSession, "good night"), Reply::Other);
+        // each kind takes its own action words
+        let restart = Offer::Power { kind: "restart".into() };
+        assert_eq!(classify_for(&restart, "restart it"), Reply::Yes);
+        assert_eq!(classify_for(&restart, "shut down"), Reply::Other);
     }
 
     #[test]

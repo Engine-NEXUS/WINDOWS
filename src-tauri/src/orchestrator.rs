@@ -675,6 +675,7 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         | ParsedIntent::CodeProject { .. }
         | ParsedIntent::CodingAgentTask { .. }
         | ParsedIntent::WatchAgentTask { .. }
+        | ParsedIntent::WatchThenPower { .. }
         | ParsedIntent::PlayMusic { .. }
         | ParsedIntent::OpenMusicPlayer { .. }
         | ParsedIntent::ScanInternshipEmails
@@ -779,7 +780,11 @@ pub async fn process_transcript<R: Runtime>(
         })
     {
         use crate::memcore::offer::{self, Offer, Reply};
-        let reply = offer::classify(&transcript);
+        // A power question also accepts the action itself ("shut it down", "good night" say yes to "Shut down?").
+        let reply = match offer::peek() {
+            Some(ref o) => offer::classify_for(o, &transcript),
+            None => offer::classify(&transcript),
+        };
         let has_choice = crate::memcore::timetable::parse_choice(&transcript).is_some();
         match offer::peek() {
             Some(Offer::FileConfirm) if reply != Reply::Other => {
@@ -1322,6 +1327,9 @@ pub async fn process_transcript<R: Runtime>(
         ParsedIntent::WatchAgentTask { agent, query } => {
             return run_watch_agent_task(app, agent.clone(), query.clone()).await;
         }
+        ParsedIntent::WatchThenPower { agent, kind, require_clean, deadline_mins } => {
+            return run_watch_then_power(app, agent.clone(), kind.clone(), *require_clean, *deadline_mins).await;
+        }
         ParsedIntent::PlayMusic { query, player } => {
             return run_play_music(app, query.clone(), player.clone()).await;
         }
@@ -1638,6 +1646,9 @@ pub async fn process_transcript<R: Runtime>(
             }
             ParsedIntent::WatchAgentTask { agent, query } => {
                 return run_watch_agent_task(app, agent.clone(), query.clone()).await;
+            }
+            ParsedIntent::WatchThenPower { agent, kind, require_clean, deadline_mins } => {
+                return run_watch_then_power(app, agent.clone(), kind.clone(), *require_clean, *deadline_mins).await;
             }
             ParsedIntent::PlayMusic { query, player } => {
                 return run_play_music(app, query.clone(), player.clone()).await;
@@ -4827,7 +4838,10 @@ async fn run_offer_reply<R: Runtime>(
             }
             None => "I didn't understand which power command that was, sir.".to_string(),
         },
-        (Offer::Power { .. }, _) => "Understood, sir. Nothing will be turned off.".to_string(),
+        (Offer::Power { .. }, _) => {
+            crate::power_cmd::forget_pending_alias();
+            "Understood, sir. Nothing will be turned off.".to_string()
+        }
         (Offer::OpenApp { display_name, spoken }, Reply::Yes) => {
             // The user confirmed the guess: remember it, then open it for real.
             crate::app_registry::confirm_resolution(&spoken, &display_name);
@@ -5527,6 +5541,29 @@ async fn run_coding_agent_task<R: Runtime>(
 
 /// "Nexus watch over this, update me when the response is received and Claude has stopped running"
 /// Or implicit: "Nexus watch over this" (inspects active foreground window/process).
+/// "Watch this session and, if it is perfect, shut down my laptop" (doc 142, phase W0).
+/// Only the understanding exists so far: the observer, the "is it perfect" verdict and the unattended
+/// shutdown are later phases. Nothing is armed, so NEXUS says exactly what it understood and that it
+/// will NOT power anything off by itself yet, instead of promising a shutdown it cannot deliver.
+async fn run_watch_then_power<R: Runtime>(
+    app: AppHandle<R>,
+    agent: Option<String>,
+    kind: String,
+    require_clean: bool,
+    deadline_mins: Option<u32>,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Some(k) = crate::power_cmd::PowerKind::from_str(&kind) else {
+        return say_and_finish(&app, request_id, "I didn't catch which power command you meant, sir.".into());
+    };
+    let plan = crate::watch_power::WatchPlan { agent, kind: k, require_clean, deadline_mins };
+    let speech = format!(
+        "I understood: {}. But automatic power-off after a watch isn't switched on yet, sir, so I haven't armed it and your laptop will stay on. Say watch over this and update me if you want a message when it finishes.",
+        crate::watch_power::read_back(&plan)
+    );
+    say_and_finish(&app, request_id, speech)
+}
+
 async fn run_watch_agent_task<R: Runtime>(
     app: AppHandle<R>,
     agent_name: Option<String>,
@@ -7516,6 +7553,25 @@ async fn try_power_and_howto<R: Runtime>(
         let (request_id, _) = install_new_request(Subsystem::LocalCommand);
         crate::memcore::offer::set(crate::memcore::offer::Offer::Power { kind: kind.as_str().to_string() }, true);
         return Some(say_and_finish(app, request_id, "Did you want me to shut down your laptop, sir?".to_string()));
+    }
+    // "That's it for today" / "I'm calling it a night": asked once; a yes teaches that exact phrase.
+    if crate::power_cmd::parse_casual(transcript).is_some() {
+        crate::power_cmd::note_loose_question(transcript);
+        let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+        crate::memcore::offer::set(crate::memcore::offer::Offer::Power { kind: "shutdown".to_string() }, true);
+        return Some(say_and_finish(app, request_id, crate::power_cmd::CASUAL_QUESTION.to_string()));
+    }
+    // A bare power verb ("shut down", "turn it off", "restart") may be meant for any app: never obeyed
+    // silently, always asked. Only a shutdown phrase can be taught by the yes.
+    if let Some(kind) = crate::power_cmd::parse_weak(transcript) {
+        if kind == crate::power_cmd::PowerKind::Shutdown {
+            crate::power_cmd::note_loose_question(transcript);
+        } else {
+            crate::power_cmd::forget_pending_alias();
+        }
+        let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+        crate::memcore::offer::set(crate::memcore::offer::Offer::Power { kind: kind.as_str().to_string() }, true);
+        return Some(say_and_finish(app, request_id, kind.confirm_question().to_string()));
     }
     None
 }

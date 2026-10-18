@@ -1,5 +1,18 @@
 # NEXUS — Project Notes
 
+## Ask-first shutdown + "watch this, then power off" W0 (2026-10-18)
+
+- **Built**: bare power verbs ("shut down", "turn it off", "restart") and end-of-day phrases ("that's it for today", "I'm calling it a night", "I'm up for tonight") now ASK once (`power_cmd::parse_weak` / `parse_casual`, `orchestrator::try_power_and_howto`); a yes teaches only a shutdown phrase (end-of-day phrases under a `casual: ` key); a power question also accepts the action itself ("shut it down", "good night") via `memcore::offer::classify_for`. `watch_power.rs` = order-free parser for "watch this session until it's done and if it's perfect shut down my laptop" -> `ParsedIntent::WatchThenPower`, claimed BEFORE the power parser and the compound "then" split. Record: `docs/changes/139-ask-first-shutdown-and-watch-then-power-w0.md`; plan `docs/features/142-...` (owner decisions D1-D4 taken as recommended).
+- **Honest limit**: the runner only reads the plan back and says power-off after a watch is NOT armed. W1-W5 (pending plan state, "is it perfect" verdict, real-session observer, agent Stop hook, 30 s unattended countdown) are not built. Today's `agent_watch` "watch over this" spawns a NEW agent or uses a top-level-file-mtime guess; neither is safe to trigger a shutdown.
+- **Verify**: new tests + 5 mutations killed (2 survived first, tests added). **Not run**: anything spoken, a rebuilt app.
+- **Pitfall**: another session edits `orchestrator.rs` / `intent_parser.rs` / `center.rs` at the same time; keep patches anchored and narrow.
+
+## Command-center alignment (2026-10-19)
+
+- `center.rs` now exposes a typed 17-center `ActionSpec` and shared `prepare_action` policy for single intents and compound steps. Compound planning excludes standalone actions on both deterministic and admin-brain paths; dependent `then` steps execute in order. Unsupported NLU labels are refused instead of gaining an execution path from a name prefix. The existing GitHub, MCP and file confirmation flows remain the actual gates.
+- Canonical ownership and adapter map: `docs/architecture/12-command-center-alignment.md`. `orchestrator.rs` remains turn owner, `command_center.rs` coordinates compounds, and the existing speech arbiter/playback timeline remains audio/orb/caption owner. The older five-bucket doc is historical.
+- Verification and remaining live checks: `docs/changes/141-command-center-alignment.md`. Post-fix Rust rerun passed 1816 tests with four unrelated concurrent-work failures filtered; TypeScript, Vitest, frontend build, turn-end and hygiene gates passed. A rebuilt voice walkthrough remains unverified. Concurrent working-tree changes were preserved.
+
 
 ## Wake-up sound (2026-10-18)
 

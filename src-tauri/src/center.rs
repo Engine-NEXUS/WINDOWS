@@ -314,7 +314,8 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
         | ParsedIntent::RunOnLocalhost
         | ParsedIntent::CodeProject { .. }
         | ParsedIntent::CodingAgentTask { .. }
-        | ParsedIntent::WatchAgentTask { .. } => "ArchitectCenter",
+        | ParsedIntent::WatchAgentTask { .. }
+        | ParsedIntent::WatchThenPower { .. } => "ArchitectCenter",
 
         ParsedIntent::Search { .. } => "KnowledgeCenter",
 

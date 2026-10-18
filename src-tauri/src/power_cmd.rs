@@ -72,6 +72,17 @@ impl PowerKind {
         }
     }
 
+    /// The "did you mean it?" question for a phrase that only might be a power command.
+    pub fn confirm_question(self) -> &'static str {
+        match self {
+            PowerKind::Shutdown => "Did you want me to shut down your laptop, sir?",
+            PowerKind::Restart => "Did you want me to restart your laptop, sir?",
+            PowerKind::Sleep => "Did you want me to put the laptop to sleep, sir?",
+            PowerKind::Lock => "Did you want me to lock the screen, sir?",
+            PowerKind::SignOut => "Did you want me to sign you out of Windows, sir?",
+        }
+    }
+
     pub fn verb(self) -> &'static str {
         match self {
             PowerKind::Shutdown => "powering off",
@@ -88,21 +99,52 @@ impl PowerKind {
 const POLITE_PREFIXES: &[&str] = &[
     "nexus ",
     "hey nexus ",
+    "hey ",
+    "okay ",
+    "ok ",
+    "alright ",
+    "so ",
+    "now ",
+    "just ",
     "please ",
     "can you ",
     "could you ",
     "would you ",
+    "will you ",
     "go ahead and ",
     "i want you to ",
     "i need you to ",
+    "i'd like you to ",
+    "i would like you to ",
+    "i'd like to ",
+    "i want to ",
+    "let's ",
+    "lets ",
 ];
-const POLITE_SUFFIXES: &[&str] = &[" right now", " immediately", " now", " please", " for me", " nexus"];
+const POLITE_SUFFIXES: &[&str] = &[
+    " right now",
+    " immediately",
+    " now",
+    " please",
+    " for me",
+    " nexus",
+    " thanks",
+    " thank you",
+    " tonight",
+    " for the night",
+    " for today",
+    " okay",
+    " ok",
+    " will you",
+    " sir",
+];
 /// The only things a power verb may be aimed at.
 const COMPUTER_WORDS: &[&str] = &["laptop", "computer", "pc", "system", "machine", "windows", "device", "notebook"];
 
 fn clean(text: &str) -> String {
-    let mut t = text.trim().to_lowercase();
-    t = t.trim_matches(|c: char| matches!(c, '.' | ',' | '!' | '?' | ' ')).to_string();
+    let mut t = text.trim().to_lowercase().replace('\u{2019}', "'").replace(',', " ");
+    t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    t = t.trim_matches(|c: char| matches!(c, '.' | ',' | '!' | '?' | ' ' | ';' | ':')).to_string();
     loop {
         let before = t.clone();
         for p in POLITE_PREFIXES {
@@ -161,13 +203,24 @@ pub fn parse(text: &str) -> Option<PowerKind> {
     }
     let t = fix_shutdown_mishearing(&t).unwrap_or(t);
 
-    // "put my laptop to sleep", "send the computer to sleep"
+    // "put my laptop to sleep", "send the computer to sleep", "put the pc on standby"
     for lead in ["put ", "send "] {
         if let Some(rest) = t.strip_prefix(lead) {
-            if let Some(mid) = rest.strip_suffix(" to sleep").or_else(|| rest.strip_suffix(" in sleep mode")) {
+            if let Some(mid) = rest
+                .strip_suffix(" to sleep")
+                .or_else(|| rest.strip_suffix(" in sleep mode"))
+                .or_else(|| rest.strip_suffix(" on standby"))
+                .or_else(|| rest.strip_suffix(" in standby"))
+            {
                 return is_computer(mid, false).then_some(PowerKind::Sleep);
             }
         }
+    }
+    // "sign me out of windows" / "log me out of my computer"
+    let t = if t.starts_with("sign me ") || t.starts_with("log me ") { t.replacen(" me", "", 1) } else { t };
+    // "turn the laptop off", "power my pc down", "give the laptop a restart"
+    if let Some(kind) = parse_reordered(&t) {
+        return Some(kind);
     }
 
     let table: &[(&str, PowerKind)] = &[
@@ -175,12 +228,16 @@ pub fn parse(text: &str) -> Option<PowerKind> {
         ("shutdown", PowerKind::Shutdown),
         ("power off", PowerKind::Shutdown),
         ("power down", PowerKind::Shutdown),
+        ("shut off", PowerKind::Shutdown),
+        ("close down", PowerKind::Shutdown),
         ("turn off", PowerKind::Shutdown),
         ("switch off", PowerKind::Shutdown),
         ("restart", PowerKind::Restart),
         ("reboot", PowerKind::Restart),
         ("sleep", PowerKind::Sleep),
         ("hibernate", PowerKind::Sleep),
+        ("suspend", PowerKind::Sleep),
+        ("standby", PowerKind::Sleep),
         ("lock", PowerKind::Lock),
         ("sign out", PowerKind::SignOut),
         ("log out", PowerKind::SignOut),
@@ -200,6 +257,172 @@ pub fn parse(text: &str) -> Option<PowerKind> {
     }
     None
 }
+
+/// The object sits between the verb and its particle: "turn the laptop off", "power my pc down",
+/// "shut my computer down", "close down the system", "give the laptop a restart".
+fn parse_reordered(t: &str) -> Option<PowerKind> {
+    let tokens: Vec<&str> = t.split_whitespace().collect();
+    if tokens.len() < 3 {
+        return None;
+    }
+    let (verb, last) = (tokens[0], *tokens.last()?);
+    let mid = tokens[1..tokens.len() - 1].join(" ");
+    let paired = match verb {
+        "turn" | "switch" => matches!(last, "off" | "offline"),
+        "power" | "shut" => matches!(last, "off" | "down"),
+        "close" | "take" => last == "down",
+        _ => false,
+    };
+    if paired {
+        return is_computer(&mid, false).then_some(PowerKind::Shutdown);
+    }
+    if verb == "give" && matches!(last, "restart" | "reboot") {
+        let mid = mid.strip_suffix(" a").or_else(|| mid.strip_suffix(" a quick")).unwrap_or(&mid);
+        return is_computer(mid, false).then_some(PowerKind::Restart);
+    }
+    None
+}
+
+/// Bare power verbs with no object: "shut down", "power off", "turn it off", "restart", "log me out".
+/// "shut down" alone could be meant for any app, so these are never obeyed silently: the caller asks
+/// first (and a yes teaches the phrase for the shutdown kind). The WHOLE utterance must be the verb.
+const WEAK_PHRASES: &[(&str, PowerKind)] = &[
+    ("shut down", PowerKind::Shutdown),
+    ("shutdown", PowerKind::Shutdown),
+    ("shut it down", PowerKind::Shutdown),
+    ("shut everything down", PowerKind::Shutdown),
+    ("shut off", PowerKind::Shutdown),
+    ("shut it off", PowerKind::Shutdown),
+    ("power off", PowerKind::Shutdown),
+    ("power it off", PowerKind::Shutdown),
+    ("power down", PowerKind::Shutdown),
+    ("power it down", PowerKind::Shutdown),
+    ("turn off", PowerKind::Shutdown),
+    ("turn it off", PowerKind::Shutdown),
+    ("switch off", PowerKind::Shutdown),
+    ("switch it off", PowerKind::Shutdown),
+    ("restart", PowerKind::Restart),
+    ("restart it", PowerKind::Restart),
+    ("reboot", PowerKind::Restart),
+    ("reboot it", PowerKind::Restart),
+    ("suspend", PowerKind::Sleep),
+    ("put it to sleep", PowerKind::Sleep),
+    ("lock", PowerKind::Lock),
+    ("lock it", PowerKind::Lock),
+    ("sign out", PowerKind::SignOut),
+    ("sign me out", PowerKind::SignOut),
+    ("log out", PowerKind::SignOut),
+    ("log me out", PowerKind::SignOut),
+    ("log off", PowerKind::SignOut),
+];
+
+pub fn parse_weak(text: &str) -> Option<PowerKind> {
+    // "restart nexus" / "shut down nexus" aim the verb AT the assistant (a vocative needs a comma: "shut down, nexus").
+    let raw = text.trim().to_lowercase().replace('\u{2019}', "'");
+    let raw = raw.trim_end_matches(|c: char| matches!(c, '.' | '!' | '?' | ' '));
+    if raw.ends_with(" nexus") && !raw.ends_with(", nexus") {
+        return None;
+    }
+    let t = clean(text);
+    WEAK_PHRASES.iter().find(|(p, _)| t == *p).map(|(_, k)| *k)
+}
+
+// ─── End-of-day phrases ("that's it for today") ──────────────────────
+
+/// Whole-utterance normaliser for end-of-day phrases: lowercase, straight apostrophes, no punctuation,
+/// no leading "nexus / hey nexus / okay / so / well / alright", no trailing "nexus / sir / now".
+/// (The strict `clean` also cuts "for today" and "tonight", which would erase the meaning here.)
+fn casual_norm(text: &str) -> String {
+    let mut t = text
+        .to_lowercase()
+        .replace('\u{2019}', "'")
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '\'' { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    loop {
+        let before = t.clone();
+        for p in ["hey nexus ", "nexus ", "okay ", "ok ", "so ", "well ", "alright ", "right ", "yeah ", "um ", "uh "] {
+            if let Some(r) = t.strip_prefix(p) {
+                t = r.to_string();
+            }
+        }
+        for sfx in [" nexus", " sir", " now"] {
+            if let Some(r) = t.strip_suffix(sfx) {
+                t = r.to_string();
+            }
+        }
+        if t == before {
+            return t;
+        }
+    }
+}
+
+const DAY_ENDS: &[&str] = &["for today", "for the day", "for tonight", "for the night", "for this evening"];
+
+/// "that's it for today", "i'm done for the night", "calling it a day", "i'm going to bed" ...
+/// Said in passing, so NEXUS only ASKS (and a yes teaches the exact phrase). Whole utterance only: a
+/// sentence that merely contains one of these words ("that's it for today's agenda") never matches.
+fn is_end_of_day(norm: &str) -> bool {
+    // "that's it / that's all / that will be all / nothing more / nothing else" + a day end (never bare)
+    for lead in [
+        "that's it", "that is it", "thats it", "that's all", "that is all", "thats all", "that'll be all",
+        "that will be all", "nothing more", "nothing else", "no more",
+    ] {
+        if let Some(rest) = norm.strip_prefix(lead) {
+            if DAY_ENDS.contains(&rest.trim()) {
+                return true;
+            }
+        }
+    }
+    // "i'm done / finished / through / off / out / good / up / wrapping up / signing off" + a day end
+    for subj in ["i'm", "i am", "we're", "we are", "im", "i'll be", "i will be"] {
+        if let Some(rest) = norm.strip_prefix(subj) {
+            let rest = rest.trim();
+            for state in [
+                "done", "finished", "through", "off", "out", "good", "up", "all done", "all set", "wrapping up",
+                "signing off", "logging off", "clocking out", "shutting down", "heading out", "heading off",
+            ] {
+                if let Some(tail) = rest.strip_prefix(state) {
+                    if DAY_ENDS.contains(&tail.trim()) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    // idioms and bedtime
+    const IDIOMS: &[&str] = &[
+        "i'm calling it a night", "i'm calling it a day", "i am calling it a night", "i am calling it a day",
+        "calling it a night", "calling it a day", "let's call it a night", "let's call it a day", "lets call it a night",
+        "lets call it a day", "i'll call it a night", "i'll call it a day", "call it a night", "call it a day",
+        "i'm going to bed", "i am going to bed", "i'm going to sleep", "i am going to sleep", "i'm off to bed",
+        "i'm off to sleep", "i'm heading to bed", "i'm heading off to bed", "i'm hitting the sack", "i'm turning in",
+        "i'm turning in for the night", "time for bed", "it's time for bed", "it's bedtime", "its bedtime", "bedtime",
+        "i'm done working", "i'm done with work", "i'm done with work for today", "i'm done with work for the day",
+        "i'm all done", "that's a wrap", "that's a wrap for today", "let's wrap up", "let's wrap it up",
+        "let's wrap up for today", "let's wrap it up for today", "time to wrap up", "wrap it up",
+        "that's enough for today", "that's enough for tonight", "enough for today", "enough for tonight",
+    ];
+    IDIOMS.contains(&norm)
+}
+
+/// End-of-day phrase -> the shutdown question (never obeyed silently).
+pub fn parse_casual(text: &str) -> Option<PowerKind> {
+    let n = casual_norm(text);
+    is_end_of_day(&n).then_some(PowerKind::Shutdown)
+}
+
+/// The normalised phrase to store when a casual phrase is taught.
+pub fn casual_key(text: &str) -> Option<String> {
+    let n = casual_norm(text);
+    is_end_of_day(&n).then_some(n)
+}
+
+/// What NEXUS asks after an end-of-day phrase.
+pub const CASUAL_QUESTION: &str = "Calling it a day, sir? Shall I shut down your laptop?";
 
 // ─── Loose match (STT mishearings) + learned phrases ─────────────────
 
@@ -269,15 +492,26 @@ pub fn load_aliases(dir: &std::path::Path) -> Vec<String> {
 
 /// Has the user confirmed this exact (normalised) phrase as "shut down" before?
 pub fn is_learned_shutdown(dir: &std::path::Path, text: &str) -> bool {
-    let key = alias_key(text);
+    let key = learn_key(text);
     !key.is_empty() && load_aliases(dir).iter().any(|a| *a == key)
+}
+
+/// Key under which a phrase is taught: casual end-of-day phrases get their own prefixed key
+/// (`alias_key` would cut "for today" off them and teach a far too broad "that's it").
+fn learn_key(text: &str) -> String {
+    match casual_key(text) {
+        Some(k) => format!("casual: {k}"),
+        None => alias_key(text),
+    }
 }
 
 /// Remember a confirmed mishearing (local only, capped, newest kept). Returns whether it was stored.
 pub fn add_alias(dir: &std::path::Path, text: &str) -> bool {
-    let key = alias_key(text);
-    // Only things the loose rule would have caught are worth storing (never an arbitrary sentence).
-    if key.is_empty() || parse_loose(&key).is_none() {
+    let key = learn_key(text);
+    // Only things the loose, bare-verb or end-of-day rule would have caught, and only for a SHUTDOWN, are worth
+    // storing (never an arbitrary sentence, never "restart" taught as a shutdown).
+    let known = parse_casual(text).is_some() || parse_loose(&key).is_some() || parse_weak(&key) == Some(PowerKind::Shutdown);
+    if key.is_empty() || !known {
         return false;
     }
     let mut all = load_aliases(dir);
@@ -299,6 +533,13 @@ pub fn add_alias(dir: &std::path::Path, text: &str) -> bool {
 pub fn note_loose_question(text: &str) {
     if let Ok(mut g) = PENDING_LOOSE.lock() {
         *g = Some((text.to_string(), std::time::Instant::now() + PENDING_LOOSE_TTL));
+    }
+}
+
+/// The user did not say yes (or a different question began): the remembered phrase must not be taught later.
+pub fn forget_pending_alias() {
+    if let Ok(mut g) = PENDING_LOOSE.lock() {
+        *g = None;
     }
 }
 
@@ -693,6 +934,204 @@ mod loose_tests {
         let all = load_aliases(&d);
         assert_eq!(all.len(), MAX_ALIASES);
         assert!(all.last().unwrap().starts_with(&word(MAX_ALIASES + 9)));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod phrase_coverage_tests {
+    use super::*;
+
+    #[test]
+    fn every_explicit_way_to_say_shut_down_the_laptop() {
+        let verbs = ["shut down", "shutdown", "power off", "power down", "turn off", "switch off", "shut off", "close down"];
+        let targets = ["my laptop", "the laptop", "my computer", "the computer", "my pc", "the pc", "the system", "windows", "my machine", "this device"];
+        let mut n = 0;
+        for v in verbs {
+            for t in targets {
+                let phrase = format!("{v} {t}");
+                assert_eq!(parse(&phrase), Some(PowerKind::Shutdown), "{phrase}");
+                n += 1;
+            }
+        }
+        // polite wrappers
+        for wrap in [
+            "nexus {}", "hey nexus {}", "please {}", "can you {}", "could you please {}", "would you {}", "will you {}",
+            "go ahead and {}", "i want you to {}", "i need you to {}", "i'd like you to {}", "i would like you to {}",
+            "i want to {}", "let's {}", "just {}", "okay nexus {}", "ok {}", "alright {}", "{} now", "{} right now",
+            "{} please", "{} for me", "{} thanks", "{} thank you", "{} tonight", "{} for the night", "{} okay",
+            "{} nexus", "{} sir", "nexus, {}.", "Nexus, please {} now.",
+        ] {
+            let phrase = wrap.replace("{}", "shut down my laptop");
+            assert_eq!(parse(&phrase), Some(PowerKind::Shutdown), "{phrase}");
+            n += 1;
+        }
+        // object between verb and particle
+        for p in [
+            "turn the laptop off", "turn my laptop off", "turn my computer off", "switch my pc off", "switch the laptop off",
+            "switch the computer offline", "power my laptop down", "power the pc off", "shut my laptop down", "shut the computer down",
+            "shut my laptop off", "close the system down", "take the system down", "turn off the laptop", "please turn my laptop off now",
+        ] {
+            assert_eq!(parse(p), Some(PowerKind::Shutdown), "{p}");
+            n += 1;
+        }
+        assert!(n >= 120, "corpus too small: {n}");
+    }
+
+    #[test]
+    fn restart_sleep_lock_and_sign_out_variants() {
+        for p in [
+            "restart my laptop", "reboot my computer", "restart windows", "reboot the pc", "give the laptop a restart",
+            "give my computer a reboot", "could you restart the system", "please reboot my laptop now",
+        ] {
+            assert_eq!(parse(p), Some(PowerKind::Restart), "{p}");
+        }
+        for p in [
+            "put my laptop to sleep", "put the computer to sleep", "send the pc to sleep", "suspend my laptop", "put the laptop on standby",
+            "put my pc in sleep mode", "hibernate the laptop", "sleep my laptop",
+        ] {
+            assert_eq!(parse(p), Some(PowerKind::Sleep), "{p}");
+        }
+        for p in ["lock my laptop", "lock the screen", "lock windows", "lock my pc", "please lock the computer"] {
+            assert_eq!(parse(p), Some(PowerKind::Lock), "{p}");
+        }
+        for p in ["sign out of windows", "sign me out of windows", "log me out of my computer", "log off my computer", "sign out of my pc"] {
+            assert_eq!(parse(p), Some(PowerKind::SignOut), "{p}");
+        }
+    }
+
+    #[test]
+    fn bare_verbs_are_only_asked_about_never_obeyed() {
+        for p in [
+            "shut down", "Shut down.", "Nexus, shut down", "please shut down", "shutdown", "shut it down", "shut it off",
+            "power off", "power down", "power it off", "turn off", "turn it off", "switch off", "switch it off", "shut everything down",
+            "can you shut down", "okay shut it down",
+        ] {
+            assert_eq!(parse(p), None, "{p}: must not be obeyed silently");
+            assert_eq!(parse_weak(p), Some(PowerKind::Shutdown), "{p}");
+        }
+        assert_eq!(parse_weak("restart"), Some(PowerKind::Restart));
+        assert_eq!(parse_weak("reboot it"), Some(PowerKind::Restart));
+        assert_eq!(parse_weak("suspend"), Some(PowerKind::Sleep));
+        assert_eq!(parse_weak("lock it"), Some(PowerKind::Lock));
+        assert_eq!(parse_weak("sign me out"), Some(PowerKind::SignOut));
+        assert_eq!(parse_weak("log me out"), Some(PowerKind::SignOut));
+        // only the WHOLE utterance counts
+        for p in ["shut down notepad", "shut down the music", "turn off the lights", "restart the download", "lock the door", "how do i shut down", "shut down and then open chrome", "restart nexus", ""] {
+            assert_eq!(parse_weak(p), None, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn things_that_are_not_about_the_computer_stay_out() {
+        for p in [
+            "shut down notepad", "shut down chrome", "shut down the music", "shut down the server", "shut down nexus",
+            "turn off the lights", "turn off the tv", "turn off the music", "turn off my phone", "turn off bluetooth",
+            "turn off the screen", "turn off notifications", "switch off the fan", "power off the printer", "power off my phone",
+            "turn the volume off", "turn the music down", "turn my phone off", "shut the door down", "shut the window",
+            "close down notepad", "close the laptop", "take the laptop to work", "take the trash down", "give me a restart",
+            "give the dog a restart", "restart the song", "restart the game", "restart nexus", "reboot the router",
+            "lock the door", "lock my phone", "lock the car", "sign out of gmail", "sign out of spotify", "log out of github",
+            "how do i shut down my laptop", "what does shut down my laptop do", "why did my laptop shut down", "my laptop shut down by itself",
+            "i shut down my laptop yesterday", "did you shut down my laptop", "shut down my laptop and open chrome",
+            "open my laptop settings", "put the laptop on the table", "put it to sleep", "good night", "that's it for today",
+        ] {
+            assert_eq!(parse(p), None, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn learning_a_bare_verb_applies_to_shutdown_only() {
+        let d = std::env::temp_dir().join(format!("nexus_power_weak_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(add_alias(&d, "Shut down."));
+        assert!(is_learned_shutdown(&d, "shut down"));
+        assert!(!add_alias(&d, "restart"), "restart must never be stored as a shutdown phrase");
+        assert!(!is_learned_shutdown(&d, "restart"));
+        forget_pending_alias();
+        note_loose_question("turn it off");
+        forget_pending_alias();
+        assert!(!learn_pending_alias(&d), "a forgotten question teaches nothing");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn each_kind_has_its_own_question() {
+        for k in [PowerKind::Shutdown, PowerKind::Restart, PowerKind::Sleep, PowerKind::Lock, PowerKind::SignOut] {
+            assert!(k.confirm_question().starts_with("Did you want me to "), "{k:?}");
+        }
+        assert!(PowerKind::Restart.confirm_question().contains("restart"));
+        assert!(PowerKind::Lock.confirm_question().contains("lock"));
+    }
+}
+
+#[cfg(test)]
+mod end_of_day_tests {
+    use super::*;
+
+    #[test]
+    fn end_of_day_phrases_are_asked_about() {
+        let mut n = 0;
+        for day in DAY_ENDS {
+            for lead in [
+                "that's it", "that is it", "thats it", "that's all", "that'll be all", "that will be all",
+                "nothing else", "nothing more",
+            ] {
+                let p = format!("{lead} {day}");
+                assert_eq!(parse_casual(&p), Some(PowerKind::Shutdown), "{p}");
+                assert_eq!(parse(&p), None, "{p}: never an explicit command");
+                n += 1;
+            }
+            for subj in ["i'm", "i am", "we're"] {
+                for state in ["done", "finished", "through", "off", "out", "good", "up", "all set", "wrapping up", "signing off"] {
+                    let p = format!("{subj} {state} {day}");
+                    assert_eq!(parse_casual(&p), Some(PowerKind::Shutdown), "{p}");
+                    n += 1;
+                }
+            }
+        }
+        for p in [
+            "calling it a night", "i'm calling it a day", "let's call it a day", "i'm going to bed", "time for bed",
+            "it's bedtime", "i'm turning in", "i'm hitting the sack", "that's a wrap", "let's wrap up", "enough for today",
+            "i'm done working", "i'm up for tonight", "I\u{2019}m done for the night",
+        ] {
+            assert_eq!(parse_casual(p), Some(PowerKind::Shutdown), "{p}");
+            n += 1;
+        }
+        for wrap in ["nexus {}", "Nexus, {}.", "hey nexus, {}", "okay {}", "so {}", "{} nexus", "{}, sir.", "alright nexus {}"] {
+            let p = wrap.replace("{}", "that's it for today");
+            assert_eq!(parse_casual(&p), Some(PowerKind::Shutdown), "{p}");
+            n += 1;
+        }
+        assert!(n >= 150, "corpus too small: {n}");
+    }
+
+    #[test]
+    fn sentences_that_merely_contain_those_words_are_left_alone() {
+        for p in [
+            "that's it", "that's all", "thats all", "i'm done", "i'm done with this file", "i'm done for now",
+            "that's it for today's agenda", "that's it for today but open chrome", "open notepad that's it for today",
+            "i'm going to bed soon remind me at ten", "is that it for today", "what's on for today", "that's it for the video",
+            "good night", "goodnight nexus", "time for bed reminder", "i'm done for today open spotify",
+            "call it a day and play music", "remind me to wrap up", "wrap up the report", "that's it for the pull request",
+            "i'm off to the gym", "i'm out of coffee", "we're done with the call", "",
+        ] {
+            assert_eq!(parse_casual(p), None, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn a_taught_end_of_day_phrase_uses_its_own_key_and_stays_exact() {
+        let d = std::env::temp_dir().join(format!("nexus_power_casual_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(add_alias(&d, "Nexus, that's it for today."));
+        assert!(is_learned_shutdown(&d, "that's it for today"));
+        assert!(is_learned_shutdown(&d, "okay nexus that's it for today"));
+        // the broad stem was NOT taught, and neither was a different day end
+        assert!(!is_learned_shutdown(&d, "that's it"));
+        assert!(!is_learned_shutdown(&d, "that's it for the video"));
+        assert!(!is_learned_shutdown(&d, "that's it for tonight"));
+        assert!(!add_alias(&d, "that's it for the video"));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

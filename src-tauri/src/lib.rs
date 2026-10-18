@@ -109,6 +109,7 @@ pub(crate) mod ghost_learning;
 pub(crate) mod nlu_update;
 pub(crate) mod power;
 pub(crate) mod power_cmd;
+pub(crate) mod watch_power;
 pub(crate) mod howto;
 pub(crate) mod power_close;
 pub(crate) mod latency;

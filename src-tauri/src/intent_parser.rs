@@ -313,6 +313,15 @@ pub enum ParsedIntent {
         agent: Option<String>,
         query: Option<String>,
     },
+    /// "Watch this session until it is complete and, if it is perfect, shut down my laptop."
+    /// `kind` = power_cmd::PowerKind::as_str; `agent` = None means the session in front.
+    #[serde(rename = "watch_then_power")]
+    WatchThenPower {
+        agent: Option<String>,
+        kind: String,
+        require_clean: bool,
+        deadline_mins: Option<u32>,
+    },
     /// Play music or search for songs on Spotify / Apple Music.
     #[serde(rename = "play_music")]
     PlayMusic {
@@ -428,6 +437,7 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::CreateVoiceReminder { .. } => "create_voice_reminder",
         ParsedIntent::AnalyseChatDocs { .. } => "analyse_chat_docs",
         ParsedIntent::WatchAgentTask { .. } => "watch_agent_task",
+        ParsedIntent::WatchThenPower { .. } => "watch_then_power",
         ParsedIntent::PlayMusic { .. } => "play_music",
         ParsedIntent::OpenMusicPlayer { .. } => "open_music_player",
         ParsedIntent::GitHubCommand { command } => match command {
@@ -659,6 +669,22 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
     // BEFORE open_app, power_cmd, or app_registry can ever treat them as desktop app targets.
     if let Some(result) = parse_github_dashboard_command(&text) {
         return Some(result);
+    }
+
+    // --- "Watch this session, and if it is perfect shut down my laptop" ---
+    // Claimed before the power and watch parsers (the sentence contains both) and before the compound
+    // split, which would cut it at "then".
+    if let Some(plan) = crate::watch_power::parse(&text) {
+        return Some(ParseResult {
+            intent: ParsedIntent::WatchThenPower {
+                agent: plan.agent,
+                kind: plan.kind.as_str().to_string(),
+                require_clean: plan.require_clean,
+                deadline_mins: plan.deadline_mins,
+            },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
     }
 
     // --- Power commands ("shut down my laptop") ---
