@@ -41,6 +41,10 @@ pub enum ParsedIntent {
     /// "open coderabbit" / "show coderabbit" / "coderabbit"
     #[serde(rename = "open_coderabbit_hub")]
     OpenCodeRabbitHub,
+    /// Open the native GitHub Dashboard / feed window.
+    /// "open github dashboard" / "open github feed" / "show pr list" / "open github interface"
+    #[serde(rename = "open_github_dashboard")]
+    OpenGitHubDashboard { subpage: String },
     #[serde(rename = "search")]
     Search { query: String },
     #[serde(rename = "analyse_repo")]
@@ -353,6 +357,7 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::OpenArchitect => "open_architect",
         ParsedIntent::OpenSettings => "open_settings",
         ParsedIntent::OpenCodeRabbitHub => "open_coderabbit_hub",
+        ParsedIntent::OpenGitHubDashboard { .. } => "open_github_dashboard",
         ParsedIntent::Search { .. } => "search",
         ParsedIntent::AnalyseRepo { .. } => "analyse_repo",
         ParsedIntent::AnalysePr { .. } => "analyse_pr",
@@ -978,8 +983,6 @@ fn looks_like_github_phrase(s: &str) -> bool {
 /// High-priority interceptor that matches all feed/dashboard phrases BEFORE open_app
 /// or app-registry can ever guess an app target.
 fn parse_github_dashboard_command(text: &str) -> Option<ParseResult> {
-    use crate::github_cmd::GitHubCommand;
-
     let norm = text.trim().to_lowercase();
     let norm = norm.replace("git hub", "github");
     let norm = norm.replace("pullrequest", "pull request");
@@ -1072,11 +1075,8 @@ fn parse_github_dashboard_command(text: &str) -> Option<ParseResult> {
 
     if is_pr_subpage {
         return Some(ParseResult {
-            intent: ParsedIntent::GitHubCommand {
-                command: GitHubCommand::ListPrs {
-                    repo: String::new(),
-                    state: "open".to_string(),
-                },
+            intent: ParsedIntent::OpenGitHubDashboard {
+                subpage: "pull_requests".to_string(),
             },
             confidence: 1.0,
             source: "deterministic".to_string(),
@@ -1103,11 +1103,8 @@ fn parse_github_dashboard_command(text: &str) -> Option<ParseResult> {
 
     if is_issues_subpage {
         return Some(ParseResult {
-            intent: ParsedIntent::GitHubCommand {
-                command: GitHubCommand::ListPrs {
-                    repo: String::new(),
-                    state: "issues".to_string(),
-                },
+            intent: ParsedIntent::OpenGitHubDashboard {
+                subpage: "issues".to_string(),
             },
             confidence: 1.0,
             source: "deterministic".to_string(),
@@ -1132,11 +1129,8 @@ fn parse_github_dashboard_command(text: &str) -> Option<ParseResult> {
 
     if is_orgs_subpage {
         return Some(ParseResult {
-            intent: ParsedIntent::GitHubCommand {
-                command: GitHubCommand::ListPrs {
-                    repo: String::new(),
-                    state: "organizations".to_string(),
-                },
+            intent: ParsedIntent::OpenGitHubDashboard {
+                subpage: "organizations".to_string(),
             },
             confidence: 1.0,
             source: "deterministic".to_string(),
@@ -1166,11 +1160,8 @@ fn parse_github_dashboard_command(text: &str) -> Option<ParseResult> {
 
     if is_feed {
         return Some(ParseResult {
-            intent: ParsedIntent::GitHubCommand {
-                command: GitHubCommand::ListPrs {
-                    repo: String::new(),
-                    state: "feed".to_string(),
-                },
+            intent: ParsedIntent::OpenGitHubDashboard {
+                subpage: "feed".to_string(),
             },
             confidence: 1.0,
             source: "deterministic".to_string(),
@@ -6876,10 +6867,11 @@ mod tests {
 
     #[test]
     fn test_launch_spotify() {
+        // Spotify is a music player intent (so the default-player setting and transport controls apply).
         let result = parse_deterministic("launch spotify");
         assert!(result.is_some());
         let r = result.unwrap();
-        assert!(matches!(r.intent, ParsedIntent::OpenApp { .. }));
+        assert!(matches!(r.intent, ParsedIntent::OpenMusicPlayer { player: Some(ref p) } if p == "spotify"), "{:?}", r.intent);
     }
 
     #[test]
@@ -9398,7 +9390,7 @@ mod tests {
 
         let res = parse_deterministic("open spot if I");
         assert!(res.is_some());
-        assert!(matches!(res.unwrap().intent, ParsedIntent::OpenApp { ref target } if target == "spotify"));
+        assert!(matches!(res.unwrap().intent, ParsedIntent::OpenMusicPlayer { player: Some(ref p) } if p == "spotify"));
     }
 
     #[test]
@@ -10650,8 +10642,6 @@ mod power_and_session_tests {
 
     #[test]
     fn test_github_feed_and_pr_list_parsing() {
-        use crate::github_cmd::GitHubCommand;
-
         // Feed / Dashboard / Home view phrases
         for phrase in [
             "show me my github feed.",
@@ -10713,12 +10703,10 @@ mod power_and_session_tests {
         ] {
             let res = parse_deterministic(phrase).unwrap_or_else(|| panic!("failed to parse feed phrase {phrase:?}"));
             match res.intent {
-                ParsedIntent::GitHubCommand {
-                    command: GitHubCommand::ListPrs { state, .. },
-                } => {
-                    assert_eq!(state, "feed", "{phrase} should have state 'feed'");
+                ParsedIntent::OpenGitHubDashboard { subpage } => {
+                    assert_eq!(subpage, "feed", "{phrase} should have subpage 'feed'");
                 }
-                other => panic!("{phrase} expected ListPrs feed, got {other:?}"),
+                other => panic!("{phrase} expected OpenGitHubDashboard feed, got {other:?}"),
             }
         }
 
@@ -10768,12 +10756,10 @@ mod power_and_session_tests {
         ] {
             let res = parse_deterministic(phrase).unwrap_or_else(|| panic!("failed to parse pr phrase {phrase:?}"));
             match res.intent {
-                ParsedIntent::GitHubCommand {
-                    command: GitHubCommand::ListPrs { state, .. },
-                } => {
-                    assert_eq!(state, "open", "{phrase} should have state 'open'");
+                ParsedIntent::OpenGitHubDashboard { subpage } => {
+                    assert_eq!(subpage, "pull_requests", "{phrase} should have subpage 'pull_requests'");
                 }
-                other => panic!("{phrase} expected ListPrs open, got {other:?}"),
+                other => panic!("{phrase} expected OpenGitHubDashboard pull_requests, got {other:?}"),
             }
         }
 
@@ -10798,12 +10784,10 @@ mod power_and_session_tests {
         ] {
             let res = parse_deterministic(phrase).unwrap_or_else(|| panic!("failed to parse issues phrase {phrase:?}"));
             match res.intent {
-                ParsedIntent::GitHubCommand {
-                    command: GitHubCommand::ListPrs { state, .. },
-                } => {
-                    assert_eq!(state, "issues", "{phrase} should have state 'issues'");
+                ParsedIntent::OpenGitHubDashboard { subpage } => {
+                    assert_eq!(subpage, "issues", "{phrase} should have subpage 'issues'");
                 }
-                other => panic!("{phrase} expected ListPrs issues, got {other:?}"),
+                other => panic!("{phrase} expected OpenGitHubDashboard issues, got {other:?}"),
             }
         }
 
@@ -10827,12 +10811,10 @@ mod power_and_session_tests {
         ] {
             let res = parse_deterministic(phrase).unwrap_or_else(|| panic!("failed to parse orgs phrase {phrase:?}"));
             match res.intent {
-                ParsedIntent::GitHubCommand {
-                    command: GitHubCommand::ListPrs { state, .. },
-                } => {
-                    assert_eq!(state, "organizations", "{phrase} should have state 'organizations'");
+                ParsedIntent::OpenGitHubDashboard { subpage } => {
+                    assert_eq!(subpage, "organizations", "{phrase} should have subpage 'organizations'");
                 }
-                other => panic!("{phrase} expected ListPrs organizations, got {other:?}"),
+                other => panic!("{phrase} expected OpenGitHubDashboard organizations, got {other:?}"),
             }
         }
     }
