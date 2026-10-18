@@ -12,6 +12,8 @@
 
 pub mod agenda;
 pub mod briefing;
+pub mod corrections;
+pub mod curator;
 pub mod crypto;
 pub mod google_io;
 pub mod health;
@@ -23,11 +25,15 @@ pub mod offer;
 pub mod leavewatch;
 pub mod leases;
 pub mod people;
+pub mod profile;
 pub mod restore;
 pub mod resume;
+pub mod review;
+pub mod routines;
 pub mod scheduler;
 pub mod session;
 pub mod store;
+pub mod synonyms;
 pub mod timetable;
 pub mod timetable_io;
 pub mod wa;
@@ -42,8 +48,9 @@ use parking_lot::Mutex;
 
 use store::{Observation, Store, Tier, Trust};
 
-/// Context-pack budget in chars (plan 95: 800 → 2000).
-pub const DEFAULT_BUDGET: usize = 2000;
+/// Context-pack budget in chars: the always-on profile (<= `profile::PROFILE_CAP`) plus about 1,200 for
+/// the question-specific facts and recent episodes (plan 95: 800 -> 2000; Memory v2 M1: 2000 -> 2600).
+pub const DEFAULT_BUDGET: usize = 2600;
 const MAX_PACK_FACTS: usize = 8;
 const MAX_PACK_EPISODES: usize = 3;
 
@@ -261,6 +268,18 @@ pub fn egress_log(app_data_dir: &Path, limit: usize) -> Vec<store::EgressEntry> 
     with_store(app_data_dir, |s| s.egress_recent(limit)).unwrap_or_default()
 }
 
+/// Every mishearing NEXUS has noticed, applied or not (Memory page, "Words I learned to fix").
+pub fn list_corrections(app_data_dir: &Path) -> Vec<store::CorrectionRow> {
+    with_store(app_data_dir, |s| s.corrections_all()).unwrap_or_default()
+}
+
+/// Stop applying and forget what was learned about one heard phrase. Returns rows removed.
+pub fn forget_correction(app_data_dir: &Path, heard: &str) -> usize {
+    let n = with_store(app_data_dir, |s| s.correction_forget(heard.trim())).unwrap_or(0);
+    corrections::refresh(app_data_dir);
+    n
+}
+
 /// Everything remembered, for the "what do you remember" views.
 pub fn list_rows(app_data_dir: &Path, limit: usize) -> Vec<store::Row> {
     with_store(app_data_dir, |s| s.list_rows(limit)).unwrap_or_default()
@@ -306,6 +325,16 @@ pub struct Status {
     pub session: bool,
     /// Startup connection check in the greeting is on.
     pub health: bool,
+    /// The always-on profile (what you told NEXUS, minus sensitive topics) is sent with cloud requests.
+    pub profile: bool,
+    /// NEXUS may notice command sequences you repeat and offer to turn them into one phrase.
+    pub routines: bool,
+    /// Optional background review of cloud conversations is on (off unless the user switched it on).
+    pub review: bool,
+    /// Suggested memory changes waiting for the user's approval.
+    pub pending: usize,
+    /// Recent housekeeping notice (e.g. an unused routine was removed); empty when there is none.
+    pub curator_note: String,
 }
 
 /// Erase recorded resume points (activity history) and nothing else.
@@ -330,6 +359,11 @@ pub fn status(app_data_dir: &Path) -> Status {
     let leave_by = flag(app_data_dir, "memcoreLeaveBy", true);
     let session = flag(app_data_dir, "memcoreSession", true);
     let health = flag(app_data_dir, "memcoreHealth", true);
+    let profile = flag(app_data_dir, "memcoreProfile", true);
+    let routines = flag(app_data_dir, "memcoreRoutines", true);
+    let review = flag(app_data_dir, "memcoreReview", false);
+    let pending = review::list(app_data_dir).len();
+    let curator_note = curator::note(app_data_dir, now_ts()).unwrap_or_default();
     let google_connected = !google_io::list_accounts(google_io::can_read_mail).is_empty();
     let google_needs_signin = with_store(app_data_dir, |s| s.meta_get("mail_needs_signin").map(|v| !v.is_empty()).unwrap_or(false))
         .unwrap_or(false);
@@ -367,6 +401,11 @@ pub fn status(app_data_dir: &Path) -> Status {
             people,
             session,
             health,
+            profile,
+            routines,
+            review,
+            pending,
+            curator_note,
         },
         None => Status {
             enabled: false,
@@ -390,6 +429,11 @@ pub fn status(app_data_dir: &Path) -> Status {
             people: 0,
             session,
             health,
+            profile,
+            routines,
+            review,
+            pending,
+            curator_note,
         },
     }
 }
@@ -507,9 +551,30 @@ fn fit_budget(text: &str, budget: usize) -> String {
 /// get their frequency signal bumped. `None` = memcore unavailable or empty
 /// (caller falls back to the legacy context).
 pub fn context_pack(app_data_dir: &Path, query: &str, budget: usize) -> Option<String> {
+    context_pack_with(app_data_dir, query, budget, flag(app_data_dir, "memcoreProfile", true))
+}
+
+/// `context_pack` with the always-on profile switched explicitly (tests compare both).
+fn context_pack_with(app_data_dir: &Path, query: &str, budget: usize, use_profile: bool) -> Option<String> {
     let now = now_ts();
-    let (facts, episodes) = with_store(app_data_dir, |s| {
-        let facts = s.search(Tier::Fact, query, MAX_PACK_FACTS, now);
+    let (profile_text, facts, episodes) = with_store(app_data_dir, |s| {
+        // Profile first and stable: the same text every turn until the user's facts change, so the
+        // prompt prefix stays cacheable. Its facts are not repeated in the recall list below.
+        let (profile_text, profile_ids) = if use_profile {
+            profile::render(&curator::profile_entries(s), profile::PROFILE_CAP)
+        } else {
+            (String::new(), Vec::new())
+        };
+        let hits = s.search(Tier::Fact, query, MAX_PACK_FACTS + profile_ids.len(), now);
+        // A profile fact the question touched was useful: count it, so the curator can keep the facts
+        // that get used when the profile is full. (It is not repeated in the recall list below.)
+        let touched: Vec<i64> = hits.iter().filter(|h| profile_ids.contains(&h.id)).map(|h| h.id).collect();
+        s.mark_used(&touched, now);
+        let facts: Vec<_> = hits
+            .into_iter()
+            .filter(|h| !profile_ids.contains(&h.id))
+            .take(MAX_PACK_FACTS)
+            .collect();
         let ids: Vec<i64> = facts.iter().map(|h| h.id).collect();
         s.mark_used(&ids, now);
         // Over-fetch, then keep only real speech: junk that predates the admit gate (or slipped
@@ -520,9 +585,12 @@ pub fn context_pack(app_data_dir: &Path, query: &str, budget: usize) -> Option<S
             .filter(|h| hygiene::transcript_quality(&h.value).is_ok())
             .take(MAX_PACK_EPISODES)
             .collect();
-        (facts, recent)
+        (profile_text, facts, recent)
     })?;
     let mut parts: Vec<String> = vec![];
+    if !profile_text.is_empty() {
+        parts.push(profile_text);
+    }
     if !facts.is_empty() {
         let lines: Vec<String> = facts.iter().map(|h| format!("- {}: {}", h.key, h.value)).collect();
         parts.push(format!("Known facts:\n{}", lines.join("\n")));
@@ -613,6 +681,51 @@ mod tests {
     }
 
     #[test]
+    fn the_profile_leads_the_pack_is_stable_and_is_not_repeated_in_recall() {
+        let d = tmpdir("profile");
+        mirror_core_fact(&d, "dog_name", "Bruno");
+        mirror_core_fact(&d, "employer", "Acme");
+        mirror_core_fact(&d, "allergy", "peanuts");
+        mirror_learned_fact(&d, "favorite_snack", "chips");
+        let prefix = "About the user (they told you this):\n- dog_name: Bruno\n- employer: Acme";
+
+        let a = context_pack_with(&d, "what is my dog name", DEFAULT_BUDGET, true).unwrap();
+        let b = context_pack_with(&d, "weather tomorrow", DEFAULT_BUDGET, true).unwrap();
+        // Same prefix whatever is asked: that is what lets providers cache it.
+        assert!(a.starts_with(prefix), "{a}");
+        assert!(b.starts_with(prefix), "{b}");
+        // A profile fact is not repeated in the question-specific list.
+        assert_eq!(a.matches("dog_name: Bruno").count(), 1, "{a}");
+        // Sensitive and mined facts are never always-on...
+        assert!(!b.contains("peanuts") && !b.contains("chips"), "{b}");
+        // ...but a question that asks for them still finds them.
+        let c = context_pack_with(&d, "am I allergic to anything", DEFAULT_BUDGET, true).unwrap();
+        assert!(c.contains("allergy: peanuts"), "{c}");
+    }
+
+    #[test]
+    fn the_profile_can_be_switched_off() {
+        let d = tmpdir("profile_off");
+        mirror_core_fact(&d, "dog_name", "Bruno");
+        let off = context_pack_with(&d, "weather tomorrow", DEFAULT_BUDGET, false);
+        assert!(off.map_or(true, |p| !p.contains("About the user")));
+        std::fs::write(d.join("settings.json"), r#"{"memcoreProfile": false}"#).unwrap();
+        assert!(!status(&d).profile);
+        let via_setting = context_pack(&d, "weather tomorrow", DEFAULT_BUDGET);
+        assert!(via_setting.map_or(true, |p| !p.contains("About the user")));
+    }
+
+    #[test]
+    fn synonyms_fill_in_after_exact_words_and_rank_below_them() {
+        let d = tmpdir("syn");
+        mirror_core_fact(&d, "work_hours", "9 to 5");
+        mirror_core_fact(&d, "employer", "Acme");
+        let hits = recall(&d, "where do I work", 3).unwrap();
+        assert_eq!(hits.first().map(|h| h.0.as_str()), Some("work_hours"), "{hits:?}");
+        assert!(hits.iter().any(|h| h.0 == "employer"), "{hits:?}");
+    }
+
+    #[test]
     fn fit_budget_cuts_on_line_boundary() {
         let text = "Known facts:\n- aaaa: 1111\n- bbbb: 2222\n- cccc: 3333";
         let cut = fit_budget(text, 40);
@@ -682,14 +795,14 @@ mod tests {
             row("fact", "employer", "Acme", "derived", now - 3 * 86_400),
             row("episode", "ep:1", "open chrome", "derived", now - 86_400),
         ];
-        let st = Status { enabled: true, encrypted: true, facts: 2, episodes: 1, egress_7d: 4, redact_names: false, activity: true, resume_points: 12, briefing: true, timetable: true, slots: 0, mail: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true };
+        let st = Status { enabled: true, encrypted: true, facts: 2, episodes: 1, egress_7d: 4, redact_names: false, activity: true, resume_points: 12, briefing: true, timetable: true, slots: 0, mail: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true, profile: true, routines: true, review: false, pending: 0, curator_note: String::new() };
         let md = card_markdown(&rows, &st, now);
         assert!(md.contains("### You told me") && md.contains("**dog name**"), "{md}");
         assert!(md.contains("\\[x\\]\\(http") || md.contains("\\[x\\]("), "markdown must be escaped: {md}");
         assert!(md.contains("### I picked up") && md.contains("last used 3d ago"), "{md}");
         assert!(md.contains("Recent conversations (1)") && md.contains("yesterday"), "{md}");
         assert!(md.contains("encrypted: **yes**") && md.contains("**4** turns"), "{md}");
-        let empty = card_markdown(&[], &Status { enabled: true, encrypted: false, facts: 0, episodes: 0, egress_7d: 0, redact_names: false, activity: true, resume_points: 0, briefing: true, timetable: true, slots: 0, mail: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true }, now);
+        let empty = card_markdown(&[], &Status { enabled: true, encrypted: false, facts: 0, episodes: 0, egress_7d: 0, redact_names: false, activity: true, resume_points: 0, briefing: true, timetable: true, slots: 0, mail: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true, profile: true, routines: true, review: false, pending: 0, curator_note: String::new() }, now);
         assert!(empty.contains("Nothing yet"), "{empty}");
     }
 
@@ -746,8 +859,8 @@ mod tests {
             ("who is Bruno", Some("dog_name")),
             ("where is the router", Some("wifi_router_location")),
             ("peanut", Some("allergic_to")),
-            // Known lexical gap: no shared word with "employer"/"Acme Robotics".
-            ("where do I work", None),
+            // Was a known lexical gap (no shared word with "employer"); the synonym families close it (Memory v2, M1).
+            ("where do I work", Some("employer")),
         ];
         let mut misses = vec![];
         for (q, want) in cases {
@@ -760,5 +873,235 @@ mod tests {
         assert!(misses.is_empty(), "recall misses:
 {}", misses.join("
 "));
+    }
+}
+
+#[cfg(test)]
+mod recall_baseline {
+    //! Memory v2 plan, phases M0/M1: a fixed measurement of how well recall works, so every change
+    //! (profile, synonyms, later aliases or embeddings) is judged against numbers instead of feel.
+    //!
+    //! 20 target facts hidden among 20 distractors, each asked two ways: `direct` (shares a word with the
+    //! key or value, which lexical search can find) and `paraphrase` (shares none, which it cannot).
+    //! M0 baseline (40-fact store): direct 20/21, paraphrase 0/19.
+    use super::*;
+    use std::time::Instant;
+
+    const FACTS: &[(&str, &str)] = &[
+        // targets
+        ("dog_name", "Bruno"),
+        ("employer", "Acme Corp"),
+        ("favorite_pizza_topping", "pepperoni"),
+        ("home_city", "Hyderabad"),
+        ("sister_name", "Asha"),
+        ("birthday", "12 March"),
+        ("college", "IIT Delhi"),
+        ("favorite_music_genre", "lo-fi"),
+        ("wake_up_time", "6 am"),
+        ("car", "Honda City"),
+        ("allergy", "peanuts"),
+        ("gym_days", "Monday Wednesday Friday"),
+        ("manager_name", "Priya"),
+        ("phone_model", "Pixel 8"),
+        ("coffee_order", "oat milk latte"),
+        ("programming_language", "Rust"),
+        ("nickname", "Laks"),
+        ("hometown", "Vijayawada"),
+        ("favorite_movie", "Interstellar"),
+        ("diet", "vegetarian"),
+        // distractors
+        ("shoe_size", "9"),
+        ("wifi_name", "HomeNet"),
+        ("laptop_brand", "HP"),
+        ("favorite_color", "blue"),
+        ("bank_branch", "Madhapur"),
+        ("blood_group", "B positive"),
+        ("tv_show", "Severance"),
+        ("newspaper", "The Hindu"),
+        ("favorite_sport", "cricket"),
+        ("cousin_name", "Ravi"),
+        ("favorite_fruit", "mango"),
+        ("pet_peeve", "loud chewing"),
+        ("commute_mode", "metro"),
+        ("favorite_book", "Dune"),
+        ("tea_preference", "no sugar"),
+        ("language_spoken", "Telugu"),
+        ("keyboard", "mechanical"),
+        ("watch_brand", "Casio"),
+        ("gaming_console", "PlayStation"),
+        ("favorite_season", "monsoon"),
+    ];
+
+    /// (question, expected key, is_paraphrase)
+    const QUESTIONS: &[(&str, &str, bool)] = &[
+        ("what is my dog's name", "dog_name", false),
+        ("what do I call my pet", "dog_name", true),
+        ("who is my employer", "employer", false),
+        ("where do I work", "employer", true),
+        ("what pizza topping do I like", "favorite_pizza_topping", false),
+        ("what do I put on my pizza", "favorite_pizza_topping", false),
+        ("which city is my home", "home_city", false),
+        ("where do I live", "home_city", true),
+        ("what is my sister called", "sister_name", false),
+        ("who is my sibling", "sister_name", true),
+        ("when is my birthday", "birthday", false),
+        ("when was I born", "birthday", true),
+        ("which college am I in", "college", false),
+        ("where do I study", "college", true),
+        ("what music genre do I like", "favorite_music_genre", false),
+        ("what do I listen to while studying", "favorite_music_genre", true),
+        ("what time do I wake up", "wake_up_time", false),
+        ("when do I get up in the morning", "wake_up_time", true),
+        ("which car do I have", "car", false),
+        ("what do I drive", "car", true),
+        ("am I allergic to anything", "allergy", false),
+        ("what can't I eat", "allergy", true),
+        ("which days do I go to the gym", "gym_days", false),
+        ("when do I work out", "gym_days", true),
+        ("who is my manager", "manager_name", false),
+        ("who is my boss", "manager_name", true),
+        ("which phone do I use", "phone_model", false),
+        ("what handset do I own", "phone_model", true),
+        ("how do I take my coffee", "coffee_order", false),
+        ("what do I drink in the morning", "coffee_order", true),
+        ("which programming language do I use", "programming_language", false),
+        ("what do I code in", "programming_language", true),
+        ("what is my nickname", "nickname", false),
+        ("what should you call me", "nickname", true),
+        ("what is my hometown", "hometown", false),
+        ("where am I from", "hometown", true),
+        ("what is my favorite movie", "favorite_movie", false),
+        ("what film do I love", "favorite_movie", true),
+        ("what is my diet", "diet", false),
+        ("do I eat meat", "diet", true),
+    ];
+
+    /// Written BEFORE the synonym families were built and not used to tune them: different wording from
+    /// `QUESTIONS`. Some are expected to stay unanswered - that is the honest part of the measurement.
+    /// (Same author as the families, so this is a smaller bias than tuning on the dev set, not none.)
+    const HELD_OUT: &[(&str, &str)] = &[
+        ("what is the name of my puppy", "dog_name"),
+        ("which firm pays me", "employer"),
+        ("what company am I employed by", "employer"),
+        ("which town do I reside in", "home_city"),
+        ("what is my brother or sister's name", "sister_name"),
+        ("what is my date of birth", "birthday"),
+        ("which university do I attend", "college"),
+        ("what kind of songs do I enjoy", "favorite_music_genre"),
+        ("when does my alarm go off", "wake_up_time"),
+        ("which vehicle do I own", "car"),
+        ("any food I should stay away from", "allergy"),
+        ("how often do I exercise", "gym_days"),
+        ("who do I report to at work", "manager_name"),
+        ("which mobile do I carry", "phone_model"),
+        ("what do I normally drink to wake up", "coffee_order"),
+        ("which language do I write programs in", "programming_language"),
+        ("what name do you use for me", "nickname"),
+        ("where did I grow up", "hometown"),
+        ("which movie do I like most", "favorite_movie"),
+        ("do I avoid any kind of food", "diet"),
+    ];
+
+    fn tmpdir(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("nexus_recall_{}_{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        let _ = std::fs::create_dir_all(&p);
+        p
+    }
+
+    fn present(pack: &str, key: &str) -> bool {
+        pack.lines().any(|l| l.starts_with(&format!("- {key}: ")))
+    }
+
+    #[test]
+    fn retrieval_hit_rates_against_the_m0_baseline() {
+        let d = tmpdir("retrieval");
+        for (k, v) in FACTS {
+            mirror_core_fact(&d, k, v);
+        }
+        assert_eq!(QUESTIONS.len(), 40);
+        let (mut direct, mut direct_n, mut para, mut para_n) = (0usize, 0usize, 0usize, 0usize);
+        let mut misses: Vec<String> = vec![];
+        for (q, key, is_para) in QUESTIONS {
+            let hit = recall(&d, q, 3).expect("memcore").iter().any(|(k, _)| k == key);
+            if *is_para {
+                para_n += 1;
+                para += hit as usize;
+            } else {
+                direct_n += 1;
+                direct += hit as usize;
+            }
+            if !hit {
+                misses.push(format!("{q} [{}] -> {key}", if *is_para { "paraphrase" } else { "direct" }));
+            }
+        }
+        let mut held = 0usize;
+        for (q, key) in HELD_OUT {
+            let hit = recall(&d, q, 3).expect("memcore").iter().any(|(k, _)| k == key);
+            held += hit as usize;
+            if !hit {
+                misses.push(format!("{q} [held-out] -> {key}"));
+            }
+        }
+        println!("RETRIEVAL ONLY (40-fact store, hit@3)   M0 baseline -> now");
+        println!("  direct            20/21 -> {direct}/{direct_n}");
+        println!("  paraphrase (dev)   0/19 -> {para}/{para_n}");
+        println!("  held-out           n/a  -> {held}/{}", HELD_OUT.len());
+        for m in &misses {
+            println!("  MISS {m}");
+        }
+        // Regression guards (never let the exact-word path get worse) plus the M1 goal on the dev set.
+        assert!(direct >= 19, "direct recall regressed: {direct}/{direct_n}");
+        assert!(para >= 1, "synonyms found nothing at all");
+    }
+
+    #[test]
+    fn what_the_cloud_model_would_see_with_and_without_the_profile() {
+        // 100 facts (targets, distractors, 60 fillers), interleaved deterministically, so the 1,400-char
+        // profile cannot hold them all and selection matters.
+        let d = tmpdir("pack100");
+        let mut all: Vec<(String, String)> = FACTS.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        for i in 0..60 {
+            all.push((format!("note_{i:02}"), format!("saved detail number {i}")));
+        }
+        all.sort_by_key(|(k, _)| k.bytes().fold(7u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64)));
+        for (k, v) in &all {
+            mirror_core_fact(&d, k, v);
+        }
+        let questions: Vec<(&str, &str)> = QUESTIONS
+            .iter()
+            .map(|(q, k, _)| (*q, *k))
+            .chain(HELD_OUT.iter().map(|(q, k)| (*q, *k)))
+            .collect();
+
+        let (mut without, mut with) = (0usize, 0usize);
+        let mut micros: Vec<u128> = vec![];
+        let mut max_chars = 0usize;
+        for (q, key) in &questions {
+            let off = context_pack_with(&d, q, DEFAULT_BUDGET, false).unwrap_or_default();
+            without += present(&off, key) as usize;
+            let t = Instant::now();
+            let on = context_pack_with(&d, q, DEFAULT_BUDGET, true).unwrap_or_default();
+            micros.push(t.elapsed().as_micros());
+            with += present(&on, key) as usize;
+            max_chars = max_chars.max(on.chars().count());
+        }
+        micros.sort_unstable();
+        let p50 = micros[micros.len() / 2];
+        let p95 = micros[(micros.len() * 95) / 100];
+        let profile_chars = {
+            let off = context_pack_with(&d, "zzz nothing matches", DEFAULT_BUDGET, true).unwrap_or_default();
+            off.chars().count()
+        };
+        println!("PACK PRESENCE (100-fact store, {} questions: dev + held-out)", questions.len());
+        println!("  fact in pack, profile OFF: {without}/{}", questions.len());
+        println!("  fact in pack, profile ON : {with}/{}", questions.len());
+        println!("  context_pack (profile on): p50 {p50} us, p95 {p95} us, max {max_chars} chars (~{} tokens)", max_chars / 4);
+        println!("  profile alone is {profile_chars} chars (cap {})", profile::PROFILE_CAP);
+
+        assert!(with >= without, "the profile must never hide a fact");
+        assert!(max_chars <= DEFAULT_BUDGET, "pack over budget: {max_chars}");
+        assert!(p95 < 100_000, "context_pack p95 {p95} us is far slower than expected (debug build)");
     }
 }

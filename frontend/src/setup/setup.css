@@ -29,8 +29,6 @@ html, body, #root {
   display: flex;
   flex-direction: column;
   background: var(--nx-bg);
-  backdrop-filter: var(--nx-glass-blur);
-  -webkit-backdrop-filter: var(--nx-glass-blur);
   border: var(--nx-glass-border);
   border-radius: 14px;
   box-shadow: var(--nx-glass-shadow);

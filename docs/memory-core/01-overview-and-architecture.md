@@ -47,7 +47,7 @@ admit gate refuses secrets and empties. Mined values never overwrite pinned
 user-said ones; a mined write cannot unpin a record.
 
 ## What leaves the device
-- Only `context_pack(query, 2000)`: ranked, PII-redacted, line-boundary cut.
+- Only `context_pack(query, 2600)`: first the always-on profile (what you told NEXUS, up to 1,400 characters, sensitive topics such as health, money and ID numbers excluded; Memory page switch), then ranked question-specific facts and recent episodes; PII-redacted, line-boundary cut.
 - Optional name redaction (`memcoreRedactNames`): people become `Person A/B`.
 - A 7-day encrypted log records exactly what each cloud turn sent (Memory page).
 - Email bodies and WhatsApp text are never part of the pack.

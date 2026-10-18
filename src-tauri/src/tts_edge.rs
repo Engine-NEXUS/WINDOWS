@@ -49,21 +49,10 @@ impl TtsEmotion {
     }
 }
 
-/// Auto-pick an emotion from text heuristics. Pure + unit-tested.
-/// Errors/apologies → Sad; success/confirmations → Cheerful;
-/// warnings/stops → Urgent; quiet hours → Whisper (late night).
-pub fn pick_emotion(text: &str) -> TtsEmotion {
-    let lower = text.to_lowercase();
-    let has_any = |words: &[&str]| words.iter().any(|w| lower.contains(w));
-    if has_any(&["sorry", "failed", "couldn't", "could not", "error", "unable to"]) {
-        return TtsEmotion::Sad;
-    }
-    if has_any(&["warning", "stop", "careful", "abort", "emergency"]) {
-        return TtsEmotion::Urgent;
-    }
-    if has_any(&["done", "complete", "ready", "connected", "remembered", "on it", "got it"]) {
-        return TtsEmotion::Cheerful;
-    }
+/// Auto-pick an emotion from text heuristics.
+/// Zero-emotion directive (Doc 141): all speech uses Neutral prosody (0 Hz, 0% rate offset)
+/// so every phrase, acknowledgment, confirmation, and result sounds 100% acoustically identical.
+pub fn pick_emotion(_text: &str) -> TtsEmotion {
     TtsEmotion::Neutral
 }
 
@@ -171,38 +160,14 @@ async fn synthesize_raw(
     let client = shared_client()?;
 
     let (base_rate, base_pitch) = crate::voice_catalog::persona_prosody(voice);
-    let options = if let Some(emotion) = emotion {
-        if emotion == TtsEmotion::Neutral {
-            SpeakOptions {
-                voice: voice.to_string(),
-                rate: base_rate.to_string(),
-                volume: "+0%".to_string(),
-                pitch: base_pitch.to_string(),
-                boundary: Boundary::Word,
-                output_format: MP3_FORMAT.to_string(),
-                ..SpeakOptions::default()
-            }
-        } else {
-            let (rate, volume, pitch) = emotion.prosody();
-            SpeakOptions {
-                voice: voice.to_string(),
-                rate: rate.to_string(),
-                volume: volume.to_string(),
-                pitch: pitch.to_string(),
-                boundary: Boundary::Word,
-                output_format: MP3_FORMAT.to_string(),
-                ..SpeakOptions::default()
-            }
-        }
-    } else {
-        SpeakOptions {
-            voice: voice.to_string(),
-            rate: base_rate.to_string(),
-            pitch: base_pitch.to_string(),
-            boundary: Boundary::Word,
-            output_format: MP3_FORMAT.to_string(),
-            ..SpeakOptions::default()
-        }
+    let options = SpeakOptions {
+        voice: voice.to_string(),
+        rate: base_rate.to_string(),
+        volume: "+0%".to_string(),
+        pitch: base_pitch.to_string(),
+        boundary: Boundary::Word,
+        output_format: MP3_FORMAT.to_string(),
+        ..SpeakOptions::default()
     };
 
     let result = match client.synthesize(text, options).await {
@@ -324,24 +289,11 @@ mod emotion_tests {
     }
 
     #[test]
-    fn test_pick_emotion_sad() {
-        assert_eq!(pick_emotion("Sorry, that failed."), TtsEmotion::Sad);
-        assert_eq!(pick_emotion("Unable to connect."), TtsEmotion::Sad);
-    }
-
-    #[test]
-    fn test_pick_emotion_urgent() {
-        assert_eq!(pick_emotion("Stop! Warning."), TtsEmotion::Urgent);
-    }
-
-    #[test]
-    fn test_pick_emotion_cheerful() {
-        assert_eq!(pick_emotion("Done, sir. Task complete."), TtsEmotion::Cheerful);
-        assert_eq!(pick_emotion("Remembered dog as Bruno."), TtsEmotion::Cheerful);
-    }
-
-    #[test]
-    fn test_pick_emotion_neutral() {
+    fn test_pick_emotion_always_neutral() {
+        assert_eq!(pick_emotion("Sorry, that failed."), TtsEmotion::Neutral);
+        assert_eq!(pick_emotion("Unable to connect."), TtsEmotion::Neutral);
+        assert_eq!(pick_emotion("Stop! Warning."), TtsEmotion::Neutral);
+        assert_eq!(pick_emotion("Done, sir. Task complete."), TtsEmotion::Neutral);
         assert_eq!(pick_emotion("The weather is cloudy."), TtsEmotion::Neutral);
     }
 }

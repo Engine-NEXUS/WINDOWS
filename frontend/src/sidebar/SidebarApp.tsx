@@ -8,6 +8,7 @@ import { stopTts } from "../audio/ttsPlayer";
 import { AnalysisDashboard } from "./AnalysisDashboard";
 import { GitHubConflictPanel } from "./GitHubConflictPanel";
 import { ConfirmationPanel } from "./ConfirmationPanel";
+import { CodeRabbitDashboard, SAMPLE_CODERABBIT_REVIEW } from "./CodeRabbitDashboard";
 import { topicTitle } from "./spatialShared";
 
 /**
@@ -22,6 +23,7 @@ import { topicTitle } from "./spatialShared";
  * - Read Aloud (TTS) control, Copy Full Response, Font-size adjustment
  * - Rich repository analysis dashboard with pie charts
  * - Interactive action confirmation cards (WhatsApp, Swiggy, GitHub)
+ * - CodeRabbit Carbon Copy dashboard for AI PR reviews
  * - Smooth acrylic blur with readable high-contrast typography
  */
 interface SidebarAppProps {
@@ -35,6 +37,7 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
   const fontSize = useSidebar((s) => s.fontSize);
   const activeImage = useSidebar((s) => s.activeImage);
   const analysisData = useSidebar((s) => s.analysisData);
+  const codeRabbitData = useSidebar((s) => s.codeRabbitData);
   const conflictData = useSidebar((s) => s.conflictData);
   const confirmationData = useSidebar((s) => s.confirmationData);
 
@@ -105,6 +108,12 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
           if (pending.confirmation) {
             console.log("[sidebar] showing with confirmation data");
             useSidebar.getState().showConfirmation(pending.confirmation);
+          } else if (pending.analysis?.findings || (pending.analysis && (pending.analysis as any).verdict)) {
+            console.log("[sidebar] showing with CodeRabbit review data");
+            useSidebar.getState().showCodeRabbit(pending.analysis);
+          } else if (pending.query?.toLowerCase().includes("coderabbit")) {
+            console.log("[sidebar] showing CodeRabbit sample/review for query");
+            useSidebar.getState().showCodeRabbit(pending.analysis || SAMPLE_CODERABBIT_REVIEW);
           } else if (pending.analysis) {
             // If analysis data is present, use the rich dashboard view
             console.log("[sidebar] showing with analysis data");
@@ -120,13 +129,19 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
       .catch((e) => console.error("[sidebar] get_pending_sidebar_content FAILED:", e));
 
     listen<{ query: string; text: string }>("sidebar:show", (event) => {
-      show(event.payload.query, event.payload.text);
+      if (event.payload.query?.toLowerCase().includes("coderabbit")) {
+        useSidebar.getState().showCodeRabbit(SAMPLE_CODERABBIT_REVIEW);
+      } else {
+        show(event.payload.query, event.payload.text);
+      }
     }).then((u) => unlisteners.push(u));
 
-    // Listen for structured analysis data from the Worker (rich dashboard)
+    // Listen for structured analysis data from the Worker (rich dashboard or CodeRabbit)
     listen<{ query: string; text: string; analysis: any }>("sidebar:analysis", (event) => {
       const { query: q, text: t, analysis } = event.payload;
-      if (analysis) {
+      if (analysis?.findings || (analysis && analysis.verdict) || q?.toLowerCase().includes("coderabbit")) {
+        useSidebar.getState().showCodeRabbit(analysis || SAMPLE_CODERABBIT_REVIEW);
+      } else if (analysis) {
         useSidebar.getState().showAnalysis(q, t, analysis);
       } else {
         show(q, t);
@@ -192,10 +207,25 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
       if (e.key === "Escape") {
         // Hierarchy locked by resolveEscDismiss (unit-tested in sidebarStore).
         if (resolveEscDismiss(activeImage !== null) === "close-overlay") {
+          e.preventDefault();
+          e.stopPropagation();
           setActiveImage(null); // Lightbox closes first
           return;
         }
-        hide(); // Sidebar dismiss (TTS-stop + hide_sidebar handled downstream)
+
+        // Check if CodeRabbit overlay drawer is open: close it first
+        const openDrawer = document.querySelector(".cr-overlay-drawer--open");
+        if (openDrawer) {
+          e.preventDefault();
+          e.stopPropagation();
+          const closeBtn = openDrawer.querySelector(".cr-drawer-close") as HTMLButtonElement | null;
+          if (closeBtn) closeBtn.click();
+          return;
+        }
+
+        hide();
+        stopTts();
+        invoke("hide_sidebar").catch(() => {});
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -306,31 +336,55 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
     responseScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   };
 
+  const isCodeRabbit = Boolean(
+    codeRabbitData ||
+      (analysisData && ((analysisData as any).findings || (analysisData as any).activePrs || (analysisData as any).mode === "pr_list")) ||
+      query?.toLowerCase().includes("coderabbit")
+  );
+
   return (
     <div id="sidebar-app" className={visible ? "sidebar--visible" : "sidebar--hidden"}>
-        <div className={`sidebar-card ${confirmationData ? "mode--confirmation" : ""} font-size--${fontSize}`}>
+        <div className={`sidebar-card ${confirmationData ? "mode--confirmation" : ""} ${isCodeRabbit ? "mode--coderabbit" : ""} font-size--${fontSize}`}>
           {/* ── Header row: drag region + dock controls (Left/Right) ────── */}
-          <header className="sidebar-header-row" data-tauri-drag-region>
-            <div className="sidebar-header-spacer" data-tauri-drag-region />
-            <div className="sidebar-dock-controls">
-              <button type="button" className="sidebar-dock-btn" onClick={() => onDock("left")} title="Dock Left">
-                ◧
-              </button>
-              <button type="button" className="sidebar-dock-btn" onClick={() => onDock("right")} title="Dock Right">
-                ◨
-              </button>
-            </div>
-          </header>
+          {!isCodeRabbit && (
+            <header className="sidebar-header-row" data-tauri-drag-region>
+              <div className="sidebar-header-spacer" data-tauri-drag-region />
+              <div className="sidebar-dock-controls">
+                <button
+                  type="button"
+                  className="sidebar-dock-btn"
+                  onClick={() => {
+                    invoke("show_sidebar_view", { view: "coderabbit", dock: "center" }).catch(() => {});
+                    useSidebar.getState().showAnalysis(
+                      "CodeRabbit AI — Active Pull Requests",
+                      "Here are the active pull requests in ultron, sir.",
+                      { mode: "pr_list", activePrs: SAMPLE_CODERABBIT_REVIEW } as any
+                    );
+                  }}
+                  title="Open CodeRabbit AI Hub"
+                  style={{ fontSize: 11, width: "auto", padding: "0 7px", gap: 4 }}
+                >
+                  <span>🐰</span> CodeRabbit
+                </button>
+                <button type="button" className="sidebar-dock-btn" onClick={() => onDock("left")} title="Dock Left">
+                  ◧
+                </button>
+                <button type="button" className="sidebar-dock-btn" onClick={() => onDock("right")} title="Dock Right">
+                  ◨
+                </button>
+              </div>
+            </header>
+          )}
 
           {/* ── Topic title — ONLY for research / analyse responses ────── */}
           {/* The search/research topic heads the information block here;
               this is also the only response class that shows Copy Code. */}
-          {showCopy && response && topicTitleText ? (
+          {showCopy && response && topicTitleText && !codeRabbitData && !isCodeRabbit ? (
             <div className="sidebar-topic-title">{topicTitleText}</div>
           ) : null}
 
           {/* ── Response Body ─────────────────────────────────────────── */}
-          {/* Priority: conflict panel > confirmation panel > analysis dashboard > markdown */}
+          {/* Priority: conflict panel > confirmation panel > CodeRabbit twin > analysis dashboard > markdown */}
           <div className="sidebar-response" ref={responseScrollRef} onScroll={handleScroll}>
             {conflictData ? (
               <GitHubConflictPanel
@@ -346,6 +400,10 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
                   hide();
                 }}
               />
+            ) : codeRabbitData ? (
+              <CodeRabbitDashboard data={codeRabbitData} />
+            ) : analysisData && ((analysisData as any).findings || (analysisData as any).activePrs || (analysisData as any).mode === "pr_list") ? (
+              <CodeRabbitDashboard data={analysisData as any} />
             ) : analysisData ? (
               <AnalysisDashboard data={analysisData} />
             ) : (
@@ -358,7 +416,7 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
           </div>
 
           {/* ── Floating Scroll to Top button ──────────────────────────── */}
-          {showScrollTop && !confirmationData && (
+          {showScrollTop && !confirmationData && !isCodeRabbit && (
             <button type="button" className="sidebar-scroll-top-btn" onClick={scrollToTop} title="Scroll to top">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <polyline points="18 15 12 9 6 15" />
@@ -366,8 +424,8 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
             </button>
           )}
 
-          {/* ── Footer Status Bar (hidden in confirmation mode) ──────────────── */}
-          {!confirmationData && (
+          {/* ── Footer Status Bar (hidden in confirmation mode & CodeRabbit) ──────────────── */}
+          {!confirmationData && !isCodeRabbit && (
             <footer className="sidebar-footer">
               <div className="sidebar-footer-hint">
                 <kbd className="sidebar-kbd">Esc</kbd> to close

@@ -72,6 +72,24 @@ export function UnifiedSidebar() {
     }).catch(() => {});
   }, []);
 
+  // Top-level capturing Escape dismissal: unconditionally hides the sidebar
+  // and halts TTS regardless of which subview or nested input currently has focus.
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        void import("../audio/ttsPlayer").then(({ stopTts }) => stopTts()).catch(() => {});
+        if (isTauri()) {
+          invoke("hide_sidebar").catch(() => {});
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown, { capture: true });
+    window.focus();
+    return () => window.removeEventListener("keydown", handleKeyDown, { capture: true });
+  }, []);
+
   // Exported for view components to call
   const dock = (d: string) => {
     if (!isTauri()) return;

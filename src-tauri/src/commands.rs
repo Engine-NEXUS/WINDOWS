@@ -773,8 +773,15 @@ pub async fn show_sidebar_with_analysis<R: Runtime>(
 ) -> Result<(), String> {
     let window_existed = app.get_webview_window("sidebar").is_some();
 
-    // Unified delegate — Assistant view, right dock, geometry before capture.
-    let prep = prepare_sidebar(&app, "assistant", None).await?;
+    let is_coderabbit = analysis.get("findings").is_some()
+        || analysis.get("activePrs").is_some()
+        || query.to_lowercase().contains("coderabbit")
+        || query.to_lowercase().contains("code rabbit");
+    let view_name = if is_coderabbit { "coderabbit" } else { "assistant" };
+    let dock_opt = if is_coderabbit { Some("center") } else { None };
+
+    // Unified delegate — Assistant or CodeRabbit view, geometry before capture.
+    let prep = prepare_sidebar(&app, view_name, dock_opt).await?;
     let backdrop = capture_and_emit_backdrop(&app, &prep);
 
     {
@@ -788,7 +795,7 @@ pub async fn show_sidebar_with_analysis<R: Runtime>(
         });
     }
 
-    finish_sidebar(&app, &prep.win, "assistant", None)?;
+    finish_sidebar(&app, &prep.win, view_name, dock_opt)?;
     spawn_sidebar_live_blur(&app, &prep.win);
 
     // Fast path: if the window already exists, also emit events
@@ -1063,7 +1070,17 @@ pub fn sidebar_geometry(
                 (x, 40.0, 960.0, h)
             }
         }
-        // "assistant" | "pr-list" | fallback → default right dock, full height.
+        "coderabbit" => {
+            let w = (monitor_w - 80.0).min(1340.0).max(1080.0);
+            let h = (monitor_h - 60.0).min(920.0).max(720.0);
+            center_xy(w, h)
+        }
+        "pr-list" | "github-dashboard" => {
+            let w = (monitor_w - 40.0).min(720.0).max(520.0);
+            let h = (monitor_h - 40.0).min(1040.0).max(500.0);
+            if dock == Some("center") { center_xy(w, h) } else { dock_x(w, h) }
+        }
+        // "assistant" | fallback → default right dock, full height.
         _ => {
             let h = (monitor_h - 40.0).min(1040.0).max(400.0);
             if dock == Some("center") { center_xy(520.0, h) } else { dock_x(520.0, h) }
@@ -1083,7 +1100,7 @@ pub fn sidebar_geometry(
 /// `capture_backdrop` (ADR-05). A correct live loop needs DXGI desktop
 /// duplication, which is separate future work.
 pub(crate) fn spawn_sidebar_live_blur<R: Runtime>(app: &tauri::AppHandle<R>, win: &tauri::WebviewWindow<R>) {
-    const DEV_LIVE_BLUR_DISABLED: bool = false; // 1 Hz live refresh enabled
+    const DEV_LIVE_BLUR_DISABLED: bool = true; // Disabled for solid opaque styling and 0% CPU overhead
     if DEV_LIVE_BLUR_DISABLED {
         return;
     }
@@ -1247,6 +1264,16 @@ pub(crate) fn finish_sidebar<R: Runtime>(
 ) -> Result<(), String> {
     win.show().map_err(|e| format!("sidebar show: {e}"))?;
     let _ = win.set_focus();
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(hwnd) = win.hwnd() {
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+                use windows::Win32::Foundation::HWND;
+                let _ = SetForegroundWindow(HWND(hwnd.0 as _));
+            }
+        }
+    }
     crate::dwm_corners::round_corners(win);
     #[cfg(target_os = "macos")]
     {
@@ -1409,6 +1436,49 @@ pub fn hide_settings_sidebar<R: Runtime>(
     Ok(())
 }
 
+/// Show the CodeRabbit active pull requests hub in a 1340x920 centered workstation window.
+#[tauri::command]
+pub async fn show_coderabbit_hub<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let window_existed = app.get_webview_window("sidebar").is_some();
+    let prep = prepare_sidebar(&app, "coderabbit", Some("center")).await?;
+    let backdrop = capture_and_emit_backdrop(&app, &prep);
+
+    let active_prs = crate::coderabbit::get_active_prs_mock();
+    let payload = serde_json::json!({
+        "mode": "pr_list",
+        "activePrs": active_prs
+    });
+
+    {
+        let mut pending = PENDING_SIDEBAR.lock().unwrap();
+        *pending = Some(PendingSidebar {
+            query: "CodeRabbit AI — Active Pull Requests".to_string(),
+            text: "Here are the active pull requests in ultron, sir.".to_string(),
+            backdrop: backdrop.clone(),
+            analysis: Some(payload.clone()),
+            confirmation: None,
+        });
+    }
+
+    finish_sidebar(&app, &prep.win, "coderabbit", Some("center"))?;
+    spawn_sidebar_live_blur(&app, &prep.win);
+
+    if window_existed {
+        let _ = app.emit("sidebar:analysis", payload);
+        let _ = app.emit(
+            "sidebar:content",
+            serde_json::json!({
+                "query": "CodeRabbit AI — Active Pull Requests",
+                "text": "Here are the active pull requests in ultron, sir.",
+            }),
+        );
+    }
+
+    Ok(())
+}
+
 /// IPC: Fetch the pending settings backdrop (called by the frontend on mount).
 /// Returns the blurred desktop image as a data URI, or null if none pending.
 /// Clears the pending data after returning. This handles the race condition
@@ -1431,6 +1501,7 @@ pub fn open_settings_window<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
     let win = crate::dyn_windows::get_or_create_window(&app, crate::dyn_windows::WindowConfig::settings())?;
+    let _ = win.set_always_on_top(true);
     win.show().map_err(|e| e.to_string())?;
     win.set_focus().map_err(|e| e.to_string())?;
     Ok(())
@@ -1812,6 +1883,17 @@ pub struct NexusSettings {
     /// Once-a-day spoken "where you left off" shortly after startup.
     #[serde(default = "default_memcore")]
     pub memcore_briefing: bool,
+    /// Send the always-on profile (facts the user told NEXUS, minus sensitive topics) with every
+    /// cloud request. Memory page switch; the egress log shows exactly what was sent.
+    #[serde(default = "default_memcore")]
+    pub memcore_profile: bool,
+    /// Notice command sequences the user repeats and offer to save them as a one-phrase routine.
+    #[serde(default = "default_memcore")]
+    pub memcore_routines: bool,
+    /// Let a free cloud model read a redacted copy of recent cloud conversations and SUGGEST profile facts.
+    /// Off by default; nothing is stored until the user approves it on the Memory page.
+    #[serde(default)]
+    pub memcore_review: bool,
     /// Timetable slot reminders ("It's time for DSA. Shall I start?").
     #[serde(default = "default_memcore")]
     pub memcore_timetable: bool,
@@ -2115,6 +2197,9 @@ impl Default for NexusSettings {
             memcore_redact_names: false,
             memcore_activity: default_memcore(),
             memcore_briefing: default_memcore(),
+            memcore_profile: default_memcore(),
+            memcore_routines: default_memcore(),
+            memcore_review: false,
             memcore_timetable: default_memcore(),
             memcore_mail: default_memcore(),
             memcore_whatsapp: false,
@@ -2246,6 +2331,11 @@ pub fn save_settings<R: Runtime>(
     settings.deepgram_api_key = crate::api_keys::merge_key(&existing, "deepgramApiKey", &settings.deepgram_api_key);
     settings.routes_api_key = crate::api_keys::merge_key(&existing, "routesApiKey", &settings.routes_api_key);
     settings.places_api_key = crate::api_keys::merge_key(&existing, "placesApiKey", &settings.places_api_key);
+    // The Worker URL receives every transcript and the device token: never accept
+    // plain http (except localhost) or a malformed value from the UI.
+    if !settings.server_url.is_empty() {
+        settings.server_url = crate::network::normalize_worker_url(&settings.server_url)?;
+    }
     normalize_voice_fields(&mut settings);
     if !settings.edge_tts_voice.is_empty() {
         settings.tts_voice = settings.edge_tts_voice.clone();
@@ -3291,6 +3381,62 @@ pub fn memcore_list<R: Runtime>(app: AppHandle<R>) -> Result<Vec<crate::memcore:
     Ok(crate::memcore::list_rows(&dir, 500))
 }
 
+/// IPC: Mishearings NEXUS has noticed ("heard brief, you meant brave"), with whether each is applied.
+#[tauri::command]
+pub fn memcore_corrections<R: Runtime>(app: AppHandle<R>) -> Result<Vec<crate::memcore::store::CorrectionRow>, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::list_corrections(&dir))
+}
+
+/// IPC: Saved routines plus the suggestion waiting for a name, if any.
+#[tauri::command]
+pub fn memcore_routines<R: Runtime>(app: AppHandle<R>) -> Result<crate::memcore::routines::View, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::routines::view(&dir))
+}
+
+/// IPC: Save the waiting suggestion under a name the user typed.
+#[tauri::command]
+pub fn memcore_routine_save<R: Runtime>(app: AppHandle<R>, name: String) -> Result<String, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    crate::memcore::routines::save_pending(&dir, &name).map(|r| r.name)
+}
+
+/// IPC: Delete a saved routine.
+#[tauri::command]
+pub fn memcore_routine_delete<R: Runtime>(app: AppHandle<R>, name: String) -> Result<bool, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::routines::delete(&dir, name.trim()))
+}
+
+/// IPC: Memory changes suggested by the background review, waiting for approval.
+#[tauri::command]
+pub fn memcore_pending<R: Runtime>(app: AppHandle<R>) -> Result<Vec<crate::memcore::store::PendingRow>, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::review::list(&dir))
+}
+
+/// IPC: Approve one suggestion; returns a sentence describing what was stored.
+#[tauri::command]
+pub fn memcore_pending_approve<R: Runtime>(app: AppHandle<R>, id: i64) -> Result<String, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    crate::memcore::review::approve(&dir, id)
+}
+
+/// IPC: Refuse one suggestion for good.
+#[tauri::command]
+pub fn memcore_pending_reject<R: Runtime>(app: AppHandle<R>, id: i64) -> Result<bool, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::review::reject(&dir, id))
+}
+
+/// IPC: Stop applying (and forget) what was learned about one mis-heard phrase.
+#[tauri::command]
+pub fn memcore_correction_forget<R: Runtime>(app: AppHandle<R>, heard: String) -> Result<usize, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::forget_correction(&dir, &heard))
+}
+
 /// IPC: The last 7 days of what was sent to cloud models.
 #[tauri::command]
 pub fn memcore_egress_log<R: Runtime>(
@@ -3467,11 +3613,36 @@ pub fn export_settings<R: Runtime>(app: AppHandle<R>) -> Result<String, String> 
     serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
 }
 
+/// Fields an imported file must never be able to set: identity (it comes from the
+/// registered device), and the remote-control channel (a swapped Telegram chat id would
+/// hand command access to whoever wrote the file).
+const IMPORT_BLOCKED_KEYS: [&str; 3] = ["userId", "deviceId", "telegramChatId"];
+
+/// Validate an imported settings document before it is written to disk.
+fn sanitize_imported_settings(mut json: serde_json::Value) -> Result<serde_json::Value, String> {
+    let obj = json
+        .as_object_mut()
+        .ok_or_else(|| "settings file must be a JSON object".to_string())?;
+    for key in IMPORT_BLOCKED_KEYS {
+        obj.remove(key);
+    }
+    if let Some(url) = obj.get("serverUrl").and_then(|v| v.as_str()).map(str::to_owned) {
+        if url.is_empty() {
+            obj.remove("serverUrl");
+        } else {
+            let ok = crate::network::normalize_worker_url(&url)?;
+            obj.insert("serverUrl".into(), serde_json::Value::String(ok));
+        }
+    }
+    Ok(json)
+}
+
 /// IPC: Import settings from a JSON string (writes settings.json + keychain).
 #[tauri::command]
 pub fn import_settings<R: Runtime>(app: AppHandle<R>, json_str: String) -> Result<(), String> {
     let json: serde_json::Value =
         serde_json::from_str(&json_str).map_err(|e| format!("invalid settings JSON: {e}"))?;
+    let json = sanitize_imported_settings(json)?;
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("settings.json");
@@ -3549,9 +3720,9 @@ mod sidebar_geometry_tests {
 
     #[test]
     fn pr_list_uses_right_dock() {
-        // x = 1920 - 520 - 10 = 1390, y = 20, h = 1040
+        // x = 1920 - 720 - 10 = 1190, y = 20, h = 1040 (720px expanded width)
         let (x, y, w, h) = sidebar_geometry("pr-list", None, 1920.0, 1080.0);
-        assert_eq!((x, y, w, h), (1390.0, 20.0, 520.0, 1040.0));
+        assert_eq!((x, y, w, h), (1190.0, 20.0, 720.0, 1040.0));
     }
 
     #[test]
@@ -3626,6 +3797,45 @@ mod sidebar_geometry_tests {
         let (x, _, _, _) = sidebar_geometry("assistant", None, 100.0, 1080.0);
         // 100 - 520 - 10 = -430 → clamp to 0
         assert_eq!(x, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod import_sanitize_tests {
+    use super::sanitize_imported_settings;
+    use serde_json::json;
+
+    #[test]
+    fn blocks_identity_and_remote_control_fields() {
+        let out = sanitize_imported_settings(json!({
+            "userId": "victim", "deviceId": "d", "telegramChatId": "999",
+            "hotkey": "Ctrl+Space"
+        }))
+        .unwrap();
+        assert!(out.get("userId").is_none());
+        assert!(out.get("deviceId").is_none());
+        assert!(out.get("telegramChatId").is_none());
+        assert_eq!(out["hotkey"], "Ctrl+Space");
+    }
+
+    #[test]
+    fn rejects_insecure_or_malformed_server_url() {
+        assert!(sanitize_imported_settings(json!({"serverUrl": "http://evil.example.com"})).is_err());
+        assert!(sanitize_imported_settings(json!({"serverUrl": "javascript:1"})).is_err());
+    }
+
+    #[test]
+    fn keeps_and_normalizes_a_good_server_url() {
+        let out = sanitize_imported_settings(json!({"serverUrl": "https://w.example.workers.dev/"})).unwrap();
+        assert_eq!(out["serverUrl"], "https://w.example.workers.dev");
+        let out = sanitize_imported_settings(json!({"serverUrl": ""})).unwrap();
+        assert!(out.get("serverUrl").is_none());
+    }
+
+    #[test]
+    fn non_object_documents_are_refused() {
+        assert!(sanitize_imported_settings(json!([1, 2])).is_err());
+        assert!(sanitize_imported_settings(json!("x")).is_err());
     }
 }
 

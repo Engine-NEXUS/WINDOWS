@@ -379,8 +379,26 @@ fn whatsapp_launch(name: &str, phone: &str) -> Result<CommandResult, String> {
     }
 }
 
+/// Only plain web URLs may be opened from a spoken/NLU-supplied intent. `open::that`
+/// would otherwise hand `file:`, `ms-msdt:`, `search-ms:` or a bare executable path to
+/// the shell. Deep links the app really needs (whatsapp:, spotify:) are opened by their
+/// own functions, never through this one.
+fn is_safe_web_url(url: &str) -> bool {
+    let u = url.trim();
+    let lower = u.to_ascii_lowercase();
+    (lower.starts_with("https://") || lower.starts_with("http://"))
+        && !u.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
 fn open_url(target: &str, url: &str) -> Result<CommandResult, String> {
-    match open::that(url) {
+    if !is_safe_web_url(url) {
+        tracing::warn!("refused to open non-web URL for '{}'", target);
+        return Ok(CommandResult {
+            success: false,
+            message: "I can only open web links from a voice command, sir.".to_string(),
+        });
+    }
+    match open::that(url.trim()) {
         Ok(()) => {
             tracing::info!("opened URL for '{}': {}", target, url);
             Ok(CommandResult {
@@ -1568,6 +1586,40 @@ mod urlencoding {
             }
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod safe_url_tests {
+    use super::*;
+
+    #[test]
+    fn web_urls_pass() {
+        assert!(is_safe_web_url("https://www.youtube.com/watch?v=abc"));
+        assert!(is_safe_web_url("HTTP://example.com"));
+        assert!(is_safe_web_url("  https://example.com  "));
+    }
+
+    #[test]
+    fn shell_handlers_and_paths_are_refused() {
+        for bad in [
+            "file:///C:/Windows/System32/calc.exe",
+            "ms-msdt:/id PCWDiagnostic",
+            "search-ms:query=x",
+            "C:\\Windows\\System32\\cmd.exe",
+            "javascript:alert(1)",
+            "https://a.com/x y",
+            "https://a.com/\r\nx",
+            "",
+        ] {
+            assert!(!is_safe_web_url(bad), "should refuse {bad:?}");
+        }
+    }
+
+    #[test]
+    fn open_url_refuses_non_web_without_launching() {
+        let r = open_url("calc", "file:///C:/Windows/System32/calc.exe").unwrap();
+        assert!(!r.success);
     }
 }
 

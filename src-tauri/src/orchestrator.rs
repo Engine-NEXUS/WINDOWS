@@ -254,6 +254,7 @@ fn pick_ack() -> &'static str {
 /// Unknown/general chat keeps the generic ack (nothing to name).
 fn ack_for(intent: &ParsedIntent) -> String {
     match intent {
+        ParsedIntent::OpenCodeRabbitHub => "CodeRabbit active pull requests, sir.".to_string(),
         ParsedIntent::AnalysePr { pr_number, repo, .. } => {
             format!("On it sir — analysing PR {pr_number} in {repo}.")
         }
@@ -324,7 +325,16 @@ fn emit<R: Runtime>(app: &AppHandle<R>, event: &OrchestratorEvent) {
     if matches!(event, OrchestratorEvent::Result { .. }) {
         crate::latency::mark(crate::latency::Stage::Answer);
     }
-    let _ = app.emit("orchestrator:event", event);
+    let mut payload = serde_json::to_value(event).unwrap_or_default();
+    if let Some(id) = payload.get("request_id").and_then(|v| v.as_str()) {
+        let source = ACTIVE_REQUEST.try_lock().ok()
+            .and_then(|guard| guard.as_ref().filter(|active| active.id == id)
+                .map(|active| format!("{:?}", active.subsystem).to_ascii_lowercase()));
+        if let (Some(source), Some(object)) = (source, payload.as_object_mut()) {
+            object.insert("source_center".into(), source.into());
+        }
+    }
+    let _ = app.emit("orchestrator:event", payload);
     tracing::debug!("orchestrator: emitted {:?}", event);
 }
 
@@ -601,8 +611,9 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         // Architecture mapper — Rust + Worker enrichment
         ParsedIntent::OpenArchitect => Subsystem::Architect,
 
-        // Settings sidebar — handled locally (no Worker round-trip)
-        ParsedIntent::OpenSettings => Subsystem::LocalCommand,
+        // Settings sidebar and CodeRabbit Hub — handled locally (no Worker round-trip)
+        ParsedIntent::OpenSettings
+        | ParsedIntent::OpenCodeRabbitHub => Subsystem::LocalCommand,
 
         // GitHub sub-command system — typed operations via octocrab
         ParsedIntent::GitHubCommand { .. } => Subsystem::GitHub,
@@ -798,6 +809,27 @@ pub async fn process_transcript<R: Runtime>(
             .and_then(|d| crate::conversation::last_exchange(&d, chrono::Utc::now().timestamp(), 10 * 60));
         return say_and_finish(&app, request_id, crate::conversation::do_what_line(last));
     }
+
+    // Routines (Memory v2 M3): "save that as study mode", "delete the study mode routine", or just the
+    // routine's name. Saving and deleting answer on the spot; running rewrites the utterance into the
+    // routine's steps joined by "then", so the normal compound path (and every confirmation gate in it)
+    // executes it. Names and the waiting suggestion are in memory, so this costs no I/O on other turns.
+    let transcript = match app
+        .path()
+        .app_data_dir()
+        .ok()
+        .and_then(|dir| crate::memcore::routines::interpret_and_apply(&dir, &transcript))
+    {
+        Some(crate::memcore::routines::Handled::Say(line)) => {
+            let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+            return say_and_finish(&app, request_id, line);
+        }
+        Some(crate::memcore::routines::Handled::Run(steps)) => {
+            tracing::info!("orchestrator: running a routine: {}", steps);
+            steps
+        }
+        None => transcript,
+    };
 
     // 1. Parse intent: deterministic (fast, <1ms) → brain (admin) → NLU → Unknown
     // The full pipeline ensures that phrases trained in BERT-Mini or classified
@@ -1308,6 +1340,9 @@ pub async fn process_transcript<R: Runtime>(
         ParsedIntent::OpenSettings => {
             return run_open_settings(app).await;
         }
+        ParsedIntent::OpenCodeRabbitHub => {
+            return run_open_coderabbit_hub(app).await;
+        }
         _ => {}
     }
 
@@ -1622,6 +1657,9 @@ pub async fn process_transcript<R: Runtime>(
             ParsedIntent::OpenSettings => {
                 return run_open_settings(app).await;
             }
+            ParsedIntent::OpenCodeRabbitHub => {
+                return run_open_coderabbit_hub(app).await;
+            }
             ParsedIntent::Unknown { .. } => {
                 // Ghost-unknown never goes to cloud chat: a slow/hung
                 // Worker round trip wedges the hot-mic loop with zero
@@ -1907,7 +1945,15 @@ pub async fn process_transcript<R: Runtime>(
                             | ParsedIntent::AnalyseLatestPr { .. }
                             | ParsedIntent::CheckBranch { .. }
                     );
-                    let has_structured_analysis = analysis.as_ref().map_or(false, |a| !a.is_null());
+                    let mut final_analysis = analysis.clone();
+                    if let ParsedIntent::AnalysePr { pr_number, repo, .. } = &intent {
+                        if final_analysis.is_none() || final_analysis.as_ref().map_or(false, |a| a.is_null()) {
+                            if let Ok(cr_data) = crate::coderabbit::coderabbit_review_pr_data(*pr_number, Some(repo.clone())).await {
+                                final_analysis = serde_json::to_value(&cr_data).ok();
+                            }
+                        }
+                    }
+                    let has_structured_analysis = final_analysis.as_ref().map_or(false, |a| !a.is_null());
                     let is_long_markdown = text.len() > 300 || text.contains("\n#") || text.contains("\n##");
                     let howto_sidebar = crate::howto::delivery_for(&transcript, &text) == crate::howto::Delivery::Sidebar;
 
@@ -1934,7 +1980,7 @@ pub async fn process_transcript<R: Runtime>(
                     };
 
                     let sidebar_text = text.clone();
-                    let sidebar_analysis = analysis.clone();
+                    let sidebar_analysis = final_analysis.clone();
 
                     // Emit result with concise spoken text for TTS
                     emit(
@@ -1942,7 +1988,7 @@ pub async fn process_transcript<R: Runtime>(
                         &OrchestratorEvent::Result {
                             text: spoken_text,
                             request_id: request_id.clone(),
-                            analysis: analysis.clone(),
+                            analysis: final_analysis.clone(),
                             dialog_state,
                         },
                     );
@@ -2751,6 +2797,7 @@ counsel: bool,
     // Enrich dialog context with persistent facts plus the coordinated
     // conversation brief and high-signal recent turns.
     let mut dialog_context = dialog_context;
+    let mem_started = std::time::Instant::now();
     if let Ok(dir) = app.path().app_data_dir() {
         let mut parts = Vec::new();
         // Counsel turns lead with the contract (F1b): 9Router's
@@ -2780,6 +2827,8 @@ counsel: bool,
             dialog_context = Some(ctx);
         }
     }
+    // How long assembling the memory context took (shown as `mem Nms` on the [LAT] line).
+    crate::latency::record_mem(mem_started.elapsed());
     // ─── 9Router fast path ──────────────────────────────────────────────
     // Try local → free cloud providers first. This bypasses the Worker
     // entirely for general questions, cutting latency from ~2s to ~242ms.
@@ -6959,6 +7008,26 @@ async fn run_open_settings<R: Runtime>(
     tauri::async_runtime::spawn(async move {
         if let Err(e) = crate::commands::show_settings_sidebar(app_handle).await {
             tracing::error!("failed to show command hub sidebar: {e}");
+        }
+    });
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Open the CodeRabbit active pull requests hub in a centered 1340x920 workstation window.
+async fn run_open_coderabbit_hub<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    speak_line(&app, "CodeRabbit active pull requests, sir.".to_string(), &request_id);
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = crate::commands::show_coderabbit_hub(app_handle).await {
+            tracing::error!("failed to show coderabbit hub: {e}");
         }
     });
     clear_active_request(&request_id);

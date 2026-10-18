@@ -155,9 +155,31 @@ pub async fn route_question(
     keys: &ProviderKeys,
     client: &reqwest::Client,
 ) -> Option<RouterResponse> {
-    // Build the prompt with optional dialog context
     let prompt = build_prompt(transcript, dialog_context);
+    cascade(SYSTEM_PROMPT, 500, &prompt, transcript, keys, client).await
+}
 
+/// Ask the same free providers for a non-spoken, structured answer with the caller's own system prompt
+/// (used by the optional background memory review). `None` if every provider fails.
+pub async fn route_with_system(
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+    keys: &ProviderKeys,
+    client: &reqwest::Client,
+) -> Option<RouterResponse> {
+    cascade(system, max_tokens, user, "background request", keys, client).await
+}
+
+/// The provider cascade shared by every caller. `label` is only for log lines.
+async fn cascade(
+    system: &str,
+    max_tokens: u32,
+    prompt: &str,
+    label: &str,
+    keys: &ProviderKeys,
+    client: &reqwest::Client,
+) -> Option<RouterResponse> {
     // Try each provider in order of speed/reliability
     let providers: &[(Provider, &str)] = &[
         (Provider::Groq, &keys.groq),
@@ -175,9 +197,9 @@ pub async fn route_question(
             continue;
         }
 
-        tracing::info!("9router: trying {} for: {:?}...", provider.name(), truncate(transcript, 60));
+        tracing::info!("9router: trying {} for: {:?}...", provider.name(), truncate(label, 60));
 
-        match call_provider(*provider, &prompt, key, client).await {
+        match call_provider(*provider, system, max_tokens, prompt, key, client).await {
             Ok(resp) => {
                 tracing::info!(
                     "9router: {} answered in {}ms",
@@ -203,6 +225,8 @@ pub async fn route_question(
 /// request format, but they all return text.
 async fn call_provider(
     provider: Provider,
+    system: &str,
+    max_tokens: u32,
     prompt: &str,
     api_key: &str,
     client: &reqwest::Client,
@@ -216,7 +240,7 @@ async fn call_provider(
             let mut last_err = "no Groq models configured".to_string();
             let mut result: Option<(String, String)> = None;
             for model in GROQ_MODELS {
-                match call_openai_compatible(GROQ_URL, model, prompt, api_key, client).await {
+                match call_openai_compatible(GROQ_URL, model, system, max_tokens, prompt, api_key, client).await {
                     Ok(ok) => {
                         result = Some(ok);
                         break;
@@ -230,9 +254,9 @@ async fn call_provider(
             result.ok_or(last_err)?
         }
         Provider::Cerebras => {
-            call_openai_compatible(CEREBRAS_URL, CEREBRAS_MODEL, prompt, api_key, client).await?
+            call_openai_compatible(CEREBRAS_URL, CEREBRAS_MODEL, system, max_tokens, prompt, api_key, client).await?
         }
-        Provider::Gemini => call_gemini(prompt, api_key, client).await?,
+        Provider::Gemini => call_gemini(system, max_tokens, prompt, api_key, client).await?,
         Provider::Worker => {
             // Worker is not called directly by 9Router — it's the fallback
             // handled by the caller. This branch should never execute.
@@ -255,19 +279,21 @@ async fn call_provider(
 async fn call_openai_compatible(
     url: &str,
     model: &str,
+    system: &str,
+    max_tokens: u32,
     prompt: &str,
     api_key: &str,
     client: &reqwest::Client,
 ) -> Result<(String, String), String> {
     let messages = serde_json::json!([
-        { "role": "system", "content": SYSTEM_PROMPT },
+        { "role": "system", "content": system },
         { "role": "user", "content": prompt },
     ]);
 
     let body = serde_json::json!({
         "model": model,
         "messages": messages,
-        "max_tokens": 500,
+        "max_tokens": max_tokens,
         "temperature": 0.3,
     });
 
@@ -315,6 +341,8 @@ async fn call_openai_compatible(
 /// Call Google Gemini's generateContent endpoint. Gemini uses a different
 /// request format than OpenAI-compatible APIs.
 async fn call_gemini(
+    system: &str,
+    max_tokens: u32,
     prompt: &str,
     api_key: &str,
     client: &reqwest::Client,
@@ -325,11 +353,11 @@ async fn call_gemini(
         "contents": [
             {
                 "role": "user",
-                "parts": [{ "text": format!("{}\n\n{}", SYSTEM_PROMPT, prompt) }],
+                "parts": [{ "text": format!("{}\n\n{}", system, prompt) }],
             }
         ],
         "generationConfig": {
-            "maxOutputTokens": 700,
+            "maxOutputTokens": max_tokens + 200,
             "temperature": 0.3,
         },
     });

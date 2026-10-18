@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { ApiKeyIcon } from "../ApiKeyIcons";
 
 interface ApiKeyInfo {
   service: string;
@@ -9,9 +10,12 @@ interface ApiKeyInfo {
 }
 
 const HINTS: Record<string, string> = {
-  groq: "Speech-to-text and fast chat · console.groq.com",
-  gemini: "Screen vision and the screen tour · aistudio.google.com",
-  cerebras: "Fastest free chat model · cloud.cerebras.ai",
+  groq: "Speech-to-text & ultra-fast Llama inference · console.groq.com",
+  gemini: "Screen vision, visual grounding & reasoning · aistudio.google.com",
+  cerebras: "World's fastest chat model (~1,800 tok/s) · cloud.cerebras.ai",
+  deepgram: "Nova-2 streaming real-time speech-to-text · console.deepgram.com",
+  google_maps: "Live routes, traffic & commute calculations · console.cloud.google.com",
+  google_places: "Place search, POI details & business lookups · console.cloud.google.com",
 };
 
 /**
@@ -77,9 +81,14 @@ export function ApiKeysPage({ onChanged }: { onChanged: () => void }) {
       {keys.map((k) => (
         <div className="hx-card hx-key" key={k.service}>
           <div className="hx-key-head">
-            <div>
-              <div className="hx-key-title">{k.label}</div>
-              <div className="hx-key-sub">{HINTS[k.service] ?? ""}</div>
+            <div className="hx-key-brand">
+              <div className="hx-key-logo-wrap" title={k.label}>
+                <ApiKeyIcon service={k.service} size={32} />
+              </div>
+              <div className="hx-key-info">
+                <div className="hx-key-title">{k.label}</div>
+                <div className="hx-key-sub">{HINTS[k.service] ?? ""}</div>
+              </div>
             </div>
             <span className={`hx-pill ${k.has_key ? "hx-pill--on" : ""}`}>{k.has_key ? "Added" : "Not set"}</span>
           </div>

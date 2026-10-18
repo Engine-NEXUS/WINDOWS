@@ -3450,6 +3450,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         "wake-engine: audio capture started in {:.1}s — listening for 'nexus'",
         t2.elapsed().as_secs_f64()
     );
+    crate::boot::mark("wake_capture_started");
 
     // ─── Phase 3b: Mic keep-alive render (Meet parity) ─────────────
     // Full-duplex traffic holds the Intel DSP awake. See start_keepalive_render.

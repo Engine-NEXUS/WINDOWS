@@ -244,7 +244,7 @@ export function HubHome({ acc, insights, themeMode, onTheme, onOpen }: Props) {
       />
       <Row icon={ICONS.audio} title="Audio" sub="Voice, volume, wake word and speech" onClick={() => onOpen("audio")} />
       <Row icon={ICONS.display} title="Display" sub="Orb position, size, colour and 3D studio" onClick={() => onOpen("display")} />
-      <Row icon={ICONS.plug} title="Connections" sub="MCP servers, Telegram and bridges" onClick={() => onOpen("connections")} />
+      <Row icon={ICONS.plug} title="MCP" sub="MCP servers, developer tools and bridges" onClick={() => onOpen("connections")} />
       <Row icon={ICONS.advanced} title="Advanced" sub="Sign-in credentials and vision settings" onClick={() => onOpen("advanced")} />
 
       <div className="hx-section">Adjust the theme to your preferences</div>

@@ -1,5 +1,8 @@
 import { useAssistant } from "../store/assistant";
 import { invoke } from "@tauri-apps/api/core";
+import { clearSpeechStage } from "./speechStage";
+import { decideSpeech } from "./speechArbiter";
+import { clearCaptionSchedule } from "./captionScheduler";
 
 /**
  * Frontend TTS generation counter — mirrors the Rust TTS_GENERATION counter.
@@ -166,6 +169,48 @@ export interface VoiceOption {
   sampleText: string;
 }
 
+export interface SpeechIntent {
+  requestId?: string;
+  sourceCenter?: string;
+  kind?: "ack" | "result" | "prompt" | "alert" | "narration" | "preview";
+}
+
+let activeIntent: SpeechIntent | null = null;
+const speechQueue: Array<{ text: string; onEnd?: () => void; intent: SpeechIntent; resolve: () => void }> = [];
+
+function claimSpeech(text: string, onEnd: (() => void) | undefined, intent: SpeechIntent): Promise<void> | null {
+  const decision = decideSpeech(activeIntent, intent);
+  if (decision === "drop") return Promise.resolve();
+  if (decision === "queue") {
+    return new Promise<void>((resolve) => {
+      if (speechQueue.length >= 8) speechQueue.shift()?.resolve();
+      const item = { text, onEnd, intent, resolve };
+      speechQueue.push(item);
+      setTimeout(() => {
+        const index = speechQueue.indexOf(item);
+        if (index >= 0) {
+          speechQueue.splice(index, 1);
+          resolve();
+        }
+      }, 30_000);
+    });
+  }
+  activeIntent = intent;
+  return null;
+}
+
+function releaseSpeech(intent: SpeechIntent) {
+  if (activeIntent !== intent) return;
+  activeIntent = null;
+  // Result turn closure has a 550 ms visual beat. Drain after it so that
+  // an old turn's reset cannot cut off the next queued utterance.
+  setTimeout(() => {
+    if (activeIntent || useAssistant.getState().awaitingInput) return;
+    const next = speechQueue.shift();
+    if (next) void speak(next.text, next.onEnd, next.intent).finally(next.resolve);
+  }, 600);
+}
+
 export const CURATED_VOICES: VoiceOption[] = [
   {
     id: "en-GB-RyanNeural",
@@ -296,12 +341,20 @@ async function getSavedSettings(): Promise<any> {
   }
 }
 
+function reportSpeechStageFailure(): void {
+  const message = "Speech is unavailable because the orb and caption could not be shown. Please try again.";
+  useAssistant.getState().addAssistantMessage(message);
+  void invoke("show_sidebar_with_content", { query: "Speech unavailable", text: message })
+    .catch((error: unknown) => console.warn("[SPEECH] Could not show stage failure:", error));
+}
+
 export async function playKokoro(
   text: string,
   voiceId: string,
   speed: number,
   myGen: number,
   onEnd?: () => void,
+  intent?: SpeechIntent,
 ): Promise<void> {
   // Check if barge-in happened before we even start
   if (ttsGeneration !== myGen) {
@@ -315,12 +368,20 @@ export async function playKokoro(
     const { invoke } = await import("@tauri-apps/api/core");
     // speak_text handles its own thread for rodio playback
     // This await resolves when rodio playback completes
-    await invoke("speak_text", { text, voice: voiceId, speed });
+    await invoke("speak_text", {
+      text, voice: voiceId, speed,
+      requestId: intent?.requestId,
+      sourceCenter: intent?.sourceCenter ?? "main",
+      kind: intent?.kind ?? "result",
+    });
   } catch (err) {
     // No browser-voice fallback: a Web Speech voice is a different speaker mid-conversation, and
     // Rust already falls back cloud -> local (one voice per utterance). Report and stay quiet.
     if (ttsGeneration === myGen) {
       console.error("[TTS] speak_text failed (no fallback voice by design):", err);
+      if (String(err).includes("Speech stage")) {
+        reportSpeechStageFailure();
+      }
     }
   } finally {
     // Only the CURRENT utterance may clear the playing flag. A superseded call (the one-moment ack
@@ -342,15 +403,24 @@ export async function previewVoice(
   onEnd?: () => void,
   speed?: number,
 ): Promise<void> {
-  stopTts();
+  const stop = stopTts();
+  const myGen = ttsGeneration;
+  await stop;
+  if (ttsGeneration !== myGen) return;
   // All voices now go through the Rust speak_text command which tries
   // Edge TTS (cloud) first, then the local Kokoro voice (offline only).
   // The voice.id should be a valid Edge TTS voice (e.g. "en-US-AvaNeural").
-  return playKokoro(voice.sampleText, voice.id, speed ?? 1.15, ttsGeneration, onEnd);
+  return playKokoro(voice.sampleText, voice.id, speed ?? 1.15, myGen, onEnd, { kind: "preview", sourceCenter: "settings" });
 }
 
-export async function speak(text: string, onEnd?: () => void): Promise<void> {
+export async function speak(text: string, onEnd?: () => void, intent?: SpeechIntent): Promise<void> {
+  const ticket = intent ?? { kind: "result" as const, sourceCenter: "main" };
+  const deferred = claimSpeech(text, onEnd, ticket);
+  if (deferred) return deferred;
+
+  try {
   const meeting = await isMeetingActive();
+  if (activeIntent !== ticket) return;
   if (meeting) {
     console.log("[TTS] Suppressed — meeting mode active");
     onEnd?.();
@@ -371,11 +441,13 @@ export async function speak(text: string, onEnd?: () => void): Promise<void> {
   // This prevents overlapping audio when the server ack and result
   // arrive in quick succession (especially during first-load when
   // the Kokoro engine takes ~7s to initialize).
-  stopTts();
+  const stop = stopTts(false);
 
   // Capture generation after stopTts — any in-flight speak() calls
   // from a previous turn will see the mismatch and skip playback.
   const myGen = ttsGeneration;
+  await stop;
+  if (ttsGeneration !== myGen) return;
 
   const settings = await getSavedSettings();
   // Check if barge-in happened during the async getSavedSettings call
@@ -394,7 +466,10 @@ export async function speak(text: string, onEnd?: () => void): Promise<void> {
   // (first audio after one sentence) under a single volume lease and a single voice decision.
   // Splitting here made each sentence its own lease (volume dipped to the original level between
   // sentences) and its own engine decision (a failed sentence changed the voice).
-  return playKokoro(text, voiceId, speed, myGen, onEnd);
+  return await playKokoro(text, voiceId, speed, myGen, onEnd, ticket);
+  } finally {
+    releaseSpeech(ticket);
+  }
 }
 
 /**
@@ -402,8 +477,14 @@ export async function speak(text: string, onEnd?: () => void): Promise<void> {
  * Falls back to `speak` if the phrase is not cached.
  * Emits `tts-started` (heard by Rust) before playback starts.
  */
-export async function speakCached(phrase: string, onEnd?: () => void): Promise<void> {
+export async function speakCached(phrase: string, onEnd?: () => void, intent?: SpeechIntent): Promise<void> {
+  const ticket = intent ?? { kind: "ack" as const, sourceCenter: "main" };
+  const deferred = claimSpeech(phrase, onEnd, ticket);
+  if (deferred) return deferred;
+
+  try {
   const meeting = await isMeetingActive();
+  if (activeIntent !== ticket) return;
   if (meeting) {
     console.log("[TTS] Suppressed — meeting mode active");
     onEnd?.();
@@ -417,39 +498,62 @@ export async function speakCached(phrase: string, onEnd?: () => void): Promise<v
   assistant.setState("speaking");
 
   // Stop any currently-playing TTS before starting new playback.
-  stopTts();
+  const stop = stopTts(false);
 
   const myGen = ttsGeneration;
+  await stop;
+  if (ttsGeneration !== myGen) return;
   rustTtsPlaying = true;
   void emitTtsEvent("tts-started");
   try {
-    await invoke("speak_cached", { text: phrase });
+    await invoke("speak_cached", {
+      text: phrase,
+      requestId: ticket.requestId,
+      sourceCenter: ticket.sourceCenter ?? "main",
+      kind: ticket.kind ?? "ack",
+    });
     if (ttsGeneration !== myGen) return;
     onEnd?.();
   } catch (e) {
     // A superseded call must neither clear the newer speech's flag nor speak its stale phrase.
     if (ttsGeneration !== myGen) return;
+    if (String(e).includes("Speech stage")) {
+      reportSpeechStageFailure();
+      onEnd?.();
+      return;
+    }
     // Fallback to regular speak if cached phrase not available
     console.warn("[TTS] speak_cached failed, falling back to speak:", e);
     rustTtsPlaying = false;
     void emitTtsEvent("tts-ended");
-    return speak(phrase, onEnd);
+    activeIntent = null;
+    return await speak(phrase, onEnd, { ...ticket });
   } finally {
     if (ttsGeneration === myGen) {
       rustTtsPlaying = false;
       void emitTtsEvent("tts-ended");
     }
   }
+  } finally {
+    releaseSpeech(ticket);
+  }
 }
 
-export function stopTts(): void {
+export function stopTts(resetArbiter = true): Promise<void> {
   // Increment frontend generation — any in-flight speak() calls will
   // see the mismatch and skip playback / onEnd.
   ttsGeneration++;
+  if (resetArbiter) {
+    activeIntent = null;
+    speechQueue.splice(0).forEach((item) => item.resolve());
+  }
   rustTtsPlaying = false;  // Clear playing flag immediately on barge-in
+  clearSpeechStage();
   // Tell Rust to stop the rodio playback immediately (barge-in).
   // Uses static import for instant invocation — no dynamic import delay.
-  void invoke("stop_tts").catch((e: unknown) => console.warn("[TTS] stop_tts failed:", e));
+  const stopped = invoke("stop_tts").then(() => undefined).catch((e: unknown) => {
+    console.warn("[TTS] stop_tts failed:", e);
+  });
   // Also cancel Web Speech API if it's being used as fallback
   if ("speechSynthesis" in window) {
     window.speechSynthesis.cancel();
@@ -457,8 +561,9 @@ export function stopTts(): void {
   void emitTtsEvent("tts-ended");
   // Response caption (plan Phase 3): cancel every pending word-reveal so a
   // barge-in never leaves a stale caption's words trickling in afterward.
-  void import("./captionScheduler").then(({ clearCaptionSchedule }) => clearCaptionSchedule());
+  clearCaptionSchedule();
   useAssistant.getState().setSpeakSeq(null);
+  return stopped;
 }
 
 // Global listener for Rust-initiated barge-in / stop requests

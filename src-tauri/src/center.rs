@@ -306,6 +306,7 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::GitHubCommand { .. } => "GitHubCenter",
 
         ParsedIntent::OpenArchitect
+        | ParsedIntent::OpenCodeRabbitHub
         | ParsedIntent::AnalyseRepo { .. }
         | ParsedIntent::AnalysePr { .. }
         | ParsedIntent::AnalyseLatestPr { .. }

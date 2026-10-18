@@ -262,32 +262,27 @@ pub fn token_status(service: &str) -> &'static str {
     }
 }
 
-/// Fetch a fresh Google access token from the Worker (which owns OAuth +
-/// refresh server-side) and cache it in the vault. Assumed 1-hour life —
-/// the Worker refreshes on its end; we re-fetch when our copy is stale.
-async fn fetch_google_token_from_worker(
+/// Fetch a fresh provider access token from the Worker (which owns OAuth + refresh
+/// server-side). The route needs this device's credentials (see `worker_auth`); the
+/// Worker derives the owner from them, so no `user_id` is sent.
+async fn fetch_provider_token_from_worker(
     worker_url: &str,
-    user_id: &str,
+    provider: &str,
+    label: &str,
+    not_connected: &str,
 ) -> Result<String, String> {
-    let url = format!(
-        "{}/oauth/google-token?user_id={}",
-        worker_url.trim_end_matches('/'),
-        user_id
-    );
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("google token fetch: {e}"))?;
-    if resp.status() == 404 {
-        return Err("Google not connected. Connect Google in setup.".into());
+    let url = format!("{}/oauth/{}-token", worker_url.trim_end_matches('/'), provider);
+    let resp = crate::worker_auth::authed_get(&url, Duration::from_secs(10)).await?;
+    let status = resp.status();
+    if status == 404 {
+        return Err(not_connected.into());
     }
-    if !resp.status().is_success() {
-        return Err(format!("google token error {}", resp.status()));
+    if status == 401 || status == 403 || status == 503 {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::worker_auth::describe_denial(status.as_u16(), &body));
+    }
+    if !status.is_success() {
+        return Err(format!("{label} token error {status}"));
     }
     let data: serde_json::Value = resp.json().await.map_err(|e| format!("token json: {e}"))?;
     data["token"]
@@ -296,37 +291,28 @@ async fn fetch_google_token_from_worker(
         .ok_or_else(|| "token field missing in worker response".to_string())
 }
 
-/// Fetch a fresh Swiggy access token from the Worker (OAuth + refresh
-/// server-side, same shape as Google) and cache it in the vault.
-async fn fetch_swiggy_token_from_worker(
-    worker_url: &str,
-    user_id: &str,
-) -> Result<String, String> {
-    let url = format!(
-        "{}/oauth/swiggy-token?user_id={}",
-        worker_url.trim_end_matches('/'),
-        user_id
-    );
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("swiggy token fetch: {e}"))?;
-    if resp.status() == 404 {
-        return Err("Swiggy not connected. Connect Swiggy in Settings, Connections tab.".into());
-    }
-    if !resp.status().is_success() {
-        return Err(format!("swiggy token error {}", resp.status()));
-    }
-    let data: serde_json::Value = resp.json().await.map_err(|e| format!("token json: {e}"))?;
-    data["token"]
-        .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| "token field missing in worker response".to_string())
+/// Fetch a fresh Google access token from the Worker and cache it in the vault.
+/// Assumed 1-hour life; we re-fetch when our copy is stale.
+async fn fetch_google_token_from_worker(worker_url: &str, _user_id: &str) -> Result<String, String> {
+    fetch_provider_token_from_worker(
+        worker_url,
+        "google",
+        "google",
+        "Google not connected. Connect Google in setup.",
+    )
+    .await
+}
+
+/// Fetch a fresh Swiggy access token from the Worker (OAuth + refresh server-side,
+/// same shape as Google) and cache it in the vault.
+async fn fetch_swiggy_token_from_worker(worker_url: &str, _user_id: &str) -> Result<String, String> {
+    fetch_provider_token_from_worker(
+        worker_url,
+        "swiggy",
+        "swiggy",
+        "Swiggy not connected. Connect Swiggy in Settings, Connections tab.",
+    )
+    .await
 }
 
 /// Refresh registry: services that can mint a fresh token without the user.

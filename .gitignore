@@ -212,3 +212,8 @@ spline-preview/
 
 # Hand mode assets (copied/downloaded by scripts/sync-hand-assets.mjs, ~17 MB)
 frontend/public/hand/
+
+# Wrangler local secrets (never commit)
+.dev.vars
+**/.dev.vars
+.wrangler/

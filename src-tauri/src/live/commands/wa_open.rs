@@ -269,7 +269,10 @@ pub fn open_chat(env: &dyn WaEnv, contact: &str, learned: &[String]) -> WaOpen {
             spent += 1_550;
             match env.header_text() {
                 Some(t) if header_matches(&t, &wanted) => return WaOpen::Opened { matched: cand.clone() },
-                Some(_) => continue, // some other chat opened: try the next name
+                Some(t) => {
+                    tracing::info!("wa_open: header '{t}' did not match candidates; ignoring");
+                    let _ = env.key("escape");
+                }
                 None => return WaOpen::Unverified { guess: cand.clone() },
             }
         }

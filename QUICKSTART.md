@@ -1,76 +1,56 @@
-# ⚡ NEXUS — Quick Start Guide
+# NEXUS — Quick Start
 
-## 🎯 The Core Problem Solved
-> *"If I change this piece of code, what else could be affected — and why?"*
+NEXUS is pre-release software for Windows 10/11. This guide gets a development or test build running and gives you a few things to try. For what the project is and what it sends to the cloud, read the [README](README.md) first.
 
-Enterprise codebases span thousands of files where architecture evolves faster than documentation. Traditional tools only list static file imports. **NEXUS is a consequence engine**: it calculates the exact **blast radius** using sub-10ms reverse-BFS graph traversal, reconstructs the shortest dependency paths, mathematically detects circular dependencies (Tarjan's SCC), and uses an AI agent with voice to explain engineering risks in plain English.
+## 1. Install or build
 
----
+**From an installer** (if you were given one): run `NEXUS_*_x64-setup.exe`. It installs per user under `%LOCALAPPDATA%\NEXUS` and does not need Administrator rights. The build is **unsigned**, so Windows SmartScreen will warn you — choose *More info → Run anyway* only if you trust where it came from.
 
-## 🚀 1. Installation (Windows)
+**From source:**
 
-1. Run **`NEXUS_0.1.0_x64-setup.exe`** (or download from [GitHub Releases](https://github.com/Engine-NEXUS/NEXUS-Agent/releases)).
-2. The installer runs **per-user** (`%LOCALAPPDATA%\NEXUS`) with **no Admin / UAC prompts** needed.
-3. Once installation completes, the **NEXUS Setup Wizard** opens automatically.
-4. Click through the voice selection (**Sky**, **Adam**, or **Emma** powered by local Kokoro TTS) and click **🚀 Launch Assistant**.
+```bash
+npm --prefix frontend install
+node nexus.mjs build     # frontend + Rust release build
+node nexus.mjs start     # run it (unified console on Windows)
+node nexus.mjs check     # diagnostics for tools, Python/Node, the Worker and models
+```
 
----
+You need Node.js 20+, Rust 1.77+, and WebView2. Python 3.11/3.12 is used for the local speech and NLU helpers and is started only when needed; Node is needed only for the coding-agent watcher.
 
-## 🎙️ 2. Instant Interaction Triggers
+## 2. First launch
 
-* **Global Hotkey:** Press **`Ctrl + Shift + Space`** anywhere in Windows.
-* **Wake Word:** Say clearly: **`"NEXUS"`** or **`"Hey NEXUS"`** into your microphone.
-* The floating liquid-glass orb will illuminate and start listening.
+1. The **Setup Wizard** opens: allow the microphone and pick a voice (the default is the "JARVIS" persona; 10 are available).
+2. Optionally connect accounts. Google needs **your own** OAuth client ID/secret (Command Hub → Advanced); GitHub and Swiggy use the NEXUS Worker.
+3. Add your own **API keys** (Groq for speech-to-text, Gemini/Cerebras for reasoning) in the Command Hub → API Keys. Without a Groq key, speech recognition falls back to the slower local model.
 
----
+## 3. Talk to it
 
-## 🧪 3. Key Test Scenarios
+* Press **`Ctrl+Space`** to start listening; press it again to cancel.
+* Or say **"NEXUS"** (wake-word accuracy is still being tuned, so the hotkey is the reliable route).
+* `Esc` closes the Command Hub and settings windows and cancels a Ghost-mode session. `Ctrl+Alt+X` is the kill-switch for the full-screen overlay.
 
-### Scenario A: Autonomous Codebase Architecture Mapper *(Core Feature)*
-1. Trigger NEXUS (`Ctrl+Space`) and say:
-   > *"Open architecture mapper"*
-2. **Result:** It will automatically detect the repository URL (e.g. your currently active project) and render an interactive dependency diagram. 
-   *(Note: Due to strict OS/laptop security policies, automatic URL detection might be incompatible on some machines. If it doesn't work, you can manually paste the repository URL into the mapper window).*
+## 4. Things to try
 
-### Scenario B: Change Impact Analysis & Blast Radius
-1. In the Architecture Map or via voice, ask:
-   > *"What breaks if I change vite.config.ts?"*
-2. **Result:** The backend executes reverse Breadth-First Search (BFS) on the dependency graph in `<10ms`, calculates graph centrality and circular dependencies (Tarjan's SCC), dims unaffected files, and pulses the blast radius in red while explaining the risk in plain English.
+| Say | What should happen |
+|---|---|
+| "Open Notepad" / "Open Chrome" | Opens or focuses the app. |
+| "Pause the music" / "Next song" | Controls Spotify or Apple Music. |
+| "What is the capital of France?" | Answered by the cloud reasoning chain and spoken aloud. |
+| "Delete the PDFs in Downloads" | NEXUS reads back what it will move, waits for "yes", then moves the files to `.nexus-trash`. "Undo that" restores them. |
+| "Ghost mode" | Hands-free desktop control; say "exit ghost mode" or press `Esc` to stop. |
+| "Analyse PR 254 in owner/repo" | Fetches the diff from GitHub and shows a review in the sidebar (needs GitHub connected). |
+| "Open architecture mapper" | Opens the codebase mapper for a repository (layers, dependency graph, blast radius). |
+| "What do you remember?" | Shows what the memory core holds, with where each item came from. |
 
-### Scenario C: Voice-Driven GitHub PR Code Review
-1. Trigger NEXUS and say:
-   > *"NEXUS, analyze PR 254 in Engine-NEXUS/NEXUS-Agent"* (or any other PR in a repo)
-2. **Result:** NEXUS fetches the PR diff from GitHub, generates a senior-engineer-grade summary of changes, potential bugs, and architectural risks, and renders it in the liquid glass sidebar.
+Several of these have only been tested in unit tests, not by voice on real hardware. If something does not work, run `node nexus.mjs check` and see the engineering log in [`AGENTS.md`](AGENTS.md) for known gaps.
 
-### Scenario D: General AI Assistant
-1. Trigger NEXUS and ask literally any question:
-   > *"Explain the difference between WebSockets and HTTP/2 in two sentences."*
-2. **Result:** Processed by the Cloudflare edge worker and spoken aloud with high-fidelity Kokoro 82M neural voice (<150ms TTFB).
+## 5. Troubleshooting
 
-### Scenario E: App & System Automation
-1. Trigger NEXUS and say:
-   > *"Open [App Name]"* (e.g. *"Open Chrome"*)
-2. **Result:** Instantly executes native OS commands to open the requested software.
-
----
-
-## 🌐 4. Live Cloud & Edge Infrastructure
-
-* **Live Deployed Edge Worker:** [`https://nexus-worker.chitkullakshya.workers.dev`](https://nexus-worker.chitkullakshya.workers.dev)
-* **Health Check:** [`https://nexus-worker.chitkullakshya.workers.dev/health`](https://nexus-worker.chitkullakshya.workers.dev/health) (Returns `{"ok":true,"serverless":true}`)
-* **Local In-Process AI:**
-  * Wake Word: `openWakeWord` (Tract-ONNX in Rust)
-  * STT: `faster-whisper tiny.en` (Local Python Sidecar)
-  * TTS: `Kokoro 82M` (In-process Rust ONNX + Rodio native playback)
-
----
-
-## 🛠️ 5. Troubleshooting for Evaluators
-
-| Issue | Solution |
-| :--- | :--- |
-| **Microphone is silent or blocked** | Press **`Ctrl+Space`** to trigger listening directly. Ensure Windows *Settings → Privacy → Microphone* allows desktop apps. |
-| **Intel SST mic goes silent (RMS=0.000000)** | The Intel Smart Sound Technology driver stops delivering audio after 2-25 min. Fix: **Device Manager → Sound, video and game controllers → Intel Smart Sound Technology for Digital Microphones → right-click → Disable → Enable**. Or run `Restart-Service -Name "Audiosrv" -Force` in PowerShell (Admin). Updating to the latest HP driver may also help. |
-| **STT returns truncated transcripts ("open-")** | This is caused by the Intel SST mic silence bug (above). NEXUS has built-in recovery: "open-" is auto-corrected to "open architecture mapper". If other commands are truncated, restart the audio service. |
-| **Want to change voice settings** | Right-click the **NEXUS tray icon** (near Windows clock) → **Settings** → **Audio & Voice**. |
-| **Need diagnostics report** | Right-click the tray icon → **Diagnostics** (checks STT, TTS, Worker, and OAuth connections). |
+| Issue | What to do |
+|---|---|
+| Microphone silent or blocked | Use `Ctrl+Space`. Check *Windows Settings → Privacy → Microphone* allows desktop apps. |
+| Intel Smart Sound mic goes silent (RMS 0.000000) after a few minutes | Known driver bug. Device Manager → *Sound, video and game controllers* → *Intel Smart Sound Technology for Digital Microphones* → Disable, then Enable. Or `Restart-Service -Name "Audiosrv" -Force` in an Administrator PowerShell. Updating the OEM audio driver can help. |
+| No speech recognition | Add a Groq API key, or check that Python is installed so the local Moonshine fallback can start. |
+| Voice sounds different or is silent offline | Edge TTS needs the internet; the offline Kokoro voice downloads on first online run. |
+| Change voice or settings | Right-click the tray icon → *Settings*, or say "open the command hub". |
+| Windows shows a blank overlay or "localhost refused to connect" | The binary was built without `--features custom-protocol`. Rebuild with `node nexus.mjs build`. |

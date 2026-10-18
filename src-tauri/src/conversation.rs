@@ -168,6 +168,13 @@ pub fn record_conversation_turn(dir: &Path, input: ConversationTurnInput) -> Opt
     if let Some(brief) = brief {
         write_brief(dir, &brief);
     }
+    // Every turn passes through here, so this is where "no, I said open brave" (or the same command
+    // again with one word changed) is noticed and remembered as a speech-recognition correction.
+    crate::memcore::corrections::observe_turn(dir, &turn.transcript, ts, turn.outcome == ConversationOutcome::Completed);
+    // A safe command that ran on this PC is also a candidate step of a routine the user may later want.
+    if turn.agent == "local" && turn.outcome == ConversationOutcome::Completed {
+        crate::memcore::routines::observe_command(dir, &turn.transcript, &turn.intent, ts);
+    }
     Some(turn.id)
 }
 
@@ -320,6 +327,22 @@ pub fn unfinished_requests(dir: &Path, now: i64) -> Vec<String> {
         }
     }
     out
+}
+
+/// (time, what the user said, what NEXUS answered) for turns that went to the cloud, completed, and were
+/// worth keeping, newer than `since`. Turns handled on this PC are never included.
+pub fn cloud_turns_since(dir: &Path, since: i64) -> Vec<(i64, String, String)> {
+    read_turns(dir)
+        .into_iter()
+        .filter(|t| {
+            t.agent != "local"
+                && t.outcome == ConversationOutcome::Completed
+                && t.owner != TurnOwnership::Rejected
+                && t.ts > since
+                && crate::memcore::hygiene::admit_conversation_turn(&t.transcript, &t.response, true).is_ok()
+        })
+        .map(|t| (t.ts, t.transcript, t.response))
+        .collect()
 }
 
 fn read_turns(dir: &Path) -> Vec<ConversationTurn> {

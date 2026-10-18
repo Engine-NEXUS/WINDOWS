@@ -9,18 +9,13 @@
 //! Security: localhost bind + bearer token (keychain-stored, rotatable)
 //! + 8KB body cap + read timeouts. No new dependencies (std TcpListener).
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 pub const WEBHOOK_PORT: u16 = 39220;
 const MAX_BODY: usize = 8192;
 const TOKEN_SERVICE: &str = "webhook";
-
-static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Get-or-create the webhook bearer token (keychain-stored).
 pub fn webhook_token() -> String {
@@ -29,27 +24,20 @@ pub fn webhook_token() -> String {
             return tok;
         }
     }
-    // std-only entropy: time + pid + counter + stack address, SipHashed.
-    // Localhost-only bearer — no network attacker model.
-    let mut h = DefaultHasher::new();
-    std::time::SystemTime::now().hash(&mut h);
-    std::process::id().hash(&mut h);
-    TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed).hash(&mut h);
-    (&raw const TOKEN_COUNTER as usize).hash(&mut h);
-    let mut seed = h.finish();
-    let tok: String = (0..32)
-        .map(|_| {
-            // xorshift64* PRNG step
-            seed ^= seed >> 12;
-            seed ^= seed << 25;
-            seed ^= seed >> 27;
-            let v = (seed.wrapping_mul(0x2545F4914F6CDD1D) >> 60) as usize % 16;
-            const HEX: &[u8] = b"0123456789abcdef";
-            HEX[v] as char
-        })
-        .collect();
+    let tok = generate_token();
     crate::auth_vault::set_api_key(TOKEN_SERVICE, &tok);
     tok
+}
+
+/// 32 random bytes from the OS CSPRNG, hex-encoded (64 chars). A predictable token would
+/// let any local process (or a web page via DNS rebinding) fire assistant actions.
+fn generate_token() -> String {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let mut bytes = [0u8; 32];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .expect("OS random source unavailable");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Rotate the webhook token. Returns the new token.
@@ -255,6 +243,15 @@ pub fn spawn_listener<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_tokens_are_64_hex_chars_and_unique() {
+        let a = generate_token();
+        let b = generate_token();
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+    }
 
     #[test]
     fn test_parse_trigger() {

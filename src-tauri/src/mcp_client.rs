@@ -831,13 +831,12 @@ pub(crate) async fn connect_card_for(server: McpServer, client: &reqwest::Client
             if probe.is_err() {
                 return McpConnectCard {
                     state: McpConnectState::Down,
-                    note: "bridge not running on :8765".to_string(),
+                    note: "Ghost mode ready · Background bridge idle".to_string(),
                     steps: vec![
-                        "Start the mcp-whatsapp program on this PC.".to_string(),
-                        "Scan the QR it shows with WhatsApp → Settings → Linked Devices.".to_string(),
-                        "NEXUS confirms automatically — no Recheck needed.".to_string(),
+                        "Ghost mode is active: speak 'open chat with <contact>' to control WhatsApp directly on your PC.".to_string(),
+                        "For background headless messaging, start the local WhatsApp bridge on port 8765.".to_string(),
                     ],
-                    pair_url: Some("http://127.0.0.1:8765/pair".to_string()),
+                    pair_url: None,
                     ..base
                 };
             }
@@ -1526,13 +1525,14 @@ mod tests {
         let cards = mcp_connect_state().await;
         assert_eq!(cards.len(), 5);
         let wa = cards.iter().find(|c| c.server == "whatsapp").unwrap();
-        assert_eq!(
-            wa.pair_url.as_deref(),
-            Some("http://127.0.0.1:8765/pair")
-        );
         if wa.state == McpConnectState::Down {
-            assert_eq!(wa.steps.len(), 3, "down card must carry fix steps");
-            assert!(wa.note.contains("8765"));
+            assert_eq!(wa.pair_url, None);
+            assert!(wa.steps.len() >= 2, "down card must carry fix steps");
+        } else {
+            assert_eq!(
+                wa.pair_url.as_deref(),
+                Some("http://127.0.0.1:8765/pair")
+            );
         }
         for card in &cards {
             if card.state == McpConnectState::AuthRequired {

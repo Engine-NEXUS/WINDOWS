@@ -96,16 +96,13 @@ pub fn get_client_credentials() -> (String, Option<String>) {
     (client_id, client_secret)
 }
 
+/// OS CSPRNG. The PKCE verifier protects the authorization code, so it must be
+/// unpredictable (RFC 7636 §7.1) — a time-seeded LCG is guessable.
 fn get_random_bytes(dest: &mut [u8]) {
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let mut rng = seed;
-    for (i, byte) in dest.iter_mut().enumerate() {
-        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-        *byte = ((rng >> 32) ^ (i as u128)) as u8;
-    }
+    use ring::rand::{SecureRandom, SystemRandom};
+    SystemRandom::new()
+        .fill(dest)
+        .expect("OS random source unavailable");
 }
 
 /// Generate PKCE verifier (43 chars) and challenge (S256).

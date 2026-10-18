@@ -61,6 +61,7 @@ pub(crate) mod stt_deepgram;
 mod stt_learning;
 mod stt_stream;
 mod tts;
+mod speech_sync;
 pub mod tts_edge;
 mod tts_network;
 mod contacts_book;
@@ -92,8 +93,11 @@ pub(crate) mod github_cmd;
 pub(crate) mod live;
 pub(crate) mod router;
 pub(crate) mod mcp_client;
+mod coderabbit;
 pub(crate) mod auth_vault;
 pub(crate) mod identity_state;
+pub(crate) mod worker_auth;
+pub(crate) mod boot;
 pub(crate) mod ghostwriter;
 pub mod screen;
 pub mod shortcuts;
@@ -169,13 +173,30 @@ fn cleanup_webview2_profile() {
         Ok(v) => v,
         Err(_) => return,
     };
-    let webview_dir = std::path::PathBuf::from(&local_appdata)
-        .join("com.nexus.assistant")
-        .join("EBWebView");
+    let base = std::path::PathBuf::from(&local_appdata).join("com.nexus.assistant");
+    let webview_dir = base.join("EBWebView");
 
-    if !webview_dir.exists() {
-        return; // Nothing to clean — fresh install or already cleaned.
+    // Reset only when the build type changed (dev <-> release). Doing it on every start
+    // (a PowerShell + WMI query, then deleting the profile) cost seconds at logon and made
+    // WebView2 rebuild a brand-new profile each time; see boot.rs.
+    let marker = base.join("webview_mode");
+    let recorded = std::fs::read_to_string(&marker).ok();
+    let mode = crate::boot::webview_mode_now();
+    if webview_dir.exists() && crate::boot::needs_profile_reset(recorded.as_deref(), mode) {
+        tracing::info!("webview2: build type changed ({:?} -> {mode}), resetting profile", recorded);
+        reset_webview2_profile(&webview_dir);
     }
+    if recorded.as_deref().map(str::trim) != Some(mode) {
+        let _ = std::fs::create_dir_all(&base);
+        let _ = std::fs::write(&marker, mode);
+    }
+}
+
+/// Kill orphaned WebView2 processes of a previous instance and delete (or, if locked,
+/// rename) the profile directory.
+#[cfg(target_os = "windows")]
+fn reset_webview2_profile(webview_dir: &std::path::Path) {
+    let webview_dir = webview_dir.to_path_buf();
 
     // Step 1: Kill orphaned msedgewebview2.exe processes from a PREVIOUS
     // NEXUS instance. These processes reference our EBWebView directory
@@ -258,6 +279,7 @@ fn cleanup_webview2_profile() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    crate::boot::mark("main");
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,nexus=debug")))
         .with_target(false)
@@ -282,8 +304,20 @@ pub fn run() {
     // WebView2 creates a fresh profile with the bundled frontend.
     // Also kill any orphaned msedgewebview2.exe processes from a previous
     // NEXUS instance that may still hold the directory locked.
+    //
+    // A SECOND launch (Start menu click while NEXUS is already running) must not do this:
+    // it would kill the running instance's WebView2 and delete its profile, leaving the orb
+    // dead until the stage watchdog rebuilt it. Only the first instance cleans up; a
+    // secondary one falls through to the single-instance plugin, which hands the request to
+    // the running instance and exits.
+    let primary = crate::boot::claim_primary_instance();
     #[cfg(target_os = "windows")]
-    cleanup_webview2_profile();
+    if primary {
+        cleanup_webview2_profile();
+    } else {
+        tracing::info!("boot: secondary launch - leaving the running instance's WebView2 untouched");
+    }
+    crate::boot::mark_with("cleanup_done", if primary { "primary" } else { "secondary" });
 
     crate::power::enable_process_ecoqos();
 
@@ -357,6 +391,7 @@ pub fn run() {
     }
 
     builder.setup(|app| {
+        crate::boot::mark("setup_begin");
         // Stage FIRST (docs/features/123, P3): WebView2's cold start (~8 s) now overlaps the rest of setup
         // (preflight audit, memory, registries) instead of following it.
         // ─── Stage: the always-on home for the orb + loading indicator ──
@@ -371,6 +406,7 @@ pub fn run() {
             if let Err(e) = crate::stage::stage_show_sync(app.handle()) {
                 tracing::error!("stage: failed to show at boot: {e}");
             }
+            crate::boot::mark("stage_shown");
 
         // Immediate 5-layer preflight system audit — prints health matrix to stdout
         let audit_dir = app.path().app_data_dir().ok();
@@ -381,7 +417,13 @@ pub fn run() {
         if let Some(dir) = audit_dir.clone() {
             volume::init(dir.clone());
             // One-time memory cleanup (junk episodes/turns/poisoned brief; originals backed up).
+            let learned_dir = dir.clone();
             std::thread::spawn(move || memcore::hygiene::run_startup_cleanup(&dir));
+            // Load the mishearings this user has corrected twice, so the parser applies them from the first command.
+            let routines_dir = learned_dir.clone();
+            std::thread::spawn(move || memcore::corrections::init(&learned_dir));
+            // Know the user's routine names from the first command.
+            std::thread::spawn(move || memcore::routines::init(&routines_dir));
         }
 
         // macOS: hide from the Dock and Cmd+Tab switcher (accessory/background app).
@@ -676,6 +718,9 @@ pub fn run() {
             proactive_policy::start_ticker(app.handle().clone()); // releases deferred alerts at breakpoints
             memcore::resume::start_recorder(app.handle().clone()); // 30 s foreground-window resume points
             memcore::briefing::start_boot_briefing(app.handle().clone()); // once-a-day spoken "where you left off"
+            memcore::routines::start_suggester(app.handle().clone()); // offers a routine when it notices a repeated sequence
+            memcore::curator::start_curator(app.handle().clone()); // daily idle upkeep: retire unused routines, keep used profile facts
+            memcore::review::start_reviewer(app.handle().clone()); // optional, default off: suggests profile facts for approval
             memcore::scheduler::start(app.handle().clone()); // timetable slot reminders
             memcore::mailwatch::start(app.handle().clone()); // Gmail history.list watcher (idle until Google is connected)
             memcore::leavewatch::start(app.handle().clone()); // leave-by reminders (needs calendar + Routes key + saved home)
@@ -990,6 +1035,13 @@ pub fn run() {
             orchestrator::orchestrator_github_clear_token,
             orchestrator::orchestrator_mcp_confirm,
             mcp_client::mcp_status,
+            coderabbit::coderabbit_status,
+            coderabbit::coderabbit_install,
+            coderabbit::coderabbit_login,
+            coderabbit::coderabbit_logout,
+            coderabbit::coderabbit_review_pr,
+            coderabbit::get_coderabbit_active_prs,
+            commands::show_coderabbit_hub,
             mcp_client::mcp_connect_state,
             stage::stage_show,
             stage::stage_hide,
@@ -1020,6 +1072,7 @@ pub fn run() {
             commands::close_setup_window,
             commands::save_server_config,
             commands::get_server_config,
+            worker_auth::worker_request,
             commands::claim_profile,
             commands::get_identity_status,
             commands::refresh_identity_status,
@@ -1053,6 +1106,14 @@ pub fn run() {
             commands::memory_forget,
             commands::memcore_status,
             commands::memcore_list,
+            commands::memcore_corrections,
+            commands::memcore_routines,
+            commands::memcore_routine_save,
+            commands::memcore_routine_delete,
+            commands::memcore_pending,
+            commands::memcore_pending_approve,
+            commands::memcore_pending_reject,
+            commands::memcore_correction_forget,
             commands::memcore_egress_log,
             commands::memcore_clear_activity,
             commands::offer_pending,
@@ -1126,6 +1187,9 @@ pub fn run() {
             stt_stream::stt_stream_stop,
             tts::speak_text,
             tts::speak_cached,
+            speech_sync::speech_stage_register,
+            speech_sync::speech_stage_ack,
+            speech_sync::speech_stage_snapshot,
             tts::stop_tts,
             tts::restore_tts_volume,
             shortcuts::exec::shortcut_do,

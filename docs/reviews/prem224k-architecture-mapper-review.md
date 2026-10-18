@@ -1,3 +1,5 @@
+> **Written 2026-08-29, when the architecture mapper was spec-only.** The mapper has since been built (phase 1 layers, phase 2 import graph, blast radius, cycle detection). Treat the "not implemented" findings below as historical.
+
 # Review: prem224k — Architecture Mapper Feature Spec
 
 **Reviewer:** Devin (automated cross-check)

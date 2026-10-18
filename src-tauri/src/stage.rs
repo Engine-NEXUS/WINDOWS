@@ -214,6 +214,7 @@ pub fn stage_heartbeat(client: Option<String>) -> Result<(), String> {
             "stage: frontend alive (client={})",
             client.as_deref().unwrap_or("unknown")
         );
+        crate::boot::mark("stage_alive");
     }
     Ok(())
 }

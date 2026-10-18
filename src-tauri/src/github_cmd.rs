@@ -18,7 +18,8 @@
 //!                 └── execute()               → octocrab API call
 //! ```
 //!
-//! Token: fetched from the Worker via `GET /oauth/github-token?user_id=...`
+//! Token: fetched from the Worker via `GET /oauth/github-token` (authenticated with this
+//! device's credentials, see `worker_auth`)
 //! and cached in memory for the session. The client_secret never leaves
 //! the Worker.
 //!
@@ -59,28 +60,22 @@ impl CachedToken {
 /// The Worker handles refresh logic internally — we just get a valid token.
 async fn fetch_token_from_worker(
     worker_url: &str,
-    user_id: &str,
+    _user_id: &str,
 ) -> Result<String, String> {
-    let url = format!(
-        "{}/oauth/github-token?user_id={}",
-        worker_url.trim_end_matches('/'),
-        user_id
-    );
+    // Authenticated with this device's credentials; the Worker derives the owner from
+    // them, so no user_id goes on the wire.
+    let url = format!("{}/oauth/github-token", worker_url.trim_end_matches('/'));
     tracing::info!("github_cmd: fetching token from worker: {}", url);
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
-
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("token fetch: {e}"))?;
+    let resp = crate::worker_auth::authed_get(&url, Duration::from_secs(10)).await?;
 
     if resp.status() == 404 {
         return Err("GitHub not connected. Please connect GitHub in the NEXUS setup.".into());
+    }
+    if resp.status() == 401 || resp.status() == 403 || resp.status() == 503 {
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::worker_auth::describe_denial(status, &body));
     }
     if !resp.status().is_success() {
         let status = resp.status();

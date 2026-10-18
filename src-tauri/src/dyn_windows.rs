@@ -53,7 +53,7 @@ impl WindowConfig {
             label: "settings", title: "NEXUS Settings", url: "settings.html",
             width: 600., height: 720., min_width: None, min_height: None,
             resizable: false, decorations: false, transparent: true,
-            always_on_top: false, skip_taskbar: false, shadow: true,
+            always_on_top: true, skip_taskbar: false, shadow: true,
             focus: true, center: true, hidden_title: true,
         }
     }
@@ -68,7 +68,7 @@ impl WindowConfig {
             width: 520., height: 980., min_width: None, min_height: None,
             resizable: false, decorations: false, transparent: true,
             always_on_top: true, skip_taskbar: true, shadow: false,
-            focus: false, center: false, hidden_title: true,
+            focus: true, center: false, hidden_title: true,
         }
     }
 

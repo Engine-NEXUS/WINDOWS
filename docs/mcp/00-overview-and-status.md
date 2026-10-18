@@ -1,3 +1,5 @@
+> **Status snapshot from 2026-09-18 — out of date.** The MCP client, connect cards, Auth Vault, Swiggy OAuth and WhatsApp watcher have since been built (see `AGENTS.md`, `docs/mcp/README.md`, `docs/memory-core/`). Most MCP paths are still documented as not run live against real services.
+
 # MCP Program — Overview and Status (2026-09-18)
 
 Family builds have no brain (`admin-brain` compiled out, `is_admin()` always

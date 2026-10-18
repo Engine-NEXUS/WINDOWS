@@ -1,3 +1,5 @@
+> **Partially superseded (2026-10-17).** The Python sidecar and its `/apikeys/*` routes mentioned here no longer exist. OAuth tokens are held by the Cloudflare Worker (D1) and the on-device vault; third-party API keys live in the OS keychain (a legacy plaintext copy in `settings.json` still exists and is being removed — see `docs/memory-core/06-limits-risks-and-roadmap.md`). Read the rest as design history.
+
 # Google Integrations
 
 > Which Google APIs NEXUS uses, how they're authenticated, and what each one is for.
@@ -22,7 +24,7 @@ These require user consent. NEXUS uses OAuth2 PKCE (see [02-oauth-flow.md](./02-
 - **Maps API** — geocoding, directions, places
 - **Translate API** — text translation
 
-These use API keys stored in the sidecar (see [03-api-keys.md](./03-api-keys.md)).
+These use API keys stored in the sidecar (see [03-api-keys.md](../archive/credentials/03-api-keys.md)).
 
 ---
 

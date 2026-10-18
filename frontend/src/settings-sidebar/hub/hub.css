@@ -3,9 +3,9 @@
    (sidebar/theme.ts). Corner radii are deliberately small ("blunt"). */
 
 .hx {
-  --hx-bg: rgba(18, 18, 24, 0.65);
-  --hx-card: rgba(30, 30, 38, 0.60);
-  --hx-card-2: rgba(42, 42, 52, 0.70);
+  --hx-bg: #0a0a0c;
+  --hx-card: #15151c;
+  --hx-card-2: #1f1f28;
   --hx-border: rgba(255, 255, 255, 0.10);
   --hx-rim: rgba(255, 255, 255, 0.16);
   --hx-text: #f4f4f5;
@@ -18,9 +18,9 @@
   --hx-radius-lg: 12px;
 }
 :root[data-theme="light"] .hx {
-  --hx-bg: rgba(244, 244, 248, 0.72);
-  --hx-card: rgba(255, 255, 255, 0.68);
-  --hx-card-2: rgba(235, 235, 242, 0.75);
+  --hx-bg: #f8f8fa;
+  --hx-card: #ffffff;
+  --hx-card-2: #ebebef;
   --hx-border: rgba(0, 0, 0, 0.08);
   --hx-rim: rgba(0, 0, 0, 0.12);
   --hx-text: #1c1c1e;
@@ -37,8 +37,6 @@
   display: flex;
   flex-direction: column;
   background: var(--hx-bg);
-  backdrop-filter: blur(28px) saturate(190%);
-  -webkit-backdrop-filter: blur(28px) saturate(190%);
   color: var(--hx-text);
   border: 1px solid var(--hx-rim);
   border-radius: var(--hx-radius-lg);
@@ -483,8 +481,32 @@
 .hx-key-head {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
-  gap: 8px;
+  align-items: center;
+  gap: 10px;
+}
+.hx-key-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+.hx-key-logo-wrap {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+}
+.hx-key-info {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 .hx-key-title {
   font-size: 14px;

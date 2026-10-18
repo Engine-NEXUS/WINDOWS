@@ -75,6 +75,8 @@ export interface SpatialData {
   provider_used: string;
 }
 
+import type { CodeRabbitReviewData } from "./CodeRabbitDashboard";
+
 interface SidebarState {
   visible: boolean;
   response: string;
@@ -85,12 +87,14 @@ interface SidebarState {
   activeImage: { src: string; alt: string } | null;
   collapsedQuery: boolean;
   analysisData: RepoAnalysis | null;
+  codeRabbitData: CodeRabbitReviewData | null;
   conflictData: ConflictData | null;
   confirmationData: ConfirmationData | null;
   spatialData: SpatialData | null;
 
   show: (query: string, text: string) => void;
   showAnalysis: (query: string, text: string, analysis: RepoAnalysis) => void;
+  showCodeRabbit: (data: CodeRabbitReviewData) => void;
   showConflict: (data: ConflictData) => void;
   showConfirmation: (data: ConfirmationData) => void;
   showSpatial: (data: SpatialData) => void;
@@ -113,6 +117,7 @@ export const useSidebar = create<SidebarState>((set) => ({
   activeImage: null,
   collapsedQuery: false,
   analysisData: null,
+  codeRabbitData: null,
   conflictData: null,
   confirmationData: null,
   spatialData: null,
@@ -127,8 +132,10 @@ export const useSidebar = create<SidebarState>((set) => ({
       speaking: false,
       activeImage: null,
       analysisData: null,
+      codeRabbitData: null,
       conflictData: null,
       confirmationData: null,
+      spatialData: null,
     });
   },
 
@@ -142,8 +149,27 @@ export const useSidebar = create<SidebarState>((set) => ({
       speaking: false,
       activeImage: null,
       analysisData: analysis,
+      codeRabbitData: null,
       conflictData: null,
       confirmationData: null,
+      spatialData: null,
+    });
+  },
+
+  showCodeRabbit: (data: CodeRabbitReviewData) => {
+    console.log("[sidebarStore] showCodeRabbit called: pr=", data.prNumber, data.repo);
+    set({
+      visible: true,
+      query: `CodeRabbit Review — PR #${data.prNumber} in ${data.repo}`,
+      response: data.summary,
+      timestamp: Date.now(),
+      speaking: false,
+      activeImage: null,
+      analysisData: null,
+      codeRabbitData: data,
+      conflictData: null,
+      confirmationData: null,
+      spatialData: null,
     });
   },
 
@@ -156,8 +182,10 @@ export const useSidebar = create<SidebarState>((set) => ({
       speaking: false,
       activeImage: null,
       analysisData: null,
+      codeRabbitData: null,
       conflictData: data,
       confirmationData: null,
+      spatialData: null,
     });
   },
 
@@ -171,6 +199,7 @@ export const useSidebar = create<SidebarState>((set) => ({
       speaking: false,
       activeImage: null,
       analysisData: null,
+      codeRabbitData: null,
       conflictData: null,
       confirmationData: data,
       spatialData: null,

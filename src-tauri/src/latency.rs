@@ -23,6 +23,8 @@ pub(crate) struct Turn {
     pub transcript: Option<Instant>,
     pub parsed: Option<Instant>,
     pub answer: Option<Instant>,
+    /// Time spent assembling the memory context for a cloud request (it sits inside the answer stage).
+    pub mem: Option<Duration>,
 }
 
 static TURN: Mutex<Option<Turn>> = Mutex::new(None);
@@ -49,6 +51,16 @@ pub fn mark(stage: Stage) {
             if slot.is_none() {
                 *slot = Some(Instant::now());
             }
+        }
+    }
+}
+
+/// Add the time spent building the memory context for this turn's cloud request. Accumulates if the
+/// context is built more than once (follow-up turns); never blocks.
+pub fn record_mem(spent: Duration) {
+    if let Ok(mut g) = TURN.try_lock() {
+        if let Some(t) = g.as_mut() {
+            t.mem = Some(t.mem.unwrap_or_default() + spent);
         }
     }
 }
@@ -84,6 +96,10 @@ pub(crate) fn format_line(t: &Turn, now: Instant) -> Option<String> {
     }
     parts.push(format!("tts {}ms", ms(prev, now)));
     parts.push(format!("total {}ms", ms(start, now)));
+    if let Some(m) = t.mem {
+        // Informational: already inside "answer", so it is not part of the delta chain above.
+        parts.push(format!("mem {}ms", m.as_millis()));
+    }
     Some(format!("[LAT] {}", parts.join(" | ")))
 }
 
@@ -103,6 +119,7 @@ mod tests {
             transcript: Some(at(b, 322)),
             parsed: Some(at(b, 611)),
             answer: Some(at(b, 1225)),
+            ..Default::default()
         };
         let line = format_line(&t, at(b, 2503)).unwrap();
         assert_eq!(line, "[LAT] stt 322ms | parse 289ms | answer 614ms | tts 1278ms | total 2503ms");
@@ -111,9 +128,19 @@ mod tests {
     #[test]
     fn a_local_command_without_a_cloud_answer_skips_that_stage() {
         let b = Instant::now();
-        let t = Turn { speech_end: Some(b), transcript: Some(at(b, 300)), parsed: Some(at(b, 340)), answer: None };
+        let t = Turn { speech_end: Some(b), transcript: Some(at(b, 300)), parsed: Some(at(b, 340)), ..Default::default() };
         let line = format_line(&t, at(b, 380)).unwrap();
         assert_eq!(line, "[LAT] stt 300ms | parse 40ms | tts 40ms | total 380ms");
+    }
+
+    #[test]
+    fn memory_time_is_reported_separately_and_only_when_recorded() {
+        let b = Instant::now();
+        let mut t = Turn { speech_end: Some(b), transcript: Some(at(b, 300)), answer: Some(at(b, 900)), ..Default::default() };
+        assert!(!format_line(&t, at(b, 1500)).unwrap().contains("mem"));
+        t.mem = Some(Duration::from_millis(7));
+        let line = format_line(&t, at(b, 1500)).unwrap();
+        assert!(line.ends_with("| total 1500ms | mem 7ms"), "{line}");
     }
 
     #[test]

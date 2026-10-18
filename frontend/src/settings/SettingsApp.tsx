@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import { stopTts, type VoicePersona, ICONIC_PERSONAS } from "../audio/ttsPlayer";
 import { initThemeSync, applyThemeMode, resolveThemeMode } from "../sidebar/theme";
 import { McpServersPanel } from "../settings-sidebar/McpServersPanel";
+import { ApiKeyIcon } from "../settings-sidebar/ApiKeyIcons";
 
 /**
  * NEXUS Settings Window
@@ -16,7 +17,7 @@ import { McpServersPanel } from "../settings-sidebar/McpServersPanel";
  *   - Backend: server URL, connection status, credentials
  */
 
-type Tab = "general" | "accounts" | "audio" | "wake" | "privacy" | "backend";
+type Tab = "general" | "accounts" | "connections" | "audio" | "wake" | "privacy" | "backend";
 
 interface Settings {
   autostart: boolean;
@@ -77,7 +78,8 @@ const DEFAULT_SETTINGS: Settings = {
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "general", label: "General", icon: "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" },
-  { id: "accounts", label: "Accounts & Integrations", icon: "M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" },
+  { id: "accounts", label: "Accounts", icon: "M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" },
+  { id: "connections", label: "MCP", icon: "M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" },
   { id: "audio", label: "Audio & Voice", icon: "M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" },
   { id: "wake", label: "Wake Word", icon: "M15 10.5a3 3 0 11-6 0 3 3 0 016 0z M19 10.5a7 7 0 11-14 0 7 7 0 0114 0z" },
   { id: "privacy", label: "Privacy", icon: "M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" },
@@ -88,6 +90,7 @@ export function SettingsApp() {
   const [tab, setTab] = useState<Tab>("general");
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [saved, setSaved] = useState(false);
+  const dirtyFields = useRef<Set<keyof Settings>>(new Set());
   const [serverConnected, setServerConnected] = useState(false);
 
   // Initialize theme synchronization
@@ -99,11 +102,13 @@ export function SettingsApp() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
         invoke("close_settings_window").catch(() => {});
       }
     };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
+    window.addEventListener("keydown", handler, { capture: true });
+    return () => window.removeEventListener("keydown", handler, { capture: true });
   }, []);
 
   // Load settings from Rust on mount
@@ -130,6 +135,7 @@ export function SettingsApp() {
   }, [tab, settings.serverUrl]);
 
   const update = useCallback(<K extends keyof Settings>(key: K, value: Settings[K]) => {
+    dirtyFields.current.add(key);
     setSettings((prev) => ({ ...prev, [key]: value }));
     setSaved(false);
   }, []);
@@ -139,7 +145,14 @@ export function SettingsApp() {
       if (settings.themeMode) {
         applyThemeMode(settings.themeMode);
       }
-      await invoke("save_settings", { settings });
+      // Patch only fields edited here, so this window cannot overwrite a
+      // Telegram chat ID or another setting changed in the Command Hub.
+      const changed = [...dirtyFields.current];
+      if (changed.length) {
+        const patch = Object.fromEntries(changed.map((key) => [key, settings[key]]));
+        await invoke("settings_patch", { patch });
+        dirtyFields.current.clear();
+      }
       // Sync autostart setting with the OS
       try {
         await invoke("set_autostart", { enabled: settings.autostart });
@@ -154,6 +167,7 @@ export function SettingsApp() {
   };
 
   const handleReset = () => {
+    dirtyFields.current = new Set(Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[]);
     setSettings(DEFAULT_SETTINGS);
     setSaved(false);
   };
@@ -217,6 +231,9 @@ export function SettingsApp() {
           )}
           {tab === "accounts" && (
             <AccountsTab />
+          )}
+          {tab === "connections" && (
+            <McpServersPanel style={{ minHeight: "560px", maxHeight: "calc(100vh - 185px)" }} />
           )}
           {tab === "audio" && (
             <AudioTab settings={settings} update={update} />
@@ -743,7 +760,10 @@ function BackendTab({ settings, update, connected }: { settings: Settings; updat
         <div className="nx-section-title">Credentials</div>
         <div className="nx-row">
           <div className="nx-row-label">
-            <span className="nx-row-name">OAuth & API Keys</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <ApiKeyIcon service="generic" size={20} />
+              <span className="nx-row-name">OAuth & API Keys</span>
+            </div>
             <span className="nx-row-hint">Manage Google, GitHub, and API key connections</span>
           </div>
           <button className="nx-btn" onClick={() => invoke("open_setup_window").catch(() => {})}>
@@ -756,7 +776,10 @@ function BackendTab({ settings, update, connected }: { settings: Settings; updat
         <div className="nx-section-title">Cloud STT (Groq)</div>
         <div className="nx-row">
           <div className="nx-row-label">
-            <span className="nx-row-name">Groq API Key</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <ApiKeyIcon service="groq" size={20} />
+              <span className="nx-row-name">Groq API Key</span>
+            </div>
             <span className="nx-row-hint">Free at console.groq.com — 2,000 commands/day, forever free</span>
           </div>
           <input
@@ -1183,10 +1206,6 @@ function AccountsTab() {
         </div>
       </section>
 
-      {/* MCP Servers Connections & Control */}
-      <section className="nx-section" style={{ minHeight: "560px" }}>
-        <McpServersPanel style={{ height: "580px" }} />
-      </section>
     </>
   );
 }

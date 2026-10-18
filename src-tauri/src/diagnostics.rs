@@ -224,6 +224,22 @@ fn check_worker(worker_url: &str) -> ServiceStatus {
     }
 }
 
+/// Authenticated GET for the Worker's /oauth/* routes: sends this device's credentials and,
+/// unlike `http_get`, keeps TLS certificate validation ON (a bearer token goes on the wire).
+fn http_get_authed(url: &str, timeout_ms: u64) -> Result<(u16, String), String> {
+    let start = std::time::Instant::now();
+    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
+    let result = rt.block_on(async {
+        let resp = crate::worker_auth::authed_get(url, Duration::from_millis(timeout_ms)).await?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        Ok::<(u16, String), String>((status, body))
+    });
+    let latency = start.elapsed().as_millis() as u64;
+    LAST_LATENCY.with(|l| l.set(Some(latency)));
+    result
+}
+
 /// Check GitHub and Google OAuth status via the Worker.
 /// Whether the /oauth/status body marks a provider expired.
 /// Shape: {"providers": {"google": {"connected": true, "expired": true}}}.
@@ -266,13 +282,10 @@ fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus
         );
     }
 
-    let status_url = format!(
-        "{}/oauth/status?user_id={}",
-        worker_url.trim_end_matches('/'),
-        user_id
-    );
+    // The Worker derives the owner from this device's credentials, not from a user_id.
+    let status_url = format!("{}/oauth/status", worker_url.trim_end_matches('/'));
 
-    match http_get(&status_url, 10000) {
+    match http_get_authed(&status_url, 10000) {
         Ok((status, body)) if status >= 200 && status < 300 => {
             let latency = get_last_latency().unwrap_or(0);
 
@@ -317,6 +330,17 @@ fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus
 
             (github, google)
         }
+        Ok((status, body)) if status == 401 || status == 403 => {
+            let why = crate::worker_auth::describe_denial(status, &body);
+            (
+                ServiceStatus { name: "GitHub".into(), connected: false, detail: why.clone(), latency_ms: None },
+                ServiceStatus { name: "Google".into(), connected: false, detail: why, latency_ms: None },
+            )
+        }
+        Err(e) if e == crate::worker_auth::NOT_LINKED => (
+            ServiceStatus { name: "GitHub".into(), connected: false, detail: e.clone(), latency_ms: None },
+            ServiceStatus { name: "Google".into(), connected: false, detail: e, latency_ms: None },
+        ),
         _ => {
             let latency = get_last_latency();
             (

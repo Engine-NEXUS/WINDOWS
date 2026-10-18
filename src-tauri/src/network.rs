@@ -81,22 +81,12 @@ static SESSION: once_cell::sync::Lazy<Arc<Mutex<Option<Session>>>> =
 
 /// Generate a RFC 4122 v4 UUID string without pulling a uuid crate.
 pub(crate) fn uuid_v4() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let pid = std::process::id() as u64;
-    let ctr = COUNTER.fetch_add(1, Ordering::Relaxed);
+    use ring::rand::{SecureRandom, SystemRandom};
 
     let mut bytes = [0u8; 16];
-    let a = nanos.wrapping_mul(0x2545F4914F6CDD1D).wrapping_add(ctr);
-    let b = pid.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(nanos ^ ctr);
-    bytes[0..8].copy_from_slice(&a.to_le_bytes());
-    bytes[8..16].copy_from_slice(&b.to_le_bytes());
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .expect("OS random source unavailable");
 
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
@@ -106,6 +96,40 @@ pub(crate) fn uuid_v4() -> String {
         bytes[4], bytes[5], bytes[6], bytes[7],
         bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
     )
+}
+
+/// Validate and normalize the Worker base URL. Transcripts and the device bearer token are
+/// sent here, so it must be https (plain http only for a local dev Worker), carry no
+/// embedded credentials, and old `ws(s)://…/ws` configs are mapped to https.
+pub(crate) fn normalize_worker_url(raw: &str) -> Result<String, String> {
+    let mut u = raw.trim().to_string();
+    if let Some(rest) = u.strip_prefix("wss://") {
+        u = format!("https://{rest}");
+    } else if let Some(rest) = u.strip_prefix("ws://") {
+        u = format!("http://{rest}");
+    }
+    if let Some(stripped) = u.strip_suffix("/ws") {
+        u = stripped.to_string();
+    }
+    let u = u.trim_end_matches('/').to_string();
+
+    if u.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("worker url contains invalid characters".into());
+    }
+    let (scheme, rest) = u
+        .split_once("://")
+        .ok_or_else(|| "worker url must start with https://".to_string())?;
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return Err("worker url has no host or embeds credentials".into());
+    }
+    let host = authority.rsplit_once(':').map_or(authority, |(h, _)| h);
+    let is_local = matches!(host, "localhost" | "127.0.0.1" | "[::1]");
+    match scheme {
+        "https" => Ok(u),
+        "http" if is_local => Ok(u),
+        _ => Err("worker url must be https (http is allowed only for localhost)".into()),
+    }
 }
 
 /// IPC: open a session — just stores the Worker URL + identity.
@@ -118,11 +142,7 @@ pub async fn open_session<R: Runtime>(
     user_id: String,
     device_id: String,
 ) -> Result<String, String> {
-    // Normalize: the URL might be a ws:// URL from old config. Convert to https://.
-    let worker_url = url
-        .replace("ws://", "http://")
-        .replace("wss://", "https://")
-        .replace("/ws", "");  // strip /ws path if present from old config
+    let worker_url = normalize_worker_url(&url)?;
 
     let session_id = uuid_v4();
 
@@ -143,10 +163,13 @@ pub fn open_session_from_config(worker_url: &str, user_id: &str, device_id: &str
     if worker_url.is_empty() || user_id.is_empty() {
         return;
     }
-    let normalized = worker_url
-        .replace("ws://", "http://")
-        .replace("wss://", "https://")
-        .replace("/ws", "");
+    let normalized = match normalize_worker_url(worker_url) {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::warn!("network: saved worker url rejected: {}", e);
+            return;
+        }
+    };
     *SESSION.lock() = Some(Session {
         worker_url: normalized,
         user_id: user_id.to_string(),
@@ -209,8 +232,8 @@ pub async fn send_transcript<R: Runtime>(
     };
     // Feature 88: canonical clients attach the Worker-issued profile_id
     // and authenticate with the device token (OS keyring, never plaintext).
-    let (profile_id, device_token) = {
-        let mut found = (None, None);
+    let (profile_id, device_token, worker_device_id) = {
+        let mut found = (None, None, None);
         if let Ok(dir) = app.path().app_data_dir() {
             let cfg = crate::identity_state::read_identity_config(&dir);
             if cfg.identity == crate::identity_state::IDENTITY_CANONICAL
@@ -220,13 +243,16 @@ pub async fn send_transcript<R: Runtime>(
                 found.1 = crate::auth_vault::get_api_key(
                     crate::identity_state::DEVICE_TOKEN_SERVICE,
                 );
+                // The Worker authenticates by the device id IT issued at claim time.
+                found.2 = Some(crate::identity_state::network_device_id(&dir))
+                    .filter(|d| !d.is_empty());
             }
         }
         found
     };
     let mut requester = serde_json::json!({
         "id": user_id,
-        "device_id": device_id,
+        "device_id": worker_device_id.as_deref().unwrap_or(device_id.as_str()),
     });
     if let Some(p) = &profile_id {
         requester["profile_id"] = serde_json::Value::String(p.clone());
@@ -348,4 +374,62 @@ pub async fn close_session() -> Result<(), String> {
 pub async fn run<R: Runtime>(_app: AppHandle<R>) -> Result<(), String> {
     std::future::pending::<()>().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod worker_url_tests {
+    use super::*;
+
+    #[test]
+    fn https_urls_normalize() {
+        assert_eq!(
+            normalize_worker_url("https://nexus-worker.example.workers.dev/").unwrap(),
+            "https://nexus-worker.example.workers.dev"
+        );
+        assert_eq!(
+            normalize_worker_url("wss://nexus-worker.example.workers.dev/ws").unwrap(),
+            "https://nexus-worker.example.workers.dev"
+        );
+    }
+
+    #[test]
+    fn only_a_trailing_ws_segment_is_stripped() {
+        // The old code removed "/ws" anywhere, mangling e.g. hosts or paths containing it.
+        assert_eq!(
+            normalize_worker_url("https://news.example.com/wsgi").unwrap(),
+            "https://news.example.com/wsgi"
+        );
+    }
+
+    #[test]
+    fn plain_http_only_for_localhost() {
+        assert!(normalize_worker_url("http://localhost:8787").is_ok());
+        assert!(normalize_worker_url("ws://127.0.0.1:8787/ws").is_ok());
+        assert!(normalize_worker_url("http://evil.example.com").is_err());
+        assert!(normalize_worker_url("ws://evil.example.com/ws").is_err());
+    }
+
+    #[test]
+    fn rejects_bad_shapes() {
+        for bad in [
+            "",
+            "worker.example.com",
+            "ftp://worker.example.com",
+            "https://user:pw@worker.example.com",
+            "https://",
+            "https://a.com/x y",
+            "file:///C:/x",
+        ] {
+            assert!(normalize_worker_url(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn uuid_is_v4_shaped_and_unique() {
+        let a = uuid_v4();
+        let b = uuid_v4();
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 36);
+        assert_eq!(a.as_bytes()[14], b'4');
+    }
 }

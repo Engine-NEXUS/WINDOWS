@@ -39,6 +39,10 @@ import {
   gateTranscript, recordDenial, denialStatus, DENIAL_ERROR,
 } from "./entitlement";
 import {
+  authenticateCaller, ownerKeyFor, createOAuthState, consumeOAuthState,
+  escapeHtml, timingSafeEqualStr, corsHeaders, type CallerAuth,
+} from "./route_auth";
+import {
   adminAuth, listPendingProfiles, listProfiles, approveProfile, suspendProfile,
   revokeProfileCascade, revokeDevice, setEntitlement, listProfileEvents,
   type AdminBody,
@@ -1848,19 +1852,24 @@ export default {
     const path = url.pathname;
     const method = request.method;
 
+    // CORS is limited to the desktop WebView origins. Native (non-browser) clients do not
+    // use CORS, so this only stops arbitrary web pages from calling the API with a
+    // victim's browser.
+    const cors = corsHeaders(request);
+
     const json = (data: unknown, status = 200) =>
       new Response(JSON.stringify(data), {
         status,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        headers: { "Content-Type": "application/json", ...cors },
       });
 
     // ---- CORS preflight ----
     if (method === "OPTIONS") {
       return new Response(null, {
         headers: {
-          "Access-Control-Allow-Origin": "*",
+          ...cors,
           "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Nexus-Profile-Id, X-Nexus-Device-Id",
         },
       });
     }
@@ -2013,73 +2022,83 @@ export default {
       return json({ error: "not found" }, 404);
     }
 
-    // ---- User registration ----
-    // ---- OAuth: get auth URL ----
-    if (path === "/oauth/auth-url" && method === "GET") {
-      return handleAuthUrl(url, env, json);
-    }
-
-    // ---- OAuth: browser callback (for testing — exchanges code automatically) ----
+    // ---- OAuth browser callback ----
+    // The provider redirects the user's BROWSER here, so no bearer header is possible.
+    // It is bound to the authenticated /oauth/auth-url request by a single-use state nonce.
     if (path === "/oauth/callback" && method === "GET") {
       return handleOAuthBrowserCallback(url, env, json);
     }
 
-    // ---- OAuth: exchange code for tokens ----
-    if (path === "/oauth/exchange" && method === "POST") {
-      return handleOAuthExchange(request, env, json);
-    }
+    // ---- Credential routes: an approved device must authenticate ----
+    // These hand out or change provider tokens, so a caller-supplied user_id is never
+    // enough: the device bearer token + profile/device ids are verified first, and any
+    // user_id the client names must belong to that profile (see route_auth.ts).
+    if (path.startsWith("/oauth/") || path.startsWith("/apikeys/")) {
+      const store = d1Store(env);
+      const authed = await authenticateCaller(store, request, null, Date.now());
+      if (!authed.ok) return json({ error: authed.code }, authed.status);
 
-    // ---- OAuth: status ----
-    if (path === "/oauth/status" && method === "GET") {
-      return handleOAuthStatus(url, env, json);
-    }
+      // Resolve the owner key for routes that carry user_id in the query string.
+      const queryOwner = async (): Promise<string | Response> => {
+        const owner = await ownerKeyFor(store, authed.profileId, url.searchParams.get("user_id"));
+        return owner.ok ? owner.ownerKey : json({ error: owner.code }, owner.status);
+      };
 
-    // ---- OAuth: get github token (for architect) ----
-    if (path === "/oauth/github-token" && method === "GET") {
-      const userId = url.searchParams.get("user_id") || "";
-      if (!userId) return json({ error: "user_id required" }, 400);
-      const token = await getValidGithubToken(env, userId);
-      if (!token) return json({ error: "GitHub not connected" }, 404);
-      return json({ token });
-    }
+      if (path === "/oauth/auth-url" && method === "GET") {
+        const owner = await queryOwner();
+        if (owner instanceof Response) return owner;
+        return handleAuthUrl(url, env, json, owner);
+      }
+      if (path === "/oauth/exchange" && method === "POST") {
+        return handleOAuthExchange(request, env, json, authed);
+      }
+      if (path === "/oauth/status" && method === "GET") {
+        const owner = await queryOwner();
+        if (owner instanceof Response) return owner;
+        return handleOAuthStatus(owner, env, json);
+      }
+      if (path === "/oauth/github-token" && method === "GET") {
+        const owner = await queryOwner();
+        if (owner instanceof Response) return owner;
+        const token = await getValidGithubToken(env, owner);
+        if (!token) return json({ error: "GitHub not connected" }, 404);
+        return json({ token });
+      }
+      // Google token for the MCP vault (Gmail/Calendar/Contacts/Drive/Sheets/Meet),
+      // refreshed server-side.
+      if (path === "/oauth/google-token" && method === "GET") {
+        const owner = await queryOwner();
+        if (owner instanceof Response) return owner;
+        const token = await getValidGoogleToken(env, owner);
+        if (!token) return json({ error: "Google not connected" }, 404);
+        return json({ token });
+      }
+      if (path === "/oauth/swiggy-token" && method === "GET") {
+        const owner = await queryOwner();
+        if (owner instanceof Response) return owner;
+        const token = await getValidSwiggyToken(env, owner);
+        if (!token) return json({ error: "Swiggy not connected" }, 404);
+        return json({ token });
+      }
+      if (path === "/oauth/disconnect" && method === "DELETE") {
+        return handleOAuthDisconnect(request, env, json, authed);
+      }
 
-    // ---- OAuth: get google token (for MCP vault: Gmail/Calendar/
-    // Contacts/Drive/Sheets/Meet — one union consent, refreshed here) ----
-    if (path === "/oauth/google-token" && method === "GET") {
-      const userId = url.searchParams.get("user_id") || "";
-      if (!userId) return json({ error: "user_id required" }, 400);
-      const token = await getValidGoogleToken(env, userId);
-      if (!token) return json({ error: "Google not connected" }, 404);
-      return json({ token });
-    }
-
-    // ---- OAuth: get swiggy token (for MCP vault — silently refreshed) ----
-    if (path === "/oauth/swiggy-token" && method === "GET") {
-      const userId = url.searchParams.get("user_id") || "";
-      if (!userId) return json({ error: "user_id required" }, 400);
-      const token = await getValidSwiggyToken(env, userId);
-      if (!token) return json({ error: "Swiggy not connected" }, 404);
-      return json({ token });
-    }
-
-    // ---- OAuth: disconnect ----
-    if (path === "/oauth/disconnect" && method === "DELETE") {
-      return handleOAuthDisconnect(request, env, json);
-    }
-
-    // ---- API keys: add ----
-    if (path === "/apikeys/add" && method === "POST") {
-      return handleAddApiKey(request, env, json);
-    }
-
-    // ---- API keys: remove ----
-    if (path === "/apikeys/remove" && method === "DELETE") {
-      return handleRemoveApiKey(request, env, json);
-    }
-
-    // ---- API keys: list ----
-    if (path === "/apikeys/list" && method === "GET") {
-      return handleListApiKeys(url, env, json);
+      // Third-party API keys are no longer stored server-side (they were only base64'd).
+      // Keys live in the OS keychain on the device. Remove/list stay so previously
+      // stored rows can be inspected and purged by their owner.
+      if (path === "/apikeys/add" && method === "POST") {
+        return json({ error: "gone", message: "API keys are stored in the OS keychain on your device, not on the server." }, 410);
+      }
+      if (path === "/apikeys/remove" && method === "DELETE") {
+        return handleRemoveApiKey(request, env, json, authed);
+      }
+      if (path === "/apikeys/list" && method === "GET") {
+        const owner = await queryOwner();
+        if (owner instanceof Response) return owner;
+        return handleListApiKeys(owner, env, json);
+      }
+      return json({ error: "not found" }, 404);
     }
 
     // ---- NLU model distribution (family devices) ----
@@ -2094,7 +2113,7 @@ export default {
       const manifest = await env.CACHE.get("nlu_model_latest");
       if (!manifest) return json({ error: "no model published yet" }, 404);
       return new Response(manifest, {
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        headers: { "Content-Type": "application/json", ...cors },
       });
     }
 
@@ -2114,7 +2133,7 @@ export default {
       return new Response(obj.body, {
         headers: {
           "Content-Type": "application/octet-stream",
-          "Access-Control-Allow-Origin": "*",
+          ...cors,
         },
       });
     }
@@ -2124,7 +2143,7 @@ export default {
       const adminToken = env.NEXUS_ADMIN_TOKEN;
       if (!adminToken) return json({ error: "publish disabled (no admin token)" }, 503);
       const auth = request.headers.get("Authorization") || "";
-      if (auth !== `Bearer ${adminToken}`) return json({ error: "unauthorized" }, 401);
+      if (!timingSafeEqualStr(auth, `Bearer ${adminToken}`)) return json({ error: "unauthorized" }, 401);
       try {
         const body = await request.json() as { version?: string; files?: Record<string, { sha256: string; size: number }> };
         if (!body.version || !body.files || Object.keys(body.files).length === 0) {
@@ -2157,15 +2176,21 @@ async function handleAuthUrl(
   url: URL,
   env: Env,
   json: (d: unknown, s?: number) => Response,
+  ownerKey: string,
 ): Promise<Response> {
   const provider = (url.searchParams.get("provider") || "").toLowerCase();
-  const userId = url.searchParams.get("user_id") || "";
   const codeChallenge = url.searchParams.get("code_challenge") || "";
   const workerOrigin = url.origin;
   const callbackUrl = `${workerOrigin}/oauth/callback`;
 
-  // State format: provider:userId
-  const state = `${provider}:${userId}`;
+  if (!["google", "github", "swiggy"].includes(provider)) {
+    return json({ error: `unsupported provider: ${provider}` }, 400);
+  }
+  // The state is an unguessable single-use nonce bound server-side to the authenticated
+  // owner and provider. The callback can therefore only ever write tokens for the
+  // account that started the flow.
+  if (!env.CACHE) return json({ error: "oauth state storage not configured" }, 503);
+  const state = await createOAuthState(env.CACHE, provider, ownerKey);
 
   if (provider === "google") {
     if (!env.GOOGLE_CLIENT_ID) return json({ error: "Google OAuth not configured" }, 500);
@@ -2222,7 +2247,11 @@ function renderOAuthHtml(
   userId: string,
   accountId = "",
 ): string {
-  const providerDisplay = provider.toLowerCase() === "google" ? "Google" : provider.toLowerCase() === "github" ? "GitHub" : provider.toLowerCase() === "swiggy" ? "Swiggy" : provider;
+  // Everything interpolated below can originate from the URL (error param, provider), so
+  // it is HTML-escaped; the deep link only contains encodeURIComponent output.
+  const providerDisplay = escapeHtml(provider.toLowerCase() === "google" ? "Google" : provider.toLowerCase() === "github" ? "GitHub" : provider.toLowerCase() === "swiggy" ? "Swiggy" : provider);
+  errorMsg = escapeHtml(errorMsg);
+  accountId = escapeHtml(accountId);
   const deepLink = `nexus://oauth/callback?provider=${encodeURIComponent(provider.toLowerCase())}&user_id=${encodeURIComponent(userId)}&status=${success ? "success" : "error"}`;
 
   if (!success) {
@@ -2298,16 +2327,17 @@ async function handleOAuthBrowserCallback(
   const workerOrigin = url.origin;
   const callbackUrl = `${workerOrigin}/oauth/callback`;
 
-  // Parse state: "provider:userId" or legacy "userId"
-  let provider = "";
-  let userId = state;
-  if (state.includes(":")) {
-    const parts = state.split(":");
-    provider = parts[0].toLowerCase();
-    userId = parts.slice(1).join(":");
-  } else {
-    provider = (url.searchParams.get("scope")?.includes("google") || url.searchParams.get("scope")?.includes("calendar")) ? "google" : "github";
+  // The state is a single-use server-side nonce minted by the authenticated /oauth/auth-url
+  // request. It carries the provider and owner, so neither can be forged via the URL.
+  const record = env.CACHE ? await consumeOAuthState(env.CACHE, state) : null;
+  if (!record) {
+    return new Response(
+      renderOAuthHtml("Service", false, "This sign-in link is invalid or has expired. Start the connection again from NEXUS.", ""),
+      { status: 400, headers: { "Content-Type": "text/html; charset=utf-8" } },
+    );
   }
+  const provider = record.provider;
+  const userId = record.ownerKey;
 
   if (error) {
     return new Response(renderOAuthHtml(provider || "Service", false, `Authorization error: ${error}`, userId), {
@@ -2475,6 +2505,7 @@ async function handleOAuthExchange(
   request: Request,
   env: Env,
   json: (d: unknown, s?: number) => Response,
+  authed: Extract<CallerAuth, { ok: true }>,
 ): Promise<Response> {
   let body: any;
   try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
@@ -2482,11 +2513,16 @@ async function handleOAuthExchange(
   const provider = (body.provider || "").toLowerCase();
   const code = body.code || "";
   const codeVerifier = body.code_verifier || "";
-  const userId = body.user_id || "";
   const workerOrigin = new URL(request.url).origin;
   const redirectUri = body.redirect_uri || `${workerOrigin}/oauth/callback`;
 
-  if (!provider || !code || !userId) return json({ error: "missing required fields" }, 400);
+  // Tokens are stored under the authenticated profile (or one of its migrated legacy ids),
+  // never under an arbitrary id named in the body.
+  const owner = await ownerKeyFor(d1Store(env), authed.profileId, body.user_id);
+  if (!owner.ok) return json({ error: owner.code }, owner.status);
+  const userId = owner.ownerKey;
+
+  if (!provider || !code) return json({ error: "missing required fields" }, 400);
 
   try {
     let tokens: any;
@@ -2588,13 +2624,10 @@ async function handleOAuthExchange(
 // ---- OAuth status handler ----
 
 async function handleOAuthStatus(
-  url: URL,
+  userId: string,
   env: Env,
   json: (d: unknown, s?: number) => Response,
 ): Promise<Response> {
-  const userId = url.searchParams.get("user_id") || "";
-  if (!userId) return json({ error: "user_id required" }, 400);
-
   const connected: Record<string, any> = {};
   const now = Date.now() / 1000;
   // We need refresh_token to determine if an expired token can be refreshed
@@ -2626,12 +2659,15 @@ async function handleOAuthDisconnect(
   request: Request,
   env: Env,
   json: (d: unknown, s?: number) => Response,
+  authed: Extract<CallerAuth, { ok: true }>,
 ): Promise<Response> {
   let body: any;
   try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
-  const userId = body.user_id || "";
+  const owner = await ownerKeyFor(d1Store(env), authed.profileId, body.user_id);
+  if (!owner.ok) return json({ error: owner.code }, owner.status);
+  const userId = owner.ownerKey;
   const provider = body.provider || "";
-  if (!userId || !provider) return json({ error: "user_id and provider required" }, 400);
+  if (!provider) return json({ error: "provider required" }, 400);
 
   await env.DB.prepare(
     "DELETE FROM oauth_tokens WHERE user_id = ? AND provider = ?"
@@ -2642,50 +2678,31 @@ async function handleOAuthDisconnect(
 
 // ---- API key handlers ----
 
-async function handleAddApiKey(
-  request: Request,
-  env: Env,
-  json: (d: unknown, s?: number) => Response,
-): Promise<Response> {
-  let body: any;
-  try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
-  const userId = body.user_id || "";
-  const provider = body.provider || "";
-  const apiKey = body.api_key || "";
-  if (!userId || !provider || !apiKey) return json({ error: "missing required fields" }, 400);
-
-  // Base64 obfuscation only (NOT encryption — Worker has no Fernet; D1 is
-  // already encrypted at rest, which is the actual protection). The
-  // NEXUS_ENCRYPTION_KEY secret was removed: it was declared but never read.
-  const obfuscated = btoa(apiKey);
-  const now = Date.now() / 1000;
-  await env.DB.prepare(
-    "INSERT OR REPLACE INTO api_keys (user_id, provider, key_encrypted, created_at) VALUES (?, ?, ?, ?)"
-  ).bind(userId, provider, obfuscated, now).run();
-
-  return json({ ok: true, provider, stored: true });
-}
+// Adding keys is gone (POST /apikeys/add -> 410): the old handler stored them with btoa()
+// only, and nothing in the Worker ever read them back. Remove/list remain so rows stored
+// before this change can be seen and purged by their owner.
 
 async function handleRemoveApiKey(
   request: Request,
   env: Env,
   json: (d: unknown, s?: number) => Response,
+  authed: Extract<CallerAuth, { ok: true }>,
 ): Promise<Response> {
   let body: any;
   try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+  const owner = await ownerKeyFor(d1Store(env), authed.profileId, body.user_id);
+  if (!owner.ok) return json({ error: owner.code }, owner.status);
   await env.DB.prepare(
     "DELETE FROM api_keys WHERE user_id = ? AND provider = ?"
-  ).bind(body.user_id || "", body.provider || "").run();
+  ).bind(owner.ownerKey, body.provider || "").run();
   return json({ ok: true, removed: body.provider });
 }
 
 async function handleListApiKeys(
-  url: URL,
+  userId: string,
   env: Env,
   json: (d: unknown, s?: number) => Response,
 ): Promise<Response> {
-  const userId = url.searchParams.get("user_id") || "";
-  if (!userId) return json({ error: "user_id required" }, 400);
   const result = await env.DB.prepare(
     "SELECT provider FROM api_keys WHERE user_id = ?"
   ).bind(userId).all();
@@ -2737,7 +2754,8 @@ async function handleTranscript(
   const dialogCtx = req.task.dialog_context;
   if (dialogCtx && dialogCtx.pending_intent && dialogCtx.original_request) {
     const combined = `${dialogCtx.original_request} ${req.task.request}`.trim();
-    console.log(`[dialog] follow-up: combining "${dialogCtx.original_request}" + "${req.task.request}" → "${combined}"`);
+    // Lengths only: with observability on, Worker logs persist, and what users say must not.
+    console.log(`[dialog] follow-up: combining ${dialogCtx.original_request.length} + ${req.task.request.length} chars`);
     req.task.request = combined;
   }
 

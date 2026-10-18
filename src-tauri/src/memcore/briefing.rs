@@ -19,8 +19,9 @@ use super::store::Tier;
 pub const MAX_RESUME_AGE_SECS: i64 = 7 * 24 * 3600;
 /// The hello waits for the stage renderer (so orb + caption exist) but never longer than this.
 pub const READY_WAIT_SECS: u64 = 60;
-/// A short settle after the stage is alive (boot is still busy for a moment).
-pub const SETTLE_SECS: u64 = 3;
+/// A short settle after the stage is alive. The hello is a cached clip (no network, no model load),
+/// so there is nothing to wait for; 3 s here was pure added latency (start-menu analysis 2026-10-18).
+pub const SETTLE_SECS: u64 = 1;
 /// The user counts as present with input in the last 5 minutes (they just typed a password at logon;
 /// unknown = assume present). The old 60 s band made an active user wait up to 15 min for nothing.
 pub const PRESENT_WITHIN_SECS: u64 = 300;
@@ -460,7 +461,7 @@ async fn today_events() -> Vec<AgendaItem> {
 async fn wait_until_ready() -> u64 {
     let start = std::time::Instant::now();
     while !crate::stage::is_ready() && start.elapsed().as_secs() < READY_WAIT_SECS {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     tokio::time::sleep(std::time::Duration::from_secs(SETTLE_SECS)).await;
     start.elapsed().as_secs()
@@ -546,6 +547,7 @@ pub fn start_boot_briefing<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         let waited = wait_until_ready().await;
         println!("[BOOT] stage ready after {waited}s (incl. {SETTLE_SECS}s settle)");
+        crate::boot::mark_with("boot_ready", &format!("waited {waited}s incl {SETTLE_SECS}s settle"));
         let Ok(dir) = app.path().app_data_dir() else { return };
         if !super::enabled(&dir) || !super::flag(&dir, "memcoreBriefing", true) {
             println!("[BOOT] skip: memcore or memcoreBriefing disabled");

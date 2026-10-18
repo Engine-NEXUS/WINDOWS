@@ -21,8 +21,8 @@ This directory contains repeatable testing procedures and release gates. Histori
 | Wake word Phase E | [Phase E Real Sample Recording](./wake-word-phase-e-real-sample-recording-2026-09-14.md) | Real microphone recording protocol, acoustic variation, and noise floors |
 | Wake word Decision | [Training Decision 2026-09-15](./wake-word-training-decision-2026-09-15.md) | Final go/no-go release gates and deployment sign-off |
 | Installer | [Installer Testing Checklist](../installer-testing-checklist.md) | Installer-specific validation |
-| Full system | [Full System Test — 2026-09-08](../full-system-test-2026-09-08.md) | Historical end-to-end system test |
-| Historical results | [Test Results — 2026-09-08](../test-results-2026-09-08.md) | Historical test outcome snapshot |
+| Full system | [Full System Test — 2026-09-08](../archive/full-system-test-2026-09-08.md) | Historical end-to-end system test |
+| Historical results | [Test Results — 2026-09-08](../archive/test-results-2026-09-08.md) | Historical test outcome snapshot |
 | Wake word | [Wake-Word Testing Strategy](../wake-word/11-testing-strategy.md) | Wake-word model validation procedure |
 | Wake word Tier 3 | [Tier 3 Testing Strategy](../wake-word/19-tier3-testing-strategy.md) | Wake-word Tier 3 validation |
 | Changelog Snapshot | [Comprehensive Changelog 2026-09-14](./comprehensive-changelog-2026-09-14.md) | Multi-phase training and audit retrospective |
