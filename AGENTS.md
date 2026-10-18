@@ -1,6 +1,12 @@
 # NEXUS — Project Notes
 
 
+## Wake-up sound (2026-10-18)
+
+- **Built**: `src-tauri/src/wake_cue.rs`: five synthesized earcons (rise default, glass, pluck, triplet, sweep) played at the wake-word fire (`wakeword_oww.rs`, before `start_stt_capture`) and on Ctrl+Space from idle (`hotkey.rs`). Own on-demand rodio stream (closes 20 s after use, `prewarm()` at the wake candidate), no TTS counters / volume lease / keep-awake. **Echo guard**: while the cue plays (+120 ms) the capture loop does not count chunks as voiced (audio still buffered). Silent in meetings, Ghost hot-mic, empty-transcript retries and the confirm/offer windows. Settings `wakeSound` / `wakeSoundStyle` / `wakeSoundVolume` (Command Hub > Audio > Wake Sound, with Play buttons; IPC `preview_wake_sound`). Record: `docs/changes/138-wake-up-sound.md`.
+- **Verify**: 10 unit tests + wiring pin, 5 mutations killed, vitest 363, tsc. **Not run**: anything audible (needs a rebuild and your ears), echo/clipping with a real mic, Bluetooth, latency (`[CUE]` log lines). Listen without the app: `cargo test --lib write_candidate_wavs -- --ignored`.
+- **Known failing (not from this work)**: 3 `intent_parser` PR-list tests expect `ListPrs` but "open pr list" now parses as `OpenGitHubDashboard` (the GitHub dashboard feature, `docs/GITHUB_DASHBOARD_SPEC.md`); another session is mid-way on it.
+
 ## Memory v2: baseline, profile + synonyms, corrections, routines (2026-10-18)
 
 - **Plan** (ported from Hermes Agent's design, Rust-native, no Hermes runtime): `docs/memory-core/07-memory-v2-baseline.md`. Phases M0-M5 built (the plan is complete; nothing run live).

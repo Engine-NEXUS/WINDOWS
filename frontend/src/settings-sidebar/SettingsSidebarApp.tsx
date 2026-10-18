@@ -16,6 +16,7 @@ import "./hub/hub.css";
 import { HubHome, type HubPage } from "./hub/HubHome";
 import { ApiKeysPage } from "./hub/ApiKeysPage";
 import { MemoryPage } from "./hub/MemoryPage";
+import { WAKE_SOUNDS, clampWakeVolume, normalizeWakeSound } from "./wakeSounds";
 import { ActionsPage } from "./hub/ActionsPage";
 import { useAccounts, useInsights } from "./hub/useHubData";
 import { McpServersPanel } from "./McpServersPanel";
@@ -51,6 +52,9 @@ interface Settings {
   ttsVoice: string;
   speechRate: number;
   ttsVolume: number;
+  wakeSound?: boolean;
+  wakeSoundStyle?: string;
+  wakeSoundVolume?: number;
   ttsProvider: string;
   groqApiKey: string;
   edgeTtsVoice: string;
@@ -157,6 +161,9 @@ const DEFAULT_SETTINGS: Settings = {
   ttsVoice: "en-US-AvaNeural",
   speechRate: 1.15,
   ttsVolume: 75,
+  wakeSound: true,
+  wakeSoundStyle: "rise",
+  wakeSoundVolume: 70,
   ttsProvider: "edge",
   groqApiKey: "",
   edgeTtsVoice: "en-US-AvaNeural",
@@ -1005,7 +1012,7 @@ function AudioTab({ settings, update }: {
           </div>
           <div className="setting-control">
             <button
-              className="settings-btn"
+              className="settings-btn settings-btn--glass"
               style={{
                 background: "rgba(168, 85, 247, 0.15)",
                 borderColor: "rgba(168, 85, 247, 0.4)",
@@ -1041,6 +1048,64 @@ function AudioTab({ settings, update }: {
               <option value="butler">Butler (formal)</option>
               <option value="friend">Friend (casual)</option>
             </select>
+          </div>
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Wake Sound</div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Play a sound when NEXUS wakes</div>
+            <div className="setting-desc">So you know it heard you without looking at the screen. Silent during meetings.</div>
+          </div>
+          <div className="setting-control">
+            <div
+              className={`settings-toggle ${settings.wakeSound !== false ? "settings-toggle--on" : ""}`}
+              onClick={() => update("wakeSound", settings.wakeSound === false)}
+            />
+          </div>
+        </div>
+        {WAKE_SOUNDS.map((w) => {
+          const chosen = normalizeWakeSound(settings.wakeSoundStyle) === w.key;
+          return (
+            <div className="setting-row" key={w.key}>
+              <div>
+                <div className="setting-label">
+                  {chosen ? "● " : "○ "}
+                  {w.label}
+                </div>
+                <div className="setting-desc">{w.blurb}</div>
+              </div>
+              <div className="setting-control">
+                <button
+                  className="settings-btn settings-btn--glass"
+                  onClick={() => invoke("preview_wake_sound", { style: w.key, volume: clampWakeVolume(settings.wakeSoundVolume) }).catch(() => {})}
+                >
+                  ▶ Play
+                </button>
+                <button className="settings-btn settings-btn--glass" disabled={chosen} onClick={() => update("wakeSoundStyle", w.key)}>
+                  {chosen ? "Selected" : "Use this"}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Wake sound level</div>
+            <div className="setting-desc">On top of your system volume</div>
+          </div>
+          <div className="setting-control">
+            <input
+              type="range"
+              className="settings-slider"
+              min={0}
+              max={100}
+              value={clampWakeVolume(settings.wakeSoundVolume)}
+              onChange={(e) => update("wakeSoundVolume", parseInt(e.target.value))}
+            />
+            <span className="slider-value">{clampWakeVolume(settings.wakeSoundVolume)}%</span>
           </div>
         </div>
       </div>
@@ -1411,7 +1476,7 @@ function AuthTab({ settings, update }: {
 
         <div style={{ marginTop: 8 }}>
           <button
-            className="settings-btn"
+            className="settings-btn settings-btn--glass"
             style={{ fontSize: 10, opacity: 0.7 }}
             onClick={() => setShowCustomCreds(!showCustomCreds)}
           >
@@ -1668,7 +1733,7 @@ function GeminiKeyTest() {
   return (
     <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8 }}>
       <button
-        className="settings-btn"
+        className="settings-btn settings-btn--glass"
         disabled={state === "testing"}
         onClick={runTest}
       >

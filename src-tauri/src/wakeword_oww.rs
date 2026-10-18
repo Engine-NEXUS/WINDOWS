@@ -1694,8 +1694,13 @@ pub(crate) mod engine {
 
                     let underway = super::STT_SPEECH_DETECTED.load(Ordering::Relaxed);
                     // Neural VAD when loaded (vadSilero), else the RMS hysteresis — see chunk_voice_flags.
-                    let (cont_voice, start_voice) =
-                        super::chunk_voice_flags(rms, super::silero_chunk_prob(&chunk));
+                    // While the wake sound is audible the mic hears it (no echo cancellation): the audio is still
+                    // buffered, but it must not count as speech or arm the endpoint.
+                    let (cont_voice, start_voice) = if crate::wake_cue::window_active_now() {
+                        (false, false)
+                    } else {
+                        super::chunk_voice_flags(rms, super::silero_chunk_prob(&chunk))
+                    };
                     if if underway { cont_voice } else { start_voice } {
                         // Speech resumed after a real pause (2+ silent chunks)?
                         // Count it — hesitant speakers get a patient endpoint.
@@ -3958,6 +3963,8 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
             tracing::debug!("wake-word: consecutive candidate suppressed by 1.5s cooldown");
             continue;
         }
+        // Open the wake-sound output now (verification can take 250 ms+), so the cue at the fire is instant.
+        crate::wake_cue::prewarm();
 
         // ── Phase D: Speaker verification ──────────────────────────
         // BEFORE the cooldown store: a rejected stranger must not burn
@@ -4051,6 +4058,9 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         // new turn. Idempotent when idle: safe on every fire.
         crate::orchestrator::request_barge_in("wake-fire");
         let _ = tauri::Emitter::emit(&app, "tts:stop", ());
+
+        // "I heard you" sound. Before capture starts so the echo guard window is already armed.
+        crate::wake_cue::play_for_wake(&app);
 
         // Start Rust-side STT capture immediately.
         // The cpal stream is already running and just detected the wake word,

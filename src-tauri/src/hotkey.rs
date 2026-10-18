@@ -134,6 +134,9 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                     tracing::info!("hotkey: Groq cloud STT configured, skipping local sidecar pre-start (saves RAM)");
                 }
 
+                // "I heard you" sound (skipped in meetings / when switched off), then capture.
+                crate::wake_cue::play_for_wake(&handle);
+
                 // Start Rust-side STT capture (same as wake word path).
                 crate::wakeword_oww::start_stt_capture();
                 crate::window_manager::wake_orb_src(&handle, "hotkey");

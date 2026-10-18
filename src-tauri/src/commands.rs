@@ -1076,9 +1076,9 @@ pub fn sidebar_geometry(
             center_xy(w, h)
         }
         "pr-list" | "github-dashboard" => {
-            let w = (monitor_w - 40.0).min(720.0).max(520.0);
-            let h = (monitor_h - 40.0).min(1040.0).max(500.0);
-            if dock == Some("center") { center_xy(w, h) } else { dock_x(w, h) }
+            // Exact same size as Settings — 400px wide, covering from top margin down to screen edge.
+            let h = (monitor_h - 40.0).min(1040.0).max(400.0);
+            if dock == Some("center") { center_xy(400.0, h) } else { dock_x(400.0, h) }
         }
         // "assistant" | fallback → default right dock, full height.
         _ => {
@@ -1602,6 +1602,14 @@ pub fn set_orb_capsule_style<R: Runtime>(
     Ok(())
 }
 
+/// IPC: Play one wake-sound candidate (Command Hub preview / audition). `style` is rise | glass | pluck |
+/// triplet | sweep; `volume` 0-100.
+#[tauri::command]
+pub fn preview_wake_sound(style: String, volume: u8) -> Result<(), String> {
+    crate::wake_cue::play_preview(&style, volume);
+    Ok(())
+}
+
 /// IPC: Trigger test wakeup animation on desktop.
 #[tauri::command]
 pub fn test_wake_orb<R: Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
@@ -1887,6 +1895,15 @@ pub struct NexusSettings {
     /// cloud request. Memory page switch; the egress log shows exactly what was sent.
     #[serde(default = "default_memcore")]
     pub memcore_profile: bool,
+    /// Play a short "I heard you" sound the instant NEXUS wakes (wake word or Ctrl+Space).
+    #[serde(default = "default_memcore")]
+    pub wake_sound: bool,
+    /// Which sound: rise | glass | pluck | triplet | sweep.
+    #[serde(default = "default_wake_sound_style")]
+    pub wake_sound_style: String,
+    /// Wake sound level, 0-100 (on top of the system volume).
+    #[serde(default = "default_wake_sound_volume")]
+    pub wake_sound_volume: u8,
     /// Notice command sequences the user repeats and offer to save them as a one-phrase routine.
     #[serde(default = "default_memcore")]
     pub memcore_routines: bool,
@@ -1961,6 +1978,14 @@ fn default_tts_provider() -> String {
 
 fn default_tts_volume() -> u8 {
     75
+}
+
+fn default_wake_sound_style() -> String {
+    "rise".to_string()
+}
+
+fn default_wake_sound_volume() -> u8 {
+    crate::wake_cue::DEFAULT_VOLUME
 }
 
 fn default_edge_tts_voice() -> String {
@@ -2200,6 +2225,9 @@ impl Default for NexusSettings {
             memcore_profile: default_memcore(),
             memcore_routines: default_memcore(),
             memcore_review: false,
+            wake_sound: true,
+            wake_sound_style: default_wake_sound_style(),
+            wake_sound_volume: default_wake_sound_volume(),
             memcore_timetable: default_memcore(),
             memcore_mail: default_memcore(),
             memcore_whatsapp: false,
@@ -3720,9 +3748,9 @@ mod sidebar_geometry_tests {
 
     #[test]
     fn pr_list_uses_right_dock() {
-        // x = 1920 - 720 - 10 = 1190, y = 20, h = 1040 (720px expanded width)
+        // x = 1920 - 400 - 10 = 1510, y = 20, h = 1040 (400px same as settings)
         let (x, y, w, h) = sidebar_geometry("pr-list", None, 1920.0, 1080.0);
-        assert_eq!((x, y, w, h), (1190.0, 20.0, 720.0, 1040.0));
+        assert_eq!((x, y, w, h), (1510.0, 20.0, 400.0, 1040.0));
     }
 
     #[test]

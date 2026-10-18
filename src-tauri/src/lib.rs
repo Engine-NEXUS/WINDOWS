@@ -62,6 +62,7 @@ mod stt_learning;
 mod stt_stream;
 mod tts;
 mod speech_sync;
+mod wake_cue;
 pub mod tts_edge;
 mod tts_network;
 mod contacts_book;
@@ -1096,6 +1097,7 @@ pub fn run() {
             commands::set_orb_morphology,
             commands::set_orb_capsule_style,
             commands::test_wake_orb,
+            commands::preview_wake_sound,
             commands::get_settings,
             commands::save_settings,
             commands::settings_patch,
