@@ -369,7 +369,7 @@ pub fn parse_command(text: &str) -> Option<PlanCommand> {
             "don't shut down after", "do not shut down after", "dont shut down after", "don't shut down when", "do not shut down when",
             "dont shut down when", "don't power off after", "do not power off after", "don't turn off after", "do not turn off after",
         ],
-    ) && (has(&p, "it") || has(&p, "it's") || has(&p, "this") || has(&p, "claude") || has(&p, "the session") || has(&p, "that"))
+    ) && (has(&p, "it") || has(&p, "it's") || has(&p, "this") || has_any(&p, &["claude", "codex", "antigravity", "agy", "opencode", "gemini", "cursor", "aider"]) || has(&p, "the session") || has(&p, "that"))
     {
         return Some(PlanCommand::Cancel);
     }
@@ -391,7 +391,7 @@ pub fn parse_command(text: &str) -> Option<PlanCommand> {
     const EVEN_VOCAB: &[&str] = &[
         "shut", "down", "shutdown", "power", "off", "turn", "even", "if", "it", "fails", "fail", "failed", "errors", "error", "something",
         "breaks", "goes", "wrong", "regardless", "no", "matter", "what", "whatever", "happens", "do", "go", "ahead", "and", "the", "laptop",
-        "computer", "pc", "my", "still", "anyway", "plan", "either", "way", "that", "when", "claude", "finishes", "is", "done", "a", "problem", "problems",
+        "computer", "pc", "my", "still", "anyway", "plan", "either", "way", "that", "when", "claude", "codex", "antigravity", "agy", "opencode", "gemini", "cursor", "aider", "finishes", "is", "done", "a", "problem", "problems",
         "there", "are",
     ];
     if (has(&p, "even if") || has(&p, "no matter what") || has(&p, "whatever happens") || has(&p, "regardless"))
@@ -479,6 +479,7 @@ mod tests {
             "shut down even if it fails", "shut down even if something goes wrong", "power off no matter what",
             "shut down my laptop regardless", "shut down whatever happens", "turn off even if there are errors", "shut down even if it breaks",
             "go ahead and shut down even if it fails", "nexus shut down even if it fails",
+            "shut down even if antigravity fails", "shut down when opencode finishes even if it fails", "shut down even if cursor fails",
         ] {
             assert_eq!(parse_command(t), Some(PlanCommand::EvenIfFails), "{t}");
         }
@@ -501,7 +502,7 @@ mod tests {
             "what are you doing", "what is the weather", "are you listening", "restart the app instead", "restart nexus instead",
             "play music instead", "make it louder", "change that to red", "change the volume to ten", "lock the door instead",
             "shut down notepad even if it fails", "run the tests even if it fails", "don't shut down even if it fails", "do not power off even if it fails", "open chrome no matter what", "do it even if it fails",
-            "don't shut down my laptop", "never mind", "just tell me", "just tell me when it's done", "tell me when claude finishes",
+            "don't shut down my laptop", "never mind", "just tell me", "just tell me when it's done", "tell me when claude finishes", "tell me when antigravity finishes",
             "sleep", "make it sleep", "i'll sleep instead of working", "cancel the shutdown", "shut down my laptop",
         ] {
             assert_eq!(parse_command(t), None, "{t:?}");

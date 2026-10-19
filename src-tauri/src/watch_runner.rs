@@ -400,6 +400,7 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
         let roots = find_roots(Some(agent.name()), &snaps, None, std::process::id());
         let tree = tree_snaps(&roots, &snaps);
         let hook_tail = agent_hooks::last_stop_tail(agent);
+        let stop_info = agent_hooks::last_stop_info(agent);
         let mut ev = observer.step(Inputs {
             now_ms,
             tree: &tree,
@@ -407,6 +408,8 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
             hook_stopped: agent_hooks::stop_is_latest(agent, stored.created_ms),
             hook_tail: hook_tail.as_deref(),
             hook_needs_user: agent_hooks::needs_user(agent, stored.created_ms),
+            hook_failed: stop_info.ok == Some(false),
+            hook_not_idle: stop_info.fully_idle == Some(false),
         });
 
         // ── decide ──
@@ -942,6 +945,8 @@ mod tests {
                 hook_stopped,
                 hook_tail: if hook_stopped { Some(tail) } else { None },
                 hook_needs_user: false,
+                hook_failed: false,
+                hook_not_idle: false,
             });
             let obs = Obs {
                 now_ms: t,

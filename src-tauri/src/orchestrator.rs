@@ -5582,14 +5582,33 @@ async fn run_watch_then_power<R: Runtime>(
     // "this session": the agent in the window in front, when it can be told
     if plan.agent.is_none() {
         let title = crate::live::commands::window::get_foreground_window_title().unwrap_or_default().to_lowercase();
-        plan.agent = ["claude", "codex"].iter().find(|a| title.contains(**a)).map(|a| (*a).to_string());
+        plan.agent = crate::agent_hooks::agent_in_title(&title).map(|a| a.name().to_string());
+        if plan.agent.is_none() {
+            // a terminal window does not name its agent: look for one in the processes below the window's process
+            plan.agent = tauri::async_runtime::spawn_blocking(|| {
+                let fg = crate::browser_url::foreground_pid()?;
+                let snaps = crate::session_observer::ProcSampler::new().sample();
+                crate::agent_hooks::agent_under(fg, &snaps, std::process::id())
+            })
+            .await
+            .ok()
+            .flatten()
+            .map(|a| a.name().to_string());
+        }
     }
     let hookable = plan.agent.as_deref().and_then(crate::agent_hooks::Agent::from_name);
+    let named_unhookable = plan.agent.clone().filter(|_| hookable.is_none());
     crate::power_plan::set(plan);
     let mode = crate::watch_runner::read_mode(&app);
     let held = crate::power_plan::run(&crate::power_plan::PlanCommand::Status, mode);
     let note = match hookable {
-        None => " But I can only tell when Claude Code or Codex stops, and I couldn't tell which one this is, so I'm not watching yet; say watch Claude, or watch Codex, with the rest.".to_string(),
+        None => match named_unhookable {
+            Some(name) => format!(" But I can't tell when {name} stops yet. I can watch {}, so I'm not watching this one.", crate::agent_hooks::Agent::spoken_list()),
+            None => format!(
+                " But I can only tell when {} stops, and I couldn't tell which one this is, so I'm not watching yet; say which one, for example watch Claude, with the rest.",
+                crate::agent_hooks::Agent::spoken_list()
+            ),
+        },
         Some(a) => {
             let hooked = crate::agent_hooks::config_path(a).map_or(false, |c| crate::agent_hooks::is_installed(a, &c));
             if !hooked {
@@ -5626,14 +5645,15 @@ fn install_agent_hook<R: Runtime>(app: &AppHandle<R>, agent: crate::agent_hooks:
         Ok(p) => p,
         Err(e) => return e.spoken(agent),
     };
-    match crate::agent_hooks::install(agent, &cfg, &script) {
+    let target = crate::agent_hooks::HookTarget { script: &script, token: &token, port: crate::webhook::WEBHOOK_PORT };
+    match crate::agent_hooks::install(agent, &cfg, &target) {
         Ok(done) => {
             crate::watch_runner::ensure_running(app.clone());
             format!(
-            "Done, sir. {} will now tell me when it stops.{} Start a new {} session for it to take effect.",
+            "Done, sir. {} will now tell me when it stops.{} {}",
             agent.label(),
             if done.backup.is_some() { " A backup of its settings is saved beside the file." } else { "" },
-            agent.label()
+            agent.restart_note()
             )
         }
         Err(e) => e.spoken(agent),
@@ -5650,10 +5670,14 @@ async fn run_agent_hook_command<R: Runtime>(app: AppHandle<R>, action: String, a
     let speech = match action {
         crate::agent_hooks::HookAction::Connect => {
             crate::memcore::offer::set(crate::memcore::offer::Offer::HookSetup { agent: agent.name().to_string() }, true);
-            format!(
-                "To know when {} stops I'd add a small stop hook to its settings file, with a backup first. Shall I, sir?",
-                agent.label()
-            )
+            if agent == crate::agent_hooks::Agent::OpenCode {
+                "To know when OpenCode stops I'd add a small plugin file of my own to its plugins folder; I wouldn't touch its settings. Shall I, sir?".to_string()
+            } else {
+                format!(
+                    "To know when {} stops I'd add a small stop hook to its settings file, with a backup first. Shall I, sir?",
+                    agent.label()
+                )
+            }
         }
         crate::agent_hooks::HookAction::Disconnect => match cfg.as_deref().map(|c| crate::agent_hooks::uninstall(agent, c)) {
             Some(Ok(true)) => format!("Done, sir. I removed my hook from {}; nothing else in its settings was touched.", agent.label()),

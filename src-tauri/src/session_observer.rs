@@ -239,6 +239,10 @@ pub struct Inputs<'a> {
     pub hook_tail: Option<&'a str>,
     /// A permission prompt is waiting for the user (from the agent's Notification hook).
     pub hook_needs_user: bool,
+    /// The agent's Stop event says it stopped on an error or an abort (Antigravity, Cursor).
+    pub hook_failed: bool,
+    /// The agent's Stop event says background work is still running (Antigravity's `fullyIdle: false`).
+    pub hook_not_idle: bool,
 }
 
 #[derive(Debug, Default)]
@@ -270,10 +274,10 @@ impl Observer {
         Evidence {
             signals,
             tail,
-            exit_ok: None,
+            exit_ok: if i.hook_failed { Some(false) } else { None },
             waiting_for_user: read.waiting || i.hook_needs_user,
             login_required: read.login,
-            still_busy: read.busy || self.idle.active_now(),
+            still_busy: read.busy || self.idle.active_now() || i.hook_not_idle,
             model: ModelVerdict::Unavailable,
         }
     }
@@ -460,7 +464,35 @@ mod tests {
     }
 
     fn run(obs: &mut Observer, now: u64, tree: &[ProcSnap], text: Option<&str>, hook: bool) -> Evidence {
-        obs.step(Inputs { now_ms: now, tree, window_text: text, hook_stopped: hook, hook_tail: None, hook_needs_user: false })
+        obs.step(Inputs { now_ms: now, tree, window_text: text, hook_stopped: hook, hook_tail: None, hook_needs_user: false, hook_failed: false, hook_not_idle: false })
+    }
+
+    /// A hook that says the agent stopped on an error / abort, or that background work is still running (Antigravity
+    /// `fullyIdle:false`), turns an otherwise clean finish into "not a go".
+    #[test]
+    fn a_stop_that_reports_an_error_or_background_work_is_never_a_go() {
+        let tree = quiet_tree();
+        let done = "Implemented it.\nAll 12 tests passed.\nDone.";
+        for (failed, not_idle, want_go) in [(false, false, true), (true, false, false), (false, true, false), (true, true, false)] {
+            let mut o = Observer::default();
+            let mut ev = None;
+            for s in 0..=8 {
+                ev = Some(o.step(Inputs {
+                    now_ms: s * 10_000,
+                    tree: &tree,
+                    window_text: None,
+                    hook_stopped: true,
+                    hook_tail: Some(done),
+                    hook_needs_user: false,
+                    hook_failed: failed,
+                    hook_not_idle: not_idle,
+                }));
+            }
+            let ev = ev.unwrap();
+            assert_eq!(judge(&ev, true) == Verdict::Go, want_go, "failed={failed} not_idle={not_idle}: {:?}", judge(&ev, true));
+            assert_eq!(ev.exit_ok, if failed { Some(false) } else { None });
+            assert_eq!(ev.still_busy, not_idle);
+        }
     }
 
     #[test]

@@ -299,6 +299,17 @@ pub(crate) fn browser_document_rect() -> Option<(i32, i32, i32, i32)> {
     Some((x, y, r.get_right() - x, r.get_bottom() - y))
 }
 
+/// Process id of the foreground window (None when it cannot be read; always None off Windows).
+#[cfg(target_os = "windows")]
+pub(crate) fn foreground_pid() -> Option<u32> {
+    get_foreground_process_id()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn foreground_pid() -> Option<u32> {
+    None
+}
+
 #[cfg(target_os = "windows")]
 fn get_foreground_process_id() -> Option<u32> {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};

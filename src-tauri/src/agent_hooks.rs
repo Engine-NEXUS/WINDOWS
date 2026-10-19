@@ -27,13 +27,33 @@ const MAX_EVENTS: usize = 64;
 pub enum Agent {
     Claude,
     Codex,
+    Antigravity,
+    OpenCode,
+    Gemini,
+    Cursor,
+    Aider,
 }
+
+pub const ALL_AGENTS: [Agent; 7] = [
+    Agent::Claude,
+    Agent::Codex,
+    Agent::Antigravity,
+    Agent::OpenCode,
+    Agent::Gemini,
+    Agent::Cursor,
+    Agent::Aider,
+];
 
 impl Agent {
     pub fn name(self) -> &'static str {
         match self {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
+            Agent::Antigravity => "antigravity",
+            Agent::OpenCode => "opencode",
+            Agent::Gemini => "gemini",
+            Agent::Cursor => "cursor",
+            Agent::Aider => "aider",
         }
     }
 
@@ -41,14 +61,47 @@ impl Agent {
         match self {
             Agent::Claude => "Claude Code",
             Agent::Codex => "Codex",
+            Agent::Antigravity => "Antigravity",
+            Agent::OpenCode => "OpenCode",
+            Agent::Gemini => "Gemini CLI",
+            Agent::Cursor => "Cursor",
+            Agent::Aider => "Aider",
         }
     }
 
+    /// The machine name ("claude") or a name the speech engine and `watch_power` use ("agy").
     pub fn from_name(s: &str) -> Option<Agent> {
         match s {
             "claude" => Some(Agent::Claude),
             "codex" => Some(Agent::Codex),
+            "antigravity" | "agy" => Some(Agent::Antigravity),
+            "opencode" | "open code" | "open-code" => Some(Agent::OpenCode),
+            "gemini" => Some(Agent::Gemini),
+            "cursor" => Some(Agent::Cursor),
+            "aider" => Some(Agent::Aider),
             _ => None,
+        }
+    }
+
+    /// "Claude Code, Codex, Antigravity, OpenCode, Gemini CLI, Cursor or Aider", for a spoken line.
+    pub fn spoken_list() -> String {
+        let labels: Vec<&str> = ALL_AGENTS.iter().map(|a| a.label()).collect();
+        match labels.split_last() {
+            Some((last, rest)) => format!("{} or {}", rest.join(", "), last),
+            None => String::new(),
+        }
+    }
+
+    /// What the user has to do for a new hook to be read.
+    pub fn restart_note(self) -> &'static str {
+        match self {
+            Agent::Claude => "Start a new Claude Code session for it to take effect.",
+            Agent::Codex => "Start a new Codex session for it to take effect.",
+            Agent::Antigravity => "Start a new Antigravity session for it to take effect.",
+            Agent::OpenCode => "Restart OpenCode so it loads the plugin.",
+            Agent::Gemini => "Start a new Gemini CLI session. If its hooks are switched off in its settings, I did not change that.",
+            Agent::Cursor => "Restart Cursor so it reads the hook.",
+            Agent::Aider => "Start a new Aider session for it to take effect.",
         }
     }
 }
@@ -60,6 +113,17 @@ pub enum EventKind {
     Notification,
     /// The user sent a new prompt: a new turn began, so an older stop no longer counts.
     Start,
+    /// A reply of the agent's, sent on its own before the stop (Cursor's `afterAgentResponse`).
+    Message,
+}
+
+/// What a Stop event says about HOW the agent stopped, when the agent says. Only ever makes the verdict stricter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StopInfo {
+    /// `Some(false)` = the agent reported an error / an abort. `Some(true)` = it reported a normal finish.
+    pub ok: Option<bool>,
+    /// `Some(false)` = the agent says background work is still running (Antigravity's `fullyIdle`).
+    pub fully_idle: Option<bool>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -108,28 +172,47 @@ pub const SCRIPT_NAME: &str = "nexus-agent-event.cmd";
 #[cfg(not(windows))]
 pub const SCRIPT_NAME: &str = "nexus-agent-event.sh";
 
-/// `script <agent> <stop|notification|start> [ignored extra arguments]`. The agent and event travel in the URL;
-/// the BODY is whatever the agent's hook gives on stdin (Claude Code sends JSON with its last message). Codex
-/// appends its own JSON as an extra argument, which is ignored. The token lives only in this file (user's app
-/// data), not in any agent config.
+/// `script <agent> <stop|notification|start|message> [ignored extra arguments]`. The agent and event travel in the
+/// URL; the BODY is whatever the agent's hook gives on stdin (Claude Code sends JSON with its last message). Codex
+/// appends its own JSON as an extra argument, which is ignored. Aider's notification command has no stdin, so for
+/// Aider the body is the working directory (its chat history is read from there). The script prints a neutral JSON
+/// line and always exits 0, so it can never block an agent: `{}`, or `{"continue":true}` for Cursor, whose prompt
+/// hook blocks the prompt without it. The token lives only in this file (user's app data), not in any agent config.
+#[cfg(windows)]
+const SCRIPT_TEMPLATE: &str = "@echo off\r\n\
+rem NEXUS agent hook: tells NEXUS that an agent stopped. Remove with \"disconnect <agent>\".\r\n\
+set AG=%~1\r\n\
+set EV=%~2\r\n\
+if \"%EV%\"==\"\" set EV=stop\r\n\
+if /i \"%AG%\"==\"aider\" goto aider\r\n\
+curl.exe -s -m 3 -X POST \"http://127.0.0.1:@PORT@/agent-event?agent=%AG%&event=%EV%\" -H \"Authorization: Bearer @TOKEN@\" -H \"Content-Type: application/json\" --data-binary @- >nul 2>&1\r\n\
+goto out\r\n\
+:aider\r\n\
+curl.exe -s -m 3 -X POST \"http://127.0.0.1:@PORT@/agent-event?agent=%AG%&event=%EV%\" -H \"Authorization: Bearer @TOKEN@\" --data-urlencode \"cwd=%CD%\" >nul 2>&1\r\n\
+:out\r\n\
+if /i \"%AG%\"==\"cursor\" goto cursor\r\n\
+echo {}\r\n\
+exit /b 0\r\n\
+:cursor\r\n\
+echo {\"continue\":true}\r\n\
+exit /b 0\r\n";
+
+#[cfg(not(windows))]
+const SCRIPT_TEMPLATE: &str = "#!/bin/sh\n\
+# NEXUS agent hook: tells NEXUS that an agent stopped.\n\
+AG=\"$1\"\n\
+EV=\"${2:-stop}\"\n\
+URL=\"http://127.0.0.1:@PORT@/agent-event?agent=$AG&event=$EV\"\n\
+if [ \"$AG\" = \"aider\" ]; then\n\
+  curl -s -m 3 -X POST \"$URL\" -H \"Authorization: Bearer @TOKEN@\" --data-urlencode \"cwd=$PWD\" >/dev/null 2>&1\n\
+else\n\
+  curl -s -m 3 -X POST \"$URL\" -H \"Authorization: Bearer @TOKEN@\" -H \"Content-Type: application/json\" --data-binary @- >/dev/null 2>&1\n\
+fi\n\
+if [ \"$AG\" = \"cursor\" ]; then echo '{\"continue\":true}'; else echo '{}'; fi\n\
+exit 0\n";
+
 pub fn script_text(token: &str, port: u16) -> String {
-    #[cfg(windows)]
-    {
-        format!(
-            "@echo off\r\nrem NEXUS agent hook: tells NEXUS that an agent stopped. Remove with \"disconnect <agent>\".\r\n\
-             set EV=%~2\r\nif \"%EV%\"==\"\" set EV=stop\r\n\
-             curl.exe -s -m 3 -X POST \"http://127.0.0.1:{port}/agent-event?agent=%~1&event=%EV%\" -H \"Authorization: Bearer {token}\" \
-             -H \"Content-Type: application/json\" --data-binary @- >nul 2>&1\r\nexit /b 0\r\n"
-        )
-    }
-    #[cfg(not(windows))]
-    {
-        format!(
-            "#!/bin/sh\n# NEXUS agent hook: tells NEXUS that an agent stopped.\nEV=\"${{2:-stop}}\"\n\
-             curl -s -m 3 -X POST \"http://127.0.0.1:{port}/agent-event?agent=$1&event=$EV\" -H \"Authorization: Bearer {token}\" \
-             -H \"Content-Type: application/json\" --data-binary @- >/dev/null 2>&1\nexit 0\n"
-        )
-    }
+    SCRIPT_TEMPLATE.replace("@PORT@", &port.to_string()).replace("@TOKEN@", token)
 }
 
 pub fn script_path(app_data: &Path) -> PathBuf {
@@ -151,25 +234,89 @@ pub fn write_script(app_data: &Path, token: &str, port: u16) -> Result<PathBuf, 
     Ok(path)
 }
 
-// ─── Editing Claude Code's settings.json ─────────────────────────────
+// ─── Editing settings files that hold a map of hook lists (Claude Code, Gemini CLI, Cursor) ──────
 
-/// (Claude Code event, our kind, matcher). `Notification` is limited to prompts that really wait for the user:
-/// "idle_prompt" also fires after a finished turn and would look like "needs you" forever.
-const CLAUDE_EVENTS: &[(&str, &str, Option<&str>)] = &[
+/// (agent event, our kind, matcher). `Notification` for Claude Code is limited to prompts that really wait for the
+/// user: "idle_prompt" also fires after a finished turn and would look like "needs you" forever.
+type HookEvents = &'static [(&'static str, &'static str, Option<&'static str>)];
+
+const CLAUDE_EVENTS: HookEvents = &[
     ("Stop", "stop", None),
     ("Notification", "notification", Some("permission_prompt|elicitation_dialog")),
     ("UserPromptSubmit", "start", None),
 ];
 
-fn command_line(script: &Path, agent: &str, kind: &str) -> String {
-    format!("\"{}\" {agent} {kind}", script.display())
+/// Gemini CLI: `AfterAgent` fires when the agent loop completes and carries `prompt_response`.
+const GEMINI_EVENTS: HookEvents = &[
+    ("AfterAgent", "stop", None),
+    ("BeforeAgent", "start", None),
+    ("Notification", "notification", None),
+];
+
+/// Cursor: `stop` has a status but no text; the text comes from `afterAgentResponse`.
+const CURSOR_EVENTS: HookEvents = &[
+    ("stop", "stop", None),
+    ("afterAgentResponse", "message", None),
+    ("beforeSubmitPrompt", "start", None),
+];
+
+/// How one hook entry looks in that agent's file.
+#[derive(Clone, Copy)]
+enum Shape {
+    /// `{ "matcher": ..., "hooks": [ { "type": "command", "command": ..., "timeout": N } ] }` (Claude Code, Gemini CLI)
+    Nested { timeout: u64 },
+    /// `{ "command": ... }` (Cursor)
+    Flat,
+}
+
+/// The 8.3 short form of an existing path (no spaces), when Windows has one.
+#[cfg(windows)]
+fn short_path(p: &Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetShortPathNameW(long: *const u16, short: *mut u16, cch: u32) -> u32;
+    }
+    let wide: Vec<u16> = p.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let mut buf = vec![0u16; 1024];
+    let n = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    if n == 0 || n >= buf.len() {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buf[..n]))
+}
+
+#[cfg(not(windows))]
+fn short_path(_: &Path) -> Option<String> {
+    None
+}
+
+/// Antigravity runs a hook command through `cmd /C` and escapes quotes the way Go does, which breaks any quoted
+/// path ("\"C:\Users\me\x.cmd\"' is not recognized as an internal or external command", seen live with `agy`
+/// 1.2.9). A path with no spaces needs no quotes, so a script path with a space is handed over in its short form.
+fn unquoted_script(script: &Path) -> Result<String, HookError> {
+    let long = script.display().to_string();
+    let candidate = if long.contains(' ') { short_path(script).unwrap_or(long) } else { long };
+    if candidate.contains(' ') || candidate.contains('"') {
+        return Err(HookError::Io("the path to my hook script has a space in it and no short form".into()));
+    }
+    Ok(candidate)
+}
+
+/// The command written into an agent's hook file: `<script> <agent> <kind>`.
+fn command_line(script: &Path, agent: &str, kind: &str) -> Result<String, HookError> {
+    if agent == "antigravity" {
+        return Ok(format!("{} {agent} {kind}", unquoted_script(script)?));
+    }
+    Ok(format!("\"{}\" {agent} {kind}", script.display()))
 }
 
 fn entry_is_ours(entry: &Value) -> bool {
-    entry
+    let nested = entry
         .get("hooks")
         .and_then(|h| h.as_array())
-        .map_or(false, |hs| hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()).map_or(false, |c| c.contains(MARKER))))
+        .map_or(false, |hs| hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()).map_or(false, |c| c.contains(MARKER))));
+    nested || entry.get("command").and_then(|c| c.as_str()).map_or(false, |c| c.contains(MARKER))
 }
 
 fn parse_settings(existing: &str) -> Result<Value, HookError> {
@@ -187,17 +334,24 @@ fn pretty(v: &Value) -> Result<String, HookError> {
     serde_json::to_string_pretty(v).map(|s| s + "\n").map_err(|e| HookError::Io(e.to_string()))
 }
 
-/// Add (or refresh) NEXUS's Stop and Notification hooks, leaving every other setting and hook as it is.
-pub fn claude_add_hook(existing: &str, script: &Path) -> Result<String, HookError> {
+/// Add (or refresh) NEXUS's hooks, leaving every other setting and hook as it is.
+fn hooks_map_add(existing: &str, script: &Path, agent: &str, events: HookEvents, shape: Shape, version: bool) -> Result<String, HookError> {
     let mut root = parse_settings(existing)?;
     let obj = root.as_object_mut().expect("checked object");
+    if version {
+        obj.entry("version").or_insert_with(|| json!(1));
+    }
     let hooks = obj.entry("hooks").or_insert_with(|| json!({}));
     let hooks = hooks.as_object_mut().ok_or_else(|| HookError::Unreadable("\"hooks\" is not an object".into()))?;
-    for (event, kind, matcher) in CLAUDE_EVENTS {
+    for (event, kind, matcher) in events {
         let list = hooks.entry(*event).or_insert_with(|| json!([]));
         let list = list.as_array_mut().ok_or_else(|| HookError::Unreadable(format!("\"{event}\" is not a list")))?;
         list.retain(|e| !entry_is_ours(e));
-        let mut entry = json!({ "hooks": [ { "type": "command", "command": command_line(script, "claude", kind), "timeout": 10 } ] });
+        let cmd = command_line(script, agent, kind)?;
+        let mut entry = match shape {
+            Shape::Nested { timeout } => json!({ "hooks": [ { "type": "command", "command": cmd, "timeout": timeout } ] }),
+            Shape::Flat => json!({ "command": cmd }),
+        };
         if let Some(m) = matcher {
             entry["matcher"] = json!(m);
         }
@@ -207,11 +361,11 @@ pub fn claude_add_hook(existing: &str, script: &Path) -> Result<String, HookErro
 }
 
 /// Remove only NEXUS's entries. Returns the new text and whether anything was removed.
-pub fn claude_remove_hook(existing: &str) -> Result<(String, bool), HookError> {
+fn hooks_map_remove(existing: &str, events: HookEvents) -> Result<(String, bool), HookError> {
     let mut root = parse_settings(existing)?;
     let mut removed = false;
     if let Some(hooks) = root.get_mut("hooks").and_then(|h| h.as_object_mut()) {
-        for (event, _, _) in CLAUDE_EVENTS {
+        for (event, _, _) in events {
             if let Some(list) = hooks.get_mut(*event).and_then(|l| l.as_array_mut()) {
                 let before = list.len();
                 list.retain(|e| !entry_is_ours(e));
@@ -232,13 +386,93 @@ pub fn claude_remove_hook(existing: &str) -> Result<(String, bool), HookError> {
     Ok((pretty(&root)?, true))
 }
 
-pub fn claude_has_hook(existing: &str) -> bool {
+fn hooks_map_has(existing: &str, events: HookEvents) -> bool {
     parse_settings(existing)
         .ok()
         .and_then(|r| r.get("hooks").and_then(|h| h.as_object()).cloned())
         .map_or(false, |hooks| {
-            CLAUDE_EVENTS.iter().all(|(event, _, _)| hooks.get(*event).and_then(|l| l.as_array()).map_or(false, |l| l.iter().any(entry_is_ours)))
+            events.iter().all(|(event, _, _)| hooks.get(*event).and_then(|l| l.as_array()).map_or(false, |l| l.iter().any(entry_is_ours)))
         })
+}
+
+pub fn claude_add_hook(existing: &str, script: &Path) -> Result<String, HookError> {
+    hooks_map_add(existing, script, "claude", CLAUDE_EVENTS, Shape::Nested { timeout: 10 }, false)
+}
+
+pub fn claude_remove_hook(existing: &str) -> Result<(String, bool), HookError> {
+    hooks_map_remove(existing, CLAUDE_EVENTS)
+}
+
+pub fn claude_has_hook(existing: &str) -> bool {
+    hooks_map_has(existing, CLAUDE_EVENTS)
+}
+
+/// Gemini CLI timeouts are in milliseconds.
+pub fn gemini_add_hook(existing: &str, script: &Path) -> Result<String, HookError> {
+    hooks_map_add(existing, script, "gemini", GEMINI_EVENTS, Shape::Nested { timeout: 10_000 }, false)
+}
+
+pub fn gemini_remove_hook(existing: &str) -> Result<(String, bool), HookError> {
+    hooks_map_remove(existing, GEMINI_EVENTS)
+}
+
+pub fn gemini_has_hook(existing: &str) -> bool {
+    hooks_map_has(existing, GEMINI_EVENTS)
+}
+
+pub fn cursor_add_hook(existing: &str, script: &Path) -> Result<String, HookError> {
+    hooks_map_add(existing, script, "cursor", CURSOR_EVENTS, Shape::Flat, true)
+}
+
+pub fn cursor_remove_hook(existing: &str) -> Result<(String, bool), HookError> {
+    hooks_map_remove(existing, CURSOR_EVENTS)
+}
+
+pub fn cursor_has_hook(existing: &str) -> bool {
+    hooks_map_has(existing, CURSOR_EVENTS)
+}
+
+// ─── Antigravity: ~/.gemini/config/hooks.json (App, CLI and IDE share it) ───────────────────────────
+
+/// The file is a map of NAMED hooks; ours is one entry of it. For events other than tool use the handlers sit directly
+/// under the event key (Antigravity's hooks documentation). `Stop` fires when the execution loop terminates;
+/// `PreInvocation` fires before each model call, which is how a new turn is noticed.
+const ANTIGRAVITY_HOOK_NAME: &str = "nexus-agent-event";
+const ANTIGRAVITY_EVENTS: &[(&str, &str)] = &[("Stop", "stop"), ("PreInvocation", "start")];
+
+fn antigravity_group_is_ours(v: &Value) -> bool {
+    v.to_string().contains(MARKER)
+}
+
+pub fn antigravity_add_hook(existing: &str, script: &Path) -> Result<String, HookError> {
+    let mut root = parse_settings(existing)?;
+    let obj = root.as_object_mut().expect("checked object");
+    if obj.get(ANTIGRAVITY_HOOK_NAME).map_or(false, |g| !antigravity_group_is_ours(g)) {
+        return Err(HookError::Unreadable("a hook named nexus-agent-event that is not ours".into()));
+    }
+    let mut group = serde_json::Map::new();
+    for (event, kind) in ANTIGRAVITY_EVENTS {
+        group.insert((*event).to_string(), json!([ { "type": "command", "command": command_line(script, "antigravity", kind)?, "timeout": 10 } ]));
+    }
+    obj.insert(ANTIGRAVITY_HOOK_NAME.to_string(), Value::Object(group));
+    pretty(&root)
+}
+
+pub fn antigravity_remove_hook(existing: &str) -> Result<(String, bool), HookError> {
+    let mut root = parse_settings(existing)?;
+    let ours = root.get(ANTIGRAVITY_HOOK_NAME).map_or(false, antigravity_group_is_ours);
+    if !ours {
+        return Ok((existing.to_string(), false));
+    }
+    root.as_object_mut().expect("object").remove(ANTIGRAVITY_HOOK_NAME);
+    Ok((pretty(&root)?, true))
+}
+
+pub fn antigravity_has_hook(existing: &str) -> bool {
+    parse_settings(existing).ok().map_or(false, |r| {
+        r.get(ANTIGRAVITY_HOOK_NAME)
+            .map_or(false, |g| antigravity_group_is_ours(g) && ANTIGRAVITY_EVENTS.iter().all(|(e, _)| g.get(*e).and_then(|l| l.as_array()).map_or(false, |l| !l.is_empty())))
+    })
 }
 
 // ─── Editing Codex's config.toml (`notify`) ──────────────────────────
@@ -316,20 +550,204 @@ pub fn codex_has_notify(existing: &str) -> bool {
     lines.iter().take(top).any(|l| is_notify_key(l) && l.contains(MARKER))
 }
 
+// ─── Editing Aider's .aider.conf.yml (`notifications-command`) ───────────────────────────────────
+
+const AIDER_COMMENT: &str = "# NEXUS: tells NEXUS when Aider finishes a reply (remove with \"disconnect aider\")";
+
+/// The top-level YAML key of a line (no indentation, not a comment), if it has one.
+fn yaml_key(line: &str) -> Option<&str> {
+    if line.starts_with(' ') || line.starts_with('\t') || line.starts_with('#') {
+        return None;
+    }
+    line.split_once(':').map(|(k, _)| k.trim())
+}
+
+fn is_aider_command_key(line: &str) -> bool {
+    matches!(yaml_key(line), Some("notifications-command") | Some("notifications_command"))
+}
+
+fn is_aider_notifications_key(line: &str) -> bool {
+    yaml_key(line) == Some("notifications")
+}
+
+/// Refuses when Aider already has notifications of its own (`notifications` or a command that is not ours):
+/// it is the user's choice, not ours to change.
+pub fn aider_add_notify(existing: &str, script: &Path) -> Result<String, HookError> {
+    let cmd = format!("\"{}\" aider stop", script.display());
+    if cmd.contains('\'') || cmd.contains('\n') {
+        return Err(HookError::Io("the script path contains a quote".into()));
+    }
+    let ours_line = format!("notifications-command: '{cmd}'");
+    let lines: Vec<&str> = existing.lines().collect();
+    let has_ours = lines.iter().any(|l| is_aider_command_key(l) && l.contains(MARKER));
+    if !has_ours && lines.iter().any(|l| is_aider_command_key(l) || is_aider_notifications_key(l)) {
+        return Err(HookError::HasOwnNotify);
+    }
+    let mut out: Vec<String> = Vec::new();
+    for l in &lines {
+        if is_aider_command_key(l) && l.contains(MARKER) {
+            out.push(ours_line.clone());
+        } else {
+            out.push((*l).to_string());
+        }
+    }
+    if !has_ours {
+        let mut head = vec![AIDER_COMMENT.to_string(), "notifications: true".to_string(), ours_line];
+        head.extend(out);
+        out = head;
+    }
+    Ok(out.join("\n") + "\n")
+}
+
+pub fn aider_remove_notify(existing: &str) -> (String, bool) {
+    let lines: Vec<&str> = existing.lines().collect();
+    if !lines.iter().any(|l| is_aider_command_key(l) && l.contains(MARKER)) {
+        return (existing.to_string(), false);
+    }
+    let mut out: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let l = lines[i];
+        if l == AIDER_COMMENT {
+            i += 1;
+            if lines.get(i).map_or(false, |n| n.trim() == "notifications: true") {
+                i += 1;
+            }
+            continue;
+        }
+        if is_aider_command_key(l) && l.contains(MARKER) {
+            i += 1;
+            continue;
+        }
+        out.push(l);
+        i += 1;
+    }
+    (out.join("\n") + "\n", true)
+}
+
+pub fn aider_has_notify(existing: &str) -> bool {
+    let lines: Vec<&str> = existing.lines().collect();
+    lines.iter().any(|l| is_aider_command_key(l) && l.contains(MARKER)) && lines.iter().any(|l| l.trim() == "notifications: true")
+}
+
+// ─── OpenCode: a plugin file of its own ──────────────────────────────────────────────────────────
+
+/// OpenCode loads every file in `~/.config/opencode/plugins/` at startup, so NEXUS owns one file there and never
+/// edits the user's config. The plugin posts `session.idle` (with the last assistant text, read through the SDK client
+/// it is given), permission prompts and new user messages. Sub-agent sessions (they have a `parentID`) are ignored,
+/// so a helper finishing is not mistaken for the whole session finishing.
+const OPENCODE_PLUGIN_TEMPLATE: &str = r###"// NEXUS agent hook (nexus-agent-event): tells NEXUS when OpenCode stops. Remove with "disconnect opencode".
+const ENDPOINT = "http://127.0.0.1:@PORT@/agent-event";
+const TOKEN = "@TOKEN@";
+
+const post = async (event, body) => {
+  try {
+    await fetch(ENDPOINT + "?agent=opencode&event=" + event, {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch (_) {}
+};
+
+export const NexusAgentEvent = async ({ client }) => {
+  const isSubSession = async (id) => {
+    try {
+      const res = await client.session.get({ path: { id } });
+      return !!(res && res.data && res.data.parentID);
+    } catch (_) {
+      return false;
+    }
+  };
+  const lastAssistantText = async (id) => {
+    try {
+      const res = await client.session.messages({ path: { id } });
+      const msgs = (res && res.data) || [];
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const m = msgs[i];
+        if (!m.info || m.info.role !== "assistant") continue;
+        const text = (m.parts || [])
+          .filter((p) => p.type === "text" && !p.synthetic && !p.ignored)
+          .map((p) => p.text)
+          .join("\n")
+          .trim();
+        if (text) return text;
+      }
+    } catch (_) {}
+    return "";
+  };
+  return {
+    event: async ({ event }) => {
+      if (!event || !event.type) return;
+      const props = event.properties || {};
+      if (event.type === "session.idle") {
+        const id = props.sessionID;
+        if (id && (await isSubSession(id))) return;
+        await post("stop", { last_assistant_message: id ? await lastAssistantText(id) : "" });
+      } else if (event.type === "permission.updated" || event.type === "permission.asked") {
+        await post("notification", {});
+      } else if (event.type === "message.updated" && props.info && props.info.role === "user") {
+        await post("start", {});
+      }
+    },
+  };
+};
+"###;
+
+pub fn opencode_plugin_text(token: &str, port: u16) -> String {
+    OPENCODE_PLUGIN_TEMPLATE.replace("@PORT@", &port.to_string()).replace("@TOKEN@", token)
+}
+
+fn opencode_install(plugin: &Path, t: &HookTarget) -> Result<Installed, HookError> {
+    let existing = match std::fs::read_to_string(plugin) {
+        Ok(s) => Some(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(HookError::Unreadable(e.to_string())),
+    };
+    if existing.as_deref().map_or(false, |s| !s.contains(MARKER)) {
+        return Err(HookError::Unreadable("a plugin file with that name is not ours".into()));
+    }
+    let text = opencode_plugin_text(t.token, t.port);
+    if existing.as_deref() == Some(text.as_str()) {
+        return Ok(Installed { backup: None });
+    }
+    if let Some(dir) = plugin.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| HookError::Io(e.to_string()))?;
+    }
+    std::fs::write(plugin, text).map_err(|e| HookError::Io(e.to_string()))?;
+    Ok(Installed { backup: None })
+}
+
 // ─── Files ───────────────────────────────────────────────────────────
 
+fn home() -> Option<PathBuf> {
+    dirs_next::home_dir()
+}
+
+/// The file NEXUS edits (or, for OpenCode, owns) for this agent.
 pub fn config_path(agent: Agent) -> Option<PathBuf> {
     match agent {
         Agent::Claude => {
-            let base = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| dirs_next::home_dir().map(|h| h.join(".claude")))?;
+            let base = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| home().map(|h| h.join(".claude")))?;
             Some(base.join("settings.json"))
         }
         Agent::Codex => {
-            let base = std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| dirs_next::home_dir().map(|h| h.join(".codex")))?;
+            let base = std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| home().map(|h| h.join(".codex")))?;
             Some(base.join("config.toml"))
+        }
+        Agent::Antigravity => Some(home()?.join(".gemini").join("config").join("hooks.json")),
+        Agent::Gemini => Some(home()?.join(".gemini").join("settings.json")),
+        Agent::Cursor => Some(home()?.join(".cursor").join("hooks.json")),
+        Agent::Aider => Some(home()?.join(".aider.conf.yml")),
+        Agent::OpenCode => {
+            let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| home().map(|h| h.join(".config")))?;
+            Some(base.join("opencode").join("plugins").join(OPENCODE_PLUGIN_FILE))
         }
     }
 }
+
+const OPENCODE_PLUGIN_FILE: &str = "nexus-agent-event.js";
 
 fn read_or_empty(path: &Path) -> Result<String, HookError> {
     match std::fs::read_to_string(path) {
@@ -368,12 +786,29 @@ pub struct Installed {
     pub backup: Option<PathBuf>,
 }
 
-/// Install the hook for `agent` into `cfg` (the script must already exist at `script`).
-pub fn install(agent: Agent, cfg: &Path, script: &Path) -> Result<Installed, HookError> {
+/// What an installer needs besides the file: the script path (most agents run it) and, for OpenCode's plugin
+/// (which posts by itself), the endpoint token and port.
+pub struct HookTarget<'a> {
+    pub script: &'a Path,
+    pub token: &'a str,
+    pub port: u16,
+}
+
+/// Install the hook for `agent` into `cfg` (the script must already exist at `target.script`).
+pub fn install(agent: Agent, cfg: &Path, target: &HookTarget) -> Result<Installed, HookError> {
+    if agent == Agent::OpenCode {
+        return opencode_install(cfg, target);
+    }
     let existing = read_or_empty(cfg)?;
+    let script = target.script;
     let updated = match agent {
         Agent::Claude => claude_add_hook(&existing, script)?,
         Agent::Codex => codex_add_notify(&existing, script)?,
+        Agent::Antigravity => antigravity_add_hook(&existing, script)?,
+        Agent::Gemini => gemini_add_hook(&existing, script)?,
+        Agent::Cursor => cursor_add_hook(&existing, script)?,
+        Agent::Aider => aider_add_notify(&existing, script)?,
+        Agent::OpenCode => unreachable!("handled above"),
     };
     if updated == existing {
         return Ok(Installed { backup: None });
@@ -386,10 +821,23 @@ pub fn uninstall(agent: Agent, cfg: &Path) -> Result<bool, HookError> {
     if !cfg.exists() {
         return Ok(false);
     }
+    if agent == Agent::OpenCode {
+        let text = read_or_empty(cfg)?;
+        if !text.contains(MARKER) {
+            return Ok(false);
+        }
+        std::fs::remove_file(cfg).map_err(|e| HookError::Io(e.to_string()))?;
+        return Ok(true);
+    }
     let existing = read_or_empty(cfg)?;
     let (updated, removed) = match agent {
         Agent::Claude => claude_remove_hook(&existing)?,
         Agent::Codex => codex_remove_notify(&existing),
+        Agent::Antigravity => antigravity_remove_hook(&existing)?,
+        Agent::Gemini => gemini_remove_hook(&existing)?,
+        Agent::Cursor => cursor_remove_hook(&existing)?,
+        Agent::Aider => aider_remove_notify(&existing),
+        Agent::OpenCode => unreachable!("handled above"),
     };
     if removed {
         write_with_backup(cfg, &updated)?;
@@ -402,6 +850,11 @@ pub fn is_installed(agent: Agent, cfg: &Path) -> bool {
     match agent {
         Agent::Claude => claude_has_hook(&text),
         Agent::Codex => codex_has_notify(&text),
+        Agent::Antigravity => antigravity_has_hook(&text),
+        Agent::Gemini => gemini_has_hook(&text),
+        Agent::Cursor => cursor_has_hook(&text),
+        Agent::Aider => aider_has_notify(&text),
+        Agent::OpenCode => text.contains(MARKER),
     }
 }
 
@@ -412,17 +865,29 @@ pub struct AgentEvent {
     pub agent: String,
     pub kind: EventKind,
     pub at_ms: u64,
-    /// The agent's last message, for a Stop (already cut to the last 4 KB and masked).
+    /// The agent's last message, for a Stop or a Message (already cut to the last 4 KB and masked).
     pub tail: Option<String>,
+    pub info: StopInfo,
 }
 
 static EVENTS: Mutex<VecDeque<AgentEvent>> = Mutex::new(VecDeque::new());
+
+/// Where a Stop event's text has to be read from when the agent did not send it in the event itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TailSource {
+    /// Antigravity's `transcriptPath` (a jsonl log).
+    Transcript(String),
+    /// Aider's working directory (its `.aider.chat.history.md` is read from there).
+    AiderCwd(String),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedEvent {
     pub agent: Agent,
     pub kind: EventKind,
     pub tail: Option<String>,
+    pub info: StopInfo,
+    pub source: Option<TailSource>,
 }
 
 fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
@@ -434,20 +899,85 @@ fn kind_from(s: &str) -> Option<EventKind> {
         "stop" => EventKind::Stop,
         "notification" => EventKind::Notification,
         "start" => EventKind::Start,
+        "message" => EventKind::Message,
         _ => return None,
     })
 }
 
-/// The agent's final text in the JSON its hook receives (Claude Code: `last_assistant_message`; Codex's
-/// notify payload: `last-assistant-message`).
-fn final_message(v: &Value) -> Option<String> {
-    ["last_assistant_message", "last-assistant-message"].iter().find_map(|k| v.get(*k).and_then(|x| x.as_str()).map(String::from))
+/// The agent's final text in the JSON its hook receives: Claude Code `last_assistant_message`, Codex's notify
+/// payload `last-assistant-message`, Gemini CLI's AfterAgent `prompt_response`; Cursor's `afterAgentResponse`
+/// (a Message event) carries `text`.
+fn final_message(v: &Value, kind: EventKind) -> Option<String> {
+    let mut keys = vec!["last_assistant_message", "last-assistant-message", "prompt_response"];
+    if kind == EventKind::Message {
+        keys.push("text");
+    }
+    keys.iter().find_map(|k| v.get(*k).and_then(|x| x.as_str()).map(String::from))
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < b.len() => {
+                let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok());
+                match hex {
+                    Some(byte) => {
+                        out.push(byte);
+                        i += 2;
+                    }
+                    None => out.push(b'%'),
+                }
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+/// `cwd=C%3A%5CUsers%5Cme%5Cproj` -> the decoded value (Aider's notification script posts a form body).
+fn form_value(body: &str, key: &str) -> Option<String> {
+    body.split('&').find_map(|kv| kv.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| percent_decode(v)))
+}
+
+/// What the agent itself says about how it stopped. Only ever makes the verdict stricter.
+fn stop_info(agent: Agent, v: &Value) -> StopInfo {
+    let mut info = StopInfo::default();
+    match agent {
+        Agent::Antigravity => {
+            let error = v.get("error").map_or(false, |e| match e {
+                Value::String(s) => !s.trim().is_empty(),
+                Value::Null => false,
+                Value::Bool(b) => *b,
+                _ => true,
+            });
+            let reason = v.get("terminationReason").and_then(|r| r.as_str()).unwrap_or("").to_lowercase();
+            let bad_reason = ["error", "fail", "abort", "cancel", "limit", "exceed", "crash"].iter().any(|w| reason.contains(w));
+            if error || bad_reason {
+                info.ok = Some(false);
+            }
+            info.fully_idle = v.get("fullyIdle").and_then(|b| b.as_bool());
+        }
+        Agent::Cursor => {
+            info.ok = match v.get("status").and_then(|s| s.as_str()) {
+                Some("completed") => Some(true),
+                Some(_) => Some(false),
+                None => None,
+            };
+        }
+        _ => {}
+    }
+    info
 }
 
 /// `?agent=claude&event=stop` (new script) or a body `{"agent":"claude","event":"stop"}` (old script) ->
-/// the event. Only two known agents and three known events are accepted. For a stop, the agent's final
-/// message is kept as DATA for the verdict (cut to the last 4 KB and masked); nothing else in the body is
-/// read or stored, and no text ever becomes a command.
+/// the event. Only known agents and four known events are accepted. For a stop, the agent's final message is kept
+/// as DATA for the verdict (cut to the last 4 KB and masked); nothing else in the body is read or stored beyond
+/// the stop status and (Antigravity, Aider) the place to read the final text from; no text ever becomes a command.
 pub fn parse_event(query: &str, body: &str) -> Option<ParsedEvent> {
     let json: Option<Value> = serde_json::from_str(body).ok();
     let (agent, kind) = match (query_value(query, "agent"), query_value(query, "event")) {
@@ -458,17 +988,148 @@ pub fn parse_event(query: &str, body: &str) -> Option<ParsedEvent> {
         }
         _ => return None,
     };
-    let tail = if kind == EventKind::Stop {
-        json.as_ref().and_then(final_message).map(|m| crate::session_verdict::prepare_tail(&m)).filter(|t| !t.trim().is_empty())
-    } else {
-        None
-    };
-    Some(ParsedEvent { agent, kind, tail })
+    let mut tail = None;
+    let mut info = StopInfo::default();
+    let mut source = None;
+    if matches!(kind, EventKind::Stop | EventKind::Message) {
+        tail = json
+            .as_ref()
+            .and_then(|v| final_message(v, kind))
+            .map(|m| crate::session_verdict::prepare_tail(&m))
+            .filter(|t| !t.trim().is_empty());
+        if kind == EventKind::Stop {
+            if let Some(v) = json.as_ref() {
+                info = stop_info(agent, v);
+            }
+            if tail.is_none() {
+                match agent {
+                    Agent::Antigravity => {
+                        source = json.as_ref().and_then(|v| v.get("transcriptPath")).and_then(|p| p.as_str()).map(|p| TailSource::Transcript(p.to_string()));
+                    }
+                    Agent::Aider => {
+                        source = form_value(body, "cwd").filter(|c| !c.trim().is_empty()).map(TailSource::AiderCwd);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Some(ParsedEvent { agent, kind, tail, info, source })
 }
 
-pub fn record_event_at(agent: Agent, kind: EventKind, at_ms: u64, tail: Option<String>) {
+// ─── Reading the final text from a file the agent names ──────────────
+
+/// At most this much is read from the END of a transcript / history file (they can be tens of megabytes).
+const TAIL_READ_BYTES: u64 = 256 * 1024;
+
+fn read_tail_bytes(path: &Path, max: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let start = len.saturating_sub(max);
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    f.take(max).read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).to_string();
+    // a read that starts mid-file begins in the middle of a line: drop that line
+    Some(if start > 0 { text.split_once('\n').map(|(_, rest)| rest.to_string()).unwrap_or_default() } else { text })
+}
+
+/// The file `raw` names, only if it is a regular file with extension `ext` that lies under `root`
+/// (`~/` is expanded). A path that escapes `root` (`..`, a symlink, another drive) gives `None`.
+fn safe_file_under(raw: &str, root: &Path, home: &Path, ext: &str) -> Option<PathBuf> {
+    let expanded = match raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+        Some(rest) => home.join(rest),
+        None => PathBuf::from(raw),
+    };
+    let file = expanded.canonicalize().ok()?;
+    let root = root.canonicalize().ok()?;
+    let ok = file.starts_with(&root) && file.is_file() && file.extension().map_or(false, |e| e.eq_ignore_ascii_case(ext));
+    ok.then_some(file)
+}
+
+/// Antigravity's `transcript.jsonl`: the final reply is the last `PLANNER_RESPONSE` that has text and no tool calls.
+/// The second value is true when an `ERROR_MESSAGE` came after it (the turn ended in an error).
+fn transcript_final(text: &str) -> (Option<String>, bool) {
+    let mut error_after = false;
+    for line in text.lines().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("ERROR_MESSAGE") => error_after = true,
+            Some("USER_INPUT") => return (None, error_after),
+            Some("PLANNER_RESPONSE") => {
+                let content = v.get("content").and_then(|c| c.as_str()).unwrap_or("").trim();
+                let has_tools = v.get("tool_calls").and_then(|t| t.as_array()).map_or(false, |a| !a.is_empty());
+                if !content.is_empty() && !has_tools {
+                    return (Some(content.to_string()), error_after);
+                }
+            }
+            _ => {}
+        }
+    }
+    (None, error_after)
+}
+
+/// The assistant's last reply in `.aider.chat.history.md`: what follows the last `#### ` (user) line, without the
+/// `> ` lines Aider uses for its own status output.
+fn aider_last_reply(history: &str) -> Option<String> {
+    let lines: Vec<&str> = history.lines().collect();
+    let start = lines.iter().rposition(|l| l.starts_with("#### "))?;
+    let reply: Vec<&str> = lines[start + 1..]
+        .iter()
+        .filter(|l| !l.starts_with('>') && !l.starts_with("# aider chat started"))
+        .copied()
+        .collect();
+    let text = reply.join("\n").trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+/// Fill in the final text (and, for Antigravity, whether the turn ended in an error) from the file the agent
+/// named. Any failure leaves the event without text, which can only make the verdict stricter.
+pub fn resolve_tail(ev: &mut ParsedEvent) {
+    resolve_tail_with(ev, home().as_deref());
+}
+
+fn resolve_tail_with(ev: &mut ParsedEvent, home: Option<&Path>) {
+    let Some(src) = ev.source.take() else { return };
+    let Some(home) = home else { return };
+    let text = match src {
+        TailSource::Transcript(raw) => {
+            let Some(file) = safe_file_under(&raw, &home.join(".gemini"), home, "jsonl") else { return };
+            let Some(raw_text) = read_tail_bytes(&file, TAIL_READ_BYTES) else { return };
+            let (reply, error_after) = transcript_final(&raw_text);
+            if error_after {
+                ev.info.ok = Some(false);
+            }
+            reply
+        }
+        TailSource::AiderCwd(cwd) => {
+            let dir = PathBuf::from(&cwd);
+            if !dir.is_absolute() || !dir.is_dir() {
+                return;
+            }
+            let file = dir.join(".aider.chat.history.md");
+            if !file.is_file() {
+                return;
+            }
+            read_tail_bytes(&file, TAIL_READ_BYTES).and_then(|t| aider_last_reply(&t))
+        }
+    };
+    ev.tail = text.map(|t| crate::session_verdict::prepare_tail(&t)).filter(|t| !t.trim().is_empty());
+}
+
+pub fn record_event_at(agent: Agent, kind: EventKind, at_ms: u64, tail: Option<String>, info: StopInfo) {
     if let Ok(mut q) = EVENTS.lock() {
-        q.push_back(AgentEvent { agent: agent.name().to_string(), kind, at_ms, tail });
+        // Antigravity posts a "start" before every model call: one per agent is enough, so they never crowd out a stop.
+        if kind == EventKind::Start {
+            if let Some(last) = q.iter_mut().rev().find(|e| e.agent == agent.name()) {
+                if last.kind == EventKind::Start {
+                    last.at_ms = at_ms;
+                    return;
+                }
+            }
+        }
+        q.push_back(AgentEvent { agent: agent.name().to_string(), kind, at_ms, tail, info });
         while q.len() > MAX_EVENTS {
             q.pop_front();
         }
@@ -497,9 +1158,21 @@ pub fn stop_is_latest(agent: Agent, since_ms: u64) -> bool {
     })
 }
 
-/// The final message of the agent's latest stop, if its hook sent one.
+/// The final message of the agent's latest stop: from the stop itself, or (Cursor) from the reply it sent just
+/// before it, within the same turn.
 pub fn last_stop_tail(agent: Agent) -> Option<String> {
-    EVENTS.lock().ok().and_then(|q| last_index(&q, agent, EventKind::Stop).and_then(|i| q[i].tail.clone()))
+    let q = EVENTS.lock().ok()?;
+    let stop = last_index(&q, agent, EventKind::Stop)?;
+    if let Some(t) = q[stop].tail.clone() {
+        return Some(t);
+    }
+    let turn_start = (0..stop).rev().find(|&i| q[i].agent == agent.name() && q[i].kind == EventKind::Start).map_or(0, |s| s + 1);
+    (turn_start..stop).rev().find(|&i| q[i].agent == agent.name() && q[i].kind == EventKind::Message).and_then(|i| q[i].tail.clone())
+}
+
+/// How the agent's latest stop says it stopped (all `None` when the agent does not say).
+pub fn last_stop_info(agent: Agent) -> StopInfo {
+    EVENTS.lock().ok().and_then(|q| last_index(&q, agent, EventKind::Stop).map(|i| q[i].info)).unwrap_or_default()
 }
 
 /// A permission prompt arrived (at or after `since_ms`) after the agent's latest stop and prompt: it is
@@ -522,6 +1195,43 @@ pub fn ago(now_ms: u64, then_ms: u64) -> String {
         0..=59 => "moments ago".to_string(),
         60..=3599 => format!("{} minute{} ago", secs / 60, if secs / 60 == 1 { "" } else { "s" }),
         _ => format!("{} hour{} ago", secs / 3600, if secs / 3600 == 1 { "" } else { "s" }),
+    }
+}
+
+// ─── Which agent is "this session"? ──────────────────────────────────
+
+/// Does this (lower-case) window title name this agent? "Gemini" alone is a website, so Gemini CLI needs "cli".
+fn title_names(agent: Agent, t: &str) -> bool {
+    match agent {
+        Agent::Antigravity => t.contains("antigravity") || t.split(|c: char| !c.is_alphanumeric()).any(|w| w == "agy"),
+        Agent::OpenCode => t.contains("opencode") || t.contains("open code"),
+        Agent::Gemini => t.contains("gemini cli") || t.contains("gemini-cli"),
+        other => t.contains(other.name()),
+    }
+}
+
+/// The one agent a window title names ("Antigravity", "OpenCode", "Cursor", "agy"). Two or none = `None`.
+pub fn agent_in_title(title: &str) -> Option<Agent> {
+    let t = title.to_lowercase();
+    let found: Vec<Agent> = ALL_AGENTS.iter().copied().filter(|a| title_names(*a, &t)).collect();
+    match found.as_slice() {
+        [one] => Some(*one),
+        _ => None,
+    }
+}
+
+/// A terminal's title rarely names the agent in it: find the one agent whose processes live below the foreground
+/// window's process (or are it). Exactly one, else `None` (the caller asks the user which).
+pub fn agent_under(foreground_pid: u32, all: &[crate::session_observer::ProcSnap], own_pid: u32) -> Option<Agent> {
+    let below = crate::session_observer::descendants(&[foreground_pid], all);
+    let found: Vec<Agent> = ALL_AGENTS
+        .iter()
+        .copied()
+        .filter(|a| crate::session_observer::find_roots(Some(a.name()), all, None, own_pid).iter().any(|r| below.contains(r)))
+        .collect();
+    match found.as_slice() {
+        [one] => Some(*one),
+        _ => None,
     }
 }
 
@@ -596,31 +1306,37 @@ fn norm(text: &str) -> String {
 
 const HOOK_VOCAB: &[&str] = &[
     "connect", "hook", "hooks", "up", "set", "setup", "install", "add", "enable", "the", "stop", "to", "nexus", "claude", "codex", "code",
+    "antigravity", "agy", "opencode", "gemini", "cursor", "aider",
     "let", "know", "when", "stops", "finishes", "is", "done", "with", "notifications", "notification", "signal", "for", "my", "me", "a",
     "disconnect", "remove", "uninstall", "delete", "disable", "unhook", "take", "out", "of", "from", "connected", "installed", "status",
     "has", "reported", "yet", "been", "hooked", "on", "in", "set-up", "tell",
 ];
 
+/// The one agent a sentence names ("agy" is Antigravity). Two different agents in one sentence = none.
+fn find_agent(padded: &str) -> Option<Agent> {
+    let found: Vec<Agent> = ALL_AGENTS
+        .iter()
+        .copied()
+        .filter(|a| padded.contains(&format!(" {} ", a.name())) || (*a == Agent::Antigravity && padded.contains(" agy ")))
+        .collect();
+    match found.as_slice() {
+        [one] => Some(*one),
+        _ => None,
+    }
+}
+
 /// "connect claude's stop hook", "let nexus know when codex stops", "remove the claude hook", "is the
 /// claude hook installed". Strict: every word must be in the hook vocabulary AND the sentence must name
 /// the hook / stop / nexus, so "install claude" or "connect to claude" are never claimed.
 pub fn parse_command(text: &str) -> Option<(HookAction, Agent)> {
-    let t = norm(text);
+    // speech splits some names: "open code", "gemini cli"
+    let t = norm(text).replace("open code", "opencode").replace("gemini cli", "gemini");
     let tokens: Vec<&str> = t.split(' ').collect();
     if tokens.is_empty() || !tokens.iter().all(|w| HOOK_VOCAB.contains(w)) {
         return None;
     }
     let p = format!(" {t} ");
-    let agent = if p.contains(" codex ") {
-        Agent::Codex
-    } else if p.contains(" claude ") {
-        Agent::Claude
-    } else {
-        return None;
-    };
-    if p.contains(" claude ") && p.contains(" codex ") {
-        return None;
-    }
+    let agent = find_agent(&p)?;
     let context = [" hook ", " hooks ", " unhook ", " nexus ", " notification ", " notifications ", " signal ", " reported "].iter().any(|c| p.contains(c));
     if !context {
         return None;
@@ -644,6 +1360,10 @@ mod tests {
 
     fn script() -> PathBuf {
         PathBuf::from(r"C:\Users\me\AppData\Roaming\com.nexus.assistant\agent_hooks").join("nexus-agent-event.cmd")
+    }
+
+    fn tgt(script: &Path) -> HookTarget<'_> {
+        HookTarget { script, token: "test-token", port: 39220 }
     }
 
     fn tmp(name: &str) -> PathBuf {
@@ -770,25 +1490,25 @@ mod tests {
         let d = tmp("install");
         let cfg = d.join("settings.json");
         std::fs::write(&cfg, r#"{"theme":"dark"}"#).unwrap();
-        let r = install(Agent::Claude, &cfg, &script()).unwrap();
+        let r = install(Agent::Claude, &cfg, &tgt(&script())).unwrap();
         let b = r.backup.expect("backup made");
         assert_eq!(std::fs::read_to_string(&b).unwrap(), r#"{"theme":"dark"}"#);
         assert!(is_installed(Agent::Claude, &cfg));
         assert!(!cfg.with_extension("nexus-tmp").exists());
         // second install is a no-op (no new backup)
-        assert_eq!(install(Agent::Claude, &cfg, &script()).unwrap().backup, None);
+        assert_eq!(install(Agent::Claude, &cfg, &tgt(&script())).unwrap().backup, None);
         assert!(uninstall(Agent::Claude, &cfg).unwrap());
         assert!(!is_installed(Agent::Claude, &cfg));
         assert_eq!(serde_json::from_str::<Value>(&std::fs::read_to_string(&cfg).unwrap()).unwrap(), json!({"theme": "dark"}));
         assert!(!uninstall(Agent::Claude, &cfg).unwrap());
         // no file yet: created, no backup
         let fresh = d.join("sub").join("config.toml");
-        assert_eq!(install(Agent::Codex, &fresh, &script()).unwrap().backup, None);
+        assert_eq!(install(Agent::Codex, &fresh, &tgt(&script())).unwrap().backup, None);
         assert!(is_installed(Agent::Codex, &fresh));
         // unreadable file: error, file untouched
         let bad = d.join("bad.json");
         std::fs::write(&bad, "{nope").unwrap();
-        assert!(install(Agent::Claude, &bad, &script()).is_err());
+        assert!(install(Agent::Claude, &bad, &tgt(&script())).is_err());
         assert_eq!(std::fs::read_to_string(&bad).unwrap(), "{nope");
         // uninstall with no file at all
         assert!(!uninstall(Agent::Codex, &d.join("missing.toml")).unwrap());
@@ -810,7 +1530,7 @@ mod tests {
 
     #[test]
     fn the_endpoint_accepts_only_an_authorised_known_agent_and_event() {
-        let ev = |agent, kind| Some(ParsedEvent { agent, kind, tail: None });
+        let ev = |agent, kind| Some(ParsedEvent { agent, kind, tail: None, info: StopInfo::default(), source: None });
         // new script: agent and event in the URL
         assert_eq!(route_event(true, "agent=claude&event=stop", ""), (202, r#"{"ok":true}"#, ev(Agent::Claude, EventKind::Stop)));
         assert_eq!(route_event(true, "agent=codex&event=notification", "{}").2, ev(Agent::Codex, EventKind::Notification));
@@ -861,36 +1581,36 @@ mod tests {
         let base = u64::MAX / 4;
         let a = Agent::Claude;
         let b = Agent::Codex;
-        record_event_at(a, EventKind::Start, base + 100, None);
+        record_event_at(a, EventKind::Start, base + 100, None, StopInfo::default());
         assert!(!stop_is_latest(a, base), "a prompt without a stop is a running turn");
-        record_event_at(a, EventKind::Stop, base + 1_000, Some("first tail".into()));
+        record_event_at(a, EventKind::Stop, base + 1_000, Some("first tail".into()), StopInfo::default());
         assert!(stop_is_latest(a, base + 1_000));
         assert!(!stop_is_latest(a, base + 1_001), "the stop is older than `since`");
         assert_eq!(last_stop_tail(a).as_deref(), Some("first tail"));
         assert_eq!(last_event_ms(a, EventKind::Stop), Some(base + 1_000));
         // a new prompt: the old stop no longer says "finished"
-        record_event_at(a, EventKind::Start, base + 2_000, None);
+        record_event_at(a, EventKind::Start, base + 2_000, None, StopInfo::default());
         assert!(!stop_is_latest(a, base));
         // and the next stop does, with its own message
-        record_event_at(a, EventKind::Stop, base + 3_000, Some("second tail".into()));
+        record_event_at(a, EventKind::Stop, base + 3_000, Some("second tail".into()), StopInfo::default());
         assert!(stop_is_latest(a, base));
         assert_eq!(last_stop_tail(a).as_deref(), Some("second tail"));
         // another agent's events do not count for this one
         assert!(!stop_is_latest(b, base));
-        record_event_at(b, EventKind::Notification, base + 4_000, None);
+        record_event_at(b, EventKind::Notification, base + 4_000, None, StopInfo::default());
         assert!(!stop_is_latest(b, base), "a notification is not a stop");
         // a permission prompt after the latest stop = waiting for the user, until the agent moves on
         assert!(needs_user(b, base));
         assert!(!needs_user(b, base + 4_001), "older than `since`");
-        record_event_at(b, EventKind::Stop, base + 5_000, None);
+        record_event_at(b, EventKind::Stop, base + 5_000, None, StopInfo::default());
         assert!(!needs_user(b, base), "a stop after the prompt answers it");
-        record_event_at(a, EventKind::Notification, base + 6_000, None);
+        record_event_at(a, EventKind::Notification, base + 6_000, None, StopInfo::default());
         assert!(needs_user(a, base));
-        record_event_at(a, EventKind::Start, base + 7_000, None);
+        record_event_at(a, EventKind::Start, base + 7_000, None, StopInfo::default());
         assert!(!needs_user(a, base), "a new prompt answers it too");
         // the list stays capped
         for i in 0..(MAX_EVENTS as u64 + 10) {
-            record_event_at(b, EventKind::Stop, base + 10_000 + i, None);
+            record_event_at(b, EventKind::Stop, base + 10_000 + i, None, StopInfo::default());
         }
         assert!(EVENTS.lock().unwrap().len() <= MAX_EVENTS);
         assert_eq!(ago(120_000, 0), "2 minutes ago");
@@ -949,5 +1669,546 @@ mod tests {
         ] {
             assert_eq!(parse_command(t), None, "{t:?}");
         }
+    }
+
+    // ─── more agents (Antigravity, OpenCode, Gemini CLI, Cursor, Aider) ─────────────────────────
+
+    /// Seen live with `agy` 1.2.9: a quoted script path made Antigravity's own hook runner fail with "is not
+    /// recognized as an internal or external command". Its command must hold no quotes and no spaces.
+    #[test]
+    fn antigravity_commands_carry_no_quotes_and_no_spaces() {
+        let after = antigravity_add_hook("", &script()).unwrap();
+        let v: Value = serde_json::from_str(&after).unwrap();
+        for event in ["Stop", "PreInvocation"] {
+            let cmd = v["nexus-agent-event"][event][0]["command"].as_str().unwrap();
+            assert!(!cmd.contains('"'), "{cmd}");
+            assert_eq!(cmd.split(' ').count(), 3, "script, agent, kind: {cmd}");
+        }
+        // other agents keep the quoted form that already works for them
+        assert!(claude_add_hook("", &script()).unwrap().contains(r#"\"C:\\Users"#), "claude keeps quotes");
+        #[cfg(windows)]
+        {
+            // a real directory with a space gets its short form (skipped on a volume without 8.3 names)
+            let d = tmp("space dir");
+            let file = d.join("x y.cmd");
+            std::fs::write(&file, "@echo off").unwrap();
+            match unquoted_script(&file) {
+                Ok(short) => assert!(!short.contains(' ') && !short.contains('"'), "{short}"),
+                Err(_) => eprintln!("8.3 names are off on this volume: skipped"),
+            }
+            let _ = std::fs::remove_dir_all(&d);
+        }
+        // a path that has a space and no short form is refused, never written quoted
+        #[cfg(windows)]
+        assert!(unquoted_script(Path::new(r"C:\no such folder\x y.cmd")).is_err());
+    }
+
+    #[test]
+    fn every_agent_has_a_name_that_round_trips_and_a_spoken_label() {
+        for a in ALL_AGENTS {
+            assert_eq!(Agent::from_name(a.name()), Some(a));
+            assert!(!a.label().is_empty() && !a.restart_note().is_empty());
+        }
+        assert_eq!(Agent::from_name("agy"), Some(Agent::Antigravity));
+        assert_eq!(Agent::from_name("open code"), Some(Agent::OpenCode));
+        for bad in ["", "evil", "Claude", "vscode", "copilot", "hermes"] {
+            assert_eq!(Agent::from_name(bad), None, "{bad}");
+        }
+        let list = Agent::spoken_list();
+        assert!(list.starts_with("Claude Code, Codex") && list.ends_with(" or Aider"), "{list}");
+    }
+
+    #[test]
+    fn antigravity_gets_a_named_hook_with_stop_and_preinvocation_and_keeps_the_rest() {
+        let before = r#"{"my-linter":{"PostToolUse":[{"matcher":"run_command","hooks":[{"type":"command","command":"./lint.sh"}]}]}}"#;
+        let after = antigravity_add_hook(before, &script()).unwrap();
+        let v: Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(v["my-linter"], serde_json::from_str::<Value>(before).unwrap()["my-linter"]);
+        let ours = &v["nexus-agent-event"];
+        // handlers sit directly under the event key for non-tool events (Antigravity's hooks documentation)
+        assert_eq!(ours["Stop"][0]["type"], "command");
+        assert!(ours["Stop"][0]["command"].as_str().unwrap().ends_with(" antigravity stop"));
+        assert!(ours["PreInvocation"][0]["command"].as_str().unwrap().ends_with(" antigravity start"));
+        assert!(ours["Stop"][0].get("hooks").is_none());
+        assert!(antigravity_has_hook(&after));
+        assert_eq!(antigravity_add_hook(&after, &script()).unwrap(), after, "idempotent");
+        let (back, removed) = antigravity_remove_hook(&after).unwrap();
+        assert!(removed && !back.contains(MARKER) && back.contains("my-linter"));
+        assert!(!antigravity_has_hook(&back));
+        assert!(antigravity_has_hook(&antigravity_add_hook("", &script()).unwrap()));
+    }
+
+    #[test]
+    fn a_foreign_antigravity_hook_with_our_name_is_never_touched() {
+        let theirs = r#"{"nexus-agent-event":{"Stop":[{"type":"command","command":"my-own.sh"}]}}"#;
+        assert!(antigravity_add_hook(theirs, &script()).is_err());
+        let (text, removed) = antigravity_remove_hook(theirs).unwrap();
+        assert!(!removed && text == theirs);
+        assert!(!antigravity_has_hook(theirs));
+        assert!(antigravity_add_hook("[1,2]", &script()).is_err() && antigravity_add_hook("{bad", &script()).is_err());
+    }
+
+    #[test]
+    fn gemini_gets_afteragent_beforeagent_and_notification_with_millisecond_timeouts() {
+        let before = r#"{"theme":"dark","hooks":{"AfterAgent":[{"hooks":[{"type":"command","command":"my.sh"}]}]}}"#;
+        let after = gemini_add_hook(before, &script()).unwrap();
+        let v: Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(v["theme"], "dark");
+        let after_agent = v["hooks"]["AfterAgent"].as_array().unwrap();
+        assert_eq!(after_agent.len(), 2);
+        assert!(after_agent.iter().any(|e| e["hooks"][0]["command"] == "my.sh"));
+        let ours = after_agent.iter().find(|e| entry_is_ours(e)).unwrap();
+        assert_eq!(ours["hooks"][0]["timeout"], 10_000);
+        assert!(ours["hooks"][0]["command"].as_str().unwrap().ends_with(" gemini stop"));
+        assert!(v["hooks"]["BeforeAgent"][0]["hooks"][0]["command"].as_str().unwrap().ends_with(" gemini start"));
+        assert!(gemini_has_hook(&after));
+        let (back, removed) = gemini_remove_hook(&after).unwrap();
+        assert!(removed && !back.contains(MARKER) && back.contains("my.sh"));
+    }
+
+    #[test]
+    fn cursor_gets_flat_hooks_and_a_version_and_keeps_the_rest() {
+        let before = r#"{"version":1,"hooks":{"stop":[{"command":"./mine.sh"}],"afterFileEdit":[{"command":"./fmt.sh"}]}}"#;
+        let after = cursor_add_hook(before, &script()).unwrap();
+        let v: Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(v["version"], 1);
+        assert_eq!(v["hooks"]["afterFileEdit"][0]["command"], "./fmt.sh");
+        assert_eq!(v["hooks"]["stop"].as_array().unwrap().len(), 2);
+        assert!(v["hooks"]["afterAgentResponse"][0]["command"].as_str().unwrap().ends_with(" cursor message"));
+        assert!(v["hooks"]["beforeSubmitPrompt"][0]["command"].as_str().unwrap().ends_with(" cursor start"));
+        assert!(cursor_has_hook(&after));
+        let fresh = cursor_add_hook("", &script()).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&fresh).unwrap()["version"], 1);
+        let (back, removed) = cursor_remove_hook(&after).unwrap();
+        assert!(removed && !back.contains(MARKER) && back.contains("./mine.sh") && back.contains("./fmt.sh"));
+        assert!(!cursor_remove_hook(before).unwrap().1);
+    }
+
+    #[test]
+    fn aider_gets_notifications_only_when_it_has_none_of_its_own() {
+        let before = "model: gpt-4o\ndark-mode: true\n";
+        let after = aider_add_notify(before, &script()).unwrap();
+        assert!(after.contains("model: gpt-4o") && after.contains("dark-mode: true"));
+        assert!(after.contains("notifications: true") && after.contains("notifications-command: '"));
+        assert!(after.contains(" aider stop'"));
+        assert!(aider_has_notify(&after));
+        assert_eq!(aider_add_notify(&after, &script()).unwrap(), after, "idempotent");
+        let (back, removed) = aider_remove_notify(&after);
+        assert!(removed && back == before, "{back:?}");
+        // the user's own notification settings are theirs
+        for theirs in ["notifications: true\n", "notifications-command: say done\n", "notifications_command: say done\n", "notifications: false\nmodel: x\n"] {
+            assert_eq!(aider_add_notify(theirs, &script()), Err(HookError::HasOwnNotify), "{theirs}");
+            assert_eq!(aider_remove_notify(theirs), (theirs.to_string(), false));
+            assert!(!aider_has_notify(theirs));
+        }
+        // a moved script refreshes our line only
+        let moved = aider_add_notify(&after, Path::new(r"D:\other\nexus-agent-event.cmd")).unwrap();
+        assert!(moved.contains(r"D:\other") && !moved.contains("Roaming") && moved.matches("notifications-command").count() == 1);
+        assert!(aider_add_notify("", Path::new("C:\\it's\\nexus-agent-event.cmd")).is_err());
+    }
+
+    #[test]
+    fn the_opencode_plugin_is_its_own_file_and_never_replaces_someone_elses() {
+        let d = tmp("opencode");
+        let plugin = d.join("opencode").join("plugins").join(OPENCODE_PLUGIN_FILE);
+        let sc = script();
+        let t = HookTarget { script: &sc, token: "tok-123", port: 39220 };
+        assert!(!is_installed(Agent::OpenCode, &plugin));
+        assert_eq!(install(Agent::OpenCode, &plugin, &t).unwrap().backup, None);
+        let text = std::fs::read_to_string(&plugin).unwrap();
+        assert!(text.contains("tok-123") && text.contains("127.0.0.1:39220/agent-event") && text.contains(MARKER));
+        assert!(text.contains("session.idle") && text.contains("permission.updated") && text.contains("parentID"));
+        assert!(is_installed(Agent::OpenCode, &plugin));
+        assert_eq!(install(Agent::OpenCode, &plugin, &t).unwrap(), Installed { backup: None }, "idempotent");
+        assert!(uninstall(Agent::OpenCode, &plugin).unwrap() && !plugin.exists());
+        assert!(!uninstall(Agent::OpenCode, &plugin).unwrap());
+        // somebody else's file with that name is left alone
+        std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        std::fs::write(&plugin, "export const Mine = async () => ({})").unwrap();
+        assert!(install(Agent::OpenCode, &plugin, &t).is_err());
+        assert!(!uninstall(Agent::OpenCode, &plugin).unwrap() && plugin.exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Runs the generated plugin under node with a fake OpenCode client and a local socket: proves the JavaScript is
+    /// valid, ignores sub-sessions and synthetic text, and posts what the endpoint accepts. Skipped when node is absent.
+    #[test]
+    fn the_opencode_plugin_runs_and_posts_what_the_endpoint_accepts() {
+        use std::io::{Read, Write};
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("node not available: skipped");
+            return;
+        }
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut seen: Vec<String> = Vec::new();
+            let started = std::time::Instant::now();
+            while seen.len() < 3 && started.elapsed() < std::time::Duration::from_secs(20) {
+                let Ok((mut s, _)) = listener.accept() else {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    continue;
+                };
+                s.set_nonblocking(false).unwrap();
+                s.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = s.read(&mut buf).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&raw).to_string();
+                    if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                        let want: usize = head.lines().find_map(|l| l.to_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse().ok())).unwrap_or(0);
+                        if body.len() >= want {
+                            break;
+                        }
+                    }
+                }
+                let _ = s.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}");
+                seen.push(String::from_utf8_lossy(&raw).to_string());
+            }
+            seen
+        });
+        let dir = tmp("opencode_js");
+        std::fs::write(dir.join("p.mjs"), opencode_plugin_text("js-token", port)).unwrap();
+        std::fs::write(
+            dir.join("run.mjs"),
+            r#"import { NexusAgentEvent } from "./p.mjs";
+const client = {
+  session: {
+    get: async ({ path }) => ({ data: { id: path.id, parentID: path.id === "child" ? "root" : undefined } }),
+    messages: async () => ({ data: [
+      { info: { role: "user" }, parts: [{ type: "text", text: "do it" }] },
+      { info: { role: "assistant" }, parts: [{ type: "text", text: "All 12 tests passed." }, { type: "text", text: "hidden", synthetic: true }] },
+    ] }),
+  },
+};
+const hooks = await NexusAgentEvent({ client });
+await hooks.event({ event: { type: "message.updated", properties: { info: { role: "user" } } } });
+await hooks.event({ event: { type: "message.updated", properties: { info: { role: "assistant" } } } });
+await hooks.event({ event: { type: "permission.updated", properties: {} } });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "child" } } });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "root" } } });
+"#,
+        )
+        .unwrap();
+        let out = std::process::Command::new("node").arg("run.mjs").current_dir(&dir).output().unwrap();
+        assert!(out.status.success(), "node failed: {}", String::from_utf8_lossy(&out.stderr));
+        let seen = server.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(seen.len(), 3, "start, notification and ONE stop (the sub-session and the assistant message are ignored): {seen:?}");
+        let events: Vec<ParsedEvent> = seen
+            .iter()
+            .map(|r| {
+                assert!(r.to_lowercase().contains("authorization: bearer js-token"), "{r}");
+                let target = r.lines().next().and_then(|l| l.split_whitespace().nth(1)).unwrap_or("");
+                let (_, q) = target.split_once('?').unwrap_or(("", ""));
+                parse_event(q, r.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("")).expect("a valid event")
+            })
+            .collect();
+        assert_eq!(events.iter().map(|e| (e.agent, e.kind)).collect::<Vec<_>>(), vec![
+            (Agent::OpenCode, EventKind::Start),
+            (Agent::OpenCode, EventKind::Notification),
+            (Agent::OpenCode, EventKind::Stop),
+        ]);
+        assert_eq!(events[2].tail.as_deref(), Some("All 12 tests passed."), "the synthetic text part is not the reply");
+    }
+
+    #[test]
+    fn each_agents_payload_becomes_the_right_event() {
+        // Antigravity: the stop status is structured; the text is read from the transcript afterwards
+        let ev = parse_event(
+            "agent=antigravity&event=stop",
+            r#"{"executionNum":1,"terminationReason":"model_stop","error":"","fullyIdle":true,"conversationId":"c","transcriptPath":"~/.gemini/antigravity/brain/c/transcript.jsonl"}"#,
+        )
+        .unwrap();
+        assert_eq!((ev.agent, ev.kind), (Agent::Antigravity, EventKind::Stop));
+        assert_eq!(ev.info, StopInfo { ok: None, fully_idle: Some(true) });
+        assert_eq!(ev.source, Some(TailSource::Transcript("~/.gemini/antigravity/brain/c/transcript.jsonl".into())));
+        assert_eq!(ev.tail, None);
+        let bad = parse_event("agent=antigravity&event=stop", r#"{"terminationReason":"model_stop","error":"quota exceeded","fullyIdle":false}"#).unwrap();
+        assert_eq!(bad.info, StopInfo { ok: Some(false), fully_idle: Some(false) });
+        let cancelled = parse_event("agent=antigravity&event=stop", r#"{"terminationReason":"user_cancelled","error":""}"#).unwrap();
+        assert_eq!(cancelled.info.ok, Some(false));
+        // Gemini CLI
+        let g = parse_event("agent=gemini&event=stop", r#"{"hook_event_name":"AfterAgent","prompt":"x","prompt_response":"Done. 5 tests pass.","stop_hook_active":false}"#).unwrap();
+        assert_eq!(g.tail.as_deref(), Some("Done. 5 tests pass."));
+        // Cursor
+        assert_eq!(parse_event("agent=cursor&event=stop", r#"{"status":"aborted","loop_count":0}"#).unwrap().info.ok, Some(false));
+        assert_eq!(parse_event("agent=cursor&event=stop", r#"{"status":"error"}"#).unwrap().info.ok, Some(false));
+        assert_eq!(parse_event("agent=cursor&event=stop", r#"{"status":"completed"}"#).unwrap().info.ok, Some(true));
+        let m = parse_event("agent=cursor&event=message", r#"{"text":"Fixed the bug."}"#).unwrap();
+        assert_eq!((m.kind, m.tail.as_deref()), (EventKind::Message, Some("Fixed the bug.")));
+        // "text" is only read for a message, never for a stop
+        assert_eq!(parse_event("agent=cursor&event=stop", r#"{"status":"completed","text":"ignore me"}"#).unwrap().tail, None);
+        // Aider posts a form body with its working directory
+        let a = parse_event("agent=aider&event=stop", "cwd=C%3A%5CUsers%5Cme%5Cmy+proj").unwrap();
+        assert_eq!(a.source, Some(TailSource::AiderCwd(r"C:\Users\me\my proj".into())));
+        // OpenCode's plugin
+        let o = parse_event("agent=opencode&event=stop", r#"{"last_assistant_message":"Merged."}"#).unwrap();
+        assert_eq!(o.tail.as_deref(), Some("Merged."));
+        // still strict
+        for (q, b) in [("agent=evil&event=stop", "{}"), ("agent=cursor&event=explode", "{}"), ("agent=cursor", "{}"), ("event=stop", "{}")] {
+            assert_eq!(parse_event(q, b), None, "{q}");
+        }
+    }
+
+    #[test]
+    fn percent_decoding_handles_the_edges() {
+        assert_eq!(percent_decode("C%3A%5Cx+y"), r"C:\x y");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz%4"), "%zz%4");
+        assert_eq!(percent_decode(""), "");
+    }
+
+    fn transcript_home(name: &str) -> (PathBuf, PathBuf) {
+        let home = tmp(name);
+        let dir = home.join(".gemini").join("antigravity").join("brain").join("c1").join(".system_generated").join("logs");
+        std::fs::create_dir_all(&dir).unwrap();
+        (home, dir.join("transcript.jsonl"))
+    }
+
+    fn transcript_event(raw: &str) -> ParsedEvent {
+        ParsedEvent { agent: Agent::Antigravity, kind: EventKind::Stop, tail: None, info: StopInfo::default(), source: Some(TailSource::Transcript(raw.to_string())) }
+    }
+
+    #[test]
+    fn antigravity_text_is_read_from_the_transcript_but_only_from_inside_its_own_folder() {
+        let (home, file) = transcript_home("agy_home");
+        let lines = [
+            r#"{"type":"USER_INPUT","content":"fix it","step_index":1}"#,
+            r#"{"type":"PLANNER_RESPONSE","content":"","tool_calls":[{"name":"run_command","args":{}}],"step_index":2}"#,
+            r#"{"type":"GENERIC","content":"output","step_index":3}"#,
+            r#"{"type":"PLANNER_RESPONSE","content":"All 12 tests pass.","step_index":4}"#,
+        ];
+        std::fs::write(&file, lines.join("\n") + "\n").unwrap();
+        let mut ev = transcript_event(&file.display().to_string());
+        resolve_tail_with(&mut ev, Some(&home));
+        assert_eq!(ev.tail.as_deref(), Some("All 12 tests pass."));
+        assert_eq!(ev.info.ok, None);
+        assert!(ev.source.is_none(), "the source is consumed");
+        // ~/ is expanded
+        let mut ev = transcript_event("~/.gemini/antigravity/brain/c1/.system_generated/logs/transcript.jsonl");
+        resolve_tail_with(&mut ev, Some(&home));
+        assert_eq!(ev.tail.as_deref(), Some("All 12 tests pass."));
+
+        // a file outside ~/.gemini, a ".." climb out of it, the wrong extension and a directory all give no text
+        let outside = home.join("other");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("transcript.jsonl"), lines.join("\n")).unwrap();
+        std::fs::write(file.with_extension("txt"), lines.join("\n")).unwrap();
+        let climb = home.join(".gemini").join("..").join("other").join("transcript.jsonl");
+        for raw in [
+            outside.join("transcript.jsonl").display().to_string(),
+            climb.display().to_string(),
+            file.with_extension("txt").display().to_string(),
+            file.parent().unwrap().display().to_string(),
+            "~/other/transcript.jsonl".to_string(),
+            "".to_string(),
+        ] {
+            let mut ev = transcript_event(&raw);
+            resolve_tail_with(&mut ev, Some(&home));
+            assert_eq!(ev.tail, None, "{raw}");
+        }
+        let mut ev = transcript_event(&file.display().to_string());
+        resolve_tail_with(&mut ev, None);
+        assert_eq!(ev.tail, None, "no home folder known: nothing is read");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The exact shape `agy` 1.2.9 posted in a live run (2026-10-19): forward-slash paths under
+    /// `~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript_full.jsonl`, `terminationReason`
+    /// "NO_TOOL_CALL" for a normal finish, a reply that is a `PLANNER_RESPONSE` with `content`.
+    #[test]
+    fn a_real_agy_stop_resolves_to_its_reply_and_a_clean_status() {
+        let home = tmp("agy_live_shape");
+        let dir = home.join(".gemini").join("antigravity-cli").join("brain").join("e52a92c1").join(".system_generated").join("logs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("transcript_full.jsonl");
+        std::fs::write(
+            &file,
+            concat!(
+                r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-19T11:09:36Z","content":"Reply with exactly the single word ok."}"#,
+                "\n",
+                r#"{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-19T11:09:38Z","input_tokens":900,"cache_read_tokens":0,"output_tokens":2,"content":"ok"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let slashed = file.display().to_string().replace('\\', "/");
+        let body = format!(
+            r#"{{"artifactDirectoryPath":"x","conversationId":"e52a92c1","error":"","executionNum":0,"fullyIdle":true,"modelName":"gemini-3.8-flash-high","terminationReason":"NO_TOOL_CALL","transcriptPath":"{slashed}","workspacePaths":["C:/w"]}}"#
+        );
+        let mut ev = parse_event("agent=antigravity&event=stop", &body).unwrap();
+        assert_eq!(ev.info, StopInfo { ok: None, fully_idle: Some(true) });
+        resolve_tail_with(&mut ev, Some(&home));
+        assert_eq!(ev.tail.as_deref(), Some("ok"));
+        assert_eq!(ev.info.ok, None, "NO_TOOL_CALL is how a normal finish is reported");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn an_error_after_the_last_reply_or_a_turn_without_a_reply_is_not_a_clean_finish() {
+        let (home, file) = transcript_home("agy_err");
+        let reply = r#"{"type":"PLANNER_RESPONSE","content":"Done.","step_index":2}"#;
+        let user = r#"{"type":"USER_INPUT","content":"go","step_index":1}"#;
+        let err = r#"{"type":"ERROR_MESSAGE","error":"model overloaded","step_index":3}"#;
+        std::fs::write(&file, [user, reply, err].join("\n") + "\n").unwrap();
+        let mut ev = transcript_event(&file.display().to_string());
+        resolve_tail_with(&mut ev, Some(&home));
+        assert_eq!((ev.tail.as_deref(), ev.info.ok), (Some("Done."), Some(false)));
+        // an error BEFORE the final reply (a retry that worked) is not held against it
+        std::fs::write(&file, [user, err, reply].join("\n") + "\n").unwrap();
+        let mut ev = transcript_event(&file.display().to_string());
+        resolve_tail_with(&mut ev, Some(&home));
+        assert_eq!((ev.tail.as_deref(), ev.info.ok), (Some("Done."), None));
+        // the last thing is the user's own message: no reply to this turn
+        std::fs::write(&file, [reply, user].join("\n") + "\n").unwrap();
+        let mut ev = transcript_event(&file.display().to_string());
+        resolve_tail_with(&mut ev, Some(&home));
+        assert_eq!(ev.tail, None);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_huge_transcript_is_read_from_its_end_only() {
+        let (home, file) = transcript_home("agy_big");
+        let filler = format!("{{\"type\":\"GENERIC\",\"content\":\"{}\",\"step_index\":1}}\n", "x".repeat(900));
+        let mut text = String::new();
+        while text.len() < 2 * 1024 * 1024 {
+            text.push_str(&filler);
+        }
+        text.push_str(r#"{"type":"PLANNER_RESPONSE","content":"Final answer.","step_index":9}"#);
+        text.push('\n');
+        std::fs::write(&file, &text).unwrap();
+        let mut ev = transcript_event(&file.display().to_string());
+        let t0 = std::time::Instant::now();
+        resolve_tail_with(&mut ev, Some(&home));
+        assert_eq!(ev.tail.as_deref(), Some("Final answer."));
+        assert!(t0.elapsed() < std::time::Duration::from_secs(2));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn aider_text_is_the_last_reply_in_its_history_file() {
+        let dir = tmp("aider_cwd");
+        let history = "# aider chat started at 2026-10-19 10:00:00\n\n> Model: x\n\n#### add a retry\n\nI added a retry loop.\n\n> Applied edit to a.py\n\n#### now run the tests\n\nAll 4 tests passed.\n\n> Tokens: 1k sent\n";
+        std::fs::write(dir.join(".aider.chat.history.md"), history).unwrap();
+        let mk = |cwd: String| ParsedEvent { agent: Agent::Aider, kind: EventKind::Stop, tail: None, info: StopInfo::default(), source: Some(TailSource::AiderCwd(cwd)) };
+        let mut ev = mk(dir.display().to_string());
+        resolve_tail_with(&mut ev, Some(&dir));
+        assert_eq!(ev.tail.as_deref(), Some("All 4 tests passed."));
+        // a relative directory, a missing directory or a directory without the history file give no text
+        for cwd in ["proj".to_string(), "".to_string(), dir.join("nope").display().to_string(), std::env::temp_dir().display().to_string()] {
+            let mut ev = mk(cwd.clone());
+            resolve_tail_with(&mut ev, Some(&dir));
+            assert_eq!(ev.tail, None, "{cwd:?}");
+        }
+        assert_eq!(aider_last_reply("no user lines here"), None);
+        assert_eq!(aider_last_reply("#### hi\n"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn start_events_are_merged_so_they_never_push_a_stop_out() {
+        let a = Agent::Gemini;
+        let base = 9_100_000_000u64;
+        record_event_at(a, EventKind::Stop, base, Some("done".into()), StopInfo::default());
+        for i in 0..200 {
+            record_event_at(a, EventKind::Start, base + 10 + i, None, StopInfo::default());
+        }
+        assert_eq!(last_event_ms(a, EventKind::Stop), Some(base), "the stop is still there");
+        assert_eq!(last_event_ms(a, EventKind::Start), Some(base + 209), "one start, refreshed");
+        assert!(!stop_is_latest(a, base), "a prompt after the stop means a new turn");
+    }
+
+    #[test]
+    fn a_cursor_reply_attaches_to_its_own_turns_stop_only() {
+        let a = Agent::Cursor;
+        let base = 9_200_000_000u64;
+        record_event_at(a, EventKind::Start, base, None, StopInfo::default());
+        record_event_at(a, EventKind::Message, base + 100, Some("Fixed the bug.".into()), StopInfo::default());
+        record_event_at(a, EventKind::Stop, base + 200, None, StopInfo { ok: Some(true), fully_idle: None });
+        assert_eq!(last_stop_tail(a).as_deref(), Some("Fixed the bug."));
+        assert_eq!(last_stop_info(a).ok, Some(true));
+        assert!(stop_is_latest(a, base));
+        // the next turn has no reply of its own: the earlier turn's reply is not borrowed
+        record_event_at(a, EventKind::Start, base + 300, None, StopInfo::default());
+        record_event_at(a, EventKind::Stop, base + 400, None, StopInfo { ok: Some(false), fully_idle: None });
+        assert_eq!(last_stop_tail(a), None);
+        assert_eq!(last_stop_info(a).ok, Some(false));
+    }
+
+    #[test]
+    fn the_hook_script_answers_with_neutral_json_and_never_blocks() {
+        let s = script_text("tok", 39220);
+        assert!(s.contains("aider") && s.contains("--data-urlencode") && s.contains("cwd="), "{s}");
+        assert!(s.contains(r#"{"continue":true}"#) && s.contains("{}"), "{s}");
+        assert!(s.contains("exit /b 0") || s.contains("exit 0"));
+        assert!(!s.contains("@PORT@") && !s.contains("@TOKEN@") && s.contains("39220") && s.contains("tok"));
+    }
+
+    #[test]
+    fn the_hook_voice_commands_know_every_agent() {
+        for (t, action, agent) in [
+            ("hook up antigravity", "connect", Agent::Antigravity),
+            ("hook up agy", "connect", Agent::Antigravity),
+            ("hook up opencode", "connect", Agent::OpenCode),
+            ("hook up open code", "connect", Agent::OpenCode),
+            ("let nexus know when gemini cli stops", "connect", Agent::Gemini),
+            ("set up the cursor hook", "connect", Agent::Cursor),
+            ("is the aider hook installed", "status", Agent::Aider),
+            ("remove the opencode hook", "disconnect", Agent::OpenCode),
+            ("hook up claude", "connect", Agent::Claude),
+        ] {
+            let (a, ag) = parse_command(t).unwrap_or_else(|| panic!("{t}"));
+            assert_eq!((a.as_str(), ag), (action, agent), "{t}");
+        }
+        for t in [
+            "hook up antigravity and cursor", "hook up claude and codex", "install cursor", "open cursor", "connect to aider", "hook up", "open the opencode hook",
+            "hook up evil", "run the aider hook",
+        ] {
+            assert_eq!(parse_command(t), None, "{t}");
+        }
+    }
+
+    #[test]
+    fn a_window_or_a_terminal_names_at_most_one_agent() {
+        assert_eq!(agent_in_title("Antigravity - my-project"), Some(Agent::Antigravity));
+        assert_eq!(agent_in_title("OpenCode: fix the tests"), Some(Agent::OpenCode));
+        assert_eq!(agent_in_title("agy - ~/proj"), Some(Agent::Antigravity));
+        assert_eq!(agent_in_title("main.rs - Cursor"), Some(Agent::Cursor));
+        assert_eq!(agent_in_title("gemini cli"), Some(Agent::Gemini));
+        for none in ["claude cursor", "Windows PowerShell", "magyar.txt", "Gemini - Google Chrome", ""] {
+            assert_eq!(agent_in_title(none), None, "{none}");
+        }
+    }
+
+    fn proc(pid: u32, ppid: u32, name: &str, cmd: &str) -> crate::session_observer::ProcSnap {
+        crate::session_observer::ProcSnap { pid, ppid, name: name.into(), cmd: cmd.into(), cpu_pct: 0.0, io_total: 0 }
+    }
+
+    #[test]
+    fn the_agent_in_a_terminal_is_found_below_the_foreground_process() {
+        let all = vec![
+            proc(10, 1, "windowsterminal.exe", "windowsterminal.exe"),
+            proc(11, 10, "pwsh.exe", "pwsh.exe"),
+            proc(12, 11, "node.exe", r"node c:\users\me\.config\opencode\bin\opencode"),
+            proc(20, 1, "claude.exe", "claude"),
+            proc(30, 1, "explorer.exe", "explorer.exe"),
+        ];
+        assert_eq!(agent_under(10, &all, 999), Some(Agent::OpenCode), "claude is not below this terminal");
+        assert_eq!(agent_under(30, &all, 999), None);
+        assert_eq!(agent_under(20, &all, 999), Some(Agent::Claude), "the foreground process can be the agent itself");
+        // two agents under one terminal: ask, never guess
+        let mut two = all.clone();
+        two.push(proc(13, 11, "codex.exe", "codex"));
+        assert_eq!(agent_under(10, &two, 999), None);
+        // NEXUS's own processes never count
+        assert_eq!(agent_under(10, &all, 12), None);
     }
 }

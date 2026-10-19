@@ -51,6 +51,25 @@ The first live try said it three times and got "didn't catch that" each time. Th
 - Tests: 6 new in `stt`, 1 in `stt_groq`, 1 in `power_plan`; the grammar bypass is covered by a test that fails without it (mutation checked; a first version survived because the widened word list made it pass on its own).
 - NOT fixed: `Raktis unattended shutdown.` (Whisper's guess for "practice") now passes the word gate, matches no grammar and goes to chat as an ordinary question; only the decoder prompt can make Whisper hear "practice". The "didn't catch that" reply when the filter, not the microphone, produced the empty text is unchanged. NOT run live (needs `nexus build`).
 
+## More agents (2026-10-19): Antigravity, OpenCode, Gemini CLI, Cursor, Aider
+
+Everything W4/W5 did for Claude Code and Codex now works through the same table-driven `agent_hooks::Agent`:
+
+| Agent | Where the hook goes | Stop signal | Final text |
+|---|---|---|---|
+| Antigravity (App, `agy`, IDE) | `~/.gemini/config/hooks.json`, named hook `nexus-agent-event` (`Stop`, `PreInvocation`) | `Stop` with `terminationReason`, `error`, `fullyIdle` | `transcriptPath` (path-checked, last 256 KB) |
+| OpenCode | its own file `~/.config/opencode/plugins/nexus-agent-event.js` | `session.idle` (sub-sessions ignored) | read through the SDK client; `permission.*` = needs you; user `message.updated` = new turn |
+| Gemini CLI | `~/.gemini/settings.json` hooks | `AfterAgent` | `prompt_response` |
+| Cursor | `~/.cursor/hooks.json` | `stop` (`status`) | `afterAgentResponse` (a separate `message` event) |
+| Aider | `~/.aider.conf.yml` | `notifications-command` | last reply in `.aider.chat.history.md` of the posted working directory |
+
+- The verdict only gets stricter from what an agent says about HOW it stopped: an `error` / `terminationReason` with error/abort/cancel words / Cursor `aborted|error` / an `ERROR_MESSAGE` after the last Antigravity reply = failed; Antigravity `fullyIdle:false` = still busy.
+- A Stop with no text (Aider without a history file, a transcript that cannot be read) cannot reach "go": NEXUS tells you and, in `on` mode, asks "Shall I shut down anyway?".
+- `run_watch_then_power` finds "this session" from the window title for any of them, else from the agent process under the foreground window.
+- **Found live, fixed:** `agy` runs hook commands through `cmd /C` and a quoted path with a space fails ("is not recognized as an internal or external command"), so the Antigravity command is written with the 8.3 short path and refused when none exists. A real `agy -p` run in a temp project (a git repo; hooks in `.agents/hooks.json` are only loaded from a project root) posted `start` and `stop` through the generated script. The installer writes the GLOBAL `~/.gemini/config/hooks.json` (the documented location for the App, CLI and IDE); that file was not exercised, so the first `hook up antigravity` is also the first real test of it.
+- **Also found:** the `[WATCH-POWER]` lines that docs 139/142 tell you to read were hidden by `scripts/run.ps1`'s filter; it now shows `[WATCH-POWER]` and `[STT-DROP]`.
+- **Not run:** OpenCode, Gemini CLI, Cursor and Aider themselves (OpenCode's plugin was run under node with a fake client; Gemini is not installed here), Claude's and Codex's real Stop payload, the spoken flows, a real shutdown.
+
 ## Known unrelated failures
 
 3 `intent_parser` PR-list tests ("open pr list" now parses as `OpenGitHubDashboard`) and a flaky `auth_vault` keyring test under parallel runs. The dead-code gate also lists items from other in-progress work (`center_for`, `tts::read_tts_emotion_setting`, `vision` fields).

@@ -196,8 +196,10 @@ fn handle_conn(
         // words, and nothing that can run a command: see agent_hooks.
         let ok = req.method == "POST" && bearer_ok(&req.auth, agent_token);
         let (code, reply, event) = crate::agent_hooks::route_event(ok, &req.query, &req.body);
-        if let Some(ev) = event {
-            crate::agent_hooks::record_event_at(ev.agent, ev.kind, crate::agent_hooks::now_ms(), ev.tail);
+        if let Some(mut ev) = event {
+            // Antigravity and Aider name a file the final text is read from (path-checked, size-capped)
+            crate::agent_hooks::resolve_tail(&mut ev);
+            crate::agent_hooks::record_event_at(ev.agent, ev.kind, crate::agent_hooks::now_ms(), ev.tail, ev.info);
         }
         respond(&mut stream, code, reply);
         return None;
@@ -396,7 +398,7 @@ mod agent_event_http_tests {
 
 #[cfg(all(test, windows))]
 mod agent_script_tests {
-    use crate::agent_hooks::{parse_event, write_script, Agent, EventKind};
+    use crate::agent_hooks::{parse_event, write_script, Agent, EventKind, TailSource};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::process::Stdio;
@@ -405,6 +407,12 @@ mod agent_script_tests {
     /// request an agent's hook would make. `stdin` is what the agent's hook would pipe in. `None` when
     /// curl.exe is not on this machine.
     fn run_script(args: &[&str], stdin: Option<&str>) -> Option<String> {
+        run_script_full(args, stdin, None).map(|(request, _)| request)
+    }
+
+    /// Like `run_script`, in a chosen working directory, also returning what the script printed to stdout.
+    fn run_script_full(args: &[&str], stdin: Option<&str>, cwd: Option<&std::path::Path>) -> Option<(String, String)> {
+        static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         if std::process::Command::new("curl.exe").arg("--version").output().is_err() {
             eprintln!("curl.exe not available: skipped");
             return None;
@@ -436,25 +444,28 @@ mod agent_script_tests {
             let _ = s.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}");
             String::from_utf8_lossy(&raw).to_string()
         });
-        let dir = std::env::temp_dir().join(format!("nexus_script_run_{}_{}_{}", std::process::id(), args.len(), stdin.is_some()));
+        let dir = std::env::temp_dir().join(format!("nexus_script_run_{}_{}", std::process::id(), RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
         let _ = std::fs::remove_dir_all(&dir);
         let script = write_script(&dir, "agent-token", port).unwrap();
-        let mut child = std::process::Command::new(&script)
-            .args(args)
+        let mut cmd = std::process::Command::new(&script);
+        cmd.args(args)
             .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if let Some(c) = cwd {
+            cmd.current_dir(c);
+        }
+        let mut child = cmd.spawn().unwrap();
         if let Some(text) = stdin {
             let mut pipe = child.stdin.take().unwrap();
             pipe.write_all(text.as_bytes()).unwrap();
             drop(pipe);
         }
-        assert!(child.wait().unwrap().success());
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
         let request = server.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-        Some(request)
+        Some((request, String::from_utf8_lossy(&out.stdout).to_string()))
     }
 
     fn body_of(request: &str) -> &str {
@@ -496,5 +507,43 @@ mod agent_script_tests {
         let Some(request) = run_script(&["claude"], None) else { return };
         let ev = parse_event(query_of(&request), body_of(&request)).expect("a valid event");
         assert_eq!((ev.agent, ev.kind), (Agent::Claude, EventKind::Stop), "{request}");
+    }
+
+    #[test]
+    fn the_script_prints_neutral_json_so_no_agent_is_ever_blocked() {
+        let Some((_, out)) = run_script_full(&["claude", "stop"], Some("{}"), None) else { return };
+        assert_eq!(out.trim(), "{}");
+        let Some((_, out)) = run_script_full(&["gemini", "stop"], Some("{}"), None) else { return };
+        assert_eq!(out.trim(), "{}");
+        // Cursor's prompt hook blocks the prompt unless it answers continue
+        let Some((_, out)) = run_script_full(&["cursor", "start"], Some("{}"), None) else { return };
+        assert_eq!(out.trim(), r#"{"continue":true}"#);
+    }
+
+    #[test]
+    fn aiders_notification_command_posts_its_working_directory_without_any_stdin() {
+        // spaces and parentheses in the path are cmd's classic trap
+        let cwd = std::env::temp_dir().join(format!("nexus aider (x86) {}", std::process::id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let Some((request, out)) = run_script_full(&["aider", "stop"], None, Some(&cwd)) else { return };
+        assert!(request.starts_with("POST /agent-event?agent=aider&event=stop HTTP/1.1"), "{request}");
+        assert_eq!(out.trim(), "{}");
+        let ev = parse_event(query_of(&request), body_of(&request)).expect("a valid event");
+        assert_eq!((ev.agent, ev.kind), (Agent::Aider, EventKind::Stop));
+        let Some(TailSource::AiderCwd(posted)) = ev.source else { panic!("no working directory in {request}") };
+        assert_eq!(std::fs::canonicalize(&posted).unwrap(), std::fs::canonicalize(&cwd).unwrap(), "{request}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn a_cursor_reply_and_an_antigravity_stop_pass_through_the_script_intact() {
+        let reply = r#"{"text":"Fixed the bug.","conversation_id":"c1"}"#;
+        let Some(request) = run_script(&["cursor", "message"], Some(reply)) else { return };
+        let ev = parse_event(query_of(&request), body_of(&request)).expect("a valid event");
+        assert_eq!((ev.agent, ev.kind, ev.tail.as_deref()), (Agent::Cursor, EventKind::Message, Some("Fixed the bug.")), "{request}");
+        let stop = r#"{"executionNum":1,"terminationReason":"model_stop","error":"","fullyIdle":false,"transcriptPath":"C:/x/t.jsonl"}"#;
+        let Some(request) = run_script(&["antigravity", "stop"], Some(stop)) else { return };
+        let ev = parse_event(query_of(&request), body_of(&request)).expect("a valid event");
+        assert_eq!((ev.agent, ev.kind, ev.info.fully_idle), (Agent::Antigravity, EventKind::Stop, Some(false)), "{request}");
     }
 }
