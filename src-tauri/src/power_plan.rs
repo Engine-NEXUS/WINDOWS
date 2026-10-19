@@ -296,9 +296,47 @@ fn parse_mode_command(tokens: &[&str], p: &str) -> Option<PlanCommand> {
     None
 }
 
+/// One edit (insert, delete or substitute) apart, never equal.
+fn one_edit_apart(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a == b || a.len().abs_diff(b.len()) > 1 {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() && i < b.len() && a[i] == b[i] {
+        i += 1;
+    }
+    match a.len().cmp(&b.len()) {
+        std::cmp::Ordering::Equal => a[i + 1..] == b[i + 1..],
+        std::cmp::Ordering::Greater => a[i + 1..] == b[i..],
+        std::cmp::Ordering::Less => a[i..] == b[i + 1..],
+    }
+}
+
+/// One typo away ("unatended", "unattanded"), or the "-tended" ending Whisper keeps ("unobtended", two
+/// edits away). Real words that look alike ("unintended", "unextended") stay out.
+fn is_unattended_misheard(w: &str) -> bool {
+    if w == "unattended" || w == "unintended" || w == "unextended" || !w.starts_with("un") {
+        return false;
+    }
+    one_edit_apart(w, "unattended") || (w.len() >= 9 && w.len() <= 11 && w.ends_with("tended"))
+}
+
+/// Speech-to-text hears "unattended" as "unobtended" / "un attended" (live miss 2026-10-19: the user said
+/// "practice unattended shutdown" three times). Repair ONLY that word, so the rest of the strict vocabulary
+/// check still decides whether the sentence is a mode command: "unintended" is two edits away and stays out.
+fn repair_unattended(t: String) -> String {
+    let joined = t.replace(" un attended", " unattended").replace(" on attended", " unattended");
+    joined
+        .split(' ')
+        .map(|w| if is_unattended_misheard(w) { "unattended" } else { w })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Parse a command about the held plan. `None` = not about the plan.
 pub fn parse_command(text: &str) -> Option<PlanCommand> {
-    let t = norm(text);
+    let t = repair_unattended(norm(text));
     if t.is_empty() {
         return None;
     }
@@ -543,6 +581,36 @@ mod tests {
         assert_eq!(WatchPowerMode::from_setting("on"), WatchPowerMode::On);
         assert_eq!(WatchPowerMode::from_setting(" On "), WatchPowerMode::On);
         assert_eq!(WatchPowerMode::from_setting("dry"), WatchPowerMode::Dry);
+    }
+
+    /// Live miss 2026-10-19: Whisper returned "unobtended" for "unattended".
+    #[test]
+    fn a_misheard_unattended_still_sets_the_mode() {
+        for (t, want) in [
+            ("practice unobtended shutdown", WatchPowerMode::Dry),
+            ("practice un attended shutdown", WatchPowerMode::Dry),
+            ("practice unattanded shutdown", WatchPowerMode::Dry),
+            ("allow unattented shutdown", WatchPowerMode::On),
+            ("turn off unatended shutdown", WatchPowerMode::Off),
+            ("practice unattended shut down", WatchPowerMode::Dry),
+        ] {
+            assert_eq!(parse_command(t), Some(PlanCommand::SetMode(want)), "{t}");
+        }
+        // only that one word is repaired: a different word, or more edits, or other sentence words, stay out
+        for t in [
+            "practice unintended shutdown", "practice unextended shutdown", "allow unattended access", "practice understood shutdown", "allow unobtended shutdown of the server",
+            "practice raktis unattended shutdown",
+        ] {
+            assert!(!matches!(parse_command(t), Some(PlanCommand::SetMode(_))), "{t}");
+        }
+        assert!(one_edit_apart("unatended", "unattended") && !one_edit_apart("unattended", "unattended"));
+        assert!(!one_edit_apart("unintended", "unattended"));
+        for w in ["unobtended", "unatended", "unattanded", "unattented"] {
+            assert!(is_unattended_misheard(w), "{w}");
+        }
+        for w in ["unattended", "unintended", "unextended", "untended", "understood", "attended", "shutdown"] {
+            assert!(!is_unattended_misheard(w), "{w}");
+        }
     }
 
     #[test]

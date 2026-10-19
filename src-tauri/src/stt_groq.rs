@@ -38,6 +38,7 @@ Remember this button as. Click learned. Forget learned. \
 Ghostwriter. Take a letter. Order food. Send message. \
 Deepgram Groq Supabase Eesha Prem Lakshya Congi Shopkart NEXUS \
 Shut down my laptop. Restart my laptop. Lock my laptop. \
+Practice unattended shutdown. Allow unattended shutdown. Turn off unattended shutdown. \
 open close stop cancel navigate analyse search type click press scroll.";
 
 /// Neutral English decoder instruction used when a turn has not been
@@ -462,6 +463,16 @@ mod tests {
         // A voice that is (or may be) someone else never gets command biasing.
         assert_eq!(decoder_bias_for(Uncertain), DecoderBias::Neutral);
         assert_eq!(decoder_bias_for(Rejected), DecoderBias::Neutral);
+    }
+
+    /// Live miss 2026-10-19: Whisper heard "practice unattended shutdown" as "practice unobtended
+    /// shutdown" and "Raktis unattended shutdown" with no hint in the prompt.
+    #[test]
+    fn vocabulary_teaches_the_unattended_shutdown_phrasing() {
+        let v = NEXUS_VOCABULARY.to_lowercase();
+        for phrase in ["practice unattended shutdown", "allow unattended shutdown", "turn off unattended shutdown"] {
+            assert!(v.contains(phrase), "vocabulary missing: {phrase}");
+        }
     }
 
     #[test]

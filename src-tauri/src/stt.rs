@@ -74,17 +74,36 @@ pub(crate) fn last_stt_path_str() -> &'static str {
 pub(crate) fn last_filter_str() -> &'static str {
     match LAST_FILTER.load(std::sync::atomic::Ordering::Relaxed) {
         1 => "hallucination",
+        2 => "dict_gate",
+        3 => "non_ascii",
+        4 => "fragment",
+        5 => "repeat_loop",
+        6 => "cjk",
+        7 => "too_short",
         _ => "none",
     }
 }
+
+/// Why `evaluate_transcript` blanked a transcript (codes shared with `last_filter_str`).
+const R_PHRASE: u8 = 1;
+const R_DICT: u8 = 2;
+const R_NON_ASCII: u8 = 3;
+const R_FRAGMENT: u8 = 4;
+const R_REPEAT: u8 = 5;
+const R_CJK: u8 = 6;
+const R_SHORT: u8 = 7;
 
 fn mark_path(code: u8) {
     LAST_STT_PATH.store(code, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn mark_filtered(original: &str, filtered: &str) {
-    if filtered != original {
-        LAST_FILTER.store(1, std::sync::atomic::Ordering::Relaxed);
+    // `filter_transcript_counted` already stored the specific reason; this only covers a caller
+    // that filtered without it (the marker was still "none").
+    if filtered != original
+        && LAST_FILTER.load(std::sync::atomic::Ordering::Relaxed) == 0
+    {
+        LAST_FILTER.store(R_PHRASE, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -497,7 +516,21 @@ pub fn groq_allowed(local_only: bool, groq_key_empty: bool) -> bool {
 pub fn filter_transcript_counted(text: &str) -> String {
     use std::sync::atomic::Ordering;
     FILTER_TOTAL.fetch_add(1, Ordering::Relaxed);
-    let out = apply_hallucination_filter(text);
+    let out = match evaluate_transcript(text) {
+        Ok(kept) => kept,
+        Err(code) => {
+            LAST_FILTER.store(code, Ordering::Relaxed);
+            // Live miss 2026-10-19: "practice unattended shut down." was blanked by the dictionary
+            // gate and the user only saw "transcript = ''". Say what was heard and why it was dropped.
+            #[cfg(not(test))]
+            if !text.trim().is_empty() {
+                let reason = last_filter_str();
+                println!("[STT-DROP] heard '{}' -> blocked by {}", text.trim(), reason);
+                crate::missed_intent_logger::log_missed_intent(text, "stt_filter", reason);
+            }
+            String::new()
+        }
+    };
     if out.is_empty() {
         FILTER_HITS.fetch_add(1, Ordering::Relaxed);
     }
@@ -588,6 +621,12 @@ const COMMON_WORDS: &[&str] = &[
     "timer", "alarm", "screenshot", "video", "mail", "email",
     "window", "screen", "volume", "mic", "time", "date", "news",
     "weather",
+    // power / session vocabulary: "shut down my laptop" scored 0.25 and "practice unattended
+    // shutdown" 0.00, so ordinary requests were blanked as gibberish (live miss 2026-10-19).
+    "shut", "down", "off", "power", "restart", "reboot", "sleep", "hibernate", "laptop", "computer",
+    "pc", "battery", "percentage", "charge", "charging", "practice", "unattended", "allow",
+    "enable", "disable", "shutdown", "brightness", "watch", "session", "done", "until", "finished",
+    "finish", "complete", "perfect", "wifi", "bluetooth", "level", "status",
 ];
 
 /// Fraction of whitespace tokens (letters only, lowercased) found in
@@ -649,9 +688,24 @@ pub(crate) fn looks_hallucinated(text: &str) -> bool {
 /// ' Thank you.', ' you', ' BOOAAA!', " It's a", ' out.', ' Oh').
 /// Kept OUT deliberately: "i'm sorry" / "i'm not" (dictation-plausible).
 fn apply_hallucination_filter(text: &str) -> String {
+    evaluate_transcript(text).unwrap_or_default()
+}
+
+/// True when NEXUS has a grammar for this sentence. Gibberish and background chatter never parse,
+/// so a parse is the strongest proof that the words are a real command, whatever the word list says.
+fn is_known_command(text: &str) -> bool {
+    crate::intent_parser::parse_deterministic(text).is_some()
+        || crate::power_plan::parse_command(text).is_some()
+        || crate::watch_power::parse(text).is_some()
+        || crate::power_cmd::parse_weak(text).is_some()
+        || crate::power_cmd::parse_casual(text).is_some()
+}
+
+/// `Ok(kept text)` or `Err(reason code)`.
+fn evaluate_transcript(text: &str) -> Result<String, u8> {
     let normalized = normalize_english_punctuation(text);
     if !is_english_compatible_text(&normalized) {
-        return "".to_string();
+        return Err(R_NON_ASCII);
     }
     let lower = normalized.to_lowercase();
     let hallucinations = [
@@ -663,7 +717,7 @@ fn apply_hallucination_filter(text: &str) -> String {
 
     for h in hallucinations.iter() {
         if lower.contains(h) {
-            return "".to_string();
+            return Err(R_PHRASE);
         }
     }
 
@@ -673,7 +727,7 @@ fn apply_hallucination_filter(text: &str) -> String {
     ];
     let bare = lower.trim().trim_end_matches(|c: char| matches!(c, '.' | ',' | '?' | '!'));
     if exact_fragments.contains(&bare) {
-        return "".to_string();
+        return Err(R_FRAGMENT);
     }
 
     // Repetition hallucination loop guard, n× general form: any full-phrase
@@ -686,7 +740,7 @@ fn apply_hallucination_filter(text: &str) -> String {
     let words: Vec<&str> = lower.split_whitespace().collect();
     if is_repetition_loop(&words) {
         tracing::info!("stt: filtered repetition loop hallucination: '{}'", text);
-        return "".to_string();
+        return Err(R_REPEAT);
     }
 
     // Foreign-script guard (measured 2026-09-19: TV anime audio transcribed
@@ -706,7 +760,7 @@ fn apply_hallucination_filter(text: &str) -> String {
         })
         .count();
     if cjk_count >= 2 {
-        return "".to_string();
+        return Err(R_CJK);
     }
 
     // Latin-gibberish dictionary gate (live miss 2026-09-29 21:00:
@@ -718,17 +772,17 @@ fn apply_hallucination_filter(text: &str) -> String {
     // dormant (0.000 on every segment with whisper-large-v3-turbo, see
     // verify_confidence); wiring it would add latency for zero effect.
     let word_count = words.len();
-    if word_count >= 3 && english_token_ratio(&words) < 0.30 {
+    if word_count >= 3 && english_token_ratio(&words) < 0.30 && !is_known_command(&normalized) {
         tracing::info!("stt: filtered non-English/background gibberish: '{}'", text);
-        return "".to_string();
+        return Err(R_DICT);
     }
 
     let alpha_count = normalized.chars().filter(|c| c.is_alphabetic()).count();
     if alpha_count < 2 {
-        return "".to_string();
+        return Err(R_SHORT);
     }
 
-    normalized
+    Ok(normalized)
 }
 
 #[cfg(test)]
@@ -884,6 +938,98 @@ mod tests {
             "stop stop stop stop"
         );
         assert_eq!(apply_hallucination_filter("no no no no"), "no no no no");
+    }
+
+    /// Live miss 2026-10-19 15:05: the user said "practice unattended shutdown" three times and the
+    /// dictionary gate blanked every transcript (0 of 4 words in the list), so NEXUS said "didn't catch
+    /// that" although Groq had heard the words almost exactly.
+    #[test]
+    fn real_commands_the_word_list_does_not_know_are_not_blanked() {
+        for real in [
+            "practice unattended shut down.",
+            "allow unattended shutdown",
+            "turn off unattended shutdown",
+            "shut down my laptop",
+            "shut down the laptop",
+            "power off the computer",
+            "watch this session until it's done",
+        ] {
+            assert_eq!(apply_hallucination_filter(real), real.trim(), "'{real}' is a command and must pass");
+        }
+        // ordinary questions made of words the old list lacked
+        assert_eq!(
+            apply_hallucination_filter("what's the battery percentage"),
+            "what's the battery percentage"
+        );
+    }
+
+    /// The word list can never cover every title, name and place a command contains. These phrases are
+    /// accepted by a grammar yet score under 30% on the word list, so ONLY the grammar bypass saves them
+    /// (this is what makes the bypass non-vacuous: remove it and this test fails).
+    #[test]
+    fn a_grammar_match_saves_commands_made_of_names() {
+        use super::{english_token_ratio, evaluate_transcript, is_known_command};
+        for cmd in [
+            "order paneer butter masala",
+            "order chicken biryani paradise",
+            "search kesariya arijit singh lyrics",
+            "ask claude to fix kesariya arijit singh",
+            "find kesariya arijit singh",
+        ] {
+            let words: Vec<&str> = cmd.split_whitespace().collect();
+            assert!(english_token_ratio(&words) < 0.30, "'{cmd}' must be unknown to the word list for this test to mean anything");
+            assert!(is_known_command(cmd), "'{cmd}' must parse");
+            assert_eq!(evaluate_transcript(cmd), Ok(cmd.to_string()), "'{cmd}'");
+        }
+    }
+
+    /// The bypass is "NEXUS has a grammar for it", so background audio and near-misses of the grammar
+    /// still go through the gate and get a specific reason.
+    #[test]
+    fn the_gate_still_blocks_what_no_grammar_accepts() {
+        use super::{evaluate_transcript, R_DICT};
+        for junk in [
+            "Tentang Otor. Post Immortal.",
+            "Cunzon usarlo sarese manguer",
+            "Souch Mamek tadrao vara yeraddy",
+            "Raktis unobtended chaman",
+        ] {
+            assert!(evaluate_transcript(junk).is_err(), "'{junk}' must still be blocked");
+            assert!(!super::is_known_command(junk), "'{junk}' must not parse as a command");
+        }
+        for junk in ["Tentang Otor. Post Immortal.", "Raktis unobtended chaman"] {
+            assert_eq!(evaluate_transcript(junk), Err(R_DICT), "'{junk}' must be blocked by the dictionary gate");
+        }
+        // "Raktis unattended shutdown." (the live mishearing of "practice ...") is mostly ordinary words, so
+        // it now passes the word-ratio gate; no grammar accepts it, so it can never act, it only reaches chat.
+        assert!(evaluate_transcript("Raktis unattended shutdown.").is_ok());
+        assert!(!super::is_known_command("Raktis unattended shutdown."));
+    }
+
+    /// Every blank carries its own reason (shown in `stt:turn_stats` and the `[STT-DROP]` line).
+    #[test]
+    fn each_blocked_transcript_names_its_reason() {
+        use super::{evaluate_transcript, R_CJK, R_DICT, R_FRAGMENT, R_NON_ASCII, R_PHRASE, R_REPEAT, R_SHORT};
+        assert_eq!(evaluate_transcript("café society"), Err(R_NON_ASCII));
+        assert_eq!(evaluate_transcript("Thank you for watching"), Err(R_PHRASE));
+        assert_eq!(evaluate_transcript("from the"), Err(R_FRAGMENT));
+        assert_eq!(evaluate_transcript("Open breath. Open breath."), Err(R_REPEAT));
+        assert_eq!(evaluate_transcript("Tentang Otor. Post Immortal."), Err(R_DICT));
+        assert_eq!(evaluate_transcript("x"), Err(R_SHORT));
+        assert!(evaluate_transcript("open brave").is_ok());
+        let _ = R_CJK;
+    }
+
+    #[test]
+    fn the_counted_wrapper_stores_the_specific_reason() {
+        use super::{last_filter_str, reset_turn_markers};
+        reset_turn_markers();
+        assert_eq!(filter_transcript_counted("Tentang Otor. Post Immortal."), "");
+        assert_eq!(last_filter_str(), "dict_gate");
+        reset_turn_markers();
+        assert_eq!(filter_transcript_counted("practice unattended shut down."), "practice unattended shut down.");
+        assert_eq!(last_filter_str(), "none");
+        reset_turn_markers();
     }
 
     /// Latin-gibberish dictionary gate: background audio with (almost) no

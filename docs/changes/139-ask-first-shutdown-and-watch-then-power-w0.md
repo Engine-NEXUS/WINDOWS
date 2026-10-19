@@ -39,6 +39,18 @@ W2 `session_verdict.rs` (judge), W3 `session_observer.rs` (evidence; both `#[cfg
 
 `watch_runner.rs`, setting `watchPower` (off / dry / on), `agent_hooks` extended so a Stop hook carries the agent's final message and a new prompt cancels an older stop. See the W5 block in doc 142 for the exact conditions, every cancel path and what was NOT verified. Practice mode first.
 
+## Live miss 2026-10-19: "practice unattended shutdown" was heard, then thrown away
+
+The first live try said it three times and got "didn't catch that" each time. The audio and Groq were fine (the log showed `practice unattended shut down.`, `practice unobtended shutdown.`, `Raktis unattended shutdown.`); the dictionary gate in `stt::evaluate_transcript` blanked all three because under 30% of their words were in a 194-word list. The same gate also blanked `shut down my laptop`, `power off the computer` and `order paneer butter masala` (simulated against the real list).
+
+- The gate is now skipped when NEXUS has a grammar for the sentence (`stt::is_known_command`: `parse_deterministic`, plan, watch and power parsers). Gibberish never parses. The word list also gained the power/session words.
+- Every blank has a reason (`dict_gate`, `non_ascii`, `fragment`, `repeat_loop`, `cjk`, `too_short`, `hallucination`) in `stt:turn_stats`, a visible `[STT-DROP] heard '...' -> blocked by ...` console line, and a `missed_intents.jsonl` entry (source `stt_filter`).
+- `scripts/run.ps1` now shows `[STT-DROP]` and `[WATCH-POWER]` lines. **Before this the `[WATCH-POWER]` lines this doc and doc 142 tell you to read were hidden by the console filter.**
+- `NEXUS_VOCABULARY` teaches the three unattended-shutdown phrases (134 of the 140-word cap).
+- `power_plan::parse_command` repairs a misheard "unattended" ("unobtended", "un attended", one-typo variants); "unintended" and "unextended" are excluded.
+- Tests: 6 new in `stt`, 1 in `stt_groq`, 1 in `power_plan`; the grammar bypass is covered by a test that fails without it (mutation checked; a first version survived because the widened word list made it pass on its own).
+- NOT fixed: `Raktis unattended shutdown.` (Whisper's guess for "practice") now passes the word gate, matches no grammar and goes to chat as an ordinary question; only the decoder prompt can make Whisper hear "practice". The "didn't catch that" reply when the filter, not the microphone, produced the empty text is unchanged. NOT run live (needs `nexus build`).
+
 ## Known unrelated failures
 
 3 `intent_parser` PR-list tests ("open pr list" now parses as `OpenGitHubDashboard`) and a flaky `auth_vault` keyring test under parallel runs. The dead-code gate also lists items from other in-progress work (`center_for`, `tts::read_tts_emotion_setting`, `vision` fields).
