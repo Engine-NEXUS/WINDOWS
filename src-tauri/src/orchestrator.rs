@@ -799,6 +799,11 @@ pub async fn process_transcript<R: Runtime>(
                 return run_offer_reply(app, o, reply, &transcript).await;
             }
             _ => {
+                // A quiet "yes" heard as "dirt." must not lose the question and go to the cloud: ask once more.
+                if crate::intent_parser::is_mumble(&transcript) && offer::reask_once() {
+                    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                    return say_and_finish(&app, request_id, "Sorry sir, was that a yes or a no?".into());
+                }
                 offer::clear();
                 crate::action_kernel::pending::clear();
             }

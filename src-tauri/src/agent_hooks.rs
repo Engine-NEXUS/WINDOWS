@@ -306,7 +306,9 @@ fn unquoted_script(script: &Path) -> Result<String, HookError> {
 /// The command written into an agent's hook file: `<script> <agent> <kind>`.
 fn command_line(script: &Path, agent: &str, kind: &str) -> Result<String, HookError> {
     if agent == "antigravity" {
-        return Ok(format!("{} {agent} {kind}", unquoted_script(script)?));
+        // The 8.3 short path has no "nexus-agent-event" in it, so the marker rides along as a trailing argument
+        // (the script reads only its first two): without it NEXUS could not recognise its own hook afterwards.
+        return Ok(format!("{} {agent} {kind} {MARKER}", unquoted_script(script)?));
     }
     Ok(format!("\"{}\" {agent} {kind}", script.display()))
 }
@@ -440,8 +442,30 @@ pub fn cursor_has_hook(existing: &str) -> bool {
 const ANTIGRAVITY_HOOK_NAME: &str = "nexus-agent-event";
 const ANTIGRAVITY_EVENTS: &[(&str, &str)] = &[("Stop", "stop"), ("PreInvocation", "start")];
 
+/// Hooks NEXUS wrote before the marker travelled as an argument: `<...\NEXUS-~1.CMD | ...\nexus-agent-event.cmd>
+/// antigravity <stop|start>`, nothing else. Live 2026-10-19: the user's own file looked like this and NEXUS refused to
+/// touch, find or remove it.
+fn legacy_antigravity_command_is_ours(cmd: &str) -> bool {
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    let [path, agent, kind] = parts[..] else { return false };
+    let file = path.rsplit(|c| c == '\\' || c == '/').next().unwrap_or("").to_lowercase();
+    let our_file = file == SCRIPT_NAME || (file.starts_with("nexus-~") && file.ends_with(".cmd"));
+    our_file && agent == "antigravity" && matches!(kind, "stop" | "start")
+}
+
 fn antigravity_group_is_ours(v: &Value) -> bool {
-    v.to_string().contains(MARKER)
+    if v.to_string().contains(MARKER) {
+        return true;
+    }
+    // legacy: every command in the group is one of ours, and there is at least one
+    let Some(events) = v.as_object() else { return false };
+    let commands: Vec<&str> = events
+        .values()
+        .filter_map(|l| l.as_array())
+        .flatten()
+        .filter_map(|e| e.get("command").and_then(|c| c.as_str()))
+        .collect();
+    !commands.is_empty() && commands.iter().all(|c| legacy_antigravity_command_is_ours(c))
 }
 
 pub fn antigravity_add_hook(existing: &str, script: &Path) -> Result<String, HookError> {
@@ -1329,6 +1353,22 @@ fn find_agent(padded: &str) -> Option<Agent> {
 /// claude hook installed". Strict: every word must be in the hook vocabulary AND the sentence must name
 /// the hook / stop / nexus, so "install claude" or "connect to claude" are never claimed.
 pub fn parse_command(text: &str) -> Option<(HookAction, Agent)> {
+    parse_command_sentence(text).or_else(|| last_sentence(text).and_then(parse_command_sentence))
+}
+
+/// When speech-to-text returns several sentences, the LAST one alone. Live 2026-10-19: Whisper continued the decoder
+/// prompt and wrote `hook up anti-pilot. hook up anti-gravity.`: a junk sentence, then the real command. The strict
+/// grammars still apply to that last sentence on its own.
+pub(crate) fn last_sentence(text: &str) -> Option<&str> {
+    let parts: Vec<&str> = text.split(|c| matches!(c, '.' | '!' | '?')).map(str::trim).filter(|s| !s.is_empty()).collect();
+    if parts.len() >= 2 {
+        parts.last().copied()
+    } else {
+        None
+    }
+}
+
+fn parse_command_sentence(text: &str) -> Option<(HookAction, Agent)> {
     // speech splits some names: "open code", "gemini cli"
     // Live (2026-10-19) Whisper wrote "hookup anti-gravity." and "hookup open code.": one word for "hook up", and
     // "anti gravity" for the agent's name.
@@ -1372,6 +1412,13 @@ mod tests {
 
     fn tgt(script: &Path) -> HookTarget<'_> {
         HookTarget { script, token: "test-token", port: 39220 }
+    }
+
+    /// The event queue is process-global and capped (MAX_EVENTS): the cap test pushes enough events to evict other
+    /// tests' events, so every test that records events takes this lock.
+    fn events_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn tmp(name: &str) -> PathBuf {
@@ -1585,6 +1632,7 @@ mod tests {
 
     #[test]
     fn stop_start_and_notification_events_are_ordered_per_agent() {
+        let _events = events_test_lock();
         // other tests share the global list: use times far in the future
         let base = u64::MAX / 4;
         let a = Agent::Claude;
@@ -1690,7 +1738,8 @@ mod tests {
         for event in ["Stop", "PreInvocation"] {
             let cmd = v["nexus-agent-event"][event][0]["command"].as_str().unwrap();
             assert!(!cmd.contains('"'), "{cmd}");
-            assert_eq!(cmd.split(' ').count(), 3, "script, agent, kind: {cmd}");
+            assert_eq!(cmd.split(' ').count(), 4, "script, agent, kind, marker: {cmd}");
+            assert!(cmd.ends_with(MARKER), "{cmd}");
         }
         // other agents keep the quoted form that already works for them
         assert!(claude_add_hook("", &script()).unwrap().contains(r#"\"C:\\Users"#), "claude keeps quotes");
@@ -1735,8 +1784,8 @@ mod tests {
         let ours = &v["nexus-agent-event"];
         // handlers sit directly under the event key for non-tool events (Antigravity's hooks documentation)
         assert_eq!(ours["Stop"][0]["type"], "command");
-        assert!(ours["Stop"][0]["command"].as_str().unwrap().ends_with(" antigravity stop"));
-        assert!(ours["PreInvocation"][0]["command"].as_str().unwrap().ends_with(" antigravity start"));
+        assert!(ours["Stop"][0]["command"].as_str().unwrap().ends_with(&format!(" antigravity stop {MARKER}")));
+        assert!(ours["PreInvocation"][0]["command"].as_str().unwrap().ends_with(&format!(" antigravity start {MARKER}")));
         assert!(ours["Stop"][0].get("hooks").is_none());
         assert!(antigravity_has_hook(&after));
         assert_eq!(antigravity_add_hook(&after, &script()).unwrap(), after, "idempotent");
@@ -1744,6 +1793,63 @@ mod tests {
         assert!(removed && !back.contains(MARKER) && back.contains("my-linter"));
         assert!(!antigravity_has_hook(&back));
         assert!(antigravity_has_hook(&antigravity_add_hook("", &script()).unwrap()));
+    }
+
+    /// The exact file NEXUS wrote on the user's machine (2026-10-19 19:18): short path, no marker in the value.
+    const USERS_LEGACY_FILE: &str = r#"{
+  "nexus-agent-event": {
+    "PreInvocation": [
+      { "command": "C:\\Users\\CHITKU~1\\AppData\\Roaming\\COMNEX~1.ASS\\AGENT_~1\\NEXUS-~1.CMD antigravity start", "timeout": 10, "type": "command" }
+    ],
+    "Stop": [
+      { "command": "C:\\Users\\CHITKU~1\\AppData\\Roaming\\COMNEX~1.ASS\\AGENT_~1\\NEXUS-~1.CMD antigravity stop", "timeout": 10, "type": "command" }
+    ]
+  }
+}"#;
+
+    #[test]
+    fn nexus_recognises_upgrades_and_removes_its_own_old_antigravity_hook() {
+        assert!(antigravity_has_hook(USERS_LEGACY_FILE), "it must find the hook it wrote");
+        // installing again no longer refuses; it upgrades the commands so they carry the marker
+        let upgraded = antigravity_add_hook(USERS_LEGACY_FILE, &script()).expect("an old hook of ours is not foreign");
+        assert!(upgraded.contains(MARKER) && antigravity_has_hook(&upgraded));
+        assert_eq!(antigravity_add_hook(&upgraded, &script()).unwrap(), upgraded, "idempotent once upgraded");
+        let (back, removed) = antigravity_remove_hook(USERS_LEGACY_FILE).unwrap();
+        assert!(removed && !back.contains("NEXUS-~1") && !antigravity_has_hook(&back));
+        // through the public install/is_installed/uninstall path on a real file
+        let d = tmp("agy_legacy");
+        let cfg = d.join("hooks.json");
+        std::fs::write(&cfg, USERS_LEGACY_FILE).unwrap();
+        assert!(is_installed(Agent::Antigravity, &cfg));
+        assert!(uninstall(Agent::Antigravity, &cfg).unwrap() && !is_installed(Agent::Antigravity, &cfg));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn only_our_exact_old_commands_count_as_ours() {
+        for ok in [
+            r"C:\x\NEXUS-~1.CMD antigravity stop",
+            r"c:\x\nexus-agent-event.cmd antigravity start",
+            "C:/x/NEXUS-~2.cmd antigravity stop",
+        ] {
+            assert!(legacy_antigravity_command_is_ours(ok), "{ok}");
+        }
+        for bad in [
+            r"C:\x\my-hook.cmd antigravity stop",
+            r"C:\x\NEXUS-~1.CMD antigravity stop && del /q *",
+            r"C:\x\NEXUS-~1.CMD claude stop",
+            r"C:\x\NEXUS-~1.CMD antigravity",
+            r"C:\x\NEXUS-~1.CMD antigravity explode",
+            "NEXUS-~1.CMD antigravity stop extra",
+            "",
+        ] {
+            assert!(!legacy_antigravity_command_is_ours(bad), "{bad}");
+        }
+        // a group under our key that mixes ours and someone else's, or holds none, is not ours
+        let mixed = r#"{"nexus-agent-event":{"Stop":[{"type":"command","command":"C:\x\NEXUS-~1.CMD antigravity stop"},{"type":"command","command":"evil.cmd"}]}}"#;
+        assert!(!antigravity_has_hook(mixed) && antigravity_add_hook(mixed, &script()).is_err());
+        let empty = r#"{"nexus-agent-event":{}}"#;
+        assert!(antigravity_add_hook(empty, &script()).is_err());
     }
 
     #[test]
@@ -2123,6 +2229,7 @@ await hooks.event({ event: { type: "session.idle", properties: { sessionID: "roo
 
     #[test]
     fn start_events_are_merged_so_they_never_push_a_stop_out() {
+        let _events = events_test_lock();
         let a = Agent::Gemini;
         let base = 9_100_000_000u64;
         record_event_at(a, EventKind::Stop, base, Some("done".into()), StopInfo::default());
@@ -2136,6 +2243,7 @@ await hooks.event({ event: { type: "session.idle", properties: { sessionID: "roo
 
     #[test]
     fn a_cursor_reply_attaches_to_its_own_turns_stop_only() {
+        let _events = events_test_lock();
         let a = Agent::Cursor;
         let base = 9_200_000_000u64;
         record_event_at(a, EventKind::Start, base, None, StopInfo::default());
@@ -2175,6 +2283,25 @@ await hooks.event({ event: { type: "session.idle", properties: { sessionID: "roo
         for t in ["hookup", "hookup anti-gravity and cursor", "anti-gravity", "hookup the gravity", "hookup evil code"] {
             assert_eq!(parse_command(t), None, "{t}");
         }
+    }
+
+    /// The exact transcripts of the live try (2026-10-19 19:17 and 18:52): a junk sentence, then the command.
+    #[test]
+    fn a_junk_first_sentence_does_not_hide_the_hook_command() {
+        for (t, agent) in [
+            ("hook up anti-pilot. hook up anti-gravity.", Agent::Antigravity),
+            ("hook up anti-cognitive shutdown. hook up anti-gravity.", Agent::Antigravity),
+            ("Practice. Hook up open code.", Agent::OpenCode),
+        ] {
+            assert_eq!(parse_command(t), Some((HookAction::Connect, agent)), "{t}");
+        }
+        // only the last sentence is tried, and it must be a hook command by itself
+        for t in ["hook up antigravity. open chrome.", "hook up anti-pilot.", "what is the weather. play music.", "hook up evil. hook up nothing."] {
+            assert_eq!(parse_command(t), None, "{t}");
+        }
+        assert_eq!(last_sentence("one. two. three"), Some("three"));
+        assert_eq!(last_sentence("just one."), None);
+        assert_eq!(last_sentence(""), None);
     }
 
     #[test]

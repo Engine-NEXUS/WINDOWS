@@ -289,6 +289,10 @@ fn canonical_agent_spelling(t: String) -> String {
 }
 
 pub fn parse(text: &str) -> Option<WatchPlan> {
+    parse_sentence(text).or_else(|| crate::agent_hooks::last_sentence(text).and_then(parse_sentence))
+}
+
+fn parse_sentence(text: &str) -> Option<WatchPlan> {
     let t = strip_fillers(canonical_agent_spelling(norm(text)));
     if t.is_empty() {
         return None;
@@ -458,6 +462,9 @@ mod tests {
         assert_eq!(shut("watch \"anti-gravity\" and shut down my laptop when it is perfect.").agent.as_deref(), Some("antigravity"));
         assert_eq!(shut("watch anti-gravity and shut down my laptop when it is perfected.").agent.as_deref(), Some("antigravity"));
         assert_eq!(shut("watch open code and shut down my laptop when it is done").agent.as_deref(), Some("opencode"));
+        // a junk first sentence (the decoder prompt continued) does not hide the plan
+        assert_eq!(shut("practice unattended shutdown. watch antigravity and shut down my laptop when it is perfect.").agent.as_deref(), Some("antigravity"));
+        assert!(parse("hmm. what is the weather today.").is_none());
         assert_eq!(shut("when vs code finishes shut down my laptop").agent.as_deref(), Some("vscode"));
         assert_eq!(shut("when open code is done shut down my laptop").agent.as_deref(), Some("opencode"));
         assert_eq!(shut("watch this until it's done and shut down my laptop").agent, None);

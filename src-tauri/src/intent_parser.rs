@@ -5403,6 +5403,13 @@ pub(crate) fn is_answer_to(pending: Option<&crate::memcore::offer::Offer>, trans
     pending.map_or(false, |o| crate::memcore::offer::classify_for(o, transcript) != crate::memcore::offer::Reply::Other)
 }
 
+/// A very short utterance that is no command and no answer (a quiet "yes" heard as "dirt."): worth asking once more
+/// instead of throwing the question away and sending the noise to the cloud. Pure.
+pub(crate) fn is_mumble(transcript: &str) -> bool {
+    let words = transcript.split_whitespace().count();
+    (1..=3).contains(&words) && parse_deterministic(transcript).is_none()
+}
+
 /// `is_answer_to` for the question that is armed right now.
 pub(crate) fn answers_a_pending_offer(transcript: &str) -> bool {
     let pending = if crate::memcore::offer::is_armed() { crate::memcore::offer::peek() } else { None };
@@ -7508,6 +7515,16 @@ mod tests {
         }
         for t in ["open chrome", "what time is it", "hook up antigravity", "sure what time is it", "yes open brave"] {
             assert!(!is_answer_to(Some(&hook), t), "{t}");
+        }
+    }
+
+    #[test]
+    fn only_a_short_non_command_is_a_mumble() {
+        for t in ["dirt.", "good.", "mm", "uh huh"] {
+            assert!(is_mumble(t), "{t}");
+        }
+        for t in ["", "open chrome", "hook up antigravity", "what is the weather like today", "open the pr list please now"] {
+            assert!(!is_mumble(t), "{t}");
         }
     }
 

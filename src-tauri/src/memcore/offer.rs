@@ -69,6 +69,8 @@ struct State {
     offer: Offer,
     armed: bool,
     expires: Instant,
+    /// The question was already asked a second time after an unclear answer (never more than once).
+    reasked: bool,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -81,7 +83,21 @@ fn lock() -> std::sync::MutexGuard<'static, Option<State>> {
 /// otherwise it arms when `arm()` is called (the reminder path).
 pub fn set(offer: Offer, armed: bool) {
     let ttl = if armed { offer.reply_window() } else { SPEAK_WAIT };
-    *lock() = Some(State { offer, armed, expires: Instant::now() + ttl });
+    *lock() = Some(State { offer, armed, expires: Instant::now() + ttl, reasked: false });
+}
+
+/// An armed question got an answer that was not one (a mumble, "dirt." for "yes"): allow ONE more try. Returns true
+/// the first time per question (and gives it a fresh reply window), false afterwards or when nothing is waiting.
+pub fn reask_once() -> bool {
+    let mut g = lock();
+    match g.as_mut() {
+        Some(s) if s.armed && s.expires > Instant::now() && !s.reasked => {
+            s.reasked = true;
+            s.expires = Instant::now() + s.offer.reply_window();
+            true
+        }
+        _ => false,
+    }
 }
 
 /// The question was spoken: start the reply window.
@@ -397,6 +413,23 @@ mod tests {
     }
 
     #[test]
+    fn an_unclear_answer_gets_exactly_one_more_try() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        assert!(!reask_once(), "nothing waiting");
+        set(Offer::HookSetup { agent: "antigravity".into() }, false);
+        assert!(!reask_once(), "an offer whose question was not spoken yet is not re-asked");
+        arm();
+        assert!(reask_once(), "first unclear answer: ask again");
+        assert!(!reask_once(), "second unclear answer: give up");
+        assert!(peek().is_some(), "the question is still waiting after the re-ask");
+        // a new question starts fresh
+        set(Offer::HookSetup { agent: "opencode".into() }, true);
+        assert!(reask_once());
+        clear();
+    }
+
+    #[test]
     fn no_and_later_families_do_not_cross() {
         for t in ["no", "nope", "no thanks", "skip it", "cancel", "don't", "never mind", "not today"] {
             assert_eq!(classify(t), Reply::No, "{t}");
@@ -461,7 +494,7 @@ mod tests {
         assert!(matches!(peek(), Some(Offer::Choose { .. })));
 
         // Expiry drops it.
-        *lock() = Some(State { offer: Offer::ClearTimetable, armed: true, expires: Instant::now() - Duration::from_secs(1) });
+        *lock() = Some(State { offer: Offer::ClearTimetable, armed: true, expires: Instant::now() - Duration::from_secs(1), reasked: false });
         assert!(peek().is_none() && !is_armed());
         clear();
     }
