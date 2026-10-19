@@ -33,13 +33,16 @@ pub struct WatchPlan {
     pub all: bool,
     /// "track all the agents and tell me when they're done": no power action, `kind` is ignored.
     pub track_only: bool,
+    /// "... and commit and raise a PR": after a CLEAN finish, commit to a new branch, push and open a draft pull
+    /// request. Held until the user says yes (`power_plan::confirm_followup`); never decides the shutdown.
+    pub followup: bool,
 }
 
 impl WatchPlan {
     /// One session (or the one in front), the shape every plan had before the tracker existed.
     #[cfg(test)]
     pub fn single(agent: Option<String>, kind: PowerKind, require_clean: bool, deadline_mins: Option<u32>) -> WatchPlan {
-        WatchPlan { agent, kind, require_clean, deadline_mins, agents: Vec::new(), all: false, track_only: false }
+        WatchPlan { agent, kind, require_clean, deadline_mins, agents: Vec::new(), all: false, track_only: false, followup: false }
     }
 
     /// The explicit agent names, in the order they were said (empty for `all` and for "this session").
@@ -251,6 +254,17 @@ fn agents_in(tokens: &[&str]) -> Vec<String> {
     out
 }
 
+/// "commit and raise a PR", "commit and push", "open a pull request": the user wants the work committed afterwards.
+fn wants_commit(tokens: &[&str]) -> bool {
+    let commit = tokens.iter().any(|w| matches!(*w, "commit" | "commits" | "committing"));
+    let pr = tokens.iter().any(|w| matches!(*w, "pr" | "prs" | "push" | "pushed" | "pushing"))
+        || contains_seq(tokens, &["pull", "request"])
+        || contains_seq(tokens, &["pull", "requests"]);
+    let raise_pr = tokens.iter().any(|w| matches!(*w, "raise" | "open" | "create" | "make" | "submit" | "send"))
+        && (tokens.iter().any(|w| matches!(*w, "pr" | "prs")) || contains_seq(tokens, &["pull", "request"]));
+    (commit && pr) || raise_pr
+}
+
 /// "all the agents", "every agent", "each of my ai assistants", "my agents": the user means whichever are running.
 fn mentions_all(tokens: &[&str]) -> bool {
     const THINGS: &[&str] = &["agent", "agents", "assistant", "assistants", "bots"];
@@ -431,20 +445,23 @@ fn parse_sentence(text: &str) -> Option<WatchPlan> {
     }
     // Several agents at once, with no power phrase: "track all the agents and update me when they're done".
     let multi = all || named.len() >= 2;
+    let followup = wants_commit(&tokens);
     let wants_update = tokens.iter().any(|w| matches!(*w, "update" | "tell" | "notify" | "alert" | "inform" | "know" | "report"));
-    let track_only = multi && (watch.is_some() || wants_update) && find_power(&tokens, true).is_none();
+    let track_only = ((multi && (watch.is_some() || wants_update)) || (followup && (watch.is_some() || wants_update || end.is_some())))
+        && find_power(&tokens, true).is_none();
     if track_only {
         if negated_before(&tokens, watch.map_or(0, |(s, _)| s)) {
             return None;
         }
         return Some(WatchPlan {
-            agent: None,
+            agent: if named.len() == 1 && !all { agent } else { None },
             kind: PowerKind::Shutdown,
             require_clean: false,
             deadline_mins: deadline(&tokens),
-            agents: if all { Vec::new() } else { named },
+            agents: if all || named.len() < 2 { Vec::new() } else { named },
             all,
             track_only: true,
+            followup,
         });
     }
 
@@ -469,6 +486,7 @@ fn parse_sentence(text: &str) -> Option<WatchPlan> {
         agents: if named.len() >= 2 { named } else { Vec::new() },
         all,
         track_only: false,
+        followup,
     })
 }
 
@@ -481,7 +499,8 @@ pub fn read_back(plan: &WatchPlan) -> String {
     };
     if plan.track_only {
         let limit = plan.deadline_mins.map(|m| format!(", waiting at most {m} minutes")).unwrap_or_default();
-        return format!("Track {who}, tell you as each one finishes, and sum it all up when the last one is done{limit}");
+        let commit = if plan.followup { ", and commit and open a draft pull request for each one that looks clean" } else { "" };
+        return format!("Track {who}, tell you as each one finishes, and sum it all up when the last one is done{limit}{commit}");
     }
     let action = match plan.kind {
         PowerKind::Shutdown => "shut down your laptop",
@@ -492,8 +511,9 @@ pub fn read_back(plan: &WatchPlan) -> String {
     };
     let cond = if plan.require_clean { "only if it looks perfect" } else { "however it ends, and I'll tell you in the morning what happened" };
     let limit = plan.deadline_mins.map(|m| format!(", waiting at most {m} minutes")).unwrap_or_default();
+    let commit = if plan.followup { ", and commit and open a draft pull request if it looks clean" } else { "" };
     let end = if plan.all || plan.agents.len() >= 2 { "they have all finished" } else { "it finishes" };
-    format!("Watch {who} until {end}, then {action}, {cond}{limit}")
+    format!("Watch {who} until {end}, then {action}, {cond}{limit}{commit}")
 }
 
 #[cfg(test)]
@@ -730,5 +750,19 @@ mod tests {
         let plan = track("watch claude and shut down my laptop when it is done");
         assert_eq!(plan.agent.as_deref(), Some("claude"));
         assert!(plan.agents.is_empty() && !plan.all);
+    }
+
+    #[test]
+    fn asking_for_a_commit_and_a_pull_request_is_a_flag_not_a_power_action() {
+        let plan = track("when claude finishes commit and raise a PR");
+        assert!(plan.followup && plan.track_only, "{plan:?}");
+        assert_eq!(plan.agent.as_deref(), Some("claude"));
+        assert!(read_back(&plan).contains("draft pull request"), "{}", read_back(&plan));
+        let plan = track("watch antigravity, commit and push it, then shut down my laptop");
+        assert!(plan.followup && !plan.track_only && plan.kind == PowerKind::Shutdown, "{plan:?}");
+        // a shutdown with no git words never asks for git
+        assert!(!track("watch claude and shut down my laptop when it is done").followup);
+        // "commit" alone, or a pull request that is only mentioned, is not a request
+        assert!(parse("when claude finishes commit").map_or(true, |p| !p.followup));
     }
 }

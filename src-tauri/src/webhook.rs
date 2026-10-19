@@ -199,6 +199,9 @@ fn handle_conn(
         if let Some(mut ev) = event {
             // Antigravity and Aider name a file the final text is read from (path-checked, size-capped)
             crate::agent_hooks::resolve_tail(&mut ev);
+            if let Some(c) = ev.cwd.as_deref() {
+                crate::agent_hooks::note_cwd(ev.agent, c);
+            }
             println!(
                 "[WATCH-POWER] agent event: {} {:?} ok={:?} fully_idle={:?} text={}B",
                 ev.agent.name(),

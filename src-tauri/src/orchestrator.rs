@@ -1334,8 +1334,8 @@ pub async fn process_transcript<R: Runtime>(
         ParsedIntent::WatchAgentTask { agent, query } => {
             return run_watch_agent_task(app, agent.clone(), query.clone()).await;
         }
-        ParsedIntent::WatchThenPower { agent, kind, require_clean, deadline_mins, agents, all, track_only } => {
-            return run_watch_then_power(app, agent.clone(), kind.clone(), *require_clean, *deadline_mins, agents.clone(), *all, *track_only).await;
+        ParsedIntent::WatchThenPower { agent, kind, require_clean, deadline_mins, agents, all, track_only, followup } => {
+            return run_watch_then_power(app, agent.clone(), kind.clone(), *require_clean, *deadline_mins, agents.clone(), *all, *track_only, *followup).await;
         }
         ParsedIntent::WatchPlanCommand { command } => {
             return run_watch_plan_command(app, command.clone()).await;
@@ -1660,8 +1660,8 @@ pub async fn process_transcript<R: Runtime>(
             ParsedIntent::WatchAgentTask { agent, query } => {
                 return run_watch_agent_task(app, agent.clone(), query.clone()).await;
             }
-            ParsedIntent::WatchThenPower { agent, kind, require_clean, deadline_mins, agents, all, track_only } => {
-                return run_watch_then_power(app, agent.clone(), kind.clone(), *require_clean, *deadline_mins, agents.clone(), *all, *track_only).await;
+            ParsedIntent::WatchThenPower { agent, kind, require_clean, deadline_mins, agents, all, track_only, followup } => {
+                return run_watch_then_power(app, agent.clone(), kind.clone(), *require_clean, *deadline_mins, agents.clone(), *all, *track_only, *followup).await;
             }
             ParsedIntent::WatchPlanCommand { command } => {
                 return run_watch_plan_command(app, command.clone()).await;
@@ -4857,6 +4857,14 @@ async fn run_offer_reply<R: Runtime>(
             }
             None => "I didn't understand which power command that was, sir.".to_string(),
         },
+        (Offer::PlanFollowUp, Reply::Yes) => {
+            if crate::power_plan::confirm_followup() {
+                "Understood, sir. When it finishes clean I'll commit to a new branch and open a draft pull request. If the result has errors I'll leave git alone and tell you.".to_string()
+            } else {
+                "There's no plan waiting for that, sir, so I haven't touched git.".to_string()
+            }
+        }
+        (Offer::PlanFollowUp, _) => "Understood, sir. I won't touch git; the rest of the plan stands.".to_string(),
         (Offer::HookSetup { agent }, Reply::Yes) if agent == "all" => install_all_agent_hooks(&app),
         (Offer::HookSetup { agent }, Reply::Yes) => match crate::agent_hooks::Agent::from_name(&agent) {
             Some(a) => install_agent_hook(&app, a),
@@ -5582,20 +5590,22 @@ async fn run_watch_then_power<R: Runtime>(
     agents: Vec<String>,
     all: bool,
     track_only: bool,
+    followup: bool,
 ) -> Result<ProcessResult, String> {
     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
     let Some(k) = crate::power_cmd::PowerKind::from_str(&kind) else {
         return say_and_finish(&app, request_id, "I didn't catch which power command you meant, sir.".into());
     };
-    let mut plan = crate::watch_power::WatchPlan { agent, kind: k, require_clean, deadline_mins, agents, all, track_only };
+    let mut plan = crate::watch_power::WatchPlan { agent, kind: k, require_clean, deadline_mins, agents, all, track_only, followup };
     // several agents, or all of them: no single "this session" to resolve
     if plan.all || plan.agents.len() >= 2 || plan.track_only {
         let note = multi_agent_note(&plan);
+        let ask = followup_question(&plan);
         crate::power_plan::set(plan);
         let mode = crate::watch_runner::read_mode(&app);
         let held = crate::power_plan::run(&crate::power_plan::PlanCommand::Status, mode);
         crate::watch_runner::ensure_running(app.clone());
-        return say_and_finish(&app, request_id, format!("I understood: {held}{note} Say cancel the plan to drop it."));
+        return say_and_finish(&app, request_id, format!("I understood: {held}{note} Say cancel the plan to drop it.{ask}"));
     }
     // "this session": the agent in the window in front, when it can be told
     if plan.agent.is_none() {
@@ -5614,6 +5624,7 @@ async fn run_watch_then_power<R: Runtime>(
             .map(|a| a.name().to_string());
         }
     }
+    let ask = followup_question(&plan);
     let hookable = plan.agent.as_deref().and_then(crate::agent_hooks::Agent::from_name);
     let named_unhookable = plan.agent.clone().filter(|_| hookable.is_none());
     crate::power_plan::set(plan);
@@ -5641,7 +5652,17 @@ async fn run_watch_then_power<R: Runtime>(
         }
     };
     crate::watch_runner::ensure_running(app.clone());
-    say_and_finish(&app, request_id, format!("I understood: {held}{note} Say cancel the shutdown plan to drop it."))
+    say_and_finish(&app, request_id, format!("I understood: {held}{note} Say cancel the shutdown plan to drop it.{ask}"))
+}
+
+/// The question that goes with a plan asking for a commit and a pull request. The git step runs only after this
+/// is answered yes, only when the agent's result looks clean, and never decides whether the laptop shuts down.
+fn followup_question(plan: &crate::watch_power::WatchPlan) -> String {
+    if !plan.followup {
+        return String::new();
+    }
+    crate::memcore::offer::set(crate::memcore::offer::Offer::PlanFollowUp, true);
+    " When it finishes clean I'd commit everything changed in the folder it worked in to a new branch, push it and open a draft pull request. If it ends with errors I won't, and I'll tell you why. Shall I, sir?".to_string()
 }
 
 /// What NEXUS adds when the plan is about several agents: which of them it can actually follow right now.
@@ -7985,6 +8006,7 @@ fn may_answer_offer(
         Uncertain => !matches!(
             offer,
             Offer::Power { .. }
+                | Offer::PlanFollowUp
                 | Offer::HookSetup { .. }
                 | Offer::FileConfirm
                 | Offer::OpenApp { .. }

@@ -75,6 +75,8 @@ pub struct Obs {
     pub outcomes: Vec<Outcome>,
     /// The plan follows nobody yet (all agents quiet, or the named ones never started).
     pub nothing_running: bool,
+    /// A commit / pull request step is still running: nothing is concluded until it is done.
+    pub followup_busy: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +89,9 @@ pub enum Action {
     BeginCountdown { kind: PowerKind, lead: String },
     /// The countdown ran out with nothing stopping it: power off now.
     Fire(PowerKind),
+    /// All tracked agents are done and the user wanted them tracked: arrange their windows in equal columns and, if
+    /// nobody is at the keyboard, turn the display off so everything is ready on return.
+    TidyUp,
     /// The watch is over. Nothing more happens for this plan.
     End(&'static str),
 }
@@ -174,6 +179,11 @@ impl Engine {
             out.extend(self.end("waited long enough"));
             return out;
         }
+        if o.followup_busy {
+            // the commit / pull request step is still running: the countdown does not start before it is done
+            self.phase = Phase::Watching { concluding: None };
+            return Vec::new();
+        }
         if !o.ended {
             // still working (or not enough evidence that it stopped): nothing is concluded, however long it takes
             self.phase = Phase::Watching { concluding: None };
@@ -213,7 +223,7 @@ impl Engine {
         if plan.track_only {
             let mut said = final_summary(&o.outcomes);
             said.push_str(&note_clause(&o.note));
-            let mut out = vec![Action::Say(said)];
+            let mut out = vec![Action::Say(said), Action::TidyUp];
             out.extend(self.end("tracked"));
             return out;
         }
@@ -347,9 +357,16 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager, Runtime};
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
+/// Commit / pull request steps in flight. The shutdown countdown waits until this is zero.
+static FOLLOWUPS_RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// What those steps said, for the overnight record.
+static FOLLOWUP_LINES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 /// How the followed agents ended as of the latest look: saved when the laptop is about to be powered off, so the
 /// next morning's briefing can say what happened.
 static LAST_OUTCOMES: std::sync::Mutex<Vec<Outcome>> = std::sync::Mutex::new(Vec::new());
+/// The followed agents and the process each one runs in, as of the latest look: where the finish sequence finds
+/// their windows.
+static LAST_TARGETS: std::sync::Mutex<Vec<(Agent, Option<u32>)>> = std::sync::Mutex::new(Vec::new());
 
 /// The `watchPower` setting, read fresh every time so "turn off unattended shutdown" works at once.
 /// Anything missing or unreadable is `off`.
@@ -452,6 +469,8 @@ struct Look {
     snapshot: TrackSnapshot,
     log: String,
     state_key: String,
+    /// The process the agent runs in (the first root found for it).
+    root_pid: Option<u32>,
 }
 
 async fn look_at<R: Runtime>(app: &AppHandle<R>, t: &mut Track, snaps: &[ProcSnap], now_ms: u64, wall_ms: u64, created_ms: u64, require_clean: bool) -> Look {
@@ -513,6 +532,7 @@ async fn look_at<R: Runtime>(app: &AppHandle<R>, t: &mut Track, snaps: &[ProcSna
         snapshot: TrackSnapshot { name: agent.name().to_string(), label: agent.label().to_string(), joined: true, ended, verdict, note },
         log,
         state_key,
+        root_pid: roots.first().copied(),
     }
 }
 
@@ -542,6 +562,7 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
     let mut countdown_gen: Option<u64> = None;
     let mut ticks: u64 = 0;
     let mut last_agg_logged: Option<String> = None;
+    let mut followed_up: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
     println!("[WATCH-POWER] watching");
 
     'watch: loop {
@@ -577,6 +598,10 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
             }
             engine = Some((stored.generation, Engine::new(now_ms)));
             tracks.clear();
+            followed_up.clear();
+            if let Ok(mut g) = FOLLOWUP_LINES.lock() {
+                g.clear();
+            }
             announcer = Announcer::default();
             awake = None;
             last_agg_logged = None;
@@ -637,6 +662,7 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
 
         let require_clean = stored.plan.require_clean;
         let mut snapshots: Vec<TrackSnapshot> = Vec::new();
+        let mut targets: Vec<(Agent, Option<u32>)> = Vec::new();
         let names: Vec<&'static str> = tracks.keys().copied().collect();
         for name in names {
             let Some(t) = tracks.get_mut(name) else { continue };
@@ -645,7 +671,13 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
                 println!("[WATCH-POWER] tick {ticks}: mode={} {}", mode.as_str(), look.log);
                 t.last_logged = Some(look.state_key.clone());
             }
+            targets.push((t.agent, look.root_pid));
             snapshots.push(look.snapshot);
+        }
+        if !targets.is_empty() {
+            if let Ok(mut g) = LAST_TARGETS.lock() {
+                *g = targets;
+            }
         }
 
         // ── decide ──
@@ -654,6 +686,15 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
             *g = agg.outcomes.clone();
         }
         let finished_now = announcer.step(now_ms, &snapshots);
+        // "... and commit and raise a PR": per finished agent, only after the user said yes, once per plan
+        if stored.plan.followup && stored.followup_ok {
+            for o in &finished_now {
+                let Some(t) = tracks.values().find(|t| t.agent.label() == o.label) else { continue };
+                if followed_up.insert(t.agent.name()) {
+                    spawn_followup(&app, t.agent, o.verdict.clone());
+                }
+            }
+        }
         // the screen stays awake exactly while some followed agent is still working
         if agg.working.is_empty() {
             awake = None;
@@ -702,6 +743,7 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
             working: agg.working.clone(),
             outcomes: agg.outcomes.clone(),
             nothing_running,
+            followup_busy: FOLLOWUPS_RUNNING.load(Ordering::SeqCst) > 0,
         };
         let agg_key = format!("{}|{}|{:?}|{:?}", agg.tracked, agg.ended, agg.verdict, agg.working);
         if tracks.len() > 1 && last_agg_logged.as_deref() != Some(agg_key.as_str()) {
@@ -740,6 +782,118 @@ fn idle_obs(now_ms: u64, mode: WatchPowerMode) -> Obs {
         working: Vec::new(),
         outcomes: Vec::new(),
         nothing_running: false,
+        followup_busy: false,
+    }
+}
+
+/// The commit-and-pull-request step for one finished agent, off the watch loop: git and the network can be slow, and the
+/// shutdown countdown waits for it (`followup_busy`). It runs only on a clean verdict (the module's own gate) and says
+/// plainly why it did not.
+fn spawn_followup<R: Runtime>(app: &AppHandle<R>, agent: Agent, verdict: Verdict) {
+    use crate::agent_followup::{default_stamp, run_followup, FollowUp, RealGit};
+    let app = app.clone();
+    FOLLOWUPS_RUNNING.fetch_add(1, Ordering::SeqCst);
+    tauri::async_runtime::spawn(async move {
+        let said = match agent_hooks::last_cwd(agent) {
+            None => format!("I can't tell which folder {} worked in, so I didn't commit anything.", agent.label()),
+            Some(dir) => {
+                let hint = agent_hooks::last_stop_tail(agent);
+                let step = FollowUp::CommitAndPr {
+                    dir: std::path::PathBuf::from(dir),
+                    agent: agent.label().to_string(),
+                    stamp: default_stamp(),
+                    message_hint: hint,
+                    base: "main".to_string(),
+                };
+                let (worker_url, user_id) = crate::network::get_session_info().map(|(w, u, _)| (w, u)).unwrap_or_default();
+                let report = run_followup(std::sync::Arc::new(RealGit::default()), step, verdict, &worker_url, &user_id).await;
+                println!("[WATCH-POWER] follow-up for {}: committed={} pushed={} pr_opened={} skipped={}", agent.name(), report.committed, report.pushed, report.pr_opened, report.skipped);
+                report.spoken
+            }
+        };
+        if let Ok(mut g) = FOLLOWUP_LINES.lock() {
+            g.push(said.clone());
+        }
+        crate::proactive_policy::submit(&app, format!("watchpower_followup_{}_{}", agent.name(), agent_hooks::now_ms()), said, crate::google::types::AlertUrgency::High);
+        FOLLOWUPS_RUNNING.fetch_sub(1, Ordering::SeqCst);
+    });
+}
+
+/// How to recognise an IDE agent's window by name (terminal agents are found through their process instead).
+fn window_spec(agent: Agent) -> Option<crate::window_tile::AgentSpec> {
+    let words: &[&str] = match agent {
+        Agent::Antigravity => &["antigravity"],
+        Agent::Cursor => &["cursor"],
+        Agent::Windsurf => &["windsurf"],
+        Agent::Trae => &["trae"],
+        _ => return None,
+    };
+    let w: Vec<String> = words.iter().map(|s| s.to_string()).collect();
+    Some(crate::window_tile::AgentSpec { exe_words: w.clone(), title_words: w })
+}
+
+/// The finish sequence: wait until NEXUS has finished speaking, put the followed agents' windows in equal columns, say
+/// what could not be done, and turn the display off if the user is away. Every step is best effort and never
+/// touches anything but window positions and the display.
+async fn tidy_up<R: Runtime>(app: AppHandle<R>) {
+    use crate::window_tile::{display_off, list_top_windows, may_blank_display, resolve_agents, tile_windows, AgentTarget, PlaceResult, RealTileEnv};
+    // let the summary be spoken first (the policy may hold it back for a breakpoint; at most 40 s)
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    for _ in 0..40 {
+        if !crate::orchestrator::has_active_request() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let followed: Vec<(Agent, Option<u32>)> = LAST_TARGETS.lock().map(|g| g.clone()).unwrap_or_default();
+    let targets: Vec<AgentTarget> =
+        followed.iter().map(|(a, pid)| AgentTarget { name: a.label().to_string(), pid: *pid, spec: window_spec(*a) }).collect();
+    let (resolution, procs) = tauri::async_runtime::spawn_blocking(move || {
+        let procs = ProcSampler::new().sample();
+        let wins = list_top_windows();
+        (resolve_agents(&targets, &procs, &wins), procs)
+    })
+    .await
+    .unwrap_or_default();
+    drop(procs);
+
+    let mut notes: Vec<String> = Vec::new();
+    for tile in &resolution.tiles {
+        if let Some(line) = tile.shared_line() {
+            notes.push(line);
+        }
+    }
+    if !resolution.missing.is_empty() {
+        notes.push(format!("I couldn't find a window for {}.", resolution.missing.join(" and ")));
+    }
+    let hwnds: Vec<isize> = resolution.tiles.iter().map(|t| t.hwnd).collect();
+    if !hwnds.is_empty() {
+        let results = tauri::async_runtime::spawn_blocking(move || tile_windows(&RealTileEnv, &hwnds)).await.unwrap_or_default();
+        let placed = results.iter().filter(|(_, r)| *r == PlaceResult::Placed).count();
+        println!("[WATCH-POWER] tidy-up: {placed} of {} windows placed", results.len());
+        for (_, r) in &results {
+            match r {
+                PlaceResult::SkippedElevated => notes.push("One window runs as administrator, so I left it where it was.".to_string()),
+                PlaceResult::Failed(why) => notes.push(format!("One window wouldn't move: {why}.")),
+                _ => {}
+            }
+        }
+    }
+    if !notes.is_empty() {
+        notes.dedup();
+        crate::proactive_policy::submit(&app, format!("watchpower_tidy_{}", agent_hooks::now_ms()), notes.join(" "), crate::google::types::AlertUrgency::Medium);
+    }
+
+    // the screen goes off only when nobody is using the laptop
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    match may_blank_display(crate::memcore::resume::user_idle_secs(), meeting_active(&app)) {
+        Ok(()) => match display_off() {
+            Ok(()) => println!("[WATCH-POWER] tidy-up: display off"),
+            Err(e) => println!("[WATCH-POWER] tidy-up: display not turned off: {e}"),
+        },
+        Err(why) => println!("[WATCH-POWER] tidy-up: display left on ({why:?})"),
     }
 }
 
@@ -780,7 +934,11 @@ async fn carry_out<R: Runtime>(app: &AppHandle<R>, actions: Vec<Action>, countdo
                     println!("[WATCH-POWER] countdown finished: starting {}", kind.as_str());
                     // remember how the agents ended: told on the next boot, even if the laptop is gone by then
                     let outcomes = LAST_OUTCOMES.lock().map(|g| g.clone()).unwrap_or_default();
-                    if let (Ok(dir), Some(rec)) = (app.path().app_data_dir(), crate::agent_outcomes::record_from(&outcomes, kind.as_str(), chrono::Utc::now().timestamp())) {
+                    if let (Ok(dir), Some(mut rec)) = (app.path().app_data_dir(), crate::agent_outcomes::record_from(&outcomes, kind.as_str(), chrono::Utc::now().timestamp())) {
+                        // what the commit / pull request step said (or why it did not run) belongs to the same story
+                        if let Ok(g) = FOLLOWUP_LINES.lock() {
+                            rec.lines.extend(g.iter().map(|l| l.trim_end_matches('.').to_string()));
+                        }
                         crate::agent_outcomes::save(&dir, &rec);
                     }
                     let line = crate::orchestrator::start_power(app, kind).await;
@@ -790,6 +948,10 @@ async fn carry_out<R: Runtime>(app: &AppHandle<R>, actions: Vec<Action>, countdo
                 }
                 power_plan::clear();
                 over = true;
+            }
+            Action::TidyUp => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move { tidy_up(app).await });
             }
             Action::End(reason) => {
                 println!("[WATCH-POWER] end: {reason}");
@@ -830,6 +992,7 @@ mod tests {
             working: Vec::new(),
             outcomes: vec![Outcome { label: "Claude Code".into(), verdict: Verdict::Go }],
             nothing_running: false,
+            followup_busy: false,
         }
     }
 
@@ -1246,6 +1409,7 @@ mod tests {
                 working: Vec::new(),
                 outcomes: vec![Outcome { label: "Claude Code".into(), verdict: Verdict::Go }],
                 nothing_running: false,
+                followup_busy: false,
             };
             for a in engine.step(&obs) {
                 out.push((t, a));
@@ -1368,6 +1532,10 @@ mod tests {
             assert!(said[2].starts_with("All 3 of your agents are done, sir.") && said[2].contains("Codex stopped, but"), "{said:?}");
             assert_eq!(said.len(), 3, "{said:?}");
             assert!(acts.iter().any(|(_, a)| matches!(a, Action::End("tracked"))), "{mode:?}");
+            assert_eq!(acts.iter().filter(|(_, a)| matches!(a, Action::TidyUp)).count(), 1, "windows are arranged once, after the summary ({mode:?})");
+            let tidy_at = acts.iter().position(|(_, a)| matches!(a, Action::TidyUp)).unwrap();
+            let summary_at = acts.iter().position(|(_, a)| matches!(a, Action::Say(t) if t.starts_with("All 3"))).unwrap();
+            assert!(summary_at < tidy_at);
             assert!(!fired(&acts) && began(&acts).is_none(), "tracking never counts down or powers off ({mode:?})");
             assert!(e.finished());
         }
@@ -1455,6 +1623,23 @@ mod tests {
         let s = says(&acts);
         assert!(s[0].starts_with("All 2 of your agents are done, sir.") && s[0].contains("I left your laptop on, sir.") && s[0].ends_with("Shall I shut down anyway?"), "{s:?}");
         assert!(acts.iter().any(|(_, a)| matches!(a, Action::SayAndAsk(..))) && !fired(&acts));
+        assert!(!acts.iter().any(|(_, a)| matches!(a, Action::TidyUp)), "a plan that powers off does not rearrange windows");
+    }
+
+    #[test]
+    fn the_countdown_waits_for_the_commit_step_and_starts_after_it() {
+        // while git runs nothing is concluded, however long it takes
+        let mut e = Engine::new(0);
+        let acts = run(&mut e, 0, 5 * 60_000, |t| {
+            let mut o = obs(t, WatchPowerMode::On);
+            o.followup_busy = true;
+            o
+        });
+        assert!(!fired(&acts));
+        assert!(!acts.iter().any(|(_, a)| matches!(a, Action::BeginCountdown { .. })), "no countdown while git is running");
+        // once it is done the normal rules apply
+        let acts = run(&mut e, 5 * 60_000 + TICK_MS, 8 * 60_000, |t| obs(t, WatchPowerMode::On));
+        assert!(acts.iter().any(|(_, a)| matches!(a, Action::BeginCountdown { .. })), "{acts:?}");
     }
 
     #[test]

@@ -181,6 +181,7 @@ windows = { version = "0.36", features = [
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm", # DWMWA_EXTENDED_FRAME_BOUNDS: window_tile border compensation
     # Windows.Media.Ocr — zero-RAM local screen text extraction (Feature 86)
     "Foundation",
     "Foundation_Collections",

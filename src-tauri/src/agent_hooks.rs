@@ -1145,6 +1145,8 @@ pub struct ParsedEvent {
     pub tail: Option<String>,
     pub info: StopInfo,
     pub source: Option<TailSource>,
+    /// The folder the agent works in, when its hook says (`cwd`, or the first of Antigravity's `workspacePaths`).
+    pub cwd: Option<String>,
 }
 
 fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
@@ -1286,7 +1288,29 @@ pub fn parse_event(query: &str, body: &str) -> Option<ParsedEvent> {
             }
         }
     }
-    Some(ParsedEvent { agent, kind, tail, info, source })
+    let cwd = json.as_ref().and_then(|v| {
+        v.get("cwd")
+            .and_then(|c| c.as_str())
+            .or_else(|| v.get("workspacePaths").and_then(|w| w.as_array()).and_then(|a| a.first()).and_then(|p| p.as_str()))
+            .map(String::from)
+    });
+    let cwd = cwd.or_else(|| form_value(body, "cwd")).filter(|c| !c.trim().is_empty());
+    Some(ParsedEvent { agent, kind, tail, info, source, cwd })
+}
+
+static CWDS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// Remember the folder an agent reported it works in (the latest one wins).
+pub fn note_cwd(agent: Agent, cwd: &str) {
+    if let Ok(mut g) = CWDS.lock() {
+        g.retain(|(a, _)| a != agent.name());
+        g.push((agent.name().to_string(), cwd.to_string()));
+    }
+}
+
+/// The folder the agent last reported working in.
+pub fn last_cwd(agent: Agent) -> Option<String> {
+    CWDS.lock().ok().and_then(|g| g.iter().find(|(a, _)| a == agent.name()).map(|(_, c)| c.clone()))
 }
 
 // ─── Reading the final text from a file the agent names ──────────────
@@ -1903,8 +1927,21 @@ mod tests {
     }
 
     #[test]
+    fn the_folder_an_agent_works_in_comes_from_its_hook_and_nothing_else() {
+        let ev = |body: &str| route_event(true, "agent=claude&event=stop", body).2.unwrap();
+        assert_eq!(ev(r#"{"cwd":"D:/proj"}"#).cwd.as_deref(), Some("D:/proj"));
+        assert_eq!(ev(r#"{"cwd":"  "}"#).cwd, None);
+        assert_eq!(ev("not json").cwd, None);
+        let agy = route_event(true, "agent=antigravity&event=stop", r#"{"workspacePaths":["D:/a","D:/b"]}"#).2.unwrap();
+        assert_eq!(agy.cwd.as_deref(), Some("D:/a"));
+        note_cwd(Agent::Codex, "D:/one");
+        note_cwd(Agent::Codex, "D:/two");
+        assert_eq!(last_cwd(Agent::Codex).as_deref(), Some("D:/two"));
+    }
+
+    #[test]
     fn the_endpoint_accepts_only_an_authorised_known_agent_and_event() {
-        let ev = |agent, kind| Some(ParsedEvent { agent, kind, tail: None, info: StopInfo::default(), source: None });
+        let ev = |agent, kind| Some(ParsedEvent { agent, kind, tail: None, info: StopInfo::default(), source: None, cwd: None });
         // new script: agent and event in the URL
         assert_eq!(route_event(true, "agent=claude&event=stop", ""), (202, r#"{"ok":true}"#, ev(Agent::Claude, EventKind::Stop)));
         assert_eq!(route_event(true, "agent=codex&event=notification", "{}").2, ev(Agent::Codex, EventKind::Notification));
@@ -2609,7 +2646,7 @@ await hooks.event({ event: { type: "session.idle", properties: { sessionID: "roo
     }
 
     fn transcript_event(raw: &str) -> ParsedEvent {
-        ParsedEvent { agent: Agent::Antigravity, kind: EventKind::Stop, tail: None, info: StopInfo::default(), source: Some(TailSource::Transcript(raw.to_string())) }
+        ParsedEvent { agent: Agent::Antigravity, kind: EventKind::Stop, tail: None, info: StopInfo::default(), source: Some(TailSource::Transcript(raw.to_string())), cwd: None }
     }
 
     #[test]
@@ -2734,7 +2771,7 @@ await hooks.event({ event: { type: "session.idle", properties: { sessionID: "roo
         let dir = tmp("aider_cwd");
         let history = "# aider chat started at 2026-10-19 10:00:00\n\n> Model: x\n\n#### add a retry\n\nI added a retry loop.\n\n> Applied edit to a.py\n\n#### now run the tests\n\nAll 4 tests passed.\n\n> Tokens: 1k sent\n";
         std::fs::write(dir.join(".aider.chat.history.md"), history).unwrap();
-        let mk = |cwd: String| ParsedEvent { agent: Agent::Aider, kind: EventKind::Stop, tail: None, info: StopInfo::default(), source: Some(TailSource::AiderCwd(cwd)) };
+        let mk = |cwd: String| ParsedEvent { agent: Agent::Aider, kind: EventKind::Stop, tail: None, info: StopInfo::default(), source: Some(TailSource::AiderCwd(cwd)), cwd: None };
         let mut ev = mk(dir.display().to_string());
         resolve_tail_with(&mut ev, Some(&dir));
         assert_eq!(ev.tail.as_deref(), Some("All 4 tests passed."));

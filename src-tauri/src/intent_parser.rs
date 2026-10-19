@@ -330,6 +330,9 @@ pub enum ParsedIntent {
         /// "track all agents and tell me when they're done": no power action
         #[serde(default)]
         track_only: bool,
+        /// "... and commit and raise a PR" (asked, and held until the user says yes)
+        #[serde(default)]
+        followup: bool,
     },
     /// "Cancel the shutdown plan", "what are you watching", "make it sleep instead" (`command` =
     /// power_plan::PlanCommand::as_str). Only about the plan NEXUS is holding; nothing else is claimed.
@@ -703,6 +706,7 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
                 agents: plan.agents,
                 all: plan.all,
                 track_only: plan.track_only,
+                followup: plan.followup,
             },
             confidence: 1.0,
             source: "deterministic".to_string(),

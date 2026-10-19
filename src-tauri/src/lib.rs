@@ -118,6 +118,8 @@ pub(crate) mod session_observer;
 pub(crate) mod watch_runner;
 pub(crate) mod agent_tracker;
 pub(crate) mod agent_outcomes;
+pub(crate) mod agent_followup;
+pub(crate) mod window_tile;
 pub(crate) mod howto;
 pub(crate) mod power_close;
 pub(crate) mod latency;

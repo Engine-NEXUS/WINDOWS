@@ -52,6 +52,9 @@ pub struct StoredPlan {
     pub generation: u64,
     /// When it was made (unix ms): only events after this count for it.
     pub created_ms: u64,
+    /// The user said yes to "commit and open a draft pull request if it looks clean" (the plan asks for it, this says
+    /// the user agreed). Without it no git command ever runs.
+    pub followup_ok: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,7 +109,21 @@ static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 pub fn set(plan: WatchPlan) {
     if let Ok(mut g) = PLAN.lock() {
         let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        *g = Some(StoredPlan { plan, notify_only: false, generation, created_ms: crate::agent_hooks::now_ms() });
+        *g = Some(StoredPlan { plan, notify_only: false, generation, created_ms: crate::agent_hooks::now_ms(), followup_ok: false });
+    }
+}
+
+/// The user said yes to the commit-and-pull-request step. False when there is no plan that asks for one.
+pub fn confirm_followup() -> bool {
+    match PLAN.lock() {
+        Ok(mut g) => match g.as_mut() {
+            Some(s) if s.plan.followup => {
+                s.followup_ok = true;
+                true
+            }
+            _ => false,
+        },
+        Err(_) => false,
     }
 }
 
@@ -441,12 +458,31 @@ pub fn parse_command(text: &str) -> Option<PlanCommand> {
 mod tests {
     use super::*;
 
+    /// The plan is process-global: the tests that set or read it take turns.
+    static TEST_GUARD: Mutex<()> = Mutex::new(());
+
     fn plan(kind: PowerKind) -> WatchPlan {
         WatchPlan::single(Some("claude".into()), kind, true, None)
     }
 
+    #[test]
+    fn the_yes_to_the_git_step_counts_only_for_a_plan_that_asked_for_it() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        assert!(!confirm_followup(), "no plan: nothing to confirm");
+        set(plan(PowerKind::Shutdown));
+        assert!(!confirm_followup(), "a plan that did not ask for git must not accept a yes");
+        let mut p = plan(PowerKind::Shutdown);
+        p.followup = true;
+        set(p);
+        assert!(!PLAN.lock().unwrap().as_ref().unwrap().followup_ok, "asking is not agreeing");
+        assert!(confirm_followup());
+        assert!(PLAN.lock().unwrap().as_ref().unwrap().followup_ok);
+        clear();
+    }
+
     fn held(kind: PowerKind) -> Option<StoredPlan> {
-        Some(StoredPlan { plan: plan(kind), notify_only: false, generation: 0, created_ms: 0 })
+        Some(StoredPlan { plan: plan(kind), notify_only: false, generation: 0, created_ms: 0, followup_ok: false })
     }
 
     #[test]
@@ -679,6 +715,7 @@ mod tests {
 
     #[test]
     fn the_global_plan_is_replaced_by_a_new_one() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         set(plan(PowerKind::Shutdown));
         assert_eq!(current().unwrap().plan.kind, PowerKind::Shutdown);
         set(WatchPlan::single(None, PowerKind::Sleep, false, Some(30)));

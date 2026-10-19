@@ -52,13 +52,15 @@ pub enum Offer {
     /// "Add a Stop hook to Claude Code's settings so I know when it stops?" (`agent` = agent_hooks::Agent::name).
     /// Nothing is written until the user says yes.
     HookSetup { agent: String },
+    /// "When it finishes clean, shall I commit to a new branch and open a draft pull request?" Nothing touches git until yes.
+    PlanFollowUp,
 }
 
 impl Offer {
     /// How long this question stays answerable after it was spoken.
     pub fn reply_window(&self) -> Duration {
         match self {
-            Offer::Power { .. } | Offer::ClearTimetable | Offer::FileConfirm | Offer::HookSetup { .. } => REPLY_WINDOW_HIGH,
+            Offer::Power { .. } | Offer::ClearTimetable | Offer::FileConfirm | Offer::HookSetup { .. } | Offer::PlanFollowUp => REPLY_WINDOW_HIGH,
             Offer::AddEvent { .. } | Offer::AddSlots { .. } => REPLY_WINDOW_MEDIUM,
             Offer::Start { .. } | Offer::Choose { .. } | Offer::ReopenSession | Offer::OpenApp { .. } => REPLY_WINDOW_LOW,
         }
