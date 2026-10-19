@@ -677,6 +677,7 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         | ParsedIntent::WatchAgentTask { .. }
         | ParsedIntent::WatchThenPower { .. }
         | ParsedIntent::WatchPlanCommand { .. }
+        | ParsedIntent::AgentHookCommand { .. }
         | ParsedIntent::PlayMusic { .. }
         | ParsedIntent::OpenMusicPlayer { .. }
         | ParsedIntent::ScanInternshipEmails
@@ -1334,6 +1335,9 @@ pub async fn process_transcript<R: Runtime>(
         ParsedIntent::WatchPlanCommand { command } => {
             return run_watch_plan_command(app, command.clone()).await;
         }
+        ParsedIntent::AgentHookCommand { hook_action, agent } => {
+            return run_agent_hook_command(app, hook_action.clone(), agent.clone()).await;
+        }
         ParsedIntent::PlayMusic { query, player } => {
             return run_play_music(app, query.clone(), player.clone()).await;
         }
@@ -1656,6 +1660,9 @@ pub async fn process_transcript<R: Runtime>(
             }
             ParsedIntent::WatchPlanCommand { command } => {
                 return run_watch_plan_command(app, command.clone()).await;
+            }
+            ParsedIntent::AgentHookCommand { hook_action, agent } => {
+                return run_agent_hook_command(app, hook_action.clone(), agent.clone()).await;
             }
             ParsedIntent::PlayMusic { query, player } => {
                 return run_play_music(app, query.clone(), player.clone()).await;
@@ -4845,6 +4852,14 @@ async fn run_offer_reply<R: Runtime>(
             }
             None => "I didn't understand which power command that was, sir.".to_string(),
         },
+        (Offer::HookSetup { agent }, Reply::Yes) => match crate::agent_hooks::Agent::from_name(&agent) {
+            Some(a) => install_agent_hook(&app, a),
+            None => "I didn't understand which agent that was, sir.".to_string(),
+        },
+        (Offer::HookSetup { agent }, _) => {
+            let label = crate::agent_hooks::Agent::from_name(&agent).map_or("its", |a| a.label());
+            format!("Understood, sir. I won't change {label} settings.")
+        }
         (Offer::Power { .. }, _) => {
             crate::power_cmd::forget_pending_alias();
             "Understood, sir. Nothing will be turned off.".to_string()
@@ -5569,6 +5584,69 @@ async fn run_watch_then_power<R: Runtime>(
         crate::watch_power::read_back(&plan)
     );
     crate::power_plan::set(plan);
+    say_and_finish(&app, request_id, speech)
+}
+
+/// Write the hook script and add NEXUS's hook to the agent's settings (a backup is made first).
+/// Only ever called after the user said yes to the offer. Returns what to say.
+fn install_agent_hook<R: Runtime>(app: &AppHandle<R>, agent: crate::agent_hooks::Agent) -> String {
+    let Ok(dir) = app.path().app_data_dir() else {
+        return "I couldn't reach my own folder, sir; nothing was changed.".to_string();
+    };
+    let Some(cfg) = crate::agent_hooks::config_path(agent) else {
+        return format!("I couldn't find where {} keeps its settings, sir.", agent.label());
+    };
+    let token = crate::agent_hooks::agent_event_token();
+    let script = match crate::agent_hooks::write_script(&dir, &token, crate::webhook::WEBHOOK_PORT) {
+        Ok(p) => p,
+        Err(e) => return e.spoken(agent),
+    };
+    match crate::agent_hooks::install(agent, &cfg, &script) {
+        Ok(done) => format!(
+            "Done, sir. {} will now tell me when it stops.{} Start a new {} session for it to take effect.",
+            agent.label(),
+            if done.backup.is_some() { " A backup of its settings is saved beside the file." } else { "" },
+            agent.label()
+        ),
+        Err(e) => e.spoken(agent),
+    }
+}
+
+/// "Hook up Claude" asks first; "remove the Claude hook" and "is it installed" answer at once.
+async fn run_agent_hook_command<R: Runtime>(app: AppHandle<R>, action: String, agent: String) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let (Some(action), Some(agent)) = (crate::agent_hooks::HookAction::from_str(&action), crate::agent_hooks::Agent::from_name(&agent)) else {
+        return say_and_finish(&app, request_id, "I didn't catch which hook you meant, sir.".to_string());
+    };
+    let cfg = crate::agent_hooks::config_path(agent);
+    let speech = match action {
+        crate::agent_hooks::HookAction::Connect => {
+            crate::memcore::offer::set(crate::memcore::offer::Offer::HookSetup { agent: agent.name().to_string() }, true);
+            format!(
+                "To know when {} stops I'd add a small stop hook to its settings file, with a backup first. Shall I, sir?",
+                agent.label()
+            )
+        }
+        crate::agent_hooks::HookAction::Disconnect => match cfg.as_deref().map(|c| crate::agent_hooks::uninstall(agent, c)) {
+            Some(Ok(true)) => format!("Done, sir. I removed my hook from {}; nothing else in its settings was touched.", agent.label()),
+            Some(Ok(false)) | None => format!("I had no hook in {}, sir.", agent.label()),
+            Some(Err(e)) => e.spoken(agent),
+        },
+        crate::agent_hooks::HookAction::Status => {
+            let installed = cfg.as_deref().map_or(false, |c| crate::agent_hooks::is_installed(agent, c));
+            let last = crate::agent_hooks::last_event_ms(agent, crate::agent_hooks::EventKind::Stop);
+            match (installed, last) {
+                (false, _) => format!("The {} hook isn't installed, sir. Say hook up {} to add it.", agent.label(), agent.name()),
+                (true, None) => format!("The {} hook is installed, sir, but {} hasn't reported stopping since I started.", agent.label(), agent.label()),
+                (true, Some(t)) => format!(
+                    "The {} hook is installed, and {} last reported stopping {}.",
+                    agent.label(),
+                    agent.label(),
+                    crate::agent_hooks::ago(crate::agent_hooks::now_ms(), t)
+                ),
+            }
+        }
+    };
     say_and_finish(&app, request_id, speech)
 }
 
@@ -7677,6 +7755,7 @@ fn may_answer_offer(
         Uncertain => !matches!(
             offer,
             Offer::Power { .. }
+                | Offer::HookSetup { .. }
                 | Offer::FileConfirm
                 | Offer::OpenApp { .. }
                 | Offer::AddEvent { .. }

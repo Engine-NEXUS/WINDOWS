@@ -326,6 +326,10 @@ pub enum ParsedIntent {
     /// power_plan::PlanCommand::as_str). Only about the plan NEXUS is holding; nothing else is claimed.
     #[serde(rename = "watch_plan_command")]
     WatchPlanCommand { command: String },
+    /// "Hook up Claude" / "remove the Codex hook" / "is the Claude hook installed"
+    /// (`hook_action` = agent_hooks::HookAction::as_str, `agent` = agent_hooks::Agent::name).
+    #[serde(rename = "agent_hook_command")]
+    AgentHookCommand { hook_action: String, agent: String },
     /// Play music or search for songs on Spotify / Apple Music.
     #[serde(rename = "play_music")]
     PlayMusic {
@@ -443,6 +447,7 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::WatchAgentTask { .. } => "watch_agent_task",
         ParsedIntent::WatchThenPower { .. } => "watch_then_power",
         ParsedIntent::WatchPlanCommand { .. } => "watch_plan_command",
+        ParsedIntent::AgentHookCommand { .. } => "agent_hook_command",
         ParsedIntent::PlayMusic { .. } => "play_music",
         ParsedIntent::OpenMusicPlayer { .. } => "open_music_player",
         ParsedIntent::GitHubCommand { command } => match command {
@@ -687,6 +692,15 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
                 require_clean: plan.require_clean,
                 deadline_mins: plan.deadline_mins,
             },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    // --- Agent Stop hooks ("hook up claude", "remove the codex hook", "is the claude hook installed") ---
+    if let Some((action, agent)) = crate::agent_hooks::parse_command(&text) {
+        return Some(ParseResult {
+            intent: ParsedIntent::AgentHookCommand { hook_action: action.as_str().to_string(), agent: agent.name().to_string() },
             confidence: 1.0,
             source: "deterministic".to_string(),
         });

@@ -111,6 +111,7 @@ pub(crate) mod power;
 pub(crate) mod power_cmd;
 pub(crate) mod watch_power;
 pub(crate) mod power_plan;
+pub(crate) mod agent_hooks;
 // The verdict engine and the observer (doc 142 W2/W3) are tested but not wired to the live app until the
 // unattended-shutdown phase (W5): compiled for tests only, so no dead code ships in between.
 #[cfg(test)]

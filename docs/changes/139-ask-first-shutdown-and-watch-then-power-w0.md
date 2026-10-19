@@ -31,6 +31,10 @@ Date: 2026-10-18. Plan: `docs/features/142-watch-session-then-power-off-plan.md`
 
 `power_plan.rs` + `ParsedIntent::WatchPlanCommand`. `run_watch_then_power` now stores the plan; cancel / status / "just tell me" / "even if it fails" / "make it sleep instead" edit or report it. Everything said still states that nothing is armed (`ARMED_SUPPORTED = false`). Strict whole-sentence vocabularies per command; 7 tests and 7 killed mutations.
 
+## W2-W4 (2026-10-19)
+
+W2 `session_verdict.rs` (judge), W3 `session_observer.rs` (evidence; both `#[cfg(test)]` until W5), W4 `agent_hooks.rs` + `POST /agent-event` (own token; approval-gated, backed-up edit of Claude Code `settings.json` Stop/Notification hooks and Codex `config.toml` `notify`; only NEXUS entries are ever replaced or removed). A real generated script was run through cmd and curl.exe against a local socket in a test. See doc 142 for the details and the honest limits.
+
 ## Known unrelated failures
 
 3 `intent_parser` PR-list tests ("open pr list" now parses as `OpenGitHubDashboard`) and a flaky `auth_vault` keyring test under parallel runs. The dead-code gate also lists items from other in-progress work (`center_for`, `tts::read_tts_emotion_setting`, `vision` fields).

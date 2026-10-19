@@ -31,7 +31,7 @@ pub fn webhook_token() -> String {
 
 /// 32 random bytes from the OS CSPRNG, hex-encoded (64 chars). A predictable token would
 /// let any local process (or a web page via DNS rebinding) fire assistant actions.
-fn generate_token() -> String {
+pub(crate) fn generate_token() -> String {
     use ring::rand::{SecureRandom, SystemRandom};
     let mut bytes = [0u8; 32];
     SystemRandom::new()
@@ -120,6 +120,7 @@ fn respond(stream: &mut std::net::TcpStream, code: u16, body: &str) {
 fn handle_conn(
     mut stream: std::net::TcpStream,
     token: &str,
+    agent_token: &str,
 ) -> Option<String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -168,6 +169,17 @@ fn handle_conn(
         respond(&mut stream, 200, r#"{"ok":true,"service":"nexus-webhook"}"#);
         return None;
     }
+    if req.path == "/agent-event" {
+        // An agent's Stop hook says "claude stopped". Its own token (never the /trigger one), a body of two
+        // words, and nothing that can run a command: see agent_hooks.
+        let ok = req.method == "POST" && bearer_ok(&req.auth, agent_token);
+        let (code, reply, event) = crate::agent_hooks::route_event(ok, &req.body);
+        if let Some((agent, kind)) = event {
+            crate::agent_hooks::record_event_at(agent, kind, crate::agent_hooks::now_ms());
+        }
+        respond(&mut stream, code, reply);
+        return None;
+    }
     if req.method != "POST" || req.path != "/trigger" {
         respond(&mut stream, 404, r#"{"error":"not found"}"#);
         return None;
@@ -206,6 +218,7 @@ pub fn spawn_listener<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                 }
             };
             let token = webhook_token();
+            let agent_token = crate::agent_hooks::agent_event_token();
             tracing::info!("webhook: listening on 127.0.0.1:{} (localhost only)", WEBHOOK_PORT);
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
@@ -216,7 +229,7 @@ pub fn spawn_listener<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                 if !peer_local {
                     continue;
                 }
-                if let Some(transcript) = handle_conn(stream, &token) {
+                if let Some(transcript) = handle_conn(stream, &token, &agent_token) {
                     tracing::info!(
                         "webhook: trigger {:?}...",
                         transcript.chars().take(60).collect::<String>()
@@ -295,5 +308,140 @@ mod tests {
         let raw = b"GET / HTTP/1.1\r\n\r\nbody";
         assert_eq!(find_header_end(raw), Some(18));
         assert_eq!(find_header_end(b"incomplete"), None);
+    }
+}
+
+#[cfg(test)]
+mod agent_event_http_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// Send one raw HTTP request to a real `handle_conn` on a loopback socket; return (status, body).
+    fn call(request: String) -> (u16, String) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_conn(stream, "trigger-token", "agent-token")
+        });
+        let mut c = std::net::TcpStream::connect(addr).unwrap();
+        c.write_all(request.as_bytes()).unwrap();
+        let mut out = String::new();
+        c.read_to_string(&mut out).unwrap();
+        let transcript = server.join().unwrap();
+        assert_eq!(transcript, None, "the agent endpoint can never queue a spoken command");
+        let status = out.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+        (status, out.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+    }
+
+    fn post(path: &str, token: &str, body: &str) -> String {
+        format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[test]
+    fn the_agent_event_endpoint_records_only_authorised_known_events() {
+        use crate::agent_hooks::{last_event_ms, Agent, EventKind};
+        assert_eq!(last_event_ms(Agent::Claude, EventKind::Notification), None);
+
+        // the /trigger token does not open this door
+        let (code, _) = call(post("/agent-event", "trigger-token", r#"{"agent":"claude","event":"notification"}"#));
+        assert_eq!(code, 401);
+        // no token at all, and a wrong method
+        let (code, _) = call("POST /agent-event HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}".to_string());
+        assert_eq!(code, 401);
+        let (code, _) = call("GET /agent-event HTTP/1.1\r\nAuthorization: Bearer agent-token\r\n\r\n".to_string());
+        assert_eq!(code, 401);
+        // an unknown agent or event is refused
+        let (code, _) = call(post("/agent-event", "agent-token", r#"{"agent":"evil","event":"notification"}"#));
+        assert_eq!(code, 400);
+        let (code, _) = call(post("/agent-event", "agent-token", r#"{"agent":"claude","event":"shutdown"}"#));
+        assert_eq!(code, 400);
+        assert_eq!(last_event_ms(Agent::Claude, EventKind::Notification), None, "nothing refused was recorded");
+
+        // the real thing
+        let (code, body) = call(post("/agent-event", "agent-token", r#"{"agent":"claude","event":"notification"}"#));
+        assert_eq!((code, body.as_str()), (202, r#"{"ok":true}"#));
+        assert!(last_event_ms(Agent::Claude, EventKind::Notification).is_some());
+
+        // and the agent token does not open /trigger
+        let (code, _) = call(post("/trigger", "agent-token", r#"{"transcript":"shut down my laptop"}"#));
+        assert_eq!(code, 401);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod agent_script_tests {
+    use crate::agent_hooks::{parse_event_body, write_script, Agent, EventKind};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// Runs the REAL generated script through cmd and curl against a local socket and returns the exact
+    /// request an agent's hook would make. `None` when curl.exe is not on this machine.
+    fn run_script(args: &[&str]) -> Option<String> {
+        if std::process::Command::new("curl.exe").arg("--version").output().is_err() {
+            eprintln!("curl.exe not available: skipped");
+            return None;
+        }
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 2048];
+            loop {
+                let n = s.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&raw).to_string();
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let want: usize = head
+                        .lines()
+                        .find_map(|l| l.to_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse().ok()))
+                        .unwrap_or(0);
+                    if body.len() >= want {
+                        break;
+                    }
+                }
+            }
+            let _ = s.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}");
+            String::from_utf8_lossy(&raw).to_string()
+        });
+        let dir = std::env::temp_dir().join(format!("nexus_script_run_{}_{}", std::process::id(), args.len()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let script = write_script(&dir, "agent-token", port).unwrap();
+        let status = std::process::Command::new(&script).args(args).status().unwrap();
+        assert!(status.success());
+        let request = server.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        Some(request)
+    }
+
+    fn body_of(request: &str) -> &str {
+        request.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("")
+    }
+
+    #[test]
+    fn the_generated_script_posts_the_right_request_through_cmd_and_curl() {
+        let Some(request) = run_script(&["claude", "notification"]) else { return };
+        assert!(request.starts_with("POST /agent-event HTTP/1.1"), "{request}");
+        assert!(request.to_lowercase().contains("authorization: bearer agent-token"), "{request}");
+        assert_eq!(parse_event_body(body_of(&request)), Some((Agent::Claude, EventKind::Notification)), "{request}");
+    }
+
+    #[test]
+    fn codex_style_calls_default_to_stop_and_ignore_the_json_codex_appends() {
+        let payload = r#"{"type":"agent-turn-complete","turn-id":"12345","input-messages":["rm -rf /"]}"#;
+        let Some(request) = run_script(&["codex", "stop", payload]) else { return };
+        assert_eq!(parse_event_body(body_of(&request)), Some((Agent::Codex, EventKind::Stop)), "{request}");
+        assert!(!request.contains("rm -rf"), "what the agent passes along is never forwarded");
+        // no event argument at all: still a stop
+        let Some(request) = run_script(&["claude"]) else { return };
+        assert_eq!(parse_event_body(body_of(&request)), Some((Agent::Claude, EventKind::Stop)), "{request}");
     }
 }
