@@ -25,6 +25,11 @@ pub const TAIL_BYTES: usize = 4096;
 pub enum Signal {
     /// The agent itself said it stopped (Stop hook / notify command).
     AgentHook,
+    /// That stop is still its latest event after a long quiet (no new prompt, no permission notice, no "background
+    /// work still running"). For an IDE agent whose process tree is never quiet this is the second sign; it comes
+    /// from the same hook channel, so it is weaker than an independent source (the model check, the countdown and
+    /// the cancels make up for it).
+    HookQuiet,
     /// The PTY adapter's own task-complete detection (a session NEXUS started).
     /// (Compiled for tests only until "ask claude to X and shut down when it's perfect" is wired.)
     #[cfg(test)]
@@ -320,11 +325,10 @@ pub fn judge(ev: &Evidence, require_clean: bool) -> Verdict {
     Verdict::Go
 }
 
-/// What NEXUS says when it does NOT power off ("Claude finished, but ... I left your laptop on.").
-/// `ask` = end with "Shall I shut down anyway?" (only when a real shutdown could follow a yes).
-pub fn spoken_hold(who: &str, verdict: &Verdict, ask: bool) -> String {
+/// The (at most two) distinct reasons of a verdict as one spoken clause: "it left questions open and I am not confident enough".
+pub fn spoken_reasons(verdict: &Verdict) -> String {
     let reasons = match verdict {
-        Verdict::Go => return format!("{who} finished and it looks perfect."),
+        Verdict::Go => return String::new(),
         Verdict::Hold(r) | Verdict::Unsure(r) => r,
     };
     let mut parts: Vec<String> = Vec::new();
@@ -337,7 +341,16 @@ pub fn spoken_hold(who: &str, verdict: &Verdict, ask: bool) -> String {
             break;
         }
     }
-    let why = parts.join(" and ");
+    parts.join(" and ")
+}
+
+/// What NEXUS says when it does NOT power off ("Claude finished, but ... I left your laptop on.").
+/// `ask` = end with "Shall I shut down anyway?" (only when a real shutdown could follow a yes).
+pub fn spoken_hold(who: &str, verdict: &Verdict, ask: bool) -> String {
+    if matches!(verdict, Verdict::Go) {
+        return format!("{who} finished and it looks perfect.");
+    }
+    let why = spoken_reasons(verdict);
     let question = if ask { " Shall I shut down anyway?" } else { "" };
     match verdict {
         Verdict::Hold(_) => format!("{who} stopped, but it is not perfect: {why}. I left your laptop on, sir.{question}"),
@@ -371,6 +384,22 @@ mod tests {
         let mut e = ev(clean_tail());
         e.model = answer(true, true, false, 0.95);
         assert_eq!(judge(&e, true), Verdict::Go);
+    }
+
+    #[test]
+    fn a_stop_that_stayed_the_latest_event_is_a_second_signal_for_a_clean_finish() {
+        let e = Evidence::new(vec![Signal::AgentHook, Signal::HookQuiet], clean_tail());
+        assert_eq!(judge(&e, true), Verdict::Go);
+        assert!(has_ended(&e));
+        // the quiet alone is not an ending, and a failure in the final message still holds
+        assert!(!has_ended(&Evidence::new(vec![Signal::HookQuiet], clean_tail())));
+        let bad = Evidence::new(vec![Signal::AgentHook, Signal::HookQuiet], "Ran it.\n2 failed, 40 passed.");
+        assert!(matches!(judge(&bad, true), Verdict::Hold(_)));
+        assert_eq!(spoken_reasons(&Verdict::Go), "");
+        assert_eq!(
+            spoken_reasons(&Verdict::Unsure(vec![Reason::StillBusy, Reason::StillBusy, Reason::NotEnoughSignals, Reason::LowConfidence])),
+            "something still looks busy and I only have one sign that it ended"
+        );
     }
 
     #[test]

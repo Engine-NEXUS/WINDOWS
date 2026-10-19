@@ -27,6 +27,8 @@ pub const IDLE_NEEDED_MS: u64 = 45_000;
 pub const QUIET_NEEDED_MS: u64 = 20_000;
 /// Fewer samples than this never count as idle (CPU needs two samples to mean anything).
 pub const MIN_SAMPLES: u32 = 3;
+/// How long the agent's Stop must stay its latest event before that quiet counts as a second sign.
+pub const HOOK_QUIET_NEEDED_MS: u64 = 45_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcSnap {
@@ -243,6 +245,11 @@ pub struct Inputs<'a> {
     pub hook_failed: bool,
     /// The agent's Stop event says background work is still running (Antigravity's `fullyIdle: false`).
     pub hook_not_idle: bool,
+    /// How long the agent's Stop has been its latest event (no start, notice or message since); `None` = not so.
+    pub hook_quiet_ms: Option<u64>,
+    /// An IDE agent (Antigravity, Cursor): its process tree is never quiet, so CPU, child processes and disk traffic
+    /// say nothing about whether it is working. Its hooks and its own stop report decide instead.
+    pub ignore_process_activity: bool,
 }
 
 #[derive(Debug, Default)]
@@ -257,6 +264,9 @@ impl Observer {
         let mut signals = Vec::new();
         if i.hook_stopped {
             signals.push(Signal::AgentHook);
+        }
+        if i.hook_stopped && !i.hook_not_idle && i.hook_quiet_ms.map_or(false, |q| q >= HOOK_QUIET_NEEDED_MS) {
+            signals.push(Signal::HookQuiet);
         }
         if self.idle.is_idle(i.now_ms) || self.idle.gone() {
             signals.push(Signal::ProcessIdle);
@@ -277,7 +287,7 @@ impl Observer {
             exit_ok: if i.hook_failed { Some(false) } else { None },
             waiting_for_user: read.waiting || i.hook_needs_user,
             login_required: read.login,
-            still_busy: read.busy || self.idle.active_now() || i.hook_not_idle,
+            still_busy: read.busy || (!i.ignore_process_activity && self.idle.active_now()) || i.hook_not_idle,
             model: ModelVerdict::Unavailable,
         }
     }
@@ -464,7 +474,18 @@ mod tests {
     }
 
     fn run(obs: &mut Observer, now: u64, tree: &[ProcSnap], text: Option<&str>, hook: bool) -> Evidence {
-        obs.step(Inputs { now_ms: now, tree, window_text: text, hook_stopped: hook, hook_tail: None, hook_needs_user: false, hook_failed: false, hook_not_idle: false })
+        obs.step(Inputs {
+            now_ms: now,
+            tree,
+            window_text: text,
+            hook_stopped: hook,
+            hook_tail: None,
+            hook_needs_user: false,
+            hook_failed: false,
+            hook_not_idle: false,
+            hook_quiet_ms: None,
+            ignore_process_activity: false,
+        })
     }
 
     /// A hook that says the agent stopped on an error / abort, or that background work is still running (Antigravity
@@ -486,6 +507,8 @@ mod tests {
                     hook_needs_user: false,
                     hook_failed: failed,
                     hook_not_idle: not_idle,
+                    hook_quiet_ms: None,
+                    ignore_process_activity: false,
                 }));
             }
             let ev = ev.unwrap();
@@ -493,6 +516,55 @@ mod tests {
             assert_eq!(ev.exit_ok, if failed { Some(false) } else { None });
             assert_eq!(ev.still_busy, not_idle);
         }
+    }
+
+    /// An IDE agent (Electron: renderers, language server, file watchers) never has a quiet process tree. Its own Stop,
+    /// still the latest event 45 s later, is the second sign; the busy tree must not veto it.
+    #[test]
+    fn an_ide_agent_ends_on_its_stop_and_a_busy_process_tree_cannot_veto_it() {
+        let busy_tree = vec![p(12, 11, "antigravity.exe", "antigravity", 35.0, 5_000), p(13, 12, "antigravity.exe", "antigravity --type=renderer", 20.0, 9_000)];
+        let done = "Implemented it.\nAll 12 tests passed.\nDone.";
+        let feed = |ignore: bool, quiet: Option<u64>, not_idle: bool, hook: bool| {
+            let mut o = Observer::default();
+            let mut ev = None;
+            for s in 0..=8u64 {
+                let mut tree = busy_tree.clone();
+                tree[0].io_total += s * 200_000; // always writing
+                ev = Some(o.step(Inputs {
+                    now_ms: s * 10_000,
+                    tree: &tree,
+                    window_text: None,
+                    hook_stopped: hook,
+                    hook_tail: Some(done),
+                    hook_needs_user: false,
+                    hook_failed: false,
+                    hook_not_idle: not_idle,
+                    hook_quiet_ms: quiet,
+                    ignore_process_activity: ignore,
+                }));
+            }
+            ev.unwrap()
+        };
+        // IDE: stop + 45 s of quiet, busy tree ignored -> ended and a go
+        let ev = feed(true, Some(HOOK_QUIET_NEEDED_MS), false, true);
+        assert!(ev.signals.contains(&Signal::AgentHook) && ev.signals.contains(&Signal::HookQuiet), "{:?}", ev.signals);
+        assert!(!ev.still_busy);
+        assert_eq!(judge(&ev, true), Verdict::Go);
+        // terminal agent: the same busy tree DOES veto
+        let ev = feed(false, Some(HOOK_QUIET_NEEDED_MS), false, true);
+        assert!(ev.still_busy);
+        assert_eq!(judge(&ev, true), Verdict::Unsure(vec![Reason::StillBusy]));
+        // not quiet long enough -> only one sign
+        let ev = feed(true, Some(HOOK_QUIET_NEEDED_MS - 1), false, true);
+        assert!(!ev.signals.contains(&Signal::HookQuiet));
+        assert_eq!(judge(&ev, true), Verdict::Unsure(vec![Reason::NotEnoughSignals]));
+        // the agent says background work is still running -> busy, and no quiet credit
+        let ev = feed(true, Some(HOOK_QUIET_NEEDED_MS), true, true);
+        assert!(ev.still_busy && !ev.signals.contains(&Signal::HookQuiet));
+        // no stop at all -> the quiet counts for nothing
+        let ev = feed(true, Some(HOOK_QUIET_NEEDED_MS), false, false);
+        assert!(!ev.signals.contains(&Signal::HookQuiet) && !ev.signals.contains(&Signal::AgentHook));
+        assert!(!matches!(judge(&ev, true), Verdict::Go));
     }
 
     #[test]

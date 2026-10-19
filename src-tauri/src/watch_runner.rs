@@ -18,7 +18,7 @@
 
 use crate::power_cmd::PowerKind;
 use crate::power_plan::WatchPowerMode;
-use crate::session_verdict::{spoken_hold, Verdict};
+use crate::session_verdict::{spoken_hold, spoken_reasons, Verdict};
 
 /// How often the loop looks.
 pub const TICK_MS: u64 = 3_000;
@@ -32,6 +32,8 @@ pub const DEFAULT_MAX_WAIT_MS: u64 = 3 * 60 * 60 * 1000;
 pub const MAX_WAIT_CEILING_MS: u64 = 12 * 60 * 60 * 1000;
 /// Input this soon after the countdown began is the user's last action before it, not a reaction to it.
 pub const INPUT_SLACK_MS: u64 = 1_500;
+/// A stop that has been the agent's latest event this long without the watch concluding is said out loud once.
+pub const STALL_NOTICE_MS: u64 = 150_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlanView {
@@ -56,6 +58,8 @@ pub struct Obs {
     /// The user said cancel (or began another power command) since the countdown started.
     pub voice_cancelled: bool,
     pub meeting: bool,
+    /// How long ago the agent's latest stop arrived, while it is still the latest (`None` = no stop to speak of).
+    pub stop_age_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -83,6 +87,8 @@ enum Phase {
 pub struct Engine {
     started_ms: u64,
     phase: Phase,
+    /// The "it stopped but I can't tell it is finished" notice was already given for this plan.
+    stall_told: bool,
 }
 
 fn gerund(kind: PowerKind) -> &'static str {
@@ -108,7 +114,7 @@ fn human_duration(ms: u64) -> String {
 
 impl Engine {
     pub fn new(now_ms: u64) -> Engine {
-        Engine { started_ms: now_ms, phase: Phase::Watching { concluding: None } }
+        Engine { started_ms: now_ms, phase: Phase::Watching { concluding: None }, stall_told: false }
     }
 
     pub fn finished(&self) -> bool {
@@ -153,6 +159,16 @@ impl Engine {
         if !o.ended {
             // still working (or not enough evidence that it stopped): nothing is concluded, however long it takes
             self.phase = Phase::Watching { concluding: None };
+            // ...but a stop that stays unexplained is never met with silence: say what is missing, once
+            if !self.stall_told && o.stop_age_ms.map_or(false, |a| a >= STALL_NOTICE_MS) {
+                self.stall_told = true;
+                let why = spoken_reasons(&o.verdict);
+                let why = if why.is_empty() { "I cannot confirm it".to_string() } else { why };
+                return vec![Action::Say(format!(
+                    "{} stopped a while ago, sir, but I can't tell that it is really finished: {why}. I'm still watching, and I haven't touched your laptop.",
+                    plan.who
+                ))];
+            }
             return Vec::new();
         }
         let is_go = o.verdict == Verdict::Go;
@@ -338,6 +354,7 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
     let mut model_cache: Option<(u64, ModelVerdict)> = None;
     let mut countdown_gen: Option<u64> = None;
     let mut ticks: u64 = 0;
+    let mut last_logged: Option<String> = None;
     println!("[WATCH-POWER] watching");
 
     'watch: loop {
@@ -401,6 +418,7 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
         let tree = tree_snaps(&roots, &snaps);
         let hook_tail = agent_hooks::last_stop_tail(agent);
         let stop_info = agent_hooks::last_stop_info(agent);
+        let wall_ms = agent_hooks::now_ms();
         let mut ev = observer.step(Inputs {
             now_ms,
             tree: &tree,
@@ -410,6 +428,8 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
             hook_needs_user: agent_hooks::needs_user(agent, stored.created_ms),
             hook_failed: stop_info.ok == Some(false),
             hook_not_idle: stop_info.fully_idle == Some(false),
+            hook_quiet_ms: agent_hooks::hook_quiet_ms_at(agent, stored.created_ms, wall_ms),
+            ignore_process_activity: agent.is_ide(),
         });
 
         // ── decide ──
@@ -419,6 +439,7 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
             let key = agent_hooks::last_event_ms(agent, EventKind::Stop).unwrap_or(0);
             if model_cache.as_ref().map(|(k, _)| *k) != Some(key) {
                 let m = ask_model(&app, &ev.tail).await;
+                println!("[WATCH-POWER] model cross-check: {m:?}");
                 model_cache = Some((key, m));
             }
             if let Some((_, m)) = &model_cache {
@@ -441,17 +462,27 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
             user_idle_ms: user_idle_ms(),
             voice_cancelled: countdown_gen.map_or(false, |g| !crate::power_cmd::is_current(g)),
             meeting: meeting_active(&app),
+            stop_age_ms: agent_hooks::stop_age_ms_at(agent, stored.created_ms, wall_ms),
         };
-        if ticks % 10 == 1 {
+        // every tenth tick, and at once whenever what the verdict rests on changes
+        let state_key = format!("{:?}|{:?}|{}|{}", obs.verdict, ev.signals, ev.still_busy, obs.ended);
+        if ticks % 10 == 1 || last_logged.as_deref() != Some(state_key.as_str()) {
+            let tree_cpu: f32 = tree.iter().map(|p| p.cpu_pct).sum();
             println!(
-                "[WATCH-POWER] tick {ticks}: mode={} ended={} verdict={:?} signals={:?} busy={} roots={}",
+                "[WATCH-POWER] tick {ticks}: mode={} ended={} verdict={:?} signals={:?} busy={} roots={} stop_age_s={} tail_len={} stop_ok={:?} fully_idle={:?} tree_cpu={:.1}",
                 mode.as_str(),
                 obs.ended,
                 obs.verdict,
                 ev.signals,
                 ev.still_busy,
-                roots.len()
+                roots.len(),
+                obs.stop_age_ms.map_or("-".to_string(), |a| (a / 1000).to_string()),
+                ev.tail.len(),
+                stop_info.ok,
+                stop_info.fully_idle,
+                tree_cpu
             );
+            last_logged = Some(state_key);
         }
         let Some((_, eng)) = engine.as_mut() else { break 'watch };
         let acts = eng.step(&obs);
@@ -477,6 +508,7 @@ fn idle_obs(now_ms: u64, mode: WatchPowerMode) -> Obs {
         user_idle_ms: user_idle_ms(),
         voice_cancelled: false,
         meeting: false,
+        stop_age_ms: None,
     }
 }
 
@@ -555,6 +587,7 @@ mod tests {
             user_idle_ms: Some(10 * 60_000),
             voice_cancelled: false,
             meeting: false,
+            stop_age_ms: None,
         }
     }
 
@@ -910,7 +943,7 @@ mod tests {
 
     // ── the whole chain, with the real observer and the real verdict, on a timeline ──
 
-    use crate::session_observer::{Inputs, Observer, ProcSnap};
+    use crate::session_observer::{Inputs, Observer, ProcSnap, HOOK_QUIET_NEEDED_MS};
     use crate::session_verdict::{has_ended, judge};
 
     fn quiet_tree() -> Vec<ProcSnap> {
@@ -923,6 +956,11 @@ mod tests {
     /// Drive Observer + judge + Engine every 3 s. `stopped_at`: when the agent's Stop hook arrives (None = never);
     /// `tail`: its final message; `prompt_at`: a new prompt that starts another turn (stop no longer counts).
     fn timeline(mode: WatchPowerMode, tail: &str, stopped_at: Option<u64>, prompt_at: Option<u64>, user_input_at: Option<u64>, cancel_at: Option<u64>) -> (Vec<(u64, Action)>, Engine) {
+        timeline_with(false, mode, tail, stopped_at, prompt_at, user_input_at, cancel_at)
+    }
+
+    /// `ide`: an IDE agent: its process tree is always busy and only its hooks tell when it ended.
+    fn timeline_with(ide: bool, mode: WatchPowerMode, tail: &str, stopped_at: Option<u64>, prompt_at: Option<u64>, user_input_at: Option<u64>, cancel_at: Option<u64>) -> (Vec<(u64, Action)>, Engine) {
         let mut observer = Observer::default();
         let mut engine = Engine::new(0);
         let mut out = Vec::new();
@@ -931,7 +969,7 @@ mod tests {
         while t <= 400_000 && !engine.finished() {
             let hook_stopped = stopped_at.map_or(false, |s| t >= s) && !prompt_at.map_or(false, |p| t >= p);
             let busy_tree;
-            let tree_now: &[ProcSnap] = if prompt_at.map_or(false, |p| t >= p && t < p + 40_000) {
+            let tree_now: &[ProcSnap] = if ide || prompt_at.map_or(false, |p| t >= p && t < p + 40_000) {
                 // the new turn is working: CPU
                 busy_tree = vec![ProcSnap { cpu_pct: 60.0, ..tree[0].clone() }, tree[1].clone()];
                 &busy_tree
@@ -947,6 +985,8 @@ mod tests {
                 hook_needs_user: false,
                 hook_failed: false,
                 hook_not_idle: false,
+                hook_quiet_ms: if hook_stopped { stopped_at.map(|s| t - s) } else { None },
+                ignore_process_activity: ide,
             });
             let obs = Obs {
                 now_ms: t,
@@ -957,6 +997,7 @@ mod tests {
                 user_idle_ms: Some(user_input_at.map_or(30 * 60_000, |u| if t >= u { t - u } else { 30 * 60_000 })),
                 voice_cancelled: cancel_at.map_or(false, |c| t >= c),
                 meeting: false,
+                stop_age_ms: if hook_stopped { stopped_at.map(|s| t - s) } else { None },
             };
             for a in engine.step(&obs) {
                 out.push((t, a));
@@ -975,6 +1016,55 @@ mod tests {
         // the process had to stay quiet 45 s before the ending counted, and the verdict then had to hold 15 s
         assert!(begin >= 45_000 + SETTLE_MS, "{begin}");
         assert!(fired(&acts));
+    }
+
+    #[test]
+    fn end_to_end_an_ide_agent_with_a_never_quiet_process_tree_ends_on_its_stop_and_is_told_about() {
+        // Antigravity: busy tree for the whole run, Stop at 20 s, nothing after it
+        let (acts, _) = timeline_with(true, WatchPowerMode::Dry, PERFECT, Some(20_000), None, None, None);
+        let said = acts.iter().find_map(|(t, a)| match a {
+            Action::Say(s) => Some((*t, s.clone())),
+            _ => None,
+        });
+        let (at, text) = said.expect("it reports the finish instead of staying silent");
+        assert!(text.contains("Practice run") && text.contains("looks perfect"), "{text}");
+        assert!(at >= 20_000 + HOOK_QUIET_NEEDED_MS + SETTLE_MS, "reported at {at}");
+        assert!(!fired(&acts));
+        // with the setting on the same finish counts down and fires
+        let (acts, _) = timeline_with(true, WatchPowerMode::On, PERFECT, Some(20_000), None, None, None);
+        assert!(began(&acts).is_some() && fired(&acts), "{acts:?}");
+    }
+
+    #[test]
+    fn end_to_end_an_ide_agent_that_asks_a_question_is_held_and_told() {
+        let (acts, _) = timeline_with(true, WatchPowerMode::Dry, "Implemented it.\nWould you like me to run the tests?", Some(20_000), None, None, None);
+        assert!(!fired(&acts));
+        assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(t) if t.contains("not perfect") && t.contains("question"))), "{acts:?}");
+    }
+
+    #[test]
+    fn a_stop_that_stays_unexplained_is_said_out_loud_exactly_once() {
+        let mut e = Engine::new(0);
+        let acts = run(&mut e, 0, 600_000, |t| {
+            let mut o = obs(t, WatchPowerMode::On);
+            o.ended = false;
+            o.verdict = Verdict::Unsure(vec![Reason::StillBusy, Reason::NotEnoughSignals]);
+            o.stop_age_ms = if t >= 10_000 { Some(t - 10_000) } else { None };
+            o
+        });
+        let notices: Vec<&(u64, Action)> = acts.iter().filter(|(_, a)| matches!(a, Action::Say(_))).collect();
+        assert_eq!(notices.len(), 1, "{acts:?}");
+        assert!(notices[0].0 >= 10_000 + STALL_NOTICE_MS && notices[0].0 < 10_000 + STALL_NOTICE_MS + 2 * TICK_MS);
+        assert!(matches!(&notices[0].1, Action::Say(t) if t.contains("stopped a while ago") && t.contains("something still looks busy") && t.contains("haven't touched")));
+        assert!(!e.finished() && !fired(&acts), "it keeps watching and never acts on a doubt");
+        // no stop, no notice: a session that is simply working says nothing
+        let mut e = Engine::new(0);
+        let acts = run(&mut e, 0, 600_000, |t| {
+            let mut o = obs(t, WatchPowerMode::On);
+            o.ended = false;
+            o
+        });
+        assert!(acts.is_empty());
     }
 
     #[test]

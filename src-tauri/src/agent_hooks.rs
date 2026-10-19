@@ -45,6 +45,12 @@ pub const ALL_AGENTS: [Agent; 7] = [
 ];
 
 impl Agent {
+    /// An IDE: its process tree (renderers, language server, file watchers) is never quiet, so process activity
+    /// cannot say whether it is working.
+    pub fn is_ide(self) -> bool {
+        matches!(self, Agent::Antigravity | Agent::Cursor)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Agent::Claude => "claude",
@@ -1182,6 +1188,22 @@ pub fn stop_is_latest(agent: Agent, since_ms: u64) -> bool {
     })
 }
 
+/// How long the agent's Stop has been its latest event of any kind (no start, notice or message since), when it
+/// arrived at or after `since_ms`. `None` = the agent did something after it, or never stopped.
+pub fn hook_quiet_ms_at(agent: Agent, since_ms: u64, now_ms: u64) -> Option<u64> {
+    let q = EVENTS.lock().ok()?;
+    let last = q.iter().rposition(|e| e.agent == agent.name())?;
+    (q[last].kind == EventKind::Stop && q[last].at_ms >= since_ms).then(|| now_ms.saturating_sub(q[last].at_ms))
+}
+
+/// How long ago the agent's latest stop arrived, while it is still the latest (no new prompt since).
+pub fn stop_age_ms_at(agent: Agent, since_ms: u64, now_ms: u64) -> Option<u64> {
+    if !stop_is_latest(agent, since_ms) {
+        return None;
+    }
+    last_event_ms(agent, EventKind::Stop).map(|t| now_ms.saturating_sub(t))
+}
+
 /// The final message of the agent's latest stop: from the stop itself, or (Cursor) from the reply it sent just
 /// before it, within the same turn.
 pub fn last_stop_tail(agent: Agent) -> Option<String> {
@@ -1628,6 +1650,34 @@ mod tests {
         let long = format!("{{\"last_assistant_message\":\"{}THE-END\"}}", "x".repeat(20_000));
         let t = parse_event("agent=claude&event=stop", &long).unwrap().tail.unwrap();
         assert!(t.len() <= crate::session_verdict::TAIL_BYTES + 20 && t.ends_with("THE-END"), "{}", t.len());
+    }
+
+    #[test]
+    fn the_quiet_after_a_stop_is_measured_from_the_stop_and_any_later_event_ends_it() {
+        let _events = events_test_lock();
+        let base = u64::MAX / 4 + 50_000_000; // far from the other tests' times
+        let a = Agent::Antigravity;
+        assert_eq!(hook_quiet_ms_at(a, base, base), None, "nothing happened yet");
+        record_event_at(a, EventKind::Start, base + 100, None, StopInfo::default());
+        assert_eq!(hook_quiet_ms_at(a, base, base + 1_000), None, "a running turn is not quiet");
+        record_event_at(a, EventKind::Stop, base + 10_000, None, StopInfo::default());
+        assert_eq!(hook_quiet_ms_at(a, base, base + 10_000), Some(0));
+        assert_eq!(hook_quiet_ms_at(a, base, base + 55_000), Some(45_000));
+        assert_eq!(stop_age_ms_at(a, base, base + 55_000), Some(45_000));
+        assert_eq!(hook_quiet_ms_at(a, base + 10_001, base + 55_000), None, "that stop is older than `since`");
+        // a permission notice, a message or a new prompt after the stop: no longer quiet
+        for kind in [EventKind::Notification, EventKind::Message, EventKind::Start] {
+            record_event_at(a, EventKind::Stop, base + 20_000, None, StopInfo::default());
+            assert!(hook_quiet_ms_at(a, base, base + 90_000).is_some());
+            record_event_at(a, kind, base + 30_000, None, StopInfo::default());
+            assert_eq!(hook_quiet_ms_at(a, base, base + 90_000), None, "{kind:?}");
+        }
+        // another agent's activity does not matter
+        record_event_at(Agent::Claude, EventKind::Start, base + 95_000, None, StopInfo::default());
+        record_event_at(a, EventKind::Stop, base + 40_000, None, StopInfo::default());
+        assert_eq!(hook_quiet_ms_at(a, base, base + 100_000), Some(60_000));
+        assert!(Agent::Antigravity.is_ide() && Agent::Cursor.is_ide());
+        assert!(!Agent::Claude.is_ide() && !Agent::Codex.is_ide() && !Agent::Aider.is_ide() && !Agent::OpenCode.is_ide() && !Agent::Gemini.is_ide());
     }
 
     #[test]
