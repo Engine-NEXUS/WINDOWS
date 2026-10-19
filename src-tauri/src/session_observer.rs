@@ -58,6 +58,9 @@ fn agent_words(agent: &str) -> &'static [&'static str] {
         "opencode" => &["opencode"],
         "hermes" => &["hermes"],
         "gemini" => &["gemini"],
+        "devin" => &["devin"],
+        "kilo" => &["kilo"],
+        "copilot" => &["copilot"],
         "vscode" => &["code.exe", "visual studio code", "/code "],
         _ => &[],
     }

@@ -369,7 +369,7 @@ pub fn parse_command(text: &str) -> Option<PlanCommand> {
             "don't shut down after", "do not shut down after", "dont shut down after", "don't shut down when", "do not shut down when",
             "dont shut down when", "don't power off after", "do not power off after", "don't turn off after", "do not turn off after",
         ],
-    ) && (has(&p, "it") || has(&p, "it's") || has(&p, "this") || has_any(&p, &["claude", "codex", "antigravity", "agy", "opencode", "gemini", "cursor", "aider"]) || has(&p, "the session") || has(&p, "that"))
+    ) && (has(&p, "it") || has(&p, "it's") || has(&p, "this") || has_any(&p, &["claude", "codex", "antigravity", "agy", "opencode", "gemini", "cursor", "aider", "devin", "windsurf", "kilo", "copilot", "trae"]) || has(&p, "the session") || has(&p, "that"))
     {
         return Some(PlanCommand::Cancel);
     }
@@ -391,7 +391,7 @@ pub fn parse_command(text: &str) -> Option<PlanCommand> {
     const EVEN_VOCAB: &[&str] = &[
         "shut", "down", "shutdown", "power", "off", "turn", "even", "if", "it", "fails", "fail", "failed", "errors", "error", "something",
         "breaks", "goes", "wrong", "regardless", "no", "matter", "what", "whatever", "happens", "do", "go", "ahead", "and", "the", "laptop",
-        "computer", "pc", "my", "still", "anyway", "plan", "either", "way", "that", "when", "claude", "codex", "antigravity", "agy", "opencode", "gemini", "cursor", "aider", "finishes", "is", "done", "a", "problem", "problems",
+        "computer", "pc", "my", "still", "anyway", "plan", "either", "way", "that", "when", "claude", "codex", "antigravity", "agy", "opencode", "gemini", "cursor", "aider", "devin", "windsurf", "kilo", "copilot", "trae", "finishes", "is", "done", "a", "problem", "problems",
         "there", "are",
     ];
     if (has(&p, "even if") || has(&p, "no matter what") || has(&p, "whatever happens") || has(&p, "regardless"))

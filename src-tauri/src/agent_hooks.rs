@@ -32,9 +32,20 @@ pub enum Agent {
     Gemini,
     Cursor,
     Aider,
+    /// Cognition's Devin CLI. It reads Claude Code's hook settings, so Claude's hook already reports it; the event
+    /// is relabelled from its payload (`parse_event`) and it has no hook of its own.
+    Devin,
+    /// Windsurf / Devin Desktop: `~/.codeium/windsurf/hooks.json`.
+    Windsurf,
+    /// Kilo Code (CLI and VS Code extension): a plugin file of its own, like OpenCode.
+    Kilo,
+    /// GitHub Copilot CLI: a hook file of its own in `~/.copilot/hooks/`.
+    Copilot,
+    /// ByteDance's Trae IDE: no hook mechanism exists. It can only be observed (processes, window title).
+    Trae,
 }
 
-pub const ALL_AGENTS: [Agent; 7] = [
+pub const ALL_AGENTS: [Agent; 12] = [
     Agent::Claude,
     Agent::Codex,
     Agent::Antigravity,
@@ -42,13 +53,24 @@ pub const ALL_AGENTS: [Agent; 7] = [
     Agent::Gemini,
     Agent::Cursor,
     Agent::Aider,
+    Agent::Devin,
+    Agent::Windsurf,
+    Agent::Kilo,
+    Agent::Copilot,
+    Agent::Trae,
 ];
 
 impl Agent {
     /// An IDE: its process tree (renderers, language server, file watchers) is never quiet, so process activity
     /// cannot say whether it is working.
     pub fn is_ide(self) -> bool {
-        matches!(self, Agent::Antigravity | Agent::Cursor)
+        matches!(self, Agent::Antigravity | Agent::Cursor | Agent::Windsurf | Agent::Trae)
+    }
+
+    /// No hook mechanism exists for it: only its processes can be watched, so it can never count as "finished
+    /// and perfect".
+    pub fn observe_only(self) -> bool {
+        matches!(self, Agent::Trae)
     }
 
     pub fn name(self) -> &'static str {
@@ -60,6 +82,11 @@ impl Agent {
             Agent::Gemini => "gemini",
             Agent::Cursor => "cursor",
             Agent::Aider => "aider",
+            Agent::Devin => "devin",
+            Agent::Windsurf => "windsurf",
+            Agent::Kilo => "kilo",
+            Agent::Copilot => "copilot",
+            Agent::Trae => "trae",
         }
     }
 
@@ -72,6 +99,11 @@ impl Agent {
             Agent::Gemini => "Gemini CLI",
             Agent::Cursor => "Cursor",
             Agent::Aider => "Aider",
+            Agent::Devin => "Devin",
+            Agent::Windsurf => "Windsurf",
+            Agent::Kilo => "Kilo Code",
+            Agent::Copilot => "GitHub Copilot CLI",
+            Agent::Trae => "Trae",
         }
     }
 
@@ -85,6 +117,11 @@ impl Agent {
             "gemini" => Some(Agent::Gemini),
             "cursor" => Some(Agent::Cursor),
             "aider" => Some(Agent::Aider),
+            "devin" | "devin cli" => Some(Agent::Devin),
+            "windsurf" | "devin desktop" => Some(Agent::Windsurf),
+            "kilo" | "kilo code" | "kilocode" => Some(Agent::Kilo),
+            "copilot" | "github copilot" | "copilot cli" => Some(Agent::Copilot),
+            "trae" => Some(Agent::Trae),
             _ => None,
         }
     }
@@ -108,6 +145,11 @@ impl Agent {
             Agent::Gemini => "Start a new Gemini CLI session. If its hooks are switched off in its settings, I did not change that.",
             Agent::Cursor => "Restart Cursor so it reads the hook.",
             Agent::Aider => "Start a new Aider session for it to take effect.",
+            Agent::Devin => "Devin reads Claude Code's hook, so start a new Devin session. I have not seen a Devin stop yet, so tell me if it does not report.",
+            Agent::Windsurf => "Restart Windsurf so it reads the hook. Hooks do not run while a workspace is in Restricted Mode.",
+            Agent::Kilo => "Restart Kilo so it loads the plugin.",
+            Agent::Copilot => "Start a new Copilot CLI session for it to take effect.",
+            Agent::Trae => "Trae has no hook to install.",
         }
     }
 }
@@ -138,6 +180,8 @@ pub enum HookError {
     Unreadable(String),
     /// Codex already has a `notify` command that is not ours.
     HasOwnNotify,
+    /// The agent has no hook mechanism at all (Trae).
+    NoHookMechanism,
     Io(String),
 }
 
@@ -146,6 +190,10 @@ impl HookError {
         match self {
             HookError::HasOwnNotify => format!(
                 "{} already has a notify command of its own, so I left its settings alone, sir.",
+                agent.label()
+            ),
+            HookError::NoHookMechanism => format!(
+                "{} has no hook I can use, sir. I can only watch whether it goes quiet, so I will never call its work perfect.",
                 agent.label()
             ),
             HookError::Unreadable(_) => format!(
@@ -266,6 +314,10 @@ const CURSOR_EVENTS: HookEvents = &[
     ("beforeSubmitPrompt", "start", None),
 ];
 
+/// Windsurf / Devin Desktop: `post_cascade_response` runs after each reply (its `tool_info.response` is the text),
+/// `pre_user_prompt` before a new prompt. Entries are flat `{ "command": ... }` objects.
+const WINDSURF_EVENTS: HookEvents = &[("post_cascade_response", "stop", None), ("pre_user_prompt", "start", None)];
+
 /// How one hook entry looks in that agent's file.
 #[derive(Clone, Copy)]
 enum Shape {
@@ -311,7 +363,7 @@ fn unquoted_script(script: &Path) -> Result<String, HookError> {
 
 /// The command written into an agent's hook file: `<script> <agent> <kind>`.
 fn command_line(script: &Path, agent: &str, kind: &str) -> Result<String, HookError> {
-    if agent == "antigravity" {
+    if agent == "antigravity" || agent == "windsurf" {
         // The 8.3 short path has no "nexus-agent-event" in it, so the marker rides along as a trailing argument
         // (the script reads only its first two): without it NEXUS could not recognise its own hook afterwards.
         return Ok(format!("{} {agent} {kind} {MARKER}", unquoted_script(script)?));
@@ -438,6 +490,18 @@ pub fn cursor_remove_hook(existing: &str) -> Result<(String, bool), HookError> {
 
 pub fn cursor_has_hook(existing: &str) -> bool {
     hooks_map_has(existing, CURSOR_EVENTS)
+}
+
+pub fn windsurf_add_hook(existing: &str, script: &Path) -> Result<String, HookError> {
+    hooks_map_add(existing, script, "windsurf", WINDSURF_EVENTS, Shape::Flat, false)
+}
+
+pub fn windsurf_remove_hook(existing: &str) -> Result<(String, bool), HookError> {
+    hooks_map_remove(existing, WINDSURF_EVENTS)
+}
+
+pub fn windsurf_has_hook(existing: &str) -> bool {
+    hooks_map_has(existing, WINDSURF_EVENTS)
 }
 
 // ─── Antigravity: ~/.gemini/config/hooks.json (App, CLI and IDE share it) ───────────────────────────
@@ -729,7 +793,108 @@ pub fn opencode_plugin_text(token: &str, port: u16) -> String {
     OPENCODE_PLUGIN_TEMPLATE.replace("@PORT@", &port.to_string()).replace("@TOKEN@", token)
 }
 
+/// Kilo Code is built on OpenCode and loads every file in `~/.config/kilo/plugin/`. Its documentation shows
+/// `export default { id, server }`; the events are the same (`session.idle`, `permission.asked`, user messages).
+/// Not run against a real Kilo yet.
+const KILO_PLUGIN_TEMPLATE: &str = r###"// NEXUS agent hook (nexus-agent-event): tells NEXUS when Kilo stops. Remove with "disconnect kilo".
+const ENDPOINT = "http://127.0.0.1:@PORT@/agent-event";
+const TOKEN = "@TOKEN@";
+
+const post = async (event, body) => {
+  try {
+    await fetch(ENDPOINT + "?agent=kilo&event=" + event, {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch (_) {}
+};
+
+const server = async ({ client }) => {
+  const isSubSession = async (id) => {
+    try {
+      const res = await client.session.get({ path: { id } });
+      return !!(res && res.data && res.data.parentID);
+    } catch (_) {
+      return false;
+    }
+  };
+  const lastAssistantText = async (id) => {
+    try {
+      const res = await client.session.messages({ path: { id } });
+      const msgs = (res && res.data) || [];
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const m = msgs[i];
+        if (!m.info || m.info.role !== "assistant") continue;
+        const text = (m.parts || [])
+          .filter((p) => p.type === "text" && !p.synthetic && !p.ignored)
+          .map((p) => p.text)
+          .join("\n")
+          .trim();
+        if (text) return text;
+      }
+    } catch (_) {}
+    return "";
+  };
+  return {
+    event: async ({ event }) => {
+      if (!event || !event.type) return;
+      const props = event.properties || {};
+      if (event.type === "session.idle") {
+        const id = props.sessionID;
+        if (id && (await isSubSession(id))) return;
+        await post("stop", { last_assistant_message: id ? await lastAssistantText(id) : "" });
+      } else if (event.type === "permission.updated" || event.type === "permission.asked") {
+        await post("notification", {});
+      } else if (event.type === "message.updated" && props.info && props.info.role === "user") {
+        await post("start", {});
+      }
+    },
+  };
+};
+
+export default { id: "nexus-agent-event", server };
+"###;
+
+pub fn kilo_plugin_text(token: &str, port: u16) -> String {
+    KILO_PLUGIN_TEMPLATE.replace("@PORT@", &port.to_string()).replace("@TOKEN@", token)
+}
+
+/// GitHub Copilot CLI reads every `*.json` in `~/.copilot/hooks/`: NEXUS owns one file there. `agentStop` is the end
+/// of a turn, `userPromptSubmitted` a new one, `notification` a prompt that waits. The payload names a
+/// `transcriptPath` but its format is not read yet, so a Copilot stop carries no text. Not run against a real
+/// Copilot CLI yet.
+pub fn copilot_hook_text(script: &Path) -> Result<String, HookError> {
+    let p = script.display().to_string();
+    if p.contains('\'') || p.contains('\n') {
+        return Err(HookError::Io("the script path contains a quote".into()));
+    }
+    let entry = |kind: &str| {
+        json!({
+            "type": "command",
+            "powershell": format!("& '{p}' copilot {kind} {MARKER}"),
+            "bash": format!("'{p}' copilot {kind} {MARKER}"),
+            "timeoutSec": 10
+        })
+    };
+    pretty(&json!({
+        "version": 1,
+        "hooks": {
+            "agentStop": [entry("stop")],
+            "userPromptSubmitted": [entry("start")],
+            "notification": [entry("notification")]
+        }
+    }))
+}
+
 fn opencode_install(plugin: &Path, t: &HookTarget) -> Result<Installed, HookError> {
+    owned_file_install(plugin, &opencode_plugin_text(t.token, t.port))
+}
+
+/// A file NEXUS owns outright (a plugin, a hook file in a drop-in folder). Refuses to overwrite a file of that name
+/// that is not ours.
+fn owned_file_install(plugin: &Path, text: &str) -> Result<Installed, HookError> {
     let existing = match std::fs::read_to_string(plugin) {
         Ok(s) => Some(s),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -738,8 +903,7 @@ fn opencode_install(plugin: &Path, t: &HookTarget) -> Result<Installed, HookErro
     if existing.as_deref().map_or(false, |s| !s.contains(MARKER)) {
         return Err(HookError::Unreadable("a plugin file with that name is not ours".into()));
     }
-    let text = opencode_plugin_text(t.token, t.port);
-    if existing.as_deref() == Some(text.as_str()) {
+    if existing.as_deref() == Some(text) {
         return Ok(Installed { backup: None });
     }
     if let Some(dir) = plugin.parent() {
@@ -774,6 +938,18 @@ pub fn config_path(agent: Agent) -> Option<PathBuf> {
             let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| home().map(|h| h.join(".config")))?;
             Some(base.join("opencode").join("plugins").join(OPENCODE_PLUGIN_FILE))
         }
+        // Devin reads Claude Code's settings, so the file is Claude's
+        Agent::Devin => config_path(Agent::Claude),
+        Agent::Windsurf => Some(home()?.join(".codeium").join("windsurf").join("hooks.json")),
+        Agent::Kilo => {
+            let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| home().map(|h| h.join(".config")))?;
+            Some(base.join("kilo").join("plugin").join(OPENCODE_PLUGIN_FILE))
+        }
+        Agent::Copilot => {
+            let base = std::env::var_os("COPILOT_HOME").map(PathBuf::from).or_else(|| home().map(|h| h.join(".copilot")))?;
+            Some(base.join("hooks").join("nexus-agent-event.json"))
+        }
+        Agent::Trae => None,
     }
 }
 
@@ -826,19 +1002,24 @@ pub struct HookTarget<'a> {
 
 /// Install the hook for `agent` into `cfg` (the script must already exist at `target.script`).
 pub fn install(agent: Agent, cfg: &Path, target: &HookTarget) -> Result<Installed, HookError> {
-    if agent == Agent::OpenCode {
-        return opencode_install(cfg, target);
+    match agent {
+        Agent::OpenCode => return opencode_install(cfg, target),
+        Agent::Kilo => return owned_file_install(cfg, &kilo_plugin_text(target.token, target.port)),
+        Agent::Copilot => return owned_file_install(cfg, &copilot_hook_text(target.script)?),
+        Agent::Trae => return Err(HookError::NoHookMechanism),
+        _ => {}
     }
     let existing = read_or_empty(cfg)?;
     let script = target.script;
     let updated = match agent {
-        Agent::Claude => claude_add_hook(&existing, script)?,
+        Agent::Claude | Agent::Devin => claude_add_hook(&existing, script)?,
+        Agent::Windsurf => windsurf_add_hook(&existing, script)?,
         Agent::Codex => codex_add_notify(&existing, script)?,
         Agent::Antigravity => antigravity_add_hook(&existing, script)?,
         Agent::Gemini => gemini_add_hook(&existing, script)?,
         Agent::Cursor => cursor_add_hook(&existing, script)?,
         Agent::Aider => aider_add_notify(&existing, script)?,
-        Agent::OpenCode => unreachable!("handled above"),
+        Agent::OpenCode | Agent::Kilo | Agent::Copilot | Agent::Trae => unreachable!("handled above"),
     };
     if updated == existing {
         return Ok(Installed { backup: None });
@@ -851,7 +1032,11 @@ pub fn uninstall(agent: Agent, cfg: &Path) -> Result<bool, HookError> {
     if !cfg.exists() {
         return Ok(false);
     }
-    if agent == Agent::OpenCode {
+    // Devin has no hook of its own (it shares Claude's), and Trae has none at all: nothing to remove
+    if matches!(agent, Agent::Devin | Agent::Trae) {
+        return Ok(false);
+    }
+    if matches!(agent, Agent::OpenCode | Agent::Kilo | Agent::Copilot) {
         let text = read_or_empty(cfg)?;
         if !text.contains(MARKER) {
             return Ok(false);
@@ -862,12 +1047,13 @@ pub fn uninstall(agent: Agent, cfg: &Path) -> Result<bool, HookError> {
     let existing = read_or_empty(cfg)?;
     let (updated, removed) = match agent {
         Agent::Claude => claude_remove_hook(&existing)?,
+        Agent::Windsurf => windsurf_remove_hook(&existing)?,
         Agent::Codex => codex_remove_notify(&existing),
         Agent::Antigravity => antigravity_remove_hook(&existing)?,
         Agent::Gemini => gemini_remove_hook(&existing)?,
         Agent::Cursor => cursor_remove_hook(&existing)?,
         Agent::Aider => aider_remove_notify(&existing),
-        Agent::OpenCode => unreachable!("handled above"),
+        Agent::OpenCode | Agent::Kilo | Agent::Copilot | Agent::Devin | Agent::Trae => unreachable!("handled above"),
     };
     if removed {
         write_with_backup(cfg, &updated)?;
@@ -878,13 +1064,15 @@ pub fn uninstall(agent: Agent, cfg: &Path) -> Result<bool, HookError> {
 pub fn is_installed(agent: Agent, cfg: &Path) -> bool {
     let Ok(text) = read_or_empty(cfg) else { return false };
     match agent {
-        Agent::Claude => claude_has_hook(&text),
+        Agent::Claude | Agent::Devin => claude_has_hook(&text),
+        Agent::Windsurf => windsurf_has_hook(&text),
+        Agent::Trae => false,
         Agent::Codex => codex_has_notify(&text),
         Agent::Antigravity => antigravity_has_hook(&text),
         Agent::Gemini => gemini_has_hook(&text),
         Agent::Cursor => cursor_has_hook(&text),
         Agent::Aider => aider_has_notify(&text),
-        Agent::OpenCode => text.contains(MARKER),
+        Agent::OpenCode | Agent::Kilo | Agent::Copilot => text.contains(MARKER),
     }
 }
 
@@ -938,6 +1126,10 @@ fn kind_from(s: &str) -> Option<EventKind> {
 /// payload `last-assistant-message`, Gemini CLI's AfterAgent `prompt_response`; Cursor's `afterAgentResponse`
 /// (a Message event) carries `text`.
 fn final_message(v: &Value, kind: EventKind) -> Option<String> {
+    // Windsurf / Devin Desktop `post_cascade_response`: the reply is `tool_info.response`
+    if let Some(r) = v.get("tool_info").and_then(|t| t.get("response")).and_then(|x| x.as_str()) {
+        return Some(r.to_string());
+    }
     let mut keys = vec!["last_assistant_message", "last-assistant-message", "prompt_response"];
     if kind == EventKind::Message {
         keys.push("text");
@@ -1004,6 +1196,16 @@ fn stop_info(agent: Agent, v: &Value) -> StopInfo {
     info
 }
 
+/// Devin CLI reads Claude Code's hook settings, so Claude's hook reports Devin's events as "claude". Devin's payload
+/// carries a `prompt_id` and no `transcript_path` (Claude Code's carries a transcript path). Taken from Devin's
+/// documentation, not yet seen on a real Devin: if Claude's payload ever carried `prompt_id` this would mislabel it.
+fn relabel(agent: Agent, json: Option<&Value>) -> Agent {
+    match (agent, json) {
+        (Agent::Claude, Some(v)) if v.get("prompt_id").is_some() && v.get("transcript_path").is_none() => Agent::Devin,
+        _ => agent,
+    }
+}
+
 /// `?agent=claude&event=stop` (new script) or a body `{"agent":"claude","event":"stop"}` (old script) ->
 /// the event. Only known agents and four known events are accepted. For a stop, the agent's final message is kept
 /// as DATA for the verdict (cut to the last 4 KB and masked); nothing else in the body is read or stored beyond
@@ -1018,6 +1220,7 @@ pub fn parse_event(query: &str, body: &str) -> Option<ParsedEvent> {
         }
         _ => return None,
     };
+    let agent = relabel(agent, json.as_ref());
     let mut tail = None;
     let mut info = StopInfo::default();
     let mut source = None;
@@ -1352,7 +1555,7 @@ fn norm(text: &str) -> String {
 
 const HOOK_VOCAB: &[&str] = &[
     "connect", "hook", "hooks", "up", "set", "setup", "install", "add", "enable", "the", "stop", "to", "nexus", "claude", "codex", "code",
-    "antigravity", "agy", "opencode", "gemini", "cursor", "aider",
+    "antigravity", "agy", "opencode", "gemini", "cursor", "aider", "devin", "windsurf", "kilo", "copilot", "trae",
     "let", "know", "when", "stops", "finishes", "is", "done", "with", "notifications", "notification", "signal", "for", "my", "me", "a",
     "disconnect", "remove", "uninstall", "delete", "disable", "unhook", "take", "out", "of", "from", "connected", "installed", "status",
     "has", "reported", "yet", "been", "hooked", "on", "in", "set-up", "tell",
@@ -1399,6 +1602,12 @@ fn parse_command_sentence(text: &str) -> Option<(HookAction, Agent)> {
         .replace(" anti gravity ", " antigravity ")
         .replace(" open code ", " opencode ")
         .replace(" gemini cli ", " gemini ")
+        .replace(" kilo code ", " kilo ")
+        .replace(" kilocode ", " kilo ")
+        .replace(" github copilot ", " copilot ")
+        .replace(" copilot cli ", " copilot ")
+        .replace(" devin cli ", " devin ")
+        .replace(" devin desktop ", " windsurf ")
         .trim()
         .to_string();
     let tokens: Vec<&str> = t.split(' ').collect();
@@ -1818,11 +2027,146 @@ mod tests {
         }
         assert_eq!(Agent::from_name("agy"), Some(Agent::Antigravity));
         assert_eq!(Agent::from_name("open code"), Some(Agent::OpenCode));
-        for bad in ["", "evil", "Claude", "vscode", "copilot", "hermes"] {
+        for bad in ["", "evil", "Claude", "vscode", "hermes", "kilo code cli", "trae agent"] {
             assert_eq!(Agent::from_name(bad), None, "{bad}");
         }
+        for (said, want) in [
+            ("devin", Agent::Devin),
+            ("windsurf", Agent::Windsurf),
+            ("devin desktop", Agent::Windsurf),
+            ("kilo", Agent::Kilo),
+            ("kilo code", Agent::Kilo),
+            ("copilot", Agent::Copilot),
+            ("github copilot", Agent::Copilot),
+            ("trae", Agent::Trae),
+        ] {
+            assert_eq!(Agent::from_name(said), Some(want), "{said}");
+        }
         let list = Agent::spoken_list();
-        assert!(list.starts_with("Claude Code, Codex") && list.ends_with(" or Aider"), "{list}");
+        assert!(list.starts_with("Claude Code, Codex") && list.contains("Kilo Code") && list.ends_with(" or Trae"), "{list}");
+    }
+
+    #[test]
+    fn windsurf_gets_its_two_hooks_with_a_marker_the_user_keeps_their_own_and_it_comes_out_clean() {
+        let before = r#"{"hooks":{"post_cascade_response":[{"command":"python audit.py","show_output":false}],"pre_run_command":[{"command":"guard.sh"}]}}"#;
+        let after = windsurf_add_hook(before, &script()).unwrap();
+        let v: Value = serde_json::from_str(&after).unwrap();
+        // the user's own hooks are untouched, ours sit beside them
+        assert_eq!(v["hooks"]["pre_run_command"][0]["command"], "guard.sh");
+        let stops = v["hooks"]["post_cascade_response"].as_array().unwrap();
+        assert_eq!(stops.len(), 2);
+        assert_eq!(stops[0]["command"], "python audit.py");
+        let ours = stops[1]["command"].as_str().unwrap();
+        assert!(ours.contains(" windsurf stop ") && ours.ends_with(MARKER), "{ours}");
+        assert!(v["hooks"]["pre_user_prompt"][0]["command"].as_str().unwrap().contains(" windsurf start "));
+        assert!(windsurf_has_hook(&after) && !windsurf_has_hook(before));
+        assert_eq!(windsurf_add_hook(&after, &script()).unwrap(), after, "idempotent");
+        let (back, removed) = windsurf_remove_hook(&after).unwrap();
+        assert!(removed);
+        let b: Value = serde_json::from_str(&back).unwrap();
+        assert_eq!(b, serde_json::from_str::<Value>(before).unwrap(), "only ours was removed");
+        // the reply text of a Windsurf stop is `tool_info.response`
+        let ev = parse_event(
+            "agent=windsurf&event=stop",
+            r#"{"agent_action_name":"post_cascade_response","trajectory_id":"t1","tool_info":{"response":"Refactored the parser.\nAll tests pass."}}"#,
+        )
+        .unwrap();
+        assert_eq!((ev.agent, ev.kind), (Agent::Windsurf, EventKind::Stop));
+        assert_eq!(ev.tail.as_deref(), Some("Refactored the parser.\nAll tests pass."));
+    }
+
+    #[test]
+    fn kilo_and_copilot_get_a_file_of_their_own_and_a_foreign_file_of_that_name_is_never_touched() {
+        let d = tmp("owned_files");
+        let t = HookTarget { script: &script(), token: "tok", port: 39220 };
+        // Kilo: a plugin file
+        let kilo = d.join("kilo").join("plugin").join("nexus-agent-event.js");
+        let done = install(Agent::Kilo, &kilo, &t).unwrap();
+        assert_eq!(done.backup, None);
+        let text = std::fs::read_to_string(&kilo).unwrap();
+        assert!(text.contains("agent=kilo") && text.contains("session.idle") && text.contains("export default") && text.contains("\"tok\""), "{text}");
+        assert!(is_installed(Agent::Kilo, &kilo));
+        assert!(install(Agent::Kilo, &kilo, &t).is_ok(), "idempotent");
+        assert_eq!(uninstall(Agent::Kilo, &kilo), Ok(true));
+        assert!(!kilo.exists());
+        std::fs::create_dir_all(kilo.parent().unwrap()).unwrap();
+        std::fs::write(&kilo, "// the user's own plugin").unwrap();
+        assert!(matches!(install(Agent::Kilo, &kilo, &t), Err(HookError::Unreadable(_))));
+        assert_eq!(std::fs::read_to_string(&kilo).unwrap(), "// the user's own plugin");
+        assert_eq!(uninstall(Agent::Kilo, &kilo), Ok(false), "not ours: left alone");
+        // Copilot: a hook file with the three events
+        let cp = d.join(".copilot").join("hooks").join("nexus-agent-event.json");
+        install(Agent::Copilot, &cp, &t).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&cp).unwrap()).unwrap();
+        assert_eq!(v["version"], 1);
+        for (event, kind) in [("agentStop", "stop"), ("userPromptSubmitted", "start"), ("notification", "notification")] {
+            let e = &v["hooks"][event][0];
+            assert_eq!(e["type"], "command", "{event}");
+            let ps = e["powershell"].as_str().unwrap();
+            assert!(ps.starts_with("& '") && ps.contains(&format!(" copilot {kind} ")) && ps.ends_with(MARKER), "{ps}");
+            assert!(e["bash"].as_str().unwrap().contains(MARKER));
+        }
+        assert!(is_installed(Agent::Copilot, &cp));
+        assert_eq!(uninstall(Agent::Copilot, &cp), Ok(true));
+        std::fs::write(&cp, "{}").unwrap();
+        assert!(matches!(install(Agent::Copilot, &cp, &t), Err(HookError::Unreadable(_))), "a hook file of the user's with that name");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn devin_shares_claudes_hook_and_is_told_apart_by_its_payload_while_trae_has_nothing_to_install() {
+        // Claude's own payload carries a transcript path
+        let claude = parse_event("agent=claude&event=stop", r#"{"session_id":"s","transcript_path":"/t.jsonl","hook_event_name":"Stop","last_assistant_message":"Done."}"#).unwrap();
+        assert_eq!(claude.agent, Agent::Claude);
+        // Devin's has a prompt id and no transcript
+        let devin = parse_event("agent=claude&event=stop", r#"{"session_id":"s","prompt_id":"p1","stop_hook_active":false}"#).unwrap();
+        assert_eq!(devin.agent, Agent::Devin);
+        assert_eq!(devin.kind, EventKind::Stop);
+        let devin_start = parse_event("agent=claude&event=start", r#"{"session_id":"s","prompt_id":"p2"}"#).unwrap();
+        assert_eq!(devin_start.agent, Agent::Devin);
+        // no payload, or another agent's name: never relabelled
+        assert_eq!(parse_event("agent=claude&event=stop", "").unwrap().agent, Agent::Claude);
+        assert_eq!(parse_event("agent=claude&event=stop", r#"{"session_id":"s","last_assistant_message":"x"}"#).unwrap().agent, Agent::Claude, "no prompt id: still Claude");
+        assert_eq!(parse_event("agent=codex&event=stop", r#"{"prompt_id":"p"}"#).unwrap().agent, Agent::Codex);
+        assert_eq!(
+            parse_event("agent=claude&event=stop", r#"{"session_id":"s","prompt_id":"p","transcript_path":"/t.jsonl"}"#).unwrap().agent,
+            Agent::Claude,
+            "a transcript path means Claude Code, whatever else the payload carries"
+        );
+        // installing "devin" installs Claude's hook in Claude's file; removing it never removes Claude's
+        assert_eq!(config_path(Agent::Devin), config_path(Agent::Claude));
+        let d = tmp("devin");
+        let cfg = d.join("settings.json");
+        let t = HookTarget { script: &script(), token: "t", port: 1 };
+        install(Agent::Devin, &cfg, &t).unwrap();
+        assert!(is_installed(Agent::Devin, &cfg) && is_installed(Agent::Claude, &cfg));
+        assert_eq!(uninstall(Agent::Devin, &cfg), Ok(false));
+        assert!(is_installed(Agent::Claude, &cfg), "Devin's disconnect must not remove Claude's hook");
+        let _ = std::fs::remove_dir_all(&d);
+        // Trae: no hook exists, nothing is written, and it is the only observe-only agent
+        assert_eq!(config_path(Agent::Trae), None);
+        assert_eq!(install(Agent::Trae, Path::new("x.json"), &t), Err(HookError::NoHookMechanism));
+        assert!(Agent::Trae.observe_only() && ALL_AGENTS.iter().filter(|a| a.observe_only()).count() == 1);
+        assert!(HookError::NoHookMechanism.spoken(Agent::Trae).contains("never call its work perfect"));
+    }
+
+    #[test]
+    fn the_hook_voice_commands_know_the_new_agents() {
+        for (t, agent) in [
+            ("hook up kilo code", Agent::Kilo),
+            ("hook up kilo", Agent::Kilo),
+            ("hook up github copilot", Agent::Copilot),
+            ("hook up copilot cli", Agent::Copilot),
+            ("hook up devin", Agent::Devin),
+            ("hook up devin desktop", Agent::Windsurf),
+            ("hook up windsurf", Agent::Windsurf),
+            ("hook up trae", Agent::Trae),
+        ] {
+            assert_eq!(parse_command(t), Some((HookAction::Connect, agent)), "{t}");
+        }
+        assert_eq!(parse_command("remove the kilo hook"), Some((HookAction::Disconnect, Agent::Kilo)));
+        assert_eq!(parse_command("is the windsurf hook installed"), Some((HookAction::Status, Agent::Windsurf)));
+        assert_eq!(parse_command("hook up kilo and devin"), None, "two agents in one sentence");
     }
 
     #[test]

@@ -67,6 +67,8 @@ const AGENTS: &[(&str, &str)] = &[
     ("opencode", "opencode"),
     ("hermes", "hermes"),
     ("gemini", "gemini"),
+    ("devin", "devin"),
+    ("kilo", "kilo"),
     ("copilot", "copilot"),
     ("vscode", "vscode"),
 ];
@@ -285,7 +287,15 @@ fn require_clean(tokens: &[&str]) -> bool {
 /// Speech-to-text writes the agent's name in several ways ("anti-gravity", "anti gravity"; live 2026-10-19:
 /// `watch "anti-gravity" and shut down my laptop when it is perfect`).
 fn canonical_agent_spelling(t: String) -> String {
-    format!(" {t} ").replace(" anti gravity ", " antigravity ").replace(" open code ", " opencode ").trim().to_string()
+    format!(" {t} ")
+        .replace(" anti gravity ", " antigravity ")
+        .replace(" open code ", " opencode ")
+        .replace(" kilo code ", " kilo ")
+        .replace(" github copilot ", " copilot ")
+        .replace(" devin cli ", " devin ")
+        .replace(" devin desktop ", " windsurf ")
+        .trim()
+        .to_string()
 }
 
 pub fn parse(text: &str) -> Option<WatchPlan> {

@@ -5616,7 +5616,9 @@ async fn run_watch_then_power<R: Runtime>(
         },
         Some(a) => {
             let hooked = crate::agent_hooks::config_path(a).map_or(false, |c| crate::agent_hooks::is_installed(a, &c));
-            if !hooked {
+            if a.observe_only() {
+                format!(" But {} has no hook, so I can't watch it for a shutdown plan; I can only notice that it went quiet.", a.label())
+            } else if !hooked {
                 format!(" But I can't tell when {} stops without its hook, so I'm not watching yet; say hook up {} first.", a.label(), a.name())
             } else if mode == crate::power_plan::WatchPowerMode::Off {
                 String::new()
@@ -5674,15 +5676,27 @@ async fn run_agent_hook_command<R: Runtime>(app: AppHandle<R>, action: String, a
     let cfg = crate::agent_hooks::config_path(agent);
     let speech = match action {
         crate::agent_hooks::HookAction::Connect => {
+            use crate::agent_hooks::Agent as A;
+            if agent == A::Trae {
+                // nothing to ask: there is no hook to add
+                return say_and_finish(&app, request_id, crate::agent_hooks::HookError::NoHookMechanism.spoken(agent));
+            }
             crate::memcore::offer::set(crate::memcore::offer::Offer::HookSetup { agent: agent.name().to_string() }, true);
-            if agent == crate::agent_hooks::Agent::OpenCode {
-                "To know when OpenCode stops I'd add a small plugin file of my own to its plugins folder; I wouldn't touch its settings. Shall I, sir?".to_string()
+            if matches!(agent, A::OpenCode | A::Kilo) {
+                format!("To know when {} stops I'd add a small plugin file of my own to its plugins folder; I wouldn't touch its settings. Shall I, sir?", agent.label())
+            } else if agent == A::Copilot {
+                "To know when Copilot CLI stops I'd add a small hook file of my own to its hooks folder; I wouldn't touch its settings. Shall I, sir?".to_string()
+            } else if agent == A::Devin {
+                "Devin reads Claude Code's hook settings, so I'd add my stop hook to Claude's settings file, with a backup first; Claude Code and Devin would both report through it. Shall I, sir?".to_string()
             } else {
                 format!(
                     "To know when {} stops I'd add a small stop hook to its settings file, with a backup first. Shall I, sir?",
                     agent.label()
                 )
             }
+        }
+        crate::agent_hooks::HookAction::Disconnect if agent == crate::agent_hooks::Agent::Devin => {
+            "Devin shares Claude Code's hook, sir. Say disconnect Claude to remove it; that stops both of them from reporting.".to_string()
         }
         crate::agent_hooks::HookAction::Disconnect => match cfg.as_deref().map(|c| crate::agent_hooks::uninstall(agent, c)) {
             Some(Ok(true)) => format!("Done, sir. I removed my hook from {}; nothing else in its settings was touched.", agent.label()),
@@ -5721,7 +5735,7 @@ async fn run_watch_plan_command<R: Runtime>(app: AppHandle<R>, command: String) 
                     crate::watch_runner::ensure_running(app.clone());
                     let mut said = crate::power_plan::run(&PlanCommand::SetMode(m), m);
                     if m != WatchPowerMode::Off {
-                        said.push_str(" It only ever applies to a plan you make with watch and shut down, and only for Claude Code or Codex with their hook installed.");
+                        said.push_str(" It only ever applies to a plan you make with watch and shut down, and only for an agent whose hook is installed.");
                     }
                     said
                 }
