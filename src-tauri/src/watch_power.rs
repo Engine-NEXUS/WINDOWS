@@ -18,13 +18,55 @@ use crate::power_cmd::{self, PowerKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchPlan {
-    /// Lowercase agent name ("claude", "codex", ...) or None = the session in front.
+    /// Lowercase agent name ("claude", "codex", ...) or None = the session in front (or `agents` / `all`).
     pub agent: Option<String>,
     pub kind: PowerKind,
-    /// Only power off when the session ended cleanly (the default, and the only safe one).
+    /// Only power off when the session ended in a way that looks perfect. True ONLY when the user attached a
+    /// condition ("if it's perfect", "only if there are no errors"); a plain "shut down after X" means "I'm done for
+    /// today" and powers off however it ended (the result is remembered and told next morning).
     pub require_clean: bool,
     /// Longest time to wait, when the user gave one.
     pub deadline_mins: Option<u32>,
+    /// Two or more named agents ("claude and codex"); empty when `agent` or `all` says it.
+    pub agents: Vec<String>,
+    /// "all my agents" / "every agent": whichever hooked agents are running (and any that start later).
+    pub all: bool,
+    /// "track all the agents and tell me when they're done": no power action, `kind` is ignored.
+    pub track_only: bool,
+}
+
+impl WatchPlan {
+    /// One session (or the one in front), the shape every plan had before the tracker existed.
+    #[cfg(test)]
+    pub fn single(agent: Option<String>, kind: PowerKind, require_clean: bool, deadline_mins: Option<u32>) -> WatchPlan {
+        WatchPlan { agent, kind, require_clean, deadline_mins, agents: Vec::new(), all: false, track_only: false }
+    }
+
+    /// The explicit agent names, in the order they were said (empty for `all` and for "this session").
+    pub fn named_agents(&self) -> Vec<String> {
+        if !self.agents.is_empty() {
+            self.agents.clone()
+        } else {
+            self.agent.iter().cloned().collect()
+        }
+    }
+}
+
+/// "Claude Code and Codex", "all your agents", "this session": what a plan is about, for speech.
+pub fn subject(plan: &WatchPlan) -> String {
+    if plan.all {
+        return "all your agents".to_string();
+    }
+    let labels: Vec<String> = plan
+        .named_agents()
+        .iter()
+        .map(|n| crate::agent_hooks::Agent::from_name(n).map_or_else(|| n.clone(), |a| a.label().to_string()))
+        .collect();
+    match labels.as_slice() {
+        [] => "this session".to_string(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {}", rest.join(", "), last),
+    }
 }
 
 const WATCH_VERBS: &[&str] = &[
@@ -187,19 +229,35 @@ fn negated_before(tokens: &[&str], start: usize) -> bool {
         || (matches!(prev, "to" | "you") && matches!(prev2, "not" | "never" | "don't"))
 }
 
-fn agent_in(tokens: &[&str]) -> Option<String> {
+/// Every distinct agent named, in the order said ("claude and codex" -> claude, codex).
+fn agents_in(tokens: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
     for (i, t) in tokens.iter().enumerate() {
-        if let Some((_, canon)) = AGENTS.iter().find(|(alias, _)| alias == t) {
-            return Some((*canon).to_string());
-        }
-        if *t == "vs" && tokens.get(i + 1) == Some(&"code") {
-            return Some("vscode".to_string());
-        }
-        if *t == "open" && tokens.get(i + 1) == Some(&"code") {
-            return Some("opencode".to_string());
+        let name = if let Some((_, canon)) = AGENTS.iter().find(|(alias, _)| alias == t) {
+            Some((*canon).to_string())
+        } else if *t == "vs" && tokens.get(i + 1) == Some(&"code") {
+            Some("vscode".to_string())
+        } else if *t == "open" && tokens.get(i + 1) == Some(&"code") {
+            Some("opencode".to_string())
+        } else {
+            None
+        };
+        if let Some(n) = name {
+            if !out.contains(&n) {
+                out.push(n);
+            }
         }
     }
-    None
+    out
+}
+
+/// "all the agents", "every agent", "each of my ai assistants", "my agents": the user means whichever are running.
+fn mentions_all(tokens: &[&str]) -> bool {
+    const THINGS: &[&str] = &["agent", "agents", "assistant", "assistants", "bots"];
+    let quantified = tokens.iter().enumerate().any(|(i, w)| {
+        matches!(*w, "all" | "every" | "each" | "everything") && tokens[i + 1..tokens.len().min(i + 6)].iter().any(|x| THINGS.contains(x) || matches!(*x, "ai" | "coding"))
+    });
+    quantified || tokens.iter().any(|w| matches!(*w, "agents" | "assistants"))
 }
 
 fn number_word(w: &str) -> Option<u32> {
@@ -280,7 +338,27 @@ fn require_clean(tokens: &[&str]) -> bool {
         || contains_seq(tokens, &["either", "way"])
         || tokens.contains(&"regardless")
         || tokens.contains(&"anyway");
-    !even_if
+    if even_if {
+        return false;
+    }
+    // A plain "shut down after X" means "I'm done for today": no condition was asked for, so none is applied.
+    has_condition(tokens)
+}
+
+/// The user attached a condition to the shutdown ("if it's perfect", "only if there are no errors", "unless it
+/// fails", "provided it passes", "without problems").
+fn has_condition(tokens: &[&str]) -> bool {
+    const WORDS: &[&str] = &[
+        "if", "unless", "provided", "perfect", "perfectly", "clean", "cleanly", "success", "successful", "successfully", "without",
+        "pass", "passes", "passed", "flawless", "flawlessly", "fine", "smoothly", "correctly", "properly",
+    ];
+    let no_failure = tokens.windows(2).any(|w| w[0] == "no" && matches!(w[1], "error" | "errors" | "issue" | "issues" | "problem" | "problems" | "failure" | "failures" | "bugs" | "mistakes"));
+    tokens.iter().any(|w| WORDS.contains(w))
+        || tokens.contains(&"nothing")
+        || no_failure
+        || contains_seq(tokens, &["as", "long", "as"])
+        || contains_seq(tokens, &["all", "good"])
+        || contains_seq(tokens, &["went", "well"])
 }
 
 /// Parse the whole utterance. `None` = not a watch-then-power request.
@@ -327,7 +405,9 @@ fn parse_sentence(text: &str) -> Option<WatchPlan> {
         return None;
     }
 
-    let agent = agent_in(&tokens);
+    let named = agents_in(&tokens);
+    let all = named.len() < 2 && mentions_all(&tokens);
+    let agent = named.first().cloned();
     let session_noun = tokens.iter().any(|w| SESSION_NOUNS.contains(w));
 
     // The thing being watched: media windows reject, otherwise an agent / session noun / clear pronoun accepts.
@@ -345,9 +425,27 @@ fn parse_sentence(text: &str) -> Option<WatchPlan> {
     }
     let pronoun_subject = watch.map_or(false, |(_, we)| tokens[we..tokens.len().min(we + 2)].iter().any(|w| is_pronoun(w)))
         || end.map_or(false, |ei| tokens[ei.saturating_sub(3)..ei].iter().any(|w| is_pronoun(w)));
-    let subject_ok = agent.is_some() || session_noun || pronoun_subject;
+    let subject_ok = agent.is_some() || all || session_noun || pronoun_subject;
     if !subject_ok {
         return None;
+    }
+    // Several agents at once, with no power phrase: "track all the agents and update me when they're done".
+    let multi = all || named.len() >= 2;
+    let wants_update = tokens.iter().any(|w| matches!(*w, "update" | "tell" | "notify" | "alert" | "inform" | "know" | "report"));
+    let track_only = multi && (watch.is_some() || wants_update) && find_power(&tokens, true).is_none();
+    if track_only {
+        if negated_before(&tokens, watch.map_or(0, |(s, _)| s)) {
+            return None;
+        }
+        return Some(WatchPlan {
+            agent: None,
+            kind: PowerKind::Shutdown,
+            require_clean: false,
+            deadline_mins: deadline(&tokens),
+            agents: if all { Vec::new() } else { named },
+            all,
+            track_only: true,
+        });
     }
 
     // Weak power phrases ("shut down", "turn it off") only with an explicit watch verb, an agent or a session word.
@@ -364,16 +462,27 @@ fn parse_sentence(text: &str) -> Option<WatchPlan> {
     }
 
     Some(WatchPlan {
-        agent,
+        agent: if named.len() >= 2 || all { None } else { agent },
         kind,
         require_clean: require_clean(&tokens),
         deadline_mins: deadline(&tokens),
+        agents: if named.len() >= 2 { named } else { Vec::new() },
+        all,
+        track_only: false,
     })
 }
 
 /// What NEXUS says back (also the text a later phase asks the user to confirm).
 pub fn read_back(plan: &WatchPlan) -> String {
-    let who = plan.agent.as_deref().map(|a| a.to_string()).unwrap_or_else(|| "this session".to_string());
+    let who = if plan.all || plan.agents.len() >= 2 {
+        subject(plan)
+    } else {
+        plan.agent.as_deref().map(|a| a.to_string()).unwrap_or_else(|| "this session".to_string())
+    };
+    if plan.track_only {
+        let limit = plan.deadline_mins.map(|m| format!(", waiting at most {m} minutes")).unwrap_or_default();
+        return format!("Track {who}, tell you as each one finishes, and sum it all up when the last one is done{limit}");
+    }
     let action = match plan.kind {
         PowerKind::Shutdown => "shut down your laptop",
         PowerKind::Restart => "restart your laptop",
@@ -381,9 +490,10 @@ pub fn read_back(plan: &WatchPlan) -> String {
         PowerKind::Lock => "lock your screen",
         PowerKind::SignOut => "sign you out",
     };
-    let cond = if plan.require_clean { "only if it looks perfect" } else { "even if it does not end cleanly" };
+    let cond = if plan.require_clean { "only if it looks perfect" } else { "however it ends, and I'll tell you in the morning what happened" };
     let limit = plan.deadline_mins.map(|m| format!(", waiting at most {m} minutes")).unwrap_or_default();
-    format!("Watch {who} until it finishes, then {action}, {cond}{limit}")
+    let end = if plan.all || plan.agents.len() >= 2 { "they have all finished" } else { "it finishes" };
+    format!("Watch {who} until {end}, then {action}, {cond}{limit}")
 }
 
 #[cfg(test)]
@@ -424,11 +534,20 @@ mod tests {
             "can u watch this and shut down my laptop if it completes perfectly",
             "watch over this and power off the computer once it has completed",
         ];
+        // no condition asked for = "I'm done for today": it powers off however the session ended
+        const PLAIN: &[&str] = &[
+            "keep watching my coding agent and turn off my computer when it's finished",
+            "babysit this build and power down the pc when it is complete",
+            "track this download until it's done then shut down my laptop",
+            "please monitor cursor and shut down my machine when it stops",
+            "watch over claude code and once it has finished running shut down the laptop",
+            "watch over this and power off the computer once it has completed",
+        ];
         let mut n = 0;
         for p in phrases {
             let plan = shut(p);
             assert_eq!(plan.kind, PowerKind::Shutdown, "{p}");
-            assert!(plan.require_clean, "{p}");
+            assert_eq!(plan.require_clean, !PLAIN.contains(&p), "{p}");
             n += 1;
         }
         assert!(n >= 25);
@@ -479,7 +598,11 @@ mod tests {
         assert_eq!(shut("when open code is done shut down my laptop").agent.as_deref(), Some("opencode"));
         assert_eq!(shut("watch this until it's done and shut down my laptop").agent, None);
 
-        assert!(shut("watch this until it's done and shut down my laptop").require_clean);
+        // a plain "shut down after X" is unconditional; any condition makes it conditional
+        assert!(!shut("watch this until it's done and shut down my laptop").require_clean);
+        assert!(shut("watch this until it's done and shut down my laptop if it's perfect").require_clean);
+        assert!(shut("watch this until it's done and shut down my laptop only if there are no errors").require_clean);
+        assert!(shut("when claude finishes shut down my laptop unless something fails").require_clean);
         assert!(!shut("watch this until it's done and shut down my laptop even if it fails").require_clean);
         assert!(!shut("shut down my laptop when this finishes no matter what").require_clean);
         assert!(!shut("when it's done shut down my laptop either way, watch this session").require_clean);
@@ -547,9 +670,65 @@ mod tests {
     fn read_back_names_every_part() {
         let p = shut("watch claude until it's done and shut down my laptop within two hours");
         let s = read_back(&p);
-        assert!(s.contains("claude") && s.contains("shut down your laptop") && s.contains("only if it looks perfect") && s.contains("120 minutes"), "{s}");
+        assert!(s.contains("claude") && s.contains("shut down your laptop") && s.contains("however it ends") && s.contains("tell you in the morning") && s.contains("120 minutes"), "{s}");
+        let c = shut("watch claude until it's done and shut down my laptop if it's perfect");
+        assert!(read_back(&c).contains("only if it looks perfect"), "{}", read_back(&c));
         let q = shut("watch this until it's done and shut down my laptop even if it fails");
         let s = read_back(&q);
-        assert!(s.contains("this session") && s.contains("even if it does not end cleanly"), "{s}");
+        assert!(s.contains("this session") && s.contains("however it ends"), "{s}");
+    }
+
+    fn track(p: &str) -> WatchPlan {
+        parse(p).unwrap_or_else(|| panic!("not claimed: {p:?}"))
+    }
+
+    #[test]
+    fn track_all_the_agents_is_a_plan_with_no_power_action() {
+        for p in [
+            "track all the agents running and update me when it is complete",
+            "track all the agents running and update me when they are complete",
+            "nexus track all my agents and tell me when they're done",
+            "keep an eye on all the ai agents and let me know when they finish",
+            "watch every agent and update me when they're all done",
+            "monitor all my coding agents and notify me when they are complete",
+            "track my agents and update me when they finish",
+        ] {
+            let plan = track(p);
+            assert!(plan.track_only && plan.all && plan.agents.is_empty() && plan.agent.is_none(), "{p}: {plan:?}");
+        }
+        // two named agents: a list, not "all"
+        let plan = track("track claude and codex and tell me when they're done");
+        assert!(plan.track_only && !plan.all);
+        assert_eq!(plan.agents, vec!["claude".to_string(), "codex".to_string()]);
+        let plan = track("watch antigravity, cursor and claude and update me when they finish");
+        assert_eq!(plan.agents, vec!["antigravity".to_string(), "cursor".to_string(), "claude".to_string()]);
+        assert_eq!(subject(&plan), "Antigravity, Cursor and Claude Code");
+        assert_eq!(subject(&track("track all the agents and update me when they are done")), "all your agents");
+        assert!(read_back(&track("track all the agents and update me when they are done")).contains("sum it all up"));
+        // a time limit still works
+        assert_eq!(track("track all my agents and update me when they're done within two hours").deadline_mins, Some(120));
+        // none of these are tracker commands
+        for p in [
+            "track my package", "watch all the videos", "what are all the agents", "track the stock price and update me", "don't track my agents",
+            "tell me about all the agents", "watch this", "watch claude and tell me when it is done",
+        ] {
+            assert!(parse(p).map_or(true, |plan| !plan.track_only), "{p:?} must not be a tracker command: {:?}", parse(p));
+        }
+    }
+
+    #[test]
+    fn several_agents_with_a_power_phrase_is_one_plan_over_all_of_them() {
+        let plan = track("watch claude and codex and shut down my laptop when they're both done");
+        assert!(!plan.track_only && !plan.require_clean);
+        assert_eq!(plan.agents, vec!["claude".to_string(), "codex".to_string()]);
+        let plan = track("track all my agents and shut down my laptop when they're all done");
+        assert!(!plan.track_only && plan.all && plan.kind == PowerKind::Shutdown);
+        let plan = track("track all my agents and shut down my laptop when they're all done if everything is perfect");
+        assert!(plan.require_clean && plan.all);
+        assert!(read_back(&plan).contains("all your agents") && read_back(&plan).contains("they have all finished"), "{}", read_back(&plan));
+        // one agent stays one agent
+        let plan = track("watch claude and shut down my laptop when it is done");
+        assert_eq!(plan.agent.as_deref(), Some("claude"));
+        assert!(plan.agents.is_empty() && !plan.all);
     }
 }

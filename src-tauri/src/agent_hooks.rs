@@ -21,7 +21,10 @@ use std::sync::Mutex;
 /// Appears in the script's file name, so it is in every command line NEXUS writes into a config.
 pub const MARKER: &str = "nexus-agent-event";
 const TOKEN_SERVICE: &str = "agent_event";
-const MAX_EVENTS: usize = 64;
+/// Events kept in all (a safety net); each agent keeps its own latest `MAX_EVENTS_PER_AGENT`, so a chatty agent can
+/// never push another agent's Stop out of the list.
+const MAX_EVENTS: usize = 256;
+const MAX_EVENTS_PER_AGENT: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {
@@ -919,6 +922,42 @@ fn home() -> Option<PathBuf> {
     dirs_next::home_dir()
 }
 
+/// Agents that look installed on this machine: the folder their tool keeps its settings in exists (Aider: its
+/// config file, Gemini CLI: its settings file). Pure over `home`, so it can be tested.
+pub fn agents_present_in(home: &Path) -> Vec<Agent> {
+    let dir = |rel: &str| home.join(rel).is_dir();
+    let file = |rel: &str| home.join(rel).is_file();
+    ALL_AGENTS
+        .iter()
+        .copied()
+        .filter(|a| match a {
+            Agent::Claude => dir(".claude"),
+            Agent::Codex => dir(".codex"),
+            Agent::Antigravity => dir(".gemini/config") || dir(".gemini/antigravity") || dir(".gemini/antigravity-cli"),
+            Agent::Gemini => file(".gemini/settings.json"),
+            Agent::Cursor => dir(".cursor"),
+            Agent::Aider => file(".aider.conf.yml") || dir(".aider"),
+            Agent::OpenCode => dir(".config/opencode"),
+            Agent::Kilo => dir(".config/kilo") || dir(".kilocode"),
+            Agent::Windsurf => dir(".codeium/windsurf"),
+            Agent::Copilot => dir(".copilot"),
+            Agent::Devin => dir(".config/devin") || dir("AppData/Roaming/devin"),
+            Agent::Trae => dir(".trae") || dir("AppData/Roaming/Trae"),
+        })
+        .collect()
+}
+
+/// `agents_present_in` for the real home folder.
+pub fn agents_present() -> Vec<Agent> {
+    home().map(|h| agents_present_in(&h)).unwrap_or_default()
+}
+
+/// The agents "hook up all agents" would touch: present ones that have a hook of their own to install (not Devin,
+/// which uses Claude's, and not Trae, which has none).
+pub fn hookable_present() -> Vec<Agent> {
+    agents_present().into_iter().filter(|a| !a.observe_only() && *a != Agent::Devin).collect()
+}
+
 /// The file NEXUS edits (or, for OpenCode, owns) for this agent.
 pub fn config_path(agent: Agent) -> Option<PathBuf> {
     match agent {
@@ -1363,6 +1402,11 @@ pub fn record_event_at(agent: Agent, kind: EventKind, at_ms: u64, tail: Option<S
             }
         }
         q.push_back(AgentEvent { agent: agent.name().to_string(), kind, at_ms, tail, info });
+        while q.iter().filter(|e| e.agent == agent.name()).count() > MAX_EVENTS_PER_AGENT {
+            if let Some(i) = q.iter().position(|e| e.agent == agent.name()) {
+                q.remove(i);
+            }
+        }
         while q.len() > MAX_EVENTS {
             q.pop_front();
         }
@@ -1389,6 +1433,12 @@ pub fn stop_is_latest(agent: Agent, since_ms: u64) -> bool {
         Some(stop) => q[stop].at_ms >= since_ms && last_index(&q, agent, EventKind::Start).map_or(true, |start| stop > start),
         None => false,
     })
+}
+
+/// Has the agent reported anything (a prompt, a stop, a permission wait) at or after `since_ms`? That is how a plan
+/// about "all my agents" learns which of them are doing something.
+pub fn any_event_since(agent: Agent, since_ms: u64) -> bool {
+    EVENTS.lock().map_or(false, |q| q.iter().any(|e| e.agent == agent.name() && e.at_ms >= since_ms))
 }
 
 /// How long the agent's Stop has been its latest event of any kind (no start, notice or message since), when it
@@ -1629,6 +1679,44 @@ fn parse_command_sentence(text: &str) -> Option<(HookAction, Agent)> {
     }
     if has(&["connect", "hook", "install", "add", "enable", "setup", "set-up", "let"]) || p.contains(" set up ") || p.contains(" hook up ") {
         return Some((HookAction::Connect, agent));
+    }
+    None
+}
+
+/// "hook up all agents", "connect every agent", "which agents are hooked up", "remove all the agent hooks". Strict like
+/// `parse_command`: every word from the hook vocabulary plus the quantifier words, and it must say all/every/agents.
+pub fn parse_all_command(text: &str) -> Option<HookAction> {
+    parse_all_sentence(text).or_else(|| last_sentence(text).and_then(parse_all_sentence))
+}
+
+fn parse_all_sentence(text: &str) -> Option<HookAction> {
+    const EXTRA: &[&str] = &["all", "every", "each", "agents", "agent", "ai", "coding", "assistants", "which", "are", "tools", "everything"];
+    let t = format!(" {} ", norm(text)).replace(" hookup ", " hook up ").trim().to_string();
+    let tokens: Vec<&str> = t.split(' ').collect();
+    if tokens.is_empty() || !tokens.iter().all(|w| HOOK_VOCAB.contains(w) || EXTRA.contains(w)) {
+        return None;
+    }
+    let p = format!(" {t} ");
+    let has = |ws: &[&str]| ws.iter().any(|w| p.contains(&format!(" {w} ")));
+    let quantified = has(&["all", "every", "each", "everything"]) && has(&["agents", "agent", "assistants", "tools"]);
+    let which = has(&["which"]) && has(&["agents", "agent"]);
+    if !(quantified || which) {
+        return None;
+    }
+    let context = has(&["hook", "hooks", "unhook", "hooked", "connect", "connected", "disconnect", "remove", "uninstall", "delete", "disable", "install", "installed", "notification", "notifications", "nexus"])
+        || p.contains(" set up ")
+        || p.contains(" hook up ");
+    if !context {
+        return None;
+    }
+    if has(&["disconnect", "remove", "uninstall", "delete", "disable", "unhook"]) || p.contains(" take out ") {
+        return Some(HookAction::Disconnect);
+    }
+    if which || has(&["status", "connected", "installed", "hooked"]) && has(&["are", "is", "which", "status"]) {
+        return Some(HookAction::Status);
+    }
+    if has(&["connect", "hook", "install", "add", "enable", "setup", "set-up"]) || p.contains(" set up ") || p.contains(" hook up ") {
+        return Some(HookAction::Connect);
     }
     None
 }
@@ -1923,11 +2011,15 @@ mod tests {
         assert!(needs_user(a, base));
         record_event_at(a, EventKind::Start, base + 7_000, None, StopInfo::default());
         assert!(!needs_user(a, base), "a new prompt answers it too");
-        // the list stays capped
-        for i in 0..(MAX_EVENTS as u64 + 10) {
+        // the list stays capped, per agent: a chatty agent never pushes another agent's stop out
+        let a_stop = last_event_ms(a, EventKind::Stop);
+        assert!(a_stop.is_some());
+        for i in 0..(MAX_EVENTS_PER_AGENT as u64 * 4) {
             record_event_at(b, EventKind::Stop, base + 10_000 + i, None, StopInfo::default());
         }
+        assert!(EVENTS.lock().unwrap().iter().filter(|e| e.agent == b.name()).count() <= MAX_EVENTS_PER_AGENT);
         assert!(EVENTS.lock().unwrap().len() <= MAX_EVENTS);
+        assert_eq!(last_event_ms(a, EventKind::Stop), a_stop, "the other agent's stop survived"); 
         assert_eq!(ago(120_000, 0), "2 minutes ago");
         assert_eq!(ago(10_000, 0), "moments ago");
         assert_eq!(ago(3_600_000, 0), "1 hour ago");
@@ -2148,6 +2240,42 @@ mod tests {
         assert_eq!(install(Agent::Trae, Path::new("x.json"), &t), Err(HookError::NoHookMechanism));
         assert!(Agent::Trae.observe_only() && ALL_AGENTS.iter().filter(|a| a.observe_only()).count() == 1);
         assert!(HookError::NoHookMechanism.spoken(Agent::Trae).contains("never call its work perfect"));
+    }
+
+    #[test]
+    fn hook_up_all_agents_is_understood_and_ordinary_sentences_are_not_claimed() {
+        for t in ["hook up all agents", "hook up all my agents", "hookup every agent", "connect all the coding agents", "hook up all the ai agents to nexus"] {
+            assert_eq!(parse_all_command(t), Some(HookAction::Connect), "{t}");
+        }
+        for t in ["remove all the agent hooks", "unhook all agents", "disconnect every agent"] {
+            assert_eq!(parse_all_command(t), Some(HookAction::Disconnect), "{t}");
+        }
+        for t in ["which agents are hooked up", "are all agents hooked up", "which agents are connected"] {
+            assert_eq!(parse_all_command(t), Some(HookAction::Status), "{t}");
+        }
+        for t in ["hook up claude", "open all the windows", "all agents are coming", "track all the agents running", "remove all the files", "which agents should I use for coding"] {
+            assert_eq!(parse_all_command(t), None, "{t}");
+        }
+    }
+
+    #[test]
+    fn the_agents_on_this_machine_are_the_ones_whose_settings_folder_exists() {
+        let h = tmp("present");
+        assert!(agents_present_in(&h).is_empty());
+        for d in [".claude", ".codex", ".config/kilo", ".codeium/windsurf", ".copilot", ".config/devin", ".trae"] {
+            std::fs::create_dir_all(h.join(d)).unwrap();
+        }
+        std::fs::create_dir_all(h.join(".gemini").join("config")).unwrap();
+        let present = agents_present_in(&h);
+        for a in [Agent::Claude, Agent::Codex, Agent::Kilo, Agent::Windsurf, Agent::Copilot, Agent::Devin, Agent::Trae, Agent::Antigravity] {
+            assert!(present.contains(&a), "{a:?}");
+        }
+        for a in [Agent::Gemini, Agent::Cursor, Agent::Aider, Agent::OpenCode] {
+            assert!(!present.contains(&a), "{a:?}");
+        }
+        std::fs::write(h.join(".gemini").join("settings.json"), "{}").unwrap();
+        assert!(agents_present_in(&h).contains(&Agent::Gemini));
+        let _ = std::fs::remove_dir_all(&h);
     }
 
     #[test]

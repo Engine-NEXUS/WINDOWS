@@ -16,6 +16,7 @@
 //!      setting turned off, or the verdict no longer being Go. Not knowing whether the user is back also stops it;
 //!   5. the normal shutdown sequence (goodbye, graceful close of apps, a last 3 s cancel window) does the rest.
 
+use crate::agent_tracker::{final_summary, progress_line, Outcome};
 use crate::power_cmd::PowerKind;
 use crate::power_plan::WatchPowerMode;
 use crate::session_verdict::{spoken_hold, spoken_reasons, Verdict};
@@ -39,6 +40,8 @@ pub const STALL_NOTICE_MS: u64 = 150_000;
 pub struct PlanView {
     pub kind: PowerKind,
     pub notify_only: bool,
+    /// "track all my agents": tell me as each finishes and when all are done; no power action at all
+    pub track_only: bool,
     pub deadline_ms: Option<u64>,
     /// "Claude Code" / "Codex" / "this session"
     pub who: String,
@@ -62,6 +65,16 @@ pub struct Obs {
     pub stop_age_ms: Option<u64>,
     /// The model overrode a failure word in the report; said together with the good news so the user knows.
     pub note: Option<String>,
+    /// The plan said "shut down after X" with no condition: it powers off however the agents ended.
+    pub unconditional: bool,
+    /// Agents that have just settled as finished (each told once).
+    pub finished_now: Vec<Outcome>,
+    /// Labels of the tracked agents still working.
+    pub working: Vec<String>,
+    /// Every tracked agent that has ended, with how.
+    pub outcomes: Vec<Outcome>,
+    /// The plan follows nobody yet (all agents quiet, or the named ones never started).
+    pub nothing_running: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -70,8 +83,8 @@ pub enum Action {
     Say(String),
     /// Tell the user and keep a strict "yes" ready for "shut down anyway?".
     SayAndAsk(String, PowerKind),
-    /// Start the cancellable countdown (and announce it).
-    BeginCountdown { kind: PowerKind, who: String, note: Option<String> },
+    /// Start the cancellable countdown (and announce it). `lead` = what is said before "I'm shutting down in 30 seconds".
+    BeginCountdown { kind: PowerKind, lead: String },
     /// The countdown ran out with nothing stopping it: power off now.
     Fire(PowerKind),
     /// The watch is over. Nothing more happens for this plan.
@@ -91,6 +104,8 @@ pub struct Engine {
     phase: Phase,
     /// The "it stopped but I can't tell it is finished" notice was already given for this plan.
     stall_told: bool,
+    /// "I don't see any agent working" was already said.
+    nothing_told: bool,
 }
 
 fn gerund(kind: PowerKind) -> &'static str {
@@ -116,7 +131,7 @@ fn human_duration(ms: u64) -> String {
 
 impl Engine {
     pub fn new(now_ms: u64) -> Engine {
-        Engine { started_ms: now_ms, phase: Phase::Watching { concluding: None }, stall_told: false }
+        Engine { started_ms: now_ms, phase: Phase::Watching { concluding: None }, stall_told: false, nothing_told: false }
     }
 
     pub fn finished(&self) -> bool {
@@ -148,12 +163,13 @@ impl Engine {
 
     fn step_watching(&mut self, o: &Obs, concluding: Option<(bool, u64)>) -> Vec<Action> {
         let Some(plan) = &o.plan else { return self.end("plan gone") };
-        if o.mode == WatchPowerMode::Off && !plan.notify_only {
+        if o.mode == WatchPowerMode::Off && !plan.notify_only && !plan.track_only {
             return self.end("unattended shutdown is off");
         }
         let limit = plan.deadline_ms.unwrap_or(DEFAULT_MAX_WAIT_MS).min(MAX_WAIT_CEILING_MS);
         if o.now_ms.saturating_sub(self.started_ms) > limit {
-            let said = format!("I stopped waiting for {} after {}, sir, so I left your laptop on.", plan.who, human_duration(limit));
+            let tail = if plan.track_only { "" } else { ", so I left your laptop on" };
+            let said = format!("I stopped waiting for {} after {}, sir{tail}.", plan.who, human_duration(limit));
             let mut out = vec![Action::Say(said)];
             out.extend(self.end("waited long enough"));
             return out;
@@ -161,19 +177,29 @@ impl Engine {
         if !o.ended {
             // still working (or not enough evidence that it stopped): nothing is concluded, however long it takes
             self.phase = Phase::Watching { concluding: None };
+            let mut out = Vec::new();
+            // agents that finished while others work are told one by one
+            if !o.finished_now.is_empty() && !o.working.is_empty() {
+                out.push(Action::Say(progress_line(&o.finished_now, &o.working)));
+            }
+            if o.nothing_running && !self.nothing_told {
+                self.nothing_told = true;
+                out.push(Action::Say("I don't see any of your agents working yet, sir. I'll keep watching until you cancel.".to_string()));
+            }
             // ...but a stop that stays unexplained is never met with silence: say what is missing, once
             if !self.stall_told && o.stop_age_ms.map_or(false, |a| a >= STALL_NOTICE_MS) {
                 self.stall_told = true;
                 let why = spoken_reasons(&o.verdict);
                 let why = if why.is_empty() { "I cannot confirm it".to_string() } else { why };
-                return vec![Action::Say(format!(
+                out.push(Action::Say(format!(
                     "{} stopped a while ago, sir, but I can't tell that it is really finished: {why}. I'm still watching, and I haven't touched your laptop.",
                     plan.who
-                ))];
+                )));
             }
-            return Vec::new();
+            return out;
         }
-        let is_go = o.verdict == Verdict::Go;
+        // "shut down after X" with no condition: the result does not matter, only that everything ended
+        let is_go = o.verdict == Verdict::Go || (o.unconditional && !plan.track_only);
         let since = match concluding {
             Some((was_go, since)) if was_go == is_go => since,
             _ => o.now_ms,
@@ -183,22 +209,45 @@ impl Engine {
             return Vec::new();
         }
 
+        // "track all my agents": the last one is done; sum it all up and finish
+        if plan.track_only {
+            let mut said = final_summary(&o.outcomes);
+            said.push_str(&note_clause(&o.note));
+            let mut out = vec![Action::Say(said)];
+            out.extend(self.end("tracked"));
+            return out;
+        }
+
         if !is_go {
             // Finished, but not perfect (or not sure). Tell the user; only a real "on" setting offers to go ahead.
             let ask = o.mode == WatchPowerMode::On && !plan.notify_only;
-            let said = spoken_hold(&plan.who, &o.verdict, ask);
+            let said = if o.outcomes.len() > 1 {
+                let mut s = final_summary(&o.outcomes);
+                s.push_str(" I left your laptop on, sir.");
+                if ask {
+                    s.push_str(" Shall I shut down anyway?");
+                }
+                s
+            } else {
+                spoken_hold(&plan.who, &o.verdict, ask)
+            };
             let mut out = vec![if ask { Action::SayAndAsk(said, plan.kind) } else { Action::Say(said) }];
             out.extend(self.end("not perfect"));
             return out;
         }
 
-        // Finished and perfect.
+        // Finished (and perfect, or the user said however it ends)
+        let simple = o.outcomes.len() <= 1 && o.verdict == Verdict::Go;
         if plan.notify_only {
-            let said = format!(
-                "{} finished and it looks perfect, sir.{} You asked me only to tell you, so I haven't touched your laptop.",
-                plan.who,
-                note_clause(&o.note)
-            );
+            let said = if simple {
+                format!(
+                    "{} finished and it looks perfect, sir.{} You asked me only to tell you, so I haven't touched your laptop.",
+                    plan.who,
+                    note_clause(&o.note)
+                )
+            } else {
+                format!("{}{} You asked me only to tell you, so I haven't touched your laptop.", final_summary(&o.outcomes), note_clause(&o.note))
+            };
             let mut out = vec![Action::Say(said)];
             out.extend(self.end("notify only"));
             return out;
@@ -206,19 +255,35 @@ impl Engine {
         match o.mode {
             WatchPowerMode::Off => self.end("unattended shutdown is off"),
             WatchPowerMode::Dry => {
-                let said = format!(
-                    "Practice run, sir: {} finished and it looks perfect.{} I would have started {} after a 30 second countdown. Nothing was changed.",
-                    plan.who,
-                    note_clause(&o.note),
-                    gerund(plan.kind)
-                );
+                let said = if simple {
+                    format!(
+                        "Practice run, sir: {} finished and it looks perfect.{} I would have started {} after a 30 second countdown. Nothing was changed.",
+                        plan.who,
+                        note_clause(&o.note),
+                        gerund(plan.kind)
+                    )
+                } else {
+                    format!(
+                        "Practice run, sir: {}{} I would have started {} after a 30 second countdown, as you asked. Nothing was changed.",
+                        final_summary(&o.outcomes),
+                        note_clause(&o.note),
+                        gerund(plan.kind)
+                    )
+                };
                 let mut out = vec![Action::Say(said)];
                 out.extend(self.end("dry run"));
                 out
             }
             WatchPowerMode::On => {
                 self.phase = Phase::Countdown { start_ms: o.now_ms };
-                vec![Action::BeginCountdown { kind: plan.kind, who: plan.who.clone(), note: o.note.clone() }]
+                let lead = if simple {
+                    format!("{} finished and it looks perfect, sir.{}", plan.who, note_clause(&o.note))
+                } else if o.verdict == Verdict::Go {
+                    format!("{}{}", final_summary(&o.outcomes), note_clause(&o.note))
+                } else {
+                    format!("{} You asked me to shut down either way.", final_summary(&o.outcomes))
+                };
+                vec![Action::BeginCountdown { kind: plan.kind, lead }]
             }
         }
     }
@@ -234,7 +299,8 @@ impl Engine {
         if o.meeting {
             return self.abort("a meeting started", "cancelled: meeting");
         }
-        if !(o.ended && o.verdict == Verdict::Go) {
+        // the user's "however it ends" survives a change of verdict; new work on any agent does not
+        if !o.ended || !(o.unconditional || o.verdict == Verdict::Go) {
             return self.abort("something changed on the session", "cancelled: session changed");
         }
         let elapsed = o.now_ms.saturating_sub(start_ms);
@@ -257,26 +323,33 @@ fn note_clause(note: &Option<String>) -> String {
     note.as_ref().map(|n| format!(" {n}")).unwrap_or_default()
 }
 
-/// The announcement spoken the moment the countdown begins.
+/// The announcement spoken the moment the countdown begins; `lead` says how the agents ended.
+pub fn announcement_with(kind: PowerKind, lead: &str) -> String {
+    format!("{lead} I'm {} in 30 seconds. Say cancel, or touch the keyboard, to stop me.", gerund(kind))
+}
+
+/// The announcement for a single agent that ended perfectly.
+#[cfg(test)]
 pub fn announcement(kind: PowerKind, who: &str, note: Option<&str>) -> String {
-    format!(
-        "{who} finished and it looks perfect, sir.{} I'm {} in 30 seconds. Say cancel, or touch the keyboard, to stop me.",
-        note.map(|n| format!(" {n}")).unwrap_or_default(),
-        gerund(kind)
-    )
+    announcement_with(kind, &format!("{who} finished and it looks perfect, sir.{}", note.map(|n| format!(" {n}")).unwrap_or_default()))
 }
 
 // ─── The loop around the engine ──────────────────────────────────────
 
 use crate::agent_hooks::{self, Agent, EventKind};
+use crate::agent_tracker::{aggregate, Announcer, JoinMode, Joiner, TrackSnapshot, NOTHING_RUNNING_MS, PENDING_DROP_MS};
 use crate::power_plan;
-use crate::session_observer::{find_roots, tree_snaps, Inputs, Observer, ProcSampler};
-use crate::session_verdict::{cleared_failure_note, has_ended, judge, model_system_prompt, parse_model_json, wants_model_check, ModelVerdict};
+use crate::session_observer::{find_roots, tree_snaps, Inputs, Observer, ProcSampler, ProcSnap, CPU_ACTIVE_PCT};
+use crate::session_verdict::{cleared_failure_note, has_ended, judge, model_system_prompt, parse_model_json, wants_model_check, ModelVerdict, Reason};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::BTreeMap;
 use std::time::Duration;
 use tauri::{AppHandle, Manager, Runtime};
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
+/// How the followed agents ended as of the latest look: saved when the laptop is about to be powered off, so the
+/// next morning's briefing can say what happened.
+static LAST_OUTCOMES: std::sync::Mutex<Vec<Outcome>> = std::sync::Mutex::new(Vec::new());
 
 /// The `watchPower` setting, read fresh every time so "turn off unattended shutdown" works at once.
 /// Anything missing or unreadable is `off`.
@@ -315,13 +388,21 @@ fn meeting_active<R: Runtime>(app: &AppHandle<R>) -> bool {
         .unwrap_or(false)
 }
 
-/// Is there anything for the loop to do right now? A plan for an agent whose Stop hook is installed (without
-/// it the end of a session cannot be told), and either "just tell me" or a setting that is not `off`.
+fn is_hooked(agent: Agent) -> bool {
+    agent_hooks::config_path(agent).map_or(false, |c| agent_hooks::is_installed(agent, &c))
+}
+
+/// Can this agent be followed at all: its hook is installed, or it has none and can only be observed.
+fn followable(agent: Agent) -> bool {
+    agent.observe_only() || is_hooked(agent)
+}
+
+/// Is there anything for the loop to do right now? A plan about at least one agent that can be followed (a hook, or
+/// observation for the ones with none), and either "just tell me" / "track" or a setting that is not `off`.
 fn wants_running<R: Runtime>(app: &AppHandle<R>) -> bool {
     let Some(p) = power_plan::current() else { return false };
-    let Some(agent) = p.plan.agent.as_deref().and_then(Agent::from_name) else { return false };
-    let hooked = agent_hooks::config_path(agent).map_or(false, |c| agent_hooks::is_installed(agent, &c));
-    hooked && (p.notify_only || read_mode(app) != WatchPowerMode::Off)
+    let targets = p.plan.all || p.plan.named_agents().iter().filter_map(|n| Agent::from_name(n)).any(followable);
+    targets && (p.notify_only || p.plan.track_only || read_mode(app) != WatchPowerMode::Off)
 }
 
 /// Start watching the held plan (once). Safe to call whenever the plan or the setting changes.
@@ -358,15 +439,109 @@ async fn ask_model<R: Runtime>(app: &AppHandle<R>, tail: &str) -> ModelVerdict {
     }
 }
 
+/// What the loop keeps for one followed agent.
+struct Track {
+    agent: Agent,
+    observer: Observer,
+    model_cache: Option<(u64, ModelVerdict)>,
+    last_logged: Option<String>,
+}
+
+/// One agent, one look: its evidence, verdict and the details the log line prints.
+struct Look {
+    snapshot: TrackSnapshot,
+    log: String,
+    state_key: String,
+}
+
+async fn look_at<R: Runtime>(app: &AppHandle<R>, t: &mut Track, snaps: &[ProcSnap], now_ms: u64, wall_ms: u64, created_ms: u64, require_clean: bool) -> Look {
+    let agent = t.agent;
+    let roots = find_roots(Some(agent.name()), snaps, None, std::process::id());
+    let tree = tree_snaps(&roots, snaps);
+    let tree_cpu: f32 = tree.iter().map(|p| p.cpu_pct).sum();
+    let hook_tail = agent_hooks::last_stop_tail(agent);
+    let stop_info = agent_hooks::last_stop_info(agent);
+    let mut ev = t.observer.step(Inputs {
+        now_ms,
+        tree: &tree,
+        window_text: None,
+        hook_stopped: agent_hooks::stop_is_latest(agent, created_ms),
+        hook_tail: hook_tail.as_deref(),
+        hook_needs_user: agent_hooks::needs_user(agent, created_ms),
+        hook_failed: stop_info.ok == Some(false),
+        hook_not_idle: stop_info.fully_idle == Some(false),
+        hook_quiet_ms: agent_hooks::hook_quiet_ms_at(agent, created_ms, wall_ms),
+        ignore_process_activity: agent.is_ide(),
+    });
+
+    let (ended, verdict, note) = if agent.observe_only() {
+        // no hook: only "went quiet" can be seen, never "finished and perfect"
+        let quiet = ev.signals.contains(&crate::session_verdict::Signal::ProcessIdle) && !ev.still_busy;
+        (quiet, if quiet { Verdict::Unsure(vec![Reason::NoHook]) } else { Verdict::Unsure(Vec::new()) }, None)
+    } else {
+        let mut verdict = judge(&ev, require_clean);
+        if wants_model_check(has_ended(&ev), &verdict) {
+            let key = agent_hooks::last_event_ms(agent, EventKind::Stop).unwrap_or(0);
+            if t.model_cache.as_ref().map(|(k, _)| *k) != Some(key) {
+                let m = ask_model(app, &ev.tail).await;
+                println!("[WATCH-POWER] {} model cross-check: {m:?}", agent.name());
+                t.model_cache = Some((key, m));
+            }
+            if let Some((_, m)) = &t.model_cache {
+                ev.model = m.clone();
+                verdict = judge(&ev, require_clean);
+            }
+        }
+        let note = if verdict == Verdict::Go { cleared_failure_note(&ev, require_clean) } else { None };
+        (has_ended(&ev), verdict, note)
+    };
+
+    let stop_age = agent_hooks::stop_age_ms_at(agent, created_ms, wall_ms);
+    let state_key = format!("{verdict:?}|{:?}|{}|{ended}|{note:?}", ev.signals, ev.still_busy);
+    let log = format!(
+        "agent={} ended={ended} verdict={verdict:?} signals={:?} busy={} roots={} stop_age_s={} tail_len={} stop_ok={:?} fully_idle={:?} tree_cpu={tree_cpu:.1} cleared_note={note:?}",
+        agent.name(),
+        ev.signals,
+        ev.still_busy,
+        roots.len(),
+        stop_age.map_or("-".to_string(), |a| (a / 1000).to_string()),
+        ev.tail.len(),
+        stop_info.ok,
+        stop_info.fully_idle,
+    );
+    Look {
+        snapshot: TrackSnapshot { name: agent.name().to_string(), label: agent.label().to_string(), joined: true, ended, verdict, note },
+        log,
+        state_key,
+    }
+}
+
+/// Does this agent show signs of doing something? A report from its hook since the plan began, or (for agents that are
+/// not IDEs, whose background processes never rest) a busy process tree.
+fn shows_activity(agent: Agent, snaps: &[ProcSnap], created_ms: u64) -> bool {
+    if agent_hooks::any_event_since(agent, created_ms) {
+        return true;
+    }
+    if agent.is_ide() && !agent.observe_only() {
+        return false;
+    }
+    let roots = find_roots(Some(agent.name()), snaps, None, std::process::id());
+    let cpu: f32 = tree_snaps(&roots, snaps).iter().map(|p| p.cpu_pct).sum();
+    cpu > CPU_ACTIVE_PCT
+}
+
 async fn run_loop<R: Runtime>(app: AppHandle<R>) {
     let t0 = std::time::Instant::now();
     let mut sampler = Some(ProcSampler::new());
-    let mut observer = Observer::default();
     let mut engine: Option<(u64, Engine)> = None;
-    let mut model_cache: Option<(u64, ModelVerdict)> = None;
+    let mut tracks: BTreeMap<&'static str, Track> = BTreeMap::new();
+    let mut joiner = Joiner::new(JoinMode::All, 0);
+    let mut announcer = Announcer::default();
+    let mut awake: Option<crate::keep_awake::KeepAwakeLease> = None;
+    let mut all_candidates: Vec<Agent> = Vec::new();
     let mut countdown_gen: Option<u64> = None;
     let mut ticks: u64 = 0;
-    let mut last_logged: Option<String> = None;
+    let mut last_agg_logged: Option<String> = None;
     println!("[WATCH-POWER] watching");
 
     'watch: loop {
@@ -385,14 +560,15 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
             }
             break 'watch;
         };
-        if mode == WatchPowerMode::Off && !stored.notify_only && !counting {
+        if mode == WatchPowerMode::Off && !stored.notify_only && !stored.plan.track_only && !counting {
             println!("[WATCH-POWER] unattended shutdown is off: nothing to do");
             break 'watch;
         }
-        let Some(agent) = stored.plan.agent.as_deref().and_then(Agent::from_name) else {
+        let named: Vec<Agent> = stored.plan.named_agents().iter().filter_map(|n| Agent::from_name(n)).collect();
+        if named.is_empty() && !stored.plan.all {
             println!("[WATCH-POWER] no hookable agent for this plan");
             break 'watch;
-        };
+        }
 
         // a new plan replaces the old one: start over
         if engine.as_ref().map(|(g, _)| *g) != Some(stored.generation) {
@@ -400,8 +576,19 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
                 crate::power_cmd::finish(g);
             }
             engine = Some((stored.generation, Engine::new(now_ms)));
-            observer = Observer::default();
-            model_cache = None;
+            tracks.clear();
+            announcer = Announcer::default();
+            awake = None;
+            last_agg_logged = None;
+            let join_mode = if stored.plan.all {
+                JoinMode::All
+            } else if named.len() >= 2 {
+                JoinMode::ExplicitMulti
+            } else {
+                JoinMode::Single
+            };
+            joiner = Joiner::new(join_mode, now_ms);
+            all_candidates.clear();
         }
 
         // ── look ──
@@ -426,78 +613,100 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
                 Vec::new()
             }
         };
-        let roots = find_roots(Some(agent.name()), &snaps, None, std::process::id());
-        let tree = tree_snaps(&roots, &snaps);
-        let hook_tail = agent_hooks::last_stop_tail(agent);
-        let stop_info = agent_hooks::last_stop_info(agent);
         let wall_ms = agent_hooks::now_ms();
-        let mut ev = observer.step(Inputs {
-            now_ms,
-            tree: &tree,
-            window_text: None,
-            hook_stopped: agent_hooks::stop_is_latest(agent, stored.created_ms),
-            hook_tail: hook_tail.as_deref(),
-            hook_needs_user: agent_hooks::needs_user(agent, stored.created_ms),
-            hook_failed: stop_info.ok == Some(false),
-            hook_not_idle: stop_info.fully_idle == Some(false),
-            hook_quiet_ms: agent_hooks::hook_quiet_ms_at(agent, stored.created_ms, wall_ms),
-            ignore_process_activity: agent.is_ide(),
-        });
 
-        // ── decide ──
-        let require_clean = stored.plan.require_clean;
-        let mut verdict = judge(&ev, require_clean);
-        if wants_model_check(has_ended(&ev), &verdict) {
-            let key = agent_hooks::last_event_ms(agent, EventKind::Stop).unwrap_or(0);
-            if model_cache.as_ref().map(|(k, _)| *k) != Some(key) {
-                let m = ask_model(&app, &ev.tail).await;
-                println!("[WATCH-POWER] model cross-check: {m:?}");
-                model_cache = Some((key, m));
-            }
-            if let Some((_, m)) = &model_cache {
-                ev.model = m.clone();
-                verdict = judge(&ev, require_clean);
+        // who is part of this plan: the named ones, or (for "all") every agent on the machine that can be followed
+        if stored.plan.all && (all_candidates.is_empty() || ticks % 10 == 1) {
+            all_candidates = agent_hooks::agents_present().into_iter().filter(|a| followable(*a)).collect();
+        }
+        let candidates: Vec<Agent> = if stored.plan.all { all_candidates.clone() } else { named.clone() };
+        let cands: Vec<(String, bool)> =
+            candidates.iter().map(|a| (a.name().to_string(), shows_activity(*a, &snaps, stored.created_ms))).collect();
+        let update = joiner.step(now_ms, &cands);
+        for name in &update.joined {
+            if let Some(agent) = Agent::from_name(name) {
+                println!("[WATCH-POWER] following {}", agent.label());
+                tracks.insert(agent.name(), Track { agent, observer: Observer::default(), model_cache: None, last_logged: None });
             }
         }
-        let note = if verdict == Verdict::Go { cleared_failure_note(&ev, require_clean) } else { None };
+        if !update.dropped.is_empty() {
+            let labels: Vec<String> = update.dropped.iter().filter_map(|n| Agent::from_name(n)).map(|a| a.label().to_string()).collect();
+            let said = format!("{} doesn't seem to be running, sir, so I'm not waiting for {}.", labels.join(" and "), if labels.len() == 1 { "it" } else { "them" });
+            carry_out(&app, vec![Action::Say(said)], &mut countdown_gen).await;
+        }
+
+        let require_clean = stored.plan.require_clean;
+        let mut snapshots: Vec<TrackSnapshot> = Vec::new();
+        let names: Vec<&'static str> = tracks.keys().copied().collect();
+        for name in names {
+            let Some(t) = tracks.get_mut(name) else { continue };
+            let look = look_at(&app, t, &snaps, now_ms, wall_ms, stored.created_ms, require_clean).await;
+            if ticks % 10 == 1 || t.last_logged.as_deref() != Some(look.state_key.as_str()) {
+                println!("[WATCH-POWER] tick {ticks}: mode={} {}", mode.as_str(), look.log);
+                t.last_logged = Some(look.state_key.clone());
+            }
+            snapshots.push(look.snapshot);
+        }
+
+        // ── decide ──
+        let agg = aggregate(&snapshots);
+        if let Ok(mut g) = LAST_OUTCOMES.lock() {
+            *g = agg.outcomes.clone();
+        }
+        let finished_now = announcer.step(now_ms, &snapshots);
+        // the screen stays awake exactly while some followed agent is still working
+        if agg.working.is_empty() {
+            awake = None;
+        } else {
+            if awake.is_none() {
+                awake = crate::keep_awake::acquire_lease();
+            }
+            crate::keep_awake::heartbeat();
+        }
+        let nothing_running = joiner.idle()
+            && match (stored.plan.all, named.len()) {
+                (true, _) => joiner.age_ms(now_ms) >= NOTHING_RUNNING_MS,
+                (false, n) if n >= 2 => joiner.age_ms(now_ms) >= PENDING_DROP_MS,
+                _ => false,
+            };
+        let stop_age_ms = if tracks.len() == 1 {
+            tracks.values().next().and_then(|t| agent_hooks::stop_age_ms_at(t.agent, stored.created_ms, wall_ms))
+        } else {
+            None
+        };
+        let note = if agg.verdict == Verdict::Go { agg.note.clone() } else { None };
         let view = PlanView {
             kind: stored.plan.kind,
             notify_only: stored.notify_only,
+            track_only: stored.plan.track_only,
             deadline_ms: stored.plan.deadline_mins.map(|m| u64::from(m) * 60_000),
-            who: agent.label().to_string(),
+            who: if tracks.len() == 1 && !stored.plan.all {
+                tracks.values().next().map_or_else(|| crate::watch_power::subject(&stored.plan), |t| t.agent.label().to_string())
+            } else {
+                crate::watch_power::subject(&stored.plan)
+            },
         };
         let obs = Obs {
             now_ms,
             mode,
             plan: Some(view),
-            ended: has_ended(&ev),
-            verdict,
+            ended: agg.ended,
+            verdict: agg.verdict.clone(),
             user_idle_ms: user_idle_ms(),
             voice_cancelled: countdown_gen.map_or(false, |g| !crate::power_cmd::is_current(g)),
             meeting: meeting_active(&app),
-            stop_age_ms: agent_hooks::stop_age_ms_at(agent, stored.created_ms, wall_ms),
+            stop_age_ms,
             note,
+            unconditional: !stored.plan.require_clean,
+            finished_now,
+            working: agg.working.clone(),
+            outcomes: agg.outcomes.clone(),
+            nothing_running,
         };
-        // every tenth tick, and at once whenever what the verdict rests on changes
-        let state_key = format!("{:?}|{:?}|{}|{}|{:?}", obs.verdict, ev.signals, ev.still_busy, obs.ended, obs.note);
-        if ticks % 10 == 1 || last_logged.as_deref() != Some(state_key.as_str()) {
-            let tree_cpu: f32 = tree.iter().map(|p| p.cpu_pct).sum();
-            println!(
-                "[WATCH-POWER] tick {ticks}: mode={} ended={} verdict={:?} signals={:?} busy={} roots={} stop_age_s={} tail_len={} stop_ok={:?} fully_idle={:?} tree_cpu={:.1} cleared_note={:?}",
-                mode.as_str(),
-                obs.ended,
-                obs.verdict,
-                ev.signals,
-                ev.still_busy,
-                roots.len(),
-                obs.stop_age_ms.map_or("-".to_string(), |a| (a / 1000).to_string()),
-                ev.tail.len(),
-                stop_info.ok,
-                stop_info.fully_idle,
-                tree_cpu,
-                obs.note
-            );
-            last_logged = Some(state_key);
+        let agg_key = format!("{}|{}|{:?}|{:?}", agg.tracked, agg.ended, agg.verdict, agg.working);
+        if tracks.len() > 1 && last_agg_logged.as_deref() != Some(agg_key.as_str()) {
+            println!("[WATCH-POWER] all: tracked={} ended={} working={:?} verdict={:?}", agg.tracked, agg.ended, agg.working, agg.verdict);
+            last_agg_logged = Some(agg_key);
         }
         let Some((_, eng)) = engine.as_mut() else { break 'watch };
         let acts = eng.step(&obs);
@@ -510,6 +719,7 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
     if let Some(g) = countdown_gen.take() {
         crate::power_cmd::finish(g);
     }
+    drop(awake);
     println!("[WATCH-POWER] stopped watching");
 }
 
@@ -525,6 +735,11 @@ fn idle_obs(now_ms: u64, mode: WatchPowerMode) -> Obs {
         meeting: false,
         stop_age_ms: None,
         note: None,
+        unconditional: false,
+        finished_now: Vec::new(),
+        working: Vec::new(),
+        outcomes: Vec::new(),
+        nothing_running: false,
     }
 }
 
@@ -548,11 +763,11 @@ async fn carry_out<R: Runtime>(app: &AppHandle<R>, actions: Vec<Action>, countdo
                     crate::google::types::AlertUrgency::High,
                 );
             }
-            Action::BeginCountdown { kind, who, note } => {
+            Action::BeginCountdown { kind, lead } => {
                 // the same cancel generation the spoken "cancel" listens to (see `power_cmd::cancel`)
                 *countdown_gen = Some(crate::power_cmd::begin());
                 println!("[WATCH-POWER] countdown started: {} in 30 s", kind.as_str());
-                crate::orchestrator::speak_unprompted(app, announcement(kind, &who, note.as_deref()));
+                crate::orchestrator::speak_unprompted(app, announcement_with(kind, &lead));
             }
             Action::Fire(kind) => {
                 // last look, right before the call: the setting and the plan must both still say yes
@@ -563,6 +778,11 @@ async fn carry_out<R: Runtime>(app: &AppHandle<R>, actions: Vec<Action>, countdo
                 }
                 if still_on {
                     println!("[WATCH-POWER] countdown finished: starting {}", kind.as_str());
+                    // remember how the agents ended: told on the next boot, even if the laptop is gone by then
+                    let outcomes = LAST_OUTCOMES.lock().map(|g| g.clone()).unwrap_or_default();
+                    if let (Ok(dir), Some(rec)) = (app.path().app_data_dir(), crate::agent_outcomes::record_from(&outcomes, kind.as_str(), chrono::Utc::now().timestamp())) {
+                        crate::agent_outcomes::save(&dir, &rec);
+                    }
                     let line = crate::orchestrator::start_power(app, kind).await;
                     crate::orchestrator::speak_unprompted(app, line);
                 } else {
@@ -590,7 +810,7 @@ mod tests {
     use crate::session_verdict::Reason;
 
     fn plan(kind: PowerKind) -> PlanView {
-        PlanView { kind, notify_only: false, deadline_ms: None, who: "Claude Code".into() }
+        PlanView { kind, notify_only: false, track_only: false, deadline_ms: None, who: "Claude Code".into() }
     }
 
     fn obs(now_ms: u64, mode: WatchPowerMode) -> Obs {
@@ -605,6 +825,11 @@ mod tests {
             meeting: false,
             stop_age_ms: None,
             note: None,
+            unconditional: false,
+            finished_now: Vec::new(),
+            working: Vec::new(),
+            outcomes: vec![Outcome { label: "Claude Code".into(), verdict: Verdict::Go }],
+            nothing_running: false,
         }
     }
 
@@ -1016,6 +1241,11 @@ mod tests {
                 meeting: false,
                 stop_age_ms: if hook_stopped { stopped_at.map(|s| t - s) } else { None },
                 note: None,
+                unconditional: false,
+                finished_now: Vec::new(),
+                working: Vec::new(),
+                outcomes: vec![Outcome { label: "Claude Code".into(), verdict: Verdict::Go }],
+                nothing_running: false,
             };
             for a in engine.step(&obs) {
                 out.push((t, a));
@@ -1079,15 +1309,180 @@ mod tests {
         let mut e = Engine::new(0);
         let acts = run(&mut e, 0, 120_000, |t| Obs { note: note.clone(), ..obs(t, WatchPowerMode::On) });
         let begin = acts.iter().find_map(|(_, a)| match a {
-            Action::BeginCountdown { note, .. } => Some(note.clone()),
+            Action::BeginCountdown { lead, .. } => Some(lead.clone()),
             _ => None,
         });
-        assert_eq!(begin, Some(note.clone()));
+        assert!(begin.map_or(false, |l| l.contains("3 failing") && l.contains("looks perfect")));
         assert!(announcement(PowerKind::Shutdown, "Antigravity", note.as_deref()).contains("3 failing"));
         // no override, no mention
         let mut e = Engine::new(0);
         let acts = run(&mut e, 0, 120_000, |t| obs(t, WatchPowerMode::Dry));
         assert!(acts.iter().all(|(_, a)| !matches!(a, Action::Say(t) if t.contains("finding"))));
+    }
+
+    fn out(label: &str, verdict: Verdict) -> Outcome {
+        Outcome { label: label.into(), verdict }
+    }
+
+    fn bad() -> Verdict {
+        Verdict::Hold(vec![Reason::FailureMarker("3 failing".into(), "Fix 3 failing tests".into())])
+    }
+
+    fn says(acts: &[(u64, Action)]) -> Vec<String> {
+        acts.iter()
+            .filter_map(|(_, a)| match a {
+                Action::Say(t) | Action::SayAndAsk(t, _) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Three agents: Claude is done at 20 s, Codex at 100 s, Cursor at 160 s.
+    fn three_agents(t: u64, mode: WatchPowerMode) -> Obs {
+        let mut o = obs(t, mode);
+        let finished: Vec<(&str, u64, Verdict)> = vec![("Claude Code", 20_000, Verdict::Go), ("Codex", 100_000, bad()), ("Cursor", 160_000, Verdict::Go)];
+        o.outcomes = finished.iter().filter(|(_, at, _)| t >= *at).map(|(l, _, v)| out(l, v.clone())).collect();
+        o.working = finished.iter().filter(|(_, at, _)| t < *at).map(|(l, _, _)| l.to_string()).collect();
+        o.ended = o.working.is_empty();
+        o.verdict = if o.ended { bad() } else { Verdict::Unsure(Vec::new()) };
+        // each agent is told once, 15 s after it stopped
+        o.finished_now = finished.iter().filter(|(_, at, _)| t >= at + 15_000 && t < at + 15_000 + TICK_MS).map(|(l, _, v)| out(l, v.clone())).collect();
+        o
+    }
+
+    #[test]
+    fn tracking_all_agents_tells_each_finish_then_sums_up_and_never_touches_the_power() {
+        for mode in [WatchPowerMode::Off, WatchPowerMode::Dry, WatchPowerMode::On] {
+            let mut e = Engine::new(0);
+            let acts = run(&mut e, 0, 400_000, |t| {
+                let mut o = three_agents(t, mode);
+                o.plan.as_mut().unwrap().track_only = true;
+                o.plan.as_mut().unwrap().who = "all your agents".into();
+                o.unconditional = true;
+                o
+            });
+            let said = says(&acts);
+            // Claude and Codex are told while others still work; the last is covered by the summary
+            assert!(said[0].starts_with("Claude Code finished clean.") && said[0].contains("Codex and Cursor are still working"), "{said:?}");
+            assert!(said[1].contains("Codex stopped, but the output mentions a failure") && said[1].ends_with("Cursor is still working."), "{said:?}");
+            assert!(said[2].starts_with("All 3 of your agents are done, sir.") && said[2].contains("Codex stopped, but"), "{said:?}");
+            assert_eq!(said.len(), 3, "{said:?}");
+            assert!(acts.iter().any(|(_, a)| matches!(a, Action::End("tracked"))), "{mode:?}");
+            assert!(!fired(&acts) && began(&acts).is_none(), "tracking never counts down or powers off ({mode:?})");
+            assert!(e.finished());
+        }
+    }
+
+    #[test]
+    fn however_it_ends_means_the_countdown_runs_even_after_a_failure_and_says_so() {
+        // On: a failed agent does not stop the shutdown the user asked for
+        let mut e = Engine::new(0);
+        let acts = run(&mut e, 0, 200_000, |t| {
+            let mut o = obs(t, WatchPowerMode::On);
+            o.unconditional = true;
+            o.verdict = bad();
+            o.outcomes = vec![out("Antigravity", bad())];
+            o
+        });
+        let lead = acts.iter().find_map(|(_, a)| match a {
+            Action::BeginCountdown { lead, .. } => Some(lead.clone()),
+            _ => None,
+        });
+        let lead = lead.expect("it counts down");
+        assert!(lead.contains("Antigravity stopped, but the output mentions a failure") && lead.contains("You asked me to shut down either way."), "{lead}");
+        assert!(fired(&acts), "and it fires after the 30 s");
+        // the same result with a condition ("only if it's perfect") holds instead
+        let mut e = Engine::new(0);
+        let acts = run(&mut e, 0, 200_000, |t| {
+            let mut o = obs(t, WatchPowerMode::On);
+            o.verdict = bad();
+            o.outcomes = vec![out("Antigravity", bad())];
+            o
+        });
+        assert!(!fired(&acts) && began(&acts).is_none());
+        // practice run says it would have done it anyway
+        let mut e = Engine::new(0);
+        let acts = run(&mut e, 0, 200_000, |t| {
+            let mut o = obs(t, WatchPowerMode::Dry);
+            o.unconditional = true;
+            o.verdict = bad();
+            o.outcomes = vec![out("Antigravity", bad())];
+            o
+        });
+        let s = says(&acts);
+        assert!(s[0].starts_with("Practice run, sir: Antigravity stopped, but") && s[0].contains("as you asked") && s[0].contains("Nothing was changed"), "{s:?}");
+        // the countdown survives the verdict changing, but not new work on an agent
+        let mut e = Engine::new(0);
+        let mut t = 0;
+        let mut began_at: Option<u64> = None;
+        while t < 300_000 && !e.finished() {
+            let mut o = obs(t, WatchPowerMode::On);
+            o.unconditional = true;
+            o.verdict = bad();
+            o.outcomes = vec![out("Antigravity", bad())];
+            if let Some(b) = began_at {
+                if t >= b + 9_000 {
+                    o.verdict = Verdict::Unsure(vec![Reason::NothingToJudge]); // flips, still ended
+                }
+            }
+            if e.step(&o).iter().any(|a| matches!(a, Action::BeginCountdown { .. })) {
+                began_at = Some(t);
+            }
+            t += TICK_MS;
+        }
+        assert!(e.finished(), "it ran to the end despite the verdict changing");
+        let mut e = Engine::new(0);
+        let acts = run(&mut e, 0, 200_000, |t| {
+            let mut o = obs(t, WatchPowerMode::On);
+            o.unconditional = true;
+            o.verdict = bad();
+            o.outcomes = vec![out("Antigravity", bad())];
+            o.ended = t < 40_000; // a new turn starts after the countdown began
+            o
+        });
+        assert!(!fired(&acts), "new work on an agent cancels it");
+    }
+
+    #[test]
+    fn several_agents_held_by_a_condition_are_summed_up_and_a_yes_can_still_shut_down() {
+        let mut e = Engine::new(0);
+        let acts = run(&mut e, 0, 120_000, |t| {
+            let mut o = obs(t, WatchPowerMode::On);
+            o.verdict = bad();
+            o.outcomes = vec![out("Claude Code", Verdict::Go), out("Codex", bad())];
+            o
+        });
+        let s = says(&acts);
+        assert!(s[0].starts_with("All 2 of your agents are done, sir.") && s[0].contains("I left your laptop on, sir.") && s[0].ends_with("Shall I shut down anyway?"), "{s:?}");
+        assert!(acts.iter().any(|(_, a)| matches!(a, Action::SayAndAsk(..))) && !fired(&acts));
+    }
+
+    #[test]
+    fn a_plan_that_follows_nobody_says_so_once_and_a_tracking_plan_gives_up_without_a_power_line() {
+        let mut e = Engine::new(0);
+        let acts = run(&mut e, 0, 120_000, |t| {
+            let mut o = obs(t, WatchPowerMode::On);
+            o.ended = false;
+            o.outcomes = Vec::new();
+            o.nothing_running = true;
+            o
+        });
+        let s = says(&acts);
+        assert_eq!(s.len(), 1);
+        assert!(s[0].contains("don't see any of your agents working yet"), "{s:?}");
+        // a tracking plan that waited out its limit does not talk about the laptop
+        let mut e = Engine::new(0);
+        let acts = run(&mut e, 0, 31 * 60_000, |t| {
+            let mut o = obs(t, WatchPowerMode::Off);
+            o.ended = false;
+            let p = o.plan.as_mut().unwrap();
+            p.track_only = true;
+            p.deadline_ms = Some(30 * 60_000);
+            p.who = "all your agents".into();
+            o
+        });
+        let s = says(&acts);
+        assert!(s.iter().any(|t| t.contains("stopped waiting for all your agents") && !t.contains("laptop")), "{s:?}");
     }
 
     #[test]

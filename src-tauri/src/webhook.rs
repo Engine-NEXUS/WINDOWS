@@ -376,7 +376,8 @@ mod agent_event_http_tests {
     #[test]
     fn the_agent_event_endpoint_records_only_authorised_known_events() {
         use crate::agent_hooks::{last_event_ms, Agent, EventKind};
-        assert_eq!(last_event_ms(Agent::Claude, EventKind::Notification), None);
+        // other tests share the event list: compare with what was there before, never with "nothing"
+        let before = last_event_ms(Agent::Claude, EventKind::Notification);
 
         // the /trigger token does not open this door
         let (code, _) = call(post("/agent-event", "trigger-token", r#"{"agent":"claude","event":"notification"}"#));
@@ -391,12 +392,12 @@ mod agent_event_http_tests {
         assert_eq!(code, 400);
         let (code, _) = call(post("/agent-event", "agent-token", r#"{"agent":"claude","event":"shutdown"}"#));
         assert_eq!(code, 400);
-        assert_eq!(last_event_ms(Agent::Claude, EventKind::Notification), None, "nothing refused was recorded");
+        assert_eq!(last_event_ms(Agent::Claude, EventKind::Notification), before, "nothing refused was recorded");
 
         // the real thing
         let (code, body) = call(post("/agent-event", "agent-token", r#"{"agent":"claude","event":"notification"}"#));
         assert_eq!((code, body.as_str()), (202, r#"{"ok":true}"#));
-        assert!(last_event_ms(Agent::Claude, EventKind::Notification).is_some());
+        assert_ne!(last_event_ms(Agent::Claude, EventKind::Notification), before, "the accepted one was recorded");
 
         // and the agent token does not open /trigger
         let (code, _) = call(post("/trigger", "agent-token", r#"{"transcript":"shut down my laptop"}"#));

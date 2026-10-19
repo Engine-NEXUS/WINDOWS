@@ -105,6 +105,8 @@ pub enum Reason {
     StillBusy,
     NotEnoughSignals,
     NothingToJudge,
+    /// The agent has no hook (Trae): all NEXUS can tell is that it went quiet.
+    NoHook,
 }
 
 impl Reason {
@@ -123,6 +125,7 @@ impl Reason {
             Reason::StillBusy => "something still looks busy".to_string(),
             Reason::NotEnoughSignals => "I only have one sign that it ended".to_string(),
             Reason::NothingToJudge => "I could not read its final output".to_string(),
+            Reason::NoHook => "it has no hook, so I can only tell that it went quiet".to_string(),
         }
     }
 }

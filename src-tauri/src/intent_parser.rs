@@ -321,6 +321,15 @@ pub enum ParsedIntent {
         kind: String,
         require_clean: bool,
         deadline_mins: Option<u32>,
+        /// "claude and codex": two or more named agents (empty otherwise)
+        #[serde(default)]
+        agents: Vec<String>,
+        /// "all my agents" / "every agent running"
+        #[serde(default)]
+        all: bool,
+        /// "track all agents and tell me when they're done": no power action
+        #[serde(default)]
+        track_only: bool,
     },
     /// "Cancel the shutdown plan", "what are you watching", "make it sleep instead" (`command` =
     /// power_plan::PlanCommand::as_str). Only about the plan NEXUS is holding; nothing else is claimed.
@@ -691,7 +700,19 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
                 kind: plan.kind.as_str().to_string(),
                 require_clean: plan.require_clean,
                 deadline_mins: plan.deadline_mins,
+                agents: plan.agents,
+                all: plan.all,
+                track_only: plan.track_only,
             },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    // --- "hook up all agents" / "which agents are hooked up" ---
+    if let Some(action) = crate::agent_hooks::parse_all_command(&text) {
+        return Some(ParseResult {
+            intent: ParsedIntent::AgentHookCommand { hook_action: action.as_str().to_string(), agent: "all".to_string() },
             confidence: 1.0,
             source: "deterministic".to_string(),
         });

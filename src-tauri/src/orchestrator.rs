@@ -1334,8 +1334,8 @@ pub async fn process_transcript<R: Runtime>(
         ParsedIntent::WatchAgentTask { agent, query } => {
             return run_watch_agent_task(app, agent.clone(), query.clone()).await;
         }
-        ParsedIntent::WatchThenPower { agent, kind, require_clean, deadline_mins } => {
-            return run_watch_then_power(app, agent.clone(), kind.clone(), *require_clean, *deadline_mins).await;
+        ParsedIntent::WatchThenPower { agent, kind, require_clean, deadline_mins, agents, all, track_only } => {
+            return run_watch_then_power(app, agent.clone(), kind.clone(), *require_clean, *deadline_mins, agents.clone(), *all, *track_only).await;
         }
         ParsedIntent::WatchPlanCommand { command } => {
             return run_watch_plan_command(app, command.clone()).await;
@@ -1660,8 +1660,8 @@ pub async fn process_transcript<R: Runtime>(
             ParsedIntent::WatchAgentTask { agent, query } => {
                 return run_watch_agent_task(app, agent.clone(), query.clone()).await;
             }
-            ParsedIntent::WatchThenPower { agent, kind, require_clean, deadline_mins } => {
-                return run_watch_then_power(app, agent.clone(), kind.clone(), *require_clean, *deadline_mins).await;
+            ParsedIntent::WatchThenPower { agent, kind, require_clean, deadline_mins, agents, all, track_only } => {
+                return run_watch_then_power(app, agent.clone(), kind.clone(), *require_clean, *deadline_mins, agents.clone(), *all, *track_only).await;
             }
             ParsedIntent::WatchPlanCommand { command } => {
                 return run_watch_plan_command(app, command.clone()).await;
@@ -4857,6 +4857,7 @@ async fn run_offer_reply<R: Runtime>(
             }
             None => "I didn't understand which power command that was, sir.".to_string(),
         },
+        (Offer::HookSetup { agent }, Reply::Yes) if agent == "all" => install_all_agent_hooks(&app),
         (Offer::HookSetup { agent }, Reply::Yes) => match crate::agent_hooks::Agent::from_name(&agent) {
             Some(a) => install_agent_hook(&app, a),
             None => "I didn't understand which agent that was, sir.".to_string(),
@@ -5578,12 +5579,24 @@ async fn run_watch_then_power<R: Runtime>(
     kind: String,
     require_clean: bool,
     deadline_mins: Option<u32>,
+    agents: Vec<String>,
+    all: bool,
+    track_only: bool,
 ) -> Result<ProcessResult, String> {
     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
     let Some(k) = crate::power_cmd::PowerKind::from_str(&kind) else {
         return say_and_finish(&app, request_id, "I didn't catch which power command you meant, sir.".into());
     };
-    let mut plan = crate::watch_power::WatchPlan { agent, kind: k, require_clean, deadline_mins };
+    let mut plan = crate::watch_power::WatchPlan { agent, kind: k, require_clean, deadline_mins, agents, all, track_only };
+    // several agents, or all of them: no single "this session" to resolve
+    if plan.all || plan.agents.len() >= 2 || plan.track_only {
+        let note = multi_agent_note(&plan);
+        crate::power_plan::set(plan);
+        let mode = crate::watch_runner::read_mode(&app);
+        let held = crate::power_plan::run(&crate::power_plan::PlanCommand::Status, mode);
+        crate::watch_runner::ensure_running(app.clone());
+        return say_and_finish(&app, request_id, format!("I understood: {held}{note} Say cancel the plan to drop it."));
+    }
     // "this session": the agent in the window in front, when it can be told
     if plan.agent.is_none() {
         let title = crate::live::commands::window::get_foreground_window_title().unwrap_or_default().to_lowercase();
@@ -5631,6 +5644,124 @@ async fn run_watch_then_power<R: Runtime>(
     say_and_finish(&app, request_id, format!("I understood: {held}{note} Say cancel the shutdown plan to drop it."))
 }
 
+/// What NEXUS adds when the plan is about several agents: which of them it can actually follow right now.
+fn multi_agent_note(plan: &crate::watch_power::WatchPlan) -> String {
+    use crate::agent_hooks::{config_path, is_installed, Agent};
+    let targets: Vec<Agent> = if plan.all {
+        crate::agent_hooks::agents_present()
+    } else {
+        plan.named_agents().iter().filter_map(|n| Agent::from_name(n)).collect()
+    };
+    let hooked = |a: &Agent| config_path(*a).map_or(false, |c| is_installed(*a, &c));
+    let watched: Vec<&str> = targets.iter().filter(|a| !a.observe_only() && hooked(a)).map(|a| a.label()).collect();
+    let unhooked: Vec<&str> = targets.iter().filter(|a| !a.observe_only() && !hooked(a)).map(|a| a.label()).collect();
+    let quiet_only: Vec<&str> = targets.iter().filter(|a| a.observe_only()).map(|a| a.label()).collect();
+    let mut note = String::new();
+    if watched.is_empty() && quiet_only.is_empty() {
+        note.push_str(" But none of them is hooked up, so I can't follow any yet; say hook up all agents.");
+    } else {
+        if !watched.is_empty() {
+            note.push_str(&format!(" I'll follow {}.", watched.join(", ")));
+        }
+        if !unhooked.is_empty() {
+            note.push_str(&format!(" {} {} not hooked up yet; say hook up all agents.", unhooked.join(", "), if unhooked.len() == 1 { "is" } else { "are" }));
+        }
+        if !quiet_only.is_empty() {
+            note.push_str(&format!(" {} has no hook, so I can only notice that it goes quiet.", quiet_only.join(", ")));
+        }
+    }
+    if plan.all {
+        note.push_str(" Agents that start later join automatically.");
+    }
+    note
+}
+
+/// "hook up all agents" / "which agents are hooked up" / "remove all the agent hooks".
+async fn run_hook_all<R: Runtime>(app: AppHandle<R>, request_id: String, action: crate::agent_hooks::HookAction) -> Result<ProcessResult, String> {
+    use crate::agent_hooks::{agents_present, config_path, hookable_present, is_installed, uninstall, Agent, HookAction};
+    let speech = match action {
+        HookAction::Connect => {
+            let todo = hookable_present();
+            if todo.is_empty() {
+                "I don't see any coding agents set up on this laptop, sir.".to_string()
+            } else {
+                crate::memcore::offer::set(crate::memcore::offer::Offer::HookSetup { agent: "all".to_string() }, true);
+                let labels: Vec<&str> = todo.iter().map(|a| a.label()).collect();
+                let extra = if agents_present().iter().any(|a| a.observe_only()) { " Trae has no hook, so I can only watch it go quiet." } else { "" };
+                format!(
+                    "I found {} on this laptop. I'd add a small hook to each, with a backup of anything I edit.{extra} Shall I, sir?",
+                    labels.join(", ")
+                )
+            }
+        }
+        HookAction::Status => {
+            let here = agents_present();
+            if here.is_empty() {
+                "I don't see any coding agents set up on this laptop, sir.".to_string()
+            } else {
+                let hooked = |a: &Agent| config_path(*a).map_or(false, |c| is_installed(*a, &c));
+                let yes: Vec<&str> = here.iter().filter(|a| !a.observe_only() && hooked(a)).map(|a| a.label()).collect();
+                let no: Vec<&str> = here.iter().filter(|a| !a.observe_only() && !hooked(a)).map(|a| a.label()).collect();
+                let quiet: Vec<&str> = here.iter().filter(|a| a.observe_only()).map(|a| a.label()).collect();
+                let mut s = if yes.is_empty() { "None of your agents is hooked up yet.".to_string() } else { format!("Hooked up: {}.", yes.join(", ")) };
+                if !no.is_empty() {
+                    s.push_str(&format!(" Not hooked up: {}.", no.join(", ")));
+                }
+                if !quiet.is_empty() {
+                    s.push_str(&format!(" {} can only be watched for going quiet.", quiet.join(", ")));
+                }
+                s
+            }
+        }
+        HookAction::Disconnect => {
+            let mut removed: Vec<&str> = Vec::new();
+            for a in hookable_present() {
+                if let Some(cfg) = config_path(a) {
+                    if matches!(uninstall(a, &cfg), Ok(true)) {
+                        removed.push(a.label());
+                    }
+                }
+            }
+            if removed.is_empty() {
+                "I had no hooks to remove, sir.".to_string()
+            } else {
+                format!("Done, sir. I removed my hook from {}; nothing else in their settings was touched.", removed.join(", "))
+            }
+        }
+    };
+    say_and_finish(&app, request_id, speech)
+}
+
+/// Install the hook for every agent that looks installed here (after the user said yes to "hook up all agents").
+fn install_all_agent_hooks<R: Runtime>(app: &AppHandle<R>) -> String {
+    let todo = crate::agent_hooks::hookable_present();
+    if todo.is_empty() {
+        return "I don't see any coding agents set up on this laptop, sir.".to_string();
+    }
+    let mut done: Vec<&str> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    let mut notes: Vec<&str> = Vec::new();
+    for a in todo {
+        let said = install_agent_hook(app, a);
+        if said.starts_with("Done, sir.") {
+            done.push(a.label());
+            if !notes.contains(&a.restart_note()) {
+                notes.push(a.restart_note());
+            }
+        } else {
+            failed.push(format!("{}: {}", a.label(), said.trim_end_matches('.')));
+        }
+    }
+    let mut out = if done.is_empty() { "None of them could be hooked up, sir.".to_string() } else { format!("Done, sir. I hooked up {}.", done.join(", ")) };
+    for f in failed.iter().take(3) {
+        out.push_str(&format!(" {f}."));
+    }
+    if !done.is_empty() {
+        out.push_str(" Restart each agent so it reads its hook. I have only seen Antigravity report on this machine, so tell me if another stays silent.");
+    }
+    out
+}
+
 /// Speak a line that nobody just asked for (the countdown announcement and what follows it). It takes the floor
 /// at once, like any request, because a countdown that can power the laptop off must be heard.
 pub(crate) fn speak_unprompted<R: Runtime>(app: &AppHandle<R>, text: String) {
@@ -5670,6 +5801,11 @@ fn install_agent_hook<R: Runtime>(app: &AppHandle<R>, agent: crate::agent_hooks:
 /// "Hook up Claude" asks first; "remove the Claude hook" and "is it installed" answer at once.
 async fn run_agent_hook_command<R: Runtime>(app: AppHandle<R>, action: String, agent: String) -> Result<ProcessResult, String> {
     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if agent == "all" {
+        if let Some(action) = crate::agent_hooks::HookAction::from_str(&action) {
+            return run_hook_all(app, request_id, action).await;
+        }
+    }
     let (Some(action), Some(agent)) = (crate::agent_hooks::HookAction::from_str(&action), crate::agent_hooks::Agent::from_name(&agent)) else {
         return say_and_finish(&app, request_id, "I didn't catch which hook you meant, sir.".to_string());
     };

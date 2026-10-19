@@ -130,7 +130,7 @@ pub fn run(cmd: &PlanCommand, mode: WatchPowerMode) -> String {
 }
 
 fn who(plan: &WatchPlan) -> String {
-    plan.agent.clone().unwrap_or_else(|| "this session".to_string())
+    crate::watch_power::subject(plan)
 }
 
 fn action_words(kind: PowerKind) -> &'static str {
@@ -175,6 +175,7 @@ pub fn apply(cmd: &PlanCommand, slot: &mut Option<StoredPlan>, mode: WatchPowerM
         (PlanCommand::SetMode(m), _) => mode_line(*m).to_string(),
         (PlanCommand::ModeStatus, _) => mode_line(mode).to_string(),
         (PlanCommand::Status, None) => "I'm not holding any shutdown plan, sir.".to_string(),
+        (PlanCommand::Status, Some(s)) if s.plan.track_only => format!("{}.", describe(s)),
         (PlanCommand::Status, Some(s)) => format!("{}.{}", describe(s), tail(mode)),
         (PlanCommand::Cancel, None) => "There's no shutdown plan to cancel, sir. Nothing will be turned off.".to_string(),
         (PlanCommand::Cancel, Some(_)) => {
@@ -441,7 +442,7 @@ mod tests {
     use super::*;
 
     fn plan(kind: PowerKind) -> WatchPlan {
-        WatchPlan { agent: Some("claude".into()), kind, require_clean: true, deadline_mins: None }
+        WatchPlan::single(Some("claude".into()), kind, true, None)
     }
 
     fn held(kind: PowerKind) -> Option<StoredPlan> {
@@ -680,7 +681,7 @@ mod tests {
     fn the_global_plan_is_replaced_by_a_new_one() {
         set(plan(PowerKind::Shutdown));
         assert_eq!(current().unwrap().plan.kind, PowerKind::Shutdown);
-        set(WatchPlan { agent: None, kind: PowerKind::Sleep, require_clean: false, deadline_mins: Some(30) });
+        set(WatchPlan::single(None, PowerKind::Sleep, false, Some(30)));
         let c = current().unwrap();
         assert_eq!((c.plan.kind, c.plan.agent), (PowerKind::Sleep, None));
         assert!(run(&PlanCommand::Cancel, WatchPowerMode::Off).contains("dropped"));
