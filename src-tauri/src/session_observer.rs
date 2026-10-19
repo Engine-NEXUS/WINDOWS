@@ -233,8 +233,12 @@ pub struct Inputs<'a> {
     pub tree: &'a [ProcSnap],
     /// The text of the watched window, when a reader exists and could read it.
     pub window_text: Option<&'a str>,
-    /// The agent's own Stop hook fired.
+    /// The agent's own Stop hook fired (and no new prompt since).
     pub hook_stopped: bool,
+    /// The agent's final message from that Stop hook, when it sent one (data for the verdict).
+    pub hook_tail: Option<&'a str>,
+    /// A permission prompt is waiting for the user (from the agent's Notification hook).
+    pub hook_needs_user: bool,
 }
 
 #[derive(Debug, Default)]
@@ -254,7 +258,7 @@ impl Observer {
             signals.push(Signal::ProcessIdle);
         }
         let mut read = WindowRead::default();
-        let mut tail = String::new();
+        let mut tail = i.hook_tail.map(prepare_tail).unwrap_or_default();
         if let Some(text) = i.window_text {
             self.stability.feed(i.now_ms, text);
             read = classify_window_text(text);
@@ -267,7 +271,7 @@ impl Observer {
             signals,
             tail,
             exit_ok: None,
-            waiting_for_user: read.waiting,
+            waiting_for_user: read.waiting || i.hook_needs_user,
             login_required: read.login,
             still_busy: read.busy || self.idle.active_now(),
             model: ModelVerdict::Unavailable,
@@ -277,6 +281,8 @@ impl Observer {
 
 /// Evidence from a session NEXUS started itself through the sidecar (`GET /watch/{id}` JSON).
 /// `output_quiet_ms` = how long its `output` has stayed the same, measured by the caller between polls.
+/// (Reserved for "ask claude to X and shut down when it's perfect"; compiled for tests only until that is wired.)
+#[cfg(test)]
 pub fn evidence_from_watch_json(json: &serde_json::Value, output_quiet_ms: u64) -> Evidence {
     let status = json.get("status").and_then(|v| v.as_str()).unwrap_or("working");
     let output = json.get("output").and_then(|v| v.as_str()).unwrap_or("");
@@ -454,7 +460,7 @@ mod tests {
     }
 
     fn run(obs: &mut Observer, now: u64, tree: &[ProcSnap], text: Option<&str>, hook: bool) -> Evidence {
-        obs.step(Inputs { now_ms: now, tree, window_text: text, hook_stopped: hook })
+        obs.step(Inputs { now_ms: now, tree, window_text: text, hook_stopped: hook, hook_tail: None, hook_needs_user: false })
     }
 
     #[test]

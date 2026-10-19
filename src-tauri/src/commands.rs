@@ -1907,6 +1907,11 @@ pub struct NexusSettings {
     /// Notice command sequences the user repeats and offer to save them as a one-phrase routine.
     #[serde(default = "default_memcore")]
     pub memcore_routines: bool,
+    /// Unattended shutdown after a watched coding session ends perfectly: "off" (default; nothing is ever powered off
+    /// by itself), "dry" (practice: says what it would do, never does it) or "on" (a 30 second cancellable countdown).
+    /// Anything else is read as "off". Changed by voice ("allow unattended shutdown").
+    #[serde(default = "default_watch_power")]
+    pub watch_power: String,
     /// Let a free cloud model read a redacted copy of recent cloud conversations and SUGGEST profile facts.
     /// Off by default; nothing is stored until the user approves it on the Memory page.
     #[serde(default)]
@@ -1950,6 +1955,10 @@ pub struct NexusSettings {
 
 fn default_music_player() -> String {
     "spotify".to_string()
+}
+
+fn default_watch_power() -> String {
+    "off".to_string()
 }
 
 fn default_memcore() -> bool {
@@ -2225,6 +2234,7 @@ impl Default for NexusSettings {
             memcore_profile: default_memcore(),
             memcore_routines: default_memcore(),
             memcore_review: false,
+            watch_power: default_watch_power(),
             wake_sound: true,
             wake_sound_style: default_wake_sound_style(),
             wake_sound_volume: default_wake_sound_volume(),

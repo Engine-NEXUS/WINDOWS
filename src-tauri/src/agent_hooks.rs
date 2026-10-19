@@ -56,8 +56,10 @@ impl Agent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
     Stop,
-    /// The agent needs the user (a permission prompt, an idle question).
+    /// The agent needs the user (a permission prompt, an elicitation).
     Notification,
+    /// The user sent a new prompt: a new turn began, so an older stop no longer counts.
+    Start,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -106,24 +108,26 @@ pub const SCRIPT_NAME: &str = "nexus-agent-event.cmd";
 #[cfg(not(windows))]
 pub const SCRIPT_NAME: &str = "nexus-agent-event.sh";
 
-/// `script <agent> <stop|notification> [ignored extra arguments]`. Codex appends its own JSON as an extra
-/// argument, which is ignored. The token lives only in this file (user's app data), not in any agent config.
+/// `script <agent> <stop|notification|start> [ignored extra arguments]`. The agent and event travel in the URL;
+/// the BODY is whatever the agent's hook gives on stdin (Claude Code sends JSON with its last message). Codex
+/// appends its own JSON as an extra argument, which is ignored. The token lives only in this file (user's app
+/// data), not in any agent config.
 pub fn script_text(token: &str, port: u16) -> String {
     #[cfg(windows)]
     {
         format!(
             "@echo off\r\nrem NEXUS agent hook: tells NEXUS that an agent stopped. Remove with \"disconnect <agent>\".\r\n\
              set EV=%~2\r\nif \"%EV%\"==\"\" set EV=stop\r\n\
-             curl.exe -s -m 3 -X POST http://127.0.0.1:{port}/agent-event -H \"Authorization: Bearer {token}\" \
-             -H \"Content-Type: application/json\" -d \"{{\\\"agent\\\":\\\"%~1\\\",\\\"event\\\":\\\"%EV%\\\"}}\" >nul 2>&1\r\nexit /b 0\r\n"
+             curl.exe -s -m 3 -X POST \"http://127.0.0.1:{port}/agent-event?agent=%~1&event=%EV%\" -H \"Authorization: Bearer {token}\" \
+             -H \"Content-Type: application/json\" --data-binary @- >nul 2>&1\r\nexit /b 0\r\n"
         )
     }
     #[cfg(not(windows))]
     {
         format!(
             "#!/bin/sh\n# NEXUS agent hook: tells NEXUS that an agent stopped.\nEV=\"${{2:-stop}}\"\n\
-             curl -s -m 3 -X POST http://127.0.0.1:{port}/agent-event -H \"Authorization: Bearer {token}\" \
-             -H \"Content-Type: application/json\" -d \"{{\\\"agent\\\":\\\"$1\\\",\\\"event\\\":\\\"$EV\\\"}}\" >/dev/null 2>&1\nexit 0\n"
+             curl -s -m 3 -X POST \"http://127.0.0.1:{port}/agent-event?agent=$1&event=$EV\" -H \"Authorization: Bearer {token}\" \
+             -H \"Content-Type: application/json\" --data-binary @- >/dev/null 2>&1\nexit 0\n"
         )
     }
 }
@@ -149,7 +153,13 @@ pub fn write_script(app_data: &Path, token: &str, port: u16) -> Result<PathBuf, 
 
 // ─── Editing Claude Code's settings.json ─────────────────────────────
 
-const CLAUDE_EVENTS: &[(&str, &str)] = &[("Stop", "stop"), ("Notification", "notification")];
+/// (Claude Code event, our kind, matcher). `Notification` is limited to prompts that really wait for the user:
+/// "idle_prompt" also fires after a finished turn and would look like "needs you" forever.
+const CLAUDE_EVENTS: &[(&str, &str, Option<&str>)] = &[
+    ("Stop", "stop", None),
+    ("Notification", "notification", Some("permission_prompt|elicitation_dialog")),
+    ("UserPromptSubmit", "start", None),
+];
 
 fn command_line(script: &Path, agent: &str, kind: &str) -> String {
     format!("\"{}\" {agent} {kind}", script.display())
@@ -183,11 +193,15 @@ pub fn claude_add_hook(existing: &str, script: &Path) -> Result<String, HookErro
     let obj = root.as_object_mut().expect("checked object");
     let hooks = obj.entry("hooks").or_insert_with(|| json!({}));
     let hooks = hooks.as_object_mut().ok_or_else(|| HookError::Unreadable("\"hooks\" is not an object".into()))?;
-    for (event, kind) in CLAUDE_EVENTS {
+    for (event, kind, matcher) in CLAUDE_EVENTS {
         let list = hooks.entry(*event).or_insert_with(|| json!([]));
         let list = list.as_array_mut().ok_or_else(|| HookError::Unreadable(format!("\"{event}\" is not a list")))?;
         list.retain(|e| !entry_is_ours(e));
-        list.push(json!({ "hooks": [ { "type": "command", "command": command_line(script, "claude", kind), "timeout": 10 } ] }));
+        let mut entry = json!({ "hooks": [ { "type": "command", "command": command_line(script, "claude", kind), "timeout": 10 } ] });
+        if let Some(m) = matcher {
+            entry["matcher"] = json!(m);
+        }
+        list.push(entry);
     }
     pretty(&root)
 }
@@ -197,7 +211,7 @@ pub fn claude_remove_hook(existing: &str) -> Result<(String, bool), HookError> {
     let mut root = parse_settings(existing)?;
     let mut removed = false;
     if let Some(hooks) = root.get_mut("hooks").and_then(|h| h.as_object_mut()) {
-        for (event, _) in CLAUDE_EVENTS {
+        for (event, _, _) in CLAUDE_EVENTS {
             if let Some(list) = hooks.get_mut(*event).and_then(|l| l.as_array_mut()) {
                 let before = list.len();
                 list.retain(|e| !entry_is_ours(e));
@@ -223,7 +237,7 @@ pub fn claude_has_hook(existing: &str) -> bool {
         .ok()
         .and_then(|r| r.get("hooks").and_then(|h| h.as_object()).cloned())
         .map_or(false, |hooks| {
-            CLAUDE_EVENTS.iter().all(|(event, _)| hooks.get(*event).and_then(|l| l.as_array()).map_or(false, |l| l.iter().any(entry_is_ours)))
+            CLAUDE_EVENTS.iter().all(|(event, _, _)| hooks.get(*event).and_then(|l| l.as_array()).map_or(false, |l| l.iter().any(entry_is_ours)))
         })
 }
 
@@ -398,26 +412,63 @@ pub struct AgentEvent {
     pub agent: String,
     pub kind: EventKind,
     pub at_ms: u64,
+    /// The agent's last message, for a Stop (already cut to the last 4 KB and masked).
+    pub tail: Option<String>,
 }
 
 static EVENTS: Mutex<VecDeque<AgentEvent>> = Mutex::new(VecDeque::new());
 
-/// `{"agent":"claude","event":"stop"}` -> (agent, kind). Anything else (other agents, other events, extra
-/// text) is refused: the body is data from a local process and carries nothing but these two words.
-pub fn parse_event_body(body: &str) -> Option<(Agent, EventKind)> {
-    let v: Value = serde_json::from_str(body).ok()?;
-    let agent = Agent::from_name(v.get("agent")?.as_str()?)?;
-    let kind = match v.get("event")?.as_str()? {
-        "stop" => EventKind::Stop,
-        "notification" => EventKind::Notification,
-        _ => return None,
-    };
-    Some((agent, kind))
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedEvent {
+    pub agent: Agent,
+    pub kind: EventKind,
+    pub tail: Option<String>,
 }
 
-pub fn record_event_at(agent: Agent, kind: EventKind, at_ms: u64) {
+fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query.split('&').find_map(|kv| kv.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| v))
+}
+
+fn kind_from(s: &str) -> Option<EventKind> {
+    Some(match s {
+        "stop" => EventKind::Stop,
+        "notification" => EventKind::Notification,
+        "start" => EventKind::Start,
+        _ => return None,
+    })
+}
+
+/// The agent's final text in the JSON its hook receives (Claude Code: `last_assistant_message`; Codex's
+/// notify payload: `last-assistant-message`).
+fn final_message(v: &Value) -> Option<String> {
+    ["last_assistant_message", "last-assistant-message"].iter().find_map(|k| v.get(*k).and_then(|x| x.as_str()).map(String::from))
+}
+
+/// `?agent=claude&event=stop` (new script) or a body `{"agent":"claude","event":"stop"}` (old script) ->
+/// the event. Only two known agents and three known events are accepted. For a stop, the agent's final
+/// message is kept as DATA for the verdict (cut to the last 4 KB and masked); nothing else in the body is
+/// read or stored, and no text ever becomes a command.
+pub fn parse_event(query: &str, body: &str) -> Option<ParsedEvent> {
+    let json: Option<Value> = serde_json::from_str(body).ok();
+    let (agent, kind) = match (query_value(query, "agent"), query_value(query, "event")) {
+        (Some(a), Some(e)) => (Agent::from_name(a)?, kind_from(e)?),
+        (None, None) => {
+            let v = json.as_ref()?;
+            (Agent::from_name(v.get("agent")?.as_str()?)?, kind_from(v.get("event")?.as_str()?)?)
+        }
+        _ => return None,
+    };
+    let tail = if kind == EventKind::Stop {
+        json.as_ref().and_then(final_message).map(|m| crate::session_verdict::prepare_tail(&m)).filter(|t| !t.trim().is_empty())
+    } else {
+        None
+    };
+    Some(ParsedEvent { agent, kind, tail })
+}
+
+pub fn record_event_at(agent: Agent, kind: EventKind, at_ms: u64, tail: Option<String>) {
     if let Ok(mut q) = EVENTS.lock() {
-        q.push_back(AgentEvent { agent: agent.name().to_string(), kind, at_ms });
+        q.push_back(AgentEvent { agent: agent.name().to_string(), kind, at_ms, tail });
         while q.len() > MAX_EVENTS {
             q.pop_front();
         }
@@ -428,17 +479,39 @@ pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
-/// When did this agent last report this kind of event?
-pub fn last_event_ms(agent: Agent, kind: EventKind) -> Option<u64> {
-    EVENTS.lock().ok().and_then(|q| q.iter().rev().find(|e| e.agent == agent.name() && e.kind == kind).map(|e| e.at_ms))
+fn last_index(q: &VecDeque<AgentEvent>, agent: Agent, kind: EventKind) -> Option<usize> {
+    q.iter().rposition(|e| e.agent == agent.name() && e.kind == kind)
 }
 
-/// Has this agent (or any, with `None`) reported a stop at or after `since_ms`? (The observer in phase W5
-/// reads this; until then it is compiled for tests only.)
-#[cfg(test)]
-pub fn stopped_since(agent: Option<Agent>, since_ms: u64) -> bool {
-    EVENTS.lock().map_or(false, |q| {
-        q.iter().any(|e| e.kind == EventKind::Stop && e.at_ms >= since_ms && agent.map_or(true, |a| e.agent == a.name()))
+/// When did this agent last report this kind of event?
+pub fn last_event_ms(agent: Agent, kind: EventKind) -> Option<u64> {
+    EVENTS.lock().ok().and_then(|q| last_index(&q, agent, kind).map(|i| q[i].at_ms))
+}
+
+/// Has this agent stopped (at or after `since_ms`) with no new prompt since? A new prompt means a new turn
+/// is running, so the older stop no longer says "finished".
+pub fn stop_is_latest(agent: Agent, since_ms: u64) -> bool {
+    EVENTS.lock().map_or(false, |q| match last_index(&q, agent, EventKind::Stop) {
+        Some(stop) => q[stop].at_ms >= since_ms && last_index(&q, agent, EventKind::Start).map_or(true, |start| stop > start),
+        None => false,
+    })
+}
+
+/// The final message of the agent's latest stop, if its hook sent one.
+pub fn last_stop_tail(agent: Agent) -> Option<String> {
+    EVENTS.lock().ok().and_then(|q| last_index(&q, agent, EventKind::Stop).and_then(|i| q[i].tail.clone()))
+}
+
+/// A permission prompt arrived (at or after `since_ms`) after the agent's latest stop and prompt: it is
+/// waiting for the user.
+pub fn needs_user(agent: Agent, since_ms: u64) -> bool {
+    EVENTS.lock().map_or(false, |q| match last_index(&q, agent, EventKind::Notification) {
+        Some(n) => {
+            q[n].at_ms >= since_ms
+                && last_index(&q, agent, EventKind::Stop).map_or(true, |i| n > i)
+                && last_index(&q, agent, EventKind::Start).map_or(true, |i| n > i)
+        }
+        None => false,
     })
 }
 
@@ -455,11 +528,11 @@ pub fn ago(now_ms: u64, then_ms: u64) -> String {
 // ─── What the endpoint answers (pure) ────────────────────────────────
 
 /// The decision for `POST /agent-event`: (HTTP status, body, event to record).
-pub fn route_event(authorized: bool, body: &str) -> (u16, &'static str, Option<(Agent, EventKind)>) {
+pub fn route_event(authorized: bool, query: &str, body: &str) -> (u16, &'static str, Option<ParsedEvent>) {
     if !authorized {
         return (401, r#"{"error":"unauthorized"}"#, None);
     }
-    match parse_event_body(body) {
+    match parse_event(query, body) {
         Some(ev) => (202, r#"{"ok":true}"#, Some(ev)),
         None => (400, r#"{"error":"bad event"}"#, None),
     }
@@ -595,6 +668,11 @@ mod tests {
         let ours = stops[1]["hooks"][0]["command"].as_str().unwrap();
         assert!(ours.contains(MARKER) && ours.ends_with("claude stop"), "{ours}");
         assert_eq!(v["hooks"]["Notification"][0]["hooks"][0]["command"].as_str().unwrap().ends_with("claude notification"), true);
+        // only prompts that really wait for the user (idle_prompt would also fire after a finished turn)
+        assert_eq!(v["hooks"]["Notification"][0]["matcher"], "permission_prompt|elicitation_dialog");
+        // a new prompt is reported too, so an older stop cannot be mistaken for the end of the new turn
+        assert!(v["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].as_str().unwrap().ends_with("claude start"));
+        assert!(v["hooks"]["UserPromptSubmit"][0].get("matcher").is_none());
         assert!(claude_has_hook(&after));
         assert!(!claude_has_hook(before));
     }
@@ -720,7 +798,8 @@ mod tests {
     #[test]
     fn the_script_carries_the_token_only_for_the_agent_event_endpoint() {
         let s = script_text("SECRETTOKEN", 39220);
-        assert!(s.contains("SECRETTOKEN") && s.contains("/agent-event") && s.contains("127.0.0.1:39220"));
+        assert!(s.contains("SECRETTOKEN") && s.contains("/agent-event?agent=") && s.contains("127.0.0.1:39220"));
+        assert!(s.contains("--data-binary @-"), "the agent's own stdin JSON is the body");
         assert!(!s.contains("/trigger"));
         let d = tmp("script");
         let p = write_script(&d, "T", 39220).unwrap();
@@ -731,36 +810,87 @@ mod tests {
 
     #[test]
     fn the_endpoint_accepts_only_an_authorised_known_agent_and_event() {
-        assert_eq!(route_event(true, r#"{"agent":"claude","event":"stop"}"#), (202, r#"{"ok":true}"#, Some((Agent::Claude, EventKind::Stop))));
-        assert_eq!(route_event(true, r#"{"agent":"codex","event":"notification"}"#).2, Some((Agent::Codex, EventKind::Notification)));
-        assert_eq!(route_event(false, r#"{"agent":"claude","event":"stop"}"#).0, 401);
-        assert_eq!(route_event(false, r#"{"agent":"claude","event":"stop"}"#).2, None);
-        for bad in [
-            "", "{", r#"{"agent":"claude"}"#, r#"{"event":"stop"}"#, r#"{"agent":"evil","event":"stop"}"#, r#"{"agent":"claude","event":"shutdown"}"#,
-            r#"{"agent":"claude","event":"STOP"}"#, r#"{"agent":1,"event":"stop"}"#, r#"[1]"#, r#"{"agent":"../x","event":"stop"}"#,
+        let ev = |agent, kind| Some(ParsedEvent { agent, kind, tail: None });
+        // new script: agent and event in the URL
+        assert_eq!(route_event(true, "agent=claude&event=stop", ""), (202, r#"{"ok":true}"#, ev(Agent::Claude, EventKind::Stop)));
+        assert_eq!(route_event(true, "agent=codex&event=notification", "{}").2, ev(Agent::Codex, EventKind::Notification));
+        assert_eq!(route_event(true, "agent=claude&event=start", "not json at all").2, ev(Agent::Claude, EventKind::Start));
+        // old script: agent and event in a JSON body
+        assert_eq!(route_event(true, "", r#"{"agent":"claude","event":"stop"}"#).2, ev(Agent::Claude, EventKind::Stop));
+        // not authorised: nothing is recorded, whatever the body says
+        assert_eq!(route_event(false, "agent=claude&event=stop", "").0, 401);
+        assert_eq!(route_event(false, "agent=claude&event=stop", "").2, None);
+        for (q, b) in [
+            ("", ""), ("", "{"), ("agent=claude", ""), ("event=stop", ""), ("agent=evil&event=stop", ""), ("agent=claude&event=shutdown", ""),
+            ("agent=claude&event=STOP", ""), ("agent=../x&event=stop", ""), ("agent=claude&agent=codex", ""), ("agent=&event=", ""),
+            ("", r#"{"agent":"evil","event":"stop"}"#), ("", r#"{"agent":1,"event":"stop"}"#), ("", "[1]"), ("", r#"{"agent":"claude"}"#),
         ] {
-            let r = route_event(true, bad);
-            assert_eq!((r.0, r.2), (400, None), "{bad}");
+            let r = route_event(true, q, b);
+            assert_eq!((r.0, r.2), (400, None), "{q:?} {b:?}");
         }
         // extra fields (text a process might try to smuggle in) are ignored, never stored
-        let r = route_event(true, r#"{"agent":"claude","event":"stop","tail":"rm -rf","transcript":"shut down"}"#);
-        assert_eq!(r.2, Some((Agent::Claude, EventKind::Stop)));
+        let r = route_event(true, "agent=claude&event=notification", r#"{"transcript":"shut down my laptop","message":"rm -rf"}"#);
+        assert_eq!(r.2, ev(Agent::Claude, EventKind::Notification));
     }
 
     #[test]
-    fn events_are_remembered_per_agent_and_the_list_is_capped() {
+    fn a_stop_keeps_the_agents_final_message_as_masked_data_and_nothing_else_does() {
+        let body = r#"{"hook_event_name":"Stop","session_id":"s","last_assistant_message":"All 12 tests passed. Mail me at someone@example.com","cwd":"C:/p"}"#;
+        let e = parse_event("agent=claude&event=stop", body).unwrap();
+        let tail = e.tail.expect("the final message is kept");
+        assert!(tail.contains("All 12 tests passed.") && !tail.contains("someone@example.com"), "{tail}");
+        // Codex spells it with dashes
+        let e = parse_event("agent=codex&event=stop", r#"{"type":"agent-turn-complete","last-assistant-message":"Done."}"#).unwrap();
+        assert_eq!(e.tail.as_deref(), Some("Done."));
+        // only a stop carries text; a prompt or a notification never stores any
+        assert_eq!(parse_event("agent=claude&event=start", body).unwrap().tail, None);
+        assert_eq!(parse_event("agent=claude&event=notification", body).unwrap().tail, None);
+        // no final message, an empty one, or a non-string: no tail
+        assert_eq!(parse_event("agent=claude&event=stop", r#"{"cwd":"x"}"#).unwrap().tail, None);
+        assert_eq!(parse_event("agent=claude&event=stop", r#"{"last_assistant_message":"   "}"#).unwrap().tail, None);
+        assert_eq!(parse_event("agent=claude&event=stop", r#"{"last_assistant_message":5}"#).unwrap().tail, None);
+        // a very long message is cut to the END (where the result is)
+        let long = format!("{{\"last_assistant_message\":\"{}THE-END\"}}", "x".repeat(20_000));
+        let t = parse_event("agent=claude&event=stop", &long).unwrap().tail.unwrap();
+        assert!(t.len() <= crate::session_verdict::TAIL_BYTES + 20 && t.ends_with("THE-END"), "{}", t.len());
+    }
+
+    #[test]
+    fn stop_start_and_notification_events_are_ordered_per_agent() {
         // other tests share the global list: use times far in the future
         let base = u64::MAX / 4;
-        record_event_at(Agent::Claude, EventKind::Stop, base + 1_000);
-        record_event_at(Agent::Codex, EventKind::Notification, base + 2_000);
-        assert_eq!(last_event_ms(Agent::Claude, EventKind::Stop), Some(base + 1_000));
-        assert_eq!(last_event_ms(Agent::Codex, EventKind::Notification), Some(base + 2_000));
-        assert!(stopped_since(Some(Agent::Claude), base + 1_000));
-        assert!(!stopped_since(Some(Agent::Claude), base + 1_001));
-        assert!(!stopped_since(Some(Agent::Codex), base), "a notification is not a stop");
-        assert!(stopped_since(None, base + 500));
+        let a = Agent::Claude;
+        let b = Agent::Codex;
+        record_event_at(a, EventKind::Start, base + 100, None);
+        assert!(!stop_is_latest(a, base), "a prompt without a stop is a running turn");
+        record_event_at(a, EventKind::Stop, base + 1_000, Some("first tail".into()));
+        assert!(stop_is_latest(a, base + 1_000));
+        assert!(!stop_is_latest(a, base + 1_001), "the stop is older than `since`");
+        assert_eq!(last_stop_tail(a).as_deref(), Some("first tail"));
+        assert_eq!(last_event_ms(a, EventKind::Stop), Some(base + 1_000));
+        // a new prompt: the old stop no longer says "finished"
+        record_event_at(a, EventKind::Start, base + 2_000, None);
+        assert!(!stop_is_latest(a, base));
+        // and the next stop does, with its own message
+        record_event_at(a, EventKind::Stop, base + 3_000, Some("second tail".into()));
+        assert!(stop_is_latest(a, base));
+        assert_eq!(last_stop_tail(a).as_deref(), Some("second tail"));
+        // another agent's events do not count for this one
+        assert!(!stop_is_latest(b, base));
+        record_event_at(b, EventKind::Notification, base + 4_000, None);
+        assert!(!stop_is_latest(b, base), "a notification is not a stop");
+        // a permission prompt after the latest stop = waiting for the user, until the agent moves on
+        assert!(needs_user(b, base));
+        assert!(!needs_user(b, base + 4_001), "older than `since`");
+        record_event_at(b, EventKind::Stop, base + 5_000, None);
+        assert!(!needs_user(b, base), "a stop after the prompt answers it");
+        record_event_at(a, EventKind::Notification, base + 6_000, None);
+        assert!(needs_user(a, base));
+        record_event_at(a, EventKind::Start, base + 7_000, None);
+        assert!(!needs_user(a, base), "a new prompt answers it too");
+        // the list stays capped
         for i in 0..(MAX_EVENTS as u64 + 10) {
-            record_event_at(Agent::Codex, EventKind::Stop, base + 10_000 + i);
+            record_event_at(b, EventKind::Stop, base + 10_000 + i, None);
         }
         assert!(EVENTS.lock().unwrap().len() <= MAX_EVENTS);
         assert_eq!(ago(120_000, 0), "2 minutes ago");

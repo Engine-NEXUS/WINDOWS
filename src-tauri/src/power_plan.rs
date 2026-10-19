@@ -6,24 +6,52 @@
 //! claimed when every word belongs to the small vocabulary of that command, so "restart instead" or
 //! "cancel the plan for the weekend" never reach this module.
 //!
-//! NOTHING IS ARMED YET: the observer and the unattended shutdown are later phases. Every answer says
-//! so while `ARMED_SUPPORTED` is false, so NEXUS never implies it will power off by itself.
+//! Whether a plan may ever power the laptop off by itself is a separate, explicit setting (`watchPower`):
+//! `off` (the default: the plan is only a note and watching only ever tells the user), `dry` (practice: it
+//! says what it WOULD do and never shuts down) or `on` (after a perfect finish: a 30 second countdown that
+//! any cancel path stops). The mode is read from settings on every step by `watch_runner`, so saying
+//! "turn off unattended shutdown" takes effect at once.
 
 use crate::power_cmd::PowerKind;
 use crate::watch_power::{read_back, WatchPlan};
 use std::sync::Mutex;
 
-/// Flipped to true by the phase that really watches a session and powers off. Until then the plan is
-/// only a note and every spoken answer says so.
-pub const ARMED_SUPPORTED: bool = false;
+/// The `watchPower` setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchPowerMode {
+    Off,
+    Dry,
+    On,
+}
 
-const NOT_ARMED: &str = "This is only noted for now, sir: I can't watch or power off by myself yet, so your laptop will stay on.";
+impl WatchPowerMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WatchPowerMode::Off => "off",
+            WatchPowerMode::Dry => "dry",
+            WatchPowerMode::On => "on",
+        }
+    }
+
+    /// Anything unknown is `Off`: a typo in settings must never arm the shutdown.
+    pub fn from_setting(s: &str) -> WatchPowerMode {
+        match s.trim().to_lowercase().as_str() {
+            "on" => WatchPowerMode::On,
+            "dry" => WatchPowerMode::Dry,
+            _ => WatchPowerMode::Off,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredPlan {
     pub plan: WatchPlan,
     /// "Never mind the shutdown, just tell me": watch, report, never power off.
     pub notify_only: bool,
+    /// Which plan this is: a new one replaces the old, and the watch starts over.
+    pub generation: u64,
+    /// When it was made (unix ms): only events after this count for it.
+    pub created_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +62,9 @@ pub enum PlanCommand {
     /// "shut down even if it fails" (the only way the clean-ending requirement is relaxed)
     EvenIfFails,
     SetKind(PowerKind),
+    /// "allow unattended shutdown" / "practice ..." / "turn off ...": changes the `watchPower` setting.
+    SetMode(WatchPowerMode),
+    ModeStatus,
 }
 
 impl PlanCommand {
@@ -45,6 +76,8 @@ impl PlanCommand {
             PlanCommand::NotifyOnly => "notify_only".to_string(),
             PlanCommand::EvenIfFails => "even_if_fails".to_string(),
             PlanCommand::SetKind(k) => format!("kind:{}", k.as_str()),
+            PlanCommand::SetMode(m) => format!("mode:{}", m.as_str()),
+            PlanCommand::ModeStatus => "mode_status".to_string(),
         }
     }
 
@@ -54,29 +87,44 @@ impl PlanCommand {
             "status" => PlanCommand::Status,
             "notify_only" => PlanCommand::NotifyOnly,
             "even_if_fails" => PlanCommand::EvenIfFails,
+            "mode_status" => PlanCommand::ModeStatus,
+            other if other.starts_with("mode:") => match &other[5..] {
+                "off" => PlanCommand::SetMode(WatchPowerMode::Off),
+                "dry" => PlanCommand::SetMode(WatchPowerMode::Dry),
+                "on" => PlanCommand::SetMode(WatchPowerMode::On),
+                _ => return None,
+            },
             other => PlanCommand::SetKind(PowerKind::from_str(other.strip_prefix("kind:")?)?),
         })
     }
 }
 
 static PLAN: Mutex<Option<StoredPlan>> = Mutex::new(None);
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Remember a new plan (replaces any older one).
 pub fn set(plan: WatchPlan) {
     if let Ok(mut g) = PLAN.lock() {
-        *g = Some(StoredPlan { plan, notify_only: false });
+        let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        *g = Some(StoredPlan { plan, notify_only: false, generation, created_ms: crate::agent_hooks::now_ms() });
     }
 }
 
-#[cfg(test)]
 pub fn current() -> Option<StoredPlan> {
     PLAN.lock().ok().and_then(|g| g.clone())
 }
 
-/// Run a command against the held plan and return what NEXUS says.
-pub fn run(cmd: &PlanCommand) -> String {
+/// Drop the plan without a word (the watch finished, or gave up).
+pub fn clear() {
+    if let Ok(mut g) = PLAN.lock() {
+        *g = None;
+    }
+}
+
+/// Run a command against the held plan and return what NEXUS says. `mode` = the `watchPower` setting NOW.
+pub fn run(cmd: &PlanCommand, mode: WatchPowerMode) -> String {
     match PLAN.lock() {
-        Ok(mut g) => apply(cmd, &mut g),
+        Ok(mut g) => apply(cmd, &mut g, mode),
         Err(_) => "I couldn't reach my notes on that, sir.".to_string(),
     }
 }
@@ -103,19 +151,31 @@ fn describe(s: &StoredPlan) -> String {
     }
 }
 
-fn tail() -> String {
-    if ARMED_SUPPORTED {
-        String::new()
-    } else {
-        format!(" {NOT_ARMED}")
+/// What the unattended-shutdown setting means right now, in one sentence.
+pub fn mode_line(mode: WatchPowerMode) -> &'static str {
+    match mode {
+        WatchPowerMode::Off => "Unattended shutdown is off, sir. I will never power your laptop off by myself.",
+        WatchPowerMode::Dry => "Unattended shutdown is in practice mode, sir. When a watched session ends perfectly I'll tell you what I would have done, but I won't shut down.",
+        WatchPowerMode::On => "Unattended shutdown is on, sir. When a watched session ends perfectly I'll count down 30 seconds, and you can say cancel, touch the keyboard or move the mouse to stop me.",
+    }
+}
+
+fn tail(mode: WatchPowerMode) -> String {
+    match mode {
+        WatchPowerMode::Off => " Unattended shutdown is off, so your laptop will stay on. Say allow unattended shutdown to switch it on.".to_string(),
+        WatchPowerMode::Dry => " Unattended shutdown is in practice mode: I'll tell you what I would do but won't shut down.".to_string(),
+        WatchPowerMode::On => " If it ends perfectly I'll count down 30 seconds first, and you can say cancel.".to_string(),
     }
 }
 
 /// Pure state change + the sentence to speak.
-pub fn apply(cmd: &PlanCommand, slot: &mut Option<StoredPlan>) -> String {
+pub fn apply(cmd: &PlanCommand, slot: &mut Option<StoredPlan>, mode: WatchPowerMode) -> String {
     match (cmd, slot.as_mut()) {
+        // the unattended-shutdown setting is global: it needs no plan
+        (PlanCommand::SetMode(m), _) => mode_line(*m).to_string(),
+        (PlanCommand::ModeStatus, _) => mode_line(mode).to_string(),
         (PlanCommand::Status, None) => "I'm not holding any shutdown plan, sir.".to_string(),
-        (PlanCommand::Status, Some(s)) => format!("{}.{}", describe(s), tail()),
+        (PlanCommand::Status, Some(s)) => format!("{}.{}", describe(s), tail(mode)),
         (PlanCommand::Cancel, None) => "There's no shutdown plan to cancel, sir. Nothing will be turned off.".to_string(),
         (PlanCommand::Cancel, Some(_)) => {
             *slot = None;
@@ -124,17 +184,17 @@ pub fn apply(cmd: &PlanCommand, slot: &mut Option<StoredPlan>) -> String {
         (_, None) => "There's no shutdown plan to change, sir. Say watch over this and shut down when it's perfect to make one.".to_string(),
         (PlanCommand::NotifyOnly, Some(s)) => {
             s.notify_only = true;
-            format!("Understood, sir. I'll only tell you when {} finishes, and I won't power anything off.{}", who(&s.plan), tail())
+            format!("Understood, sir. I'll only tell you when {} finishes, and I won't power anything off.{}", who(&s.plan), tail(mode))
         }
         (PlanCommand::EvenIfFails, Some(s)) => {
             s.notify_only = false;
             s.plan.require_clean = false;
-            format!("Understood, sir. I'll {} when {} finishes, even if it does not end cleanly.{}", action_words(s.plan.kind), who(&s.plan), tail())
+            format!("Understood, sir. I'll {} when {} finishes, even if it does not end cleanly.{}", action_words(s.plan.kind), who(&s.plan), tail(mode))
         }
         (PlanCommand::SetKind(k), Some(s)) => {
             s.plan.kind = *k;
             s.notify_only = false;
-            format!("Changed, sir. When {} finishes I'll {}.{}", who(&s.plan), action_words(*k), tail())
+            format!("Changed, sir. When {} finishes I'll {}.{}", who(&s.plan), action_words(*k), tail(mode))
         }
     }
 }
@@ -204,6 +264,38 @@ const NOUNS_OF_THE_PLAN: &[&str] = &[
     "shutdown plan", "shut down plan", "power off plan", "power plan", "the plan", "the watch", "this watch", "the shutdown watch",
 ];
 
+const MODE_VOCAB: &[&str] = &[
+    "allow", "enable", "activate", "turn", "on", "off", "disable", "disallow", "stop", "forbid", "block", "never", "unattended", "automatic",
+    "auto", "shutdown", "shut", "down", "power", "after", "a", "watch", "watching", "practice", "rehearse", "dry", "run", "test", "mode",
+    "switch", "the", "is", "status", "allowing", "can", "you", "ever", "by", "itself", "only",
+];
+
+/// "allow unattended shutdown", "practice unattended shutdown", "turn off unattended shutdown", "is
+/// unattended shutdown on". Needs the word "unattended" (or "automatic"/"auto" next to a shutdown word) and
+/// nothing outside the small vocabulary, so "turn off the laptop" or "enable automatic updates" never match.
+fn parse_mode_command(tokens: &[&str], p: &str) -> Option<PlanCommand> {
+    if !only_vocab(tokens, MODE_VOCAB) {
+        return None;
+    }
+    let shutdown_word = has_any(p, &["shutdown", "shut down", "power off", "power"]);
+    if !(has(p, "unattended") || ((has(p, "automatic") || has(p, "auto")) && shutdown_word)) || !shutdown_word {
+        return None;
+    }
+    if has(p, "status") || tokens.first() == Some(&"is") {
+        return Some(PlanCommand::ModeStatus);
+    }
+    if has_any(p, &["practice", "rehearse", "dry", "test"]) {
+        return Some(PlanCommand::SetMode(WatchPowerMode::Dry));
+    }
+    if has_any(p, &["off", "disable", "disallow", "stop", "forbid", "block", "never"]) {
+        return Some(PlanCommand::SetMode(WatchPowerMode::Off));
+    }
+    if has_any(p, &["allow", "enable", "activate", "on"]) {
+        return Some(PlanCommand::SetMode(WatchPowerMode::On));
+    }
+    None
+}
+
 /// Parse a command about the held plan. `None` = not about the plan.
 pub fn parse_command(text: &str) -> Option<PlanCommand> {
     let t = norm(text);
@@ -212,6 +304,10 @@ pub fn parse_command(text: &str) -> Option<PlanCommand> {
     }
     let tokens: Vec<&str> = t.split(' ').collect();
     let p = format!(" {t} ");
+
+    if let Some(mode_cmd) = parse_mode_command(&tokens, &p) {
+        return Some(mode_cmd);
+    }
 
     // "never mind the shutdown, just tell me (when it's done)"
     let tell_me = has_any(&p, &["just tell me", "just notify me", "just let me know", "only tell me", "only notify me", "only let me know", "just alert me", "just message me"]);
@@ -311,7 +407,7 @@ mod tests {
     }
 
     fn held(kind: PowerKind) -> Option<StoredPlan> {
-        Some(StoredPlan { plan: plan(kind), notify_only: false })
+        Some(StoredPlan { plan: plan(kind), notify_only: false, generation: 0, created_ms: 0 })
     }
 
     #[test]
@@ -378,11 +474,13 @@ mod tests {
     fn the_wire_form_round_trips() {
         for c in [
             PlanCommand::Cancel, PlanCommand::Status, PlanCommand::NotifyOnly, PlanCommand::EvenIfFails,
-            PlanCommand::SetKind(PowerKind::Sleep), PlanCommand::SetKind(PowerKind::SignOut),
+            PlanCommand::SetKind(PowerKind::Sleep), PlanCommand::SetKind(PowerKind::SignOut), PlanCommand::ModeStatus,
+            PlanCommand::SetMode(WatchPowerMode::On), PlanCommand::SetMode(WatchPowerMode::Dry), PlanCommand::SetMode(WatchPowerMode::Off),
         ] {
             assert_eq!(PlanCommand::from_str(&c.as_str()), Some(c));
         }
         assert_eq!(PlanCommand::from_str("kind:bogus"), None);
+        assert_eq!(PlanCommand::from_str("mode:maybe"), None);
         assert_eq!(PlanCommand::from_str("nonsense"), None);
     }
 
@@ -391,47 +489,101 @@ mod tests {
         // nothing held
         let mut none: Option<StoredPlan> = None;
         for c in [PlanCommand::Cancel, PlanCommand::Status, PlanCommand::NotifyOnly, PlanCommand::EvenIfFails, PlanCommand::SetKind(PowerKind::Sleep)] {
-            let said = apply(&c, &mut none);
+            let said = apply(&c, &mut none, WatchPowerMode::Off);
             assert!(none.is_none(), "{c:?} must not create a plan");
             assert!(said.contains("no shutdown plan") || said.contains("not holding"), "{said}");
         }
 
         // status tells the whole plan and that nothing is armed
         let mut s = held(PowerKind::Shutdown);
-        let said = apply(&PlanCommand::Status, &mut s);
+        let said = apply(&PlanCommand::Status, &mut s, WatchPowerMode::Off);
         assert!(said.contains("claude") && said.contains("shut down your laptop") && said.contains("only if it looks perfect"), "{said}");
         assert!(said.contains("laptop will stay on"), "{said}");
 
         // each change applies and is spoken
-        let said = apply(&PlanCommand::SetKind(PowerKind::Sleep), &mut s);
+        let said = apply(&PlanCommand::SetKind(PowerKind::Sleep), &mut s, WatchPowerMode::Off);
         assert_eq!(s.as_ref().unwrap().plan.kind, PowerKind::Sleep);
         assert!(said.contains("put your laptop to sleep"), "{said}");
-        let said = apply(&PlanCommand::EvenIfFails, &mut s);
+        let said = apply(&PlanCommand::EvenIfFails, &mut s, WatchPowerMode::Off);
         assert!(!s.as_ref().unwrap().plan.require_clean);
         assert!(said.contains("even if it does not end cleanly"), "{said}");
-        let said = apply(&PlanCommand::NotifyOnly, &mut s);
+        let said = apply(&PlanCommand::NotifyOnly, &mut s, WatchPowerMode::Off);
         assert!(s.as_ref().unwrap().notify_only);
         assert!(said.contains("won't power anything off"), "{said}");
-        let said = apply(&PlanCommand::Status, &mut s);
+        let said = apply(&PlanCommand::Status, &mut s, WatchPowerMode::Off);
         assert!(said.contains("only tell you") && !said.contains("shut down your laptop"), "{said}");
         // a new power action turns "just tell me" back off
-        apply(&PlanCommand::SetKind(PowerKind::Shutdown), &mut s);
+        apply(&PlanCommand::SetKind(PowerKind::Shutdown), &mut s, WatchPowerMode::Off);
         assert!(!s.as_ref().unwrap().notify_only);
 
         // cancel removes it for good
-        let said = apply(&PlanCommand::Cancel, &mut s);
+        let said = apply(&PlanCommand::Cancel, &mut s, WatchPowerMode::Off);
         assert!(s.is_none());
         assert!(said.contains("Nothing will be turned off"), "{said}");
-        assert!(apply(&PlanCommand::Status, &mut s).contains("not holding"));
+        assert!(apply(&PlanCommand::Status, &mut s, WatchPowerMode::Off).contains("not holding"));
     }
 
     #[test]
-    fn nothing_claims_to_be_armed_while_the_observer_does_not_exist() {
-        assert!(!ARMED_SUPPORTED, "flip this only together with the phase that really powers off");
-        let mut s = held(PowerKind::Shutdown);
-        for c in [PlanCommand::Status, PlanCommand::NotifyOnly, PlanCommand::EvenIfFails, PlanCommand::SetKind(PowerKind::Lock)] {
-            assert!(apply(&c, &mut s).contains("stay on"), "{c:?}");
+    fn every_answer_says_what_the_unattended_shutdown_setting_is() {
+        for (mode, must) in [
+            (WatchPowerMode::Off, "stay on"),
+            (WatchPowerMode::Dry, "practice mode"),
+            (WatchPowerMode::On, "count down 30 seconds"),
+        ] {
+            let mut s = held(PowerKind::Shutdown);
+            for c in [PlanCommand::Status, PlanCommand::NotifyOnly, PlanCommand::EvenIfFails, PlanCommand::SetKind(PowerKind::Lock)] {
+                let said = apply(&c, &mut s, mode);
+                assert!(said.contains(must), "{mode:?} {c:?}: {said}");
+            }
         }
+        // anything that is not exactly on / dry means off: a typo in settings never arms the shutdown
+        for v in ["", "off", "OFF", "true", "yes", "enabled", "onn", "1", " "] {
+            assert_eq!(WatchPowerMode::from_setting(v), WatchPowerMode::Off, "{v:?}");
+        }
+        assert_eq!(WatchPowerMode::from_setting("on"), WatchPowerMode::On);
+        assert_eq!(WatchPowerMode::from_setting(" On "), WatchPowerMode::On);
+        assert_eq!(WatchPowerMode::from_setting("dry"), WatchPowerMode::Dry);
+    }
+
+    #[test]
+    fn the_mode_commands_are_recognised_and_strict() {
+        for (t, want) in [
+            ("allow unattended shutdown", WatchPowerMode::On),
+            ("turn on unattended shutdown", WatchPowerMode::On),
+            ("enable unattended shutdown", WatchPowerMode::On),
+            ("activate automatic shutdown after a watch", WatchPowerMode::On),
+            ("nexus enable automatic shutdown", WatchPowerMode::On),
+            ("practice unattended shutdown", WatchPowerMode::Dry),
+            ("dry run unattended shutdown", WatchPowerMode::Dry),
+            ("test unattended shutdown", WatchPowerMode::Dry),
+            ("turn off unattended shutdown", WatchPowerMode::Off),
+            ("disable unattended shutdown", WatchPowerMode::Off),
+            ("stop allowing unattended shutdown", WatchPowerMode::Off),
+            ("never shut down unattended", WatchPowerMode::Off),
+            ("disallow automatic shutdown after a watch", WatchPowerMode::Off),
+            ("forbid unattended power off", WatchPowerMode::Off),
+        ] {
+            assert_eq!(parse_command(t), Some(PlanCommand::SetMode(want)), "{t}");
+        }
+        for t in ["is unattended shutdown on", "unattended shutdown status", "is automatic shutdown on"] {
+            assert_eq!(parse_command(t), Some(PlanCommand::ModeStatus), "{t}");
+        }
+        for t in [
+            "allow shutdown", "turn off the laptop", "enable automatic updates", "turn on the unattended camera", "allow unattended access",
+            "shut down my laptop", "unattended", "automatic", "allow unattended shutdown of the server", "turn on auto save",
+            "disable shutdown", "practice", "allow unattended shutdown and open chrome",
+        ] {
+            assert!(!matches!(parse_command(t), Some(PlanCommand::SetMode(_)) | Some(PlanCommand::ModeStatus)), "{t}");
+        }
+        // the setting needs no plan and changes no plan
+        let mut none: Option<StoredPlan> = None;
+        let said = apply(&PlanCommand::SetMode(WatchPowerMode::On), &mut none, WatchPowerMode::On);
+        assert!(said.contains("count down 30 seconds") && none.is_none(), "{said}");
+        let mut held_plan = held(PowerKind::Shutdown);
+        let before = held_plan.clone();
+        apply(&PlanCommand::SetMode(WatchPowerMode::Dry), &mut held_plan, WatchPowerMode::Dry);
+        assert_eq!(held_plan, before);
+        assert!(apply(&PlanCommand::ModeStatus, &mut none, WatchPowerMode::Off).contains("never power your laptop off"));
     }
 
     #[test]
@@ -462,7 +614,7 @@ mod tests {
         set(WatchPlan { agent: None, kind: PowerKind::Sleep, require_clean: false, deadline_mins: Some(30) });
         let c = current().unwrap();
         assert_eq!((c.plan.kind, c.plan.agent), (PowerKind::Sleep, None));
-        assert!(run(&PlanCommand::Cancel).contains("dropped"));
+        assert!(run(&PlanCommand::Cancel, WatchPowerMode::Off).contains("dropped"));
         assert!(current().is_none());
     }
 }

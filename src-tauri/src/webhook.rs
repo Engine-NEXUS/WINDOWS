@@ -15,6 +15,8 @@ use std::time::Duration;
 
 pub const WEBHOOK_PORT: u16 = 39220;
 const MAX_BODY: usize = 8192;
+/// A Stop hook posts the agent's final message, which can be long. Only `/agent-event` may send this much.
+const MAX_AGENT_BODY: usize = 64 * 1024;
 const TOKEN_SERVICE: &str = "webhook";
 
 /// Get-or-create the webhook bearer token (keychain-stored).
@@ -49,6 +51,7 @@ pub fn rotate_webhook_token() -> String {
 /// Parsed webhook request. Pure + unit-tested.
 #[derive(Debug, PartialEq)]
 pub struct WebhookRequest {
+    pub query: String,
     pub method: String,
     pub path: String,
     pub auth: String,
@@ -57,23 +60,42 @@ pub struct WebhookRequest {
 
 /// Parse a raw HTTP request (headers + body already joined).
 /// Returns None on malformed input or oversize body.
+#[cfg(test)]
 pub fn parse_request(raw: &str) -> Option<WebhookRequest> {
+    parse_request_limited(raw, MAX_BODY)
+}
+
+/// Body limit for the request described by `head`: only `/agent-event` may be large.
+fn body_limit(head: &str) -> usize {
+    let target = head.lines().next().and_then(|l| l.split_whitespace().nth(1)).unwrap_or("");
+    let path = target.split('?').next().unwrap_or("");
+    if path == "/agent-event" {
+        MAX_AGENT_BODY
+    } else {
+        MAX_BODY
+    }
+}
+
+pub fn parse_request_limited(raw: &str, limit: usize) -> Option<WebhookRequest> {
     let (head, body) = raw.split_once("\r\n\r\n")?;
     let mut lines = head.lines();
     let request_line = lines.next()?;
     let mut parts = request_line.split_whitespace();
     let method = parts.next()?.to_string();
-    let path = parts.next()?.split('?').next()?.to_string();
+    let target = parts.next()?;
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let (path, query) = (path.to_string(), query.to_string());
     let mut auth = String::new();
     for line in lines {
         if let Some(v) = line.strip_prefix("Authorization:") {
             auth = v.trim().to_string();
         }
     }
-    if body.len() > MAX_BODY {
+    if body.len() > limit {
         return None;
     }
     Some(WebhookRequest {
+        query,
         method,
         path,
         auth,
@@ -151,7 +173,7 @@ fn handle_conn(
                 .and_then(|v| v.trim().parse().ok())
         })
         .unwrap_or(0);
-    if content_len > MAX_BODY {
+    if content_len > body_limit(&head) {
         respond(&mut stream, 400, r#"{"error":"too large"}"#);
         return None;
     }
@@ -163,7 +185,7 @@ fn handle_conn(
         raw.extend_from_slice(&buf[..n]);
     }
     let body = String::from_utf8_lossy(&raw[hlen..]).to_string();
-    let req = parse_request(&format!("{}\r\n\r\n{}", head, body))?;
+    let req = parse_request_limited(&format!("{}\r\n\r\n{}", head, body), body_limit(&head))?;
 
     if req.method == "GET" && req.path == "/health" {
         respond(&mut stream, 200, r#"{"ok":true,"service":"nexus-webhook"}"#);
@@ -173,9 +195,9 @@ fn handle_conn(
         // An agent's Stop hook says "claude stopped". Its own token (never the /trigger one), a body of two
         // words, and nothing that can run a command: see agent_hooks.
         let ok = req.method == "POST" && bearer_ok(&req.auth, agent_token);
-        let (code, reply, event) = crate::agent_hooks::route_event(ok, &req.body);
-        if let Some((agent, kind)) = event {
-            crate::agent_hooks::record_event_at(agent, kind, crate::agent_hooks::now_ms());
+        let (code, reply, event) = crate::agent_hooks::route_event(ok, &req.query, &req.body);
+        if let Some(ev) = event {
+            crate::agent_hooks::record_event_at(ev.agent, ev.kind, crate::agent_hooks::now_ms(), ev.tail);
         }
         respond(&mut stream, code, reply);
         return None;
@@ -374,13 +396,15 @@ mod agent_event_http_tests {
 
 #[cfg(all(test, windows))]
 mod agent_script_tests {
-    use crate::agent_hooks::{parse_event_body, write_script, Agent, EventKind};
+    use crate::agent_hooks::{parse_event, write_script, Agent, EventKind};
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::process::Stdio;
 
     /// Runs the REAL generated script through cmd and curl against a local socket and returns the exact
-    /// request an agent's hook would make. `None` when curl.exe is not on this machine.
-    fn run_script(args: &[&str]) -> Option<String> {
+    /// request an agent's hook would make. `stdin` is what the agent's hook would pipe in. `None` when
+    /// curl.exe is not on this machine.
+    fn run_script(args: &[&str], stdin: Option<&str>) -> Option<String> {
         if std::process::Command::new("curl.exe").arg("--version").output().is_err() {
             eprintln!("curl.exe not available: skipped");
             return None;
@@ -412,11 +436,22 @@ mod agent_script_tests {
             let _ = s.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}");
             String::from_utf8_lossy(&raw).to_string()
         });
-        let dir = std::env::temp_dir().join(format!("nexus_script_run_{}_{}", std::process::id(), args.len()));
+        let dir = std::env::temp_dir().join(format!("nexus_script_run_{}_{}_{}", std::process::id(), args.len(), stdin.is_some()));
         let _ = std::fs::remove_dir_all(&dir);
         let script = write_script(&dir, "agent-token", port).unwrap();
-        let status = std::process::Command::new(&script).args(args).status().unwrap();
-        assert!(status.success());
+        let mut child = std::process::Command::new(&script)
+            .args(args)
+            .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        if let Some(text) = stdin {
+            let mut pipe = child.stdin.take().unwrap();
+            pipe.write_all(text.as_bytes()).unwrap();
+            drop(pipe);
+        }
+        assert!(child.wait().unwrap().success());
         let request = server.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         Some(request)
@@ -426,22 +461,40 @@ mod agent_script_tests {
         request.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("")
     }
 
+    fn query_of(request: &str) -> &str {
+        let target = request.lines().next().and_then(|l| l.split_whitespace().nth(1)).unwrap_or("");
+        target.split_once('?').map(|(_, q)| q).unwrap_or("")
+    }
+
     #[test]
     fn the_generated_script_posts_the_right_request_through_cmd_and_curl() {
-        let Some(request) = run_script(&["claude", "notification"]) else { return };
-        assert!(request.starts_with("POST /agent-event HTTP/1.1"), "{request}");
+        let Some(request) = run_script(&["claude", "notification"], None) else { return };
+        assert!(request.starts_with("POST /agent-event?agent=claude&event=notification HTTP/1.1"), "{request}");
         assert!(request.to_lowercase().contains("authorization: bearer agent-token"), "{request}");
-        assert_eq!(parse_event_body(body_of(&request)), Some((Agent::Claude, EventKind::Notification)), "{request}");
+        let ev = parse_event(query_of(&request), body_of(&request)).expect("a valid event");
+        assert_eq!((ev.agent, ev.kind, ev.tail), (Agent::Claude, EventKind::Notification, None), "{request}");
+    }
+
+    #[test]
+    fn a_claude_stop_carries_the_final_message_the_hook_received_on_stdin() {
+        let stdin = r#"{"hook_event_name":"Stop","session_id":"s1","transcript_path":"C:/x/t.jsonl","last_assistant_message":"Implemented it.\nAll 12 tests passed."}"#;
+        let Some(request) = run_script(&["claude", "stop"], Some(stdin)) else { return };
+        assert_eq!(body_of(&request), stdin, "the body is exactly what the hook piped in");
+        let ev = parse_event(query_of(&request), body_of(&request)).expect("a valid event");
+        assert_eq!((ev.agent, ev.kind), (Agent::Claude, EventKind::Stop));
+        assert_eq!(ev.tail.as_deref(), Some("Implemented it.\nAll 12 tests passed."), "{request}");
     }
 
     #[test]
     fn codex_style_calls_default_to_stop_and_ignore_the_json_codex_appends() {
         let payload = r#"{"type":"agent-turn-complete","turn-id":"12345","input-messages":["rm -rf /"]}"#;
-        let Some(request) = run_script(&["codex", "stop", payload]) else { return };
-        assert_eq!(parse_event_body(body_of(&request)), Some((Agent::Codex, EventKind::Stop)), "{request}");
-        assert!(!request.contains("rm -rf"), "what the agent passes along is never forwarded");
+        let Some(request) = run_script(&["codex", "stop", payload], None) else { return };
+        let ev = parse_event(query_of(&request), body_of(&request)).expect("a valid event");
+        assert_eq!((ev.agent, ev.kind), (Agent::Codex, EventKind::Stop), "{request}");
+        assert!(!request.contains("rm -rf"), "what the agent passes along as an argument is never forwarded");
         // no event argument at all: still a stop
-        let Some(request) = run_script(&["claude"]) else { return };
-        assert_eq!(parse_event_body(body_of(&request)), Some((Agent::Claude, EventKind::Stop)), "{request}");
+        let Some(request) = run_script(&["claude"], None) else { return };
+        let ev = parse_event(query_of(&request), body_of(&request)).expect("a valid event");
+        assert_eq!((ev.agent, ev.kind), (Agent::Claude, EventKind::Stop), "{request}");
     }
 }

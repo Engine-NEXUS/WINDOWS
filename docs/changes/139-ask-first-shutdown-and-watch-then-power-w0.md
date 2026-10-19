@@ -35,6 +35,10 @@ Date: 2026-10-18. Plan: `docs/features/142-watch-session-then-power-off-plan.md`
 
 W2 `session_verdict.rs` (judge), W3 `session_observer.rs` (evidence; both `#[cfg(test)]` until W5), W4 `agent_hooks.rs` + `POST /agent-event` (own token; approval-gated, backed-up edit of Claude Code `settings.json` Stop/Notification hooks and Codex `config.toml` `notify`; only NEXUS entries are ever replaced or removed). A real generated script was run through cmd and curl.exe against a local socket in a test. See doc 142 for the details and the honest limits.
 
+## W5 (2026-10-19): the unattended shutdown, off by default
+
+`watch_runner.rs`, setting `watchPower` (off / dry / on), `agent_hooks` extended so a Stop hook carries the agent's final message and a new prompt cancels an older stop. See the W5 block in doc 142 for the exact conditions, every cancel path and what was NOT verified. Practice mode first.
+
 ## Known unrelated failures
 
 3 `intent_parser` PR-list tests ("open pr list" now parses as `OpenGitHubDashboard`) and a flaky `auth_vault` keyring test under parallel runs. The dead-code gate also lists items from other in-progress work (`center_for`, `tts::read_tts_emotion_setting`, `vision` fields).

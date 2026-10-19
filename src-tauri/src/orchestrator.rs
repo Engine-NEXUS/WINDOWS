@@ -5578,13 +5578,38 @@ async fn run_watch_then_power<R: Runtime>(
     let Some(k) = crate::power_cmd::PowerKind::from_str(&kind) else {
         return say_and_finish(&app, request_id, "I didn't catch which power command you meant, sir.".into());
     };
-    let plan = crate::watch_power::WatchPlan { agent, kind: k, require_clean, deadline_mins };
-    let speech = format!(
-        "I understood: {}. But automatic power-off after a watch isn't switched on yet, sir, so I haven't armed it and your laptop will stay on. I've kept the plan; say cancel the shutdown plan to drop it, or what are you watching to hear it again.",
-        crate::watch_power::read_back(&plan)
-    );
+    let mut plan = crate::watch_power::WatchPlan { agent, kind: k, require_clean, deadline_mins };
+    // "this session": the agent in the window in front, when it can be told
+    if plan.agent.is_none() {
+        let title = crate::live::commands::window::get_foreground_window_title().unwrap_or_default().to_lowercase();
+        plan.agent = ["claude", "codex"].iter().find(|a| title.contains(**a)).map(|a| (*a).to_string());
+    }
+    let hookable = plan.agent.as_deref().and_then(crate::agent_hooks::Agent::from_name);
     crate::power_plan::set(plan);
-    say_and_finish(&app, request_id, speech)
+    let mode = crate::watch_runner::read_mode(&app);
+    let held = crate::power_plan::run(&crate::power_plan::PlanCommand::Status, mode);
+    let note = match hookable {
+        None => " But I can only tell when Claude Code or Codex stops, and I couldn't tell which one this is, so I'm not watching yet; say watch Claude, or watch Codex, with the rest.".to_string(),
+        Some(a) => {
+            let hooked = crate::agent_hooks::config_path(a).map_or(false, |c| crate::agent_hooks::is_installed(a, &c));
+            if !hooked {
+                format!(" But I can't tell when {} stops without its hook, so I'm not watching yet; say hook up {} first.", a.label(), a.name())
+            } else if mode == crate::power_plan::WatchPowerMode::Off {
+                String::new()
+            } else {
+                format!(" I'm watching {} now.", a.label())
+            }
+        }
+    };
+    crate::watch_runner::ensure_running(app.clone());
+    say_and_finish(&app, request_id, format!("I understood: {held}{note} Say cancel the shutdown plan to drop it."))
+}
+
+/// Speak a line that nobody just asked for (the countdown announcement and what follows it). It takes the floor
+/// at once, like any request, because a countdown that can power the laptop off must be heard.
+pub(crate) fn speak_unprompted<R: Runtime>(app: &AppHandle<R>, text: String) {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let _ = say_and_finish(app, request_id, text);
 }
 
 /// Write the hook script and add NEXUS's hook to the agent's settings (a backup is made first).
@@ -5602,12 +5627,15 @@ fn install_agent_hook<R: Runtime>(app: &AppHandle<R>, agent: crate::agent_hooks:
         Err(e) => return e.spoken(agent),
     };
     match crate::agent_hooks::install(agent, &cfg, &script) {
-        Ok(done) => format!(
+        Ok(done) => {
+            crate::watch_runner::ensure_running(app.clone());
+            format!(
             "Done, sir. {} will now tell me when it stops.{} Start a new {} session for it to take effect.",
             agent.label(),
             if done.backup.is_some() { " A backup of its settings is saved beside the file." } else { "" },
             agent.label()
-        ),
+            )
+        }
         Err(e) => e.spoken(agent),
     }
 }
@@ -5654,8 +5682,31 @@ async fn run_agent_hook_command<R: Runtime>(app: AppHandle<R>, action: String, a
 /// "shut down even if it fails": edits or reports the one plan NEXUS is holding (doc 142, phase W1).
 async fn run_watch_plan_command<R: Runtime>(app: AppHandle<R>, command: String) -> Result<ProcessResult, String> {
     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-    let speech = match crate::power_plan::PlanCommand::from_str(&command) {
-        Some(cmd) => crate::power_plan::run(&cmd),
+    use crate::power_plan::{PlanCommand, WatchPowerMode};
+    let speech = match PlanCommand::from_str(&command) {
+        Some(PlanCommand::SetMode(m)) => {
+            let mut patch = serde_json::Map::new();
+            patch.insert("watchPower".to_string(), serde_json::Value::String(m.as_str().to_string()));
+            match crate::commands::settings_patch(app.clone(), patch) {
+                Ok(()) => {
+                    crate::watch_runner::ensure_running(app.clone());
+                    let mut said = crate::power_plan::run(&PlanCommand::SetMode(m), m);
+                    if m != WatchPowerMode::Off {
+                        said.push_str(" It only ever applies to a plan you make with watch and shut down, and only for Claude Code or Codex with their hook installed.");
+                    }
+                    said
+                }
+                Err(e) => {
+                    tracing::warn!("watchPower: could not save the setting: {e}");
+                    "I couldn't save that setting, sir, so nothing changed.".to_string()
+                }
+            }
+        }
+        Some(cmd) => {
+            let said = crate::power_plan::run(&cmd, crate::watch_runner::read_mode(&app));
+            crate::watch_runner::ensure_running(app.clone());
+            said
+        }
         None => "I didn't catch what to do with the plan, sir.".to_string(),
     };
     say_and_finish(&app, request_id, speech)
@@ -6073,7 +6124,7 @@ async fn run_power_action<R: Runtime>(app: AppHandle<R>, kind: String) -> Result
 }
 
 /// The user said yes to a power command: note what is open, announce, count down.
-async fn start_power<R: Runtime>(app: &AppHandle<R>, k: crate::power_cmd::PowerKind) -> String {
+pub(crate) async fn start_power<R: Runtime>(app: &AppHandle<R>, k: crate::power_cmd::PowerKind) -> String {
     let mut noted = String::new();
     if k.needs_snapshot() {
         if let Ok(dir) = app.path().app_data_dir() {

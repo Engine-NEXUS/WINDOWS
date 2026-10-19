@@ -26,12 +26,15 @@ pub enum Signal {
     /// The agent itself said it stopped (Stop hook / notify command).
     AgentHook,
     /// The PTY adapter's own task-complete detection (a session NEXUS started).
+    /// (Compiled for tests only until "ask claude to X and shut down when it's perfect" is wired.)
+    #[cfg(test)]
     AdapterTaskComplete,
     /// The agent's whole process tree is idle: no CPU, no children, no disk writes.
     ProcessIdle,
     /// The terminal / IDE window reads as finished: prompt back, no spinner.
     WindowQuiet,
-    /// The captured output of a session NEXUS started has stopped moving.
+    /// The captured output of a session NEXUS started has stopped moving. (Tests only, like the one above.)
+    #[cfg(test)]
     OutputQuiet,
 }
 
@@ -58,6 +61,7 @@ pub struct Evidence {
 }
 
 impl Evidence {
+    #[cfg(test)]
     pub fn new(signals: Vec<Signal>, tail: &str) -> Evidence {
         Evidence {
             signals,
@@ -243,6 +247,11 @@ fn distinct(signals: &[Signal]) -> usize {
     s.len()
 }
 
+/// The session looks over: two independent signals say so and nothing says it is still busy.
+pub fn has_ended(ev: &Evidence) -> bool {
+    distinct(&ev.signals) >= 2 && !ev.still_busy
+}
+
 /// Decide. `require_clean = false` is the user's explicit "even if it fails": failures no longer block,
 /// but "not over yet", a login wall and a waiting question still do.
 pub fn judge(ev: &Evidence, require_clean: bool) -> Verdict {
@@ -312,7 +321,8 @@ pub fn judge(ev: &Evidence, require_clean: bool) -> Verdict {
 }
 
 /// What NEXUS says when it does NOT power off ("Claude finished, but ... I left your laptop on.").
-pub fn spoken_hold(who: &str, verdict: &Verdict) -> String {
+/// `ask` = end with "Shall I shut down anyway?" (only when a real shutdown could follow a yes).
+pub fn spoken_hold(who: &str, verdict: &Verdict, ask: bool) -> String {
     let reasons = match verdict {
         Verdict::Go => return format!("{who} finished and it looks perfect."),
         Verdict::Hold(r) | Verdict::Unsure(r) => r,
@@ -328,9 +338,10 @@ pub fn spoken_hold(who: &str, verdict: &Verdict) -> String {
         }
     }
     let why = parts.join(" and ");
+    let question = if ask { " Shall I shut down anyway?" } else { "" };
     match verdict {
-        Verdict::Hold(_) => format!("{who} stopped, but it is not perfect: {why}. I left your laptop on, sir. Shall I shut down anyway?"),
-        _ => format!("{who} may be done, but I am not sure it is perfect: {why}. I left your laptop on, sir. Shall I shut down anyway?"),
+        Verdict::Hold(_) => format!("{who} stopped, but it is not perfect: {why}. I left your laptop on, sir.{question}"),
+        _ => format!("{who} may be done, but I am not sure it is perfect: {why}. I left your laptop on, sir.{question}"),
     }
 }
 
@@ -543,12 +554,13 @@ mod tests {
     #[test]
     fn the_spoken_line_names_the_reason_and_leaves_the_laptop_on() {
         let hold = Verdict::Hold(vec![Reason::OpenQuestion("Run the tests?".into()), Reason::StillBusy, Reason::LowConfidence]);
-        let s = spoken_hold("Claude", &hold);
+        let s = spoken_hold("Claude", &hold, true);
         assert!(s.contains("Claude stopped, but it is not perfect") && s.contains("question") && s.contains("busy"), "{s}");
         assert!(s.contains("left your laptop on") && s.contains("shut down anyway"), "{s}");
         assert!(!s.contains("confident"), "at most two reasons are spoken: {s}");
         let unsure = Verdict::Unsure(vec![Reason::NotEnoughSignals]);
-        assert!(spoken_hold("this session", &unsure).contains("not sure it is perfect"));
-        assert!(spoken_hold("Claude", &Verdict::Go).contains("looks perfect"));
+        assert!(spoken_hold("this session", &unsure, true).contains("not sure it is perfect"));
+        assert!(!spoken_hold("this session", &unsure, false).contains("Shall I"), "no question when a yes could not lead to a shutdown");
+        assert!(spoken_hold("Claude", &Verdict::Go, true).contains("looks perfect"));
     }
 }
