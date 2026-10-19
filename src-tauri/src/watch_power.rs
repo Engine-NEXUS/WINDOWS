@@ -282,8 +282,14 @@ fn require_clean(tokens: &[&str]) -> bool {
 }
 
 /// Parse the whole utterance. `None` = not a watch-then-power request.
+/// Speech-to-text writes the agent's name in several ways ("anti-gravity", "anti gravity"; live 2026-10-19:
+/// `watch "anti-gravity" and shut down my laptop when it is perfect`).
+fn canonical_agent_spelling(t: String) -> String {
+    format!(" {t} ").replace(" anti gravity ", " antigravity ").replace(" open code ", " opencode ").trim().to_string()
+}
+
 pub fn parse(text: &str) -> Option<WatchPlan> {
-    let t = strip_fillers(norm(text));
+    let t = strip_fillers(canonical_agent_spelling(norm(text)));
     if t.is_empty() {
         return None;
     }
@@ -448,6 +454,10 @@ mod tests {
         assert_eq!(shut("when codex is done, power off the pc").agent.as_deref(), Some("codex"));
         assert_eq!(shut("when antigravity is done shut down my laptop").agent.as_deref(), Some("antigravity"));
         assert_eq!(shut("watch agy until it's done and shut down my laptop").agent.as_deref(), Some("antigravity"));
+        // the exact transcripts of the live try (2026-10-19 18:31)
+        assert_eq!(shut("watch \"anti-gravity\" and shut down my laptop when it is perfect.").agent.as_deref(), Some("antigravity"));
+        assert_eq!(shut("watch anti-gravity and shut down my laptop when it is perfected.").agent.as_deref(), Some("antigravity"));
+        assert_eq!(shut("watch open code and shut down my laptop when it is done").agent.as_deref(), Some("opencode"));
         assert_eq!(shut("when vs code finishes shut down my laptop").agent.as_deref(), Some("vscode"));
         assert_eq!(shut("when open code is done shut down my laptop").agent.as_deref(), Some("opencode"));
         assert_eq!(shut("watch this until it's done and shut down my laptop").agent, None);

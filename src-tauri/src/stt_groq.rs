@@ -33,8 +33,7 @@ Open my chat with Mummy in WhatsApp. Chat with Amma. \
 Analyse Servx. Analyse Zync. GitHub pull request. Merge pull request. \
 List pull requests. Search for. Play pause. Next track. Previous track. \
 Memory audit. Forget everything. Take the mouse. Control my cursor. \
-Type this. Press enter. Click the button. Search the web. \
-Remember this button as. Click learned. Forget learned. \
+Type this. Press enter. Click the button. \
 Ghostwriter. Take a letter. Order food. Send message. \
 Deepgram Groq Supabase Eesha Prem Lakshya Congi Shopkart NEXUS \
 Shut down my laptop. Restart my laptop. Lock my laptop. \
@@ -464,6 +463,16 @@ mod tests {
         // A voice that is (or may be) someone else never gets command biasing.
         assert_eq!(decoder_bias_for(Uncertain), DecoderBias::Neutral);
         assert_eq!(decoder_bias_for(Rejected), DecoderBias::Neutral);
+    }
+
+    /// Live miss 2026-10-19 18:21: Groq answered 400 "prompt length must be 896 characters or fewer, but provided
+    /// prompt contains 928 characters" for EVERY turn, so all speech silently fell back to the slow local model.
+    /// The word-count cap above is not the real limit; this is. Keep a margin for the next phrase someone adds.
+    #[test]
+    fn vocabulary_fits_groqs_prompt_character_limit() {
+        let chars = NEXUS_VOCABULARY.chars().count();
+        assert!(chars <= 860, "NEXUS_VOCABULARY is {chars} characters; Groq rejects the whole request above 896");
+        assert!(NEUTRAL_DECODER_PROMPT.chars().count() <= 860);
     }
 
     /// Live miss 2026-10-19: Whisper heard "practice unattended shutdown" as "practice unobtended
