@@ -5396,6 +5396,19 @@ fn parse_greeting(text: &str) -> Option<ParseResult> {
     None
 }
 
+/// Does this sentence answer the question NEXUS is waiting on (and only that)? Live miss 2026-10-19: after "Shall I
+/// add the hook, sir?" the owner said "yes", the deterministic parser read it as a chat acknowledgement
+/// ("Very good, sir."), the frontend answered it locally, and the question never saw its answer. Pure.
+pub(crate) fn is_answer_to(pending: Option<&crate::memcore::offer::Offer>, transcript: &str) -> bool {
+    pending.map_or(false, |o| crate::memcore::offer::classify_for(o, transcript) != crate::memcore::offer::Reply::Other)
+}
+
+/// `is_answer_to` for the question that is armed right now.
+pub(crate) fn answers_a_pending_offer(transcript: &str) -> bool {
+    let pending = if crate::memcore::offer::is_armed() { crate::memcore::offer::peek() } else { None };
+    is_answer_to(pending.as_ref(), transcript)
+}
+
 /// Pick a reply from a list, deterministically based on a hash of the input
 /// text. This gives variety (different replies for different inputs) while
 /// remaining deterministic (same input ΓåÆ same reply, no randomness).
@@ -6587,6 +6600,16 @@ fn regex_captures<'t>(text: &'t str, pattern: &str) -> Option<regex::Captures<'t
 pub async fn parse_transcript(transcript: String) -> Result<ParseResult, String> {
     tracing::info!("[intent_parser] parsing: {:?}", transcript);
 
+    // 0. A question is waiting for its answer ("Shall I, sir?"): "yes" must reach the orchestrator, where the offer
+    //    is answered, not be turned into a chat acknowledgement here (see `answers_a_pending_offer`).
+    if answers_a_pending_offer(&transcript) {
+        return Ok(ParseResult {
+            intent: ParsedIntent::Unknown { raw: transcript.clone() },
+            confidence: 0.0,
+            source: "offer-pending".to_string(),
+        });
+    }
+
     // 1. Try deterministic parser
     if let Some(result) = parse_deterministic(&transcript) {
         tracing::info!(
@@ -7466,6 +7489,25 @@ mod tests {
                 cmd,
                 r.intent
             );
+        }
+    }
+
+    #[test]
+    fn a_yes_answers_the_question_that_is_waiting_but_only_then() {
+        use crate::memcore::offer::Offer;
+        let hook = Offer::HookSetup { agent: "antigravity".into() };
+        let power = Offer::Power { kind: "shutdown".into() };
+        for t in ["yes", "Yes.", "yeah", "sure", "okay", "go ahead", "no", "nope", "not now"] {
+            assert!(is_answer_to(Some(&hook), t), "{t}");
+        }
+        // a power question also takes the action itself
+        assert!(is_answer_to(Some(&power), "good night"));
+        // with nothing waiting, or for a sentence that is not an answer, the parser stays in charge
+        for t in ["yes", "okay"] {
+            assert!(!is_answer_to(None, t), "{t}");
+        }
+        for t in ["open chrome", "what time is it", "hook up antigravity", "sure what time is it", "yes open brave"] {
+            assert!(!is_answer_to(Some(&hook), t), "{t}");
         }
     }
 

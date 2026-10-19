@@ -3919,7 +3919,13 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     let raw_text = transcript.unwrap_or_default();
                     let normalized = crate::intent_parser::normalize_phonetic_mishearings(&raw_text);
                     let text = if normalized.is_empty() { raw_text } else { normalized };
-                    let parsed = crate::intent_parser::parse_deterministic(&text);
+                    // A waiting question owns a bare "yes" / "no": hand it to the orchestrator unparsed, or the
+                    // greeting parser would answer it as chat and the question would never see it.
+                    let parsed = if crate::intent_parser::answers_a_pending_offer(&text) {
+                        None
+                    } else {
+                        crate::intent_parser::parse_deterministic(&text)
+                    };
                     let intent_label = parsed.as_ref().map(|p| crate::intent_parser::intent_to_label(&p.intent));
                     let pre_parsed = parsed.as_ref().and_then(|p| serde_json::to_value(p).ok());
 
