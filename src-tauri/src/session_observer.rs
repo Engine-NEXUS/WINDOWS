@@ -605,7 +605,7 @@ mod tests {
         let ev = run(&mut o, 0, &tree, Some(text), true);
         assert!(ev.signals.contains(&Signal::AgentHook));
         // hook + (not yet quiet window / idle) is one signal
-        assert_eq!(judge(&ev, true), Verdict::Hold(vec![Reason::FailureMarker("error[e0432]".into()), Reason::NotEnoughSignals]));
+        assert_eq!(judge(&ev, true), Verdict::Hold(vec![Reason::FailureMarker("error[e0432]".into(), "error[E0432]: unresolved import".into()), Reason::NotEnoughSignals]));
     }
 
     #[test]

@@ -60,6 +60,8 @@ pub struct Obs {
     pub meeting: bool,
     /// How long ago the agent's latest stop arrived, while it is still the latest (`None` = no stop to speak of).
     pub stop_age_ms: Option<u64>,
+    /// The model overrode a failure word in the report; said together with the good news so the user knows.
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,7 +71,7 @@ pub enum Action {
     /// Tell the user and keep a strict "yes" ready for "shut down anyway?".
     SayAndAsk(String, PowerKind),
     /// Start the cancellable countdown (and announce it).
-    BeginCountdown { kind: PowerKind, who: String },
+    BeginCountdown { kind: PowerKind, who: String, note: Option<String> },
     /// The countdown ran out with nothing stopping it: power off now.
     Fire(PowerKind),
     /// The watch is over. Nothing more happens for this plan.
@@ -192,7 +194,11 @@ impl Engine {
 
         // Finished and perfect.
         if plan.notify_only {
-            let said = format!("{} finished and it looks perfect, sir. You asked me only to tell you, so I haven't touched your laptop.", plan.who);
+            let said = format!(
+                "{} finished and it looks perfect, sir.{} You asked me only to tell you, so I haven't touched your laptop.",
+                plan.who,
+                note_clause(&o.note)
+            );
             let mut out = vec![Action::Say(said)];
             out.extend(self.end("notify only"));
             return out;
@@ -201,8 +207,9 @@ impl Engine {
             WatchPowerMode::Off => self.end("unattended shutdown is off"),
             WatchPowerMode::Dry => {
                 let said = format!(
-                    "Practice run, sir: {} finished and it looks perfect. I would have started {} after a 30 second countdown. Nothing was changed.",
+                    "Practice run, sir: {} finished and it looks perfect.{} I would have started {} after a 30 second countdown. Nothing was changed.",
                     plan.who,
+                    note_clause(&o.note),
                     gerund(plan.kind)
                 );
                 let mut out = vec![Action::Say(said)];
@@ -211,7 +218,7 @@ impl Engine {
             }
             WatchPowerMode::On => {
                 self.phase = Phase::Countdown { start_ms: o.now_ms };
-                vec![Action::BeginCountdown { kind: plan.kind, who: plan.who.clone() }]
+                vec![Action::BeginCountdown { kind: plan.kind, who: plan.who.clone(), note: o.note.clone() }]
             }
         }
     }
@@ -246,10 +253,15 @@ impl Engine {
     }
 }
 
+fn note_clause(note: &Option<String>) -> String {
+    note.as_ref().map(|n| format!(" {n}")).unwrap_or_default()
+}
+
 /// The announcement spoken the moment the countdown begins.
-pub fn announcement(kind: PowerKind, who: &str) -> String {
+pub fn announcement(kind: PowerKind, who: &str, note: Option<&str>) -> String {
     format!(
-        "{who} finished and it looks perfect, sir. I'm {} in 30 seconds. Say cancel, or touch the keyboard, to stop me.",
+        "{who} finished and it looks perfect, sir.{} I'm {} in 30 seconds. Say cancel, or touch the keyboard, to stop me.",
+        note.map(|n| format!(" {n}")).unwrap_or_default(),
         gerund(kind)
     )
 }
@@ -259,7 +271,7 @@ pub fn announcement(kind: PowerKind, who: &str) -> String {
 use crate::agent_hooks::{self, Agent, EventKind};
 use crate::power_plan;
 use crate::session_observer::{find_roots, tree_snaps, Inputs, Observer, ProcSampler};
-use crate::session_verdict::{has_ended, judge, model_system_prompt, parse_model_json, ModelVerdict};
+use crate::session_verdict::{cleared_failure_note, has_ended, judge, model_system_prompt, parse_model_json, wants_model_check, ModelVerdict};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::{AppHandle, Manager, Runtime};
@@ -435,7 +447,7 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
         // ── decide ──
         let require_clean = stored.plan.require_clean;
         let mut verdict = judge(&ev, require_clean);
-        if has_ended(&ev) && verdict == crate::session_verdict::Verdict::Go {
+        if wants_model_check(has_ended(&ev), &verdict) {
             let key = agent_hooks::last_event_ms(agent, EventKind::Stop).unwrap_or(0);
             if model_cache.as_ref().map(|(k, _)| *k) != Some(key) {
                 let m = ask_model(&app, &ev.tail).await;
@@ -447,6 +459,7 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
                 verdict = judge(&ev, require_clean);
             }
         }
+        let note = if verdict == Verdict::Go { cleared_failure_note(&ev, require_clean) } else { None };
         let view = PlanView {
             kind: stored.plan.kind,
             notify_only: stored.notify_only,
@@ -463,13 +476,14 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
             voice_cancelled: countdown_gen.map_or(false, |g| !crate::power_cmd::is_current(g)),
             meeting: meeting_active(&app),
             stop_age_ms: agent_hooks::stop_age_ms_at(agent, stored.created_ms, wall_ms),
+            note,
         };
         // every tenth tick, and at once whenever what the verdict rests on changes
-        let state_key = format!("{:?}|{:?}|{}|{}", obs.verdict, ev.signals, ev.still_busy, obs.ended);
+        let state_key = format!("{:?}|{:?}|{}|{}|{:?}", obs.verdict, ev.signals, ev.still_busy, obs.ended, obs.note);
         if ticks % 10 == 1 || last_logged.as_deref() != Some(state_key.as_str()) {
             let tree_cpu: f32 = tree.iter().map(|p| p.cpu_pct).sum();
             println!(
-                "[WATCH-POWER] tick {ticks}: mode={} ended={} verdict={:?} signals={:?} busy={} roots={} stop_age_s={} tail_len={} stop_ok={:?} fully_idle={:?} tree_cpu={:.1}",
+                "[WATCH-POWER] tick {ticks}: mode={} ended={} verdict={:?} signals={:?} busy={} roots={} stop_age_s={} tail_len={} stop_ok={:?} fully_idle={:?} tree_cpu={:.1} cleared_note={:?}",
                 mode.as_str(),
                 obs.ended,
                 obs.verdict,
@@ -480,7 +494,8 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
                 ev.tail.len(),
                 stop_info.ok,
                 stop_info.fully_idle,
-                tree_cpu
+                tree_cpu,
+                obs.note
             );
             last_logged = Some(state_key);
         }
@@ -509,6 +524,7 @@ fn idle_obs(now_ms: u64, mode: WatchPowerMode) -> Obs {
         voice_cancelled: false,
         meeting: false,
         stop_age_ms: None,
+        note: None,
     }
 }
 
@@ -532,11 +548,11 @@ async fn carry_out<R: Runtime>(app: &AppHandle<R>, actions: Vec<Action>, countdo
                     crate::google::types::AlertUrgency::High,
                 );
             }
-            Action::BeginCountdown { kind, who } => {
+            Action::BeginCountdown { kind, who, note } => {
                 // the same cancel generation the spoken "cancel" listens to (see `power_cmd::cancel`)
                 *countdown_gen = Some(crate::power_cmd::begin());
                 println!("[WATCH-POWER] countdown started: {} in 30 s", kind.as_str());
-                crate::orchestrator::speak_unprompted(app, announcement(kind, &who));
+                crate::orchestrator::speak_unprompted(app, announcement(kind, &who, note.as_deref()));
             }
             Action::Fire(kind) => {
                 // last look, right before the call: the setting and the plan must both still say yes
@@ -588,6 +604,7 @@ mod tests {
             voice_cancelled: false,
             meeting: false,
             stop_age_ms: None,
+            note: None,
         }
     }
 
@@ -637,8 +654,8 @@ mod tests {
             (PowerKind::Lock, "locking"),
             (PowerKind::SignOut, "signing you out"),
         ] {
-            assert!(announcement(kind, "Claude Code").contains(word), "{kind:?}");
-            assert!(announcement(kind, "Claude Code").contains("30 seconds") && announcement(kind, "Claude Code").contains("cancel"));
+            assert!(announcement(kind, "Claude Code", None).contains(word), "{kind:?}");
+            assert!(announcement(kind, "Claude Code", None).contains("30 seconds") && announcement(kind, "Claude Code", None).contains("cancel"));
         }
     }
 
@@ -998,6 +1015,7 @@ mod tests {
                 voice_cancelled: cancel_at.map_or(false, |c| t >= c),
                 meeting: false,
                 stop_age_ms: if hook_stopped { stopped_at.map(|s| t - s) } else { None },
+                note: None,
             };
             for a in engine.step(&obs) {
                 out.push((t, a));
@@ -1040,6 +1058,36 @@ mod tests {
         let (acts, _) = timeline_with(true, WatchPowerMode::Dry, "Implemented it.\nWould you like me to run the tests?", Some(20_000), None, None, None);
         assert!(!fired(&acts));
         assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(t) if t.contains("not perfect") && t.contains("question"))), "{acts:?}");
+    }
+
+    #[test]
+    fn when_the_model_overrode_a_failure_word_every_good_news_message_says_so() {
+        let note = Some("Its report mentions \"3 failing\", which I read as a finding, not a failure.".to_string());
+        // practice run
+        let mut e = Engine::new(0);
+        let acts = run(&mut e, 0, 120_000, |t| Obs { note: note.clone(), ..obs(t, WatchPowerMode::Dry) });
+        assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(t) if t.contains("looks perfect") && t.contains("3 failing") && t.contains("finding"))), "{acts:?}");
+        // just tell me
+        let mut e = Engine::new(0);
+        let acts = run(&mut e, 0, 120_000, |t| {
+            let mut o = Obs { note: note.clone(), ..obs(t, WatchPowerMode::On) };
+            o.plan.as_mut().unwrap().notify_only = true;
+            o
+        });
+        assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(t) if t.contains("3 failing"))), "{acts:?}");
+        // the countdown announcement carries it
+        let mut e = Engine::new(0);
+        let acts = run(&mut e, 0, 120_000, |t| Obs { note: note.clone(), ..obs(t, WatchPowerMode::On) });
+        let begin = acts.iter().find_map(|(_, a)| match a {
+            Action::BeginCountdown { note, .. } => Some(note.clone()),
+            _ => None,
+        });
+        assert_eq!(begin, Some(note.clone()));
+        assert!(announcement(PowerKind::Shutdown, "Antigravity", note.as_deref()).contains("3 failing"));
+        // no override, no mention
+        let mut e = Engine::new(0);
+        let acts = run(&mut e, 0, 120_000, |t| obs(t, WatchPowerMode::Dry));
+        assert!(acts.iter().all(|(_, a)| !matches!(a, Action::Say(t) if t.contains("finding"))));
     }
 
     #[test]
