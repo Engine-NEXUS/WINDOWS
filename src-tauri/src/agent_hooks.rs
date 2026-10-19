@@ -1330,7 +1330,15 @@ fn find_agent(padded: &str) -> Option<Agent> {
 /// the hook / stop / nexus, so "install claude" or "connect to claude" are never claimed.
 pub fn parse_command(text: &str) -> Option<(HookAction, Agent)> {
     // speech splits some names: "open code", "gemini cli"
-    let t = norm(text).replace("open code", "opencode").replace("gemini cli", "gemini");
+    // Live (2026-10-19) Whisper wrote "hookup anti-gravity." and "hookup open code.": one word for "hook up", and
+    // "anti gravity" for the agent's name.
+    let t = format!(" {} ", norm(text))
+        .replace(" hookup ", " hook up ")
+        .replace(" anti gravity ", " antigravity ")
+        .replace(" open code ", " opencode ")
+        .replace(" gemini cli ", " gemini ")
+        .trim()
+        .to_string();
     let tokens: Vec<&str> = t.split(' ').collect();
     if tokens.is_empty() || !tokens.iter().all(|w| HOOK_VOCAB.contains(w)) {
         return None;
@@ -2150,6 +2158,23 @@ await hooks.event({ event: { type: "session.idle", properties: { sessionID: "roo
         assert!(s.contains(r#"{"continue":true}"#) && s.contains("{}"), "{s}");
         assert!(s.contains("exit /b 0") || s.contains("exit 0"));
         assert!(!s.contains("@PORT@") && !s.contains("@TOKEN@") && s.contains("39220") && s.contains("tok"));
+    }
+
+    /// The exact transcripts of the first live try (2026-10-19 17:50).
+    #[test]
+    fn speech_to_text_spellings_of_hook_up_and_the_agents_are_understood() {
+        for (t, agent) in [
+            ("hookup anti-gravity.", Agent::Antigravity),
+            ("Hookup open code.", Agent::OpenCode),
+            ("hook up anti gravity", Agent::Antigravity),
+            ("Nexus, hookup Open Code please", Agent::OpenCode),
+            ("hookup gemini cli", Agent::Gemini),
+        ] {
+            assert_eq!(parse_command(t), Some((HookAction::Connect, agent)), "{t}");
+        }
+        for t in ["hookup", "hookup anti-gravity and cursor", "anti-gravity", "hookup the gravity", "hookup evil code"] {
+            assert_eq!(parse_command(t), None, "{t}");
+        }
     }
 
     #[test]

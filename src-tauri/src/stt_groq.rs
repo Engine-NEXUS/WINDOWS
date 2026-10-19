@@ -39,6 +39,7 @@ Ghostwriter. Take a letter. Order food. Send message. \
 Deepgram Groq Supabase Eesha Prem Lakshya Congi Shopkart NEXUS \
 Shut down my laptop. Restart my laptop. Lock my laptop. \
 Practice unattended shutdown. Allow unattended shutdown. Turn off unattended shutdown. \
+Hook up Antigravity. Hook up OpenCode. \
 open close stop cancel navigate analyse search type click press scroll.";
 
 /// Neutral English decoder instruction used when a turn has not been
@@ -470,7 +471,7 @@ mod tests {
     #[test]
     fn vocabulary_teaches_the_unattended_shutdown_phrasing() {
         let v = NEXUS_VOCABULARY.to_lowercase();
-        for phrase in ["practice unattended shutdown", "allow unattended shutdown", "turn off unattended shutdown"] {
+        for phrase in ["practice unattended shutdown", "allow unattended shutdown", "turn off unattended shutdown", "hook up antigravity", "hook up opencode"] {
             assert!(v.contains(phrase), "vocabulary missing: {phrase}");
         }
     }
