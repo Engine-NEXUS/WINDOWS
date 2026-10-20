@@ -5298,6 +5298,7 @@ mod tests {
             text: text.to_string(),
             avg_logprob: -0.1,
             no_speech_prob: no_speech,
+            compression_ratio: 0.0,
         }
     }
 

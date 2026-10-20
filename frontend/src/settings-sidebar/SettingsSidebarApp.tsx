@@ -69,6 +69,7 @@ interface Settings {
   telegramChatId?: string;
   // Ghost FIFO queue: speak "Queued, sir." once per session at depth 2+ (D5/D6)
   ghostDepthAck?: boolean;
+  sttConfidenceGate?: boolean;
   // Ghost FIFO queue: per-step watchdog timeout, ms (D7)
   ghostStepTimeoutMs?: number;
   // Ghost FIFO queue: inter-command gap τ, ms (D4)
@@ -117,6 +118,7 @@ const DEFAULT_SETTINGS: Settings = {
   visionRace: "sequential",
   telegramChatId: "",
   ghostDepthAck: true,
+  sttConfidenceGate: false,
   ghostStepTimeoutMs: 15000,
   ghostTurnGapMs: 1000,
   wavesHorizontalPct: 0.5,
@@ -622,6 +624,18 @@ function AudioTab({ settings, update }: {
             <div
               className={`settings-toggle ${settings.localSttOnly ? "settings-toggle--on" : ""}`}
               onClick={() => update("localSttOnly", !settings.localSttOnly)}
+            />
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Reject low-confidence speech</div>
+            <div className="setting-desc">Experimental. Drops Groq transcripts the engine itself is unsure about. Turn on only after your voice scorecard shows it helps.</div>
+          </div>
+          <div className="setting-control">
+            <div
+              className={`settings-toggle ${settings.sttConfidenceGate ? "settings-toggle--on" : ""}`}
+              onClick={() => update("sttConfidenceGate", !settings.sttConfidenceGate)}
             />
           </div>
         </div>

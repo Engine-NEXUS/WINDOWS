@@ -54,3 +54,5 @@ Keep `baseline.json`; after each fix phase re-run with `--baseline baseline.json
 ## Verify
 
 Rust lib 935/935 serial (baseline 922 + 13 new); Python 21/21; both examples build in release; Windows-only paths type-checked via temporary Linux scaffolding (removed before commit).
+
+> **Correction (change 85):** `wake_eval.rs` / `stt_eval.rs` were not actually committed with this change — `src-tauri/examples/` was git-ignored. They are tracked from change 85 onward.

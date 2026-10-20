@@ -161,7 +161,9 @@ kaggle_nexus_v2/
 src-tauri/resources/oww/*.backup
 
 # Test/example directories
-src-tauri/examples/
+src-tauri/examples/*
+!src-tauri/examples/wake_eval.rs
+!src-tauri/examples/stt_eval.rs
 src-tauri/src/test_wda.rs
 
 # NLU training outputs (only the runtime ONNX model + tokenizer are committed;

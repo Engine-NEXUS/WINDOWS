@@ -448,6 +448,60 @@ pub async fn synth_controls(
     Ok(out)
 }
 
+/// Groq per-transcript confidence statistics, summarised over all segments.
+/// These are the inputs of `stt_groq::confidence_rejects`; the scorecard sweeps
+/// thresholds over them to see whether the gate separates hallucinations from
+/// your real commands before it is ever enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SegStats {
+    pub n_segments: usize,
+    pub min_avg_logprob: f32,
+    /// The gate rejects when EVERY segment is below the floor, i.e. when this
+    /// (the best segment) is below it — this is the value to sweep.
+    pub max_avg_logprob: f32,
+    pub max_compression_ratio: f32,
+    pub max_no_speech_prob: f32,
+    /// What the shipped gate would decide for this transcript.
+    pub gate_rejects: bool,
+}
+
+pub fn seg_stats(segments: &[crate::stt_groq::GroqSegment]) -> SegStats {
+    if segments.is_empty() {
+        return SegStats::default();
+    }
+    SegStats {
+        n_segments: segments.len(),
+        min_avg_logprob: segments.iter().map(|s| s.avg_logprob).fold(f32::INFINITY, f32::min),
+        max_avg_logprob: segments.iter().map(|s| s.avg_logprob).fold(f32::NEG_INFINITY, f32::max),
+        max_compression_ratio: segments.iter().map(|s| s.compression_ratio).fold(0.0, f32::max),
+        max_no_speech_prob: segments.iter().map(|s| s.no_speech_prob).fold(0.0, f32::max),
+        gate_rejects: crate::stt_groq::confidence_rejects(segments),
+    }
+}
+
+/// Like [`transcribe`] but also returns confidence statistics (Groq only; the
+/// local engine reports none, so its stats are all-default / `n_segments == 0`).
+pub async fn transcribe_verbose(
+    samples: &[i16],
+    engine: SttEngine,
+    bias: Bias,
+    groq_key: &str,
+    client: &reqwest::Client,
+) -> Result<(String, SegStats), String> {
+    match engine {
+        SttEngine::Groq => {
+            let prompt = match bias {
+                Bias::Owner => Some(crate::stt_groq::NEXUS_VOCABULARY),
+                Bias::Neutral => None,
+            };
+            let (text, segs) =
+                crate::stt_groq::transcribe_with_groq_verbose(samples, groq_key, client, prompt).await?;
+            Ok((text, seg_stats(&segs)))
+        }
+        SttEngine::Local => Ok((crate::stt::transcribe_local(samples, client).await?, SegStats::default())),
+    }
+}
+
 // ─── Word error rate ─────────────────────────────────────────────────────
 
 /// Lowercase, strip punctuation, split on whitespace. Apostrophes are removed
@@ -646,5 +700,20 @@ mod tests {
         };
         let _ = run_wake_engine(&mut e, &vec![0.0; 16000], Some(0.9));
         assert!((e.threshold - 0.9).abs() < 1e-6);
+    }
+    #[test]
+    fn test_seg_stats_summarises_segments() {
+        use crate::stt_groq::GroqSegment;
+        assert_eq!(seg_stats(&[]), SegStats::default());
+        let segs = vec![
+            GroqSegment { text: "a".into(), avg_logprob: -0.4, no_speech_prob: 0.0, compression_ratio: 1.2 },
+            GroqSegment { text: "b".into(), avg_logprob: -1.6, no_speech_prob: 0.1, compression_ratio: 2.9 },
+        ];
+        let st = seg_stats(&segs);
+        assert_eq!(st.n_segments, 2);
+        assert!((st.min_avg_logprob + 1.6).abs() < 1e-6);
+        assert!((st.max_avg_logprob + 0.4).abs() < 1e-6);
+        assert!((st.max_compression_ratio - 2.9).abs() < 1e-6);
+        assert!(st.gate_rejects, "ratio 2.9 trips the shipped gate");
     }
 }

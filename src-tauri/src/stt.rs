@@ -75,6 +75,50 @@ fn mark_filtered(original: &str, filtered: &str) {
     }
 }
 
+/// Filter a transcript that came from the LOCAL engine. The Moonshine/whisper
+/// sidecar hallucinates on silence and noise exactly like the cloud one
+/// ("Thank you.", looped phrases, foreign confabulations), yet its output used
+/// to bypass the filter entirely — so a user without a Groq key (or with
+/// Groq down) got the raw junk straight into the command parser.
+fn finish_local(text: String) -> String {
+    let filtered = filter_transcript_counted(&text);
+    mark_filtered(&text, &filtered);
+    if filtered != text {
+        tracing::info!("stt: filtered local hallucination '{}' -> '{}'", text, filtered);
+    }
+    filtered
+}
+
+/// One Groq transcription for a normal (non-verifier) turn. With the
+/// confidence gate on, ask for `verbose_json` and drop the transcript when
+/// Groq's own segment statistics reject it (`stt_groq::confidence_rejects`);
+/// off (default), the plain `json` request is unchanged.
+async fn groq_turn(
+    samples: &[i16],
+    api_key: &str,
+    client: &reqwest::Client,
+    prompt: Option<&'static str>,
+    confidence_gate: bool,
+) -> Result<String, String> {
+    if !confidence_gate {
+        return crate::stt_groq::transcribe_with_groq(samples, api_key, client, prompt).await;
+    }
+    let (text, segments) =
+        crate::stt_groq::transcribe_with_groq_verbose(samples, api_key, client, prompt).await?;
+    if !text.trim().is_empty() && crate::stt_groq::confidence_rejects(&segments) {
+        tracing::info!(
+            "stt: confidence gate rejected '{}' ({} segs, min avg_logprob {:.2}, max compression {:.2})",
+            text,
+            segments.len(),
+            segments.iter().map(|s| s.avg_logprob).fold(f32::INFINITY, f32::min),
+            segments.iter().map(|s| s.compression_ratio).fold(0.0, f32::max),
+        );
+        LAST_FILTER.store(1, std::sync::atomic::Ordering::Relaxed);
+        return Ok(String::new());
+    }
+    Ok(text)
+}
+
 /// Transcribe audio — tries Groq cloud first, falls back to local faster-whisper.
 ///
 /// The frontend sends Int16 PCM samples at 16kHz. We route to Groq if an API
@@ -118,7 +162,7 @@ pub async fn transcribe_audio(
     } else if !groq_key.is_empty() {
         // Primary: Groq cloud STT (~247ms, free) — with the NEXUS domain
         // vocabulary so rare entities (Servx, Zync, Eesha) win decoder bets.
-        match crate::stt_groq::transcribe_with_groq(&samples, &groq_key, &state.client, Some(crate::stt_groq::NEXUS_VOCABULARY)).await {
+        match groq_turn(&samples, &groq_key, &state.client, Some(crate::stt_groq::NEXUS_VOCABULARY), crate::commands::read_stt_confidence_gate(&app)).await {
             Ok(text) => {
                 let filtered = filter_transcript_counted(&text);
                 mark_path(1);
@@ -143,7 +187,7 @@ pub async fn transcribe_audio(
 
     // Fallback: local faster-whisper Python sidecar
     match transcribe_local(&samples, &state.client).await {
-        Ok(text) => Ok(text),
+        Ok(text) => Ok(finish_local(text)),
         Err(e) => {
             mark_path(7);
             Err(e)
@@ -196,7 +240,7 @@ pub async fn transcribe_samples<R: tauri::Runtime>(
             tracing::info!("stt: localSttOnly=true, using local whisper (privacy mode)");
             mark_path(4);
         } else if !groq_key.is_empty() {
-            match crate::stt_groq::transcribe_with_groq(samples, &groq_key, client, prompt).await {
+            match groq_turn(samples, &groq_key, client, prompt, crate::commands::read_stt_confidence_gate(app)).await {
                 Ok(text) => {
                     let filtered = filter_transcript_counted(&text);
                     mark_path(1);
@@ -221,7 +265,7 @@ pub async fn transcribe_samples<R: tauri::Runtime>(
 
     // Fallback: local faster-whisper Python sidecar
     match transcribe_local(samples, client).await {
-        Ok(text) => Ok(text),
+        Ok(text) => Ok(finish_local(text)),
         Err(e) => {
             mark_path(7);
             // Without this the user got silence: an empty transcript and a
@@ -311,7 +355,7 @@ pub async fn transcribe_samples_verbose<R: tauri::Runtime>(
 
     // Fallback: local sidecar returns plain text (no segment metadata).
     match transcribe_local(samples, client).await {
-        Ok(text) => Ok((text, Vec::new())),
+        Ok(text) => Ok((finish_local(text), Vec::new())),
         Err(e) => {
             mark_path(7);
             Err(e)
@@ -705,6 +749,18 @@ mod tests {
     use super::apply_hallucination_filter;
     use super::{filter_transcript_counted, hallucination_stats};
     use super::stt_unavailable_guidance;
+
+    /// B10: the local engine's output goes through the same filter as Groq's.
+    #[test]
+    fn test_local_output_is_filtered() {
+        use super::finish_local;
+        assert_eq!(finish_local(" Thank you.".to_string()), "");
+        assert_eq!(finish_local("Thanks for watching!".to_string()), "");
+        assert_eq!(finish_local("open brave open brave open brave".to_string()), "");
+        assert_eq!(finish_local("Open Chrome.".to_string()), "Open Chrome.");
+        assert_eq!(finish_local("List pull requests.".to_string()), "List pull requests.");
+        assert_eq!(finish_local(String::new()), "");
+    }
 
     #[test]
     fn test_local_path_for() {

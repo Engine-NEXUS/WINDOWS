@@ -261,6 +261,35 @@ pub struct GroqSegment {
     pub avg_logprob: f32,
     #[serde(default)]
     pub no_speech_prob: f32,
+    /// Whisper's own repetition signal (gzip ratio of the segment text);
+    /// > ~2.4 means a looping/degenerate decode.
+    #[serde(default)]
+    pub compression_ratio: f32,
+}
+
+/// Thresholds for [`confidence_rejects`]. Whisper's reference decoder falls
+/// back/gives up at avg_logprob < -1.0 and compression_ratio > 2.4; we are
+/// stricter about *acting* than the decoder is about retrying, so the shipped
+/// values leave a margin. They are a starting point: calibrate them from the
+/// held-out set (`voice_scorecard.py` prints the sweep) before enabling the gate.
+pub const CONFIDENCE_MIN_AVG_LOGPROB: f32 = -1.2;
+pub const CONFIDENCE_MAX_COMPRESSION_RATIO: f32 = 2.6;
+
+/// True when Groq's own segment statistics say the transcript is not trustworthy:
+/// EVERY segment is below the log-probability floor, or ANY segment is a
+/// degenerate repetition. Empty segment list (no information) never rejects.
+/// `no_speech_prob` is deliberately not used: it reads 0.000 on every segment of
+/// `whisper-large-v3-turbo` (see `verify_confidence`).
+pub fn confidence_rejects(segments: &[GroqSegment]) -> bool {
+    confidence_rejects_with(segments, CONFIDENCE_MIN_AVG_LOGPROB, CONFIDENCE_MAX_COMPRESSION_RATIO)
+}
+
+pub fn confidence_rejects_with(segments: &[GroqSegment], min_logprob: f32, max_ratio: f32) -> bool {
+    if segments.is_empty() {
+        return false;
+    }
+    segments.iter().all(|s| s.avg_logprob < min_logprob)
+        || segments.iter().any(|s| s.compression_ratio > max_ratio)
 }
 
 /// Transcribe with structured segment metadata (`verbose_json`).
@@ -332,6 +361,10 @@ pub async fn transcribe_with_groq_verbose(
                     .unwrap_or(0.0) as f32,
                 no_speech_prob: seg
                     .get("no_speech_prob")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as f32,
+                compression_ratio: seg
+                    .get("compression_ratio")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0) as f32,
             });
@@ -469,5 +502,28 @@ mod tests {
         let seg: GroqSegment = serde_json::from_value(v).unwrap();
         assert_eq!(seg.text, " Lots of children.");
         assert!((seg.no_speech_prob - 0.91).abs() < 1e-6);
+    }
+
+    fn seg(logprob: f32, ratio: f32) -> GroqSegment {
+        GroqSegment { text: "x".into(), avg_logprob: logprob, no_speech_prob: 0.0, compression_ratio: ratio }
+    }
+
+    #[test]
+    fn test_confidence_rejects() {
+        // Confident, normal speech passes.
+        assert!(!confidence_rejects(&[seg(-0.3, 1.1)]));
+        assert!(!confidence_rejects(&[seg(-0.9, 1.6), seg(-1.1, 1.4)]));
+        // No metadata → no information → never reject (local fallback, parse gaps).
+        assert!(!confidence_rejects(&[]));
+        // Every segment below the floor → reject.
+        assert!(confidence_rejects(&[seg(-1.5, 1.2)]));
+        assert!(confidence_rejects(&[seg(-1.3, 1.0), seg(-1.9, 1.0)]));
+        // One confident segment saves a mixed transcript.
+        assert!(!confidence_rejects(&[seg(-1.5, 1.0), seg(-0.4, 1.0)]));
+        // A single looping segment rejects regardless of logprob.
+        assert!(confidence_rejects(&[seg(-0.2, 3.1)]));
+        // Missing compression_ratio parses as 0 (never trips).
+        let v: GroqSegment = serde_json::from_value(serde_json::json!({"text":"hi","avg_logprob":-0.5})).unwrap();
+        assert_eq!(v.compression_ratio, 0.0);
     }
 }

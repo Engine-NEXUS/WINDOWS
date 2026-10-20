@@ -221,6 +221,83 @@ def stt_metrics(rows):
     return out
 
 
+# ─── confidence-gate calibration ─────────────────────────────────────────
+
+LOGPROB_STEPS = (-0.6, -0.8, -1.0, -1.2, -1.5, -2.0)
+RATIO_STEPS = (2.0, 2.4, 2.6, 3.0, 4.0)
+MAX_WRONG_REJECT = 0.005  # same budget as TARGETS["stt_wrongly_dropped"]
+
+
+def confidence_sweep(rows):
+    """For each candidate threshold: hallucinations it would still catch vs real
+    commands it would wrongly reject. Uses the stats stt_eval records from Groq's
+    verbose_json. Returns None when the rows carry no such stats (local engine,
+    or a run made before the stats existed).
+
+    leaks   = silence/noise clips whose text SURVIVED the text filter (the only
+              ones a confidence gate could still help with)
+    commands = real command clips that produced text
+    The shipped rule rejects when every segment is below the logprob floor
+    (max_avg_logprob < t) or any segment's compression ratio exceeds the cap.
+    """
+    cmds = [r for r in rows if r.get("kind") == "command" and r.get("raw", "").strip()
+            and "max_avg_logprob" in r]
+    leaks = [r for r in rows if r.get("kind") in ("silence", "noise") and r.get("leaked")
+             and "max_avg_logprob" in r]
+    if not cmds:
+        return None
+    sweep = []
+    for signal, steps in (("avg_logprob", LOGPROB_STEPS), ("compression_ratio", RATIO_STEPS)):
+        for t in steps:
+            if signal == "avg_logprob":
+                hit = lambda r, t=t: float(r["max_avg_logprob"]) < t  # noqa: E731
+            else:
+                hit = lambda r, t=t: float(r.get("max_compression_ratio", 0)) > t  # noqa: E731
+            wrong = sum(1 for r in cmds if hit(r))
+            caught = sum(1 for r in leaks if hit(r))
+            sweep.append({"signal": signal, "threshold": t, "wrong": wrong, "n_commands": len(cmds),
+                          "caught": caught, "n_leaks": len(leaks),
+                          "wrong_rate": wrong / len(cmds),
+                          "caught_rate": (caught / len(leaks)) if leaks else None})
+    return sweep
+
+
+def recommend_gate(sweep):
+    """Per signal, the setting that catches the most leaks while rejecting at most
+    MAX_WRONG_REJECT of real commands; None if no setting helps (or no leaks)."""
+    best = {}
+    for row in sweep or []:
+        if row["n_leaks"] == 0 or row["wrong_rate"] > MAX_WRONG_REJECT or not row["caught"]:
+            continue
+        cur = best.get(row["signal"])
+        if cur is None or row["caught"] > cur["caught"]:
+            best[row["signal"]] = row
+    return best
+
+
+def render_sweep(sweep):
+    if sweep is None:
+        return ""
+    rec = recommend_gate(sweep)
+    lines = ["### Confidence gate calibration (setting is OFF unless you enable it)", "",
+             "| Signal | Threshold | Leaks caught | Real commands rejected |", "|---|---|---|---|"]
+    for r in sweep:
+        op = "best segment <" if r["signal"] == "avg_logprob" else "any segment >"
+        caught = "n/a (no leaks)" if r["caught_rate"] is None else f'{r["caught"]}/{r["n_leaks"]}'
+        lines.append(f'| {r["signal"]} | {op} {r["threshold"]} | {caught} | '
+                     f'{r["wrong"]}/{r["n_commands"]} ({r["wrong_rate"] * 100:.1f}%) |')
+    lines.append("")
+    if rec:
+        parts = [f'{k} at {v["threshold"]} (catches {v["caught"]}/{v["n_leaks"]}, rejects '
+                 f'{v["wrong"]}/{v["n_commands"]} commands)' for k, v in rec.items()]
+        lines.append("**Safe to enable:** " + "; ".join(parts) + ". Set the matching constant in "
+                     "`stt_groq.rs`, then turn on *Reject low-confidence speech*.")
+    else:
+        lines.append("**Do not enable the gate:** no threshold catches leaks without rejecting more than "
+                     f"{MAX_WRONG_REJECT * 100:.1f}% of real commands (or there were no leaks to catch).")
+    return "\n".join(lines)
+
+
 # ─── rendering ───────────────────────────────────────────────────────────
 
 def fmt_value(m):
@@ -294,6 +371,9 @@ def build_report(wake_rows, stt_rows, baseline=None, title="NEXUS voice accuracy
         s = stt_metrics(stt_rows)
         sections.append(render_table("Speech-to-text", s, baseline))
         all_m += s
+        sweep_md = render_sweep(confidence_sweep(stt_rows))
+        if sweep_md:
+            sections.append(sweep_md)
     n, note = overall(all_m)
     head = [f"# {title}", "", f"**Overall: {star_bar(n)}** - {note}.", "",
             "Stars follow the lower confidence bound against the target, not just the average. "

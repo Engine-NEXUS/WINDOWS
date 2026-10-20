@@ -232,5 +232,52 @@ class MetricTests(unittest.TestCase):
         self.assertIn("(was 100.0% (10/10))", report2)
 
 
+class ConfidenceSweepTests(unittest.TestCase):
+    def rows(self):
+        cmd = lambda lp, cr=1.2, **k: {"kind": "command", "raw": "open chrome", "max_avg_logprob": lp,  # noqa: E731
+                                       "max_compression_ratio": cr, **k}
+        rows = [cmd(-0.3) for _ in range(300)] + [cmd(-0.5) for _ in range(100)]
+        # hallucinations that survived the text filter: low confidence / looping
+        rows += [{"kind": "noise", "raw": "so we begin", "leaked": True, "max_avg_logprob": -1.4,
+                  "max_compression_ratio": 1.1},
+                 {"kind": "silence", "raw": "uh huh", "leaked": True, "max_avg_logprob": -1.8,
+                  "max_compression_ratio": 1.0},
+                 {"kind": "noise", "raw": "ha ha ha ha", "leaked": True, "max_avg_logprob": -0.4,
+                  "max_compression_ratio": 3.4}]
+        return rows
+
+    def test_sweep_counts_and_recommendation(self):
+        sweep = sc.confidence_sweep(self.rows())
+        by = {(r["signal"], r["threshold"]): r for r in sweep}
+        r = by[("avg_logprob", -1.2)]
+        self.assertEqual((r["caught"], r["n_leaks"], r["wrong"]), (2, 3, 0))
+        r = by[("compression_ratio", 3.0)]
+        self.assertEqual((r["caught"], r["wrong"]), (1, 0))
+        rec = sc.recommend_gate(sweep)
+        self.assertEqual(rec["avg_logprob"]["caught"], 2)
+        self.assertEqual(rec["compression_ratio"]["caught"], 1)
+
+    def test_no_recommendation_when_it_would_reject_real_commands(self):
+        rows = [{"kind": "command", "raw": "x", "max_avg_logprob": -1.6, "max_compression_ratio": 1.0}
+                for _ in range(10)]
+        rows.append({"kind": "noise", "raw": "y", "leaked": True, "max_avg_logprob": -1.7,
+                     "max_compression_ratio": 1.0})
+        rec = sc.recommend_gate(sc.confidence_sweep(rows))
+        self.assertNotIn("avg_logprob", rec)
+        self.assertIn("Do not enable", sc.render_sweep(sc.confidence_sweep(rows)))
+
+    def test_no_stats_means_no_section(self):
+        self.assertIsNone(sc.confidence_sweep([{"kind": "command", "raw": "open chrome"}]))
+        report, _ = sc.build_report([], [{"kind": "command", "raw": "open chrome", "ref_words": 2,
+                                          "edits_raw": 0, "edits_filtered": 0, "intent_ok": True,
+                                          "expected_text": "open chrome"}])
+        self.assertNotIn("Confidence gate calibration", report)
+
+    def test_report_contains_sweep_when_stats_present(self):
+        report, _ = sc.build_report([], self.rows())
+        self.assertIn("Confidence gate calibration", report)
+        self.assertIn("Safe to enable", report)
+
+
 if __name__ == "__main__":
     unittest.main()

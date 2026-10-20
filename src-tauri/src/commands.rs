@@ -1552,6 +1552,12 @@ pub struct NexusSettings {
     /// depth reaches 2+. Default: true. Plans D5/D6.
     #[serde(default = "default_ghost_depth_ack")]
     pub ghost_depth_ack: bool,
+    /// Drop Groq transcripts whose own segment statistics (avg_logprob /
+    /// compression_ratio) mark them as unreliable. Off by default: enable it
+    /// only after `voice_scorecard.py` shows a threshold that catches
+    /// hallucinations without rejecting your real commands.
+    #[serde(default)]
+    pub stt_confidence_gate: bool,
     /// Ghost FIFO queue: per-step watchdog timeout in ms. Default: 15000. D7.
     #[serde(default = "default_ghost_step_timeout_ms")]
     pub ghost_step_timeout_ms: u64,
@@ -1719,6 +1725,7 @@ impl Default for NexusSettings {
             mic_keep_alive: true,
             telegram_chat_id: String::new(),
             ghost_depth_ack: true,
+            stt_confidence_gate: false,
             ghost_step_timeout_ms: 15000,
             ghost_turn_gap_ms: 1000,
             waves_horizontal_pct: 0.5,
@@ -2394,6 +2401,16 @@ pub fn stt_capture_had_speech() -> Result<bool, String> {
 }
 
 // ─── Ghost FIFO queue readers (loose settings.json parse) ───────────────
+
+/// Read the sttConfidenceGate flag (off unless the user turned it on).
+pub fn read_stt_confidence_gate<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return false; };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("sttConfidenceGate").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
 
 /// Read the ghostDepthAck flag (ghost FIFO queue depth-ACK, D5/D6).
 pub fn read_ghost_depth_ack<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
