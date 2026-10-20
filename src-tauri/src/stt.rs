@@ -529,6 +529,11 @@ const COMMON_WORDS: &[&str] = &[
     "timer", "alarm", "screenshot", "video", "mail", "email",
     "window", "screen", "volume", "mic", "time", "date", "news",
     "weather",
+    // general verbs / nouns real commands use
+    "list", "pull", "request", "requests", "merge", "order", "find", "read",
+    "reply", "forward", "back", "next", "previous", "scroll", "click", "copy",
+    "paste", "save", "add", "remove", "food", "all", "latest", "first",
+    "second", "third", "result", "results", "page", "file", "folder",
 ];
 
 /// Fraction of whitespace tokens (letters only, lowercased) found in
@@ -589,8 +594,15 @@ fn apply_hallucination_filter(text: &str) -> String {
         return "".to_string();
     }
     let lower = normalized.to_lowercase();
+    // Multi-word junk Whisper emits on silence / TV audio. Matched anywhere in
+    // the transcript, so every entry must be a phrase nobody says as a command.
+    // Short ones ("thank you.", "you.", "bye.") are NOT here: as a substring
+    // they wiped real speech ("tell mom I love you.", "goodbye.") — they are
+    // whole-utterance matches in `exact_fragments` below.
     let hallucinations = [
-        "thank you for watching", "thanks for watching", "thank you.", "you.", "bye.",
+        "thank you for watching", "thanks for watching", "thank you so much for watching",
+        "thanks for listening", "thank you for listening", "see you in the next video",
+        "like and subscribe", "don't forget to subscribe", "amara.org",
         "please subscribe", "subscribe to my channel", "booaaa", "and the world is coming",
         "cunzon usarlo", "sarese manguer", "tadrao vara", "yeraddy",
         "subtitles by", "translated by", "all rights reserved",
@@ -603,7 +615,7 @@ fn apply_hallucination_filter(text: &str) -> String {
     }
 
     let exact_fragments = [
-        "you", "oh", "out", "it's a", "thank you", "thanks", "from the", "in the",
+        "you", "oh", "out", "it's a", "thank you", "thanks", "bye", "from the", "in the",
         "of the", "to the", "and then", "and the", "on the", "open drift", "open breath",
     ];
     let bare = lower.trim().trim_end_matches(|c: char| matches!(c, '.' | ',' | '?' | '!'));
@@ -652,8 +664,16 @@ fn apply_hallucination_filter(text: &str) -> String {
     // NOTE: no_speech_prob veto deliberately NOT used here — measured
     // dormant (0.000 on every segment with whisper-large-v3-turbo, see
     // verify_confidence); wiring it would add latency for zero effect.
+    // A transcript the command parser resolves to a real intent is a command
+    // even when its nouns are outside the small dictionary ("list pull
+    // requests", "order pizza from dominos" were wiped by this gate). The
+    // parser is the same one that will act on it, so nothing gibberish gets
+    // through that it would not have acted on anyway.
     let word_count = words.len();
-    if word_count >= 3 && english_token_ratio(&words) < 0.30 {
+    if word_count >= 3
+        && english_token_ratio(&words) < 0.30
+        && crate::intent_parser::parse_deterministic(&normalized).is_none()
+    {
         tracing::info!("stt: filtered non-English/background gibberish: '{}'", text);
         return "".to_string();
     }
@@ -827,5 +847,68 @@ mod tests {
         ] {
             assert_eq!(apply_hallucination_filter(real), real, "'{real}' must pass");
         }
+    }
+    /// Real commands the speech engine transcribed correctly must reach the
+    /// parser (audit defect 11, confirmed offline: "list pull requests" and
+    /// "order pizza from dominos" were wiped by the dictionary gate; "tell mom
+    /// I love you." by the "you." substring). Whisper adds the trailing period.
+    #[test]
+    fn test_real_commands_survive_the_filter() {
+        for real in [
+            "List pull requests.",
+            "order pizza from dominos",
+            "Order pizza from Dominos.",
+            "Order biryani.",
+            "Search for shoes on Amazon.",
+            "Merge PR 23 in zync.",
+            "Tell mom I love you.",
+            "Send mummy a WhatsApp message saying hi.",
+            "I love you.",
+            "Thank you. Open Chrome.",
+            "Say goodbye.",
+            "Good morning.",
+        ] {
+            assert_eq!(apply_hallucination_filter(real), normalized(real), "'{real}' must pass");
+        }
+    }
+
+    /// The wholly-hallucinated forms still go, including the YouTube-outro
+    /// family that previously leaked.
+    #[test]
+    fn test_youtube_outro_hallucinations_filtered() {
+        for junk in [
+            "Thank you.",
+            "Thank you",
+            "You.",
+            "Bye.",
+            "Bye",
+            "Thanks for watching!",
+            "Thank you so much for watching.",
+            "See you in the next video.",
+            "Don't forget to like and subscribe.",
+            "Thanks for listening.",
+            "Subtitles by the Amara.org community",
+            "Thank you. Thank you.",
+        ] {
+            assert_eq!(apply_hallucination_filter(junk), "", "'{junk}' must filter");
+        }
+    }
+
+    /// The parser exemption must not reopen the gibberish gate: nonsense that
+    /// the parser cannot act on is still dropped.
+    #[test]
+    fn test_gibberish_still_dropped_with_parser_exemption() {
+        for junk in [
+            "Tentang Otor. Post Immortal.",
+            "Souch Mamek tadrao vara",
+            "blargle wargle xyz",
+            "asdkfjhasd qwerty zxcv",
+        ] {
+            assert_eq!(apply_hallucination_filter(junk), "", "'{junk}' must filter");
+        }
+    }
+
+    fn normalized(s: &str) -> String {
+        super::normalize_english_punctuation(s)
     }
 }

@@ -6,6 +6,7 @@
 - **Built (Phase A, measurement only — zero runtime change)**: `voice_eval.rs` (drives the real `WakeEngine`, filter, `strip_wake_prefix`, parser), `examples/wake_eval.rs`, `examples/stt_eval.rs`, `scripts/voice_eval_set.py` (held-out recorder/validator), `scripts/voice_scorecard.py` (Wilson-CI stars table, `--baseline` deltas). Held-out set lives in git-ignored `eval_set/`; never train on it.
 - **First findings**: the hallucination filter wipes real commands ("list pull requests", "order pizza from dominos") — confirmed in Rust; synthetic "next us" fires the wake model (0.89).
 - **Verify**: Rust lib 935/935 serial (baseline 922), Python tools 21/21.
+- **Phase B6 done (change 80)**: hallucination filter no longer wipes real commands — short junk (`you.`/`bye.`/`thank you.`) is whole-utterance only, the dictionary gate defers to the command parser, YouTube-outro phrases added. Rust lib 938/938. Docs: `docs/changes/80-hallucination-filter-stops-wiping-real-commands.md`.
 - **Pending (user-run, Windows)**: record the held-out set (you + 2–3 others), run the baseline scorecard **before** Phase B fixes. Docs: `docs/changes/79-voice-accuracy-measurement-harness.md`.
 
 ## Ghost / Screen-Analysis / Memory Fix Pass + Free-BYOK Key Hygiene (2026-10-05)
