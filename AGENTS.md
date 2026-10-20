@@ -1,5 +1,13 @@
 # NEXUS — Project Notes
 
+## Voice Accuracy Measurement Harness — Phase A (2026-10-20)
+
+- **Context**: user asked for the real wake-word ("NEXUS", "hey NEXUS") and STT accuracy in a stars/% table and a plan to make both near-perfect. Audit result: **no trustworthy number existed** (all wake recalls were on training files or a leaky split; STT never measured on real audio). Plan: `docs/research/voice-accuracy/01-…md` (phases A measure → B bug fixes → C retrain → D STT polish).
+- **Built (Phase A, measurement only — zero runtime change)**: `voice_eval.rs` (drives the real `WakeEngine`, filter, `strip_wake_prefix`, parser), `examples/wake_eval.rs`, `examples/stt_eval.rs`, `scripts/voice_eval_set.py` (held-out recorder/validator), `scripts/voice_scorecard.py` (Wilson-CI stars table, `--baseline` deltas). Held-out set lives in git-ignored `eval_set/`; never train on it.
+- **First findings**: the hallucination filter wipes real commands ("list pull requests", "order pizza from dominos") — confirmed in Rust; synthetic "next us" fires the wake model (0.89).
+- **Verify**: Rust lib 935/935 serial (baseline 922), Python tools 21/21.
+- **Pending (user-run, Windows)**: record the held-out set (you + 2–3 others), run the baseline scorecard **before** Phase B fixes. Docs: `docs/changes/79-voice-accuracy-measurement-harness.md`.
+
 ## Ghost / Screen-Analysis / Memory Fix Pass + Free-BYOK Key Hygiene (2026-10-05)
 
 - **Context**: after the NEXUS-vs-Dexter comparison the user fixed the scope — NEXUS stays **free and BYOK** (users add their own free Groq + Gemini keys) with a **600–700 MB** local-RAM ceiling — and named three pillars: memory, Ghost Mode ("broken"), screen analysis ("broken"). Plan-mode first (6 read-only audits, plan approved), then built. Paid/RAM-heavy ideas (Worker free tier, shared key, bundled Python, premium TTS, generic MCP bridge) were evaluated and **deliberately not built** — see change 78.

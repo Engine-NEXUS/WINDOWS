@@ -16,6 +16,10 @@ mod wakeword_oww;
 mod wakeword {
     pub use crate::wakeword_oww::*;
 }
+// Offline wake/STT accuracy evaluation (drives the real engine + filter + parser;
+// used by examples/wake_eval.rs and examples/stt_eval.rs — never by the app itself).
+#[cfg(all(feature = "wakeword-oww", not(feature = "mock-wake")))]
+pub mod voice_eval;
 // Phase D: Speaker verification module (voice profile enrollment + cosine similarity)
 pub mod voice_profile;
 pub mod acoustic_profile;

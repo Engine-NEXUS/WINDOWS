@@ -191,3 +191,4 @@ installers/
 scripts/kaggle_kernel/
 *.yaml
 !src-tauri/resources/**/*.yaml
+eval_set/

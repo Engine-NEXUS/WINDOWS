@@ -42,8 +42,9 @@ pub fn set_meeting_state(_state: std::sync::Arc<crate::meeting_detect::MeetingSt
 #[cfg(feature = "mock-wake")]
 pub(crate) fn clear_tts_playing() {}
 
+// `pub(crate)`: the offline evaluator (`voice_eval.rs`) drives the REAL engine.
 #[cfg(not(feature = "mock-wake"))]
-mod engine {
+pub(crate) mod engine {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
@@ -2056,7 +2057,7 @@ fn check_pre_trigger(
 /// passes the gate or the trimmed span is suspiciously short (<0.3s).
 /// Unused under `mock-wake` (verifier compiled out) — allowed, not dead.
 #[allow(dead_code)]
-fn vad_trim(audio: &[f32]) -> Vec<f32> {
+pub(crate) fn vad_trim(audio: &[f32]) -> Vec<f32> {
     const FRAME: usize = 320; // 20ms @16kHz
     const GATE: f32 = 0.02; // speech-body floor (above mic-noise/SST floor)
     const MARGIN: usize = 4800; // ~300ms each side (v3: keep context —
