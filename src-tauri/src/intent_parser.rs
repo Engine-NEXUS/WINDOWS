@@ -5486,7 +5486,47 @@ fn parse_media(text: &str) -> Option<ParsedIntent> {
     if regex_match(text, r"^(?:stop\s+music|stop\s+media|stop\s+playback|stop)$") {
         return Some(ParsedIntent::MediaStop);
     }
+    // 5. Bare "play <title>" / "play <title> by <artist>" / "put on <title>". Last on purpose: every exact form above
+    //    (play, play/pause, play next ...) wins, and anything that is clearly not music is left to the other parsers.
+    if let Some(caps) = regex_captures(text, r"^(?:play|put\s+on)\s+(.+)$") {
+        let query = caps.get(1).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
+        if is_music_title(&query) {
+            return Some(ParsedIntent::PlayMusic { query: Some(query), player: None });
+        }
+    }
     None
+}
+
+/// Could "play <this>" be a song, album or artist? A title is short and is not a pronoun, a transport word, or an
+/// obvious video / game / streaming-site request.
+pub(crate) fn is_music_title(query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    let words: Vec<&str> = q.split_whitespace().collect();
+    if words.is_empty() || words.len() > 12 {
+        return false;
+    }
+    const NOT_A_TITLE: &[&str] = &[
+        "it", "that", "this", "again", "back", "now", "pause", "resume", "next", "previous", "last", "first",
+        "something", "anything", "songs", "music", "stop", "faster", "slower",
+    ];
+    if words.len() == 1 && NOT_A_TITLE.contains(&words[0]) {
+        return false;
+    }
+    if matches!(words[0], "it" | "that" | "this" | "them" | "those" | "these") {
+        return false;
+    }
+    let transport = |w: &str| matches!(w, "next" | "previous" | "last");
+    let unit = |w: &str| matches!(w, "song" | "track" | "one" | "songs" | "tracks");
+    if (transport(words[0]) && words.get(1).map_or(true, |w| unit(w)))
+        || (words[0] == "the" && words.get(1).is_some_and(|w| transport(w)) && words.get(2).map_or(true, |w| unit(w)))
+    {
+        return false;
+    }
+    const NOT_MUSIC: &[&str] = &[
+        "youtube", "netflix", "video", "videos", "movie", "movies", "game", "games", "chess", "minecraft", "trailer",
+        "podcast", "episode", "stream", "twitch", "prime", "hotstar", "reel", "reels", "clip",
+    ];
+    !words.iter().any(|w| NOT_MUSIC.contains(w))
 }
 
 // ΓöÇΓöÇΓöÇ Architecture mapper ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ

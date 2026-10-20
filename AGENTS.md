@@ -1,5 +1,12 @@
 # NEXUS — Project Notes
 
+## Feature production programme (2026-10-20)
+
+- **What:** every feature is being brought to >= 80% / four stars on a rubric scorecard (built, tests, live-verified, safety, industry parity). Plan and queue: `docs/features/149-feature-production-programme.md`; data and generator: `docs/testing/scorecard-data.json`, `python scripts/scorecard.py report|gaps|set`; live runs are recorded in `docs/testing/live-proof-ledger.md` (an L score may only rise for a run that has a ledger line). Decisions taken: macOS/Linux, Administrator control and the admin brain are out of the current target.
+- **Done so far:** music control (fixed `R&B`/multi-word titles that `cmd start` broke, removed a false "playing" claim and a stray pause key, honest "not installed", bare `play <title>`), leave-by reminders (pure tested logic, no per-minute retry after a failed route lookup), Activity Manager hardening (in the working tree with the Device Links work). Each has mutation-checked tests; none has the owner's live run yet, so none is at 80%.
+- **Lesson:** tests and fixes lift a row from about 50% to about 68%; the last 12 points are live proof, so the four owner walkthroughs in the programme doc are the critical path.
+- **Pitfall:** `auth_vault::...google_account_registry_roundtrip` and `memory::...test_profile_carries_phone` flake in a full parallel run and pass alone.
+
 ## Universal agent control: track all agents, tile, display off, unconditional shutdown, overnight record, gated commit/PR (2026-10-20)
 
 - **Built:** hooks for Codex, Devin (via Claude's settings, relabelled), Windsurf, Kilo, Copilot CLI (Trae is observe-only); "hook up all agents"; `agent_tracker.rs` (many agents, per-agent announcements, one summary); `window_tile.rs` + `Action::TidyUp` (equal columns, then display off only if the user is idle and no meeting); plain "shut down after X" now powers off whatever happened (conditional only with "if it's perfect"), `agent_outcomes.rs` + `briefing.rs` say it next morning and ask to reopen the other apps; `agent_followup.rs` commit + draft PR for "... commit and raise a PR": asked once (`Offer::PlanFollowUp`), runs per finished agent only after the yes and only on a clean verdict, the shutdown waits while git runs and never depends on it. Record: `docs/changes/149-universal-agent-control.md` (also 147, 148).
