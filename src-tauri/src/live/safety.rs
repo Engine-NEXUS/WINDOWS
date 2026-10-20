@@ -62,7 +62,8 @@ pub const CONFIRM_ACTIONS: &[&str] = &[
 
 /// Check if a tool is allowed.
 pub fn is_tool_allowed(tool: &str) -> bool {
-    ALLOWED_TOOLS.contains(&tool)
+    let t = tool.trim().to_lowercase();
+    ALLOWED_TOOLS.iter().any(|&a| a == t.as_str())
 }
 
 /// Check if a target (app name, URL, etc.) is blocked.
@@ -73,7 +74,8 @@ pub fn is_target_blocked(target: &str) -> bool {
 
 /// Check if an action requires user confirmation.
 pub fn needs_confirmation(tool: &str) -> bool {
-    CONFIRM_ACTIONS.contains(&tool)
+    let t = tool.trim().to_lowercase();
+    CONFIRM_ACTIONS.iter().any(|&c| c == t.as_str())
 }
 
 /// Full safety check for a (tool, target) pair.
@@ -194,6 +196,233 @@ mod tests {
         assert_eq!(
             safety_check("ghost_calibrate", None),
             SafetyVerdict::Allowed
+        );
+    }
+
+    #[test]
+    fn test_all_allowed_tools_whitelisted() {
+        for &tool in ALLOWED_TOOLS {
+            assert!(
+                is_tool_allowed(tool),
+                "Allowed tool list must accept '{tool}'"
+            );
+            // Without a blocked target, each should either be Allowed or NeedsConfirmation, never Blocked
+            let verdict = safety_check(tool, None);
+            assert!(
+                matches!(verdict, SafetyVerdict::Allowed | SafetyVerdict::NeedsConfirmation),
+                "Tool '{tool}' had unexpected verdict: {verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unknown_and_dangerous_tools_blocked() {
+        let dangerous = [
+            "delete_file",
+            "rm_rf",
+            "format_c",
+            "shell_exec",
+            "powershell",
+            "bash",
+            "cmd",
+            "eval",
+            "write_file",
+            "kill_process",
+            "",
+            "   ",
+        ];
+        for tool in dangerous {
+            assert!(
+                !is_tool_allowed(tool),
+                "Tool '{tool}' must not be allowed"
+            );
+            assert_eq!(
+                safety_check(tool, None),
+                SafetyVerdict::Blocked(format!("Tool '{tool}' is not in the allowed list"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_tool_casing_and_whitespace_normalisation() {
+        assert!(is_tool_allowed("  type_text  "));
+        assert!(is_tool_allowed("TYPE_TEXT"));
+        assert!(is_tool_allowed("WhatsApp_Open"));
+        assert!(is_tool_allowed(" browser_search\t"));
+        assert!(!is_tool_allowed("unknown_command"));
+    }
+
+    #[test]
+    fn test_denied_targets_all_classes_blocked() {
+        // Password managers
+        let pwd_managers = [
+            "1password.exe",
+            "Bitwarden Desktop",
+            "LastPass Vault",
+            "keepassxc.exe",
+            "Dashlane",
+            "Apple Keychain",
+        ];
+        for target in pwd_managers {
+            assert!(is_target_blocked(target), "Password manager target '{target}' must be blocked");
+        }
+
+        // Banking & payment sites
+        let banking = [
+            "Chase Bank Online",
+            "https://bankofamerica.com",
+            "PayPal Balance",
+            "Venmo Payment",
+            "CashApp Transfer",
+            "Stripe Dashboard",
+        ];
+        for target in banking {
+            assert!(is_target_blocked(target), "Banking target '{target}' must be blocked");
+        }
+
+        // Crypto & hardware wallets
+        let crypto = [
+            "Coinbase Pro",
+            "MetaMask Extension",
+            "Trezor Suite",
+            "Ledger Live",
+        ];
+        for target in crypto {
+            assert!(is_target_blocked(target), "Crypto target '{target}' must be blocked");
+        }
+    }
+
+    #[test]
+    fn test_denied_targets_casing_and_punctuation_variations() {
+        assert!(is_target_blocked("1PASSWORD"));
+        assert!(is_target_blocked("BiTwArDeN"));
+        assert!(is_target_blocked("   paypal   "));
+        assert!(is_target_blocked("MY_BANK_ACCOUNT"));
+        assert!(is_target_blocked("metamask.io"));
+        assert!(is_target_blocked("KeePass-2.54.exe"));
+    }
+
+    #[test]
+    fn test_harmless_targets_not_blocked() {
+        let safe = [
+            "whatsapp",
+            "brave",
+            "notepad",
+            "Visual Studio Code",
+            "Spotify Free",
+            "Calculator",
+            "Google Chrome",
+            "Slack",
+            "Terminal",
+            "River Park",
+            "Central Park",
+        ];
+        for target in safe {
+            assert!(!is_target_blocked(target), "Harmless target '{target}' should not be blocked");
+            assert_eq!(
+                safety_check("open_app", Some(target)),
+                SafetyVerdict::Allowed
+            );
+        }
+    }
+
+    #[test]
+    fn test_substring_matching_rules_and_ambiguity() {
+        // As defined by the substring check in DENIED_TARGETS:
+        // "bank" is a denylist entry, so "Bank of the River Park" contains "bank" and is blocked.
+        assert!(
+            is_target_blocked("Bank of the River Park"),
+            "Substring matching blocks 'Bank of the River Park' due to 'bank'"
+        );
+        // By contrast, the park without the word 'bank' is not blocked.
+        assert!(
+            !is_target_blocked("River Park"),
+            "'River Park' has no denylist keywords and must be allowed"
+        );
+    }
+
+    #[test]
+    fn test_google_accounts_not_blocked_by_default() {
+        // The current DENIED_TARGETS list does not claim generic Google login pages.
+        // Assert current behavior as defined in the rules.
+        assert!(
+            !is_target_blocked("Sign in - Google Accounts"),
+            "Sign in - Google Accounts is not currently in DENIED_TARGETS"
+        );
+    }
+
+    #[test]
+    fn test_confirmation_required_exact_and_variations() {
+        for &tool in CONFIRM_ACTIONS {
+            assert!(
+                needs_confirmation(tool),
+                "Action '{tool}' must require confirmation"
+            );
+        }
+        assert!(!needs_confirmation("type_text"));
+        assert!(!needs_confirmation("open_app"));
+        assert!(!needs_confirmation("open_url"));
+    }
+
+    #[test]
+    fn test_confirmation_cannot_be_bypassed_by_spaces_or_casing() {
+        // Extra spaces or case variations must still trigger confirmation, never Allowed
+        let variations = [
+            "whatsapp_send",
+            " whatsapp_send ",
+            "WhatsApp_Send",
+            "WHATSAPP_SEND",
+            "confirm_send",
+            " confirm_send ",
+            "Confirm_Send",
+            "CONFIRM_SEND",
+            "close_app",
+            " Close_App ",
+            "CLOSE_APP",
+        ];
+        for tool in variations {
+            assert!(
+                needs_confirmation(tool),
+                "Confirmation check failed for variation '{tool}'"
+            );
+            assert_eq!(
+                safety_check(tool, None),
+                SafetyVerdict::NeedsConfirmation,
+                "safety_check must demand confirmation for '{tool}', never skip it"
+            );
+        }
+    }
+
+    #[test]
+    fn test_safety_check_matrix_combinations() {
+        // 1. Allowed tool + Safe target -> Allowed
+        assert_eq!(
+            safety_check("open_app", Some("notepad")),
+            SafetyVerdict::Allowed
+        );
+
+        // 2. Allowed tool + Blocked target -> Blocked
+        assert_eq!(
+            safety_check("open_app", Some("1Password")),
+            SafetyVerdict::Blocked("Target '1Password' is blocked for your safety, sir".to_string())
+        );
+
+        // 3. Confirm tool + Safe target -> NeedsConfirmation
+        assert_eq!(
+            safety_check("whatsapp_send", Some("friend")),
+            SafetyVerdict::NeedsConfirmation
+        );
+
+        // 4. Confirm tool + Blocked target -> Blocked wins over confirmation
+        assert_eq!(
+            safety_check("whatsapp_send", Some("my bank")),
+            SafetyVerdict::Blocked("Target 'my bank' is blocked for your safety, sir".to_string())
+        );
+
+        // 5. Unknown tool + Blocked target -> Unknown tool blocked wins
+        assert_eq!(
+            safety_check("steal_passwords", Some("1Password")),
+            SafetyVerdict::Blocked("Tool 'steal_passwords' is not in the allowed list".to_string())
         );
     }
 }

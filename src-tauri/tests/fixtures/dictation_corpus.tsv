@@ -1,0 +1,181 @@
+# Spoken dictation test corpus: 156 pairs covering cleaner rules.
+# Columns: spoken<TAB>expected<TAB>mode[<TAB>doubt]
+# Modes:
+#   multi   - document target (at_sentence_start: true, single_line: false)
+#   oneline - search/address target (at_sentence_start: false, single_line: true)
+#   dict    - document target with test dictionary (zinc, nexus, github, vscode, tauri)
+# \n in expected represents a newline character.
+
+# --- 1. Plain sentences with STT punctuation (25 pairs) ---
+hello this is a test.	Hello this is a test.	multi
+hello, this is a test.	Hello, this is a test.	multi
+how are you doing today?	How are you doing today?	multi
+everything looks good to me!	Everything looks good to me!	multi
+we need milk, eggs, and bread.	We need milk, eggs, and bread.	multi
+the project is almost complete.	The project is almost complete.	multi
+can we schedule a meeting for tomorrow?	Can we schedule a meeting for tomorrow?	multi
+yes, that sounds like a great plan.	Yes, that sounds like a great plan.	multi
+please let me know what you think.	Please let me know what you think.	multi
+the quick brown fox jumps over the lazy dog.	The quick brown fox jumps over the lazy dog.	multi
+i will see you there.	I will see you there.	multi
+good morning, everyone.	Good morning, everyone.	multi
+it was a pleasure speaking with you today.	It was a pleasure speaking with you today.	multi
+let us review the details together.	Let us review the details together.	multi
+what time does the train arrive?	What time does the train arrive?	multi
+the weather today is absolutely beautiful!	The weather today is absolutely beautiful!	multi
+i have already sent the email.	I have already sent the email.	multi
+first, second, and third place.	First, second, and third place.	multi
+we should consider all the options carefully.	We should consider all the options carefully.	multi
+are there any questions before we begin?	Are there any questions before we begin?	multi
+thank you for your help.	Thank you for your help.	multi
+let me check on that for you.	Let me check on that for you.	multi
+this approach seems reasonable.	This approach seems reasonable.	multi
+is this the correct version?	Is this the correct version?	multi
+everything is working as expected.	Everything is working as expected.	multi
+
+# --- 2. Filler removal (20 pairs) ---
+um hello uh world	Hello world	multi
+umm good morning	Good morning	multi
+uh this is great	This is great	multi
+uhh I am ready	I am ready	multi
+uhm let me see	Let me see	multi
+er what do you think	What do you think	multi
+erm that might work	That might work	multi
+hmm let me consider that	Let me consider that	multi
+mm I agree with you	I agree with you	multi
+mmm that tastes good	That tastes good	multi
+so er I think we should go	So I think we should go	multi
+the umbrella is here	The umbrella is here	multi
+an error occurred	An error occurred	multi
+we saw summer flowers	We saw summer flowers	multi
+Um, hello.	Hello.	multi
+I like uh this one better	I like this one better	multi
+you know what I mean	You know what I mean	multi
+it is, you know, quite difficult	It is, you know, quite difficult	multi
+well, uh, maybe tomorrow	Well, maybe tomorrow	multi
+um uh er let us begin	Let us begin	multi
+
+# --- 3. Spoken punctuation and layout (25 pairs) ---
+hello comma this is a test full stop	Hello, this is a test.	multi
+hello comma, this is a test full stop.	Hello, this is a test.	multi
+dear sam comma new line thanks for the update full stop	Dear sam,\nThanks for the update.	multi
+are you coming question mark	Are you coming?	multi
+that is great exclamation mark	That is great!	multi
+look out exclamation point	Look out!	multi
+note colon	Note:	multi
+first part semicolon second part	First part; second part	multi
+item a semi colon item b	Item a; item b	multi
+this is a period of time	This is a period of time	multi
+that is all period	That is all.	multi
+the colon is part of the body	The colon is part of the body	multi
+first line new paragraph second line	First line\n\nSecond line	multi
+shopping list new line bullet point milk new line bullet point eggs	Shopping list\n- Milk\n- Eggs	multi
+he said open quote hello there close quote	He said "hello there"	multi
+see open bracket figure two close bracket	See (figure two)	multi
+line one next line line two	Line one\nLine two	multi
+she said begin quote welcome home end quote	She said "welcome home"	multi
+open quote quote test unquote	"Quote test"	multi
+read open parenthesis chapter five close parenthesis	Read (chapter five)	multi
+formula open paren x close paren	Formula (x)	multi
+warning colon new line proceed with caution	Warning:\nProceed with caution	multi
+first line period new line second line	First line.\nSecond line	multi
+open quote hello comma world exclamation mark close quote	"Hello, world!"	multi
+bullet point start here	- Start here	multi
+
+# --- 4. Scratch that inside utterance (15 pairs) ---
+meet me at five scratch that meet me at six	Meet me at six	multi
+send to john delete that send to mary	Send to mary	multi
+call tomorrow strike that call today	Call today	multi
+the price is ten scratch that twenty dollars	20 dollars	multi
+we should go north delete that head south	Head south	multi
+arriving monday strike that arriving tuesday	Arriving tuesday	multi
+first draft scratch that second draft delete that final draft	Final draft	multi
+good morning scratch that good evening everyone	Good evening everyone	multi
+please cancel scratch that please confirm the order	Please confirm the order	multi
+meet at two delete that three p m	3 pm	multi
+turn left scratch that turn right	Turn right	multi
+hello world scratch that		multi
+start the engine delete that		multi
+it was blue strike that it was red	It was red	multi
+send email to alice scratch that send message to bob	Send message to bob	multi
+
+# --- 5. Paused corrections and non-corrections (15 pairs) ---
+send it to bob, no, wait, send it to alice	Send it to alice	multi
+hello comma send it to bob, no wait, alice	Hello, alice	multi
+see you tomorrow, sorry I mean on friday	On friday	multi
+call bob, wait, no, call charlie	Call charlie	multi
+meet at two, no, wait, meet at three	Meet at three	multi
+deliver on monday, sorry, I mean on tuesday	On tuesday	multi
+invite david, wait, no, invite sarah	Invite sarah	multi
+send to john, no, wait, to mary	To mary	multi
+i have no wait time today	I have no wait time today	multi
+there is no wait for the bus	There is no wait for the bus	multi
+we can wait no longer	We can wait no longer	multi
+please wait no more	Please wait no more	multi
+there was no wait at the counter	There was no wait at the counter	multi
+i am sorry that happened	I am sorry that happened	multi
+he did not mean that	He did not mean that	multi
+
+# --- 6. Numbers, times, percentages, units, currency (20 pairs) ---
+meet at five p m	Meet at 5 pm	multi
+wake up at seven a m	Wake up at 7 am	multi
+call at six pm	Call at 6 pm	multi
+flight departs at eight am	Flight departs at 8 am	multi
+it grew twenty five percent	It grew 25%	multi
+discount of fifty percent	Discount of 50%	multi
+interest rate of three percent	Interest rate of 3%	multi
+ninety nine percent complete	99% complete	multi
+about forty dollars	About 40 dollars	multi
+costs twenty dollars	Costs 20 dollars	multi
+give me one dollar	Give me 1 dollars	multi	doubt
+price is fifty dollars	Price is 50 dollars	multi
+fee is seventy five rupees	Fee is 75 rupees	multi
+cost ten rupees	Cost 10 rupees	multi
+charge is one rupee	Charge is 1 rupees	multi	doubt
+call at seven o'clock	Call at 7 o'clock	multi
+party at eleven o'clock	Party at 11 o'clock	multi
+i have five apples	I have five apples	multi
+we walked three miles	We walked three miles	multi
+wait for twenty minutes	Wait for twenty minutes	multi
+
+# --- 7. Capitalisation (15 pairs) ---
+i think i'm right and i'll prove it	I think I'm right and I'll prove it	multi
+one thing full stop another thing	One thing. Another thing	multi
+is it ready question mark yes it is	Is it ready? Yes it is	multi
+stop exclamation mark do not move	Stop! Do not move	multi
+i know that i've seen this before	I know that I've seen this before	multi
+if i'd known i would have come	If I'd known I would have come	multi
+yesterday i saw what you did	Yesterday I saw what you did	multi
+can i help you with that?	Can I help you with that?	multi
+first sentence. second sentence? third sentence!	First sentence. Second sentence? Third sentence!	multi
+here is a list: item one full stop item two	Here is a list: item one. Item two	multi
+dear sam comma how are you	Dear sam, how are you	multi
+we met in london last week	We met in london last week	multi	doubt
+i think therefore i am	I think therefore I am	multi
+tell me what i should do next	Tell me what I should do next	multi
+hello full stop i am here	Hello. I am here	multi
+
+# --- 8. One-line targets (15 pairs) ---
+search for cats.	search for cats	oneline
+hello. how are you.	hello. How are you	oneline
+see you at 5	see you at 5	oneline
+weather in tokyo	weather in tokyo	oneline
+how to bake bread?	how to bake bread?	oneline
+urgent alert!	urgent alert!	oneline
+open google dot com	open google dot com	oneline
+find best restaurants nearby.	find best restaurants nearby	oneline
+first part new line second part	first part second part	oneline
+item one bullet point item two	item one item two	oneline
+i want to buy shoes.	I want to buy shoes	oneline
+i'm looking for a book.	I'm looking for a book	oneline
+query one. query two.	query one. Query two	oneline
+simple search query	simple search query	oneline
+nexus scratch that settings page.	settings page	oneline
+
+# --- 9. Dictionary replacements (6 pairs) ---
+open the zinc repo	Open the Zync repo	dict
+zincing is not zinc	Zincing is not Zync	dict
+welcome to nexus	Welcome to NEXUS	dict
+push the code to github	Push the code to GitHub	dict
+launch vscode now	Launch VS Code now	dict
+built with tauri	Built with Tauri	dict

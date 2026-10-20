@@ -307,6 +307,26 @@ fn classify_power(kind: &str, text: &str) -> Reply {
     Reply::Other
 }
 
+/// "Shall I reopen them?" / "Do you want me to open the other apps you were using too?" is naturally answered with
+/// the action itself ("reopen them", "open them all", "open everything"). Only such short action phrases count; any
+/// word outside the small vocabulary (a "no", a "don't", a different request) leaves it to the generic classifier.
+fn classify_reopen(text: &str) -> Reply {
+    const VOCAB: &[&str] = &[
+        "reopen", "open", "them", "it", "all", "everything", "apps", "app", "the", "other", "of", "please", "those",
+        "my", "windows", "and",
+    ];
+    let mut w = words(text);
+    if w.first().map(|x| x == "nexus").unwrap_or(false) {
+        w.remove(0);
+    }
+    if w.is_empty() || w.len() > MAX_REPLY_WORDS || !w.iter().all(|x| VOCAB.contains(&x.as_str())) {
+        return Reply::Other;
+    }
+    let has_action = w.iter().any(|x| x == "reopen" || x == "open");
+    let has_object = w.iter().any(|x| matches!(x.as_str(), "them" | "it" | "all" | "everything" | "apps" | "app" | "those" | "windows"));
+    if has_action && has_object { Reply::Yes } else { Reply::Other }
+}
+
 /// Classify an answer to the question that is waiting. Power questions also accept the action itself.
 pub fn classify_for(offer: &Offer, text: &str) -> Reply {
     let base = classify(text);
@@ -315,6 +335,7 @@ pub fn classify_for(offer: &Offer, text: &str) -> Reply {
     }
     match offer {
         Offer::Power { kind } => classify_power(kind, text),
+        Offer::ReopenSession => classify_reopen(text),
         _ => Reply::Other,
     }
 }
@@ -499,5 +520,49 @@ mod tests {
         *lock() = Some(State { offer: Offer::ClearTimetable, armed: true, expires: Instant::now() - Duration::from_secs(1), reasked: false });
         assert!(peek().is_none() && !is_armed());
         clear();
+    }
+
+    #[test]
+    fn test_reopen_session_offer_accepts_yes_variants() {
+        let off = Offer::ReopenSession;
+        for t in [
+            "yes", "yes please", "yeah", "sure", "okay", "go ahead", "do it", "please do",
+            "yes reopen them", "reopen them", "Nexus yes", "absolutely", "sounds good",
+        ] {
+            assert_eq!(classify_for(&off, t), Reply::Yes, "{t}");
+        }
+    }
+
+    #[test]
+    fn test_reopen_session_offer_clears_on_no_without_launching() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        set(Offer::ReopenSession, true);
+        assert!(is_armed());
+
+        let off = peek().expect("offer waiting");
+        for t in ["no", "no thanks", "don't", "skip it", "cancel", "never mind", "not now"] {
+            let reply = classify_for(&off, t);
+            assert!(reply == Reply::No || reply == Reply::Later, "{t}");
+        }
+
+        // On "no", consumer takes and clears offer without launching anything
+        assert_eq!(take(), Some(Offer::ReopenSession));
+        assert!(peek().is_none());
+        assert!(!is_armed());
+    }
+
+    #[test]
+    fn test_reopen_session_second_yes_does_nothing() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        set(Offer::ReopenSession, true);
+
+        // First take consumes the offer
+        assert_eq!(take(), Some(Offer::ReopenSession));
+
+        // Second take returns None; a second "yes" finds nothing waiting
+        assert_eq!(take(), None);
+        assert!(peek().is_none());
     }
 }

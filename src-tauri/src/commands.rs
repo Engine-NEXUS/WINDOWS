@@ -2363,12 +2363,12 @@ pub fn save_settings<R: Runtime>(
         .ok()
         .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
         .unwrap_or_else(|| serde_json::json!({}));
-    settings.groq_api_key = crate::api_keys::merge_key(&existing, "groqApiKey", &settings.groq_api_key);
-    settings.gemini_api_key = crate::api_keys::merge_key(&existing, "geminiApiKey", &settings.gemini_api_key);
-    settings.cerebras_api_key = crate::api_keys::merge_key(&existing, "cerebrasApiKey", &settings.cerebras_api_key);
-    settings.deepgram_api_key = crate::api_keys::merge_key(&existing, "deepgramApiKey", &settings.deepgram_api_key);
-    settings.routes_api_key = crate::api_keys::merge_key(&existing, "routesApiKey", &settings.routes_api_key);
-    settings.places_api_key = crate::api_keys::merge_key(&existing, "placesApiKey", &settings.places_api_key);
+    settings.groq_api_key = crate::api_keys::handle_save_key(&crate::api_keys::KeychainKeyStore, "groq", "groqApiKey", &existing, &settings.groq_api_key);
+    settings.gemini_api_key = crate::api_keys::handle_save_key(&crate::api_keys::KeychainKeyStore, "gemini", "geminiApiKey", &existing, &settings.gemini_api_key);
+    settings.cerebras_api_key = crate::api_keys::handle_save_key(&crate::api_keys::KeychainKeyStore, "cerebras", "cerebrasApiKey", &existing, &settings.cerebras_api_key);
+    settings.deepgram_api_key = crate::api_keys::handle_save_key(&crate::api_keys::KeychainKeyStore, "deepgram", "deepgramApiKey", &existing, &settings.deepgram_api_key);
+    settings.routes_api_key = crate::api_keys::handle_save_key(&crate::api_keys::KeychainKeyStore, "google_maps", "routesApiKey", &existing, &settings.routes_api_key);
+    settings.places_api_key = crate::api_keys::handle_save_key(&crate::api_keys::KeychainKeyStore, "google_places", "placesApiKey", &existing, &settings.places_api_key);
     // The Worker URL receives every transcript and the device token: never accept
     // plain http (except localhost) or a malformed value from the UI.
     if !settings.server_url.is_empty() {
@@ -2590,7 +2590,12 @@ pub fn read_stt_log_confidence<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> 
 /// Used by ghost.rs (vision keys) and the health panel. `service` is the
 /// vault service id ("groq" | "gemini" | "cerebras").
 pub fn read_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>, service: &str) -> String {
-    if let Some(k) = crate::auth_vault::get_api_key(service) {
+    let vault_svc = match service {
+        "routes" => "google_maps",
+        "places" => "google_places",
+        other => other,
+    };
+    if let Some(k) = crate::auth_vault::get_api_key(vault_svc) {
         if !k.is_empty() {
             return k;
         }
@@ -2607,23 +2612,38 @@ pub fn read_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>, service: &str)
         "gemini" => "geminiApiKey",
         "cerebras" => "cerebrasApiKey",
         "deepgram" => "deepgramApiKey",
-        "google_maps" => "routesApiKey",
-        "google_places" => "placesApiKey",
+        "google_maps" | "routes" => "routesApiKey",
+        "google_places" | "places" => "placesApiKey",
         _ => "groqApiKey",
     };
     let snake = match service {
         "gemini" => "gemini_api_key",
         "cerebras" => "cerebras_api_key",
         "deepgram" => "deepgram_api_key",
-        "google_maps" => "routes_api_key",
-        "google_places" => "places_api_key",
+        "google_maps" | "routes" => "routes_api_key",
+        "google_places" | "places" => "places_api_key",
         _ => "groq_api_key",
     };
-    json.get(camel)
+    let val = json.get(camel)
         .or_else(|| json.get(snake))
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .to_string()
+        .to_string();
+    if !val.is_empty() {
+        return val;
+    }
+    if service == "google_maps" || service == "routes" {
+        if let Some(v) = json
+            .get("googleMapsApiKey")
+            .or_else(|| json.get("google_maps_api_key"))
+            .and_then(|v| v.as_str())
+        {
+            if !v.is_empty() {
+                return v.to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 /// Read the verifyWake flag from settings.json (non-IPC helper for wakeword_oww.rs).
@@ -3683,40 +3703,18 @@ pub fn import_settings<R: Runtime>(app: AppHandle<R>, json_str: String) -> Resul
     let json = sanitize_imported_settings(json)?;
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut json = json;
+    // An import means "use these": a key in the imported file replaces the one in the keychain (the plain scrub would
+    // treat a different stored value as a conflict and leave the imported one unused). Then the file copy is blanked.
+    for &(service, _, field) in crate::api_keys::KEY_SERVICES {
+        if let Some(k) = json.get(field).and_then(|v| v.as_str()).filter(|k| !k.is_empty()) {
+            crate::auth_vault::set_api_key(service, k);
+        }
+    }
+    crate::api_keys::scrub_plaintext_keys(&mut json, &crate::api_keys::KeychainKeyStore);
     let path = dir.join("settings.json");
-    std::fs::write(&path, serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    // Heal API keys into the OS keychain (best-effort).
-    if let Some(k) = json.get("groqApiKey").and_then(|v| v.as_str()) {
-        if !k.is_empty() {
-            crate::auth_vault::set_api_key("groq", k);
-        }
-    }
-    if let Some(k) = json.get("geminiApiKey").and_then(|v| v.as_str()) {
-        if !k.is_empty() {
-            crate::auth_vault::set_api_key("gemini", k);
-        }
-    }
-    if let Some(k) = json.get("cerebrasApiKey").and_then(|v| v.as_str()) {
-        if !k.is_empty() {
-            crate::auth_vault::set_api_key("cerebras", k);
-        }
-    }
-    if let Some(k) = json.get("deepgramApiKey").and_then(|v| v.as_str()) {
-        if !k.is_empty() {
-            crate::auth_vault::set_api_key("deepgram", k);
-        }
-    }
-    if let Some(k) = json.get("routesApiKey").and_then(|v| v.as_str()) {
-        if !k.is_empty() {
-            crate::auth_vault::set_api_key("google_maps", k);
-        }
-    }
-    if let Some(k) = json.get("placesApiKey").and_then(|v| v.as_str()) {
-        if !k.is_empty() {
-            crate::auth_vault::set_api_key("google_places", k);
-        }
-    }
+    let pretty = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
+    crate::memory::atomic_write(&path, pretty.as_bytes());
     Ok(())
 }
 

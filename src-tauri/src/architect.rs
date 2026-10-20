@@ -515,6 +515,7 @@ fn scan_for_owner_repo(s: &str) -> Option<(String, String)> {
             if start < i && end > i + 1 {
                 let owner: String = chars[start..i].iter().collect();
                 let repo: String = chars[i + 1..end].iter().collect();
+                let repo = repo.strip_suffix(".git").unwrap_or(&repo).to_string();
                 if is_valid_github_slug(&owner) && is_valid_github_slug(&repo) {
                     return Some((owner, repo));
                 }
@@ -529,8 +530,9 @@ fn is_slug_char(c: char) -> bool {
 }
 
 fn sanitize_github_name(name: &str) -> String {
-    name.trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.')
-        .to_string()
+    let clean = name.split(['?', '#']).next().unwrap_or(name);
+    let trimmed = clean.trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.');
+    trimmed.strip_suffix(".git").unwrap_or(trimmed).to_string()
 }
 
 fn is_valid_github_slug(s: &str) -> bool {
@@ -1263,8 +1265,16 @@ fn cluster_files_into_layers(
             }
         }
 
-        if p_lower.contains("client")
-            || p_lower.contains("ui")
+        // An `api` folder is server code even inside a UI framework's tree (`pages/api/x.ts`, `app/api/y/route.ts`),
+        // and `ui` only means the UI folder as a whole path segment (not "build", "guide", "suite").
+        let segments: Vec<&str> = p_lower.split('/').collect();
+        let is_api_route = segments.iter().any(|s| *s == "api");
+        let in_ui_folder = segments.iter().any(|s| *s == "ui");
+
+        if is_api_route {
+            backend_files.push(path.clone());
+        } else if p_lower.contains("client")
+            || in_ui_folder
             || p_lower.contains("frontend")
             || p_lower.contains("components")
             || p_lower.contains("pages")
@@ -1429,7 +1439,7 @@ fn extract_top_dirs(files: &[String]) -> Vec<String> {
         }
     }
     let mut sorted: Vec<(String, usize)> = dir_counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     sorted.into_iter().take(3).map(|(d, _)| format!("{}/", d)).collect()
 }
 
@@ -2986,6 +2996,614 @@ mod tests {
         let fuzzy_impact = query_impact("http".to_string(), Some(5)).expect("Fuzzy impact query should succeed");
         assert_eq!(fuzzy_impact.target_file, "src/http.ts");
         assert_eq!(fuzzy_impact.direct_count, 2);
+    }
+
+    #[test]
+    fn test_empty_and_single_file_tree_never_panics() {
+        let empty_files: &[String] = &[];
+        let empty_key_files: &[KeyFile] = &[];
+
+        // Empty tree clustering produces empty layers, edges, and entry points
+        let (layers_empty, edges_empty, entry_empty) = cluster_files_into_layers(empty_files, "Rust");
+        assert!(layers_empty.is_empty());
+        assert!(edges_empty.is_empty());
+        assert!(entry_empty.is_empty());
+
+        let tech_empty = detect_tech_stack(empty_key_files, "Rust", empty_files);
+        assert_eq!(tech_empty.language, "Rust");
+        assert!(tech_empty.framework.is_none());
+
+        let concerns_empty = detect_concerns(empty_files, &tech_empty, empty_key_files);
+        assert!(!concerns_empty.is_empty());
+
+        let fast_summary = build_fast_summary("empty-repo", "No description", "Rust", &tech_empty, &layers_empty, 0, &concerns_empty);
+        assert!(fast_summary.contains("## empty-repo — Fast Analysis"));
+
+        let spoken_summary = build_spoken_summary("empty-repo", "Rust", &tech_empty, &layers_empty, 0, &concerns_empty);
+        assert!(spoken_summary.contains("empty-repo is a Rust repository"));
+
+        let dirs_empty = extract_top_dirs(empty_files);
+        assert!(dirs_empty.is_empty());
+
+        // Single file at root (no parent directory component)
+        let single = vec!["README.md".to_string()];
+        let (layers_single, edges_single, entry_single) = cluster_files_into_layers(&single, "Markdown");
+        assert_eq!(layers_single.len(), 1);
+        assert_eq!(layers_single[0].id, "layer_shared");
+        assert!(edges_single.is_empty());
+        assert!(entry_single.is_empty());
+
+        let dirs_single = extract_top_dirs(&single);
+        assert!(dirs_single.is_empty());
+    }
+
+    #[test]
+    fn test_ignored_paths_filtering() {
+        // Standard ignored directory paths
+        assert!(is_ignored_path("node_modules/react/index.js"));
+        assert!(is_ignored_path("src/node_modules/pkg/index.js"));
+        assert!(is_ignored_path("target/debug/build.rs"));
+        assert!(is_ignored_path(".git/HEAD"));
+        assert!(is_ignored_path("dist/bundle.js"));
+        assert!(is_ignored_path("vendor/autoload.php"));
+        assert!(is_ignored_path("build/output.js"));
+        assert!(is_ignored_path("__pycache__/app.cpython-310.pyc"));
+
+        // Generated declaration and minified bundles
+        assert!(is_ignored_path("src/types/index.d.ts"));
+        assert!(is_ignored_path("dist/bundle.min.js"));
+
+        // Test and spec files
+        assert!(is_ignored_path("src/App.test.ts"));
+        assert!(is_ignored_path("src/App.test.tsx"));
+        assert!(is_ignored_path("src/App.test.js"));
+        assert!(is_ignored_path("src/App.spec.ts"));
+        assert!(is_ignored_path("src/App.spec.tsx"));
+        assert!(is_ignored_path("src/App.spec.js"));
+
+        // Valid source files that must not be ignored
+        assert!(!is_ignored_path("src/App.tsx"));
+        assert!(!is_ignored_path("src/server/routes.ts"));
+        assert!(!is_ignored_path(".github/workflows/ci.yml"));
+    }
+
+    #[test]
+    fn test_source_file_detection_excludes_binary_and_lock_files() {
+        // Valid source extensions
+        assert!(is_source_file(Path::new("src/main.rs")));
+        assert!(is_source_file(Path::new("src/App.tsx")));
+        assert!(is_source_file(Path::new("server.go")));
+        assert!(is_source_file(Path::new("script.py")));
+        assert!(is_source_file(Path::new("Service.java")));
+        assert!(is_source_file(Path::new("index.mjs")));
+        assert!(is_source_file(Path::new("module.cjs")));
+
+        // Lock files must not be treated as source files
+        assert!(!is_source_file(Path::new("Cargo.lock")));
+        assert!(!is_source_file(Path::new("package-lock.json")));
+        assert!(!is_source_file(Path::new("yarn.lock")));
+        assert!(!is_source_file(Path::new("pnpm-lock.yaml")));
+
+        // Binary and asset files must not be treated as source files
+        assert!(!is_source_file(Path::new("assets/logo.png")));
+        assert!(!is_source_file(Path::new("public/favicon.ico")));
+        assert!(!is_source_file(Path::new("target/app.exe")));
+        assert!(!is_source_file(Path::new("archive.zip")));
+        assert!(!is_source_file(Path::new("document.pdf")));
+    }
+
+    #[test]
+    fn test_large_tree_performance_and_caps() {
+        // Generate 50,000 files in memory across 100 directories
+        let paths: Vec<String> = (0..50_000)
+            .map(|i| format!("src/dir_{}/file_{}.ts", i % 100, i))
+            .collect();
+
+        let start = std::time::Instant::now();
+        let (layers, _edges, entry_points) = cluster_files_into_layers(&paths, "TypeScript");
+        let duration = start.elapsed();
+
+        // A debug build under a loaded machine (the whole suite runs in parallel) needs well over a second; the
+        // limit only has to catch accidental quadratic behaviour, which would take minutes.
+        assert!(duration < std::time::Duration::from_secs(15), "Clustering 50k files took {:?}", duration);
+
+        // Documented caps: entry points capped at 5
+        assert!(entry_points.len() <= 5);
+
+        // Documented caps: sample files per layer capped at 4
+        for layer in &layers {
+            assert!(layer.sample_files.len() <= 4);
+            // Dirs per layer capped at 3
+            assert!(layer.dirs.len() <= 3);
+        }
+
+        // Enrichment payload sample capped at 300 files
+        let sample: Vec<String> = paths.iter().take(300).cloned().collect();
+        assert_eq!(sample.len(), 300);
+
+        // Concern detection on 50,000 files must warn about large repository size
+        let tech = detect_tech_stack(&[], "TypeScript", &paths);
+        let concerns = detect_concerns(&paths, &tech, &[]);
+        assert!(concerns.iter().any(|c| c.contains("Large repository (50000 files)")));
+    }
+
+    #[test]
+    fn test_normalize_path_various_shapes() {
+        // Leading ./ and redundant current dir components
+        assert_eq!(normalize_path(Path::new("./src/components/Header.tsx")), "src/components/Header.tsx");
+        assert_eq!(normalize_path(Path::new("./././App.tsx")), "App.tsx");
+
+        // Parent directory traversal
+        assert_eq!(normalize_path(Path::new("src/utils/../components/Header.tsx")), "src/components/Header.tsx");
+        assert_eq!(normalize_path(Path::new("a/b/../../c/d.rs")), "c/d.rs");
+
+        // Spaces and unicode in path names
+        assert_eq!(normalize_path(Path::new("./src/space dir/unicodé_app.tsx")), "src/space dir/unicodé_app.tsx");
+    }
+
+    #[test]
+    fn test_layer_assignment_nextjs() {
+        let files = vec![
+            "pages/index.tsx".to_string(),
+            "pages/api/users.ts".to_string(),
+            "components/Header.tsx".to_string(),
+            "styles/globals.css".to_string(),
+            "prisma/schema.prisma".to_string(),
+            "Dockerfile".to_string(),
+            ".github/workflows/deploy.yml".to_string(),
+            "utils/helpers.ts".to_string(),
+        ];
+
+        let (layers, edges, entry_points) = cluster_files_into_layers(&files, "TypeScript");
+
+        let frontend = layers.iter().find(|l| l.id == "layer_frontend").expect("Missing frontend layer");
+        assert_eq!(frontend.label, "Client / Presentation Layer");
+        assert_eq!(frontend.tech_stack, "React / Web UI");
+
+        let backend = layers.iter().find(|l| l.id == "layer_backend").expect("Missing backend layer");
+        assert_eq!(backend.label, "Server / API Services");
+
+        let data = layers.iter().find(|l| l.id == "layer_data").expect("Missing data layer");
+        assert_eq!(data.label, "Data & State Management");
+
+        let infra = layers.iter().find(|l| l.id == "layer_infra").expect("Missing infra layer");
+        assert_eq!(infra.label, "Infrastructure & CI/CD");
+
+        let shared = layers.iter().find(|l| l.id == "layer_shared").expect("Missing shared layer");
+        assert_eq!(shared.label, "Shared Utilities & Types");
+
+        assert!(entry_points.contains(&"pages/index.tsx".to_string()));
+
+        assert!(edges.iter().any(|e| e.source == "layer_frontend" && e.target == "layer_backend"));
+        assert!(edges.iter().any(|e| e.source == "layer_backend" && e.target == "layer_data"));
+        assert!(edges.iter().any(|e| e.source == "layer_backend" && e.target == "layer_shared"));
+        assert!(edges.iter().any(|e| e.source == "layer_frontend" && e.target == "layer_shared"));
+    }
+
+    #[test]
+    fn test_layer_assignment_rust_workspace() {
+        let files = vec![
+            "src/main.rs".to_string(),
+            "src/routes/api.rs".to_string(),
+            "src/db/queries.sql".to_string(),
+            "src/utils/logger.rs".to_string(),
+            "Cargo.toml".to_string(),
+        ];
+
+        let (layers, _edges, entry_points) = cluster_files_into_layers(&files, "Rust");
+
+        assert!(entry_points.contains(&"src/main.rs".to_string()));
+
+        let backend = layers.iter().find(|l| l.id == "layer_backend").expect("Missing backend layer");
+        assert_eq!(backend.tech_stack, "Rust Core Runtime");
+
+        let data = layers.iter().find(|l| l.id == "layer_data").expect("Missing data layer");
+        assert!(data.sample_files.contains(&"src/db/queries.sql".to_string()));
+
+        let infra = layers.iter().find(|l| l.id == "layer_infra").expect("Missing infra layer");
+        assert!(infra.sample_files.contains(&"Cargo.toml".to_string()));
+
+        let shared = layers.iter().find(|l| l.id == "layer_shared").expect("Missing shared layer");
+        assert!(shared.sample_files.contains(&"src/utils/logger.rs".to_string()));
+    }
+
+    #[test]
+    fn test_layer_assignment_python_service() {
+        let files = vec![
+            "app/manage.py".to_string(),
+            "app/routes/api.py".to_string(),
+            "app/models/user.py".to_string(),
+            "docker/Dockerfile".to_string(),
+            "app/common/utils.py".to_string(),
+        ];
+
+        let (layers, _edges, entry_points) = cluster_files_into_layers(&files, "Python");
+
+        assert!(entry_points.contains(&"app/manage.py".to_string()));
+
+        let backend = layers.iter().find(|l| l.id == "layer_backend").expect("Missing backend layer");
+        assert_eq!(backend.tech_stack, "Python Core Runtime");
+
+        assert!(layers.iter().any(|l| l.id == "layer_data"));
+        assert!(layers.iter().any(|l| l.id == "layer_infra"));
+        assert!(layers.iter().any(|l| l.id == "layer_shared"));
+    }
+
+    #[test]
+    fn test_layer_assignment_monorepo_packages() {
+        let files = vec![
+            "packages/frontend/src/App.tsx".to_string(),
+            "packages/server/src/server.ts".to_string(),
+            "packages/database/src/schema.prisma".to_string(),
+            "packages/shared/src/index.ts".to_string(),
+            "deploy/k8s.yml".to_string(),
+        ];
+
+        let (layers, _edges, _entry_points) = cluster_files_into_layers(&files, "TypeScript");
+
+        let frontend = layers.iter().find(|l| l.id == "layer_frontend").expect("Missing frontend layer");
+        assert!(frontend.dirs.contains(&"packages/frontend/src/".to_string()));
+
+        let backend = layers.iter().find(|l| l.id == "layer_backend").expect("Missing backend layer");
+        assert!(backend.dirs.contains(&"packages/server/src/".to_string()));
+
+        let data = layers.iter().find(|l| l.id == "layer_data").expect("Missing data layer");
+        assert!(data.dirs.contains(&"packages/database/src/".to_string()));
+
+        let infra = layers.iter().find(|l| l.id == "layer_infra").expect("Missing infra layer");
+        assert!(infra.dirs.contains(&"deploy/".to_string()));
+    }
+
+    #[test]
+    fn test_extract_top_dirs_determinism_and_tie_breaking() {
+        // Files in three directories with equal counts (1 each)
+        let files = vec![
+            "zeta/file.ts".to_string(),
+            "alpha/file.ts".to_string(),
+            "gamma/file.ts".to_string(),
+        ];
+
+        let top_dirs = extract_top_dirs(&files);
+        // Tie-breaker must sort alphabetically: alpha/ -> gamma/ -> zeta/
+        assert_eq!(top_dirs, vec!["alpha/", "gamma/", "zeta/"]);
+
+        // Order of input files must not alter the deterministic output
+        let reversed_files: Vec<String> = files.into_iter().rev().collect();
+        let top_dirs_rev = extract_top_dirs(&reversed_files);
+        assert_eq!(top_dirs_rev, vec!["alpha/", "gamma/", "zeta/"]);
+    }
+
+    #[test]
+    fn test_clustering_determinism_identical_runs() {
+        let files = vec![
+            "src/client/App.tsx".to_string(),
+            "src/server/api.ts".to_string(),
+            "src/db/schema.prisma".to_string(),
+            "src/utils/helpers.ts".to_string(),
+        ];
+
+        let (layers1, edges1, entry1) = cluster_files_into_layers(&files, "TypeScript");
+        let (layers2, edges2, entry2) = cluster_files_into_layers(&files, "TypeScript");
+
+        assert_eq!(layers1.len(), layers2.len());
+        assert_eq!(edges1.len(), edges2.len());
+        assert_eq!(entry1, entry2);
+
+        for (l1, l2) in layers1.iter().zip(layers2.iter()) {
+            assert_eq!(l1.id, l2.id);
+            assert_eq!(l1.label, l2.label);
+            assert_eq!(l1.dirs, l2.dirs);
+            assert_eq!(l1.file_count, l2.file_count);
+            assert_eq!(l1.sample_files, l2.sample_files);
+        }
+    }
+
+    #[test]
+    fn test_enrichment_payload_builder_sample_caps_and_no_contents() {
+        let file_paths: Vec<String> = (0..500).map(|i| format!("src/file_{}.ts", i)).collect();
+        let (layers, edges, entry_points) = cluster_files_into_layers(&file_paths, "TypeScript");
+
+        let response = Phase1Response {
+            owner: "nexus".into(),
+            repo: "engine".into(),
+            default_branch: "main".into(),
+            primary_language: "TypeScript".into(),
+            description: "Nexus engine".into(),
+            summary: "Architecture summary".into(),
+            layers,
+            edges,
+            entry_points,
+            total_files: file_paths.len(),
+            sample_file_paths: file_paths.iter().take(300).cloned().collect(),
+        };
+
+        // Assert cap at 300
+        assert_eq!(response.sample_file_paths.len(), 300);
+
+        // Serialize to JSON and verify structure: sample_file_paths is array of path strings, never contents
+        let json_val = serde_json::to_value(&response).expect("Phase1Response serialization failed");
+        let sample_arr = json_val["sample_file_paths"].as_array().expect("sample_file_paths must be an array");
+        assert_eq!(sample_arr.len(), 300);
+        for item in sample_arr {
+            assert!(item.is_string(), "Sample path must be a plain string path, not a file content object");
+        }
+    }
+
+    #[test]
+    fn test_extract_github_repo_from_url_variations() {
+        // Standard URL
+        let r1 = extract_github_repo_from_url("https://github.com/facebook/react").expect("Failed to parse standard url");
+        assert_eq!(r1.owner, "facebook");
+        assert_eq!(r1.repo, "react");
+
+        // Trailing slash
+        let r2 = extract_github_repo_from_url("https://github.com/facebook/react/").expect("Failed to parse trailing slash");
+        assert_eq!(r2.owner, "facebook");
+        assert_eq!(r2.repo, "react");
+
+        // Trailing .git
+        let r3 = extract_github_repo_from_url("https://github.com/facebook/react.git").expect("Failed to parse trailing .git");
+        assert_eq!(r3.owner, "facebook");
+        assert_eq!(r3.repo, "react");
+
+        // Deep tree path
+        let r4 = extract_github_repo_from_url("https://github.com/facebook/react/tree/main/packages/react").expect("Failed to parse deep tree");
+        assert_eq!(r4.owner, "facebook");
+        assert_eq!(r4.repo, "react");
+
+        // Deep blob path
+        let r5 = extract_github_repo_from_url("https://github.com/facebook/react/blob/main/README.md").expect("Failed to parse blob path");
+        assert_eq!(r5.owner, "facebook");
+        assert_eq!(r5.repo, "react");
+
+        // Query parameters and hash anchors
+        let r6 = extract_github_repo_from_url("https://github.com/facebook/react?tab=readme-ov-file#readme").expect("Failed to parse query/hash");
+        assert_eq!(r6.owner, "facebook");
+        assert_eq!(r6.repo, "react");
+
+        // Uppercase preserved
+        let r7 = extract_github_repo_from_url("https://github.com/Engine-NEXUS/NEXUS-Agent").expect("Failed to parse uppercase");
+        assert_eq!(r7.owner, "Engine-NEXUS");
+        assert_eq!(r7.repo, "NEXUS-Agent");
+
+        // Invalid non-github or malformed URLs
+        assert!(extract_github_repo_from_url("https://gitlab.com/facebook/react").is_none());
+        assert!(extract_github_repo_from_url("https://github.com/").is_none());
+        assert!(extract_github_repo_from_url("https://github.com/single").is_none());
+    }
+
+    #[test]
+    fn test_sanitize_github_name() {
+        assert_eq!(sanitize_github_name("react.git"), "react");
+        assert_eq!(sanitize_github_name("react?tab=readme"), "react");
+        assert_eq!(sanitize_github_name("react#heading"), "react");
+        assert_eq!(sanitize_github_name("  /my-cool_repo.1/  "), "my-cool_repo.1");
+    }
+
+    #[test]
+    fn test_is_valid_github_slug() {
+        assert!(is_valid_github_slug("valid-slug_1.0"));
+        assert!(is_valid_github_slug("NEXUS-Agent"));
+
+        // Reject reserved words
+        assert!(!is_valid_github_slug("github"));
+        assert!(!is_valid_github_slug("login"));
+        assert!(!is_valid_github_slug("settings"));
+        assert!(!is_valid_github_slug("pulls"));
+        assert!(!is_valid_github_slug("issues"));
+
+        // Reject invalid characters or empty
+        assert!(!is_valid_github_slug(""));
+        assert!(!is_valid_github_slug("has space"));
+        assert!(!is_valid_github_slug("has/slash"));
+
+        // Reject slugs > 100 characters
+        let long_slug = "a".repeat(101);
+        assert!(!is_valid_github_slug(&long_slug));
+    }
+
+    #[test]
+    fn test_scan_for_owner_repo() {
+        let (o1, r1) = scan_for_owner_repo("Check out facebook/react on GitHub").expect("Should find facebook/react");
+        assert_eq!(o1, "facebook");
+        assert_eq!(r1, "react");
+
+        let (o2, r2) = scan_for_owner_repo("Repo: Engine-NEXUS/NEXUS-Agent.git").expect("Should find hyphenated repo and strip .git");
+        assert_eq!(o2, "Engine-NEXUS");
+        assert_eq!(r2, "NEXUS-Agent");
+
+        assert!(scan_for_owner_repo("No repo slug in this string").is_none());
+    }
+
+    #[test]
+    fn test_is_likely_entrypoint() {
+        assert!(is_likely_entrypoint("src/main.rs"));
+        assert!(is_likely_entrypoint("src/main.tsx"));
+        assert!(is_likely_entrypoint("src/index.tsx"));
+        assert!(is_likely_entrypoint("src/index.js"));
+        assert!(is_likely_entrypoint("server.ts"));
+        assert!(is_likely_entrypoint("app.tsx"));
+        assert!(is_likely_entrypoint("cmd/main.go"));
+        assert!(is_likely_entrypoint("app.py"));
+        assert!(is_likely_entrypoint("manage.py"));
+
+        // Non-entrypoint files
+        assert!(!is_likely_entrypoint("src/components/Button.tsx"));
+        assert!(!is_likely_entrypoint("src/utils/math.ts"));
+    }
+
+    #[test]
+    fn test_extract_quoted_specifier() {
+        assert_eq!(extract_quoted_specifier(r#"import React from "react";"#), Some("react".into()));
+        assert_eq!(extract_quoted_specifier(r#"import { Button } from './components/Button';"#), Some("./components/Button".into()));
+        assert_eq!(extract_quoted_specifier("const math = require(`@/utils/math`);"), Some("@/utils/math".into()));
+        assert_eq!(extract_quoted_specifier(r#"import """#), None);
+        assert_eq!(extract_quoted_specifier("unquoted text"), None);
+    }
+
+    #[test]
+    fn test_detect_tech_stack_node_frameworks() {
+        // Next.js
+        let next_pkg = KeyFile {
+            path: "package.json".into(),
+            content: r#"{"dependencies": {"next": "14.2.0", "react": "18.3.0"}, "scripts": {"dev": "pnpm dev"}}"#.into(),
+            size_bytes: 0,
+            truncated: false,
+        };
+        let stack = detect_tech_stack(&[next_pkg], "TypeScript", &["src/App.tsx".into()]);
+        assert_eq!(stack.framework, Some("Next.js".into()));
+        assert_eq!(stack.package_manager, Some("pnpm".into()));
+        assert_eq!(stack.dependencies_count, Some(2));
+
+        // Express + Vite + yarn
+        let express_pkg = KeyFile {
+            path: "package.json".into(),
+            content: r#"{"dependencies": {"express": "4.19.0"}, "devDependencies": {"vite": "5.2.0"}, "scripts": {"build": "yarn build"}}"#.into(),
+            size_bytes: 0,
+            truncated: false,
+        };
+        let stack2 = detect_tech_stack(&[express_pkg], "JavaScript", &["server.js".into()]);
+        assert_eq!(stack2.framework, Some("Express".into()));
+        assert_eq!(stack2.build_tool, Some("Vite".into()));
+        assert_eq!(stack2.package_manager, Some("yarn".into()));
+    }
+
+    #[test]
+    fn test_detect_tech_stack_rust_cargo() {
+        let cargo = KeyFile {
+            path: "Cargo.toml".into(),
+            content: r#"
+[package]
+name = "api"
+version = "0.1.0"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+"#
+            .into(),
+            size_bytes: 0,
+            truncated: false,
+        };
+        let stack = detect_tech_stack(&[cargo], "Rust", &["src/main.rs".into()]);
+        assert_eq!(stack.framework, Some("Axum".into()));
+        assert_eq!(stack.build_tool, Some("cargo".into()));
+        assert_eq!(stack.package_manager, Some("cargo".into()));
+        assert_eq!(detect_rust_framework("axum = \"0.7\""), Some("Axum".into()));
+        assert_eq!(detect_rust_framework("actix-web = \"4\""), Some("Actix Web".into()));
+        assert_eq!(detect_rust_framework("tokio = \"1\""), Some("Tokio (async runtime)".into()));
+        assert_eq!(detect_rust_framework("serde = \"1\""), None);
+    }
+
+    #[test]
+    fn test_detect_tech_stack_python_and_go() {
+        // Python with FastAPI in pyproject.toml
+        let pyproject = KeyFile {
+            path: "pyproject.toml".into(),
+            content: "[tool.poetry.dependencies]\nfastapi = \"^0.110.0\"\n".into(),
+            size_bytes: 0,
+            truncated: false,
+        };
+        let py_stack = detect_tech_stack(&[pyproject], "Python", &["app/main.py".into()]);
+        assert_eq!(py_stack.framework, Some("FastAPI".into()));
+        assert_eq!(py_stack.build_tool, Some("poetry".into()));
+        assert_eq!(py_stack.package_manager, Some("pip".into()));
+
+        // Go with Gin in go.mod
+        let gomod = KeyFile {
+            path: "go.mod".into(),
+            content: "module testapp\ngo 1.22\nrequire github.com/gin-gonic/gin v1.9.1\n".into(),
+            size_bytes: 0,
+            truncated: false,
+        };
+        let go_stack = detect_tech_stack(&[gomod], "Go", &["main.go".into()]);
+        assert_eq!(go_stack.framework, Some("Gin".into()));
+        assert_eq!(go_stack.build_tool, Some("go build".into()));
+        assert_eq!(go_stack.package_manager, Some("go modules".into()));
+    }
+
+    #[test]
+    fn test_detect_concerns_comprehensive() {
+        let tech_no_hygiene = TechStackInfo {
+            language: "Rust".into(),
+            framework: None,
+            build_tool: None,
+            package_manager: None,
+            deploy_target: None,
+            has_tests: false,
+            has_ci: false,
+            has_docker: false,
+            dependencies_count: None,
+        };
+
+        let files = vec!["src/main.rs".to_string()];
+        let concerns = detect_concerns(&files, &tech_no_hygiene, &[]);
+        assert!(concerns.iter().any(|c| c.contains("No test files detected")));
+        assert!(concerns.iter().any(|c| c.contains("No CI/CD workflows")));
+        assert!(concerns.iter().any(|c| c.contains("No Dockerfile")));
+        assert!(concerns.iter().any(|c| c.contains("No license file")));
+        assert!(concerns.iter().any(|c| c.contains("No .gitignore")));
+
+        // Healthy repository with all hygiene files
+        let tech_healthy = TechStackInfo {
+            language: "TypeScript".into(),
+            framework: Some("Next.js".into()),
+            build_tool: Some("Vite".into()),
+            package_manager: Some("npm".into()),
+            deploy_target: Some("Vercel".into()),
+            has_tests: true,
+            has_ci: true,
+            has_docker: true,
+            dependencies_count: Some(10),
+        };
+
+        let healthy_files = vec![
+            "src/App.tsx".to_string(),
+            "src/App.test.tsx".to_string(),
+            ".github/workflows/ci.yml".to_string(),
+            "Dockerfile".to_string(),
+            "LICENSE".to_string(),
+            ".gitignore".to_string(),
+        ];
+        let concerns_healthy = detect_concerns(&healthy_files, &tech_healthy, &[]);
+        assert!(concerns_healthy.is_empty(), "Healthy repo should have 0 concerns: {:?}", concerns_healthy);
+    }
+
+    #[test]
+    fn test_build_fast_and_spoken_summary() {
+        let tech = TechStackInfo {
+            language: "Rust".into(),
+            framework: Some("Axum".into()),
+            build_tool: Some("cargo".into()),
+            package_manager: Some("cargo".into()),
+            deploy_target: Some("Docker".into()),
+            has_tests: true,
+            has_ci: true,
+            has_docker: true,
+            dependencies_count: Some(5),
+        };
+        let layers = vec![ArchitectLayer {
+            id: "layer_backend".into(),
+            label: "Server / API Services".into(),
+            layer_type: "backend".into(),
+            dirs: vec!["src/routes/".into()],
+            tech_stack: "Rust Core Runtime".into(),
+            file_count: 10,
+            sample_files: vec!["src/routes/mod.rs".into()],
+        }];
+        let concerns = vec!["No license file found.".into()];
+
+        let fast_md = build_fast_summary("nexus-core", "Fast backend engine", "Rust", &tech, &layers, 10, &concerns);
+        assert!(fast_md.contains("## nexus-core — Fast Analysis"));
+        assert!(fast_md.contains("Framework: Axum"));
+        assert!(fast_md.contains("Total files:** 10"));
+        assert!(fast_md.contains("Server / API Services"));
+        assert!(fast_md.contains("No license file found."));
+
+        let spoken = build_spoken_summary("nexus-core", "Rust", &tech, &layers, 10, &concerns);
+        assert!(spoken.contains("nexus-core is a Rust repository built with Axum"));
+        assert!(spoken.contains("containing 10 files across 1 architectural layers"));
+        assert!(spoken.contains("No license file found."));
     }
 }
 

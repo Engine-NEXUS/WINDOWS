@@ -428,6 +428,8 @@ pub fn run() {
         // user's original volume back before anything speaks.
         if let Some(dir) = audit_dir.clone() {
             volume::init(dir.clone());
+            // Plaintext API keys left in settings.json by older versions move to the keychain and are blanked (verified by read-back).
+            crate::api_keys::scrub_settings_file(&dir);
             // One-time memory cleanup (junk episodes/turns/poisoned brief; originals backed up).
             let learned_dir = dir.clone();
             std::thread::spawn(move || memcore::hygiene::run_startup_cleanup(&dir));

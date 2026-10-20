@@ -6,6 +6,7 @@
 //! UI thread). Nothing here runs without a spoken "yes".
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use super::session::{SessionApp, Snapshot};
 
@@ -150,6 +151,16 @@ pub fn running_exes() -> HashSet<String> {
     sys.processes().values().map(|p| p.name().to_string_lossy().to_lowercase()).collect()
 }
 
+/// Command arguments that will be passed when launching `item`. Pure. (Tests only: the launcher builds its own.)
+#[cfg(test)]
+pub fn item_args(item: &Item) -> Vec<String> {
+    match item {
+        Item::Exe { args, .. } => args.clone(),
+        Item::Browser { .. } => vec!["--restore-last-session".to_string()],
+        _ => vec![],
+    }
+}
+
 /// Launch one item. Blocking but quick (spawn only).
 fn launch(item: &Item) -> Result<(), String> {
     match item {
@@ -169,14 +180,19 @@ fn launch(item: &Item) -> Result<(), String> {
     }
 }
 
-/// Open everything in `plan`, one item every 400 ms. Returns (opened, failed) labels.
-pub async fn run(items: Vec<Item>) -> (Vec<String>, Vec<String>) {
+/// Open items in `plan`, using `launcher` to spawn each item. Returns (opened, failed) labels.
+pub async fn run_with<F>(items: Vec<Item>, stagger_ms: u64, launcher: F) -> (Vec<String>, Vec<String>)
+where
+    F: Fn(&Item) -> Result<(), String> + Send + Sync + 'static,
+{
+    let launcher = Arc::new(launcher);
     let mut opened = vec![];
     let mut failed = vec![];
     for it in items {
         let label = it.label();
         let it2 = it.clone();
-        match tauri::async_runtime::spawn_blocking(move || launch(&it2)).await {
+        let l = launcher.clone();
+        match tauri::async_runtime::spawn_blocking(move || l(&it2)).await {
             Ok(Ok(())) => {
                 println!("[SESSION] reopened {label}");
                 opened.push(label);
@@ -186,9 +202,16 @@ pub async fn run(items: Vec<Item>) -> (Vec<String>, Vec<String>) {
                 failed.push(label);
             }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(STAGGER_MS)).await;
+        if stagger_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(stagger_ms)).await;
+        }
     }
     (opened, failed)
+}
+
+/// Open everything in `plan`, one item every 400 ms. Returns (opened, failed) labels.
+pub async fn run(items: Vec<Item>) -> (Vec<String>, Vec<String>) {
+    run_with(items, STAGGER_MS, launch).await
 }
 
 #[cfg(test)]
@@ -261,5 +284,127 @@ mod tests {
         );
         assert_eq!(report(&[], &[], &["Brave".into(), "Code".into()], 0), "I couldn't reopen anything, sir. Brave and Code were already open.");
         assert_eq!(report(&["A".into()], &["B".into()], &[], 2), "Reopened A. B would not start. I left 2 out.");
+    }
+
+    #[test]
+    fn test_restore_plan_ordering_is_stable_browsers_then_apps_then_folders() {
+        let mut b1 = app("brave.exe", "Brave");
+        b1.browser = true;
+        let mut b2 = app("chrome.exe", "Chrome");
+        b2.browser = true;
+        let a1 = app("code.exe", "VS Code");
+        let a2 = app("notepad.exe", "Notepad");
+
+        let s = snap(vec![a1, b1, a2, b2], &[r"C:\Docs", r"C:\Music"]);
+        let p = plan(&s, &running(&[]), &|_| true);
+
+        // Browsers come first, in original relative order
+        assert!(matches!(&p.items[0], Item::Browser { label, .. } if label == "Brave"));
+        assert!(matches!(&p.items[1], Item::Browser { label, .. } if label == "Chrome"));
+        // Apps follow, in original relative order
+        assert!(matches!(&p.items[2], Item::Exe { label, .. } if label == "VS Code"));
+        assert!(matches!(&p.items[3], Item::Exe { label, .. } if label == "Notepad"));
+        // Folders come last
+        assert!(matches!(&p.items[4], Item::Folder { path } if path == r"C:\Docs"));
+        assert!(matches!(&p.items[5], Item::Folder { path } if path == r"C:\Music"));
+    }
+
+    #[test]
+    fn test_apps_already_running_are_not_launched_twice() {
+        let a1 = app("code.exe", "VS Code");
+        let a2 = app("code.exe", "VS Code on ULTRON");
+        let a3 = app("notepad.exe", "Notepad");
+
+        let s = snap(vec![a1, a2, a3], &[]);
+        let p = plan(&s, &running(&["code.exe"]), &|_| true);
+
+        // code.exe is running, only notepad.exe is planned
+        assert_eq!(p.items.len(), 1);
+        assert_eq!(p.items[0].label(), "Notepad");
+        // already_open dedupes label to single mention
+        assert_eq!(p.already_open, vec!["VS Code".to_string()]);
+    }
+
+    #[test]
+    fn test_uninstalled_or_missing_app_is_reported_not_silently_skipped() {
+        let missing = app("deleted_tool.exe", "DeletedTool");
+        let s = snap(vec![missing], &[]);
+        // path_ok returns false for missing app
+        let p = plan(&s, &running(&[]), &|_| false);
+        assert_eq!(p.items.len(), 0);
+        assert_eq!(p.skipped, 1);
+
+        let rep = report(&[], &[], &[], p.skipped);
+        assert_eq!(rep, "I couldn't reopen anything. I left 1 out.");
+    }
+
+    #[test]
+    fn test_browser_restore_adds_argument_only_for_known_browsers() {
+        let mut b = app("brave.exe", "Brave");
+        b.browser = true;
+        let mut editor = app("code.exe", "VS Code");
+        editor.args = vec![r"C:\work".to_string()];
+
+        let s = snap(vec![b, editor], &[]);
+        let p = plan(&s, &running(&[]), &|_| true);
+
+        assert_eq!(item_args(&p.items[0]), vec!["--restore-last-session".to_string()]);
+        assert_eq!(item_args(&p.items[1]), vec![r"C:\work".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_run_with_launcher_mock_execution() {
+        let items = vec![
+            Item::Exe { path: r"C:\app1.exe".into(), args: vec![], label: "App1".into() },
+            Item::Exe { path: r"C:\fail.exe".into(), args: vec![], label: "FailApp".into() },
+        ];
+        let mock_launcher = |it: &Item| {
+            if it.label() == "FailApp" {
+                Err("Failed to start".to_string())
+            } else {
+                Ok(())
+            }
+        };
+        let (opened, failed) = run_with(items, 0, mock_launcher).await;
+        assert_eq!(opened, vec!["App1".to_string()]);
+        assert_eq!(failed, vec!["FailApp".to_string()]);
+
+        let rep = report(&opened, &failed, &[], 0);
+        assert_eq!(rep, "Reopened App1. FailApp would not start.");
+    }
+
+    #[test]
+    fn test_plan_empty_when_all_apps_running_or_invalid() {
+        let a1 = app("running.exe", "RunningApp");
+        let a2 = app("gone.exe", "GoneApp");
+        let s = snap(vec![a1, a2], &[]);
+        let p = plan(&s, &running(&["running.exe"]), &|path| !path.contains("gone"));
+        assert!(p.is_empty());
+        assert_eq!(p.already_open, vec!["RunningApp".to_string()]);
+        assert_eq!(p.skipped, 1);
+    }
+
+    #[test]
+    fn test_describe_formats_speech_accurately() {
+        let items = vec![
+            Item::Browser { path: "brave.exe".into(), label: "Brave".into() },
+            Item::Exe { path: "code.exe".into(), args: vec![], label: "VS Code".into() },
+            Item::Folder { path: r"C:\work\ultron".into() },
+            Item::Folder { path: r"C:\work\nexus".into() },
+        ];
+        assert_eq!(describe(&items), "Brave, VS Code and 2 folders");
+    }
+
+    #[test]
+    fn test_packaged_app_lookup_failure_reported() {
+        let mut w = app("whatsapp.root.exe", "WhatsApp");
+        w.packaged = true;
+        w.path = String::new();
+        let p = plan(&snap(vec![w], &[]), &running(&[]), &|_| true);
+        assert_eq!(p.items, vec![Item::Packaged { label: "WhatsApp".into() }]);
+
+        // In report, if it fails to start it is reported cleanly
+        let rep = report(&[], &["WhatsApp".into()], &[], 0);
+        assert_eq!(rep, "I couldn't reopen anything. WhatsApp would not start.");
     }
 }

@@ -527,6 +527,14 @@ mod tests {
     }
 
     #[test]
+    fn columns_odd_width_1919_fills_exactly_for_one_to_six() {
+        for n in 1..=6 {
+            check_tiling(r(0, 0, 1919, 1040), n);
+            check_tiling(r(10, 20, 1929, 1060), n);
+        }
+    }
+
+    #[test]
     fn columns_with_negative_origin_monitor() {
         // a monitor to the left of and above the primary
         for n in 1..=6 {
@@ -871,5 +879,307 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── live proofs on real windows (run by hand) ──
+
+    #[cfg(target_os = "windows")]
+    struct OwnWindowsGuard {
+        thread_id: u32,
+        join_handle: Option<std::thread::JoinHandle<()>>,
+        hwnds: Vec<isize>,
+    }
+
+    #[cfg(target_os = "windows")]
+    impl Drop for OwnWindowsGuard {
+        fn drop(&mut self) {
+            use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+            use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, PostThreadMessageW, WM_QUIT};
+
+            unsafe {
+                for _ in 0..10 {
+                    if PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0)).as_bool() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+
+            if let Some(join) = self.join_handle.take() {
+                let _ = join.join();
+            }
+
+            for &h in &self.hwnds {
+                unsafe {
+                    let _ = DestroyWindow(HWND(h));
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn spawn_test_windows(pid: u32) -> OwnWindowsGuard {
+        use std::sync::mpsc;
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, RegisterClassW,
+            ShowWindow, TranslateMessage, CW_USEDEFAULT, MSG, SW_SHOWNOACTIVATE,
+            WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        };
+
+        unsafe extern "system" fn test_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+
+        let (tx, rx) = mpsc::channel();
+
+        let join_handle = std::thread::spawn(move || unsafe {
+            let thread_id = GetCurrentThreadId();
+            let class_name: Vec<u16> = format!("NXTILE_CLASS_{pid}\0").encode_utf16().collect();
+            let hinst = GetModuleHandleW(PCWSTR(std::ptr::null())).unwrap_or(HINSTANCE(0));
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(test_wnd_proc),
+                hInstance: hinst,
+                lpszClassName: PCWSTR(class_name.as_ptr()),
+                ..Default::default()
+            };
+            let atom = RegisterClassW(&wc);
+            assert_ne!(atom, 0, "RegisterClassW failed");
+
+            let mut win_hwnds: Vec<HWND> = Vec::with_capacity(3);
+            let mut raw_hwnds: Vec<isize> = Vec::with_capacity(3);
+            for n in 1..=3 {
+                let title: Vec<u16> = format!("NXTILE_{pid}_{n}\0").encode_utf16().collect();
+                let hwnd = CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    PCWSTR(class_name.as_ptr()),
+                    PCWSTR(title.as_ptr()),
+                    WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    HWND(0),
+                    None,
+                    hinst,
+                    std::ptr::null(),
+                );
+                assert_ne!(hwnd.0, 0, "CreateWindowExW failed for window {n}");
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                win_hwnds.push(hwnd);
+                raw_hwnds.push(hwnd.0);
+            }
+
+            let _ = tx.send((thread_id, raw_hwnds));
+
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, HWND(0), 0, 0).0 > 0 {
+                if msg.message == windows::Win32::UI::WindowsAndMessaging::WM_QUIT {
+                    break;
+                }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+
+            for h in win_hwnds {
+                let _ = DestroyWindow(h);
+            }
+            let _ = windows::Win32::UI::WindowsAndMessaging::UnregisterClassW(
+                PCWSTR(class_name.as_ptr()),
+                hinst,
+            );
+        });
+
+        let (thread_id, hwnds) = rx.recv().expect("receive test window handles");
+        OwnWindowsGuard {
+            thread_id,
+            join_handle: Some(join_handle),
+            hwnds,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn visible_frame(hwnd: isize) -> Option<Rect> {
+        use std::ffi::c_void;
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+        let h = HWND(hwnd);
+        unsafe {
+            let mut fb = RECT::default();
+            if DwmGetWindowAttribute(
+                h,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                &mut fb as *mut RECT as *mut c_void,
+                std::mem::size_of::<RECT>() as u32,
+            )
+            .is_ok()
+            {
+                Some(to_rect(fb))
+            } else {
+                let mut wr = RECT::default();
+                if GetWindowRect(h, &mut wr).as_bool() {
+                    Some(to_rect(wr))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Creates three visible top-level windows owned by the test process, tiles them into equal columns,
+    /// asserts visible frames are ordered left-to-right, widths and heights match the work area, and
+    /// windows do not overlap, then closes all three.
+    ///
+    /// Run by hand:
+    ///   cargo test --lib --features custom-protocol,admin-brain -- window_tile::tests::live_three_own_windows_are_tiled_into_equal_columns --ignored --nocapture
+    #[test]
+    #[cfg(target_os = "windows")]
+    #[ignore = "opens three real test windows; run by hand"]
+    fn live_three_own_windows_are_tiled_into_equal_columns() {
+        let pid = std::process::id();
+        let marker = format!("NXTILE_{pid}_");
+        let _guard = spawn_test_windows(pid);
+
+        // The windows belong to this process, and `list_top_windows` deliberately reports our own process as
+        // "nexus.exe", which is never tileable, so the handles come straight from the helper thread.
+        let hwnds: Vec<isize> = _guard.hwnds.clone();
+        assert_eq!(hwnds.len(), 3, "found {} of 3 own windows with marker {marker}", hwnds.len());
+        for &h in &hwnds {
+            assert!(RealTileEnv.exists(h), "window {h} should exist");
+        }
+
+        let results = tile_windows(&RealTileEnv, &hwnds);
+        assert_eq!(results.len(), 3, "expected 3 placement results");
+        for (h, res) in &results {
+            assert_eq!(*res, PlaceResult::Placed, "window {h} placement was not Placed: {res:?}");
+        }
+
+        let mut frames: Vec<Rect> = Vec::new();
+        for &h in &hwnds {
+            let f = visible_frame(h).expect("failed to get visible frame for tiled window");
+            println!("[PROOF] tiled hwnd={h} rect=({},{},{},{})", f.left, f.top, f.right, f.bottom);
+            frames.push(f);
+        }
+
+        // The three visible frames are left to right in the order given
+        assert!(
+            frames[0].left < frames[1].left && frames[1].left < frames[2].left,
+            "visible frames must be ordered left to right: {:?}",
+            frames
+        );
+
+        // Their widths are equal within 2 px
+        assert!(
+            (frames[0].width() - frames[1].width()).abs() <= 2,
+            "widths of frame 0 and 1 must be equal within 2 px: {} vs {}",
+            frames[0].width(),
+            frames[1].width()
+        );
+        assert!(
+            (frames[1].width() - frames[2].width()).abs() <= 2,
+            "widths of frame 1 and 2 must be equal within 2 px: {} vs {}",
+            frames[1].width(),
+            frames[2].width()
+        );
+        assert!(
+            (frames[0].width() - frames[2].width()).abs() <= 2,
+            "widths of frame 0 and 2 must be equal within 2 px: {} vs {}",
+            frames[0].width(),
+            frames[2].width()
+        );
+
+        // Their heights equal the work-area height within 2 px
+        let work = RealTileEnv.work_area().expect("primary monitor work area must exist");
+        let work_h = work.height();
+        for (i, f) in frames.iter().enumerate() {
+            assert!(
+                (f.height() - work_h).abs() <= 2,
+                "frame {i} height must equal work area height ({work_h}) within 2 px, got {}",
+                f.height()
+            );
+        }
+
+        // They do not overlap by more than 2 px
+        assert!(
+            frames[0].right - frames[1].left <= 2,
+            "frame 0 and 1 must not overlap by more than 2 px: right {} vs next left {}",
+            frames[0].right,
+            frames[1].left
+        );
+        assert!(
+            frames[1].right - frames[2].left <= 2,
+            "frame 1 and 2 must not overlap by more than 2 px: right {} vs next left {}",
+            frames[1].right,
+            frames[2].left
+        );
+
+        println!("[PROOF] tiled 3 own windows into equal columns");
+    }
+
+    /// Turns the physical display off via Win32 SC_MONITORPOWER for ~3 seconds,
+    /// then injects a relative mouse move (+1 px, -1 px) via SendInput to wake the display.
+    ///
+    /// WARNING: When run by hand, this briefly blanks the screen. The mouse move restores it.
+    ///
+    /// Run by hand:
+    ///   cargo test --lib --features custom-protocol,admin-brain -- window_tile::tests::live_display_off_then_input_wakes_it --ignored --nocapture
+    #[test]
+    #[cfg(target_os = "windows")]
+    #[ignore = "turns the real display off for about 3 seconds; run by hand"]
+    fn live_display_off_then_input_wakes_it() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT,
+        };
+
+        if may_blank_display(Some(120), false).is_err() {
+            println!("[PROOF] SKIPPED: may_blank_display returned error for 120s idle");
+            return;
+        }
+
+        let first = display_off();
+        assert!(first.is_ok(), "display_off first call failed: {first:?}");
+
+        // A second call right after is also Ok (idempotent)
+        let second = display_off();
+        assert!(second.is_ok(), "display_off second call (idempotent) failed: {second:?}");
+
+        std::thread::sleep(std::time::Duration::from_secs(3));
+
+        let inputs = [
+            INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dx: 1,
+                        dy: 0,
+                        mouseData: 0,
+                        dwFlags: MOUSEEVENTF_MOVE,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+            INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dx: -1,
+                        dy: 0,
+                        mouseData: 0,
+                        dwFlags: MOUSEEVENTF_MOVE,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+        ];
+        let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+        assert_eq!(sent, 2, "SendInput must deliver mouse wake events");
+
+        println!("[PROOF] display_off returned Ok");
     }
 }

@@ -4816,23 +4816,30 @@ async fn run_offer_reply<R: Runtime>(
         }
         (Offer::ClearTimetable, _) => "Understood, sir. Your timetable stays.".to_string(),
         (Offer::AddEvent { summary, start_iso, end_iso, when }, Reply::Yes) => {
-            let ev = crate::google::types::NewEvent {
-                summary: summary.clone(),
-                description: Some("Added by NEXUS".to_string()),
-                start_iso,
-                end_iso,
-                location: None,
-            };
             let acct = crate::memcore::google_io::primary_account(crate::memcore::google_io::can_use_calendar);
             let email = acct.and_then(|a| a.email);
             let res = crate::memcore::google_io::with_client(email.as_deref(), |c| {
-                let ev = ev.clone();
-                async move { crate::memcore::google_io::calendar_insert(&c, &ev).await }
+                let summary = summary.clone();
+                let start_iso = start_iso.clone();
+                let end_iso = end_iso.clone();
+                let when = when.clone();
+                async move {
+                    let (speech, added) = crate::memcore::agenda::insert_confirmed_event(
+                        &c,
+                        summary,
+                        start_iso,
+                        end_iso,
+                        when,
+                        crate::memcore::agenda::CLIENT_TIMEOUT,
+                    )
+                    .await;
+                    Ok::<_, crate::google::types::GoogleError>((speech, added))
+                }
             })
             .await;
             match res {
-                Ok(_) => format!("Done, sir. {summary} is on your calendar {when}."),
-                Err(_) => "I couldn't save it to your calendar, sir. Please check that Google is connected.".to_string(),
+                Ok((speech, _)) => speech,
+                Err(err) => crate::memcore::agenda::insert_error_speech(&err),
             }
         }
         (Offer::AddEvent { .. }, Reply::Later) => "Very well, sir. Ask me again whenever you're ready.".to_string(),
@@ -6279,14 +6286,9 @@ async fn run_calendar_add<R: Runtime>(app: AppHandle<R>, text: String) -> Result
         .ok()
         .and_then(|r| r.ok())
         .unwrap_or_default();
-    let when = agenda::when_phrase(draft.start, now);
-    let ev = agenda::to_new_event(&draft);
-    let conflict = agenda::conflict_speech(&busy, &draft).map(|c| format!(" {c}")).unwrap_or_default();
-    offer::set(
-        offer::Offer::AddEvent { summary: draft.summary.clone(), start_iso: ev.start_iso, end_iso: ev.end_iso, when: when.clone() },
-        true,
-    );
-    say_and_finish(&app, request_id, format!("Add {} {when} to your calendar?{conflict}", draft.summary))
+    let (prompt, pending) = agenda::prompt_add_event(&draft, now, &busy);
+    offer::set(pending, true);
+    say_and_finish(&app, request_id, prompt)
 }
 
 /// "Where did I leave off / show my briefing" (P3): built from local data,

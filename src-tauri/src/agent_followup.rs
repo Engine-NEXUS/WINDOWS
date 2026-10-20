@@ -1214,4 +1214,145 @@ mod tests {
         }
         assert!(prod.contains("Command::new(\"git\")"));
     }
+
+    // ───── real git, real repositories on disk (a bare local repository stands in for GitHub) ─────
+
+    fn have_git() -> bool {
+        std::process::Command::new("git").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let o = std::process::Command::new("git").args(["-c", "core.quotepath=off"]).args(args).current_dir(dir).output().expect("git runs");
+        assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    /// A working repository with one commit on `main`, pushed to a bare repository next to it.
+    fn real_repo(name: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("nexus_followup_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (work, remote) = (base.join("work"), base.join("remote.git"));
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&remote).unwrap();
+        git(&remote, &["init", "--bare", "-b", "main"]);
+        git(&work, &["init", "-b", "main"]);
+        git(&work, &["config", "user.name", "Nexus Test"]);
+        git(&work, &["config", "user.email", "test@example.invalid"]);
+        git(&work, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(work.join("README.md"), "first\n").unwrap();
+        git(&work, &["add", "--", "README.md"]);
+        git(&work, &["commit", "-m", "initial"]);
+        git(&work, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(&work, &["push", "-u", "origin", "main"]);
+        (work, remote)
+    }
+
+    fn real_step(work: &Path) -> FollowUp {
+        FollowUp::CommitAndPr {
+            dir: work.to_path_buf(),
+            agent: "Claude Code".into(),
+            stamp: "20261020-1200".into(),
+            message_hint: Some("Added the parser.\n\nMore detail the subject must not carry.".into()),
+            base: "main".into(),
+        }
+    }
+
+    #[test]
+    fn real_git_branches_commits_and_pushes_only_the_changed_files() {
+        if !have_git() { return; }
+        let (work, remote) = real_repo("happy");
+        std::fs::write(work.join("README.md"), "changed\n").unwrap();
+        std::fs::write(work.join("new file \u{e9}.txt"), "x").unwrap();
+        std::fs::write(work.join(".gitignore"), "*.log\n").unwrap();
+        std::fs::write(work.join("junk.log"), "ignored").unwrap();
+        let runner = RealGit::default();
+        let Decision::Run(steps) = prepare(&runner, &real_step(&work), &Verdict::Go) else { panic!("expected a plan") };
+        assert!(!steps.paths.iter().any(|p| p.contains("junk.log")), "{:?}", steps.paths);
+        let out = execute_git(&runner, &steps);
+        assert!(out.failure.is_none() && out.branch_created && out.staged && out.committed && out.pushed, "{out:?}");
+        // the remote has the new branch with one commit whose subject is the agent's first line
+        assert!(git(&remote, &["branch", "--format=%(refname:short)"]).lines().any(|b| b == steps.branch), "{}", git(&remote, &["branch"]));
+        assert_eq!(git(&remote, &["log", "-1", "--format=%s", &steps.branch]), "Added the parser");
+        let files = git(&remote, &["show", "--name-only", "--format=", &steps.branch]);
+        assert!(files.contains("README.md") && files.contains("new file \u{e9}.txt") && files.contains(".gitignore"), "{files}");
+        assert!(!files.contains("junk.log"), "an ignored file must not be committed: {files}");
+        // main is untouched on both sides
+        assert_eq!(git(&remote, &["log", "--format=%s", "main"]), "initial");
+        assert_eq!(git(&work, &["log", "--format=%s", "main"]), "initial");
+        let _ = std::fs::remove_dir_all(work.parent().unwrap());
+    }
+
+    #[test]
+    fn real_git_refuses_secrets_and_leaves_no_branch_behind() {
+        if !have_git() { return; }
+        let (work, remote) = real_repo("secrets");
+        std::fs::write(work.join("README.md"), "changed\n").unwrap();
+        std::fs::write(work.join(".env"), "TOKEN=abc\n").unwrap();
+        std::fs::write(work.join("server.pem"), ["-----BEGIN", " PRIVATE KEY-----\n"].concat()).unwrap();
+        let runner = RealGit::default();
+        let d = prepare(&runner, &real_step(&work), &Verdict::Go);
+        match d {
+            Decision::Skip(SkipReason::Secrets(files)) => {
+                assert!(files.iter().any(|f| f.contains(".env")) && files.iter().any(|f| f.contains("server.pem")), "{files:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(git(&work, &["branch", "--format=%(refname:short)"]), "main", "no branch was created");
+        assert_eq!(git(&remote, &["branch", "--format=%(refname:short)"]), "main");
+        assert!(git(&work, &["status", "--porcelain"]).contains("README.md"), "the work is still uncommitted");
+        let _ = std::fs::remove_dir_all(work.parent().unwrap());
+    }
+
+    #[test]
+    fn real_git_nothing_changed_detached_head_and_unfinished_merge_are_skipped() {
+        if !have_git() { return; }
+        let runner = RealGit::default();
+        // nothing changed
+        let (work, _remote) = real_repo("clean");
+        assert!(matches!(prepare(&runner, &real_step(&work), &Verdict::Go), Decision::Skip(SkipReason::NothingChanged)));
+        // detached HEAD with a change
+        std::fs::write(work.join("README.md"), "changed\n").unwrap();
+        git(&work, &["checkout", "--detach"]);
+        assert!(matches!(prepare(&runner, &real_step(&work), &Verdict::Go), Decision::Skip(SkipReason::DetachedHead)));
+        git(&work, &["checkout", "-f", "main"]);
+        // a merge in progress
+        std::fs::write(work.join("README.md"), "changed again\n").unwrap();
+        let head = git(&work, &["rev-parse", "HEAD"]);
+        std::fs::write(work.join(".git").join("MERGE_HEAD"), format!("{head}\n")).unwrap();
+        assert!(matches!(prepare(&runner, &real_step(&work), &Verdict::Go), Decision::Skip(SkipReason::InProgress(_))));
+        let _ = std::fs::remove_dir_all(work.parent().unwrap());
+    }
+
+    #[test]
+    fn real_git_a_hold_or_unsure_verdict_never_touches_the_repository() {
+        if !have_git() { return; }
+        let (work, remote) = real_repo("hold");
+        std::fs::write(work.join("README.md"), "changed\n").unwrap();
+        let before = git(&work, &["status", "--porcelain"]);
+        let runner = RealGit::default();
+        for v in [hold(), unsure()] {
+            assert!(matches!(prepare(&runner, &real_step(&work), &v), Decision::Skip(SkipReason::NotClean(_))));
+        }
+        assert_eq!(git(&work, &["status", "--porcelain"]), before);
+        assert_eq!(git(&work, &["branch", "--format=%(refname:short)"]), "main");
+        assert_eq!(git(&remote, &["branch", "--format=%(refname:short)"]), "main");
+        let _ = std::fs::remove_dir_all(work.parent().unwrap());
+    }
+
+    #[test]
+    fn real_git_a_failed_push_keeps_the_local_commit_and_reports_the_push_stage() {
+        if !have_git() { return; }
+        let (work, remote) = real_repo("pushfail");
+        std::fs::write(work.join("README.md"), "changed\n").unwrap();
+        let runner = RealGit::default();
+        let Decision::Run(steps) = prepare(&runner, &real_step(&work), &Verdict::Go) else { panic!("expected a plan") };
+        std::fs::remove_dir_all(&remote).unwrap(); // the remote disappears
+        let out = execute_git(&runner, &steps);
+        assert!(out.committed && !out.pushed, "{out:?}");
+        assert!(matches!(out.failure, Some((Stage::Push, _))), "{:?}", out.failure);
+        assert_eq!(git(&work, &["log", "-1", "--format=%s", &steps.branch]), "Added the parser", "the local commit is kept");
+        let said = describe_outcome(&out, None).spoken;
+        assert!(!said.is_empty());
+        let _ = std::fs::remove_dir_all(work.parent().unwrap());
+    }
 }

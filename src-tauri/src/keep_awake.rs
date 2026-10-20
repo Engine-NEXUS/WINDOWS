@@ -119,9 +119,10 @@ impl Controller {
 
     fn release(self: &Arc<Self>) {
         let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = st.count;
         st.count = st.count.saturating_sub(1);
         tracing::debug!("[KEEPAWAKE] release count={}", st.count);
-        if st.count == 0 {
+        if prev > 0 && st.count == 0 {
             // Cleared instantly, no grace period — unlike volume, a flicker here has no
             // audible defect, and the user explicitly wants this instant.
             if let Err(e) = self.backend.clear() {
@@ -277,6 +278,16 @@ mod tests {
         }
     }
 
+    struct FailingBackend;
+    impl KeepAwakeBackend for FailingBackend {
+        fn assert(&self) -> Result<(), String> {
+            Err("hardware failure".into())
+        }
+        fn clear(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
     fn rig() -> (Arc<Fake>, Arc<Controller>) {
         let fake = Fake::new();
         let c = Controller::with_timing(fake.clone(), Duration::from_millis(400), Duration::from_millis(40));
@@ -310,6 +321,32 @@ mod tests {
     }
 
     #[test]
+    fn two_overlapping_leases_keep_state_until_last_drops() {
+        let (fake, c) = rig();
+        let lease_a = c.acquire().expect("lease a");
+        assert!(*fake.live.lock().unwrap());
+        assert_eq!(fake.asserted.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.cleared.load(Ordering::SeqCst), 0);
+
+        // Second lease overlaps with the first.
+        let lease_b = c.acquire().expect("lease b");
+        assert_eq!(c.snapshot(), 2);
+        assert_eq!(fake.asserted.load(Ordering::SeqCst), 1);
+
+        // First lease drops while second is still held: backend must remain asserted.
+        drop(lease_a);
+        assert!(*fake.live.lock().unwrap(), "state must remain set while lease_b is held");
+        assert_eq!(fake.cleared.load(Ordering::SeqCst), 0);
+        assert_eq!(c.snapshot(), 1);
+
+        // Second lease drops: backend must now clear.
+        drop(lease_b);
+        assert!(!*fake.live.lock().unwrap(), "state must clear when last lease drops");
+        assert_eq!(fake.cleared.load(Ordering::SeqCst), 1);
+        assert_eq!(c.snapshot(), 0);
+    }
+
+    #[test]
     fn leaked_lease_is_released_by_the_watchdog() {
         let (fake, c) = rig();
         let lease = c.acquire().unwrap();
@@ -334,6 +371,47 @@ mod tests {
     }
 
     #[test]
+    fn watchdog_clears_lease_whose_heartbeat_stopped() {
+        let fake = Fake::new();
+        // 80 ms watchdog timeout, 15 ms poll interval
+        let c = Controller::with_timing(fake.clone(), Duration::from_millis(80), Duration::from_millis(15));
+        let lease = c.acquire().expect("lease");
+        assert!(*fake.live.lock().unwrap());
+        std::mem::forget(lease); // abandoned lease, heartbeat ceases
+
+        // Wait up to 250 ms (under 300 ms) for watchdog to clear the un-heartbeated lease.
+        let deadline = std::time::Instant::now() + Duration::from_millis(250);
+        while *fake.live.lock().unwrap() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(15));
+        }
+
+        assert!(!*fake.live.lock().unwrap(), "watchdog must clear un-heartbeated lease within 250 ms");
+        assert_eq!(c.snapshot(), 0);
+    }
+
+    #[test]
+    fn watchdog_does_not_clear_heartbeating_lease() {
+        let fake = Fake::new();
+        // 80 ms watchdog timeout, 15 ms poll interval
+        let c = Controller::with_timing(fake.clone(), Duration::from_millis(80), Duration::from_millis(15));
+        let lease = c.acquire().expect("lease");
+        assert!(*fake.live.lock().unwrap());
+
+        // Heartbeat every 20 ms for 160 ms (2x the watchdog timeout, well under 300 ms total).
+        for _ in 0..8 {
+            std::thread::sleep(Duration::from_millis(20));
+            c.heartbeat();
+        }
+
+        assert!(*fake.live.lock().unwrap(), "heartbeating lease must not be cleared by watchdog");
+        assert_eq!(c.snapshot(), 1);
+
+        drop(lease);
+        assert!(!*fake.live.lock().unwrap());
+        assert_eq!(c.snapshot(), 0);
+    }
+
+    #[test]
     fn force_clear_drops_the_live_count_regardless_of_outstanding_leases() {
         let (fake, c) = rig();
         let lease = c.acquire().unwrap();
@@ -341,6 +419,56 @@ mod tests {
         assert!(!*fake.live.lock().unwrap());
         assert_eq!(c.snapshot(), 0);
         drop(lease); // the stale drop must not underflow or re-clear incorrectly
+        assert_eq!(c.snapshot(), 0);
+    }
+
+    #[test]
+    fn drop_after_force_clear_does_not_underflow_or_reset_state() {
+        let (fake, c) = rig();
+        let lease = c.acquire().expect("lease");
+        assert!(*fake.live.lock().unwrap());
+        assert_eq!(c.snapshot(), 1);
+
+        c.force_clear();
+        assert!(!*fake.live.lock().unwrap());
+        assert_eq!(c.snapshot(), 0);
+        let cleared_before = fake.cleared.load(Ordering::SeqCst);
+
+        // Stale drop: dropping a lease whose controller was already force-cleared.
+        drop(lease);
+        assert_eq!(c.snapshot(), 0, "snapshot count must not underflow below zero");
+        assert!(!*fake.live.lock().unwrap(), "state must not be re-set to asserted");
+        assert_eq!(fake.asserted.load(Ordering::SeqCst), 1, "backend must not re-assert");
+        assert_eq!(fake.cleared.load(Ordering::SeqCst), cleared_before, "backend must not re-clear");
+    }
+
+    #[test]
+    fn lease_acquired_after_force_clear_works_again() {
+        let (fake, c) = rig();
+        let lease1 = c.acquire().expect("initial lease");
+        assert!(*fake.live.lock().unwrap());
+        assert_eq!(c.snapshot(), 1);
+
+        c.force_clear();
+        assert!(!*fake.live.lock().unwrap());
+        assert_eq!(c.snapshot(), 0);
+        drop(lease1);
+
+        // A new lease acquired after force_clear must assert the backend and function normally.
+        let lease2 = c.acquire().expect("lease after force_clear");
+        assert!(*fake.live.lock().unwrap(), "backend must be re-asserted for new lease");
+        assert_eq!(c.snapshot(), 1);
+        assert_eq!(fake.asserted.load(Ordering::SeqCst), 2);
+
+        drop(lease2);
+        assert!(!*fake.live.lock().unwrap(), "backend must clear when lease2 is released");
+        assert_eq!(c.snapshot(), 0);
+    }
+
+    #[test]
+    fn acquire_returns_none_when_backend_assert_fails() {
+        let c = Controller::new(Arc::new(FailingBackend));
+        assert!(c.acquire().is_none(), "acquire must fail if backend assert fails");
         assert_eq!(c.snapshot(), 0);
     }
 
@@ -353,5 +481,73 @@ mod tests {
         set_working(true); // no-op, must not double-acquire
         set_working(false);
         set_working(false); // no-op
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "changes the real power state for a second; run by hand"]
+    fn live_lease_sets_and_clears_the_real_execution_state() {
+        use windows::Win32::System::Power::{
+            CallNtPowerInformation, SystemExecutionState, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
+        };
+
+        struct CleanupGuard;
+        impl Drop for CleanupGuard {
+            fn drop(&mut self) {
+                force_clear();
+            }
+        }
+
+        // Clean up even if an assertion or panic occurs.
+        let _guard = CleanupGuard;
+
+        // Ensure we start with no residual keep-awake state from prior operations.
+        force_clear();
+
+        let query_execution_state = || -> u32 {
+            let mut state: u32 = 0;
+            // SAFETY: CallNtPowerInformation with SystemExecutionState writes a ULONG bitmask
+            // to outputbuffer. inputbuffer is NULL and inputbufferlength is 0.
+            let status = unsafe {
+                CallNtPowerInformation(
+                    SystemExecutionState,
+                    std::ptr::null(),
+                    0,
+                    &mut state as *mut u32 as *mut std::ffi::c_void,
+                    std::mem::size_of::<u32>() as u32,
+                )
+            };
+            assert_eq!(status, 0, "CallNtPowerInformation failed with NTSTATUS {status:#x}");
+            state
+        };
+
+        let required_bits = ES_SYSTEM_REQUIRED.0 | ES_DISPLAY_REQUIRED.0;
+
+        // Acquire a real lease using the production backend.
+        let lease = acquire_lease().expect("real lease must be acquired");
+        let while_held = query_execution_state();
+        println!("[PROOF] execution_state_while_held=0x{while_held:08x}");
+        assert_eq!(
+            while_held & required_bits,
+            required_bits,
+            "system-required and display-required bits must be set while lease is held; got 0x{while_held:08x}"
+        );
+
+        // Release the lease and poll for up to 2 seconds until the bits are cleared.
+        drop(lease);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut after_release = query_execution_state();
+        while (after_release & required_bits) != 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            after_release = query_execution_state();
+        }
+
+        println!("[PROOF] execution_state_after_release=0x{after_release:08x}");
+        assert_eq!(
+            after_release & required_bits,
+            0,
+            "system-required and display-required bits must be cleared after lease release; got 0x{after_release:08x}"
+        );
     }
 }

@@ -118,4 +118,139 @@ mod tests {
         assert_eq!(parse("not json"), None);
         assert_eq!(parse(r#"{"at":1}"#), None, "a partial record is ignored");
     }
+
+    static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct DirGuard(std::path::PathBuf);
+    impl Drop for DirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn tmpdir(name: &str) -> (std::path::PathBuf, DirGuard) {
+        let p = std::env::temp_dir().join(format!("nexus_outcomes_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        let _ = std::fs::create_dir_all(&p);
+        let guard = DirGuard(p.clone());
+        (p, guard)
+    }
+
+    #[test]
+    fn the_record_survives_a_restart_and_is_told_exactly_once() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let (dir, _guard) = tmpdir("restart");
+        let now = 1_700_000_000;
+        let outcomes = vec![
+            Outcome { label: "Claude Code".into(), verdict: Verdict::Go },
+            Outcome { label: "Antigravity".into(), verdict: fail() },
+            Outcome { label: "Cursor".into(), verdict: Verdict::Unsure(vec![Reason::NothingToJudge]) },
+        ];
+        let rec = record_from(&outcomes, "shut down", now).expect("record from outcomes");
+        save(&dir, &rec);
+
+        // Drop in-memory handles before peek, simulating restart boot flow
+        drop(rec);
+        drop(outcomes);
+
+        let loaded = peek(&dir, now + 60).expect("record returned by peek");
+        assert_eq!(loaded.lines.len(), 3);
+        assert_eq!(loaded.lines[0], "Claude Code finished clean");
+        assert_eq!(loaded.lines[1], "Antigravity stopped, but the output mentions a failure (3 failing)");
+        assert_eq!(loaded.lines[2], "Cursor may be done, but I could not read its final output");
+        assert_eq!(loaded.what, "shut down");
+        assert_eq!(loaded.at, now);
+        assert!(!loaded.clean);
+        assert!(!loaded.told);
+
+        let spoken_text = spoken(&loaded);
+        assert!(spoken_text.contains("Claude Code"));
+        assert!(spoken_text.contains("Antigravity"));
+        assert!(spoken_text.contains("Cursor"));
+        assert!(spoken_text.contains("3 failing"));
+        assert_eq!(
+            spoken_text,
+            "Before the laptop went off, Claude Code finished clean. Antigravity stopped, but the output mentions a failure (3 failing). Cursor may be done, but I could not read its final output."
+        );
+
+        mark_told(&dir);
+        assert!(peek(&dir, now + 120).is_none(), "told record must not be peeked again");
+
+        // Save a new record later and verify told state resets for the new record
+        let later_now = now + 3600;
+        let new_rec = record_from(
+            &[Outcome { label: "Codex".into(), verdict: Verdict::Go }],
+            "restarted",
+            later_now,
+        )
+        .expect("new record");
+        save(&dir, &new_rec);
+        drop(new_rec);
+
+        let loaded_new = peek(&dir, later_now + 30).expect("new record returned by peek");
+        assert_eq!(loaded_new.what, "restarted");
+        assert_eq!(loaded_new.lines, vec!["Codex finished clean"]);
+        assert!(loaded_new.clean);
+        assert!(!loaded_new.told);
+        assert_eq!(loaded_new.at, later_now);
+    }
+
+    #[test]
+    fn an_old_record_is_not_told() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let (dir, _guard) = tmpdir("old");
+        let now = 1_000_000;
+        let rec = record_from(
+            &[Outcome { label: "Claude Code".into(), verdict: Verdict::Go }],
+            "shut down",
+            now,
+        )
+        .expect("record");
+        save(&dir, &rec);
+
+        // One second inside the maximum age limit: record is returned
+        assert!(peek(&dir, now + MAX_AGE_SECS - 1).is_some(), "one second inside max age must be returned");
+        assert!(peek(&dir, now + MAX_AGE_SECS).is_some(), "exactly at max age must be returned");
+
+        // Older than the maximum age limit: record is not returned
+        assert!(peek(&dir, now + MAX_AGE_SECS + 1).is_none(), "older than max age must not be returned");
+    }
+
+    #[test]
+    fn a_corrupt_record_is_ignored_and_does_not_block_the_next_one() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let (dir, _guard) = tmpdir("corrupt");
+        let now = 1_000_000;
+
+        // Write corrupt garbage where the record is stored using module's storage key
+        crate::memcore::with_store(&dir, |s| s.meta_set(KEY, "{ not valid json @@@"));
+
+        // peek returns None without panicking
+        assert!(peek(&dir, now).is_none());
+
+        // A following save of a good record is readable
+        let good = record_from(
+            &[Outcome { label: "Claude Code".into(), verdict: Verdict::Go }],
+            "shut down",
+            now,
+        )
+        .expect("good record");
+        save(&dir, &good);
+
+        let read = peek(&dir, now + 10).expect("saved record should be readable");
+        assert_eq!(read, good);
+    }
+
+    #[test]
+    fn no_outcomes_means_no_record() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let (dir, _guard) = tmpdir("none");
+        let now = 1_000_000;
+
+        let rec = record_from(&[], "shut down", now);
+        assert!(rec.is_none(), "no outcomes must produce None record");
+
+        // Saving nothing leaves peek None
+        assert!(peek(&dir, now).is_none(), "peek must return None when nothing was saved");
+    }
 }

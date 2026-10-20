@@ -91,13 +91,72 @@ pub fn is_kin_word(word: &str) -> bool {
     KIN_GROUPS.iter().any(|g| g.contains(&w.as_str()))
 }
 
+/// Trim conversational heads ("my chat with ...", "open chat with ..."),
+/// tails ("in whatsapp", "on whatsapp", "'s chat", "chat"), and surrounding punctuation from a contact name.
+pub fn clean_contact_name(raw: &str) -> String {
+    let mut s = raw.trim().to_lowercase();
+    s = s.trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace()).to_string();
+
+    const PREFIXES: &[&str] = &[
+        "open my whatsapp chat with ",
+        "open whatsapp chat with ",
+        "open my chat with ",
+        "open the chat with ",
+        "open chat with ",
+        "show my chat with ",
+        "show chat with ",
+        "go to my chat with ",
+        "go to chat with ",
+        "my chat with ",
+        "the chat with ",
+        "chat with ",
+        "my ",
+        "the ",
+    ];
+    for p in PREFIXES {
+        if let Some(rest) = s.strip_prefix(p) {
+            s = rest.trim().to_string();
+            break;
+        }
+    }
+
+    const SUFFIXES: &[&str] = &[
+        " in whatsapp",
+        " on whatsapp",
+        " in the whatsapp app",
+        " on the whatsapp app",
+        " in wa",
+        " on wa",
+        "'s chat",
+        " chats",
+        " chat",
+    ];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for suf in SUFFIXES {
+            if let Some(rest) = s.strip_suffix(suf) {
+                s = rest.trim().to_string();
+                changed = true;
+            }
+        }
+    }
+
+    s.trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace()).to_string()
+}
+
 /// Candidate search strings, best first: learned aliases, the spoken name, then the other words of
 /// its kinship group (so "mummy" also tries "amma"/"mom"). Deduplicated, lowercase.
 /// A miss costs ~2 s per candidate; ten of them made "not found" take 20-30 s.
 pub const MAX_CANDIDATES: usize = 3;
 
 pub fn name_candidates(contact: &str, learned: &[String]) -> Vec<String> {
-    let spoken = contact.trim().to_lowercase();
+    let cleaned = clean_contact_name(contact);
+    let spoken = if cleaned.is_empty() {
+        contact.trim().to_lowercase()
+    } else {
+        cleaned
+    };
     let mut out: Vec<String> = Vec::new();
     let mut push = |s: &str| {
         let s = s.trim().to_lowercase();
@@ -114,6 +173,9 @@ pub fn name_candidates(contact: &str, learned: &[String]) -> Vec<String> {
             push(w);
         }
     }
+    // The cleaning above drops words like "my" / "the" / "chat"; a contact saved as "My Love" or "Chat Support" is
+    // still found because the name as spoken is tried too (last, so it never pushes out a kin-group alternative).
+    push(contact.trim().trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace()));
     out.truncate(MAX_CANDIDATES);
     out
 }
@@ -334,6 +396,13 @@ pub fn normalize_phone(raw: &str) -> Option<String> {
 /// `whatsapp://send?phone=<digits>`: opens that chat directly, no search box, no UI scraping.
 pub fn deep_link(phone_digits: &str) -> String {
     format!("whatsapp://send?phone={phone_digits}")
+}
+
+/// Validate and build a WhatsApp deep link: `normalize_phone(raw).map(deep_link)`.
+/// Returns `None` if `raw` does not contain a valid 8-15 digit phone number.
+#[cfg(test)]
+pub fn phone_deep_link(raw: &str) -> Option<String> {
+    normalize_phone(raw).map(|digits| deep_link(&digits))
 }
 
 // ─────────────────────────────── real environment ───────────────────────────────
@@ -776,6 +845,173 @@ mod tests {
         // and the next open tries the learned name FIRST
         let c = name_candidates("mummy", &learned_aliases(&dir, "mummy"));
         assert_eq!(c[0], "mom");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_name_candidates_trims_tails_and_punctuation() {
+        // Full tail with punctuation
+        let c1 = name_candidates("open my chat with mummy in whatsapp.", &[]);
+        assert_eq!(c1[0], "mummy");
+        assert!(c1.contains(&"amma".to_string()));
+        assert!(c1.contains(&"mom".to_string()));
+
+        // Suffix "on whatsapp" and exclamation
+        let c2 = name_candidates("chat with mummy on whatsapp!", &[]);
+        assert_eq!(c2[0], "mummy");
+
+        // Kin group daddy/papa with "in wa"
+        let c3 = name_candidates("open chat with papa in wa", &[]);
+        assert_eq!(c3[0], "papa");
+        assert!(c3.contains(&"daddy".to_string()));
+        assert!(c3.contains(&"dad".to_string()));
+
+        // Trailing ellipsis
+        let c4 = name_candidates("mummy...", &[]);
+        assert_eq!(c4[0], "mummy");
+    }
+
+    #[test]
+    fn test_clean_contact_name_all_affixes() {
+        assert_eq!(clean_contact_name("open my chat with mummy in whatsapp"), "mummy");
+        assert_eq!(clean_contact_name("open the chat with sister on whatsapp"), "sister");
+        assert_eq!(clean_contact_name("show my chat with akka in whatsapp"), "akka");
+        assert_eq!(clean_contact_name("chat with papa's chat on wa"), "papa");
+        assert_eq!(clean_contact_name("'Mummy!'"), "mummy");
+        assert_eq!(clean_contact_name("Chris"), "chris");
+        assert_eq!(clean_contact_name(""), "");
+    }
+
+    #[test]
+    fn test_name_candidates_dedup_and_max_three_with_kin() {
+        // Kin group has 10 words, candidates must be truncated to MAX_CANDIDATES (3)
+        let c = name_candidates("mummy", &[]);
+        assert_eq!(c.len(), MAX_CANDIDATES);
+        assert_eq!(c[0], "mummy");
+
+        // Ensure no duplicate entries
+        let mut deduped = c.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(deduped.len(), c.len());
+
+        // When learned alias overlaps with kin name
+        let c_overlap = name_candidates("mummy", &["Amma".into()]);
+        assert_eq!(c_overlap[0], "amma");
+        assert_eq!(c_overlap[1], "mummy");
+        assert_eq!(c_overlap.len(), MAX_CANDIDATES);
+        assert_eq!(c_overlap.iter().filter(|x| *x == "amma").count(), 1);
+    }
+
+    #[test]
+    fn test_name_candidates_learned_alias_priority_with_cleaning() {
+        let learned = vec!["Amma Jaan".to_string()];
+        let c = name_candidates("open chat with mummy in whatsapp", &learned);
+        assert_eq!(c[0], "amma jaan", "Learned alias must take slot #1");
+        assert_eq!(c[1], "mummy", "Cleaned spoken name must take slot #2");
+        assert_eq!(c[2], "amma", "Next kin synonym fills slot #3");
+        assert_eq!(c.len(), 3);
+    }
+
+    #[test]
+    fn test_phone_normalize_and_deep_link_builder() {
+        assert_eq!(normalize_phone("+91 98765 43210").as_deref(), Some("919876543210"));
+        assert_eq!(normalize_phone("+(1) 555-0199-234").as_deref(), Some("15550199234"));
+        assert_eq!(normalize_phone("09876543210").as_deref(), Some("09876543210"));
+
+        assert_eq!(
+            phone_deep_link("+91 98765 43210"),
+            Some("whatsapp://send?phone=919876543210".to_string())
+        );
+        assert_eq!(
+            deep_link("919876543210"),
+            "whatsapp://send?phone=919876543210"
+        );
+    }
+
+    #[test]
+    fn test_phone_deep_link_refuses_invalid_inputs() {
+        assert_eq!(phone_deep_link(""), None);
+        assert_eq!(phone_deep_link("not a phone number"), None);
+        assert_eq!(phone_deep_link("12345"), None, "too short (< 8 digits)");
+        assert_eq!(phone_deep_link("123456789012345678"), None, "too long (> 15 digits)");
+        assert_eq!(phone_deep_link("+abc-def-ghij"), None, "letters only");
+    }
+
+    #[test]
+    fn test_pick_match_scoring_exact_beats_prefix_and_contains() {
+        let items = vec![
+            item("Mummy Work", 10, 10),
+            item("Best Mummy Ever", 20, 20),
+            item("Mummy", 30, 30),
+        ];
+        let hit = pick_match(&items, "mummy").unwrap();
+        assert_eq!(hit.name, "Mummy", "Exact match (score 3) beats prefix (2) and contains (1)");
+
+        // Without exact match, prefix beats contains
+        let items_no_exact = vec![
+            item("Best Mummy Ever", 20, 20),
+            item("Mummy Work", 10, 10),
+        ];
+        let hit_prefix = pick_match(&items_no_exact, "mummy").unwrap();
+        assert_eq!(hit_prefix.name, "Mummy Work", "Prefix match (score 2) beats contains (1)");
+
+        // Contains only
+        let items_contains_only = vec![
+            item("Best Mummy Ever", 20, 20),
+        ];
+        let hit_contains = pick_match(&items_contains_only, "mummy").unwrap();
+        assert_eq!(hit_contains.name, "Best Mummy Ever");
+    }
+
+    #[test]
+    fn test_pick_match_unicode_and_emojis() {
+        let items = vec![
+            item("Mummy ❤", 1, 1),
+            item("Amma 🌸", 2, 2),
+        ];
+        let hit_mummy = pick_match(&items, "mummy").unwrap();
+        assert_eq!(hit_mummy.name, "Mummy ❤");
+
+        let hit_amma = pick_match(&items, "amma").unwrap();
+        assert_eq!(hit_amma.name, "Amma 🌸");
+    }
+
+    #[test]
+    fn test_pick_match_case_insensitivity_and_whitespace() {
+        let items = vec![
+            item("Dr Raj Kumar", 1, 1),
+        ];
+        assert_eq!(pick_match(&items, "DR RAJ").unwrap().name, "Dr Raj Kumar");
+        assert_eq!(pick_match(&items, "  dr    kumar  ").unwrap().name, "Dr Raj Kumar");
+        assert_eq!(pick_match(&items, "raj").unwrap().name, "Dr Raj Kumar");
+    }
+
+    #[test]
+    fn test_pick_match_near_miss_fails() {
+        let items = vec![
+            item("Thanmatee", 1, 1),
+            item("Akka", 2, 2),
+        ];
+        // Searching for multi-token name requires all tokens to be present in candidate
+        assert!(pick_match(&items, "thanmatee akka").is_none());
+        assert!(pick_match(&items, "someone else").is_none());
+        assert!(pick_match(&items, "").is_none());
+        assert!(pick_match(&items, "a").is_none(), "single character token filtered out");
+    }
+
+    #[test]
+    fn test_alias_learning_key_normalization_consistency() {
+        let dir = std::env::temp_dir().join(format!("nexus_wa_alias_norm_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert!(learn_alias(&dir, "Mummy!", "Mom"));
+        // Looking up with varied spacing/casing maps to the exact same normalized key
+        assert_eq!(learned_aliases(&dir, "mummy"), vec!["Mom".to_string()]);
+        assert_eq!(learned_aliases(&dir, "  MUMMY  "), vec!["Mom".to_string()]);
+        assert_eq!(learned_aliases(&dir, "Mummy!"), vec!["Mom".to_string()]);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

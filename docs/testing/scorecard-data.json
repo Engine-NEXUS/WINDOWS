@@ -13,13 +13,13 @@
  {
   "area": "Voice front end",
   "feature": "Global hotkey Ctrl+Space (call / cancel)",
-  "tests": "0 tests",
+  "tests": "5",
   "B": 100,
-  "T": 10,
+  "T": 75,
   "L": 85,
-  "S": 80,
+  "S": 85,
   "I": 80,
-  "note": "Used daily and works; no automated test."
+  "note": "Cancel/call decision extracted and checked for all 16 states; stale doc comment rewritten."
  },
  {
   "area": "Voice front end",
@@ -235,13 +235,13 @@
  {
   "area": "Understanding",
   "feature": "Mishearing normaliser + learned corrections",
-  "tests": "34 tests",
+  "tests": "45",
   "B": 100,
-  "T": 60,
-  "L": 45,
-  "S": 70,
-  "I": 55,
-  "note": "Real recall of learned corrections unmeasured."
+  "T": 75,
+  "L": 55,
+  "S": 75,
+  "I": 62,
+  "note": "Real log replay: 31 of 194 unique missed commands are now understood; added openbread/open brief/command hop. 163 still missed (see ledger)."
  },
  {
   "area": "Desktop control",
@@ -279,24 +279,24 @@
  {
   "area": "Desktop control",
   "feature": "Dictation (type what I say)",
-  "tests": "24 tests",
+  "tests": "20 + 156-pair corpus",
   "B": 95,
-  "T": 65,
+  "T": 90,
   "L": 40,
   "S": 85,
-  "I": 55,
-  "note": "29 tests vs a planned 150-pair corpus."
+  "I": 65,
+  "note": "156-pair spoken->written corpus gates the cleaner. Known quirks: 'one dollar' -> '1 dollars', proper nouns stay lowercase. Still needs real dictation into apps (W3)."
  },
  {
   "area": "Desktop control",
   "feature": "Action Kernel (voice file control, quarantine delete, undo)",
-  "tests": "43 tests",
+  "tests": "53",
   "B": 100,
-  "T": 75,
-  "L": 10,
+  "T": 90,
+  "L": 45,
   "S": 95,
-  "I": 70,
-  "note": "20/20 mutations killed; never run by voice."
+  "I": 75,
+  "note": "Spoken grammar -> confirm -> trash -> undo on real folders (unicode, long names, clashes, forbidden places, wrong origin). Still needs: one spoken delete and undo by voice (W3)."
  },
  {
   "area": "Desktop control",
@@ -323,13 +323,13 @@
  {
   "area": "Desktop control",
   "feature": "Live mode: WhatsApp / browser flows",
-  "tests": "11 tests",
-  "B": 85,
-  "T": 35,
+  "tests": "45",
+  "B": 90,
+  "T": 75,
   "L": 45,
-  "S": 70,
+  "S": 80,
   "I": 45,
-  "note": "WhatsApp UIA unverified on current build; opener bounded to 3 candidates."
+  "note": "State machine, safety layer and WhatsApp name/number logic tested (case-insensitive tool matching, name cleaning keeps the spoken name as a last candidate). Still needs the current WhatsApp build run (W3)."
  },
  {
   "area": "Desktop control",
@@ -345,13 +345,13 @@
  {
   "area": "Desktop control",
   "feature": "Window tiling + display off",
-  "tests": "21 tests",
+  "tests": "21 pure + 2 live",
   "B": 100,
-  "T": 55,
-  "L": 5,
-  "S": 85,
-  "I": 50,
-  "note": "No real window moved, display_off never called."
+  "T": 85,
+  "L": 55,
+  "S": 88,
+  "I": 60,
+  "note": "Real proof: 3 own windows tiled into exact 640px columns (0-640-1280-1920) and display_off returned Ok. Still needs: the finish sequence on real agent windows, the screen actually going dark seen by the owner, an elevated window skip (W1)."
  },
  {
   "area": "Desktop control",
@@ -400,24 +400,24 @@
  {
   "area": "Agent control",
   "feature": "Overnight record + morning briefing",
-  "tests": "23 tests",
+  "tests": "10",
   "B": 100,
-  "T": 65,
-  "L": 0,
+  "T": 85,
+  "L": 20,
   "S": 85,
   "I": 60,
-  "note": "Not run across a real shutdown."
+  "note": "Save, restart, tell once, expiry, corrupt record and new-record reset tested against the real sealed store. Still needs: a real shutdown and the next-morning briefing (W1)."
  },
  {
   "area": "Agent control",
   "feature": "Gated commit + draft PR",
-  "tests": "25 tests",
+  "tests": "30 (5 real git)",
   "B": 100,
-  "T": 80,
-  "L": 0,
-  "S": 90,
-  "I": 60,
-  "note": "Never run against a real repo or GitHub."
+  "T": 90,
+  "L": 45,
+  "S": 92,
+  "I": 65,
+  "note": "Real git against a local bare remote: branch, commit, push, ignored files left out, secrets/detached/merge/hold refused, push failure keeps the commit. Still needs: a real GitHub draft PR from a throwaway repo (owner approval)."
  },
  {
   "area": "Agent control",
@@ -433,13 +433,13 @@
  {
   "area": "Agent control",
   "feature": "Keep-awake",
-  "tests": "6 tests",
+  "tests": "12 + 1 live",
   "B": 100,
-  "T": 65,
-  "L": 35,
-  "S": 70,
-  "I": 65,
-  "note": "powercfg behaviour on this Modern-Standby laptop not checked."
+  "T": 80,
+  "L": 65,
+  "S": 80,
+  "I": 70,
+  "note": "Real proof: execution state 0x3 while a lease is held, 0x0 after release. Fixed a stale-drop re-clear. Still needs: a long reply on battery and the system-only mode."
  },
  {
   "area": "Agent control",
@@ -488,13 +488,13 @@
  {
   "area": "Memory and proactive",
   "feature": "Calendar read / add",
-  "tests": "8 tests",
-  "B": 90,
-  "T": 50,
-  "L": 15,
-  "S": 85,
-  "I": 60,
-  "note": ""
+  "tests": "22",
+  "B": 98,
+  "T": 80,
+  "L": 25,
+  "S": 90,
+  "I": 65,
+  "note": "Production flow now uses the tested helpers (specific spoken errors for expired sign-in, quota, network, timeout); evening/afternoon times understood; all-day events no longer treated as conflicts. Still needs: a real Google account run (W4)."
  },
  {
   "area": "Memory and proactive",
@@ -512,7 +512,7 @@
   "feature": "Boot briefing + resume points",
   "tests": "31 tests",
   "B": 95,
-  "T": 70,
+  "T": 78,
   "L": 25,
   "S": 80,
   "I": 60,
@@ -521,13 +521,13 @@
  {
   "area": "Memory and proactive",
   "feature": "Session snapshot / restore",
-  "tests": "18 tests",
+  "tests": "36",
   "B": 90,
-  "T": 60,
-  "L": 15,
-  "S": 80,
-  "I": 55,
-  "note": "Brave/Edge restore flag not verified."
+  "T": 85,
+  "L": 20,
+  "S": 90,
+  "I": 60,
+  "note": "Fixed: UNC paths could be launched on restore (NTLM leak risk); injectable launcher; 22 new tests; 'reopen them' is now understood as a yes. Still needs a real reboot (W4)."
  },
  {
   "area": "Memory and proactive",
@@ -587,13 +587,13 @@
  {
   "area": "Integrations",
   "feature": "Architecture mapper",
-  "tests": "6 tests",
+  "tests": "42",
   "B": 100,
-  "T": 35,
+  "T": 85,
   "L": 70,
-  "S": 70,
-  "I": 65,
-  "note": "2,991 lines, 6 tests."
+  "S": 78,
+  "I": 68,
+  "note": "23 new pure tests; fixed .git suffix handling, API routes classified as server code (pages/api), deterministic tie-break. Network error mapping is still inline."
  },
  {
   "area": "Integrations",
@@ -677,13 +677,13 @@
  {
   "area": "Platform and quality",
   "feature": "Security: keychain, PII filter, sealed memory",
-  "tests": "~30 tests",
+  "tests": "30",
   "B": 100,
-  "T": 70,
-  "L": 60,
-  "S": 85,
-  "I": 70,
-  "note": "Keys still also in settings.json in places."
+  "T": 82,
+  "L": 50,
+  "S": 95,
+  "I": 78,
+  "note": "Plaintext API keys (5 found in settings.json) are now moved to the keychain and blanked at startup, verified by read-back; readers are keychain-first; import replaces. Still needs the first real startup scrub and a restart check."
  },
  {
   "area": "Platform and quality",

@@ -88,6 +88,16 @@ impl LiveContext {
         }
     }
 
+    /// Create a new context with a custom timeout.
+    #[cfg(test)]
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self {
+            state: Mutex::new(LiveState::Idle),
+            last_action: Mutex::new(Instant::now()),
+            timeout,
+        }
+    }
+
     /// Get the current state. Resets to Idle if expired.
     pub fn state(&self) -> LiveState {
         let mut guard = self.state.lock().unwrap();
@@ -115,13 +125,25 @@ impl LiveContext {
 
     /// Check if the context has expired (no action for `timeout` duration).
     pub fn is_expired(&self) -> bool {
-        self.last_action.lock().unwrap().elapsed() > self.timeout
+        let last = *self.last_action.lock().unwrap();
+        is_expired_at(last, Instant::now(), self.timeout)
     }
 
     /// Time since the last action.
     pub fn time_since_last_action(&self) -> Duration {
-        self.last_action.lock().unwrap().elapsed()
+        Instant::now().saturating_duration_since(*self.last_action.lock().unwrap())
     }
+}
+
+/// Helper: returns true if `now` has elapsed past `last` by more than the default 30s timeout.
+#[cfg(test)]
+pub fn expired(last: Instant, now: Instant) -> bool {
+    is_expired_at(last, now, Duration::from_secs(30))
+}
+
+/// Helper: returns true if `now` has elapsed past `last` by more than `timeout`.
+pub fn is_expired_at(last: Instant, now: Instant, timeout: Duration) -> bool {
+    now.saturating_duration_since(last) > timeout
 }
 
 /// Global live-mode context (lazy-initialized, shared across Tauri commands).
@@ -187,6 +209,226 @@ mod tests {
             LiveState::AppOpen { app: "whatsapp".into() }
         );
 
+        ctx.reset();
+        assert_eq!(ctx.state(), LiveState::Idle);
+    }
+
+    #[test]
+    fn test_state_describe_browser_and_typed_variants() {
+        assert_eq!(
+            LiveState::BrowserSearch { query: "weather forecast".into() }.describe(),
+            "searched: weather forecast"
+        );
+        assert_eq!(
+            LiveState::BrowserOpen { url: None }.describe(),
+            "browser open"
+        );
+        assert_eq!(
+            LiveState::BrowserOpen { url: Some("https://example.com".into()) }.describe(),
+            "browser open at https://example.com"
+        );
+        assert_eq!(
+            LiveState::TextTyped {
+                app: "whatsapp".into(),
+                contact: "raj".into(),
+                text: "see you soon".into()
+            }
+            .describe(),
+            "whatsapp chat with raj, typed: see you soon"
+        );
+    }
+
+    #[test]
+    fn test_app_context_coverage_all_states() {
+        assert_eq!(LiveState::Idle.app_context(), None);
+        assert_eq!(LiveState::AppOpen { app: "slack".into() }.app_context(), Some("slack"));
+        assert_eq!(
+            LiveState::ChatActive { app: "telegram".into(), contact: "bob".into() }.app_context(),
+            Some("telegram")
+        );
+        assert_eq!(
+            LiveState::TextTyped {
+                app: "whatsapp".into(),
+                contact: "alice".into(),
+                text: "hey".into()
+            }
+            .app_context(),
+            Some("whatsapp")
+        );
+        assert_eq!(LiveState::BrowserSearch { query: "rust".into() }.app_context(), None);
+        assert_eq!(
+            LiveState::BrowserOpen { url: Some("https://rust-lang.org".into()) }.app_context(),
+            None
+        );
+        assert_eq!(LiveState::BrowserOpen { url: None }.app_context(), None);
+    }
+
+    #[test]
+    fn test_has_pending_text_all_states() {
+        assert!(!LiveState::Idle.has_pending_text());
+        assert!(!LiveState::AppOpen { app: "notepad".into() }.has_pending_text());
+        assert!(!LiveState::ChatActive { app: "whatsapp".into(), contact: "mom".into() }.has_pending_text());
+        assert!(LiveState::TextTyped {
+            app: "whatsapp".into(),
+            contact: "mom".into(),
+            text: "on my way".into()
+        }.has_pending_text());
+        assert!(!LiveState::BrowserSearch { query: "query".into() }.has_pending_text());
+        assert!(!LiveState::BrowserOpen { url: None }.has_pending_text());
+    }
+
+    #[test]
+    fn test_state_sequential_lifecycle_transitions() {
+        let ctx = LiveContext::new();
+        assert_eq!(ctx.state(), LiveState::Idle);
+        assert_eq!(ctx.state().app_context(), None);
+        assert!(!ctx.state().has_pending_text());
+
+        // Step 1: User: "open whatsapp"
+        ctx.transition(LiveState::AppOpen { app: "whatsapp".into() });
+        assert_eq!(ctx.state(), LiveState::AppOpen { app: "whatsapp".into() });
+        assert_eq!(ctx.state().app_context(), Some("whatsapp"));
+        assert_eq!(ctx.state().describe(), "whatsapp open");
+        assert!(!ctx.state().has_pending_text());
+
+        // Step 2: User: "chat with mummy"
+        ctx.transition(LiveState::ChatActive { app: "whatsapp".into(), contact: "mummy".into() });
+        assert_eq!(
+            ctx.state(),
+            LiveState::ChatActive { app: "whatsapp".into(), contact: "mummy".into() }
+        );
+        assert_eq!(ctx.state().app_context(), Some("whatsapp"));
+        assert_eq!(ctx.state().describe(), "whatsapp chat with mummy");
+        assert!(!ctx.state().has_pending_text());
+
+        // Step 3: User: "type hi"
+        ctx.transition(LiveState::TextTyped {
+            app: "whatsapp".into(),
+            contact: "mummy".into(),
+            text: "hi".into(),
+        });
+        assert_eq!(
+            ctx.state(),
+            LiveState::TextTyped {
+                app: "whatsapp".into(),
+                contact: "mummy".into(),
+                text: "hi".into(),
+            }
+        );
+        assert_eq!(ctx.state().app_context(), Some("whatsapp"));
+        assert!(ctx.state().has_pending_text());
+
+        // Step 4: User: "send" -> resets to Idle
+        ctx.reset();
+        assert_eq!(ctx.state(), LiveState::Idle);
+        assert_eq!(ctx.state().app_context(), None);
+        assert!(!ctx.state().has_pending_text());
+    }
+
+    #[test]
+    fn test_reset_from_every_state_returns_to_idle() {
+        let states = vec![
+            LiveState::Idle,
+            LiveState::AppOpen { app: "terminal".into() },
+            LiveState::ChatActive { app: "whatsapp".into(), contact: "alice".into() },
+            LiveState::TextTyped {
+                app: "whatsapp".into(),
+                contact: "alice".into(),
+                text: "draft".into(),
+            },
+            LiveState::BrowserSearch { query: "search terms".into() },
+            LiveState::BrowserOpen { url: Some("https://example.com".into()) },
+            LiveState::BrowserOpen { url: None },
+        ];
+
+        for s in states {
+            let ctx = LiveContext::new();
+            ctx.transition(s);
+            ctx.reset();
+            assert_eq!(ctx.state(), LiveState::Idle, "reset must return to Idle from any state");
+        }
+    }
+
+    #[test]
+    fn test_pure_expired_helper_30s_threshold() {
+        let now = Instant::now();
+        // Exact same instant -> not expired
+        assert!(!expired(now, now));
+        // Up to 30s -> not expired
+        assert!(!expired(now, now + Duration::from_secs(10)));
+        assert!(!expired(now, now + Duration::from_secs(29)));
+        assert!(!expired(now, now + Duration::from_secs(30)));
+        // Strictly over 30s -> expired
+        assert!(expired(now, now + Duration::from_secs(30) + Duration::from_millis(1)));
+        assert!(expired(now, now + Duration::from_secs(31)));
+        assert!(expired(now, now + Duration::from_secs(100)));
+        // Clock jitter where now is before last -> saturates at 0, not expired
+        assert!(!expired(now + Duration::from_secs(10), now));
+    }
+
+    #[test]
+    fn test_pure_is_expired_at_custom_durations() {
+        let base = Instant::now();
+        let timeout_5s = Duration::from_secs(5);
+        assert!(!is_expired_at(base, base + Duration::from_secs(4), timeout_5s));
+        assert!(!is_expired_at(base, base + Duration::from_secs(5), timeout_5s));
+        assert!(is_expired_at(base, base + Duration::from_secs(6), timeout_5s));
+
+        let timeout_100ms = Duration::from_millis(100);
+        assert!(!is_expired_at(base, base + Duration::from_millis(50), timeout_100ms));
+        assert!(is_expired_at(base, base + Duration::from_millis(101), timeout_100ms));
+    }
+
+    #[test]
+    fn test_context_with_timeout_auto_reset() {
+        let ctx = LiveContext::with_timeout(Duration::from_millis(5));
+        ctx.transition(LiveState::AppOpen { app: "whatsapp".into() });
+        assert_eq!(ctx.state(), LiveState::AppOpen { app: "whatsapp".into() });
+
+        // Deterministic short sleep (< 1000ms per hard rule 5) to allow 5ms timeout to expire
+        std::thread::sleep(Duration::from_millis(20));
+
+        assert!(ctx.is_expired());
+        // state() call detects expiry and resets to Idle
+        assert_eq!(ctx.state(), LiveState::Idle);
+    }
+
+    #[test]
+    fn test_context_transition_refreshes_expiry_clock() {
+        let ctx = LiveContext::with_timeout(Duration::from_millis(50));
+        ctx.transition(LiveState::AppOpen { app: "whatsapp".into() });
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(!ctx.is_expired(), "25ms < 50ms timeout");
+
+        // Transitioning refreshes last_action
+        ctx.transition(LiveState::ChatActive { app: "whatsapp".into(), contact: "dad".into() });
+        std::thread::sleep(Duration::from_millis(25));
+        // Total elapsed is 50ms, but since transition refreshed it, only 25ms since last action
+        assert!(!ctx.is_expired(), "action clock was refreshed by transition");
+        assert_eq!(
+            ctx.state(),
+            LiveState::ChatActive { app: "whatsapp".into(), contact: "dad".into() }
+        );
+    }
+
+    #[test]
+    fn test_unexpected_state_transitions_handled() {
+        let ctx = LiveContext::new();
+        // Jump directly from Idle to TextTyped without AppOpen/ChatActive
+        ctx.transition(LiveState::TextTyped {
+            app: "unknown".into(),
+            contact: "nobody".into(),
+            text: "lost text".into(),
+        });
+        assert_eq!(
+            ctx.state(),
+            LiveState::TextTyped {
+                app: "unknown".into(),
+                contact: "nobody".into(),
+                text: "lost text".into(),
+            }
+        );
+        // Resetting cleans up immediately
         ctx.reset();
         assert_eq!(ctx.state(), LiveState::Idle);
     }

@@ -574,3 +574,23 @@ The queue above is the plan; this table is the truth. A row is DONE only when it
 | 2026-10-20 | 8 Music control | 49% | 67% | Fixed `R&B` / multi-word titles, removed the false "playing" claim and the stray pause key, honest "not installed", bare `play <title>` understood, 10 tests | A spoken Spotify run (W3) |
 
 Observation after the first three rows: **tests and fixes move a row from about 50% to about 68%; the last 12 points are the live proof (L axis, 30% weight).** The four owner walkthroughs in section 8 are therefore the critical path for the whole programme, not a final polish step. Schedule W1 as soon as the agent rows are built.
+
+### 2026-10-20 (second batch, coded by Antigravity/Gemini, reviewed and verified by the engineer)
+
+| Row | Before | After | Real proof run | Real bugs found and fixed |
+|---|---|---|---|---|
+| Global hotkey | 72% | 85% (Production) | decision checked for all 16 states | stale design comment rewritten |
+| Window tiling + display off | 53% | 76% | 3 real windows tiled into exact 640 px columns; `display_off` returned Ok | none; the proof harness itself needed a real-windows approach (console windows do not appear under `cargo test`) |
+| Gated commit + PR | 58% | 75% | real git against a local bare remote (5 tests) | none |
+| Keep-awake | 64% | 78% | execution state `0x3` held, `0x0` released | a stale lease drop re-cleared the state |
+| Action Kernel | 63% | 77% | spoken delete, confirm, undo on real folders | none |
+| Architecture mapper | 68% | 80% | 23 new pure tests | `.git` suffix kept in repo names; `pages/api` was treated as UI; unstable tie order |
+| Overnight record | 55% | 65% | store round trip, expiry, corruption | none |
+| Calendar read / add | 54% | 66% | local mock server | the real flow now uses the tested helpers (specific spoken errors); evening/afternoon times; all-day events no longer conflicts |
+| Dictation | 65% | 72% | 156-pair corpus | known quirks recorded ("one dollar" -> "1 dollars") |
+| Live mode / WhatsApp | 55% | 65% | 25+ pure tests | name cleaning no longer drops the spoken name |
+| Session restore | 55% | 64% | injectable launcher, 22 tests | UNC paths could be launched on restore (NTLM risk); "reopen them" was not understood as a yes |
+| Mishearing normaliser | 64% | 72% | owner's real log replayed: 31 of 194 unique misses now understood | added openbread / open brief / command hop |
+| Security (keys) | 75% | 77% | audit found 5 plaintext keys in the owner's settings.json | keys now move to the keychain and are blanked at startup; import replaces; readers keychain-first |
+
+Method note: the coding was delegated to the Antigravity CLI (`agy`, Gemini 3.8 Flash) from written specs; every report was checked against the diff. Two things to watch for in delegated work, both seen here: (1) a helper written only for its own tests that production never calls (calendar), fixed by wiring production to it; (2) helpers that exist only for tests must be `#[cfg(test)]` or the dead-code gate fails.

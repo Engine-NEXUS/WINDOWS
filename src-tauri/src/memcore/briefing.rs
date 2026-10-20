@@ -729,6 +729,76 @@ mod tests {
     }
 
     #[test]
+    fn the_morning_briefing_with_an_overnight_record_asks_to_reopen_the_other_apps() {
+        use crate::agent_tracker::Outcome;
+        use crate::session_verdict::{Reason, Verdict};
+
+        let mut i = input();
+        let rec = crate::agent_outcomes::record_from(
+            &[
+                Outcome { label: "Claude Code".into(), verdict: Verdict::Go },
+                Outcome {
+                    label: "Antigravity".into(),
+                    verdict: Verdict::Hold(vec![Reason::FailureMarker("3 failing".into(), "Fix 3 failing tests".into())]),
+                },
+                Outcome {
+                    label: "Cursor".into(),
+                    verdict: Verdict::Unsure(vec![Reason::NothingToJudge]),
+                },
+            ],
+            "shut down",
+            i.now - 30_000,
+        )
+        .unwrap();
+
+        i.overnight = Some(rec.clone());
+        i.session = Some(SessionOffer {
+            summary: "VS Code on ULTRON and Brave".into(),
+            left_at: i.now - 30_000,
+        });
+
+        let b = build(&i).expect("briefing with overnight and session must build");
+
+        // The spoken text starts with what happened overnight
+        let spoken_details = without_greeting(&b.spoken, i.hour, i.name.as_deref(), i.friend);
+        assert!(
+            spoken_details.starts_with("Before the laptop went off, Claude Code finished clean. Antigravity stopped, but"),
+            "{}",
+            b.spoken
+        );
+
+        // Mentions the failed agent and its reason
+        assert!(b.spoken.contains("Antigravity"), "{}", b.spoken);
+        assert!(b.spoken.contains("3 failing"), "{}", b.spoken);
+
+        // Ends with the reopen question text used by the module
+        assert!(
+            b.spoken.ends_with("Do you want me to open the other apps you were using too?"),
+            "{}",
+            b.spoken
+        );
+
+        // The card sections include one row per agent
+        assert!(b.card_md.contains("### Before the shutdown"), "{}", b.card_md);
+        for line in &rec.lines {
+            assert!(
+                b.card_md.contains(&format!("- {line}\n")),
+                "card must include row for agent line: {line}\nCard:\n{}",
+                b.card_md
+            );
+        }
+
+        // Without an overnight record the old question is used
+        i.overnight = None;
+        let b_without = build(&i).expect("briefing without overnight must build");
+        assert!(
+            b_without.spoken.ends_with("Shall I reopen them?"),
+            "{}",
+            b_without.spoken
+        );
+    }
+
+    #[test]
     fn nothing_to_say_means_silence() {
         assert!(build(&input()).is_none());
         let mut i = input();

@@ -120,6 +120,10 @@ impl CalendarService {
                 if ev.status == "cancelled" {
                     return false;
                 }
+                // All-day events (date-only, e.g. YYYY-MM-DD) are not timed conflicts.
+                if ev.start_iso.len() == 10 || !ev.start_iso.contains('T') {
+                    return false;
+                }
                 let ev_start = match Self::parse_iso_to_epoch(&ev.start_iso) {
                     Some(s) => s,
                     None => return false,
@@ -145,7 +149,7 @@ impl CalendarService {
     ) -> Vec<(i64, i64)> {
         let mut busy_ranges: Vec<(i64, i64)> = events
             .iter()
-            .filter(|e| e.status != "cancelled")
+            .filter(|e| e.status != "cancelled" && e.start_iso.len() > 10 && e.start_iso.contains('T'))
             .filter_map(|e| {
                 let s = Self::parse_iso_to_epoch(&e.start_iso)?;
                 let end = Self::parse_iso_to_epoch(&e.end_iso)?;
@@ -332,5 +336,105 @@ mod tests {
         assert_eq!(slots[0].1 - slots[0].0, 1800);
         assert_eq!(slots[1].1 - slots[1].0, 1800);
         assert_eq!(slots[2].1 - slots[2].0, 3600);
+    }
+
+    #[test]
+    fn test_rfc3339_timezone_offset_resolves_to_same_instant() {
+        // 17:30 in India (+05:30) is 12:00 UTC (Z) on the same day.
+        let iso_kolkata = "2026-10-20T17:30:00+05:30";
+        let iso_utc = "2026-10-20T12:00:00Z";
+        let epoch_kolkata = CalendarService::parse_iso_to_epoch(iso_kolkata).expect("kolkata parse");
+        let epoch_utc = CalendarService::parse_iso_to_epoch(iso_utc).expect("utc parse");
+        assert_eq!(epoch_kolkata, epoch_utc, "both representations must resolve to the identical instant");
+        assert_eq!(epoch_kolkata, 1792497600);
+    }
+
+    #[test]
+    fn test_all_day_event_not_treated_as_timed_conflict() {
+        let events = vec![CalendarEvent {
+            id: "holiday".into(),
+            summary: "Diwali".into(),
+            description: None,
+            start_iso: "2026-10-20".into(),
+            end_iso: "2026-10-21".into(),
+            location: None,
+            status: "confirmed".into(),
+        }];
+        // Proposed meeting at 2:00 PM - 3:00 PM UTC on the holiday date.
+        let start = CalendarService::parse_iso_to_epoch("2026-10-20T14:00:00Z").unwrap();
+        let end = CalendarService::parse_iso_to_epoch("2026-10-20T15:00:00Z").unwrap();
+        let conflicts = CalendarService::check_schedule_conflict(&events, start, end);
+        assert!(conflicts.is_empty(), "all-day date-only event must not trigger timed conflict");
+    }
+
+    #[test]
+    fn test_check_schedule_conflict_cancelled_touching_and_one_second_overlap() {
+        let events = vec![
+            CalendarEvent {
+                id: "active".into(),
+                summary: "Design review".into(),
+                description: None,
+                start_iso: "2026-10-20T10:00:00Z".into(), // 1792490400
+                end_iso: "2026-10-20T11:00:00Z".into(),   // 1792494000
+                location: None,
+                status: "confirmed".into(),
+            },
+            CalendarEvent {
+                id: "cancelled".into(),
+                summary: "Cancelled sync".into(),
+                description: None,
+                start_iso: "2026-10-20T10:00:00Z".into(),
+                end_iso: "2026-10-20T11:00:00Z".into(),
+                location: None,
+                status: "cancelled".into(),
+            },
+        ];
+        let t10 = CalendarService::parse_iso_to_epoch("2026-10-20T10:00:00Z").unwrap();
+        let t11 = CalendarService::parse_iso_to_epoch("2026-10-20T11:00:00Z").unwrap();
+        let t09 = CalendarService::parse_iso_to_epoch("2026-10-20T09:00:00Z").unwrap();
+        let t12 = CalendarService::parse_iso_to_epoch("2026-10-20T12:00:00Z").unwrap();
+
+        // 1. Cancelled event is ignored even when exactly matching proposed range
+        let canc_conflicts = CalendarService::check_schedule_conflict(&events[1..2], t10, t11);
+        assert!(canc_conflicts.is_empty(), "cancelled events must be ignored");
+
+        // 2. Touching boundary: [09:00, 10:00] ends exactly when active starts
+        let touching_before = CalendarService::check_schedule_conflict(&events, t09, t10);
+        assert!(touching_before.is_empty(), "touching boundary (end == start) is not an overlap");
+
+        // 3. Touching boundary: [11:00, 12:00] starts exactly when active ends
+        let touching_after = CalendarService::check_schedule_conflict(&events, t11, t12);
+        assert!(touching_after.is_empty(), "touching boundary (start == end) is not an overlap");
+
+        // 4. One-second overlap on trailing edge: [10:59:59, 12:00:00]
+        let one_sec_overlap_trailing = CalendarService::check_schedule_conflict(&events, t11 - 1, t12);
+        assert_eq!(one_sec_overlap_trailing.len(), 1, "1 second overlap on trailing boundary must be caught");
+        assert_eq!(one_sec_overlap_trailing[0].id, "active");
+
+        // 5. One-second overlap on leading edge: [09:00:00, 10:00:01]
+        let one_sec_overlap_leading = CalendarService::check_schedule_conflict(&events, t09, t10 + 1);
+        assert_eq!(one_sec_overlap_leading.len(), 1, "1 second overlap on leading boundary must be caught");
+        assert_eq!(one_sec_overlap_leading[0].id, "active");
+    }
+
+    #[test]
+    fn test_create_event_payload_with_special_characters_and_json_escaping() {
+        let special_summary = "Review \"Q&A\" & Feedback \u{1f680} café";
+        let new_ev = NewEvent {
+            summary: special_summary.to_string(),
+            description: Some("Discussion with André & Team".to_string()),
+            start_iso: "2026-10-20T17:30:00+05:30".to_string(),
+            end_iso: "2026-10-20T18:30:00+05:30".to_string(),
+            location: Some("Café \"Le Procope\" & Terrace".to_string()),
+        };
+        let payload = CalendarService::create_event_payload(&new_ev);
+        assert_eq!(payload["summary"], special_summary);
+        assert_eq!(payload["location"], "Café \"Le Procope\" & Terrace");
+
+        // Assert JSON serialization escapes quotes and preserves Unicode characters properly
+        let json_str = serde_json::to_string(&payload).expect("serialize payload");
+        assert!(json_str.contains(r#"Review \"Q&A\" & Feedback"#));
+        let roundtrip: serde_json::Value = serde_json::from_str(&json_str).expect("deserialize payload");
+        assert_eq!(roundtrip["summary"], special_summary);
     }
 }

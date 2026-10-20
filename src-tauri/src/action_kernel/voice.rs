@@ -399,9 +399,13 @@ pub fn undo(ctx: &Ctx) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::action_kernel::files::{self, Request};
+    use crate::action_kernel::journal::TRASH_DIR;
     use crate::action_kernel::paths::test_dir;
     use crate::action_kernel::policy::{test_env, Policy, PolicyEnv};
     use crate::action_kernel::Origin;
+    use crate::action_kernel::Outcome;
+    use crate::action_kernel::Tool;
 
     fn fa(t: &str) -> Option<(String, String, Option<String>, Option<String>)> {
         match parse(t) {
@@ -574,5 +578,636 @@ mod tests {
         assert!(docs.join("taxes").join("invoice.pdf").exists());
         let r = handle(&c, "move", "invoice", Some(&format!("taxes folder in {docs_name}")), Some("nowhere"));
         assert!(matches!(r, Reply::Say(ref s) if s.contains("don't know")), "unknown dest or source folder is refused");
+    }
+
+    struct TempCleaner(PathBuf);
+    impl Drop for TempCleaner {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn test_world(tag: &str) -> (PathBuf, PolicyEnv, Policy, Vec<PathBuf>, TempCleaner) {
+        let root = test_dir(tag);
+        let cleaner = TempCleaner(root.clone());
+        let (env, mut policy, roots) = test_env(&root);
+        policy.extra_roots = vec![roots[0].to_string_lossy().to_string()];
+        (root, env, policy, roots, cleaner)
+    }
+
+    #[test]
+    fn spoken_delete_confirm_undo_round_trip_on_real_files() {
+        let _g = crate::action_kernel::pending::TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::action_kernel::pending::clear();
+        let (_root, env, policy, roots, _cleaner) = test_world("del_rt");
+        let data = env.data_dir.clone();
+        let folder = roots[0].clone();
+
+        let a_path = folder.join("a.pdf");
+        let b_path = folder.join("b.pdf");
+        let notes_path = folder.join("notes.txt");
+        let sub_dir = folder.join("sub");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        let c_path = sub_dir.join("c.pdf");
+
+        let a_bytes = b"bytes of a.pdf";
+        let b_bytes = b"bytes of b.pdf";
+        let notes_bytes = b"bytes of notes.txt";
+        let c_bytes = b"bytes of sub/c.pdf";
+
+        std::fs::write(&a_path, a_bytes).unwrap();
+        std::fs::write(&b_path, b_bytes).unwrap();
+        std::fs::write(&notes_path, notes_bytes).unwrap();
+        std::fs::write(&c_path, c_bytes).unwrap();
+
+        let folder_alias = folder.file_name().unwrap().to_string_lossy().to_lowercase();
+        let transcript = format!("delete the pdfs in {folder_alias}");
+
+        // orchestrator parses transcript
+        let parsed = parse(&transcript);
+        let Some(ParsedIntent::FileAction { verb, object, folder: parsed_folder, dest }) = parsed else {
+            panic!("voice::parse failed to parse {transcript}");
+        };
+        assert_eq!(verb, "delete");
+        assert_eq!(object, "pdfs");
+
+        let ctx = Ctx {
+            dir: &data,
+            policy: &policy,
+            env: &env,
+            roots: &roots,
+            now: 1000,
+            phrase: &transcript,
+            origin: Origin::UserVoice,
+        };
+
+        // orchestrator handles the file action
+        let reply = handle(&ctx, &verb, &object, parsed_folder.as_deref(), dest.as_deref());
+        let Reply::Confirm { spoken: confirm_prompt, plan, .. } = reply else {
+            panic!("handle must return Reply::Confirm for delete");
+        };
+        assert!(confirm_prompt.contains("2 items"), "read-back prompt must mention count: {confirm_prompt}");
+
+        // before confirm nothing moved
+        assert!(a_path.exists());
+        assert!(b_path.exists());
+        assert!(notes_path.exists());
+        assert!(c_path.exists());
+
+        // orchestrator holds the plan and runs confirm on user yes
+        crate::action_kernel::pending::hold(*plan);
+        let confirm_reply = confirm(&ctx);
+        assert!(confirm_reply.contains("2 items"), "confirm reply must mention count: {confirm_reply}");
+
+        // after confirm pdf files are gone from their places
+        assert!(!a_path.exists(), "a.pdf must be moved away");
+        assert!(!b_path.exists(), "b.pdf must be moved away");
+        // notes.txt untouched
+        assert!(notes_path.exists());
+        assert_eq!(std::fs::read(&notes_path).unwrap(), notes_bytes);
+        // sub/c.pdf untouched
+        assert!(c_path.exists());
+        assert_eq!(std::fs::read(&c_path).unwrap(), c_bytes);
+
+        // pdf files exist under .nexus-trash
+        let j = crate::action_kernel::journal::load(&data);
+        assert_eq!(j.quarantine.len(), 2);
+        for q in &j.quarantine {
+            assert!(q.stored.contains(TRASH_DIR));
+            assert!(Path::new(&q.stored).exists(), "quarantined file must exist at {}", q.stored);
+        }
+
+        // orchestrator runs undo on user request
+        let undo_reply = undo(&ctx);
+        assert!(undo_reply.contains("2 items"), "undo reply must mention count: {undo_reply}");
+
+        // after undo every file is back with identical bytes
+        assert!(a_path.exists());
+        assert_eq!(std::fs::read(&a_path).unwrap(), a_bytes);
+        assert!(b_path.exists());
+        assert_eq!(std::fs::read(&b_path).unwrap(), b_bytes);
+        assert!(notes_path.exists());
+        assert_eq!(std::fs::read(&notes_path).unwrap(), notes_bytes);
+        assert!(c_path.exists());
+        assert_eq!(std::fs::read(&c_path).unwrap(), c_bytes);
+
+        // trash is empty of them
+        for q in &j.quarantine {
+            assert!(!Path::new(&q.stored).exists(), "trash must be empty of {}", q.stored);
+        }
+        let j_after = crate::action_kernel::journal::load(&data);
+        assert!(j_after.waiting().is_empty());
+    }
+
+    #[test]
+    fn decline_and_timeout_leave_everything_untouched() {
+        let _g = crate::action_kernel::pending::TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::action_kernel::pending::clear();
+        let (_root, env, policy, roots, _cleaner) = test_world("decline_timeout");
+        let data = env.data_dir.clone();
+        let folder = roots[0].clone();
+
+        let file_path = folder.join("precious.pdf");
+        let content = b"do not delete me";
+        std::fs::write(&file_path, content).unwrap();
+
+        let ctx = Ctx {
+            dir: &data,
+            policy: &policy,
+            env: &env,
+            roots: &roots,
+            now: 1000,
+            phrase: "delete precious.pdf in documents",
+            origin: Origin::UserVoice,
+        };
+
+        // hold a delete, call decline
+        let reply = handle(&ctx, "delete", "precious.pdf", Some("documents"), None);
+        let Reply::Confirm { plan, .. } = reply else { panic!("handle must return Reply::Confirm") };
+        crate::action_kernel::pending::hold(*plan);
+
+        let decline_msg = decline(&ctx);
+        assert!(decline_msg.contains("left everything as it was"), "decline message: {decline_msg}");
+        assert!(file_path.exists(), "file must stay after decline");
+        assert_eq!(std::fs::read(&file_path).unwrap(), content);
+        assert!(crate::action_kernel::pending::take().is_none(), "pending must be cleared after decline");
+
+        // hold a delete, clear pending (simulating timeout), then confirm
+        let reply2 = handle(&ctx, "delete", "precious.pdf", Some("documents"), None);
+        let Reply::Confirm { plan: plan2, .. } = reply2 else { panic!("handle must return Reply::Confirm") };
+        crate::action_kernel::pending::hold(*plan2);
+
+        crate::action_kernel::pending::clear();
+
+        let confirm_msg = confirm(&ctx);
+        assert!(confirm_msg.contains("anything waiting"), "confirm on timed-out plan says nothing waiting: {confirm_msg}");
+        assert!(file_path.exists(), "file must stay untouched after timeout");
+        assert_eq!(std::fs::read(&file_path).unwrap(), content);
+    }
+
+    #[test]
+    fn a_typed_or_non_voice_origin_cannot_confirm_a_delete() {
+        let _g = crate::action_kernel::pending::TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::action_kernel::pending::clear();
+        let (_root, env, policy, roots, _cleaner) = test_world("non_voice");
+        let data = env.data_dir.clone();
+        let folder = roots[0].clone();
+
+        let file_path = folder.join("guarded.pdf");
+        let content = b"guarded file content";
+        std::fs::write(&file_path, content).unwrap();
+
+        let user_ctx = Ctx {
+            dir: &data,
+            policy: &policy,
+            env: &env,
+            roots: &roots,
+            now: 1000,
+            phrase: "delete guarded.pdf in documents",
+            origin: Origin::UserVoice,
+        };
+
+        let reply = handle(&user_ctx, "delete", "guarded.pdf", Some("documents"), None);
+        let Reply::Confirm { plan, .. } = reply else { panic!("user voice delete must ask for confirmation") };
+        crate::action_kernel::pending::hold(*plan);
+
+        let non_voice_ctx = Ctx {
+            origin: Origin::Derived,
+            phrase: "yes",
+            ..user_ctx
+        };
+
+        let confirm_msg = confirm(&non_voice_ctx);
+        assert!(
+            confirm_msg.contains("didn't come from your voice"),
+            "confirm must refuse non-voice origin: {confirm_msg}"
+        );
+        assert!(file_path.exists(), "file must remain untouched when non-voice confirms");
+        assert_eq!(std::fs::read(&file_path).unwrap(), content);
+    }
+
+    #[test]
+    fn move_copy_rename_never_overwrite() {
+        let _g = crate::action_kernel::pending::TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::action_kernel::pending::clear();
+        let (_root, env, policy, roots, _cleaner) = test_world("no_overwrite");
+        let data = env.data_dir.clone();
+        let docs = roots[0].clone();
+        let archive = docs.join("archive");
+        std::fs::create_dir_all(&archive).unwrap();
+
+        let ctx = Ctx {
+            dir: &data,
+            policy: &policy,
+            env: &env,
+            roots: &roots,
+            now: 1000,
+            phrase: "test",
+            origin: Origin::UserVoice,
+        };
+
+        let docs_alias = docs.file_name().unwrap().to_string_lossy().to_string();
+
+        // 1. Copy: picks safe name "name (2).ext" without overwriting destination
+        let copy_src = docs.join("doc.txt");
+        let copy_dest = archive.join("doc.txt");
+        std::fs::write(&copy_src, b"source doc bytes").unwrap();
+        std::fs::write(&copy_dest, b"existing archive bytes").unwrap();
+
+        let copy_reply = handle(&ctx, "copy", "doc.txt", Some(&docs_alias), Some(&format!("archive folder in {docs_alias}")));
+        let Reply::Say(copy_spoken) = copy_reply else { panic!("copy must return Reply::Say") };
+        assert!(copy_spoken.starts_with("Copied"), "copy result: {copy_spoken}");
+        assert_eq!(std::fs::read(&copy_dest).unwrap(), b"existing archive bytes");
+        let safe_copy = archive.join("doc (2).txt");
+        assert!(safe_copy.exists(), "safe copy name must exist");
+        assert_eq!(std::fs::read(&safe_copy).unwrap(), b"source doc bytes");
+        assert!(copy_src.exists(), "source must still exist after copy");
+
+        // 2. Move: picks safe name "name (3).ext" without overwriting destination
+        let move_reply = handle(&ctx, "move", "doc.txt", Some(&docs_alias), Some(&format!("archive folder in {docs_alias}")));
+        let Reply::Say(move_spoken) = move_reply else { panic!("move must return Reply::Say") };
+        assert!(move_spoken.starts_with("Moved"), "move result: {move_spoken}");
+        assert_eq!(std::fs::read(&copy_dest).unwrap(), b"existing archive bytes");
+        let safe_move = archive.join("doc (3).txt");
+        assert!(safe_move.exists(), "safe move name must exist");
+        assert_eq!(std::fs::read(&safe_move).unwrap(), b"source doc bytes");
+        assert!(!copy_src.exists(), "source must be moved");
+
+        // 3. Rename: refuses outright when destination name already exists
+        let rename_src = docs.join("alpha.txt");
+        let rename_target = docs.join("beta.txt");
+        std::fs::write(&rename_src, b"alpha bytes").unwrap();
+        std::fs::write(&rename_target, b"beta bytes").unwrap();
+
+        let rename_reply = handle(&ctx, "rename", "alpha.txt", Some(&docs_alias), Some("beta.txt"));
+        let Reply::Say(rename_spoken) = rename_reply else { panic!("rename must return Reply::Say") };
+        assert!(
+            rename_spoken.contains("already there") && rename_spoken.contains("won't overwrite"),
+            "rename must refuse to overwrite: {rename_spoken}"
+        );
+        assert_eq!(std::fs::read(&rename_target).unwrap(), b"beta bytes");
+        assert_eq!(std::fs::read(&rename_src).unwrap(), b"alpha bytes");
+    }
+
+    #[test]
+    fn delete_everything_and_wipe_my_drive_are_refused_locally() {
+        let _g = crate::action_kernel::pending::TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let (_root, env, policy, roots, _cleaner) = test_world("refuse_wipe");
+        let data = env.data_dir.clone();
+
+        let ctx = Ctx {
+            dir: &data,
+            policy: &policy,
+            env: &env,
+            roots: &roots,
+            now: 1000,
+            phrase: "delete everything",
+            origin: Origin::UserVoice,
+        };
+
+        for phrase in [
+            "delete everything",
+            "wipe my drive",
+            "wipe my c drive",
+            "erase everything on my computer",
+            "destroy my hard drive",
+        ] {
+            crate::action_kernel::pending::clear();
+            let parsed = parse(phrase);
+            let Some(ParsedIntent::FileAction { verb, object, folder, dest }) = parsed else {
+                panic!("phrase {phrase:?} must be claimed by voice::parse");
+            };
+            assert_eq!(verb, "delete", "{phrase}");
+            assert_eq!(object, "everything", "{phrase}");
+
+            let reply = handle(&ctx, &verb, &object, folder.as_deref(), dest.as_deref());
+            let Reply::Say(spoken) = reply else {
+                panic!("{phrase}: broad wipe commands must return Reply::Say refusal, not confirmation");
+            };
+            assert!(
+                spoken.contains("won't delete everything or wipe a drive"),
+                "{phrase}: refusal message mismatch: {spoken}"
+            );
+            assert!(
+                crate::action_kernel::pending::take().is_none(),
+                "{phrase}: nothing must be held in pending"
+            );
+        }
+    }
+
+    #[test]
+    fn forbidden_places_are_never_touched() {
+        let _g = crate::action_kernel::pending::TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let (root, env, policy, roots, _cleaner) = test_world("forbidden");
+        // The temp folders live under the real users folder, which the policy treats as "another user";
+        // take that rule out of the picture so each case below is decided by the rule it is meant to test.
+        let mut env = env;
+        env.users_dir = None;
+        let data = env.data_dir.clone();
+        let docs = roots[0].clone();
+
+        let ctx = Ctx {
+            dir: &data,
+            policy: &policy,
+            env: &env,
+            roots: &roots,
+            now: 1000,
+            phrase: "test forbidden",
+            origin: Origin::UserVoice,
+        };
+
+        // 1. Outside the allowed roots
+        let outside_dir = root.join("unallowed_folder");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let outside_file = outside_dir.join("outside.txt");
+        std::fs::write(&outside_file, b"outside content").unwrap();
+
+        let req_outside = Request { tool: Tool::Delete, sources: vec![outside_file.clone()], dest_dir: None, new_name: None };
+        let p_outside = files::plan(&ctx, &req_outside).unwrap();
+        assert!(matches!(p_outside.verdict.decision, Decision::Deny(ref w) if w.contains("outside the folders")), "{:?}", p_outside.verdict.decision);
+        let r_outside = files::execute(&ctx, &p_outside, true);
+        assert_eq!(r_outside.outcome, Outcome::Blocked);
+        assert_eq!(std::fs::read(&outside_file).unwrap(), b"outside content");
+
+        // 2. Windows system folder
+        let sys_file = env.system_dirs[0].join("kernel_probe.dll");
+        std::fs::create_dir_all(&env.system_dirs[0]).unwrap();
+        std::fs::write(&sys_file, b"system file bytes").unwrap();
+
+        let req_sys = Request { tool: Tool::Delete, sources: vec![sys_file.clone()], dest_dir: None, new_name: None };
+        let p_sys = files::plan(&ctx, &req_sys).unwrap();
+        assert!(matches!(p_sys.verdict.decision, Decision::Deny(ref w) if w.contains("part of Windows")));
+        let r_sys = files::execute(&ctx, &p_sys, true);
+        assert_eq!(r_sys.outcome, Outcome::Blocked);
+        assert_eq!(std::fs::read(&sys_file).unwrap(), b"system file bytes");
+
+        // 3. The app's own data folder
+        let data_file = env.data_dir.join("app_secret.json");
+        std::fs::write(&data_file, b"data file bytes").unwrap();
+
+        let req_data = Request { tool: Tool::Delete, sources: vec![data_file.clone()], dest_dir: None, new_name: None };
+        let p_data = files::plan(&ctx, &req_data).unwrap();
+        assert!(matches!(p_data.verdict.decision, Decision::Deny(ref w) if w.contains("my own data")));
+        let r_data = files::execute(&ctx, &p_data, true);
+        assert_eq!(r_data.outcome, Outcome::Blocked);
+        assert_eq!(std::fs::read(&data_file).unwrap(), b"data file bytes");
+
+        // 4. Protected .git folder inside an allowed root
+        let git_dir = docs.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        let git_file = git_dir.join("config");
+        std::fs::write(&git_file, b"git config bytes").unwrap();
+
+        let req_git = Request { tool: Tool::Delete, sources: vec![git_file.clone()], dest_dir: None, new_name: None };
+        let p_git = files::plan(&ctx, &req_git).unwrap();
+        assert!(matches!(p_git.verdict.decision, Decision::Deny(ref w) if w.contains("protected location")));
+        let r_git = files::execute(&ctx, &p_git, true);
+        assert_eq!(r_git.outcome, Outcome::Blocked);
+        assert_eq!(std::fs::read(&git_file).unwrap(), b"git config bytes");
+    }
+
+    #[test]
+    fn unicode_spaces_and_long_names_survive_the_trash_round_trip() {
+        let _g = crate::action_kernel::pending::TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::action_kernel::pending::clear();
+        let (_root, env, policy, roots, _cleaner) = test_world("unicode_long");
+        let data = env.data_dir.clone();
+        let docs = roots[0].clone();
+
+        let unicode_name = "my report \u{e9}.pdf";
+        let long_name = format!("{}.pdf", "a".repeat(146));
+        assert_eq!(long_name.len(), 150);
+
+        let f1 = docs.join(unicode_name);
+        let f2 = docs.join(&long_name);
+        let bytes1 = b"unicode report \xc3\xa9 content";
+        let bytes2 = b"150-char name content bytes";
+
+        std::fs::write(&f1, bytes1).unwrap();
+        std::fs::write(&f2, bytes2).unwrap();
+
+        let ctx = Ctx {
+            dir: &data,
+            policy: &policy,
+            env: &env,
+            roots: &roots,
+            now: 1000,
+            phrase: "delete the pdfs in documents",
+            origin: Origin::UserVoice,
+        };
+
+        let docs_alias = docs.file_name().unwrap().to_string_lossy().to_string();
+        let reply = handle(&ctx, "delete", "pdfs", Some(&docs_alias), None);
+        let Reply::Confirm { plan, spoken, .. } = reply else {
+            panic!("handle must ask for confirmation on delete")
+        };
+        assert!(spoken.contains("2 items"), "read-back mentions count: {spoken}");
+
+        crate::action_kernel::pending::hold(*plan);
+        let confirm_spoken = confirm(&ctx);
+        assert!(confirm_spoken.contains("2 items"), "confirm mentions count: {confirm_spoken}");
+
+        assert!(!f1.exists());
+        assert!(!f2.exists());
+
+        let j = crate::action_kernel::journal::load(&data);
+        assert_eq!(j.quarantine.len(), 2);
+        for q in &j.quarantine {
+            assert!(Path::new(&q.stored).exists());
+        }
+
+        let undo_spoken = undo(&ctx);
+        assert!(undo_spoken.contains("2 items"), "undo mentions count: {undo_spoken}");
+
+        assert!(f1.exists(), "unicode and spaces file must be restored");
+        assert_eq!(std::fs::read(&f1).unwrap(), bytes1);
+
+        assert!(f2.exists(), "150-character name file must be restored");
+        assert_eq!(std::fs::read(&f2).unwrap(), bytes2);
+    }
+
+    #[test]
+    fn undo_with_nothing_to_undo_and_double_undo_are_harmless() {
+        let _g = crate::action_kernel::pending::TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::action_kernel::pending::clear();
+        let (_root, env, policy, roots, _cleaner) = test_world("double_undo");
+        let data = env.data_dir.clone();
+        let docs = roots[0].clone();
+
+        let ctx = Ctx {
+            dir: &data,
+            policy: &policy,
+            env: &env,
+            roots: &roots,
+            now: 1000,
+            phrase: "test undo",
+            origin: Origin::UserVoice,
+        };
+
+        // 1. Undo with nothing to undo
+        let res0 = undo(&ctx);
+        assert!(res0.contains("nothing to undo"), "undo when empty: {res0}");
+
+        // 2. Perform one delete action
+        let f = docs.join("temp.pdf");
+        std::fs::write(&f, b"temp data").unwrap();
+
+        let docs_alias = docs.file_name().unwrap().to_string_lossy().to_string();
+        let reply = handle(&ctx, "delete", "temp.pdf", Some(&docs_alias), None);
+        let Reply::Confirm { plan, .. } = reply else { panic!("delete asks") };
+        crate::action_kernel::pending::hold(*plan);
+        let _ = confirm(&ctx);
+        assert!(!f.exists());
+
+        // 3. First undo reverses the action
+        let res1 = undo(&ctx);
+        assert!(res1.starts_with("Done, sir. I undid"), "first undo: {res1}");
+        assert!(f.exists());
+
+        // 4. Second undo in a row says nothing to undo
+        let res2 = undo(&ctx);
+        assert!(res2.contains("nothing to undo"), "second undo: {res2}");
+        assert!(f.exists());
+    }
+
+    #[test]
+    fn a_name_clash_in_the_trash_does_not_lose_a_file() {
+        let _g = crate::action_kernel::pending::TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::action_kernel::pending::clear();
+        let (_root, env, policy, roots, _cleaner) = test_world("trash_clash");
+        let data = env.data_dir.clone();
+        let docs = roots[0].clone();
+        let docs_alias = docs.file_name().unwrap().to_string_lossy().to_string();
+
+        let f = docs.join("a.pdf");
+        let v1_bytes = b"version 1 contents";
+        let v2_bytes = b"version 2 contents";
+
+        // 1. Delete a.pdf (version 1)
+        std::fs::write(&f, v1_bytes).unwrap();
+        let ctx1 = Ctx {
+            dir: &data,
+            policy: &policy,
+            env: &env,
+            roots: &roots,
+            now: 1000,
+            phrase: "delete a.pdf in documents",
+            origin: Origin::UserVoice,
+        };
+        let Reply::Confirm { plan: p1, .. } = handle(&ctx1, "delete", "a.pdf", Some(&docs_alias), None) else { panic!() };
+        crate::action_kernel::pending::hold(*p1);
+        let c1 = confirm(&ctx1);
+        assert!(c1.starts_with("Done, sir"));
+        assert!(!f.exists());
+
+        // 2. Create a NEW a.pdf at the same place
+        std::fs::write(&f, v2_bytes).unwrap();
+
+        // 3. Delete a.pdf again (version 2)
+        let ctx2 = Ctx {
+            dir: &data,
+            policy: &policy,
+            env: &env,
+            roots: &roots,
+            now: 2000,
+            phrase: "delete a.pdf in documents",
+            origin: Origin::UserVoice,
+        };
+        let Reply::Confirm { plan: p2, .. } = handle(&ctx2, "delete", "a.pdf", Some(&docs_alias), None) else { panic!() };
+        crate::action_kernel::pending::hold(*p2);
+        let c2 = confirm(&ctx2);
+        assert!(c2.starts_with("Done, sir"));
+        assert!(!f.exists());
+
+        // Check journal: both versions are recorded in quarantine
+        let j = crate::action_kernel::journal::load(&data);
+        assert_eq!(j.quarantine.len(), 2);
+        assert_eq!(j.batches.len(), 2);
+        assert!(j.quarantine.iter().all(|q| q.original.ends_with("a.pdf")));
+
+        // 4. Undo twice: both versions are recoverable
+        let u1 = undo(&ctx2);
+        assert!(u1.starts_with("Done, sir"));
+        assert!(f.exists());
+        assert_eq!(std::fs::read(&f).unwrap(), v2_bytes, "version 2 restored first to a.pdf");
+
+        let u2 = undo(&ctx2);
+        assert!(u2.starts_with("Done, sir"));
+
+        // Version 2 remains at a.pdf, and version 1 was restored without overwrite as a (2).pdf
+        assert_eq!(std::fs::read(&f).unwrap(), v2_bytes);
+        let f_clash = docs.join("a (2).pdf");
+        assert!(f_clash.exists(), "clashing restored file must be named a (2).pdf");
+        assert_eq!(std::fs::read(&f_clash).unwrap(), v1_bytes);
+
+        // Journal shows both restored
+        let j_final = crate::action_kernel::journal::load(&data);
+        assert!(j_final.quarantine.iter().all(|q| q.restored));
+        assert!(j_final.batches.iter().all(|b| b.undone));
+    }
+
+    #[test]
+    fn list_and_find_return_results_without_changing_anything() {
+        let _g = crate::action_kernel::pending::TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let (_root, env, policy, roots, _cleaner) = test_world("list_find");
+        let data = env.data_dir.clone();
+        let docs = roots[0].clone();
+
+        let f1 = docs.join("annual_report.pdf");
+        let f2 = docs.join("budget_summary.xlsx");
+        let bytes1 = b"annual report data 2026";
+        let bytes2 = b"budget spreadsheet numbers";
+
+        std::fs::write(&f1, bytes1).unwrap();
+        std::fs::write(&f2, bytes2).unwrap();
+
+        let ctx = Ctx {
+            dir: &data,
+            policy: &policy,
+            env: &env,
+            roots: &roots,
+            now: 1000,
+            phrase: "test",
+            origin: Origin::UserVoice,
+        };
+
+        // 1. List
+        let list_transcript = "what's in documents";
+        let Some(ParsedIntent::FileAction { verb: list_verb, object: list_obj, folder: list_f, dest: list_dest }) = parse(list_transcript) else {
+            panic!("parse failed for {list_transcript}");
+        };
+        assert_eq!(list_verb, "list");
+
+        let list_reply = handle(&ctx, &list_verb, &list_obj, list_f.as_deref(), list_dest.as_deref());
+        let Reply::Card { spoken: list_spoken, markdown: list_md, .. } = list_reply else {
+            panic!("list must return Reply::Card");
+        };
+        assert!(list_spoken.contains("2 items"), "list spoken counts files: {list_spoken}");
+        assert!(list_md.contains("annual_report.pdf"), "list markdown mentions annual_report: {list_md}");
+        assert!(list_md.contains("budget_summary.xlsx"), "list markdown mentions budget_summary: {list_md}");
+
+        // 2. Find
+        let find_transcript = "find report in documents";
+        let Some(ParsedIntent::FileAction { verb: find_verb, object: find_obj, folder: find_f, dest: find_dest }) = parse(find_transcript) else {
+            panic!("parse failed for {find_transcript}");
+        };
+        assert_eq!(find_verb, "find");
+
+        let find_reply = handle(&ctx, &find_verb, &find_obj, find_f.as_deref(), find_dest.as_deref());
+        let Reply::Card { spoken: find_spoken, markdown: find_md, .. } = find_reply else {
+            panic!("find must return Reply::Card");
+        };
+        assert!(find_spoken.contains("1 item"), "find spoken counts matching item: {find_spoken}");
+        assert!(find_md.contains("annual_report.pdf"), "find markdown mentions annual_report: {find_md}");
+        assert!(!find_md.contains("budget_summary.xlsx"), "find markdown does not mention non-matching: {find_md}");
+
+        // 3. Folder is byte-identical afterwards
+        assert!(f1.exists());
+        assert_eq!(std::fs::read(&f1).unwrap(), bytes1);
+        assert!(f2.exists());
+        assert_eq!(std::fs::read(&f2).unwrap(), bytes2);
+
+        let count = std::fs::read_dir(&docs).unwrap().filter_map(|e| e.ok()).count();
+        assert_eq!(count, 2, "no new files created or deleted");
     }
 }

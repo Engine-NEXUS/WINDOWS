@@ -112,18 +112,19 @@ async fn transcribe_voice_note<R: Runtime>(
     app: &AppHandle<R>,
     bytes: Vec<u8>,
 ) -> Result<String, String> {
-    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let settings_path = data_dir.join("settings.json");
-    let content = std::fs::read_to_string(&settings_path).unwrap_or_default();
-    let _json: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
-    let key = crate::auth_vault::get_api_key("groq").unwrap_or_else(|| {
+    let key = if let Some(k) = crate::auth_vault::get_api_key("groq").filter(|k| !k.is_empty()) {
+        k
+    } else {
+        let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let settings_path = data_dir.join("settings.json");
+        let content = std::fs::read_to_string(&settings_path).unwrap_or_default();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
         json.get("groqApiKey")
             .or_else(|| json.get("groq_api_key"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string()
-    });
+    };
     if key.is_empty() {
         return Err("Groq key missing — voice notes need it".to_string());
     }

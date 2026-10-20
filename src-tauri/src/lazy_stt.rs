@@ -1,4 +1,4 @@
-﻿//! Lazy STT server manager Î“Ã‡Ã¶ starts the local faster-whisper STT server
+//! Lazy STT server manager Î“Ã‡Ã¶ starts the local faster-whisper STT server
 //! on-demand when the wake word fires, and kills it after idle to save
 //! ~340 MB of RAM at idle.
 //!
@@ -359,20 +359,21 @@ pub fn spawn_prewarm(app_data_dir: std::path::PathBuf) {
         .spawn(move || {
             // Let boot settle (wake engine + first paint win the race).
             std::thread::sleep(Duration::from_secs(20));
+            let groq_vault = crate::auth_vault::get_api_key("groq").unwrap_or_default();
             let settings_path = app_data_dir.join("settings.json");
             let (groq_key, local_only) = match std::fs::read_to_string(&settings_path) {
                 Ok(content) => {
                     let json: serde_json::Value =
                         serde_json::from_str(&content).unwrap_or_default();
-                    let key = crate::auth_vault::get_api_key("groq").unwrap_or_else(|| {
-                        let json: serde_json::Value =
-                            serde_json::from_str(&content).unwrap_or_default();
+                    let key = if !groq_vault.is_empty() {
+                        groq_vault
+                    } else {
                         json.get("groqApiKey")
                             .or_else(|| json.get("groq_api_key"))
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string()
-                    });
+                    };
                     let local = json
                         .get("localSttOnly")
                         .or_else(|| json.get("local_stt_only"))
@@ -380,7 +381,7 @@ pub fn spawn_prewarm(app_data_dir: std::path::PathBuf) {
                         .unwrap_or(false);
                     (key, local)
                 }
-                Err(_) => (String::new(), false),
+                Err(_) => (groq_vault, false),
             };
             if groq_key.is_empty() || local_only {
                 tracing::info!(

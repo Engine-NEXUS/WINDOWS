@@ -6286,6 +6286,9 @@ pub fn normalize_phonetic_mishearings(text: &str) -> String {
 
         "open note pad" | "open not pad" => return "open notepad".to_string(),
 
+        // Real missed-command log 2026-10-20 ("openbread" twice) and the earlier "open brief" live miss.
+        "openbread" | "open bread" | "open brief" | "open braved" | "openbrave" => return "open brave".to_string(),
+
         "stand down" | "stop it now" => return "stop".to_string(),
 
         "cancel action" | "cancel task" | "cancel that" => return "cancel".to_string(),
@@ -6293,7 +6296,8 @@ pub fn normalize_phonetic_mishearings(text: &str) -> String {
         "open command center" | "nexus settings" | "nexus preferences"
         | "nexus config" => return "open settings".to_string(),
 
-        "comment hub" | "common hub" | "comma hub" | "comment center" | "common center" => return "command hub".to_string(),
+        "comment hub" | "common hub" | "comma hub" | "comment center" | "common center"
+        | "command hop" | "command roker" | "command rocker" | "command hug" => return "command hub".to_string(),
         "open comment hub" | "open common hub" | "open comment center" | "open common center" => return "open command hub".to_string(),
 
         "open mute up" | "open new tablet" | "open new table" | "open new tap"

@@ -18,8 +18,8 @@ Stars = % / 20 in half steps. Verdict: **Production** >= 80, **Beta** 65-79, **A
 
 ## Headline
 
-- 64 features scored. Average **64%**.
-- Production: **6**, Beta: **26**, Alpha: **26**, Prototype: **6**.
+- 64 features scored. Average **68%**.
+- Production: **7**, Beta: **34**, Alpha: **20**, Prototype: **3**.
 - Repository size: 191 Rust modules, ~134,700 lines, 2,029 Rust test annotations (23 ignored dev benches), 362 frontend test cases in 45 files, 11 Worker test files, 9 Python test files, 176 change records, 180 feature docs, 382 commits.
 - The dominant weakness across the whole project is not missing code, it is *unverified in the running app* (see the L column).
 
@@ -27,13 +27,13 @@ Stars = % / 20 in half steps. Verdict: **Production** >= 80, **Beta** 65-79, **A
 
 | Area | Features | Avg % | Stars | Avg live-verified (L) |
 |---|---|---|---|---|
-| Voice front end | 15 | 65% | ★★★½☆ | 50% |
-| Understanding | 6 | 69% | ★★★½☆ | 52% |
-| Desktop control | 11 | 62% | ★★★☆☆ | 38% |
-| Agent control | 8 | 65% | ★★★½☆ | 30% |
-| Memory and proactive | 10 | 59% | ★★★☆☆ | 19% |
-| Integrations | 8 | 66% | ★★★½☆ | 48% |
-| Platform and quality | 6 | 69% | ★★★½☆ | 56% |
+| Voice front end | 15 | 66% | ★★★½☆ | 50% |
+| Understanding | 6 | 71% | ★★★½☆ | 54% |
+| Desktop control | 11 | 69% | ★★★½☆ | 47% |
+| Agent control | 8 | 70% | ★★★½☆ | 42% |
+| Memory and proactive | 10 | 62% | ★★★☆☆ | 20% |
+| Integrations | 8 | 71% | ★★★½☆ | 53% |
+| Platform and quality | 6 | 69% | ★★★½☆ | 54% |
 
 ## Full table
 
@@ -42,10 +42,10 @@ Stars = % / 20 in half steps. Verdict: **Production** >= 80, **Beta** 65-79, **A
 | Feature | Tests | B | T | L | S | I | Score | Stars | Verdict | Evidence / gap |
 |---|---|---|---|---|---|---|---|---|---|---|
 | TTS online (Edge, persistent connection) | 44 tests | 100 | 70 | 90 | 80 | 85 | **86%** | ★★★★½ | Production | 409 ms median per short line, 290 ms after wake pre-warm; ~2.6 s end of speech to first audio for a cloud reply. |
+| Global hotkey Ctrl+Space (call / cancel) | 5 | 100 | 75 | 85 | 85 | 80 | **85%** | ★★★★½ | Production | Cancel/call decision extracted and checked for all 16 states; stale doc comment rewritten. |
 | Cloud STT (Groq Whisper turbo) + hallucination filter | 29 tests | 100 | 75 | 85 | 80 | 80 | **84%** | ★★★★☆ | Production | Sits on the industry curve (~4-5% WER clean English). ~240 ms end to end. |
 | Voice personas + offline twin swap | 31 tests | 95 | 75 | 55 | 85 | 70 | **74%** | ★★★½☆ | Beta | Pinned hashes, latest-wins queue. Audition by ear not done. |
 | Wake word "NEXUS" (openWakeWord, own model) | 64 tests, replay harness | 100 | 90 | 55 | 75 | 40 | **72%** | ★★★½☆ | Beta | Works live, but the honest held-out measure is recall 63.2% (quiet 3/10, far 15/25) and ~12 false fires/h on real background; the 98.6% figure was self-scored on training data. Target is >=95% at <=0.1/h. |
-| Global hotkey Ctrl+Space (call / cancel) | 0 tests | 100 | 10 | 85 | 80 | 80 | **72%** | ★★★½☆ | Beta | Used daily and works; no automated test. |
 | Captions (word-by-word, black capsule) | vitest | 100 | 60 | 55 | 70 | 70 | **70%** | ★★★½☆ | Beta | Estimated (not real) word timing on the offline voice. |
 | Orb UI and turn lifecycle | vitest | 100 | 55 | 60 | 65 | 65 | **68%** | ★★★½☆ | Beta | 'Stuck orb' class of bug recurred 6+ times; each fix partly unverified live. |
 | Local STT fallback (Moonshine) | python sidecar | 90 | 40 | 60 | 75 | 75 | **66%** | ★★★½☆ | Beta | 6.65-7.84% WER; lazy sidecar; only used offline. |
@@ -63,54 +63,54 @@ Stars = % / 20 in half steps. Verdict: **Production** >= 80, **Beta** 65-79, **A
 |---|---|---|---|---|---|---|---|---|---|---|
 | Deterministic intent parser (regex tier) | 236 tests | 100 | 95 | 75 | 75 | 55 | **81%** | ★★★★☆ | Production | Strongest tested module. Early P0 measure: bare command 43% correct / 12% wrong action; since improved but not re-measured. |
 | 9Router (Cerebras > Groq > Gemini > Worker) | 18 tests | 100 | 55 | 70 | 75 | 85 | **76%** | ★★★★☆ | Beta | ~242 ms vs 600-2100 ms through the Worker. |
+| Mishearing normaliser + learned corrections | 45 | 100 | 75 | 55 | 75 | 62 | **72%** | ★★★½☆ | Beta | Real log replay: 31 of 194 unique missed commands are now understood; added openbread/open brief/command hop. 163 still missed (see ledger). |
 | Compound commands ("X then Y") | 31 tests | 100 | 75 | 40 | 85 | 55 | **68%** | ★★★½☆ | Beta | GitHub step inside a compound drops the remaining steps (known). |
 | Main centre / 17 sub-centres validation | 16 tests | 100 | 65 | 45 | 80 | 60 | **68%** | ★★★½☆ | Beta | Typed ActionSpec, shared policy; live walkthrough pending. |
-| Mishearing normaliser + learned corrections | 34 tests | 100 | 60 | 45 | 70 | 55 | **64%** | ★★★☆☆ | Alpha | Real recall of learned corrections unmeasured. |
 | NLU fallback (BERT-Mini ONNX) | 13 tests | 90 | 55 | 40 | 65 | 60 | **60%** | ★★★☆☆ | Alpha | Candidate model 0.9004 test intent; shipped model may lag; OTA update path built, never run end to end. |
 
 ### Desktop control
 
 | Feature | Tests | B | T | L | S | I | Score | Stars | Verdict | Evidence / gap |
 |---|---|---|---|---|---|---|---|---|---|---|
+| Action Kernel (voice file control, quarantine delete, undo) | 53 | 100 | 90 | 45 | 95 | 75 | **77%** | ★★★★☆ | Beta | Spoken grammar -> confirm -> trash -> undo on real folders (unicode, long names, clashes, forbidden places, wrong origin). Still needs: one spoken delete and undo by voice (W3). |
 | Open / close / focus apps | 15+ tests | 100 | 55 | 80 | 75 | 70 | **77%** | ★★★★☆ | Beta | Used constantly; duplicate-window bug fixed. |
+| Window tiling + display off | 21 pure + 2 live | 100 | 85 | 55 | 88 | 60 | **76%** | ★★★★☆ | Beta | Real proof: 3 own windows tiled into exact 640px columns (0-640-1280-1920) and display_off returned Ok. Still needs: the finish sequence on real agent windows, the screen actually going dark seen by the owner, an elevated window skip (W1). |
 | Ghost mode (voice drives the PC) | 16+ tests | 100 | 65 | 60 | 85 | 55 | **72%** | ★★★½☆ | Beta | Keyboard-first is where the industry is reliable (>=89%); cursor/vision clicks sit in a 20-55% band. |
+| Dictation (type what I say) | 20 + 156-pair corpus | 95 | 90 | 40 | 85 | 65 | **72%** | ★★★½☆ | Beta | 156-pair spoken->written corpus gates the cleaner. Known quirks: 'one dollar' -> '1 dollars', proper nouns stay lowercase. Still needs real dictation into apps (W3). |
 | Shortcut map + action router | 28 tests | 90 | 65 | 45 | 95 | 70 | **69%** | ★★★½☆ | Beta | Wrong-window = nothing sent; tested on Notepad only. |
 | Hand mode (camera pointer) | 80+ tests | 95 | 70 | 55 | 85 | 45 | **69%** | ★★★½☆ | Beta | Pinch 'almost perfect' per owner; gestures, multi-monitor, macOS not run; camera 15 fps on battery. |
-| Dictation (type what I say) | 24 tests | 95 | 65 | 40 | 85 | 55 | **65%** | ★★★☆☆ | Beta | 29 tests vs a planned 150-pair corpus. |
-| Action Kernel (voice file control, quarantine delete, undo) | 43 tests | 100 | 75 | 10 | 95 | 70 | **63%** | ★★★☆☆ | Alpha | 20/20 mutations killed; never run by voice. |
+| Music control (Spotify / Apple Music) | 10 tests, 5 mutations | 95 | 75 | 35 | 85 | 65 | **67%** | ★★★½☆ | Beta | Fixed R&B / multi-word titles (cmd start quoting), no more false 'playing' claim or stray pause key, honest 'not installed', bare 'play <title>' now understood. Still needs a spoken Spotify run (W3). |
+| Live mode: WhatsApp / browser flows | 45 | 90 | 75 | 45 | 80 | 45 | **65%** | ★★★½☆ | Beta | State machine, safety layer and WhatsApp name/number logic tested (case-insensitive tool matching, name cleaning keeps the spoken name as a last candidate). Still needs the current WhatsApp build run (W3). |
 | Screen analysis / narrated tour | 48 tests | 95 | 70 | 30 | 75 | 50 | **61%** | ★★★☆☆ | Alpha | Gemini box accuracy and 125/150% scaling not verified. |
-| Live mode: WhatsApp / browser flows | 11 tests | 85 | 35 | 45 | 70 | 45 | **55%** | ★★½☆☆ | Alpha | WhatsApp UIA unverified on current build; opener bounded to 3 candidates. |
 | Vision-grounded click | 43 tests | 85 | 60 | 25 | 70 | 40 | **53%** | ★★½☆☆ | Alpha | No measured accuracy on real screens; calibration results never recorded. |
-| Window tiling + display off | 21 tests | 100 | 55 | 5 | 85 | 50 | **53%** | ★★½☆☆ | Alpha | No real window moved, display_off never called. |
-| Music control (Spotify / Apple Music) | 3 tests | 85 | 35 | 25 | 60 | 55 | **49%** | ★★½☆☆ | Prototype | Windows media keys and deep links. |
 
 ### Agent control
 
 | Feature | Tests | B | T | L | S | I | Score | Stars | Verdict | Evidence / gap |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Watch one agent, then power off | ~100 tests | 100 | 85 | 65 | 95 | 70 | **81%** | ★★★★☆ | Production | Two practice-mode runs, verdict engine behaves; a real shutdown never run. |
+| Keep-awake | 12 + 1 live | 100 | 80 | 65 | 80 | 70 | **78%** | ★★★★☆ | Beta | Real proof: execution state 0x3 while a lease is held, 0x0 after release. Fixed a stale-drop re-clear. Still needs: a long reply on battery and the system-only mode. |
+| Gated commit + draft PR | 30 (5 real git) | 100 | 90 | 45 | 92 | 65 | **75%** | ★★★★☆ | Beta | Real git against a local bare remote: branch, commit, push, ignored files left out, secrets/detached/merge/hold refused, push failure keeps the commit. Still needs: a real GitHub draft PR from a throwaway repo (owner approval). |
 | Ask-first shutdown / sleep / restart | 23 tests | 100 | 75 | 50 | 95 | 70 | **75%** | ★★★½☆ | Beta | Graceful close; a save prompt stops it. |
 | Agent hooks (Claude, Codex, Antigravity, Cursor, Gemini, OpenCode, Aider, Devin, Windsurf, Kilo, Copilot) | 48 tests | 100 | 90 | 40 | 90 | 70 | **74%** | ★★★½☆ | Beta | Live: Antigravity start/stop, Claude prompt hook. Docs only: Codex, Devin, Windsurf, Kilo, Copilot, Cursor, Gemini, OpenCode, Aider. |
-| Keep-awake | 6 tests | 100 | 65 | 35 | 70 | 65 | **64%** | ★★★☆☆ | Alpha | powercfg behaviour on this Modern-Standby laptop not checked. |
+| Overnight record + morning briefing | 10 | 100 | 85 | 20 | 85 | 60 | **65%** | ★★★☆☆ | Alpha | Save, restart, tell once, expiry, corrupt record and new-record reset tested against the real sealed store. Still needs: a real shutdown and the next-morning briefing (W1). |
 | Track all agents (announce each, summary) | 4+37 tests | 100 | 70 | 5 | 90 | 65 | **59%** | ★★★☆☆ | Alpha | Built today; no multi-agent live run. |
-| Gated commit + draft PR | 25 tests | 100 | 80 | 0 | 90 | 60 | **58%** | ★★★☆☆ | Alpha | Never run against a real repo or GitHub. |
 | Agent watch sidecar (spawn + watch CLIs) | 2 tests | 80 | 30 | 45 | 70 | 60 | **55%** | ★★★☆☆ | Alpha | Real PTY spawn verified once (Claude); others not installed here. |
-| Overnight record + morning briefing | 23 tests | 100 | 65 | 0 | 85 | 60 | **55%** | ★★½☆☆ | Alpha | Not run across a real shutdown. |
 
 ### Memory and proactive
 
 | Feature | Tests | B | T | L | S | I | Score | Stars | Verdict | Evidence / gap |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Memory core (encrypted store, ranked recall, context pack) | 62 tests | 100 | 90 | 55 | 90 | 70 | **78%** | ★★★★☆ | Beta | Paraphrase recall 19/19 on dev set (tuned), 17/20 held-out. |
+| Calendar read / add | 22 | 98 | 80 | 25 | 90 | 65 | **66%** | ★★★½☆ | Beta | Production flow now uses the tested helpers (specific spoken errors for expired sign-in, quota, network, timeout); evening/afternoon times understood; all-day events no longer treated as conflicts. Still needs: a real Google account run (W4). |
 | Timetable from an image + reminders | 16 tests | 90 | 65 | 45 | 80 | 60 | **66%** | ★★★½☆ | Beta | Real Gemini read all 5 slots of a generated timetable. |
-| Boot briefing + resume points | 31 tests | 95 | 70 | 25 | 80 | 60 | **62%** | ★★★☆☆ | Alpha | Real reboot never tested. |
+| Session snapshot / restore | 36 | 90 | 85 | 20 | 90 | 60 | **64%** | ★★★☆☆ | Alpha | Fixed: UNC paths could be launched on restore (NTLM leak risk); injectable launcher; 22 new tests; 'reopen them' is now understood as a yes. Still needs a real reboot (W4). |
+| Boot briefing + resume points | 31 tests | 95 | 78 | 25 | 80 | 60 | **63%** | ★★★☆☆ | Alpha | Real reboot never tested. |
 | Important-mail watcher + triage | 22 tests | 95 | 75 | 10 | 85 | 65 | **60%** | ★★★☆☆ | Alpha | No Google account connected at test time. |
 | Profile, corrections, routines, review, curator | 59 tests | 95 | 75 | 10 | 85 | 60 | **59%** | ★★★☆☆ | Alpha | Review never run against a real model; routines have no history yet. |
 | Proactive-speech policy | 15 tests | 90 | 70 | 10 | 85 | 55 | **56%** | ★★★☆☆ | Alpha | Thresholds are hypotheses; nothing emits a Critical alert yet. |
-| Session snapshot / restore | 18 tests | 90 | 60 | 15 | 80 | 55 | **55%** | ★★½☆☆ | Alpha | Brave/Edge restore flag not verified. |
-| Calendar read / add | 8 tests | 90 | 50 | 15 | 85 | 60 | **54%** | ★★½☆☆ | Alpha |  |
+| Leave-by reminders | 12 tests, 5 mutations | 95 | 80 | 0 | 85 | 55 | **56%** | ★★★☆☆ | Alpha | Logic split into pure tested functions; route lookups no longer retried every minute after a failure. Still needs a real calendar event with an address (W4). |
 | WhatsApp priority people (read-only) | 17+8 tests | 85 | 65 | 5 | 90 | 50 | **52%** | ★★½☆☆ | Alpha | OFF by default; read-receipt side effects unknown. |
-| Leave-by reminders | 5 tests | 90 | 35 | 0 | 75 | 55 | **44%** | ★★☆☆☆ | Prototype | Needs a real calendar event. |
 
 ### Integrations
 
@@ -118,18 +118,18 @@ Stars = % / 20 in half steps. Verdict: **Production** >= 80, **Beta** 65-79, **A
 |---|---|---|---|---|---|---|---|---|---|---|
 | Cloudflare Worker | 145 tests | 100 | 80 | 75 | 85 | 75 | **82%** | ★★★★☆ | Production |  |
 | GitHub commands (PRs, merge, review) | 61 tests | 100 | 85 | 70 | 85 | 70 | **81%** | ★★★★☆ | Production |  |
+| Architecture mapper | 42 | 100 | 85 | 70 | 78 | 68 | **80%** | ★★★★☆ | Beta | 23 new pure tests; fixed .git suffix handling, API routes classified as server code (pages/api), deterministic tie-break. Network error mapping is still inline. |
 | MCP connect system (Swiggy, Amazon, WhatsApp) | 28 tests | 100 | 75 | 40 | 85 | 70 | **70%** | ★★★½☆ | Beta | Swiggy production needs approval; bridges not running here. |
-| Architecture mapper | 6 tests | 100 | 35 | 70 | 70 | 65 | **68%** | ★★★½☆ | Beta | 2,991 lines, 6 tests. |
+| Activity Manager (app-only history) | 13 tests, 8 mutations killed | 90 | 80 | 40 | 92 | 55 | **68%** | ★★★½☆ | Beta | Hardened (substring privacy list incl. keepassxc, rollback on failed save, tested sealed round-trip/tamper/expiry); real foreground+idle read verified. Still needs: a real 1-hour opted-in run and the Hub toggle used by the owner (W1). |
 | Maps / Places / Directions | 8 tests | 95 | 45 | 55 | 70 | 65 | **65%** | ★★★☆☆ | Alpha | Both keys verified once. |
 | Google accounts + OAuth | ~40 tests | 95 | 45 | 40 | 80 | 65 | **62%** | ★★★☆☆ | Alpha | Needs the user's own OAuth client; Testing-mode token expires in 7 days. |
 | Device Links (phone / laptop pairing) | 145 Worker tests share | 75 | 70 | 35 | 85 | 60 | **61%** | ★★★☆☆ | Alpha | Local Wrangler + D1 verified; no live SMS or two-laptop run. |
-| Activity Manager (app-only history) | 1 test | 70 | 10 | 0 | 85 | 40 | **35%** | ★½☆☆☆ | Prototype | Off by default. |
 
 ### Platform and quality
 
 | Feature | Tests | B | T | L | S | I | Score | Stars | Verdict | Evidence / gap |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Security: keychain, PII filter, sealed memory | ~30 tests | 100 | 70 | 60 | 85 | 70 | **75%** | ★★★★☆ | Beta | Keys still also in settings.json in places. |
+| Security: keychain, PII filter, sealed memory | 30 | 100 | 82 | 50 | 95 | 78 | **77%** | ★★★★☆ | Beta | Plaintext API keys (5 found in settings.json) are now moved to the keychain and blanked at startup, verified by read-back; readers are keychain-first; import replaces. Still needs the first real startup scrub and a restart check. |
 | Resource footprint (RAM / CPU / battery) | measured | 100 | 40 | 80 | 75 | 80 | **75%** | ★★★★☆ | Beta | Idle 104-269 MB; Kokoro +368 MB when loaded. |
 | TTS volume lease / restore | 14 tests | 100 | 70 | 55 | 85 | 75 | **74%** | ★★★½☆ | Beta |  |
 | Command Hub / settings UI | vitest | 100 | 60 | 65 | 70 | 70 | **72%** | ★★★½☆ | Beta | Visual match to design not verified at 400 px. |
@@ -171,18 +171,18 @@ Stars = % / 20 in half steps. Verdict: **Production** >= 80, **Beta** 65-79, **A
 
 | Feature | Score | Main reason |
 |---|---|---|
-| Activity Manager (app-only history) | 35% | Off by default. |
 | Speaker verification / owner check | 37% | Wired, off by default, fail-open; enrolment model (G1) not built. |
-| Leave-by reminders | 44% | Needs a real calendar event. |
 | Streaming partial captions (Deepgram, optional) | 45% | Optional, needs a key; stream module has no tests. |
 | Installer / release pipeline | 47% | NSIS broken locally; MSI built; start-menu shortcut points at a stale exe. |
-| Music control (Spotify / Apple Music) | 49% | Windows media keys and deep links. |
 | WhatsApp priority people (read-only) | 52% | OFF by default; read-receipt side effects unknown. |
-| Window tiling + display off | 53% | No real window moved, display_off never called. |
 | Vision-grounded click | 53% | No measured accuracy on real screens; calibration results never recorded. |
-| Calendar read / add | 54% | low live proof |
-| Live mode: WhatsApp / browser flows | 55% | WhatsApp UIA unverified on current build; opener bounded to 3 candidates. |
-| Overnight record + morning briefing | 55% | Not run across a real shutdown. |
+| Agent watch sidecar (spawn + watch CLIs) | 55% | Real PTY spawn verified once (Claude); others not installed here. |
+| Proactive-speech policy | 56% | Thresholds are hypotheses; nothing emits a Critical alert yet. |
+| Leave-by reminders | 56% | Logic split into pure tested functions; route lookups no longer retried every minute after a failure. Still needs a real calendar event with an address (W4). |
+| Wake-up sound | 57% | Nothing audible has been heard yet. |
+| Boot hello / shutdown flow / resume hello | 57% | Built in two rounds; nothing run live after rebuild. |
+| Track all agents (announce each, summary) | 59% | Built today; no multi-agent live run. |
+| Profile, corrections, routines, review, curator | 59% | Review never run against a real model; routines have no history yet. |
 
 ## Out of the current target (decision recorded)
 
