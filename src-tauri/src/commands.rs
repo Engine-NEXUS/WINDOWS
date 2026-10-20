@@ -1664,6 +1664,22 @@ fn default_loading_size() -> u32 {
     80
 }
 
+/// `localSttOnly` when the setting is absent. ONE value for the struct default
+/// and every raw-JSON reader (they used to disagree: the Settings UI showed
+/// `true` while the runtime read `false`, so a user who only pasted a Groq key
+/// saw "Local STT only" ON — and, once any save persisted it, had the key
+/// silently ignored). `false`: a key the user entered is used; with no key the
+/// local engine is used regardless.
+pub const DEFAULT_LOCAL_STT_ONLY: bool = false;
+
+/// Read `localSttOnly` from parsed settings JSON (camelCase or snake_case).
+pub fn local_stt_only_from_json(json: &serde_json::Value) -> bool {
+    json.get("localSttOnly")
+        .or_else(|| json.get("local_stt_only"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(DEFAULT_LOCAL_STT_ONLY)
+}
+
 impl Default for NexusSettings {
     fn default() -> Self {
         Self {
@@ -1676,7 +1692,7 @@ impl Default for NexusSettings {
             speaker_verification: false,
             meeting_mode_auto: true,
             suppress_tts_in_meetings: true,
-            local_stt_only: true,
+            local_stt_only: DEFAULT_LOCAL_STT_ONLY,
             server_url: option_env!("NEXUS_SERVER_URL")
                 .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev")
                 .to_string(),
@@ -1793,8 +1809,27 @@ pub fn get_settings<R: Runtime>(
         return Ok(NexusSettings::default());
     }
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut settings: NexusSettings = serde_json::from_str(&content)
-        .unwrap_or_default();
+    let mut settings: NexusSettings = match parse_settings_lenient(&content) {
+        Some((s, dropped)) => {
+            if !dropped.is_empty() {
+                tracing::warn!(
+                    "settings.json: ignored invalid field(s) {:?}; other settings kept",
+                    dropped
+                );
+            }
+            s
+        }
+        None => {
+            // Not JSON at all. Keep the broken file next to the new one so the
+            // next Save cannot silently destroy it.
+            let backup = dir.join("settings.json.corrupt");
+            if !backup.exists() {
+                let _ = std::fs::copy(&path, &backup);
+            }
+            tracing::error!("settings.json is unreadable; using defaults (copy kept at {:?})", backup);
+            NexusSettings::default()
+        }
+    };
     // Merge server config if present
     let config_path = dir.join("nexus-config.json");
     if config_path.exists() {
@@ -1842,6 +1877,8 @@ pub fn save_settings<R: Runtime>(
     let path = dir.join("settings.json");
     let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    // Sensitivity takes effect immediately (no restart).
+    crate::wakeword_oww::apply_wake_sensitivity(&settings.wake_sensitivity);
 
     // Also save server config separately — but NEVER overwrite an existing
     // identity (user_id / device_id) with empty values. This prevents
@@ -1909,14 +1946,48 @@ pub fn read_groq_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String
 /// audio never leaves the device). Returns false if not set or file missing.
 pub fn read_local_stt_only<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let dir = app.path().app_data_dir();
-    let Ok(dir) = dir else { return false; };
+    let Ok(dir) = dir else { return DEFAULT_LOCAL_STT_ONLY; };
     let path = dir.join("settings.json");
-    let Ok(content) = std::fs::read_to_string(&path) else { return false; };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return false; };
-    json.get("localSttOnly")
-        .or_else(|| json.get("local_stt_only"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+    let Ok(content) = std::fs::read_to_string(&path) else { return DEFAULT_LOCAL_STT_ONLY; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return DEFAULT_LOCAL_STT_ONLY; };
+    local_stt_only_from_json(&json)
+}
+
+/// Read `wakeSensitivity` ("low" | "medium" | "high") from settings.json.
+pub fn read_wake_sensitivity<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
+    let Ok(dir) = app.path().app_data_dir() else { return "medium".to_string(); };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("wakeSensitivity").and_then(|v| v.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "medium".to_string())
+}
+
+/// Parse settings.json field by field. One bad or missing field (an older file
+/// without a newer required key, a hand-edit with the wrong type) used to make
+/// the whole parse fail → `unwrap_or_default()` → **every** setting (hotkey,
+/// voices, orb position, …) reset to defaults in the UI, and the next Save
+/// wrote those defaults over the user's file. Now only the offending fields
+/// fall back; the rest is kept. Returns the settings and the dropped keys.
+pub fn parse_settings_lenient(content: &str) -> Option<(NexusSettings, Vec<String>)> {
+    let file: serde_json::Value = serde_json::from_str(content).ok()?;
+    let file = file.as_object()?;
+    // Fast path: a fully valid file.
+    if let Ok(s) = serde_json::from_value::<NexusSettings>(serde_json::Value::Object(file.clone())) {
+        return Some((s, Vec::new()));
+    }
+    let mut merged = serde_json::to_value(NexusSettings::default()).ok()?;
+    let mut dropped = Vec::new();
+    for (key, value) in file {
+        let mut candidate = merged.clone();
+        candidate.as_object_mut()?.insert(key.clone(), value.clone());
+        if serde_json::from_value::<NexusSettings>(candidate.clone()).is_ok() {
+            merged = candidate;
+        } else {
+            dropped.push(key.clone());
+        }
+    }
+    serde_json::from_value::<NexusSettings>(merged).ok().map(|s| (s, dropped))
 }
 
 /// Read an API key by service name: keychain first, settings.json fallback.
@@ -2723,5 +2794,63 @@ mod sidebar_geometry_tests {
         let (x, _, _, _) = sidebar_geometry("assistant", None, 100.0, 1080.0);
         // 100 - 520 - 10 = -430 → clamp to 0
         assert_eq!(x, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod settings_robustness_tests {
+    use super::*;
+
+    #[test]
+    fn local_stt_only_has_one_default_everywhere() {
+        assert!(!DEFAULT_LOCAL_STT_ONLY);
+        assert_eq!(NexusSettings::default().local_stt_only, DEFAULT_LOCAL_STT_ONLY);
+        // Absent key → the same default the struct uses.
+        assert_eq!(local_stt_only_from_json(&serde_json::json!({})), DEFAULT_LOCAL_STT_ONLY);
+        // Explicit values win, in either spelling.
+        assert!(local_stt_only_from_json(&serde_json::json!({"localSttOnly": true})));
+        assert!(local_stt_only_from_json(&serde_json::json!({"local_stt_only": true})));
+        assert!(!local_stt_only_from_json(&serde_json::json!({"localSttOnly": false})));
+        // Wrong type → default, not a panic.
+        assert_eq!(
+            local_stt_only_from_json(&serde_json::json!({"localSttOnly": "yes"})),
+            DEFAULT_LOCAL_STT_ONLY
+        );
+    }
+
+    #[test]
+    fn lenient_parse_keeps_valid_fields_when_one_is_bad() {
+        let mut v = serde_json::to_value(NexusSettings::default()).unwrap();
+        v["hotkey"] = serde_json::json!("Ctrl+Alt+N");
+        v["orbSize"] = serde_json::json!("huge"); // wrong type
+        v["ttsVolume"] = serde_json::json!(33);
+        v["somethingNew"] = serde_json::json!(1); // unknown keys are fine
+        let (s, dropped) = parse_settings_lenient(&v.to_string()).expect("parses");
+        assert_eq!(s.hotkey, "Ctrl+Alt+N", "valid custom field survives");
+        assert_eq!(s.tts_volume, 33);
+        assert_eq!(s.orb_size, NexusSettings::default().orb_size, "bad field falls back alone");
+        assert_eq!(dropped, vec!["orbSize".to_string()]);
+    }
+
+    #[test]
+    fn lenient_parse_handles_files_missing_required_fields() {
+        // An older file that predates most fields used to reset EVERYTHING.
+        let old = r#"{"hotkey":"Ctrl+Shift+Space","wakeSensitivity":"high","groqApiKey":"k"}"#;
+        let (s, dropped) = parse_settings_lenient(old).expect("parses");
+        assert_eq!(s.hotkey, "Ctrl+Shift+Space");
+        assert_eq!(s.wake_sensitivity, "high");
+        assert_eq!(s.groq_api_key, "k");
+        assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn lenient_parse_valid_file_is_untouched_and_garbage_is_none() {
+        let full = serde_json::to_string(&NexusSettings::default()).unwrap();
+        let (s, dropped) = parse_settings_lenient(&full).unwrap();
+        assert!(dropped.is_empty());
+        assert_eq!(s.hotkey, NexusSettings::default().hotkey);
+        assert!(parse_settings_lenient("{not json").is_none());
+        assert!(parse_settings_lenient("[1,2]").is_none());
+        assert!(parse_settings_lenient("").is_none());
     }
 }

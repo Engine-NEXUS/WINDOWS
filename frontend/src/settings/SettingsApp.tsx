@@ -51,7 +51,7 @@ const DEFAULT_SETTINGS: Settings = {
   speakerVerification: false,
   meetingModeAuto: true,
   suppressTtsInMeetings: true,
-  localSttOnly: true,
+  localSttOnly: false,
   serverUrl: "",
   userId: "local-user",
   deviceId: "local-device",

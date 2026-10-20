@@ -358,14 +358,10 @@ pub fn spawn_prewarm(app_data_dir: std::path::PathBuf) {
                             .unwrap_or("")
                             .to_string()
                     });
-                    let local = json
-                        .get("localSttOnly")
-                        .or_else(|| json.get("local_stt_only"))
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
+                    let local = crate::commands::local_stt_only_from_json(&json);
                     (key, local)
                 }
-                Err(_) => (String::new(), false),
+                Err(_) => (String::new(), crate::commands::DEFAULT_LOCAL_STT_ONLY),
             };
             if groq_key.is_empty() || local_only {
                 tracing::info!(

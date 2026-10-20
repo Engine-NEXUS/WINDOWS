@@ -28,6 +28,24 @@
 
 use tauri::{AppHandle, Manager, Runtime};
 
+/// Settings → detection threshold. `wakeSensitivity` ("low" | "medium" | "high")
+/// shifts the calibrated threshold (`acoustic_profile.json` `kws_threshold`,
+/// 0.68 as shipped): medium is exactly the calibrated value, high is more
+/// willing to wake (more false alarms), low is stricter. Unknown labels mean
+/// medium. Clamped so a bad profile can never disable or trivialise the gate.
+#[allow(dead_code)]
+pub fn sensitivity_threshold(base: f32, label: &str) -> f32 {
+    let offset = match label.trim().to_ascii_lowercase().as_str() {
+        "high" => -0.08,
+        "low" => 0.07,
+        _ => 0.0,
+    };
+    (base + offset).clamp(0.40, 0.90)
+}
+
+#[cfg(feature = "mock-wake")]
+pub fn apply_wake_sensitivity(_label: &str) {}
+
 #[cfg(feature = "mock-wake")]
 pub fn run<R: Runtime>(_app: AppHandle<R>) -> Result<(), String> {
     tracing::info!("wake-word: mock mode (no native listener)");
@@ -623,6 +641,9 @@ pub(crate) mod engine {
         pub sample_rate: i32,
         pub chunk_buffer: Vec<f32>,
         pub threshold: f32,
+        /// Calibrated threshold from the acoustic profile; `threshold` is this
+        /// shifted by the user's `wakeSensitivity` (see `set_sensitivity`).
+        pub base_threshold: f32,
         pub detections_buffer: CircularBuffer<DETECTION_BUFFER_SIZE, f32>,
         pub last_detection_time: std::time::Instant,
         /// Tier 3: command classifiers loaded from resources/oww/commands/
@@ -727,6 +748,18 @@ pub(crate) mod engine {
     }
 
     impl WakeEngine {
+        /// Apply the user's wake sensitivity on top of the calibrated threshold.
+        pub fn set_sensitivity(&mut self, label: &str) {
+            let t = super::sensitivity_threshold(self.base_threshold, label);
+            if (t - self.threshold).abs() > f32::EPSILON {
+                tracing::info!(
+                    "wake-engine: sensitivity '{}' → threshold {:.2} (calibrated {:.2})",
+                    label, t, self.base_threshold
+                );
+            }
+            self.threshold = t;
+        }
+
         pub fn new(resource_dir: PathBuf, #[allow(unused_variables)] app_data_dir: PathBuf) -> anyhow::Result<Self> {
             let oww_dir = resolve_oww_dir(&resource_dir).ok_or_else(|| {
                 anyhow::anyhow!(
@@ -811,6 +844,7 @@ pub(crate) mod engine {
                 sample_rate: 16000,
                 chunk_buffer: Vec::with_capacity(OWW_CHUNK_SIZE),
                 threshold,
+                base_threshold: threshold,
                 detections_buffer: CircularBuffer::<DETECTION_BUFFER_SIZE, f32>::new(),
                 last_detection_time: std::time::Instant::now()
                     .checked_sub(std::time::Duration::from_secs(10))
@@ -1844,6 +1878,19 @@ pub(crate) mod engine {
 use once_cell::sync::OnceCell;
 #[cfg(not(feature = "mock-wake"))]
 static WAKE_TX: OnceCell<std::sync::mpsc::Sender<WakeCandidate>> = OnceCell::new();
+/// The running engine, so Settings can change sensitivity without a restart.
+#[cfg(not(feature = "mock-wake"))]
+static ENGINE_HANDLE: OnceCell<std::sync::Arc<parking_lot::Mutex<engine::WakeEngine>>> =
+    OnceCell::new();
+
+/// Apply a new `wakeSensitivity` to the live engine (no-op before it starts;
+/// `run()` applies the saved value at startup).
+#[cfg(not(feature = "mock-wake"))]
+pub fn apply_wake_sensitivity(label: &str) {
+    if let Some(e) = ENGINE_HANDLE.get() {
+        e.lock().set_sensitivity(label);
+    }
+}
 /// Global meeting/privacy state — checked on every audio chunk.
 /// Set up in `lib.rs` before the wake engine starts.
 #[cfg(not(feature = "mock-wake"))]
@@ -2965,8 +3012,10 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     let (cmd_tx, cmd_rx) =
         std::sync::mpsc::channel::<engine::CommandIntent>();
     wake_engine.command_tx = Some(cmd_tx);
+    wake_engine.set_sensitivity(&crate::commands::read_wake_sensitivity(&app));
 
     let engine = std::sync::Arc::new(parking_lot::Mutex::new(wake_engine));
+    let _ = ENGINE_HANDLE.set(engine.clone());
 
     let (tx, rx) = std::sync::mpsc::channel::<WakeCandidate>();
     let _ = WAKE_TX.set(tx);
@@ -3609,13 +3658,10 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                         .unwrap_or("")
                         .to_string()
                 });
-                let local = json.get("localSttOnly")
-                    .or_else(|| json.get("local_stt_only"))
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let local = crate::commands::local_stt_only_from_json(&json);
                 (key, local)
             }
-            _ => (String::new(), false),
+            _ => (String::new(), crate::commands::DEFAULT_LOCAL_STT_ONLY),
         };
 
         if groq_key.is_empty() || local_only {
@@ -5027,6 +5073,21 @@ mod tests {
     }
 
     // ─── Verifier v2 tests ──────────────────────────────────────────
+
+    /// B8: wakeSensitivity actually moves the threshold; medium is the
+    /// calibrated value untouched.
+    #[test]
+    fn test_sensitivity_threshold() {
+        use super::sensitivity_threshold as t;
+        assert!((t(0.68, "medium") - 0.68).abs() < 1e-6);
+        assert!((t(0.68, "high") - 0.60).abs() < 1e-6);
+        assert!((t(0.68, "low") - 0.75).abs() < 1e-6);
+        assert!((t(0.68, "HIGH ") - 0.60).abs() < 1e-6, "case/space tolerant");
+        assert!((t(0.68, "garbage") - 0.68).abs() < 1e-6, "unknown → medium");
+        // A degenerate profile can neither disable the gate nor trivialise it.
+        assert_eq!(t(0.95, "low"), 0.90);
+        assert_eq!(t(0.30, "high"), 0.40);
+    }
 
     /// B3: a cold local engine must not stall the wake until the timeout.
     #[test]
