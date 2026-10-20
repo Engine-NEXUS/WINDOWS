@@ -4,6 +4,7 @@
 //!       --manifest eval_set/manifest.jsonl --root eval_set \
 //!       [--threshold 0.68] [--kinds wake,negative,room] [--stage2] \
 //!       [--resources <dir containing oww/>] [--out wake_results.jsonl]
+//!       [--dsp legacy|aligned]    front-end chain (default legacy = shipped behaviour)
 //!
 //!   cargo run --release --example wake_eval -- --selftest
 //!
@@ -50,6 +51,9 @@ async fn run(args: Vec<String>) -> i32 {
             return 2;
         }
     };
+
+    let dsp = arg(&args, "--dsp").unwrap_or_else(|| "legacy".to_string());
+    engine.set_dsp(&dsp);
 
     if flag(&args, "--selftest") {
         return selftest(&mut engine, resources.as_deref(), threshold).await;
@@ -113,6 +117,7 @@ async fn run(args: Vec<String>) -> i32 {
         };
         let mut res = Map::new();
         res.insert("threshold".into(), json!(effective_thr));
+        res.insert("dsp".into(), json!(dsp));
         res.insert("duration_ms".into(), json!(audio.len() as u64 * 1000 / ve::SR as u64));
         if kind == "room" {
             // Long recording: stream it (no padding / per-clip reset) and count triggers.

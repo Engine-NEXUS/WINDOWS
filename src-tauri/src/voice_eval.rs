@@ -843,4 +843,21 @@ mod tests {
         let r = simulate_endpoint(&tone(0.001, 30), 0.003, None);
         assert!(!r.cut_early);
     }
+    #[test]
+    fn test_engine_dsp_profiles_switch_and_stay_silent_on_silence() {
+        let mut e = new_wake_engine(None).expect("engine");
+        assert_eq!(e.dsp_profile, crate::wake_dsp::DspProfile::Legacy, "default = shipped behaviour");
+        let legacy = e.dsp;
+        e.set_dsp("aligned");
+        assert_eq!(e.dsp_profile, crate::wake_dsp::DspProfile::Aligned);
+        assert_eq!(e.dsp.highpass_hz, 80.0);
+        assert_eq!(e.dsp.floor_gain, 1.0);
+        assert_ne!(e.dsp, legacy);
+        // Neither chain may wake on silence.
+        let silence = vec![0.0f32; 16000 * 3];
+        assert!(!eval_wake_clip(&mut e, &silence, None).fired);
+        e.set_dsp("legacy");
+        assert_eq!(e.dsp, legacy, "switching back restores the original chain");
+        assert!(!eval_wake_clip(&mut e, &silence, None).fired);
+    }
 }

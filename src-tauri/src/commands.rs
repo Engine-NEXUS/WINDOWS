@@ -1569,6 +1569,11 @@ pub struct NexusSettings {
     /// choose with `stt_eval --capture-offset-ms`. Clamped to ±400.
     #[serde(default)]
     pub wake_seed_offset_ms: i32,
+    /// Wake-word front-end chain: "legacy" (the original runtime chain, default)
+    /// or "aligned" (identical to the chain the classifier was trained with).
+    /// Compare with `wake_eval --dsp` on your recordings before switching.
+    #[serde(default = "default_wake_dsp_profile")]
+    pub wake_dsp_profile: String,
     /// Ghost FIFO queue: per-step watchdog timeout in ms. Default: 15000. D7.
     #[serde(default = "default_ghost_step_timeout_ms")]
     pub ghost_step_timeout_ms: u64,
@@ -1647,6 +1652,10 @@ fn default_vision_provider() -> String {
 
 fn default_vision_race() -> String {
     "sequential".to_string()
+}
+
+fn default_wake_dsp_profile() -> String {
+    "legacy".to_string()
 }
 
 fn default_ghost_depth_ack() -> bool {
@@ -1739,6 +1748,7 @@ impl Default for NexusSettings {
             stt_confidence_gate: false,
             stt_command_hints: false,
             wake_seed_offset_ms: 0,
+            wake_dsp_profile: default_wake_dsp_profile(),
             ghost_step_timeout_ms: 15000,
             ghost_turn_gap_ms: 1000,
             waves_horizontal_pct: 0.5,
@@ -1899,6 +1909,7 @@ pub fn save_settings<R: Runtime>(
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
     // Sensitivity takes effect immediately (no restart).
     crate::wakeword_oww::apply_wake_sensitivity(&settings.wake_sensitivity);
+    crate::wakeword_oww::apply_wake_dsp(&settings.wake_dsp_profile);
 
     // Also save server config separately — but NEVER overwrite an existing
     // identity (user_id / device_id) with empty values. This prevents
@@ -2414,6 +2425,16 @@ pub fn stt_capture_had_speech() -> Result<bool, String> {
 }
 
 // ─── Ghost FIFO queue readers (loose settings.json parse) ───────────────
+
+/// Read `wakeDspProfile` ("legacy" when unset).
+pub fn read_wake_dsp_profile<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
+    let Ok(dir) = app.path().app_data_dir() else { return "legacy".to_string(); };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("wakeDspProfile").and_then(|v| v.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "legacy".to_string())
+}
 
 /// Read `wakeSeedOffsetMs` (0 when unset or invalid).
 pub fn read_wake_seed_offset_ms<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> i32 {

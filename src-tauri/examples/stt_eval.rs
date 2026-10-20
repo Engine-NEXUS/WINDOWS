@@ -82,7 +82,10 @@ async fn run(args: Vec<String>) -> i32 {
     let wake_threshold = arg(&args, "--threshold").and_then(|t| t.parse::<f32>().ok());
     let mut wake_engine = if capture_offset.is_some() && !text_only {
         match ve::new_wake_engine(arg(&args, "--resources").map(PathBuf::from).as_deref()) {
-            Ok(e) => Some(e),
+            Ok(mut e) => {
+                e.set_dsp(&arg(&args, "--dsp").unwrap_or_else(|| "legacy".to_string()));
+                Some(e)
+            }
             Err(e) => {
                 eprintln!("--capture-offset-ms needs the wake engine: {e}");
                 return 2;

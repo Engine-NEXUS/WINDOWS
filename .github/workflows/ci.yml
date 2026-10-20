@@ -36,6 +36,29 @@ jobs:
       - name: Turn-end choke-point gate (ghost hot-mic loop)
         run: node ../scripts/check-turn-ends.mjs
 
+  voice-accuracy-tools:
+    # Wake-word data gate + the stdlib/numpy tests of the evaluation and training tools.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Wake model manifest + data gate
+        run: python scripts/wake_data_foundation.py validate
+
+      - name: Evaluation tool tests (stdlib)
+        run: |
+          python -m unittest scripts/test_voice_eval_tools.py
+          python -m unittest scripts/test_wake_dsp.py
+
+      - name: Trainer library tests (numpy / scipy / onnxruntime)
+        run: |
+          pip install numpy scipy onnxruntime
+          python -m unittest scripts/test_wake_train_lib.py
+
   windows-installer:
     runs-on: windows-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/phase-1')

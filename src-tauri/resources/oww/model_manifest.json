@@ -12,11 +12,15 @@
     1
   ],
   "runtime": {
-    "wake_threshold": 0.35,
-    "silence_rms_threshold": 0.002,
-    "target_rms": 0.03,
-    "max_gain": 20.0,
-    "restart_grace_seconds": 10,
+    "wake_threshold": 0.68,
+    "trainer_frontend": {
+      "highpass_hz": 80.0,
+      "silence_rms": 0.002,
+      "target_rms": 0.03,
+      "max_gain": 15.0,
+      "floor_gain": 1.0
+    },
+    "dsp_spec_sha256": "9e11903bd888aada888d85a314814cd76f9d489a2da10efcae31b565816eae17",
     "refractory_milliseconds": 3000
   },
   "models": [
@@ -33,7 +37,7 @@
     {
       "file": "nexus.onnx",
       "bytes": 860081,
-      "sha256": "2de9887f7902befa9d1d2e8f2a02d98b9534b4cad159ebef9ddad73e97760f5a"
+      "sha256": "563b4af3e51dbdb67467752e2341fe938f6e0ab0f91d005821befaadca8f475d"
     }
   ]
 }

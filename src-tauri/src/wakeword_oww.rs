@@ -45,6 +45,8 @@ pub fn sensitivity_threshold(base: f32, label: &str) -> f32 {
 
 #[cfg(feature = "mock-wake")]
 pub fn apply_wake_sensitivity(_label: &str) {}
+#[cfg(feature = "mock-wake")]
+pub fn apply_wake_dsp(_label: &str) {}
 
 #[cfg(feature = "mock-wake")]
 pub fn run<R: Runtime>(_app: AppHandle<R>) -> Result<(), String> {
@@ -669,6 +671,9 @@ pub(crate) mod engine {
         pub webrtc_vad: SendVad,
         /// Adaptive acoustic profile loaded for the host microphone.
         pub acoustic_profile: crate::acoustic_profile::AcousticProfile,
+        /// Front-end parameters (high-pass / gate / AGC) — see `wake_dsp`.
+        pub dsp: crate::wake_dsp::DspParams,
+        pub dsp_profile: crate::wake_dsp::DspProfile,
     }
 
     /// Send-safe wrapper for webrtc_vad::Vad (see field docs).
@@ -748,6 +753,20 @@ pub(crate) mod engine {
     }
 
     impl WakeEngine {
+        /// Select the front-end chain (`wakeDspProfile`): "legacy" (default, the
+        /// previous runtime behaviour) or "aligned" (exactly what the trainer
+        /// feeds the classifier). Rebuilds the high-pass filter for the new cutoff.
+        pub fn set_dsp(&mut self, label: &str) {
+            let profile = crate::wake_dsp::DspProfile::from_label(label);
+            let params = crate::wake_dsp::DspParams::resolve(profile, &self.acoustic_profile);
+            if profile != self.dsp_profile {
+                tracing::info!("wake-engine: front-end '{}' → '{}'", self.dsp_profile.label(), profile.label());
+            }
+            self.dsp_profile = profile;
+            self.dsp = params;
+            self.preprocessor.high_pass = HighPassFilter::new(params.highpass_hz, 16000.0);
+        }
+
         /// Apply the user's wake sensitivity on top of the calibrated threshold.
         pub fn set_sensitivity(&mut self, label: &str) {
             let t = super::sensitivity_threshold(self.base_threshold, label);
@@ -861,6 +880,8 @@ pub(crate) mod engine {
                         webrtc_vad::VadMode::Quality,
                     ),
                 ),
+                dsp: crate::wake_dsp::DspParams::resolve(crate::wake_dsp::DspProfile::Legacy, &profile),
+                dsp_profile: crate::wake_dsp::DspProfile::Legacy,
                 acoustic_profile: profile,
             })
         }
@@ -931,10 +952,7 @@ pub(crate) mod engine {
             };
 
             // ─── Energy gate + Automatic Gain Control (AGC) ────────────
-            let silence_rms_threshold = self.acoustic_profile.silence_rms_threshold;
-            let target_rms = 0.035f32; // Target nominal speech RMS
-            let max_gain = 30.0f32;
-            let _pre_gain = self.acoustic_profile.pre_gain;
+            let silence_rms_threshold = self.dsp.silence_rms;
 
             let rms = if chunk.is_empty() {
                 0.0
@@ -993,18 +1011,15 @@ pub(crate) mod engine {
                 let _ = voiced;
             }
 
-            // AGC: amplify quiet speech to target RMS with calibrated pre-gain
-            // This ensures consistent model input across different laptop microphones.
-            let pre_gain = self.acoustic_profile.pre_gain.max(1.0);
-            let (chunk, agc_gain): (Vec<f32>, f32) = if rms < target_rms {
-                let target_gain = (target_rms / rms).min(max_gain);
-                let gain = target_gain.max(pre_gain);
-                tracing::trace!("wake: AGC gain={:.1}x (RMS {:.6} → {:.6})", gain, rms, target_rms);
-                (chunk.iter().map(|&s| (s * gain).clamp(-1.0, 1.0)).collect(), gain)
-            } else if pre_gain > 1.0 {
-                (chunk.iter().map(|&s| (s * pre_gain).clamp(-1.0, 1.0)).collect(), pre_gain)
+            // AGC (see `wake_dsp::agc_gain`): lift quiet speech toward the target RMS.
+            // `legacy` = the original runtime chain (per-device pre-gain as a minimum
+            // gain on everything); `aligned` = what the classifier was trained on.
+            let agc_gain = crate::wake_dsp::agc_gain(rms, &self.dsp);
+            let chunk: Vec<f32> = if (agc_gain - 1.0).abs() < f32::EPSILON {
+                chunk
             } else {
-                (chunk, 1.0)
+                tracing::trace!("wake: AGC gain={:.1}x (RMS {:.6})", agc_gain, rms);
+                chunk.iter().map(|&s| (s * agc_gain).clamp(-1.0, 1.0)).collect()
             };
 
             // Get audio features (melspectrogram → embedding)
@@ -1887,6 +1902,14 @@ static ENGINE_HANDLE: OnceCell<std::sync::Arc<parking_lot::Mutex<engine::WakeEng
 pub fn apply_wake_sensitivity(label: &str) {
     if let Some(e) = ENGINE_HANDLE.get() {
         e.lock().set_sensitivity(label);
+    }
+}
+
+/// Apply a new `wakeDspProfile` ("legacy" | "aligned") to the live engine.
+#[cfg(not(feature = "mock-wake"))]
+pub fn apply_wake_dsp(label: &str) {
+    if let Some(e) = ENGINE_HANDLE.get() {
+        e.lock().set_dsp(label);
     }
 }
 /// Global meeting/privacy state — checked on every audio chunk.
@@ -3227,6 +3250,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         std::sync::mpsc::channel::<engine::CommandIntent>();
     wake_engine.command_tx = Some(cmd_tx);
     wake_engine.set_sensitivity(&crate::commands::read_wake_sensitivity(&app));
+    wake_engine.set_dsp(&crate::commands::read_wake_dsp_profile(&app));
 
     let engine = std::sync::Arc::new(parking_lot::Mutex::new(wake_engine));
     let _ = ENGINE_HANDLE.set(engine.clone());
