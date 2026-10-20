@@ -8,6 +8,7 @@
 - **Verify**: Rust lib 935/935 serial (baseline 922), Python tools 21/21.
 - **Phase B6 done (change 80)**: hallucination filter no longer wipes real commands — short junk (`you.`/`bye.`/`thank you.`) is whole-utterance only, the dictionary gate defers to the command parser, YouTube-outro phrases added. Rust lib 938/938. Docs: `docs/changes/80-hallucination-filter-stops-wiping-real-commands.md`.
 - **Phase B4 done (change 81)**: `wake_names.rs` is the single list of STT spellings of the name (exact / near words / split pairs like "next us"), used by both the stage-2 verifier and `strip_wake_prefix`. Policy change: "next us"/"next sis" are now near forms (need neural prob ≥ 0.6) — verify with `wake_eval --stage2` on the soundalike clips. Rust lib 941/941. Docs: `docs/changes/81-shared-wake-name-list.md`.
+- **Phase B1 done (change 82)**: a stage-2-verified wake no longer gets dropped by the 1.5 s cooldown (and no stale `VERIFIED_BYPASS` token can wake an unverified candidate later) — `WakeCandidate.verified` + pure `candidate_gate`. Rust lib 943/943. Docs: `docs/changes/82-verified-wake-bypasses-cooldown.md`.
 - **Pending (user-run, Windows)**: record the held-out set (you + 2–3 others), run the baseline scorecard **before** Phase B fixes. Docs: `docs/changes/79-voice-accuracy-measurement-harness.md`.
 
 ## Ghost / Screen-Analysis / Memory Fix Pass + Free-BYOK Key Hygiene (2026-10-05)

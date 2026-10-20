@@ -1795,6 +1795,7 @@ pub(crate) mod engine {
                             let _ = wake_tx.send(super::WakeCandidate {
                                 audio,
                                 prob: 0.0,
+                                verified: false,
                             });
                         }
                     }
@@ -1832,7 +1833,7 @@ pub(crate) mod engine {
                     drop(eng);
                     let audio: Vec<f32> =
                         super::VERIFY_RING.lock().iter().copied().collect();
-                    let _ = wake_tx.send(super::WakeCandidate { audio, prob });
+                    let _ = wake_tx.send(super::WakeCandidate { audio, prob, verified: false });
                 }
             }
         }
@@ -1879,18 +1880,18 @@ pub struct WakeCandidate {
     pub audio: Vec<f32>,
     /// Stage-1 smoothed score that fired (pending_probability at trigger).
     pub prob: f32,
+    /// True only for the self-send a successful stage-2 verification makes:
+    /// the audio was already confirmed, so the receiver fires it immediately
+    /// (no cooldown, no re-verification). Carrying this on the candidate itself
+    /// (instead of a shared flag) means a verified wake can never be eaten by
+    /// the cooldown, nor leave a stale "verified" token for an unrelated
+    /// candidate to consume.
+    pub verified: bool,
 }
 /// Only one verification may be in flight at a time (prevents double-fire).
 #[cfg(not(feature = "mock-wake"))]
 static VERIFY_IN_FLIGHT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-/// Set by the verifier thread when a candidate is accepted: the next trip
-/// through the wake loop fires immediately WITHOUT re-verifying (the audio
-/// was already confirmed). Consumed via swap(false) — single fire guaranteed.
-#[cfg(not(feature = "mock-wake"))]
-static VERIFIED_BYPASS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 /// Speaker verification state — lazily initialized on first candidate.
 /// Holds a separate AudioFeatures instance (not the live engine's) so the
 /// streaming buffers stay pristine during verification.
@@ -3481,17 +3482,22 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     while let Ok(candidate) = rx.recv() {
         let now_ms = monotonic_ms();
         let last_fire = LAST_NEURAL_FIRE_MS.load(std::sync::atomic::Ordering::Relaxed);
-        if now_ms.saturating_sub(last_fire) < 1500 {
-            tracing::debug!("wake-word: consecutive candidate suppressed by 1.5s cooldown");
-            continue;
-        }
+        let verified = match candidate_gate(candidate.verified, now_ms, last_fire) {
+            CandidateGate::Suppress => {
+                tracing::debug!("wake-word: consecutive candidate suppressed by 1.5s cooldown");
+                continue;
+            }
+            CandidateGate::FireVerified => true,
+            CandidateGate::Proceed => false,
+        };
 
         // ── Phase D: Speaker verification ──────────────────────────
         // BEFORE the cooldown store: a rejected stranger must not burn
         // the owner's 1.5s window. Uses a separate AudioFeatures instance
         // so the live engine's streaming buffers stay pristine.
-        // Fail-open on any error.
-        if crate::commands::read_speaker_verification(&app) {
+        // Fail-open on any error. A stage-2-verified candidate already passed
+        // this check when it was first seen — never repeat it.
+        if !verified && crate::commands::read_speaker_verification(&app) {
             match verify_speaker_at_fire(&app, &candidate.audio) {
                 Some(false) => {
                     tracing::info!(
@@ -3512,14 +3518,14 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 
         // ── Stage-2 verifier dispatch ──────────────────────────────
         // The old body below fires immediately; it now runs ONLY when the
-        // verifier accepts (via VERIFIED_BYPASS), when verification is
+        // verifier accepts (a `verified` candidate), when verification is
         // disabled, or when a worker can't be spawned (fail-open).
         // A rejected candidate simply never reaches the fire path.
         {
             use std::sync::atomic::Ordering;
-            // A previously accepted candidate is waiting: fire now, no re-verify.
-            if VERIFIED_BYPASS.swap(false, Ordering::SeqCst) {
-                tracing::info!("verify: previously accepted candidate → firing");
+            // The stage-2 verifier accepted this audio: fire now, no re-verify.
+            if verified {
+                tracing::info!("verify: verified candidate → firing");
                 if let Ok(dir) = app.path().app_data_dir() {
                     crate::diary::log_event(&dir, "wake", "trigger (verified)");
                 }
@@ -3642,7 +3648,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 /// loop to fire ONLY on a transcript match. Runs on a dedicated thread
 /// (never the audio path). Fail-open: STT errors, timeouts, and too-short
 /// audio all fire anyway — only a confident non-match suppresses the wake.
-/// Signalling uses VERIFIED_BYPASS + a self-send on WAKE_TX so the single
+/// Signalling is a self-send on WAKE_TX of a `verified` candidate so the single
 /// existing fire path (the wake loop body) stays the only place that fires.
 #[cfg(not(feature = "mock-wake"))]
 /// Mean-pooled speaker embedding for turn-level authorship checks. Uses the
@@ -3768,6 +3774,35 @@ fn verify_speaker_at_fire<R: Runtime>(app: &AppHandle<R>, audio: &[f32]) -> Opti
     Some(verified)
 }
 
+/// Cooldown between candidate fires (consecutive frames of one utterance
+/// collapse into a single wake).
+const CANDIDATE_COOLDOWN_MS: u64 = 1500;
+
+/// What the candidate receiver does with a newly arrived candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateGate {
+    /// Inside the cooldown after a recent candidate: drop it.
+    Suppress,
+    /// Already confirmed by stage 2: fire immediately.
+    FireVerified,
+    /// A fresh stage-1 candidate: run the normal checks.
+    Proceed,
+}
+
+/// Pure admission rule. The cooldown clock is stamped when a candidate STARTS
+/// verification, so a verified wake normally arrives 0.25–2 s later — inside
+/// the cooldown. It must therefore bypass it: the cooldown exists to merge
+/// duplicate stage-1 frames, not to discard a wake the user already confirmed.
+fn candidate_gate(verified: bool, now_ms: u64, last_fire_ms: u64) -> CandidateGate {
+    if verified {
+        CandidateGate::FireVerified
+    } else if now_ms.saturating_sub(last_fire_ms) < CANDIDATE_COOLDOWN_MS {
+        CandidateGate::Suppress
+    } else {
+        CandidateGate::Proceed
+    }
+}
+
 /// Instant-fire decision for the candidate receiver. `verify_wake` is the
 /// user's STT-cross-check setting; `prob` is the candidate's stage-1
 /// probability. A candidate with essentially no neural evidence (the
@@ -3782,11 +3817,11 @@ fn should_instant_fire(verify_wake: bool, prob: f32) -> bool {
 
 fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32) {    // Signal the main loop to fire (consumed once via swap).
     let fire = || {
-        VERIFIED_BYPASS.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(tx) = WAKE_TX.get() {
             let _ = tx.send(WakeCandidate {
                 audio: Vec::new(),
                 prob: 0.0,
+                verified: true,
             });
         }
     };
@@ -4938,6 +4973,39 @@ mod tests {
     }
 
     // ─── Verifier v2 tests ──────────────────────────────────────────
+
+    /// B1: a verified wake arrives inside the cooldown that its own
+    /// candidate started; it must still fire. Unverified duplicates inside the
+    /// window are still merged, and nothing outside it is lost.
+    #[test]
+    fn test_candidate_gate_verified_wake_bypasses_cooldown() {
+        use super::{candidate_gate, CandidateGate::*};
+        // Candidate stamped the clock at t=10_000; verification finished 400 ms later.
+        assert_eq!(candidate_gate(true, 10_400, 10_000), FireVerified);
+        assert_eq!(candidate_gate(true, 10_001, 10_000), FireVerified);
+        // A second raw frame of the same utterance is still suppressed...
+        assert_eq!(candidate_gate(false, 10_400, 10_000), Suppress);
+        assert_eq!(candidate_gate(false, 11_499, 10_000), Suppress);
+        // ...and a fresh candidate after the window proceeds.
+        assert_eq!(candidate_gate(false, 11_500, 10_000), Proceed);
+        assert_eq!(candidate_gate(false, 5_000, 0), Proceed);
+        // Clock going backwards never panics or wedges.
+        assert_eq!(candidate_gate(false, 9_000, 10_000), Suppress);
+    }
+
+    /// B1: the verified signal rides on the candidate; no shared flag exists
+    /// that a later unrelated candidate could consume without verification.
+    #[test]
+    fn test_unverified_candidate_never_inherits_a_verified_token() {
+        let stale = super::WakeCandidate { audio: Vec::new(), prob: 0.0, verified: true };
+        let fresh = super::WakeCandidate { audio: vec![0.0; 10], prob: 0.7, verified: false };
+        assert!(stale.verified && !fresh.verified);
+        assert_eq!(
+            super::candidate_gate(fresh.verified, 50_000, 0),
+            super::CandidateGate::Proceed,
+            "an unrelated candidate goes through normal verification"
+        );
+    }
 
     /// Two-key gate: exact "nexus" fires at ANY stage-1 probability.
     #[test]
