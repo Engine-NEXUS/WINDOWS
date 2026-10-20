@@ -11,6 +11,12 @@ use reqwest::Client;
 
 const GROQ_STT_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 const GROQ_MODEL: &str = "whisper-large-v3-turbo";
+/// Slower, more accurate sibling of the production model. NOT used by the app;
+/// it exists so the evaluator can answer "is turbo costing us command accuracy?"
+/// (`stt_eval --engine groq-large`) before anyone changes the production default.
+pub const GROQ_MODEL_LARGE: &str = "whisper-large-v3";
+/// The production model id, exported for the evaluator.
+pub const GROQ_MODEL_TURBO: &str = GROQ_MODEL;
 
 /// Domain-vocabulary decoder bias for every NEXUS command transcription.
 ///
@@ -342,13 +348,25 @@ pub async fn transcribe_with_groq_verbose(
     client: &Client,
     prompt: Option<&'static str>,
 ) -> Result<(String, Vec<GroqSegment>), String> {
+    transcribe_with_groq_verbose_model(samples, api_key, client, prompt, GROQ_MODEL).await
+}
+
+/// [`transcribe_with_groq_verbose`] with an explicit model id (evaluator A/B).
+pub async fn transcribe_with_groq_verbose_model(
+    samples: &[i16],
+    api_key: &str,
+    client: &Client,
+    prompt: Option<&'static str>,
+    model: &'static str,
+) -> Result<(String, Vec<GroqSegment>), String> {
     if api_key.is_empty() {
         return Err("No Groq API key provided".to_string());
     }
 
     let wav_bytes = pcm_to_wav(samples, 16000);
 
-    let fields = transcription_fields("audio.wav", "audio/wav", prompt, true);
+    let mut fields = transcription_fields("audio.wav", "audio/wav", prompt, true);
+    fields.model = model;
     let form = groq_transcription_form(wav_bytes, &fields)?;
 
     let resp = client

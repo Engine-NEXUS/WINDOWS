@@ -1,5 +1,5 @@
 import { useAssistant } from "../store/assistant";
-import { normalizeLearnedCorrections } from "./learnedCorrections";
+import { applyLearnedCorrections as applyCorrectionsPure, normalizeLearnedCorrections } from "./learnedCorrections";
 import {
   openSession,
   ensureSessionOpen,
@@ -358,7 +358,7 @@ function correctSttTranscript(transcript: string): string {
 // Learned corrections are loaded from the Rust side at startup and applied
 // after the hardcoded corrections above. See stt_learning.rs.
 
-let learnedCorrections: Array<{ from: string; to: string }> = [];
+let learnedCorrections: Array<{ from: string; to: string; context?: string }> = [];
 
 async function loadLearnedCorrections(): Promise<void> {
   try {
@@ -375,17 +375,14 @@ async function loadLearnedCorrections(): Promise<void> {
 }
 
 function applyLearnedCorrections(transcript: string): string {
-  let t = transcript;
-  for (const { from, to } of learnedCorrections) {
-    if (t.includes(from)) {
-      t = t.replace(new RegExp(escapeRegExp(from), "gi"), to);
-    }
+  const { text, applied } = applyCorrectionsPure(transcript, learnedCorrections);
+  for (const a of applied) {
+    // Fire-and-forget hit counter (stt_learning.rs) - lets a stale or harmful correction be spotted.
+    void import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke("record_correction_hit", { from: a.from, to: a.to }))
+      .catch(() => {});
   }
-  return t;
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return text;
 }
 
 async function logFailedTranscript(transcript: string): Promise<void> {

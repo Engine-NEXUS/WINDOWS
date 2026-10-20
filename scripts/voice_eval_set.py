@@ -14,6 +14,14 @@ any training recordings). Record it with the owner plus 2-3 other people.
     python scripts/voice_eval_set.py validate
     python scripts/voice_eval_set.py stats
 
+TRAINING positives/soundalikes (Phase C3) use the same guided protocol but a different purpose, so they can
+never be mixed up with the held-out set (separate folder, split="train", ids "trn-...", NEW sessions):
+
+    python scripts/voice_eval_set.py --purpose train record --speaker friend1 --section wake
+    python scripts/voice_eval_set.py --purpose train record --speaker friend1 --section negative
+    python scripts/voice_eval_set.py --purpose train validate
+    python scripts/wake_data_foundation.py validate        # speaker/session/group must not span splits
+
 Layout (default eval_set/, git-ignored):
     eval_set/manifest.jsonl
     eval_set/audio/<speaker>/<session>/<id>.wav
@@ -36,6 +44,8 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DIR = ROOT_DIR / "eval_set"
+TRAIN_DIR = ROOT_DIR / "wake_word_data"
+PURPOSES = ("eval", "train")
 SAMPLE_RATE = 16000
 
 KINDS = {"wake", "negative", "command", "silence", "noise", "room"}
@@ -114,7 +124,7 @@ def slug(text):
     return "".join(c if c.isalnum() else "-" for c in text.lower()).strip("-")
 
 
-def _row(item_id, kind, phrase, speaker, session, device, accent, env, dist, vol, **extra):
+def _row(item_id, kind, phrase, speaker, session, device, accent, env, dist, vol, split="test", **extra):
     row = {
         "id": item_id,
         "audio": "",  # filled by the recorder
@@ -128,17 +138,33 @@ def _row(item_id, kind, phrase, speaker, session, device, accent, env, dist, vol
         "volume": vol,
         "session_id": session,
         "source_group_id": f"{speaker}-{session}",
-        "split": "test",
+        "split": split,
         "consent": True,
     }
     row.update(extra)
     return Item(row)
 
 
-def build_plan(section, speaker, session, device, accent="unspecified"):
-    """All recording slots for one speaker + section, in a stable order."""
+def build_plan(section, speaker, session, device, accent="unspecified", purpose="eval"):
+    """All recording slots for one speaker + section, in a stable order.
+
+    purpose="train": only the wake / negative sections, split="train", ids prefixed "trn-"."""
     if section not in SECTIONS:
         raise ValueError(f"unknown section {section!r}")
+    if purpose not in PURPOSES:
+        raise ValueError(f"unknown purpose {purpose!r}")
+    if purpose == "train" and section not in ("wake", "negative"):
+        raise ValueError("training recordings cover only the wake and negative sections "
+                         "(use record_wake_samples.py background for room noise)")
+    items = _plan_items(section, speaker, session, device, accent)
+    if purpose == "train":
+        for it in items:
+            it["id"] = "trn-" + it["id"]
+            it["split"] = "train"
+    return items
+
+
+def _plan_items(section, speaker, session, device, accent):
     items = []
     if section == "wake":
         for phrase in WAKE_PHRASES:
@@ -223,7 +249,7 @@ def wav_stats(path):
     return sr, ch, len(a) / ch / sr, rms
 
 
-def validate(root, rows=None):
+def validate(root, rows=None, expected_split="test"):
     """Return (errors, warnings). Errors make the set unusable for scoring."""
     root = Path(root)
     rows = rows if rows is not None else read_manifest(root / "manifest.jsonl")
@@ -242,8 +268,10 @@ def validate(root, rows=None):
             errors.append(f"{rid}: bad kind {r['kind']!r}")
         if r["volume"] not in VOLUMES:
             errors.append(f"{rid}: bad volume {r['volume']!r}")
-        if r["split"] != "test":
-            errors.append(f"{rid}: held-out rows must have split='test' (got {r['split']!r})")
+        if r["split"] != expected_split:
+            errors.append(f"{rid}: rows here must have split={expected_split!r} (got {r['split']!r})")
+        if expected_split == "test" and str(rid).startswith("trn-"):
+            errors.append(f"{rid}: a TRAINING recording is in the held-out set")
         if r["consent"] is not True:
             errors.append(f"{rid}: consent must be true")
         if r["kind"] == "command" and not r.get("expected_text"):
@@ -313,10 +341,18 @@ def _prompt_text(item):
     return "keep the TV / background talk running, do NOT address the device"
 
 
+def audio_path(root, purpose, item, speaker, session):
+    """Where a recording is stored: eval -> audio/<speaker>/<session>/, train -> positive/ | negative/
+    (the layout train_local_wakeword.py reads)."""
+    if purpose == "train":
+        return Path(root) / ("positive" if item["kind"] == "wake" else "negative") / f"{item['id']}.wav"
+    return Path(root) / "audio" / speaker / session / f"{item['id']}.wav"
+
+
 def cmd_record(args):
     root = Path(args.dir)
     session = args.session or datetime.now().strftime("s%Y%m%d")
-    plan = build_plan(args.section, args.speaker, session, args.device, args.accent)
+    plan = build_plan(args.section, args.speaker, session, args.device, args.accent, purpose=args.purpose)
     done = {r["id"] for r in read_manifest(root / "manifest.jsonl")}
     todo = [i for i in plan if i["id"] not in done]
     print(f"{len(plan) - len(todo)}/{len(plan)} already recorded; {len(todo)} to go. Ctrl+C to stop - progress is saved.")
@@ -324,7 +360,7 @@ def cmd_record(args):
         while True:
             input(f"[{n}/{len(todo)}] {_prompt_text(item)}\n    Enter to record, then speak... ")
             pcm = _record(item["seconds"])
-            tmp = root / "audio" / args.speaker / session / f"{item['id']}.wav"
+            tmp = audio_path(root, args.purpose, item, args.speaker, session)
             _write_wav(tmp, pcm)
             _, _, _, rms = wav_stats(tmp)
             print(f"    level rms={rms:.4f}" + ("  (very quiet!)" if rms < 0.003 and item["kind"] in ("wake", "command") else ""))
@@ -367,7 +403,7 @@ def cmd_plan(args):
 
 
 def cmd_validate(args):
-    errors, warnings = validate(args.dir)
+    errors, warnings = validate(args.dir, expected_split="train" if args.purpose == "train" else "test")
     for w in warnings[:50]:
         print("warning:", w)
     for e in errors[:50]:
@@ -388,7 +424,9 @@ def cmd_stats(args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dir", default=str(DEFAULT_DIR), help="evaluation set directory (default eval_set/)")
+    ap.add_argument("--purpose", choices=PURPOSES, default="eval",
+                    help="eval = held-out test set (default); train = wake-word TRAINING recordings")
+    ap.add_argument("--dir", default=None, help="data directory (default eval_set/, or wake_word_data/ for --purpose train)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("plan").set_defaults(fn=cmd_plan)
     sub.add_parser("validate").set_defaults(fn=cmd_validate)
@@ -406,6 +444,8 @@ def main(argv=None):
             p.add_argument("--environment", default="tv", choices=sorted(ENVIRONMENTS))
         p.set_defaults(fn=fn)
     args = ap.parse_args(argv)
+    if args.dir is None:
+        args.dir = str(TRAIN_DIR if args.purpose == "train" else DEFAULT_DIR)
     return args.fn(args) or 0
 
 

@@ -3,7 +3,7 @@
 //!
 //!   GROQ_API_KEY=... cargo run --release --example stt_eval -- \
 //!       --manifest eval_set/manifest.jsonl --root eval_set \
-//!       [--engine groq|local] [--bias owner|commands|neutral] [--kinds command,silence,noise] \
+//!       [--engine groq|groq-large|local] [--bias owner|commands|neutral] [--kinds command,silence,noise] \
 //!       [--out stt_results.jsonl]
 //!
 //!   cargo run --release --example stt_eval -- --text-only --manifest rows.jsonl
@@ -56,16 +56,17 @@ fn main() {
 
 async fn run(args: Vec<String>) -> i32 {
     let Some(manifest) = arg(&args, "--manifest") else {
-        eprintln!("usage: stt_eval --manifest <jsonl> [--root <dir>] [--engine groq|local] [--bias owner|commands|neutral] [--kinds a,b] [--text-only] [--out file]");
+        eprintln!("usage: stt_eval --manifest <jsonl> [--root <dir>] [--engine groq|groq-large|local] [--bias owner|commands|neutral] [--kinds a,b] [--text-only] [--out file]");
         return 2;
     };
     let root = arg(&args, "--root").map(PathBuf::from).unwrap_or_default();
     let text_only = flag(&args, "--text-only");
     let engine = match arg(&args, "--engine").as_deref() {
         Some("local") => ve::SttEngine::Local,
+        Some("groq-large") => ve::SttEngine::GroqLarge,
         Some("groq") | None => ve::SttEngine::Groq,
         Some(other) => {
-            eprintln!("unknown --engine {other} (groq|local)");
+            eprintln!("unknown --engine {other} (groq|groq-large|local)");
             return 2;
         }
     };
@@ -103,7 +104,7 @@ async fn run(args: Vec<String>) -> i32 {
         .map(|s| s.trim().to_string())
         .collect();
     let groq_key = std::env::var("GROQ_API_KEY").unwrap_or_default();
-    if !text_only && engine == ve::SttEngine::Groq && groq_key.is_empty() {
+    if !text_only && engine != ve::SttEngine::Local && groq_key.is_empty() {
         eprintln!("--engine groq needs GROQ_API_KEY (or use --engine local / --text-only)");
         return 2;
     }
@@ -187,7 +188,7 @@ async fn run(args: Vec<String>) -> i32 {
                 let started = std::time::Instant::now();
                 let r = ve::transcribe_verbose(&samples, engine, bias, &groq_key, &client).await;
                 stt_ms = Some(started.elapsed().as_millis() as u64);
-                if engine == ve::SttEngine::Groq {
+                if engine != ve::SttEngine::Local {
                     // Groq free tier: 20 requests/minute.
                     tokio::time::sleep(std::time::Duration::from_millis(3200)).await;
                 }

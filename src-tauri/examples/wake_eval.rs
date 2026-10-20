@@ -5,6 +5,7 @@
 //!       [--threshold 0.68] [--kinds wake,negative,room] [--stage2] \
 //!       [--resources <dir containing oww/>] [--out wake_results.jsonl]
 //!       [--dsp legacy|aligned]    front-end chain (default legacy = shipped behaviour)
+//!       [--sweep 0.5,0.6,0.68,0.75]   also evaluate every clip at each threshold (for wake_calibrate.py)
 //!
 //!   cargo run --release --example wake_eval -- --selftest
 //!
@@ -52,11 +53,14 @@ async fn run(args: Vec<String>) -> i32 {
         }
     };
 
+    let sweep: Vec<f32> = arg(&args, "--sweep")
+        .map(|v| v.split(',').filter_map(|t| t.trim().parse::<f32>().ok()).collect())
+        .unwrap_or_default();
     let dsp = arg(&args, "--dsp").unwrap_or_else(|| "legacy".to_string());
     engine.set_dsp(&dsp);
 
     if flag(&args, "--selftest") {
-        return selftest(&mut engine, resources.as_deref(), threshold).await;
+        return selftest(&mut engine, resources.as_deref(), threshold, &sweep).await;
     }
 
     let (Some(manifest), Some(root)) = (arg(&args, "--manifest"), arg(&args, "--root")) else {
@@ -163,6 +167,25 @@ async fn run(args: Vec<String>) -> i32 {
                 tokio::time::sleep(std::time::Duration::from_millis(3200)).await;
             }
         }
+        if !sweep.is_empty() {
+            // Same clip, same real engine, once per threshold: lets the calibrator pick the
+            // operating point without re-running cargo for every candidate.
+            let mut by_thr = Map::new();
+            for &t in &sweep {
+                let entry = if kind == "room" {
+                    ve::reset_engine_state(&mut engine);
+                    let run = ve::run_wake_engine(&mut engine, &audio, Some(t));
+                    json!({ "n_fires": run.fires.len() })
+                } else {
+                    let v = ve::eval_wake_clip(&mut engine, &audio, Some(t));
+                    json!({ "fired": v.fired, "n_fires": v.n_fires })
+                };
+                by_thr.insert(format!("{t:.2}"), entry);
+            }
+            res.insert("sweep".into(), Value::Object(by_thr));
+            // Leave the engine at the requested operating point for the next clip.
+            engine.threshold = threshold.unwrap_or(engine.base_threshold);
+        }
         for (k, val) in res {
             row.insert(k, val);
         }
@@ -178,7 +201,7 @@ async fn run(args: Vec<String>) -> i32 {
 
 /// Positive-control sanity check with the bundled offline Piper voice.
 /// Synthetic voice: proves the harness can detect speech; NOT an accuracy number.
-async fn selftest(engine: &mut nexus_lib::voice_eval::WakeEngine, resources: Option<&Path>, thr: Option<f32>) -> i32 {
+async fn selftest(engine: &mut nexus_lib::voice_eval::WakeEngine, resources: Option<&Path>, thr: Option<f32>, sweep: &[f32]) -> i32 {
     let phrases = ["nexus", "hey nexus", "okay nexus", "next us", "lexus", "hello there", "open chrome"];
     let clips = match ve::synth_controls(resources, &phrases).await {
         Ok(c) => c,
@@ -190,7 +213,11 @@ async fn selftest(engine: &mut nexus_lib::voice_eval::WakeEngine, resources: Opt
     println!("{:<14} {:>7} {:>6} {:>8}", "phrase", "fired", "fires", "maxprob");
     for (phrase, audio) in clips {
         let v = ve::eval_wake_clip(engine, &audio, thr);
-        println!("{:<14} {:>7} {:>6} {:>8.3}", phrase, v.fired, v.n_fires, v.max_prob);
+        let swept: String = sweep
+            .iter()
+            .map(|&t| format!(" {t:.2}:{}", if ve::eval_wake_clip(engine, &audio, Some(t)).fired { "Y" } else { "-" }))
+            .collect();
+        println!("{:<14} {:>7} {:>6} {:>8.3}{swept}", phrase, v.fired, v.n_fires, v.max_prob);
     }
     println!("(synthetic Piper voice: a harness sanity check, not an accuracy measurement)");
     0

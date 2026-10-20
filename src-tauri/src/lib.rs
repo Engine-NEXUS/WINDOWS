@@ -1092,6 +1092,7 @@ pub fn run() {
             stt_learning::log_failed_transcript,
             stt_learning::log_successful_transcript,
             stt_learning::get_learned_corrections,
+            stt_learning::record_correction_hit,
             missed_intent_logger::get_missed_intents,
             command_executor::execute_command,
             intent_parser::parse_transcript,

@@ -496,6 +496,9 @@ fn pcm_to_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
 /// counts — reset on restart (rates, not absolutes, are the SLO).
 static FILTER_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static FILTER_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Turns whose raw transcript was already empty (nothing for the filter to do) -
+/// these used to be counted as filter hits, inflating the confabulation rate.
+static FILTER_EMPTY_RAW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Filter + count one transcript. Drop-in for `apply_hallucination_filter`
 /// at production call sites (tests keep calling the pure fn directly).
@@ -503,7 +506,10 @@ pub fn filter_transcript_counted(text: &str) -> String {
     use std::sync::atomic::Ordering;
     FILTER_TOTAL.fetch_add(1, Ordering::Relaxed);
     let out = apply_hallucination_filter(text);
-    if out.is_empty() {
+    if text.trim().is_empty() {
+        FILTER_EMPTY_RAW.fetch_add(1, Ordering::Relaxed);
+    } else if out.is_empty() {
+        // Real text turned into nothing: a hallucination caught (or a command lost).
         FILTER_HITS.fetch_add(1, Ordering::Relaxed);
     }
     out
@@ -518,6 +524,11 @@ pub fn hallucination_stats() -> (u64, u64) {
         FILTER_TOTAL.load(Ordering::Relaxed),
         FILTER_HITS.load(Ordering::Relaxed),
     )
+}
+
+/// Turns where STT itself returned nothing (not a filter decision).
+pub fn empty_raw_count() -> u64 {
+    FILTER_EMPTY_RAW.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// IPC: read the confabulation counters (SLO dashboard / `nexus check`).
@@ -791,6 +802,13 @@ mod tests {
         let (t1, h1) = hallucination_stats();
         assert_eq!(t1 - t0, 2, "two counted turns");
         assert_eq!(h1 - h0, 1, "one filter hit");
+        // An already-empty STT reply is not a filter decision.
+        let e0 = super::empty_raw_count();
+        assert_eq!(filter_transcript_counted(""), "");
+        assert_eq!(filter_transcript_counted("   "), "");
+        let (_, h2) = hallucination_stats();
+        assert_eq!(h2, h1, "empty raw replies must not count as filter hits");
+        assert_eq!(super::empty_raw_count() - e0, 2);
     }
 
     /// Turn-packet markers (approach A): reset → codes → wire strings.

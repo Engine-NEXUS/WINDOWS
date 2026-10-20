@@ -476,7 +476,10 @@ pub fn stage2_gate(transcript: &str, prob: f32) -> bool {
 /// Which STT engine produced a transcript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SttEngine {
+    /// Production cloud model (whisper-large-v3-turbo).
     Groq,
+    /// whisper-large-v3 - evaluation only, to measure what turbo costs.
+    GroqLarge,
     Local,
 }
 
@@ -501,12 +504,19 @@ pub async fn transcribe(
     client: &reqwest::Client,
 ) -> Result<String, String> {
     match engine {
-        SttEngine::Groq => {
+        SttEngine::Groq | SttEngine::GroqLarge => {
             let prompt = match bias {
                 Bias::Owner => Some(crate::stt_groq::NEXUS_VOCABULARY),
                 Bias::Commands => Some(crate::stt_groq::COMMAND_VOCABULARY),
                 Bias::Neutral => None,
             };
+            if engine == SttEngine::GroqLarge {
+                return crate::stt_groq::transcribe_with_groq_verbose_model(
+                    samples, groq_key, client, prompt, crate::stt_groq::GROQ_MODEL_LARGE,
+                )
+                .await
+                .map(|(t, _)| t);
+            }
             crate::stt_groq::transcribe_with_groq(samples, groq_key, client, prompt).await
         }
         SttEngine::Local => crate::stt::transcribe_local(samples, client).await,
@@ -578,14 +588,21 @@ pub async fn transcribe_verbose(
     client: &reqwest::Client,
 ) -> Result<(String, SegStats), String> {
     match engine {
-        SttEngine::Groq => {
+        SttEngine::Groq | SttEngine::GroqLarge => {
             let prompt = match bias {
                 Bias::Owner => Some(crate::stt_groq::NEXUS_VOCABULARY),
                 Bias::Commands => Some(crate::stt_groq::COMMAND_VOCABULARY),
                 Bias::Neutral => None,
             };
-            let (text, segs) =
-                crate::stt_groq::transcribe_with_groq_verbose(samples, groq_key, client, prompt).await?;
+            let model = if engine == SttEngine::GroqLarge {
+                crate::stt_groq::GROQ_MODEL_LARGE
+            } else {
+                crate::stt_groq::GROQ_MODEL_TURBO
+            };
+            let (text, segs) = crate::stt_groq::transcribe_with_groq_verbose_model(
+                samples, groq_key, client, prompt, model,
+            )
+            .await?;
             Ok((text, seg_stats(&segs)))
         }
         SttEngine::Local => Ok((crate::stt::transcribe_local(samples, client).await?, SegStats::default())),

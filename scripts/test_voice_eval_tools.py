@@ -17,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import voice_eval_set as vs  # noqa: E402
 import voice_scorecard as sc  # noqa: E402
+import wake_calibrate as wc  # noqa: E402
+import wake_audition as wa  # noqa: E402
 
 
 def write_wav(path, seconds=1.0, amp=3000, sr=16000):
@@ -68,6 +70,39 @@ class PlanTests(unittest.TestCase):
         phrases = {i["phrase"] for i in vs.build_plan("negative", "o", "s", "m")}
         for must in ("lexus", "next us", "nixes"):
             self.assertIn(must, phrases)
+
+
+class TrainPurposeTests(unittest.TestCase):
+    def test_train_plan_is_marked_and_limited(self):
+        plan = vs.build_plan("wake", "friend1", "s9", "mic", purpose="train")
+        self.assertEqual(len(plan), 90)
+        self.assertTrue(all(i["id"].startswith("trn-") and i["split"] == "train" for i in plan))
+        ev = {i["id"] for i in vs.build_plan("wake", "friend1", "s9", "mic")}
+        self.assertFalse(ev & {i["id"] for i in plan}, "ids never collide with the eval set")
+        with self.assertRaises(ValueError):
+            vs.build_plan("command", "a", "b", "c", purpose="train")
+        with self.assertRaises(ValueError):
+            vs.build_plan("wake", "a", "b", "c", purpose="bogus")
+
+    def test_train_audio_lands_where_the_trainer_reads_it(self):
+        root = Path("/x")
+        wake = vs.build_plan("wake", "f", "s", "m", purpose="train")[0]
+        neg = vs.build_plan("negative", "f", "s", "m", purpose="train")[0]
+        self.assertEqual(vs.audio_path(root, "train", wake, "f", "s"), root / "positive" / f"{wake['id']}.wav")
+        self.assertEqual(vs.audio_path(root, "train", neg, "f", "s"), root / "negative" / f"{neg['id']}.wav")
+        self.assertIn("audio", str(vs.audio_path(root, "eval", wake, "f", "s")))
+
+    def test_validate_keeps_the_two_sets_apart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            row = vs.build_plan("wake", "owner", "s1", "mic", purpose="train")[0]
+            row["audio"] = "positive/a.wav"
+            write_wav(Path(tmp) / row["audio"])
+            vs.append_manifest(Path(tmp) / "manifest.jsonl", row)
+            errors, _ = vs.validate(tmp, expected_split="train")
+            self.assertEqual(errors, [])
+            errors, _ = vs.validate(tmp)   # judged as the held-out set: must be refused
+            self.assertTrue(any("split='test'" in e for e in errors))
+            self.assertTrue(any("TRAINING recording" in e for e in errors))
 
 
 class ValidateTests(unittest.TestCase):
@@ -300,6 +335,106 @@ class ConfidenceSweepTests(unittest.TestCase):
         report, _ = sc.build_report([], self.rows())
         self.assertIn("Confidence gate calibration", report)
         self.assertIn("Safe to enable", report)
+
+
+def sweep_rows(neg_max=0.60):
+    """30 wake clips whose scores spread 0.5..0.95, 20 soundalikes up to neg_max, 2 h of room audio."""
+    ths = ["0.50", "0.60", "0.68", "0.76", "0.84"]
+    rows = []
+    for i in range(30):
+        score = 0.5 + 0.45 * i / 29
+        rows.append({"kind": "wake", "sweep": {t: {"fired": score >= float(t), "n_fires": 1} for t in ths}})
+    for i in range(20):
+        score = neg_max * i / 19
+        rows.append({"kind": "negative", "sweep": {t: {"fired": score >= float(t), "n_fires": 0} for t in ths}})
+    # room audio: noise bursts at 0.55 (x3) and 0.65 (x1)
+    fires = {"0.50": 4, "0.60": 1, "0.68": 0, "0.76": 0, "0.84": 0}
+    rows.append({"kind": "room", "duration_ms": 2 * 3600 * 1000,
+                 "sweep": {t: {"n_fires": fires[t]} for t in ths}})
+    return rows
+
+
+class CalibrateTests(unittest.TestCase):
+    def test_table_and_recommendation_pick_highest_recall_inside_budget(self):
+        tab = wc.table(sweep_rows())
+        by = {r["threshold"]: r for r in tab}
+        self.assertEqual(len(tab), 5)
+        self.assertEqual(by[0.50]["fires"], 4)
+        self.assertAlmostEqual(by[0.50]["fa_per_hour"], 2.0)
+        self.assertAlmostEqual(by[0.68]["hours"], 2.0)
+        self.assertGreater(by[0.50]["recall"], by[0.84]["recall"])
+        rec = wc.recommend(tab)
+        # 0.50/0.60 break the false-alarm budget; 0.68 is the highest-recall acceptable point.
+        self.assertEqual(rec["threshold"], 0.68)
+
+    def test_soundalike_budget_can_veto_a_threshold(self):
+        tab = wc.table(sweep_rows(neg_max=0.74))
+        rec = wc.recommend(tab, max_fa_per_hour=100.0, max_soundalike_fa=0.0)
+        self.assertEqual(rec["threshold"], 0.76)   # 0.68 lets a soundalike (0.74) through
+
+    def test_no_acceptable_threshold_and_missing_room_audio(self):
+        tab = wc.table(sweep_rows())
+        self.assertIsNone(wc.recommend([dict(r, fa_per_hour=9.0) for r in tab]))
+        no_room = [r for r in sweep_rows() if r["kind"] != "room"]
+        rec = wc.recommend(wc.table(no_room))
+        self.assertIsNotNone(rec, "without room audio the soundalike budget still decides")
+
+    def test_report_flags_uncertified_recommendations(self):
+        tab = wc.table(sweep_rows())
+        text = wc.render(tab, wc.recommend(tab), 0.125, 0.01)
+        self.assertIn("Recommended threshold: **0.68**", text)
+        self.assertIn("Not certified", text)   # 2 h of audio cannot prove 1 per 8 h
+
+
+class AuditionTests(unittest.TestCase):
+    def _tone(self, ms, amp=6000):
+        n = 16000 * ms // 1000
+        return [int(amp * math.sin(i / 7)) for i in range(n)]
+
+    def _silence(self, ms):
+        return [0] * (16000 * ms // 1000)
+
+    def test_split_utterances_finds_words_drops_clicks_and_caps_length(self):
+        a = (self._silence(500) + self._tone(600) + self._silence(1200) + self._tone(60)
+             + self._silence(1200) + self._tone(800) + self._silence(600))
+        segs = wa.split_utterances(a)
+        self.assertEqual(len(segs), 2, "two real words; the 60 ms click is dropped")
+        for s, e in segs:
+            self.assertGreater(e - s, 16000 * 600 // 1000)   # includes the padding
+        # a 9 s monologue is cut into pieces of <= 4 s (+ nothing lost)
+        long_segs = wa.split_utterances(self._silence(300) + self._tone(9000) + self._silence(600))
+        self.assertGreaterEqual(len(long_segs), 3)
+        self.assertTrue(all((e - s) <= 16000 * 4000 // 1000 for s, e in long_segs))
+        self.assertEqual(wa.split_utterances(self._silence(3000)), [])
+
+    def test_decisions_move_files_and_log_and_never_collide(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "positive").mkdir()
+            wa.write_wav(base / "positive" / "audition_0007.wav", self._tone(300))
+            src1, src2, src3 = base / "a.wav", base / "b.wav", base / "c.wav"
+            for p in (src1, src2, src3):
+                wa.write_wav(p, self._tone(300))
+            d1 = wa.apply_decision(src1, "p", base, now=1)
+            d2 = wa.apply_decision(src2, "n", base, now=2)
+            self.assertEqual(d1.name, "audition_0008.wav", "continues after the highest existing index")
+            self.assertEqual(d2.parent.name, "negative")
+            self.assertFalse(src1.exists() and src2.exists())
+            # skip / replay / garbage do nothing and never touch the file
+            for ans in ("s", "r", "x", ""):
+                self.assertIsNone(wa.apply_decision(src3, ans, base))
+            self.assertTrue(src3.exists())
+            log = [json.loads(l) for l in (base / "audition_log.jsonl").read_text().splitlines()]
+            self.assertEqual([r["decision"] for r in log], ["positive", "negative"])
+            counts, audited = wa.stats(base)
+            self.assertEqual((counts["positive"], counts["negative"], audited), (2, 1, 2))
+
+    def test_wav_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "x.wav"
+            wa.write_wav(p, self._tone(100))
+            sr, a = wa.read_wav(p)
+            self.assertEqual((sr, len(a)), (16000, 1600))
 
 
 if __name__ == "__main__":
