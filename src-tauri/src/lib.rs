@@ -28,6 +28,7 @@ mod tray;
 pub mod commands;
 mod command_executor;
 mod app_registry;
+pub mod wake_names;
 pub mod intent_parser;
 mod nlu_client;
 mod nlu_local;

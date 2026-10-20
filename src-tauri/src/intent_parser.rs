@@ -272,21 +272,13 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
 /// nothing remains — bare "hey nexus" stays a greeting, never strips
 /// to empty. Longest prefixes first; word-boundary required.
 fn strip_wake_prefix(text: &str) -> Option<String> {
-    const PREFIXES: &[&str] = &[
-        "hello nexus",
-        "okay nexus",
-        "hey nexus",
-        "ok nexus",
-        "hi nexus",
-        "nexus",
-    ];
     let mut current = text.trim();
     let mut stripped_any = false;
 
     loop {
         let mut found = false;
-        for prefix in PREFIXES {
-            if let Some(rest) = current.strip_prefix(prefix) {
+        for prefix in crate::wake_names::wake_prefixes() {
+            if let Some(rest) = current.strip_prefix(prefix.as_str()) {
                 // Word boundary check: string ended, whitespace, or punctuation (. , ! ? : - ;)
                 let after = rest.as_bytes().first().copied();
                 if after.is_none()
@@ -6568,6 +6560,37 @@ mod tests {
         assert_eq!(strip_wake_prefix("nexus"), None);
         assert_eq!(strip_wake_prefix("hey nexus"), None);
         assert_eq!(strip_wake_prefix(""), None);
+    }
+
+    /// STT writes the name many ways; the stripper shares the verifier's list
+    /// (`wake_names`), so every form the verifier accepts also strips.
+    #[test]
+    fn test_strip_wake_prefix_soundalike_forms() {
+        for (said, rest) in [
+            ("lexus open chrome", "open chrome"),
+            ("nixus open chrome", "open chrome"),
+            ("nexis, open chrome", "open chrome"),
+            ("nexxus open chrome", "open chrome"),
+            ("next us open chrome", "open chrome"),
+            ("next sis. open chrome", "open chrome"),
+            ("hey next us search for cats", "search for cats"),
+            ("okay lexus stop", "stop"),
+            ("nexus. nexus open chrome", "open chrome"),
+        ] {
+            assert_eq!(strip_wake_prefix(said), Some(rest.to_string()), "{said}");
+        }
+        // Word boundary still required; ordinary speech is untouched.
+        for keep in ["next usb drive", "nexuses are", "texas open chrome", "next song", "next is open chrome", "lexington"] {
+            assert_eq!(strip_wake_prefix(keep), None, "{keep}");
+        }
+        for (said, label) in [
+            ("lexus open chrome", "open_app"),
+            ("next us open chrome", "open_app"),
+            ("hey nixus search for cats", "search"),
+            ("next sis ghost mode", "enter_ghost_control"),
+        ] {
+            assert_eq!(wake_matrix_label(said), label, "{said}");
+        }
     }
 
     #[test]

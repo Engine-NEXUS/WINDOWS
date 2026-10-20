@@ -1939,19 +1939,8 @@ pub fn verify_transcript(text: &str) -> bool {
     verify_transcript_gated(text, 1.0)
 }
 
-/// Transcript words that always confirm, at any stage-1 probability.
-/// (The bare word fires whether whispered or shouted.)
-const VERIFY_EXACT_WORDS: &[&str] = &["nexus"];
-/// Near-matches (STT confusions within phoneme-edit-distance ~1, measured on
-/// 30 owner takes + 100-combo matrix: lexus 37%, NIXUS/NIXIS dominant spellings
-/// (K02/K06/K10/BN05/BN11/A20), nexat/nexo truncations, nexas/nekus artifacts).
-/// Require stage-1 prob ≥ 0.6 (two-key) — no single weak signal wakes alone.
-/// Deliberately EXCLUDES texas/next/access (constant on news/TV — accepting
-/// them would reopen the FA gate v30+verifier just closed).
-const VERIFY_NEAR_WORDS: &[&str] = &[
-    "lexus", "nexis", "nixus", "nixis", "nexas", "nexuss", "nekus", "lexis",
-    "nexat", "nexo", "nexos", "nex", "knex", "mexus", "mexis",
-];
+// Name forms (exact vs near, incl. split pairs like "next us") live in
+// `crate::wake_names`, shared with `intent_parser::strip_wake_prefix`.
 /// Stage-1 probability floor for near-matches.
 pub const VERIFY_NEAR_PROB_FLOOR: f32 = 0.6;
 
@@ -1964,20 +1953,16 @@ fn transcript_words(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Two-key transcript gate: exact words fire at any probability;
-/// near-matches additionally require `prob >= VERIFY_NEAR_PROB_FLOOR`.
-/// Pure function (unit-tested).
+/// Two-key transcript gate: the exact name fires at any probability;
+/// near forms (`wake_names::NEAR_WORDS` / `NEAR_PAIRS`) additionally require
+/// `prob >= VERIFY_NEAR_PROB_FLOOR`. Pure function (unit-tested).
 pub fn verify_transcript_gated(text: &str, prob: f32) -> bool {
-    let words = transcript_words(text);
-    if words.iter().any(|w| VERIFY_EXACT_WORDS.contains(&w.as_str())) {
-        return true;
+    use crate::wake_names::{classify, NameMatch};
+    match classify(&transcript_words(text)) {
+        NameMatch::Exact => true,
+        NameMatch::Near => prob >= VERIFY_NEAR_PROB_FLOOR,
+        NameMatch::None => false,
     }
-    if prob >= VERIFY_NEAR_PROB_FLOOR
-        && words.iter().any(|w| VERIFY_NEAR_WORDS.contains(&w.as_str()))
-    {
-        return true;
-    }
-    false
 }
 
 /// Confidence veto threshold: suppress only when EVERY segment looks like
@@ -4906,7 +4891,9 @@ mod tests {
         for text in [
             "",
             "   ",
-            "next us",
+            "next is the budget",
+            "next test",
+            "texas",
             "thank you for watching",
             "alexa play music",
             "ok google",
@@ -4978,6 +4965,10 @@ mod tests {
             "LEXUS",
             "nexo",
             "hey nixus",
+            "next us",
+            "Next, sis.",
+            "nexxus",
+            "nixes",
         ] {
             assert!(
                 !super::verify_transcript_gated(word, 0.59),
@@ -5001,7 +4992,9 @@ mod tests {
             "texas",
             "hey texas",
             "next",
-            "next us",
+            // "next us" is a *near* form since B4 (owner "nexus" is often heard
+            // that way): it needs prob >= 0.6, so it never fires at 0.59 — see
+            // test_gated_near_needs_high_prob.
             "next episode",
             "hey alexis", // whole-word: "alexis" != "lexis"
             "thank you",
