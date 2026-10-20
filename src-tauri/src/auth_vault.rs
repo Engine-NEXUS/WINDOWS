@@ -590,6 +590,18 @@ pub fn set_primary_google_account(email: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Tests that touch the Google account registry (a process-wide cache plus the mock keychain) take turns, and each
+/// starts from an empty registry, so one test's accounts can never leak into another's.
+#[cfg(test)]
+pub(crate) fn lock_accounts_for_test() -> std::sync::MutexGuard<'static, ()> {
+    static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    for a in get_google_accounts() {
+        let _ = remove_google_account(&a.email);
+    }
+    g
+}
+
 /// Disconnect and remove a Google account and its tokens.
 pub fn remove_google_account(email: &str) -> Result<(), String> {
     let mut accounts = get_google_accounts();
@@ -717,6 +729,7 @@ mod tests {
 
     #[test]
     fn google_account_registry_roundtrip_and_primary_switch() {
+        let _g = lock_accounts_for_test();
         let prof1 = GoogleAccountProfile {
             email: "user1@gmail.com".into(),
             name: "User One".into(),

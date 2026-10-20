@@ -18,8 +18,8 @@ Stars = % / 20 in half steps. Verdict: **Production** >= 80, **Beta** 65-79, **A
 
 ## Headline
 
-- 64 features scored. Average **68%**.
-- Production: **7**, Beta: **34**, Alpha: **20**, Prototype: **3**.
+- 63 features scored. Average **69%**.
+- Production: **7**, Beta: **37**, Alpha: **17**, Prototype: **2**.
 - Repository size: 191 Rust modules, ~134,700 lines, 2,029 Rust test annotations (23 ignored dev benches), 362 frontend test cases in 45 files, 11 Worker test files, 9 Python test files, 176 change records, 180 feature docs, 382 commits.
 - The dominant weakness across the whole project is not missing code, it is *unverified in the running app* (see the L column).
 
@@ -27,13 +27,13 @@ Stars = % / 20 in half steps. Verdict: **Production** >= 80, **Beta** 65-79, **A
 
 | Area | Features | Avg % | Stars | Avg live-verified (L) |
 |---|---|---|---|---|
-| Voice front end | 15 | 66% | ★★★½☆ | 50% |
+| Voice front end | 14 | 69% | ★★★½☆ | 52% |
 | Understanding | 6 | 71% | ★★★½☆ | 54% |
 | Desktop control | 11 | 69% | ★★★½☆ | 47% |
 | Agent control | 8 | 70% | ★★★½☆ | 42% |
 | Memory and proactive | 10 | 62% | ★★★☆☆ | 20% |
-| Integrations | 8 | 71% | ★★★½☆ | 53% |
-| Platform and quality | 6 | 69% | ★★★½☆ | 54% |
+| Integrations | 8 | 73% | ★★★½☆ | 53% |
+| Platform and quality | 6 | 70% | ★★★½☆ | 54% |
 
 ## Full table
 
@@ -41,21 +41,20 @@ Stars = % / 20 in half steps. Verdict: **Production** >= 80, **Beta** 65-79, **A
 
 | Feature | Tests | B | T | L | S | I | Score | Stars | Verdict | Evidence / gap |
 |---|---|---|---|---|---|---|---|---|---|---|
+| Cloud STT (Groq Whisper turbo) + hallucination filter | 60 | 100 | 85 | 85 | 88 | 80 | **88%** | ★★★★½ | Production | Routing extracted and tested (privacy mode never reaches a cloud step); fixed empty-buffer upload and NaN energy; Deepgram key now honoured by the main entry point; provider-side audio rejection still falls back to local. |
 | TTS online (Edge, persistent connection) | 44 tests | 100 | 70 | 90 | 80 | 85 | **86%** | ★★★★½ | Production | 409 ms median per short line, 290 ms after wake pre-warm; ~2.6 s end of speech to first audio for a cloud reply. |
 | Global hotkey Ctrl+Space (call / cancel) | 5 | 100 | 75 | 85 | 85 | 80 | **85%** | ★★★★½ | Production | Cancel/call decision extracted and checked for all 16 states; stale doc comment rewritten. |
-| Cloud STT (Groq Whisper turbo) + hallucination filter | 29 tests | 100 | 75 | 85 | 80 | 80 | **84%** | ★★★★☆ | Production | Sits on the industry curve (~4-5% WER clean English). ~240 ms end to end. |
 | Voice personas + offline twin swap | 31 tests | 95 | 75 | 55 | 85 | 70 | **74%** | ★★★½☆ | Beta | Pinned hashes, latest-wins queue. Audition by ear not done. |
+| Local STT fallback (Moonshine) | python sidecar | 90 | 70 | 60 | 75 | 75 | **72%** | ★★★½☆ | Beta | Fallback decisions tested; airplane-mode walkthrough still to do. |
+| Orb UI and turn lifecycle | vitest | 100 | 72 | 60 | 65 | 65 | **72%** | ★★★½☆ | Beta | Store transitions, thinking dwell and watchdog inputs now tested; the 50-turn soak is still needed. |
 | Wake word "NEXUS" (openWakeWord, own model) | 64 tests, replay harness | 100 | 90 | 55 | 75 | 40 | **72%** | ★★★½☆ | Beta | Works live, but the honest held-out measure is recall 63.2% (quiet 3/10, far 15/25) and ~12 false fires/h on real background; the 98.6% figure was self-scored on training data. Target is >=95% at <=0.1/h. |
-| Captions (word-by-word, black capsule) | vitest | 100 | 60 | 55 | 70 | 70 | **70%** | ★★★½☆ | Beta | Estimated (not real) word timing on the offline voice. |
-| Orb UI and turn lifecycle | vitest | 100 | 55 | 60 | 65 | 65 | **68%** | ★★★½☆ | Beta | 'Stuck orb' class of bug recurred 6+ times; each fix partly unverified live. |
-| Local STT fallback (Moonshine) | python sidecar | 90 | 40 | 60 | 75 | 75 | **66%** | ★★★½☆ | Beta | 6.65-7.84% WER; lazy sidecar; only used offline. |
+| Captions (word-by-word, black capsule) | vitest | 100 | 70 | 55 | 70 | 70 | **72%** | ★★★½☆ | Beta | Estimated (not real) word timing on the offline voice. |
+| Directed-speech gate (TV / side-talk filter) | 27 + 145-line corpus | 100 | 80 | 35 | 82 | 55 | **67%** | ★★★½☆ | Beta | 145-line corpus: noise rejected 98.7%; fixed 'tell him I'll call back' being accepted (tell now needs me/us/nexus/an agent). Corpus was written by the engineer, so still optimistic. Needs the 30-minute live TV test. |
 | TTS offline (Kokoro-82M) | 27 tests | 90 | 70 | 50 | 80 | 50 | **66%** | ★★★½☆ | Beta | Real-time on CPU only (RTF 0.7-2.4); deliberately NOT the live voice. |
-| Directed-speech gate (TV / side-talk filter) | 15 tests | 100 | 65 | 35 | 75 | 50 | **62%** | ★★★☆☆ | Alpha | Replay ignored 72/96 of a real noise log (75%); rules written after reading the same log, so optimistic. No live TV test. |
 | Endpointing / VAD / turn detection | 5 tests | 90 | 45 | 55 | 60 | 50 | **60%** | ★★★☆☆ | Alpha | Adaptive 240-800 ms; age-bias (older speakers cut off) unmeasured. |
 | Wake-up sound | 11 tests | 100 | 65 | 10 | 80 | 60 | **57%** | ★★★☆☆ | Alpha | Nothing audible has been heard yet. |
 | Boot hello / shutdown flow / resume hello | mixed | 100 | 50 | 25 | 70 | 60 | **57%** | ★★★☆☆ | Alpha | Built in two rounds; nothing run live after rebuild. |
-| Streaming partial captions (Deepgram, optional) | 3 tests | 80 | 25 | 20 | 60 | 60 | **45%** | ★★☆☆☆ | Prototype | Optional, needs a key; stream module has no tests. |
-| Speaker verification / owner check | 14 tests | 60 | 50 | 10 | 50 | 30 | **37%** | ★★☆☆☆ | Prototype | Wired, off by default, fail-open; enrolment model (G1) not built. |
+| Speaker verification / owner check | 14 tests | 75 | 55 | 10 | 50 | 30 | **41%** | ★★☆☆☆ | Prototype | Enrolment exists in the setup wizard (not in the Command Hub) and the gate is wired, but speakerVerification is off and no voice profile exists on this PC. Needs your enrolment and a false-accept/reject measurement. |
 
 ### Understanding
 
@@ -75,14 +74,14 @@ Stars = % / 20 in half steps. Verdict: **Production** >= 80, **Beta** 65-79, **A
 | Action Kernel (voice file control, quarantine delete, undo) | 53 | 100 | 90 | 45 | 95 | 75 | **77%** | ★★★★☆ | Beta | Spoken grammar -> confirm -> trash -> undo on real folders (unicode, long names, clashes, forbidden places, wrong origin). Still needs: one spoken delete and undo by voice (W3). |
 | Open / close / focus apps | 15+ tests | 100 | 55 | 80 | 75 | 70 | **77%** | ★★★★☆ | Beta | Used constantly; duplicate-window bug fixed. |
 | Window tiling + display off | 21 pure + 2 live | 100 | 85 | 55 | 88 | 60 | **76%** | ★★★★☆ | Beta | Real proof: 3 own windows tiled into exact 640px columns (0-640-1280-1920) and display_off returned Ok. Still needs: the finish sequence on real agent windows, the screen actually going dark seen by the owner, an elevated window skip (W1). |
+| Shortcut map + action router | 55 | 90 | 85 | 45 | 95 | 70 | **73%** | ★★★½☆ | Beta | 16 new tests: seed validity, precedence for 5 real app cases, terminals never inherit Ctrl+C/Z/S/X/A/Y, router gates and call order. No wrong chord found in the seed. Tested on Notepad only live. |
 | Ghost mode (voice drives the PC) | 16+ tests | 100 | 65 | 60 | 85 | 55 | **72%** | ★★★½☆ | Beta | Keyboard-first is where the industry is reliable (>=89%); cursor/vision clicks sit in a 20-55% band. |
 | Dictation (type what I say) | 20 + 156-pair corpus | 95 | 90 | 40 | 85 | 65 | **72%** | ★★★½☆ | Beta | 156-pair spoken->written corpus gates the cleaner. Known quirks: 'one dollar' -> '1 dollars', proper nouns stay lowercase. Still needs real dictation into apps (W3). |
-| Shortcut map + action router | 28 tests | 90 | 65 | 45 | 95 | 70 | **69%** | ★★★½☆ | Beta | Wrong-window = nothing sent; tested on Notepad only. |
 | Hand mode (camera pointer) | 80+ tests | 95 | 70 | 55 | 85 | 45 | **69%** | ★★★½☆ | Beta | Pinch 'almost perfect' per owner; gestures, multi-monitor, macOS not run; camera 15 fps on battery. |
 | Music control (Spotify / Apple Music) | 10 tests, 5 mutations | 95 | 75 | 35 | 85 | 65 | **67%** | ★★★½☆ | Beta | Fixed R&B / multi-word titles (cmd start quoting), no more false 'playing' claim or stray pause key, honest 'not installed', bare 'play <title>' now understood. Still needs a spoken Spotify run (W3). |
 | Live mode: WhatsApp / browser flows | 45 | 90 | 75 | 45 | 80 | 45 | **65%** | ★★★½☆ | Beta | State machine, safety layer and WhatsApp name/number logic tested (case-insensitive tool matching, name cleaning keeps the spoken name as a last candidate). Still needs the current WhatsApp build run (W3). |
 | Screen analysis / narrated tour | 48 tests | 95 | 70 | 30 | 75 | 50 | **61%** | ★★★☆☆ | Alpha | Gemini box accuracy and 125/150% scaling not verified. |
-| Vision-grounded click | 43 tests | 85 | 60 | 25 | 70 | 40 | **53%** | ★★½☆☆ | Alpha | No measured accuracy on real screens; calibration results never recorded. |
+| Vision-grounded click | 43 tests | 85 | 66 | 25 | 70 | 40 | **54%** | ★★½☆☆ | Alpha | Measurement harness written (UIA ground truth vs the vision model, kept in the working tree with other uncommitted vision work); NOT run: it sends a screenshot of the whole screen to a cloud provider, so it needs a clean desktop. Found: Groq vision models are decommissioned, so auto uses Gemini only. |
 
 ### Agent control
 
@@ -119,10 +118,10 @@ Stars = % / 20 in half steps. Verdict: **Production** >= 80, **Beta** 65-79, **A
 | Cloudflare Worker | 145 tests | 100 | 80 | 75 | 85 | 75 | **82%** | ★★★★☆ | Production |  |
 | GitHub commands (PRs, merge, review) | 61 tests | 100 | 85 | 70 | 85 | 70 | **81%** | ★★★★☆ | Production |  |
 | Architecture mapper | 42 | 100 | 85 | 70 | 78 | 68 | **80%** | ★★★★☆ | Beta | 23 new pure tests; fixed .git suffix handling, API routes classified as server code (pages/api), deterministic tie-break. Network error mapping is still inline. |
+| Maps / Places / Directions | 20 | 95 | 75 | 55 | 80 | 68 | **73%** | ★★★½☆ | Beta | Fixed: # and % and non-ASCII were not encoded in map URLs (apartment #4 truncated the query); empty/long addresses and HTTP errors now give speakable errors. |
+| Google accounts + OAuth | 45 | 95 | 80 | 40 | 92 | 68 | **71%** | ★★★½☆ | Beta | Found and fixed: the sign-in callback never checked the OAuth state (code injection/CSRF) and treated /favicon.ico as a callback; disconnecting the last account left the legacy token. Not run: a real sign-in with the owner's client. |
 | MCP connect system (Swiggy, Amazon, WhatsApp) | 28 tests | 100 | 75 | 40 | 85 | 70 | **70%** | ★★★½☆ | Beta | Swiggy production needs approval; bridges not running here. |
 | Activity Manager (app-only history) | 13 tests, 8 mutations killed | 90 | 80 | 40 | 92 | 55 | **68%** | ★★★½☆ | Beta | Hardened (substring privacy list incl. keepassxc, rollback on failed save, tested sealed round-trip/tamper/expiry); real foreground+idle read verified. Still needs: a real 1-hour opted-in run and the Hub toggle used by the owner (W1). |
-| Maps / Places / Directions | 8 tests | 95 | 45 | 55 | 70 | 65 | **65%** | ★★★☆☆ | Alpha | Both keys verified once. |
-| Google accounts + OAuth | ~40 tests | 95 | 45 | 40 | 80 | 65 | **62%** | ★★★☆☆ | Alpha | Needs the user's own OAuth client; Testing-mode token expires in 7 days. |
 | Device Links (phone / laptop pairing) | 145 Worker tests share | 75 | 70 | 35 | 85 | 60 | **61%** | ★★★☆☆ | Alpha | Local Wrangler + D1 verified; no live SMS or two-laptop run. |
 
 ### Platform and quality
@@ -130,9 +129,9 @@ Stars = % / 20 in half steps. Verdict: **Production** >= 80, **Beta** 65-79, **A
 | Feature | Tests | B | T | L | S | I | Score | Stars | Verdict | Evidence / gap |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Security: keychain, PII filter, sealed memory | 30 | 100 | 82 | 50 | 95 | 78 | **77%** | ★★★★☆ | Beta | Plaintext API keys (5 found in settings.json) are now moved to the keychain and blanked at startup, verified by read-back; readers are keychain-first; import replaces. Still needs the first real startup scrub and a restart check. |
+| Command Hub / settings UI | frontend 507 total | 100 | 78 | 65 | 70 | 70 | **76%** | ★★★★☆ | Beta | Hub models, store and boundary tests added (about 140 frontend tests this session). No component render tests: the repo has no React testing library. |
 | Resource footprint (RAM / CPU / battery) | measured | 100 | 40 | 80 | 75 | 80 | **75%** | ★★★★☆ | Beta | Idle 104-269 MB; Kokoro +368 MB when loaded. |
 | TTS volume lease / restore | 14 tests | 100 | 70 | 55 | 85 | 75 | **74%** | ★★★½☆ | Beta |  |
-| Command Hub / settings UI | vitest | 100 | 60 | 65 | 70 | 70 | **72%** | ★★★½☆ | Beta | Visual match to design not verified at 400 px. |
 | CI gates: dead code, IPC, turn-end, hygiene | scripts | 95 | 70 | 40 | 85 | 75 | **69%** | ★★★½☆ | Beta | Gates fail on unrelated concurrent items; the GitHub workflow itself never run. |
 | Installer / release pipeline | - | 70 | 30 | 35 | 60 | 50 | **47%** | ★★½☆☆ | Prototype | NSIS broken locally; MSI built; start-menu shortcut points at a stale exe. |
 
@@ -171,11 +170,10 @@ Stars = % / 20 in half steps. Verdict: **Production** >= 80, **Beta** 65-79, **A
 
 | Feature | Score | Main reason |
 |---|---|---|
-| Speaker verification / owner check | 37% | Wired, off by default, fail-open; enrolment model (G1) not built. |
-| Streaming partial captions (Deepgram, optional) | 45% | Optional, needs a key; stream module has no tests. |
+| Speaker verification / owner check | 41% | Enrolment exists in the setup wizard (not in the Command Hub) and the gate is wired, but speakerVerification is off and no voice profile exists on this PC. Needs your enrolment and a false-accept/reject measurement. |
 | Installer / release pipeline | 47% | NSIS broken locally; MSI built; start-menu shortcut points at a stale exe. |
 | WhatsApp priority people (read-only) | 52% | OFF by default; read-receipt side effects unknown. |
-| Vision-grounded click | 53% | No measured accuracy on real screens; calibration results never recorded. |
+| Vision-grounded click | 54% | Measurement harness written (UIA ground truth vs the vision model, kept in the working tree with other uncommitted vision work); NOT run: it sends a screenshot of the whole screen to a cloud provider, so it needs a clean desktop. Found: Groq vision models are decommissioned, so auto uses Gemini only. |
 | Agent watch sidecar (spawn + watch CLIs) | 55% | Real PTY spawn verified once (Claude); others not installed here. |
 | Proactive-speech policy | 56% | Thresholds are hypotheses; nothing emits a Critical alert yet. |
 | Leave-by reminders | 56% | Logic split into pure tested functions; route lookups no longer retried every minute after a failure. Still needs a real calendar event with an address (W4). |
@@ -183,11 +181,13 @@ Stars = % / 20 in half steps. Verdict: **Production** >= 80, **Beta** 65-79, **A
 | Boot hello / shutdown flow / resume hello | 57% | Built in two rounds; nothing run live after rebuild. |
 | Track all agents (announce each, summary) | 59% | Built today; no multi-agent live run. |
 | Profile, corrections, routines, review, curator | 59% | Review never run against a real model; routines have no history yet. |
+| Important-mail watcher + triage | 60% | No Google account connected at test time. |
 
 ## Out of the current target (decision recorded)
 
 | Feature | Score | Why it is out |
 |---|---|---|
+| Streaming partial captions (Deepgram, optional) | 45% | D4: optional streaming captions needing a paid key; revisit if wanted |
 | Admin brain (Qwen, admin only) | 50% | D2: compiled out of family builds; scored only for the admin build |
 | Administrator control | 30% | D2: administrator access is closed by the owner until enrolment and verification are built |
 | macOS / Linux parity | 23% | D1: Windows 1.0 target only; macOS/Linux is its own programme and needs a Mac |

@@ -24,24 +24,24 @@
  {
   "area": "Voice front end",
   "feature": "Cloud STT (Groq Whisper turbo) + hallucination filter",
-  "tests": "29 tests",
+  "tests": "60",
   "B": 100,
-  "T": 75,
+  "T": 85,
   "L": 85,
-  "S": 80,
+  "S": 88,
   "I": 80,
-  "note": "Sits on the industry curve (~4-5% WER clean English). ~240 ms end to end."
+  "note": "Routing extracted and tested (privacy mode never reaches a cloud step); fixed empty-buffer upload and NaN energy; Deepgram key now honoured by the main entry point; provider-side audio rejection still falls back to local."
  },
  {
   "area": "Voice front end",
   "feature": "Local STT fallback (Moonshine)",
   "tests": "python sidecar",
   "B": 90,
-  "T": 40,
+  "T": 70,
   "L": 60,
   "S": 75,
   "I": 75,
-  "note": "6.65-7.84% WER; lazy sidecar; only used offline."
+  "note": "Fallback decisions tested; airplane-mode walkthrough still to do."
  },
  {
   "area": "Voice front end",
@@ -52,7 +52,9 @@
   "L": 20,
   "S": 60,
   "I": 60,
-  "note": "Optional, needs a key; stream module has no tests."
+  "note": "Optional, needs a key; stream module has no tests.",
+  "scope": "out",
+  "scope_reason": "D4: optional streaming captions needing a paid key; revisit if wanted"
  },
  {
   "area": "Voice front end",
@@ -68,24 +70,24 @@
  {
   "area": "Voice front end",
   "feature": "Directed-speech gate (TV / side-talk filter)",
-  "tests": "15 tests",
+  "tests": "27 + 145-line corpus",
   "B": 100,
-  "T": 65,
+  "T": 80,
   "L": 35,
-  "S": 75,
-  "I": 50,
-  "note": "Replay ignored 72/96 of a real noise log (75%); rules written after reading the same log, so optimistic. No live TV test."
+  "S": 82,
+  "I": 55,
+  "note": "145-line corpus: noise rejected 98.7%; fixed 'tell him I'll call back' being accepted (tell now needs me/us/nexus/an agent). Corpus was written by the engineer, so still optimistic. Needs the 30-minute live TV test."
  },
  {
   "area": "Voice front end",
   "feature": "Speaker verification / owner check",
   "tests": "14 tests",
-  "B": 60,
-  "T": 50,
+  "B": 75,
+  "T": 55,
   "L": 10,
   "S": 50,
   "I": 30,
-  "note": "Wired, off by default, fail-open; enrolment model (G1) not built."
+  "note": "Enrolment exists in the setup wizard (not in the Command Hub) and the gate is wired, but speakerVerification is off and no voice profile exists on this PC. Needs your enrolment and a false-accept/reject measurement."
  },
  {
   "area": "Voice front end",
@@ -125,7 +127,7 @@
   "feature": "Captions (word-by-word, black capsule)",
   "tests": "vitest",
   "B": 100,
-  "T": 60,
+  "T": 70,
   "L": 55,
   "S": 70,
   "I": 70,
@@ -136,11 +138,11 @@
   "feature": "Orb UI and turn lifecycle",
   "tests": "vitest",
   "B": 100,
-  "T": 55,
+  "T": 72,
   "L": 60,
   "S": 65,
   "I": 65,
-  "note": "'Stuck orb' class of bug recurred 6+ times; each fix partly unverified live."
+  "note": "Store transitions, thinking dwell and watchdog inputs now tested; the 50-turn soak is still needed."
  },
  {
   "area": "Voice front end",
@@ -268,13 +270,13 @@
  {
   "area": "Desktop control",
   "feature": "Shortcut map + action router",
-  "tests": "28 tests",
+  "tests": "55",
   "B": 90,
-  "T": 65,
+  "T": 85,
   "L": 45,
   "S": 95,
   "I": 70,
-  "note": "Wrong-window = nothing sent; tested on Notepad only."
+  "note": "16 new tests: seed validity, precedence for 5 real app cases, terminals never inherit Ctrl+C/Z/S/X/A/Y, router gates and call order. No wrong chord found in the seed. Tested on Notepad only live."
  },
  {
   "area": "Desktop control",
@@ -314,11 +316,11 @@
   "feature": "Vision-grounded click",
   "tests": "43 tests",
   "B": 85,
-  "T": 60,
+  "T": 66,
   "L": 25,
   "S": 70,
   "I": 40,
-  "note": "No measured accuracy on real screens; calibration results never recorded."
+  "note": "Measurement harness written (UIA ground truth vs the vision model, kept in the working tree with other uncommitted vision work); NOT run: it sends a screenshot of the whole screen to a cloud provider, so it needs a clean desktop. Found: Groq vision models are decommissioned, so auto uses Gemini only."
  },
  {
   "area": "Desktop control",
@@ -598,24 +600,24 @@
  {
   "area": "Integrations",
   "feature": "Google accounts + OAuth",
-  "tests": "~40 tests",
+  "tests": "45",
   "B": 95,
-  "T": 45,
+  "T": 80,
   "L": 40,
-  "S": 80,
-  "I": 65,
-  "note": "Needs the user's own OAuth client; Testing-mode token expires in 7 days."
+  "S": 92,
+  "I": 68,
+  "note": "Found and fixed: the sign-in callback never checked the OAuth state (code injection/CSRF) and treated /favicon.ico as a callback; disconnecting the last account left the legacy token. Not run: a real sign-in with the owner's client."
  },
  {
   "area": "Integrations",
   "feature": "Maps / Places / Directions",
-  "tests": "8 tests",
+  "tests": "20",
   "B": 95,
-  "T": 45,
+  "T": 75,
   "L": 55,
-  "S": 70,
-  "I": 65,
-  "note": "Both keys verified once."
+  "S": 80,
+  "I": 68,
+  "note": "Fixed: # and % and non-ASCII were not encoded in map URLs (apartment #4 truncated the query); empty/long addresses and HTTP errors now give speakable errors."
  },
  {
   "area": "Integrations",
@@ -699,13 +701,13 @@
  {
   "area": "Platform and quality",
   "feature": "Command Hub / settings UI",
-  "tests": "vitest",
+  "tests": "frontend 507 total",
   "B": 100,
-  "T": 60,
+  "T": 78,
   "L": 65,
   "S": 70,
   "I": 70,
-  "note": "Visual match to design not verified at 400 px."
+  "note": "Hub models, store and boundary tests added (about 140 frontend tests this session). No component render tests: the repo has no React testing library."
  },
  {
   "area": "Platform and quality",

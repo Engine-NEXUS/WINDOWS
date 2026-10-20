@@ -265,10 +265,13 @@ mod tests {
         sent: RefCell<Vec<String>>,
         send_err: Option<String>,
         stop: Cell<bool>,
+        stop_after_decision: Cell<bool>,
         self_elev: bool,
         protected_exe: Option<&'static str>,
+        protected_title: Option<&'static str>,
         clock: Cell<u64>,
         fg_calls: Cell<usize>,
+        call_log: RefCell<Vec<String>>,
     }
 
     fn win(exe: &str, title: &str, hwnd: isize) -> Foreground {
@@ -282,10 +285,13 @@ mod tests {
                 sent: RefCell::new(vec![]),
                 send_err: None,
                 stop: Cell::new(false),
+                stop_after_decision: Cell::new(false),
                 self_elev: false,
                 protected_exe: None,
+                protected_title: None,
                 clock: Cell::new(0),
                 fg_calls: Cell::new(0),
+                call_log: RefCell::new(vec![]),
             }
         }
         /// The same window forever.
@@ -295,15 +301,20 @@ mod tests {
         fn sent(&self) -> Vec<String> {
             self.sent.borrow().clone()
         }
+        fn calls(&self) -> Vec<String> {
+            self.call_log.borrow().clone()
+        }
     }
 
     impl Env for FakeEnv {
         fn foreground(&self) -> Option<Foreground> {
             self.fg_calls.set(self.fg_calls.get() + 1);
+            self.call_log.borrow_mut().push("foreground".to_string());
             let mut q = self.fg.borrow_mut();
             if q.len() > 1 { q.remove(0) } else { q[0].clone() }
         }
         fn send(&self, chord: &Chord) -> Result<(), String> {
+            self.call_log.borrow_mut().push(format!("send({})", chord.display()));
             if let Some(e) = &self.send_err {
                 return Err(e.clone());
             }
@@ -311,19 +322,31 @@ mod tests {
             Ok(())
         }
         fn sleep_ms(&self, ms: u64) {
+            self.call_log.borrow_mut().push(format!("sleep({ms})"));
             self.clock.set(self.clock.get() + ms);
         }
         fn now_ms(&self) -> u64 {
             self.clock.get()
         }
         fn stop_requested(&self) -> bool {
+            if self.stop_after_decision.get() && self.fg_calls.get() > 1 {
+                return true;
+            }
             self.stop.get()
         }
         fn self_elevated(&self) -> bool {
             self.self_elev
         }
-        fn is_protected(&self, exe: &str, _title: &str) -> bool {
-            self.protected_exe.map(|p| p == exe).unwrap_or(false)
+        fn is_protected(&self, exe: &str, title: &str) -> bool {
+            if self.protected_exe.map(|p| p == exe).unwrap_or(false) {
+                return true;
+            }
+            if let Some(needle) = self.protected_title {
+                if title.to_ascii_lowercase().contains(&needle.to_ascii_lowercase()) {
+                    return true;
+                }
+            }
+            false
         }
     }
 
@@ -584,5 +607,346 @@ mod tests {
             spoken(Action::Refresh, None, &Outcome::NoBinding { known_app: true, exe: "notepad.exe".into() }).unwrap_err(),
             "Notepad has no refresh shortcut, sir."
         );
+    }
+
+    #[test]
+    fn wrong_foreground_at_recheck_swapped_app_or_hwnd_or_gone() {
+        // Sub-case 1: Application exe changed before send.
+        let env_app_changed = FakeEnv::new(vec![
+            Some(win("brave.exe", "Inbox", 10)),
+            Some(win("code.exe", "editor.rs", 20)),
+        ]);
+        let out = run(&env_app_changed, &SEED, Action::NewTab, None);
+        assert_eq!(
+            out,
+            Outcome::Aborted(Abort::ForegroundChanged {
+                expected: "brave.exe".into(),
+                actual: "code.exe".into(),
+            })
+        );
+        assert!(env_app_changed.sent().is_empty());
+        assert_eq!(
+            spoken(Action::NewTab, None, &out).unwrap_err(),
+            "The window changed, I pressed nothing, sir."
+        );
+
+        // Sub-case 2: Window handle changed (different window of same app).
+        let env_hwnd_changed = FakeEnv::new(vec![
+            Some(win("brave.exe", "Tab 1", 10)),
+            Some(win("brave.exe", "Tab 2", 11)),
+        ]);
+        let out = run(&env_hwnd_changed, &SEED, Action::Refresh, None);
+        assert_eq!(
+            out,
+            Outcome::Aborted(Abort::ForegroundChanged {
+                expected: "brave.exe".into(),
+                actual: "brave.exe".into(),
+            })
+        );
+        assert!(env_hwnd_changed.sent().is_empty());
+
+        // Sub-case 3: Foreground window lost completely right before send.
+        let env_lost = FakeEnv::new(vec![Some(win("brave.exe", "Inbox", 10)), None]);
+        let out = run(&env_lost, &SEED, Action::CloseTab, None);
+        assert_eq!(out, Outcome::Aborted(Abort::NoForeground));
+        assert!(env_lost.sent().is_empty());
+        assert_eq!(
+            spoken(Action::CloseTab, None, &out).unwrap_err(),
+            "I can't tell which window is in front, sir."
+        );
+    }
+
+    #[test]
+    fn protected_exe_list_password_managers_and_banking_refused() {
+        for exe in ["1password.exe", "bitwarden.exe", "keepass.exe", "chase.exe"] {
+            let mut env = FakeEnv::steady(win(exe, "Vault", 100));
+            env.protected_exe = Some(exe);
+            let out = run(&env, &SEED, Action::Copy, None);
+            assert_eq!(out, Outcome::Aborted(Abort::Blocked));
+            assert!(env.sent().is_empty(), "never send keys to protected exe {exe}");
+            assert_eq!(
+                reason(Action::Copy, &out),
+                Some("that window is protected, I won't send keys to it".to_string())
+            );
+            assert_eq!(
+                spoken(Action::Copy, None, &out).unwrap_err(),
+                "That window is protected, I won't send keys to it, sir."
+            );
+        }
+    }
+
+    #[test]
+    fn credential_tool_recognised_only_by_window_title_refuses() {
+        let sensitive_titles = [
+            ("brave.exe", "Bitwarden Web Vault - Personal"),
+            ("chrome.exe", "1Password — Password Manager"),
+            ("msedge.exe", "MetaMask Notification"),
+            ("firefox.exe", "KeePass Password Safe - Database"),
+            ("brave.exe", "LastPass Vault - Web Browser"),
+        ];
+
+        for (exe, title) in sensitive_titles {
+            let mut env = FakeEnv::steady(win(exe, title, 50));
+            // Match any credential needle in title.
+            for needle in ["bitwarden", "1password", "metamask", "keepass", "lastpass"] {
+                if title.to_ascii_lowercase().contains(needle) {
+                    env.protected_title = Some(needle);
+                    break;
+                }
+            }
+            let out = run(&env, &SEED, Action::Paste, None);
+            assert_eq!(out, Outcome::Aborted(Abort::Blocked), "blocked by title '{title}'");
+            assert!(env.sent().is_empty(), "0 keys sent to credential title '{title}'");
+            assert_eq!(
+                spoken(Action::Paste, None, &out).unwrap_err(),
+                "That window is protected, I won't send keys to it, sir."
+            );
+        }
+    }
+
+    #[test]
+    fn elevated_target_refuses_and_says_why() {
+        let mut elevated_target = win("powershell.exe", "Administrator: Windows PowerShell", 99);
+        elevated_target.elevated = true;
+
+        let env = FakeEnv::steady(elevated_target);
+        assert!(!env.self_elevated());
+
+        let out = run(&env, &SEED, Action::CloseTab, None);
+        assert_eq!(out, Outcome::Aborted(Abort::Elevated));
+        assert!(env.sent().is_empty());
+        assert_eq!(
+            reason(Action::CloseTab, &out),
+            Some("that app runs as administrator, I can't send it keys".to_string())
+        );
+        assert_eq!(
+            spoken(Action::CloseTab, None, &out).unwrap_err(),
+            "That app runs as administrator, I can't send it keys, sir."
+        );
+    }
+
+    #[test]
+    fn verification_title_change_succeeds_vs_unconfirmed_vs_failure_spoken_results() {
+        // Case A: Title change verified (Verified::Yes) -> spoken is Ok.
+        let env_verified = FakeEnv::new(vec![
+            Some(win("brave.exe", "Old Tab - Brave", 1)),
+            Some(win("brave.exe", "Old Tab - Brave", 1)),
+            Some(win("brave.exe", "New Tab - Brave", 1)),
+        ]);
+        let out_verified = run(&env_verified, &SEED, Action::NewTab, None);
+        match &out_verified {
+            Outcome::Sent { verified, .. } => assert_eq!(*verified, Verified::Yes),
+            other => panic!("expected Sent, got {other:?}"),
+        }
+        assert_eq!(spoken(Action::NewTab, None, &out_verified).unwrap(), "New tab sir.");
+
+        // Case B: Title change unconfirmed (Verified::Unconfirmed) -> keys sent, spoken is still Ok.
+        let env_unconfirmed = FakeEnv::steady(win("brave.exe", "Static Tab - Brave", 1));
+        let out_unconfirmed = run(&env_unconfirmed, &SEED, Action::NewTab, None);
+        match &out_unconfirmed {
+            Outcome::Sent { verified, .. } => assert_eq!(*verified, Verified::Unconfirmed),
+            other => panic!("expected Sent, got {other:?}"),
+        }
+        assert_eq!(spoken(Action::NewTab, None, &out_unconfirmed).unwrap(), "New tab sir.");
+
+        // Case C: Recheck abort (Abort::ForegroundChanged) -> spoken is Err.
+        let env_aborted = FakeEnv::new(vec![
+            Some(win("brave.exe", "Old Tab", 1)),
+            Some(win("other.exe", "Swapped", 2)),
+        ]);
+        let out_aborted = run(&env_aborted, &SEED, Action::NewTab, None);
+        assert!(matches!(out_aborted, Outcome::Aborted(Abort::ForegroundChanged { .. })));
+        assert_eq!(
+            spoken(Action::NewTab, None, &out_aborted).unwrap_err(),
+            "The window changed, I pressed nothing, sir."
+        );
+
+        // Case D: Send failure (Outcome::Failed) -> spoken is Err.
+        let mut env_failed = FakeEnv::steady(win("brave.exe", "Tab", 1));
+        env_failed.send_err = Some("SendInput error 5".into());
+        let out_failed = run(&env_failed, &SEED, Action::NewTab, None);
+        assert!(matches!(out_failed, Outcome::Failed(_)));
+        assert_eq!(
+            spoken(Action::NewTab, None, &out_failed).unwrap_err(),
+            "Couldn't send the shortcut: SendInput error 5, sir."
+        );
+    }
+
+    #[test]
+    fn send_failure_is_reported_and_not_hidden() {
+        let mut env = FakeEnv::steady(win("notepad.exe", "Document - Notepad", 10));
+        env.send_err = Some("Win32 error: blocked by UIPI".into());
+        let out = run(&env, &SEED, Action::Save, None);
+        assert_eq!(out, Outcome::Failed("Win32 error: blocked by UIPI".into()));
+        assert!(env.sent().is_empty());
+        assert_eq!(
+            reason(Action::Save, &out),
+            Some("couldn't send the shortcut: Win32 error: blocked by UIPI".to_string())
+        );
+        assert_eq!(
+            spoken(Action::Save, None, &out).unwrap_err(),
+            "Couldn't send the shortcut: Win32 error: blocked by UIPI, sir."
+        );
+        // Failed send skips verification completely.
+        assert_eq!(env.now_ms(), 0);
+    }
+
+    #[test]
+    fn presend_recheck_call_order_and_timing() {
+        let env = FakeEnv::new(vec![
+            Some(win("brave.exe", "Tab 1 - Brave", 1)), // 1. Initial decision
+            Some(win("brave.exe", "Tab 1 - Brave", 1)), // 2. Pre-send re-check
+            Some(win("brave.exe", "Tab 2 - Brave", 1)), // 3. Verification poll
+        ]);
+        let out = run(&env, &SEED, Action::NextTab, None);
+        assert!(matches!(out, Outcome::Sent { verified: Verified::Yes, .. }));
+
+        let calls = env.calls();
+        // Call #0: initial foreground check.
+        assert_eq!(calls[0], "foreground");
+        // Call #1: pre-send re-check (must happen immediately before send).
+        assert_eq!(calls[1], "foreground");
+        // Call #2: send chord.
+        assert_eq!(calls[2], "send(Ctrl+Tab)");
+        // Call #3: sleep in verification loop.
+        assert_eq!(calls[3], "sleep(40)");
+        // Call #4: verification foreground poll.
+        assert_eq!(calls[4], "foreground");
+    }
+
+    #[test]
+    fn known_app_without_shortcut_says_so_with_speakable_text() {
+        let known_cases = [
+            (
+                win("notepad.exe", "Untitled - Notepad", 1),
+                Action::Refresh,
+                "Notepad has no refresh shortcut, sir.",
+            ),
+            (
+                win("notepad.exe", "Untitled - Notepad", 1),
+                Action::ReopenTab,
+                "Notepad has no reopen-tab shortcut, sir.",
+            ),
+            (
+                win("notepad.exe", "Untitled - Notepad", 1),
+                Action::GoBack,
+                "Notepad has no back shortcut, sir.",
+            ),
+            (
+                win("cmd.exe", "Command Prompt", 2),
+                Action::Save,
+                "Cmd has no save shortcut, sir.",
+            ),
+            (
+                win("cmd.exe", "Command Prompt", 2),
+                Action::Undo,
+                "Cmd has no undo shortcut, sir.",
+            ),
+            (
+                win("explorer.exe", "File Explorer", 3),
+                Action::ReopenTab,
+                "Explorer has no reopen-tab shortcut, sir.",
+            ),
+            (
+                win("windowsterminal.exe", "Windows Terminal", 4),
+                Action::GoBack,
+                "Windowsterminal has no back shortcut, sir.",
+            ),
+        ];
+
+        for (target, action, expected_spoken) in known_cases {
+            let env = FakeEnv::steady(target);
+            let out = run(&env, &SEED, action, None);
+            assert!(
+                matches!(out, Outcome::NoBinding { known_app: true, .. }),
+                "{:?} should report NoBinding(known_app=true)",
+                action
+            );
+            assert!(env.sent().is_empty());
+            assert_eq!(spoken(action, None, &out).unwrap_err(), expected_spoken);
+        }
+    }
+
+    #[test]
+    fn unknown_app_without_binding_says_so_differently_from_known_app() {
+        let env_unknown = FakeEnv::steady(win("arc.exe", "Arc", 1));
+        let out_unknown = run(&env_unknown, &SEED, Action::NewTab, None);
+        assert_eq!(
+            out_unknown,
+            Outcome::NoBinding { known_app: false, exe: "arc.exe".into() }
+        );
+        assert_eq!(
+            reason(Action::NewTab, &out_unknown),
+            Some("I don't know a new-tab shortcut for Arc".to_string())
+        );
+        assert_eq!(
+            spoken(Action::NewTab, None, &out_unknown).unwrap_err(),
+            "I don't know a new-tab shortcut for Arc, sir."
+        );
+
+        // Contrast with known app:
+        let env_known = FakeEnv::steady(win("notepad.exe", "Untitled", 2));
+        let out_known = run(&env_known, &SEED, Action::Refresh, None);
+        assert_eq!(
+            spoken(Action::Refresh, None, &out_known).unwrap_err(),
+            "Notepad has no refresh shortcut, sir."
+        );
+    }
+
+    #[test]
+    fn actions_with_and_without_observable_verification_budget() {
+        // Actions with observable title change wait up to 700ms.
+        for action in [
+            Action::NewTab,
+            Action::CloseTab,
+            Action::ReopenTab,
+            Action::NextTab,
+            Action::PrevTab,
+            Action::GotoTab,
+            Action::GoBack,
+            Action::GoForward,
+        ] {
+            assert_eq!(verify_budget_ms(action), Some(700), "{action:?}");
+        }
+
+        // Actions without observable title change have None budget and do not poll.
+        for action in [
+            Action::Refresh,
+            Action::AddressBar,
+            Action::FindInPage,
+            Action::Save,
+            Action::Copy,
+            Action::Paste,
+            Action::Cut,
+            Action::Undo,
+            Action::Redo,
+            Action::SelectAll,
+            Action::ScrollDown,
+            Action::ScrollUp,
+            Action::ZoomIn,
+            Action::ZoomOut,
+            Action::SwitchWindow,
+        ] {
+            assert_eq!(verify_budget_ms(action), None, "{action:?}");
+        }
+
+        // Running an unobservable action sends keys immediately and skips sleep.
+        let env = FakeEnv::steady(win("brave.exe", "Page - Brave", 1));
+        let out = run(&env, &SEED, Action::Save, None);
+        assert!(matches!(out, Outcome::Sent { verified: Verified::NotChecked, .. }));
+        assert_eq!(env.now_ms(), 0);
+        assert_eq!(env.calls(), vec!["foreground", "foreground", "send(Ctrl+S)"]);
+    }
+
+    #[test]
+    fn stop_requested_at_presend_recheck_aborts_send() {
+        let env = FakeEnv::steady(win("brave.exe", "Page - Brave", 1));
+        // Set stop to trigger after the initial decision (on the 2nd foreground call).
+        env.stop_after_decision.set(true);
+
+        let out = run(&env, &SEED, Action::NewTab, None);
+        assert_eq!(out, Outcome::Aborted(Abort::Stopped));
+        assert!(env.sent().is_empty(), "stop request at pre-send gate must send nothing");
+        assert_eq!(spoken(Action::NewTab, None, &out).unwrap_err(), "Stopped, sir.");
     }
 }

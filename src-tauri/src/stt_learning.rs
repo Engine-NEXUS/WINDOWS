@@ -519,4 +519,17 @@ mod tests {
         assert_eq!(diffs[0].to_word, "zync");
         assert_eq!(diffs[0].context_before, "in");
     }
+
+    /// Task ST: Word diff correctly captures two distinct positions within MAX_DIFF_POSITIONS.
+    #[test]
+    fn test_word_diff_multiple_diffs_within_limit() {
+        let diffs = word_diff("open zink now", "launch zync now");
+        assert_eq!(diffs.len(), 2);
+        assert_eq!(diffs[0].from_word, "open");
+        assert_eq!(diffs[0].to_word, "launch");
+        assert_eq!(diffs[0].context_before, "");
+        assert_eq!(diffs[1].from_word, "zink");
+        assert_eq!(diffs[1].to_word, "zync");
+        assert_eq!(diffs[1].context_before, "open");
+    }
 }

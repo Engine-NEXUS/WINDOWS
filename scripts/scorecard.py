@@ -195,7 +195,7 @@ def main(argv):
             sys.exit(f"{len(hit)} rows match {q!r}")
         for kv in argv[3:]:
             k, v = kv.split("=", 1)
-            hit[0][k] = v if k in ("note", "tests") else int(v)
+            hit[0][k] = v if k in ("note", "tests", "scope", "scope_reason") else int(v)
         open(DATA, "w", encoding="utf-8", newline="\n").write(json.dumps(d, indent=1, ensure_ascii=False) + "\n")
         print("updated", hit[0]["feature"])
     elif cmd != "report":

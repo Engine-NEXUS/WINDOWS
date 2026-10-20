@@ -137,6 +137,158 @@ pub(crate) fn format_confidence_line(
     }
 }
 
+/// Minimum audio samples required for transcription (200ms at 16kHz).
+pub const MIN_AUDIO_SAMPLES: usize = 3200;
+
+/// Root-mean-square energy floor below which audio is treated as silence / noise.
+pub const RMS_ENERGY_FLOOR: f64 = 0.005;
+
+/// Pre-gate decision for raw audio buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioPreGate {
+    Pass,
+    TooShort,
+    LowEnergy,
+}
+
+/// Compute root-mean-square energy of raw PCM samples.
+/// Returns 0.0 for empty buffers and guards against NaN.
+pub fn audio_rms(samples: &[i16]) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f64 = samples.iter().map(|&s| {
+        let f = s as f64 / 32768.0;
+        f * f
+    }).sum();
+    let mean = sum_sq / samples.len() as f64;
+    if mean <= 0.0 || mean.is_nan() {
+        0.0
+    } else {
+        mean.sqrt()
+    }
+}
+
+/// Acoustic pre-gate: drops buffers shorter than 200ms (3200 samples)
+/// or with RMS energy under 0.005 before any cloud API or local server call.
+pub fn check_audio_pre_gate(samples: &[i16]) -> AudioPreGate {
+    if samples.len() < MIN_AUDIO_SAMPLES {
+        return AudioPreGate::TooShort;
+    }
+    let rms = audio_rms(samples);
+    if rms.is_nan() || rms < RMS_ENERGY_FLOOR {
+        return AudioPreGate::LowEnergy;
+    }
+    AudioPreGate::Pass
+}
+
+/// STT execution engines ordered in a route plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SttEngine {
+    Deepgram,
+    Groq,
+    Local,
+}
+
+/// Ordered list of STT engines to attempt.
+pub type RoutePlan = Vec<SttEngine>;
+
+/// Pure routing decision: decides which STT engines to attempt in order.
+/// If `local_only` is true (privacy mode), only `[Local]` is returned.
+/// Otherwise, engines with available keys are prioritized: Deepgram -> Groq -> Local.
+pub fn choose_route(local_only: bool, has_deepgram: bool, has_groq: bool) -> RoutePlan {
+    if local_only {
+        return vec![SttEngine::Local];
+    }
+    let mut plan = Vec::with_capacity(3);
+    if has_deepgram {
+        plan.push(SttEngine::Deepgram);
+    }
+    if has_groq {
+        plan.push(SttEngine::Groq);
+    }
+    plan.push(SttEngine::Local);
+    plan
+}
+
+/// Classification of errors from STT engines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SttError {
+    Network(String),
+    RateLimited,
+    Unauthorized,
+    ServerError(u16),
+    Timeout,
+    EmptyCloudTranscript,
+    InvalidAudio(String),
+    TooShort { samples: usize, min_samples: usize },
+    Other(String),
+}
+
+impl std::fmt::Display for SttError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SttError::Network(msg) => write!(f, "Network error: {msg}"),
+            SttError::RateLimited => write!(f, "Rate limit hit (429)"),
+            SttError::Unauthorized => write!(f, "Unauthorized (401)"),
+            SttError::ServerError(code) => write!(f, "Server error ({code})"),
+            SttError::Timeout => write!(f, "Request timed out"),
+            SttError::EmptyCloudTranscript => write!(f, "Empty transcript returned from cloud"),
+            SttError::InvalidAudio(msg) => write!(f, "Invalid audio: {msg}"),
+            SttError::TooShort { samples, min_samples } => {
+                write!(f, "Audio buffer too short ({samples} < {min_samples} samples)")
+            }
+            SttError::Other(msg) => write!(f, "STT error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for SttError {}
+
+impl SttError {
+    pub fn from_error_message(msg: &str) -> Self {
+        let lower = msg.to_lowercase();
+        if lower.contains("too short") || lower.contains("empty audio") {
+            SttError::TooShort { samples: 0, min_samples: MIN_AUDIO_SAMPLES }
+        } else if lower.starts_with("invalid audio:") {
+            // Only OUR own pre-validation message. A cloud provider rejecting the file ("invalid audio mime type",
+            // "mime error") is a provider-side failure: the local engine can still transcribe it, so it falls back.
+            SttError::InvalidAudio(msg.to_string())
+        } else if lower.contains("429") || lower.contains("rate limit") {
+            SttError::RateLimited
+        } else if lower.contains("401") || lower.contains("unauthorized") || lower.contains("invalid api key") || lower.contains("api key invalid") {
+            SttError::Unauthorized
+        } else if lower.contains("timeout") || lower.contains("timed out") {
+            SttError::Timeout
+        } else if lower.contains("empty transcript") {
+            SttError::EmptyCloudTranscript
+        } else if lower.contains("500") || lower.contains("502") || lower.contains("503") || lower.contains("504") {
+            SttError::ServerError(500)
+        } else if lower.contains("network") || lower.contains("connection") || lower.contains("request failed") {
+            SttError::Network(msg.to_string())
+        } else {
+            SttError::Other(msg.to_string())
+        }
+    }
+}
+
+/// Fallback decision: returns true if the error is a transient failure or provider issue
+/// that warrants falling back to the next engine in the plan.
+/// Client-side invalid inputs (e.g. invalid audio format or buffer too short) do not fall back.
+pub fn should_fall_back(err: &SttError) -> bool {
+    match err {
+        SttError::Network(_)
+        | SttError::RateLimited
+        | SttError::Unauthorized
+        | SttError::ServerError(_)
+        | SttError::Timeout
+        | SttError::EmptyCloudTranscript
+        | SttError::Other(_) => true,
+        SttError::InvalidAudio(_)
+        | SttError::TooShort { .. } => false,
+    }
+}
+
 /// Transcribe audio — tries Groq cloud first, falls back to local faster-whisper.
 ///
 /// The frontend sends Int16 PCM samples at 16kHz. We route to Groq if an API
@@ -149,35 +301,60 @@ pub async fn transcribe_audio(
 ) -> Result<String, String> {
     tracing::info!("stt: received {} samples for transcription", samples.len());
 
-    // Reject buffers shorter than 200ms (3200 samples at 16kHz)
-    if samples.len() < 3200 {
-        tracing::info!("stt: buffer too short ({} samples), skipping STT", samples.len());
-        mark_path(5);
-        return Ok("".to_string());
+    match check_audio_pre_gate(&samples) {
+        AudioPreGate::TooShort => {
+            tracing::info!("stt: buffer too short ({} samples), skipping STT", samples.len());
+            mark_path(5);
+            return Ok("".to_string());
+        }
+        AudioPreGate::LowEnergy => {
+            let rms = audio_rms(&samples);
+            tracing::info!("stt: audio energy below threshold (RMS {:.5} < 0.005), skipping STT", rms);
+            mark_path(6);
+            return Ok("".to_string());
+        }
+        AudioPreGate::Pass => {}
     }
 
-    // Audio energy check: if below threshold, audio is room noise / silence
-    let sum_sq: f64 = samples.iter().map(|&s| {
-        let f = s as f64 / 32768.0;
-        f * f
-    }).sum();
-    let rms = (sum_sq / samples.len() as f64).sqrt();
-    if rms < 0.005 {
-        tracing::info!("stt: audio energy below threshold (RMS {:.5} < 0.005), skipping STT", rms);
-        mark_path(6);
-        return Ok("".to_string());
-    }
-
-    // Read Groq API key from settings
+    // Read API keys from settings
+    let deepgram_key = crate::commands::read_api_key(&app, "deepgram");
     let groq_key = crate::commands::read_groq_api_key(&app);
-
-    // Check if user has enabled "Local STT only" (privacy mode).
-    // If true, audio never leaves the device — skip Groq cloud entirely.
     let local_only = crate::commands::read_local_stt_only(&app);
-    if local_only {
-        tracing::info!("stt: localSttOnly=true, using local whisper (privacy mode)");
-        mark_path(4);
-    } else if !groq_key.is_empty() {
+
+    let plan = choose_route(local_only, !deepgram_key.is_empty(), !groq_key.is_empty());
+
+    if plan.first() == Some(&SttEngine::Local) {
+        if local_only {
+            tracing::info!("stt: localSttOnly=true, using local whisper (privacy mode)");
+            mark_path(4);
+        } else {
+            tracing::info!("stt: no groq/deepgram key, using local whisper directly");
+            mark_path(3);
+        }
+    }
+
+    if plan.contains(&SttEngine::Deepgram) {
+        match crate::stt_deepgram::transcribe_with_deepgram(&samples, &deepgram_key, &state.client).await {
+            Ok(text) => {
+                let filtered = filter_transcript_counted(&text);
+                mark_path(8);
+                mark_filtered(&text, &filtered);
+                tracing::info!("stt: deepgram transcript: '{}'", filtered);
+                return Ok(filtered);
+            }
+            Err(e) => {
+                let err = SttError::from_error_message(&e);
+                if should_fall_back(&err) {
+                    tracing::warn!("stt: deepgram failed ({}), falling back to Groq LPU pipeline", e);
+                } else {
+                    tracing::warn!("stt: deepgram failed with non-fallback error ({})", e);
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    if plan.contains(&SttEngine::Groq) {
         // Primary: Groq cloud STT (~247ms, free) — with the NEXUS domain
         // vocabulary so rare entities (Servx, Zync, Eesha) win decoder bets.
         // P0 measurement (opt-in `sttLogConfidence`): same request as verbose_json so Whisper's
@@ -206,15 +383,17 @@ pub async fn transcribe_audio(
                 return Ok(filtered);
             }
             Err(e) => {
-                tracing::warn!("stt: groq failed ({}), falling back to local whisper", e);
-                println!("[STT-ERR] Groq STT failed, falling back to local (slower, may reorder turns): {e}");
-                mark_path(2);
-                // Fall through to local STT
+                let err = SttError::from_error_message(&e);
+                if should_fall_back(&err) {
+                    tracing::warn!("stt: groq failed ({}), falling back to local whisper", e);
+                    println!("[STT-ERR] Groq STT failed, falling back to local (slower, may reorder turns): {e}");
+                    mark_path(2);
+                } else {
+                    tracing::warn!("stt: groq failed with non-fallback error ({})", e);
+                    return Err(e);
+                }
             }
         }
-    } else {
-        tracing::info!("stt: no groq key, using local whisper directly");
-        mark_path(3);
     }
 
     // Fallback: local faster-whisper Python sidecar
@@ -244,23 +423,19 @@ pub async fn transcribe_samples<R: tauri::Runtime>(
 ) -> Result<String, String> {
     tracing::info!("stt: transcribing {} samples (Rust-side capture)", samples.len());
 
-    // Reject buffers shorter than 200ms (3200 samples at 16kHz)
-    if samples.len() < 3200 {
-        tracing::info!("stt: buffer too short ({} samples), skipping STT", samples.len());
-        mark_path(5);
-        return Ok("".to_string());
-    }
-
-    // Audio energy check: if below threshold, audio is room noise / silence
-    let sum_sq: f64 = samples.iter().map(|&s| {
-        let f = s as f64 / 32768.0;
-        f * f
-    }).sum();
-    let rms = (sum_sq / samples.len() as f64).sqrt();
-    if rms < 0.005 {
-        tracing::info!("stt: audio energy below threshold (RMS {:.5} < 0.005), skipping STT", rms);
-        mark_path(6);
-        return Ok("".to_string());
+    match check_audio_pre_gate(samples) {
+        AudioPreGate::TooShort => {
+            tracing::info!("stt: buffer too short ({} samples), skipping STT", samples.len());
+            mark_path(5);
+            return Ok("".to_string());
+        }
+        AudioPreGate::LowEnergy => {
+            let rms = audio_rms(samples);
+            tracing::info!("stt: audio energy below threshold (RMS {:.5} < 0.005), skipping STT", rms);
+            mark_path(6);
+            return Ok("".to_string());
+        }
+        AudioPreGate::Pass => {}
     }
 
     // Read API keys from settings (if app handle is available)
@@ -269,10 +444,19 @@ pub async fn transcribe_samples<R: tauri::Runtime>(
         let groq_key = crate::commands::read_groq_api_key(app);
         let local_only = crate::commands::read_local_stt_only(app);
 
-        if local_only {
-            tracing::info!("stt: localSttOnly=true, using local whisper (privacy mode)");
-            mark_path(4);
-        } else if !deepgram_key.is_empty() {
+        let plan = choose_route(local_only, !deepgram_key.is_empty(), !groq_key.is_empty());
+
+        if plan.first() == Some(&SttEngine::Local) {
+            if local_only {
+                tracing::info!("stt: localSttOnly=true, using local whisper (privacy mode)");
+                mark_path(4);
+            } else {
+                tracing::info!("stt: no groq/deepgram key, using local whisper directly");
+                mark_path(3);
+            }
+        }
+
+        if plan.contains(&SttEngine::Deepgram) {
             // Optional Deepgram Nova-2 cloud STT
             match crate::stt_deepgram::transcribe_with_deepgram(samples, &deepgram_key, client).await {
                 Ok(text) => {
@@ -283,15 +467,18 @@ pub async fn transcribe_samples<R: tauri::Runtime>(
                     return Ok(filtered);
                 }
                 Err(e) => {
-                    tracing::warn!("stt: deepgram failed ({}), falling back to Groq LPU pipeline", e);
-                    // Fall through to Groq below
+                    let err = SttError::from_error_message(&e);
+                    if should_fall_back(&err) {
+                        tracing::warn!("stt: deepgram failed ({}), falling back to Groq LPU pipeline", e);
+                    } else {
+                        tracing::warn!("stt: deepgram failed with non-fallback error ({})", e);
+                        return Err(e);
+                    }
                 }
             }
         }
-        
-        // Privacy mode must never reach the cloud (this used to be a bare
-        // `if`, so localSttOnly=true still sent audio to Groq).
-        if groq_allowed(local_only, groq_key.is_empty()) {
+
+        if plan.contains(&SttEngine::Groq) {
             match crate::stt_groq::transcribe_with_groq(samples, &groq_key, client, prompt).await {
                 Ok(text) => {
                     let filtered = filter_transcript_counted(&text);
@@ -305,14 +492,17 @@ pub async fn transcribe_samples<R: tauri::Runtime>(
                     return Ok(filtered);
                 }
                 Err(e) => {
-                    tracing::warn!("stt: groq failed ({}), falling back to local whisper", e);
-                println!("[STT-ERR] Groq STT failed, falling back to local (slower, may reorder turns): {e}");
-                    mark_path(2);
+                    let err = SttError::from_error_message(&e);
+                    if should_fall_back(&err) {
+                        tracing::warn!("stt: groq failed ({}), falling back to local whisper", e);
+                        println!("[STT-ERR] Groq STT failed, falling back to local (slower, may reorder turns): {e}");
+                        mark_path(2);
+                    } else {
+                        tracing::warn!("stt: groq failed with non-fallback error ({})", e);
+                        return Err(e);
+                    }
                 }
             }
-        } else if !local_only && deepgram_key.is_empty() {
-            tracing::info!("stt: no groq/deepgram key, using local whisper directly");
-            mark_path(3);
         }
     }
 
@@ -416,7 +606,7 @@ pub async fn transcribe_local(samples: &[i16], client: &reqwest::Client) -> Resu
         return Err("STT server did not become ready in 20s".to_string());
     }
 
-    let wav_bytes = pcm_to_wav(samples, 16000);
+    let wav_bytes = encode_wav_for_upload(samples, 16000)?;
     tracing::info!("stt: sending {} bytes WAV to {}", wav_bytes.len(), STT_URL);
 
     let part = reqwest::multipart::Part::bytes(wav_bytes)
@@ -496,6 +686,15 @@ pub(crate) fn pcm_to_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
     }
 
     wav
+}
+
+/// Encode 16-bit mono PCM samples to a WAV byte buffer for upload to STT engines.
+/// Returns an error if the sample buffer is empty (0 samples).
+pub(crate) fn encode_wav_for_upload(samples: &[i16], sample_rate: u32) -> Result<Vec<u8>, String> {
+    if samples.is_empty() {
+        return Err("cannot encode empty audio buffer (0 samples)".to_string());
+    }
+    Ok(pcm_to_wav(samples, sample_rate))
 }
 
 /// Confabulation counters (P0 deployment SLO: filter hits / total).
@@ -1059,6 +1258,391 @@ mod tests {
             "send mom a whatsapp message saying I'll be late",
         ] {
             assert_eq!(apply_hallucination_filter(real), real, "'{real}' must pass");
+        }
+    }
+
+    /// Task ST: Full truth table for choose_route (8 combinations).
+    #[test]
+    fn test_choose_route_truth_table_all_combinations() {
+        use super::{choose_route, SttEngine};
+
+        // Privacy mode always yields only Local
+        assert_eq!(choose_route(true, true, true), vec![SttEngine::Local]);
+        assert_eq!(choose_route(true, true, false), vec![SttEngine::Local]);
+        assert_eq!(choose_route(true, false, true), vec![SttEngine::Local]);
+        assert_eq!(choose_route(true, false, false), vec![SttEngine::Local]);
+
+        // Non-privacy routes based on available provider keys
+        assert_eq!(
+            choose_route(false, true, true),
+            vec![SttEngine::Deepgram, SttEngine::Groq, SttEngine::Local]
+        );
+        assert_eq!(
+            choose_route(false, true, false),
+            vec![SttEngine::Deepgram, SttEngine::Local]
+        );
+        assert_eq!(
+            choose_route(false, false, true),
+            vec![SttEngine::Groq, SttEngine::Local]
+        );
+        assert_eq!(
+            choose_route(false, false, false),
+            vec![SttEngine::Local]
+        );
+    }
+
+    /// Task ST: Privacy guarantee — local_only == true NEVER yields a cloud step.
+    #[test]
+    fn test_privacy_mode_never_yields_cloud_step() {
+        use super::{choose_route, SttEngine};
+        for has_deepgram in [false, true] {
+            for has_groq in [false, true] {
+                let plan = choose_route(true, has_deepgram, has_groq);
+                assert!(
+                    !plan.contains(&SttEngine::Deepgram),
+                    "privacy mode must never route to Deepgram (keys: dg={has_deepgram}, groq={has_groq})"
+                );
+                assert!(
+                    !plan.contains(&SttEngine::Groq),
+                    "privacy mode must never route to Groq (keys: dg={has_deepgram}, groq={has_groq})"
+                );
+                assert_eq!(plan, vec![SttEngine::Local]);
+            }
+        }
+    }
+
+    /// Task ST: Fallback decision on transient/server errors vs client/invalid audio errors.
+    #[test]
+    fn test_should_fall_back_classification() {
+        use super::{should_fall_back, SttError};
+
+        // Network error -> fall back
+        assert!(should_fall_back(&SttError::Network("connection reset".to_string())));
+        // 429 Rate limit -> fall back
+        assert!(should_fall_back(&SttError::RateLimited));
+        // 401 Unauthorized -> fall back
+        assert!(should_fall_back(&SttError::Unauthorized));
+        // 5xx Server error -> fall back
+        assert!(should_fall_back(&SttError::ServerError(500)));
+        assert!(should_fall_back(&SttError::ServerError(502)));
+        assert!(should_fall_back(&SttError::ServerError(503)));
+        // Timeout -> fall back
+        assert!(should_fall_back(&SttError::Timeout));
+        // Empty cloud transcript -> fall back
+        assert!(should_fall_back(&SttError::EmptyCloudTranscript));
+        // Generic cloud error -> fall back
+        assert!(should_fall_back(&SttError::Other("unknown error".to_string())));
+
+        // Invalid audio or too short -> do NOT call downstream engines
+        assert!(!should_fall_back(&SttError::InvalidAudio("unsupported format".to_string())));
+        assert!(!should_fall_back(&SttError::TooShort { samples: 100, min_samples: 3200 }));
+
+        // Test parser from message
+        assert_eq!(SttError::from_error_message("429 Too Many Requests"), SttError::RateLimited);
+        assert_eq!(SttError::from_error_message("Groq rate limit hit (2,000 req/day free tier)"), SttError::RateLimited);
+        assert_eq!(SttError::from_error_message("Groq API key invalid — check Settings"), SttError::Unauthorized);
+        assert_eq!(SttError::from_error_message("401 Unauthorized"), SttError::Unauthorized);
+        assert_eq!(SttError::from_error_message("Groq STT error 500: internal server error"), SttError::ServerError(500));
+        assert_eq!(SttError::from_error_message("Request timed out after 15s"), SttError::Timeout);
+        assert_eq!(SttError::from_error_message("empty transcript received"), SttError::EmptyCloudTranscript);
+        assert_eq!(SttError::from_error_message("Invalid audio: not 16 kHz mono"), SttError::InvalidAudio("Invalid audio: not 16 kHz mono".into()));
+        // a provider rejecting the file is not our validation: it must still fall back to the local engine
+        let provider = SttError::from_error_message("Groq STT error 400: invalid audio mime type");
+        assert!(should_fall_back(&provider), "{provider:?}");
+        assert!(should_fall_back(&SttError::from_error_message("mime error from provider")));
+        assert_eq!(SttError::from_error_message("audio buffer too short"), SttError::TooShort { samples: 0, min_samples: 3200 });
+        assert_eq!(SttError::from_error_message("Empty audio"), SttError::TooShort { samples: 0, min_samples: 3200 });
+    }
+
+    /// Task ST: Pre-gate boundary tests at exactly 3199, 3200, 3201 samples.
+    #[test]
+    fn test_pre_gate_sample_count_boundaries() {
+        use super::{check_audio_pre_gate, AudioPreGate};
+
+        // Constant amplitude 164 gives RMS = 164 / 32768 = ~0.0050049 > 0.005
+        let make_buf = |len: usize| vec![164i16; len];
+
+        assert_eq!(
+            check_audio_pre_gate(&make_buf(3199)),
+            AudioPreGate::TooShort,
+            "3199 samples is below 3200 minimum (200ms at 16kHz)"
+        );
+        assert_eq!(
+            check_audio_pre_gate(&make_buf(3200)),
+            AudioPreGate::Pass,
+            "3200 samples exactly meets 200ms threshold"
+        );
+        assert_eq!(
+            check_audio_pre_gate(&make_buf(3201)),
+            AudioPreGate::Pass,
+            "3201 samples passes length threshold"
+        );
+    }
+
+    /// Task ST: Pre-gate RMS energy boundary tests at 0.00499, 0.005, 0.00501.
+    #[test]
+    fn test_pre_gate_rms_energy_boundaries() {
+        use super::{audio_rms, check_audio_pre_gate, AudioPreGate};
+
+        // Construct 3200-sample buffers with precise RMS values:
+        // Amplitude 163 -> RMS = 163 / 32768.0 = 0.004974 < 0.005
+        let low_buf = vec![163i16; 3200];
+        let low_rms = audio_rms(&low_buf);
+        assert!(low_rms < 0.005, "low_rms must be < 0.005: {low_rms}");
+        assert_eq!(check_audio_pre_gate(&low_buf), AudioPreGate::LowEnergy);
+
+        // Amplitude 164 -> RMS = 164 / 32768.0 = 0.00500488 > 0.005
+        let pass_buf = vec![164i16; 3200];
+        let pass_rms = audio_rms(&pass_buf);
+        assert!(pass_rms >= 0.005, "pass_rms must be >= 0.005: {pass_rms}");
+        assert_eq!(check_audio_pre_gate(&pass_buf), AudioPreGate::Pass);
+
+        // Amplitude 200 -> RMS = 200 / 32768.0 = 0.00610 > 0.00501
+        let high_buf = vec![200i16; 3200];
+        assert_eq!(check_audio_pre_gate(&high_buf), AudioPreGate::Pass);
+    }
+
+    /// Task ST: Silence, click, empty buffer, and NaN handling in pre-gate.
+    #[test]
+    fn test_pre_gate_silence_click_nan_empty_buffers() {
+        use super::{audio_rms, check_audio_pre_gate, AudioPreGate};
+
+        // Silence (all zeros) -> low energy
+        let silence = vec![0i16; 3200];
+        assert_eq!(audio_rms(&silence), 0.0);
+        assert_eq!(check_audio_pre_gate(&silence), AudioPreGate::LowEnergy);
+
+        // Single click impulse: 1 sample at 2000 amplitude, rest 3199 silence
+        // RMS = sqrt((2000/32768)^2 / 3200) = ~0.00108 < 0.005
+        let mut click = vec![0i16; 3200];
+        click[0] = 2000;
+        let click_rms = audio_rms(&click);
+        assert!(click_rms < 0.005, "single click RMS {click_rms} should be < 0.005");
+        assert_eq!(check_audio_pre_gate(&click), AudioPreGate::LowEnergy);
+
+        // Empty buffer -> TooShort, no panic
+        assert_eq!(audio_rms(&[]), 0.0);
+        assert_eq!(check_audio_pre_gate(&[]), AudioPreGate::TooShort);
+    }
+
+    /// Task ST: Hallucination filter table of 40 inputs (20 removed, 20 kept).
+    /// Reviews "thank you" behavior: isolated "thank you" is filtered as an exact noise fragment,
+    /// while genuine conversational responses like "thank you very much" and "thank you nexus" pass.
+    #[test]
+    fn test_hallucination_filter_40_cases_table() {
+        use super::apply_hallucination_filter;
+
+        // 20 inputs that MUST be removed (blanked to "")
+        let removed_cases = [
+            "thank you for watching",
+            "thanks for watching",
+            "please subscribe",
+            "subscribe to my channel",
+            "all rights reserved",
+            "subtitles by",
+            "translated by",
+            "booaaa",
+            "and the world is coming",
+            // Isolated "thank you" / "thanks" are Whisper noise fragments on silence/TV
+            "thank you",
+            "thanks",
+            "from the",
+            "to the",
+            "open breath. open breath.",
+            "open notepad open notepad open notepad",
+            "I'm gonna say that. I'm gonna say that. I'm gonna say that.",
+            "café society",
+            "治療が短くなっている",
+            "12345",
+            "Tentang Otor. Post Immortal.",
+        ];
+
+        for junk in removed_cases {
+            assert_eq!(
+                apply_hallucination_filter(junk),
+                "",
+                "Hallucination filter must remove '{junk}'"
+            );
+        }
+
+        // 20 real commands and genuine phrases that MUST be kept
+        let kept_cases = [
+            "open notepad",
+            "open brave",
+            "open a new tab",
+            "switch to tab 3",
+            "close tab 5",
+            "ghost mode",
+            "shut down my laptop",
+            "restart the computer",
+            "type hello world",
+            "press enter",
+            "what time is it",
+            "what's the weather today",
+            "order food",
+            "analyse PR 24 in zync",
+            "stop stop stop stop",
+            "cancel cancel cancel cancel",
+            "no no no no",
+            // Genuine conversational replies containing gratitude with context pass through
+            "thank you very much",
+            "thank you nexus",
+            "practice unattended shutdown",
+        ];
+
+        for cmd in kept_cases {
+            let res = apply_hallucination_filter(cmd);
+            assert!(
+                !res.is_empty(),
+                "Hallucination filter must keep valid command '{cmd}'"
+            );
+        }
+    }
+
+    /// Task ST: Repetition loops of different lengths (2x2, 3x2, 2x3, 3x3, 2x4, 3x4).
+    /// Emphatic safety-critical single-word repeats must pass.
+    #[test]
+    fn test_hallucination_filter_repetition_loops_various_lengths() {
+        use super::apply_hallucination_filter;
+
+        // 2-word block, 2 repeats (len 4)
+        assert_eq!(apply_hallucination_filter("open drift open drift"), "");
+        // 2-word block, 3 repeats (len 6)
+        assert_eq!(apply_hallucination_filter("open notepad open notepad open notepad"), "");
+        // 3-word block, 2 repeats (len 6)
+        assert_eq!(apply_hallucination_filter("open a tab open a tab"), "");
+        // 3-word block, 3 repeats (len 9)
+        assert_eq!(apply_hallucination_filter("switch the tab switch the tab switch the tab"), "");
+        // 4-word block, 2 repeats (len 8)
+        assert_eq!(apply_hallucination_filter("what is the time what is the time"), "");
+        // 4-word block, 3 repeats (len 12)
+        assert_eq!(
+            apply_hallucination_filter("I'm gonna say that. I'm gonna say that. I'm gonna say that."),
+            ""
+        );
+
+        // Safety-critical single word repeats pass
+        assert_eq!(apply_hallucination_filter("stop stop stop stop"), "stop stop stop stop");
+        assert_eq!(apply_hallucination_filter("cancel cancel cancel cancel"), "cancel cancel cancel cancel");
+
+        // Non-safety single-word repeats filter
+        assert_eq!(apply_hallucination_filter("hello hello hello hello"), "");
+    }
+
+    /// Task ST: Mixed case and punctuation normalization in hallucination filter.
+    #[test]
+    fn test_hallucination_filter_mixed_case_and_punctuation() {
+        use super::apply_hallucination_filter;
+
+        assert_eq!(apply_hallucination_filter("OPEN NOTEPAD"), "OPEN NOTEPAD");
+        assert_eq!(apply_hallucination_filter("Open Brave."), "Open Brave.");
+        assert_eq!(apply_hallucination_filter("What's up?"), "What's up?");
+        // Typographical punctuation normalization
+        assert_eq!(apply_hallucination_filter("Open “WhatsApp”…"), "Open \"WhatsApp\".");
+    }
+
+    /// Task ST: Text with only digits is rejected (fewer than 2 alphabetic characters).
+    #[test]
+    fn test_hallucination_filter_digits_only_rejected() {
+        use super::apply_hallucination_filter;
+
+        assert_eq!(apply_hallucination_filter("12345"), "");
+        assert_eq!(apply_hallucination_filter("999"), "");
+        assert_eq!(apply_hallucination_filter("42"), "");
+        assert_eq!(apply_hallucination_filter("0"), "");
+    }
+
+    /// Task ST: WAV encoding for upload header fields (sample rate 16000, mono, 16-bit PCM).
+    #[test]
+    fn test_wav_encoding_header_fields_mono_16bit_16000hz() {
+        use super::encode_wav_for_upload;
+
+        let samples = vec![100i16; 160];
+        let wav = encode_wav_for_upload(&samples, 16000).expect("valid wav encoding");
+
+        // Magic markers
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(&wav[12..16], b"fmt ");
+        assert_eq!(&wav[36..40], b"data");
+
+        // Format chunk size (16 for PCM)
+        let fmt_chunk_size = u32::from_le_bytes([wav[16], wav[17], wav[18], wav[19]]);
+        assert_eq!(fmt_chunk_size, 16);
+
+        // Audio format = 1 (PCM)
+        let audio_format = u16::from_le_bytes([wav[20], wav[21]]);
+        assert_eq!(audio_format, 1);
+
+        // Num channels = 1 (mono)
+        let channels = u16::from_le_bytes([wav[22], wav[23]]);
+        assert_eq!(channels, 1);
+
+        // Sample rate = 16000
+        let sample_rate = u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]);
+        assert_eq!(sample_rate, 16000);
+
+        // Byte rate = sample_rate * channels * bits/8 = 16000 * 1 * 16 / 8 = 32000
+        let byte_rate = u32::from_le_bytes([wav[28], wav[29], wav[30], wav[31]]);
+        assert_eq!(byte_rate, 32000);
+
+        // Block align = channels * bits/8 = 1 * 16 / 8 = 2
+        let block_align = u16::from_le_bytes([wav[32], wav[33]]);
+        assert_eq!(block_align, 2);
+
+        // Bits per sample = 16
+        let bits_per_sample = u16::from_le_bytes([wav[34], wav[35]]);
+        assert_eq!(bits_per_sample, 16);
+    }
+
+    /// Task ST: WAV encoding length field matches exact data size.
+    #[test]
+    fn test_wav_encoding_length_field_matches_data() {
+        use super::encode_wav_for_upload;
+
+        for count in [10, 100, 3200, 8000] {
+            let samples = vec![50i16; count];
+            let wav = encode_wav_for_upload(&samples, 16000).expect("valid wav");
+            let data_size = (count * 2) as u32;
+
+            // RIFF chunk size at bytes 4..8 = 36 + data_size
+            let riff_size = u32::from_le_bytes([wav[4], wav[5], wav[6], wav[7]]);
+            assert_eq!(riff_size, 36 + data_size);
+
+            // Data chunk size at bytes 40..44 = data_size
+            let read_data_size = u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]);
+            assert_eq!(read_data_size, data_size);
+
+            assert_eq!(wav.len(), 44 + (count * 2));
+        }
+    }
+
+    /// Task ST: A buffer of 0 samples is refused for upload.
+    #[test]
+    fn test_wav_encoding_refuses_empty_buffer() {
+        use super::encode_wav_for_upload;
+
+        let empty: Vec<i16> = Vec::new();
+        let res = encode_wav_for_upload(&empty, 16000);
+        assert!(res.is_err(), "A buffer of 0 samples must be refused for upload");
+    }
+
+    /// Task ST: Odd sample counts work and produce correct WAV encoding.
+    #[test]
+    fn test_wav_encoding_odd_sizes_work() {
+        use super::encode_wav_for_upload;
+
+        for count in [1, 3199, 3201] {
+            let samples = vec![42i16; count];
+            let wav = encode_wav_for_upload(&samples, 16000).expect("odd size wav");
+            let data_size = (count * 2) as u32;
+
+            let riff_size = u32::from_le_bytes([wav[4], wav[5], wav[6], wav[7]]);
+            assert_eq!(riff_size, 36 + data_size);
+
+            let read_data_size = u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]);
+            assert_eq!(read_data_size, data_size);
+            assert_eq!(wav.len(), 44 + (count * 2));
         }
     }
 }

@@ -79,16 +79,13 @@ pub(crate) fn decoder_prompt(prompt: Option<&'static str>) -> &'static str {
     prompt.unwrap_or(NEUTRAL_DECODER_PROMPT)
 }
 
-/// Which decoder bias a turn gets. The NEXUS vocabulary nudges Whisper toward NEXUS commands,
-/// so it is withheld from a voice that is KNOWN not to be the owner (uncertain, rejected).
-/// With nobody enrolled there is no owner to protect: `Unenrolled` gets the vocabulary too.
-/// Before, every unenrolled turn got the neutral prompt, so "chat with mummy in WhatsApp" was
-/// heard as "chart with mommy and what so".
+/// Only a verified owner gets command vocabulary. For an unenrolled voice,
+/// vocabulary can turn background speech into a plausible executable command.
 pub(crate) fn decoder_bias_for(ownership: crate::voice_profile::TurnOwnership) -> DecoderBias {
     use crate::voice_profile::TurnOwnership::*;
     match ownership {
-        Verified | Unenrolled => DecoderBias::OwnerCommand,
-        Uncertain | Rejected => DecoderBias::Neutral,
+        Verified => DecoderBias::OwnerCommand,
+        Unenrolled | Uncertain | Rejected => DecoderBias::Neutral,
     }
 }
 
@@ -159,7 +156,7 @@ pub async fn transcribe_with_groq(
         return Err("No Groq API key provided".to_string());
     }
 
-    let wav_bytes = pcm_to_wav(samples, 16000);
+    let wav_bytes = crate::stt::encode_wav_for_upload(samples, 16000)?;
     tracing::info!(
         "stt-groq: sending {} bytes ({}ms audio) to Groq",
         wav_bytes.len(),
@@ -307,7 +304,7 @@ pub async fn transcribe_with_groq_verbose(
         return Err("No Groq API key provided".to_string());
     }
 
-    let wav_bytes = pcm_to_wav(samples, 16000);
+    let wav_bytes = crate::stt::encode_wav_for_upload(samples, 16000)?;
 
     let fields = transcription_fields("audio.wav", "audio/wav", prompt, true);
     let form = groq_transcription_form(wav_bytes, &fields)?;
@@ -372,34 +369,7 @@ pub async fn transcribe_with_groq_verbose(
 
 /// Convert raw i16 PCM samples to a WAV file (16-bit, mono, given sample rate).
 fn pcm_to_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
-    let num_samples = samples.len();
-    let data_size = num_samples * 2;
-    let mut wav = Vec::with_capacity(44 + data_size);
-
-    // RIFF header
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36 + data_size as u32).to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-
-    // fmt chunk
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
-    wav.extend_from_slice(&sample_rate.to_le_bytes());
-    wav.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
-    wav.extend_from_slice(&2u16.to_le_bytes()); // block align
-    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-
-    // data chunk
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&(data_size as u32).to_le_bytes());
-
-    for &s in samples {
-        wav.extend_from_slice(&s.to_le_bytes());
-    }
-
-    wav
+    crate::stt::pcm_to_wav(samples, sample_rate)
 }
 
 #[cfg(test)]
@@ -458,7 +428,7 @@ mod tests {
     fn decoder_bias_follows_ownership() {
         use crate::voice_profile::TurnOwnership::*;
         // Nobody enrolled: there is no owner to protect, so the NEXUS vocabulary applies.
-        assert_eq!(decoder_bias_for(Unenrolled), DecoderBias::OwnerCommand);
+        assert_eq!(decoder_bias_for(Unenrolled), DecoderBias::Neutral);
         assert_eq!(decoder_bias_for(Verified), DecoderBias::OwnerCommand);
         // A voice that is (or may be) someone else never gets command biasing.
         assert_eq!(decoder_bias_for(Uncertain), DecoderBias::Neutral);
@@ -536,5 +506,48 @@ mod tests {
         let seg: GroqSegment = serde_json::from_value(v).unwrap();
         assert_eq!(seg.text, " Lots of children.");
         assert!((seg.no_speech_prob - 0.91).abs() < 1e-6);
+    }
+
+    /// Task ST: Vocabulary biasing contract for NEXUS_VOCABULARY:
+    /// - Under provider character limit (<= 860 < 896 cap)
+    /// - Contains the wake word ("NEXUS" / "nexus")
+    /// - Contains the ghost-mode phrases ("Ghost mode", "Ghost control", "Exit ghost mode")
+    /// - Contains no duplicate phrase entries
+    #[test]
+    fn test_nexus_vocabulary_prompt_contract() {
+        let chars = NEXUS_VOCABULARY.chars().count();
+        assert!(chars <= 860, "NEXUS_VOCABULARY exceeds character ceiling: {chars}");
+
+        let lower = NEXUS_VOCABULARY.to_lowercase();
+        // Wake word
+        assert!(lower.contains("nexus"), "NEXUS_VOCABULARY must contain the wake word");
+
+        // Ghost mode phrases
+        assert!(lower.contains("ghost mode"), "missing 'ghost mode'");
+        assert!(lower.contains("ghost control"), "missing 'ghost control'");
+        assert!(lower.contains("exit ghost mode"), "missing 'exit ghost mode'");
+
+        // No duplicate entries (sentence-level command phrases)
+        let phrases: Vec<&str> = NEXUS_VOCABULARY
+            .split('.')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut seen = std::collections::HashSet::new();
+        for phrase in phrases {
+            let lower_phrase = phrase.to_lowercase();
+            assert!(
+                seen.insert(lower_phrase.clone()),
+                "NEXUS_VOCABULARY contains duplicate entry: '{phrase}'"
+            );
+        }
+    }
+
+    /// Task ST: Upload encoding refuses an empty audio buffer (0 samples) to prevent wasted API calls.
+    #[test]
+    fn test_groq_refuses_empty_samples_buffer() {
+        let res = crate::stt::encode_wav_for_upload(&[], 16000);
+        assert!(res.is_err(), "Empty audio buffer must be refused before upload");
     }
 }

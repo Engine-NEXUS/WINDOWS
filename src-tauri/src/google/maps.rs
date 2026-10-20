@@ -215,6 +215,48 @@ impl MapsService {
         Ok(RouteEta { minutes: ((secs / 60.0).round() as u32).max(1), meters, via })
     }
 
+    pub const MAX_ADDRESS_LEN: usize = 250;
+
+    /// Clean, validate and clip an address string to prevent API errors.
+    pub fn clean_and_clip_address(addr: &str, field_name: &str) -> Result<String, GoogleError> {
+        let trimmed = addr.trim();
+        if trimmed.is_empty() {
+            return Err(GoogleError::InvalidInput(format!(
+                "Please provide a valid {field_name} address for directions."
+            )));
+        }
+        let clipped: String = trimmed.chars().take(Self::MAX_ADDRESS_LEN).collect();
+        Ok(clipped)
+    }
+
+    /// Map HTTP response error status code and body to a typed GoogleError.
+    pub fn map_response_error(code: u16, body: &str) -> GoogleError {
+        match code {
+            400 => GoogleError::InvalidInput(if body.is_empty() {
+                "Google Maps could not locate that address. Please check the spelling.".into()
+            } else {
+                format!("Bad address or invalid request: {body}")
+            }),
+            403 => GoogleError::ApiError {
+                code: 403,
+                message: if body.is_empty() {
+                    "Google Maps API key is restricted or unauthorized.".into()
+                } else {
+                    format!("Google Maps API key restricted: {body}")
+                },
+            },
+            429 => GoogleError::RateLimited,
+            _ => GoogleError::ApiError {
+                code,
+                message: if body.is_empty() {
+                    "Google Maps service error.".into()
+                } else {
+                    body.to_string()
+                },
+            },
+        }
+    }
+
     /// Call Routes API v2. The key travels in a header (never in a URL or log).
     pub async fn compute_route(
         client: &reqwest::Client,
@@ -223,17 +265,20 @@ impl MapsService {
         destination: &str,
         mode: TravelMode,
     ) -> Result<RouteEta, GoogleError> {
+        let clean_origin = Self::clean_and_clip_address(origin, "origin")?;
+        let clean_dest = Self::clean_and_clip_address(destination, "destination")?;
         let resp = client
             .post("https://routes.googleapis.com/directions/v2:computeRoutes")
             .header("X-Goog-Api-Key", api_key)
             .header("X-Goog-FieldMask", "routes.duration,routes.distanceMeters,routes.description")
-            .json(&Self::routes_request_body(origin, destination, mode))
+            .json(&Self::routes_request_body(&clean_origin, &clean_dest, mode))
             .send()
             .await
             .map_err(|e| GoogleError::NetworkError(e.to_string()))?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(GoogleError::ApiError { code: status.as_u16(), message: "Routes API request failed".into() });
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Self::map_response_error(status.as_u16(), &body));
         }
         let json: Value = resp.json().await.map_err(|e| GoogleError::SerializationError(e.to_string()))?;
         Self::parse_routes_json(&json)
@@ -287,7 +332,8 @@ impl MapsService {
             .map_err(|e| GoogleError::NetworkError(e.to_string()))?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(GoogleError::ApiError { code: status.as_u16(), message: "Places API request failed".into() });
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Self::map_response_error(status.as_u16(), &body));
         }
         let json: Value = resp.json().await.map_err(|e| GoogleError::SerializationError(e.to_string()))?;
         Ok(Self::parse_places_new_json(&json))
@@ -341,9 +387,17 @@ fn percent_encode(s: &str) -> String {
 }
 
 fn urlencoding_simple(s: &str) -> String {
-    s.replace(' ', "+")
-        .replace('&', "%26")
-        .replace(',', "%2C")
+    let mut out = String::with_capacity(s.len() * 2);
+    for b in s.trim().bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else if b == b' ' {
+            out.push('+');
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 // ─── Unit Tests ──────────────────────────────────────────────────────────────
@@ -488,5 +542,200 @@ mod tests {
         assert_eq!(MapsService::parse_routes_json(&j).unwrap().spoken(), "1 minute");
         assert!(MapsService::parse_routes_json(&serde_json::json!({})).is_err());
         assert!(MapsService::parse_routes_json(&serde_json::json!({"routes":[{"distanceMeters":5}]})).is_err());
+    }
+
+    #[test]
+    fn routes_response_zero_distance_and_minimum_eta() {
+        let j = serde_json::json!({
+            "routes": [{
+                "duration": "0s",
+                "distanceMeters": 0
+            }]
+        });
+        let eta = MapsService::parse_routes_json(&j).unwrap();
+        assert_eq!(eta.minutes, 1, "duration of 0 seconds clamps to minimum 1 minute ETA");
+        assert_eq!(eta.meters, 0);
+        assert_eq!(eta.spoken(), "1 minute");
+    }
+
+    #[test]
+    fn routes_response_missing_duration_fails_with_serialization_error() {
+        let j = serde_json::json!({
+            "routes": [{
+                "distanceMeters": 500
+            }]
+        });
+        let res = MapsService::parse_routes_json(&j);
+        assert!(matches!(res, Err(GoogleError::SerializationError(ref msg)) if msg.contains("duration")));
+    }
+
+    #[test]
+    fn directions_leg_summary_zero_distance_and_unknown_duration() {
+        let raw = serde_json::json!({
+            "routes": [{
+                "legs": [{
+                    "distance": { "text": "0 ft", "value": 0 },
+                    "steps": []
+                }]
+            }]
+        });
+        let summary = MapsService::parse_directions_json(&raw, "Here", "Here").unwrap();
+        assert_eq!(summary.distance_text, "0 ft");
+        assert_eq!(summary.duration_text, "Unknown duration");
+        assert_eq!(summary.duration_seconds, 0);
+        assert_eq!(summary.traffic_delay_minutes, 0);
+    }
+
+    #[test]
+    fn directions_leg_summary_traffic_delay_calculation() {
+        // Traffic duration longer than normal duration -> positive delay
+        let raw_delay = serde_json::json!({
+            "routes": [{
+                "legs": [{
+                    "duration": { "text": "20 mins", "value": 1200 },
+                    "duration_in_traffic": { "text": "35 mins", "value": 2100 }
+                }]
+            }]
+        });
+        let s1 = MapsService::parse_directions_json(&raw_delay, "A", "B").unwrap();
+        assert_eq!(s1.traffic_delay_minutes, 15);
+
+        // Traffic duration shorter than or equal to normal duration -> 0 delay
+        let raw_no_delay = serde_json::json!({
+            "routes": [{
+                "legs": [{
+                    "duration": { "text": "20 mins", "value": 1200 },
+                    "duration_in_traffic": { "text": "18 mins", "value": 1080 }
+                }]
+            }]
+        });
+        let s2 = MapsService::parse_directions_json(&raw_no_delay, "A", "B").unwrap();
+        assert_eq!(s2.traffic_delay_minutes, 0);
+
+        // No duration_in_traffic specified -> 0 delay
+        let raw_missing = serde_json::json!({
+            "routes": [{
+                "legs": [{
+                    "duration": { "text": "20 mins", "value": 1200 }
+                }]
+            }]
+        });
+        let s3 = MapsService::parse_directions_json(&raw_missing, "A", "B").unwrap();
+        assert_eq!(s3.traffic_delay_minutes, 0);
+    }
+
+    #[test]
+    fn travel_mode_routes_mapping_and_traffic_preference() {
+        let driving = MapsService::routes_request_body("Home", "Work", TravelMode::Driving);
+        assert_eq!(driving["travelMode"], "DRIVE");
+        assert_eq!(driving["routingPreference"], "TRAFFIC_AWARE");
+
+        let walking = MapsService::routes_request_body("Home", "Park", TravelMode::Walking);
+        assert_eq!(walking["travelMode"], "WALK");
+        assert!(walking.get("routingPreference").is_none());
+
+        let cycling = MapsService::routes_request_body("Home", "Store", TravelMode::Bicycling);
+        assert_eq!(cycling["travelMode"], "BICYCLE");
+        assert!(cycling.get("routingPreference").is_none());
+
+        let transit = MapsService::routes_request_body("Home", "Airport", TravelMode::Transit);
+        assert_eq!(transit["travelMode"], "TRANSIT");
+        assert!(transit.get("routingPreference").is_none());
+    }
+
+    #[test]
+    fn travel_mode_directions_url_mapping() {
+        for (mode, expected) in [
+            (TravelMode::Driving, "driving"),
+            (TravelMode::Walking, "walking"),
+            (TravelMode::Bicycling, "bicycling"),
+            (TravelMode::Transit, "transit"),
+        ] {
+            let u1 = MapsService::build_directions_url(Some("A"), "B", mode);
+            assert!(u1.ends_with(&format!("travelmode={expected}")), "{u1}");
+
+            let u2 = MapsService::build_maps_nav_url("A", "B", mode);
+            assert!(u2.ends_with(&format!("travelmode={expected}")), "{u2}");
+        }
+    }
+
+    #[test]
+    fn urlencoding_encodes_ampersand_hash_percent_unicode_and_spaces() {
+        let input = "Café & Bakery #42 100% Good";
+        let encoded = urlencoding_simple(input);
+        assert!(encoded.contains("%26"), "must encode &: {encoded}");
+        assert!(encoded.contains("%23"), "must encode #: {encoded}");
+        assert!(encoded.contains("%25"), "must encode %: {encoded}");
+        assert!(encoded.contains("%C3%A9"), "must encode unicode: {encoded}");
+        assert!(encoded.contains('+'), "must encode spaces: {encoded}");
+        assert!(!encoded.contains('#'), "must not contain raw #: {encoded}");
+        assert!(!encoded.contains('&'), "must not contain raw &: {encoded}");
+        assert!(!encoded.contains(' '), "must not contain raw space: {encoded}");
+
+        let deep_link = MapsService::build_directions_url(Some("Café #1"), "100% Bakery & Tea", TravelMode::Driving);
+        assert!(!deep_link.contains('#'));
+        assert!(deep_link.contains("%23"));
+        assert!(deep_link.contains("%25"));
+        assert!(deep_link.contains("%26"));
+        assert!(deep_link.contains("%C3%A9"));
+    }
+
+    #[test]
+    fn place_search_url_encodes_special_and_unicode_characters() {
+        let url = MapsService::build_place_search_url("café & tacos near Apt #4 (100% fresh)");
+        assert!(url.starts_with("https://www.google.com/maps/search/?api=1&query="));
+        let query_string = url.split_once('?').map(|(_, qs)| qs).unwrap_or("");
+        let query_val = query_string
+            .split('&')
+            .find_map(|pair| {
+                let (k, v) = pair.split_once('=')?;
+                if k == "query" {
+                    Some(v)
+                } else {
+                    None
+                }
+            })
+            .expect("query parameter must be present");
+        assert!(query_val.contains("%26"), "must encode &: {query_val}");
+        assert!(query_val.contains("%23"), "must encode #: {query_val}");
+        assert!(query_val.contains("%25"), "must encode %: {query_val}");
+        assert!(query_val.contains("%C3%A9"), "must encode unicode: {query_val}");
+        assert!(!query_val.contains('#'), "must not contain raw #: {query_val}");
+        assert!(!query_val.contains('&'), "must not contain unescaped &: {query_val}");
+        assert!(!query_val.contains(' '), "must not contain raw space: {query_val}");
+    }
+
+    #[test]
+    fn maps_empty_or_blank_endpoints_rejected_with_speakable_message() {
+        let err1 = MapsService::clean_and_clip_address("", "origin").unwrap_err();
+        assert!(matches!(err1, GoogleError::InvalidInput(ref msg) if msg.contains("origin")));
+
+        let err2 = MapsService::clean_and_clip_address("   \t  ", "destination").unwrap_err();
+        assert!(matches!(err2, GoogleError::InvalidInput(ref msg) if msg.contains("destination")));
+    }
+
+    #[test]
+    fn maps_very_long_address_is_clipped() {
+        let long_addr = "123 Very Long Street Name Suite 400 Extra Details ".repeat(10);
+        assert!(long_addr.chars().count() > MapsService::MAX_ADDRESS_LEN);
+
+        let clipped = MapsService::clean_and_clip_address(&long_addr, "destination").unwrap();
+        assert_eq!(clipped.chars().count(), MapsService::MAX_ADDRESS_LEN);
+        assert!(long_addr.starts_with(&clipped));
+    }
+
+    #[test]
+    fn maps_response_error_mapping_400_403_429_500() {
+        let err_400 = MapsService::map_response_error(400, "INVALID_ARGUMENT: address not found");
+        assert!(matches!(err_400, GoogleError::InvalidInput(ref msg) if msg.contains("address")));
+
+        let err_403 = MapsService::map_response_error(403, "API_KEY_RESTRICTED");
+        assert!(matches!(err_403, GoogleError::ApiError { code: 403, ref message } if message.contains("restricted")));
+
+        let err_429 = MapsService::map_response_error(429, "RESOURCE_EXHAUSTED");
+        assert_eq!(err_429, GoogleError::RateLimited);
+
+        let err_500 = MapsService::map_response_error(500, "INTERNAL_ERROR");
+        assert!(matches!(err_500, GoogleError::ApiError { code: 500, .. }));
     }
 }
