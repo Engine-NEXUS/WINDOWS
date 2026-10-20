@@ -37,6 +37,7 @@ TARGETS = {
     "stt_hallucination_leak": (0.005, "low"),
     "stt_wrongly_dropped": (0.005, "low"),
     "stt_one_breath": (0.95, "high"),
+    "stt_endpoint_cutoff": (0.01, "low"),
 }
 
 
@@ -214,6 +215,11 @@ def stt_metrics(rows):
     bg = [r for r in rows if r.get("kind") in ("silence", "noise") and "error" not in r]
     out.append(rate("stt_hallucination_leak", "Hallucinated text on silence / TV noise",
                     sum(bool(r.get("leaked")) for r in bg), len(bg)))
+    ep = [r for r in cmd if "cut_early" in r]
+    if ep:
+        out.append(rate("stt_endpoint_cutoff", "Commands cut off mid-sentence by the endpointer",
+                        sum(bool(r["cut_early"]) for r in ep), len(ep),
+                        note="stt_eval --simulate-endpoint (sweep --endpoint-silence-chunks)"))
     bok = [r for r in breath if "intent_ok" in r]
     sim = [r for r in bok if "capture_offset_ms" in r]
     if sim:

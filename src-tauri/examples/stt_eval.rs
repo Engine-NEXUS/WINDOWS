@@ -8,6 +8,9 @@
 //!
 //!   cargo run --release --example stt_eval -- --text-only --manifest rows.jsonl
 //!
+//!   # where would the live endpointer cut each command? (add --endpoint-silence-chunks N to sweep)
+//!   cargo run --release --example stt_eval -- --manifest M --root R --simulate-endpoint
+//!
 //!   # one-breath rows ("nexus open chrome"): feed STT only what the command
 //!   # capture would hear after the REAL wake engine fires; sweep the offset
 //!   # (ms from the detection point; default production value 0) to choose wakeSeedOffsetMs
@@ -88,6 +91,9 @@ async fn run(args: Vec<String>) -> i32 {
     } else {
         None
     };
+    let simulate_endpoint = flag(&args, "--simulate-endpoint");
+    let endpoint_silence: Option<u32> = arg(&args, "--endpoint-silence-chunks").and_then(|v| v.parse().ok());
+    let noise_floor: f32 = arg(&args, "--noise-floor").and_then(|v| v.parse().ok()).unwrap_or(0.003);
     let kinds: Vec<String> = arg(&args, "--kinds")
         .unwrap_or_else(|| "command,silence,noise,text".to_string())
         .split(',')
@@ -160,6 +166,15 @@ async fn run(args: Vec<String>) -> i32 {
                         }
                     }
                 }
+            }
+            // Command rows: transcribe only what the live endpointer would capture.
+            if simulate_endpoint && row.get("kind").and_then(Value::as_str) == Some("command") {
+                let r = ve::simulate_endpoint(&audio, noise_floor, endpoint_silence);
+                audio.truncate(r.cut_samples);
+                row.insert("endpoint_stopped".into(), json!(r.stopped));
+                row.insert("endpoint_cut_ms".into(), json!(r.cut_samples as u64 * 1000 / ve::SR as u64));
+                row.insert("speech_end_ms".into(), json!(r.speech_end_ms));
+                row.insert("cut_early".into(), json!(r.cut_early));
             }
             let samples = ve::to_i16(&audio);
             gate = ve::acoustic_gate(&samples);

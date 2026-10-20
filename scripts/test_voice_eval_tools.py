@@ -236,6 +236,15 @@ class MetricTests(unittest.TestCase):
         self.assertEqual((m["k"], m["n"]), (3, 4))
         self.assertIn("1 wake miss", m["note"])
 
+    def test_endpoint_cutoff_row_only_with_simulation(self):
+        base = {"kind": "command", "expected_text": "open chrome", "raw": "open chrome", "ref_words": 2,
+                "edits_raw": 0, "edits_filtered": 0, "intent_ok": True}
+        keys = {m["key"] for m in sc.stt_metrics([dict(base)])}
+        self.assertNotIn("stt_endpoint_cutoff", keys)
+        rows = [dict(base, cut_early=False) for _ in range(99)] + [dict(base, cut_early=True)]
+        m = {x["key"]: x for x in sc.stt_metrics(rows)}["stt_endpoint_cutoff"]
+        self.assertEqual((m["k"], m["n"]), (1, 100))
+
     def test_report_renders_table_and_baseline_delta(self):
         wake = [wake_row("nexus", True, ms=100)] * 10
         report, metrics = sc.build_report(wake, [])

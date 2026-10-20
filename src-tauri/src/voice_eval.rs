@@ -355,6 +355,60 @@ pub fn simulate_capture(
     Some(audio[start..].to_vec())
 }
 
+// ─── Endpointing simulation (where would the capture stop?) ──────────────
+
+/// Where the live endpointer would cut a recorded command, and whether that
+/// is before the speaker was done.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EndpointResult {
+    /// Capture length in samples (the whole clip when it never stopped).
+    pub cut_samples: usize,
+    /// The endpointer stopped before the end of the clip.
+    pub stopped: bool,
+    /// End of the last clearly voiced chunk of the clip, in ms.
+    pub speech_end_ms: u64,
+    /// Capture ended while voiced audio was still to come (> 160 ms of it).
+    pub cut_early: bool,
+}
+
+/// Run a clip through the production endpointer (`EndpointSim`, kept identical to
+/// the live path by a unit test) in 80 ms chunks.
+/// `silence_limit`: override the 5-chunk silence limit to sweep alternatives.
+pub fn simulate_endpoint(audio: &[f32], noise_floor: f32, silence_limit: Option<u32>) -> EndpointResult {
+    let chunk = OWW_CHUNK_SIZE;
+    let rms_of = |c: &[f32]| (c.iter().map(|s| s * s).sum::<f32>() / c.len().max(1) as f32).sqrt();
+    // Reference speech end: last chunk clearly above the production speech threshold.
+    let (hi, _) = crate::wakeword_oww::endpoint_thresholds(noise_floor);
+    let mut last_voiced: Option<usize> = None;
+    for (i, c) in audio.chunks(chunk).enumerate() {
+        if rms_of(c) > hi {
+            last_voiced = Some(i);
+        }
+    }
+    let speech_end_ms = last_voiced.map(|i| ((i + 1) * chunk) as u64 * 1000 / SR as u64).unwrap_or(0);
+
+    let mut sim = crate::wakeword_oww::EndpointSim::new(noise_floor);
+    sim.silence_limit_override = silence_limit;
+    let mut stop_chunk: Option<usize> = None;
+    for (i, c) in audio.chunks(chunk).enumerate() {
+        if sim.step(rms_of(c)) {
+            stop_chunk = Some(i);
+            break;
+        }
+    }
+    let cut_samples = match stop_chunk {
+        Some(i) => ((i + 1) * chunk).min(audio.len()),
+        None => audio.len(),
+    };
+    let cut_ms = cut_samples as u64 * 1000 / SR as u64;
+    EndpointResult {
+        cut_samples,
+        stopped: stop_chunk.is_some(),
+        speech_end_ms,
+        cut_early: stop_chunk.is_some() && cut_ms + 160 < speech_end_ms,
+    }
+}
+
 // ─── Text stage (filter + wake-prefix strip + parser) ────────────────────
 
 /// Resolved intent label as the e2e fixture computes it: the inner NLU/live
@@ -761,5 +815,32 @@ mod tests {
         // Never before the clip start, never past its end.
         assert_eq!(capture_start_sample(0, -400, 100_000), 0);
         assert_eq!(capture_start_sample(60_000, 0, 16_000), 16_000);
+    }
+    #[test]
+    fn test_simulate_endpoint_cuts_after_speech_and_flags_early_cuts() {
+        let ch = OWW_CHUNK_SIZE;
+        let tone = |amp: f32, chunks: usize| vec![amp; ch * chunks];
+        // 3 chunks of room, 8 of speech, then silence: stops ~400 ms after speech, not early.
+        let mut clip = tone(0.001, 3);
+        clip.extend(tone(0.1, 8));
+        clip.extend(tone(0.001, 12));
+        let r = simulate_endpoint(&clip, 0.003, None);
+        assert!(r.stopped && !r.cut_early);
+        assert_eq!(r.speech_end_ms, 11 * 80);
+        assert!(r.cut_samples >= 11 * ch && r.cut_samples <= 17 * ch, "{}", r.cut_samples);
+        // A 640 ms mid-sentence pause: the default 400 ms limit cuts the speaker off...
+        let mut clip = tone(0.001, 3);
+        clip.extend(tone(0.1, 6));
+        clip.extend(tone(0.001, 8));
+        clip.extend(tone(0.1, 6));
+        clip.extend(tone(0.001, 12));
+        let r = simulate_endpoint(&clip, 0.003, None);
+        assert!(r.stopped && r.cut_early, "{r:?}");
+        // ...a longer limit does not.
+        let r = simulate_endpoint(&clip, 0.003, Some(10));
+        assert!(!r.cut_early, "{r:?}");
+        // Silence only: never "cut early".
+        let r = simulate_endpoint(&tone(0.001, 30), 0.003, None);
+        assert!(!r.cut_early);
     }
 }

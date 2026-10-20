@@ -1596,6 +1596,15 @@ pub(crate) mod engine {
                 // EVERY chunk (including during STT capture / suppression
                 // drain) so the snapshot is always fresh. Cost: one 1280-
                 // float memcpy per 80ms — negligible.
+                {
+                    let sum_sq: f32 = chunk.iter().map(|s| s * s).sum();
+                    let rms = (sum_sq / chunk.len().max(1) as f32).sqrt();
+                    let prev = f32::from_bits(super::NOISE_FLOOR_BITS.load(Ordering::Relaxed));
+                    super::NOISE_FLOOR_BITS.store(
+                        super::track_noise_floor(prev, rms).to_bits(),
+                        Ordering::Relaxed,
+                    );
+                }
                 let chunk_end = {
                     let mut ring = super::VERIFY_RING.lock();
                     super::push_capped(&mut ring, &chunk, super::VERIFY_RING_CAP);
@@ -1648,11 +1657,7 @@ pub(crate) mod engine {
                     // Adaptive endpoint: fast 400ms normally, ~1s once the
                     // speaker has shown they pause mid-thought (2+ pauses).
                     let silence_limit =
-                        if super::STT_PAUSE_COUNT.load(Ordering::Relaxed) >= 2 {
-                            super::STT_SILENCE_CHUNK_LIMIT_PATIENT
-                        } else {
-                            super::STT_SILENCE_CHUNK_LIMIT
-                        };
+                        super::silence_limit_for(super::STT_PAUSE_COUNT.load(Ordering::Relaxed));
 
                     // Stop conditions (pure predicate, F1):
                     // 1. Silence after a CONFIRMED turn: adaptive (400ms / ~1s patient).
@@ -2801,6 +2806,10 @@ pub fn start_stt_capture() {
         // so no phonemes are lost — the user has already finished the wake
         // word and is just starting to say the command.
     }
+    CAPTURE_FLOOR_BITS.store(
+        NOISE_FLOOR_BITS.load(std::sync::atomic::Ordering::Relaxed),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     STT_CAPTURING.store(true, std::sync::atomic::Ordering::Relaxed);
     STT_SPEECH_DETECTED.store(false, std::sync::atomic::Ordering::Relaxed);
     STT_SILENCE_CHUNKS.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -2867,6 +2876,7 @@ pub fn start_stt_capture_seeded(offset_ms: i32, ring_end: u64) {
         buf.clear();
         buf.extend_from_slice(&seed);
     }
+    CAPTURE_FLOOR_BITS.store(NOISE_FLOOR_BITS.load(Ordering::Relaxed), Ordering::Relaxed);
     STT_SPEECH_DETECTED.store(false, Ordering::Relaxed);
     STT_SILENCE_CHUNKS.store(0, Ordering::Relaxed);
     STT_TOTAL_CHUNKS.store(0, Ordering::Relaxed);
@@ -2890,6 +2900,97 @@ pub fn start_stt_capture_seeded(offset_ms: i32, ring_end: u64) {
     );
 }
 
+/// Slow minimum-tracking estimate of the room's noise floor (RMS per 80 ms
+/// chunk), updated by the audio callback for every chunk. f32 bits in an atomic.
+#[cfg(not(feature = "mock-wake"))]
+static NOISE_FLOOR_BITS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0x3B44_9BA6); // 0.003
+/// The floor frozen at capture start (so the user's own speech cannot drag the
+/// thresholds up mid-turn).
+#[cfg(not(feature = "mock-wake"))]
+static CAPTURE_FLOOR_BITS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0x3B44_9BA6);
+
+/// Default room noise floor the fixed thresholds were tuned for.
+pub const DEFAULT_NOISE_FLOOR: f32 = 0.003;
+
+/// One step of the noise-floor tracker. Falls fast to a quieter chunk, rises
+/// slowly (~50 s time constant) so a few seconds of speech barely move it.
+/// Pure (unit-tested).
+pub fn track_noise_floor(prev: f32, rms: f32) -> f32 {
+    if !rms.is_finite() || !prev.is_finite() {
+        return DEFAULT_NOISE_FLOOR;
+    }
+    let r = rms.clamp(0.0, 0.2);
+    let next = if r < prev { prev * 0.8 + r * 0.2 } else { prev * 0.9985 + r * 0.0015 };
+    next.clamp(0.0005, 0.05)
+}
+
+/// Speech-start / keep-going RMS thresholds for a given noise floor.
+///
+/// The fixed 0.010 / 0.006 pair assumed a quiet room: next to a fan or open
+/// window at an RMS of ~0.008 the capture never fell below the "silent" level,
+/// so every turn ran to the 10 s cap. The pair now scales with the measured
+/// floor but NEVER drops below the old values, so a quiet room behaves exactly
+/// as before. Pure (unit-tested).
+pub fn endpoint_thresholds(floor: f32) -> (f32, f32) {
+    let f = if floor.is_finite() { floor.clamp(0.0005, 0.05) } else { DEFAULT_NOISE_FLOOR };
+    let speech = (f * 3.34).clamp(STT_SPEECH_RMS_THRESHOLD, 0.05);
+    let silence = (f * 2.0).clamp(STT_SILENCE_RMS_THRESHOLD, speech * 0.8);
+    (speech, silence)
+}
+
+/// Silent-chunk limit before a confirmed turn ends: patient once the speaker
+/// has paused mid-turn twice.
+fn silence_limit_for(pauses: u32) -> u32 {
+    if pauses >= 2 { STT_SILENCE_CHUNK_LIMIT_PATIENT } else { STT_SILENCE_CHUNK_LIMIT }
+}
+
+/// Offline mirror of the live endpointer (`capture_vad_update` + the stop
+/// predicate in the audio callback), used by the evaluator to see where a
+/// recorded command would be cut. A unit test drives it and the live atomics
+/// with the same chunk sequence so the two cannot drift apart.
+#[derive(Debug, Clone)]
+pub struct EndpointSim {
+    speech: bool,
+    silence: u32,
+    voiced: u32,
+    pauses: u32,
+    total: u32,
+    hi: f32,
+    lo: f32,
+    /// Replace the 5-chunk silence limit (for sweeps); `None` = production.
+    pub silence_limit_override: Option<u32>,
+}
+
+impl EndpointSim {
+    pub fn new(noise_floor: f32) -> Self {
+        let (hi, lo) = endpoint_thresholds(noise_floor);
+        Self { speech: false, silence: 0, voiced: 0, pauses: 0, total: 0, hi, lo, silence_limit_override: None }
+    }
+
+    /// Feed one 80 ms chunk's RMS; true = the capture would stop here.
+    pub fn step(&mut self, rms: f32) -> bool {
+        let thresh = if self.speech { self.lo } else { self.hi };
+        if rms > thresh {
+            if self.speech && self.silence >= 2 {
+                self.pauses += 1;
+            }
+            self.speech = true;
+            self.silence = 0;
+            if rms > self.hi {
+                self.voiced += 1;
+            }
+        } else if self.speech {
+            self.silence += 1;
+        }
+        let total_before = self.total;
+        self.total += 1;
+        let limit = self.silence_limit_override.unwrap_or_else(|| silence_limit_for(self.pauses));
+        should_stop_capture(self.speech, self.voiced, self.silence, limit, total_before)
+    }
+}
+
 /// Per-chunk speech/silence tracking for the command capture (shared by the
 /// live audio callback and the seed replay so both behave identically).
 /// Hysteresis: a high threshold STARTS speech (rejects noise), a lower one
@@ -2898,7 +2999,8 @@ pub fn start_stt_capture_seeded(offset_ms: i32, ring_end: u64) {
 fn capture_vad_update(rms: f32) {
     use std::sync::atomic::Ordering;
     let underway = STT_SPEECH_DETECTED.load(Ordering::Relaxed);
-    let thresh = if underway { STT_SILENCE_RMS_THRESHOLD } else { STT_SPEECH_RMS_THRESHOLD };
+    let (hi, lo) = endpoint_thresholds(f32::from_bits(CAPTURE_FLOOR_BITS.load(Ordering::Relaxed)));
+    let thresh = if underway { lo } else { hi };
     if rms > thresh {
         // Speech resumed after a real pause (2+ silent chunks)? Count it —
         // hesitant speakers get a patient endpoint.
@@ -2909,7 +3011,7 @@ fn capture_vad_update(rms: f32) {
         STT_SILENCE_CHUNKS.store(0, Ordering::Relaxed);
         // TRUE voice energy (above the speech threshold, not the hysteresis
         // band): arms the silence endpoint (F1).
-        if rms > STT_SPEECH_RMS_THRESHOLD {
+        if rms > hi {
             STT_VOICED_CHUNKS.fetch_add(1, Ordering::Relaxed);
         }
     } else if underway {
@@ -5186,6 +5288,111 @@ mod tests {
     }
 
     // ─── Verifier v2 tests ──────────────────────────────────────────
+
+    /// B9: the noise floor follows the room without being dragged up by speech.
+    #[test]
+    fn test_track_noise_floor() {
+        use super::track_noise_floor as t;
+        // Falls quickly toward a quieter room.
+        let mut f = 0.02;
+        for _ in 0..30 {
+            f = t(f, 0.002);
+        }
+        assert!(f < 0.0025, "{f}");
+        // 3 s of loud speech (37 chunks at 0.1) barely moves a quiet floor.
+        let mut f = 0.003;
+        for _ in 0..37 {
+            f = t(f, 0.1);
+        }
+        assert!(f < 0.01, "speech must not raise the floor much, got {f}");
+        // A persistently noisy room is learned within a couple of minutes.
+        let mut f = 0.003;
+        for _ in 0..3000 {
+            f = t(f, 0.012);
+        }
+        assert!(f > 0.01, "{f}");
+        // Garbage in never poisons the estimate.
+        assert_eq!(t(0.003, f32::NAN), super::DEFAULT_NOISE_FLOOR);
+        assert!(t(0.003, 5.0) <= 0.05);
+    }
+
+    /// B9: thresholds scale up with a noisy floor, never below today's values.
+    #[test]
+    fn test_endpoint_thresholds() {
+        use super::endpoint_thresholds as th;
+        let (hi, lo) = th(0.003);
+        assert!((hi - 0.01).abs() < 1e-3 && (lo - 0.006).abs() < 1e-3, "{hi} {lo}");
+        // Quiet rooms keep the old thresholds (never more sensitive than before).
+        assert_eq!(th(0.0005), (0.01, 0.006));
+        assert_eq!(th(0.001), (0.01, 0.006));
+        // A fan at ~0.008 RMS: "silence" is now above the fan, so the turn can end.
+        let (hi, lo) = th(0.008);
+        assert!(lo > 0.008 && hi > lo, "{hi} {lo}");
+        // Always ordered and bounded.
+        for f in [0.0, 0.0005, 0.003, 0.01, 0.03, 0.05, 1.0, f32::NAN] {
+            let (hi, lo) = th(f);
+            assert!(lo <= hi * 0.8 + 1e-6 && hi <= 0.05 && lo >= 0.006, "{f}: {hi} {lo}");
+        }
+    }
+
+    /// B9: the offline endpointer must behave exactly like the live atomics.
+    #[test]
+    fn test_endpoint_sim_matches_live_path() {
+        use std::sync::atomic::Ordering;
+        use super::{EndpointSim, STT_SPEECH_DETECTED, STT_SILENCE_CHUNKS, STT_VOICED_CHUNKS,
+                    STT_PAUSE_COUNT, STT_TOTAL_CHUNKS, CAPTURE_FLOOR_BITS};
+        // Silence, speech with a pause, hesitant second phrase, long tail.
+        let mut seq: Vec<f32> = vec![0.002; 5];
+        seq.extend(vec![0.08; 6]);
+        seq.extend(vec![0.001; 3]);
+        seq.extend(vec![0.07; 4]);
+        seq.extend(vec![0.0015; 3]);
+        seq.extend(vec![0.06; 3]);
+        seq.extend(vec![0.001; 20]);
+        for floor in [0.003f32, 0.008] {
+            // reset live state
+            super::abort_stt_capture();
+            CAPTURE_FLOOR_BITS.store(floor.to_bits(), Ordering::Relaxed);
+            let mut sim = EndpointSim::new(floor);
+            for (i, &rms) in seq.iter().enumerate() {
+                let sim_stop = sim.step(rms);
+                super::capture_vad_update(rms);
+                let total = STT_TOTAL_CHUNKS.fetch_add(1, Ordering::Relaxed);
+                let live_stop = super::should_stop_capture(
+                    STT_SPEECH_DETECTED.load(Ordering::Relaxed),
+                    STT_VOICED_CHUNKS.load(Ordering::Relaxed),
+                    STT_SILENCE_CHUNKS.load(Ordering::Relaxed),
+                    super::silence_limit_for(STT_PAUSE_COUNT.load(Ordering::Relaxed)),
+                    total,
+                );
+                assert_eq!(sim_stop, live_stop, "floor {floor}, chunk {i}");
+                if live_stop {
+                    break;
+                }
+            }
+            super::abort_stt_capture();
+        }
+        CAPTURE_FLOOR_BITS.store(super::DEFAULT_NOISE_FLOOR.to_bits(), Ordering::Relaxed);
+    }
+
+    /// B9 end to end: next to a fan the old fixed thresholds never end the turn.
+    #[test]
+    fn test_endpoint_sim_noisy_room_ends_turn() {
+        use super::EndpointSim;
+        // 6 chunks of speech at 0.1, then a fan at 0.008 RMS forever.
+        let mut seq = vec![0.1f32; 6];
+        seq.extend(vec![0.008; 40]);
+        let stop_at = |floor: f32| {
+            let mut sim = EndpointSim::new(floor);
+            seq.iter().position(|&r| sim.step(r))
+        };
+        // Floor unaware (old behaviour: thresholds for a quiet room) → runs on.
+        let quiet = stop_at(0.003);
+        assert!(quiet.map_or(true, |i| i >= 40), "old thresholds hang: {quiet:?}");
+        // Floor-aware → ends ~400 ms after speech stops.
+        let aware = stop_at(0.008).expect("must end");
+        assert!((10..=12).contains(&aware), "{aware}");
+    }
 
     /// B2: which part of the ring a capture seed takes.
     #[test]
