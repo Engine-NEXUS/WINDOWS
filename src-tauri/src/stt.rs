@@ -319,6 +319,20 @@ pub async fn transcribe_samples_verbose<R: tauri::Runtime>(
     }
 }
 
+/// Pure: would a transcription use the local sidecar? (privacy mode, or no
+/// Groq key — Groq failures that fall back to local are a runtime event.)
+pub(crate) fn local_path_for(local_only: bool, groq_key_empty: bool) -> bool {
+    local_only || groq_key_empty
+}
+
+/// Would `transcribe_samples_verbose` start on the local sidecar right now?
+pub fn stt_uses_local_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    local_path_for(
+        crate::commands::read_local_stt_only(app),
+        crate::commands::read_groq_api_key(app).is_empty(),
+    )
+}
+
 /// Transcribe using the local faster-whisper Python sidecar (port 39217).
 pub async fn transcribe_local(samples: &[i16], client: &reqwest::Client) -> Result<String, String> {
     // Ensure the STT server is running (lazy start)
@@ -691,6 +705,15 @@ mod tests {
     use super::apply_hallucination_filter;
     use super::{filter_transcript_counted, hallucination_stats};
     use super::stt_unavailable_guidance;
+
+    #[test]
+    fn test_local_path_for() {
+        use super::local_path_for;
+        assert!(local_path_for(true, false), "privacy mode is always local");
+        assert!(local_path_for(false, true), "no key → local");
+        assert!(local_path_for(true, true));
+        assert!(!local_path_for(false, false), "key + cloud allowed → Groq first");
+    }
 
     #[test]
     fn test_stt_unavailable_guidance_names_the_right_fix() {

@@ -3803,6 +3803,47 @@ fn candidate_gate(verified: bool, now_ms: u64, last_fire_ms: u64) -> CandidateGa
     }
 }
 
+/// Minimum stage-1 probability that counts as acoustic evidence of the wake
+/// word. Candidates below it (the prob-0.0 barge-in candidates) have none.
+const STAGE1_EVIDENCE_FLOOR: f32 = 0.3;
+
+/// May the verifier FAIL OPEN (fire anyway) when it cannot get a transcript
+/// (STT error, timeout, cold engine, clip too short)? Only with real neural
+/// evidence behind the candidate. A barge-in candidate has none: failing open
+/// there fired phantom "confidence 0.0%" wakes whenever speech played over TTS
+/// and the STT call failed.
+fn fail_open_allowed(prob: f32) -> bool {
+    prob >= STAGE1_EVIDENCE_FLOOR
+}
+
+/// What the verifier does before spending time on a transcription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerifyPlan {
+    /// Run the STT cross-check as usual.
+    Transcribe,
+    /// The only available engine is a cold local sidecar (model load takes
+    /// 10–20 s — the user would stare at a dead orb until the verifier's
+    /// timeout): skip the check and fire on the neural evidence alone.
+    SkipFire,
+    /// Same, but there is no neural evidence to fire on: drop the candidate.
+    SkipSuppress,
+}
+
+/// `local_path`: the verifier's transcription would use the local sidecar
+/// (no Groq key, or local-only mode). `local_ready`: that sidecar answers now.
+/// With a Groq key the cloud engine is used and local readiness is irrelevant.
+fn verify_plan(local_path: bool, local_ready: bool, prob: f32) -> VerifyPlan {
+    if local_path && !local_ready {
+        if fail_open_allowed(prob) {
+            VerifyPlan::SkipFire
+        } else {
+            VerifyPlan::SkipSuppress
+        }
+    } else {
+        VerifyPlan::Transcribe
+    }
+}
+
 /// Instant-fire decision for the candidate receiver. `verify_wake` is the
 /// user's STT-cross-check setting; `prob` is the candidate's stage-1
 /// probability. A candidate with essentially no neural evidence (the
@@ -3812,7 +3853,7 @@ fn candidate_gate(verified: bool, now_ms: u64, last_fire_ms: u64) -> CandidateGa
 /// sustained speech (TV) played during TTS. Those candidates are routed to
 /// the STT gate instead.
 fn should_instant_fire(verify_wake: bool, prob: f32) -> bool {
-    !verify_wake && prob >= 0.3
+    !verify_wake && prob >= STAGE1_EVIDENCE_FLOOR
 }
 
 fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32) {    // Signal the main loop to fire (consumed once via swap).
@@ -3826,13 +3867,36 @@ fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32) 
         }
     };
 
+    // Fail-open only with neural evidence; otherwise the candidate is dropped.
+    let fail_open = |why: &str| {
+        if fail_open_allowed(prob) {
+            tracing::warn!("verify: {why} — firing (fail-open)");
+            fire();
+        } else {
+            tracing::info!("verify: {why} and stage-1 prob {prob:.3} is no evidence — SUPPRESSED");
+        }
+    };
+
     if audio.len() < 8000 {
-        tracing::warn!(
-            "verify: candidate too short ({} samples) — firing (fail-open)",
-            audio.len()
-        );
-        fire();
+        fail_open(&format!("candidate too short ({} samples)", audio.len()));
         return;
+    }
+
+    // A cold local engine cannot answer inside the verifier's budget: don't
+    // make the user wait for the timeout. Warm it for the command that follows.
+    let local_path = crate::stt::stt_uses_local_path(app);
+    let plan = verify_plan(local_path, !local_path || crate::lazy_stt::is_stt_responsive(), prob);
+    match plan {
+        VerifyPlan::Transcribe => {}
+        VerifyPlan::SkipFire => {
+            crate::lazy_stt::ensure_stt_running();
+            fail_open("local STT engine is cold");
+            return;
+        }
+        VerifyPlan::SkipSuppress => {
+            fail_open("local STT engine is cold");
+            return;
+        }
     }
 
     // VAD-trim: cut leading/trailing silence so Whisper hears the word, not
@@ -3867,8 +3931,7 @@ fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32) 
     {
         Ok(rt) => rt,
         Err(e) => {
-            tracing::error!("verify: runtime build failed ({e}) — firing (fail-open)");
-            fire();
+            fail_open(&format!("runtime build failed ({e})"));
             return;
         }
     };
@@ -3966,17 +4029,8 @@ fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32) 
                     prob
                 );
             }
-            Ok(Err(e)) => {
-                tracing::warn!("verify: STT failed ({e}) — firing (fail-open)");
-                fire();
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "verify: STT timed out after {}s — firing (fail-open)",
-                    VERIFY_TIMEOUT_SECS
-                );
-                fire();
-            }
+            Ok(Err(e)) => fail_open(&format!("STT failed ({e})")),
+            Err(_) => fail_open(&format!("STT timed out after {VERIFY_TIMEOUT_SECS}s")),
         }
     });
 }
@@ -4973,6 +5027,33 @@ mod tests {
     }
 
     // ─── Verifier v2 tests ──────────────────────────────────────────
+
+    /// B3: a cold local engine must not stall the wake until the timeout.
+    #[test]
+    fn test_verify_plan_cold_local_engine() {
+        use super::{verify_plan, VerifyPlan::*};
+        // Cloud STT (Groq key): local readiness is irrelevant.
+        assert_eq!(verify_plan(false, false, 0.9), Transcribe);
+        assert_eq!(verify_plan(false, true, 0.9), Transcribe);
+        // Local path, engine up: normal cross-check.
+        assert_eq!(verify_plan(true, true, 0.9), Transcribe);
+        // Local path, engine cold: fire on neural evidence, drop evidence-free candidates.
+        assert_eq!(verify_plan(true, false, 0.9), SkipFire);
+        assert_eq!(verify_plan(true, false, 0.3), SkipFire);
+        assert_eq!(verify_plan(true, false, 0.0), SkipSuppress);
+    }
+
+    /// B3: barge-in candidates (prob 0.0) never fail open.
+    #[test]
+    fn test_fail_open_needs_neural_evidence() {
+        assert!(super::fail_open_allowed(0.36));
+        assert!(super::fail_open_allowed(0.99));
+        assert!(!super::fail_open_allowed(0.0));
+        assert!(!super::fail_open_allowed(0.29));
+        // Same threshold the instant path uses.
+        assert!(super::should_instant_fire(false, 0.3));
+        assert!(!super::should_instant_fire(false, 0.29));
+    }
 
     /// B1: a verified wake arrives inside the cooldown that its own
     /// candidate started; it must still fire. Unverified duplicates inside the

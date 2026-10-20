@@ -276,6 +276,14 @@ pub fn mark_stt_request() {
     *LAST_REQUEST.lock().unwrap() = Some(Instant::now());
 }
 
+/// Idle-kill decision. During a Ghost Mode session the user pauses between
+/// commands for a while; killing the sidecar then makes the next command pay a
+/// 10–20 s model load. The sidecar only exists here for local-STT users, and it
+/// is reclaimed the first check after the session ends.
+fn idle_kill_due(idle: Duration, ghost_session_active: bool) -> bool {
+    !ghost_session_active && idle > STT_IDLE_TIMEOUT
+}
+
 /// Check if the STT server has been idle for too long and kill it.
 /// Called periodically from a background thread.
 /// NOTE: STT is now kept alive permanently (STT_KEEP_ALIVE=true) because
@@ -294,7 +302,10 @@ pub fn check_stt_idle() {
     let should_kill = {
         let last = LAST_REQUEST.lock().unwrap();
         match *last {
-            Some(t) => Instant::now().duration_since(t) > STT_IDLE_TIMEOUT,
+            Some(t) => idle_kill_due(
+                Instant::now().duration_since(t),
+                crate::ghost::session_active(),
+            ),
             None => false,
         }
     };
@@ -412,6 +423,15 @@ fn read_moonshine_model() -> String {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn test_idle_kill_waits_for_ghost_session_to_end() {
+        let long = STT_IDLE_TIMEOUT + Duration::from_secs(1);
+        assert!(idle_kill_due(long, false));
+        assert!(!idle_kill_due(long, true), "keep the sidecar warm during a ghost session");
+        assert!(!idle_kill_due(Duration::from_secs(5), false));
+        assert!(!idle_kill_due(STT_IDLE_TIMEOUT, false), "strictly greater than the timeout");
+    }
 
     /// The local-STT default must stay inside the 600–700 MB budget.
     #[test]
