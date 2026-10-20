@@ -324,6 +324,37 @@ pub fn eval_wake_clip(e: &mut WakeEngine, audio: &[f32], threshold: Option<f32>)
     }
 }
 
+// ─── Capture simulation (what the command STT actually receives) ─────────
+
+/// First sample of the command capture for a clip whose wake word fired in the
+/// chunk starting at `first_fire_ms`. Production starts capturing at the END of
+/// the detecting chunk (+80 ms) shifted by `offset_ms` (`wakeSeedOffsetMs`).
+/// Clamped to the clip. Pure.
+pub fn capture_start_sample(first_fire_ms: u64, offset_ms: i32, len: usize) -> usize {
+    let start_ms = first_fire_ms as i64 + 80 + offset_ms as i64;
+    ((start_ms.max(0) as usize) * SR as usize / 1000).min(len)
+}
+
+/// Run a one-breath clip ("nexus open chrome") through the REAL wake engine and
+/// return only the audio the command capture would hear: everything after the
+/// detection point (+ `offset_ms`). `None` = the wake word never fired, so in
+/// production this utterance would have done nothing at all.
+///
+/// This makes the offline "one breath" score include capture loss, which a plain
+/// transcription of the whole clip cannot see — and lets you choose
+/// `wakeSeedOffsetMs` from data instead of guessing.
+pub fn simulate_capture(
+    e: &mut WakeEngine,
+    audio: &[f32],
+    threshold: Option<f32>,
+    offset_ms: i32,
+) -> Option<Vec<f32>> {
+    let v = eval_wake_clip(e, audio, threshold);
+    let fire = v.first_fire_ms?;
+    let start = capture_start_sample(fire, offset_ms, audio.len());
+    Some(audio[start..].to_vec())
+}
+
 // ─── Text stage (filter + wake-prefix strip + parser) ────────────────────
 
 /// Resolved intent label as the e2e fixture computes it: the inner NLU/live
@@ -720,5 +751,15 @@ mod tests {
         assert!((st.max_avg_logprob + 0.4).abs() < 1e-6);
         assert!((st.max_compression_ratio - 2.9).abs() < 1e-6);
         assert!(st.gate_rejects, "ratio 2.9 trips the shipped gate");
+    }
+    #[test]
+    fn test_capture_start_sample() {
+        // Fired in the chunk starting at 1000 ms → capture starts at 1080 ms.
+        assert_eq!(capture_start_sample(1000, 0, 100_000), 1080 * 16);
+        assert_eq!(capture_start_sample(1000, -160, 100_000), 920 * 16);
+        assert_eq!(capture_start_sample(1000, 80, 100_000), 1160 * 16);
+        // Never before the clip start, never past its end.
+        assert_eq!(capture_start_sample(0, -400, 100_000), 0);
+        assert_eq!(capture_start_sample(60_000, 0, 16_000), 16_000);
     }
 }

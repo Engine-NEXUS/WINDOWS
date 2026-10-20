@@ -215,9 +215,21 @@ def stt_metrics(rows):
     out.append(rate("stt_hallucination_leak", "Hallucinated text on silence / TV noise",
                     sum(bool(r.get("leaked")) for r in bg), len(bg)))
     bok = [r for r in breath if "intent_ok" in r]
-    out.append(rate("stt_one_breath", '"NEXUS open Chrome" in one breath (STT + parser only)',
-                    sum(bool(r["intent_ok"]) for r in bok), len(bok),
-                    note="capture clipping is NOT measurable offline"))
+    sim = [r for r in bok if "capture_offset_ms" in r]
+    if sim:
+        # stt_eval --capture-offset-ms: the real wake engine decided where the
+        # capture starts, so capture loss and wake misses are INCLUDED.
+        offs = sorted({r["capture_offset_ms"] for r in sim})
+        missed = sum(bool(r.get("wake_missed")) for r in sim)
+        m = rate("stt_one_breath",
+                 f'"NEXUS open Chrome" in one breath (wake + capture simulated, offset {offs[0]} ms)',
+                 sum(bool(r["intent_ok"]) for r in bok), len(bok),
+                 note=f"{missed} wake miss(es) counted as failures")
+    else:
+        m = rate("stt_one_breath", '"NEXUS open Chrome" in one breath (STT + parser only)',
+                 sum(bool(r["intent_ok"]) for r in bok), len(bok),
+                 note="whole clip transcribed; capture loss NOT included - run stt_eval --capture-offset-ms")
+    out.append(m)
     return out
 
 

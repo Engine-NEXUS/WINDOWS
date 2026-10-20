@@ -222,6 +222,20 @@ class MetricTests(unittest.TestCase):
         self.assertEqual((m["stt_hallucination_leak"]["k"], m["stt_hallucination_leak"]["n"]), (1, 2))
         self.assertEqual(m["stt_one_breath"]["k"], 0)
 
+    def test_one_breath_label_reflects_capture_simulation(self):
+        base = {"kind": "command", "one_breath": True, "expected_text": "nexus open chrome",
+                "raw": "open chrome", "ref_words": 3, "edits_raw": 1, "edits_filtered": 1}
+        plain = [dict(base, intent_ok=True) for _ in range(4)]
+        m = {x["key"]: x for x in sc.stt_metrics(plain)}["stt_one_breath"]
+        self.assertIn("STT + parser only", m["label"])
+        self.assertIn("NOT included", m["note"])
+        sim = [dict(base, intent_ok=True, capture_offset_ms=-160) for _ in range(3)]
+        sim.append(dict(base, intent_ok=False, capture_offset_ms=-160, wake_missed=True, raw=""))
+        m = {x["key"]: x for x in sc.stt_metrics(sim)}["stt_one_breath"]
+        self.assertIn("capture simulated, offset -160 ms", m["label"])
+        self.assertEqual((m["k"], m["n"]), (3, 4))
+        self.assertIn("1 wake miss", m["note"])
+
     def test_report_renders_table_and_baseline_delta(self):
         wake = [wake_row("nexus", True, ms=100)] * 10
         report, metrics = sc.build_report(wake, [])

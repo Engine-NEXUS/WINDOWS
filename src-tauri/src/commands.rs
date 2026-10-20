@@ -1562,6 +1562,13 @@ pub struct NexusSettings {
     /// that are not owner-verified. Off by default; A/B it with the scorecard.
     #[serde(default)]
     pub stt_command_hints: bool,
+    /// Where the command capture starts, in ms relative to the end of the
+    /// chunk that detected the wake word. 0 = right after the detection point
+    /// (audio spoken while verifying/starting up is kept; the wake word is not).
+    /// Negative values reach back into the wake word's tail — experimental;
+    /// choose with `stt_eval --capture-offset-ms`. Clamped to ±400.
+    #[serde(default)]
+    pub wake_seed_offset_ms: i32,
     /// Ghost FIFO queue: per-step watchdog timeout in ms. Default: 15000. D7.
     #[serde(default = "default_ghost_step_timeout_ms")]
     pub ghost_step_timeout_ms: u64,
@@ -1731,6 +1738,7 @@ impl Default for NexusSettings {
             ghost_depth_ack: true,
             stt_confidence_gate: false,
             stt_command_hints: false,
+            wake_seed_offset_ms: 0,
             ghost_step_timeout_ms: 15000,
             ghost_turn_gap_ms: 1000,
             waves_horizontal_pct: 0.5,
@@ -2406,6 +2414,17 @@ pub fn stt_capture_had_speech() -> Result<bool, String> {
 }
 
 // ─── Ghost FIFO queue readers (loose settings.json parse) ───────────────
+
+/// Read `wakeSeedOffsetMs` (0 when unset or invalid).
+pub fn read_wake_seed_offset_ms<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> i32 {
+    let Ok(dir) = app.path().app_data_dir() else { return 0; };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("wakeSeedOffsetMs").and_then(|v| v.as_i64()))
+        .map(|v| v.clamp(-400, 400) as i32)
+        .unwrap_or(0)
+}
 
 /// Read the sttCommandHints flag (off unless the user turned it on).
 pub fn read_stt_command_hints<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {

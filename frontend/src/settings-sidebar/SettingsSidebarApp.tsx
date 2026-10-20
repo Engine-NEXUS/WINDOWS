@@ -71,6 +71,7 @@ interface Settings {
   ghostDepthAck?: boolean;
   sttConfidenceGate?: boolean;
   sttCommandHints?: boolean;
+  wakeSeedOffsetMs?: number;
   // Ghost FIFO queue: per-step watchdog timeout, ms (D7)
   ghostStepTimeoutMs?: number;
   // Ghost FIFO queue: inter-command gap τ, ms (D4)
@@ -121,6 +122,7 @@ const DEFAULT_SETTINGS: Settings = {
   ghostDepthAck: true,
   sttConfidenceGate: false,
   sttCommandHints: false,
+  wakeSeedOffsetMs: 0,
   ghostStepTimeoutMs: 15000,
   ghostTurnGapMs: 1000,
   wavesHorizontalPct: 0.5,

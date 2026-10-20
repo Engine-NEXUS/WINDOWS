@@ -1596,15 +1596,22 @@ pub(crate) mod engine {
                 // EVERY chunk (including during STT capture / suppression
                 // drain) so the snapshot is always fresh. Cost: one 1280-
                 // float memcpy per 80ms — negligible.
-                {
+                let chunk_end = {
                     let mut ring = super::VERIFY_RING.lock();
                     super::push_capped(&mut ring, &chunk, super::VERIFY_RING_CAP);
-                }
+                    super::RING_TOTAL.fetch_add(chunk.len() as u64, Ordering::SeqCst)
+                        + chunk.len() as u64
+                };
 
                 // ── Rust-side STT capture ──────────────────────────────
                 // If capturing, append chunk to buffer and run RMS VAD.
                 // Skip KWS during capture (prevents double-trigger).
                 if super::STT_CAPTURING.load(Ordering::Relaxed) {
+                    // Already delivered as part of the capture seed (it was in the
+                    // ring when the capture started): don't append it twice.
+                    if chunk_end <= super::SEED_UPTO.load(Ordering::SeqCst) {
+                        continue;
+                    }
                     {
                         let mut cap = super::STT_CAPTURE_BUFFER.lock();
                         cap.extend(chunk.iter().copied());
@@ -1633,30 +1640,7 @@ pub(crate) mod engine {
                         }
                     }
 
-                    let underway = super::STT_SPEECH_DETECTED.load(Ordering::Relaxed);
-                    let thresh = if underway {
-                        super::STT_SILENCE_RMS_THRESHOLD
-                    } else {
-                        super::STT_SPEECH_RMS_THRESHOLD
-                    };
-                    if rms > thresh {
-                        // Speech resumed after a real pause (2+ silent chunks)?
-                        // Count it — hesitant speakers get a patient endpoint.
-                        if underway
-                            && super::STT_SILENCE_CHUNKS.load(Ordering::Relaxed) >= 2
-                        {
-                            super::STT_PAUSE_COUNT.fetch_add(1, Ordering::Relaxed);
-                        }
-                        super::STT_SPEECH_DETECTED.store(true, Ordering::Relaxed);
-                        super::STT_SILENCE_CHUNKS.store(0, Ordering::Relaxed);
-                        // TRUE voice energy (above the speech threshold, not the
-                        // hysteresis band): arms the silence endpoint (F1).
-                        if rms > super::STT_SPEECH_RMS_THRESHOLD {
-                            super::STT_VOICED_CHUNKS.fetch_add(1, Ordering::Relaxed);
-                        }
-                    } else if underway {
-                        super::STT_SILENCE_CHUNKS.fetch_add(1, Ordering::Relaxed);
-                    }
+                    super::capture_vad_update(rms);
 
                     let total = super::STT_TOTAL_CHUNKS.fetch_add(1, Ordering::Relaxed);
                     let silence = super::STT_SILENCE_CHUNKS.load(Ordering::Relaxed);
@@ -1830,6 +1814,8 @@ pub(crate) mod engine {
                                 audio,
                                 prob: 0.0,
                                 verified: false,
+                                // No wake word was heard: nothing to seed from.
+                                ring_end: 0,
                             });
                         }
                     }
@@ -1865,9 +1851,16 @@ pub(crate) mod engine {
                     // the verifier thread (two-key gate needs both).
                     let prob = eng.pending_probability;
                     drop(eng);
-                    let audio: Vec<f32> =
-                        super::VERIFY_RING.lock().iter().copied().collect();
-                    let _ = wake_tx.send(super::WakeCandidate { audio, prob, verified: false });
+                    // Snapshot the audio AND the stream position under one lock so
+                    // `ring_end` is exactly the end of the last sample in `audio`.
+                    let (audio, ring_end): (Vec<f32>, u64) = {
+                        let ring = super::VERIFY_RING.lock();
+                        (
+                            ring.iter().copied().collect(),
+                            super::RING_TOTAL.load(Ordering::SeqCst),
+                        )
+                    };
+                    let _ = wake_tx.send(super::WakeCandidate { audio, prob, verified: false, ring_end });
                 }
             }
         }
@@ -1934,7 +1927,22 @@ pub struct WakeCandidate {
     /// the cooldown, nor leave a stale "verified" token for an unrelated
     /// candidate to consume.
     pub verified: bool,
+    /// Position of the end of the detecting chunk in the audio stream
+    /// (`RING_TOTAL` when it fired); 0 = unknown, then the capture starts fresh.
+    /// A verified self-send carries the original candidate's value.
+    pub ring_end: u64,
 }
+/// Total 16 kHz samples ever pushed into `VERIFY_RING` (monotonic). Lets a wake
+/// candidate say *where in the audio stream* it was detected, so the command
+/// capture can start from that exact point instead of from "whenever the
+/// receiver thread got around to it".
+#[cfg(not(feature = "mock-wake"))]
+static RING_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Ring-total up to which audio was already handed to the capture as a seed;
+/// the audio callback skips chunks that end at or before it (no duplicates).
+#[cfg(not(feature = "mock-wake"))]
+static SEED_UPTO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Only one verification may be in flight at a time (prevents double-fire).
 #[cfg(not(feature = "mock-wake"))]
 static VERIFY_IN_FLIGHT: std::sync::atomic::AtomicBool =
@@ -2805,6 +2813,110 @@ pub fn start_stt_capture() {
     tracing::info!("stt-capture: started (cpal-side capture, no baton pass)");
 }
 
+/// Mock builds have no audio path.
+#[cfg(feature = "mock-wake")]
+pub fn start_stt_capture_seeded(_offset_ms: i32, _ring_end: u64) {}
+
+/// Which slice of the verify ring a capture seed uses. Pure (unit-tested).
+///
+/// `total_now`: samples ever pushed; `ring_len`: samples currently in the ring
+/// (the newest `ring_len` of them); `ring_end`: stream position of the end of
+/// the detecting chunk; `offset`: samples to shift the start (negative reaches
+/// back into the wake word — experimental, default 0).
+/// Returns `(start_index_in_ring, count)`, or `None` when there is nothing to seed.
+#[allow(dead_code)]
+fn seed_slice(total_now: u64, ring_len: usize, ring_end: u64, offset: i64) -> Option<(usize, usize)> {
+    if ring_end == 0 || ring_end > total_now {
+        return None;
+    }
+    let ring_start = total_now.saturating_sub(ring_len as u64);
+    let want = (ring_end as i64 + offset).clamp(ring_start as i64, total_now as i64) as u64;
+    let count = (total_now - want) as usize;
+    if count == 0 {
+        return None;
+    }
+    Some(((want - ring_start) as usize, count))
+}
+
+/// Like [`start_stt_capture`], but the capture begins with the audio that
+/// arrived after the wake word was detected (`ring_end`, shifted by
+/// `offset_ms`, clamped to ±400 ms). The seed is replayed through the same
+/// speech/silence tracking a live chunk gets, so a command that was already
+/// finished by the time the capture starts ends on the next chunk instead of
+/// waiting out the 8 s no-speech timeout.
+///
+/// Holds the ring lock, which the audio callback also takes before touching the
+/// capture, so no chunk is lost or counted twice (`SEED_UPTO`).
+#[cfg(not(feature = "mock-wake"))]
+pub fn start_stt_capture_seeded(offset_ms: i32, ring_end: u64) {
+    use std::sync::atomic::Ordering;
+    if ring_end == 0 {
+        start_stt_capture();
+        return;
+    }
+    let ring = VERIFY_RING.lock();
+    let total_now = RING_TOTAL.load(Ordering::SeqCst);
+    let offset = offset_ms.clamp(-400, 400) as i64 * 16;
+    let seed: Vec<f32> = match seed_slice(total_now, ring.len(), ring_end, offset) {
+        Some((start, count)) => ring.iter().skip(start).take(count).copied().collect(),
+        None => Vec::new(),
+    };
+
+    {
+        let mut buf = STT_CAPTURE_BUFFER.lock();
+        buf.clear();
+        buf.extend_from_slice(&seed);
+    }
+    STT_SPEECH_DETECTED.store(false, Ordering::Relaxed);
+    STT_SILENCE_CHUNKS.store(0, Ordering::Relaxed);
+    STT_TOTAL_CHUNKS.store(0, Ordering::Relaxed);
+    STT_VOICED_CHUNKS.store(0, Ordering::Relaxed);
+    STT_PAUSE_COUNT.store(0, Ordering::Relaxed);
+    for chunk in seed.chunks(engine::OWW_CHUNK_SIZE) {
+        let sum_sq: f32 = chunk.iter().map(|s| s * s).sum();
+        capture_vad_update((sum_sq / chunk.len() as f32).sqrt());
+        STT_TOTAL_CHUNKS.fetch_add(1, Ordering::Relaxed);
+    }
+    SEED_UPTO.store(total_now, Ordering::SeqCst);
+    STT_CAPTURING.store(true, Ordering::Relaxed);
+    drop(ring);
+
+    crate::ghost::note_ghost_activity();
+    tracing::info!(
+        "stt-capture: started (seeded {} samples = {}ms after the detection point, offset {}ms)",
+        seed.len(),
+        seed.len() / 16,
+        offset_ms
+    );
+}
+
+/// Per-chunk speech/silence tracking for the command capture (shared by the
+/// live audio callback and the seed replay so both behave identically).
+/// Hysteresis: a high threshold STARTS speech (rejects noise), a lower one
+/// keeps it going (boundary chatter must not stall or stretch the turn).
+#[cfg(not(feature = "mock-wake"))]
+fn capture_vad_update(rms: f32) {
+    use std::sync::atomic::Ordering;
+    let underway = STT_SPEECH_DETECTED.load(Ordering::Relaxed);
+    let thresh = if underway { STT_SILENCE_RMS_THRESHOLD } else { STT_SPEECH_RMS_THRESHOLD };
+    if rms > thresh {
+        // Speech resumed after a real pause (2+ silent chunks)? Count it —
+        // hesitant speakers get a patient endpoint.
+        if underway && STT_SILENCE_CHUNKS.load(Ordering::Relaxed) >= 2 {
+            STT_PAUSE_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        STT_SPEECH_DETECTED.store(true, Ordering::Relaxed);
+        STT_SILENCE_CHUNKS.store(0, Ordering::Relaxed);
+        // TRUE voice energy (above the speech threshold, not the hysteresis
+        // band): arms the silence endpoint (F1).
+        if rms > STT_SPEECH_RMS_THRESHOLD {
+            STT_VOICED_CHUNKS.fetch_add(1, Ordering::Relaxed);
+        }
+    } else if underway {
+        STT_SILENCE_CHUNKS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Result of `abort_stt_capture()` (second Ctrl+Space press while listening).
 /// `had_speech` tells the frontend whether to let the in-flight turn finish
 /// (voice already underway — never kill mid-word) or hide the orb outright.
@@ -3524,6 +3636,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     static LAST_NEURAL_FIRE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     while let Ok(candidate) = rx.recv() {
+        let ring_end = candidate.ring_end;
         let now_ms = monotonic_ms();
         let last_fire = LAST_NEURAL_FIRE_MS.load(std::sync::atomic::Ordering::Relaxed);
         let verified = match candidate_gate(candidate.verified, now_ms, last_fire) {
@@ -3606,7 +3719,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                 match std::thread::Builder::new()
                     .name("wake-verify".into())
                     .spawn(move || {
-                        verify_candidate(&app_for_verify, candidate.audio, candidate.prob);
+                        verify_candidate(&app_for_verify, candidate.audio, candidate.prob, candidate.ring_end);
                         VERIFY_IN_FLIGHT.store(false, Ordering::SeqCst);
                     }) {
                     Ok(_) => {
@@ -3633,7 +3746,11 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         // so it's delivering audio. We capture from the same stream — no baton
         // pass, no getUserMedia. This fixes the Intel SST driver issue where
         // getUserMedia returns silence but cpal is still working.
-        start_stt_capture();
+        // Seeded with whatever the user said AFTER the detection point while we
+        // were verifying / starting up, so a one-breath "NEXUS open Chrome"
+        // keeps "open Chrome". Never includes the wake word itself (that
+        // poisoned Groq in the 2026-09-25 prefix-pad incident).
+        start_stt_capture_seeded(crate::commands::read_wake_seed_offset_ms(&app), ring_end);
 
         // Only pre-start the local faster-whisper sidecar if Groq cloud STT
         // will NOT be used. This saves ~64-128MB RAM when Groq is configured.
@@ -3897,13 +4014,14 @@ fn should_instant_fire(verify_wake: bool, prob: f32) -> bool {
     !verify_wake && prob >= STAGE1_EVIDENCE_FLOOR
 }
 
-fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32) {    // Signal the main loop to fire (consumed once via swap).
+fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32, ring_end: u64) {    // Signal the main loop to fire (consumed once via swap).
     let fire = || {
         if let Some(tx) = WAKE_TX.get() {
             let _ = tx.send(WakeCandidate {
                 audio: Vec::new(),
                 prob: 0.0,
                 verified: true,
+                ring_end,
             });
         }
     };
@@ -5069,6 +5187,81 @@ mod tests {
 
     // ─── Verifier v2 tests ──────────────────────────────────────────
 
+    /// B2: which part of the ring a capture seed takes.
+    #[test]
+    fn test_seed_slice() {
+        use super::seed_slice;
+        // 100k samples ever pushed, ring holds the newest 40k (positions 60k..100k).
+        // Detection ended at 90k: the seed is the 10k samples after it.
+        assert_eq!(seed_slice(100_000, 40_000, 90_000, 0), Some((30_000, 10_000)));
+        // Detection just happened (nothing after it yet) → nothing to seed.
+        assert_eq!(seed_slice(100_000, 40_000, 100_000, 0), None);
+        // Unknown position (0) or one from the future → no seed.
+        assert_eq!(seed_slice(100_000, 40_000, 0, 0), None);
+        assert_eq!(seed_slice(100_000, 40_000, 100_001, 0), None);
+        // Detection older than the ring: the seed is capped at what the ring holds.
+        assert_eq!(seed_slice(100_000, 40_000, 10_000, 0), Some((0, 40_000)));
+        // Negative offset reaches back into the word; clamped at the ring start.
+        assert_eq!(seed_slice(100_000, 40_000, 90_000, -1_600), Some((28_400, 11_600)));
+        assert_eq!(seed_slice(100_000, 40_000, 61_000, -5_000), Some((0, 40_000)));
+        // Positive offset skips samples; past "now" → nothing.
+        assert_eq!(seed_slice(100_000, 40_000, 90_000, 1_600), Some((31_600, 8_400)));
+        assert_eq!(seed_slice(100_000, 40_000, 99_000, 5_000), None);
+        // Short history (ring not full yet).
+        assert_eq!(seed_slice(5_000, 5_000, 3_000, 0), Some((3_000, 2_000)));
+    }
+
+    /// B2: the seed is replayed through the speech tracker, and the chunks the
+    /// audio callback already saw are marked so they are not appended twice.
+    #[test]
+    fn test_seeded_capture_keeps_post_detection_speech() {
+        use std::sync::atomic::Ordering;
+        const CH: usize = 1280;
+        let reset = || {
+            super::VERIFY_RING.lock().clear();
+            super::RING_TOTAL.store(0, Ordering::SeqCst);
+            super::SEED_UPTO.store(0, Ordering::SeqCst);
+            super::abort_stt_capture();
+        };
+        reset();
+        // 12 chunks of room tone, the wake word ends (detection) …
+        let push = |amp: f32, n: usize| {
+            for _ in 0..n {
+                let c = vec![amp; CH];
+                let mut ring = super::VERIFY_RING.lock();
+                super::push_capped(&mut ring, &c, super::VERIFY_RING_CAP);
+                super::RING_TOTAL.fetch_add(CH as u64, Ordering::SeqCst);
+            }
+        };
+        push(0.0, 12);
+        let ring_end = super::RING_TOTAL.load(Ordering::SeqCst);
+        // … then 6 chunks of command speech arrived while verification ran.
+        push(0.2, 6);
+
+        super::start_stt_capture_seeded(0, ring_end);
+        assert!(super::STT_CAPTURING.load(Ordering::Relaxed));
+        assert_eq!(super::STT_CAPTURE_BUFFER.lock().len(), 6 * CH, "only post-detection audio");
+        assert!(super::STT_CAPTURE_BUFFER.lock().iter().all(|&x| x == 0.2), "no wake-word audio");
+        assert!(super::STT_SPEECH_DETECTED.load(Ordering::Relaxed));
+        assert_eq!(super::STT_VOICED_CHUNKS.load(Ordering::Relaxed), 6);
+        assert_eq!(super::STT_TOTAL_CHUNKS.load(Ordering::Relaxed), 6);
+        assert_eq!(super::SEED_UPTO.load(Ordering::SeqCst), super::RING_TOTAL.load(Ordering::SeqCst));
+        assert!(super::stt_capture_had_speech(), "a seeded turn already counts as having speech");
+
+        // Nothing after the detection point → fresh, empty capture; unknown position too.
+        reset();
+        push(0.0, 3);
+        let end = super::RING_TOTAL.load(Ordering::SeqCst);
+        super::start_stt_capture_seeded(0, end);
+        assert!(super::STT_CAPTURE_BUFFER.lock().is_empty());
+        assert!(super::STT_CAPTURING.load(Ordering::Relaxed));
+        reset();
+        push(0.2, 3);
+        super::start_stt_capture_seeded(0, 0);
+        assert!(super::STT_CAPTURE_BUFFER.lock().is_empty(), "ring_end 0 = unknown = fresh capture");
+        reset();
+    }
+
     /// B8: wakeSensitivity actually moves the threshold; medium is the
     /// calibrated value untouched.
     #[test]
@@ -5134,8 +5327,8 @@ mod tests {
     /// that a later unrelated candidate could consume without verification.
     #[test]
     fn test_unverified_candidate_never_inherits_a_verified_token() {
-        let stale = super::WakeCandidate { audio: Vec::new(), prob: 0.0, verified: true };
-        let fresh = super::WakeCandidate { audio: vec![0.0; 10], prob: 0.7, verified: false };
+        let stale = super::WakeCandidate { audio: Vec::new(), prob: 0.0, verified: true, ring_end: 0 };
+        let fresh = super::WakeCandidate { audio: vec![0.0; 10], prob: 0.7, verified: false, ring_end: 10 };
         assert!(stale.verified && !fresh.verified);
         assert_eq!(
             super::candidate_gate(fresh.verified, 50_000, 0),

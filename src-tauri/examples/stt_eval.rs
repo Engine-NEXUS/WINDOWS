@@ -8,6 +8,11 @@
 //!
 //!   cargo run --release --example stt_eval -- --text-only --manifest rows.jsonl
 //!
+//!   # one-breath rows ("nexus open chrome"): feed STT only what the command
+//!   # capture would hear after the REAL wake engine fires; sweep the offset
+//!   # (ms from the detection point; default production value 0) to choose wakeSeedOffsetMs
+//!   cargo run --release --example stt_eval -- --manifest M --root R --capture-offset-ms -160
+//!
 //! Manifest rows are JSON lines:
 //!   kind              command | silence | noise | text
 //!   audio             WAV path relative to --root          (not for text-only)
@@ -70,6 +75,19 @@ async fn run(args: Vec<String>) -> i32 {
             return 2;
         }
     };
+    let capture_offset: Option<i32> = arg(&args, "--capture-offset-ms").and_then(|v| v.parse().ok());
+    let wake_threshold = arg(&args, "--threshold").and_then(|t| t.parse::<f32>().ok());
+    let mut wake_engine = if capture_offset.is_some() && !text_only {
+        match ve::new_wake_engine(arg(&args, "--resources").map(PathBuf::from).as_deref()) {
+            Ok(e) => Some(e),
+            Err(e) => {
+                eprintln!("--capture-offset-ms needs the wake engine: {e}");
+                return 2;
+            }
+        }
+    } else {
+        None
+    };
     let kinds: Vec<String> = arg(&args, "--kinds")
         .unwrap_or_else(|| "command,silence,noise,text".to_string())
         .split(',')
@@ -128,6 +146,21 @@ async fn run(args: Vec<String>) -> i32 {
                     continue;
                 }
             };
+            // One-breath rows: replace the clip by what the capture would receive.
+            let mut audio = audio;
+            if let (Some(off), Some(eng)) = (capture_offset, wake_engine.as_mut()) {
+                if row.get("one_breath").and_then(Value::as_bool) == Some(true) {
+                    row.insert("capture_offset_ms".into(), json!(off));
+                    match ve::simulate_capture(eng, &audio, wake_threshold, off) {
+                        Some(a) => audio = a,
+                        None => {
+                            // The wake word never fired: production would do nothing.
+                            row.insert("wake_missed".into(), json!(true));
+                            audio = Vec::new();
+                        }
+                    }
+                }
+            }
             let samples = ve::to_i16(&audio);
             gate = ve::acoustic_gate(&samples);
             if gate.is_some() {
