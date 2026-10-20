@@ -28,6 +28,16 @@ const GROQ_MODEL: &str = "whisper-large-v3-turbo";
 /// eliminates them.
 pub const NEXUS_VOCABULARY: &str = "Activate ghost mode. Open ghost mode. Start ghost mode. Exit ghost mode. Open WhatsApp. Open Chrome. Open VS Code. Open Spotify. Open Discord. Open browser. Open settings. Open architecture mapper. List pull requests. Merge pull request. Servx Zync Eesha Prem Lakshya Congi Shopkart GitHub Supabase NEXUS open close stop cancel navigate settings search.";
 
+/// Generic command hints for turns that are NOT owner-verified (speaker
+/// verification is off by default, so this is most users' turns). Unlike
+/// [`NEXUS_VOCABULARY`] it names no private projects or people — only phrases
+/// every NEXUS user can say — so it cannot push a stranger's speech toward the
+/// developer's repo names. Opt-in (`sttCommandHints`): a decoder prompt can also
+/// make Whisper invent these words on silence, so it ships off until the
+/// scorecard's A/B (`stt_eval --bias commands` vs `--bias neutral`) shows the
+/// leak rate does not rise. Stays well inside Whisper's 224-token prompt window.
+pub const COMMAND_VOCABULARY: &str = "NEXUS. Open Chrome. Open WhatsApp. Open Spotify. Open settings. Close the window. New tab. Search for. Play. Pause. Next song. Stop. Cancel. Ghost mode. Exit ghost mode. List pull requests. Send a WhatsApp message.";
+
 /// Neutral English decoder instruction used when a turn has not been
 /// owner-verified. Unlike the owner vocabulary, it does not bias Whisper
 /// toward NEXUS commands or known entities.
@@ -46,7 +56,34 @@ pub const STT_VERBOSE_RESPONSE_FORMAT: &str = "verbose_json";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecoderBias {
     OwnerCommand,
+    /// Generic [`COMMAND_VOCABULARY`] for unenrolled turns, when enabled.
+    Commands,
     Neutral,
+}
+
+/// Which decoder bias a turn gets. Only a verified owner earns the private
+/// vocabulary; an unenrolled user (no voice profile — the default) can opt into
+/// the generic command hints; a stranger, an uncertain or a rejected voice never
+/// gets any bias.
+pub fn decoder_bias_for_turn(
+    ownership: crate::voice_profile::TurnOwnership,
+    command_hints: bool,
+) -> DecoderBias {
+    use crate::voice_profile::TurnOwnership as T;
+    match ownership {
+        T::Verified => DecoderBias::OwnerCommand,
+        T::Unenrolled if command_hints => DecoderBias::Commands,
+        _ => DecoderBias::Neutral,
+    }
+}
+
+/// Label recorded in `stt:turn_stats.decoder_bias`.
+pub fn decoder_bias_label(bias: DecoderBias) -> &'static str {
+    match bias {
+        DecoderBias::OwnerCommand => "owner",
+        DecoderBias::Commands => "commands",
+        DecoderBias::Neutral => "neutral",
+    }
 }
 
 /// Pure Groq multipart fields. Centralizing these values prevents one STT path
@@ -69,6 +106,7 @@ pub(crate) fn decoder_prompt(prompt: Option<&'static str>) -> &'static str {
 pub(crate) fn decoder_bias_prompt(bias: DecoderBias) -> &'static str {
     match bias {
         DecoderBias::OwnerCommand => NEXUS_VOCABULARY,
+        DecoderBias::Commands => COMMAND_VOCABULARY,
         DecoderBias::Neutral => NEUTRAL_DECODER_PROMPT,
     }
 }
@@ -525,5 +563,34 @@ mod tests {
         // Missing compression_ratio parses as 0 (never trips).
         let v: GroqSegment = serde_json::from_value(serde_json::json!({"text":"hi","avg_logprob":-0.5})).unwrap();
         assert_eq!(v.compression_ratio, 0.0);
+    }
+    #[test]
+    fn test_decoder_bias_for_turn() {
+        use crate::voice_profile::TurnOwnership as T;
+        // Default (hints off) = exactly the previous behaviour.
+        assert_eq!(decoder_bias_for_turn(T::Verified, false), DecoderBias::OwnerCommand);
+        assert_eq!(decoder_bias_for_turn(T::Unenrolled, false), DecoderBias::Neutral);
+        // Hints on: only unenrolled turns change; the owner keeps the owner prompt.
+        assert_eq!(decoder_bias_for_turn(T::Unenrolled, true), DecoderBias::Commands);
+        assert_eq!(decoder_bias_for_turn(T::Verified, true), DecoderBias::OwnerCommand);
+        // Someone else's voice never receives a bias, setting or not.
+        for t in [T::Uncertain, T::Rejected] {
+            assert_eq!(decoder_bias_for_turn(t, true), DecoderBias::Neutral);
+            assert_eq!(decoder_bias_for_turn(t, false), DecoderBias::Neutral);
+        }
+        assert_eq!(decoder_bias_label(DecoderBias::Commands), "commands");
+        assert_eq!(decoder_bias_prompt(DecoderBias::Commands), COMMAND_VOCABULARY);
+    }
+
+    #[test]
+    fn test_command_vocabulary_is_generic_and_small() {
+        // No private names from the owner prompt.
+        for private in ["Servx", "Zync", "Eesha", "Prem", "Lakshya", "Congi", "Shopkart", "Supabase"] {
+            assert!(!COMMAND_VOCABULARY.contains(private), "{private}");
+        }
+        // Whisper's prompt window is 224 tokens; stay far below (≈ 1.5 tokens/word).
+        assert!(COMMAND_VOCABULARY.split_whitespace().count() * 2 < 224);
+        assert!(NEXUS_VOCABULARY.split_whitespace().count() * 2 < 224);
+        assert!(COMMAND_VOCABULARY.contains("NEXUS"));
     }
 }

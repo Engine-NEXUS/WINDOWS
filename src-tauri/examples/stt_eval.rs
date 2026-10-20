@@ -3,7 +3,7 @@
 //!
 //!   GROQ_API_KEY=... cargo run --release --example stt_eval -- \
 //!       --manifest eval_set/manifest.jsonl --root eval_set \
-//!       [--engine groq|local] [--bias owner|neutral] [--kinds command,silence,noise] \
+//!       [--engine groq|local] [--bias owner|commands|neutral] [--kinds command,silence,noise] \
 //!       [--out stt_results.jsonl]
 //!
 //!   cargo run --release --example stt_eval -- --text-only --manifest rows.jsonl
@@ -48,7 +48,7 @@ fn main() {
 
 async fn run(args: Vec<String>) -> i32 {
     let Some(manifest) = arg(&args, "--manifest") else {
-        eprintln!("usage: stt_eval --manifest <jsonl> [--root <dir>] [--engine groq|local] [--bias owner|neutral] [--kinds a,b] [--text-only] [--out file]");
+        eprintln!("usage: stt_eval --manifest <jsonl> [--root <dir>] [--engine groq|local] [--bias owner|commands|neutral] [--kinds a,b] [--text-only] [--out file]");
         return 2;
     };
     let root = arg(&args, "--root").map(PathBuf::from).unwrap_or_default();
@@ -63,9 +63,10 @@ async fn run(args: Vec<String>) -> i32 {
     };
     let bias = match arg(&args, "--bias").as_deref() {
         Some("owner") => ve::Bias::Owner,
+        Some("commands") => ve::Bias::Commands,
         Some("neutral") | None => ve::Bias::Neutral,
         Some(other) => {
-            eprintln!("unknown --bias {other} (owner|neutral)");
+            eprintln!("unknown --bias {other} (owner|commands|neutral)");
             return 2;
         }
     };

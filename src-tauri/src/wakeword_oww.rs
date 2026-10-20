@@ -3427,11 +3427,11 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                 // uses neutral English decoding. Rejected audio never reaches
                 // Groq, the router, speech, memory, or learning.
                 let (ownership, owner_score) = verify_turn_audio(&app_for_stt, &buffer);
-                let decoder_bias = if ownership == crate::voice_profile::TurnOwnership::Verified {
-                    "owner"
-                } else {
-                    "neutral"
-                };
+                let bias_choice = crate::stt_groq::decoder_bias_for_turn(
+                    ownership,
+                    crate::commands::read_stt_command_hints(&app_for_stt),
+                );
+                let decoder_bias = crate::stt_groq::decoder_bias_label(bias_choice);
                 stats.owner = ownership.as_str();
                 stats.owner_score = owner_score;
                 stats.decoder_bias = decoder_bias;
@@ -3491,12 +3491,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                         .unwrap_or_default();
 
                     crate::stt::reset_turn_markers();
-                    let bias = if ownership == crate::voice_profile::TurnOwnership::Verified {
-                        crate::stt_groq::DecoderBias::OwnerCommand
-                    } else {
-                        crate::stt_groq::DecoderBias::Neutral
-                    };
-                    let vocabulary = Some(crate::stt_groq::decoder_bias_prompt(bias));
+                    let vocabulary = Some(crate::stt_groq::decoder_bias_prompt(bias_choice));
                     let transcript = crate::stt::transcribe_samples(
                         &samples,
                         &client,

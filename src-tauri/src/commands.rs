@@ -1558,6 +1558,10 @@ pub struct NexusSettings {
     /// hallucinations without rejecting your real commands.
     #[serde(default)]
     pub stt_confidence_gate: bool,
+    /// Send generic NEXUS command hints (`COMMAND_VOCABULARY`) to Groq on turns
+    /// that are not owner-verified. Off by default; A/B it with the scorecard.
+    #[serde(default)]
+    pub stt_command_hints: bool,
     /// Ghost FIFO queue: per-step watchdog timeout in ms. Default: 15000. D7.
     #[serde(default = "default_ghost_step_timeout_ms")]
     pub ghost_step_timeout_ms: u64,
@@ -1726,6 +1730,7 @@ impl Default for NexusSettings {
             telegram_chat_id: String::new(),
             ghost_depth_ack: true,
             stt_confidence_gate: false,
+            stt_command_hints: false,
             ghost_step_timeout_ms: 15000,
             ghost_turn_gap_ms: 1000,
             waves_horizontal_pct: 0.5,
@@ -2401,6 +2406,16 @@ pub fn stt_capture_had_speech() -> Result<bool, String> {
 }
 
 // ─── Ghost FIFO queue readers (loose settings.json parse) ───────────────
+
+/// Read the sttCommandHints flag (off unless the user turned it on).
+pub fn read_stt_command_hints<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return false; };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("sttCommandHints").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
 
 /// Read the sttConfidenceGate flag (off unless the user turned it on).
 pub fn read_stt_confidence_gate<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {

@@ -70,6 +70,7 @@ interface Settings {
   // Ghost FIFO queue: speak "Queued, sir." once per session at depth 2+ (D5/D6)
   ghostDepthAck?: boolean;
   sttConfidenceGate?: boolean;
+  sttCommandHints?: boolean;
   // Ghost FIFO queue: per-step watchdog timeout, ms (D7)
   ghostStepTimeoutMs?: number;
   // Ghost FIFO queue: inter-command gap τ, ms (D4)
@@ -119,6 +120,7 @@ const DEFAULT_SETTINGS: Settings = {
   telegramChatId: "",
   ghostDepthAck: true,
   sttConfidenceGate: false,
+  sttCommandHints: false,
   ghostStepTimeoutMs: 15000,
   ghostTurnGapMs: 1000,
   wavesHorizontalPct: 0.5,
@@ -624,6 +626,18 @@ function AudioTab({ settings, update }: {
             <div
               className={`settings-toggle ${settings.localSttOnly ? "settings-toggle--on" : ""}`}
               onClick={() => update("localSttOnly", !settings.localSttOnly)}
+            />
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Command hints for speech</div>
+            <div className="setting-desc">Experimental. Tells Groq the commands NEXUS understands. Can help "open Chrome"-style phrases; can also make it hear commands in noise. Compare with your voice scorecard.</div>
+          </div>
+          <div className="setting-control">
+            <div
+              className={`settings-toggle ${settings.sttCommandHints ? "settings-toggle--on" : ""}`}
+              onClick={() => update("sttCommandHints", !settings.sttCommandHints)}
             />
           </div>
         </div>

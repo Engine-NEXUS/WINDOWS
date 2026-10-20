@@ -400,6 +400,9 @@ pub enum SttEngine {
 pub enum Bias {
     /// `NEXUS_VOCABULARY` — only sent today for owner-verified turns.
     Owner,
+    /// `COMMAND_VOCABULARY` — the generic hints an unenrolled turn gets when
+    /// `sttCommandHints` is on. A/B this against `Neutral`.
+    Commands,
     /// The neutral English prompt every other turn gets.
     Neutral,
 }
@@ -416,6 +419,7 @@ pub async fn transcribe(
         SttEngine::Groq => {
             let prompt = match bias {
                 Bias::Owner => Some(crate::stt_groq::NEXUS_VOCABULARY),
+                Bias::Commands => Some(crate::stt_groq::COMMAND_VOCABULARY),
                 Bias::Neutral => None,
             };
             crate::stt_groq::transcribe_with_groq(samples, groq_key, client, prompt).await
@@ -492,6 +496,7 @@ pub async fn transcribe_verbose(
         SttEngine::Groq => {
             let prompt = match bias {
                 Bias::Owner => Some(crate::stt_groq::NEXUS_VOCABULARY),
+                Bias::Commands => Some(crate::stt_groq::COMMAND_VOCABULARY),
                 Bias::Neutral => None,
             };
             let (text, segs) =
