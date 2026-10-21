@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 from scipy.io import wavfile
-from scipy.signal import fftconvolve, resample_poly
+from scipy.signal import fftconvolve, lfilter, resample_poly
 
 import wake_dsp
 
@@ -73,13 +73,8 @@ class Frontend:
         dt = 1.0 / SR
         rc = 1.0 / (2.0 * np.pi * fc)
         alpha = rc / (rc + dt)
-        out = np.empty_like(audio)
-        prev_y = prev_x = 0.0
-        for i, x in enumerate(audio):
-            y = alpha * (prev_y + x - prev_x)
-            prev_x, prev_y = x, y
-            out[i] = y
-        return out
+        # y[n] = alpha * (y[n-1] + x[n] - x[n-1])  ==  IIR with b=[alpha,-alpha], a=[1,-alpha]
+        return lfilter([alpha, -alpha], [1.0, -alpha], audio.astype(np.float64)).astype(np.float32)
 
     def windows(self, audio, include_transitions=False, highpass_hz=None):
         """List of [16, 96] embedding windows, one per voiced 80 ms chunk (+2 transition windows)."""
@@ -155,6 +150,32 @@ def load_manifest_rows(path):
             rows[Path(r.get("audio", "")).name] = r
             rows[r.get("audio", "")] = r
     return rows
+
+
+def is_sealed(group, frac, seed=1337):
+    """True for a stable `frac` of groups, chosen by a hash independent of the train/val/test one. Sealed
+    recordings are never read for training, validation or the trainer's own test split - they are the
+    real-world test set that `wake_eval` scores afterwards."""
+    if frac <= 0:
+        return False
+    h = int(hashlib.sha256(f"sealed:{seed}:{group}".encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+    return h < frac
+
+
+def cap_list(items, cap, rng):
+    """At most `cap` items, a uniform random subset when over (order of the survivors preserved)."""
+    if cap is None or len(items) <= cap:
+        return list(items)
+    keep = np.sort(rng.choice(len(items), size=cap, replace=False))
+    return [items[i] for i in keep]
+
+
+def hard_negative_indices(probs, floor, cap):
+    """Indices of the most confusing negatives: probability >= floor, highest first, at most `cap`."""
+    probs = np.asarray(probs, dtype=np.float64)
+    idx = np.nonzero(probs >= floor)[0]
+    idx = idx[np.argsort(-probs[idx], kind="stable")]
+    return idx[:cap]
 
 
 # ─── augmentations (all take an explicit numpy Generator) ────────────────

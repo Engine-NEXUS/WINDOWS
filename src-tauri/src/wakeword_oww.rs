@@ -3815,7 +3815,11 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
             } else if VERIFY_IN_FLIGHT.swap(true, Ordering::SeqCst) {
                 tracing::debug!("verify: candidate dropped (already in flight)");
                 continue;
-            } else if should_instant_fire(crate::commands::read_verify_wake(&app), candidate.prob) {
+            } else if should_instant_fire(
+                read_verify_mode(&app),
+                crate::commands::read_wake_verify_high(&app),
+                candidate.prob,
+            ) {
                 // Instant fire ONLY for real stage-1 detections. A prob-0.0
                 // candidate (v4 barge-in "exact-only verify") has ZERO neural
                 // evidence — firing it here sent phantom "confidence 0.0%"
@@ -4128,16 +4132,72 @@ fn verify_plan(local_path: bool, local_ready: bool, prob: f32) -> VerifyPlan {
     }
 }
 
-/// Instant-fire decision for the candidate receiver. `verify_wake` is the
-/// user's STT-cross-check setting; `prob` is the candidate's stage-1
-/// probability. A candidate with essentially no neural evidence (the
-/// prob-0.0 barge-in / verify-bypass candidates) must NEVER take the
-/// instant path — it has no stage-1 detection behind it at all, and firing
+/// How the stage-2 STT cross-check ("speech check") is applied to a stage-1 candidate.
+///
+/// * `Off`    - fire on the neural detection alone (fastest; relies on the classifier).
+/// * `Always` - every candidate is checked by STT (the original behaviour and the default).
+/// * `Tiered` - a candidate the classifier is VERY sure about (`prob >= high`) fires at once; only the
+///   uncertain middle band is checked. The check measurably hurts sure candidates: in the 2026-09-19
+///   99-case review ~28 of 34 misses were STT confabulation on clips stage 1 had scored 0.93-0.9996
+///   (docs/wake-word/22-hundred-combo-review.md). `high` is chosen from data with
+///   `wake_calibrate.py --verify`, not guessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyMode {
+    Off,
+    Always,
+    Tiered,
+}
+
+/// Provisional `high` for Tiered mode until `wake_calibrate.py --verify` has chosen one from real clips.
+pub const DEFAULT_VERIFY_HIGH: f32 = 0.97;
+
+/// `raw`: the `wakeVerifyMode` setting (case/space tolerant) when present;
+/// `legacy_verify_wake`: the older boolean `verifyWake` (true = check every candidate).
+/// An unknown or missing `wakeVerifyMode` falls back to the legacy flag, so existing settings files keep
+/// their behaviour.
+pub fn verify_mode_from(raw: Option<&str>, legacy_verify_wake: bool) -> VerifyMode {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("off") => VerifyMode::Off,
+        Some("always") => VerifyMode::Always,
+        Some("tiered") => VerifyMode::Tiered,
+        _ if legacy_verify_wake => VerifyMode::Always,
+        _ => VerifyMode::Off,
+    }
+}
+
+/// Keep `high` inside a sane band: it can neither disable the classifier's own threshold nor make the
+/// instant path unreachable.
+pub fn clamp_verify_high(high: f32) -> f32 {
+    if high.is_finite() {
+        high.clamp(0.80, 0.9999)
+    } else {
+        DEFAULT_VERIFY_HIGH
+    }
+}
+
+fn read_verify_mode<R: Runtime>(app: &AppHandle<R>) -> VerifyMode {
+    verify_mode_from(
+        crate::commands::read_wake_verify_mode(app).as_deref(),
+        crate::commands::read_verify_wake(app),
+    )
+}
+
+/// Instant-fire decision for the candidate receiver: `true` = wake now, no STT round trip.
+/// `prob` is the candidate's stage-1 probability. A candidate with essentially no neural
+/// evidence (the prob-0.0 barge-in / verify-bypass candidates) must NEVER take the
+/// instant path in ANY mode - it has no stage-1 detection behind it at all, and firing
 /// it unverified produced phantom "confidence 0.0%" wakes whenever
 /// sustained speech (TV) played during TTS. Those candidates are routed to
 /// the STT gate instead.
-fn should_instant_fire(verify_wake: bool, prob: f32) -> bool {
-    !verify_wake && prob >= STAGE1_EVIDENCE_FLOOR
+fn should_instant_fire(mode: VerifyMode, high: f32, prob: f32) -> bool {
+    if prob < STAGE1_EVIDENCE_FLOOR {
+        return false;
+    }
+    match mode {
+        VerifyMode::Off => true,
+        VerifyMode::Always => false,
+        VerifyMode::Tiered => prob >= clamp_verify_high(high),
+    }
 }
 
 fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32, ring_end: u64) {    // Signal the main loop to fire (consumed once via swap).
@@ -4827,6 +4887,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::level_from_rms;
+    use super::VerifyMode;
 
     /// UI level map contract for speech-synced visuals (`audio:level`).
     /// Silence/dead input → 0 (never NaN over the bridge); speech band
@@ -5531,8 +5592,8 @@ mod tests {
         assert!(!super::fail_open_allowed(0.0));
         assert!(!super::fail_open_allowed(0.29));
         // Same threshold the instant path uses.
-        assert!(super::should_instant_fire(false, 0.3));
-        assert!(!super::should_instant_fire(false, 0.29));
+        assert!(super::should_instant_fire(VerifyMode::Off, 0.97, 0.3));
+        assert!(!super::should_instant_fire(VerifyMode::Off, 0.97, 0.29));
     }
 
     /// B1: a verified wake arrives inside the cooldown that its own
@@ -5701,13 +5762,45 @@ mod tests {
     #[test]
     fn test_should_instant_fire_never_fires_zero_evidence() {
         // Barge-in candidate (prob 0.0): never instant, verify or drop.
-        assert!(!super::should_instant_fire(false, 0.0));
-        assert!(!super::should_instant_fire(true, 0.0));
+        for mode in [VerifyMode::Off, VerifyMode::Always, VerifyMode::Tiered] {
+            assert!(!super::should_instant_fire(mode, 0.97, 0.0), "{mode:?}");
+        }
         // Real stage-1 detections (model threshold 0.68): instant when the
         // user disabled the STT cross-check.
-        assert!(super::should_instant_fire(false, 0.978));
-        assert!(super::should_instant_fire(false, 0.68));
-        assert!(!super::should_instant_fire(true, 0.978));
+        assert!(super::should_instant_fire(VerifyMode::Off, 0.97, 0.978));
+        assert!(super::should_instant_fire(VerifyMode::Off, 0.97, 0.68));
+        assert!(!super::should_instant_fire(VerifyMode::Always, 0.97, 0.978));
+    }
+
+    /// E4: tiered verification - sure candidates skip the STT round trip, uncertain ones keep it.
+    #[test]
+    fn test_tiered_verification_truth_table() {
+        let t = |p: f32| super::should_instant_fire(VerifyMode::Tiered, 0.97, p);
+        assert!(t(0.9996), "a sure candidate fires without STT (the confabulation cases)");
+        assert!(t(0.97), "boundary is inclusive");
+        assert!(!t(0.9699), "just below the band: check with STT");
+        assert!(!t(0.68), "a threshold-level candidate is checked");
+        assert!(!t(0.0), "no evidence is never instant");
+        // `high` is clamped: a bad setting can neither make everything instant nor nothing.
+        assert!(super::should_instant_fire(VerifyMode::Tiered, 0.10, 0.81), "clamped up to 0.80, not 0.10");
+        assert!(!super::should_instant_fire(VerifyMode::Tiered, 0.10, 0.79));
+        assert!(!super::should_instant_fire(VerifyMode::Tiered, 5.0, 0.99), "clamped down to 0.9999");
+        assert!(super::should_instant_fire(VerifyMode::Tiered, f32::NAN, 0.98), "NaN -> default 0.97");
+    }
+
+    /// E4: the new wakeVerifyMode setting overrides the legacy boolean; nothing else changes behaviour.
+    #[test]
+    fn test_verify_mode_setting_and_legacy_fallback() {
+        use super::verify_mode_from as m;
+        assert_eq!(m(Some("tiered"), true), VerifyMode::Tiered);
+        assert_eq!(m(Some(" Tiered "), false), VerifyMode::Tiered, "case/space tolerant, wins over legacy");
+        assert_eq!(m(Some("off"), true), VerifyMode::Off);
+        assert_eq!(m(Some("always"), false), VerifyMode::Always);
+        // Missing or unknown -> the old boolean, so existing settings files behave exactly as before.
+        assert_eq!(m(None, true), VerifyMode::Always);
+        assert_eq!(m(None, false), VerifyMode::Off);
+        assert_eq!(m(Some("garbage"), true), VerifyMode::Always);
+        assert_eq!(m(Some(""), false), VerifyMode::Off);
     }
 
     // ─── v3 confidence-gate tests ───────────────────────────────────

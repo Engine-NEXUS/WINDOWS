@@ -38,9 +38,12 @@ Send me `scorecard-baseline.md`. The rows with the fewest stars are the work lis
 | Where should the command capture start? | `stt_eval --capture-offset-ms -320/-160/0/80` | one-breath row ↑ with command match not ↓ | `wakeSeedOffsetMs` |
 | Longer first-pause tolerance? | `stt_eval --simulate-endpoint --endpoint-silence-chunks 5/6/8/10` | "cut off mid-sentence" ↓ | (constant `STT_SILENCE_CHUNK_LIMIT`) |
 | Is Groq turbo costing accuracy? | `stt_eval --engine groq` vs `--engine groq-large` | word accuracy ↑ meaningfully | (production model const) |
+| Speech check: always / tiered / off? | `wake_eval --stage2` then `nexus wake verify` | the table shows tiered keeps recall with room fires inside budget | `wakeVerifyMode`, `wakeVerifyHigh` |
 | "next us"/"next sis" as near-wakes? | `wake_eval --stage2` soundalike row | soundalike false alarms stay ≈ 0 | `NEAR_PAIRS` in `wake_names.rs` |
 
-After each switch: re-score with `--baseline baseline.json` to get “was X%” deltas.
+After each switch: re-score with `--baseline baseline.json` to get “was X%” deltas. (`nexus wake score` does the wake half in one command.)
+
+Note: `nexus data wake validate` only checks that the model hash and the data files are consistent. It measures **no accuracy**; `nexus wake score` does.
 
 ## 4. Threshold (C4)
 ```powershell
@@ -53,13 +56,54 @@ python scripts/wake_data_foundation.py fingerprint-models
 ```
 `wakeSensitivity` (low/medium/high) is the user-facing knob around this value.
 
-## 5. Retrain only if the scorecard says the model is the problem (C2 → C3 → C1)
-1. **Clean the data by ear** (not Whisper): `python scripts/wake_audition.py segment` (cut `wake_word_data/free/` into utterances) then `review` them; also review `negative/soundalike_from_*` (the 345 files moved on 2026-09-24).
-2. **Record training positives** (separate people/sittings from §1, including "okay NEXUS" and bare "NEXUS"): `python scripts/voice_eval_set.py --purpose train record --speaker friend1 --section wake` (and `negative`), then `--purpose train validate` and `python scripts/wake_data_foundation.py validate`.
-3. Add hard negatives you find (real false alarms, TV phrases) through `wake_audition.py review` so they land in `negative/`.
-4. `python scripts/train_local_wakeword.py --dry-run` (counts, split sizes — every split needs positives), then `python scripts/train_local_wakeword.py` → `nexus.candidate.onnx` + `train_report.json`.
-5. **Score the candidate, not the report**: copy the candidate over a scratch resources dir (or `--promote` on a branch), run §2/§4 with `--dsp aligned`, compare with `--baseline`. Promote only if every wake row is ≥ the old model's and false alarms/h are not worse.
-6. Promote: `--promote`, then `python scripts/wake_data_foundation.py fingerprint-models`, commit.
+## 5. Retrain (Phase E order: audit → clean by ear → fetch → synth → train → score → calibrate → promote)
+
+You do **not** need to record TV, room noise or everyday speech: real public audio of all of it is fetched, and thousands of synthetic speakers say "NEXUS". Only your own voice (and 2-3 other people for the test set, §1) is recorded.
+
+```powershell
+# 0. one-time
+pip install numpy scipy onnxruntime sounddevice soundfile piper-tts torch onnx
+
+# 1. AUDIT - find poisoned labels from the AUDIO (no Whisper). Mandatory before training.
+nexus wake audit                 # inventory by origin + out-of-fold scoring -> wake_word_data/audit_flags.jsonl
+nexus wake audit review          # listen worst-first: [p]ositive [n]egative [k]eep [x]exclude. A real soundalike
+                                 #   ("texas", "next us") that scores high is a GOOD hard negative - answer [n].
+nexus wake audit status          # exit 0 only when every flagged clip has a decision (the trainer enforces this)
+
+# 2. REUSABLE DATA (permissive licences only; licences + attribution -> wake_word_data/public/DATA_SOURCES.md)
+nexus wake fetch list
+nexus wake fetch get librispeech-dev-clean librispeech-test-clean librispeech-train-clean-100 speech-commands musan rirs-noises --max-gb 12
+nexus wake fetch prepare --max-hours 8          # public/negative, public/background (+ synthetic "TV in a room"), public/heldout (long, never trained on)
+
+# 3. SYNTHETIC SPEAKERS (Piper; each voice's MODEL_CARD licence is checked)
+nexus wake synth voices
+nexus wake synth positives --per-phrase 800     # "hey/okay/hi/hello nexus" + bare "nexus"
+nexus wake synth negatives                      # clear soundalikes -> negative/; AMBIGUOUS ones ("next us") -> borderline/
+python scripts/wake_audition.py review --dir wake_word_data/borderline     # listen: some ARE "nexus". p/n decides.
+nexus wake audit                                # re-run: new files get scored too
+
+# 4. TRAIN a candidate (a dry run first: every split needs positives)
+nexus wake train --dry-run
+nexus wake train                # base fit -> hard-negative mining x2 (--mine-rounds) -> nexus.candidate.onnx + train_report.json
+                                #   30 % of your own takes are SEALED (--seal-owner) and never trained on -> sealed/manifest.jsonl
+
+# 5. SCORE the SHIPPED model, then the candidate, on audio neither trained on
+nexus wake score --json before.json
+nexus wake score --model src-tauri/resources/oww/nexus.candidate.onnx --baseline before.json --out docs/research/voice-accuracy/scorecard-after.md
+```
+Reading the score: the **sealed owner takes** row is optimistic for the *shipped* model (it was trained on those takes before they were sealed). The fair before/after is the held-out `eval_set` (other speakers) and the **public held-out hours** (false alarms/hour) - neither model has heard them.
+
+6. **Choose the operating point from data**
+   ```powershell
+   cd src-tauri
+   cargo run --release --example wake_eval -- --manifest ../eval_set/manifest.jsonl --root ../eval_set --resources <dir with oww/ using the candidate> --sweep 0.50,0.60,0.68,0.76,0.80 --out ../wake_sweep.jsonl
+   cargo run --release --example wake_eval -- --manifest ../eval_set/manifest.jsonl --root ../eval_set --stage2 --out ../wake_stage2.jsonl     # GROQ_API_KEY
+   cd ..
+   nexus wake threshold wake_sweep.jsonl          # kws_threshold (add --apply)
+   nexus wake verify wake_stage2.jsonl            # speech-check policy: off | always | tiered + wakeVerifyHigh
+   ```
+   The speech check is **on** by default (`verifyWake` defaults to true in code). In the 2026-09-19 99-case review it cost half the real wake-ups on the old model (43 % vs 93 % neural-only recall; ~28 of 34 misses were Groq confabulating text for clips the model scored 0.93-0.9996). `wakeVerifyMode: tiered` skips the check for very sure candidates; set it only when `nexus wake verify` recommends it for *your* model.
+7. **Promote** only if every wake row is >= the old model's and false alarms/hour are not worse: `nexus wake train --promote` (or copy the candidate over `nexus.onnx`), then `python scripts/wake_data_foundation.py fingerprint-models`, commit.
 
 ## 6. What “done” means (from the plan)
 Wake recall per phrase ≥ 95% with the 95% lower bound ≥ 90%; ≤ 1 false alarm per 8 h on out-of-sample room audio (needs ≈ 30 h of room audio to *prove* — `wake_calibrate.py` says so); one-breath commands ≥ 95%; command match ≥ 95%; hallucination leaks and wrongly dropped commands ≤ 0.5% each. Until a row has the data, the scorecard shows **not measured** rather than a guess.

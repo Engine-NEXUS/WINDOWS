@@ -14,7 +14,7 @@
 
 ## Trade-off
 
-For local-STT users with `verifyWake` on, the first wake after > 60 s idle is neural-only (not STT-verified); that wake also warms the engine, so the next one is verified. `verifyWake` is off by default.
+For local-STT users with `verifyWake` on, the first wake after > 60 s idle is neural-only (not STT-verified); that wake also warms the engine, so the next one is verified. `verifyWake` is ON by default in the code (`commands.rs` `default_verify_wake` / `read_verify_wake` return true when the setting is missing or unreadable); an earlier version of this note said "off by default", which was wrong (corrected in change 91).
 
 ## Tests (+4)
 

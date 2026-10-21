@@ -10,6 +10,11 @@ recall that stays inside both false-alarm budgets. `--apply` writes it to
 src-tauri/resources/oww/acoustic_profile.json (kws_threshold) - after which you must re-run
 `wake_data_foundation.py fingerprint-models`.
 
+Speech-check policy (Phase E4):  `--verify` reads a `wake_eval --stage2` file (clips AND the long room
+recordings) and chooses `wakeVerifyHigh` for `wakeVerifyMode: tiered`: candidates the classifier scores at or
+above it wake WITHOUT the Groq speech check, the rest are checked. It compares the three policies
+(off / always / tiered) on recall and false alarms and prints the one to use.
+
 Honest limit: 0 false alarms in H hours of audio only shows the rate is <= 3.7/H per hour (95%).
 Certifying 1 per 8 h needs ~30 h of room audio; with less, the tool still recommends from the point estimates
 but says so. Standard library only.
@@ -91,13 +96,93 @@ def render(tab, rec, max_fa_per_hour, max_soundalike_fa):
     return "\n".join(lines)
 
 
+# ─── speech-check policy (tiered verification) ───────────────────────────
+
+VERIFY_GRID = (0.80, 0.85, 0.90, 0.93, 0.95, 0.97, 0.98, 0.99, 0.995, 0.999)
+
+
+def _passes(row, t_hi):
+    """Would this fired clip wake under tiered verification at `t_hi`? Sure candidates skip the check."""
+    prob = row.get("first_fire_prob")
+    if not row.get("fired"):
+        return False
+    if prob is not None and prob >= t_hi:
+        return True
+    return bool(row.get("stage2_pass", True))
+
+
+def verify_table(rows, grid=VERIFY_GRID):
+    """One entry per policy: off (t_hi=0), tiered at each grid value, always (t_hi=inf)."""
+    wake = [r for r in rows if r.get("kind") == "wake"]
+    neg = [r for r in rows if r.get("kind") == "negative"]
+    room = [r for r in rows if r.get("kind") == "room"]
+    hours = sum(float(r.get("duration_ms", 0)) for r in room) / 3.6e6
+    room_probs = [p for r in room for p in (r.get("fire_probs") or [])]
+    out = []
+    for name, t in [("off", 0.0)] + [(f"tiered {g:.3f}", g) for g in grid] + [("always", float("inf"))]:
+        k = sum(_passes(r, t) for r in wake)
+        nk = sum(_passes(r, t) for r in neg)
+        unchecked = sum(p >= t for p in room_probs)           # room fires that would wake with NO check at all
+        rec, rlo, _ = wilson(k, len(wake)) if wake else (float("nan"),) * 3
+        out.append({"policy": name, "t_hi": t, "recall": rec, "recall_lo": rlo, "k": k, "n_wake": len(wake),
+                    "soundalike_fa": (nk / len(neg)) if neg else float("nan"), "soundalike_k": nk, "n_neg": len(neg),
+                    "unchecked_fires": unchecked, "hours": hours,
+                    "unchecked_per_hour": (unchecked / hours) if hours else float("nan"),
+                    "room_fires_total": len(room_probs)})
+    return out
+
+
+def recommend_verify(tab, max_fa_per_hour=0.125, max_soundalike_fa=0.01):
+    """Highest recall within budgets; among equals prefer the MORE checked policy (safer). `unchecked_per_hour`
+    is a guaranteed floor on room false alarms (those fires skip the check); the checked ones may add more
+    or be suppressed - the speech check on long room audio is not measured by wake_eval."""
+    ok = [r for r in tab
+          if not math.isnan(r["recall"])
+          and (math.isnan(r["unchecked_per_hour"]) or r["unchecked_per_hour"] <= max_fa_per_hour)
+          and (math.isnan(r["soundalike_fa"]) or r["soundalike_fa"] <= max_soundalike_fa)]
+    if not ok:
+        return None
+    best = max(round(r["recall"], 6) for r in ok)
+    return max((r for r in ok if round(r["recall"], 6) == best), key=lambda r: r["t_hi"])
+
+
+def render_verify(tab, rec):
+    lines = ["| Policy | Recall (95% low) | Soundalike FA | Room fires with no check /h |", "|---|---|---|---|"]
+    for r in tab:
+        mark = "  <== recommended" if rec and r["policy"] == rec["policy"] else ""
+        sa = "n/a" if math.isnan(r["soundalike_fa"]) else f'{r["soundalike_fa"] * 100:.1f}% ({r["soundalike_k"]}/{r["n_neg"]})'
+        un = "n/a (no room audio)" if math.isnan(r["unchecked_per_hour"]) else \
+            f'{r["unchecked_per_hour"]:.2f} ({r["unchecked_fires"]}/{r["room_fires_total"]} fires, {r["hours"]:.1f} h)'
+        lines.append(f'| {r["policy"]} | {r["recall"] * 100:.1f}% ({r["recall_lo"] * 100:.1f}%) | {sa} | {un}{mark} |')
+    lines.append("")
+    if rec is None:
+        lines.append("No policy fits the budgets - improve the model before choosing a policy.")
+    elif rec["policy"] == "always":
+        lines.append("Recommended: wakeVerifyMode = always (the speech check is worth its cost here).")
+    elif rec["policy"] == "off":
+        lines.append("Recommended: wakeVerifyMode = off (no false-alarm budget is used up without the check).")
+    else:
+        lines.append(f'Recommended: wakeVerifyMode = tiered, wakeVerifyHigh = {rec["t_hi"]:.3f}.')
+    return "\n".join(lines)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("sweep_file")
     ap.add_argument("--max-fa-per-hour", type=float, default=0.125)
     ap.add_argument("--max-soundalike-fa", type=float, default=0.01)
     ap.add_argument("--apply", action="store_true", help="write the recommendation to acoustic_profile.json")
+    ap.add_argument("--verify", action="store_true",
+                    help="treat the file as `wake_eval --stage2` output and choose the speech-check policy")
     args = ap.parse_args(argv)
+    if args.verify:
+        rows = load(args.sweep_file)
+        if not any("stage2_pass" in r for r in rows):
+            print("no stage-2 data: run wake_eval with --stage2 (needs GROQ_API_KEY)")
+            return 2
+        tab = verify_table(rows)
+        print(render_verify(tab, recommend_verify(tab, args.max_fa_per_hour, args.max_soundalike_fa)))
+        return 0
     tab = table(load(args.sweep_file))
     if not tab:
         print("no sweep data: run wake_eval with --sweep")

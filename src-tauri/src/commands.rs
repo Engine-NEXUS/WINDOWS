@@ -1523,6 +1523,14 @@ pub struct NexusSettings {
     /// Default: true. Set false in settings.json to restore fire-on-detect.
     #[serde(default = "default_verify_wake")]
     pub verify_wake: bool,
+    /// Speech-check policy: "always" (every candidate is checked, the default), "tiered" (candidates the
+    /// classifier is very sure about, `wake_verify_high`, fire without the check) or "off". Empty = follow
+    /// the legacy `verify_wake` boolean. Choose with `wake_calibrate.py --verify` on your clips.
+    #[serde(default)]
+    pub wake_verify_mode: String,
+    /// Tiered mode: stage-1 probability at or above which the speech check is skipped (0.80-0.9999).
+    #[serde(default = "default_wake_verify_high")]
+    pub wake_verify_high: f32,
     /// Mic keep-alive render (Meet parity): inaudible output stream beside
     /// capture holds the Intel DSP awake so it never power-gates the mic
     /// path mid-session. Default: true. Silent zeros, ~0 CPU.
@@ -1628,6 +1636,10 @@ fn default_moonshine_model() -> String {
 
 fn default_verify_wake() -> bool {
     true
+}
+
+fn default_wake_verify_high() -> f32 {
+    crate::wakeword_oww::DEFAULT_VERIFY_HIGH
 }
 
 fn default_mic_keep_alive() -> bool {
@@ -1742,6 +1754,8 @@ impl Default for NexusSettings {
             vision_provider: "auto".to_string(),
             vision_race: "sequential".to_string(),
             verify_wake: true,
+            wake_verify_mode: String::new(),
+            wake_verify_high: default_wake_verify_high(),
             mic_keep_alive: true,
             telegram_chat_id: String::new(),
             ghost_depth_ack: true,
@@ -2434,6 +2448,27 @@ pub fn read_wake_dsp_profile<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> St
         .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
         .and_then(|j| j.get("wakeDspProfile").and_then(|v| v.as_str()).map(str::to_string))
         .unwrap_or_else(|| "legacy".to_string())
+}
+
+/// Read `wakeVerifyMode` ("always" | "tiered" | "off"); None when unset.
+pub fn read_wake_verify_mode<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<String> {
+    let dir = app.path().app_data_dir().ok()?;
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("wakeVerifyMode").and_then(|v| v.as_str()).map(str::to_string))
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// Read `wakeVerifyHigh` (the provisional default when unset or invalid).
+pub fn read_wake_verify_high<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> f32 {
+    let Ok(dir) = app.path().app_data_dir() else { return crate::wakeword_oww::DEFAULT_VERIFY_HIGH; };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("wakeVerifyHigh").and_then(|v| v.as_f64()))
+        .map(|v| v as f32)
+        .unwrap_or(crate::wakeword_oww::DEFAULT_VERIFY_HIGH)
 }
 
 /// Read `wakeSeedOffsetMs` (0 when unset or invalid).

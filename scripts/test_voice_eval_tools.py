@@ -208,6 +208,54 @@ def wake_row(phrase, fired, speaker="owner", env="quiet", dist=30, vol="normal",
     return r
 
 
+def vrow(prob, passed, kind="wake", fired=True):
+    return {"kind": kind, "fired": fired, "first_fire_prob": prob, "stage2_pass": passed}
+
+
+class VerifyPolicyTests(unittest.TestCase):
+    """E4: choosing wakeVerifyMode / wakeVerifyHigh from data."""
+
+    def rows(self):
+        # 10 real wakes: 6 are very sure (>=0.99) but the STT check loses 3 of them; 4 are middling and fine.
+        wake = [vrow(0.995, False)] * 3 + [vrow(0.995, True)] * 3 + [vrow(0.80, True)] * 4
+        # soundalikes: one is sure (0.99, STT would have caught it), one middling and caught.
+        neg = [vrow(0.99, False, "negative"), vrow(0.75, False, "negative"), vrow(0.0, False, "negative", fired=False)]
+        room = [{"kind": "room", "duration_ms": 3600 * 1000 * 4, "fire_probs": [0.70, 0.75, 0.999]}]
+        return wake + neg + room
+
+    def test_table_policies_bracket_each_other(self):
+        tab = {r["policy"]: r for r in wc.verify_table(self.rows())}
+        self.assertEqual(tab["always"]["k"], 7)             # only the 3+4 whose check passed
+        self.assertEqual(tab["off"]["k"], 10)               # every fired wake
+        self.assertEqual(tab["tiered 0.990"]["k"], 10)      # sure ones skip the check -> nothing lost
+        self.assertEqual(tab["tiered 0.999"]["k"], 7)       # nobody is sure enough: same as always
+        self.assertEqual(tab["off"]["soundalike_k"], 2)
+        self.assertEqual(tab["always"]["soundalike_k"], 0)
+        self.assertEqual(tab["tiered 0.990"]["soundalike_k"], 1)   # the 0.99 soundalike now skips the check
+        self.assertEqual(tab["off"]["unchecked_fires"], 3)
+        self.assertEqual(tab["tiered 0.990"]["unchecked_fires"], 1)
+        self.assertEqual(tab["always"]["unchecked_fires"], 0)
+
+    def test_recommendation_respects_both_budgets_and_prefers_more_checking_on_ties(self):
+        tab = wc.verify_table(self.rows())
+        r = wc.recommend_verify(tab, max_fa_per_hour=0.5, max_soundalike_fa=0.5)
+        self.assertTrue(r["policy"].startswith("tiered"))
+        self.assertEqual(r["recall"], 1.0)
+        # zero soundalike budget: the 0.99 soundalike must stay checked, so t_hi has to be above 0.99
+        r = wc.recommend_verify(tab, max_fa_per_hour=0.5, max_soundalike_fa=0.0)
+        self.assertGreater(r["t_hi"], 0.99)
+        self.assertEqual(r["soundalike_k"], 0)
+        self.assertEqual(r["recall"], 1.0)
+        # tight room budget rules out the unchecked 0.999 fire
+        r = wc.recommend_verify(tab, max_fa_per_hour=0.0, max_soundalike_fa=0.5)
+        self.assertEqual(r["policy"], "always")
+
+    def test_no_data_cases(self):
+        tab = wc.verify_table([vrow(0.99, True)])
+        self.assertTrue(math.isnan(tab[0]["unchecked_per_hour"]))
+        self.assertIsNotNone(wc.render_verify(tab, wc.recommend_verify(tab)))
+
+
 class MetricTests(unittest.TestCase):
     def test_wake_metrics_recall_groups_and_false_alarms(self):
         rows = [wake_row("nexus", True, ms=100)] * 9 + [wake_row("nexus", False)]
@@ -226,6 +274,13 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(m["Soundalike / everyday-word false alarms (neural only)"]["k"], 1)
         lat = m["Wake speed p95 (ms after you start speaking) (neural only)"]
         self.assertTrue(100 <= lat["point"] <= 200)
+
+    def test_owner_sealed_takes_have_their_own_row(self):
+        rows = [dict(wake_row("owner_sealed", True), source="owner_sealed")] * 7
+        rows += [dict(wake_row("owner_sealed", False), source="owner_sealed")] * 3
+        m = {x["label"]: x for x in sc.wake_metrics(rows)}
+        row = m["Owner's own takes withheld from training (all phrases) (neural only)"]
+        self.assertEqual((row["k"], row["n"]), (7, 10))
 
     def test_full_gate_requires_stage2_and_adds_latency(self):
         rows = [wake_row("nexus", True, stage2=True, ms=100), wake_row("nexus", True, stage2=False, ms=100)]

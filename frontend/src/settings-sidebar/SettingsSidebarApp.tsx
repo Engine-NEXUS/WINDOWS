@@ -73,6 +73,8 @@ interface Settings {
   sttCommandHints?: boolean;
   wakeSeedOffsetMs?: number;
   wakeDspProfile?: string;
+  wakeVerifyMode?: string;
+  wakeVerifyHigh?: number;
   // Ghost FIFO queue: per-step watchdog timeout, ms (D7)
   ghostStepTimeoutMs?: number;
   // Ghost FIFO queue: inter-command gap τ, ms (D4)
@@ -125,6 +127,8 @@ const DEFAULT_SETTINGS: Settings = {
   sttCommandHints: false,
   wakeSeedOffsetMs: 0,
   wakeDspProfile: "legacy",
+  wakeVerifyMode: "",
+  wakeVerifyHigh: 0.97,
   ghostStepTimeoutMs: 15000,
   ghostTurnGapMs: 1000,
   wavesHorizontalPct: 0.5,
@@ -631,6 +635,23 @@ function AudioTab({ settings, update }: {
               className={`settings-toggle ${settings.localSttOnly ? "settings-toggle--on" : ""}`}
               onClick={() => update("localSttOnly", !settings.localSttOnly)}
             />
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Wake word speech check</div>
+            <div className="setting-desc">Always: every wake is double-checked by speech recognition (fewest false wakes, can miss real ones). Tiered: skip the check when the wake model is very sure. Off: wake on the model alone (fastest). Pick with your voice scorecard.</div>
+          </div>
+          <div className="setting-control">
+            <select
+              className="settings-input"
+              value={settings.wakeVerifyMode || ((settings as { verifyWake?: boolean }).verifyWake === false ? "off" : "always")}
+              onChange={(e) => update("wakeVerifyMode", e.target.value)}
+            >
+              <option value="always">Always</option>
+              <option value="tiered">Tiered</option>
+              <option value="off">Off</option>
+            </select>
           </div>
         </div>
         <div className="setting-row">

@@ -53,11 +53,15 @@ jobs:
         run: |
           python -m unittest scripts/test_voice_eval_tools.py
           python -m unittest scripts/test_wake_dsp.py
+          python -m unittest scripts/test_wake_score.py
 
       - name: Trainer library tests (numpy / scipy / onnxruntime)
         run: |
           pip install numpy scipy onnxruntime
           python -m unittest scripts/test_wake_train_lib.py
+          python -m unittest scripts/test_wake_label_audit.py
+          python -m unittest scripts/test_wake_data_fetch.py
+          python -m unittest scripts/test_wake_data_synth.py
 
   windows-installer:
     runs-on: windows-latest

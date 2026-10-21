@@ -170,7 +170,8 @@ class TrainerDryRunTests(unittest.TestCase):
                               (rng.standard_normal(16000) * 0.01 * 32767).astype(np.int16))
             out = d / "cand.onnx"
             res = subprocess.run([sys.executable, str(SCRIPTS / "train_local_wakeword.py"), "--dry-run",
-                                  "--data-dir", str(d), "--out", str(out), "--seed", "7"],
+                                  "--data-dir", str(d), "--out", str(out), "--seed", "7",
+                                  "--seal-owner", "0"],
                                  capture_output=True, text=True, timeout=900)
             self.assertEqual(res.returncode, 0, res.stdout[-800:] + res.stderr[-800:])
             rep = json.loads((d / "train_report.dry.json").read_text())
@@ -178,12 +179,108 @@ class TrainerDryRunTests(unittest.TestCase):
             self.assertEqual(sum(rec.values()), 60, "every recording lands in exactly one split")
             self.assertGreater(rec["train"], rec["val"])
             for sp in ("train", "val", "test"):
-                self.assertGreater(rep["windows"][sp]["pos"], 0, sp)
+                self.assertGreater(rep["windows"][sp]["pos"] + rep["windows"][sp]["owner_pos"], 0, sp)
             # Val/test are clean recordings only; train is augmented (many more windows per file).
-            per_file_train = rep["windows"]["train"]["pos"] / rec["train"]
-            per_file_val = rep["windows"]["val"]["pos"] / max(rec["val"], 1)
+            per_file_train = (rep["windows"]["train"]["pos"] + rep["windows"]["train"]["owner_pos"]) / rec["train"]
+            per_file_val = (rep["windows"]["val"]["pos"] + rep["windows"]["val"]["owner_pos"]) / max(rec["val"], 1)
             self.assertGreater(per_file_train, 2 * per_file_val)
             self.assertFalse(out.exists(), "a dry run must not write a model")
+
+
+class TrainerPhaseETests(unittest.TestCase):
+    def make_data(self, d, n_pos=60):
+        for sub in ("positive", "negative", "background"):
+            (d / sub).mkdir(exist_ok=True)
+        rng = np.random.default_rng(0)
+        for i in range(n_pos):
+            wavfile.write(str(d / "positive" / f"nexus_{i:04d}.wav"), 16000, (burst(0.5, f0=150 + 3 * i) * 32767).astype(np.int16))
+        for i in range(20):
+            wavfile.write(str(d / "negative" / f"neg_{i:04d}.wav"), 16000, (burst(0.5, f0=300 + 5 * i) * 32767).astype(np.int16))
+        for i in range(6):
+            wavfile.write(str(d / "background" / f"bg_{i:04d}.wav"), 16000, (rng.standard_normal(16000) * 0.01 * 32767).astype(np.int16))
+
+    def run_trainer(self, d, *extra):
+        return subprocess.run([sys.executable, str(SCRIPTS / "train_local_wakeword.py"), "--dry-run", "--data-dir", str(d),
+                               "--out", str(d / "cand.onnx"), "--seed", "7", *extra],
+                              capture_output=True, text=True, timeout=900)
+
+    def test_sealed_owner_clips_are_withheld_and_listed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self.make_data(d)
+            res = self.run_trainer(d, "--seal-owner", "0.3")
+            self.assertEqual(res.returncode, 0, res.stdout[-600:] + res.stderr[-600:])
+            rep = json.loads((d / "train_report.dry.json").read_text())
+            sealed = [json.loads(l) for l in (d / "sealed" / "manifest.jsonl").read_text().splitlines()]
+            self.assertEqual(len(sealed), rep["sealed_owner_recordings"])
+            self.assertGreater(len(sealed), 5)
+            self.assertEqual(sum(rep["recordings"]["positive"].values()) + len(sealed), 60)
+            self.assertTrue(all(r["kind"] == "wake" and r["audio"].startswith("positive/") for r in sealed))
+            # sealing is stable: the same files are sealed on the next run
+            first = [r["audio"] for r in sealed]
+            self.run_trainer(d, "--seal-owner", "0.3")
+            again = [json.loads(l)["audio"] for l in (d / "sealed" / "manifest.jsonl").read_text().splitlines()]
+            self.assertEqual(first, again)
+
+    def test_audit_gate_blocks_a_real_run_but_only_warns_on_dry_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self.make_data(d)
+            (d / "audit_flags.jsonl").write_text(json.dumps(
+                {"sha": "x", "path": "negative/neg_0000.wav", "label": "negative", "provenance": "owner_mic",
+                 "oof": 0.9, "severity": 0.9, "reasons": ["negative_sounds_like_nexus"]}) + "\n")
+            dry = self.run_trainer(d, "--seal-owner", "0")
+            self.assertEqual(dry.returncode, 0)
+            self.assertIn("AUDIT GATE FAILED", dry.stdout)
+            rep = json.loads((d / "train_report.dry.json").read_text())
+            self.assertFalse(rep["audit_gate"]["ok"])
+            real = subprocess.run([sys.executable, str(SCRIPTS / "train_local_wakeword.py"), "--data-dir", str(d),
+                                   "--out", str(d / "cand.onnx")], capture_output=True, text=True, timeout=900)
+            self.assertNotEqual(real.returncode, 0)
+            self.assertIn("Refusing to train on unaudited labels", real.stderr + real.stdout)
+
+    def test_synth_and_public_clips_use_lighter_augmentation_than_owner_clips(self):
+        import onnxruntime as ort
+        mel = ort.InferenceSession(str(L.OWW_DIR / "melspectrogram.onnx"))
+        emb = ort.InferenceSession(str(L.OWW_DIR / "embedding_model.onnx"))
+        fe = L.Frontend(mel, emb)
+        sys.path.insert(0, str(SCRIPTS))
+        import train_local_wakeword as T
+        a = burst(0.6)
+        full = T.positives_from(fe, a, np.random.default_rng(1), [], train=True, level="full")
+        lite = T.positives_from(fe, a, np.random.default_rng(1), [], train=True, level="lite")
+        clean = T.positives_from(fe, a, np.random.default_rng(1), [], train=False)
+        self.assertGreater(len(full), len(lite))
+        self.assertGreater(len(lite), len(clean))
+
+
+class LibHelpers(unittest.TestCase):
+    def test_sealed_fraction_is_stable_and_roughly_right(self):
+        gs = [f"g{i}" for i in range(2000)]
+        s = [L.is_sealed(g, 0.3) for g in gs]
+        self.assertEqual(s, [L.is_sealed(g, 0.3) for g in gs])
+        self.assertAlmostEqual(sum(s) / len(s), 0.3, delta=0.04)
+        self.assertFalse(any(L.is_sealed(g, 0.0) for g in gs))
+
+    def test_sealing_is_independent_of_the_split_hash(self):
+        gs = [f"g{i}" for i in range(3000)]
+        sp = L.assign_splits(gs)
+        sealed = [g for g in gs if L.is_sealed(g, 0.3)]
+        frac_test = sum(sp[g] == "test" for g in sealed) / len(sealed)
+        self.assertAlmostEqual(frac_test, 0.15, delta=0.05)
+
+    def test_cap_list(self):
+        rng = np.random.default_rng(0)
+        self.assertEqual(L.cap_list([1, 2, 3], 5, rng), [1, 2, 3])
+        out = L.cap_list(list(range(100)), 10, rng)
+        self.assertEqual(len(out), 10)
+        self.assertEqual(out, sorted(out))
+
+    def test_hard_negative_indices(self):
+        p = [0.1, 0.9, 0.25, 0.5, 0.19]
+        self.assertEqual(list(L.hard_negative_indices(p, 0.2, 10)), [1, 3, 2])
+        self.assertEqual(list(L.hard_negative_indices(p, 0.2, 2)), [1, 3])
+        self.assertEqual(len(L.hard_negative_indices([0.0, 0.1], 0.2, 5)), 0)
 
 
 if __name__ == "__main__":

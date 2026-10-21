@@ -9,6 +9,10 @@
     python scripts/wake_audition.py review --dir wake_word_data/review
     python scripts/wake_audition.py review --dir wake_word_data/negative --pattern "soundalike_from_*"
 
+    # audit queue (Phase E1): the clips scripts/wake_label_audit.py flagged, worst first, with the
+    # model's score and the current label shown. [k]eep = the label is right; [x] = exclude from training
+    python scripts/wake_audition.py review --queue wake_word_data/audit_flags.jsonl
+
     python scripts/wake_audition.py stats
 
 Decisions move the file to wake_word_data/positive or negative (named audition_<n>.wav so source and
@@ -179,6 +183,8 @@ def _play(path):
 
 
 def cmd_review(args):
+    if args.queue:
+        return cmd_review_queue(args)
     d = Path(args.dir)
     files = sorted(f for f in d.glob("*.wav") if fnmatch(f.name, args.pattern))
     if not files:
@@ -204,6 +210,62 @@ def cmd_review(args):
     return 0
 
 
+QUEUE_KEYS = {"p": "positive", "n": "negative", "k": "keep", "x": "exclude"}
+
+
+def queue_decision_dest(label, decision, base=BASE):
+    """Where a queue decision moves the file: None = stay put (keep), quarantine/ for exclude, else the
+    class folder. A decision equal to the current label also stays put."""
+    if decision == "keep" or decision == label:
+        return None
+    if decision == "exclude":
+        return Path(base) / "quarantine"
+    return Path(base) / decision
+
+
+def cmd_review_queue(args):
+    import wake_label_audit as A
+    base = BASE
+    qpath = Path(args.queue)
+    flags = A.load_flags(qpath)
+    ledger_path = qpath.parent / A.LEDGER_NAME
+    todo = A.unreviewed(flags, A.load_ledger(ledger_path))
+    if not todo:
+        print("nothing left to review in the queue.")
+        return 0
+    print(f"{len(todo)} flagged clips, worst first.  [p]ositive (clearly says NEXUS)  [n]egative (anything else - a real "
+          "soundalike is a GOOD negative)  [k]eep current label  [x] exclude from training  [r]eplay  [s]kip  [q]uit")
+    for i, fl in enumerate(todo, 1):
+        f = qpath.parent / fl["path"]
+        if not f.exists():
+            continue
+        while True:
+            score = "n/a" if fl["oof"] is None else f'{fl["oof"]:.2f}'
+            print(f"[{i}/{len(todo)}] {fl['path']}  label={fl['label']}  model says P(NEXUS)={score}  "
+                  f"origin={fl['provenance']}  why={','.join(fl['reasons'])}")
+            _play(f)
+            ans = (input("  p / n / k / x / r / s / q > ").strip().lower() or "r")[:1]
+            if ans == "r":
+                continue
+            if ans == "q":
+                return 0
+            if ans == "s":
+                break
+            decision = QUEUE_KEYS.get(ans)
+            if decision is None:
+                continue
+            dest_dir = queue_decision_dest(fl["label"], decision, qpath.parent)
+            if dest_dir is not None:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / f"audit_{next_index(dest_dir, 'audit_'):04d}.wav"
+                shutil.move(str(f), str(dest))
+                # the content hash is unchanged by the move, so the ledger entry still matches
+            A.record_decision(ledger_path, fl["sha"], decision, fl["path"])
+            print(f"  -> {decision}")
+            break
+    return 0
+
+
 def cmd_stats(args):
     counts, audited = stats()
     for k, v in counts.items():
@@ -222,6 +284,7 @@ def main(argv=None):
     p = sub.add_parser("review")
     p.add_argument("--dir", default=str(BASE / "review"))
     p.add_argument("--pattern", default="*")
+    p.add_argument("--queue", default=None, help="audit_flags.jsonl from wake_label_audit.py score")
     p.set_defaults(fn=cmd_review)
     sub.add_parser("stats").set_defaults(fn=cmd_stats)
     args = ap.parse_args(argv)

@@ -28,6 +28,7 @@ WAKE_PHRASES = ("nexus", "hey nexus", "okay nexus")
 TARGETS = {
     "wake_recall": (0.95, "high"),
     "wake_other_people": (0.90, "high"),
+    "wake_owner_sealed": (0.95, "high"),
     "wake_hard_conditions": (0.90, "high"),
     "wake_false_alarm_per_hour": (1 / 8, "low"),
     "wake_negative_false_alarm": (0.01, "low"),
@@ -141,6 +142,9 @@ def wake_metrics(rows, full_gate=False):
     others = [r for r in wake if r.get("speaker_id") not in owner]
     out.append(rate("wake_other_people", "Other people (non-owner speakers)" + suffix,
                     sum(_gate_fired(r, full_gate) for r in others), len(others)))
+    sealed = [r for r in wake if r.get("source") == "owner_sealed"]
+    out.append(rate("wake_owner_sealed", "Owner's own takes withheld from training (all phrases)" + suffix,
+                    sum(_gate_fired(r, full_gate) for r in sealed), len(sealed)))
     hard = [r for r in wake if r.get("environment", "quiet") != "quiet"
             or float(r.get("distance_cm", 0) or 0) >= 100 or r.get("volume") == "whisper"]
     out.append(rate("wake_hard_conditions", "Noisy room / far away / whisper" + suffix,

@@ -1,5 +1,12 @@
 # NEXUS — Project Notes
 
+## Voice Accuracy Phase E — Label Audit, Public Data, Synthetic Speakers, Tiered Speech Check (2026-10-21)
+
+- **Context**: user asked whether negatives were truly negative (a soundalike filed as a negative poisons the model), whether the model was trained, what the "43 %" speech-check figure means, and why record noise/TV when public data exists. Answers: **no** audit by audio ever existed (all gates were Whisper-text); **no** training happened (shipped `nexus.onnx` unchanged; `nexus wake train` writes a candidate, `--promote` replaces); 43 % = old 99-case review where the Groq check cost ~half the real wakes (`docs/wake-word/22-…`); "background/TV" data was DSP-synthesised, public real data exists, no public "nexus" model exists.
+- **Correction**: `verifyWake` (speech check) defaults to **TRUE** in code — earlier notes (change 48, 83, feature 67) saying "off by default" were wrong and are fixed.
+- **Built**: `wake_label_audit.py` (provenance + out-of-fold flagging + ledger by content hash + trainer gate) with `wake_audition.py review --queue`; `wake_data_fetch.py` (permissive public data, TOFU checksums, held-out hours) and `wake_data_synth.py` (Piper voices, licence-checked, borderline soundalikes quarantined for listening); trainer: public pools, owner sealing (`--seal-owner`), streaming hard-negative mining; `wake_score.py` = `nexus wake score` (real recall + false alarms/hour); tiered speech check `wakeVerifyMode` always|tiered|off + `wakeVerifyHigh` (default behaviour unchanged = always) with `wake_calibrate.py --verify`; `nexus wake audit|fetch|synth|score|threshold|verify`.
+- **Verify**: Rust lib 973/973 serial; Python 114 across 7 files; trainer run end-to-end with real torch on synthetic data. **No accuracy number exists until the user runs the runbook on Windows** (§5 of `docs/research/voice-accuracy/02-runbook-record-score-fix-retrain.md`). Docs: `docs/changes/91-label-audit-reusable-data-tiered-speech-check.md`.
+
 ## Voice Accuracy Measurement Harness — Phase A (2026-10-20)
 
 - **Context**: user asked for the real wake-word ("NEXUS", "hey NEXUS") and STT accuracy in a stars/% table and a plan to make both near-perfect. Audit result: **no trustworthy number existed** (all wake recalls were on training files or a leaky split; STT never measured on real audio). Plan: `docs/research/voice-accuracy/01-…md` (phases A measure → B bug fixes → C retrain → D STT polish).
@@ -501,7 +508,7 @@ until this 5-phase arc. All 5 phases are done and committed
   - Investigated why `nexus start` showed a 1.2s–1.8s delay and lower sensitivity than `nexus wake test` (which triggers in < 35ms at 98.4% confidence).
   - Identified 5 root causes: 1) `read_verify_wake` defaulted to `true` (unnecessary Stage-2 Whisper STT HTTP cross-check), 2) 500ms post-hit secondary buffer delay in `wakeword_oww.rs`, 3) WebRTC VAD onset decapitation chopping the initial nasal consonant `/n/`, 4) 4-channel averaging in `try_device` downmix halving signal on Intel SST arrays, 5) repetitive 2s audio heartbeat dumps flooding `nexus_unified.log`.
 - **Rust Engine Optimization & Fail-Open DSP**:
-  - `commands.rs`: Defaulted `read_verify_wake` to `false` for instant neural firing.
+  - `commands.rs`: Defaulted `read_verify_wake` to `false` for instant neural firing. **[Correction 2026-10-21: the current code defaults `verifyWake` to TRUE; this default did not stick. See change 91.]**
   - `wakeword_oww.rs`: Immediate return on detection; made WebRTC VAD fail-open; connected calibrated `pre_gain` (2.50x) in AGC normalization; downmixed active stereo pair ($\text{Ch}_0+\text{Ch}_1$) on 4-channel devices; demoted 2s heartbeat logs to `DEBUG`.
   - `meeting_detect.rs`: Added `python.exe`, `nexus.exe`, and `node.exe` to system process exclusions.
 - **Unified Console UX & Live Speaker Waveform (`scripts/run.ps1` & `scripts/test_wake_live.py`)**:
