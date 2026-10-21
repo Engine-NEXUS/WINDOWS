@@ -26,6 +26,12 @@ The "43 %" figure: `docs/wake-word/22-hundred-combo-review.md` (2026-09-19, 99 c
 | Speech-check policy | `wakeword_oww.rs` (`VerifyMode`, `verify_mode_from`, `should_instant_fire`), `commands.rs`, Settings select, `wake_calibrate.py --verify` / `nexus wake verify` | `wakeVerifyMode` = `always` (default, unchanged) \| `tiered` \| `off`; `wakeVerifyHigh` (default 0.97, clamped 0.80-0.9999) = stage-1 probability at/above which the check is skipped; unset mode follows the legacy `verifyWake` boolean; candidates with no neural evidence (barge-in prob 0.0) are never instant in any mode |
 | CLI | `nexus.mjs` | `wake audit [review|status]`, `fetch`, `synth voices|positives|negatives`, `score`, `threshold`, `verify`; `train` now forwards flags; `devices` fixed and labelled as *synthetic* filters; the old accent synth is `synth-accents`; `data wake validate` documented as structural-only |
 
+## One command to review it on your laptop: `nexus wake improve`
+`scripts/wake_improve.py` runs the whole loop and writes `docs/research/voice-accuracy/improvement-report.md`:
+seal your held-out takes → **score the shipped model** → fetch public data → synth voices → audit (it **stops once**, exit 3, for you to listen to flagged clips with `nexus wake audit review`; re-run to continue) → train a candidate → **score the candidate** against the same audio → verdict.
+Verdict rules (pure, unit-tested): any conclusive regression ⇒ `REGRESSED`; ≥1 conclusive improvement and none worse ⇒ `IMPROVED`; rows with < 20 clips are "too few clips"; one flipped clip is noise; rows the shipped model may have trained on (sealed owner takes) are shown as *optimistic* and never count; no measurable rows ⇒ `NO_DATA` (the report lists what is missing — it never fills in a number). `--promote` installs the candidate only on `IMPROVED`.
+Integration-tested here with the real wake engine (`cargo run --example wake_eval` with a swapped candidate model) on synthetic stand-in audio — that verifies the plumbing, not accuracy.
+
 ## Honest limits
 - **No accuracy number exists yet.** The sandbox has no recordings and blocked data hosts (HuggingFace, PyTorch index); everything is verified on synthetic stand-ins and the real code paths. The trainer was run end-to-end here with real torch on a synthetic dataset (base fit → 2 mining rounds → ONNX export, candidate loads in onnxruntime).
 - Piper's CLI/model-card format could not be fetched here; the adapter was written against the installed `piper-tts` 1.8 source (`PiperVoice.load`, `SynthesisConfig`), and the licence parser is conservative (anything unrecognised is skipped). Piper itself is GPL-3 — used only as an offline tool.
@@ -35,7 +41,7 @@ The "43 %" figure: `docs/wake-word/22-hundred-combo-review.md` (2026-09-19, 99 c
 - Public-data licences are the publishers' stated ones (checked at implementation time, not legal advice); MUSAN has per-file notes — keep `DATA_SOURCES.md` with the model.
 
 ## Verify
-Rust lib **973/973** serial (971 + 2: tiered truth table incl. clamping/NaN, mode-setting fallback); Python: `test_voice_eval_tools` 41, `test_wake_train_lib` 21, `test_wake_label_audit` 16, `test_wake_data_fetch` 11, `test_wake_data_synth` 19, `test_wake_score` 3, `test_wake_dsp` 3; `tsc` clean (only the pre-existing `identityBanner.test.ts` errors); CI job `voice-accuracy-tools` extended.
+Rust lib **973/973** serial (971 + 2: tiered truth table incl. clamping/NaN, mode-setting fallback); Python: `test_voice_eval_tools` 41, `test_wake_train_lib` 21, `test_wake_label_audit` 16, `test_wake_data_fetch` 11, `test_wake_data_synth` 19, `test_wake_score` 3, `test_wake_improve` 12, `test_wake_dsp` 3; `tsc` clean (only the pre-existing `identityBanner.test.ts` errors); CI job `voice-accuracy-tools` extended.
 
 ## Your steps (Windows)
 See `docs/research/voice-accuracy/02-runbook-record-score-fix-retrain.md` §5: `nexus wake audit` → `audit review` → `fetch` → `synth` → `train --dry-run` → `train` → `score` (shipped, then candidate with `--baseline`) → `threshold` / `verify` → promote.

@@ -54,6 +54,7 @@ jobs:
           python -m unittest scripts/test_voice_eval_tools.py
           python -m unittest scripts/test_wake_dsp.py
           python -m unittest scripts/test_wake_score.py
+          python -m unittest scripts/test_wake_improve.py
 
       - name: Trainer library tests (numpy / scipy / onnxruntime)
         run: |

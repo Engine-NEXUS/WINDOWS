@@ -2,6 +2,17 @@
 
 Everything below exists and is tested; the only thing missing in the repo is **your recordings** (no accuracy number can be produced without them). Commands are PowerShell from the repo root unless noted.
 
+## Fastest path: one command
+
+```powershell
+nexus wake improve            # scores the shipped model, fetches public data, makes synthetic voices, audits labels,
+                              # STOPS once for you to listen to flagged clips (nexus wake audit review), trains a candidate,
+                              # scores it, and writes docs/research/voice-accuracy/improvement-report.md (verdict + before/after table)
+nexus wake improve            # run again after the by-ear review - it continues where it stopped
+nexus wake improve --promote  # installs the candidate ONLY if the verdict is IMPROVED
+```
+Open `improvement-report.md` and `scorecard-after.md` to review. Verdict rules: any conclusive regression => REGRESSED; rows with < 20 clips are "too few clips"; rows the shipped model may have trained on are marked optimistic and never count. The steps below are the same loop done by hand.
+
 ## 0. One-time
 ```powershell
 pip install sounddevice numpy scipy onnxruntime       # recorder + trainer tools

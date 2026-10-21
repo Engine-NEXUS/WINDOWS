@@ -1011,6 +1011,16 @@ function cmdWake() {
     }
   };
 
+  if (sub === "improve") {
+    // nexus wake improve [--skip-fetch] [--skip-synth] [--promote]
+    // One command: before-score -> data -> audit (stops for your by-ear review) -> train -> after-score -> verdict report.
+    ensurePy("onnxruntime", "onnxruntime", "wake front end");
+    ensurePy("torch", "torch", "classifier training");
+    ensurePy("onnx", "onnx", "model export");
+    run(py, [needScript("wake_improve.py"), ...process.argv.slice(4)], { cwd: ROOT, allowFail: true });
+    return;
+  }
+
   if (sub === "audit") {
     // nexus wake audit            -> inventory + out-of-fold scoring, writes the review queue
     // nexus wake audit review     -> listen to flagged clips (worst first), decide by ear
@@ -1153,6 +1163,7 @@ function cmdWake() {
     info("  nexus wake test --compare        (simultaneous wake test & live speech transcription comparison)");
     info("  nexus wake test --batch          (benchmark model against all 3,000 dataset WAVs)");
     info("  nexus wake devices               (benchmark model across 5 SYNTHETIC mic filters - not real devices)");
+    info("  nexus wake improve [--promote]   (EVERYTHING: score shipped -> data -> audit -> train -> score candidate -> verdict report)");
     info("  nexus wake audit                 (find mislabeled clips by audio, not Whisper) / audit review / audit status");
     info("  nexus wake fetch list|get <id>|prepare   (permissively-licensed public speech/noise/TV data)");
     info("  nexus wake synth voices|positives|negatives   (Piper TTS voices: thousands of synthetic speakers)");
@@ -1247,6 +1258,7 @@ ${C.cyan}Examples:${C.reset}
   ${IS_WIN ? "nexus" : "./nexus"} collect     # speak phrases → save real voice samples for training
   ${IS_WIN ? "nexus" : "./nexus"} wake record 300 # record 300 real wake word samples ("NEXUS")
   ${IS_WIN ? "nexus" : "./nexus"} wake stats  # inspect wake word audio dataset statistics
+  ${IS_WIN ? "nexus" : "./nexus"} wake improve # the whole loop + a before/after verdict report to review
   ${IS_WIN ? "nexus" : "./nexus"} wake audit  # find poisoned/mislabeled wake clips, then "wake audit review"
   ${IS_WIN ? "nexus" : "./nexus"} wake score  # measure real wake-word recall + false alarms per hour
   ${IS_WIN ? "nexus" : "./nexus"} data nlu validate
