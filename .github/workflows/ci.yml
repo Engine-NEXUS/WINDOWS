@@ -174,6 +174,15 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # tauri::generate_context! with the custom-protocol feature embeds frontend/dist at compile time
+      # and panics if the folder is missing. The frontend is built by frontend-check; this job only
+      # needs the folder to exist to type-check and test the Rust side.
+      - name: Placeholder frontend/dist (embedded-assets build needs the folder)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force frontend/dist | Out-Null
+          Set-Content frontend/dist/index.html "<!doctype html><title>ci</title>"
+
       - name: Cargo check (default)
         working-directory: src-tauri
         run: cargo check

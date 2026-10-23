@@ -1437,7 +1437,6 @@ pub fn hide_settings_sidebar<R: Runtime>(
 }
 
 /// Show the CodeRabbit active pull requests hub in a 1340x920 centered workstation window.
-#[tauri::command]
 pub async fn show_coderabbit_hub<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
@@ -1467,13 +1466,6 @@ pub async fn show_coderabbit_hub<R: Runtime>(
 
     if window_existed {
         let _ = app.emit("sidebar:analysis", payload);
-        let _ = app.emit(
-            "sidebar:content",
-            serde_json::json!({
-                "query": "CodeRabbit AI — Active Pull Requests",
-                "text": "Here are the active pull requests in ultron, sir.",
-            }),
-        );
     }
 
     Ok(())

@@ -8077,7 +8077,6 @@ async fn run_ghost_center_task<R: Runtime>(
     }).await.map_err(|e| e.to_string())?;
     let stopped_in_run = crate::ghost::stop_requested() || is_cancelled(&cancel_flag);
     drop(guard);
-    let _ = app.emit("ghost:action_receipts", &receipts);
     let reply = match receipts.last() {
         Some(receipt) if receipts.len() > 1 && receipt.outcome == crate::ghost_center::Outcome::Verified =>
             format!("Completed all {} Ghost steps, sir.", receipts.len()),

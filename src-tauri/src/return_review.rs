@@ -176,13 +176,6 @@ fn save_card(dir: &std::path::Path, text: &str) {
     crate::memcore::with_store(dir, |store| store.meta_set(CARD_KEY, &card.to_string()));
 }
 
-#[tauri::command]
-pub fn get_return_review<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Option<serde_json::Value> {
-    let dir = app.path().app_data_dir().ok()?;
-    crate::memcore::with_store(&dir, |store| store.meta_get(CARD_KEY)).flatten()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-}
-
 fn heartbeat(dir: &std::path::Path) {
     if AWAY.load(Ordering::Acquire) { return; }
     let Some(idle_secs) = crate::memcore::resume::user_idle_secs() else { return };
@@ -322,12 +315,6 @@ async fn deliver<R: tauri::Runtime>(app: tauri::AppHandle<R>, dir: std::path::Pa
         if tasks.is_empty() { "No agent tasks are being tracked." } else { "No new agent updates." }.to_string()
     } else { parts.join(" ") };
     save_card(&dir, &card_text);
-    let _ = app.emit("return:review", serde_json::json!({
-        "awayMinutes": away_ms / 60_000,
-        "greeting": greet,
-        "tasks": tasks.len(),
-        "text": card_text,
-    }));
     if !parts.is_empty() {
         // The card is available first. Sound waits for the orb/caption
         // surface and a still-present owner, without dropping the episode.

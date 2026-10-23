@@ -617,18 +617,6 @@ pub async fn stop_watch(id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Current status + buffered output for one watch, for a UI that wants to
-/// show live progress without waiting for completion.
-pub async fn get_watch(id: String) -> Result<serde_json::Value, String> {
-    let client = client();
-    let resp = client
-        .get(sidecar_url(&format!("/watch/{id}")))
-        .send()
-        .await
-        .map_err(|e| format!("failed to reach agent-watch sidecar: {e}"))?;
-    resp.json().await.map_err(|e| format!("bad response: {e}"))
-}
-
 /// Every watch the sidecar knows about (id/type/status/timestamps, no
 /// output), for a Settings panel to list. Empty, not an error, when the
 /// sidecar isn't running — a UI polling this while idle shouldn't need to
@@ -659,23 +647,8 @@ pub fn agent_watch_unavailable_reason() -> Option<String> {
 }
 
 #[tauri::command]
-pub async fn agent_watch_start<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    adapter_type: String,
-    workdir: Option<String>,
-    prompt: Option<String>,
-) -> Result<String, String> {
-    start_watch(app, adapter_type, workdir, prompt).await
-}
-
-#[tauri::command]
 pub async fn agent_watch_stop(id: String) -> Result<(), String> {
     stop_watch(id).await
-}
-
-#[tauri::command]
-pub async fn agent_watch_status(id: String) -> Result<serde_json::Value, String> {
-    get_watch(id).await
 }
 
 #[tauri::command]

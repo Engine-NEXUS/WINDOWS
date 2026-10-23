@@ -567,13 +567,6 @@ pub fn get_active_prs_mock() -> Vec<CodeRabbitPrSummary> {
 }
 
 #[tauri::command]
-pub fn get_coderabbit_active_prs(
-    _repo: Option<String>,
-) -> Result<Vec<CodeRabbitPrSummary>, String> {
-    Ok(get_active_prs_mock())
-}
-
-#[tauri::command]
 pub async fn coderabbit_review_pr(
     pr_number: u32,
     repo: Option<String>,
