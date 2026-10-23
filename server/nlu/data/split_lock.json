@@ -3,10 +3,10 @@
   "family_algorithm": "intent-plus-slot-masked-normalized-text-v1",
   "splits": {
     "train": {
-      "rows": 2904,
-      "sha256": "be4b441afc1c9d5c8a39d3c76c00cd9647547db92583f8411e8994f0824298fc",
-      "families": 1988,
-      "intents": 63
+      "rows": 2728,
+      "sha256": "26321f47d515a86b6ebac300bca9b98454772d0a2901eb7fb73f026d2e4eead6",
+      "families": 1922,
+      "intents": 65
     },
     "validation": {
       "rows": 514,
@@ -28,8 +28,8 @@
     }
   },
   "quarantine": {
-    "rows": 1303,
-    "sha256": "19d0f9e0391168becbf93cfc02db264e17ae96d1a7455f2778e9281168f5eab7",
+    "rows": 1310,
+    "sha256": "4602b53cbc67659340827c31d2503c6bb1492875d88fb40e1e82ec41ae82a655",
     "reason": "Phrase family overlaps frozen final test; excluded from optimization and model selection"
   }
 }

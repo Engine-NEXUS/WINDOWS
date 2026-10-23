@@ -4247,13 +4247,6 @@
       }
     },
     {
-      "text": "architect open a",
-      "intent": "OpenArchitect",
-      "slots": {
-        "action": "open_architect"
-      }
-    },
-    {
       "text": "grant julia push access on {repo}",
       "intent": "add_collaborator",
       "slots": {
@@ -5829,26 +5822,9 @@
       "slots": {}
     },
     {
-      "text": "analyse pr 68 servx-lab",
-      "intent": "analyse_pr",
-      "slots": {
-        "action": "analyse_pr",
-        "owner": null,
-        "pr_number": 68,
-        "repo": "servx-lab"
-      }
-    },
-    {
       "text": "open dependency mapper",
       "intent": "open_architect",
       "slots": {}
-    },
-    {
-      "text": "architect open the",
-      "intent": "OpenArchitect",
-      "slots": {
-        "action": "open_architect"
-      }
     },
     {
       "text": "let me know if this deadline moves",
@@ -8363,16 +8339,6 @@
       "intent": "browser_search",
       "slots": {
         "query": "blender tutorial"
-      }
-    },
-    {
-      "text": "analyse pr 68 in servx-lab",
-      "intent": "analyse_pr",
-      "slots": {
-        "action": "analyse_pr",
-        "owner": null,
-        "pr_number": 68,
-        "repo": "servx-lab"
       }
     },
     {
@@ -11442,13 +11408,6 @@
       }
     },
     {
-      "text": "architect open in",
-      "intent": "OpenArchitect",
-      "slots": {
-        "action": "open_architect"
-      }
-    },
-    {
       "text": "combine the pull request 42 into {repo}",
       "intent": "merge_pr",
       "slots": {
@@ -12090,11 +12049,6 @@
       "slots": {
         "repo": "eesh264/congi"
       }
-    },
-    {
-      "text": "Show me the PR list.",
-      "intent": "Unknown { raw: \"Show me the PR list.\" }",
-      "slots": null
     },
     {
       "text": "and halt playback",
@@ -17590,11 +17544,6 @@
         "org": "devhub",
         "username": "helen"
       }
-    },
-    {
-      "text": "Show me the PR list.",
-      "intent": "list_prs",
-      "slots": null
     },
     {
       "text": "reverse the merge of pr 42 in {repo}",
@@ -39356,6 +39305,57 @@
       "text": "Close the tab.",
       "intent": "browser_close_tab",
       "slots": {}
+    },
+    {
+      "text": "architect open a",
+      "intent": "OpenArchitect",
+      "slots": {
+        "action": "open_architect"
+      }
+    },
+    {
+      "text": "analyse pr 68 servx-lab",
+      "intent": "analyse_pr",
+      "slots": {
+        "action": "analyse_pr",
+        "owner": null,
+        "pr_number": 68,
+        "repo": "servx-lab"
+      }
+    },
+    {
+      "text": "architect open the",
+      "intent": "OpenArchitect",
+      "slots": {
+        "action": "open_architect"
+      }
+    },
+    {
+      "text": "analyse pr 68 in servx-lab",
+      "intent": "analyse_pr",
+      "slots": {
+        "action": "analyse_pr",
+        "owner": null,
+        "pr_number": 68,
+        "repo": "servx-lab"
+      }
+    },
+    {
+      "text": "architect open in",
+      "intent": "OpenArchitect",
+      "slots": {
+        "action": "open_architect"
+      }
+    },
+    {
+      "text": "Show me the PR list.",
+      "intent": "Unknown { raw: \"Show me the PR list.\" }",
+      "slots": null
+    },
+    {
+      "text": "Show me the PR list.",
+      "intent": "list_prs",
+      "slots": null
     }
   ]
 }
