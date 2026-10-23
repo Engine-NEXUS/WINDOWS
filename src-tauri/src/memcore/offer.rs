@@ -43,16 +43,24 @@ pub enum Offer {
     ReopenSession,
     /// "Shut down your laptop?" (`kind` = power_cmd::PowerKind::as_str)
     Power { kind: String },
+    /// "Move these 3 PDFs to the trash, 14 MB? Say yes." The held plan lives in
+    /// `action_kernel::pending`; this marker only opens the answer window.
+    FileConfirm,
     /// "I couldn't find 'mummy chat' exactly - did you mean Google Chat?"
     /// A guess from the app registry: nothing launches until the user says yes.
     OpenApp { display_name: String, spoken: String },
+    /// "Add a Stop hook to Claude Code's settings so I know when it stops?" (`agent` = agent_hooks::Agent::name).
+    /// Nothing is written until the user says yes.
+    HookSetup { agent: String },
+    /// "When it finishes clean, shall I commit to a new branch and open a draft pull request?" Nothing touches git until yes.
+    PlanFollowUp,
 }
 
 impl Offer {
     /// How long this question stays answerable after it was spoken.
     pub fn reply_window(&self) -> Duration {
         match self {
-            Offer::Power { .. } | Offer::ClearTimetable => REPLY_WINDOW_HIGH,
+            Offer::Power { .. } | Offer::ClearTimetable | Offer::FileConfirm | Offer::HookSetup { .. } | Offer::PlanFollowUp => REPLY_WINDOW_HIGH,
             Offer::AddEvent { .. } | Offer::AddSlots { .. } => REPLY_WINDOW_MEDIUM,
             Offer::Start { .. } | Offer::Choose { .. } | Offer::ReopenSession | Offer::OpenApp { .. } => REPLY_WINDOW_LOW,
         }
@@ -63,6 +71,8 @@ struct State {
     offer: Offer,
     armed: bool,
     expires: Instant,
+    /// The question was already asked a second time after an unclear answer (never more than once).
+    reasked: bool,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -75,7 +85,21 @@ fn lock() -> std::sync::MutexGuard<'static, Option<State>> {
 /// otherwise it arms when `arm()` is called (the reminder path).
 pub fn set(offer: Offer, armed: bool) {
     let ttl = if armed { offer.reply_window() } else { SPEAK_WAIT };
-    *lock() = Some(State { offer, armed, expires: Instant::now() + ttl });
+    *lock() = Some(State { offer, armed, expires: Instant::now() + ttl, reasked: false });
+}
+
+/// An armed question got an answer that was not one (a mumble, "dirt." for "yes"): allow ONE more try. Returns true
+/// the first time per question (and gives it a fresh reply window), false afterwards or when nothing is waiting.
+pub fn reask_once() -> bool {
+    let mut g = lock();
+    match g.as_mut() {
+        Some(s) if s.armed && s.expires > Instant::now() && !s.reasked => {
+            s.reasked = true;
+            s.expires = Instant::now() + s.offer.reply_window();
+            true
+        }
+        _ => false,
+    }
 }
 
 /// The question was spoken: start the reply window.
@@ -155,6 +179,9 @@ const ANSWER_VOCAB: &[&str] = &[
     "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "proceed", "confirm", "confirmed", "affirmative",
     "go", "ahead", "do", "it", "for", "let's", "lets", "start", "begin", "add", "save", "them", "those", "reopen",
     "everything", "all",
+    // more ways to say yes ("absolutely", "sounds good", "by all means", "that would be great", "make it so")
+    "absolutely", "definitely", "certainly", "of", "course", "sounds", "good", "alright", "correct", "agreed", "thing",
+    "would", "be", "great", "by", "means", "make", "so", "why", "on", "right", "that's", "thats", "i", "do", "fine",
     // no
     "no", "nope", "nah", "skip", "cancel", "stop", "don't", "dont", "never", "mind", "not", "today", "leave",
     // later
@@ -179,14 +206,18 @@ pub fn classify(text: &str) -> Reply {
     if !w.iter().all(|x| ANSWER_VOCAB.contains(&x.as_str())) {
         return Reply::Other;
     }
-    let joined = w.join(" ");
+    // "why not" is a yes whose "not" is not a negation.
+    let joined = w.join(" ").replace("why not", "whynot");
+    let w: Vec<String> = joined.split_whitespace().map(String::from).collect();
     let has = |needle: &str| joined.contains(needle);
     let has_word = |cands: &[&str]| w.iter().any(|x| cands.contains(&x.as_str()));
 
     if has("not now") || has("later") || has("remind me") || has("snooze") || has("few minutes") || has("in a bit") {
         return Reply::Later;
     }
-    if has_word(&["no", "nope", "nah", "skip", "cancel", "stop"])
+    // Any negation wins over a yes word: "absolutely not", "not sure", "of course not", "definitely not".
+    if has_word(&["no", "nope", "nah", "skip", "cancel", "stop", "not", "never"])
+        || w.iter().any(|x| x.ends_with("n't"))
         || has("don't")
         || has("do not")
         || has("never mind")
@@ -195,8 +226,24 @@ pub fn classify(text: &str) -> Reply {
     {
         return Reply::No;
     }
-    if has_word(&["yes", "yeah", "yep", "yup", "sure", "ok", "okay", "proceed", "confirm", "confirmed", "affirmative"])
+    if has_word(&[
+        "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "proceed", "confirm", "confirmed", "affirmative",
+        "absolutely", "definitely", "certainly", "alright", "agreed", "correct",
+    ])
         || has("go ahead")
+        || has("go on")
+        || has("of course")
+        || has("sounds good")
+        || has("by all means")
+        || has("whynot")
+        || has("make it so")
+        || has("please do")
+        || has("do that")
+        || has("that would be great")
+        || has("that would be good")
+        || has("that's right")
+        || has("thats right")
+        || has("i do")
         || has("do it")
         || has("go for it")
         || has("let's go")
@@ -211,6 +258,86 @@ pub fn classify(text: &str) -> Reply {
         return Reply::Yes;
     }
     Reply::Other
+}
+
+/// Extra words a spoken answer to a POWER question may contain ("shut it down", "yes power off",
+/// "good night"). Only used for `Offer::Power`, so "shut down" cannot approve any other question.
+const POWER_VOCAB: &[&str] = &[
+    "shut", "down", "off", "power", "turn", "switch", "restart", "reboot", "sleep", "lock", "sign", "out", "log",
+    "me", "laptop", "computer", "pc", "system", "good", "night", "goodnight", "tonight", "put", "to", "my", "up",
+];
+
+fn power_action_phrases(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "shutdown" => &[
+            "shut down", "shutdown", "shut it down", "shut off", "power off", "power it off", "power down",
+            "turn it off", "turn off", "switch it off", "switch off", "good night", "goodnight", "night night",
+        ],
+        "restart" => &["restart", "reboot"],
+        "sleep" => &["sleep", "put it to sleep", "suspend"],
+        "lock" => &["lock", "lock it"],
+        "signout" => &["sign out", "sign me out", "log out", "log me out", "log off"],
+        _ => &[],
+    }
+}
+
+/// Answers to a power question: the generic yes/no/later words PLUS the action itself, so "shut it down",
+/// "yes, power off" and "good night" all say yes to "Shut down your laptop?". A negation anywhere wins
+/// ("no don't shut down"). A different action ("restart it" to a shutdown question) is not an answer.
+fn classify_power(kind: &str, text: &str) -> Reply {
+    let mut w = words(text);
+    if w.first().map(|x| x == "nexus").unwrap_or(false) {
+        w.remove(0);
+    }
+    if w.is_empty() || w.len() > MAX_REPLY_WORDS {
+        return Reply::Other;
+    }
+    if !w.iter().all(|x| ANSWER_VOCAB.contains(&x.as_str()) || POWER_VOCAB.contains(&x.as_str())) {
+        return Reply::Other;
+    }
+    let joined = w.join(" ");
+    if w.iter().any(|x| matches!(x.as_str(), "no" | "nope" | "nah" | "don't" | "dont" | "not" | "never" | "cancel" | "stop" | "skip"))
+        || joined.contains("do not")
+    {
+        return Reply::No;
+    }
+    if power_action_phrases(kind).iter().any(|p| joined.contains(p)) {
+        return Reply::Yes;
+    }
+    Reply::Other
+}
+
+/// "Shall I reopen them?" / "Do you want me to open the other apps you were using too?" is naturally answered with
+/// the action itself ("reopen them", "open them all", "open everything"). Only such short action phrases count; any
+/// word outside the small vocabulary (a "no", a "don't", a different request) leaves it to the generic classifier.
+fn classify_reopen(text: &str) -> Reply {
+    const VOCAB: &[&str] = &[
+        "reopen", "open", "them", "it", "all", "everything", "apps", "app", "the", "other", "of", "please", "those",
+        "my", "windows", "and",
+    ];
+    let mut w = words(text);
+    if w.first().map(|x| x == "nexus").unwrap_or(false) {
+        w.remove(0);
+    }
+    if w.is_empty() || w.len() > MAX_REPLY_WORDS || !w.iter().all(|x| VOCAB.contains(&x.as_str())) {
+        return Reply::Other;
+    }
+    let has_action = w.iter().any(|x| x == "reopen" || x == "open");
+    let has_object = w.iter().any(|x| matches!(x.as_str(), "them" | "it" | "all" | "everything" | "apps" | "app" | "those" | "windows"));
+    if has_action && has_object { Reply::Yes } else { Reply::Other }
+}
+
+/// Classify an answer to the question that is waiting. Power questions also accept the action itself.
+pub fn classify_for(offer: &Offer, text: &str) -> Reply {
+    let base = classify(text);
+    if base != Reply::Other {
+        return base;
+    }
+    match offer {
+        Offer::Power { kind } => classify_power(kind, text),
+        Offer::ReopenSession => classify_reopen(text),
+        _ => Reply::Other,
+    }
 }
 
 /// Slots read from an image but not yet confirmed. Kept for 10 minutes so
@@ -247,6 +374,48 @@ mod tests {
     }
 
     #[test]
+    fn many_more_ways_to_say_yes() {
+        for t in [
+            "yup", "yep", "yeah sure", "absolutely", "definitely", "certainly", "of course", "sounds good", "alright",
+            "agreed", "correct", "that's right", "please do", "do that", "go on", "by all means", "sure thing",
+            "why not", "make it so", "that would be great", "yes sir", "yes please do", "okay do it", "sure go ahead",
+            "yeah go ahead", "affirmative", "confirmed", "i do", "Nexus, absolutely", "yes, of course",
+        ] {
+            assert_eq!(classify(t), Reply::Yes, "{t}");
+        }
+        // and the refusals still win
+        for t in ["no way", "absolutely not", "of course not", "not sure", "no thanks sir", "definitely not"] {
+            assert_ne!(classify(t), Reply::Yes, "{t}");
+        }
+    }
+
+    #[test]
+    fn a_power_question_also_accepts_the_action_itself() {
+        let off = Offer::Power { kind: "shutdown".into() };
+        for t in [
+            "shut it down", "shut down", "yes shut down", "yes, shut it down", "power off", "turn it off", "switch it off",
+            "go ahead and shut down", "do it shut down", "good night", "yes good night", "shut down the laptop", "Nexus shut it down",
+            "yup", "sure", "absolutely",
+        ] {
+            assert_eq!(classify_for(&off, t), Reply::Yes, "{t}");
+        }
+        for t in ["don't shut down", "no don't shut it down", "cancel", "not tonight", "stop", "never mind"] {
+            assert_eq!(classify_for(&off, t), Reply::No, "{t}");
+        }
+        // a different action or an unrelated sentence is not an answer
+        for t in ["restart it", "sleep", "shut down notepad", "open chrome", "turn off the lights", "good morning"] {
+            assert_eq!(classify_for(&off, t), Reply::Other, "{t}");
+        }
+        // "shut down" must not approve any other question
+        assert_eq!(classify_for(&Offer::ClearTimetable, "shut down"), Reply::Other);
+        assert_eq!(classify_for(&Offer::ReopenSession, "good night"), Reply::Other);
+        // each kind takes its own action words
+        let restart = Offer::Power { kind: "restart".into() };
+        assert_eq!(classify_for(&restart, "restart it"), Reply::Yes);
+        assert_eq!(classify_for(&restart, "shut down"), Reply::Other);
+    }
+
+    #[test]
     fn a_sentence_that_merely_contains_an_answer_word_is_not_an_answer() {
         for t in [
             "okay open chrome",
@@ -264,6 +433,23 @@ mod tests {
         // "yes, in the browser" answers a Choose offer through parse_choice, not through yes/no.
         assert_eq!(classify("yes, in the browser"), Reply::Other);
         assert!(super::super::timetable::parse_choice("yes, in the browser").is_some());
+    }
+
+    #[test]
+    fn an_unclear_answer_gets_exactly_one_more_try() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        assert!(!reask_once(), "nothing waiting");
+        set(Offer::HookSetup { agent: "antigravity".into() }, false);
+        assert!(!reask_once(), "an offer whose question was not spoken yet is not re-asked");
+        arm();
+        assert!(reask_once(), "first unclear answer: ask again");
+        assert!(!reask_once(), "second unclear answer: give up");
+        assert!(peek().is_some(), "the question is still waiting after the re-ask");
+        // a new question starts fresh
+        set(Offer::HookSetup { agent: "opencode".into() }, true);
+        assert!(reask_once());
+        clear();
     }
 
     #[test]
@@ -331,8 +517,52 @@ mod tests {
         assert!(matches!(peek(), Some(Offer::Choose { .. })));
 
         // Expiry drops it.
-        *lock() = Some(State { offer: Offer::ClearTimetable, armed: true, expires: Instant::now() - Duration::from_secs(1) });
+        *lock() = Some(State { offer: Offer::ClearTimetable, armed: true, expires: Instant::now() - Duration::from_secs(1), reasked: false });
         assert!(peek().is_none() && !is_armed());
         clear();
+    }
+
+    #[test]
+    fn test_reopen_session_offer_accepts_yes_variants() {
+        let off = Offer::ReopenSession;
+        for t in [
+            "yes", "yes please", "yeah", "sure", "okay", "go ahead", "do it", "please do",
+            "yes reopen them", "reopen them", "Nexus yes", "absolutely", "sounds good",
+        ] {
+            assert_eq!(classify_for(&off, t), Reply::Yes, "{t}");
+        }
+    }
+
+    #[test]
+    fn test_reopen_session_offer_clears_on_no_without_launching() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        set(Offer::ReopenSession, true);
+        assert!(is_armed());
+
+        let off = peek().expect("offer waiting");
+        for t in ["no", "no thanks", "don't", "skip it", "cancel", "never mind", "not now"] {
+            let reply = classify_for(&off, t);
+            assert!(reply == Reply::No || reply == Reply::Later, "{t}");
+        }
+
+        // On "no", consumer takes and clears offer without launching anything
+        assert_eq!(take(), Some(Offer::ReopenSession));
+        assert!(peek().is_none());
+        assert!(!is_armed());
+    }
+
+    #[test]
+    fn test_reopen_session_second_yes_does_nothing() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        set(Offer::ReopenSession, true);
+
+        // First take consumes the offer
+        assert_eq!(take(), Some(Offer::ReopenSession));
+
+        // Second take returns None; a second "yes" finds nothing waiting
+        assert_eq!(take(), None);
+        assert!(peek().is_none());
     }
 }

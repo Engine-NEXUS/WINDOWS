@@ -831,13 +831,12 @@ pub(crate) async fn connect_card_for(server: McpServer, client: &reqwest::Client
             if probe.is_err() {
                 return McpConnectCard {
                     state: McpConnectState::Down,
-                    note: "bridge not running on :8765".to_string(),
+                    note: "Ghost mode ready · Background bridge idle".to_string(),
                     steps: vec![
-                        "Start the mcp-whatsapp program on this PC.".to_string(),
-                        "Scan the QR it shows with WhatsApp → Settings → Linked Devices.".to_string(),
-                        "NEXUS confirms automatically — no Recheck needed.".to_string(),
+                        "Ghost mode is active: speak 'open chat with <contact>' to control WhatsApp directly on your PC.".to_string(),
+                        "For background headless messaging, start the local WhatsApp bridge on port 8765.".to_string(),
                     ],
-                    pair_url: Some("http://127.0.0.1:8765/pair".to_string()),
+                    pair_url: None,
                     ..base
                 };
             }
@@ -988,83 +987,6 @@ pub fn all_servers() -> Vec<McpServer> {
         McpServer::WhatsApp,
         McpServer::Amazon,
     ]
-}
-
-/// Per-server reachability for the Connections tab.
-/// `reachable` means transport works (HTTP 200 OR 401-auth-required).
-/// A 401 is honest signal: server alive, login needed — NOT "down".
-#[derive(Debug, Clone, Serialize)]
-pub struct McpStatus {
-    pub server: String,
-    pub url: String,
-    pub reachable: bool,
-    pub latency_ms: u64,
-    pub note: String,
-}
-
-/// Probe every registered MCP server with a cheap `tools/list` call.
-/// Short timeouts so one dead bridge can't stall the dashboard.
-#[tauri::command]
-pub async fn mcp_status() -> Vec<McpStatus> {
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .connect_timeout(Duration::from_secs(3))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => {
-            return all_servers()
-                .iter()
-                .map(|s| McpStatus {
-                    server: s.name().to_string(),
-                    url: s.url().to_string(),
-                    reachable: false,
-                    latency_ms: 0,
-                    note: "http client failed".to_string(),
-                })
-                .collect()
-        }
-    };
-
-    let mut out = Vec::new();
-    for server in all_servers() {
-        let start = std::time::Instant::now();
-        // Probe WITH the vault credential when one exists: an anonymous
-        // probe can't distinguish "bridge up, login needed" from "token
-        // dead". Session bridges (None) probe anonymously by design.
-        let token = server
-            .vault_key()
-            .and_then(crate::auth_vault::get_token);
-        let probe = list_tools(server, &client, token.as_deref()).await;
-        let latency_ms = start.elapsed().as_millis() as u64;
-        let (reachable, note) = match probe {
-            Ok(tools) => (true, format!("ok, {} tools", tools.len())),
-            Err(e) => {
-                // Auth-required means ALIVE (login needed, not down).
-                // Connection-refused/timeout means the bridge isn't running.
-                // Narrow match: a bare "auth" substring also hits words
-                // like "author" in tool output.
-                let lower = e.to_lowercase();
-                if lower.contains("401")
-                    || lower.contains("unauthorized")
-                    || lower.contains("invalid_token")
-                    || lower.contains("authentication required")
-                {
-                    (true, "reachable — login required".to_string())
-                } else {
-                    (false, format!("unreachable: {e}"))
-                }
-            }
-        };
-        out.push(McpStatus {
-            server: server.name().to_string(),
-            url: server.url().to_string(),
-            reachable,
-            latency_ms,
-            note,
-        });
-    }
-    out
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -1526,13 +1448,14 @@ mod tests {
         let cards = mcp_connect_state().await;
         assert_eq!(cards.len(), 5);
         let wa = cards.iter().find(|c| c.server == "whatsapp").unwrap();
-        assert_eq!(
-            wa.pair_url.as_deref(),
-            Some("http://127.0.0.1:8765/pair")
-        );
         if wa.state == McpConnectState::Down {
-            assert_eq!(wa.steps.len(), 3, "down card must carry fix steps");
-            assert!(wa.note.contains("8765"));
+            assert_eq!(wa.pair_url, None);
+            assert!(wa.steps.len() >= 2, "down card must carry fix steps");
+        } else {
+            assert_eq!(
+                wa.pair_url.as_deref(),
+                Some("http://127.0.0.1:8765/pair")
+            );
         }
         for card in &cards {
             if card.state == McpConnectState::AuthRequired {

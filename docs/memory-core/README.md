@@ -19,3 +19,4 @@ organised, readable version.)
 - WhatsApp manual check: `docs/testing/whatsapp-read-receipt-test.md`
 - Code: `src-tauri/src/memcore/` (store, crypto, mailwatch, mailtriage, agenda, timetable, resume, briefing, offer, people, wa, google_io), `google/oauth.rs`, `auth_vault.rs`
 - UI: `frontend/src/settings-sidebar/hub/MemoryPage.tsx`, `memoryModel.ts`
+- Memory v2 plan and measured recall baseline: [07-memory-v2-baseline.md](07-memory-v2-baseline.md)

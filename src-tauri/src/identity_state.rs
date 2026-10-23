@@ -23,6 +23,10 @@ pub const DEVICE_TOKEN_SERVICE: &str = "device_token";
 pub const IDENTITY_PROVISIONAL: &str = "provisional";
 pub const IDENTITY_CANONICAL: &str = "canonical";
 
+/// Polling parameters for the pending-identity background loop.
+const POLL_INTERVAL_SECS: u64 = 600; // 10 min
+const POLLS_PER_SESSION: u32 = 18; // ~3h cap, then stop silently
+
 // ---- Config model ----
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -37,6 +41,10 @@ pub struct IdentityConfig {
     pub last_known_status: String,
     #[serde(rename = "deviceName", default)]
     pub device_name: String,
+    /// The device id the WORKER issued at claim time. The Worker authenticates by this id,
+    /// not by the provisional local `deviceId`.
+    #[serde(rename = "workerDeviceId", default)]
+    pub worker_device_id: String,
 }
 
 /// Read the identity block from nexus-config.json. Missing file or fields
@@ -55,6 +63,7 @@ pub fn read_identity_config(dir: &std::path::Path) -> IdentityConfig {
         legacy_user_id: json["userId"].as_str().unwrap_or("").to_string(),
         last_known_status: json["lastKnownStatus"].as_str().unwrap_or("").to_string(),
         device_name: json["deviceName"].as_str().unwrap_or("").to_string(),
+        worker_device_id: json["workerDeviceId"].as_str().unwrap_or("").to_string(),
     }
 }
 
@@ -75,6 +84,7 @@ pub fn write_identity_config(
     if !patch.legacy_user_id.is_empty() { obj.insert("legacyUserId".into(), serde_json::Value::String(patch.legacy_user_id.clone())); }
     if !patch.last_known_status.is_empty() { obj.insert("lastKnownStatus".into(), serde_json::Value::String(patch.last_known_status.clone())); }
     if !patch.device_name.is_empty() { obj.insert("deviceName".into(), serde_json::Value::String(patch.device_name.clone())); }
+    if !patch.worker_device_id.is_empty() { obj.insert("workerDeviceId".into(), serde_json::Value::String(patch.worker_device_id.clone())); }
     std::fs::write(&path, serde_json::Value::Object(obj).to_string()).map_err(|e| e.to_string())
 }
 
@@ -155,14 +165,20 @@ pub async fn claim<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<Ident
         });
     }
 
-    let (profile_id, _device_id, token) = parse_claim_response(&data)?;
-    crate::auth_vault::set_api_key(DEVICE_TOKEN_SERVICE, &token);
+    let (profile_id, device_id, token) = parse_claim_response(&data)?;
+    // A hint-match retry returns the existing profile WITHOUT a token. Writing "" here
+    // would wipe the credential this device already holds.
+    if !token.is_empty() {
+        crate::auth_vault::set_api_key(DEVICE_TOKEN_SERVICE, &token);
+    }
     write_identity_config(&dir, &IdentityConfig {
         identity: IDENTITY_CANONICAL.to_string(),
         profile_id: profile_id.clone(),
         legacy_user_id: cfg.legacy_user_id.clone(),
         last_known_status: data["status"].as_str().unwrap_or("pending").to_string(),
         device_name: body["device_name"].as_str().unwrap_or("").to_string(),
+        // The Worker authenticates by ITS device id; keep it (it used to be discarded).
+        worker_device_id: device_id,
     })?;
     tracing::info!("identity: claimed profile {} (status pending — awaiting admin approval)", profile_id);
 
@@ -285,12 +301,18 @@ pub async fn refresh_status<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Res
     })
 }
 
-fn network_device_id(dir: &std::path::Path) -> String {
-    dir.join("nexus-config.json")
-        .to_str()
-        .and_then(|_| std::fs::read_to_string(dir.join("nexus-config.json")).ok())
-        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-        .and_then(|j| j["deviceId"].as_str().map(|s| s.to_string()))
+/// The device id to present to the Worker: the id it issued at claim time, falling back to
+/// the provisional local id for legacy (never-claimed) devices.
+pub(crate) fn network_device_id(dir: &std::path::Path) -> String {
+    let json = std::fs::read_to_string(dir.join("nexus-config.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
+    let Some(j) = json else { return String::new() };
+    ["workerDeviceId", "deviceId"]
+        .iter()
+        .filter_map(|k| j[*k].as_str())
+        .find(|s| !s.is_empty())
+        .map(str::to_string)
         .unwrap_or_default()
 }
 
@@ -347,15 +369,12 @@ fn reset_identity_config(dir: &std::path::Path) -> Result<(), String> {
         .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
         .unwrap_or_else(|| serde_json::json!({}));
     let mut obj = existing.as_object().cloned().unwrap_or_default();
-    for key in ["profileId", "legacyUserId", "lastKnownStatus", "deviceName"] {
+    for key in ["profileId", "legacyUserId", "lastKnownStatus", "deviceName", "workerDeviceId"] {
         obj.remove(key);
     }
     obj.insert("identity".into(), serde_json::Value::String(IDENTITY_PROVISIONAL.into()));
     std::fs::write(&path, serde_json::Value::Object(obj).to_string()).map_err(|e| e.to_string())
 }
-
-const POLL_INTERVAL_SECS: u64 = 600; // 10 min
-const POLLS_PER_SESSION: u32 = 18;   // ~3h cap, then stop silently
 
 /// Bounded poll loop: while the profile is pending, refresh every 10 min.
 /// Stops once approved/denied (the transcript 403 path also triggers a
@@ -446,6 +465,7 @@ mod tests {
             legacy_user_id: "user_old1".to_string(),
             last_known_status: "pending".to_string(),
             device_name: "XPS".to_string(),
+            worker_device_id: "dev_Q9".to_string(),
         })
         .unwrap();
         let cfg = read_identity_config(&dir);
@@ -481,6 +501,37 @@ mod tests {
             std::fs::write(dir.join("nexus-config.json"), base.to_string()).unwrap();
             assert_eq!(identity_status(&dir).state, expected, "known={known}");
         }
+    }
+
+    #[test]
+    fn test_worker_device_id_wins_over_provisional_local_id() {
+        let dir = tmp("devid");
+        // Legacy / never-claimed device: only the provisional local id exists.
+        std::fs::write(
+            dir.join("nexus-config.json"),
+            serde_json::json!({ "deviceId": "device_local1" }).to_string(),
+        )
+        .unwrap();
+        assert_eq!(network_device_id(&dir), "device_local1");
+
+        // After a claim the Worker's id is stored and must be the one presented — the
+        // Worker rejects the provisional id because it never issued it.
+        write_identity_config(&dir, &IdentityConfig {
+            identity: IDENTITY_CANONICAL.to_string(),
+            profile_id: "prof_A".to_string(),
+            worker_device_id: "dev_worker9".to_string(),
+            ..IdentityConfig::default()
+        })
+        .unwrap();
+        assert_eq!(network_device_id(&dir), "dev_worker9");
+        assert_eq!(read_identity_config(&dir).worker_device_id, "dev_worker9");
+
+        // Self-revoke clears it again.
+        reset_identity_config(&dir).unwrap();
+        assert_eq!(network_device_id(&dir), "device_local1");
+
+        // Missing config yields an empty id, never a panic.
+        assert_eq!(network_device_id(&tmp("devid_missing")), "");
     }
 
     #[test]

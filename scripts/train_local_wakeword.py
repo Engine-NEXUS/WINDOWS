@@ -1,384 +1,442 @@
 #!/usr/bin/env python3
 """
-Focal Loss & Hard Negative Mining Trainer for NEXUS Wake Word.
-Solves the "Easy Negative Swamping" problem where 33,000 background noise samples
-dilute hard speech negatives (such as words ending in -tion, -ction, or fast conversational speech).
+NEXUS wake-word classifier trainer (focal loss, hard-negative oversampling).
 
-Key Enhancements:
-  1. Focal Loss (gamma=2.0): Automatically scales down gradients from easy background
-     samples (p_t ~ 1.0 -> weight ~ 0.0), forcing 95%+ of backprop gradients onto hard
-     phonetic negatives (soundalikes and fast multi-syllabic phrases).
-  2. Hard Negative Mining: Identifies high-scoring negative windows and trains explicitly
-     until every soundalike and multi-syllabic phrase scores < 10%.
-  3. Device Invariance Augmentation across all 106 pristine NEXUS recordings.
+What changed in the voice-accuracy program (B7 / C1) - numbers from the old trainer were optimistic
+because validation shared recordings with training and "best epoch" was just the last one:
+
+  * Front end = the SHARED spec (`dsp_spec.json`, 'aligned'): the same high-pass / gate / AGC the runtime
+    uses with wakeDspProfile=aligned, so serving matches training (see wake_dsp.py, wake_train_lib.py).
+  * Splits are by recording / manifest source group (train 70 / val 15 / test 15, deterministic by hash),
+    never by window. Augmentation is applied to TRAIN only; val and test are clean recordings.
+  * `best_weights` is a real deep copy of the best epoch (it used to alias the live weights).
+  * Everything is seeded (`--seed`).
+  * Recall / false-alarm are reported at the DEPLOYED threshold (acoustic_profile.json kws_threshold) and at
+    0.50, on val every epoch and on the untouched test split once at the end.
+  * New augmentations: speed +-8%, reverb, random start shift, random gain, real background noise at
+    0-20 dB SNR (plus the previous telecom / fan-hum / quiet-speech ones).
+  * The result is written to `nexus.candidate.onnx` + `train_report.json`; the shipped `nexus.onnx` is only
+    replaced with --promote (the old backup is kept as nexus.previous.onnx).
+
+Phase E (data clean-up + reusable data):
+  * LABEL GATE: training refuses to run until `wake_label_audit.py` has scored the data and every flagged clip
+    (negatives that sound like NEXUS, positives that do not, the old Whisper "soundalike_from_*" relabels)
+    has a by-ear decision. --skip-audit-gate overrides and is recorded in train_report.json. --dry-run only warns.
+  * PUBLIC DATA: wake_word_data/public/{negative,background} (wake_data_fetch.py prepare) joins the pools;
+    synthetic TTS positives (wake_data_synth.py) live in positive/ like any other positive. Public long
+    recordings in public/heldout/ are NEVER read here - they measure false alarms per hour.
+  * OWNER DATA: owner recordings get full augmentation and --owner-repeat weight; a stable --seal-owner
+    fraction of them is withheld from every split and listed in sealed/manifest.jsonl for `nexus wake score`.
+    Synthetic / public clips get lighter augmentation and per-file window caps.
+  * HARD-NEGATIVE MINING: after the first fit, the unused negative pool (and extra background) is STREAMED
+    through the model; the windows it fires on are added (repeated) and the model is fine-tuned, --mine-rounds times.
+
+Usage:
+    python scripts/train_local_wakeword.py --dry-run            # counts + split check, no torch needed
+    python scripts/train_local_wakeword.py                      # train, write candidate
+    python scripts/train_local_wakeword.py --promote            # ...and replace the shipped model
+
+Data layout (wake_word_data/, git-ignored): positive/ negative/ background/ [manifest.jsonl].
+Held-out evaluation recordings (eval_set/) are NEVER read here.
 """
 
-import os
-import sys
+import argparse
+import copy
 import glob
-import random
+import json
+import shutil
+import sys
 from pathlib import Path
+
 import numpy as np
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import TensorDataset, DataLoader
-import onnxruntime as ort
-from scipy.io import wavfile
-from scipy.signal import butter, lfilter
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import wake_label_audit as A  # noqa: E402
+import wake_train_lib as L  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent.parent
-OWW_DIR = ROOT / "src-tauri" / "resources" / "oww"
+ROOT = L.ROOT
+OWW_DIR = L.OWW_DIR
 DATA_DIR = ROOT / "wake_word_data"
 
-CHUNK = 1280
-LOOKBACK = 480
-MEL_PER_CHUNK = 8
-MEL_CIRC = 10
-EMB_FRAMES = 16
-TARGET_RMS = 0.03
-MAX_GAIN = 15.0
-SILENCE_RMS = 0.002
-SR = 16000
 
-class OwwClassifier(nn.Module):
-    def __init__(self, input_dim=16*96, hidden_dim=128):
-        super().__init__()
-        self.layer1 = nn.Linear(input_dim, hidden_dim)
-        self.layernorm1 = nn.LayerNorm(hidden_dim)
-        self.relu1 = nn.ReLU()
-        
-        self.layer2 = nn.Linear(hidden_dim, hidden_dim)
-        self.layernorm2 = nn.LayerNorm(hidden_dim)
-        self.relu2 = nn.ReLU()
-        
-        self.last_layer = nn.Linear(hidden_dim, 1)
-        nn.init.constant_(self.last_layer.bias, -4.0)
+def torch_parts():
+    """Import torch lazily so --dry-run and the unit tests do not need it."""
+    import torch
+    import torch.nn as nn
 
-    def forward(self, x):
-        batch_size = x.shape[0]
-        view = x.view(batch_size, -1)
-        
-        linear = self.layer1(view)
-        norm1 = self.layernorm1(linear)
-        relu = self.relu1(norm1)
-        
-        linear_1 = self.layer2(relu)
-        norm2 = self.layernorm2(linear_1)
-        relu_1 = self.relu2(norm2)
-        
-        return self.last_layer(relu_1)
+    class OwwClassifier(nn.Module):
+        def __init__(self, input_dim=16 * 96, hidden_dim=128):
+            super().__init__()
+            self.layer1 = nn.Linear(input_dim, hidden_dim)
+            self.layernorm1 = nn.LayerNorm(hidden_dim)
+            self.relu1 = nn.ReLU()
+            self.layer2 = nn.Linear(hidden_dim, hidden_dim)
+            self.layernorm2 = nn.LayerNorm(hidden_dim)
+            self.relu2 = nn.ReLU()
+            self.last_layer = nn.Linear(hidden_dim, 1)
+            nn.init.constant_(self.last_layer.bias, -4.0)
 
-class BinaryFocalLoss(nn.Module):
-    def __init__(self, gamma=2.0, pos_weight=1.5):
-        super().__init__()
-        self.gamma = gamma
-        self.pos_weight = pos_weight
+        def forward(self, x):
+            v = x.view(x.shape[0], -1)
+            h = self.relu1(self.layernorm1(self.layer1(v)))
+            h = self.relu2(self.layernorm2(self.layer2(h)))
+            return self.last_layer(h)
 
-    def forward(self, logits, targets):
-        probs = torch.sigmoid(logits)
-        # Numerical stability clamp
-        probs = torch.clamp(probs, 1e-7, 1.0 - 1e-7)
-        
-        # Binary focal loss formulation:
-        # For target=1: -pos_weight * (1 - p)^gamma * log(p)
-        # For target=0: -(p)^gamma * log(1 - p)
-        loss_pos = -self.pos_weight * ((1.0 - probs) ** self.gamma) * torch.log(probs)
-        loss_neg = -(probs ** self.gamma) * torch.log(1.0 - probs)
-        
-        loss = targets * loss_pos + (1.0 - targets) * loss_neg
-        return loss.mean()
+    class BinaryFocalLoss(nn.Module):
+        def __init__(self, gamma=2.0, pos_weight=1.5):
+            super().__init__()
+            self.gamma, self.pos_weight = gamma, pos_weight
 
-def butter_bandpass(lowcut, highcut, fs=SR, order=3):
-    nyq = 0.5 * fs
-    low = max(lowcut / nyq, 0.01)
-    high = min(highcut / nyq, 0.99)
-    b, a = butter(order, [low, high], btype='band')
-    return b, a
-
-def extract_windows_from_audio(audio, mel_sess, emb_sess, names, highpass_cutoff=80.0, include_transitions=False):
-    dt = 1.0 / 16000.0
-    rc = 1.0 / (2.0 * np.pi * highpass_cutoff)
-    alpha = rc / (rc + dt)
-    filtered = np.empty_like(audio)
-    prev_y = 0.0
-    prev_x = 0.0
-    for i in range(len(audio)):
-        y = alpha * (prev_y + audio[i] - prev_x)
-        prev_x = audio[i]
-        prev_y = y
-        filtered[i] = y
-    audio = filtered
-
-    lookback = np.zeros(LOOKBACK, dtype=np.float32)
-    mel_buf = [np.zeros((MEL_PER_CHUNK, 32), dtype=np.float32)] * MEL_CIRC
-    
-    comfort_path = OWW_DIR / "comfort_embedding.npy"
-    if comfort_path.exists():
-        comfort_emb = np.load(str(comfort_path)).astype(np.float32)
-    else:
-        comfort_emb = np.zeros(96, dtype=np.float32)
-    emb_buf = [comfort_emb.copy() for _ in range(EMB_FRAMES)]
-    
-    windows = []
-    trailing_silence_count = 0
-    had_speech = False
-    
-    for i in range(0, len(audio) - CHUNK + 1, CHUNK):
-        chunk = audio[i:i + CHUNK].copy()
-        rms = float(np.sqrt(np.mean(chunk ** 2)))
-        
-        if rms < SILENCE_RMS:
-            emb_buf = (emb_buf + [comfort_emb])[-EMB_FRAMES:]
-            mel_buf = (mel_buf + [np.zeros((MEL_PER_CHUNK, 32), dtype=np.float32)])[-MEL_CIRC:]
-            if include_transitions and had_speech and trailing_silence_count < 2:
-                trailing_silence_count += 1
-                stacked = np.stack(emb_buf).astype(np.float32)
-                windows.append(stacked)
-            continue
-            
-        had_speech = True
-        trailing_silence_count = 0
-        
-        if rms < TARGET_RMS:
-            gain = min(TARGET_RMS / rms, MAX_GAIN)
-            chunk = np.clip(chunk * gain, -1.0, 1.0)
-            
-        framed = np.concatenate([lookback, chunk]) * 32768.0
-        lookback = chunk[-LOOKBACK:]
-        
-        m = mel_sess.run(None, {names[0]: framed[None, :]})[0]
-        m = m.reshape(MEL_PER_CHUNK, 32) / 10.0 + 2.0
-        mel_buf = (mel_buf + [m])[-MEL_CIRC:]
-        
-        window = np.stack(mel_buf).reshape(80, 32)[4:80]
-        e = emb_sess.run(None, {names[1]: window[None, :, :, None].astype(np.float32)})[0]
-        emb_buf = (emb_buf + [e.reshape(-1)])[-EMB_FRAMES:]
-        
-        stacked = np.stack(emb_buf).astype(np.float32)
-        windows.append(stacked)
-        
-    return windows
-
-def main():
-    print("=" * 70, flush=True)
-    print("  NEXUS FOCAL-LOSS & HARD NEGATIVE MINING WAKE WORD TRAINER", flush=True)
-    print("=" * 70, flush=True)
-
-    mel = ort.InferenceSession(str(OWW_DIR / 'melspectrogram.onnx'))
-    emb = ort.InferenceSession(str(OWW_DIR / 'embedding_model.onnx'))
-    names = (mel.get_inputs()[0].name, emb.get_inputs()[0].name)
-
-    X_pos = []
-    X_neg_speech = []  # Hard speech negatives (soundalikes, multi-syllabic, fast words)
-    X_neg_noise = []   # Background ambient noise
-
-    b_telecom, a_telecom = butter_bandpass(300, 3400)
-
-    # 1. POSITIVES
-    pos_files = sorted(glob.glob(str(DATA_DIR / "positive" / "*.wav")))
-    print(f"1. Extracting positive features from {len(pos_files)} pristine recordings...", flush=True)
-    
-    for p in pos_files:
-        sr, data = wavfile.read(p)
-        if sr != 16000:
-            continue
-        if data.ndim > 1:
-            data = data.mean(axis=1)
-        raw_audio = data.astype(np.float32) / 32768.0
-
-        # Aug 1: Clean (with transition frames)
-        w = extract_windows_from_audio(raw_audio, mel, emb, names, 80.0, include_transitions=True)
-        if w:
-            take_k = min(len(w), 5)
-            X_pos.extend(w[-take_k:])
-
-        # Aug 2: Telecom
-        aud_tel = lfilter(b_telecom, a_telecom, raw_audio).astype(np.float32)
-        w = extract_windows_from_audio(aud_tel, mel, emb, names, 80.0, include_transitions=True)
-        if w:
-            take_k = min(len(w), 4)
-            X_pos.extend(w[-take_k:])
-
-        # Aug 3: Laptop fan hum
-        t = np.linspace(0, len(raw_audio)/16000.0, len(raw_audio), endpoint=False)
-        for fund in [113.3, 72.0]:
-            hum = (0.020 * np.sin(2 * np.pi * fund * t)).astype(np.float32)
-            w = extract_windows_from_audio(np.clip(raw_audio * 0.70 + hum, -1.0, 1.0), mel, emb, names, 128.0, include_transitions=True)
-            if w:
-                take_k = min(len(w), 3)
-                X_pos.extend(w[-take_k:])
-
-        # Aug 4: Whisper attenuation
-        w = extract_windows_from_audio(raw_audio * 0.35, mel, emb, names, 80.0, include_transitions=True)
-        if w:
-            take_k = min(len(w), 3)
-            X_pos.extend(w[-take_k:])
-
-    print(f"   Collected {len(X_pos)} positive training windows.\n", flush=True)
-
-    # 2. HARD SPEECH NEGATIVES
-    print("2. Extracting hard speech negatives (soundalikes, multi-syllabic fast words)...", flush=True)
-    neg_speech_files = sorted(glob.glob(str(DATA_DIR / "negative" / "*.wav")))
-    for p in neg_speech_files:
-        sr, data = wavfile.read(p)
-        if data.ndim > 1:
-            data = data.mean(axis=1)
-        if sr != 16000:
-            total_samples = len(data)
-            num_16k = int(total_samples * 16000 / sr)
-            indices = np.linspace(0, total_samples - 1, num_16k)
-            raw_audio = np.interp(indices, np.arange(total_samples), data).astype(np.float32) / 32768.0
-        else:
-            raw_audio = data.astype(np.float32) / 32768.0
-        w = extract_windows_from_audio(raw_audio, mel, emb, names, 80.0, include_transitions=True)
-        if w:
-            X_neg_speech.extend(w)
-
-    print(f"   Collected {len(X_neg_speech)} hard speech negative windows.\n", flush=True)
-
-    # 3. BACKGROUND NOISE
-    print("3. Extracting background noise pool...", flush=True)
-    bg_files = sorted(glob.glob(str(DATA_DIR / "background" / "*.wav")))[:300]
-    for p in bg_files:
-        sr, data = wavfile.read(p)
-        if data.ndim > 1:
-            data = data.mean(axis=1)
-        if sr != 16000:
-            total_samples = len(data)
-            num_16k = int(total_samples * 16000 / sr)
-            indices = np.linspace(0, total_samples - 1, num_16k)
-            raw_audio = np.interp(indices, np.arange(total_samples), data).astype(np.float32) / 32768.0
-        else:
-            raw_audio = data.astype(np.float32) / 32768.0
-        w = extract_windows_from_audio(raw_audio, mel, emb, names, 80.0, include_transitions=True)
-        if w:
-            X_neg_noise.extend(w)
-
-    print(f"   Collected {len(X_neg_noise)} background noise windows.\n", flush=True)
-
-    # Balanced Negative Assembly: Hard Speech Negatives (50%) + Background Noise (50%)
-    # Oversample hard speech negatives so they cannot be swamped!
-    speech_mult = int(np.ceil(len(X_neg_noise) / len(X_neg_speech)))
-    X_neg = X_neg_speech * speech_mult + X_neg_noise
-
-    # Comfort noise negatives
-    comfort_path = OWW_DIR / "comfort_embedding.npy"
-    if comfort_path.exists():
-        comfort_emb = np.load(str(comfort_path)).astype(np.float32)
-        comfort_win = np.stack([comfort_emb.copy() for _ in range(EMB_FRAMES)])
-        for _ in range(1000):
-            noise = np.random.normal(0.0, 0.005, size=comfort_win.shape).astype(np.float32)
-            X_neg.append(comfort_win + noise)
-
-    X_pos = np.array(X_pos, dtype=np.float32)
-    X_neg = np.array(X_neg, dtype=np.float32)
-
-    y_pos = np.ones((len(X_pos), 1), dtype=np.float32)
-    y_neg = np.zeros((len(X_neg), 1), dtype=np.float32)
-
-    # Train / Val Split
-    split_p = int(0.85 * len(X_pos))
-    idx_p = np.random.permutation(len(X_pos))
-    X_p_tr, X_p_va = X_pos[idx_p[:split_p]], X_pos[idx_p[split_p:]]
-    y_p_tr, y_p_va = y_pos[idx_p[:split_p]], y_pos[idx_p[split_p:]]
-
-    split_n = int(0.85 * len(X_neg))
-    idx_n = np.random.permutation(len(X_neg))
-    X_n_tr, X_n_va = X_neg[idx_n[:split_n]], X_neg[idx_n[split_n:]]
-    y_n_tr, y_n_va = y_neg[idx_n[:split_n]], y_neg[idx_n[split_n:]]
-
-    X_train = np.concatenate([X_p_tr, X_n_tr], axis=0)
-    y_train = np.concatenate([y_p_tr, y_n_tr], axis=0)
-    X_val = np.concatenate([X_p_va, X_n_va], axis=0)
-    y_val = np.concatenate([y_p_va, y_n_va], axis=0)
-
-    print(f"Training Samples: {len(X_train)} ({len(X_p_tr)} pos, {len(X_n_tr)} neg)", flush=True)
-    print(f"Validation Samples: {len(X_val)} ({len(X_p_va)} pos, {len(X_n_va)} neg)\n", flush=True)
-
-    train_loader = DataLoader(TensorDataset(torch.from_numpy(X_train), torch.from_numpy(y_train)),
-                              batch_size=64, shuffle=True)
-
-    model = OwwClassifier()
-    # FOCAL LOSS: gamma=2.0 downweights easy negatives exponentially
-    criterion = BinaryFocalLoss(gamma=2.0, pos_weight=2.2)
-    optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=45)
-
-    print("4. Training with Focal Loss Optimization (45 Epochs)...", flush=True)
-    best_val_loss = float('inf')
-    best_weights = None
-
-    for epoch in range(1, 46):
-        model.train()
-        total_loss = 0.0
-        for bx, by in train_loader:
-            optimizer.zero_grad()
-            preds = model(bx)
-            loss = criterion(preds, by)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item() * len(bx)
-        scheduler.step()
-
-        # Validation
-        model.eval()
-        with torch.no_grad():
-            val_logits = model(torch.from_numpy(X_val))
-            val_loss = criterion(val_logits, torch.from_numpy(y_val)).item()
-            probs = torch.sigmoid(val_logits).numpy()
-
-            pos_probs = probs[:len(X_p_va)]
-            neg_probs = probs[len(X_p_va):]
-
-            recall = np.mean(pos_probs >= 0.50)
-            fa = np.mean(neg_probs >= 0.50)
-
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                best_weights = model.state_dict().copy()
-
-        if epoch % 5 == 0 or epoch == 1:
-            print(f"   Epoch {epoch:2d}/45 — Loss: {total_loss/len(X_train):.4f} | Val Loss: {val_loss:.4f} | Recall: {recall:5.1%} | FA: {fa:5.2%}", flush=True)
-
-    print("\n5. Exporting Optimized Model to ONNX with Sigmoid Output...", flush=True)
-    model.load_state_dict(best_weights)
-    model.eval()
+        def forward(self, logits, targets):
+            p = torch.clamp(torch.sigmoid(logits), 1e-7, 1.0 - 1e-7)
+            loss_pos = -self.pos_weight * ((1.0 - p) ** self.gamma) * torch.log(p)
+            loss_neg = -(p ** self.gamma) * torch.log(1.0 - p)
+            return (targets * loss_pos + (1.0 - targets) * loss_neg).mean()
 
     class SigmoidExportWrapper(nn.Module):
         def __init__(self, base):
             super().__init__()
             self.base = base
+
         def forward(self, x):
             return torch.sigmoid(self.base(x))
 
-    export_model = SigmoidExportWrapper(model)
-    export_model.eval()
+    return torch, nn, OwwClassifier, BinaryFocalLoss, SigmoidExportWrapper
 
-    dummy_input = torch.randn(1, 16, 96, dtype=torch.float32)
-    onnx_path = OWW_DIR / "nexus.onnx"
-    data_file = OWW_DIR / "nexus.onnx.data"
-    if data_file.exists():
-        data_file.unlink()
 
-    torch.onnx.export(
-        export_model,
-        dummy_input,
-        str(onnx_path),
-        input_names=["input"],
-        output_names=["output"],
-        dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
-        opset_version=14,
-        dynamo=False,
-    )
+def butter_bandpass(lowcut, highcut, fs=L.SR, order=3):
+    from scipy.signal import butter
+    nyq = 0.5 * fs
+    return butter(order, [max(lowcut / nyq, 0.01), min(highcut / nyq, 0.99)], btype="band")
 
-    print(f"Saved calibrated ONNX model to: {onnx_path}", flush=True)
+
+def positives_from(fe, audio, rng, noise_pool, train, level="full"):
+    """Windows for one positive recording. Val/test get the clean recording only.
+
+    level 'full' = the owner's real takes (every augmentation); 'lite' = synthetic / public clips, which are
+    already varied by construction (base + two random augmentations) so thousands of them stay affordable."""
+    take = lambda w, k: w[-min(len(w), k):]  # noqa: E731 - last k windows = word end + transitions
+    out = []
+    w = fe.windows(audio, include_transitions=True)
+    out += take(w, 5)
+    if not train:
+        return out
+    if level == "lite":
+        fns = [L.aug_speed, L.aug_reverb, L.aug_shift, L.aug_gain]
+        for i in rng.permutation(len(fns))[:2]:
+            out += take(fe.windows(fns[int(i)](audio, rng), include_transitions=True), 3)
+        if len(noise_pool):
+            noise = noise_pool[int(rng.integers(0, len(noise_pool)))]
+            out += take(fe.windows(L.mix_noise(audio, noise, float(rng.uniform(0.0, 20.0)), rng), include_transitions=True), 3)
+        return out
+    from scipy.signal import lfilter
+    b, a = butter_bandpass(300, 3400)
+    out += take(fe.windows(lfilter(b, a, audio).astype(np.float32), include_transitions=True), 4)   # telecom
+    t = np.arange(len(audio)) / L.SR
+    for fund in (113.3, 72.0):                                                                     # fan hum
+        hum = (0.020 * np.sin(2 * np.pi * fund * t)).astype(np.float32)
+        out += take(fe.windows(np.clip(audio * 0.70 + hum, -1, 1), True, highpass_hz=128.0), 3)
+    out += take(fe.windows(audio * 0.35, include_transitions=True), 3)                              # quiet speech
+    for fn in (L.aug_speed, L.aug_reverb, L.aug_shift, L.aug_gain):
+        out += take(fe.windows(fn(audio, rng), include_transitions=True), 3)
+    if len(noise_pool):
+        for _ in range(2):                                                                         # real noise, 0-20 dB
+            noise = noise_pool[int(rng.integers(0, len(noise_pool)))]
+            snr = float(rng.uniform(0.0, 20.0))
+            out += take(fe.windows(L.mix_noise(audio, noise, snr, rng), include_transitions=True), 3)
+    return out
+
+
+OWNER_ORIGINS = {"owner_mic", "by_ear"}
+
+
+def collect_positives(fe, files, rng, manifest, noise_pool, args):
+    """({split: [windows]}, {split: n_files}, owner_windows {split: [..]}, sealed [files])."""
+    groups = {f: L.group_key(f, manifest) for f in files}
+    splits = L.assign_splits(set(groups.values()), seed=args.seed)
+    buckets = {"train": [], "val": [], "test": []}
+    owner = {"train": [], "val": [], "test": []}
+    counts = {"train": 0, "val": 0, "test": 0}
+    sealed = []
+    for f in files:
+        prov = A.provenance(Path(f).name)
+        is_owner = prov in OWNER_ORIGINS
+        if is_owner and L.is_sealed(groups[f], args.seal_owner, args.seed):
+            sealed.append(f)
+            continue
+        sp = splits[groups[f]]
+        counts[sp] += 1
+        audio = L.load_wav_16k(f)
+        w = positives_from(fe, audio, rng, noise_pool, train=(sp == "train"), level="full" if is_owner else "lite")
+        (owner if is_owner else buckets)[sp] += w
+    return buckets, counts, owner, sealed
+
+
+def collect_negatives(fe, files, rng, manifest, args, per_file_cap=None):
+    """{split: [windows]}, {split: n_files} for negative speech/sound files, assigned by recording/group."""
+    groups = {f: L.group_key(f, manifest) for f in files}
+    splits = L.assign_splits(set(groups.values()), seed=args.seed)
+    buckets = {"train": [], "val": [], "test": []}
+    counts = {"train": 0, "val": 0, "test": 0}
+    for f in files:
+        sp = splits[groups[f]]
+        counts[sp] += 1
+        audio = L.load_wav_16k(f)
+        w = fe.windows(audio, include_transitions=True)
+        if per_file_cap and len(w) > per_file_cap:
+            w = L.cap_list(w, per_file_cap, rng)
+        buckets[sp] += w
+        if sp == "train" and len(w) and A.provenance(Path(f).name) != "public_dataset":
+            # one gain-perturbed copy so soundalikes are not memorised at one level
+            buckets[sp] += fe.windows(L.aug_gain(audio, rng), include_transitions=True)
+    return buckets, counts
+
+
+def write_sealed_manifest(data, sealed):
+    """Owner recordings withheld from training, as a wake_eval manifest (kind 'wake')."""
+    out = Path(data) / "sealed"
+    out.mkdir(parents=True, exist_ok=True)
+    rows = [{"audio": f"positive/{Path(f).name}", "kind": "wake", "phrase": "owner_sealed", "speaker_id": "owner",
+             "source": "owner_sealed"} for f in sorted(sealed)]
+    (out / "manifest.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return len(rows)
+
+
+def discover(data, public):
+    """File lists for the three classes (public pools appended when present)."""
+    data = Path(data)
+    pos = sorted(glob.glob(str(data / "positive" / "*.wav")))
+    neg = sorted(glob.glob(str(data / "negative" / "*.wav")))
+    bg = sorted(glob.glob(str(data / "background" / "*.wav")))
+    if public:
+        pub = Path(public)
+        neg += sorted(glob.glob(str(pub / "negative" / "*.wav")))
+        bg += sorted(glob.glob(str(pub / "background" / "*.wav")))
+    return pos, neg, bg
+
+
+def load_manifests(args, data):
+    rows = {}
+    for p in (data / "manifest.jsonl", data / "synth" / "manifest.jsonl"):
+        rows.update(L.load_manifest_rows(args.manifest if (args.manifest and p == data / "manifest.jsonl") else p))
+    return rows
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--data-dir", default=str(DATA_DIR))
+    ap.add_argument("--public-dir", default=None, help="public pools (default <data-dir>/public if it exists)")
+    ap.add_argument("--no-public", action="store_true")
+    ap.add_argument("--manifest", default=None, help="manifest.jsonl (default <data-dir>/manifest.jsonl)")
+    ap.add_argument("--epochs", type=int, default=45)
+    ap.add_argument("--seed", type=int, default=1337)
+    ap.add_argument("--threshold", type=float, default=None, help="deployed threshold (default: acoustic_profile.json)")
+    ap.add_argument("--max-background", type=int, default=600)
+    ap.add_argument("--max-neg-files", type=int, default=6000, help="negative files in the first fit; the rest is the mining pool")
+    ap.add_argument("--public-windows-per-file", type=int, default=4)
+    ap.add_argument("--owner-repeat", type=int, default=3, help="owner positives are repeated this many times in training")
+    ap.add_argument("--seal-owner", type=float, default=0.3, help="fraction of owner positives withheld for scoring")
+    ap.add_argument("--mine-rounds", type=int, default=2, help="hard-negative mining rounds (0 = off)")
+    ap.add_argument("--mine-epochs", type=int, default=12)
+    ap.add_argument("--mine-floor", type=float, default=0.2, help="a pool window above this score counts as hard")
+    ap.add_argument("--mine-cap", type=int, default=20000)
+    ap.add_argument("--hard-neg-repeat", type=int, default=3)
+    ap.add_argument("--out", default=str(OWW_DIR / "nexus.candidate.onnx"))
+    ap.add_argument("--promote", action="store_true", help="replace the shipped nexus.onnx with the candidate")
+    ap.add_argument("--dry-run", action="store_true", help="extract + split + report counts; no training, no torch")
+    ap.add_argument("--skip-audit-gate", action="store_true", help="train even though flagged clips are unreviewed (recorded)")
+    args = ap.parse_args(argv)
+
+    data = Path(args.data_dir)
+    public = None if args.no_public else (Path(args.public_dir) if args.public_dir else (data / "public" if (data / "public").exists() else None))
+    rng = L.seeded(args.seed)
+    thr = args.threshold if args.threshold is not None else L.deployed_threshold()
+    print("=" * 70)
+    print("  NEXUS WAKE-WORD TRAINER  (shared front end: dsp_spec.json 'aligned')")
+    print(f"  seed={args.seed}  deployed threshold={thr:.2f}  data={data}  public={'yes' if public else 'no'}")
     print("=" * 70, flush=True)
+
+    gate_ok, gate_msg = A.gate(data)
+    print(("AUDIT GATE: " if gate_ok else "AUDIT GATE FAILED: ") + gate_msg, flush=True)
+    if not gate_ok and not args.dry_run and not args.skip_audit_gate:
+        sys.exit("Refusing to train on unaudited labels (a soundalike filed as a negative, or a real NEXUS filed "
+                 "as a negative, poisons the model). Fix: nexus wake audit  -> review the queue by ear.  "
+                 "Override: --skip-audit-gate")
+
+    import onnxruntime as ort
+    mel = ort.InferenceSession(str(OWW_DIR / "melspectrogram.onnx"))
+    emb = ort.InferenceSession(str(OWW_DIR / "embedding_model.onnx"))
+    fe = L.Frontend(mel, emb)
+    manifest = load_manifests(args, data)
+    print(f"manifest rows: {len(manifest) // 2 if manifest else 0}", flush=True)
+
+    pos_files, neg_files, bg_files = discover(data, public)
+    bg_sel = [bg_files[i] for i in rng.permutation(len(bg_files))[: args.max_background]] if bg_files else []
+    noise_pool = [L.load_wav_16k(p) for p in bg_sel[:40]]
+
+    pos, pc, owner_pos, sealed = collect_positives(fe, pos_files, rng, manifest, noise_pool, args)
+    n_sealed = write_sealed_manifest(data, sealed)
+    order = rng.permutation(len(neg_files))
+    first = [neg_files[i] for i in order[: args.max_neg_files]]
+    pool_files = [neg_files[i] for i in order[args.max_neg_files:]]
+    sneg, sc = collect_negatives(fe, first, rng, manifest, args, per_file_cap=args.public_windows_per_file)
+    noise_buckets = {"train": [], "val": [], "test": []}
+    bsplits = L.assign_splits({Path(p).name for p in bg_sel}, seed=args.seed)
+    for p in bg_sel:
+        w = fe.windows(L.load_wav_16k(p), include_transitions=True)
+        noise_buckets[bsplits[Path(p).name]] += L.cap_list(w, 12, rng)
+
+    comfort = np.stack([fe.comfort.copy() for _ in range(L.EMB_FRAMES)])
+    for sp, n in (("train", 1000), ("val", 150), ("test", 150)):
+        noise_buckets[sp] += [comfort + rng.normal(0.0, 0.005, comfort.shape).astype(np.float32) for _ in range(n)]
+
+    origins = {}
+    for f in pos_files:
+        origins[A.provenance(Path(f).name)] = origins.get(A.provenance(Path(f).name), 0) + 1
+    report = {"seed": args.seed, "threshold": thr, "recordings": {"positive": pc, "speech_negative": sc},
+              "positive_origins": origins, "sealed_owner_recordings": n_sealed,
+              "negative_pool_files_for_mining": len(pool_files),
+              "audit_gate": {"ok": gate_ok, "message": gate_msg, "skipped": bool(not gate_ok and args.skip_audit_gate)},
+              "windows": {s: {"pos": len(pos[s]), "owner_pos": len(owner_pos[s]), "speech_neg": len(sneg[s]),
+                              "noise_neg": len(noise_buckets[s])} for s in ("train", "val", "test")}}
+    print(json.dumps(report["windows"], indent=2), flush=True)
+    print(f"sealed owner recordings (never trained on): {n_sealed}  -> {data / 'sealed' / 'manifest.jsonl'}", flush=True)
+    for sp in ("train", "val", "test"):
+        if not (pos[sp] or owner_pos[sp]):
+            sys.exit(f"ERROR: no positive windows in the {sp} split ({pc}). Add more NEXUS clips "
+                     f"(the split is by recording/speaker, so each split needs several).")
+    if args.dry_run:
+        Path(args.out).with_name("train_report.dry.json").write_text(json.dumps(report, indent=2))
+        print("dry run complete (nothing trained).")
+        return
+
+    def assemble(sp, repeat_owner=1):
+        neg_sp, neg_no = sneg[sp], noise_buckets[sp]
+        if sp == "train" and neg_sp and neg_no:       # speech negatives must not be swamped by noise
+            neg_sp = neg_sp * int(np.ceil(len(neg_no) / len(neg_sp)))
+        neg = neg_sp + neg_no
+        pw = pos[sp] + owner_pos[sp] * (repeat_owner if sp == "train" else 1)
+        X = np.array(pw + neg, dtype=np.float32)
+        y = np.concatenate([np.ones((len(pw), 1)), np.zeros((len(neg), 1))]).astype(np.float32)
+        return X, y, len(pw)
+
+    torch, nn, OwwClassifier, BinaryFocalLoss, SigmoidExportWrapper = torch_parts()
+    from torch.utils.data import DataLoader, TensorDataset
+    torch.manual_seed(args.seed)
+    Xtr, ytr, _ = assemble("train", args.owner_repeat)
+    Xva, yva, nva = assemble("val")
+    Xte, yte, nte = assemble("test")
+    model = OwwClassifier()
+    crit = BinaryFocalLoss(gamma=2.0, pos_weight=2.2)
+
+    def evaluate(X, y, n_pos):
+        model.eval()
+        with torch.no_grad():
+            logits = model(torch.from_numpy(X))
+            loss = crit(logits, torch.from_numpy(y)).item()
+            probs = torch.sigmoid(logits).numpy().reshape(-1)
+        return loss, L.rates_at(probs[:n_pos], probs[n_pos:], thr), L.rates_at(probs[:n_pos], probs[n_pos:], 0.5)
+
+    def fit(X, y, epochs, lr, tag):
+        loader = DataLoader(TensorDataset(torch.from_numpy(X), torch.from_numpy(y)), batch_size=64, shuffle=True,
+                            generator=torch.Generator().manual_seed(args.seed))
+        opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
+        best_loss, best_state, best_epoch = float("inf"), None, 0
+        for epoch in range(1, epochs + 1):
+            model.train()
+            total = 0.0
+            for bx, by in loader:
+                opt.zero_grad()
+                loss = crit(model(bx), by)
+                loss.backward()
+                opt.step()
+                total += loss.item() * len(bx)
+            sched.step()
+            vloss, (rec_d, fa_d), (rec_5, fa_5) = evaluate(Xva, yva, nva)
+            if vloss < best_loss:
+                best_loss, best_epoch = vloss, epoch
+                best_state = copy.deepcopy(model.state_dict())      # a real copy, not an alias
+            if epoch % 5 == 0 or epoch == 1:
+                print(f"  [{tag}] epoch {epoch:2d}/{epochs} loss {total/len(X):.4f} | val loss {vloss:.4f} | "
+                      f"@{thr:.2f}: recall {rec_d:5.1%} FA {fa_d:5.2%} | @0.50: recall {rec_5:5.1%} FA {fa_5:5.2%}", flush=True)
+        model.load_state_dict(best_state)
+        report.setdefault("fits", []).append({"stage": tag, "epochs": epochs, "best_epoch": best_epoch,
+                                              "best_val_loss": round(best_loss, 5)})
+        return best_loss, best_epoch
+
+    best_loss, best_epoch = fit(Xtr, ytr, args.epochs, 0.001, "base")
+    report["mining"] = []
+
+    train_groups = {f: L.group_key(f, manifest) for f in pool_files}
+    train_split = L.assign_splits(set(train_groups.values()), seed=args.seed)
+    pool_train = [f for f in pool_files if train_split[train_groups[f]] == "train"]
+    bg_pool = [f for f in bg_files if f not in set(bg_sel) and L.assign_splits({Path(f).name}, seed=args.seed)[Path(f).name] == "train"]
+    for rnd in range(1, args.mine_rounds + 1):
+        stream = pool_train + bg_pool
+        if not stream:
+            print("no unused negative pool - mining skipped (everything fit in the first set)")
+            break
+        hard = []
+        model.eval()
+        scored = 0
+        for f in stream:
+            wins = L.cap_list(fe.windows(L.load_wav_16k(f), include_transitions=True), args.public_windows_per_file * 3, rng)
+            if not wins:
+                continue
+            with torch.no_grad():
+                p = torch.sigmoid(model(torch.from_numpy(np.array(wins, dtype=np.float32)))).numpy().reshape(-1)
+            scored += len(wins)
+            for i in L.hard_negative_indices(p, args.mine_floor, 8):
+                hard.append((float(p[i]), wins[int(i)]))
+        hard.sort(key=lambda t: -t[0])
+        hard = hard[: args.mine_cap]
+        stats = {"round": rnd, "windows_scored": scored, "hard_found": len(hard),
+                 "max_score": hard[0][0] if hard else 0.0, "files": len(stream)}
+        report["mining"].append(stats)
+        print(f"  mining round {rnd}: scored {scored} windows, {len(hard)} above {args.mine_floor:.2f} "
+              f"(worst {stats['max_score']:.2f})", flush=True)
+        if not hard:
+            break
+        Hx = np.array([w for _, w in hard] * args.hard_neg_repeat, dtype=np.float32)
+        Xtr = np.concatenate([Xtr, Hx])
+        ytr = np.concatenate([ytr, np.zeros((len(Hx), 1), np.float32)])
+        best_loss, best_epoch = fit(Xtr, ytr, args.mine_epochs, 0.0003, f"mine{rnd}")
+
+    _, (rec_d, fa_d), (rec_5, fa_5) = evaluate(Xte, yte, nte)
+    report["best_epoch"] = best_epoch
+    report["best_val_loss"] = best_loss
+    report["test"] = {"recall_at_deployed": rec_d, "false_alarm_at_deployed": fa_d,
+                      "recall_at_0.5": rec_5, "false_alarm_at_0.5": fa_5,
+                      "n_pos": nte, "n_neg": len(Xte) - nte}
+    print(f"\nTEST split (untouched until now), final stage best epoch {best_epoch}: recall {rec_d:.1%} / FA {fa_d:.2%} "
+          f"at {thr:.2f}; recall {rec_5:.1%} / FA {fa_5:.2%} at 0.50", flush=True)
+    print("NOTE: these are window-level rates on your own recordings. The real accuracy numbers come from "
+          "`nexus wake score` (sealed owner clips, held-out eval_set, hours of public held-out audio).", flush=True)
+
+    model.eval()
+    out = Path(args.out)
+    export = SigmoidExportWrapper(model).eval()
+    torch.onnx.export(export, torch.randn(1, 16, 96), str(out), input_names=["input"], output_names=["output"],
+                      dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
+                      opset_version=14, dynamo=False)
+    out.with_name("nexus.candidate.onnx.data").unlink(missing_ok=True)
+    out.with_name("train_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(f"saved candidate: {out}", flush=True)
+    if args.promote:
+        shipped = OWW_DIR / "nexus.onnx"
+        if shipped.exists():
+            shutil.copy2(shipped, OWW_DIR / "nexus.previous.onnx")
+        shutil.copy2(out, shipped)
+        print(f"PROMOTED to {shipped} (old model kept as nexus.previous.onnx). Now run: "
+              f"python scripts/wake_data_foundation.py fingerprint-models", flush=True)
+    else:
+        print("not promoted: score it first (nexus wake score --model <candidate>), then re-run with --promote.", flush=True)
+
 
 if __name__ == "__main__":
     main()

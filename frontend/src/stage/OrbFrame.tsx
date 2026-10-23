@@ -5,6 +5,7 @@ import { initOrchestratorListener, hideOrbAfterSpeech } from "../net/orchestrato
 import { stepWatchdog, INITIAL_WATCHDOG_STATE, type WatchdogState } from "../net/orbIdleWatchdog";
 import { initialGhostOrbState, stepGhostOrb, type GhostOrbState } from "../net/orbPolicy";
 import { isGhostParked } from "../net/ghostHotMic";
+import { initSpeechStage, setSpeechOrbReady } from "../audio/speechStage";
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -334,6 +335,10 @@ export function OrbFrame() {
   const wakeupMode = useAssistant((s) => s.orbWakeupMode || 1);
 
   const [rect, setRect] = useState<OrbRect | null>(null);
+  useEffect(() => {
+    setSpeechOrbReady(Boolean(rect));
+    return () => setSpeechOrbReady(false);
+  }, [rect]);
   // Calibration can force the orb hidden (Loading target active) or shown
   // (Wakeup/Waves target active) independent of the normal voice `visible`
   // flag — see calibration.rs's apply_main/calibration_set_target. `null`
@@ -353,6 +358,7 @@ export function OrbFrame() {
     void import("../audio/ttsActivity").then(({ initTtsActivityListener }) =>
       initTtsActivityListener(),
     );
+    void initSpeechStage();
   }, []);
 
   // Orb rect (position/size), physical px from Rust → CSS px here. Pulls

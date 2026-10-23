@@ -26,11 +26,14 @@ function mockDB() {
         },
         all: async () => ({ results: [] }),
         run: async () => {
-          if (sql.includes("INSERT OR REPLACE INTO usage_log")) {
+          if (sql.includes("INTO usage_log")) {
+            // Emulates INSERT ... ON CONFLICT DO UPDATE SET col = col + excluded.col
             const key = `${args[0]}:${args[1]}`;
+            const prev = data[key] || { requests: 0, ai_neurons: 0, d1_reads: 0, d1_writes: 0, search_calls: 0, deep_calls: 0 };
             data[key] = {
-              requests: args[2], ai_neurons: args[3], d1_reads: args[4],
-              d1_writes: args[5], search_calls: args[6], deep_calls: args[7],
+              requests: prev.requests + args[2], ai_neurons: prev.ai_neurons + args[3],
+              d1_reads: prev.d1_reads + args[4], d1_writes: prev.d1_writes + args[5],
+              search_calls: prev.search_calls + args[6], deep_calls: prev.deep_calls + args[7],
             };
           }
           return {};

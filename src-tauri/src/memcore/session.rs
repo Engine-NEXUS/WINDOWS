@@ -135,6 +135,10 @@ fn is_private_browser_title(title: &str) -> bool {
 /// Paths that must never be written into a snapshot or passed back to an app.
 pub fn path_is_sensitive(path: &str) -> bool {
     let p = path.to_lowercase();
+    // Network shares (UNC paths) can trigger NTLM authentication or hang if offline.
+    if p.starts_with(r"\\") || p.starts_with("//") {
+        return true;
+    }
     [
         ".ssh", "password", "passwd", "credential", "secret", ".kdbx", "keepass", "wallet", "bank", ".env",
         "id_rsa", "token", "private key", "1password", "bitwarden",
@@ -153,7 +157,7 @@ pub fn sanitize_args(cmd: &[String], exists: &dyn Fn(&str) -> bool) -> Vec<Strin
     cmd.iter()
         .skip(1)
         .map(|a| a.trim().trim_matches('"').to_string())
-        .filter(|a| !a.is_empty() && !a.starts_with('-') && !a.starts_with('/'))
+        .filter(|a| !a.is_empty() && !a.starts_with('-') && !a.starts_with('/') && !a.starts_with(r"\\"))
         .filter(|a| !path_is_sensitive(a) && exists(a))
         .take(3)
         .collect()
@@ -192,10 +196,12 @@ pub fn build(
         if w.title.trim().is_empty() {
             continue;
         }
-        if crate::screen_context::is_sensitive(&exe, &w.title, None) {
+        // Clip excessively long window titles to avoid runaway memory or comparison overhead.
+        let title: String = w.title.trim().chars().take(256).collect();
+        if crate::screen_context::is_sensitive(&exe, &title, None) {
             continue;
         }
-        if is_browser_exe(&exe) && is_private_browser_title(&w.title) {
+        if is_browser_exe(&exe) && is_private_browser_title(&title) {
             continue;
         }
         let g = groups.entry(exe.clone()).or_insert_with(|| {
@@ -203,7 +209,7 @@ pub fn build(
             (w.path.clone(), w.cmd.clone(), 0, vec![])
         });
         g.2 += 1;
-        g.3.push(w.title.clone());
+        g.3.push(title);
     }
 
     let mut apps: Vec<SessionApp> = vec![];
@@ -943,6 +949,233 @@ mod tests {
         assert_eq!(load_pending(&dir).unwrap().ts, 4_000);
         clear_pending(&dir);
         assert!(load_pending(&dir).is_none());
+    }
+
+    #[test]
+    fn test_only_allowed_fields_are_stored() {
+        let snap = Snapshot {
+            ts: 12345,
+            reason: REASON_PERIODIC.into(),
+            apps: vec![SessionApp {
+                exe: "code.exe".into(),
+                path: r"C:\app\code.exe".into(),
+                args: vec![r"C:\work\project".into()],
+                label: "VS Code".into(),
+                windows: 2,
+                packaged: false,
+                browser: false,
+            }],
+            folders: vec![r"C:\work".into()],
+        };
+        let encoded = encode(&snap);
+        let val: serde_json::Value = serde_json::from_str(&encoded).expect("valid json");
+        let obj = val.as_object().expect("snapshot must be a json object");
+
+        let mut keys: Vec<&String> = obj.keys().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["apps", "folders", "reason", "ts"]);
+
+        let app_obj = obj["apps"][0].as_object().expect("app must be an object");
+        let mut app_keys: Vec<&String> = app_obj.keys().collect();
+        app_keys.sort();
+        assert_eq!(app_keys, vec!["args", "browser", "exe", "label", "packaged", "path", "windows"]);
+    }
+
+    #[test]
+    fn test_sensitive_apps_and_banking_and_private_never_enter_snapshot() {
+        let raws = vec![
+            raw("1password.exe", r"C:\1p.exe", &[], "1Password Vault"),
+            raw("bitwarden.exe", r"C:\bw.exe", &[], "Bitwarden"),
+            raw("keepass.exe", r"C:\kp.exe", &[], "KeePass Password Safe"),
+            raw("chrome.exe", r"C:\chrome.exe", &[], "Chase Bank - Online Banking"),
+            raw("msedge.exe", r"C:\edge.exe", &[], "Bank of America - Sign In"),
+            raw("brave.exe", r"C:\brave.exe", &[], "PayPal Checkout"),
+            raw("firefox.exe", r"C:\firefox.exe", &[], "Private Browsing - Mozilla Firefox"),
+            raw("chrome.exe", r"C:\chrome.exe", &[], "New Tab - Incognito"),
+            raw("msedge.exe", r"C:\edge.exe", &[], "InPrivate window"),
+            raw("brave.exe", r"C:\brave.exe", &[], "Secret - Brave (Private)"),
+            raw("notepad.exe", r"C:\notepad.exe", &["notepad.exe"], "Notes - Notepad"),
+        ];
+        let s = build(&raws, &[], &[], 100, REASON_PERIODIC, &all_exist);
+        assert_eq!(s.apps.len(), 1, "Only non-sensitive apps allowed: {:?}", s.apps);
+        assert_eq!(s.apps[0].exe, "notepad.exe");
+    }
+
+    #[test]
+    fn test_snapshot_with_200_windows_capped_at_max_apps() {
+        let raws: Vec<RawWindow> = (0..200)
+            .map(|i| raw(&format!("app{i}.exe"), &format!(r"C:\apps\app{i}.exe"), &[], &format!("Window {i}")))
+            .collect();
+        let s = build(&raws, &[], &[], 100, REASON_PERIODIC, &all_exist);
+        assert_eq!(s.apps.len(), MAX_APPS);
+        assert_eq!(MAX_APPS, 24);
+    }
+
+    #[test]
+    fn test_duplicate_windows_collapse_into_window_count() {
+        let raws = vec![
+            raw("notepad.exe", r"C:\notepad.exe", &["notepad.exe"], "doc1.txt - Notepad"),
+            raw("notepad.exe", r"C:\notepad.exe", &["notepad.exe"], "doc2.txt - Notepad"),
+            raw("notepad.exe", r"C:\notepad.exe", &["notepad.exe"], "doc3.txt - Notepad"),
+            raw("notepad.exe", r"C:\notepad.exe", &["notepad.exe"], "doc4.txt - Notepad"),
+            raw("notepad.exe", r"C:\notepad.exe", &["notepad.exe"], "doc5.txt - Notepad"),
+        ];
+        let s = build(&raws, &[], &[], 100, REASON_PERIODIC, &all_exist);
+        assert_eq!(s.apps.len(), 1);
+        assert_eq!(s.apps[0].exe, "notepad.exe");
+        assert_eq!(s.apps[0].windows, 5);
+    }
+
+    #[test]
+    fn test_empty_and_whitespace_titles_are_dropped() {
+        let raws = vec![
+            raw("app1.exe", r"C:\app1.exe", &[], ""),
+            raw("app2.exe", r"C:\app2.exe", &[], "   "),
+            raw("app3.exe", r"C:\app3.exe", &[], "\t\r\n"),
+            raw("notepad.exe", r"C:\notepad.exe", &["notepad.exe"], "valid.txt - Notepad"),
+        ];
+        let s = build(&raws, &[], &[], 100, REASON_PERIODIC, &all_exist);
+        assert_eq!(s.apps.len(), 1);
+        assert_eq!(s.apps[0].exe, "notepad.exe");
+    }
+
+    #[test]
+    fn test_nonexistent_and_unc_paths_are_dropped() {
+        let cmd = vec![
+            "app.exe".into(),
+            r"\\remote-server\share\file.txt".into(),
+            "//other-server/share/file.txt".into(),
+            r"C:\work\valid.txt".into(),
+            r"C:\work\missing.txt".into(),
+        ];
+        let exists = |p: &str| p == r"C:\work\valid.txt";
+        let sanitized = sanitize_args(&cmd, &exists);
+        assert_eq!(sanitized, vec![r"C:\work\valid.txt".to_string()]);
+    }
+
+    #[test]
+    fn test_very_long_titles_are_clipped() {
+        let long_title = "A".repeat(10_000);
+        let raws = vec![raw("notepad.exe", r"C:\notepad.exe", &["notepad.exe"], &long_title)];
+        let s = build(&raws, &[], &[], 100, REASON_PERIODIC, &all_exist);
+        assert_eq!(s.apps.len(), 1);
+        assert_eq!(s.apps[0].exe, "notepad.exe");
+    }
+
+    #[test]
+    fn test_names_phrase_singular_and_plural_apps_and_folders() {
+        assert_eq!(names_phrase(vec!["Notepad".into()], 0), "Notepad");
+
+        let apps5 = vec!["A".into(), "B".into(), "C".into(), "D".into(), "E".into()];
+        assert_eq!(names_phrase(apps5, 0), "A, B, C, D and 1 more app");
+
+        let apps6 = vec!["A".into(), "B".into(), "C".into(), "D".into(), "E".into(), "F".into()];
+        assert_eq!(names_phrase(apps6, 0), "A, B, C, D and 2 more apps");
+
+        assert_eq!(names_phrase(vec!["VS Code".into()], 1), "VS Code and 1 folder");
+        assert_eq!(names_phrase(vec!["VS Code".into()], 2), "VS Code and 2 folders");
+
+        let mk_browser = |windows: u32| Snapshot {
+            ts: 1,
+            reason: REASON_PERIODIC.into(),
+            apps: vec![SessionApp {
+                exe: "brave.exe".into(),
+                path: String::new(),
+                args: vec![],
+                label: "Brave".into(),
+                windows,
+                packaged: false,
+                browser: true,
+            }],
+            folders: vec![],
+        };
+        assert_eq!(summary(&mk_browser(1)), "Brave");
+        assert_eq!(summary(&mk_browser(3)), "Brave with 3 windows");
+    }
+
+    #[test]
+    fn test_snapshot_older_than_max_age_is_not_offered() {
+        let dir = std::env::temp_dir().join(format!("nexus_session_age_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let now = 1_000_000;
+        let old_ts = now - MAX_AGE_SECS - 60;
+        let snap = Snapshot {
+            ts: old_ts,
+            reason: REASON_SESSION_END.into(),
+            apps: vec![SessionApp {
+                exe: "notepad.exe".into(),
+                path: "notepad.exe".into(),
+                args: vec![],
+                label: "Notepad".into(),
+                windows: 1,
+                packaged: false,
+                browser: false,
+            }],
+            folders: vec![],
+        };
+        assert!(!should_hold_for_boot(&snap, now));
+
+        assert!(save_last(&dir, &snap, None, true));
+        at_boot(&dir, now);
+        assert!(load_pending(&dir).is_none(), "Old snapshot must not become pending offer");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_corrupt_or_half_written_snapshot_is_ignored_without_panic() {
+        assert!(decode("").is_none());
+        assert!(decode("not valid json at all").is_none());
+        assert!(decode(r#"{"ts": 1234, "apps": [incomplete"#).is_none());
+        assert!(decode(r#"{"unexpected": "fields_only"}"#).is_none());
+
+        let dir = std::env::temp_dir().join(format!("nexus_session_corrupt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        super::super::with_store(&dir, |s| s.meta_set(META_LAST, "{bad json"));
+        assert!(load_last(&dir).is_none());
+
+        super::super::with_store(&dir, |s| s.meta_set(META_PENDING, r#"{"ts": 999"#));
+        assert!(load_pending(&dir).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_previous_good_snapshot_kept_when_write_fails() {
+        let dir = std::env::temp_dir().join(format!("nexus_session_write_fail_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let good = Snapshot {
+            ts: 5_000,
+            reason: REASON_PERIODIC.into(),
+            apps: vec![SessionApp {
+                exe: "calc.exe".into(),
+                path: "calc.exe".into(),
+                args: vec![],
+                label: "Calculator".into(),
+                windows: 1,
+                packaged: false,
+                browser: false,
+            }],
+            folders: vec![],
+        };
+        assert!(save_last(&dir, &good, None, true));
+
+        // Attempting an unforced write of identical content within REFRESH_SECS returns false (no-op)
+        let identical = Snapshot { ts: 5_010, ..good.clone() };
+        assert!(!save_last(&dir, &identical, Some(&good), false));
+
+        // Stored snapshot remains the initial good one
+        let loaded = load_last(&dir).expect("good snapshot remains");
+        assert_eq!(loaded.ts, 5_000);
+        assert_eq!(loaded.apps[0].exe, "calc.exe");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

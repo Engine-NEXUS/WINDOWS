@@ -259,4 +259,85 @@ mod tests {
         let large = PhotosService::get_sized_base_url(base, 1920, 1080, false);
         assert_eq!(large, "https://lh3.googleusercontent.com/xyz123=w1920-h1080");
     }
+
+    #[test]
+    fn semantic_query_empty_and_whitespace_only() {
+        let q1 = PhotosService::parse_semantic_query("");
+        assert_eq!(q1.query, "");
+        assert_eq!(q1.category, None);
+        assert_eq!(q1.date_from, None);
+        assert_eq!(q1.date_to, None);
+
+        let q2 = PhotosService::parse_semantic_query("   \t \n  ");
+        assert_eq!(q2.query, "");
+        assert_eq!(q2.category, None);
+        assert_eq!(q2.date_from, None);
+        assert_eq!(q2.date_to, None);
+    }
+
+    #[test]
+    fn semantic_query_date_extraction_for_supported_years() {
+        let q1 = PhotosService::parse_semantic_query("vacation photos in Paris 2023");
+        assert_eq!(q1.date_from, Some("2023-01-01".to_string()));
+        assert_eq!(q1.date_to, Some("2023-12-31".to_string()));
+
+        let q2 = PhotosService::parse_semantic_query("receipts from 2026");
+        assert_eq!(q2.category, Some("DOCUMENTS".to_string()));
+        assert_eq!(q2.date_from, Some("2026-01-01".to_string()));
+        assert_eq!(q2.date_to, Some("2026-12-31".to_string()));
+
+        let q3 = PhotosService::parse_semantic_query("photos from 2038");
+        assert_eq!(q3.date_from, Some("2038-01-01".to_string()));
+        assert_eq!(q3.date_to, Some("2038-12-31".to_string()));
+    }
+
+    #[test]
+    fn semantic_query_without_dates_has_none_date_range() {
+        let q1 = PhotosService::parse_semantic_query("pictures of my dog");
+        assert_eq!(q1.category, Some("ANIMALS".to_string()));
+        assert_eq!(q1.date_from, None);
+        assert_eq!(q1.date_to, None);
+
+        let q2 = PhotosService::parse_semantic_query("show photos of food");
+        assert_eq!(q2.category, Some("FOOD".to_string()));
+        assert_eq!(q2.date_from, None);
+        assert_eq!(q2.date_to, None);
+    }
+
+    #[test]
+    fn semantic_query_people_less_categories() {
+        // Animals
+        let q_animals = PhotosService::parse_semantic_query("show pictures of cute cats and dogs");
+        assert_eq!(q_animals.category, Some("ANIMALS".to_string()));
+        assert_ne!(q_animals.category, Some("PEOPLE".to_string()));
+
+        // Food
+        let q_food = PhotosService::parse_semantic_query("delicious dinner and lunch dish");
+        assert_eq!(q_food.category, Some("FOOD".to_string()));
+        assert_ne!(q_food.category, Some("PEOPLE".to_string()));
+
+        // Landmarks
+        let q_landmarks = PhotosService::parse_semantic_query("famous monument and tower");
+        assert_eq!(q_landmarks.category, Some("LANDMARKS".to_string()));
+        assert_ne!(q_landmarks.category, Some("PEOPLE".to_string()));
+
+        // Documents
+        let q_docs = PhotosService::parse_semantic_query("receipt and bill");
+        assert_eq!(q_docs.category, Some("DOCUMENTS".to_string()));
+        assert_ne!(q_docs.category, Some("PEOPLE".to_string()));
+    }
+
+    #[test]
+    fn semantic_query_generic_without_category_and_payload_filters() {
+        let q = PhotosService::parse_semantic_query("sunset over the ocean in summer");
+        assert_eq!(q.category, None);
+        assert_eq!(q.date_from, None);
+        assert_eq!(q.date_to, None);
+
+        let payload = PhotosService::build_search_payload(&q, 10);
+        assert_eq!(payload["pageSize"], 10);
+        let filters = payload.get("filters").and_then(|f| f.as_object()).unwrap();
+        assert!(!filters.contains_key("contentFilter"), "no contentFilter expected when category is None");
+        assert!(!filters.contains_key("dateFilter"), "no dateFilter expected when dates are None");
+    }
 }

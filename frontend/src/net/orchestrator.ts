@@ -42,6 +42,7 @@ interface OrchestratorEvent {
     | "conflict_report"
     | "github_result";
   request_id: string;
+  source_center?: string;
   // state
   state?: "idle" | "listening" | "thinking" | "speaking";
   // loading
@@ -467,7 +468,7 @@ export async function initOrchestratorListener(): Promise<void> {
         if (ev.text) {
           store.setState("speaking");
           store.addAssistantMessage(ev.text);
-          void speak(ev.text);
+          void speak(ev.text, undefined, { requestId: ev.request_id, sourceCenter: ev.source_center, kind: "ack" });
           // Hide the orb after TTS actually finishes (if not in ghost
           // mode) — the zoom plays fully instead of sliding down mid-speech.
           hideOrbAfterSpeech(1500);
@@ -498,7 +499,7 @@ export async function initOrchestratorListener(): Promise<void> {
             }
             void openClarificationCapture(captureAfterSpeech, captureTimeout);
           };
-          void speak(ev.prompt, beginReplyCapture).catch(beginReplyCapture);
+          void speak(ev.prompt, beginReplyCapture, { requestId: ev.request_id, sourceCenter: ev.source_center, kind: "prompt" }).catch(beginReplyCapture);
         } else {
           void openClarificationCapture(ev.request_id, ev.timeout_ms ?? QUESTION_WAIT_MS);
         }
@@ -544,7 +545,7 @@ export async function initOrchestratorListener(): Promise<void> {
           pendingSpeechCloseFor = spokenFor;
           speak(ev.text, () => {
             finishSpokenResult(spokenFor);
-          }).catch((err) => {
+          }, { requestId: spokenFor, sourceCenter: ev.source_center, kind: "result" }).catch((err) => {
             console.warn("[NEXUS] orchestrator: result TTS failed:", err);
             finishSpokenResult(spokenFor);
           });
@@ -638,7 +639,7 @@ export async function initOrchestratorListener(): Promise<void> {
         if (!store.ghostActive) pendingSpeechCloseFor = ev.request_id;
         void speak(errMsg, () => {
           closeTurnOnSpeechEnd(ev.request_id);
-        }).catch(() => {
+        }, { requestId: ev.request_id, sourceCenter: ev.source_center, kind: "result" }).catch(() => {
           closeTurnOnSpeechEnd(ev.request_id);
         });
         // After speaking the error, end the turn via the ghost-aware
@@ -672,7 +673,7 @@ export async function initOrchestratorListener(): Promise<void> {
           store.addAssistantMessage(ev.prompt);
           void speak(ev.prompt, () => {
             openConfirmVoiceWindow();
-          }).catch(() => {
+          }, { requestId: ev.request_id, sourceCenter: ev.source_center, kind: "prompt" }).catch(() => {
             openConfirmVoiceWindow();
           });
         }
@@ -704,7 +705,7 @@ export async function initOrchestratorListener(): Promise<void> {
         if (!store.ghostActive) pendingSpeechCloseFor = ev.request_id;
         void speak(spoken, () => {
           closeTurnOnSpeechEnd(ev.request_id);
-        }).catch(() => {
+        }, { requestId: ev.request_id, sourceCenter: ev.source_center, kind: "result" }).catch(() => {
           closeTurnOnSpeechEnd(ev.request_id);
         });
 

@@ -24,6 +24,42 @@ export interface Point {
   y: number;
 }
 
+/** The existing ring and callout remain the base for every motion style. */
+export type TourMotion = "classic" | "ripple" | "scan" | "trace" | "beam";
+
+/** Clip model coordinates to the stage; reject missing or degenerate boxes. */
+export function visibleTarget(target: Rect | null, screen: Size): Rect | null {
+  if (!target || ![target.x, target.y, target.w, target.h, screen.w, screen.h].every(Number.isFinite)) return null;
+  if (target.w < 16 || target.h < 16 || screen.w <= 0 || screen.h <= 0) return null;
+  const x = Math.max(0, target.x);
+  const y = Math.max(0, target.y);
+  const right = Math.min(screen.w, target.x + target.w);
+  const bottom = Math.min(screen.h, target.y + target.h);
+  return right - x >= 16 && bottom - y >= 16 ? { x, y, w: right - x, h: bottom - y } : null;
+}
+
+/** A restrained motion vocabulary keyed to the item NEXUS is explaining. */
+export function motionFor(category: string | undefined, target: Rect | null, screen: Size): TourMotion {
+  if (!target || target.w * target.h > screen.w * screen.h * 0.35) return "classic";
+  switch (category?.toLowerCase()) {
+    case "person":
+    case "product":
+    case "food":
+    case "object":
+      return "ripple";
+    case "text_block":
+    case "code":
+      return "scan";
+    case "chart":
+    case "diagram":
+      return "trace";
+    case "ui_element":
+      return "beam";
+    default:
+      return "classic";
+  }
+}
+
 export type Side = "right" | "left" | "below" | "above" | "inside" | "default";
 
 export interface Placement {

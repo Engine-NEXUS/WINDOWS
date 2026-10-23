@@ -49,6 +49,61 @@ pub const MIN_CONFIDENCE: f64 = 0.2;
 
 const SCHEMA_VERSION: i64 = 1;
 
+/// Hits found only through synonyms are worth this fraction of an exact hit's score.
+const SYNONYM_PENALTY: f64 = 0.7;
+
+/// A learned correction needs this many separate sightings...
+pub const CORRECTION_PROMOTE_AT: i64 = 2;
+/// ...at least this far apart (the same utterance repeated in a row is one sighting).
+pub const CORRECTION_MIN_APART_SECS: i64 = 60;
+/// Single sightings that never repeat are forgotten after this long.
+const CORRECTION_STALE_SECS: i64 = 30 * 24 * 3600;
+const MAX_CORRECTIONS: i64 = 300;
+
+/// Executed, safe-to-repeat commands are kept this long and at most this many (routine mining reads them).
+const COMMAND_LOG_RETENTION_SECS: i64 = 60 * 24 * 3600;
+const MAX_COMMAND_LOG: i64 = 3000;
+/// Routines the user can have.
+pub const MAX_ROUTINES: usize = 30;
+
+/// Suggested memory changes waiting for the user's yes (phase M4), at most this many, this long.
+const MAX_PENDING: i64 = 30;
+const PENDING_TTL_SECS: i64 = 14 * 24 * 3600;
+
+/// One suggested change: `op` is "add", "patch" or "remove".
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PendingRow {
+    pub id: i64,
+    pub op: String,
+    pub key: String,
+    pub value: String,
+    /// The current value being replaced or removed (empty for an add).
+    pub old_value: String,
+    /// Why it was suggested, in the model's words (clipped).
+    pub reason: String,
+    pub created: i64,
+}
+
+/// A saved routine: a name the user chose and the commands it runs, in order.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RoutineRow {
+    pub name: String,
+    pub steps: Vec<String>,
+    pub created: i64,
+    pub last_run: i64,
+    pub runs: i64,
+}
+
+/// One (heard -> meant) pair with how often it was seen and whether it is applied.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CorrectionRow {
+    pub heard: String,
+    pub meant: String,
+    pub count: i64,
+    pub last_seen: i64,
+    pub promoted: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
     /// Explicit + learned facts about the user (plan T1).
@@ -369,6 +424,41 @@ impl Store {
                source TEXT,
                trust TEXT,
                actor TEXT);
+             CREATE TABLE IF NOT EXISTS corrections(
+               heard TEXT NOT NULL,
+               meant TEXT NOT NULL,
+               count INTEGER NOT NULL DEFAULT 1,
+               first_seen INTEGER NOT NULL,
+               last_seen INTEGER NOT NULL,
+               PRIMARY KEY(heard, meant));
+             CREATE TABLE IF NOT EXISTS command_log(
+               id INTEGER PRIMARY KEY,
+               ts INTEGER NOT NULL,
+               label TEXT NOT NULL,
+               canon TEXT NOT NULL);
+             CREATE INDEX IF NOT EXISTS idx_command_log_ts ON command_log(ts);
+             CREATE TABLE IF NOT EXISTS routines(
+               name TEXT PRIMARY KEY,
+               steps TEXT NOT NULL,
+               created INTEGER NOT NULL,
+               last_run INTEGER NOT NULL DEFAULT 0,
+               runs INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE IF NOT EXISTS pending(
+               id INTEGER PRIMARY KEY,
+               op TEXT NOT NULL,
+               key TEXT NOT NULL,
+               value TEXT NOT NULL,
+               old_value TEXT NOT NULL DEFAULT '',
+               reason TEXT NOT NULL DEFAULT '',
+               created INTEGER NOT NULL,
+               UNIQUE(op, key, value));
+             CREATE TABLE IF NOT EXISTS review_rejected(
+               sig TEXT PRIMARY KEY,
+               ts INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS routine_offers(
+               key TEXT PRIMARY KEY,
+               shown INTEGER NOT NULL DEFAULT 0,
+               last_shown INTEGER NOT NULL DEFAULT 0);
              CREATE TABLE IF NOT EXISTS egress(
                id INTEGER PRIMARY KEY,
                ts INTEGER NOT NULL,
@@ -504,7 +594,7 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))
             .unwrap_or(0);
         let _ = self.conn.execute_batch(
-            "DELETE FROM records; DELETE FROM records_fts; DELETE FROM audit; DELETE FROM egress;
+            "DELETE FROM records; DELETE FROM records_fts; DELETE FROM audit; DELETE FROM egress; DELETE FROM corrections; DELETE FROM command_log; DELETE FROM routines; DELETE FROM routine_offers; DELETE FROM pending; DELETE FROM review_rejected;
              DELETE FROM meta WHERE k != 'schema_version';",
         );
         self.audit(now, "wipe", "", "", "", "", actor);
@@ -543,6 +633,20 @@ impl Store {
         } else {
             self.fts_hits(tier, &tokens, now)
         };
+        // The question's own words did not fill the list: look for words that mean the same thing
+        // ("where do I work" -> employer). These rank below exact matches.
+        if !tokens.is_empty() && hits.len() < limit {
+            let extra = super::synonyms::expand_query(query, &tokens);
+            if !extra.is_empty() {
+                let have: Vec<i64> = hits.iter().map(|h| h.id).collect();
+                for mut h in self.fts_hits(tier, &extra, now) {
+                    if !have.contains(&h.id) {
+                        h.score *= SYNONYM_PENALTY;
+                        hits.push(h);
+                    }
+                }
+            }
+        }
         hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         hits.truncate(limit);
         hits
@@ -594,7 +698,14 @@ impl Store {
             if t.len() > 3 && t.ends_with('s') {
                 expanded.push(t[..t.len() - 1].to_string());
             }
+            // Word-form variants share a stem ("allergic" -> "allerg" finds "allergy"). The
+            // terms are prefix-matched below, so a long enough stem covers every ending.
+            let stem = super::synonyms::stem(t);
+            if stem != *t && stem.chars().count() >= 4 {
+                expanded.push(stem);
+            }
         }
+        expanded.sort();
         expanded.dedup();
         let q = expanded
             .iter()
@@ -650,6 +761,338 @@ impl Store {
             return vec![];
         };
         rows.flatten().collect()
+    }
+
+    /// Record one sighting of "heard X, meant Y". Returns the number of separate sightings so far.
+    /// The same utterance repeated within `CORRECTION_MIN_APART_SECS` is one sighting, not two.
+    pub fn corrections_observe(&self, heard: &str, meant: &str, now: i64) -> u32 {
+        let existing: Option<(i64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT count, last_seen FROM corrections WHERE heard = ?1 AND meant = ?2",
+                params![heard, meant],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
+        let count = match existing {
+            Some((c, last)) if now - last >= CORRECTION_MIN_APART_SECS => {
+                let _ = self.conn.execute(
+                    "UPDATE corrections SET count = count + 1, last_seen = ?3 WHERE heard = ?1 AND meant = ?2",
+                    params![heard, meant, now],
+                );
+                c + 1
+            }
+            Some((c, _)) => c,
+            None => {
+                let _ = self.conn.execute(
+                    "INSERT INTO corrections(heard, meant, count, first_seen, last_seen) VALUES(?1, ?2, 1, ?3, ?3)",
+                    params![heard, meant, now],
+                );
+                1
+            }
+        };
+        // Housekeeping: one-off sightings fade; the table stays small.
+        let _ = self.conn.execute(
+            "DELETE FROM corrections WHERE count < ?1 AND last_seen < ?2",
+            params![CORRECTION_PROMOTE_AT, now - CORRECTION_STALE_SECS],
+        );
+        let _ = self.conn.execute(
+            "DELETE FROM corrections WHERE rowid IN (
+               SELECT rowid FROM corrections ORDER BY count ASC, last_seen ASC
+               LIMIT MAX(0, (SELECT COUNT(*) FROM corrections) - ?1))",
+            params![MAX_CORRECTIONS],
+        );
+        self.audit(now, "correction", "", heard, "", "", "memcore");
+        self.flush();
+        count as u32
+    }
+
+    /// Every pair with whether it is currently applied. A pair is applied when it has been seen
+    /// `CORRECTION_PROMOTE_AT` times and no rival answer for the same heard phrase has as many.
+    pub fn corrections_all(&self) -> Vec<CorrectionRow> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT heard, meant, count, last_seen FROM corrections ORDER BY heard ASC, count DESC, last_seen DESC",
+        ) else {
+            return vec![];
+        };
+        let Ok(rows) = stmt.query_map([], |r| {
+            Ok(CorrectionRow { heard: r.get(0)?, meant: r.get(1)?, count: r.get(2)?, last_seen: r.get(3)?, promoted: false })
+        }) else {
+            return vec![];
+        };
+        let mut all: Vec<CorrectionRow> = rows.flatten().collect();
+        // Rows of one `heard` are adjacent and best-first: the leader wins only if it clears the
+        // bar and strictly beats the runner-up.
+        let mut i = 0;
+        while i < all.len() {
+            let mut j = i;
+            while j < all.len() && all[j].heard == all[i].heard {
+                j += 1;
+            }
+            let runner_up = if j - i > 1 { all[i + 1].count } else { 0 };
+            all[i].promoted = all[i].count >= CORRECTION_PROMOTE_AT && all[i].count > runner_up;
+            i = j;
+        }
+        all
+    }
+
+    /// The (heard, meant) pairs that are applied to commands.
+    pub fn corrections_promoted(&self) -> Vec<(String, String)> {
+        self.corrections_all().into_iter().filter(|c| c.promoted).map(|c| (c.heard, c.meant)).collect()
+    }
+
+    /// Forget everything learned about one heard phrase. Returns rows removed.
+    pub fn correction_forget(&self, heard: &str) -> usize {
+        let n = self
+            .conn
+            .execute("DELETE FROM corrections WHERE heard = ?1", params![heard])
+            .unwrap_or(0);
+        if n > 0 {
+            self.flush();
+        }
+        n
+    }
+
+    // ---- Suggested changes awaiting approval (Memory v2, phase M4) ----
+
+    fn pending_sig(op: &str, key: &str, value: &str) -> String {
+        format!("{op}|{key}|{value}").to_lowercase()
+    }
+
+    /// Queue a suggestion. `false` when it is a duplicate, was rejected before, or the queue is full.
+    pub fn pending_add(&self, op: &str, key: &str, value: &str, old_value: &str, reason: &str, now: i64) -> bool {
+        let _ = self.conn.execute("DELETE FROM pending WHERE created < ?1", params![now - PENDING_TTL_SECS]);
+        let rejected: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM review_rejected WHERE sig = ?1",
+                params![Self::pending_sig(op, key, value)],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let waiting: i64 = self.conn.query_row("SELECT COUNT(*) FROM pending", [], |r| r.get(0)).unwrap_or(0);
+        if rejected > 0 || waiting >= MAX_PENDING {
+            return false;
+        }
+        let n = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO pending(op, key, value, old_value, reason, created) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![op, key, value, old_value, reason, now],
+            )
+            .unwrap_or(0);
+        if n > 0 {
+            self.flush();
+        }
+        n > 0
+    }
+
+    pub fn pending_list(&self, now: i64) -> Vec<PendingRow> {
+        let _ = self.conn.execute("DELETE FROM pending WHERE created < ?1", params![now - PENDING_TTL_SECS]);
+        let Ok(mut stmt) = self
+            .conn
+            .prepare("SELECT id, op, key, value, old_value, reason, created FROM pending ORDER BY created DESC, id DESC")
+        else {
+            return vec![];
+        };
+        let Ok(rows) = stmt.query_map([], |r| {
+            Ok(PendingRow {
+                id: r.get(0)?,
+                op: r.get(1)?,
+                key: r.get(2)?,
+                value: r.get(3)?,
+                old_value: r.get(4)?,
+                reason: r.get(5)?,
+                created: r.get(6)?,
+            })
+        }) else {
+            return vec![];
+        };
+        rows.flatten().collect()
+    }
+
+    /// Remove and return one suggestion (the caller then applies or discards it).
+    pub fn pending_take(&self, id: i64) -> Option<PendingRow> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, op, key, value, old_value, reason, created FROM pending WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok(PendingRow {
+                        id: r.get(0)?,
+                        op: r.get(1)?,
+                        key: r.get(2)?,
+                        value: r.get(3)?,
+                        old_value: r.get(4)?,
+                        reason: r.get(5)?,
+                        created: r.get(6)?,
+                    })
+                },
+            )
+            .ok()?;
+        let _ = self.conn.execute("DELETE FROM pending WHERE id = ?1", params![id]);
+        self.flush();
+        Some(row)
+    }
+
+    /// Discard a suggestion and remember that it was refused, so it is not suggested again.
+    pub fn pending_reject(&self, id: i64, now: i64) -> bool {
+        let Some(row) = self.pending_take(id) else { return false };
+        let _ = self.conn.execute(
+            "INSERT OR IGNORE INTO review_rejected(sig, ts) VALUES(?1, ?2)",
+            params![Self::pending_sig(&row.op, &row.key, &row.value), now],
+        );
+        self.flush();
+        true
+    }
+
+    // ---- Routines (Memory v2, phase M3) ----
+
+    /// Remember that a safe command ran. No flush: a lost line costs nothing, and the log is rewritten
+    /// with the next real change.
+    pub fn command_log_add(&self, ts: i64, label: &str, canon: &str) {
+        let _ = self.conn.execute(
+            "INSERT INTO command_log(ts, label, canon) VALUES(?1, ?2, ?3)",
+            params![ts, label, canon],
+        );
+        let _ = self.conn.execute("DELETE FROM command_log WHERE ts < ?1", params![ts - COMMAND_LOG_RETENTION_SECS]);
+        let _ = self.conn.execute(
+            "DELETE FROM command_log WHERE id IN (
+               SELECT id FROM command_log ORDER BY ts ASC
+               LIMIT MAX(0, (SELECT COUNT(*) FROM command_log) - ?1))",
+            params![MAX_COMMAND_LOG],
+        );
+    }
+
+    /// (time, canonical command) for every logged command since `since`, oldest first.
+    pub fn command_log_since(&self, since: i64) -> Vec<(i64, String)> {
+        let Ok(mut stmt) = self.conn.prepare("SELECT ts, canon FROM command_log WHERE ts >= ?1 ORDER BY ts ASC, id ASC") else {
+            return vec![];
+        };
+        let Ok(rows) = stmt.query_map(params![since], |r| Ok((r.get(0)?, r.get(1)?))) else {
+            return vec![];
+        };
+        rows.flatten().collect()
+    }
+
+    pub fn routines_all(&self) -> Vec<RoutineRow> {
+        let Ok(mut stmt) = self.conn.prepare("SELECT name, steps, created, last_run, runs FROM routines ORDER BY created ASC") else {
+            return vec![];
+        };
+        let Ok(rows) = stmt.query_map([], |r| {
+            let steps: String = r.get(1)?;
+            Ok(RoutineRow {
+                name: r.get(0)?,
+                steps: serde_json::from_str(&steps).unwrap_or_default(),
+                created: r.get(2)?,
+                last_run: r.get(3)?,
+                runs: r.get(4)?,
+            })
+        }) else {
+            return vec![];
+        };
+        rows.flatten().filter(|r| !r.steps.is_empty()).collect()
+    }
+
+    /// Save a routine. `Err` explains why not (name taken, too many).
+    pub fn routine_add(&self, name: &str, steps: &[String], now: i64) -> Result<(), String> {
+        if self.routines_all().len() >= MAX_ROUTINES {
+            return Err("you already have the most routines I can keep".into());
+        }
+        let json = serde_json::to_string(steps).map_err(|e| e.to_string())?;
+        let n = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO routines(name, steps, created) VALUES(?1, ?2, ?3)",
+                params![name, json, now],
+            )
+            .map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("a routine with that name already exists".into());
+        }
+        self.audit(now, "routine_add", "", name, "user:routine", "", "memcore");
+        self.flush();
+        Ok(())
+    }
+
+    pub fn routine_delete(&self, name: &str, now: i64) -> bool {
+        let n = self.conn.execute("DELETE FROM routines WHERE name = ?1", params![name]).unwrap_or(0);
+        if n > 0 {
+            self.audit(now, "routine_delete", "", name, "user:routine", "", "memcore");
+            self.flush();
+        }
+        n > 0
+    }
+
+    pub fn routine_record_run(&self, name: &str, now: i64) {
+        let _ = self.conn.execute(
+            "UPDATE routines SET runs = runs + 1, last_run = ?2 WHERE name = ?1",
+            params![name, now],
+        );
+    }
+
+    /// How many times this suggestion has been put in front of the user.
+    pub fn offer_shown(&self, key: &str) -> i64 {
+        self.conn
+            .query_row("SELECT shown FROM routine_offers WHERE key = ?1", params![key], |r| r.get(0))
+            .unwrap_or(0)
+    }
+
+    pub fn offer_mark_shown(&self, key: &str, now: i64) {
+        let _ = self.conn.execute(
+            "INSERT INTO routine_offers(key, shown, last_shown) VALUES(?1, 1, ?2)
+             ON CONFLICT(key) DO UPDATE SET shown = shown + 1, last_shown = ?2",
+            params![key, now],
+        );
+        self.flush();
+    }
+
+    /// The facts the user themselves asked NEXUS to remember (pinned, `user_said`), oldest first.
+    /// Candidates for the always-on profile; `profile::render` applies the cap and the sensitivity screen.
+    pub fn pinned_user_facts(&self) -> Vec<super::profile::Entry> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT id, key, value FROM records
+             WHERE tier = 'fact' AND pinned = 1 AND trust = 'user_said'
+             ORDER BY created ASC, id ASC LIMIT 300",
+        ) else {
+            return vec![];
+        };
+        let Ok(rows) = stmt.query_map([], |r| {
+            Ok(super::profile::Entry { id: r.get(0)?, key: r.get(1)?, value: r.get(2)? })
+        }) else {
+            return vec![];
+        };
+        rows.flatten().collect()
+    }
+
+    /// Ids of the user's pinned facts, most used first (ties: oldest first). Curator input.
+    pub fn pinned_fact_ids_by_use(&self) -> Vec<i64> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT id FROM records WHERE tier = 'fact' AND pinned = 1 AND trust = 'user_said'
+             ORDER BY uses DESC, created ASC, id ASC LIMIT 300",
+        ) else {
+            return vec![];
+        };
+        let Ok(rows) = stmt.query_map([], |r| r.get::<_, i64>(0)) else { return vec![] };
+        rows.flatten().collect()
+    }
+
+    /// Drop bookkeeping that only ever grows: refused-suggestion markers older than a year and
+    /// routine-offer counters not shown for six months. Returns rows removed.
+    pub fn housekeeping(&self, now: i64) -> usize {
+        let a = self
+            .conn
+            .execute("DELETE FROM review_rejected WHERE ts < ?1", params![now - 365 * 24 * 3600])
+            .unwrap_or(0);
+        let b = self
+            .conn
+            .execute("DELETE FROM routine_offers WHERE last_shown < ?1", params![now - 180 * 24 * 3600])
+            .unwrap_or(0);
+        if a + b > 0 {
+            self.flush();
+        }
+        a + b
     }
 
     /// Exact-key value lookup within a tier.

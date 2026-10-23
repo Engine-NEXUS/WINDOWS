@@ -38,41 +38,24 @@ html, body {
   position: relative;
   display: flex;
   flex-direction: column;
-  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, transparent 40%);
-  background-color: rgba(20, 20, 22, 0.60);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-top: 1px solid rgba(255, 255, 255, 0.25);
+  background-color: var(--nx-bg, #0a0a0c);
+  border: 1px solid var(--nx-border, rgba(255, 255, 255, 0.12));
   border-radius: 18px;
-  box-shadow:
-    0 24px 64px rgba(0, 0, 0, 0.6),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.06),
-    inset 0 0 6px 0 rgba(255, 255, 255, 0.04),
-    inset 0 2px 4px -2px rgba(255, 255, 255, 0.28),
-    inset 0 -2px 4px -2px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
   padding: 14px 16px 8px 16px;
   gap: 10px;
   overflow: hidden;
   isolation: isolate;
 }
+:root[data-theme="light"] .settings-container {
+  background-color: var(--nx-bg, #f8f9fa);
+  border-color: rgba(0, 0, 0, 0.1);
+  color: #17212e;
+}
 
-/* Blurred desktop backdrop — ADR-05 screenshot capture (restored to the
-   verified GitHub rule; the 2026-10-01 solid-black directive is removed).
-   Stronger gradient overlay ensures text behind is frosted but readable
-   (Start Menu style). */
+/* Backdrop image disabled in solid opaque theme */
 .settings-container::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: 18px;
-  background-image:
-    linear-gradient(180deg, rgba(8, 8, 10, 0.65) 0%, rgba(8, 8, 10, 0.45) 100%),
-    var(--sidebar-backdrop-image, none);
-  background-size: cover;
-  background-position: center;
-  opacity: 1;
-  transition: opacity 0.3s ease-out;
-  pointer-events: none;
-  z-index: 0;
+  display: none;
 }
 
 /* Specular edge sheen */

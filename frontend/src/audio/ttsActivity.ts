@@ -1,4 +1,5 @@
 import { useAssistant } from "../store/assistant";
+import { speechStageRegistered } from "./speechStage";
 
 /**
  * TTS activity signal — the single truthful source for "is audio actually
@@ -34,10 +35,12 @@ export async function initTtsActivityListener(): Promise<void> {
   try {
     const { listen } = await import("@tauri-apps/api/event");
     await listen("tts-started", () => {
+      if (speechStageRegistered()) return;
       clearGrace();
       useAssistant.getState().setTtsActive(true);
     });
     await listen("tts-ended", () => {
+      if (speechStageRegistered()) return;
       const myGen = ++graceGen;
       if (graceTimer) clearTimeout(graceTimer);
       graceTimer = setTimeout(() => {

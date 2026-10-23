@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 interface WatchInfo {
   id: string;
@@ -54,9 +55,18 @@ export function AgentWatchSection() {
     };
     poll();
     const id = setInterval(poll, 4000);
+    // A watch changing state refreshes the list at once instead of on the next tick.
+    const unlisten = [
+      listen("agent_watch:progress", poll),
+      listen("agent_watch:done", poll),
+      listen("agent_watch:error", poll),
+      listen("agent_watch:login_required", poll),
+      listen("agent_watch:stopped", poll),
+    ];
     return () => {
       alive = false;
       clearInterval(id);
+      unlisten.forEach((u) => void u.then((fn) => fn()).catch(() => {}));
     };
   }, []);
 

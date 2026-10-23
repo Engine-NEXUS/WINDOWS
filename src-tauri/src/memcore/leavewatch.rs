@@ -36,6 +36,8 @@ const LEAD_SECS: i64 = 5 * 60;
 /// A longer "trip" than this is a wrong geocode, not a commute.
 const MAX_ETA_SECS: i64 = 3 * 3600;
 const MAX_ETA_CALLS_PER_TICK: usize = 3;
+/// After a failed route lookup, leave that event alone this long (a bad key or a quota error must not be retried every minute).
+const ETA_RETRY_AFTER_FAILURE_SECS: u64 = 2 * 60;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LeaveEvent {
@@ -131,6 +133,65 @@ pub fn decide(ev: &LeaveEvent, eta_secs: i64, now: i64, address: Option<&str>) -
     Some(Reminder { key: format!("{}:{}", ev.id, ev.start_epoch), urgency, text })
 }
 
+/// Stable per event and start time: a moved event reminds again, a re-read of the same event does not.
+pub fn event_key(ev: &LeaveEvent) -> String {
+    format!("{}:{}", ev.id, ev.start_epoch)
+}
+
+/// Why the watcher does nothing this tick (`None` = it may run). Pure.
+pub fn skip_reason(memcore_on: bool, leaveby_on: bool, maps_key_set: bool, has_home: bool, has_account: bool) -> Option<&'static str> {
+    if !memcore_on {
+        Some("memory is off")
+    } else if !leaveby_on {
+        Some("leave-by reminders are off")
+    } else if !maps_key_set {
+        Some("no Routes API key")
+    } else if !has_home {
+        Some("no remembered home address")
+    } else if !has_account {
+        Some("no connected Google account with calendar access")
+    } else {
+        None
+    }
+}
+
+/// Events that need a (billable) route lookup now: starting within the lookup window, not yet reminded, with
+/// no fresh answer, at most `max` of them. Pure.
+pub fn needs_lookup<'a>(
+    events: &'a [LeaveEvent],
+    now: i64,
+    has_fresh_answer: impl Fn(&str) -> bool,
+    already_reminded: impl Fn(&str) -> bool,
+    max: usize,
+) -> Vec<&'a LeaveEvent> {
+    events
+        .iter()
+        .filter(|ev| ev.start_epoch > now && ev.start_epoch - now <= ETA_WINDOW_SECS)
+        .filter(|ev| !already_reminded(&event_key(ev)))
+        .filter(|ev| !has_fresh_answer(&ev.id))
+        .take(max)
+        .collect()
+}
+
+/// Reminders due now: events in the window, not yet reminded, whose trip time is known. Pure.
+pub fn due_reminders(
+    events: &[LeaveEvent],
+    now: i64,
+    eta_secs_of: impl Fn(&str) -> Option<i64>,
+    already_reminded: impl Fn(&str) -> bool,
+    address: Option<&str>,
+) -> Vec<(String, Reminder)> {
+    events
+        .iter()
+        .filter(|ev| ev.start_epoch > now && ev.start_epoch - now <= ETA_WINDOW_SECS)
+        .filter(|ev| !already_reminded(&event_key(ev)))
+        .filter_map(|ev| {
+            let eta = eta_secs_of(&ev.id)?;
+            decide(ev, eta, now, address).map(|r| (event_key(ev), r))
+        })
+        .collect()
+}
+
 fn already_fired(dir: &std::path::Path, key: &str) -> bool {
     super::with_store(dir, |s| s.meta_get(&format!("leaveby:{key}")).is_some()).unwrap_or(false)
 }
@@ -153,19 +214,26 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
         let mut events: Vec<LeaveEvent> = vec![];
         let mut next_cal = Instant::now();
         let mut etas: HashMap<String, (i64, Instant)> = HashMap::new();
+        let mut failed: HashMap<String, Instant> = HashMap::new();
         let mut fired: HashSet<String> = HashSet::new();
         loop {
             tokio::time::sleep(Duration::from_secs(TICK_SECS)).await;
             let Ok(dir) = app.path().app_data_dir() else { continue };
-            if !super::enabled(&dir) || !super::flag(&dir, "memcoreLeaveBy", true) {
-                continue;
-            }
             let key = crate::commands::read_api_key(&app, "google_maps");
-            if key.is_empty() {
+            let home = home_address(&dir);
+            let acct = google_io::primary_account(google_io::can_use_calendar);
+            if skip_reason(
+                super::enabled(&dir),
+                super::flag(&dir, "memcoreLeaveBy", true),
+                !key.is_empty(),
+                home.is_some(),
+                acct.is_some(),
+            )
+            .is_some()
+            {
                 continue;
             }
-            let Some(home) = home_address(&dir) else { continue };
-            let Some(acct) = google_io::primary_account(google_io::can_use_calendar) else { continue };
+            let (Some(home), Some(acct)) = (home, acct) else { continue };
             let now = chrono::Utc::now().timestamp();
 
             if Instant::now() >= next_cal {
@@ -182,35 +250,40 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
                     Err(e) => tracing::debug!("leavewatch: calendar: {e}"),
                 }
                 etas.retain(|id, _| events.iter().any(|e| &e.id == id));
+                failed.retain(|id, _| events.iter().any(|e| &e.id == id));
             }
 
             let address = super::wa::speak_address(&app);
-            let mut calls = 0usize;
-            for ev in &events {
-                if ev.start_epoch <= now || ev.start_epoch - now > ETA_WINDOW_SECS {
-                    continue;
-                }
-                let k = format!("{}:{}", ev.id, ev.start_epoch);
-                if fired.contains(&k) || already_fired(&dir, &k) {
-                    continue;
-                }
-                let stale = etas.get(&ev.id).map(|(_, at)| at.elapsed() >= Duration::from_secs(ETA_REFRESH_SECS)).unwrap_or(true);
-                if stale && calls < MAX_ETA_CALLS_PER_TICK {
-                    calls += 1;
-                    match MapsService::compute_route(&client, &key, &home, &ev.location, TravelMode::Driving).await {
-                        Ok(eta) => {
-                            etas.insert(ev.id.clone(), (eta.minutes as i64 * 60, Instant::now()));
-                        }
-                        Err(e) => tracing::debug!("leavewatch: routes: {e}"),
+            let reminded = |k: &str| fired.contains(k) || already_fired(&dir, k);
+            let fresh = |id: &str| {
+                etas.get(id).is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(ETA_REFRESH_SECS))
+                    || failed.get(id).is_some_and(|at| at.elapsed() < Duration::from_secs(ETA_RETRY_AFTER_FAILURE_SECS))
+            };
+            let todo: Vec<LeaveEvent> = needs_lookup(&events, now, fresh, reminded, MAX_ETA_CALLS_PER_TICK)
+                .into_iter()
+                .cloned()
+                .collect();
+            for ev in &todo {
+                match MapsService::compute_route(&client, &key, &home, &ev.location, TravelMode::Driving).await {
+                    Ok(eta) => {
+                        failed.remove(&ev.id);
+                        etas.insert(ev.id.clone(), (eta.minutes as i64 * 60, Instant::now()));
+                    }
+                    Err(e) => {
+                        tracing::debug!("leavewatch: routes: {e}");
+                        failed.insert(ev.id.clone(), Instant::now());
                     }
                 }
-                let Some((eta_s, _)) = etas.get(&ev.id) else { continue };
-                if let Some(r) = decide(ev, *eta_s, now, address.as_deref()) {
-                    fired.insert(k.clone());
-                    mark_fired(&dir, &k);
-                    tracing::info!("leavewatch: reminder for '{}'", ev.summary);
-                    crate::proactive_policy::submit(&app, format!("leaveby_{}", r.key), r.text, r.urgency);
-                }
+            }
+            let due = {
+                let reminded = |k: &str| fired.contains(k) || already_fired(&dir, k);
+                due_reminders(&events, now, |id| etas.get(id).map(|(s, _)| *s), reminded, address.as_deref())
+            };
+            for (k, r) in due {
+                fired.insert(k.clone());
+                mark_fired(&dir, &k);
+                tracing::info!("leavewatch: reminder {k}");
+                crate::proactive_policy::submit(&app, format!("leaveby_{}", r.key), r.text, r.urgency);
             }
         }
     });
@@ -292,6 +365,87 @@ mod tests {
         assert!(r.text.starts_with("You're running late for Dentist."), "{}", r.text);
         // Event already started: never speak.
         assert_eq!(decide(&e, 20 * 60, NOW + 61 * 60, None), None);
+    }
+
+    fn lev(id: &str, start_offset: i64) -> LeaveEvent {
+        LeaveEvent { id: id.into(), summary: id.into(), location: "5 High St".into(), start_epoch: NOW + start_offset }
+    }
+
+    #[test]
+    fn the_watcher_names_the_first_missing_ingredient() {
+        assert_eq!(skip_reason(true, true, true, true, true), None);
+        assert_eq!(skip_reason(false, true, true, true, true), Some("memory is off"));
+        assert_eq!(skip_reason(true, false, true, true, true), Some("leave-by reminders are off"));
+        assert_eq!(skip_reason(true, true, false, true, true), Some("no Routes API key"));
+        assert_eq!(skip_reason(true, true, true, false, true), Some("no remembered home address"));
+        assert_eq!(skip_reason(true, true, true, true, false), Some("no connected Google account with calendar access"));
+        // several missing: the first in the fixed order wins
+        assert_eq!(skip_reason(true, true, false, false, false), Some("no Routes API key"));
+    }
+
+    #[test]
+    fn only_events_inside_the_ninety_minute_window_are_looked_up() {
+        let evs = vec![lev("soon", 30 * 60), lev("edge", 90 * 60), lev("far", 90 * 60 + 1), lev("started", -1), lev("now", 0)];
+        let got: Vec<_> = needs_lookup(&evs, NOW, |_| false, |_| false, 10).iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(got, ["soon", "edge"], "exactly 90 min is in, one second later is out, started events are out");
+    }
+
+    #[test]
+    fn a_fresh_answer_a_finished_reminder_or_the_per_tick_cap_each_stop_a_lookup() {
+        let evs = vec![lev("a", 600), lev("b", 700), lev("c", 800), lev("d", 900), lev("e", 1000)];
+        assert_eq!(needs_lookup(&evs, NOW, |_| false, |_| false, MAX_ETA_CALLS_PER_TICK).len(), 3, "billable calls are capped per tick");
+        let got: Vec<_> = needs_lookup(&evs, NOW, |id| id == "a", |_| false, 10).iter().map(|e| e.id.clone()).collect();
+        assert_eq!(got, ["b", "c", "d", "e"], "a fresh answer is not asked again");
+        let done = format!("b:{}", NOW + 700);
+        let got: Vec<_> = needs_lookup(&evs, NOW, |_| false, |k| k == done, 10).iter().map(|e| e.id.clone()).collect();
+        assert!(!got.contains(&"b".to_string()), "an event already reminded is never looked up again");
+    }
+
+    #[test]
+    fn a_reminder_needs_a_known_trip_time_and_is_given_once_per_event_start() {
+        let evs = vec![lev("a", 60 * 60)];
+        // no trip time yet: nothing
+        assert!(due_reminders(&evs, NOW + 31 * 60, |_| None, |_| false, None).is_empty());
+        // trip known and it is time
+        let due = due_reminders(&evs, NOW + 31 * 60, |_| Some(20 * 60), |_| false, Some("sir"));
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].0, format!("a:{}", NOW + 3600));
+        assert!(due[0].1.text.contains(", sir."), "{}", due[0].1.text);
+        // the same event again after it was recorded: nothing
+        let key = due[0].0.clone();
+        assert!(due_reminders(&evs, NOW + 31 * 60, |_| Some(20 * 60), |k| k == key, None).is_empty());
+        // the event is moved 30 minutes later: a new key, so it can remind again
+        let moved = vec![lev("a", 90 * 60)];
+        assert_ne!(event_key(&moved[0]), key);
+        assert_eq!(due_reminders(&moved, NOW + 61 * 60, |_| Some(20 * 60), |k| k == key, None).len(), 1);
+    }
+
+    #[test]
+    fn two_events_in_one_tick_give_two_reminders_in_calendar_order() {
+        let evs = vec![lev("first", 40 * 60), lev("second", 45 * 60)];
+        let due = due_reminders(&evs, NOW + 25 * 60, |_| Some(10 * 60), |_| false, None);
+        assert_eq!(due.iter().map(|(k, _)| k.split(':').next().unwrap()).collect::<Vec<_>>(), ["first", "second"]);
+    }
+
+    #[test]
+    fn calendar_time_zones_are_read_correctly() {
+        use crate::google::calendar::CalendarService as C;
+        let utc = C::parse_iso_to_epoch("2026-10-20T09:30:00Z").unwrap();
+        assert_eq!(C::parse_iso_to_epoch("2026-10-20T15:00:00+05:30"), Some(utc));
+        assert_eq!(C::parse_iso_to_epoch("2026-10-20T04:30:00-05:00"), Some(utc));
+        assert_eq!(C::parse_iso_to_epoch("not a time"), None);
+    }
+
+    #[test]
+    fn the_given_reminder_survives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("nexus_leaveby_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!already_fired(&dir, "e1:100"));
+        mark_fired(&dir, "e1:100");
+        assert!(already_fired(&dir, "e1:100"));
+        assert!(!already_fired(&dir, "e1:101"), "another start time is another reminder");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

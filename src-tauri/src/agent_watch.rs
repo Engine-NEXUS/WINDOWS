@@ -19,7 +19,7 @@
 use std::io::BufRead;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tauri::Emitter;
@@ -35,6 +35,27 @@ const POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// underlying agent truly never signals completion (e.g. it crashed in a
 /// way the adapter doesn't recognize). This is generous on purpose.
 const MAX_WATCH_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Per-run secret shared with the sidecar: it refuses every request without it, so no other local
+/// process can start coding agents through that port.
+fn token() -> &'static str {
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN.get_or_init(|| {
+        use ring::rand::SecureRandom;
+        let mut bytes = [0u8; 32];
+        ring::rand::SystemRandom::new().fill(&mut bytes).expect("system random");
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    })
+}
+
+/// HTTP client that always carries the sidecar token.
+fn client() -> reqwest::Client {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Ok(v) = reqwest::header::HeaderValue::from_str(token()) {
+        headers.insert("x-nexus-token", v);
+    }
+    reqwest::Client::builder().default_headers(headers).build().unwrap_or_else(|_| reqwest::Client::new())
+}
 
 static SIDECAR_CHILD: Mutex<Option<Child>> = Mutex::new(None);
 static SIDECAR_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -210,6 +231,10 @@ fn ensure_sidecar_running() {
     cmd.arg("server.cjs")
         .current_dir(&dir)
         .env("AGENT_WATCH_PORT", AGENT_WATCH_PORT.to_string())
+        .env("AGENT_WATCH_TOKEN", token())
+        .env("NEXUS_PARENT_PID", std::process::id().to_string())
+        // the open pipe is the sidecar's lifeline: when this process ends it closes and the sidecar exits
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
@@ -316,7 +341,7 @@ pub async fn list_adapters() -> Vec<String> {
     if !is_sidecar_responsive() {
         return KNOWN_ADAPTERS.iter().map(|s| s.to_string()).collect();
     }
-    let client = reqwest::Client::new();
+    let client = client();
     match client.get(sidecar_url("/adapters")).send().await {
         Ok(resp) => match resp.json::<serde_json::Value>().await {
             Ok(json) => json
@@ -361,11 +386,22 @@ pub async fn start_watch<R: tauri::Runtime>(
         return Err("agent-watch sidecar did not start in time".to_string());
     }
 
-    let client = reqwest::Client::new();
+    let client = client();
+    let preset = {
+        use tauri::Manager;
+        let configured = app
+            .path()
+            .app_data_dir()
+            .map(|d| crate::action_kernel::policy::load(&d).agent_approval)
+            .unwrap_or_default();
+        crate::action_kernel::policy::safe_agent_preset(&configured)
+    };
     let body = serde_json::json!({
         "type": adapter_type,
         "workdir": workdir,
         "prompt": prompt,
+        // never autonomous: see action_kernel::policy::safe_agent_preset
+        "adapterConfig": { "approvalPreset": preset },
     });
     let resp = client
         .post(sidecar_url("/watch"))
@@ -401,7 +437,7 @@ async fn poll_watch_until_done<R: tauri::Runtime>(
     id: String,
     adapter_type: String,
 ) {
-    let client = reqwest::Client::new();
+    let client = client();
     let started = Instant::now();
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -574,23 +610,11 @@ async fn poll_desktop_task_quiescence<R: tauri::Runtime>(
 /// Stop a watch and release its keep-awake lease immediately.
 pub async fn stop_watch(id: String) -> Result<(), String> {
     if is_sidecar_responsive() {
-        let client = reqwest::Client::new();
+        let client = client();
         let _ = client.post(sidecar_url(&format!("/watch/{id}/stop"))).send().await;
     }
     ACTIVE_WATCHES.lock().unwrap().retain(|(wid, _)| wid != &id);
     Ok(())
-}
-
-/// Current status + buffered output for one watch, for a UI that wants to
-/// show live progress without waiting for completion.
-pub async fn get_watch(id: String) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(sidecar_url(&format!("/watch/{id}")))
-        .send()
-        .await
-        .map_err(|e| format!("failed to reach agent-watch sidecar: {e}"))?;
-    resp.json().await.map_err(|e| format!("bad response: {e}"))
 }
 
 /// Every watch the sidecar knows about (id/type/status/timestamps, no
@@ -601,7 +625,7 @@ pub async fn list_watches() -> Result<serde_json::Value, String> {
     if !is_sidecar_responsive() {
         return Ok(serde_json::json!({ "watches": [] }));
     }
-    let client = reqwest::Client::new();
+    let client = client();
     let resp = client
         .get(sidecar_url("/watch"))
         .send()
@@ -623,23 +647,8 @@ pub fn agent_watch_unavailable_reason() -> Option<String> {
 }
 
 #[tauri::command]
-pub async fn agent_watch_start<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    adapter_type: String,
-    workdir: Option<String>,
-    prompt: Option<String>,
-) -> Result<String, String> {
-    start_watch(app, adapter_type, workdir, prompt).await
-}
-
-#[tauri::command]
 pub async fn agent_watch_stop(id: String) -> Result<(), String> {
     stop_watch(id).await
-}
-
-#[tauri::command]
-pub async fn agent_watch_status(id: String) -> Result<serde_json::Value, String> {
-    get_watch(id).await
 }
 
 #[tauri::command]

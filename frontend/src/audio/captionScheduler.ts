@@ -350,6 +350,13 @@ function scheduleChunk(track: CaptionTrack): void {
 }
 
 let initialized = false;
+let playbackTimelineEnabled = false;
+
+/** The stage playback cursor owns response captions once registered. */
+export function setPlaybackTimelineEnabled(enabled: boolean): void {
+  playbackTimelineEnabled = enabled;
+  if (enabled) clearCaptionSchedule();
+}
 
 /** Call once (idempotent) to start listening for Rust's `tts:caption` event. */
 /** Test hook: drive scheduleChunk directly (vitest only) — it isn't
@@ -364,6 +371,7 @@ export function initCaptionListener(): void {
   void import("@tauri-apps/api/event")
     .then(({ listen }) =>
       listen<CaptionTrack>("tts:caption", (event) => {
+        if (playbackTimelineEnabled) return;
         if (event.payload) scheduleChunk(event.payload);
       }),
     )

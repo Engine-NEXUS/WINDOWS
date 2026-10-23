@@ -317,11 +317,37 @@ mod windows_impl {
     /// message instead of clicking into the void.
     pub fn is_foreground_fullscreen() -> bool {
         use windows::Win32::Foundation::RECT;
-        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect};
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect, IsZoomed};
         unsafe {
             let fg = GetForegroundWindow();
             if fg.0 == 0 {
                 return false;
+            }
+            // Standard maximized windows (Brave, VSCode, Explorer, etc.) are NOT exclusive-fullscreen games.
+            if IsZoomed(fg).as_bool() {
+                return false;
+            }
+            // Whitelist standard desktop application processes — they never block Ghost mode.
+            if let Some(proc) = crate::browser_url::foreground_process_name() {
+                let p = proc.to_lowercase();
+                if p == "brave.exe"
+                    || p == "chrome.exe"
+                    || p == "msedge.exe"
+                    || p == "firefox.exe"
+                    || p == "code.exe"
+                    || p == "whatsapp.exe"
+                    || p == "whatsapp.root.exe"
+                    || p == "explorer.exe"
+                    || p == "slack.exe"
+                    || p == "discord.exe"
+                    || p == "spotify.exe"
+                    || p == "windowsterminal.exe"
+                    || p == "cmd.exe"
+                    || p == "powershell.exe"
+                    || p == "pwsh.exe"
+                {
+                    return false;
+                }
             }
             let mut r = RECT::default();
             if GetWindowRect(fg, &mut r).as_bool() {

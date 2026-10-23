@@ -534,6 +534,7 @@ static TTS_GENERATION: AtomicUsize = AtomicUsize::new(0);
 #[tauri::command]
 pub fn stop_tts() -> Result<(), String> {
     TTS_GENERATION.fetch_add(1, Ordering::SeqCst);
+    crate::speech_sync::cancel_current();
     tracing::info!("tts: stop requested (generation {})", TTS_GENERATION.load(Ordering::SeqCst));
     // Deferred: the frontend calls stopTts() right before every speak(), so restoring instantly would
     // dip the volume between the old utterance and the new one. Stale leases end now; the original
@@ -558,6 +559,9 @@ pub async fn speak_text(
     text: String,
     voice: Option<String>,
     _speed: Option<f32>,
+    request_id: Option<String>,
+    source_center: Option<String>,
+    kind: Option<crate::speech_sync::SpeechKind>,
     state: State<'_, TtsState>,
     meeting: State<'_, Arc<MeetingState>>,
     app: tauri::AppHandle,
@@ -568,6 +572,7 @@ pub async fn speak_text(
 
     meeting.set_tts_playing(true);
     let my_generation = TTS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    crate::speech_sync::register_intent(my_generation as u64, request_id, source_center, kind);
 
     // Read settings
     let edge_voice = crate::commands::read_edge_tts_voice(&app);
@@ -624,6 +629,11 @@ pub async fn speak_text(
                     return Ok(());
                 }
                 Err(e) => {
+                    if e.starts_with("Speech stage") || e.starts_with("Speech superseded") {
+                        drop(stream_volume_lease);
+                        meeting.set_tts_playing(false);
+                        return Err(e);
+                    }
                     tracing::warn!("tts: streaming failed ({}), falling back to single-shot", e);
                     drop(stream_volume_lease);
                     // Fall through to legacy single-shot synthesis below.
@@ -902,6 +912,9 @@ pub fn get_voice_status<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn speak_cached(
     text: String,
+    request_id: Option<String>,
+    source_center: Option<String>,
+    kind: Option<crate::speech_sync::SpeechKind>,
     state: State<'_, TtsState>,
     meeting: State<'_, Arc<MeetingState>>,
     app: tauri::AppHandle,
@@ -912,6 +925,7 @@ pub async fn speak_cached(
 
     meeting.set_tts_playing(true);
     let my_generation = TTS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    crate::speech_sync::register_intent(my_generation as u64, request_id, source_center, kind);
 
     // Try to get cached audio
     let cache_arc = state.cache.clone();
@@ -1077,24 +1091,28 @@ async fn play_audio(
             Ok((_stream, handle)) => {
                 match Sink::try_new(&handle) {
                     Ok(sink) => {
-                        if TTS_GENERATION.load(Ordering::SeqCst) <= my_generation {
-                            crate::latency::first_audio();
-                            let _ = app.emit("tts:caption", &caption);
-                        }
+                        if TTS_GENERATION.load(Ordering::SeqCst) > my_generation { return Ok(()); }
+                        crate::speech_sync::prepare(my_generation as u64, caption.clone())?;
+                        if TTS_GENERATION.load(Ordering::SeqCst) > my_generation { return Ok(()); }
+                        crate::latency::first_audio();
+                        let _ = app.emit("tts:caption", &caption);
                         let source = SamplesBuffer::new(1, sample_rate, audio);
                         sink.append(source);
 
                         // Poll for stop request (barge-in)
                         while !sink.empty() {
+                            crate::speech_sync::playing(my_generation as u64, sink.get_pos().as_millis() as u64);
                             crate::volume::heartbeat();
                             crate::keep_awake::heartbeat();
                             if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
                                 sink.stop();
+                                crate::speech_sync::finish(my_generation as u64, "cancelled", 0);
                                 tracing::info!("tts: playback stopped by user (barge-in)");
                                 return Ok(());
                             }
                             std::thread::sleep(std::time::Duration::from_millis(20));
                         }
+                        crate::speech_sync::finish(my_generation as u64, "finished", caption.total_ms);
                         tracing::info!("tts: audio playback completed");
                         Ok(())
                     }
@@ -1117,41 +1135,9 @@ async fn play_audio(
     })
 }
 
-/// Read the TTS emotion setting from settings.json.
-/// Returns "auto" (default), "neutral", "cheerful", "calm", "sad",
-/// "urgent", or "whisper". "auto" picks per-text heuristics.
-fn read_tts_emotion_setting<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
-    use tauri::Manager;
-    let dir = match app.path().app_data_dir() {
-        Ok(d) => d,
-        Err(_) => return "auto".to_string(),
-    };
-    let path = dir.join("settings.json");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return "neutral".to_string(),
-    };
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-        if let Some(e) = json.get("ttsEmotion").and_then(|v| v.as_str()) {
-            return e.to_string();
-        }
-        if let Some(e) = json.get("tts_emotion").and_then(|v| v.as_str()) {
-            return e.to_string();
-        }
-    }
-    "neutral".to_string()
-}
-
-/// Resolve the effective emotion: explicit setting wins, defaults to Neutral (Ava Neutral).
-fn resolve_emotion<R: tauri::Runtime>(app: &tauri::AppHandle<R>, text: &str) -> crate::tts_edge::TtsEmotion {
-    let setting = read_tts_emotion_setting(app);
-    if setting.eq_ignore_ascii_case("auto") {
-        return crate::tts_edge::pick_emotion(text);
-    }
-    if setting.is_empty() || setting.eq_ignore_ascii_case("neutral") {
-        return crate::tts_edge::TtsEmotion::Neutral;
-    }
-    crate::tts_edge::TtsEmotion::parse_label(&setting)
+/// Resolve the effective emotion: zero-emotion directive (Doc 141) locks all utterances to Neutral.
+fn resolve_emotion<R: tauri::Runtime>(_app: &tauri::AppHandle<R>, _text: &str) -> crate::tts_edge::TtsEmotion {
+    crate::tts_edge::TtsEmotion::Neutral
 }
 
 /// Read the TTS volume setting from settings.json.
@@ -1444,13 +1430,17 @@ async fn play_audio_streamed(
             Ok((_stream, handle)) => match Sink::try_new(&handle) {
                 Ok(sink) => {
                     let mut cumulative_ms: u64 = 0;
+                    let mut completed_ms: u64 = 0;
+                    let mut queued_ms = std::collections::VecDeque::<u64>::new();
                     if let Some((audio, sr, mut caption)) = first {
                         caption.envelope_start_ms = cumulative_ms;
-                        if TTS_GENERATION.load(Ordering::SeqCst) <= my_generation {
-                            crate::latency::first_audio();
-                            let _ = app.emit("tts:caption", &caption);
-                        }
+                        if TTS_GENERATION.load(Ordering::SeqCst) > my_generation { return Ok(()); }
+                        crate::speech_sync::prepare(my_generation as u64, caption.clone())?;
+                        if TTS_GENERATION.load(Ordering::SeqCst) > my_generation { return Ok(()); }
+                        crate::latency::first_audio();
+                        let _ = app.emit("tts:caption", &caption);
                         cumulative_ms += caption.total_ms;
+                        queued_ms.push_back(caption.total_ms);
                         sink.append(SamplesBuffer::new(1, sr, audio));
                     }
                     // Drain the producer channel (blocking recv is fine here —
@@ -1458,13 +1448,20 @@ async fn play_audio_streamed(
                     loop {
                         // Short timeout so the volume heartbeat keeps beating (and a barge-in is
                         // noticed) while the producer is still synthesizing the next sentence.
-                        let msg = match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                        let msg = match rx.recv_timeout(std::time::Duration::from_millis(20)) {
                             Ok(m) => m,
                             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                while queued_ms.len() > sink.len() {
+                                    completed_ms += queued_ms.pop_front().unwrap_or(0);
+                                }
+                                if !sink.empty() {
+                                    crate::speech_sync::playing(my_generation as u64, completed_ms + sink.get_pos().as_millis() as u64);
+                                }
                                 crate::volume::heartbeat();
                                 crate::keep_awake::heartbeat();
                                 if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
                                     sink.stop();
+                                    crate::speech_sync::finish(my_generation as u64, "cancelled", completed_ms);
                                     tracing::info!("tts: streaming stopped by user (barge-in)");
                                     return Ok(());
                                 }
@@ -1476,6 +1473,7 @@ async fn play_audio_streamed(
                         crate::keep_awake::heartbeat();
                         if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
                             sink.stop();
+                            crate::speech_sync::finish(my_generation as u64, "cancelled", completed_ms);
                             tracing::info!("tts: streaming stopped by user (barge-in)");
                             return Ok(());
                         }
@@ -1487,22 +1485,30 @@ async fn play_audio_streamed(
                                 caption.envelope_start_ms = cumulative_ms;
                                 crate::latency::first_audio();
                                 let _ = app.emit("tts:caption", &caption);
+                                crate::speech_sync::chunk(my_generation as u64, caption.clone());
                                 cumulative_ms += caption.total_ms;
+                                queued_ms.push_back(caption.total_ms);
                                 sink.append(SamplesBuffer::new(1, sr, audio));
                             }
                             None => break,
                         }
                     }
                     while !sink.empty() {
+                        while queued_ms.len() > sink.len() {
+                            completed_ms += queued_ms.pop_front().unwrap_or(0);
+                        }
+                        crate::speech_sync::playing(my_generation as u64, completed_ms + sink.get_pos().as_millis() as u64);
                         crate::volume::heartbeat();
                         crate::keep_awake::heartbeat();
                         if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
                             sink.stop();
+                            crate::speech_sync::finish(my_generation as u64, "cancelled", completed_ms);
                             tracing::info!("tts: playback stopped by user (barge-in)");
                             return Ok(());
                         }
                         std::thread::sleep(std::time::Duration::from_millis(20));
                     }
+                    crate::speech_sync::finish(my_generation as u64, "finished", cumulative_ms);
                     tracing::info!("tts: streaming playback completed");
                     Ok(())
                 }
@@ -1612,6 +1618,7 @@ where
 
     meeting.set_tts_playing(true);
     let my_generation = TTS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    crate::speech_sync::register_intent(my_generation as u64, None, Some("screen_tour".into()), Some(crate::speech_sync::SpeechKind::Narration));
     for l in &lines {
         crate::directed::note_spoken(l);
     }
@@ -1706,9 +1713,10 @@ where
         let mut tracker = NarrationTracker::new();
         let mut appended = 0usize;
         let mut cumulative_ms: u64 = 0;
+        let mut durations = Vec::<u64>::new();
         let mut channel_done = false;
 
-        let append = |sink: &Sink, item: Item, appended: &mut usize, cumulative: &mut u64| {
+        let append = |sink: &Sink, item: Item, appended: &mut usize, cumulative: &mut u64, durations: &mut Vec<u64>| {
             let (mut audio, sr, mut caption) = item;
             let own_ms = audio.len() as u64 * 1000 / (sr as u64).max(1);
             pad_silence(&mut audio, sr, NARRATION_GAP_MS);
@@ -1720,25 +1728,33 @@ where
                 caption.total_ms = own_ms;
             }
             let _ = app_for_audio.emit("tts:caption", &caption);
+            if *appended > 0 {
+                crate::speech_sync::chunk(my_generation as u64, caption.clone());
+            }
             *cumulative += own_ms + NARRATION_GAP_MS;
+            durations.push(own_ms + NARRATION_GAP_MS);
             sink.append(SamplesBuffer::new(1, sr, audio));
             *appended += 1;
         };
 
-        append(&sink, first, &mut appended, &mut cumulative_ms);
+        if let Err(e) = crate::speech_sync::prepare(my_generation as u64, first.2.clone()) {
+            return NarrateOutcome::Unavailable(e);
+        }
+        append(&sink, first, &mut appended, &mut cumulative_ms, &mut durations);
         for ev in tracker.update(appended, sink.len()) {
             on_event(ev);
         }
         loop {
             if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
                 sink.stop();
+                crate::speech_sync::finish(my_generation as u64, "cancelled", 0);
                 return NarrateOutcome::Cancelled;
             }
             if !channel_done {
                 loop {
                     match rx.try_recv() {
                         Ok(Some(item)) => {
-                            append(&sink, item, &mut appended, &mut cumulative_ms);
+                            append(&sink, item, &mut appended, &mut cumulative_ms, &mut durations);
                         }
                         Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                             channel_done = true;
@@ -1753,7 +1769,13 @@ where
             for ev in tracker.update(appended, sink.len()) {
                 on_event(ev);
             }
+            let completed = appended.saturating_sub(sink.len());
+            let prior_ms: u64 = durations.iter().take(completed).sum();
+            if !sink.empty() {
+                crate::speech_sync::playing(my_generation as u64, prior_ms + sink.get_pos().as_millis() as u64);
+            }
             if channel_done && sink.empty() {
+                crate::speech_sync::finish(my_generation as u64, "finished", cumulative_ms);
                 return NarrateOutcome::Completed;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));

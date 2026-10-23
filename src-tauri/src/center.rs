@@ -73,6 +73,8 @@ pub fn is_side_effect(intent: &ParsedIntent) -> bool {
     matches!(
         intent,
         ParsedIntent::OpenArchitect
+            | ParsedIntent::FileAction { .. }
+            | ParsedIntent::FileUndo
             | ParsedIntent::GitHubCommand { .. }
             | ParsedIntent::OrderFood { .. }
             | ParsedIntent::SearchProduct { .. }
@@ -280,7 +282,8 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::OpenApp { .. }
         | ParsedIntent::OpenUrl { .. }
         | ParsedIntent::CloseApp { .. }
-        | ParsedIntent::OpenSettings => "AppCenter",
+        | ParsedIntent::OpenSettings
+        | ParsedIntent::OpenGitHubDashboard { .. } => "AppCenter",
 
         ParsedIntent::BrowserTab { .. }
         | ParsedIntent::BrowserCloseTab { .. }
@@ -304,6 +307,7 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::GitHubCommand { .. } => "GitHubCenter",
 
         ParsedIntent::OpenArchitect
+        | ParsedIntent::OpenCodeRabbitHub
         | ParsedIntent::AnalyseRepo { .. }
         | ParsedIntent::AnalysePr { .. }
         | ParsedIntent::AnalyseLatestPr { .. }
@@ -311,7 +315,10 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
         | ParsedIntent::RunOnLocalhost
         | ParsedIntent::CodeProject { .. }
         | ParsedIntent::CodingAgentTask { .. }
-        | ParsedIntent::WatchAgentTask { .. } => "ArchitectCenter",
+        | ParsedIntent::WatchAgentTask { .. }
+        | ParsedIntent::WatchThenPower { .. }
+        | ParsedIntent::WatchPlanCommand { .. }
+        | ParsedIntent::AgentHookCommand { .. } => "ArchitectCenter",
 
         ParsedIntent::Search { .. } => "KnowledgeCenter",
 
@@ -329,6 +336,8 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
         | ParsedIntent::GhostAction { .. }
         | ParsedIntent::ScreenClick { .. }
         | ParsedIntent::ScreenRead { .. } => "GhostCenter",
+
+        ParsedIntent::FileAction { .. } | ParsedIntent::FileUndo => "FileCenter",
 
         ParsedIntent::Greeting { .. }
         | ParsedIntent::NeedMoreInfo { .. } => "GreetingCenter",
@@ -480,7 +489,7 @@ pub fn validate(intent: &ParsedIntent, transcript: &str, has_dialog_context: boo
     }
 }
 
-/// All 16 action sub-centers in the NEXUS Command Center architecture.
+/// All 17 action sub-centers in the NEXUS Command Center architecture.
 #[allow(dead_code)]
 pub const ALL_SUB_CENTERS: &[&str] = &[
     "AppCenter",
@@ -496,6 +505,7 @@ pub const ALL_SUB_CENTERS: &[&str] = &[
     "HandCenter",
     "GoogleCenter",
     "MemoryCenter",
+    "FileCenter",
     "DictationCenter",
     "GreetingCenter",
     "KnowledgeCenter",
@@ -647,6 +657,7 @@ mod tests {
             ("HandCenter", ParsedIntent::EnterHandMode),
             ("GoogleCenter", ParsedIntent::WatchScreenEmail),
             ("MemoryCenter", ParsedIntent::MemoryAudit),
+            ("FileCenter", ParsedIntent::FileUndo),
             ("DictationCenter", ParsedIntent::StartDictation),
             ("GreetingCenter", ParsedIntent::Greeting { reply: "x".into() }),
             ("KnowledgeCenter", ParsedIntent::Search { query: "x".into() }),
@@ -970,6 +981,68 @@ mod director_tests {
         assert_eq!(
             action_disposition(&nlu, "nexus. oco notepad.", "nlu", TurnOwnership::Rejected, true),
             ActionDisposition::AmbientDrop
+        );
+    }
+
+    fn live(intent: &str) -> ParsedIntent {
+        ParsedIntent::NluResult {
+            intent: intent.to_string(),
+            slots: serde_json::json!({}),
+            confidence: 1.0,
+        }
+    }
+
+    /// Regression: with speaker verification off (every turn `Unenrolled`) an
+    /// explicit ghost-session command must run, not be dropped as ambient.
+    #[test]
+    fn test_ghost_unenrolled_explicit_commands_are_allowed() {
+        for source in [
+            "deterministic",
+            "deterministic-live",
+            "deterministic-dictation",
+            "deterministic-screen-analysis",
+        ] {
+            assert_eq!(
+                action_disposition(
+                    &live("browser_new_tab"),
+                    "new tab",
+                    source,
+                    TurnOwnership::Unenrolled,
+                    true
+                ),
+                ActionDisposition::Allow,
+                "source {source}"
+            );
+        }
+    }
+
+    /// The ghost mic is hot: narrative speech stays ambient, and a voice that is
+    /// positively not the owner is never obeyed.
+    #[test]
+    fn test_ghost_unenrolled_narrative_still_dropped() {
+        let unknown = ParsedIntent::Unknown {
+            raw: "we should probably leave soon".to_string(),
+        };
+        assert_eq!(
+            action_disposition(&unknown, "we should probably leave soon", "none", TurnOwnership::Unenrolled, true),
+            ActionDisposition::AmbientDrop
+        );
+        assert_eq!(
+            action_disposition(&live("type_text"), "type hi", "deterministic-live", TurnOwnership::Rejected, true),
+            ActionDisposition::AmbientDrop
+        );
+    }
+
+    /// Outside ghost the original behavior is unchanged.
+    #[test]
+    fn test_non_ghost_unenrolled_unchanged() {
+        assert_eq!(
+            action_disposition(&live("browser_new_tab"), "new tab", "deterministic-live", TurnOwnership::Unenrolled, false),
+            ActionDisposition::Allow
+        );
+        assert_eq!(
+            action_disposition(&live("type_text"), "type hi", "nlu", TurnOwnership::Unenrolled, false),
+            ActionDisposition::Clarify
         );
     }
 }

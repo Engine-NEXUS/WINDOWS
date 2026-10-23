@@ -12,12 +12,19 @@
     1
   ],
   "runtime": {
-    "threshold_source": "acoustic_profile.json kws_threshold",
     "startup_grace_milliseconds": 1500,
     "refractory_milliseconds": 3000,
     "smoothing_frames": 12,
     "agc_target_rms": 0.035,
-    "agc_max_gain": 30.0
+    "agc_max_gain": 30.0,
+    "trainer_frontend": {
+      "highpass_hz": 80.0,
+      "silence_rms": 0.002,
+      "target_rms": 0.03,
+      "max_gain": 15.0,
+      "floor_gain": 1.0
+    },
+    "dsp_spec_sha256": "9e11903bd888aada888d85a314814cd76f9d489a2da10efcae31b565816eae17"
   },
   "models": [
     {

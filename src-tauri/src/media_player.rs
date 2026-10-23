@@ -35,18 +35,105 @@ pub fn resolve_player(requested: Option<&str>) -> String {
     // Try reading default from local settings.json
     if let Some(config_dir) = dirs_next::data_dir() {
         let settings_path = config_dir.join("com.nexus.assistant").join("settings.json");
-        if settings_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&settings_path) {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(p) = val.get("defaultMusicPlayer").and_then(|v| v.as_str()) {
-                        return normalize_player_name(p).to_string();
-                    }
-                }
+        if let Ok(content) = std::fs::read_to_string(&settings_path) {
+            if let Some(p) = player_from_settings(&content) {
+                return p;
             }
         }
     }
 
     PLAYER_SPOTIFY.to_string()
+}
+
+/// The saved `defaultMusicPlayer`, if the settings text has a usable one. Pure.
+fn player_from_settings(content: &str) -> Option<String> {
+    let val = serde_json::from_str::<serde_json::Value>(content).ok()?;
+    let p = val.get("defaultMusicPlayer")?.as_str()?;
+    if p.trim().is_empty() {
+        return None;
+    }
+    Some(normalize_player_name(p).to_string())
+}
+
+/// Percent-encode everything except unreserved characters, so a spoken title can never add shell or URL syntax
+/// (`R&B`, `rock & roll`, `50% off`, `a;b`). Pure.
+pub fn encode_component(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() * 3);
+    for b in text.trim().bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+pub fn spotify_search_uri(query: &str) -> String {
+    format!("spotify:search:{}", encode_component(query))
+}
+
+pub fn apple_music_search_url(query: &str) -> String {
+    format!("https://music.apple.com/search?term={}", encode_component(query))
+}
+
+/// What a Windows media request comes to. Pure, so every phrase can be checked without touching the machine.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, PartialEq)]
+enum WinPlan {
+    /// Send this media key, then say this.
+    Key(u8, String),
+    /// Open this address (an app protocol or a web page), then say this.
+    Open(String, String),
+    /// Say this and do nothing.
+    Refuse(String),
+}
+
+#[cfg(any(target_os = "windows", test))]
+const VK_PLAY_PAUSE: u8 = 0xB3;
+#[cfg(any(target_os = "windows", test))]
+const VK_NEXT: u8 = 0xB0;
+#[cfg(any(target_os = "windows", test))]
+const VK_PREV: u8 = 0xB1;
+#[cfg(any(target_os = "windows", test))]
+const VK_STOP: u8 = 0xB2;
+
+#[cfg(any(target_os = "windows", test))]
+fn plan_windows(action: &str, query: Option<&str>, player: &str, display: &str, installed: impl Fn(&str) -> bool) -> WinPlan {
+    let query = query.map(str::trim).filter(|q| !q.is_empty());
+    match action {
+        "open" | "launch" => {
+            if player == PLAYER_APPLE_MUSIC {
+                if installed(PLAYER_APPLE_MUSIC) {
+                    WinPlan::Open("applemusic:".into(), format!("Opened {display}, sir."))
+                } else {
+                    WinPlan::Open("https://music.apple.com".into(), "Apple Music isn't installed, so I opened it in the browser, sir.".into())
+                }
+            } else if installed(PLAYER_SPOTIFY) {
+                WinPlan::Open("spotify:".into(), format!("Opened {display}, sir."))
+            } else {
+                WinPlan::Refuse("Spotify isn't installed on this PC, sir.".into())
+            }
+        }
+        "play_pause" | "toggle" => WinPlan::Key(VK_PLAY_PAUSE, format!("Toggled playback, sir.")),
+        "play" => match query {
+            Some(q) if player == PLAYER_SPOTIFY => {
+                if installed(PLAYER_SPOTIFY) {
+                    // A search page only: starting a particular track needs the Spotify web API, so say what happened.
+                    WinPlan::Open(spotify_search_uri(q), format!("I opened a Spotify search for {q}, sir. Press play on the result."))
+                } else {
+                    WinPlan::Refuse("Spotify isn't installed on this PC, sir.".into())
+                }
+            }
+            Some(q) => WinPlan::Open(apple_music_search_url(q), format!("I opened an Apple Music search for {q}, sir.")),
+            None => WinPlan::Key(VK_PLAY_PAUSE, format!("Play or pause sent, sir.")),
+        },
+        "pause" => WinPlan::Key(VK_PLAY_PAUSE, "Pause sent, sir.".into()),
+        "next" | "skip" => WinPlan::Key(VK_NEXT, "Skipped to the next track, sir.".into()),
+        "previous" | "prev" => WinPlan::Key(VK_PREV, "Back to the previous track, sir.".into()),
+        "stop" => WinPlan::Key(VK_STOP, "Stopped, sir.".into()),
+        other => WinPlan::Refuse(format!("I don't know the media action {other}, sir.")),
+    }
 }
 
 /// Display name for user-facing speech and captions.
@@ -218,87 +305,39 @@ fn execute_windows_action(
     player: &str,
     display: &str,
 ) -> Result<String, String> {
-    match action {
-        "open" | "launch" => open_player_windows(player, display),
-        "play_pause" | "toggle" => {
-            send_windows_media_key(0xB3)?; // VK_MEDIA_PLAY_PAUSE
-            Ok(format!("Toggled playback on {display}, sir."))
+    match plan_windows(action, query, player, display, protocol_registered) {
+        WinPlan::Key(vk, said) => {
+            send_windows_media_key(vk)?;
+            Ok(said)
         }
-        "play" => {
-            if let Some(q) = query {
-                play_track_windows(player, q, display)
-            } else {
-                send_windows_media_key(0xB3)?; // VK_MEDIA_PLAY_PAUSE
-                Ok(format!("Playing on {display}, sir."))
-            }
+        WinPlan::Open(address, said) => {
+            open_address(&address)?;
+            Ok(said)
         }
-        "pause" => {
-            send_windows_media_key(0xB3)?; // VK_MEDIA_PLAY_PAUSE
-            Ok(format!("Paused {display}, sir."))
-        }
-        "next" | "skip" => {
-            send_windows_media_key(0xB0)?; // VK_MEDIA_NEXT_TRACK
-            Ok(format!("Skipped to the next track on {display}, sir."))
-        }
-        "previous" | "prev" => {
-            send_windows_media_key(0xB1)?; // VK_MEDIA_PREV_TRACK
-            Ok(format!("Playing previous track on {display}, sir."))
-        }
-        "stop" => {
-            send_windows_media_key(0xB2)?; // VK_MEDIA_STOP
-            Ok(format!("Stopped {display}, sir."))
-        }
-        _ => Err(format!("Unknown media action: {action}")),
+        WinPlan::Refuse(said) => Err(said),
     }
 }
 
+/// Is an app registered for this player's address scheme (`spotify:` / `applemusic:`)?
 #[cfg(target_os = "windows")]
-fn open_player_windows(player: &str, display: &str) -> Result<String, String> {
-    if player == PLAYER_APPLE_MUSIC {
-        // Try Windows Apple Music protocol or store app
-        let launched = Command::new("cmd")
-            .args(["/c", "start", "applemusic:"])
-            .spawn()
-            .is_ok();
-        if !launched {
-            let _ = Command::new("cmd")
-                .args(["/c", "start", "itms:"])
-                .spawn();
-        }
-    } else {
-        // Spotify protocol or executable
-        let launched = Command::new("cmd")
-            .args(["/c", "start", "spotify:"])
-            .spawn()
-            .is_ok();
-        if !launched {
-            if let Some(entry) = crate::app_registry::lookup_strict("spotify") {
-                let _ = crate::app_registry::launch(&entry);
-            }
-        }
-    }
-    Ok(format!("Opened {display}, sir."))
+fn protocol_registered(player: &str) -> bool {
+    let key = if player == PLAYER_APPLE_MUSIC { r"HKCR\applemusic" } else { r"HKCR\spotify" };
+    Command::new("reg")
+        .args(["query", key])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
+/// Open an address through the shell's own opener, never through `cmd`: the argument is one value, so nothing
+/// in it can be read as a second command.
 #[cfg(target_os = "windows")]
-fn play_track_windows(player: &str, query: &str, _display: &str) -> Result<String, String> {
-    if player == PLAYER_SPOTIFY {
-        let uri = format!("spotify:search:{}", query);
-        let _ = Command::new("cmd")
-            .args(["/c", "start", &uri])
-            .spawn();
-        // Give Spotify a brief moment to focus, then send play key
-        std::thread::sleep(std::time::Duration::from_millis(600));
-        let _ = send_windows_media_key(0xB3);
-        Ok(format!("Searching and playing {} on Spotify, sir.", query))
-    } else {
-        // Apple Music search web or protocol
-        let url = format!("https://music.apple.com/search?term={}", query.replace(' ', "+"));
-        let _ = Command::new("cmd")
-            .args(["/c", "start", &url])
-            .spawn();
-        Ok(format!("Opening {} on Apple Music, sir.", query))
-    }
+fn open_address(address: &str) -> Result<(), String> {
+    Command::new("explorer.exe")
+        .arg(address)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("I couldn't open that, sir: {e}"))
 }
 
 #[cfg(target_os = "windows")]
@@ -337,5 +376,124 @@ mod tests {
     fn test_resolve_player_explicit() {
         assert_eq!(resolve_player(Some("spotify")), "spotify");
         assert_eq!(resolve_player(Some("apple music")), "apple_music");
+    }
+
+    #[test]
+    fn the_saved_default_player_is_read_from_settings_and_junk_is_ignored() {
+        assert_eq!(player_from_settings(r#"{"defaultMusicPlayer":"apple_music"}"#).as_deref(), Some(PLAYER_APPLE_MUSIC));
+        assert_eq!(player_from_settings(r#"{"defaultMusicPlayer":"Spotify"}"#).as_deref(), Some(PLAYER_SPOTIFY));
+        assert_eq!(player_from_settings(r#"{"defaultMusicPlayer":"  "}"#), None);
+        assert_eq!(player_from_settings(r#"{"defaultMusicPlayer":5}"#), None);
+        assert_eq!(player_from_settings(r#"{"other":1}"#), None);
+        assert_eq!(player_from_settings("not json"), None);
+    }
+
+    #[test]
+    fn a_spoken_title_can_never_add_shell_or_url_syntax() {
+        assert_eq!(encode_component("R&B"), "R%26B");
+        assert_eq!(encode_component("rock & roll"), "rock%20%26%20roll");
+        assert_eq!(encode_component("50% off; calc | x ^ y"), "50%25%20off%3B%20calc%20%7C%20x%20%5E%20y");
+        assert_eq!(encode_component("  Despacito  "), "Despacito");
+        assert_eq!(encode_component("caf\u{e9}"), "caf%C3%A9");
+        assert_eq!(encode_component("AC-DC_live.v2~"), "AC-DC_live.v2~");
+        for evil in ["a&calc", "a|b", "a\"b", "a'b", "a<b>", "a^b", "a%b", "a;b", "a`b", "a$b", "a(b)", "a\nb"] {
+            let e = encode_component(evil);
+            assert!(e.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '%' | '-' | '_' | '.' | '~')), "{evil} -> {e}");
+        }
+        assert_eq!(spotify_search_uri("R&B hits"), "spotify:search:R%26B%20hits");
+        assert_eq!(apple_music_search_url("R&B hits"), "https://music.apple.com/search?term=R%26B%20hits");
+    }
+
+    fn all_installed(_: &str) -> bool { true }
+    fn none_installed(_: &str) -> bool { false }
+
+    #[test]
+    fn transport_phrases_send_the_right_media_key() {
+        for (action, key) in [("play_pause", VK_PLAY_PAUSE), ("toggle", VK_PLAY_PAUSE), ("pause", VK_PLAY_PAUSE),
+            ("next", VK_NEXT), ("skip", VK_NEXT), ("previous", VK_PREV), ("prev", VK_PREV), ("stop", VK_STOP)] {
+            match plan_windows(action, None, PLAYER_SPOTIFY, "Spotify", none_installed) {
+                WinPlan::Key(k, said) => {
+                    assert_eq!(k, key, "{action}");
+                    assert!(said.ends_with("sir."), "{said}");
+                }
+                other => panic!("{action}: {other:?}"),
+            }
+        }
+        // plain "play" with nothing to search for is the play/pause key, and it says so
+        assert!(matches!(plan_windows("play", None, PLAYER_SPOTIFY, "Spotify", none_installed), WinPlan::Key(VK_PLAY_PAUSE, _)));
+        assert!(matches!(plan_windows("play", Some("  "), PLAYER_SPOTIFY, "Spotify", none_installed), WinPlan::Key(VK_PLAY_PAUSE, _)));
+    }
+
+    #[test]
+    fn playing_a_title_opens_a_search_and_does_not_claim_it_is_playing() {
+        let plan = plan_windows("play", Some("bohemian rhapsody"), PLAYER_SPOTIFY, "Spotify", all_installed);
+        match plan {
+            WinPlan::Open(addr, said) => {
+                assert_eq!(addr, "spotify:search:bohemian%20rhapsody");
+                assert!(said.contains("opened a Spotify search"), "{said}");
+                assert!(!said.to_lowercase().contains("playing"), "must not claim playback: {said}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // no media key is sent after a search (it would pause whatever is playing)
+        let plan = plan_windows("play", Some("R&B"), PLAYER_APPLE_MUSIC, "Apple Music", none_installed);
+        assert!(matches!(plan, WinPlan::Open(ref a, _) if a == "https://music.apple.com/search?term=R%26B"), "{plan:?}");
+    }
+
+    #[test]
+    fn a_missing_player_is_said_not_pretended() {
+        assert!(matches!(plan_windows("open", None, PLAYER_SPOTIFY, "Spotify", none_installed), WinPlan::Refuse(ref s) if s.contains("isn't installed")));
+        assert!(matches!(plan_windows("play", Some("x"), PLAYER_SPOTIFY, "Spotify", none_installed), WinPlan::Refuse(_)));
+        assert_eq!(plan_windows("open", None, PLAYER_SPOTIFY, "Spotify", all_installed), WinPlan::Open("spotify:".into(), "Opened Spotify, sir.".into()));
+        // Apple Music falls back to the web page and says so
+        assert!(matches!(plan_windows("open", None, PLAYER_APPLE_MUSIC, "Apple Music", none_installed),
+            WinPlan::Open(ref a, ref s) if a == "https://music.apple.com" && s.contains("browser")));
+        assert_eq!(plan_windows("open", None, PLAYER_APPLE_MUSIC, "Apple Music", all_installed),
+            WinPlan::Open("applemusic:".into(), "Opened Apple Music, sir.".into()));
+    }
+
+    /// Live probe (run with `--ignored --nocapture`): which players this PC has, and how the usual phrases parse.
+    #[test]
+    #[ignore = "reads the registry of the real machine; run by hand"]
+    fn live_probe_players_and_phrases() {
+        #[cfg(target_os = "windows")]
+        println!("[PROOF] spotify registered={} applemusic registered={}", protocol_registered(PLAYER_SPOTIFY), protocol_registered(PLAYER_APPLE_MUSIC));
+        for phrase in ["play despacito", "play bohemian rhapsody on spotify", "play the song despacito", "play some music", "next song",
+            "pause", "open spotify", "play despacito by luis fonsi", "play rock and roll on apple music", "shuffle my liked songs"] {
+            let r = crate::intent_parser::parse_deterministic(phrase);
+            println!("[PROOF] {phrase:?} -> {:?}", r.map(|x| x.intent));
+        }
+    }
+
+    #[test]
+    fn bare_play_title_is_music_but_pronouns_transport_words_and_videos_are_not() {
+        use crate::intent_parser::{is_music_title, parse_deterministic, ParsedIntent};
+        for title in ["despacito", "bohemian rhapsody", "despacito by luis fonsi", "the weeknd", "believer imagine dragons", "arijit singh songs"] {
+            assert!(is_music_title(title), "{title}");
+        }
+        for not in ["it", "that", "again", "pause", "next", "the next song", "previous track", "something", "music", "",
+            "minecraft", "the video on youtube", "a movie", "chess online", "episode 4", "twitch stream"] {
+            assert!(!is_music_title(not), "{not:?}");
+        }
+        assert!(!is_music_title(&"word ".repeat(13)), "a whole sentence is not a title");
+        let play = |t: &str| parse_deterministic(t).map(|r| r.intent);
+        assert!(matches!(play("play despacito"), Some(ParsedIntent::PlayMusic { query: Some(ref q), player: None }) if q == "despacito"));
+        assert!(matches!(play("play despacito by luis fonsi"), Some(ParsedIntent::PlayMusic { query: Some(ref q), .. }) if q == "despacito by luis fonsi"));
+        assert!(matches!(play("put on believer"), Some(ParsedIntent::PlayMusic { query: Some(ref q), .. }) if q == "believer"));
+        // the exact forms keep winning
+        assert!(matches!(play("play"), Some(ParsedIntent::MediaPlayPause)));
+        assert!(matches!(play("play/pause"), Some(ParsedIntent::MediaPlayPause)));
+        assert!(matches!(play("play bohemian rhapsody on spotify"), Some(ParsedIntent::PlayMusic { player: Some(ref p), .. }) if p == "spotify"));
+        assert!(matches!(play("play some music"), Some(ParsedIntent::PlayMusic { query: None, .. })));
+        // not music: never claimed as music
+        assert!(!matches!(play("play minecraft"), Some(ParsedIntent::PlayMusic { .. })));
+        assert!(!matches!(play("play the video on youtube"), Some(ParsedIntent::PlayMusic { .. })));
+        assert!(!matches!(play("play it again"), Some(ParsedIntent::PlayMusic { .. })));
+    }
+
+    #[test]
+    fn an_unknown_action_is_refused_without_side_effects() {
+        assert!(matches!(plan_windows("rewind", None, PLAYER_SPOTIFY, "Spotify", all_installed), WinPlan::Refuse(ref s) if s.contains("rewind")));
+        assert!(matches!(plan_windows("", None, PLAYER_SPOTIFY, "Spotify", all_installed), WinPlan::Refuse(_)));
     }
 }

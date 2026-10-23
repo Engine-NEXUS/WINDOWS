@@ -20,7 +20,11 @@ database_id = "4bca5d1b-55e1-4a30-bbf9-ca28cf96e3ea"
 
 # ---- Environment variables (non-secret) ----
 [vars]
-# No non-secret vars needed. OAuth client IDs/secrets are set as secrets:
+# Identity gate (Feature 88). "off" lets any caller who names a user_id use the AI path and
+# spend quota; "strict" requires an approved device (claim -> admin approve -> bearer token).
+# Deploy "strict" only after existing devices have claimed a profile, or they get 401/403.
+MIGRATION_MODE = "strict"
+# OAuth client IDs/secrets are set as secrets:
 #   npx wrangler secret put GOOGLE_CLIENT_ID
 #   npx wrangler secret put GOOGLE_CLIENT_SECRET
 #   npx wrangler secret put GITHUB_CLIENT_ID

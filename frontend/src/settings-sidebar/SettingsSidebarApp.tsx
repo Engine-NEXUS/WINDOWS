@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { HandModeSection } from "./HandModeSection";
 import { AgentWatchSection } from "./AgentWatchSection";
 import { invoke } from "@tauri-apps/api/core";
 import { isPlausibleGeminiKey } from "./keyFormat";
-import { identityBanner, type IdentityBanner } from "../setup/identityBanner";
+import { groqKeyHint, GROQ_KEY_URL } from "./keyHints";
+import { identityBanner } from "../setup/identityBanner";
 import {
   setSidecarBaseUrl,
   getOAuthStatus,
@@ -16,8 +17,11 @@ import "./hub/hub.css";
 import { HubHome, type HubPage } from "./hub/HubHome";
 import { ApiKeysPage } from "./hub/ApiKeysPage";
 import { MemoryPage } from "./hub/MemoryPage";
+import { WAKE_SOUNDS, clampWakeVolume, normalizeWakeSound } from "./wakeSounds";
+import { ActionsPage } from "./hub/ActionsPage";
 import { useAccounts, useInsights } from "./hub/useHubData";
 import { McpServersPanel } from "./McpServersPanel";
+import { ApiKeyIcon } from "./ApiKeyIcons";
 
 /**
  * NEXUS Settings Sidebar
@@ -49,6 +53,9 @@ interface Settings {
   ttsVoice: string;
   speechRate: number;
   ttsVolume: number;
+  wakeSound?: boolean;
+  wakeSoundStyle?: string;
+  wakeSoundVolume?: number;
   ttsProvider: string;
   groqApiKey: string;
   edgeTtsVoice: string;
@@ -64,7 +71,7 @@ interface Settings {
   geminiApiKey?: string;
   // Cerebras API key (9Router — fastest free provider, ~80ms)
   cerebrasApiKey?: string;
-  // Moonshine STT model (medium_streaming=6.65% WER, small_streaming=7.84%)
+  // Moonshine STT model (small_streaming=7.84% WER ≈300MB default; medium_streaming=6.65% ≈400MB)
   moonshineModel?: string;
   // TTS voice emotion (auto = heuristics per reply; prosody via rate/pitch)
   ttsEmotion?: string;
@@ -75,6 +82,9 @@ interface Settings {
   // Memory Core: record the working window (where-you-left-off) / speak the boot briefing
   memcoreActivity?: boolean;
   memcoreBriefing?: boolean;
+  memcoreProfile?: boolean;
+  memcoreRoutines?: boolean;
+  memcoreReview?: boolean;
   memcoreTimetable?: boolean;
   memcoreMail?: boolean;
   memcoreWhatsapp?: boolean;
@@ -93,6 +103,12 @@ interface Settings {
   telegramChatId?: string;
   // Ghost FIFO queue: speak "Queued, sir." once per session at depth 2+ (D5/D6)
   ghostDepthAck?: boolean;
+  sttConfidenceGate?: boolean;
+  sttCommandHints?: boolean;
+  wakeSeedOffsetMs?: number;
+  wakeDspProfile?: string;
+  wakeVerifyMode?: string;
+  wakeVerifyHigh?: number;
   // Ghost FIFO queue: per-step watchdog timeout, ms (D7)
   ghostStepTimeoutMs?: number;
   // Ghost FIFO queue: inter-command gap τ, ms (D4)
@@ -145,13 +161,16 @@ const DEFAULT_SETTINGS: Settings = {
   speakerVerification: false,
   meetingModeAuto: true,
   suppressTtsInMeetings: true,
-  localSttOnly: true,
+  localSttOnly: false,
   serverUrl: "",
   userId: "",
   deviceId: "",
   ttsVoice: "en-US-AvaNeural",
   speechRate: 1.15,
   ttsVolume: 75,
+  wakeSound: true,
+  wakeSoundStyle: "rise",
+  wakeSoundVolume: 70,
   ttsProvider: "edge",
   groqApiKey: "",
   edgeTtsVoice: "en-US-AvaNeural",
@@ -167,7 +186,7 @@ const DEFAULT_SETTINGS: Settings = {
   orbListenMode: 1,
   geminiApiKey: "",
   cerebrasApiKey: "",
-  moonshineModel: "medium_streaming",
+  moonshineModel: "small_streaming",
   ttsEmotion: "auto",
   personaMode: "butler",
   themeMode: "dark",
@@ -175,6 +194,12 @@ const DEFAULT_SETTINGS: Settings = {
   visionRace: "sequential",
   telegramChatId: "",
   ghostDepthAck: true,
+  sttConfidenceGate: false,
+  sttCommandHints: false,
+  wakeSeedOffsetMs: 0,
+  wakeDspProfile: "legacy",
+  wakeVerifyMode: "",
+  wakeVerifyHigh: 0.97,
   ghostStepTimeoutMs: 15000,
   ghostTurnGapMs: 1000,
   ghostEngagementSecs: 0,
@@ -203,13 +228,15 @@ const PAGE_TITLES: Record<HubPage, string> = {
   home: "Command Hub",
   keys: "API Keys",
   memory: "Memory",
+  actions: "Actions & Permissions",
   audio: "Audio",
   display: "Display",
-  connections: "Connections",
+  connections: "MCP",
   advanced: "Advanced",
 };
 
 export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string) => void }) {
+  const dirtyFields = useRef<Set<keyof Settings>>(new Set());
   const [page, setPage] = useState<HubPage>("home");
   const [insightsKey, setInsightsKey] = useState(0);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
@@ -293,13 +320,19 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
   }, []);
 
   const update = useCallback(<K extends keyof Settings>(key: K, value: Settings[K]) => {
+    dirtyFields.current.add(key);
     setSettings((prev) => ({ ...prev, [key]: value }));
     setSaved(false);
   }, []);
 
   const handleSave = async () => {
     try {
-      await invoke("save_settings", { settings });
+      const changed = [...dirtyFields.current];
+      if (changed.length) {
+        const patch = Object.fromEntries(changed.map((key) => [key, settings[key]]));
+        await invoke("settings_patch", { patch });
+        dirtyFields.current.clear();
+      }
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (e) {
@@ -308,6 +341,7 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
   };
 
   const handleReset = () => {
+    dirtyFields.current = new Set(Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[]);
     setSettings(DEFAULT_SETTINGS);
     setSaved(false);
   };
@@ -355,17 +389,17 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
         )}
         {page === "keys" && <ApiKeysPage onChanged={() => setInsightsKey((k) => k + 1)} />}
         {page === "memory" && <MemoryPage onFlagChanged={(flag, on) => update(flag, on)} />}
+        {page === "actions" && <ActionsPage />}
         {page === "connections" && (
-          <div style={{ display: "flex", flexDirection: "column", height: "100%", gap: "16px", padding: "12px 14px 24px" }}>
-            <McpServersPanel style={{ flex: 1, minHeight: "560px" }} />
-            <ConnectionsTab settings={settings} update={update} />
+          <div style={{ padding: "12px 14px 24px", height: "100%", boxSizing: "border-box" }}>
+            <McpServersPanel style={{ minHeight: "560px", maxHeight: "100%" }} />
           </div>
         )}
         {isLegacyPage && (
           <div className="hx-legacy">
             {page === "display" && <DisplayTab settings={settings} update={update} />}
             {page === "audio" && <AudioTab settings={settings} update={update} />}
-            {page === "advanced" && <AuthTab settings={settings} update={update} />}
+            {page === "advanced" && <><AgentWatchSection /><AdvancedSystemStatus /><AuthTab settings={settings} update={update} /></>}
           </div>
         )}
       </div>
@@ -991,7 +1025,7 @@ function AudioTab({ settings, update }: {
           </div>
           <div className="setting-control">
             <button
-              className="settings-btn"
+              className="settings-btn settings-btn--glass"
               style={{
                 background: "rgba(168, 85, 247, 0.15)",
                 borderColor: "rgba(168, 85, 247, 0.4)",
@@ -1027,6 +1061,64 @@ function AudioTab({ settings, update }: {
               <option value="butler">Butler (formal)</option>
               <option value="friend">Friend (casual)</option>
             </select>
+          </div>
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Wake Sound</div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Play a sound when NEXUS wakes</div>
+            <div className="setting-desc">So you know it heard you without looking at the screen. Silent during meetings.</div>
+          </div>
+          <div className="setting-control">
+            <div
+              className={`settings-toggle ${settings.wakeSound !== false ? "settings-toggle--on" : ""}`}
+              onClick={() => update("wakeSound", settings.wakeSound === false)}
+            />
+          </div>
+        </div>
+        {WAKE_SOUNDS.map((w) => {
+          const chosen = normalizeWakeSound(settings.wakeSoundStyle) === w.key;
+          return (
+            <div className="setting-row" key={w.key}>
+              <div>
+                <div className="setting-label">
+                  {chosen ? "● " : "○ "}
+                  {w.label}
+                </div>
+                <div className="setting-desc">{w.blurb}</div>
+              </div>
+              <div className="setting-control">
+                <button
+                  className="settings-btn settings-btn--glass"
+                  onClick={() => invoke("preview_wake_sound", { style: w.key, volume: clampWakeVolume(settings.wakeSoundVolume) }).catch(() => {})}
+                >
+                  ▶ Play
+                </button>
+                <button className="settings-btn settings-btn--glass" disabled={chosen} onClick={() => update("wakeSoundStyle", w.key)}>
+                  {chosen ? "Selected" : "Use this"}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Wake sound level</div>
+            <div className="setting-desc">On top of your system volume</div>
+          </div>
+          <div className="setting-control">
+            <input
+              type="range"
+              className="settings-slider"
+              min={0}
+              max={100}
+              value={clampWakeVolume(settings.wakeSoundVolume)}
+              onChange={(e) => update("wakeSoundVolume", parseInt(e.target.value))}
+            />
+            <span className="slider-value">{clampWakeVolume(settings.wakeSoundVolume)}%</span>
           </div>
         </div>
       </div>
@@ -1089,6 +1181,47 @@ function AudioTab({ settings, update }: {
         </div>
         <div className="setting-row">
           <div>
+            <div className="setting-label">Wake word speech check</div>
+            <div className="setting-desc">Always: every wake is double-checked by speech recognition (fewest false wakes, can miss real ones). Tiered: skip the check when the wake model is very sure. Off: wake on the model alone (fastest). Pick with your voice scorecard.</div>
+          </div>
+          <div className="setting-control">
+            <select
+              className="settings-input"
+              value={settings.wakeVerifyMode || ((settings as { verifyWake?: boolean }).verifyWake === false ? "off" : "always")}
+              onChange={(e) => update("wakeVerifyMode", e.target.value)}
+            >
+              <option value="always">Always</option>
+              <option value="tiered">Tiered</option>
+              <option value="off">Off</option>
+            </select>
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Command hints for speech</div>
+            <div className="setting-desc">Experimental. Tells Groq the commands NEXUS understands. Can help "open Chrome"-style phrases; can also make it hear commands in noise. Compare with your voice scorecard.</div>
+          </div>
+          <div className="setting-control">
+            <div
+              className={`settings-toggle ${settings.sttCommandHints ? "settings-toggle--on" : ""}`}
+              onClick={() => update("sttCommandHints", !settings.sttCommandHints)}
+            />
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Reject low-confidence speech</div>
+            <div className="setting-desc">Experimental. Drops Groq transcripts the engine itself is unsure about. Turn on only after your voice scorecard shows it helps.</div>
+          </div>
+          <div className="setting-control">
+            <div
+              className={`settings-toggle ${settings.sttConfidenceGate ? "settings-toggle--on" : ""}`}
+              onClick={() => update("sttConfidenceGate", !settings.sttConfidenceGate)}
+            />
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
             <div className="setting-label">Speaker verification</div>
             <div className="setting-desc">Only enrolled voice can wake NEXUS</div>
           </div>
@@ -1107,7 +1240,7 @@ function AudioTab({ settings, update }: {
           <div className="setting-control">
             <select
               className="settings-input"
-              value={settings.moonshineModel ?? "medium_streaming"}
+              value={settings.moonshineModel ?? "small_streaming"}
               onChange={(e) => update("moonshineModel", e.target.value)}
             >
               <option value="medium_streaming">Medium v2 (245M, 6.65% WER, ~400MB)</option>
@@ -1397,7 +1530,7 @@ function AuthTab({ settings, update }: {
 
         <div style={{ marginTop: 8 }}>
           <button
-            className="settings-btn"
+            className="settings-btn settings-btn--glass"
             style={{ fontSize: 10, opacity: 0.7 }}
             onClick={() => setShowCustomCreds(!showCustomCreds)}
           >
@@ -1456,7 +1589,10 @@ function AuthTab({ settings, update }: {
         <div className="settings-section-title">GitHub Account</div>
         <div className="auth-card">
           <div className="auth-card-header">
-            <span className="auth-card-title">GitHub</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <ApiKeyIcon service="github" size={24} />
+              <span className="auth-card-title">GitHub</span>
+            </div>
             <span className={`status-badge ${githubConnected ? "status-badge--connected" : "status-badge--disconnected"}`}>
               {githubConnected ? "Connected" : "Not connected"}
             </span>
@@ -1484,7 +1620,10 @@ function AuthTab({ settings, update }: {
 
         <div className="auth-card">
           <div className="auth-card-header">
-            <span className="auth-card-title">Gemini API Key</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <ApiKeyIcon service="gemini" size={24} />
+              <span className="auth-card-title">Gemini API Key</span>
+            </div>
             <GeminiKeyPill />
           </div>
           <input
@@ -1519,7 +1658,10 @@ function AuthTab({ settings, update }: {
 
         <div className="auth-card">
           <div className="auth-card-header">
-            <span className="auth-card-title">Groq API Key</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <ApiKeyIcon service="groq" size={24} />
+              <span className="auth-card-title">Groq API Key</span>
+            </div>
           </div>
           <input
             type="password"
@@ -1528,11 +1670,18 @@ function AuthTab({ settings, update }: {
             value={settings.groqApiKey}
             onChange={(e) => update("groqApiKey", e.target.value)}
           />
+          <GroqKeyHint
+            hint={groqKeyHint(settings.groqApiKey, settings.localSttOnly)}
+            onEnableCloud={() => update("localSttOnly", false)}
+          />
         </div>
 
         <div className="auth-card">
           <div className="auth-card-header">
-            <span className="auth-card-title">Cerebras API Key</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <ApiKeyIcon service="cerebras" size={24} />
+              <span className="auth-card-title">Cerebras API Key</span>
+            </div>
           </div>
           <input
             type="password"
@@ -1543,7 +1692,7 @@ function AuthTab({ settings, update }: {
           />
         </div>
         <div className="setting-desc" style={{ marginTop: 4 }}>
-          Keys stay on this device (OS keychain) — never uploaded, never in Cloudflare.
+          Keys stay on this device (OS keychain + your local settings file) — never uploaded, never in Cloudflare.
         </div>
       </div>
 
@@ -1608,6 +1757,62 @@ function GeminiKeyPill() {
   );
 }
 
+function openExternal(url: string) {
+  import("@tauri-apps/plugin-shell")
+    .then(({ open }) => open(url).catch(() => {}))
+    .catch(() => {
+      window.open(url, "_blank");
+    });
+}
+
+/** Guidance under the Groq key: where to get one, and the local-only trap. */
+function GroqKeyHint({
+  hint,
+  onEnableCloud,
+}: {
+  hint: ReturnType<typeof groqKeyHint>;
+  onEnableCloud: () => void;
+}) {
+  if (hint === "get-key") {
+    return (
+      <div className="setting-desc" style={{ marginTop: 4 }}>
+        Free cloud speech-to-text + fast chat. Without a key NEXUS still works: speech runs locally.{" "}
+        <a
+          href="#"
+          onClick={(e) => {
+            e.preventDefault();
+            openExternal(GROQ_KEY_URL);
+          }}
+        >
+          Get a free key
+        </a>
+      </div>
+    );
+  }
+  if (hint === "local-only-blocks") {
+    return (
+      <div className="setting-desc" style={{ marginTop: 4, color: "#ffd479" }}>
+        “Local STT only” is on, so this key isn&apos;t used for speech yet — your voice stays on this PC.{" "}
+        <a
+          href="#"
+          onClick={(e) => {
+            e.preventDefault();
+            onEnableCloud();
+          }}
+        >
+          Turn it off to use cloud speech
+        </a>{" "}
+        (then press Save).
+      </div>
+    );
+  }
+  return (
+    <div className="setting-desc" style={{ marginTop: 4 }}>
+      Cloud speech-to-text is on. Falls back to local speech if Groq is unreachable.
+    </div>
+  );
+}
+
 function GeminiKeyTest() {
   const [state, setState] = useState<"idle" | "testing" | "ok" | "fail">("idle");
   const [detail, setDetail] = useState<string>("");
@@ -1642,7 +1847,7 @@ function GeminiKeyTest() {
   return (
     <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8 }}>
       <button
-        className="settings-btn"
+        className="settings-btn settings-btn--glass"
         disabled={state === "testing"}
         onClick={runTest}
       >
@@ -1700,403 +1905,44 @@ function VisionQuota() {
   );
 }
 
-// ─── Connections Tab (MCP vault — one login per service group) ──────
-// Each card shows vault status (live/expired/missing) with Reconnect +
-// Delete. Google reconnects via OAuth (Accounts tab flow writes the token
-// into the vault on next MCP call); token services paste a key directly.
-// Session bridges (WhatsApp/LinkedIn) show bridge health + instructions.
-const VAULT_META: Record<string, { title: string; hint: string; kind: "oauth" | "token" | "session"; tokenUrl?: string }> = {
-  google: { title: "Google (Gmail, Calendar, Contacts, Drive, Sheets, Meet)", hint: "One OAuth login covers all six. Reconnect in Accounts tab, then Delete here only clears the local copy.", kind: "oauth" },
-  telegram: { title: "Telegram remote (owner-only phone control)", hint: "Create a bot via @BotFather, paste its token below, then put your chat id (from @userinfobot) in the Owner chat id field and press Save + restart.", kind: "token" },
-  swiggy: { title: "Swiggy (Food, Instamart, Dineout)", hint: "One OAuth login covers all three. Login opens your browser; NEXUS stores and refreshes the token. A pasted token works too.", kind: "token" },
-  spotify: { title: "Spotify", hint: "1. Open the Spotify dashboard (button below). 2. Create a token with user-read scope. 3. Paste it here.", kind: "token", tokenUrl: "https://developer.spotify.com/dashboard" },
-  vercel: { title: "Vercel", hint: "1. Open Vercel account settings (button below). 2. Create a token (read-only recommended). 3. Paste it here.", kind: "token", tokenUrl: "https://vercel.com/account/tokens" },
-  render: { title: "Render", hint: "1. Open Render API keys (button below). 2. Create a key. 3. Paste it here. OAuth preferred — keys are broadly scoped.", kind: "token", tokenUrl: "https://dashboard.render.com/u/keys" },
-};
-
-function statusCell(ok: boolean): React.CSSProperties {
-  return {
-    display: "flex",
-    justifyContent: "space-between",
-    padding: "6px 10px",
-    borderRadius: 4,
-    background: ok ? "rgba(80,200,120,0.08)" : "rgba(255,120,120,0.08)",
-    border: `1px solid ${ok ? "rgba(80,200,120,0.25)" : "rgba(255,120,120,0.25)"}`,
-  };
-}
-
-function formatUptime(sec: number): string {
-  if (sec < 60) return `${sec}s`;
-  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
-  if (sec < 86400) return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
-  return `${Math.floor(sec / 86400)}d ${Math.floor((sec % 86400) / 3600)}h`;
-}
-
-function ConnectionsTab({ settings, update }: {
-  settings: Settings;
-  update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
-}) {
-  const [vault, setVault] = useState<Record<string, string>>({});
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [error, setError] = useState<string | null>(null);
-  const [swiggyConnecting, setSwiggyConnecting] = useState(false);
+function AdvancedSystemStatus() {
+  const [identity, setIdentity] = useState<{ state: string; profileId?: string; deviceName?: string } | null>(null);
   const [health, setHealth] = useState<{
-    memoryMb: number;
-    uptimeSec: number;
-    sttPort: boolean;
-    nluPort: boolean;
-    workerReachable: boolean;
-    groqKey: boolean;
-    geminiKey: boolean;
+    memoryMb: number; uptimeSec: number; sttPort: boolean; nluPort: boolean;
+    workerReachable: boolean; groqKey: boolean; geminiKey: boolean;
   } | null>(null);
-  // Feature 88: canonical laptop identity state.
-  const [identityState, setIdentityState] = useState<{
-    state: string;
-    profileId?: string;
-    deviceName?: string;
-  } | null>(null);
-
-  useEffect(() => {
-    invoke<{ state: string; profileId?: string; deviceName?: string }>("get_identity_status")
-      .then((st) => setIdentityState(st))
-      .catch(() => setIdentityState({ state: "unknown_profile" }));
-  }, []);
-
+  const [error, setError] = useState<string | null>(null);
   const refresh = useCallback(async () => {
-    try {
-      const entries = await invoke<{ service: string; status: string }[]>("vault_status");
-      const map: Record<string, string> = {};
-      for (const e of entries) map[e.service] = e.status;
-      setVault(map);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
+    const [identityResult, healthResult] = await Promise.allSettled([
+      invoke<{ state: string; profileId?: string; deviceName?: string }>("get_identity_status"),
+      invoke<typeof health>("get_health_status"),
+    ]);
+    if (identityResult.status === "fulfilled") setIdentity(identityResult.value);
+    if (healthResult.status === "fulfilled") setHealth(healthResult.value);
   }, []);
-
-  const refreshHealth = useCallback(async () => {
-    try {
-      const h = await invoke<{
-        memoryMb: number;
-        uptimeSec: number;
-        sttPort: boolean;
-        nluPort: boolean;
-        workerReachable: boolean;
-        groqKey: boolean;
-        geminiKey: boolean;
-      }>("get_health_status");
-      setHealth(h);
-    } catch {
-      // Health check failed — leave stale data
-    }
-  }, []);
-
-  useEffect(() => { refresh().catch(() => {}); }, [refresh]);
-  useEffect(() => { refreshHealth().catch(() => {}); }, [refreshHealth]);
-
-  // Refresh health every 5s while tab is open
-  useEffect(() => {
-    const id = setInterval(() => { refreshHealth().catch(() => {}); }, 5000);
-    return () => clearInterval(id);
-  }, [refreshHealth]);
-
-  // Live refresh when the idle vault monitor reports a credential change
-  // (expiry/reconnect while the tab is open).
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    (async () => {
-      const { listen } = await import("@tauri-apps/api/event");
-      unlisten = await listen<string>("vault:changed", () => {
-        refresh().catch(() => {});
-      });
-    })();
-    return () => { unlisten?.(); };
-  }, [refresh]);
-
-  const handleSave = async (service: string) => {
-    setError(null);
-    try {
-      await invoke("vault_set_token", { service, token: drafts[service] ?? "", expiresInSecs: 0 });
-      setDrafts((d) => ({ ...d, [service]: "" }));
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const handleDelete = async (service: string) => {
-    setError(null);
-    try {
-      await invoke("vault_clear_token", { service });
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  // Swiggy OAuth: browser login → Worker stores + refreshes server-side;
-  // the vault pulls a fresh token on next use (or the user pastes one).
-  const handleSwiggyLogin = async () => {
-    setError(null);
-    setSwiggyConnecting(true);
-    try {
-      if (!settings.serverUrl) throw new Error("Server URL not configured");
-      setSidecarBaseUrl(settings.serverUrl);
-      await connectOAuth("swiggy", settings.userId || "local-user");
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSwiggyConnecting(false);
-    }
-  };
-
-  const badge = (status?: string) => (
-    <span className={`status-badge ${status === "live" ? "status-badge--connected" : "status-badge--disconnected"}`}>
-      {status === "live" ? "Live" : status === "expired" ? "Expired" : "Missing"}
-    </span>
-  );
-
-  return (
-    <>
-      {error && (
-        <div className="auth-card" style={{ borderColor: "rgba(255,80,80,0.3)" }}>
-          <span style={{ fontSize: 12, color: "rgba(255,150,150,0.9)" }}>{error}</span>
-        </div>
-      )}
-
-      <AgentWatchSection />
-
-      <div className="settings-section">
-        <div className="settings-section-title">Identity</div>
-        {(() => {
-          if (identityState == null) {
-            return <div style={{ fontSize: 12, opacity: 0.5 }}>Loading…</div>;
-          }
-          const banner = identityBanner(identityState);
-          const colors: Record<IdentityBanner["tone"], string> = {
-            amber: "#fbbf24", green: "#22c55e", red: "#ef4444", dim: "#94a3b8",
-          };
-          return (
-            <div className="auth-card">
-              <div className="auth-card-header">
-                <span className="auth-card-title">{banner.title}</span>
-                <span style={{ fontSize: 11, color: colors[banner.tone] }}>{identityState.state}</span>
-              </div>
-              <div style={{ fontSize: 12, opacity: 0.65, margin: "4px 0 8px" }}>{banner.subtitle}</div>
-              {identityState.profileId ? (
-                <div style={{ fontSize: 11, opacity: 0.45, marginBottom: 8 }}>
-                  device: {identityState.deviceName || "unknown"} · profile …{identityState.profileId.slice(-6)}
-                </div>
-              ) : null}
-              {identityState.state === "approved" && (
-                <button
-                  className="settings-btn"
-                  onClick={async () => {
-                    if (!window.confirm("Disconnect this device from the NEXUS cloud? Cloud features will be disabled until re-approval.")) return;
-                    try {
-                      await invoke("disconnect_device");
-                      setIdentityState({ state: "provisional" });
-                    } catch (err) {
-                      console.warn("[NEXUS] disconnect failed:", err);
-                    }
-                  }}
-                >
-                  Disconnect this device
-                </button>
-              )}
-            </div>
-          );
-        })()}
+  useEffect(() => { void refresh(); }, [refresh]);
+  const banner = identity ? identityBanner(identity) : null;
+  return <div className="settings-section">
+    <div className="settings-section-title">Device & system</div>
+    <div className="auth-card">
+      <div className="auth-card-header">
+        <span className="auth-card-title">{banner?.title ?? "Checking device…"}</span>
+        <button className="settings-btn" onClick={() => void refresh()}>Refresh</button>
       </div>
-
-      <div className="settings-section">
-        <div className="settings-section-title">System Status</div>
-        {health ? (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", fontSize: 12 }}>
-            <div style={statusCell(health.memoryMb > 0)}>
-              <span style={{ opacity: 0.6 }}>Memory</span>
-              <span>{health.memoryMb} MB</span>
-            </div>
-            <div style={statusCell(true)}>
-              <span style={{ opacity: 0.6 }}>Uptime</span>
-              <span>{formatUptime(health.uptimeSec)}</span>
-            </div>
-            <div style={statusCell(health.sttPort)}>
-              <span style={{ opacity: 0.6 }}>STT</span>
-              <span>{health.sttPort ? "Running" : "Idle"}</span>
-            </div>
-            <div style={statusCell(health.nluPort)}>
-              <span style={{ opacity: 0.6 }}>NLU</span>
-              <span>{health.nluPort ? "Running" : "Idle"}</span>
-            </div>
-            <div style={statusCell(health.workerReachable)}>
-              <span style={{ opacity: 0.6 }}>Worker</span>
-              <span>{health.workerReachable ? "Online" : "Offline"}</span>
-            </div>
-            <div style={statusCell(true)}>
-              <span style={{ opacity: 0.6 }}>Wake</span>
-              <span>Active</span>
-            </div>
-            <div style={statusCell(health.groqKey || health.geminiKey)}>
-              <span style={{ opacity: 0.6 }}>Keys</span>
-              <span>Groq {health.groqKey ? "✓" : "✗"} · Gemini {health.geminiKey ? "✓" : "✗"}</span>
-            </div>
-          </div>
-        ) : (
-          <div style={{ fontSize: 12, opacity: 0.5 }}>Loading…</div>
-        )}
-      </div>
-
-      <div className="settings-section">
-        <div className="settings-section-title">Vision keys</div>
-        <div style={{ fontSize: 12, opacity: 0.65, margin: "4px 0 8px" }}>
-          {health == null
-            ? "Checking…"
-            : health.groqKey || health.geminiKey
-              ? "A vision key is present — ghost clicks can see custom buttons."
-              : "No Groq or Gemini key — add one in the Accounts tab for cloud STT + ghost vision."}
-        </div>
-      </div>
-
-      <div className="settings-section">
-        <div className="settings-section-title">MCP Connections (vault)</div>
-
-        {Object.entries(VAULT_META).map(([service, meta]) => (
-          <div className="auth-card" key={service}>
-            <div className="auth-card-header">
-              <span className="auth-card-title">{meta.title}</span>
-              {badge(vault[service])}
-            </div>
-            <div style={{ fontSize: 12, opacity: 0.65, margin: "4px 0 8px" }}>{meta.hint}</div>
-            {meta.kind === "token" && service !== "telegram" && (
-              <input
-                type="password"
-                className="settings-input"
-                placeholder="paste token…"
-                value={drafts[service] ?? ""}
-                onChange={(e) => setDrafts((d) => ({ ...d, [service]: e.target.value }))}
-              />
-            )}
-            {service === "telegram" && (
-              <>
-                <input
-                  type="password"
-                  className="settings-input"
-                  placeholder="bot token from @BotFather…"
-                  value={drafts[service] ?? ""}
-                  onChange={(e) => setDrafts((d) => ({ ...d, [service]: e.target.value }))}
-                />
-                <input
-                  type="text"
-                  className="settings-input"
-                  placeholder="owner chat id (from @userinfobot)…"
-                  value={settings.telegramChatId ?? ""}
-                  onChange={(e) => update("telegramChatId", e.target.value)}
-                />
-                <div style={{ fontSize: 12, opacity: 0.65, margin: "4px 0 8px" }}>
-                  Save (footer) persists the chat id — restart NEXUS to start the bridge. Only this chat is ever answered.
-                </div>
-              </>
-            )}
-            {service === "swiggy" && (
-              <button
-                className="settings-btn settings-btn--primary"
-                disabled={swiggyConnecting || !settings.serverUrl}
-                onClick={handleSwiggyLogin}
-              >
-                {swiggyConnecting ? "Waiting for login…" : "Login with Swiggy"}
-              </button>
-            )}
-            {meta.kind === "token" && meta.tokenUrl && (
-              <button
-                className="settings-btn"
-                onClick={() => { import("@tauri-apps/plugin-shell").then(({ open }) => open(meta.tokenUrl!)).catch(() => window.open(meta.tokenUrl!, "_blank")); }}
-              >
-                Get token
-              </button>
-            )}
-            <div className="auth-card-actions">
-              {meta.kind === "token" && (
-                <button
-                  className="settings-btn settings-btn--primary"
-                  disabled={!(drafts[service] ?? "").trim()}
-                  onClick={() => handleSave(service)}
-                >
-                  Save token
-                </button>
-              )}
-              <button className="settings-btn settings-btn--danger" onClick={() => handleDelete(service)}>
-                Delete
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <div className="settings-section">
-        <div className="settings-section-title">Session bridges (local)</div>
-
-        <BridgeCards />
-      </div>
-    </>
-  );
-}
-
-function BridgeCards() {
-  const [bridges, setBridges] = useState<Record<string, { reachable: boolean; note: string }>>({});
-  const [checking, setChecking] = useState(false);
-
-  const refresh = useCallback(async () => {
-    setChecking(true);
-    try {
-      const list = await invoke<{ server: string; url: string; reachable: boolean; latency_ms: number; note: string }[]>("mcp_status");
-      const map: Record<string, { reachable: boolean; note: string }> = {};
-      for (const b of list) map[b.server] = { reachable: b.reachable, note: b.note };
-      setBridges(map);
-    } catch {
-      // probe failed entirely — leave cards in unknown state
-    } finally {
-      setChecking(false);
-    }
-  }, []);
-
-  useEffect(() => { refresh().catch(() => {}); }, [refresh]);
-
-  const card = (key: string, title: string, hint: string) => {
-    const st = bridges[key];
-    return (
-      <div className="auth-card" key={key}>
-        <div className="auth-card-header">
-          <span className="auth-card-title">{title}</span>
-          <span className={`status-badge ${st?.reachable ? "status-badge--connected" : "status-badge--disconnected"}`}>
-            {st ? (st.reachable ? "Reachable" : "Down") : "…"}
-          </span>
-        </div>
-        <div style={{ fontSize: 12, opacity: 0.65, margin: "4px 0 8px" }}>{hint}</div>
-        {st && (
-          <div style={{ fontSize: 12, opacity: 0.65, margin: "0 0 8px" }}>{st.note}</div>
-        )}
-      </div>
-    );
-  };
-
-  return (
-    <>
-      {card("whatsapp", "WhatsApp bridge (:8765)", "Run the bridge binary, then scan the QR once — the session persists. Reads never mark messages read.")}
-      {card("amazon", "Amazon bridge (:8766)", "Run the product-search bridge locally. Read-only: search, details, reviews.")}
-      <div className="auth-card">
-        <div className="auth-card-header">
-          <span className="auth-card-title">LinkedIn session</span>
-        </div>
-        <div style={{ fontSize: 12, opacity: 0.65, margin: "4px 0 8px" }}>
-          Uses your logged-in browser session cookie. Re-login in the browser if writes start failing.
-        </div>
-      </div>
-      <div className="auth-card-actions">
-        <button className="settings-btn" disabled={checking} onClick={refresh}>
-          {checking ? "Checking…" : "Recheck bridges"}
-        </button>
-      </div>
-    </>
-  );
+      {banner && <div className="setting-desc">{banner.subtitle}</div>}
+      {identity?.deviceName && <div className="setting-desc">{identity.deviceName}</div>}
+      {identity?.state === "approved" && <button className="settings-btn settings-btn--danger" onClick={async () => {
+        if (!window.confirm("Disconnect this device from the NEXUS cloud?")) return;
+        try { await invoke("disconnect_device"); await refresh(); }
+        catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+      }}>Disconnect this device</button>}
+    </div>
+    {health && <div className="auth-card">
+      <div className="auth-card-title">System status</div>
+      <div className="setting-desc">Memory {health.memoryMb} MB · Uptime {Math.floor(health.uptimeSec / 60)} min</div>
+      <div className="setting-desc">Speech {health.sttPort ? "running" : "idle"} · Local understanding {health.nluPort ? "running" : "idle"} · Worker {health.workerReachable ? "online" : "offline"}</div>
+      <div className="setting-desc">Groq key {health.groqKey ? "present" : "missing"} · Gemini key {health.geminiKey ? "present" : "missing"}</div>
+    </div>}
+    {error && <div className="hx-error" role="alert">{error}</div>}
+  </div>;
 }

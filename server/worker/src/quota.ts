@@ -74,7 +74,9 @@ export async function getGlobalNeurons(env: Env): Promise<number> {
 }
 
 /**
- * Increment usage counters for a user. Uses INSERT OR REPLACE to upsert.
+ * Increment usage counters for a user in ONE atomic statement. The previous
+ * read-then-INSERT OR REPLACE lost updates under concurrent requests, so a burst could
+ * run past the daily limits. The delta is added inside the database instead.
  */
 export async function incrementUsage(
   env: Env,
@@ -82,23 +84,19 @@ export async function incrementUsage(
   delta: Partial<UsageRow>
 ): Promise<void> {
   const day = todayUTC();
-  const current = await getUsage(env, userId);
-
-  const updated: UsageRow = {
-    requests: current.requests + (delta.requests || 0),
-    ai_neurons: current.ai_neurons + (delta.ai_neurons || 0),
-    d1_reads: current.d1_reads + (delta.d1_reads || 0),
-    d1_writes: current.d1_writes + (delta.d1_writes || 0),
-    search_calls: current.search_calls + (delta.search_calls || 0),
-    deep_calls: current.deep_calls + (delta.deep_calls || 0),
-  };
-
   await env.DB.prepare(
-    "INSERT OR REPLACE INTO usage_log (user_id, day_utc, requests, ai_neurons, d1_reads, d1_writes, search_calls, deep_calls) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    "INSERT INTO usage_log (user_id, day_utc, requests, ai_neurons, d1_reads, d1_writes, search_calls, deep_calls) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+    + "ON CONFLICT(user_id, day_utc) DO UPDATE SET "
+    + "requests = requests + excluded.requests, "
+    + "ai_neurons = ai_neurons + excluded.ai_neurons, "
+    + "d1_reads = d1_reads + excluded.d1_reads, "
+    + "d1_writes = d1_writes + excluded.d1_writes, "
+    + "search_calls = search_calls + excluded.search_calls, "
+    + "deep_calls = deep_calls + excluded.deep_calls"
   ).bind(
     userId, day,
-    updated.requests, updated.ai_neurons, updated.d1_reads,
-    updated.d1_writes, updated.search_calls, updated.deep_calls
+    delta.requests || 0, delta.ai_neurons || 0, delta.d1_reads || 0,
+    delta.d1_writes || 0, delta.search_calls || 0, delta.deep_calls || 0
   ).run();
 }
 

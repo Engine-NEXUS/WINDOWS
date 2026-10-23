@@ -277,4 +277,205 @@ mod tests {
             assert_eq!(parse_chord(&format!("Ctrl+{d}")).unwrap().vk, 0x30 + d);
         }
     }
+
+    #[test]
+    fn modifier_parsing_is_case_insensitive_and_accepts_aliases() {
+        // Equivalent casings and spacing for Ctrl+Shift+T.
+        let variants = [
+            "ctrl+shift+t",
+            "Ctrl+Shift+T",
+            "CTRL+SHIFT+T",
+            "control + shift + t",
+            "CONTROL + SHIFT + T",
+            "  Ctrl   +   Shift  +  T  ",
+        ];
+        let expected = Chord {
+            mods: vec![Modifier::Ctrl, Modifier::Shift],
+            vk: 0x54,
+            extended: false,
+            label: "T".into(),
+        };
+        for v in variants {
+            let parsed = parse_chord(v).expect(v);
+            assert_eq!(parsed, expected, "variant '{v}' should parse identically");
+            assert_eq!(parsed.display(), "Ctrl+Shift+T");
+        }
+
+        // Alt aliases: "alt" and "option".
+        let alt = parse_chord("Alt+Left").unwrap();
+        let opt = parse_chord("option+left").unwrap();
+        assert_eq!(alt, opt);
+        assert_eq!(alt.mods, vec![Modifier::Alt]);
+
+        // Windows key aliases: "win", "windows", "meta", "super", "cmd".
+        for alias in ["win", "windows", "meta", "super", "cmd"] {
+            let c = parse_chord(&format!("{alias}+r")).unwrap();
+            assert_eq!(c.mods, vec![Modifier::Win]);
+            assert_eq!(c.vk, 0x52);
+            assert_eq!(c.display(), "Win+R");
+        }
+    }
+
+    #[test]
+    fn virtual_key_codes_used_for_letters_and_digits_independent_of_layout() {
+        // ASCII letters map to VK_A..VK_Z (0x41..0x5A), not characters or localized keycodes.
+        for (idx, ch) in ('a'..='z').enumerate() {
+            let upper = ch.to_ascii_uppercase();
+            let c_lower = parse_chord(&format!("Ctrl+{ch}")).unwrap();
+            let c_upper = parse_chord(&format!("Ctrl+{upper}")).unwrap();
+            assert_eq!(c_lower, c_upper, "lower '{ch}' and upper '{upper}' must match");
+            let expected_vk = 0x41 + idx as u16;
+            assert_eq!(c_lower.vk, expected_vk, "letter '{ch}' VK");
+            assert!(!c_lower.extended, "letters are never extended keys");
+        }
+
+        // Digits map to VK_0..VK_9 (0x30..0x39).
+        for d in 0..=9u16 {
+            let c = parse_chord(&format!("Alt+{d}")).unwrap();
+            assert_eq!(c.vk, 0x30 + d, "digit {d} VK");
+            assert!(!c.extended, "digits are never extended keys");
+        }
+    }
+
+    #[test]
+    fn unknown_key_names_and_invalid_modifiers_rejected() {
+        // Unknown key names fail with an informative error rather than being silently ignored.
+        for bad_key in ["UnknownKey", "FooBar", "NoSuchKey", "F0", "F25", "F100"] {
+            let err = parse_chord(&format!("Ctrl+{bad_key}")).unwrap_err();
+            assert!(
+                err.contains(&format!("unknown key '{bad_key}'")),
+                "expected unknown key error for '{bad_key}', got: {err}"
+            );
+        }
+
+        // Invalid modifier names fail.
+        for bad_mod in ["Bogus", "Fake", "Invalid", "CommandX"] {
+            let err = parse_chord(&format!("{bad_mod}+T")).unwrap_err();
+            assert!(
+                err.contains("is not a modifier"),
+                "expected invalid modifier error for '{bad_mod}', got: {err}"
+            );
+        }
+
+        // Duplicate modifiers are rejected.
+        assert!(parse_chord("Ctrl+Control+A").unwrap_err().contains("duplicate modifier 'Ctrl'"));
+        assert!(parse_chord("Alt+Option+B").unwrap_err().contains("duplicate modifier 'Alt'"));
+        assert!(parse_chord("Win+Super+C").unwrap_err().contains("duplicate modifier 'Win'"));
+
+        // Malformed structural chords are rejected.
+        assert!(parse_chord("").is_err());
+        assert!(parse_chord("   ").is_err());
+        assert!(parse_chord("Ctrl+").is_err());
+        assert!(parse_chord("+Enter").is_err());
+        assert!(parse_chord("Ctrl+Tab+").is_err());
+        assert!(parse_chord("Ctrl++").is_err());
+    }
+
+    #[test]
+    fn navigation_editing_and_control_keys_map_correct_vks_and_flags() {
+        // Extended navigation keys: arrows, Home, End, PageUp, PageDown, Delete, Insert.
+        let extended_cases: &[(&str, u16, &str)] = &[
+            ("Left", 0x25, "Left"),
+            ("Up", 0x26, "Up"),
+            ("Right", 0x27, "Right"),
+            ("Down", 0x28, "Down"),
+            ("Home", 0x24, "Home"),
+            ("End", 0x23, "End"),
+            ("PageUp", 0x21, "PageUp"),
+            ("PgUp", 0x21, "PageUp"),
+            ("PageDown", 0x22, "PageDown"),
+            ("PgDn", 0x22, "PageDown"),
+            ("Delete", 0x2E, "Delete"),
+            ("Del", 0x2E, "Delete"),
+            ("Insert", 0x2D, "Insert"),
+            ("Ins", 0x2D, "Insert"),
+        ];
+        for &(name, expected_vk, canonical_label) in extended_cases {
+            let c = parse_chord(name).unwrap();
+            assert_eq!(c.vk, expected_vk, "VK for {name}");
+            assert!(c.extended, "{name} must have extended flag true");
+            assert_eq!(c.display(), canonical_label);
+
+            // Case-insensitivity.
+            let lower = parse_chord(&name.to_ascii_lowercase()).unwrap();
+            assert_eq!(lower.vk, expected_vk);
+            assert!(lower.extended);
+        }
+
+        // Non-extended control keys: Tab, Esc, Enter, Space, Backspace.
+        let standard_cases: &[(&str, u16, &str)] = &[
+            ("Tab", 0x09, "Tab"),
+            ("Esc", 0x1B, "Esc"),
+            ("Escape", 0x1B, "Esc"),
+            ("Enter", 0x0D, "Enter"),
+            ("Return", 0x0D, "Enter"),
+            ("Space", 0x20, "Space"),
+            ("Spacebar", 0x20, "Space"),
+            ("Backspace", 0x08, "Backspace"),
+        ];
+        for &(name, expected_vk, canonical_label) in standard_cases {
+            let c = parse_chord(name).unwrap();
+            assert_eq!(c.vk, expected_vk, "VK for {name}");
+            assert!(!c.extended, "{name} must have extended flag false");
+            assert_eq!(c.display(), canonical_label);
+
+            let with_mod = parse_chord(&format!("Ctrl+{name}")).unwrap();
+            assert_eq!(with_mod.vk, expected_vk);
+            assert!(!with_mod.extended);
+            assert_eq!(with_mod.display(), format!("Ctrl+{canonical_label}"));
+        }
+    }
+
+    #[test]
+    fn function_keys_f1_to_f24_full_range_and_boundaries() {
+        for n in 1..=24u16 {
+            // Lowercase "f{n}" and uppercase "F{n}".
+            let lower = parse_chord(&format!("f{n}")).unwrap();
+            let upper = parse_chord(&format!("F{n}")).unwrap();
+            assert_eq!(lower, upper);
+            assert_eq!(lower.vk, 0x6F + n, "VK for F{n}");
+            assert!(!lower.extended, "F{n} is not extended");
+            assert_eq!(lower.display(), format!("F{n}"));
+
+            // With modifiers.
+            let chord = parse_chord(&format!("Ctrl+Alt+F{n}")).unwrap();
+            assert_eq!(chord.vk, 0x6F + n);
+            assert_eq!(chord.display(), format!("Ctrl+Alt+F{n}"));
+        }
+
+        // Out-of-bounds function keys.
+        assert!(parse_chord("F0").is_err());
+        assert!(parse_chord("F25").is_err());
+        assert!(parse_chord("Ctrl+F99").is_err());
+    }
+
+    #[test]
+    fn punctuation_keys_and_arithmetic_aliases() {
+        // Punctuation keys mapping to VK_OEM_* codes.
+        let punct = [
+            ("=", 0xBB),
+            ("-", 0xBD),
+            (",", 0xBC),
+            (".", 0xBE),
+            ("/", 0xBF),
+            (";", 0xBA),
+            ("`", 0xC0),
+            ("[", 0xDB),
+            ("\\", 0xDC),
+            ("]", 0xDD),
+            ("'", 0xDE),
+        ];
+        for (symbol, expected_vk) in punct {
+            let c = parse_chord(&format!("Ctrl+{symbol}")).unwrap();
+            assert_eq!(c.vk, expected_vk, "symbol '{symbol}'");
+            assert!(!c.extended);
+        }
+
+        // Named arithmetic keys.
+        assert_eq!(parse_chord("Plus").unwrap().vk, 0xBB);
+        assert_eq!(parse_chord("Minus").unwrap().vk, 0xBD);
+        assert_eq!(parse_chord("NumAdd").unwrap().vk, 0x6B);
+        assert_eq!(parse_chord("NumSubtract").unwrap().vk, 0x6D);
+        assert_eq!(parse_chord("NumSub").unwrap().vk, 0x6D);
+    }
 }

@@ -34,6 +34,16 @@ export interface MemoryStatus {
   resume_points: number;
   /** Once-a-day boot briefing is on. */
   briefing: boolean;
+  /** The always-on profile is sent with cloud requests (older builds omit this: treat as on). */
+  profile?: boolean;
+  /** NEXUS may offer to save command sequences you repeat as one phrase (older builds omit this: on). */
+  routines?: boolean;
+  /** Optional background review of cloud conversations (older builds omit this: off). */
+  review?: boolean;
+  /** Suggested memory changes waiting for approval. */
+  pending?: number;
+  /** Recent housekeeping notice, e.g. an unused routine was removed (older builds omit this). */
+  curator_note?: string;
   /** Timetable reminders are on. */
   timetable: boolean;
   /** Saved timetable slots. */
@@ -171,6 +181,9 @@ export type MemoryFlag =
   | "memcoreRedactNames"
   | "memcoreActivity"
   | "memcoreBriefing"
+  | "memcoreProfile"
+  | "memcoreRoutines"
+  | "memcoreReview"
   | "memcoreTimetable"
   | "memcoreMail"
   | "memcoreWhatsapp"
@@ -240,6 +253,77 @@ export function sourceLabel(source: string): string {
   if (source.startsWith("legacy:")) return "imported from earlier memory";
   if (source === "turn") return "conversation";
   return source;
+}
+
+/** A mishearing NEXUS noticed: it heard `heard` where you meant `meant`. */
+export interface CorrectionRow {
+  heard: string;
+  meant: string;
+  count: number;
+  last_seen: number;
+  /** Applied to later commands (seen on two separate occasions, no rival answer). */
+  promoted: boolean;
+}
+
+/** One line for the Memory page: “brief” → “brave” · applied / seen once, waiting for a second time. */
+export function describeCorrection(c: CorrectionRow): string {
+  const state = c.promoted
+    ? `applied, seen ${c.count}×`
+    : c.count >= 2
+      ? "not applied: two answers tie"
+      : "seen once, waiting for a second time";
+  return `“${c.heard}” → “${c.meant}” · ${state}`;
+}
+
+/** A memory change the background review suggested, waiting for a yes or no. */
+export interface PendingRow {
+  id: number;
+  op: "add" | "patch" | "remove";
+  key: string;
+  value: string;
+  old_value: string;
+  reason: string;
+  created: number;
+}
+
+/** "Remember: sister name is Asha" / "Change employer from Acme to Globex" / "Forget: employer (Acme)" */
+export function describePending(p: PendingRow): string {
+  const label = p.key.replace(/_/g, " ");
+  if (p.op === "remove") return `Forget: ${label} (${p.old_value})`;
+  if (p.op === "patch") return `Change ${label} from ${p.old_value} to ${p.value}`;
+  return `Remember: ${label} is ${p.value}`;
+}
+
+/** A saved routine: the phrase you say and the commands it runs. */
+export interface RoutineRow {
+  name: string;
+  steps: string[];
+  created: number;
+  last_run: number;
+  runs: number;
+}
+
+/** A routine NEXUS noticed and is waiting for you to name. */
+export interface RoutineSuggestion {
+  steps: string[];
+  /** Readable summary, e.g. "open vs code, chrome and spotify". */
+  text: string;
+}
+
+export interface RoutinesView {
+  routines: RoutineRow[];
+  suggestion: RoutineSuggestion | null;
+  limit: number;
+}
+
+/** "open vs code → open chrome → open spotify" */
+export function stepsLine(steps: string[]): string {
+  return steps.join(" → ");
+}
+
+/** "used 3 times" / "not used yet" */
+export function routineUse(r: RoutineRow): string {
+  return r.runs === 0 ? "not used yet" : `used ${r.runs} time${r.runs === 1 ? "" : "s"}`;
 }
 
 /** Display name for a stored key ("dog_name" → "dog name"; episode keys are hidden). */

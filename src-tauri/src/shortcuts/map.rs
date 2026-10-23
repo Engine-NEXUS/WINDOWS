@@ -479,4 +479,447 @@ mod tests {
         let term = SEED.actions_for("cmd.exe");
         assert!(term.is_empty(), "plain consoles bind nothing: {term:?}");
     }
+
+    #[test]
+    fn seed_all_action_names_exist_in_action_vocabulary() {
+        let v: serde_json::Value = serde_json::from_str(SEED_JSON).expect("valid json");
+        let bindings = v["bindings"].as_object().expect("bindings object");
+        for (scope, table) in bindings {
+            let entries = table.as_object().expect("scope entries object");
+            for action_name in entries.keys() {
+                assert!(
+                    Action::from_id(action_name).is_some(),
+                    "unknown action id '{action_name}' in scope '{scope}'"
+                );
+            }
+        }
+        // Also verify the total size of Action::ALL matches the documented vocabulary size.
+        assert_eq!(Action::ALL.len(), 23);
+    }
+
+    #[test]
+    fn seed_every_chord_template_parses() {
+        let v: serde_json::Value = serde_json::from_str(SEED_JSON).expect("valid json");
+        let bindings = v["bindings"].as_object().expect("bindings object");
+        for (scope, table) in bindings {
+            let entries = table.as_object().expect("scope entries object");
+            for (aid, val) in entries {
+                let templates: Vec<String> = match val {
+                    serde_json::Value::String(s) => vec![s.clone()],
+                    serde_json::Value::Array(arr) => arr
+                        .iter()
+                        .map(|x| x.as_str().unwrap().to_string())
+                        .collect(),
+                    _ => panic!("unexpected value shape in {scope}.{aid}"),
+                };
+                for t in templates {
+                    let probe = if t.contains("{n}") { t.replace("{n}", "1") } else { t.clone() };
+                    let chord = parse_chord(&probe);
+                    assert!(
+                        chord.is_ok(),
+                        "failed to parse chord '{t}' in {scope}.{aid}: {:?}",
+                        chord.err()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn seed_no_scope_binds_two_actions_to_same_chord() {
+        let v: serde_json::Value = serde_json::from_str(SEED_JSON).expect("valid json");
+        let bindings = v["bindings"].as_object().expect("bindings object");
+        for (scope, table) in bindings {
+            let entries = table.as_object().expect("scope entries object");
+            let mut seen_chords: HashMap<String, Action> = HashMap::new();
+            for (aid, val) in entries {
+                let action = Action::from_id(aid).unwrap();
+                let first_template = match val {
+                    serde_json::Value::String(s) => s.as_str(),
+                    serde_json::Value::Array(arr) => arr[0].as_str().unwrap(),
+                    _ => panic!("unexpected shape"),
+                };
+                let probe = first_template.replace("{n}", "1");
+                let canonical = parse_chord(&probe).unwrap().display();
+                if let Some(prev) = seen_chords.insert(canonical.clone(), action) {
+                    panic!(
+                        "scope '{scope}' binds both {:?} and {:?} to chord '{canonical}'",
+                        prev, action
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn seed_every_action_has_family_or_global_binding() {
+        for action in Action::ALL {
+            let global_has = SEED.lookup("unknown_fallback_app.exe", action, Some(1));
+            let mut family_has = false;
+            for exe in [
+                "chrome.exe",
+                "code.exe",
+                "explorer.exe",
+                "notepad.exe",
+                "windowsterminal.exe",
+            ] {
+                if let Lookup::Found { scope, .. } = SEED.lookup(exe, action, Some(1)) {
+                    if matches!(scope, Scope::Family(_) | Scope::Exe(_)) {
+                        family_has = true;
+                        break;
+                    }
+                }
+            }
+            let is_global = matches!(global_has, Lookup::Found { scope: Scope::Global, .. });
+            assert!(
+                is_global || family_has,
+                "action {:?} ({}) must have either a family binding or a global binding",
+                action,
+                action.id()
+            );
+        }
+    }
+
+    #[test]
+    fn terminals_and_consoles_comprehensive_safety_check() {
+        let terminal_consoles = [
+            "windowsterminal.exe",
+            "cmd.exe",
+            "powershell.exe",
+            "pwsh.exe",
+            "conhost.exe",
+            "openconsole.exe",
+            "mintty.exe",
+        ];
+        let dangerous_actions = [
+            (Action::Copy, "Ctrl+C"),
+            (Action::Cut, "Ctrl+X"),
+            (Action::Paste, "Ctrl+V"),
+            (Action::Undo, "Ctrl+Z"),
+            (Action::Redo, "Ctrl+Y"),
+            (Action::SelectAll, "Ctrl+A"),
+            (Action::Save, "Ctrl+S"),
+        ];
+
+        for exe in terminal_consoles {
+            for (action, dangerous_chord) in dangerous_actions {
+                let res = SEED.lookup(exe, action, None);
+                match res {
+                    Lookup::Found { chord, scope, .. } => {
+                        assert_ne!(
+                            scope,
+                            Scope::Global,
+                            "{exe} must NEVER inherit Scope::Global for {action:?}"
+                        );
+                        assert_ne!(
+                            chord.display(),
+                            dangerous_chord,
+                            "{exe} must never receive dangerous chord {dangerous_chord} for {action:?}"
+                        );
+                    }
+                    Lookup::NoBinding { known_app, .. } => {
+                        assert!(known_app, "{exe} must be recognized as known app");
+                    }
+                    Lookup::BadArg(_) => unreachable!(),
+                }
+            }
+        }
+
+        // For plain consoles (not Windows Terminal), ALL 7 edit actions must be NoBinding.
+        for console_exe in ["cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe", "openconsole.exe", "mintty.exe"] {
+            for (action, _) in dangerous_actions {
+                let res = SEED.lookup(console_exe, action, None);
+                assert!(
+                    matches!(res, Lookup::NoBinding { known_app: true, .. }),
+                    "{console_exe} should have NoBinding for {action:?}, got: {res:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn precedence_five_concrete_app_cases() {
+        let json = r#"{
+          "families": {
+            "browser": {"exes": ["chrome.exe", "brave.exe"]},
+            "vscode": {"exes": ["code.exe", "cursor.exe"]},
+            "terminal": {"exes": ["windowsterminal.exe"], "no_global": true},
+            "console": {"exes": ["cmd.exe", "powershell.exe"], "no_global": true},
+            "explorer": {"exes": ["explorer.exe"]},
+            "notepad": {"exes": ["notepad.exe"]}
+          },
+          "bindings": {
+            "*": {
+              "copy": "Ctrl+C",
+              "save": "Ctrl+S",
+              "refresh": "Ctrl+R",
+              "find_in_page": "Ctrl+F",
+              "cut": "Ctrl+X"
+            },
+            "browser": {
+              "refresh": "F5",
+              "new_tab": "Ctrl+T"
+            },
+            "vscode": {
+              "new_tab": "Ctrl+N",
+              "close_tab": "Ctrl+W"
+            },
+            "terminal": {
+              "new_tab": "Ctrl+Shift+T",
+              "copy": "Ctrl+Shift+C"
+            },
+            "explorer": {
+              "new_tab": "Ctrl+T",
+              "address_bar": "Ctrl+L"
+            },
+            "notepad": {
+              "new_tab": "Ctrl+N"
+            },
+            "brave.exe": {
+              "refresh": "Ctrl+Shift+R"
+            },
+            "cursor.exe": {
+              "find_in_page": "Ctrl+K"
+            },
+            "powershell.exe": {
+              "paste": "Ctrl+V"
+            },
+            "explorer.exe": {
+              "address_bar": "Alt+D"
+            },
+            "notepad.exe": {
+              "save": "Ctrl+Shift+S"
+            }
+          }
+        }"#;
+        let map = ShortcutMap::from_json(json).expect("valid custom precedence map");
+
+        // Case 1: chrome vs brave sharing browser family.
+        // brave.exe has exe override for refresh, chrome uses family, both use global copy.
+        assert_eq!(
+            map.lookup("brave.exe", Action::Refresh, None),
+            Lookup::Found {
+                chord: parse_chord("Ctrl+Shift+R").unwrap(),
+                scope: Scope::Exe("brave.exe".into()),
+                source: Source::Seed,
+            }
+        );
+        assert_eq!(
+            map.lookup("chrome.exe", Action::Refresh, None),
+            Lookup::Found {
+                chord: parse_chord("F5").unwrap(),
+                scope: Scope::Family("browser".into()),
+                source: Source::Seed,
+            }
+        );
+        assert_eq!(
+            map.lookup("chrome.exe", Action::Copy, None),
+            Lookup::Found {
+                chord: parse_chord("Ctrl+C").unwrap(),
+                scope: Scope::Global,
+                source: Source::Seed,
+            }
+        );
+
+        // Case 2: code.exe vs cursor.exe sharing vscode family.
+        // cursor.exe has exe override for find_in_page, code.exe falls back to global, both share family new_tab.
+        assert_eq!(
+            map.lookup("cursor.exe", Action::FindInPage, None),
+            Lookup::Found {
+                chord: parse_chord("Ctrl+K").unwrap(),
+                scope: Scope::Exe("cursor.exe".into()),
+                source: Source::Seed,
+            }
+        );
+        assert_eq!(
+            map.lookup("code.exe", Action::FindInPage, None),
+            Lookup::Found {
+                chord: parse_chord("Ctrl+F").unwrap(),
+                scope: Scope::Global,
+                source: Source::Seed,
+            }
+        );
+        assert_eq!(
+            map.lookup("cursor.exe", Action::NewTab, None),
+            Lookup::Found {
+                chord: parse_chord("Ctrl+N").unwrap(),
+                scope: Scope::Family("vscode".into()),
+                source: Source::Seed,
+            }
+        );
+
+        // Case 3: windowsterminal vs cmd.exe vs powershell.exe.
+        // powershell.exe has exe override paste, cmd.exe has no binding (no_global),
+        // windowsterminal.exe gets terminal family copy.
+        assert_eq!(
+            map.lookup("powershell.exe", Action::Paste, None),
+            Lookup::Found {
+                chord: parse_chord("Ctrl+V").unwrap(),
+                scope: Scope::Exe("powershell.exe".into()),
+                source: Source::Seed,
+            }
+        );
+        assert!(matches!(
+            map.lookup("cmd.exe", Action::Paste, None),
+            Lookup::NoBinding { known_app: true, .. }
+        ));
+        assert_eq!(
+            map.lookup("windowsterminal.exe", Action::Copy, None),
+            Lookup::Found {
+                chord: parse_chord("Ctrl+Shift+C").unwrap(),
+                scope: Scope::Family("terminal".into()),
+                source: Source::Seed,
+            }
+        );
+
+        // Case 4: explorer.exe: exe override beats family, family beats global, global applies where unbound.
+        assert_eq!(
+            map.lookup("explorer.exe", Action::AddressBar, None),
+            Lookup::Found {
+                chord: parse_chord("Alt+D").unwrap(),
+                scope: Scope::Exe("explorer.exe".into()),
+                source: Source::Seed,
+            }
+        );
+        assert_eq!(
+            map.lookup("explorer.exe", Action::NewTab, None),
+            Lookup::Found {
+                chord: parse_chord("Ctrl+T").unwrap(),
+                scope: Scope::Family("explorer".into()),
+                source: Source::Seed,
+            }
+        );
+        assert_eq!(
+            map.lookup("explorer.exe", Action::Save, None),
+            Lookup::Found {
+                chord: parse_chord("Ctrl+S").unwrap(),
+                scope: Scope::Global,
+                source: Source::Seed,
+            }
+        );
+
+        // Case 5: notepad.exe: exe override for save beats global, family beats global for new_tab, cut falls back.
+        assert_eq!(
+            map.lookup("notepad.exe", Action::Save, None),
+            Lookup::Found {
+                chord: parse_chord("Ctrl+Shift+S").unwrap(),
+                scope: Scope::Exe("notepad.exe".into()),
+                source: Source::Seed,
+            }
+        );
+        assert_eq!(
+            map.lookup("notepad.exe", Action::NewTab, None),
+            Lookup::Found {
+                chord: parse_chord("Ctrl+N").unwrap(),
+                scope: Scope::Family("notepad".into()),
+                source: Source::Seed,
+            }
+        );
+        assert_eq!(
+            map.lookup("notepad.exe", Action::Cut, None),
+            Lookup::Found {
+                chord: parse_chord("Ctrl+X").unwrap(),
+                scope: Scope::Global,
+                source: Source::Seed,
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_exe_global_fallback_vs_missing_binding() {
+        // Universal edit actions fall back to global table for an unknown application.
+        assert_eq!(
+            SEED.lookup("unknown_tool.exe", Action::Copy, None),
+            Lookup::Found {
+                chord: parse_chord("Ctrl+C").unwrap(),
+                scope: Scope::Global,
+                source: Source::Seed,
+            }
+        );
+        assert_eq!(
+            SEED.lookup("unknown_tool.exe", Action::Save, None),
+            Lookup::Found {
+                chord: parse_chord("Ctrl+S").unwrap(),
+                scope: Scope::Global,
+                source: Source::Seed,
+            }
+        );
+        assert_eq!(
+            SEED.lookup("unknown_tool.exe", Action::Undo, None),
+            Lookup::Found {
+                chord: parse_chord("Ctrl+Z").unwrap(),
+                scope: Scope::Global,
+                source: Source::Seed,
+            }
+        );
+
+        // Actions not in global table return NoBinding with known_app=false.
+        assert_eq!(
+            SEED.lookup("unknown_tool.exe", Action::NewTab, None),
+            Lookup::NoBinding { known_app: false, family: None }
+        );
+        assert_eq!(
+            SEED.lookup("unknown_tool.exe", Action::CloseTab, None),
+            Lookup::NoBinding { known_app: false, family: None }
+        );
+        assert_eq!(
+            SEED.lookup("unknown_tool.exe", Action::GotoTab, Some(1)),
+            Lookup::NoBinding { known_app: false, family: None }
+        );
+        assert_eq!(
+            SEED.lookup("unknown_tool.exe", Action::Refresh, None),
+            Lookup::NoBinding { known_app: false, family: None }
+        );
+    }
+
+    #[test]
+    fn known_apps_report_family_and_informative_nobinding() {
+        assert_eq!(
+            SEED.lookup("notepad.exe", Action::Refresh, None),
+            Lookup::NoBinding { known_app: true, family: Some("notepad".into()) }
+        );
+        assert_eq!(
+            SEED.lookup("notepad.exe", Action::GotoTab, Some(1)),
+            Lookup::NoBinding { known_app: true, family: Some("notepad".into()) }
+        );
+        assert_eq!(
+            SEED.lookup("notepad.exe", Action::GoBack, None),
+            Lookup::NoBinding { known_app: true, family: Some("notepad".into()) }
+        );
+        assert_eq!(
+            SEED.lookup("cmd.exe", Action::Refresh, None),
+            Lookup::NoBinding { known_app: true, family: Some("console".into()) }
+        );
+        assert_eq!(
+            SEED.lookup("cmd.exe", Action::Save, None),
+            Lookup::NoBinding { known_app: true, family: Some("console".into()) }
+        );
+    }
+
+    #[test]
+    fn case_insensitive_executable_resolution_for_all_families() {
+        assert_eq!(SEED.family_of("CHROME.EXE"), Some("browser"));
+        assert_eq!(SEED.family_of("Chrome.exe"), Some("browser"));
+        assert_eq!(SEED.family_of("CODE.EXE"), Some("vscode"));
+        assert_eq!(SEED.family_of("Code - Insiders.exe"), Some("vscode"));
+        assert_eq!(SEED.family_of("EXPLORER.EXE"), Some("explorer"));
+        assert_eq!(SEED.family_of("NOTEPAD.EXE"), Some("notepad"));
+        assert_eq!(SEED.family_of("WINDOWSTERMINAL.EXE"), Some("terminal"));
+        assert_eq!(SEED.family_of("POWERSHELL.EXE"), Some("console"));
+        assert_eq!(SEED.family_of("PWSH.EXE"), Some("console"));
+        assert_eq!(SEED.family_of("OpenConsole.exe"), Some("console"));
+        assert_eq!(SEED.family_of("Mintty.exe"), Some("console"));
+        assert_eq!(SEED.family_of("NonExistent.exe"), None);
+    }
+
+    #[test]
+    fn empty_shortcut_map_returns_no_binding_for_all() {
+        let empty = ShortcutMap::empty();
+        assert_eq!(empty.family_of("chrome.exe"), None);
+        assert_eq!(
+            empty.lookup("chrome.exe", Action::NewTab, None),
+            Lookup::NoBinding { known_app: false, family: None }
+        );
+        assert!(empty.actions_for("chrome.exe").is_empty());
+    }
 }

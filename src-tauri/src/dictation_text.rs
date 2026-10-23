@@ -639,4 +639,115 @@ mod tests {
         assert!(ends_sentence(""));
         assert!(!ends_sentence("and then"));
     }
+
+    const CORPUS: &str = include_str!("../tests/fixtures/dictation_corpus.tsv");
+
+    struct CorpusRow<'a> {
+        line_no: usize,
+        spoken: &'a str,
+        expected: String,
+        mode: &'a str,
+        doubt: bool,
+    }
+
+    fn test_dict() -> Vec<(String, String)> {
+        vec![
+            ("zinc".into(), "Zync".into()),
+            ("nexus".into(), "NEXUS".into()),
+            ("github".into(), "GitHub".into()),
+            ("vscode".into(), "VS Code".into()),
+            ("tauri".into(), "Tauri".into()),
+        ]
+    }
+
+    fn ctx_for_mode(mode: &str) -> Ctx {
+        match mode {
+            "multi" => doc(),
+            "oneline" => line(),
+            "dict" => Ctx {
+                at_sentence_start: true,
+                single_line: false,
+                dictionary: test_dict(),
+            },
+            other => panic!("Unknown corpus mode: {other}"),
+        }
+    }
+
+    fn parse_corpus(raw: &str) -> Vec<CorpusRow<'_>> {
+        let mut rows = Vec::new();
+        for (idx, line) in raw.lines().enumerate() {
+            let line = line.trim_end_matches(['\r', '\n']);
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('\t').collect();
+            assert!(
+                parts.len() >= 3,
+                "Line {} in dictation_corpus.tsv has fewer than 3 columns: {:?}",
+                idx + 1,
+                line
+            );
+            let spoken = parts[0];
+            let expected = parts[1].replace("\\n", "\n");
+            let mode = parts[2].trim();
+            let doubt = parts.get(3).map_or(false, |d| d.trim() == "doubt");
+            rows.push(CorpusRow {
+                line_no: idx + 1,
+                spoken,
+                expected,
+                mode,
+                doubt,
+            });
+        }
+        rows
+    }
+
+    #[test]
+    fn corpus_has_at_least_150_pairs() {
+        let rows = parse_corpus(CORPUS);
+        assert!(
+            rows.len() >= 150,
+            "Corpus must have at least 150 pairs, found {}",
+            rows.len()
+        );
+    }
+
+    #[test]
+    fn corpus_doubt_lines_fewer_than_20() {
+        let rows = parse_corpus(CORPUS);
+        let doubt_count = rows.iter().filter(|r| r.doubt).count();
+        assert!(
+            doubt_count < 20,
+            "Expected fewer than 20 doubt lines, found {doubt_count}"
+        );
+    }
+
+    #[test]
+    fn corpus_150_pairs_match() {
+        let rows = parse_corpus(CORPUS);
+        let total = rows.len();
+        let mut mismatches = Vec::new();
+
+        for row in &rows {
+            let ctx = ctx_for_mode(row.mode);
+            let actual = clean(row.spoken, &ctx).text;
+            if actual != row.expected {
+                mismatches.push((row.line_no, row.spoken, row.expected.clone(), actual));
+            }
+        }
+
+        if !mismatches.is_empty() {
+            let passed = total - mismatches.len();
+            let mut msg = format!("\n{passed}/{total} passed ({} mismatches):\n", mismatches.len());
+            msg.push_str(&format!("{:<6} | {:<35} | {:<30} | {:<30}\n", "Line", "Spoken", "Expected", "Actual"));
+            msg.push_str(&format!("{:-<6}-+-{:-<35}-+-{:-<30}-+-{:-<30}\n", "", "", "", ""));
+            for (line_no, spoken, expected, actual) in &mismatches {
+                msg.push_str(&format!(
+                    "{:<6} | {:<35} | {:<30} | {:<30}\n",
+                    line_no, spoken, expected, actual
+                ));
+            }
+            panic!("{msg}");
+        }
+    }
 }

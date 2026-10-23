@@ -61,11 +61,7 @@ pub async fn transcribe_with_deepgram(
     api_key: &str,
     client: &reqwest::Client,
 ) -> Result<String, String> {
-    if samples.is_empty() {
-        return Ok(String::new());
-    }
-
-    let wav_bytes = crate::stt::pcm_to_wav(samples, 16000);
+    let wav_bytes = crate::stt::encode_wav_for_upload(samples, 16000)?;
 
     let url = deepgram_listen_url();
 
@@ -157,5 +153,12 @@ mod tests {
         let raw = r#"{ "results": { "channels": [] } }"#;
         let parsed: DeepgramResponse = serde_json::from_str(raw).expect("empty channels json");
         assert!(parsed.results.channels.is_empty());
+    }
+
+    /// Task ST: Deepgram upload path refuses empty sample buffers.
+    #[test]
+    fn test_deepgram_refuses_empty_audio_buffer() {
+        let res = crate::stt::encode_wav_for_upload(&[], 16000);
+        assert!(res.is_err(), "Empty audio buffer must be refused");
     }
 }

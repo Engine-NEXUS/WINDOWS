@@ -57,7 +57,13 @@ function build() {
   const r = spawnSync(
     "cargo",
     ["rustc", "--lib", "--profile", "check", "--features", FEATURES, "--message-format=short", "--", "--force-warn", "dead_code"],
-    { cwd: join(ROOT, "src-tauri"), encoding: "utf8", maxBuffer: 256 * 1024 * 1024 },
+    {
+      cwd: join(ROOT, "src-tauri"),
+      encoding: "utf8",
+      maxBuffer: 256 * 1024 * 1024,
+      // CI sets CARGO_TERM_COLOR=always; ANSI codes would hide every warning from normalise().
+      env: { ...process.env, CARGO_TERM_COLOR: "never" },
+    },
   );
   const text = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
   if (r.status !== 0 && !/warning:/.test(text)) {
