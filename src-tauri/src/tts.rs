@@ -1135,32 +1135,6 @@ async fn play_audio(
     })
 }
 
-/// Read the TTS emotion setting from settings.json.
-/// Returns "auto" (default), "neutral", "cheerful", "calm", "sad",
-/// "urgent", or "whisper". "auto" picks per-text heuristics.
-#[allow(dead_code)]
-fn read_tts_emotion_setting<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
-    use tauri::Manager;
-    let dir = match app.path().app_data_dir() {
-        Ok(d) => d,
-        Err(_) => return "auto".to_string(),
-    };
-    let path = dir.join("settings.json");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return "neutral".to_string(),
-    };
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-        if let Some(e) = json.get("ttsEmotion").and_then(|v| v.as_str()) {
-            return e.to_string();
-        }
-        if let Some(e) = json.get("tts_emotion").and_then(|v| v.as_str()) {
-            return e.to_string();
-        }
-    }
-    "neutral".to_string()
-}
-
 /// Resolve the effective emotion: zero-emotion directive (Doc 141) locks all utterances to Neutral.
 fn resolve_emotion<R: tauri::Runtime>(_app: &tauri::AppHandle<R>, _text: &str) -> crate::tts_edge::TtsEmotion {
     crate::tts_edge::TtsEmotion::Neutral

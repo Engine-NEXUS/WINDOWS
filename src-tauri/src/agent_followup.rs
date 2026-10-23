@@ -437,20 +437,6 @@ impl SkipReason {
     }
 }
 
-/// What NEXUS says about a decision (before anything runs, or instead of running).
-#[cfg_attr(not(test), expect(dead_code, reason = "the runner speaks `Report.spoken`; the tests read the decision text"))]
-pub fn describe(decision: &Decision) -> String {
-    match decision {
-        Decision::Skip(r) => r.spoken(),
-        Decision::Run(s) => format!(
-            "Committing {} to a new branch {}, then opening a draft pull request against {}.",
-            plural(s.paths.len()),
-            s.branch,
-            s.base
-        ),
-    }
-}
-
 // ─── Running git ─────────────────────────────────────────────────────
 
 pub trait GitRunner: Send + Sync {
@@ -791,6 +777,19 @@ pub async fn run_followup(runner: Arc<dyn GitRunner>, step: FollowUp, verdict: V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What NEXUS says about a decision (before anything runs, or instead of running).
+    fn describe(decision: &Decision) -> String {
+        match decision {
+            Decision::Skip(r) => r.spoken(),
+            Decision::Run(s) => format!(
+                "Committing {} to a new branch {}, then opening a draft pull request against {}.",
+                plural(s.paths.len()),
+                s.branch,
+                s.base
+            ),
+        }
+    }
     use std::process::ExitStatus;
     use std::sync::Mutex;
 

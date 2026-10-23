@@ -868,16 +868,12 @@ pub fn has_usable_vision_key(order_setting: &str, groq_key: &str, gemini_key: &s
     })
 }
 
-/// Located target + which provider served it + quota context for speech.
-/// `quota_hit` names a provider skipped for exhaustion (announce it even
-/// when the serving provider succeeded first try). `raced` = parallel
+/// Located target + how it was found for speech. `raced` = parallel
 /// race fired both providers (2 quota units — announce for honesty).
 #[allow(dead_code)]
 pub struct LocatedTarget {
     pub el: crate::screen::UiElement,
-    pub provider: &'static str,
     pub fell_back: bool,
-    pub quota_hit: Option<&'static str>,
     pub raced: bool,
 }
 
@@ -939,7 +935,6 @@ pub async fn locate_with_fallback(
             LocateStep::Found(el) => Some(el.clone()),
             _ => None,
         };
-        let q1 = matches!(r1, LocateStep::Quota(_));
         if let LocateStep::Quota(kind) = r1 {
             apply_rate_limit(usage_dir, "groq", kind);
         }
@@ -947,12 +942,9 @@ pub async fn locate_with_fallback(
             apply_rate_limit(usage_dir, "gemini", kind);
         }
         if let Some(el) = pick(&r1).or_else(|| pick(&r2)) {
-            let from_groq = pick(&r1).is_some() || (!q1 && matches!(r1, LocateStep::Miss));
             return Some(LocatedTarget {
                 el,
-                provider: if from_groq { "groq" } else { "gemini" },
                 fell_back: false,
-                quota_hit: None,
                 raced: true,
             });
         }
@@ -962,7 +954,6 @@ pub async fn locate_with_fallback(
     // ── Sequential path (default) ────────────────────────────────
     let order = provider_order(order_setting);
     let mut tried = 0;
-    let mut quota_hit: Option<&'static str> = None;
     for provider in order {
         let (key, label): (&str, &'static str) = match provider {
             "groq" => (groq_key, "groq"),
@@ -972,7 +963,6 @@ pub async fn locate_with_fallback(
             continue;
         }
         if unavailable(usage_dir, label) {
-            quota_hit.get_or_insert(label);
             continue;
         }
         tried += 1;
@@ -985,15 +975,12 @@ pub async fn locate_with_fallback(
                 record_use(usage_dir, label);
                 return Some(LocatedTarget {
                     el,
-                    provider: label,
                     fell_back: tried > 1,
-                    quota_hit,
                     raced: false,
                 });
             }
             LocateStep::Quota(kind) => {
                 apply_rate_limit(usage_dir, label, kind);
-                quota_hit.get_or_insert(label);
                 continue;
             }
             LocateStep::Miss => continue,
