@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "doc": "Wake-word front-end (high-pass, gate, AGC) parameter sets. ONE source of truth: Rust (src/wake_dsp.rs, compiled in with include_str!) and scripts/train_local_wakeword.py both read this file. 'legacy' reproduces the runtime as shipped before B7 (uses the per-device acoustic_profile for gate, high-pass and a minimum gain). 'aligned' is exactly what the trainer feeds the classifier, so serving matches training. Switch with the wakeDspProfile setting; compare with wake_eval --dsp.",
+  "aligned": {
+    "highpass_hz": 80.0,
+    "silence_rms": 0.002,
+    "target_rms": 0.03,
+    "max_gain": 15.0,
+    "floor_gain": 1.0
+  },
+  "legacy": {
+    "target_rms": 0.035,
+    "max_gain": 30.0,
+    "comment": "highpass_hz, silence_rms and floor_gain come from the AcousticProfile (cutoff, silence_rms_threshold, pre_gain)"
+  },
+  "golden_agc_aligned": [
+    [0.0005, 15.0],
+    [0.002, 15.0],
+    [0.0025, 12.0],
+    [0.01, 3.0],
+    [0.03, 1.0],
+    [0.08, 1.0]
+  ],
+  "golden_agc_legacy_pre_gain_2_5": [
+    [0.0005, 30.0],
+    [0.002, 17.5],
+    [0.01, 3.5],
+    [0.035, 2.5],
+    [0.2, 2.5]
+  ]
+}

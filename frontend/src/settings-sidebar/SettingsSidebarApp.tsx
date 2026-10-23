@@ -3,6 +3,7 @@ import { HandModeSection } from "./HandModeSection";
 import { AgentWatchSection } from "./AgentWatchSection";
 import { invoke } from "@tauri-apps/api/core";
 import { isPlausibleGeminiKey } from "./keyFormat";
+import { groqKeyHint, GROQ_KEY_URL } from "./keyHints";
 import { identityBanner } from "../setup/identityBanner";
 import {
   setSidecarBaseUrl,
@@ -70,7 +71,7 @@ interface Settings {
   geminiApiKey?: string;
   // Cerebras API key (9Router — fastest free provider, ~80ms)
   cerebrasApiKey?: string;
-  // Moonshine STT model (medium_streaming=6.65% WER, small_streaming=7.84%)
+  // Moonshine STT model (small_streaming=7.84% WER ≈300MB default; medium_streaming=6.65% ≈400MB)
   moonshineModel?: string;
   // TTS voice emotion (auto = heuristics per reply; prosody via rate/pitch)
   ttsEmotion?: string;
@@ -102,6 +103,12 @@ interface Settings {
   telegramChatId?: string;
   // Ghost FIFO queue: speak "Queued, sir." once per session at depth 2+ (D5/D6)
   ghostDepthAck?: boolean;
+  sttConfidenceGate?: boolean;
+  sttCommandHints?: boolean;
+  wakeSeedOffsetMs?: number;
+  wakeDspProfile?: string;
+  wakeVerifyMode?: string;
+  wakeVerifyHigh?: number;
   // Ghost FIFO queue: per-step watchdog timeout, ms (D7)
   ghostStepTimeoutMs?: number;
   // Ghost FIFO queue: inter-command gap τ, ms (D4)
@@ -154,7 +161,7 @@ const DEFAULT_SETTINGS: Settings = {
   speakerVerification: false,
   meetingModeAuto: true,
   suppressTtsInMeetings: true,
-  localSttOnly: true,
+  localSttOnly: false,
   serverUrl: "",
   userId: "",
   deviceId: "",
@@ -179,7 +186,7 @@ const DEFAULT_SETTINGS: Settings = {
   orbListenMode: 1,
   geminiApiKey: "",
   cerebrasApiKey: "",
-  moonshineModel: "medium_streaming",
+  moonshineModel: "small_streaming",
   ttsEmotion: "auto",
   personaMode: "butler",
   themeMode: "dark",
@@ -187,6 +194,12 @@ const DEFAULT_SETTINGS: Settings = {
   visionRace: "sequential",
   telegramChatId: "",
   ghostDepthAck: true,
+  sttConfidenceGate: false,
+  sttCommandHints: false,
+  wakeSeedOffsetMs: 0,
+  wakeDspProfile: "legacy",
+  wakeVerifyMode: "",
+  wakeVerifyHigh: 0.97,
   ghostStepTimeoutMs: 15000,
   ghostTurnGapMs: 1000,
   ghostEngagementSecs: 0,
@@ -1168,6 +1181,47 @@ function AudioTab({ settings, update }: {
         </div>
         <div className="setting-row">
           <div>
+            <div className="setting-label">Wake word speech check</div>
+            <div className="setting-desc">Always: every wake is double-checked by speech recognition (fewest false wakes, can miss real ones). Tiered: skip the check when the wake model is very sure. Off: wake on the model alone (fastest). Pick with your voice scorecard.</div>
+          </div>
+          <div className="setting-control">
+            <select
+              className="settings-input"
+              value={settings.wakeVerifyMode || ((settings as { verifyWake?: boolean }).verifyWake === false ? "off" : "always")}
+              onChange={(e) => update("wakeVerifyMode", e.target.value)}
+            >
+              <option value="always">Always</option>
+              <option value="tiered">Tiered</option>
+              <option value="off">Off</option>
+            </select>
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Command hints for speech</div>
+            <div className="setting-desc">Experimental. Tells Groq the commands NEXUS understands. Can help "open Chrome"-style phrases; can also make it hear commands in noise. Compare with your voice scorecard.</div>
+          </div>
+          <div className="setting-control">
+            <div
+              className={`settings-toggle ${settings.sttCommandHints ? "settings-toggle--on" : ""}`}
+              onClick={() => update("sttCommandHints", !settings.sttCommandHints)}
+            />
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Reject low-confidence speech</div>
+            <div className="setting-desc">Experimental. Drops Groq transcripts the engine itself is unsure about. Turn on only after your voice scorecard shows it helps.</div>
+          </div>
+          <div className="setting-control">
+            <div
+              className={`settings-toggle ${settings.sttConfidenceGate ? "settings-toggle--on" : ""}`}
+              onClick={() => update("sttConfidenceGate", !settings.sttConfidenceGate)}
+            />
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
             <div className="setting-label">Speaker verification</div>
             <div className="setting-desc">Only enrolled voice can wake NEXUS</div>
           </div>
@@ -1186,7 +1240,7 @@ function AudioTab({ settings, update }: {
           <div className="setting-control">
             <select
               className="settings-input"
-              value={settings.moonshineModel ?? "medium_streaming"}
+              value={settings.moonshineModel ?? "small_streaming"}
               onChange={(e) => update("moonshineModel", e.target.value)}
             >
               <option value="medium_streaming">Medium v2 (245M, 6.65% WER, ~400MB)</option>
@@ -1616,6 +1670,10 @@ function AuthTab({ settings, update }: {
             value={settings.groqApiKey}
             onChange={(e) => update("groqApiKey", e.target.value)}
           />
+          <GroqKeyHint
+            hint={groqKeyHint(settings.groqApiKey, settings.localSttOnly)}
+            onEnableCloud={() => update("localSttOnly", false)}
+          />
         </div>
 
         <div className="auth-card">
@@ -1634,7 +1692,7 @@ function AuthTab({ settings, update }: {
           />
         </div>
         <div className="setting-desc" style={{ marginTop: 4 }}>
-          Keys stay on this device (OS keychain) — never uploaded, never in Cloudflare.
+          Keys stay on this device (OS keychain + your local settings file) — never uploaded, never in Cloudflare.
         </div>
       </div>
 
@@ -1696,6 +1754,62 @@ function GeminiKeyPill() {
     <span className="status-badge status-badge--connected">✓ Saved</span>
   ) : (
     <span className="status-badge status-badge--disconnected">○ Missing</span>
+  );
+}
+
+function openExternal(url: string) {
+  import("@tauri-apps/plugin-shell")
+    .then(({ open }) => open(url).catch(() => {}))
+    .catch(() => {
+      window.open(url, "_blank");
+    });
+}
+
+/** Guidance under the Groq key: where to get one, and the local-only trap. */
+function GroqKeyHint({
+  hint,
+  onEnableCloud,
+}: {
+  hint: ReturnType<typeof groqKeyHint>;
+  onEnableCloud: () => void;
+}) {
+  if (hint === "get-key") {
+    return (
+      <div className="setting-desc" style={{ marginTop: 4 }}>
+        Free cloud speech-to-text + fast chat. Without a key NEXUS still works: speech runs locally.{" "}
+        <a
+          href="#"
+          onClick={(e) => {
+            e.preventDefault();
+            openExternal(GROQ_KEY_URL);
+          }}
+        >
+          Get a free key
+        </a>
+      </div>
+    );
+  }
+  if (hint === "local-only-blocks") {
+    return (
+      <div className="setting-desc" style={{ marginTop: 4, color: "#ffd479" }}>
+        “Local STT only” is on, so this key isn&apos;t used for speech yet — your voice stays on this PC.{" "}
+        <a
+          href="#"
+          onClick={(e) => {
+            e.preventDefault();
+            onEnableCloud();
+          }}
+        >
+          Turn it off to use cloud speech
+        </a>{" "}
+        (then press Save).
+      </div>
+    );
+  }
+  return (
+    <div className="setting-desc" style={{ marginTop: 4 }}>
+      Cloud speech-to-text is on. Falls back to local speech if Groq is unreachable.
+    </div>
   );
 }
 

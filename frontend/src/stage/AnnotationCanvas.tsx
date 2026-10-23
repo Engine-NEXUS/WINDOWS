@@ -82,7 +82,9 @@ export default function AnnotationCanvas() {
     const rects = state.active
       ? [{ x: 0, y: 0, w: Math.round(window.innerWidth * dpr), h: Math.round(window.innerHeight * dpr) }]
       : state.elements.map(elementHitbox).filter((r): r is NonNullable<typeof r> => r !== null);
-    invoke("stage_set_hitboxes", { rects }).catch(() => {});
+    invoke("stage_set_hitboxes", { source: "annotation", rects }).catch((e) => {
+      console.warn("[NEXUS] stage_set_hitboxes(annotation) failed:", e);
+    });
   }, [state.active, state.elements]);
 
   // ── Esc exits capture (keeps ink visible + interactive) ──────

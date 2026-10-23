@@ -927,7 +927,7 @@ mod tests {
         use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, RegisterClassW,
             ShowWindow, TranslateMessage, CW_USEDEFAULT, MSG, SW_SHOWNOACTIVATE,
-            WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+            WINDOW_EX_STYLE, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
         };
 
         unsafe extern "system" fn test_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {

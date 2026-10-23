@@ -23,6 +23,10 @@ pub const DEVICE_TOKEN_SERVICE: &str = "device_token";
 pub const IDENTITY_PROVISIONAL: &str = "provisional";
 pub const IDENTITY_CANONICAL: &str = "canonical";
 
+/// Polling parameters for the pending-identity background loop.
+const POLL_INTERVAL_SECS: u64 = 600; // 10 min
+const POLLS_PER_SESSION: u32 = 18; // ~3h cap, then stop silently
+
 // ---- Config model ----
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -371,9 +375,6 @@ fn reset_identity_config(dir: &std::path::Path) -> Result<(), String> {
     obj.insert("identity".into(), serde_json::Value::String(IDENTITY_PROVISIONAL.into()));
     std::fs::write(&path, serde_json::Value::Object(obj).to_string()).map_err(|e| e.to_string())
 }
-
-const POLL_INTERVAL_SECS: u64 = 600; // 10 min
-const POLLS_PER_SESSION: u32 = 18;   // ~3h cap, then stop silently
 
 /// Bounded poll loop: while the profile is pending, refresh every 10 min.
 /// Stops once approved/denied (the transcript 403 path also triggers a

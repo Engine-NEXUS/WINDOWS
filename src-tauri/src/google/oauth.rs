@@ -284,7 +284,7 @@ async fn start_loopback_oauth_flow_with(extended: bool) -> Result<GoogleAccountP
     let _ = open::that(&auth_url);
 
     // Wait up to 120s for OAuth authorization callback
-    let mut auth_code: Option<String> = None;
+    let auth_code: Option<String>;
     let timeout = tokio::time::sleep(Duration::from_secs(120));
     tokio::pin!(timeout);
 

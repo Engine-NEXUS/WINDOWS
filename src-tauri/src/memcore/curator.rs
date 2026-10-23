@@ -254,10 +254,10 @@ mod tests {
         }
         // topic_05 is already in the profile; topic_20 is not. Both get asked about, 05 more often.
         for _ in 0..5 {
-            super::super::context_pack(&dir, "yak", super::super::DEFAULT_BUDGET);
+            super::super::context_pack(&dir, "yak", 2600);
         }
         for _ in 0..3 {
-            super::super::context_pack(&dir, "zebra", super::super::DEFAULT_BUDGET);
+            super::super::context_pack(&dir, "zebra", 2600);
         }
         assert!(run_pass(&dir, now).unwrap().order_changed);
         let first: Vec<String> = super::super::with_store(&dir, |s| {
@@ -310,15 +310,15 @@ mod tests {
             let lead = if i == 20 { "zebra".to_string() } else { format!("n{i:02}") };
             super::super::mirror_core_fact(&dir, &format!("topic_{i:02}"), &format!("{lead} {value}"));
         }
-        let before = super::super::context_pack(&dir, "weather", super::super::DEFAULT_BUDGET).unwrap();
+        let before = super::super::context_pack(&dir, "weather", 2600).unwrap();
         assert!(!before.contains("topic_20"), "premise: the newest fact does not fit: {before}");
         // The user keeps asking about the zebra fact: relevant questions bump its usage.
         for _ in 0..3 {
-            super::super::context_pack(&dir, "zebra", super::super::DEFAULT_BUDGET);
+            super::super::context_pack(&dir, "zebra", 2600);
         }
         let r = run_pass(&dir, now).unwrap();
         assert!(r.order_changed);
-        let after = super::super::context_pack(&dir, "weather", super::super::DEFAULT_BUDGET).unwrap();
+        let after = super::super::context_pack(&dir, "weather", 2600).unwrap();
         assert!(after.contains("topic_20"), "{after}");
         // Nothing asked about changes again -> the second pass leaves the order (and the prefix) alone.
         assert!(!run_pass(&dir, now + DAY).unwrap().order_changed);

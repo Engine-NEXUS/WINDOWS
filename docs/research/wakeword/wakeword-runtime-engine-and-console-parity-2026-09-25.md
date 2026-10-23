@@ -64,7 +64,7 @@ In early development iterations, `verifyWakeWithStt` was enabled by default to p
 - Local faster-whisper CPU inference latency: $750\,\text{ms} - 1,400\,\text{ms}$.
 - Cloud Groq Whisper latency: $400\,\text{ms} - 900\,\text{ms}$ + network overhead.
 - Because the neural model was already retrained with Binary Focal Loss across 31,048 negative samples (yielding 0.00% FA on 186 fast conversational phrases and 90 vocal friction clips), **the Whisper check was redundant and introduced 100% of the perceived user lag**.
-- **Solution:** Defaulted `read_verify_wake` to `false`. Neural wake triggers now execute in $< 35\,\text{ms}$.
+- **Solution (superseded - the code default is `true` again, see change 91):** Defaulted `read_verify_wake` to `false`. Neural wake triggers now execute in $< 35\,\text{ms}$.
 
 ### 3.2 Bottleneck 2: The 500ms Secondary Buffer Delay
 

@@ -289,6 +289,50 @@ pub fn should_fall_back(err: &SttError) -> bool {
     }
 }
 
+/// Filter a transcript that came from the LOCAL engine. The Moonshine/whisper
+/// sidecar hallucinates on silence and noise exactly like the cloud one
+/// ("Thank you.", looped phrases, foreign confabulations), yet its output used
+/// to bypass the filter entirely — so a user without a Groq key (or with
+/// Groq down) got the raw junk straight into the command parser.
+fn finish_local(text: String) -> String {
+    let filtered = filter_transcript_counted(&text);
+    mark_filtered(&text, &filtered);
+    if filtered != text {
+        tracing::info!("stt: filtered local hallucination '{}' -> '{}'", text, filtered);
+    }
+    filtered
+}
+
+/// One Groq transcription for a normal (non-verifier) turn. With the
+/// confidence gate on, ask for `verbose_json` and drop the transcript when
+/// Groq's own segment statistics reject it (`stt_groq::confidence_rejects`);
+/// off (default), the plain `json` request is unchanged.
+async fn groq_turn(
+    samples: &[i16],
+    api_key: &str,
+    client: &reqwest::Client,
+    prompt: Option<&'static str>,
+    confidence_gate: bool,
+) -> Result<String, String> {
+    if !confidence_gate {
+        return crate::stt_groq::transcribe_with_groq(samples, api_key, client, prompt).await;
+    }
+    let (text, segments) =
+        crate::stt_groq::transcribe_with_groq_verbose(samples, api_key, client, prompt).await?;
+    if !text.trim().is_empty() && crate::stt_groq::confidence_rejects(&segments) {
+        tracing::info!(
+            "stt: confidence gate rejected '{}' ({} segs, min avg_logprob {:.2}, max compression {:.2})",
+            text,
+            segments.len(),
+            segments.iter().map(|s| s.avg_logprob).fold(f32::INFINITY, f32::min),
+            segments.iter().map(|s| s.compression_ratio).fold(0.0, f32::max),
+        );
+        LAST_FILTER.store(1, std::sync::atomic::Ordering::Relaxed);
+        return Ok(String::new());
+    }
+    Ok(text)
+}
+
 /// Transcribe audio — tries Groq cloud first, falls back to local faster-whisper.
 ///
 /// The frontend sends Int16 PCM samples at 16kHz. We route to Groq if an API
@@ -358,17 +402,24 @@ pub async fn transcribe_audio(
         // Primary: Groq cloud STT (~247ms, free) — with the NEXUS domain
         // vocabulary so rare entities (Servx, Zync, Eesha) win decoder bets.
         // P0 measurement (opt-in `sttLogConfidence`): same request as verbose_json so Whisper's
-        // per-segment confidence can be logged for every command turn. Never changes the result.
+        // per-segment confidence can be logged for every command turn. Never changes the result,
+        // except that the (separate, A/B-gated) confidence gate still applies.
+        let gate = crate::commands::read_stt_confidence_gate(&app);
         let groq_result = if crate::commands::read_stt_log_confidence(&app) {
             match crate::stt_groq::transcribe_with_groq_verbose(&samples, &groq_key, &state.client, Some(crate::stt_groq::NEXUS_VOCABULARY)).await {
                 Ok((text, segments)) => {
                     tracing::info!("{}", format_confidence_line(&text, &segments, samples.len()));
-                    Ok(text)
+                    if gate && !text.trim().is_empty() && crate::stt_groq::confidence_rejects(&segments) {
+                        LAST_FILTER.store(1, std::sync::atomic::Ordering::Relaxed);
+                        Ok(String::new())
+                    } else {
+                        Ok(text)
+                    }
                 }
                 Err(e) => Err(e),
             }
         } else {
-            crate::stt_groq::transcribe_with_groq(&samples, &groq_key, &state.client, Some(crate::stt_groq::NEXUS_VOCABULARY)).await
+            groq_turn(&samples, &groq_key, &state.client, Some(crate::stt_groq::NEXUS_VOCABULARY), gate).await
         };
         match groq_result {
             Ok(text) => {
@@ -398,7 +449,7 @@ pub async fn transcribe_audio(
 
     // Fallback: local faster-whisper Python sidecar
     match transcribe_local(&samples, &state.client).await {
-        Ok(text) => Ok(text),
+        Ok(text) => Ok(finish_local(text)),
         Err(e) => {
             mark_path(7);
             Err(e)
@@ -479,7 +530,7 @@ pub async fn transcribe_samples<R: tauri::Runtime>(
         }
 
         if plan.contains(&SttEngine::Groq) {
-            match crate::stt_groq::transcribe_with_groq(samples, &groq_key, client, prompt).await {
+            match groq_turn(samples, &groq_key, client, prompt, crate::commands::read_stt_confidence_gate(app)).await {
                 Ok(text) => {
                     let filtered = filter_transcript_counted(&text);
                     mark_path(1);
@@ -508,12 +559,49 @@ pub async fn transcribe_samples<R: tauri::Runtime>(
 
     // Fallback: local faster-whisper Python sidecar
     match transcribe_local(samples, client).await {
-        Ok(text) => Ok(text),
+        Ok(text) => Ok(finish_local(text)),
         Err(e) => {
             mark_path(7);
+            // Without this the user got silence: an empty transcript and a
+            // "didn't catch that" loop with no hint that no speech engine was
+            // running at all (no Python sidecar, no cloud key).
+            if let Some(app) = app {
+                note_stt_unavailable(app);
+            }
             Err(e)
         }
     }
+}
+
+/// What to tell the user when NO speech engine could transcribe. Pure.
+///   * no Groq key: the free cloud key is the easy fix;
+///   * key present but "Local STT only" on: the toggle is the fix;
+///   * key present and cloud mode: Groq AND local both failed → connectivity.
+pub fn stt_unavailable_guidance(has_groq_key: bool, local_only: bool) -> &'static str {
+    if !has_groq_key {
+        "I can't turn your speech into text, sir — my local speech engine isn't running. Add a free Groq key in Command Hub, Accounts, or install Python with the Moonshine package for offline speech."
+    } else if local_only {
+        "I can't turn your speech into text, sir — speech is set to local only and the local engine isn't running. Turn off Local STT only in Command Hub to use Groq, or install Python with the Moonshine package."
+    } else {
+        "I can't reach any speech engine right now, sir. Check your internet connection."
+    }
+}
+
+static STT_GUIDE_SPOKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Speak the "no speech engine" guide ONCE per run (never nag every utterance).
+fn note_stt_unavailable<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if STT_GUIDE_SPOKEN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let has_key = !crate::commands::read_groq_api_key(app).is_empty();
+    let local_only = crate::commands::read_local_stt_only(app);
+    crate::orchestrator::speak_proactive_alert(
+        app,
+        stt_unavailable_guidance(has_key, local_only).to_string(),
+        crate::google::types::AlertUrgency::Medium,
+        "stt_unavailable".to_string(),
+    );
 }
 
 /// Verbose variant for the wake-word verifier (v3 confidence gate).
@@ -567,12 +655,26 @@ pub async fn transcribe_samples_verbose<R: tauri::Runtime>(
 
     // Fallback: local sidecar returns plain text (no segment metadata).
     match transcribe_local(samples, client).await {
-        Ok(text) => Ok((text, Vec::new())),
+        Ok(text) => Ok((finish_local(text), Vec::new())),
         Err(e) => {
             mark_path(7);
             Err(e)
         }
     }
+}
+
+/// Pure: would a transcription use the local sidecar? (privacy mode, or no
+/// Groq key — Groq failures that fall back to local are a runtime event.)
+pub(crate) fn local_path_for(local_only: bool, groq_key_empty: bool) -> bool {
+    local_only || groq_key_empty
+}
+
+/// Would `transcribe_samples_verbose` start on the local sidecar right now?
+pub fn stt_uses_local_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    local_path_for(
+        crate::commands::read_local_stt_only(app),
+        crate::commands::read_groq_api_key(app).is_empty(),
+    )
 }
 
 /// Transcribe using the local faster-whisper Python sidecar (port 39217).
@@ -704,14 +806,6 @@ pub(crate) fn encode_wav_for_upload(samples: &[i16], sample_rate: u32) -> Result
 static FILTER_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static FILTER_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Filter + count one transcript. Drop-in for `apply_hallucination_filter`
-/// at production call sites (tests keep calling the pure fn directly).
-/// May this audio go to Groq? Privacy mode (`localSttOnly`) never reaches the cloud.
-/// Pure + unit-tested so the routing cannot silently regress again.
-pub fn groq_allowed(local_only: bool, groq_key_empty: bool) -> bool {
-    !local_only && !groq_key_empty
-}
-
 pub fn filter_transcript_counted(text: &str) -> String {
     use std::sync::atomic::Ordering;
     FILTER_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -730,7 +824,7 @@ pub fn filter_transcript_counted(text: &str) -> String {
             String::new()
         }
     };
-    if out.is_empty() {
+    if out.is_empty() && !text.trim().is_empty() {
         FILTER_HITS.fetch_add(1, Ordering::Relaxed);
     }
     out
@@ -826,6 +920,11 @@ const COMMON_WORDS: &[&str] = &[
     "pc", "battery", "percentage", "charge", "charging", "practice", "unattended", "allow",
     "enable", "disable", "shutdown", "brightness", "watch", "session", "done", "until", "finished",
     "finish", "complete", "perfect", "wifi", "bluetooth", "level", "status",
+    // general verbs / nouns real commands use
+    "list", "pull", "request", "requests", "merge", "order", "find", "read",
+    "reply", "forward", "back", "next", "previous", "scroll", "click", "copy",
+    "paste", "save", "add", "remove", "food", "all", "latest", "first",
+    "second", "third", "result", "results", "page", "file", "folder",
 ];
 
 /// Fraction of whitespace tokens (letters only, lowercased) found in
@@ -907,8 +1006,15 @@ fn evaluate_transcript(text: &str) -> Result<String, u8> {
         return Err(R_NON_ASCII);
     }
     let lower = normalized.to_lowercase();
+    // Multi-word junk Whisper emits on silence / TV audio. Matched anywhere in
+    // the transcript, so every entry must be a phrase nobody says as a command.
+    // Short ones ("thank you.", "you.", "bye.") are NOT here: as a substring
+    // they wiped real speech ("tell mom I love you.", "goodbye.") — they are
+    // whole-utterance matches in `exact_fragments` below.
     let hallucinations = [
-        "thank you for watching", "thanks for watching", "thank you.", "you.", "bye.",
+        "thank you for watching", "thanks for watching", "thank you so much for watching",
+        "thanks for listening", "thank you for listening", "see you in the next video",
+        "like and subscribe", "don't forget to subscribe", "amara.org",
         "please subscribe", "subscribe to my channel", "booaaa", "and the world is coming",
         "cunzon usarlo", "sarese manguer", "tadrao vara", "yeraddy",
         "subtitles by", "translated by", "all rights reserved",
@@ -921,7 +1027,7 @@ fn evaluate_transcript(text: &str) -> Result<String, u8> {
     }
 
     let exact_fragments = [
-        "you", "oh", "out", "it's a", "thank you", "thanks", "from the", "in the",
+        "you", "oh", "out", "it's a", "thank you", "thanks", "bye", "from the", "in the",
         "of the", "to the", "and then", "and the", "on the", "open drift", "open breath",
     ];
     let bare = lower.trim().trim_end_matches(|c: char| matches!(c, '.' | ',' | '?' | '!'));
@@ -970,6 +1076,11 @@ fn evaluate_transcript(text: &str) -> Result<String, u8> {
     // NOTE: no_speech_prob veto deliberately NOT used here — measured
     // dormant (0.000 on every segment with whisper-large-v3-turbo, see
     // verify_confidence); wiring it would add latency for zero effect.
+    // A transcript the command parser resolves to a real intent is a command
+    // even when its nouns are outside the small dictionary ("list pull
+    // requests", "order pizza from dominos" were wiped by this gate). The
+    // parser is the same one that will act on it, so nothing gibberish gets
+    // through that it would not have acted on anyway.
     let word_count = words.len();
     if word_count >= 3 && english_token_ratio(&words) < 0.30 && !is_known_command(&normalized) {
         tracing::info!("stt: filtered non-English/background gibberish: '{}'", text);
@@ -988,19 +1099,43 @@ fn evaluate_transcript(text: &str) -> Result<String, u8> {
 mod tests {
     use super::apply_hallucination_filter;
     use super::{filter_transcript_counted, hallucination_stats};
+    use super::stt_unavailable_guidance;
+
+    /// B10: the local engine's output goes through the same filter as Groq's.
+    #[test]
+    fn test_local_output_is_filtered() {
+        use super::finish_local;
+        assert_eq!(finish_local(" Thank you.".to_string()), "");
+        assert_eq!(finish_local("Thanks for watching!".to_string()), "");
+        assert_eq!(finish_local("open brave open brave open brave".to_string()), "");
+        assert_eq!(finish_local("Open Chrome.".to_string()), "Open Chrome.");
+        assert_eq!(finish_local("List pull requests.".to_string()), "List pull requests.");
+        assert_eq!(finish_local(String::new()), "");
+    }
 
     #[test]
-    fn privacy_mode_never_reaches_the_cloud() {
-        assert!(!super::groq_allowed(true, false), "localSttOnly must block Groq even with a key");
-        assert!(!super::groq_allowed(true, true));
-        assert!(super::groq_allowed(false, false));
-        assert!(!super::groq_allowed(false, true), "no key => no cloud");
+    fn test_local_path_for() {
+        use super::local_path_for;
+        assert!(local_path_for(true, false), "privacy mode is always local");
+        assert!(local_path_for(false, true), "no key → local");
+        assert!(local_path_for(true, true));
+        assert!(!local_path_for(false, false), "key + cloud allowed → Groq first");
+    }
+
+    #[test]
+    fn test_stt_unavailable_guidance_names_the_right_fix() {
+        assert!(stt_unavailable_guidance(false, true).contains("free Groq key"));
+        assert!(stt_unavailable_guidance(false, false).contains("free Groq key"));
+        assert!(stt_unavailable_guidance(true, true).contains("Local STT only"));
+        assert!(stt_unavailable_guidance(true, false).contains("internet"));
+        // Never blames the network when the real cause is a missing engine/key.
+        assert!(!stt_unavailable_guidance(false, true).contains("internet"));
     }
 
     #[test]
     fn confidence_summary_takes_worst_case_across_segments() {
         use crate::stt_groq::GroqSegment;
-        let seg = |lp: f32, ns: f32| GroqSegment { text: String::new(), avg_logprob: lp, no_speech_prob: ns };
+        let seg = |lp: f32, ns: f32| GroqSegment { text: String::new(), avg_logprob: lp, no_speech_prob: ns, compression_ratio: 0.0 };
         assert_eq!(super::confidence_summary(&[]), None);
         let (lp, ns) = super::confidence_summary(&[seg(-0.2, 0.01), seg(-0.9, 0.05), seg(-0.4, 0.30)]).unwrap();
         assert!((lp - -0.9).abs() < 1e-6 && (ns - 0.30).abs() < 1e-6);
@@ -1011,7 +1146,7 @@ mod tests {
         use crate::stt_groq::GroqSegment;
         let line = super::format_confidence_line(
             " open chrome ",
-            &[GroqSegment { text: "open chrome".into(), avg_logprob: -0.31, no_speech_prob: 0.02 }],
+            &[GroqSegment { text: "open chrome".into(), avg_logprob: -0.31, no_speech_prob: 0.02, compression_ratio: 0.0 }],
             16000,
         );
         assert_eq!(
@@ -1032,6 +1167,11 @@ mod tests {
         let (t1, h1) = hallucination_stats();
         assert_eq!(t1 - t0, 2, "two counted turns");
         assert_eq!(h1 - h0, 1, "one filter hit");
+        // An already-empty STST reply is not a filter decision.
+        assert_eq!(filter_transcript_counted(""), "");
+        assert_eq!(filter_transcript_counted("   "), "");
+        let (_, h2) = hallucination_stats();
+        assert_eq!(h2, h1, "empty raw replies must not count as filter hits");
     }
 
     /// Turn-packet markers (approach A): reset → codes → wire strings.
@@ -1644,5 +1784,69 @@ mod tests {
             assert_eq!(read_data_size, data_size);
             assert_eq!(wav.len(), 44 + (count * 2));
         }
+}
+
+    /// Real commands the speech engine transcribed correctly must reach the
+    /// parser (audit defect 11, confirmed offline: "list pull requests" and
+    /// "order pizza from dominos" were wiped by the dictionary gate; "tell mom
+    /// I love you." by the "you." substring). Whisper adds the trailing period.
+    #[test]
+    fn test_real_commands_survive_the_filter() {
+        for real in [
+            "List pull requests.",
+            "order pizza from dominos",
+            "Order pizza from Dominos.",
+            "Order biryani.",
+            "Search for shoes on Amazon.",
+            "Merge PR 23 in zync.",
+            "Tell mom I love you.",
+            "Send mummy a WhatsApp message saying hi.",
+            "I love you.",
+            "Thank you. Open Chrome.",
+            "Say goodbye.",
+            "Good morning.",
+        ] {
+            assert_eq!(apply_hallucination_filter(real), normalized(real), "'{real}' must pass");
+        }
+    }
+
+    /// The wholly-hallucinated forms still go, including the YouTube-outro
+    /// family that previously leaked.
+    #[test]
+    fn test_youtube_outro_hallucinations_filtered() {
+        for junk in [
+            "Thank you.",
+            "Thank you",
+            "You.",
+            "Bye.",
+            "Bye",
+            "Thanks for watching!",
+            "Thank you so much for watching.",
+            "See you in the next video.",
+            "Don't forget to like and subscribe.",
+            "Thanks for listening.",
+            "Subtitles by the Amara.org community",
+            "Thank you. Thank you.",
+        ] {
+            assert_eq!(apply_hallucination_filter(junk), "", "'{junk}' must filter");
+        }
+    }
+
+    /// The parser exemption must not reopen the gibberish gate: nonsense that
+    /// the parser cannot act on is still dropped.
+    #[test]
+    fn test_gibberish_still_dropped_with_parser_exemption() {
+        for junk in [
+            "Tentang Otor. Post Immortal.",
+            "Souch Mamek tadrao vara",
+            "blargle wargle xyz",
+            "asdkfjhasd qwerty zxcv",
+        ] {
+            assert_eq!(apply_hallucination_filter(junk), "", "'{junk}' must filter");
+        }
+    }
+
+    fn normalized(s: &str) -> String {
+        super::normalize_english_punctuation(s)
     }
 }

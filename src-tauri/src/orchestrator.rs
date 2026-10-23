@@ -338,6 +338,24 @@ fn emit<R: Runtime>(app: &AppHandle<R>, event: &OrchestratorEvent) {
     tracing::debug!("orchestrator: emitted {:?}", event);
 }
 
+/// Close a turn that was silently dropped as ambient speech while a ghost
+/// session is live. A dropped turn emits nothing, but the ghost mic is
+/// single-shot and the 8s no-input timeout is skipped in ghost mode, so the
+/// orb stayed "listening" with no capture running (deaf until the watchdog).
+/// `Done` makes the frontend reopen the mic silently (`maybeGhostRelisten`).
+/// Skipped mid-drill (the drill ends its own turn) and outside ghost.
+fn close_dropped_ghost_turn<R: Runtime>(app: &AppHandle<R>) {
+    if !crate::ghost::session_active() || crate::ghost::drill_running() {
+        return;
+    }
+    emit(
+        app,
+        &OrchestratorEvent::Done {
+            request_id: new_request_id(),
+        },
+    );
+}
+
 /// Cancel any active request and install a new one.
 /// Returns the new request's ID and its cancel flag.
 /// `pub(crate)` for the global-hotkey ghost-exit path (same turn semantics
@@ -613,7 +631,8 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
 
         // Settings sidebar and CodeRabbit Hub — handled locally (no Worker round-trip)
         ParsedIntent::OpenSettings
-        | ParsedIntent::OpenCodeRabbitHub => Subsystem::LocalCommand,
+        | ParsedIntent::OpenCodeRabbitHub
+        | ParsedIntent::OpenGitHubDashboard { .. } => Subsystem::LocalCommand,
 
         // GitHub sub-command system — typed operations via octocrab
         ParsedIntent::GitHubCommand { .. } => Subsystem::GitHub,
@@ -936,6 +955,7 @@ pub async fn process_transcript<R: Runtime>(
             turn.session,
             turn.owner_score
         );
+        close_dropped_ghost_turn(&app);
         return Ok(ProcessResult {
             request_id: new_request_id(),
             subsystem: Subsystem::None,
@@ -958,13 +978,22 @@ pub async fn process_transcript<R: Runtime>(
         return run_ghost_stop(&app, crate::ghost::drill_running());
     }
 
+    let ghost_live = crate::ghost::session_active();
+    // A stop-word during a ghost session must never be eaten by the ambient
+    // gate (it parses as `Unknown`, i.e. no evidence): "halt"/"abort"/
+    // "stand down" are handled by the ghost stop branches below. Rejected
+    // (not the owner's voice) turns are still dropped.
+    let ghost_stop_word = ghost_live
+        && turn.ownership != crate::voice_profile::TurnOwnership::Rejected
+        && crate::ghost::is_stop_phrase(&transcript);
     match crate::center::action_disposition(
         &intent,
         &transcript,
         source,
         turn.ownership,
-        crate::ghost::session_active(),
+        ghost_live,
     ) {
+        crate::center::ActionDisposition::AmbientDrop if ghost_stop_word => {}
         crate::center::ActionDisposition::AmbientDrop => {
             println!(
                 "[DROP] Ambient drop: evidence={:?}, ownership={:?}, ghost_active={} — dropped transcript: '{}'",
@@ -973,6 +1002,7 @@ pub async fn process_transcript<R: Runtime>(
                 crate::ghost::session_active(),
                 transcript.chars().take(80).collect::<String>().replace('\n', " ")
             );
+            close_dropped_ghost_turn(&app);
             return Ok(ProcessResult {
                 request_id: new_request_id(),
                 subsystem: Subsystem::None,
@@ -1138,233 +1168,242 @@ pub async fn process_transcript<R: Runtime>(
     // ─── Screen control (ordinal click / read-back / tab switch) ────
     // Executes inline (UIA grounding is local, ~50-500ms) with spoken
     // results. Nothing here touches the network.
-    match &intent {
-        ParsedIntent::ScreenClick { ordinal } => {
-            return run_screen_click(app, *ordinal).await;
+    //
+    // While a ghost drill is running, mid-drill speech must go to the FIFO
+    // block below (stop-words preempt, everything else queues in arrival
+    // order) instead of executing here immediately — an inline click / type /
+    // tab action would fight the drill for the mouse and keyboard, and the
+    // queue's ordering/superseding rules would never see it.
+    let queue_mid_drill = crate::ghost::session_active() && crate::ghost::drill_running();
+    if !queue_mid_drill {
+        match &intent {
+            ParsedIntent::ScreenClick { ordinal } => {
+                return run_screen_click(app, *ordinal).await;
+            }
+            ParsedIntent::ScreenRead { ordinal } => {
+                return run_screen_read(app, *ordinal).await;
+            }
+            ParsedIntent::BrowserTab { index } => {
+                return run_browser_tab(app, *index).await;
+            }
+            ParsedIntent::BrowserCloseTab { index } => {
+                return run_browser_close(app, *index).await;
+            }
+            ParsedIntent::NluResult { intent, .. } if intent == "browser_new_tab" => {
+                // Live browser hotkeys: local, visible keyboard action. Routing
+                // this to WorkerBackend sent "open a new tab" to the cloud chat
+                // while ctrl+t sat unused in the executor (audit).
+                return run_browser_new_tab(app).await;
+            }
+            ParsedIntent::BrowserSearch { query } => {
+                return run_browser_search(app, query.clone()).await;
+            }
+            ParsedIntent::BrowserSearchFocus => {
+                return run_browser_search_focus(app).await;
+            }
+            ParsedIntent::WatchScreenEmail => {
+                return run_watch_screen_email(app).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "youtube_search" => {
+                let query = slots.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                return run_youtube_search(app, query).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "youtube_journal" => {
+                let url = slots.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                return run_youtube_journal(app, url).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "type_text" => {
+                let text = slots.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                return run_type_text(app, text).await;
+            }
+            // Local system control (doc 07 P2): these previously had no
+            // dispatch arm at all, so a classified "focus_app"/"system_*"
+            // intent silently defaulted to Subsystem::WorkerBackend — the
+            // classifier ran instantly and locally, then its answer was
+            // thrown away for a cloud round-trip that couldn't act on it.
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "focus_app" => {
+                let target = slots.get("target").and_then(|v| v.as_str())
+                    .or_else(|| slots.get("app").and_then(|v| v.as_str()))
+                    .or_else(|| slots.get("title").and_then(|v| v.as_str()))
+                    .unwrap_or("").to_string();
+                return run_focus_app(app, target).await;
+            }
+            ParsedIntent::NluResult { intent, .. } if intent == "system_minimize_window" => {
+                return run_minimize_window(app).await;
+            }
+            ParsedIntent::NluResult { intent, .. } if intent == "system_maximize_window" => {
+                return run_maximize_window(app).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "system_click_element" || intent == "click_element" => {
+                let name = slots.get("name").and_then(|v| v.as_str())
+                    .or_else(|| slots.get("element").and_then(|v| v.as_str()))
+                    .unwrap_or("").to_string();
+                return run_click_element(app, name).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_analysis" => {
+                let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("analyze the screen").to_string();
+                return run_screen_analysis(app, prompt).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_annotation" => {
+                let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("annotate the screen").to_string();
+                return run_screen_annotation(app, prompt).await;
+            }
+            ParsedIntent::MemoryAudit => {
+                return run_memory_audit(app).await;
+            }
+            ParsedIntent::Briefing => {
+                return run_briefing(app).await;
+            }
+            ParsedIntent::ImportContacts => {
+                return run_import_contacts(app).await;
+            }
+            ParsedIntent::PowerAction { kind } => {
+                return run_power_action(app, kind.clone()).await;
+            }
+            ParsedIntent::FileAction { verb, object, folder, dest } => {
+                return run_file_action(app, &transcript, origin, verb.clone(), object.clone(), folder.clone(), dest.clone()).await;
+            }
+            ParsedIntent::FileUndo => {
+                return run_file_undo(app, &transcript, origin).await;
+            }
+            ParsedIntent::ReopenSession => {
+                return run_reopen_session(app).await;
+            }
+            ParsedIntent::TimetableAdd { source, section } => {
+                return run_timetable_add(app, source.clone(), *section).await;
+            }
+            ParsedIntent::TimetableShow => {
+                return run_timetable_show(app).await;
+            }
+            ParsedIntent::TimetableClear => {
+                return run_timetable_clear(app).await;
+            }
+            ParsedIntent::TimetableCommit => {
+                return run_timetable_commit(app).await;
+            }
+            ParsedIntent::StudyPref { activity, choice } => {
+                return run_study_pref(app, activity.clone(), choice.clone()).await;
+            }
+            ParsedIntent::MailDigest => {
+                return run_mail_digest(app).await;
+            }
+            ParsedIntent::MailMute => {
+                return run_mail_mute(app).await;
+            }
+            ParsedIntent::Directions { destination, origin, mode } => {
+                return run_directions(app, destination.clone(), origin.clone(), mode.clone()).await;
+            }
+            ParsedIntent::PlacesSearch { query, near } => {
+                return run_places_search(app, query.clone(), near.clone()).await;
+            }
+            ParsedIntent::WhatsappRead { name } => {
+                return run_whatsapp_read(app, name.clone()).await;
+            }
+            ParsedIntent::PeopleFlag { name, kind, on } => {
+                return run_people_flag(app, name.clone(), kind.clone(), *on).await;
+            }
+            ParsedIntent::PeopleList => {
+                return run_people_list(app).await;
+            }
+            ParsedIntent::CalendarAgenda { day } => {
+                return run_calendar_agenda(app, day.clone()).await;
+            }
+            ParsedIntent::CalendarAdd { text } => {
+                return run_calendar_add(app, text.clone()).await;
+            }
+            ParsedIntent::MemoryForget { key } => {
+                return run_memory_forget(app, key.clone()).await;
+            }
+            ParsedIntent::MemoryForgetAll => {
+                return run_memory_forget_all(app).await;
+            }
+            ParsedIntent::MemoryForgetAllConfirm => {
+                return run_memory_forget_all_confirm(app).await;
+            }
+            ParsedIntent::PersonaFriend => {
+                return run_persona_switch(app, true).await;
+            }
+            ParsedIntent::PersonaButler => {
+                return run_persona_switch(app, false).await;
+            }
+            ParsedIntent::ShareConcern { story } => {
+                return run_share_concern(app, story.clone()).await;
+            }
+            ParsedIntent::StartDictation => {
+                start_dictation_session(&app);
+                let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                speak_line(&app, "Dictation started, sir. Say new line for a line break, or scratch that to undo.".to_string(), &request_id);
+                clear_active_request(&request_id);
+                return Ok(ProcessResult {
+                    request_id,
+                    subsystem: Subsystem::LocalCommand,
+                    handled_locally: true,
+                });
+            }
+            ParsedIntent::StopDictation => {
+                set_dictation_active(false);
+                let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                speak_line(&app, "Stopped typing, sir.".to_string(), &request_id);
+                clear_active_request(&request_id);
+                return Ok(ProcessResult {
+                    request_id,
+                    subsystem: Subsystem::LocalCommand,
+                    handled_locally: true,
+                });
+            }
+            ParsedIntent::BlockContact { target, platform, duration_days } => {
+                return run_block_contact(app, target.clone(), platform.clone(), *duration_days).await;
+            }
+            ParsedIntent::UnblockContact { target, platform } => {
+                return run_unblock_contact(app, target.clone(), platform.clone()).await;
+            }
+            ParsedIntent::ListBlockedContacts => {
+                return run_list_blocked_contacts(app).await;
+            }
+            ParsedIntent::RunOnLocalhost => {
+                return run_localhost_dev(app).await;
+            }
+            ParsedIntent::CodeProject { source, prompt } => {
+                return run_code_project(app, source.clone(), prompt.clone()).await;
+            }
+            ParsedIntent::CodingAgentTask { agent, prompt } => {
+                return run_coding_agent_task(app, agent.clone(), prompt.clone()).await;
+            }
+            ParsedIntent::WatchAgentTask { agent, query } => {
+                return run_watch_agent_task(app, agent.clone(), query.clone()).await;
+            }
+            ParsedIntent::WatchThenPower { agent, kind, require_clean, deadline_mins, agents, all, track_only, followup } => {
+                return run_watch_then_power(app, agent.clone(), kind.clone(), *require_clean, *deadline_mins, agents.clone(), *all, *track_only, *followup).await;
+            }
+            ParsedIntent::WatchPlanCommand { command } => {
+                return run_watch_plan_command(app, command.clone()).await;
+            }
+            ParsedIntent::AgentHookCommand { hook_action, agent } => {
+                return run_agent_hook_command(app, hook_action.clone(), agent.clone()).await;
+            }
+            ParsedIntent::PlayMusic { query, player } => {
+                return run_play_music(app, query.clone(), player.clone()).await;
+            }
+            ParsedIntent::OpenMusicPlayer { player } => {
+                return run_open_music_player(app, player.clone()).await;
+            }
+            ParsedIntent::ScanInternshipEmails => {
+                return run_scan_internship_emails(app).await;
+            }
+            ParsedIntent::CreateVoiceReminder { task, minutes } => {
+                return run_create_voice_reminder(app, task.clone(), *minutes).await;
+            }
+            ParsedIntent::AnalyseChatDocs { contact } => {
+                return run_analyse_chat_docs(app, contact.clone()).await;
+            }
+            ParsedIntent::OpenSettings => {
+                return run_open_settings(app).await;
+            }
+            ParsedIntent::OpenCodeRabbitHub => {
+                return run_open_coderabbit_hub(app).await;
+            }
+            _ => {}
         }
-        ParsedIntent::ScreenRead { ordinal } => {
-            return run_screen_read(app, *ordinal).await;
-        }
-        ParsedIntent::BrowserTab { index } => {
-            return run_browser_tab(app, *index).await;
-        }
-        ParsedIntent::BrowserCloseTab { index } => {
-            return run_browser_close(app, *index).await;
-        }
-        ParsedIntent::NluResult { intent, .. } if intent == "browser_new_tab" => {
-            // Live browser hotkeys: local, visible keyboard action. Routing
-            // this to WorkerBackend sent "open a new tab" to the cloud chat
-            // while ctrl+t sat unused in the executor (audit).
-            return run_browser_new_tab(app).await;
-        }
-        ParsedIntent::BrowserSearch { query } => {
-            return run_browser_search(app, query.clone()).await;
-        }
-        ParsedIntent::BrowserSearchFocus => {
-            return run_browser_search_focus(app).await;
-        }
-        ParsedIntent::WatchScreenEmail => {
-            return run_watch_screen_email(app).await;
-        }
-        ParsedIntent::NluResult { intent, slots, .. } if intent == "youtube_search" => {
-            let query = slots.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            return run_youtube_search(app, query).await;
-        }
-        ParsedIntent::NluResult { intent, slots, .. } if intent == "youtube_journal" => {
-            let url = slots.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            return run_youtube_journal(app, url).await;
-        }
-        ParsedIntent::NluResult { intent, slots, .. } if intent == "type_text" => {
-            let text = slots.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            return run_type_text(app, text).await;
-        }
-        // Local system control (doc 07 P2): these previously had no
-        // dispatch arm at all, so a classified "focus_app"/"system_*"
-        // intent silently defaulted to Subsystem::WorkerBackend — the
-        // classifier ran instantly and locally, then its answer was
-        // thrown away for a cloud round-trip that couldn't act on it.
-        ParsedIntent::NluResult { intent, slots, .. } if intent == "focus_app" => {
-            let target = slots.get("target").and_then(|v| v.as_str())
-                .or_else(|| slots.get("app").and_then(|v| v.as_str()))
-                .or_else(|| slots.get("title").and_then(|v| v.as_str()))
-                .unwrap_or("").to_string();
-            return run_focus_app(app, target).await;
-        }
-        ParsedIntent::NluResult { intent, .. } if intent == "system_minimize_window" => {
-            return run_minimize_window(app).await;
-        }
-        ParsedIntent::NluResult { intent, .. } if intent == "system_maximize_window" => {
-            return run_maximize_window(app).await;
-        }
-        ParsedIntent::NluResult { intent, slots, .. } if intent == "system_click_element" || intent == "click_element" => {
-            let name = slots.get("name").and_then(|v| v.as_str())
-                .or_else(|| slots.get("element").and_then(|v| v.as_str()))
-                .unwrap_or("").to_string();
-            return run_click_element(app, name).await;
-        }
-        ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_analysis" => {
-            let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("analyze the screen").to_string();
-            return run_screen_analysis(app, prompt).await;
-        }
-        ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_annotation" => {
-            let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("annotate the screen").to_string();
-            return run_screen_annotation(app, prompt).await;
-        }
-        ParsedIntent::MemoryAudit => {
-            return run_memory_audit(app).await;
-        }
-        ParsedIntent::Briefing => {
-            return run_briefing(app).await;
-        }
-        ParsedIntent::ImportContacts => {
-            return run_import_contacts(app).await;
-        }
-        ParsedIntent::PowerAction { kind } => {
-            return run_power_action(app, kind.clone()).await;
-        }
-        ParsedIntent::FileAction { verb, object, folder, dest } => {
-            return run_file_action(app, &transcript, origin, verb.clone(), object.clone(), folder.clone(), dest.clone()).await;
-        }
-        ParsedIntent::FileUndo => {
-            return run_file_undo(app, &transcript, origin).await;
-        }
-        ParsedIntent::ReopenSession => {
-            return run_reopen_session(app).await;
-        }
-        ParsedIntent::TimetableAdd { source, section } => {
-            return run_timetable_add(app, source.clone(), *section).await;
-        }
-        ParsedIntent::TimetableShow => {
-            return run_timetable_show(app).await;
-        }
-        ParsedIntent::TimetableClear => {
-            return run_timetable_clear(app).await;
-        }
-        ParsedIntent::TimetableCommit => {
-            return run_timetable_commit(app).await;
-        }
-        ParsedIntent::StudyPref { activity, choice } => {
-            return run_study_pref(app, activity.clone(), choice.clone()).await;
-        }
-        ParsedIntent::MailDigest => {
-            return run_mail_digest(app).await;
-        }
-        ParsedIntent::MailMute => {
-            return run_mail_mute(app).await;
-        }
-        ParsedIntent::Directions { destination, origin, mode } => {
-            return run_directions(app, destination.clone(), origin.clone(), mode.clone()).await;
-        }
-        ParsedIntent::PlacesSearch { query, near } => {
-            return run_places_search(app, query.clone(), near.clone()).await;
-        }
-        ParsedIntent::WhatsappRead { name } => {
-            return run_whatsapp_read(app, name.clone()).await;
-        }
-        ParsedIntent::PeopleFlag { name, kind, on } => {
-            return run_people_flag(app, name.clone(), kind.clone(), *on).await;
-        }
-        ParsedIntent::PeopleList => {
-            return run_people_list(app).await;
-        }
-        ParsedIntent::CalendarAgenda { day } => {
-            return run_calendar_agenda(app, day.clone()).await;
-        }
-        ParsedIntent::CalendarAdd { text } => {
-            return run_calendar_add(app, text.clone()).await;
-        }
-        ParsedIntent::MemoryForget { key } => {
-            return run_memory_forget(app, key.clone()).await;
-        }
-        ParsedIntent::MemoryForgetAll => {
-            return run_memory_forget_all(app).await;
-        }
-        ParsedIntent::MemoryForgetAllConfirm => {
-            return run_memory_forget_all_confirm(app).await;
-        }
-        ParsedIntent::PersonaFriend => {
-            return run_persona_switch(app, true).await;
-        }
-        ParsedIntent::PersonaButler => {
-            return run_persona_switch(app, false).await;
-        }
-        ParsedIntent::ShareConcern { story } => {
-            return run_share_concern(app, story.clone()).await;
-        }
-        ParsedIntent::StartDictation => {
-            start_dictation_session(&app);
-            let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-            speak_line(&app, "Dictation started, sir. Say new line for a line break, or scratch that to undo.".to_string(), &request_id);
-            clear_active_request(&request_id);
-            return Ok(ProcessResult {
-                request_id,
-                subsystem: Subsystem::LocalCommand,
-                handled_locally: true,
-            });
-        }
-        ParsedIntent::StopDictation => {
-            set_dictation_active(false);
-            let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-            speak_line(&app, "Stopped typing, sir.".to_string(), &request_id);
-            clear_active_request(&request_id);
-            return Ok(ProcessResult {
-                request_id,
-                subsystem: Subsystem::LocalCommand,
-                handled_locally: true,
-            });
-        }
-        ParsedIntent::BlockContact { target, platform, duration_days } => {
-            return run_block_contact(app, target.clone(), platform.clone(), *duration_days).await;
-        }
-        ParsedIntent::UnblockContact { target, platform } => {
-            return run_unblock_contact(app, target.clone(), platform.clone()).await;
-        }
-        ParsedIntent::ListBlockedContacts => {
-            return run_list_blocked_contacts(app).await;
-        }
-        ParsedIntent::RunOnLocalhost => {
-            return run_localhost_dev(app).await;
-        }
-        ParsedIntent::CodeProject { source, prompt } => {
-            return run_code_project(app, source.clone(), prompt.clone()).await;
-        }
-        ParsedIntent::CodingAgentTask { agent, prompt } => {
-            return run_coding_agent_task(app, agent.clone(), prompt.clone()).await;
-        }
-        ParsedIntent::WatchAgentTask { agent, query } => {
-            return run_watch_agent_task(app, agent.clone(), query.clone()).await;
-        }
-        ParsedIntent::WatchThenPower { agent, kind, require_clean, deadline_mins, agents, all, track_only, followup } => {
-            return run_watch_then_power(app, agent.clone(), kind.clone(), *require_clean, *deadline_mins, agents.clone(), *all, *track_only, *followup).await;
-        }
-        ParsedIntent::WatchPlanCommand { command } => {
-            return run_watch_plan_command(app, command.clone()).await;
-        }
-        ParsedIntent::AgentHookCommand { hook_action, agent } => {
-            return run_agent_hook_command(app, hook_action.clone(), agent.clone()).await;
-        }
-        ParsedIntent::PlayMusic { query, player } => {
-            return run_play_music(app, query.clone(), player.clone()).await;
-        }
-        ParsedIntent::OpenMusicPlayer { player } => {
-            return run_open_music_player(app, player.clone()).await;
-        }
-        ParsedIntent::ScanInternshipEmails => {
-            return run_scan_internship_emails(app).await;
-        }
-        ParsedIntent::CreateVoiceReminder { task, minutes } => {
-            return run_create_voice_reminder(app, task.clone(), *minutes).await;
-        }
-        ParsedIntent::AnalyseChatDocs { contact } => {
-            return run_analyse_chat_docs(app, contact.clone()).await;
-        }
-        ParsedIntent::OpenSettings => {
-            return run_open_settings(app).await;
-        }
-        ParsedIntent::OpenCodeRabbitHub => {
-            return run_open_coderabbit_hub(app).await;
-        }
-        _ => {}
     }
 
     // ─── Ghostwriter session intercept ──────────────────────────────
@@ -1375,6 +1414,11 @@ pub async fn process_transcript<R: Runtime>(
     if crate::ghostwriter::is_active() {
         return run_ghostwriter_turn(app, transcript).await;
     }
+
+    // A previous drill's stop must not leak into this fresh turn (the flag
+    // was only reset on session entry → every action after one "stop" said
+    // "Stopped, sir."). Mid-drill turns keep it: that stop is still in flight.
+    crate::ghost::clear_stale_stop();
 
     // ─── Ghost drill overlap: stop-words + follow-up queue ──────────
     // While a ghost drill runs, mid-drill speech must not route normally
@@ -2706,7 +2750,7 @@ pub fn denial_spoken_line(body: &str) -> Option<String> {
         return None;
     }
     let line = match json["code"].as_str().unwrap_or("") {
-        "pending" => "Cloud access is awaiting approval from your administrator, sir. Everything local still works meanwhile.",
+        "pending" => "Cloud access is awaiting approval from your administrator, sir. Everything local still works meanwhile — or add a free Groq or Gemini key in Command Hub, Accounts, and I'll answer on my own.",
         "suspended" => "Cloud access has been suspended, sir. Please contact your administrator.",
         "revoked" => "This device's cloud access has been revoked, sir.",
         "expired" => "This device's cloud access grant has expired, sir. Please ask your administrator to renew it.",
@@ -3956,6 +4000,19 @@ pub fn classify_screen_query(prompt: &str) -> ScreenQueryTier {
     }
 }
 
+/// Pure: does a `ReadOnly` screen query explicitly ask for the screen's TEXT
+/// ("read my screen", "scan…", "list the text on my screen")? Those are best
+/// served by free local OCR even when a vision key is usable. Descriptive
+/// ones ("what's on my screen", "show me my screen", "tell me what I see")
+/// deserve the VLM when it is available — they used to be answered with
+/// "87 text lines, starting with: …" even with a valid Gemini key.
+pub fn screen_query_wants_ocr(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    ["read", "scan", "text", "transcrib", "copy", "list"]
+        .iter()
+        .any(|k| lower.contains(k))
+}
+
 /// LOCAL OCR answer attempt (Feature 86, zero-RAM, keyless+offline).
 /// Runs Windows.Media.Ocr on a blocking thread (WinRT async), speaks a
 /// text summary, and shows the extracted text in the assistant panel via
@@ -3969,6 +4026,7 @@ async fn try_ocr_answer<R: Runtime>(
     app: &AppHandle<R>,
     prompt: &str,
     request_id: &str,
+    downgrade_reason: Option<&str>,
 ) -> Option<ProcessResult> {
     match tokio::task::spawn_blocking(crate::ocr::capture_screen_text).await {
         Ok(Some((text, rects))) => {
@@ -3982,7 +4040,10 @@ async fn try_ocr_answer<R: Runtime>(
                 .ok()
                 .map(|d| crate::vision::exhausted(&d, "gemini"))
                 .unwrap_or(false);
-            let prefix = screen_key_guidance(has_key, exhausted)
+            // A concrete reason (key rejected, rate limited, timed out)
+            // outranks the generic keyless/quota guidance.
+            let prefix = downgrade_reason
+                .or_else(|| screen_key_guidance(has_key, exhausted))
                 .map(|s| format!("{s} "))
                 .unwrap_or_default();
             speak_line(
@@ -3993,14 +4054,22 @@ async fn try_ocr_answer<R: Runtime>(
                 ),
                 request_id,
             );
-            crate::commands::set_pending_sidebar_text(
-                prompt.to_string(),
-                format!(
-                    "## Screen Text (OCR)\n\n```\n{}\n```",
-                    text.chars().take(3000).collect::<String>()
-                ),
+            let sidebar_text = format!(
+                "## Screen Text (OCR)\n\n```\n{}\n```",
+                text.chars().take(3000).collect::<String>()
             );
+            crate::commands::set_pending_sidebar_text(prompt.to_string(), sidebar_text.clone());
             let _ = crate::commands::unified_show_sidebar(app, "assistant", None).await;
+            // The sidebar window is kept warm after first use, and a mounted
+            // SidebarApp only fetches the pending content once (on mount).
+            // `unified_show_sidebar` just flips the view, so without this the
+            // spoken "full text is in the sidebar" pointed at a blank/stale
+            // card on every use after the first. Same payload the other
+            // show paths emit when the window already exists.
+            let _ = app.emit(
+                "sidebar:show",
+                serde_json::json!({ "query": prompt, "text": sidebar_text }),
+            );
             tracing::info!(
                 "ocr: screen text extracted ({} lines, {} rects)",
                 line_count,
@@ -4330,7 +4399,7 @@ async fn run_screen_tour<R: Runtime>(
             if spoken {
                 speak_line(app, "I'm having trouble reaching the vision service, sir. Reading the visible text on your screen instead.".to_string(), &rid);
             }
-            if let Some(res) = try_ocr_answer(app, prompt, &rid).await {
+            if let Some(res) = try_ocr_answer(app, prompt, &rid, None).await {
                 clear_active_request(&rid);
                 return TourRun::Done(res);
             }
@@ -6754,7 +6823,7 @@ async fn run_screen_analysis<R: Runtime>(
                     // answer was computed in ~25ms; speak it NOW (≤1.5s
                     // worst-case failure). Empty OCR (graphical screen) falls
                     // through to a single spatial attempt below.
-                    if let Some(res) = try_ocr_answer(&app, &prompt, &request_id).await {
+                    if let Some(res) = try_ocr_answer(&app, &prompt, &request_id, None).await {
                         return Ok(res);
                     }
                 }
@@ -6766,21 +6835,60 @@ async fn run_screen_analysis<R: Runtime>(
     if !tour_acked {
         speak_line(&app, "Analyzing the screen, sir.".to_string(), &request_id);
     }
+    // Why the VLM path was skipped/failed — spoken once, folded into the
+    // fallback line instead of a silent downgrade.
+    // (Initialised for the paths that reach the fallbacks without the spatial
+    // attempt failing; the spatial `Ok` arm returns, so the compiler can't see
+    // a read of the initial value.)
+    #[cfg(target_os = "windows")]
+    #[allow(unused_assignments)]
+    let mut downgrade_reason: Option<&'static str> = None;
+    #[cfg(target_os = "windows")]
+    #[allow(unused_assignments)]
+    let mut skip_plain_text = false;
 
     #[cfg(target_os = "windows")]
     {
-        // ── Phase 5 cost pre-filter: transcription queries ("read my
-        // screen", "what's on my screen") skip BOTH VLM paths and go
-        // straight to free local OCR. Visual queries keep VLM-first.
-        if classify_screen_query(&prompt) == ScreenQueryTier::ReadOnly {
-            if let Some(result) = try_ocr_answer(&app, &prompt, &request_id).await {
+        // ── Cost pre-filter: queries that ask for the screen's TEXT
+        // ("read/scan my screen", "list the text…") go to free local OCR.
+        // Descriptive ones ("what's on my screen") use the VLM whenever it is
+        // usable and only fall to OCR when there is no key / quota / cooldown.
+        let vlm_ready = !crate::commands::read_api_key(&app, "gemini").is_empty()
+            && !app
+                .path()
+                .app_data_dir()
+                .ok()
+                .map(|d| crate::vision::unavailable(&d, "gemini"))
+                .unwrap_or(false);
+        if classify_screen_query(&prompt) == ScreenQueryTier::ReadOnly
+            && (screen_query_wants_ocr(&prompt) || !vlm_ready)
+        {
+            if let Some(result) = try_ocr_answer(&app, &prompt, &request_id, None).await {
                 return Ok(result);
             }
             tracing::info!("ocr: empty for a ReadOnly query — continuing to VLM chain");
         }
 
+        // Drop pins from a previous analysis BEFORE the screenshot: the stage
+        // overlay is not capture-excluded, so NEXUS used to photograph its own
+        // old boxes and describe them.
+        let _ = app.emit(
+            "stage:spatial_annotations",
+            serde_json::json!({ "title": "", "pins": [] }),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
         // ── Primary path: spatial decomposition (Gemini → Groq) ──────
-        match crate::vision::analyze_screen_spatial(&app, &prompt).await {
+        // "Analyzing…" is spoken once the screenshot exists (see
+        // `analyze_screen_spatial`'s `on_captured`), so its caption/orb are
+        // never in the capture.
+        let analyzing_app = app.clone();
+        let analyzing_id = request_id.clone();
+        match crate::vision::analyze_screen_spatial(&app, &prompt, move || {
+            speak_line(&analyzing_app, "Analyzing the screen, sir.".to_string(), &analyzing_id)
+        })
+        .await
+        {
             Ok(payload) => {
                 // 1. Ensure the stage overlay is on screen (click-through;
                 //    ghost ring coexists when a session is live).
@@ -6850,7 +6958,11 @@ async fn run_screen_analysis<R: Runtime>(
                 });
             }
             Err(e) => {
-                tracing::warn!("spatial analysis unavailable: {e} — falling back to plain-text VLM");
+                tracing::warn!("spatial analysis unavailable: {e}");
+                // A rejected key / quota / rate limit / timeout would fail the
+                // plain-text retry the same way and only add dead air.
+                skip_plain_text = !e.plain_text_retry_worthwhile();
+                downgrade_reason = e.spoken_reason();
             }
         }
 
@@ -6858,7 +6970,7 @@ async fn run_screen_analysis<R: Runtime>(
         // 2026-10-01: Groq decommissioned all vision models (404) — this
         // fallback now runs on Gemini Flash-Lite.
         let gemini_key = crate::commands::read_api_key(&app, "gemini");
-        if !gemini_key.is_empty() {
+        if !gemini_key.is_empty() && !skip_plain_text {
             // Feature 98: pooled 4s client (was a fresh 12s build — part of
             // the 30s death spiral).
             let client = crate::vision::shared_vision_client();
@@ -6927,13 +7039,32 @@ async fn run_screen_analysis<R: Runtime>(
     // API keys and zero network.
     #[cfg(target_os = "windows")]
     {
-        if let Some(result) = try_ocr_answer(&app, &prompt, &request_id).await {
+        if let Some(result) = try_ocr_answer(&app, &prompt, &request_id, downgrade_reason).await {
             return Ok(result);
         }
 
         // ── Fallback 3: UIA actionable-element count ─────────────────
+        // Keep the real reason audible — the bare count used to mask a
+        // rejected key / missing key behind "I see N actionable elements".
         let els = crate::screen::list_actionables();
-        speak_line(&app, format!("I see {} actionable elements on the screen, sir.", els.len()), &request_id);
+        let lead = downgrade_reason
+            .or_else(|| {
+                let has_key = !crate::commands::read_api_key(&app, "gemini").is_empty();
+                let exhausted = app
+                    .path()
+                    .app_data_dir()
+                    .ok()
+                    .map(|d| crate::vision::exhausted(&d, "gemini"))
+                    .unwrap_or(false);
+                screen_key_guidance(has_key, exhausted)
+            })
+            .map(|s| format!("{s} "))
+            .unwrap_or_default();
+        speak_line(
+            &app,
+            format!("{lead}I see {} actionable elements on the screen, sir.", els.len()),
+            &request_id,
+        );
     }
 
     clear_active_request(&request_id);
@@ -7342,7 +7473,12 @@ async fn run_click_element<R: Runtime>(app: AppHandle<R>, name: String) -> Resul
             None => {
                 let groq_key = crate::commands::read_groq_api_key(&app);
                 let gemini_key = crate::commands::read_api_key(&app, "gemini");
-                if groq_key.is_empty() && gemini_key.is_empty() {
+                let usage_dir = app
+                    .path()
+                    .app_data_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let order = crate::vision::read_vision_provider(&usage_dir);
+                if !crate::vision::has_usable_vision_key(&order, &groq_key, &gemini_key) {
                     None
                 } else {
                     let usage_dir = app
@@ -8976,6 +9112,16 @@ mod tests {
     }
 
     #[test]
+    fn test_screen_query_wants_ocr_only_for_text_requests() {
+        for q in ["read my screen", "scan my screen", "list the text on my screen"] {
+            assert!(screen_query_wants_ocr(q), "should OCR: {q}");
+        }
+        for q in ["what's on my screen", "what is on the screen", "show me my screen", "tell me what i see"] {
+            assert!(!screen_query_wants_ocr(q), "should use VLM when available: {q}");
+        }
+    }
+
+    #[test]
     fn test_annotation_seed_shape() {
         let seed = annotation_seed("annotate my screen");
         assert_eq!(seed.get("tool").and_then(|v| v.as_str()), Some("select"));
@@ -9060,7 +9206,7 @@ mod tests {
         };
         assert_eq!(
             denial_spoken_line(&mk("pending")).unwrap(),
-            "Cloud access is awaiting approval from your administrator, sir. Everything local still works meanwhile."
+            "Cloud access is awaiting approval from your administrator, sir. Everything local still works meanwhile — or add a free Groq or Gemini key in Command Hub, Accounts, and I'll answer on my own."
         );
         assert_eq!(
             denial_spoken_line(&mk("suspended")).unwrap(),

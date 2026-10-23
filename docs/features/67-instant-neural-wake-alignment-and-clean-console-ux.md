@@ -59,6 +59,8 @@ This specification documents the end-to-end audit, the diagnosis of the 5 runtim
 
 ### 3.1 Instant Neural Trigger Mode (`commands.rs` & `wakeword_oww.rs`)
 
+> **Correction (change 91):** in the current code `read_verify_wake` returns `true` by default; the text below describes an earlier state.
+
 In `src-tauri/src/commands.rs`, `read_verify_wake` now defaults to `false`. Because the openWakeWord model was trained with Binary Focal Loss across 31,048 samples and hardened against 25,835 negative speech windows (achieving 0.00% false alarms on fast conversational speech), the slow, secondary Stage-2 Whisper STT check is no longer required.
 
 ```rust

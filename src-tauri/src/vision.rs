@@ -113,17 +113,26 @@ pub fn build_locate_prompt(description: &str) -> String {
 /// Parse a 0-1000 coordinate pair from VLM text, scale to pixels.
 /// Accepts {"x":N,"y":M}, [N,M], or bare N,M. Pure + unit-tested.
 pub fn parse_coords(text: &str, w: i32, h: i32) -> Option<(i32, i32)> {
-    let nums: Vec<i64> = {
+    // Numbers may be decimals ("512.5, 300.2"): the old integer-only tokenizer
+    // split them into four numbers and returned (512, 5).
+    let nums: Vec<f64> = {
         let mut out = vec![];
         let mut cur = String::new();
         let mut neg = false;
-        for ch in text.chars().chain(std::iter::once(' ')) {
+        let chars: Vec<char> = text.chars().chain(std::iter::once(' ')).collect();
+        for (i, &ch) in chars.iter().enumerate() {
             if ch == '-' && cur.is_empty() {
                 neg = true;
             } else if ch.is_ascii_digit() {
                 cur.push(ch);
+            } else if ch == '.'
+                && !cur.is_empty()
+                && !cur.contains('.')
+                && chars.get(i + 1).map_or(false, |c| c.is_ascii_digit())
+            {
+                cur.push('.');
             } else if !cur.is_empty() {
-                let mut n: i64 = cur.parse().ok()?;
+                let mut n: f64 = cur.parse().ok()?;
                 if neg {
                     n = -n;
                 }
@@ -140,9 +149,10 @@ pub fn parse_coords(text: &str, w: i32, h: i32) -> Option<(i32, i32)> {
         return None;
     }
     let (x, y) = (nums[0], nums[1]);
-    if x < 0 || y < 0 || x > 1000 || y > 1000 {
+    if x < 0.0 || y < 0.0 || x > 1000.0 || y > 1000.0 {
         return None;
     }
+    let (x, y) = (x.round() as i64, y.round() as i64);
     Some(((x * w as i64 / 1000) as i32, (y * h as i64 / 1000) as i32))
 }
 
@@ -581,6 +591,99 @@ pub fn mark_exhausted(app_data_dir: &std::path::Path, provider: &str) {
     save_usage(app_data_dir, &u);
 }
 
+/// What an HTTP 429 from a vision provider actually means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateLimitKind {
+    /// The free-tier DAILY quota is gone — locked until the Pacific day rolls.
+    Daily,
+    /// A per-minute (or other short-window) limit — retry shortly.
+    Rate,
+}
+
+/// Classify a 429 response body. Gemini's error carries a `quotaId` such as
+/// `GenerateRequestsPerDayPerProjectPerModel-FreeTier` (daily) versus
+/// `...PerMinute...` (rate). Anything that doesn't name a daily window is a
+/// short rate limit: treating every 429 as "spent for the day" (the old
+/// behavior) locked vision — shared with ghost click grounding — until the
+/// next Pacific midnight after a single RPM blip. Pure.
+pub fn classify_429(body: &str) -> RateLimitKind {
+    let b = body.to_lowercase();
+    if b.contains("perday") || b.contains("per day") || b.contains("daily") {
+        RateLimitKind::Daily
+    } else {
+        RateLimitKind::Rate
+    }
+}
+
+/// How long a rate-limited provider is skipped.
+pub const RATE_COOLDOWN_SECS: u64 = 60;
+
+static COOLDOWNS: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Skip `provider` for `secs` (in-memory only — a restart clears it, which is
+/// right for a short-window limit).
+pub fn set_cooldown(provider: &str, secs: u64) {
+    if let Ok(mut m) = COOLDOWNS.lock() {
+        m.insert(
+            provider.to_string(),
+            std::time::Instant::now() + std::time::Duration::from_secs(secs),
+        );
+    }
+}
+
+/// True while a short rate-limit cooldown is running for `provider`.
+pub fn on_cooldown(provider: &str) -> bool {
+    COOLDOWNS
+        .lock()
+        .ok()
+        .and_then(|m| m.get(provider).copied())
+        .map(|until| std::time::Instant::now() < until)
+        .unwrap_or(false)
+}
+
+/// Record the consequence of a 429: daily → locked for the day, otherwise a
+/// short cooldown.
+pub fn apply_rate_limit(app_data_dir: &std::path::Path, provider: &str, kind: RateLimitKind) {
+    match kind {
+        RateLimitKind::Daily => mark_exhausted(app_data_dir, provider),
+        RateLimitKind::Rate => set_cooldown(provider, RATE_COOLDOWN_SECS),
+    }
+}
+
+/// Provider can't be used right now: daily cap hit OR short cooldown running.
+pub fn unavailable(app_data_dir: &std::path::Path, provider: &str) -> bool {
+    exhausted(app_data_dir, provider) || on_cooldown(provider)
+}
+
+/// Pure: does this failed response mean the API key itself is bad? 401/403,
+/// or Gemini's 400 `API_KEY_INVALID` ("API key not valid").
+pub fn is_auth_failure(status: u16, body: &str) -> bool {
+    match status {
+        401 | 403 => true,
+        400 => {
+            let b = body.to_lowercase();
+            b.contains("api key") || b.contains("api_key_invalid")
+        }
+        _ => false,
+    }
+}
+
+/// Read a failed response's status and a short body snippet (for the log and
+/// for 429/auth classification). Previously non-2xx replies were swallowed
+/// with no trace, so a rejected key looked identical to "no result".
+async fn failure_detail(resp: reqwest::Response) -> (u16, String) {
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    (status, body.chars().take(400).collect())
+}
+
+/// First `n` chars of a response body for one-line logging.
+fn snip(body: &str) -> String {
+    body.chars().take(200).collect::<String>().replace('\n', " ")
+}
+
 /// True when today's count hit the free-tier cap.
 pub fn exhausted(app_data_dir: &std::path::Path, provider: &str) -> bool {
     let u = load_usage(app_data_dir);
@@ -605,7 +708,8 @@ pub fn quota_status(app_data_dir: &std::path::Path) -> serde_json::Value {
 enum LocateStep {
     Found(crate::screen::UiElement),
     Miss,
-    Quota,
+    /// 429 — daily cap vs short rate limit decides the lockout (see `classify_429`).
+    Quota(RateLimitKind),
 }
 
 fn found_el(description: &str, x: i32, y: i32, via: &str) -> crate::screen::UiElement {
@@ -653,10 +757,15 @@ async fn locate_groq_with_image(
             Ok(r) => r,
             Err(_) => continue,
         };
-        if resp.status().as_u16() == 429 {
-            return LocateStep::Quota;
-        }
         if !resp.status().is_success() {
+            let (status, body) = failure_detail(resp).await;
+            if status == 429 {
+                return LocateStep::Quota(classify_429(&body));
+            }
+            tracing::warn!("vision: groq locate {model} HTTP {status}: {}", snip(&body));
+            if is_auth_failure(status, &body) {
+                return LocateStep::Miss;
+            }
             continue;
         }
         let json: serde_json::Value = match resp.json().await {
@@ -691,6 +800,7 @@ async fn locate_gemini_with_image(
         }],
         "generationConfig": {"maxOutputTokens": 64, "temperature": 0.0},
     });
+    let mut quota_seen: Option<RateLimitKind> = None;
     for model in [GEMINI_VISION_MODEL].into_iter().chain(GEMINI_VISION_FALLBACKS.iter().copied()) {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -705,10 +815,21 @@ async fn locate_gemini_with_image(
             Ok(r) => r,
             Err(_) => continue,
         };
-        if resp.status().as_u16() == 429 {
-            return LocateStep::Quota;
-        }
         if !resp.status().is_success() {
+            let (status, body) = failure_detail(resp).await;
+            if status == 429 {
+                // Each model has its own free-tier quota — try the next
+                // before declaring the provider out.
+                quota_seen = Some(match (quota_seen, classify_429(&body)) {
+                    (Some(RateLimitKind::Daily), _) | (_, RateLimitKind::Daily) => RateLimitKind::Daily,
+                    _ => RateLimitKind::Rate,
+                });
+                continue;
+            }
+            tracing::warn!("vision: gemini locate {model} HTTP {status}: {}", snip(&body));
+            if is_auth_failure(status, &body) {
+                return LocateStep::Miss;
+            }
             continue;
         }
         let json: serde_json::Value = match resp.json().await {
@@ -729,7 +850,22 @@ async fn locate_gemini_with_image(
             return LocateStep::Found(found_el(description, x, y, model));
         }
     }
-    LocateStep::Miss
+    match quota_seen {
+        Some(kind) => LocateStep::Quota(kind),
+        None => LocateStep::Miss,
+    }
+}
+
+/// Is there a key for a provider that the given order will ACTUALLY try?
+/// The gates used to check "any key at all" — but Groq vision is gone, so
+/// `provider_order("auto")` is Gemini-only and a Groq-only user passed the gate,
+/// had the screenshot captured and then heard "my daily vision limits are
+/// spent" (a lie: no call was ever made). Pure.
+pub fn has_usable_vision_key(order_setting: &str, groq_key: &str, gemini_key: &str) -> bool {
+    provider_order(order_setting).iter().any(|p| match *p {
+        "groq" => !groq_key.is_empty(),
+        _ => !gemini_key.is_empty(),
+    })
 }
 
 /// Located target + which provider served it + quota context for speech.
@@ -789,8 +925,8 @@ pub async fn locate_with_fallback(
         && provider_order(order_setting).len() > 1
         && !groq_key.is_empty()
         && !gemini_key.is_empty()
-        && !exhausted(usage_dir, "groq")
-        && !exhausted(usage_dir, "gemini")
+        && !unavailable(usage_dir, "groq")
+        && !unavailable(usage_dir, "gemini")
     {
         let g1 = locate_groq_with_image(description, &b64, w, h, groq_key, client);
         let g2 = locate_gemini_with_image(description, &b64, w, h, gemini_key, client);
@@ -803,13 +939,12 @@ pub async fn locate_with_fallback(
             LocateStep::Found(el) => Some(el.clone()),
             _ => None,
         };
-        let q1 = matches!(r1, LocateStep::Quota);
-        let q2 = matches!(r2, LocateStep::Quota);
-        if q1 {
-            mark_exhausted(usage_dir, "groq");
+        let q1 = matches!(r1, LocateStep::Quota(_));
+        if let LocateStep::Quota(kind) = r1 {
+            apply_rate_limit(usage_dir, "groq", kind);
         }
-        if q2 {
-            mark_exhausted(usage_dir, "gemini");
+        if let LocateStep::Quota(kind) = r2 {
+            apply_rate_limit(usage_dir, "gemini", kind);
         }
         if let Some(el) = pick(&r1).or_else(|| pick(&r2)) {
             let from_groq = pick(&r1).is_some() || (!q1 && matches!(r1, LocateStep::Miss));
@@ -836,7 +971,7 @@ pub async fn locate_with_fallback(
         if key.is_empty() {
             continue;
         }
-        if exhausted(usage_dir, label) {
+        if unavailable(usage_dir, label) {
             quota_hit.get_or_insert(label);
             continue;
         }
@@ -856,8 +991,8 @@ pub async fn locate_with_fallback(
                     raced: false,
                 });
             }
-            LocateStep::Quota => {
-                mark_exhausted(usage_dir, label);
+            LocateStep::Quota(kind) => {
+                apply_rate_limit(usage_dir, label, kind);
                 quota_hit.get_or_insert(label);
                 continue;
             }
@@ -897,6 +1032,16 @@ mod tests {
     #[test]
     fn test_parse_coords_json() {
         assert_eq!(parse_coords(r#"{"x": 500, "y": 250}"#, 2000, 1000), Some((1000, 250)));
+    }
+
+    #[test]
+    fn test_parse_coords_decimals_are_one_number_each() {
+        assert_eq!(parse_coords("512.5, 300.2", 1000, 1000), Some((513, 300)));
+        assert_eq!(parse_coords("[250.0, 750.4]", 2000, 1000), Some((500, 750)));
+        assert_eq!(parse_coords("{\"x\": 100.5, \"y\": 200.5}", 1000, 1000), Some((101, 201)));
+        // A trailing sentence period is not a decimal point.
+        assert_eq!(parse_coords("It is at 400, 600.", 1000, 1000), Some((400, 600)));
+        assert_eq!(parse_coords("1000.7, 5", 1000, 1000), None);
     }
 
     #[test]
@@ -1296,9 +1441,36 @@ pub(crate) fn normalize_box(v: &serde_json::Value) -> Option<SpatialBoundingBox>
 /// Parse a spatial analysis response into a validated payload.
 /// Renumber ids sequentially (model duplicates happen), drop degenerate
 /// boxes, cap at SPATIAL_MAX_ITEMS. Pure + unit-tested.
+/// Repair JSON truncated mid-array (token limit hit while listing items):
+/// find the longest prefix ending in `}` that parses once `]}` is appended
+/// (closing the `items` array and the root object). Pure; bounded work.
+pub fn repair_truncated_json(raw: &str) -> Option<String> {
+    let t = raw.trim_end();
+    let mut tries = 0;
+    for (idx, ch) in t.char_indices().rev() {
+        if ch != '}' {
+            continue;
+        }
+        tries += 1;
+        if tries > 400 {
+            break;
+        }
+        let candidate = format!("{}]}}", &t[..=idx]);
+        if serde_json::from_str::<serde_json::Value>(&candidate).is_ok() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 pub fn parse_spatial_json(text: &str) -> Option<SpatialAnalysisPayload> {
     let json_str = strip_json_fences(text);
-    let val: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let val: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        // A reply cut off at the token limit is still mostly good: keep the
+        // complete items instead of discarding the whole (billed) call.
+        Err(_) => serde_json::from_str(&repair_truncated_json(json_str)?).ok()?,
+    };
     let items_val = val.get("items")?.as_array()?;
     let mut items: Vec<SpatialAnalysisItem> = Vec::new();
     for raw in items_val.iter() {
@@ -1414,8 +1586,69 @@ pub fn pin_anchor_for(
 enum SpatialStep {
     Found(SpatialAnalysisPayload),
     Miss,
-    Quota,
+    /// 429 — daily cap vs short rate limit decides the lockout.
+    Quota(RateLimitKind),
+    /// The provider rejected the API key (401/403/"API key not valid").
+    Rejected,
 }
+
+/// Why spatial screen analysis produced nothing — drives what NEXUS says,
+/// and whether the plain-text VLM retry is worth its extra seconds (it is not
+/// when the cause is the key, the quota, the rate limit or a timeout: the
+/// second call would fail identically and just add dead air).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpatialError {
+    NoKeys,
+    CaptureFailed,
+    KeyRejected,
+    RateLimited,
+    QuotaSpent,
+    TimedOut,
+    /// Providers answered but nothing usable came back (parse miss, 404s).
+    Unavailable,
+}
+
+impl std::fmt::Display for SpatialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SpatialError::NoKeys => "No vision API keys configured",
+            SpatialError::CaptureFailed => "Screen capture failed",
+            SpatialError::KeyRejected => "Vision API key rejected",
+            SpatialError::RateLimited => "Vision provider rate limited",
+            SpatialError::QuotaSpent => "Vision quota spent",
+            SpatialError::TimedOut => "Vision request timed out",
+            SpatialError::Unavailable => "All vision providers unavailable",
+        })
+    }
+}
+
+impl SpatialError {
+    /// Worth a second (plain-text) VLM attempt? Only when the failure was a
+    /// parse/availability miss, not a key/quota/rate/time problem.
+    pub fn plain_text_retry_worthwhile(&self) -> bool {
+        matches!(self, SpatialError::Unavailable)
+    }
+
+    /// One spoken clause explaining the downgrade (None = say nothing extra:
+    /// the keyless/quota onboarding guidance already covers those).
+    pub fn spoken_reason(&self) -> Option<&'static str> {
+        match self {
+            SpatialError::KeyRejected => Some(
+                "Gemini rejected the key, sir — check it in Command Hub, Accounts.",
+            ),
+            SpatialError::RateLimited => {
+                Some("Gemini is rate limiting me, sir — try again in a minute.")
+            }
+            SpatialError::TimedOut => Some("Gemini took too long to answer, sir."),
+            _ => None,
+        }
+    }
+}
+
+/// Total wall-clock budget for one spatial provider attempt. Each request
+/// already times out at 20s and the Gemini model ladder tries up to 3 models,
+/// so a bad network used to mean a full minute of silence.
+const SPATIAL_TOTAL_TIMEOUT_SECS: u64 = 25;
 
 /// Provider attempt order for SPATIAL analysis. Gemini-only for auto:
 /// Groq decommissioned every vision model (2026-10-01 live check —
@@ -1459,11 +1692,17 @@ async fn spatial_groq_with_image(
         Ok(r) => r,
         Err(_) => return SpatialStep::Miss,
     };
-    if resp.status().as_u16() == 429 {
-        return SpatialStep::Quota;
-    }
     if !resp.status().is_success() {
-        return SpatialStep::Miss;
+        let (status, body) = failure_detail(resp).await;
+        if status == 429 {
+            return SpatialStep::Quota(classify_429(&body));
+        }
+        tracing::warn!("vision: groq spatial HTTP {status}: {}", snip(&body));
+        return if is_auth_failure(status, &body) {
+            SpatialStep::Rejected
+        } else {
+            SpatialStep::Miss
+        };
     }
     let json: serde_json::Value = match resp.json().await {
         Ok(j) => j,
@@ -1497,7 +1736,7 @@ async fn spatial_gemini_with_image(
             p.provider_used = "gemini".to_string();
             SpatialStep::Found(p)
         }
-        JsonStep::Quota => SpatialStep::Quota,
+        JsonStep::Quota => SpatialStep::Quota(RateLimitKind::Daily),
         JsonStep::Miss => SpatialStep::Miss,
     }
 }
@@ -1655,19 +1894,23 @@ pub(crate) async fn gemini_json_with_image<T>(
 pub async fn analyze_screen_spatial<R: Runtime>(
     app: &tauri::AppHandle<R>,
     user_prompt: &str,
-) -> Result<SpatialAnalysisPayload, String> {
+    on_captured: impl FnOnce() + Send,
+) -> Result<SpatialAnalysisPayload, SpatialError> {
     let groq_key = crate::commands::read_groq_api_key(app);
     let gemini_key = crate::commands::read_api_key(app, "gemini");
     if groq_key.is_empty() && gemini_key.is_empty() {
-        return Err("No vision API keys configured".to_string());
+        return Err(SpatialError::NoKeys);
     }
     let usage_dir = app
         .path()
         .app_data_dir()
-        .map_err(|e: tauri::Error| e.to_string())?;
+        .map_err(|_: tauri::Error| SpatialError::CaptureFailed)?;
     let Some((b64, _, _)) = capture_gridded_jpeg_base64() else {
-        return Err("Screen capture failed".to_string());
+        return Err(SpatialError::CaptureFailed);
     };
+    // The screenshot is taken: only now is it safe to speak ("Analyzing…" and
+    // its word-by-word caption are stage overlays that BitBlt would photograph).
+    on_captured();
     // Feature 98 P6: identical screen within 60s replays the cached answer
     // (<30ms, zero quota burn).
     let hash = frame_hash(&b64);
@@ -1680,17 +1923,42 @@ pub async fn analyze_screen_spatial<R: Runtime>(
     let client = shared_vision_client();
 
     let setting = read_vision_provider(&usage_dir);
+    // Strongest reason seen across providers; reported if none succeeds.
+    let mut why = SpatialError::Unavailable;
     for provider in spatial_provider_order(&setting) {
         let (key, label): (&str, &'static str) = match provider {
             "groq" => (groq_key.as_str(), "groq"),
             _ => (gemini_key.as_str(), "gemini"),
         };
-        if key.is_empty() || exhausted(&usage_dir, label) {
+        if key.is_empty() {
             continue;
         }
-        let step = match provider {
-            "groq" => spatial_groq_with_image(&prompt, &b64, key, &client).await,
-            _ => spatial_gemini_with_image(&prompt, &b64, key, &client).await,
+        if exhausted(&usage_dir, label) {
+            why = SpatialError::QuotaSpent;
+            continue;
+        }
+        if on_cooldown(label) {
+            why = SpatialError::RateLimited;
+            continue;
+        }
+        let attempt = async {
+            match provider {
+                "groq" => spatial_groq_with_image(&prompt, &b64, key, &client).await,
+                _ => spatial_gemini_with_image(&prompt, &b64, key, &client).await,
+            }
+        };
+        let step = match tokio::time::timeout(
+            std::time::Duration::from_secs(SPATIAL_TOTAL_TIMEOUT_SECS),
+            attempt,
+        )
+        .await
+        {
+            Ok(step) => step,
+            Err(_) => {
+                tracing::warn!("vision: {label} spatial attempt exceeded {SPATIAL_TOTAL_TIMEOUT_SECS}s");
+                why = SpatialError::TimedOut;
+                continue;
+            }
         };
         match step {
             SpatialStep::Found(payload) => {
@@ -1703,19 +1971,115 @@ pub async fn analyze_screen_spatial<R: Runtime>(
                 );
                 return Ok(payload);
             }
-            SpatialStep::Quota => {
-                mark_exhausted(&usage_dir, label);
+            SpatialStep::Quota(kind) => {
+                apply_rate_limit(&usage_dir, label, kind);
+                why = match kind {
+                    RateLimitKind::Daily => SpatialError::QuotaSpent,
+                    RateLimitKind::Rate => SpatialError::RateLimited,
+                };
+                continue;
+            }
+            SpatialStep::Rejected => {
+                why = SpatialError::KeyRejected;
                 continue;
             }
             SpatialStep::Miss => continue,
         }
     }
-    Err("All vision providers unavailable".to_string())
+    Err(why)
 }
 
 #[cfg(test)]
 mod spatial_tests {
     use super::*;
+
+    #[test]
+    fn test_has_usable_vision_key_follows_provider_order() {
+        // auto / gemini: only a Gemini key counts (Groq vision is gone).
+        assert!(has_usable_vision_key("auto", "", "g-key"));
+        assert!(!has_usable_vision_key("auto", "groq-key", ""));
+        assert!(!has_usable_vision_key("gemini", "groq-key", ""));
+        assert!(!has_usable_vision_key("auto", "", ""));
+        // Explicit groq setting still uses the Groq key.
+        assert!(has_usable_vision_key("groq", "groq-key", ""));
+        assert!(!has_usable_vision_key("groq", "", "g-key"));
+    }
+
+    #[test]
+    fn test_classify_429_daily_vs_rate() {
+        let daily = r#"{"error":{"code":429,"details":[{"violations":[{"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}]}}"#;
+        let rate = r#"{"error":{"code":429,"details":[{"violations":[{"quotaId":"GenerateContentRequestsPerMinutePerProjectPerModel-FreeTier"}]}]}}"#;
+        assert_eq!(classify_429(daily), RateLimitKind::Daily);
+        assert_eq!(classify_429(rate), RateLimitKind::Rate);
+        assert_eq!(classify_429("Resource exhausted"), RateLimitKind::Rate);
+        assert_eq!(classify_429(""), RateLimitKind::Rate);
+    }
+
+    #[test]
+    fn test_is_auth_failure_matrix() {
+        assert!(is_auth_failure(401, ""));
+        assert!(is_auth_failure(403, "permission denied"));
+        assert!(is_auth_failure(400, "API key not valid. Please pass a valid API key."));
+        assert!(is_auth_failure(400, "API_KEY_INVALID"));
+        assert!(!is_auth_failure(400, "Invalid JSON payload"));
+        assert!(!is_auth_failure(404, "model not found"));
+        assert!(!is_auth_failure(429, "quota"));
+        assert!(!is_auth_failure(500, ""));
+    }
+
+    #[test]
+    fn test_rate_cooldown_is_short_lived_and_per_provider() {
+        set_cooldown("test-provider-a", 60);
+        assert!(on_cooldown("test-provider-a"));
+        assert!(!on_cooldown("test-provider-b"));
+        set_cooldown("test-provider-c", 0);
+        assert!(!on_cooldown("test-provider-c"));
+    }
+
+    #[test]
+    fn test_rate_limit_does_not_lock_the_day() {
+        let dir = std::env::temp_dir().join(format!("nexus-vision-rl-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        apply_rate_limit(&dir, "gemini", RateLimitKind::Rate);
+        assert!(!exhausted(&dir, "gemini"), "an RPM blip must not spend the day");
+        assert!(unavailable(&dir, "gemini"));
+        apply_rate_limit(&dir, "gemini", RateLimitKind::Daily);
+        assert!(exhausted(&dir, "gemini"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_spatial_error_policy() {
+        assert!(SpatialError::Unavailable.plain_text_retry_worthwhile());
+        for e in [
+            SpatialError::NoKeys,
+            SpatialError::KeyRejected,
+            SpatialError::RateLimited,
+            SpatialError::QuotaSpent,
+            SpatialError::TimedOut,
+        ] {
+            assert!(!e.plain_text_retry_worthwhile(), "{e:?}");
+        }
+        assert!(SpatialError::KeyRejected.spoken_reason().is_some());
+        assert!(SpatialError::RateLimited.spoken_reason().is_some());
+        assert!(SpatialError::TimedOut.spoken_reason().is_some());
+        // Keyless / quota-spent are covered by the onboarding guidance.
+        assert!(SpatialError::NoKeys.spoken_reason().is_none());
+        assert!(SpatialError::QuotaSpent.spoken_reason().is_none());
+    }
+
+    #[test]
+    fn test_repair_truncated_json_keeps_complete_items() {
+        let cut = r#"{"title":"T","overview":"O","items":[
+            {"id":1,"label":"A","box_2d":[10,20,30,40],"details":[{"title":"x","value":"y"}]},
+            {"id":2,"label":"B","box_2d":[50,60,70,80],"details":[{"title":"x","va"#;
+        let p = parse_spatial_json(cut).expect("truncated reply should be repaired");
+        assert_eq!(p.items.len(), 1);
+        assert_eq!(p.items[0].label, "A");
+        // Nothing salvageable stays None.
+        assert!(parse_spatial_json("{\"items\": [{\"label\": \"A\", \"box_2d").is_none());
+        assert!(repair_truncated_json("not json").is_none());
+    }
 
     #[test]
     fn test_spatial_prompt_contract() {

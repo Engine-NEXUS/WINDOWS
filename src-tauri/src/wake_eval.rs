@@ -621,17 +621,13 @@ mod tests {
     /// 1.5 s / 30 / profile threshold). Keep them pinned together.
     #[test]
     fn model_manifest_runtime_matches_engine_constants() {
-        use crate::wakeword_oww::engine::{
-            AGC_MAX_GAIN, AGC_TARGET_RMS, NO_DETECTION_MS, STARTUP_GRACE_MS,
-        };
+        use crate::wakeword_oww::engine::{NO_DETECTION_MS, STARTUP_GRACE_MS};
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/oww/model_manifest.json");
         let m: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let rt = &m["runtime"];
         assert_eq!(rt["startup_grace_milliseconds"].as_u64(), Some(STARTUP_GRACE_MS));
         assert_eq!(rt["refractory_milliseconds"].as_u64(), Some(NO_DETECTION_MS));
         assert_eq!(rt["smoothing_frames"].as_u64(), Some(DETECTION_BUFFER_SIZE as u64));
-        assert_eq!(rt["agc_target_rms"].as_f64().map(|v| v as f32), Some(AGC_TARGET_RMS));
-        assert_eq!(rt["agc_max_gain"].as_f64().map(|v| v as f32), Some(AGC_MAX_GAIN));
         assert!(rt.get("wake_threshold").is_none(), "threshold belongs to the acoustic profile");
     }
 

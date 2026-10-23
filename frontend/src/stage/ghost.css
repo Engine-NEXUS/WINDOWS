@@ -120,6 +120,17 @@
 /* Glowing bounding box framing a detected element.
    LIGHT GREY (user directive 2026-10-01): a neutral mid-light tone that
    reads on BOTH white and black backgrounds — no theme probe needed. */
+/* SVG leader-line layer — styled here, not via a React `style` prop (the stage
+   CSP nonce silently drops inline styles; see OrbFrame.tsx). */
+.spatial-leader-layer {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  z-index: 99998;
+}
+
 .spatial-box {
   position: fixed;
   border: 2px solid rgba(210, 213, 220, 0.95);

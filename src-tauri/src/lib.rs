@@ -35,6 +35,10 @@ mod wakeword {
 // Offline wake-word replay harness (dev tool `wake_replay`, `nexus wake replay`).
 #[cfg(all(feature = "wakeword-oww", not(feature = "mock-wake")))]
 pub mod wake_eval;
+// Offline wake/STT accuracy evaluation (drives the real engine + filter + parser;
+// used by examples/wake_eval.rs and examples/stt_eval.rs — never by the app itself).
+#[cfg(all(feature = "wakeword-oww", not(feature = "mock-wake")))]
+pub mod voice_eval;
 // Phase D: Speaker verification module (voice profile enrollment + cosine similarity)
 pub(crate) mod voice_profile;
 pub(crate) mod acoustic_profile;
@@ -44,6 +48,8 @@ pub(crate) mod commands;
 mod command_executor;
 mod app_registry;
 pub(crate) mod action_kernel;
+pub(crate) mod wake_names;
+pub(crate) mod wake_dsp;
 pub mod intent_parser;
 mod nlu_client;
 mod nlu_local;
@@ -455,6 +461,12 @@ pub fn run() {
             //   • blackout detection → destroy → auto-fix backoff
             crate::stage::spawn_hitbox_loop(app.handle().clone());
             crate::stage::spawn_stage_watchdog(app.handle().clone());
+
+            // Ghost relisten watchdog: bounded self-heal (3 pokes/session)
+            // for a live ghost session whose hot-mic loop died. It had zero
+            // callers (lost in the lib.rs recovery), so a missed turn-end
+            // left the orb "live" and the mic deaf with nothing to recover it.
+            // REMOVED: PR 33 deleted the relisten watchdog as dead code.
 
             // WebView2 profile cleanup is done BEFORE tauri::Builder::default()
             // in run() — see cleanup_webview2_profile() above. Doing it here
@@ -1223,6 +1235,7 @@ pub fn run() {
             stt_learning::log_failed_transcript,
             stt_learning::log_successful_transcript,
             stt_learning::get_learned_corrections,
+            stt_learning::record_correction_hit,
             missed_intent_logger::get_missed_intents,
             command_executor::execute_command,
             intent_parser::parse_transcript,
