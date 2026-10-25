@@ -176,9 +176,10 @@ def cmd_segment(args):
 
 
 def _play(path):
+    import numpy as np
     import sounddevice as sd  # lazy: only the reviewer needs it
     sr, a = read_wav(path)
-    sd.play(list(a), sr)
+    sd.play(np.frombuffer(a, dtype=np.int16), sr)  # a list becomes int64, which sounddevice rejects
     sd.wait()
 
 

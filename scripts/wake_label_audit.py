@@ -257,9 +257,9 @@ def cmd_inventory(args):
         sha = file_sha(f)
         counts.setdefault(label, {}).setdefault(prov, 0)
         counts[label][prov] += 1
-        items.append({"path": str(f.relative_to(base)), "label": label, "provenance": prov, "sha": sha,
+        items.append({"path": f.relative_to(base).as_posix(), "label": label, "provenance": prov, "sha": sha,
                       "duration_s": round(dur, 3), "rms": round(rms, 5)})
-        by_sha.setdefault(sha, []).append(str(f.relative_to(base)))
+        by_sha.setdefault(sha, []).append(f.relative_to(base).as_posix())
     dup = {s: p for s, p in by_sha.items() if len(p) > 1}
     report = {"counts": counts, "exact_duplicates": dup,
               "too_short_positive": [i["path"] for i in items if i["label"] == "positive" and i["duration_s"] < MIN_SECONDS],
@@ -300,7 +300,7 @@ def cmd_score(args):
         audio = L.load_wav_16k(f)
         d = clip_descriptor(fe.windows(audio, include_transitions=True))
         dur, rms = len(audio) / L.SR, float(np.sqrt(np.mean(audio.astype(np.float64) ** 2))) if len(audio) else 0.0
-        meta.append({"sha": file_sha(f), "path": str(f.relative_to(base)), "label": label,
+        meta.append({"sha": file_sha(f), "path": f.relative_to(base).as_posix(), "label": label,
                      "provenance": provenance(f.name), "duration_s": dur, "rms": rms})
         feats.append(d)
         if i % 200 == 0:
