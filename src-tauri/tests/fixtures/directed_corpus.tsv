@@ -1,0 +1,160 @@
+# Directed speech test corpus: realistic open-mic traffic.
+# Columns: transcript	expected	reason_or_dash	kind
+# expected: accept | ignore
+# reason_or_dash: expected reason code or -
+# kind: command | polite_request | tv | side_talk | other_assistant | filler | repetition
+# Echo cases are tested in Rust unit tests with explicit recent speech context.
+# Category breakdown: 50 commands, 20 requests, 25 tv, 20 side_talk, 10 other, 10 fillers, 10 loops.
+# Total data rows: 145.
+# --- 1. Genuine commands (50 items) ---
+open notepad	accept	command	command
+close this window	accept	command	command
+search for rust documentation	accept	command	command
+type hello world	accept	command	command
+click the submit button	accept	command	command
+scroll down	accept	command	command
+scroll up	accept	command	command
+what's the time	accept	cues	command
+remind me to call john	accept	cues	command
+play some classical music	accept	command	command
+go to tab two	accept	command	command
+switch window	accept	command	command
+open google chrome	accept	command	command
+close browser	accept	command	command
+search for cheap flights	accept	command	command
+what time is it	accept	cues	command
+remind me to buy milk	accept	cues	command
+play next song	accept	command	command
+pause music	accept	command	command
+resume playback	accept	command	command
+stop the music	accept	command	command
+mute volume	accept	command	command
+unmute	accept	command	command
+turn the volume up	accept	cues	command
+turn the volume down	accept	cues	command
+open spotify	accept	command	command
+launch terminal	accept	command	command
+switch to next tab	accept	command	command
+close this tab	accept	command	command
+maximize window	accept	command	command
+minimize this window	accept	command	command
+what is the weather in seattle	accept	cues	command
+how is the traffic to work	accept	cues	command
+take a screenshot	accept	command	command
+click the blue link	accept	command	command
+double click the icon	accept	command	command
+scroll to top	accept	command	command
+scroll to bottom	accept	command	command
+go back	accept	command	command
+go forward	accept	command	command
+refresh page	accept	command	command
+copy this text	accept	command	command
+paste here	accept	command	command
+select all	accept	command	command
+undo that	accept	command	command
+redo that	accept	command	command
+save this file	accept	command	command
+find word in document	accept	command	command
+open command hub	accept	command	command
+close settings	accept	command	command
+# --- 2. Polite and indirect requests (20 items) ---
+could you open my notes	accept	cues	polite_request
+can you turn the volume down	accept	cues	polite_request
+could you check my calendar	accept	cues	polite_request
+can you search for weather in boston	accept	cues	polite_request
+would you close the browser window	accept	cues	polite_request
+please turn down the brightness	accept	cues	polite_request
+please pause the music for a second	accept	cues	polite_request
+i need you to open github	accept	cues	polite_request
+i want you to close this tab	accept	cues	polite_request
+could you please read my emails	accept	cues	polite_request
+can you show me the open windows	accept	cues	polite_request
+would you please mute the sound	accept	cues	polite_request
+could you find files modified today	accept	cues	polite_request
+can you tell me what time it is	accept	cues	polite_request
+please switch to the terminal window	accept	cues	polite_request
+i need you to remind me at four	accept	cues	polite_request
+could you maximize this application	accept	cues	polite_request
+can you open my settings page	accept	cues	polite_request
+would you help me find my downloads	accept	cues	polite_request
+please scroll down to the bottom	accept	cues	polite_request
+# --- 3. TV and background speech (25 items) ---
+and in other news the market opened lower today	ignore	no_cues	tv
+the president addressed parliament earlier this morning	ignore	no_cues	tv
+heavy rain and thunderstorms will continue into the evening	ignore	no_cues	tv
+doctors recommend getting at least seven hours of sleep	ignore	no_cues	tv
+in tonight's episode the team travels across the border	ignore	no_cues	tv
+she said that nobody was available at the station	ignore	no_cues	tv
+the defense attorney called another witness to testify	ignore	no_cues	tv
+investors are watching inflation numbers very closely this quarter	ignore	no_cues	tv
+scientists discovered a new species in the rainforest	ignore	no_cues	tv
+our correspondent in Tokyo reported earlier on the situation	ignore	no_cues	tv
+officials announced a new policy regarding public transportation fares	ignore	no_cues	tv
+a rare painting was auctioned for millions in Paris	ignore	no_cues	tv
+local schools will remain closed due to extreme weather	ignore	no_cues	tv
+traffic on the highway is moving slowly after an accident	ignore	no_cues	tv
+the prime minister spoke at the international conference today	ignore	no_cues	tv
+temperatures dropped below freezing in several northern provinces	ignore	no_cues	tv
+the spacecraft successfully entered orbit around the moon	ignore	no_cues	tv
+and that is why the economy keeps struggling	ignore	no_cues	tv
+she told me yesterday that it was fine	ignore	no_cues	tv
+the championship match will resume tomorrow after being postponed due to heavy rainfall on the court	ignore	too_long	tv
+and now for the local forecast showing heavy showers spreading across the entire northern region tonight	ignore	too_long	tv
+according to recent studies drinking enough water throughout the day improves focus and energy levels	ignore	too_long	tv
+the company announced record quarterly profits driven by strong demand across international markets	ignore	no_cues	tv
+tonight at ten we have exclusive coverage of the festival	ignore	no_cues	tv
+the latest documentary explores wildlife in the deep ocean	ignore	no_cues	tv
+# --- 4. Side conversations (20 items) ---
+honey did you see my keys	ignore	no_cues	side_talk
+tell him I'll call back	ignore	-	side_talk
+dinner is almost ready if you want to eat	ignore	no_cues	side_talk
+I'm heading out to the grocery store now	ignore	no_cues	side_talk
+we need to leave in twenty minutes	ignore	no_cues	side_talk
+the laundry is finally finished	ignore	no_cues	side_talk
+mom called while you were outside	ignore	no_cues	side_talk
+I'll be downstairs in just a minute	ignore	no_cues	side_talk
+pass me the water bottle from the table	ignore	no_cues	side_talk
+my phone battery is almost dead	ignore	no_cues	side_talk
+I'm going to grab a cup of coffee	ignore	no_cues	side_talk
+someone left the garage door wide open	ignore	no_cues	side_talk
+we are out of milk and bread again	ignore	no_cues	side_talk
+the package arrived on the front porch	ignore	no_cues	side_talk
+I'm on a work call right now	ignore	no_cues	side_talk
+the traffic was terrible on the way home	ignore	no_cues	side_talk
+dad wants to know if you're coming tomorrow	ignore	no_cues	side_talk
+I'm going to take a quick shower	ignore	no_cues	side_talk
+my train was delayed by fifteen minutes	ignore	no_cues	side_talk
+the printer is making that weird squeaking noise again	ignore	no_cues	side_talk
+# --- 5. Other assistant wake words (10 items) ---
+alexa what's the weather	ignore	foreign_wake	other_assistant
+hey google play music	ignore	foreign_wake	other_assistant
+hey siri set a timer	ignore	foreign_wake	other_assistant
+ok google what time is it	ignore	foreign_wake	other_assistant
+alexa turn off the lights	ignore	foreign_wake	other_assistant
+hey siri call mom	ignore	foreign_wake	other_assistant
+okay google navigate home	ignore	foreign_wake	other_assistant
+hi siri remind me to take medicine	ignore	foreign_wake	other_assistant
+hey cortana open calendar	ignore	foreign_wake	other_assistant
+hey bixby volume up	ignore	foreign_wake	other_assistant
+# --- 6. Fillers and fragments (10 items) ---
+hmm	ignore	filler	filler
+uh huh	ignore	filler	filler
+okay okay	ignore	filler	filler
+yeah	ignore	filler	filler
+um	ignore	filler	filler
+uhh	ignore	filler	filler
+ah right	ignore	filler	filler
+well then	ignore	filler	filler
+yes sure	ignore	filler	filler
+oh cool	ignore	filler	filler
+# --- 7. Repetition loops and hallucinations (10 items) ---
+thank you thank you thank you	ignore	filler	repetition
+you you you you	ignore	filler	repetition
+I'm gonna say that I'm gonna say that I'm gonna say that	ignore	repetition	repetition
+I'm going to go I'm going to go I'm going to go	ignore	repetition	repetition
+wait wait wait wait wait wait wait wait	ignore	repetition	repetition
+the air the air the air the air the air the air the air	ignore	repetition	repetition
+go the page too go the page too go the page too	ignore	repetition	repetition
+no no no no no no no no	ignore	repetition	repetition
+repeating this repeating this repeating this repeating this	ignore	repetition	repetition
+testing one two testing one two testing one two	ignore	repetition	repetition

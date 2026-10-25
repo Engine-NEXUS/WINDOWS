@@ -412,7 +412,7 @@ After successful OAuth, the Worker stores:
 4. **Base64 API key storage** — `api_keys.key_encrypted` uses `btoa()` which
    is reversible encoding, not encryption. Should use AES-GCM.
 
-These are documented in `docs/credentials/07-security-best-practices.md` and
+These are documented in `docs/archive/credentials/07-security-best-practices.md` and
 are pending implementation.
 
 ---

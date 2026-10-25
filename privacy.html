@@ -15,7 +15,7 @@
       justify-content: center;
     }
     .container {
-      max-width: 750px;
+      max-width: 820px;
       background: rgba(255, 255, 255, 0.04);
       border: 1px solid rgba(255, 255, 255, 0.1);
       border-radius: 16px;
@@ -23,31 +23,74 @@
       backdrop-filter: blur(12px);
     }
     h1 { color: #ffffff; font-size: 26px; }
-    h2 { color: #f8fafc; font-size: 18px; margin-top: 24px; }
-    p, li { color: #94a3b8; line-height: 1.6; font-size: 14px; }
+    h2 { color: #f8fafc; font-size: 18px; margin-top: 28px; }
+    p, li, td, th { color: #94a3b8; line-height: 1.6; font-size: 14px; }
+    th { color: #e2e8f0; text-align: left; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid rgba(255, 255, 255, 0.1); vertical-align: top; }
+    code { color: #cbd5e1; }
     a { color: #38bdf8; text-decoration: none; }
+    .note { border: 1px solid rgba(251, 191, 36, 0.4); border-radius: 8px; padding: 10px 14px; }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>Privacy Policy for NEXUS Assistant</h1>
-    <p>Last updated: September 29, 2026</p>
+    <p>Last updated: October 17, 2026</p>
+    <p class="note"><strong>Pre-release draft.</strong> NEXUS is under active development and this policy describes the current development build. It has not been reviewed by a lawyer. It will change as the product does, and the date above will change with it.</p>
 
-    <h2>1. Data Minimization & Local Privacy</h2>
-    <p>NEXUS Assistant is designed as an on-device personal assistant. All user data, speech transcripts, configuration settings, and OAuth access/refresh tokens are stored locally on your device within the OS Credential Store (Windows Credential Manager / macOS Keychain).</p>
+    <h2>1. The short version</h2>
+    <p>NEXUS is <strong>local-first, not offline-only</strong>. Your memory, settings and file-action history live on your device. To understand speech and answer questions, NEXUS sends data to third-party services, listed in section 3. Nothing is sold, and NEXUS has no advertising or analytics.</p>
 
-    <h2>2. Google User Data Protection</h2>
-    <p>When you authenticate with your Google Account via RFC 8252 Loopback OAuth, NEXUS requests permissions solely for reading email updates (for proactive deadline alerts), accessing calendar events, searching photos, and maps routing.</p>
+    <h2>2. What stays on your device</h2>
     <ul>
-      <li>Google tokens are stored exclusively in your local OS Keychain.</li>
-      <li>Google user data is processed locally on your device and is never transmitted to, sold to, or shared with third-party remote servers.</li>
+      <li><strong>Wake-word detection.</strong> The microphone is monitored on-device for the wake word. Audio is sent anywhere only after the wake word or the hotkey starts a turn.</li>
+      <li><strong>Memory.</strong> Facts you told NEXUS, short conversation summaries (30 days), where you left off (7 days), timetable slots you confirmed, and previews of important mail (7 days) are kept in a database encrypted with AES-256-GCM. The key is held in the operating-system credential store. If no credential store is available, the file is kept unencrypted and the app says so. Encryption protects against disk theft and other user accounts, not against malware running as you.</li>
+      <li><strong>Camera (Hand mode).</strong> Only when you turn it on. Video frames are processed on-device; only landmark numbers are used and no frames are stored.</li>
+      <li><strong>File actions.</strong> Voice file operations are logged locally (an audit log) and deleted files are moved to a <code>.nexus-trash</code> folder, not erased, until you remove them.</li>
+      <li><strong>Settings and API keys.</strong> API keys you add are stored in the OS credential store. In this build a legacy plaintext copy may also exist in <code>settings.json</code>; removing it is a planned fix.</li>
     </ul>
 
-    <h2>3. Telemetry & Analytics</h2>
-    <p>NEXUS Assistant does not collect, transmit, or sell personal telemetry, user data, or analytics to any external tracking servers.</p>
+    <h2>3. What is sent to third parties</h2>
+    <table>
+      <tr><th>Recipient</th><th>What is sent</th><th>When</th></tr>
+      <tr><td>Groq</td><td>Audio of your spoken command (speech-to-text); transcripts and context for language-model replies</td><td>Every voice turn unless local-only speech recognition is on and working</td></tr>
+      <tr><td>Deepgram</td><td>Audio for speech-to-text</td><td>Only if you add a Deepgram key</td></tr>
+      <tr><td>Cerebras, Groq, Google Gemini</td><td>Transcript plus a ranked, PII-filtered memory context pack (up to about 2,000 characters)</td><td>When a question needs the cloud language model</td></tr>
+      <tr><td>Google Gemini (vision)</td><td>Screenshots or images (screen analysis, timetable import, click-target grounding)</td><td>Only when you ask NEXUS to look at your screen or an image</td></tr>
+      <tr><td>Microsoft Edge text-to-speech</td><td>The text NEXUS speaks, including names that appear in alerts</td><td>Whenever NEXUS speaks online</td></tr>
+      <tr><td>NEXUS Cloudflare Worker (operated by the NEXUS team)</td><td>Transcripts, device identifier, usage counters; OAuth tokens for GitHub, Google and Swiggy connections made through the Worker</td><td>Cloud-routed turns and when you connect those accounts. Processed with Cloudflare Workers AI and stored in Cloudflare D1.</td></tr>
+      <tr><td>GitHub</td><td>API requests using your token (PR diffs, repository metadata)</td><td>When you use GitHub commands</td></tr>
+      <tr><td>Google APIs (Gmail, Calendar, Maps/Places/Routes, Contacts)</td><td>API requests using your Google token and, for Maps, a spoken origin or destination</td><td>When you connect Google and use those features</td></tr>
+      <tr><td>Swiggy, Amazon and WhatsApp bridges</td><td>Search terms, order and message content you ask for</td><td>Only when you use those commands. The WhatsApp bridge is a local, unofficial client.</td></tr>
+      <tr><td>Hugging Face</td><td>Download requests for the offline voice model files</td><td>First online run and voice changes</td></tr>
+      <tr><td>Telegram</td><td>Messages to and from the bot you configure</td><td>Only if you enable Telegram remote control</td></tr>
+    </table>
+    <p>Each of these services has its own privacy policy and terms; NEXUS does not control how they handle data once received. The Memory page in the Command Hub keeps a 7-day encrypted log of exactly which memory text each cloud turn sent.</p>
 
-    <h2>4. Contact Us</h2>
-    <p>If you have any questions regarding this Privacy Policy, contact us at: <a href="mailto:official.lakshya.chitkul@gmail.com">official.lakshya.chitkul@gmail.com</a></p>
+    <h2>4. Google user data</h2>
+    <p>If you connect a Google account, NEXUS uses Gmail message metadata and snippets (never full message bodies) to alert you to deadlines and important mail, Calendar to read and add events, and Maps services for directions. This data is used only to provide the features you invoke. It is not sold, not used for advertising and not used to train AI models. Google tokens obtained through your own OAuth client are stored in the OS credential store; tokens obtained through the NEXUS Worker are stored in the Worker's database until you disconnect. Subjects, senders or snippets may appear in the memory context pack described above, and sender names may be spoken aloud through Edge text-to-speech.</p>
+
+    <h2>5. Retention and your controls</h2>
+    <ul>
+      <li>Memory: conversation summaries 30 days, resume points and mail previews 7 days, facts until you remove them. Say "forget …", use the Memory page, or wipe memory entirely (this also discards the encryption key).</li>
+      <li>Cloud-send log: 7 days, stored encrypted on your device.</li>
+      <li>Worker: OAuth tokens are kept until you disconnect the provider or an administrator removes your device. Daily usage counters are kept per device.</li>
+      <li>Disconnect any account from the Command Hub; remove API keys from the API Keys page.</li>
+      <li>Optional name redaction replaces people's names in memory sent to the cloud with placeholders.</li>
+    </ul>
+
+    <h2>6. Telemetry and logs</h2>
+    <p>NEXUS does not send analytics or crash telemetry. It keeps local usage counters and a local diary on your device. The Cloudflare Worker has request logging enabled; the current code logs message lengths, not message text, but older deployments may have logged fragments of what was said.</p>
+
+    <h2>7. Children</h2>
+    <p>NEXUS is not directed at children under 13.</p>
+
+    <h2>8. Changes</h2>
+    <p>We will update this page and its date when data practices change.</p>
+
+    <h2>9. Contact</h2>
+    <p>Questions about this policy: <a href="mailto:official.lakshya.chitkul@gmail.com">official.lakshya.chitkul@gmail.com</a></p>
   </div>
 </body>
 </html>

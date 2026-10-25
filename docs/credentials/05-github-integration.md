@@ -1,3 +1,5 @@
+> **Partially superseded (2026-10-17).** The Python sidecar and its `/apikeys/*` routes mentioned here no longer exist. OAuth tokens are held by the Cloudflare Worker (D1) and the on-device vault; third-party API keys live in the OS keychain (a legacy plaintext copy in `settings.json` still exists and is being removed — see `docs/memory-core/06-limits-risks-and-roadmap.md`). Read the rest as design history.
+
 # GitHub Integration
 
 > How NEXUS connects to GitHub via OAuth and what it can do with the access token.

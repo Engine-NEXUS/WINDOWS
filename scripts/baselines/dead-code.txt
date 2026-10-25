@@ -144,16 +144,7 @@ vision.rs: function locate_via_vision
 vision.rs: function parse_screen_email_json
 vision.rs: function resolve_named_target
 vision.rs: struct ScreenEmailContext
-voice_catalog.rs: function find_by_cloud_id
 voice_catalog.rs: function find_by_kokoro_voice
 voice_catalog.rs: function read_manifest
-voice_profile.rs: method acceptance_threshold
-voice_profile.rs: method delete
-voice_profile.rs: method implicit_enroll
-voice_profile.rs: method num_embeddings
-wakeword_oww.rs: associated function new
-wakeword_oww.rs: field impulsive_ratio
-wakeword_oww.rs: function stt_capturing
 wakeword_oww.rs: function verify_transcript
-wakeword_oww.rs: method floor
 youtube_center.rs: constant ACTIONS

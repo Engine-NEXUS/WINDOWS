@@ -1,3 +1,5 @@
+> **STATUS 2026-10-17: BUILT (P0-P6)** with the recommended defaults for D1-D5; record, verification and the limits: `docs/changes/135-action-kernel-file-control-and-agent-safety.md`.
+
 # 140 — How agents like Claude Code and Codex control a computer (and delete things) safely, and the plan to give NEXUS the same control (RESEARCH + PLAN, nothing built)
 
 Date: 2026-10-17. Owner ask: understand how AI agents control the laptop, run commands and delete files "perfectly", so NEXUS can get that control and understanding. Method: official docs of Claude Code and Codex, Microsoft's UFO2 paper, Anthropic computer-use material, prompt-injection design papers, Windows file-API docs, plus a read of NEXUS's own code on `D:\ULTRON`. Sources at the end; items marked (secondary) came from blogs/summaries, not vendor docs.

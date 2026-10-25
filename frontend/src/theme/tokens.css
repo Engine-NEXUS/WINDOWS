@@ -4,22 +4,22 @@
    ═══════════════════════════════════════════════════════════════ */
 
 :root {
-  /* ── Dark Mode: Frosted Liquid Glass & Pitch Tint ───────────────── */
-  --nx-bg:             rgba(12, 12, 16, 0.72);
-  --nx-bg-card:        rgba(26, 26, 32, 0.62);
-  --nx-bg-hover:       rgba(255, 255, 255, 0.08);
-  --nx-bg-elevated:    rgba(34, 34, 42, 0.75);
+  /* ── Dark Mode: 100% Solid Pitch Black & Clean Surfaces ───────────── */
+  --nx-bg:             #0a0a0c;
+  --nx-bg-card:        #141418;
+  --nx-bg-hover:       #1e1e24;
+  --nx-bg-elevated:    #1e1e26;
 
-  --nx-glass-blur:     blur(26px) saturate(190%);
-  --nx-glass-border:   1px solid rgba(255, 255, 255, 0.14);
-  --nx-glass-shadow:   0 20px 50px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  --nx-glass-blur:     none;
+  --nx-glass-border:   1px solid rgba(255, 255, 255, 0.12);
+  --nx-glass-shadow:   0 20px 50px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.08);
 
   --nx-text-primary:   #ffffff;
   --nx-text-secondary: rgba(255, 255, 255, 0.72);
   --nx-text-tertiary:  rgba(255, 255, 255, 0.45);
   --nx-text-inverse:   #000000;
 
-  --nx-border:           rgba(255, 255, 255, 0.14);
+  --nx-border:           rgba(255, 255, 255, 0.12);
   --nx-border-focus:     #ffffff;
   --nx-border-glow:      0 0 16px rgba(255, 255, 255, 0.12);
 
@@ -42,13 +42,13 @@
 }
 
 :root[data-theme="light"] {
-  /* ── Light Mode: Frosted Liquid Glass & Pure Frosted White ───────── */
-  --nx-bg:             rgba(244, 244, 248, 0.75);
-  --nx-bg-card:        rgba(255, 255, 255, 0.68);
-  --nx-bg-hover:       rgba(0, 0, 0, 0.05);
-  --nx-bg-elevated:    rgba(255, 255, 255, 0.88);
+  /* ── Light Mode: 100% Solid Pure White & Crisp Light Surfaces ───────── */
+  --nx-bg:             #f8f9fa;
+  --nx-bg-card:        #ffffff;
+  --nx-bg-hover:       #e9ecef;
+  --nx-bg-elevated:    #f1f3f5;
 
-  --nx-glass-blur:     blur(26px) saturate(190%);
+  --nx-glass-blur:     none;
   --nx-glass-border:   1px solid rgba(0, 0, 0, 0.08);
   --nx-glass-shadow:   0 16px 40px rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.6);
 

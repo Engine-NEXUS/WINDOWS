@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { UnifiedSidebar } from "./UnifiedSidebar";
 // View styles — all four views live in this ONE window now.
 import "./sidebar.css";
+import "./coderabbit.css";
 import "./unified.css";
 import "../settings-sidebar/settings-sidebar.css";
 import "../architect/architect.css";

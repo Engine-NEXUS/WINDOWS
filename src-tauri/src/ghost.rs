@@ -205,8 +205,10 @@ fn clear_stop() {
 /// Drop a stop flag left behind with no drill to consume it (a `live_cancel`
 /// while idle). Called when a new top-level command starts; a stop raised
 /// DURING a drill is left alone (the drill is still observing it).
+/// Outside a session the flag is left alone (test expectation: a stray stop
+/// from a previous session should not be silently cleared).
 pub fn clear_stale_stop() {
-    if !drill_running() {
+    if !drill_running() && session_active() {
         clear_stop();
     }
 }
@@ -326,13 +328,14 @@ pub fn dequeue_command() -> Option<QueuedCmd> {
 
 /// Rule 3: re-verify grounding at dequeue time, never execute blind.
 /// Browser-targeted steps require a browser to actually hold the
-/// foreground (a URL read proves it); anything else re-verifies inside
-/// its own runner (focus-verify before+after). Err = skip with one
-/// spoken line, queue continues.
+/// foreground (checked by process name — an address-bar URL read is empty on
+/// a fresh new tab, which skipped "search …" right after "new tab");
+/// anything else re-verifies inside its own runner (focus-verify
+/// before+after). Err = skip with one spoken line, queue continues.
 pub fn verify_grounding(cmd: &QueuedCmd) -> Result<(), String> {
     match cmd.slot {
         SlotClass::BrowserAction | SlotClass::Navigate => {
-            if crate::browser_url::get_active_browser_url().is_none() {
+            if !crate::browser_url::foreground_is_browser() {
                 return Err("Target browser window lost focus".into());
             }
         }
@@ -356,6 +359,8 @@ pub fn drop_followups() -> usize {
 pub fn session_active() -> bool {
     *SESSION.lock() == Session::Active
 }
+
+
 
 /// Speak one line through the orb without touching any handshake
 /// (same rails as abort notices). Used for session entry/exit narration.
@@ -729,11 +734,18 @@ pub mod ghost_wry {
     /// (R::Handle is dependently-sized; a direct transmute is rejected).
     /// Lives in ONE place (here), not scattered through every caller.
     pub fn g_wry<R: tauri::Runtime>(app: AppHandle<R>) -> AppHandle<tauri::Wry> {
+        // Ownership MOVES into the returned handle. The previous version did a
+        // bare `ptr::read` and then let `app` drop at scope end — two owners of
+        // the same Arcs, one decrement too many on every call (each owning
+        // call site: ghost drills, voice exit, abort). Over enough ghost
+        // enter/exit cycles that underflows the refcounts (use-after-free).
+        // `ManuallyDrop` suppresses the original's destructor.
+        let app = std::mem::ManuallyDrop::new(app);
         unsafe {
             // Same memory, reinterpreted under the Wry marker — field
             // offsets are identical (Handle is a unit marker struct in
             // every runtime used).
-            let raw = &app as *const AppHandle<R> as *const AppHandle<tauri::Wry>;
+            let raw = &*app as *const AppHandle<R> as *const AppHandle<tauri::Wry>;
             std::ptr::read(raw)
         }
     }
@@ -779,6 +791,33 @@ mod tests {
         assert!(!is_active());
         *SESSION.lock() = Session::Idle;
         assert!(!is_active());
+    }
+
+    /// Regression: one voice "stop" used to poison every later ghost action
+    /// ("Stopped, sir.") because only `ghost_enter` reset the flag.
+    #[test]
+    fn test_stale_stop_cleared_on_fresh_turn_not_mid_drill() {
+        *SESSION.lock() = Session::Active;
+        GHOST_BUSY.store(0, std::sync::atomic::Ordering::Relaxed);
+        request_stop();
+        assert!(stop_requested());
+
+        // Mid-drill: the stop is still in flight and must survive.
+        drill_begin();
+        clear_stale_stop();
+        assert!(stop_requested());
+        drill_end();
+
+        // Fresh turn after the drill finished: stale stop is dropped.
+        clear_stale_stop();
+        assert!(!stop_requested());
+
+        // Outside a session the flag is left alone.
+        *SESSION.lock() = Session::Idle;
+        request_stop();
+        clear_stale_stop();
+        assert!(stop_requested());
+        clear_stop();
     }
 
     #[test]
@@ -953,6 +992,9 @@ mod tests {
 
     #[test]
     fn test_stale_stop_without_a_drill_is_dropped_but_a_live_one_is_kept() {
+        // Session must be Active for clear_stale_stop to clear the flag
+        // (outside a session, a stray stop from a previous session is left alone).
+        *SESSION.lock() = Session::Active;
         while drill_running() {
             drill_end();
         }

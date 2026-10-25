@@ -96,16 +96,21 @@ pub fn get_client_credentials() -> (String, Option<String>) {
     (client_id, client_secret)
 }
 
+/// OS CSPRNG. The PKCE verifier protects the authorization code, so it must be
+/// unpredictable (RFC 7636 §7.1) — a time-seeded LCG is guessable.
 fn get_random_bytes(dest: &mut [u8]) {
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let mut rng = seed;
-    for (i, byte) in dest.iter_mut().enumerate() {
-        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-        *byte = ((rng >> 32) ^ (i as u128)) as u8;
-    }
+    use ring::rand::{SecureRandom, SystemRandom};
+    SystemRandom::new()
+        .fill(dest)
+        .expect("OS random source unavailable");
+}
+
+/// Compute S256 PKCE code challenge from a verifier string (RFC 7636 §4.2).
+pub fn compute_pkce_challenge(verifier: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(verifier.as_bytes());
+    let hash = hasher.finalize();
+    URL_SAFE_NO_PAD.encode(hash)
 }
 
 /// Generate PKCE verifier (43 chars) and challenge (S256).
@@ -113,13 +118,107 @@ pub fn generate_pkce() -> (String, String) {
     let mut random_bytes = [0u8; 32];
     get_random_bytes(&mut random_bytes);
     let verifier = URL_SAFE_NO_PAD.encode(random_bytes);
-
-    let mut hasher = Sha256::new();
-    hasher.update(verifier.as_bytes());
-    let hash = hasher.finalize();
-    let challenge = URL_SAFE_NO_PAD.encode(hash);
+    let challenge = compute_pkce_challenge(&verifier);
 
     (verifier, challenge)
+}
+
+/// Generate random state parameter (32 chars base64url) for CSRF mitigation (RFC 6749 §10.12).
+pub fn generate_state() -> String {
+    let mut random_bytes = [0u8; 24];
+    get_random_bytes(&mut random_bytes);
+    URL_SAFE_NO_PAD.encode(random_bytes)
+}
+
+/// Construct Google OAuth 2.0 authorization URL with PKCE and state parameters.
+pub fn build_authorization_url(
+    client_id: &str,
+    redirect_uri: &str,
+    scopes: &str,
+    challenge: &str,
+    state: &str,
+) -> String {
+    format!(
+        "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256&state={}&access_type=offline&prompt=consent",
+        urlencoding::encode(client_id),
+        urlencoding::encode(redirect_uri),
+        urlencoding::encode(scopes),
+        urlencoding::encode(challenge),
+        urlencoding::encode(state)
+    )
+}
+
+/// Result of parsing an incoming HTTP request in the OAuth loopback listener.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallbackResult {
+    /// Authorization code received with matching state.
+    Success(String),
+    /// Non-callback request (e.g. /favicon.ico) that should be ignored by the listener.
+    Ignore,
+    /// Error returned by OAuth provider or state validation failure (speakable message).
+    Error(String),
+}
+
+/// Parse loopback callback HTTP request, validating expected state and extracting auth code.
+/// Never returns or echoes the authorization code inside error messages or logs.
+pub fn parse_oauth_callback(req_str: &str, expected_state: &str) -> CallbackResult {
+    let Some(first_line) = req_str.lines().next() else {
+        return CallbackResult::Error("Empty HTTP request received.".into());
+    };
+    let Some(path) = first_line.split_whitespace().nth(1) else {
+        return CallbackResult::Error("Malformed HTTP request line.".into());
+    };
+
+    // Ignore favicon or other browser auxiliary requests
+    if path.starts_with("/favicon.ico") {
+        return CallbackResult::Ignore;
+    }
+
+    if !path.starts_with("/callback") {
+        return CallbackResult::Ignore;
+    }
+
+    let mut code: Option<String> = None;
+    let mut state: Option<String> = None;
+    let mut callback_error: Option<String> = None;
+
+    if let Some((_, query)) = path.split_once('?') {
+        for pair in query.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                let v = urlencoding::decode(v).unwrap_or_default();
+                match k {
+                    "code" => code = Some(v),
+                    "state" => state = Some(v),
+                    "error" => callback_error = Some(v),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if let Some(err) = callback_error {
+        let msg = match err.as_str() {
+            "access_denied" => "Google sign-in was cancelled or this Google account is not allowed to use the app yet. While the OAuth consent screen is in Testing mode, add the account under Test users.".to_string(),
+            other => format!("Google sign-in failed: {other}"),
+        };
+        return CallbackResult::Error(msg);
+    }
+
+    // State check: reject if state is missing or does not match
+    match state {
+        Some(s) if s == expected_state => {}
+        Some(_) => {
+            return CallbackResult::Error("State mismatch in OAuth callback; possible CSRF detected.".into());
+        }
+        None => {
+            return CallbackResult::Error("Missing state parameter in OAuth callback.".into());
+        }
+    }
+
+    match code {
+        Some(c) if !c.is_empty() => CallbackResult::Success(c),
+        _ => CallbackResult::Error("No authorization code received in callback.".into()),
+    }
 }
 
 /// Base scopes: identity + Gmail + Calendar + Photos. Phone/address are
@@ -170,17 +269,10 @@ async fn start_loopback_oauth_flow_with(extended: bool) -> Result<GoogleAccountP
     }
     let (client_id, client_secret) = get_client_credentials();
     let (verifier, challenge) = generate_pkce();
+    let state = generate_state();
 
     let scopes = base_scopes(extended);
-
-
-    let auth_url = format!(
-        "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256&access_type=offline&prompt=consent",
-        urlencoding::encode(&client_id),
-        urlencoding::encode(REDIRECT_URI),
-        urlencoding::encode(&scopes),
-        urlencoding::encode(&challenge)
-    );
+    let auth_url = build_authorization_url(&client_id, REDIRECT_URI, &scopes, &challenge, &state);
 
     // Bind loopback TCP listener
     let addr = format!("127.0.0.1:{LOOPBACK_PORT}");
@@ -192,57 +284,62 @@ async fn start_loopback_oauth_flow_with(extended: bool) -> Result<GoogleAccountP
     let _ = open::that(&auth_url);
 
     // Wait up to 120s for OAuth authorization callback
-    let mut code: Option<String> = None;
-    let mut callback_error: Option<String> = None;
+    let auth_code: Option<String>;
     let timeout = tokio::time::sleep(Duration::from_secs(120));
     tokio::pin!(timeout);
 
-    tokio::select! {
-        res = listener.accept() => {
-            match res {
-                Ok((mut stream, _)) => {
-                    let mut buf = [0u8; 2048];
-                    let read_bytes = stream.read(&mut buf).await.unwrap_or(0);
-                    let req_str = String::from_utf8_lossy(&buf[..read_bytes]);
+    loop {
+        tokio::select! {
+            res = listener.accept() => {
+                match res {
+                    Ok((mut stream, _)) => {
+                        let mut buf = [0u8; 2048];
+                        let read_bytes = stream.read(&mut buf).await.unwrap_or(0);
+                        let req_str = String::from_utf8_lossy(&buf[..read_bytes]);
 
-                    // Parse request line e.g. GET /callback?code=4/0A... HTTP/1.1
-                    if let Some(first_line) = req_str.lines().next() {
-                        if let Some(path) = first_line.split_whitespace().nth(1) {
-                            if let Some(query) = path.split_once('?') {
-                                for pair in query.1.split('&') {
-                                    if let Some((k, v)) = pair.split_once('=') {
-                                        let v = urlencoding::decode(v).unwrap_or_default().to_string();
-                                        if k == "code" {
-                                            code = Some(v);
-                                        } else if k == "error" {
-                                            callback_error = Some(v);
-                                        }
-                                    }
-                                }
+                        let result = parse_oauth_callback(&req_str, &state);
+
+                        let (html, status_line) = match &result {
+                            CallbackResult::Success(_) => (
+                                "<html><body style='font-family:sans-serif;text-align:center;padding-top:50px;'><h2>Authentication successful!</h2><p>You can close this tab and return to NEXUS.</p></body></html>",
+                                "HTTP/1.1 200 OK",
+                            ),
+                            CallbackResult::Ignore => (
+                                "",
+                                "HTTP/1.1 404 Not Found",
+                            ),
+                            CallbackResult::Error(_) => (
+                                "<html><body style='font-family:sans-serif;text-align:center;padding-top:50px;'><h2>Authentication failed</h2><p>Please return to NEXUS.</p></body></html>",
+                                "HTTP/1.1 400 Bad Request",
+                            ),
+                        };
+
+                        let resp = format!("{}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", status_line, html.len(), html);
+                        let _ = stream.write_all(resp.as_bytes()).await;
+
+                        match result {
+                            CallbackResult::Success(c) => {
+                                auth_code = Some(c);
+                                break;
+                            }
+                            CallbackResult::Ignore => {
+                                continue;
+                            }
+                            CallbackResult::Error(msg) => {
+                                return Err(msg);
                             }
                         }
                     }
-
-                    // Respond to browser with a clean success page
-                    let html = "<html><body style='font-family:sans-serif;text-align:center;padding-top:50px;'><h2>Authentication successful!</h2><p>You can close this tab and return to NEXUS.</p></body></html>";
-                    let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", html.len(), html);
-                    let _ = stream.write_all(resp.as_bytes()).await;
+                    Err(e) => return Err(format!("TCP accept error: {e}")),
                 }
-                Err(e) => return Err(format!("TCP accept error: {e}")),
+            }
+            _ = &mut timeout => {
+                return Err("OAuth login timed out after 120 seconds.".to_string());
             }
         }
-        _ = &mut timeout => {
-            return Err("OAuth login timed out after 120 seconds.".to_string());
-        }
     }
 
-    if let Some(err) = callback_error {
-        return Err(match err.as_str() {
-            "access_denied" => "Google sign-in was cancelled or this Google account is not allowed to use the app yet. While the OAuth consent screen is in Testing mode, add the account under Test users.".to_string(),
-            other => format!("Google sign-in failed: {other}"),
-        });
-    }
-    let auth_code = code.ok_or_else(|| "No authorization code received in callback".to_string())?;
+    let auth_code = auth_code.ok_or_else(|| "No authorization code received in callback".to_string())?;
 
     // Exchange auth code for tokens
     exchange_code_and_save(&client_id, client_secret.as_deref(), &auth_code, &verifier, extended).await
@@ -292,6 +389,42 @@ async fn fetch_extended_contact(access_token: &str) -> (Option<String>, Option<S
     (phone, address)
 }
 
+/// Parsed token response from Google OAuth2 token endpoint.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedTokenResponse {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_in: f64,
+}
+
+/// Parse token response body and HTTP status code. Pure.
+/// Maps `invalid_grant` errors to a clear "sign in again" instruction.
+pub fn parse_token_response(status_code: u16, body: &str) -> Result<ParsedTokenResponse, String> {
+    if status_code != 200 {
+        if body.contains("invalid_grant") {
+            return Err("Google sign-in expired or revoked. Please sign in again.".to_string());
+        }
+        return Err(format!("Token exchange failed (HTTP {status_code}): {body}"));
+    }
+
+    let json: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| format!("Invalid token response JSON: {e}"))?;
+
+    let access_token = json["access_token"]
+        .as_str()
+        .ok_or_else(|| "Missing access_token in token response".to_string())?
+        .to_string();
+
+    let refresh_token = json["refresh_token"].as_str().map(str::to_string);
+    let expires_in = json["expires_in"].as_f64().unwrap_or(3600.0);
+
+    Ok(ParsedTokenResponse {
+        access_token,
+        refresh_token,
+        expires_in,
+    })
+}
+
 /// Exchange OAuth authorization code for tokens and store account profile.
 async fn exchange_code_and_save(
     client_id: &str,
@@ -322,22 +455,13 @@ async fn exchange_code_and_save(
         .await
         .map_err(|e| format!("Token request failed: {e}"))?;
 
-    if !resp.status().is_success() {
-        let err_body = resp.text().await.unwrap_or_default();
-        return Err(format!("Token exchange failed: {err_body}"));
-    }
+    let status = resp.status();
+    let err_or_body = resp.text().await.unwrap_or_default();
+    let tokens = parse_token_response(status.as_u16(), &err_or_body)?;
 
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Invalid token response JSON: {e}"))?;
-
-    let access_token = json["access_token"]
-        .as_str()
-        .ok_or_else(|| "Missing access_token in token response".to_string())?;
-
-    let refresh_token = json["refresh_token"].as_str();
-    let expires_in = json["expires_in"].as_f64().unwrap_or(3600.0);
+    let access_token = tokens.access_token.as_str();
+    let refresh_token = tokens.refresh_token.as_deref();
+    let expires_in = tokens.expires_in;
 
     // Fetch user profile info
     let profile_resp = client
@@ -444,21 +568,17 @@ pub async fn refresh_access_token_for(email: &str) -> Result<String, String> {
         .await
         .map_err(|e| format!("Token refresh request failed: {e}"))?;
 
-    if !resp.status().is_success() {
-        let err_body = resp.text().await.unwrap_or_default();
-        return Err(format!("Token refresh failed for {email}: {err_body}"));
-    }
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    let tokens = parse_token_response(status.as_u16(), &body)
+        .map_err(|e| if e.contains("sign in again") {
+            format!("Google token for {email} is no longer valid. Please sign in again.")
+        } else {
+            format!("Token refresh failed for {email}: {e}")
+        })?;
 
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Invalid token refresh response JSON: {e}"))?;
-
-    let access_token = json["access_token"]
-        .as_str()
-        .ok_or_else(|| "Missing access_token in refresh response".to_string())?;
-
-    let expires_in = json["expires_in"].as_f64().unwrap_or(3600.0);
+    let access_token = tokens.access_token.as_str();
+    let expires_in = tokens.expires_in;
 
     crate::auth_vault::set_google_access_token(email, access_token, expires_in);
 
@@ -580,5 +700,181 @@ mod tests {
         assert!(ext.iter().any(|s| s.contains("user.phonenumbers.read")));
         assert!(ext.iter().any(|s| s.contains("user.addresses.read")));
         assert_eq!(ext.len(), base.len() + 2);
+    }
+
+    #[test]
+    fn pkce_verifier_length_and_unreserved_charset() {
+        let (verifier, _) = generate_pkce();
+        assert!(verifier.len() >= 43 && verifier.len() <= 128);
+        // RFC 7636 §4.1: [A-Z] / [a-z] / [0-9] / "-" / "." / "_" / "~"
+        for ch in verifier.chars() {
+            assert!(
+                ch.is_ascii_alphanumeric() || ch == '-' || ch == '.' || ch == '_' || ch == '~',
+                "disallowed char in verifier: {ch}"
+            );
+        }
+    }
+
+    #[test]
+    fn pkce_challenge_matches_rfc7636_test_vector() {
+        // Known RFC 7636 Appendix B test vector:
+        let test_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let expected_challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+        let challenge = compute_pkce_challenge(test_verifier);
+        assert_eq!(challenge, expected_challenge);
+        assert!(!challenge.contains('='));
+    }
+
+    #[test]
+    fn authorization_url_contains_all_required_rfc8252_parameters() {
+        let client_id = "123456789012-abcdefghijklmnop1234567890abcdef.apps.googleusercontent.com";
+        let scopes = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar";
+        let challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+        let state = "secure_random_state_12345";
+
+        let url = build_authorization_url(client_id, REDIRECT_URI, scopes, challenge, state);
+
+        assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
+        assert!(url.contains("response_type=code"));
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(url.contains(&format!("code_challenge={challenge}")));
+        assert!(url.contains(&format!("state={state}")));
+        assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A49152%2Fcallback"));
+        assert!(url.contains("access_type=offline"));
+        assert!(url.contains("prompt=consent"));
+        assert!(url.contains(&format!("client_id={client_id}")));
+    }
+
+    #[test]
+    fn authorization_url_scopes_are_url_encoded() {
+        let client_id = "123456789012-abcdefghijklmnop1234567890abcdef.apps.googleusercontent.com";
+        let scopes = "scope1 scope2 https://example.com/auth";
+        let url = build_authorization_url(client_id, REDIRECT_URI, scopes, "chal", "st");
+
+        assert!(url.contains("scope=scope1%20scope2%20https%3A%2F%2Fexample.com%2Fauth"));
+        assert!(!url.contains("scope=scope1 scope2"));
+    }
+
+    #[test]
+    fn oauth_state_is_random_per_invocation() {
+        let mut states = std::collections::HashSet::new();
+        for _ in 0..20 {
+            let s = generate_state();
+            assert!(s.len() >= 24);
+            assert!(s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+            assert!(states.insert(s), "duplicate state generated");
+        }
+    }
+
+    #[test]
+    fn callback_parser_accepts_valid_code_and_matching_state() {
+        let req = "GET /callback?code=4/0AbCdEfGh123&state=my_secret_state HTTP/1.1\r\nHost: 127.0.0.1:49152\r\n\r\n";
+        let res = parse_oauth_callback(req, "my_secret_state");
+        assert_eq!(res, CallbackResult::Success("4/0AbCdEfGh123".to_string()));
+    }
+
+    #[test]
+    fn callback_parser_rejects_mismatched_state() {
+        let req = "GET /callback?code=4/0AbCdEfGh123&state=attacker_state HTTP/1.1\r\nHost: 127.0.0.1:49152\r\n\r\n";
+        let res = parse_oauth_callback(req, "expected_state");
+        assert!(matches!(res, CallbackResult::Error(msg) if msg.contains("State mismatch")));
+    }
+
+    #[test]
+    fn callback_parser_rejects_missing_state() {
+        let req = "GET /callback?code=4/0AbCdEfGh123 HTTP/1.1\r\nHost: 127.0.0.1:49152\r\n\r\n";
+        let res = parse_oauth_callback(req, "expected_state");
+        assert!(matches!(res, CallbackResult::Error(msg) if msg.contains("Missing state")));
+    }
+
+    #[test]
+    fn callback_parser_handles_access_denied_with_speakable_message() {
+        let req = "GET /callback?error=access_denied&state=expected_state HTTP/1.1\r\nHost: 127.0.0.1:49152\r\n\r\n";
+        let res = parse_oauth_callback(req, "expected_state");
+        match res {
+            CallbackResult::Error(msg) => {
+                assert!(msg.contains("cancelled") || msg.contains("Testing mode"));
+                assert!(msg.contains("Test users"));
+            }
+            other => panic!("expected speakable error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn callback_parser_ignores_favicon_and_non_callback_requests() {
+        let fav = "GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1:49152\r\n\r\n";
+        assert_eq!(parse_oauth_callback(fav, "state123"), CallbackResult::Ignore);
+
+        let other = "GET /some/other/path HTTP/1.1\r\nHost: 127.0.0.1:49152\r\n\r\n";
+        assert_eq!(parse_oauth_callback(other, "state123"), CallbackResult::Ignore);
+    }
+
+    #[test]
+    fn callback_parser_never_echoes_auth_code_in_errors() {
+        let secret_code = "SUPER_SECRET_AUTH_CODE_xyz987";
+        // State mismatch error
+        let req1 = format!("GET /callback?code={secret_code}&state=wrong_state HTTP/1.1\r\n\r\n");
+        let res1 = parse_oauth_callback(&req1, "real_state");
+        if let CallbackResult::Error(msg) = res1 {
+            assert!(!msg.contains(secret_code), "auth code echoed in state mismatch error: {msg}");
+        } else {
+            panic!("expected error");
+        }
+
+        // Empty code error
+        let req2 = "GET /callback?code=&state=real_state HTTP/1.1\r\n\r\n";
+        let res2 = parse_oauth_callback(req2, "real_state");
+        if let CallbackResult::Error(msg) = res2 {
+            assert!(!msg.contains(secret_code));
+        } else {
+            panic!("expected error");
+        }
+    }
+
+    #[test]
+    fn client_id_validation_comprehensive_cases() {
+        assert!(is_valid_client_id("1065171708892-v7k7b2f6k526b74499n8k1a2b3c4d5e6.apps.googleusercontent.com"));
+        assert!(is_valid_client_id("  123456789012-abcdefghijklmnop1234567890abcdef.apps.googleusercontent.com "));
+        assert!(!is_valid_client_id("1065171708892-v7k7b2f6k526b74499n8k00000000000.apps.googleusercontent.com"));
+        assert!(!is_valid_client_id(""));
+        assert!(!is_valid_client_id("   "));
+        assert!(!is_valid_client_id("123-abc.apps.googleusercontent.com"));
+        assert!(!is_valid_client_id("123456789012-abc.apps.googleusercontent.com"));
+        assert!(!is_valid_client_id("123456789012-abcdefgh.otherdomain.com"));
+    }
+
+    #[test]
+    fn token_response_missing_refresh_token_succeeds_with_none() {
+        let body = r#"{"access_token": "ya29.a0AfH6...", "expires_in": 3599, "token_type": "Bearer"}"#;
+        let res = parse_token_response(200, body).unwrap();
+        assert_eq!(res.access_token, "ya29.a0AfH6...");
+        assert_eq!(res.refresh_token, None);
+        assert_eq!(res.expires_in, 3599.0);
+    }
+
+    #[test]
+    fn token_response_missing_expires_in_defaults_to_one_hour() {
+        let body = r#"{"access_token": "ya29.a0AfH6...", "refresh_token": "1//04..."}"#;
+        let res = parse_token_response(200, body).unwrap();
+        assert_eq!(res.access_token, "ya29.a0AfH6...");
+        assert_eq!(res.refresh_token.as_deref(), Some("1//04..."));
+        assert_eq!(res.expires_in, 3600.0);
+    }
+
+    #[test]
+    fn token_response_invalid_grant_maps_to_sign_in_again() {
+        let body = r#"{"error": "invalid_grant", "error_description": "Token has been expired or revoked."}"#;
+        let res = parse_token_response(400, body);
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("sign in again"), "expected sign in again in error: {err}");
+    }
+
+    #[test]
+    fn token_response_missing_access_token_fails() {
+        let body = r#"{"refresh_token": "1//04...", "expires_in": 3600}"#;
+        let res = parse_token_response(200, body);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Missing access_token"));
     }
 }

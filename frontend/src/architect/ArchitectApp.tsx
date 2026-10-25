@@ -47,13 +47,11 @@ export function ArchitectApp({ onDock = () => {} }: { onDock?: (d: string) => vo
   // Fetch GitHub OAuth token from the Worker (for private repo access)
   const fetchGithubToken = useCallback(async (): Promise<string | null> => {
     try {
-      const { getServerConfig } = await import("../net/wsBridge");
-      const config = await getServerConfig();
-      const resp = await fetch(`${config.url}/oauth/github-token?user_id=${encodeURIComponent(config.userId)}`);
-      if (resp.ok) {
-        const data = await resp.json();
-        return data.token || null;
-      }
+      // Authenticated by Rust with this device's credentials (the token never reaches the web view).
+      const { workerRequest } = await import("../net/workerApi");
+      const resp = await workerRequest<{ token?: string }>("GET", "/oauth/github-token");
+      if (resp.status >= 200 && resp.status < 300) return resp.body?.token || null;
+      if (resp.message) console.warn("GitHub token unavailable:", resp.message);
     } catch (err) {
       console.warn("Failed to fetch GitHub token:", err);
     }

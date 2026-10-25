@@ -18,6 +18,13 @@ import {
   type MailRow,
   type PersonRow,
   type WhatsappSelfTest,
+  describeCorrection,
+  describePending,
+  routineUse,
+  stepsLine,
+  type CorrectionRow,
+  type PendingRow,
+  type RoutinesView,
   type MemoryFlag,
   type MemoryRow,
   type MemoryStatus,
@@ -34,6 +41,10 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
   const [rows, setRows] = useState<MemoryRow[]>([]);
   const [egress, setEgress] = useState<EgressEntry[]>([]);
   const [slots, setSlots] = useState<TimetableSlot[]>([]);
+  const [corrections, setCorrections] = useState<CorrectionRow[]>([]);
+  const [routinesView, setRoutinesView] = useState<RoutinesView>({ routines: [], suggestion: null, limit: 30 });
+  const [routineName, setRoutineName] = useState("");
+  const [pending, setPending] = useState<PendingRow[]>([]);
   const [mail, setMail] = useState<MailRow[]>([]);
   const [people, setPeople] = useState<PersonRow[]>([]);
   const [selftest, setSelftest] = useState<WhatsappSelfTest | null>(null);
@@ -45,7 +56,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
 
   const load = useCallback(async () => {
     try {
-      const [s, r, e, t, m, ppl, keys] = await Promise.all([
+      const [s, r, e, t, m, ppl, keys, fixes, rv, pend] = await Promise.all([
         invoke<MemoryStatus>("memcore_status"),
         invoke<MemoryRow[]>("memcore_list"),
         invoke<EgressEntry[]>("memcore_egress_log", { limit: 50 }),
@@ -53,6 +64,9 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
         invoke<MailRow[]>("memcore_mail_list"),
         invoke<PersonRow[]>("memcore_people"),
         invoke<{ service: string; has_key: boolean }[]>("api_keys_list").catch(() => [] as { service: string; has_key: boolean }[]),
+        invoke<CorrectionRow[]>("memcore_corrections").catch(() => [] as CorrectionRow[]),
+        invoke<RoutinesView>("memcore_routines").catch(() => ({ routines: [], suggestion: null, limit: 30 }) as RoutinesView),
+        invoke<PendingRow[]>("memcore_pending").catch(() => [] as PendingRow[]),
       ]);
       setStatus(s);
       setRows(r);
@@ -60,6 +74,9 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
       setSlots(t);
       setMail(m);
       setPeople(ppl);
+      setCorrections(fixes);
+      setRoutinesView(rv);
+      setPending(pend);
       setHasRoutesKey(keys.some((k) => k.service === "google_maps" && k.has_key));
     } catch (e) {
       setError(String(e));
@@ -138,6 +155,62 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
     setError(null);
     try {
       setSelftest(await invoke<WhatsappSelfTest>("whatsapp_selftest"));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const decide = async (id: number, approve: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (approve) await invoke("memcore_pending_approve", { id });
+      else await invoke("memcore_pending_reject", { id });
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveRoutine = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("memcore_routine_save", { name: routineName });
+      setRoutineName("");
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeRoutine = async (name: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("memcore_routine_delete", { name });
+      setConfirm(null);
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeCorrection = async (heard: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("memcore_correction_forget", { heard });
+      setConfirm(null);
+      await load();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -315,6 +388,42 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
             />
           </label>
           <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
+            <span className="hx-key-sub">
+              Always tell cloud assistants what you asked me to remember (health, money and ID topics are never
+              included automatically)
+            </span>
+            <input
+              type="checkbox"
+              checked={status.profile !== false}
+              disabled={busy}
+              onChange={(e) => setFlag("memcoreProfile", e.target.checked)}
+            />
+          </label>
+          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
+            <span className="hx-key-sub">
+              Notice commands I see you repeat together, and offer to save them as one phrase (never without asking)
+            </span>
+            <input
+              type="checkbox"
+              checked={status.routines !== false}
+              disabled={busy}
+              onChange={(e) => setFlag("memcoreRoutines", e.target.checked)}
+            />
+          </label>
+          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
+            <span className="hx-key-sub">
+              Let a free cloud AI read a redacted copy of recent cloud conversations (never commands handled on this PC)
+              and suggest things to remember. Off by default. Nothing is saved until you approve it below, and each
+              request appears in “Sent to cloud models”.
+            </span>
+            <input
+              type="checkbox"
+              checked={status.review === true}
+              disabled={busy}
+              onChange={(e) => setFlag("memcoreReview", e.target.checked)}
+            />
+          </label>
+          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
             <span className="hx-key-sub">Say a short “where you left off” once a day, a little after startup</span>
             <input
               type="checkbox"
@@ -410,6 +519,128 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
               {p.muted ? "Unmute" : "Mute"}
             </button>
           </div>
+        </div>
+      ))}
+
+      {(pending.length > 0 || status?.review === true) && (
+        <>
+          <div className="hx-section">Waiting for your OK ({pending.length})</div>
+          <div className="hx-key-sub">
+            Suggested by the background review. Approving stores it as something you told me; refusing means it is not
+            suggested again. Suggestions you ignore disappear after two weeks.
+          </div>
+          {pending.length === 0 && <div className="hx-key-sub">Nothing waiting.</div>}
+          {pending.map((p) => (
+            <div className="hx-card hx-key" key={p.id}>
+              <div className="hx-key-head">
+                <div>
+                  <div className="hx-key-title">{describePending(p)}</div>
+                  {p.reason && <div className="hx-key-sub">{p.reason}</div>}
+                </div>
+              </div>
+              <div className="hx-row-actions">
+                <button className="hx-btn" disabled={busy} onClick={() => decide(p.id, false)}>
+                  No
+                </button>
+                <button className="hx-btn" disabled={busy} onClick={() => decide(p.id, true)}>
+                  Yes, remember
+                </button>
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+
+      <div className="hx-section">Routines ({routinesView.routines.length})</div>
+      {status?.curator_note && <div className="hx-key-sub">{status.curator_note}</div>}
+      <div className="hx-key-sub">
+        Say a routine’s name and I run its commands one after another. Only opening apps, sites and music is ever
+        saved this way. Say “delete the … routine” or remove it here.
+      </div>
+      {routinesView.suggestion && (
+        <div className="hx-card hx-key">
+          <div className="hx-key-head">
+            <div>
+              <div className="hx-key-title">I noticed a pattern</div>
+              <div className="hx-key-sub">You often {routinesView.suggestion.text}. Give it a name to make it one phrase.</div>
+            </div>
+          </div>
+          <div className="hx-row-actions">
+            <input
+              type="text"
+              value={routineName}
+              placeholder="e.g. study mode"
+              maxLength={30}
+              onChange={(e) => setRoutineName(e.target.value)}
+              style={{ flex: 1 }}
+            />
+            <button className="hx-btn" disabled={busy || routineName.trim().length < 3} onClick={saveRoutine}>
+              Save
+            </button>
+          </div>
+        </div>
+      )}
+      {routinesView.routines.length === 0 && !routinesView.suggestion && (
+        <div className="hx-key-sub">None yet. When I notice commands you repeat together I will offer one.</div>
+      )}
+      {routinesView.routines.map((r) => (
+        <div className="hx-card hx-key" key={r.name}>
+          <div className="hx-key-head">
+            <div>
+              <div className="hx-key-title">{r.name}</div>
+              <div className="hx-key-sub">
+                {stepsLine(r.steps)} · {routineUse(r)}
+              </div>
+            </div>
+          </div>
+          {confirm === `routine:${r.name}` ? (
+            <div className="hx-row-actions">
+              <span className="hx-confirm">Delete this routine?</span>
+              <button className="hx-btn" onClick={() => setConfirm(null)}>
+                No
+              </button>
+              <button className="hx-btn hx-btn--danger" disabled={busy} onClick={() => removeRoutine(r.name)}>
+                Delete
+              </button>
+            </div>
+          ) : (
+            <div className="hx-row-actions">
+              <button className="hx-btn hx-btn--danger-ghost" onClick={() => setConfirm(`routine:${r.name}`)}>
+                Delete
+              </button>
+            </div>
+          )}
+        </div>
+      ))}
+
+      <div className="hx-section">Words I learned to fix ({corrections.length})</div>
+      <div className="hx-key-sub">
+        When I mishear a command and you correct me (“no, I said open brave”) or repeat it with one word changed, I
+        note it. After it happens on two separate occasions I apply it to later commands. Remove any you don’t want.
+      </div>
+      {corrections.length === 0 && <div className="hx-key-sub">Nothing yet.</div>}
+      {corrections.map((c) => (
+        <div className="hx-card hx-key" key={`${c.heard}->${c.meant}`}>
+          <div className="hx-key-head">
+            <div className="hx-key-sub">{describeCorrection(c)}</div>
+          </div>
+          {confirm === `fix:${c.heard}` ? (
+            <div className="hx-row-actions">
+              <span className="hx-confirm">Forget this correction?</span>
+              <button className="hx-btn" onClick={() => setConfirm(null)}>
+                No
+              </button>
+              <button className="hx-btn hx-btn--danger" disabled={busy} onClick={() => removeCorrection(c.heard)}>
+                Forget
+              </button>
+            </div>
+          ) : (
+            <div className="hx-row-actions">
+              <button className="hx-btn hx-btn--danger-ghost" onClick={() => setConfirm(`fix:${c.heard}`)}>
+                Forget
+              </button>
+            </div>
+          )}
         </div>
       ))}
 

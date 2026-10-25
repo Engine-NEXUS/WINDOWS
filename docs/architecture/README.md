@@ -8,10 +8,10 @@ This directory contains the system architecture designs, data flow graphs, compo
 
 | # | Document | Scope & Focus |
 |---|----------|---------------|
-| 01 | **[01-system-overview.md](01-system-overview.md)** | High-level mental model: Thin client (Tauri/Rust) + Fat Server/Worker, 5 Golden Rules, process topology, and communication channels. |
-| 02 | **[02-data-flow-graphs.md](02-data-flow-graphs.md)** | Sequence diagrams for voice requests, Tier-3 acoustic commands, boot greetings, sleep/wake transitions, and cancel/barge-in paths. |
-| 03 | **[03-component-map.md](03-component-map.md)** | Complete file-to-subsystem mapping covering Rust backend, React/TS frontend, Sidecar, and Models. |
-| 04 | **[04-tech-stack.md](04-tech-stack.md)** | Comprehensive rationales for every crate, framework, and tool chosen, along with port allocations and feature flags. |
+| 01 | **[01-system-overview.md](../archive/architecture/01-system-overview.md)** *(archived)* | High-level mental model: Thin client (Tauri/Rust) + Fat Server/Worker, 5 Golden Rules, process topology, and communication channels. |
+| 02 | **[02-data-flow-graphs.md](../archive/architecture/02-data-flow-graphs.md)** *(archived)* | Sequence diagrams for voice requests, Tier-3 acoustic commands, boot greetings, sleep/wake transitions, and cancel/barge-in paths. |
+| 03 | **[03-component-map.md](../archive/architecture/03-component-map.md)** *(archived)* | Complete file-to-subsystem mapping covering Rust backend, React/TS frontend, Sidecar, and Models. |
+| 04 | **[04-tech-stack.md](../archive/architecture/04-tech-stack.md)** *(archived)* | Comprehensive rationales for every crate, framework, and tool chosen, along with port allocations and feature flags. |
 | 05 | **[05-state-machine.md](05-state-machine.md)** | Frontend Zustand state machine transitions, event dispatching, and animation choreography. |
 | 06 | **[06-liquid-glass-screenshot-blur.md](06-liquid-glass-screenshot-blur.md)** | Liquid glass backdrop capture and hardware-accelerated Gaussian blur implementation for floating overlays. |
 | 07 | **[07-central-orchestrator.md](07-central-orchestrator.md)** | Central request orchestrator: single owner of lifecycle, request routing, LLM cascades, and barge-in cancellation. |

@@ -31,6 +31,7 @@ export type Intent =
   | { action: "whatsapp_chat"; contact: string }
   | { action: "open_architect" }
   | { action: "open_settings" }
+  | { action: "open_coderabbit_hub" }
   | { action: "search"; query: string }
   | { action: "analyse_repo"; owner?: string; repo: string }
   | { action: "analyse_pr"; owner?: string; repo: string; pr_number: number }
@@ -574,6 +575,16 @@ function levenshtein(a: string, b: string): number {
  */
 export function parseIntent(transcript: string): Intent {
   const text = transcript.trim().toLowerCase().replace(/\s+/g, " ");
+
+  // --- CodeRabbit Review shortcut commands ---
+  const crNorm = text.replace(/code\s*rabbit/g, "coderabbit").replace(/coderrabbit/g, "coderabbit");
+  if (crNorm.includes("coderabbit")) {
+    const prMatch = crNorm.match(/\b(?:pr|pull\s*request)?\s*#?(\d+)\b/i);
+    if (prMatch && prMatch[1]) {
+      return { action: "analyse_pr", repo: "ultron", pr_number: parseInt(prMatch[1], 10) };
+    }
+    return { action: "open_coderabbit_hub" };
+  }
 
   // --- Open Architecture Mapper ---
   // "open architecture mapper", "open architect", "open architecture map"

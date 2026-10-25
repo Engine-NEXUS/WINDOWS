@@ -131,24 +131,26 @@ fn get_last_latency() -> Option<u64> {
 }
 
 /// Check if the STT engine is ready.
-/// Phase 2: Groq cloud STT is primary (0 MB RAM, ~247ms).
-/// Local faster-whisper on port 39217 is the fallback (lazy-started).
+/// NEXUS is BYOK/free: cloud STT (Groq) is used only when the user has added
+/// their own key AND turned "Local STT only" off; otherwise speech runs on the
+/// local Moonshine server on port 39217 (lazy-started). This row used to say
+/// "Groq cloud primary" regardless, which was wrong for every keyless user.
 fn check_stt() -> ServiceStatus {
-    // Check if the local faster-whisper fallback STT server is reachable
+    // Check if the local STT server is reachable
     match http_get("http://127.0.0.1:39217/health", 3000) {
         Ok((status, _body)) if status >= 200 && status < 400 => {
             ServiceStatus {
-                name: "STT (Groq cloud + local fallback)".into(),
+                name: "STT (local Moonshine + optional Groq cloud)".into(),
                 connected: true,
-                detail: "Groq primary + faster-whisper fallback ready on port 39217".into(),
+                detail: "Local speech engine ready on port 39217 (Groq cloud speech needs your free key)".into(),
                 latency_ms: get_last_latency(),
             }
         }
         _ => {
             ServiceStatus {
-                name: "STT (Groq cloud + local fallback)".into(),
-                connected: true, // Not an error — Groq is cloud, local is lazy
-                detail: "Groq cloud primary — local fallback lazy-starts on first wake".into(),
+                name: "STT (local Moonshine + optional Groq cloud)".into(),
+                connected: true, // Not an error — the local engine lazy-starts on first wake
+                detail: "Local speech engine lazy-starts on first wake; Groq cloud speech is optional (free key in Settings, Accounts)".into(),
                 latency_ms: Some(0),
             }
         }
@@ -224,6 +226,22 @@ fn check_worker(worker_url: &str) -> ServiceStatus {
     }
 }
 
+/// Authenticated GET for the Worker's /oauth/* routes: sends this device's credentials and,
+/// unlike `http_get`, keeps TLS certificate validation ON (a bearer token goes on the wire).
+fn http_get_authed(url: &str, timeout_ms: u64) -> Result<(u16, String), String> {
+    let start = std::time::Instant::now();
+    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
+    let result = rt.block_on(async {
+        let resp = crate::worker_auth::authed_get(url, Duration::from_millis(timeout_ms)).await?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        Ok::<(u16, String), String>((status, body))
+    });
+    let latency = start.elapsed().as_millis() as u64;
+    LAST_LATENCY.with(|l| l.set(Some(latency)));
+    result
+}
+
 /// Check GitHub and Google OAuth status via the Worker.
 /// Whether the /oauth/status body marks a provider expired.
 /// Shape: {"providers": {"google": {"connected": true, "expired": true}}}.
@@ -266,13 +284,10 @@ fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus
         );
     }
 
-    let status_url = format!(
-        "{}/oauth/status?user_id={}",
-        worker_url.trim_end_matches('/'),
-        user_id
-    );
+    // The Worker derives the owner from this device's credentials, not from a user_id.
+    let status_url = format!("{}/oauth/status", worker_url.trim_end_matches('/'));
 
-    match http_get(&status_url, 10000) {
+    match http_get_authed(&status_url, 10000) {
         Ok((status, body)) if status >= 200 && status < 300 => {
             let latency = get_last_latency().unwrap_or(0);
 
@@ -317,6 +332,17 @@ fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus
 
             (github, google)
         }
+        Ok((status, body)) if status == 401 || status == 403 => {
+            let why = crate::worker_auth::describe_denial(status, &body);
+            (
+                ServiceStatus { name: "GitHub".into(), connected: false, detail: why.clone(), latency_ms: None },
+                ServiceStatus { name: "Google".into(), connected: false, detail: why, latency_ms: None },
+            )
+        }
+        Err(e) if e == crate::worker_auth::NOT_LINKED => (
+            ServiceStatus { name: "GitHub".into(), connected: false, detail: e.clone(), latency_ms: None },
+            ServiceStatus { name: "Google".into(), connected: false, detail: e, latency_ms: None },
+        ),
         _ => {
             let latency = get_last_latency();
             (

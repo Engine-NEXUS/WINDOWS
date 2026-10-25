@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { leaveBySummary, activitySummary, ageLabel, categoryLabel, fmtDays, fmtSlotTime, fmtTime, groupRows, keyLabel, mailSummary, selftestSummary, sourceLabel, whatsappSummary, type MemoryRow, type WhatsappSelfTest } from "./memoryModel";
+import { leaveBySummary, activitySummary, ageLabel, categoryLabel, fmtDays, fmtSlotTime, fmtTime, groupRows, keyLabel, mailSummary, selftestSummary, sourceLabel, whatsappSummary, describeCorrection, routineUse, stepsLine, describePending, type MemoryRow, type WhatsappSelfTest } from "./memoryModel";
 
 const row = (over: Partial<MemoryRow>): MemoryRow => ({
   id: 1,
@@ -110,5 +110,43 @@ describe("memoryModel", () => {
     expect(activitySummary({ activity: true, resume_points: 0 })).toBe("On — nothing recorded yet.");
     expect(activitySummary({ activity: true, resume_points: 1 })).toContain("1 point kept");
     expect(activitySummary({ activity: true, resume_points: 12 })).toContain("12 points kept");
+  });
+});
+
+describe("describeCorrection", () => {
+  const base = { heard: "brief", meant: "brave", count: 1, last_seen: 0, promoted: false };
+  it("says when a correction is not applied yet", () => {
+    expect(describeCorrection(base)).toBe("“brief” → “brave” · seen once, waiting for a second time");
+  });
+  it("says when it is applied", () => {
+    expect(describeCorrection({ ...base, count: 3, promoted: true })).toBe("“brief” → “brave” · applied, seen 3×");
+  });
+  it("explains a tie", () => {
+    expect(describeCorrection({ ...base, count: 2 })).toBe("“brief” → “brave” · not applied: two answers tie");
+  });
+});
+
+describe("routine helpers", () => {
+  it("joins steps with arrows", () => {
+    expect(stepsLine(["open vs code", "open chrome"])).toBe("open vs code → open chrome");
+  });
+  it("says how often a routine was used", () => {
+    const base = { name: "study mode", steps: ["open vs code", "open chrome"], created: 0, last_run: 0, runs: 0 };
+    expect(routineUse(base)).toBe("not used yet");
+    expect(routineUse({ ...base, runs: 1 })).toBe("used 1 time");
+    expect(routineUse({ ...base, runs: 4 })).toBe("used 4 times");
+  });
+});
+
+describe("describePending", () => {
+  const base = { id: 1, key: "sister_name", value: "Asha", old_value: "", reason: "", created: 0 };
+  it("words an add, a patch and a remove", () => {
+    expect(describePending({ ...base, op: "add" })).toBe("Remember: sister name is Asha");
+    expect(describePending({ ...base, op: "patch", key: "employer", value: "Globex", old_value: "Acme" })).toBe(
+      "Change employer from Acme to Globex",
+    );
+    expect(describePending({ ...base, op: "remove", key: "employer", value: "", old_value: "Acme" })).toBe(
+      "Forget: employer (Acme)",
+    );
   });
 });

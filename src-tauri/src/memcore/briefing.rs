@@ -19,8 +19,9 @@ use super::store::Tier;
 pub const MAX_RESUME_AGE_SECS: i64 = 7 * 24 * 3600;
 /// The hello waits for the stage renderer (so orb + caption exist) but never longer than this.
 pub const READY_WAIT_SECS: u64 = 60;
-/// A short settle after the stage is alive (boot is still busy for a moment).
-pub const SETTLE_SECS: u64 = 3;
+/// A short settle after the stage is alive. The hello is a cached clip (no network, no model load),
+/// so there is nothing to wait for; 3 s here was pure added latency (start-menu analysis 2026-10-18).
+pub const SETTLE_SECS: u64 = 1;
 /// The user counts as present with input in the last 5 minutes (they just typed a password at logon;
 /// unknown = assume present). The old 60 s band made an active user wait up to 15 min for nothing.
 pub const PRESENT_WITHIN_SECS: u64 = 300;
@@ -101,6 +102,8 @@ pub struct Input {
     pub health_spoken: Option<String>,
     /// Card section listing every current connection problem.
     pub health_card: Option<String>,
+    /// What the agents had done when the laptop was last powered off by NEXUS (told once, while fresh).
+    pub overnight: Option<crate::agent_outcomes::Record>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -250,12 +253,21 @@ pub fn build(input: &Input) -> Option<Briefing> {
         && input.events.is_empty()
         && input.session.is_none()
         && input.health_spoken.is_none()
+        && input.overnight.is_none()
     {
         return None;
     }
 
     // ── spoken (short) ──
     let mut spoken = greeting(input.hour, input.name.as_deref(), input.friend);
+    // what the agents had done when the laptop went off comes before anything else
+    if let Some(o) = &input.overnight {
+        spoken.push(' ');
+        spoken.push_str(&crate::agent_outcomes::spoken(o));
+        if input.session.is_some() {
+            spoken.push_str(" This is where we left off.");
+        }
+    }
     if let Some(s) = &input.session {
         // The whole previous session is more useful than the single last window.
         // Active voice, no repeated greeting (the time-of-day greeting above
@@ -297,11 +309,18 @@ pub fn build(input: &Input) -> Option<Briefing> {
     }
     // The question comes last so the answer window opens right after it.
     if input.session.is_some() {
-        spoken.push_str(" Shall I reopen them?");
+        spoken.push_str(if input.overnight.is_some() { " Do you want me to open the other apps you were using too?" } else { " Shall I reopen them?" });
     }
 
     // ── card (full) ──
     let mut md = String::from("## Welcome back\n\n");
+    if let Some(o) = &input.overnight {
+        md.push_str("### Before the shutdown\n");
+        for l in &o.lines {
+            md.push_str(&format!("- {}\n", md_escape(l)));
+        }
+        md.push('\n');
+    }
     if let Some(s) = &input.session {
         md.push_str("### Open when you left\n");
         md.push_str(&format!("- {} — {}\n\n", md_escape(&s.summary), ago_phrase(input.now, s.left_at)));
@@ -406,6 +425,7 @@ fn gather<R: tauri::Runtime>(
     events: Vec<AgendaItem>,
     session: Option<SessionOffer>,
     health: super::health::Report,
+    overnight: Option<crate::agent_outcomes::Record>,
 ) -> Input {
     use chrono::Timelike;
     let now = chrono::Utc::now().timestamp();
@@ -427,6 +447,7 @@ fn gather<R: tauri::Runtime>(
         session,
         health_spoken: super::health::spoken_line(&health.to_speak),
         health_card: super::health::card_section(&health.all),
+        overnight,
     }
 }
 
@@ -460,7 +481,7 @@ async fn today_events() -> Vec<AgendaItem> {
 async fn wait_until_ready() -> u64 {
     let start = std::time::Instant::now();
     while !crate::stage::is_ready() && start.elapsed().as_secs() < READY_WAIT_SECS {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     tokio::time::sleep(std::time::Duration::from_secs(SETTLE_SECS)).await;
     start.elapsed().as_secs()
@@ -546,6 +567,7 @@ pub fn start_boot_briefing<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         let waited = wait_until_ready().await;
         println!("[BOOT] stage ready after {waited}s (incl. {SETTLE_SECS}s settle)");
+        crate::boot::mark_with("boot_ready", &format!("waited {waited}s incl {SETTLE_SECS}s settle"));
         let Ok(dir) = app.path().app_data_dir() else { return };
         if !super::enabled(&dir) || !super::flag(&dir, "memcoreBriefing", true) {
             println!("[BOOT] skip: memcore or memcoreBriefing disabled");
@@ -565,11 +587,12 @@ pub fn start_boot_briefing<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
         // 1. The hello: every logon, short, cached, immediate.
         let hello_spoken = submit_hello(&app, &dir, "boot");
 
-        // 2. The details, once a day.
+        // 2. The details, once a day (and always when the agents left news before the last shutdown).
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let overnight = crate::agent_outcomes::peek(&dir, chrono::Utc::now().timestamp());
         let already = super::with_store(&dir, |s| s.meta_get("last_briefing_day").as_deref() == Some(today.as_str()))
             .unwrap_or(true);
-        if already {
+        if already && overnight.is_none() {
             println!("[BOOT] skip briefing: already briefed today ({today})");
             return;
         }
@@ -604,12 +627,15 @@ pub fn start_boot_briefing<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             }
         };
         let (events, session, health) = tokio::join!(events_fut, session_fut, health_fut);
-        let input = gather(&app, &dir, snapshot, events, session, health);
+        let input = gather(&app, &dir, snapshot, events, session, health, overnight);
         let Some(briefing) = build(&input) else {
             println!("[BOOT] skip briefing: nothing to say (no resume/mail/events/session/health)");
             return;
         };
         super::with_store(&dir, |s| s.meta_set("last_briefing_day", &today));
+        if input.overnight.is_some() {
+            crate::agent_outcomes::mark_told(&dir);
+        }
         println!(
             "[BOOT] briefing: session_offer={} health_spoken={} open_items={}",
             input.session.is_some(),
@@ -644,7 +670,7 @@ pub async fn on_demand<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std::
         .into_iter()
         .filter(|r| now - r.last_seen > CURRENT_WINDOW_SECS)
         .collect();
-    build(&gather(app, dir, resume, events, None, super::health::Report::default()))
+    build(&gather(app, dir, resume, events, None, super::health::Report::default(), None))
 }
 
 #[cfg(test)]
@@ -668,7 +694,108 @@ mod tests {
             session: None,
             health_spoken: None,
             health_card: None,
+            overnight: None,
         }
+    }
+
+    #[test]
+    fn what_the_agents_did_before_the_shutdown_comes_first_and_changes_the_question() {
+        use crate::agent_tracker::Outcome;
+        use crate::session_verdict::{Reason, Verdict};
+        let rec = crate::agent_outcomes::record_from(
+            &[
+                Outcome { label: "Claude Code".into(), verdict: Verdict::Go },
+                Outcome { label: "Antigravity".into(), verdict: Verdict::Hold(vec![Reason::FailureMarker("3 failing".into(), "x".into())]) },
+            ],
+            "shut down",
+            input().now - 30_000,
+        )
+        .unwrap();
+        // alone it is worth a briefing
+        let mut i = input();
+        i.overnight = Some(rec.clone());
+        let b = build(&i).expect("news from the agents is never silent");
+        assert!(b.spoken.starts_with("Good morning, sir. Before the laptop went off, Claude Code finished clean. Antigravity stopped, but"), "{}", b.spoken);
+        assert!(!b.offers_restore && b.card_md.contains("### Before the shutdown") && b.card_md.contains("Claude Code finished clean"));
+        // with the last session: "this is where we left off" and the user's question
+        i.session = Some(SessionOffer { summary: "VS Code on ULTRON and Brave".into(), left_at: i.now - 30_000 });
+        let b = build(&i).unwrap();
+        assert!(b.offers_restore);
+        assert!(b.spoken.contains("This is where we left off. You left VS Code on ULTRON and Brave open"), "{}", b.spoken);
+        assert!(b.spoken.ends_with("Do you want me to open the other apps you were using too?"), "{}", b.spoken);
+        // without news the old question is unchanged
+        i.overnight = None;
+        assert!(build(&i).unwrap().spoken.ends_with("Shall I reopen them?"));
+    }
+
+    #[test]
+    fn the_morning_briefing_with_an_overnight_record_asks_to_reopen_the_other_apps() {
+        use crate::agent_tracker::Outcome;
+        use crate::session_verdict::{Reason, Verdict};
+
+        let mut i = input();
+        let rec = crate::agent_outcomes::record_from(
+            &[
+                Outcome { label: "Claude Code".into(), verdict: Verdict::Go },
+                Outcome {
+                    label: "Antigravity".into(),
+                    verdict: Verdict::Hold(vec![Reason::FailureMarker("3 failing".into(), "Fix 3 failing tests".into())]),
+                },
+                Outcome {
+                    label: "Cursor".into(),
+                    verdict: Verdict::Unsure(vec![Reason::NothingToJudge]),
+                },
+            ],
+            "shut down",
+            i.now - 30_000,
+        )
+        .unwrap();
+
+        i.overnight = Some(rec.clone());
+        i.session = Some(SessionOffer {
+            summary: "VS Code on ULTRON and Brave".into(),
+            left_at: i.now - 30_000,
+        });
+
+        let b = build(&i).expect("briefing with overnight and session must build");
+
+        // The spoken text starts with what happened overnight
+        let spoken_details = without_greeting(&b.spoken, i.hour, i.name.as_deref(), i.friend);
+        assert!(
+            spoken_details.starts_with("Before the laptop went off, Claude Code finished clean. Antigravity stopped, but"),
+            "{}",
+            b.spoken
+        );
+
+        // Mentions the failed agent and its reason
+        assert!(b.spoken.contains("Antigravity"), "{}", b.spoken);
+        assert!(b.spoken.contains("3 failing"), "{}", b.spoken);
+
+        // Ends with the reopen question text used by the module
+        assert!(
+            b.spoken.ends_with("Do you want me to open the other apps you were using too?"),
+            "{}",
+            b.spoken
+        );
+
+        // The card sections include one row per agent
+        assert!(b.card_md.contains("### Before the shutdown"), "{}", b.card_md);
+        for line in &rec.lines {
+            assert!(
+                b.card_md.contains(&format!("- {line}\n")),
+                "card must include row for agent line: {line}\nCard:\n{}",
+                b.card_md
+            );
+        }
+
+        // Without an overnight record the old question is used
+        i.overnight = None;
+        let b_without = build(&i).expect("briefing without overnight must build");
+        assert!(
+            b_without.spoken.ends_with("Shall I reopen them?"),
+            "{}",
+            b_without.spoken
+        );
     }
 
     #[test]
@@ -927,6 +1054,7 @@ mod session_greeting_tests {
             session: None,
             health_spoken: None,
             health_card: None,
+            overnight: None,
         }
     }
 

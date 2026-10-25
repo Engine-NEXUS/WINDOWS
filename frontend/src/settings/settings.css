@@ -25,8 +25,6 @@ html, body, #root {
   height: 100vh;
   overflow: hidden;
   background: var(--nx-bg);
-  backdrop-filter: var(--nx-glass-blur);
-  -webkit-backdrop-filter: var(--nx-glass-blur);
   border: var(--nx-glass-border);
   border-radius: 14px;
   box-shadow: var(--nx-glass-shadow);
@@ -54,8 +52,6 @@ html, body, #root {
 .nx-sidebar {
   width: 200px;
   background: var(--nx-bg-card);
-  backdrop-filter: var(--nx-glass-blur);
-  -webkit-backdrop-filter: var(--nx-glass-blur);
   border-right: 1px solid var(--nx-border);
   padding: 48px var(--nx-space-3) var(--nx-space-6);
   display: flex;

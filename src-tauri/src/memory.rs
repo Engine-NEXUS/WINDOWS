@@ -1,9 +1,13 @@
-//! 3-tier persistent memory: core facts + episodic log + semantic recall.
+//! Persistent memory: core facts (+ the about-me profile in `profile.rs` and
+//! learned habits in `habits.rs`).
 //!
 //! File-based (no native deps): memory/ under app data dir.
 //!   core.json      — persistent key-value facts ("name" -> "Lakshya")
-//!   episodes.jsonl — rolling 30-day conversation log (transcript + response)
-//!   facts.json     — extracted semantic facts [{key, value, updated_at}]
+//!   profile.json   — who the user is / what they can do / need / prioritise
+//!   habits.json    — local usage counters (self-learning, no LLM)
+//!   episodes.jsonl — optional rolling 30-day log (`log_episode`; not wired to
+//!                    any caller today — conversation history lives in
+//!                    `conversation.rs`)
 //!
 //! Recall is substring-based (no embeddings) — fast, local, deterministic.
 
@@ -24,6 +28,27 @@ pub(crate) fn read_json(path: &Path) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
+/// Read a JSON file for a read-modify-write. A file that EXISTS but does not
+/// parse is first copied to `<name>.corrupt` so the next write can't silently
+/// replace every stored fact with `{}` (the old behavior after a crash
+/// mid-write).
+pub(crate) fn read_json_for_update(path: &Path) -> serde_json::Value {
+    match std::fs::read_to_string(path) {
+        Ok(c) => match serde_json::from_str(&c) {
+            Ok(v) => v,
+            Err(_) => {
+                if !c.trim().is_empty() {
+                    let mut backup = path.as_os_str().to_owned();
+                    backup.push(".corrupt");
+                    let _ = std::fs::write(PathBuf::from(backup), c);
+                }
+                serde_json::Value::Null
+            }
+        },
+        Err(_) => serde_json::Value::Null,
+    }
+}
+
 /// Write via temp file + rename so a crash or a racing writer can never
 /// leave a half-written store behind.
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> bool {
@@ -39,51 +64,99 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> bool {
     if std::fs::rename(&tmp, path).is_ok() {
         return true;
     }
-    // Windows can refuse to rename over a file another handle just opened.
+    // Windows can refuse to rename over a file another handle just opened:
+    // remove + rename, then a plain overwrite as the last resort.
     let _ = std::fs::remove_file(path);
-    let ok = std::fs::rename(&tmp, path).is_ok();
-    if !ok {
-        let _ = std::fs::remove_file(&tmp);
+    if std::fs::rename(&tmp, path).is_ok() {
+        return true;
     }
+    let ok = std::fs::copy(&tmp, path).is_ok();
+    let _ = std::fs::remove_file(&tmp);
     ok
 }
 
-fn write_json(path: &Path, v: &serde_json::Value) -> bool {
-    serde_json::to_string_pretty(v)
-        .map(|s| atomic_write(path, s.as_bytes()))
-        .unwrap_or(false)
+/// Atomic JSON write (pretty-printed).
+pub(crate) fn write_json(path: &Path, v: &serde_json::Value) -> bool {
+    match serde_json::to_string_pretty(v) {
+        Ok(text) => atomic_write(path, text.as_bytes()),
+        Err(_) => false,
+    }
+}
+
+/// Atomic text write (temp file + rename) — shared by every memory-side file.
+pub(crate) fn write_text_atomic(path: &Path, text: &str) -> bool {
+    atomic_write(path, text.as_bytes())
+}
+
+/// Truncate to at most `max` CHARACTERS (never bytes — `String::truncate`
+/// panics when the byte index lands inside a multibyte character, e.g. Hindi
+/// or accented text in a stored fact).
+pub(crate) fn truncate_chars(s: &mut String, max: usize) {
+    if let Some((idx, _)) = s.char_indices().nth(max) {
+        s.truncate(idx);
+    }
+}
+
+/// Personal attributes the bare "my X is Y" shorthand may store. Without this
+/// gate any complaint ("my mic is not working", "my screen is dim") became a
+/// permanent fact. Explicit "remember …" commands accept any key.
+fn is_personal_attribute(key: &str) -> bool {
+    const ATTRS: &[&str] = &[
+        "name", "nickname", "age", "birthday", "birthdate", "birth_date", "email",
+        "phone", "number", "address", "city", "location", "hometown", "country",
+        "job", "profession", "role", "title", "company", "employer", "college",
+        "university", "school", "major", "course", "degree", "branch", "year",
+        "wife", "husband", "partner", "girlfriend", "boyfriend", "mom", "mother",
+        "dad", "father", "brother", "sister", "son", "daughter", "friend", "boss",
+        "dog", "cat", "pet", "hobby", "goal", "language", "timezone", "diet",
+        "birth_city", "pronouns",
+    ];
+    if ATTRS.contains(&key) {
+        return true;
+    }
+    key.starts_with("favorite_")
+        || key.starts_with("favourite_")
+        || key.ends_with("_name")
+        || key.ends_with("_birthday")
+        || key.ends_with("_email")
+        || key.ends_with("_number")
 }
 
 /// Parse "remember that X is Y" / "remember X is Y" / "my X is Y".
 /// Returns (key, value). All lowercase keys, original-case values.
 pub fn parse_remember(transcript: &str) -> Option<(String, String)> {
     let t = transcript.trim();
-    let lower = t.to_lowercase();
+    // ASCII-lowercase keeps byte offsets identical to `t` (Unicode lowercasing
+    // can change byte lengths and made the slicing below land mid-character).
+    let lower = t.to_ascii_lowercase();
     // Explicit remember commands
     for prefix in ["remember that ", "remember ", "note that "] {
-        if let Some(rest) = lower.strip_prefix(prefix) {
-            // rest is lowercase; recover original-case value by slicing original
-            let orig_rest = &t[prefix.len().min(t.len())..];
+        if lower.starts_with(prefix) {
+            let orig_rest = t.get(prefix.len()..).unwrap_or("");
             if let Some((k, v)) = split_is(orig_rest) {
-                return Some((normalize_key(k), v.trim().to_string()));
+                let key = normalize_key(k);
+                if !key.is_empty() && !v.trim().is_empty() {
+                    return Some((key, v.trim().to_string()));
+                }
             }
-            let _ = rest;
         }
     }
-    // "my X is Y" shorthand
-    if let Some(rest) = lower.strip_prefix("my ") {
-        let orig_rest = &t[3.min(t.len())..];
+    // "my X is Y" shorthand — personal attributes only
+    if lower.starts_with("my ") {
+        let orig_rest = t.get(3..).unwrap_or("");
         if let Some((k, v)) = split_is(orig_rest) {
-            let _ = rest;
-            return Some((normalize_key(k), v.trim().to_string()));
+            let key = normalize_key(k);
+            if is_personal_attribute(&key) && !v.trim().is_empty() {
+                return Some((key, v.trim().to_string()));
+            }
         }
     }
     None
 }
 
 fn split_is(s: &str) -> Option<(&str, &str)> {
-    let lower = s.to_lowercase();
-    // find " is " (case-insensitive via lower, same byte indices for ASCII " is ")
+    // ASCII-lowercase: same byte indices as `s`, so slicing is always safe.
+    let lower = s.to_ascii_lowercase();
     let idx = lower.find(" is ")?;
     Some((s[..idx].trim(), s[idx + 4..].trim()))
 }
@@ -129,7 +202,7 @@ pub fn remember(app_data_dir: &Path, key: &str, value: &str) -> bool {
     }
     let dir = resolve_memory_dir(app_data_dir);
     let path = dir.join("core.json");
-    let mut map = read_json(&path);
+    let mut map = read_json_for_update(&path);
     if !map.is_object() {
         map = serde_json::json!({});
     }
@@ -157,7 +230,7 @@ pub fn forget(app_data_dir: &Path, key: &str) -> bool {
     let mut removed = false;
 
     let core_path = dir.join("core.json");
-    let mut map = read_json(&core_path);
+    let mut map = read_json_for_update(&core_path);
     if let Some(obj) = map.as_object_mut() {
         if obj.remove(key).is_some() {
             write_json(&core_path, &map);
@@ -420,19 +493,25 @@ fn prune_episodes(path: &Path, now: i64) {
 }
 
 /// Build a compact memory context block for prompt injection.
-/// Core facts matching the transcript + up to 3 recent episodes.
+/// Core facts matching the transcript + up to 3 recent episodes (legacy path;
+/// the Memory Core context pack is used first).
 pub fn get_memory_context(app_data_dir: &Path, transcript: &str) -> Option<String> {
-    // Memory Core context pack: ranked, PII-redacted, 2000-char budget.
+    // Memory Core context pack: ranked, PII-redacted, budgeted to MAX_CONTEXT_CHARS.
     if let Some(pack) = crate::memcore::context_pack(
         app_data_dir,
         transcript,
-        crate::memcore::DEFAULT_BUDGET,
+        MAX_CONTEXT_CHARS,
     ) {
         return Some(pack);
     }
     let mut parts: Vec<String> = vec![];
 
-    let facts = recall(app_data_dir, transcript);
+    // Facts containing PII (phone, e-mail, card, …) stay local: injecting them
+    // only for the router to redact (and the Worker path to leak) helped nobody.
+    let facts: Vec<(String, String)> = recall(app_data_dir, transcript)
+        .into_iter()
+        .filter(|(_, v)| crate::pii_filter::sanitize(v) == *v)
+        .collect();
     if !facts.is_empty() {
         let lines: Vec<String> = facts
             .iter()
@@ -466,9 +545,7 @@ pub fn get_memory_context(app_data_dir: &Path, transcript: &str) -> Option<Strin
         return None;
     }
     let mut ctx = parts.join("\n");
-    if ctx.len() > MAX_CONTEXT_CHARS {
-        ctx.truncate(MAX_CONTEXT_CHARS);
-    }
+    truncate_chars(&mut ctx, MAX_CONTEXT_CHARS);
     Some(ctx)
 }
 
@@ -503,6 +580,32 @@ pub fn add_mail_watch(app_data_dir: &Path, watch: ThreadWatchTarget) -> bool {
     } else {
         watches.push(watch);
     }
+    save_mail_watches(app_data_dir, &watches)
+}
+
+/// Advance a watch's baseline after an alert so the same change is not
+/// re-reported on every poll. The sentinel polls every 15s and compared the
+/// live thread against the baseline captured when the watch was created; with
+/// nothing ever written back, ONE new reply (or deadline extension) was
+/// re-announced forever. The watch stays `Active` — the user asked for "any
+/// update", so later changes must still alert. Returns true if saved.
+pub fn advance_mail_watch(
+    app_data_dir: &Path,
+    watch_id: &str,
+    message_count: usize,
+    new_deadline: Option<&str>,
+    now_ms: u64,
+) -> bool {
+    let mut watches = load_mail_watches(app_data_dir);
+    let Some(w) = watches.iter_mut().find(|w| w.watch_id == watch_id) else {
+        return false;
+    };
+    // Never move the baseline backwards (a poll that parsed fewer messages).
+    w.message_count = w.message_count.max(message_count);
+    if let Some(d) = new_deadline {
+        w.initial_deadline_raw = Some(d.to_string());
+    }
+    w.last_checked_ms = now_ms;
     save_mail_watches(app_data_dir, &watches)
 }
 
@@ -845,6 +948,84 @@ mod tests {
         assert_eq!(parse_remember("remember"), None);
     }
 
+    /// Regression: any "my X is Y" complaint used to become a permanent fact.
+    #[test]
+    fn test_parse_remember_my_shorthand_ignores_complaints() {
+        for t in [
+            "my mic is not working",
+            "my screen is too dim",
+            "my laptop is slow today",
+            "my internet is down",
+        ] {
+            assert_eq!(parse_remember(t), None, "{t}");
+        }
+        assert_eq!(
+            parse_remember("my name is Lakshya"),
+            Some(("name".to_string(), "Lakshya".to_string()))
+        );
+        assert_eq!(
+            parse_remember("my best friend name is Asha"),
+            Some(("best_friend_name".to_string(), "Asha".to_string()))
+        );
+        // Explicit remember still accepts anything.
+        assert_eq!(
+            parse_remember("remember that my laptop is a Dell"),
+            Some(("my_laptop".to_string(), "a Dell".to_string()))
+        );
+    }
+
+    /// Regression: byte-offset slicing of a Unicode-lowercased copy could land
+    /// mid-character and panic on non-ASCII input.
+    #[test]
+    fn test_parse_remember_non_ascii_never_panics() {
+        for t in [
+            "remember İstanbul is my city",
+            "my İsim is Ahmet",
+            "remember that मेरा शहर is दिल्ली",
+            "remember that my café is Blue Tokai",
+        ] {
+            let _ = parse_remember(t);
+        }
+        assert_eq!(
+            parse_remember("remember that my café is Blue Tokai"),
+            Some(("my_café".to_string(), "Blue Tokai".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_truncate_chars_is_utf8_safe() {
+        let mut s = "é".repeat(500); // 2 bytes per char; byte 800 is mid-char
+        truncate_chars(&mut s, 400);
+        assert_eq!(s.chars().count(), 400);
+        let mut short = "abc".to_string();
+        truncate_chars(&mut short, 400);
+        assert_eq!(short, "abc");
+    }
+
+    #[test]
+    fn test_context_with_multibyte_facts_does_not_panic() {
+        let d = tmpdir("utf8ctx");
+        for i in 0..8 {
+            remember(&d, &format!("fact_{i}"), &"दिल्ली".repeat(40));
+        }
+        let ctx = get_memory_context(&d, "").expect("context");
+        assert!(ctx.chars().count() <= MAX_CONTEXT_CHARS);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn test_corrupt_core_is_backed_up_not_silently_wiped() {
+        let d = tmpdir("corrupt");
+        let dir = resolve_memory_dir(&d);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("core.json"), "{\"name\": \"Lakshya\", ").unwrap();
+        assert!(remember(&d, "city", "Delhi"));
+        let backup = std::fs::read_to_string(dir.join("core.json.corrupt")).unwrap();
+        assert!(backup.contains("Lakshya"), "corrupt original must be preserved");
+        assert!(!dir.join("core.json.tmp").exists(), "no temp file left behind");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn test_remember_recall_forget() {
         let d = tmpdir("rrf");
@@ -872,6 +1053,18 @@ mod tests {
         let ctx = get_memory_context(&d, "dog name");
         assert!(ctx.is_some());
         assert!(ctx.unwrap().contains("Bruno"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn test_context_skips_pii_facts() {
+        let d = tmpdir("ctxprof");
+        remember(&d, "phone", "9876543210");
+        remember(&d, "city", "Delhi");
+        let ctx = get_memory_context(&d, "which city and phone").unwrap();
+        assert!(!ctx.contains("9876543210"), "PII fact must stay local: {ctx}");
+        let ctx = get_memory_context(&d, "which city").unwrap();
+        assert!(ctx.contains("Delhi"), "{ctx}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -916,6 +1109,17 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].watch_id, "w_123");
         assert_eq!(loaded[0].status, WatchStatus::Active);
+
+        // Baseline advances after an alert and never moves backwards.
+        assert!(advance_mail_watch(&d, "w_123", 3, Some("Monday 9 AM"), 5000));
+        let adv = load_mail_watches(&d);
+        assert_eq!(adv[0].message_count, 3);
+        assert_eq!(adv[0].initial_deadline_raw.as_deref(), Some("Monday 9 AM"));
+        assert_eq!(adv[0].last_checked_ms, 5000);
+        assert_eq!(adv[0].status, WatchStatus::Active, "stays active for later updates");
+        assert!(advance_mail_watch(&d, "w_123", 1, None, 6000));
+        assert_eq!(load_mail_watches(&d)[0].message_count, 3);
+        assert!(!advance_mail_watch(&d, "missing", 9, None, 1));
 
         // Update status to Triggered
         assert!(update_mail_watch_status(&d, "w_123", WatchStatus::Triggered));

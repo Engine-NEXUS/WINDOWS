@@ -6,5 +6,4 @@ emitted-never-listened architect:phase1-ready
 emitted-never-listened directed:ignored
 emitted-never-listened proactive:card
 emitted-never-listened proactive:nudge
-emitted-never-listened settings:updated
 listened-never-emitted stage:annotation_mode

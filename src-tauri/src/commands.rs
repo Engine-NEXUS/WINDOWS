@@ -773,8 +773,15 @@ pub async fn show_sidebar_with_analysis<R: Runtime>(
 ) -> Result<(), String> {
     let window_existed = app.get_webview_window("sidebar").is_some();
 
-    // Unified delegate — Assistant view, right dock, geometry before capture.
-    let prep = prepare_sidebar(&app, "assistant", None).await?;
+    let is_coderabbit = analysis.get("findings").is_some()
+        || analysis.get("activePrs").is_some()
+        || query.to_lowercase().contains("coderabbit")
+        || query.to_lowercase().contains("code rabbit");
+    let view_name = if is_coderabbit { "coderabbit" } else { "assistant" };
+    let dock_opt = if is_coderabbit { Some("center") } else { None };
+
+    // Unified delegate — Assistant or CodeRabbit view, geometry before capture.
+    let prep = prepare_sidebar(&app, view_name, dock_opt).await?;
     let backdrop = capture_and_emit_backdrop(&app, &prep);
 
     {
@@ -788,7 +795,7 @@ pub async fn show_sidebar_with_analysis<R: Runtime>(
         });
     }
 
-    finish_sidebar(&app, &prep.win, "assistant", None)?;
+    finish_sidebar(&app, &prep.win, view_name, dock_opt)?;
     spawn_sidebar_live_blur(&app, &prep.win);
 
     // Fast path: if the window already exists, also emit events
@@ -1063,7 +1070,17 @@ pub fn sidebar_geometry(
                 (x, 40.0, 960.0, h)
             }
         }
-        // "assistant" | "pr-list" | fallback → default right dock, full height.
+        "coderabbit" => {
+            let w = (monitor_w - 80.0).min(1340.0).max(1080.0);
+            let h = (monitor_h - 60.0).min(920.0).max(720.0);
+            center_xy(w, h)
+        }
+        "pr-list" | "github-dashboard" => {
+            // Exact same size as Settings — 400px wide, covering from top margin down to screen edge.
+            let h = (monitor_h - 40.0).min(1040.0).max(400.0);
+            if dock == Some("center") { center_xy(400.0, h) } else { dock_x(400.0, h) }
+        }
+        // "assistant" | fallback → default right dock, full height.
         _ => {
             let h = (monitor_h - 40.0).min(1040.0).max(400.0);
             if dock == Some("center") { center_xy(520.0, h) } else { dock_x(520.0, h) }
@@ -1083,7 +1100,7 @@ pub fn sidebar_geometry(
 /// `capture_backdrop` (ADR-05). A correct live loop needs DXGI desktop
 /// duplication, which is separate future work.
 pub(crate) fn spawn_sidebar_live_blur<R: Runtime>(app: &tauri::AppHandle<R>, win: &tauri::WebviewWindow<R>) {
-    const DEV_LIVE_BLUR_DISABLED: bool = false; // 1 Hz live refresh enabled
+    const DEV_LIVE_BLUR_DISABLED: bool = true; // Disabled for solid opaque styling and 0% CPU overhead
     if DEV_LIVE_BLUR_DISABLED {
         return;
     }
@@ -1247,6 +1264,16 @@ pub(crate) fn finish_sidebar<R: Runtime>(
 ) -> Result<(), String> {
     win.show().map_err(|e| format!("sidebar show: {e}"))?;
     let _ = win.set_focus();
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(hwnd) = win.hwnd() {
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+                use windows::Win32::Foundation::HWND;
+                let _ = SetForegroundWindow(HWND(hwnd.0 as _));
+            }
+        }
+    }
     crate::dwm_corners::round_corners(win);
     #[cfg(target_os = "macos")]
     {
@@ -1409,6 +1436,41 @@ pub fn hide_settings_sidebar<R: Runtime>(
     Ok(())
 }
 
+/// Show the CodeRabbit active pull requests hub in a 1340x920 centered workstation window.
+pub async fn show_coderabbit_hub<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let window_existed = app.get_webview_window("sidebar").is_some();
+    let prep = prepare_sidebar(&app, "coderabbit", Some("center")).await?;
+    let backdrop = capture_and_emit_backdrop(&app, &prep);
+
+    let active_prs = crate::coderabbit::get_active_prs_mock();
+    let payload = serde_json::json!({
+        "mode": "pr_list",
+        "activePrs": active_prs
+    });
+
+    {
+        let mut pending = PENDING_SIDEBAR.lock().unwrap();
+        *pending = Some(PendingSidebar {
+            query: "CodeRabbit AI — Active Pull Requests".to_string(),
+            text: "Here are the active pull requests in ultron, sir.".to_string(),
+            backdrop: backdrop.clone(),
+            analysis: Some(payload.clone()),
+            confirmation: None,
+        });
+    }
+
+    finish_sidebar(&app, &prep.win, "coderabbit", Some("center"))?;
+    spawn_sidebar_live_blur(&app, &prep.win);
+
+    if window_existed {
+        let _ = app.emit("sidebar:analysis", payload);
+    }
+
+    Ok(())
+}
+
 /// IPC: Fetch the pending settings backdrop (called by the frontend on mount).
 /// Returns the blurred desktop image as a data URI, or null if none pending.
 /// Clears the pending data after returning. This handles the race condition
@@ -1431,6 +1493,7 @@ pub fn open_settings_window<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
     let win = crate::dyn_windows::get_or_create_window(&app, crate::dyn_windows::WindowConfig::settings())?;
+    let _ = win.set_always_on_top(true);
     win.show().map_err(|e| e.to_string())?;
     win.set_focus().map_err(|e| e.to_string())?;
     Ok(())
@@ -1528,6 +1591,14 @@ pub fn set_orb_capsule_style<R: Runtime>(
         "mode": settings.orb_wakeup_mode,
         "genesis": settings.orb_interior_genesis,
     }));
+    Ok(())
+}
+
+/// IPC: Play one wake-sound candidate (Command Hub preview / audition). `style` is rise | glass | pluck |
+/// triplet | sweep; `volume` 0-100.
+#[tauri::command]
+pub fn preview_wake_sound(style: String, volume: u8) -> Result<(), String> {
+    crate::wake_cue::play_preview(&style, volume);
     Ok(())
 }
 
@@ -1662,9 +1733,9 @@ pub struct NexusSettings {
     pub places_api_key: String,
     /// Moonshine STT model architecture.
     /// Options: "small_streaming" (123M, 7.84% WER, default for family),
-    ///          "medium_streaming" (245M, 6.65% WER, recommended for admin),
+    ///          "medium_streaming" (245M, 6.65% WER, ~400 MB — opt-in),
     ///          "tiny_streaming" (34M, 12% WER, ultra-low RAM).
-    /// Default: "medium_streaming" (better accuracy, admin has RAM).
+    /// Default: "small_streaming" — fits the 600–700 MB local-usage budget.
     #[serde(default = "default_moonshine_model")]
     pub moonshine_model: String,
     /// Stage-2 wake-word verifier: on a stage-1 (acoustic) candidate, run the
@@ -1673,6 +1744,14 @@ pub struct NexusSettings {
     /// Default: true. Set false in settings.json to restore fire-on-detect.
     #[serde(default = "default_verify_wake")]
     pub verify_wake: bool,
+    /// Speech-check policy: "always" (every candidate is checked, the default), "tiered" (candidates the
+    /// classifier is very sure about, `wake_verify_high`, fire without the check) or "off". Empty = follow
+    /// the legacy `verify_wake` boolean. Choose with `wake_calibrate.py --verify` on your clips.
+    #[serde(default)]
+    pub wake_verify_mode: String,
+    /// Tiered mode: stage-1 probability at or above which the speech check is skipped (0.80-0.9999).
+    #[serde(default = "default_wake_verify_high")]
+    pub wake_verify_high: f32,
     /// Mic keep-alive render (Meet parity): inaudible output stream beside
     /// capture holds the Intel DSP awake so it never power-gates the mic
     /// path mid-session. Default: true. Silent zeros, ~0 CPU.
@@ -1702,6 +1781,28 @@ pub struct NexusSettings {
     /// depth reaches 2+. Default: true. Plans D5/D6.
     #[serde(default = "default_ghost_depth_ack")]
     pub ghost_depth_ack: bool,
+    /// Drop Groq transcripts whose own segment statistics (avg_logprob /
+    /// compression_ratio) mark them as unreliable. Off by default: enable it
+    /// only after `voice_scorecard.py` shows a threshold that catches
+    /// hallucinations without rejecting your real commands.
+    #[serde(default)]
+    pub stt_confidence_gate: bool,
+    /// Send generic NEXUS command hints (`COMMAND_VOCABULARY`) to Groq on turns
+    /// that are not owner-verified. Off by default; A/B it with the scorecard.
+    #[serde(default)]
+    pub stt_command_hints: bool,
+    /// Where the command capture starts, in ms relative to the end of the
+    /// chunk that detected the wake word. 0 = right after the detection point
+    /// (audio spoken while verifying/starting up is kept; the wake word is not).
+    /// Negative values reach back into the wake word's tail — experimental;
+    /// choose with `stt_eval --capture-offset-ms`. Clamped to ±400.
+    #[serde(default)]
+    pub wake_seed_offset_ms: i32,
+    /// Wake-word front-end chain: "legacy" (the original runtime chain, default)
+    /// or "aligned" (identical to the chain the classifier was trained with).
+    /// Compare with `wake_eval --dsp` on your recordings before switching.
+    #[serde(default = "default_wake_dsp_profile")]
+    pub wake_dsp_profile: String,
     /// Ghost FIFO queue: per-step watchdog timeout in ms. Default: 15000. D7.
     #[serde(default = "default_ghost_step_timeout_ms")]
     pub ghost_step_timeout_ms: u64,
@@ -1812,6 +1913,31 @@ pub struct NexusSettings {
     /// Once-a-day spoken "where you left off" shortly after startup.
     #[serde(default = "default_memcore")]
     pub memcore_briefing: bool,
+    /// Send the always-on profile (facts the user told NEXUS, minus sensitive topics) with every
+    /// cloud request. Memory page switch; the egress log shows exactly what was sent.
+    #[serde(default = "default_memcore")]
+    pub memcore_profile: bool,
+    /// Play a short "I heard you" sound the instant NEXUS wakes (wake word or Ctrl+Space).
+    #[serde(default = "default_memcore")]
+    pub wake_sound: bool,
+    /// Which sound: rise | glass | pluck | triplet | sweep.
+    #[serde(default = "default_wake_sound_style")]
+    pub wake_sound_style: String,
+    /// Wake sound level, 0-100 (on top of the system volume).
+    #[serde(default = "default_wake_sound_volume")]
+    pub wake_sound_volume: u8,
+    /// Notice command sequences the user repeats and offer to save them as a one-phrase routine.
+    #[serde(default = "default_memcore")]
+    pub memcore_routines: bool,
+    /// Unattended shutdown after a watched coding session ends perfectly: "off" (default; nothing is ever powered off
+    /// by itself), "dry" (practice: says what it would do, never does it) or "on" (a 30 second cancellable countdown).
+    /// Anything else is read as "off". Changed by voice ("allow unattended shutdown").
+    #[serde(default = "default_watch_power")]
+    pub watch_power: String,
+    /// Let a free cloud model read a redacted copy of recent cloud conversations and SUGGEST profile facts.
+    /// Off by default; nothing is stored until the user approves it on the Memory page.
+    #[serde(default)]
+    pub memcore_review: bool,
     /// Timetable slot reminders ("It's time for DSA. Shall I start?").
     #[serde(default = "default_memcore")]
     pub memcore_timetable: bool,
@@ -1853,6 +1979,10 @@ fn default_music_player() -> String {
     "spotify".to_string()
 }
 
+fn default_watch_power() -> String {
+    "off".to_string()
+}
+
 fn default_memcore() -> bool {
     true
 }
@@ -1881,6 +2011,14 @@ fn default_tts_volume() -> u8 {
     75
 }
 
+fn default_wake_sound_style() -> String {
+    "rise".to_string()
+}
+
+fn default_wake_sound_volume() -> u8 {
+    crate::wake_cue::DEFAULT_VOLUME
+}
+
 fn default_edge_tts_voice() -> String {
     "en-GB-RyanNeural".to_string()
 }
@@ -1898,11 +2036,15 @@ fn default_orb_size() -> u32 {
 }
 
 fn default_moonshine_model() -> String {
-    "medium_streaming".to_string()
+    crate::lazy_stt::DEFAULT_MOONSHINE_MODEL.to_string()
 }
 
 fn default_verify_wake() -> bool {
     true
+}
+
+fn default_wake_verify_high() -> f32 {
+    crate::wakeword_oww::DEFAULT_VERIFY_HIGH
 }
 
 fn default_mic_keep_alive() -> bool {
@@ -1927,6 +2069,10 @@ fn default_vision_provider() -> String {
 
 fn default_vision_race() -> String {
     "sequential".to_string()
+}
+
+fn default_wake_dsp_profile() -> String {
+    "legacy".to_string()
 }
 
 fn default_ghost_depth_ack() -> bool {
@@ -2029,6 +2175,22 @@ fn default_orb_listen_mode() -> u32 {
     1
 }
 
+/// `localSttOnly` when the setting is absent. ONE value for the struct default
+/// and every raw-JSON reader (they used to disagree: the Settings UI showed
+/// `true` while the runtime read `false`, so a user who only pasted a Groq key
+/// saw "Local STT only" ON — and, once any save persisted it, had the key
+/// silently ignored). `false`: a key the user entered is used; with no key the
+/// local engine is used regardless.
+pub const DEFAULT_LOCAL_STT_ONLY: bool = false;
+
+/// Read `localSttOnly` from parsed settings JSON (camelCase or snake_case).
+pub fn local_stt_only_from_json(json: &serde_json::Value) -> bool {
+    json.get("localSttOnly")
+        .or_else(|| json.get("local_stt_only"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(DEFAULT_LOCAL_STT_ONLY)
+}
+
 impl Default for NexusSettings {
     fn default() -> Self {
         Self {
@@ -2041,7 +2203,7 @@ impl Default for NexusSettings {
             speaker_verification: false,
             meeting_mode_auto: true,
             suppress_tts_in_meetings: true,
-            local_stt_only: true,
+            local_stt_only: DEFAULT_LOCAL_STT_ONLY,
             server_url: option_env!("NEXUS_SERVER_URL")
                 .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev")
                 .to_string(),
@@ -2077,14 +2239,20 @@ impl Default for NexusSettings {
             deepgram_api_key: String::new(),
             routes_api_key: String::new(),
             places_api_key: String::new(),
-            moonshine_model: "medium_streaming".to_string(),
+            moonshine_model: crate::lazy_stt::DEFAULT_MOONSHINE_MODEL.to_string(),
             tts_emotion: "auto".to_string(),
             vision_provider: "auto".to_string(),
             vision_race: "sequential".to_string(),
             verify_wake: true,
+            wake_verify_mode: String::new(),
+            wake_verify_high: default_wake_verify_high(),
             mic_keep_alive: true,
             telegram_chat_id: String::new(),
             ghost_depth_ack: true,
+            stt_confidence_gate: false,
+            stt_command_hints: false,
+            wake_seed_offset_ms: 0,
+            wake_dsp_profile: default_wake_dsp_profile(),
             ghost_step_timeout_ms: 15000,
             ghost_turn_gap_ms: 1000,
             ghost_engagement_secs: 0,
@@ -2115,6 +2283,13 @@ impl Default for NexusSettings {
             memcore_redact_names: false,
             memcore_activity: default_memcore(),
             memcore_briefing: default_memcore(),
+            memcore_profile: default_memcore(),
+            memcore_routines: default_memcore(),
+            memcore_review: false,
+            watch_power: default_watch_power(),
+            wake_sound: true,
+            wake_sound_style: default_wake_sound_style(),
+            wake_sound_volume: default_wake_sound_volume(),
             memcore_timetable: default_memcore(),
             memcore_mail: default_memcore(),
             memcore_whatsapp: false,
@@ -2199,8 +2374,27 @@ pub fn get_settings<R: Runtime>(
         return Ok(NexusSettings::default());
     }
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut settings: NexusSettings = serde_json::from_str(&content)
-        .unwrap_or_default();
+    let mut settings: NexusSettings = match parse_settings_lenient(&content) {
+        Some((s, dropped)) => {
+            if !dropped.is_empty() {
+                tracing::warn!(
+                    "settings.json: ignored invalid field(s) {:?}; other settings kept",
+                    dropped
+                );
+            }
+            s
+        }
+        None => {
+            // Not JSON at all. Keep the broken file next to the new one so the
+            // next Save cannot silently destroy it.
+            let backup = dir.join("settings.json.corrupt");
+            if !backup.exists() {
+                let _ = std::fs::copy(&path, &backup);
+            }
+            tracing::error!("settings.json is unreadable; using defaults (copy kept at {:?})", backup);
+            NexusSettings::default()
+        }
+    };
     // Merge server config if present
     let config_path = dir.join("nexus-config.json");
     if config_path.exists() {
@@ -2230,6 +2424,19 @@ pub fn save_settings<R: Runtime>(
     app: tauri::AppHandle<R>,
     mut settings: NexusSettings,
 ) -> Result<(), String> {
+    // Keys are pasted by hand: a trailing space/newline makes every provider
+    // answer 401 while the Settings card still looks configured.
+    settings.groq_api_key = settings.groq_api_key.trim().to_string();
+    settings.gemini_api_key = settings.gemini_api_key.trim().to_string();
+    settings.cerebras_api_key = settings.cerebras_api_key.trim().to_string();
+    // The keychain wins on read (`read_api_key`), but Settings only ever wrote
+    // settings.json — so a stale keychain copy (from a heal-forward / import)
+    // silently overrode a corrected key and made "Test key" report the OLD
+    // key's result. Every save now updates both stores (an emptied field
+    // clears the credential).
+    crate::auth_vault::set_api_key("groq", &settings.groq_api_key);
+    crate::auth_vault::set_api_key("gemini", &settings.gemini_api_key);
+    crate::auth_vault::set_api_key("cerebras", &settings.cerebras_api_key);
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("settings.json");
@@ -2240,12 +2447,17 @@ pub fn save_settings<R: Runtime>(
         .ok()
         .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
         .unwrap_or_else(|| serde_json::json!({}));
-    settings.groq_api_key = crate::api_keys::merge_key(&existing, "groqApiKey", &settings.groq_api_key);
-    settings.gemini_api_key = crate::api_keys::merge_key(&existing, "geminiApiKey", &settings.gemini_api_key);
-    settings.cerebras_api_key = crate::api_keys::merge_key(&existing, "cerebrasApiKey", &settings.cerebras_api_key);
-    settings.deepgram_api_key = crate::api_keys::merge_key(&existing, "deepgramApiKey", &settings.deepgram_api_key);
-    settings.routes_api_key = crate::api_keys::merge_key(&existing, "routesApiKey", &settings.routes_api_key);
-    settings.places_api_key = crate::api_keys::merge_key(&existing, "placesApiKey", &settings.places_api_key);
+    settings.groq_api_key = crate::api_keys::handle_save_key(&crate::api_keys::KeychainKeyStore, "groq", "groqApiKey", &existing, &settings.groq_api_key);
+    settings.gemini_api_key = crate::api_keys::handle_save_key(&crate::api_keys::KeychainKeyStore, "gemini", "geminiApiKey", &existing, &settings.gemini_api_key);
+    settings.cerebras_api_key = crate::api_keys::handle_save_key(&crate::api_keys::KeychainKeyStore, "cerebras", "cerebrasApiKey", &existing, &settings.cerebras_api_key);
+    settings.deepgram_api_key = crate::api_keys::handle_save_key(&crate::api_keys::KeychainKeyStore, "deepgram", "deepgramApiKey", &existing, &settings.deepgram_api_key);
+    settings.routes_api_key = crate::api_keys::handle_save_key(&crate::api_keys::KeychainKeyStore, "google_maps", "routesApiKey", &existing, &settings.routes_api_key);
+    settings.places_api_key = crate::api_keys::handle_save_key(&crate::api_keys::KeychainKeyStore, "google_places", "placesApiKey", &existing, &settings.places_api_key);
+    // The Worker URL receives every transcript and the device token: never accept
+    // plain http (except localhost) or a malformed value from the UI.
+    if !settings.server_url.is_empty() {
+        settings.server_url = crate::network::normalize_worker_url(&settings.server_url)?;
+    }
     normalize_voice_fields(&mut settings);
     if !settings.edge_tts_voice.is_empty() {
         settings.tts_voice = settings.edge_tts_voice.clone();
@@ -2255,6 +2467,9 @@ pub fn save_settings<R: Runtime>(
     }
     let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    // Sensitivity takes effect immediately (no restart).
+    crate::wakeword_oww::apply_wake_sensitivity(&settings.wake_sensitivity);
+    crate::wakeword_oww::apply_wake_dsp(&settings.wake_dsp_profile);
 
     // Also save server config separately — but NEVER overwrite an existing
     // identity (user_id / device_id) with empty values. This prevents
@@ -2292,12 +2507,19 @@ pub fn save_settings<R: Runtime>(
         (url, settings.user_id.clone(), settings.device_id.clone())
     };
 
-    let config = serde_json::json!({
-        "serverUrl": server_url,
-        "userId": user_id,
-        "deviceId": device_id,
-    });
-    std::fs::write(&config_path, config.to_string()).map_err(|e| e.to_string())?;
+    // Update ONLY the three fields this command owns. The file also carries
+    // the identity record (identity / profileId / lastKnownStatus / …) written
+    // by identity_state; rebuilding it from scratch here dropped those on
+    // every Settings save and silently reverted a claimed profile.
+    let mut config = existing
+        .as_ref()
+        .and_then(|e| e.as_object().cloned())
+        .unwrap_or_default();
+    config.insert("serverUrl".into(), serde_json::Value::String(server_url));
+    config.insert("userId".into(), serde_json::Value::String(user_id));
+    config.insert("deviceId".into(), serde_json::Value::String(device_id));
+    std::fs::write(&config_path, serde_json::Value::Object(config).to_string())
+        .map_err(|e| e.to_string())?;
     let _ = app.emit("settings:updated", &settings);
     let _ = app.emit("orb:morphology_changed", serde_json::json!({
         "think": settings.orb_think_mode,
@@ -2413,26 +2635,12 @@ mod settings_voice_tests {
     }
 }
 
-/// Read the Groq API key from settings.json (non-IPC helper for stt.rs).
-/// Returns empty string if no key is set or settings file doesn't exist.
+/// Read the Groq API key (non-IPC helper for stt.rs and the vision gates).
+/// Delegates to `read_api_key` (keychain first, settings.json fallback) so a
+/// keychain-only key — e.g. after a settings import, which strips keys from
+/// the file — is honored by cloud STT too. Returns empty string if no key.
 pub fn read_groq_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
-    if let Some(k) = crate::auth_vault::get_api_key("groq") {
-        if !k.is_empty() {
-            return k;
-        }
-    }
-    let dir = app.path().app_data_dir();
-    let Ok(dir) = dir else { return String::new(); };
-    let path = dir.join("settings.json");
-    let Ok(content) = std::fs::read_to_string(&path) else { return String::new(); };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return String::new(); };
-    // Read groqApiKey (frontend camelCase) with fallback to groq_api_key
-    // (snake_case, used by manual settings.json edits or older versions).
-    json.get("groqApiKey")
-        .or_else(|| json.get("groq_api_key"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
+    read_api_key(app, "groq")
 }
 
 /// Read the localSttOnly flag from settings.json (non-IPC helper for stt.rs).
@@ -2440,14 +2648,48 @@ pub fn read_groq_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String
 /// audio never leaves the device). Returns false if not set or file missing.
 pub fn read_local_stt_only<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let dir = app.path().app_data_dir();
-    let Ok(dir) = dir else { return false; };
+    let Ok(dir) = dir else { return DEFAULT_LOCAL_STT_ONLY; };
     let path = dir.join("settings.json");
-    let Ok(content) = std::fs::read_to_string(&path) else { return false; };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return false; };
-    json.get("localSttOnly")
-        .or_else(|| json.get("local_stt_only"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+    let Ok(content) = std::fs::read_to_string(&path) else { return DEFAULT_LOCAL_STT_ONLY; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return DEFAULT_LOCAL_STT_ONLY; };
+    local_stt_only_from_json(&json)
+}
+
+/// Read `wakeSensitivity` ("low" | "medium" | "high") from settings.json.
+pub fn read_wake_sensitivity<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
+    let Ok(dir) = app.path().app_data_dir() else { return "medium".to_string(); };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("wakeSensitivity").and_then(|v| v.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "medium".to_string())
+}
+
+/// Parse settings.json field by field. One bad or missing field (an older file
+/// without a newer required key, a hand-edit with the wrong type) used to make
+/// the whole parse fail → `unwrap_or_default()` → **every** setting (hotkey,
+/// voices, orb position, …) reset to defaults in the UI, and the next Save
+/// wrote those defaults over the user's file. Now only the offending fields
+/// fall back; the rest is kept. Returns the settings and the dropped keys.
+pub fn parse_settings_lenient(content: &str) -> Option<(NexusSettings, Vec<String>)> {
+    let file: serde_json::Value = serde_json::from_str(content).ok()?;
+    let file = file.as_object()?;
+    // Fast path: a fully valid file.
+    if let Ok(s) = serde_json::from_value::<NexusSettings>(serde_json::Value::Object(file.clone())) {
+        return Some((s, Vec::new()));
+    }
+    let mut merged = serde_json::to_value(NexusSettings::default()).ok()?;
+    let mut dropped = Vec::new();
+    for (key, value) in file {
+        let mut candidate = merged.clone();
+        candidate.as_object_mut()?.insert(key.clone(), value.clone());
+        if serde_json::from_value::<NexusSettings>(candidate.clone()).is_ok() {
+            merged = candidate;
+        } else {
+            dropped.push(key.clone());
+        }
+    }
+    serde_json::from_value::<NexusSettings>(merged).ok().map(|s| (s, dropped))
 }
 
 /// Read the sttLogConfidence flag (P0 measurement): log Whisper confidence per command turn.
@@ -2462,7 +2704,13 @@ pub fn read_stt_log_confidence<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> 
 /// Used by ghost.rs (vision keys) and the health panel. `service` is the
 /// vault service id ("groq" | "gemini" | "cerebras").
 pub fn read_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>, service: &str) -> String {
-    if let Some(k) = crate::auth_vault::get_api_key(service) {
+    let vault_svc = match service {
+        "routes" => "google_maps",
+        "places" => "google_places",
+        other => other,
+    };
+    if let Some(k) = crate::auth_vault::get_api_key(vault_svc) {
+        let k = k.trim().to_string();
         if !k.is_empty() {
             return k;
         }
@@ -2479,23 +2727,39 @@ pub fn read_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>, service: &str)
         "gemini" => "geminiApiKey",
         "cerebras" => "cerebrasApiKey",
         "deepgram" => "deepgramApiKey",
-        "google_maps" => "routesApiKey",
-        "google_places" => "placesApiKey",
+        "google_maps" | "routes" => "routesApiKey",
+        "google_places" | "places" => "placesApiKey",
         _ => "groqApiKey",
     };
     let snake = match service {
         "gemini" => "gemini_api_key",
         "cerebras" => "cerebras_api_key",
         "deepgram" => "deepgram_api_key",
-        "google_maps" => "routes_api_key",
-        "google_places" => "places_api_key",
+        "google_maps" | "routes" => "routes_api_key",
+        "google_places" | "places" => "places_api_key",
         _ => "groq_api_key",
     };
-    json.get(camel)
+    let val = json.get(camel)
         .or_else(|| json.get(snake))
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .to_string()
+        .trim()
+        .to_string();
+    if !val.is_empty() {
+        return val;
+    }
+    if service == "google_maps" || service == "routes" {
+        if let Some(v) = json
+            .get("googleMapsApiKey")
+            .or_else(|| json.get("google_maps_api_key"))
+            .and_then(|v| v.as_str())
+        {
+            if !v.is_empty() {
+                return v.to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 /// Read the verifyWake flag from settings.json (non-IPC helper for wakeword_oww.rs).
@@ -2824,13 +3088,24 @@ pub fn open_mic_settings() -> Result<(), String> {
     Ok(())
 }
 
-/// IPC: Clear the conversation transcript (frontend store).
-/// This is a no-op on the Rust side — the frontend handles it.
-/// The command exists so the settings UI can call it via IPC.
+/// IPC: Clear the stored conversation. This used to be a no-op ("the frontend
+/// handles it") while the Settings label promised "Remove all stored
+/// transcripts" — `conversation.jsonl`, the conversation brief and the episodic
+/// log stayed on disk. It now deletes them (profile/facts are separate:
+/// `memory_clear`).
 #[tauri::command]
-pub fn clear_transcript() -> Result<(), String> {
-    tracing::info!("transcript cleared (frontend-side)");
-    Ok(())
+pub fn clear_transcript<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    // Raw conversation turns + brief, and the legacy episodic log.
+    let turns_cleared = crate::conversation::clear_all(&dir);
+    let episodes = crate::memory::resolve_memory_dir(&dir).join("episodes.jsonl");
+    let episodes_cleared = !episodes.exists() || std::fs::remove_file(episodes).is_ok();
+    if turns_cleared && episodes_cleared {
+        tracing::info!("stored conversation cleared");
+        Ok(())
+    } else {
+        Err("couldn't remove every stored transcript file".to_string())
+    }
 }
 
 /// Force a manual app registry refresh (e.g. after installing a new app).
@@ -2899,6 +3174,68 @@ pub fn stt_capture_had_speech() -> Result<bool, String> {
 }
 
 // ─── Ghost FIFO queue readers (loose settings.json parse) ───────────────
+
+/// Read `wakeDspProfile` ("legacy" when unset).
+pub fn read_wake_dsp_profile<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
+    let Ok(dir) = app.path().app_data_dir() else { return "legacy".to_string(); };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("wakeDspProfile").and_then(|v| v.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "legacy".to_string())
+}
+
+/// Read `wakeVerifyMode` ("always" | "tiered" | "off"); None when unset.
+pub fn read_wake_verify_mode<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<String> {
+    let dir = app.path().app_data_dir().ok()?;
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("wakeVerifyMode").and_then(|v| v.as_str()).map(str::to_string))
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// Read `wakeVerifyHigh` (the provisional default when unset or invalid).
+pub fn read_wake_verify_high<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> f32 {
+    let Ok(dir) = app.path().app_data_dir() else { return crate::wakeword_oww::DEFAULT_VERIFY_HIGH; };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("wakeVerifyHigh").and_then(|v| v.as_f64()))
+        .map(|v| v as f32)
+        .unwrap_or(crate::wakeword_oww::DEFAULT_VERIFY_HIGH)
+}
+
+/// Read `wakeSeedOffsetMs` (0 when unset or invalid).
+pub fn read_wake_seed_offset_ms<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> i32 {
+    let Ok(dir) = app.path().app_data_dir() else { return 0; };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("wakeSeedOffsetMs").and_then(|v| v.as_i64()))
+        .map(|v| v.clamp(-400, 400) as i32)
+        .unwrap_or(0)
+}
+
+/// Read the sttCommandHints flag (off unless the user turned it on).
+pub fn read_stt_command_hints<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return false; };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("sttCommandHints").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
+
+/// Read the sttConfidenceGate flag (off unless the user turned it on).
+pub fn read_stt_confidence_gate<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return false; };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("sttConfidenceGate").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
 
 /// Read the ghostDepthAck flag (ghost FIFO queue depth-ACK, D5/D6).
 pub fn read_ghost_depth_ack<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
@@ -3291,6 +3628,62 @@ pub fn memcore_list<R: Runtime>(app: AppHandle<R>) -> Result<Vec<crate::memcore:
     Ok(crate::memcore::list_rows(&dir, 500))
 }
 
+/// IPC: Mishearings NEXUS has noticed ("heard brief, you meant brave"), with whether each is applied.
+#[tauri::command]
+pub fn memcore_corrections<R: Runtime>(app: AppHandle<R>) -> Result<Vec<crate::memcore::store::CorrectionRow>, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::list_corrections(&dir))
+}
+
+/// IPC: Saved routines plus the suggestion waiting for a name, if any.
+#[tauri::command]
+pub fn memcore_routines<R: Runtime>(app: AppHandle<R>) -> Result<crate::memcore::routines::View, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::routines::view(&dir))
+}
+
+/// IPC: Save the waiting suggestion under a name the user typed.
+#[tauri::command]
+pub fn memcore_routine_save<R: Runtime>(app: AppHandle<R>, name: String) -> Result<String, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    crate::memcore::routines::save_pending(&dir, &name).map(|r| r.name)
+}
+
+/// IPC: Delete a saved routine.
+#[tauri::command]
+pub fn memcore_routine_delete<R: Runtime>(app: AppHandle<R>, name: String) -> Result<bool, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::routines::delete(&dir, name.trim()))
+}
+
+/// IPC: Memory changes suggested by the background review, waiting for approval.
+#[tauri::command]
+pub fn memcore_pending<R: Runtime>(app: AppHandle<R>) -> Result<Vec<crate::memcore::store::PendingRow>, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::review::list(&dir))
+}
+
+/// IPC: Approve one suggestion; returns a sentence describing what was stored.
+#[tauri::command]
+pub fn memcore_pending_approve<R: Runtime>(app: AppHandle<R>, id: i64) -> Result<String, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    crate::memcore::review::approve(&dir, id)
+}
+
+/// IPC: Refuse one suggestion for good.
+#[tauri::command]
+pub fn memcore_pending_reject<R: Runtime>(app: AppHandle<R>, id: i64) -> Result<bool, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::review::reject(&dir, id))
+}
+
+/// IPC: Stop applying (and forget) what was learned about one mis-heard phrase.
+#[tauri::command]
+pub fn memcore_correction_forget<R: Runtime>(app: AppHandle<R>, heard: String) -> Result<usize, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::forget_correction(&dir, &heard))
+}
+
 /// IPC: The last 7 days of what was sent to cloud models.
 #[tauri::command]
 pub fn memcore_egress_log<R: Runtime>(
@@ -3467,47 +3860,50 @@ pub fn export_settings<R: Runtime>(app: AppHandle<R>) -> Result<String, String> 
     serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
 }
 
+/// Fields an imported file must never be able to set: identity (it comes from the
+/// registered device), and the remote-control channel (a swapped Telegram chat id would
+/// hand command access to whoever wrote the file).
+const IMPORT_BLOCKED_KEYS: [&str; 3] = ["userId", "deviceId", "telegramChatId"];
+
+/// Validate an imported settings document before it is written to disk.
+fn sanitize_imported_settings(mut json: serde_json::Value) -> Result<serde_json::Value, String> {
+    let obj = json
+        .as_object_mut()
+        .ok_or_else(|| "settings file must be a JSON object".to_string())?;
+    for key in IMPORT_BLOCKED_KEYS {
+        obj.remove(key);
+    }
+    if let Some(url) = obj.get("serverUrl").and_then(|v| v.as_str()).map(str::to_owned) {
+        if url.is_empty() {
+            obj.remove("serverUrl");
+        } else {
+            let ok = crate::network::normalize_worker_url(&url)?;
+            obj.insert("serverUrl".into(), serde_json::Value::String(ok));
+        }
+    }
+    Ok(json)
+}
+
 /// IPC: Import settings from a JSON string (writes settings.json + keychain).
 #[tauri::command]
 pub fn import_settings<R: Runtime>(app: AppHandle<R>, json_str: String) -> Result<(), String> {
     let json: serde_json::Value =
         serde_json::from_str(&json_str).map_err(|e| format!("invalid settings JSON: {e}"))?;
+    let json = sanitize_imported_settings(json)?;
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut json = json;
+    // An import means "use these": a key in the imported file replaces the one in the keychain (the plain scrub would
+    // treat a different stored value as a conflict and leave the imported one unused). Then the file copy is blanked.
+    for &(service, _, field) in crate::api_keys::KEY_SERVICES {
+        if let Some(k) = json.get(field).and_then(|v| v.as_str()).filter(|k| !k.is_empty()) {
+            crate::auth_vault::set_api_key(service, k);
+        }
+    }
+    crate::api_keys::scrub_plaintext_keys(&mut json, &crate::api_keys::KeychainKeyStore);
     let path = dir.join("settings.json");
-    std::fs::write(&path, serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    // Heal API keys into the OS keychain (best-effort).
-    if let Some(k) = json.get("groqApiKey").and_then(|v| v.as_str()) {
-        if !k.is_empty() {
-            crate::auth_vault::set_api_key("groq", k);
-        }
-    }
-    if let Some(k) = json.get("geminiApiKey").and_then(|v| v.as_str()) {
-        if !k.is_empty() {
-            crate::auth_vault::set_api_key("gemini", k);
-        }
-    }
-    if let Some(k) = json.get("cerebrasApiKey").and_then(|v| v.as_str()) {
-        if !k.is_empty() {
-            crate::auth_vault::set_api_key("cerebras", k);
-        }
-    }
-    if let Some(k) = json.get("deepgramApiKey").and_then(|v| v.as_str()) {
-        if !k.is_empty() {
-            crate::auth_vault::set_api_key("deepgram", k);
-        }
-    }
-    if let Some(k) = json.get("routesApiKey").and_then(|v| v.as_str()) {
-        if !k.is_empty() {
-            crate::auth_vault::set_api_key("google_maps", k);
-        }
-    }
-    if let Some(k) = json.get("placesApiKey").and_then(|v| v.as_str()) {
-        if !k.is_empty() {
-            crate::auth_vault::set_api_key("google_places", k);
-        }
-    }
+    let pretty = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
+    crate::memory::atomic_write(&path, pretty.as_bytes());
     Ok(())
 }
 
@@ -3549,9 +3945,9 @@ mod sidebar_geometry_tests {
 
     #[test]
     fn pr_list_uses_right_dock() {
-        // x = 1920 - 520 - 10 = 1390, y = 20, h = 1040
+        // x = 1920 - 400 - 10 = 1510, y = 20, h = 1040 (400px same as settings)
         let (x, y, w, h) = sidebar_geometry("pr-list", None, 1920.0, 1080.0);
-        assert_eq!((x, y, w, h), (1390.0, 20.0, 520.0, 1040.0));
+        assert_eq!((x, y, w, h), (1510.0, 20.0, 400.0, 1040.0));
     }
 
     #[test]
@@ -3630,6 +4026,45 @@ mod sidebar_geometry_tests {
 }
 
 #[cfg(test)]
+mod import_sanitize_tests {
+    use super::sanitize_imported_settings;
+    use serde_json::json;
+
+    #[test]
+    fn blocks_identity_and_remote_control_fields() {
+        let out = sanitize_imported_settings(json!({
+            "userId": "victim", "deviceId": "d", "telegramChatId": "999",
+            "hotkey": "Ctrl+Space"
+        }))
+        .unwrap();
+        assert!(out.get("userId").is_none());
+        assert!(out.get("deviceId").is_none());
+        assert!(out.get("telegramChatId").is_none());
+        assert_eq!(out["hotkey"], "Ctrl+Space");
+    }
+
+    #[test]
+    fn rejects_insecure_or_malformed_server_url() {
+        assert!(sanitize_imported_settings(json!({"serverUrl": "http://evil.example.com"})).is_err());
+        assert!(sanitize_imported_settings(json!({"serverUrl": "javascript:1"})).is_err());
+    }
+
+    #[test]
+    fn keeps_and_normalizes_a_good_server_url() {
+        let out = sanitize_imported_settings(json!({"serverUrl": "https://w.example.workers.dev/"})).unwrap();
+        assert_eq!(out["serverUrl"], "https://w.example.workers.dev");
+        let out = sanitize_imported_settings(json!({"serverUrl": ""})).unwrap();
+        assert!(out.get("serverUrl").is_none());
+    }
+
+    #[test]
+    fn non_object_documents_are_refused() {
+        assert!(sanitize_imported_settings(json!([1, 2])).is_err());
+        assert!(sanitize_imported_settings(json!("x")).is_err());
+    }
+}
+
+#[cfg(test)]
 mod nexus_settings_tests {
     use super::NexusSettings;
 
@@ -3671,3 +4106,61 @@ mod nexus_settings_tests {
     }
 }
 
+
+#[cfg(test)]
+mod settings_robustness_tests {
+    use super::*;
+
+    #[test]
+    fn local_stt_only_has_one_default_everywhere() {
+        assert!(!DEFAULT_LOCAL_STT_ONLY);
+        assert_eq!(NexusSettings::default().local_stt_only, DEFAULT_LOCAL_STT_ONLY);
+        // Absent key → the same default the struct uses.
+        assert_eq!(local_stt_only_from_json(&serde_json::json!({})), DEFAULT_LOCAL_STT_ONLY);
+        // Explicit values win, in either spelling.
+        assert!(local_stt_only_from_json(&serde_json::json!({"localSttOnly": true})));
+        assert!(local_stt_only_from_json(&serde_json::json!({"local_stt_only": true})));
+        assert!(!local_stt_only_from_json(&serde_json::json!({"localSttOnly": false})));
+        // Wrong type → default, not a panic.
+        assert_eq!(
+            local_stt_only_from_json(&serde_json::json!({"localSttOnly": "yes"})),
+            DEFAULT_LOCAL_STT_ONLY
+        );
+    }
+
+    #[test]
+    fn lenient_parse_keeps_valid_fields_when_one_is_bad() {
+        let mut v = serde_json::to_value(NexusSettings::default()).unwrap();
+        v["hotkey"] = serde_json::json!("Ctrl+Alt+N");
+        v["orbSize"] = serde_json::json!("huge"); // wrong type
+        v["ttsVolume"] = serde_json::json!(33);
+        v["somethingNew"] = serde_json::json!(1); // unknown keys are fine
+        let (s, dropped) = parse_settings_lenient(&v.to_string()).expect("parses");
+        assert_eq!(s.hotkey, "Ctrl+Alt+N", "valid custom field survives");
+        assert_eq!(s.tts_volume, 33);
+        assert_eq!(s.orb_size, NexusSettings::default().orb_size, "bad field falls back alone");
+        assert_eq!(dropped, vec!["orbSize".to_string()]);
+    }
+
+    #[test]
+    fn lenient_parse_handles_files_missing_required_fields() {
+        // An older file that predates most fields used to reset EVERYTHING.
+        let old = r#"{"hotkey":"Ctrl+Shift+Space","wakeSensitivity":"high","groqApiKey":"k"}"#;
+        let (s, dropped) = parse_settings_lenient(old).expect("parses");
+        assert_eq!(s.hotkey, "Ctrl+Shift+Space");
+        assert_eq!(s.wake_sensitivity, "high");
+        assert_eq!(s.groq_api_key, "k");
+        assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn lenient_parse_valid_file_is_untouched_and_garbage_is_none() {
+        let full = serde_json::to_string(&NexusSettings::default()).unwrap();
+        let (s, dropped) = parse_settings_lenient(&full).unwrap();
+        assert!(dropped.is_empty());
+        assert_eq!(s.hotkey, NexusSettings::default().hotkey);
+        assert!(parse_settings_lenient("{not json").is_none());
+        assert!(parse_settings_lenient("[1,2]").is_none());
+        assert!(parse_settings_lenient("").is_none());
+    }
+}

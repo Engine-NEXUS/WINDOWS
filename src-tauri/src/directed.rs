@@ -267,6 +267,25 @@ const STARTERS: &[&str] = &[
     "bring", "window", "screen", "back", "forward", "new", "hit", "push",
 ];
 
+/// Recipients that validate "tell" as a command starter. Directed at a third person
+/// ("tell him", "tell her", "tell mom"), "tell" indicates side conversation.
+const TELL_TARGETS: &[&str] = &[
+    "me", "us", "nexus", "claude", "codex", "gemini", "antigravity", "cursor", "aider", "opencode",
+    "devin", "windsurf", "kilo", "copilot", "agent",
+];
+
+/// "tell" is a valid command starter only when addressed to NEXUS or a coding agent.
+/// A bare "tell" with nothing after it is not accepted.
+fn tell_is_addressed_to_us(words: &[&str]) -> bool {
+    if words.len() < 2 {
+        return false;
+    }
+    if !words[0].eq_ignore_ascii_case("tell") {
+        return false;
+    }
+    TELL_TARGETS.iter().any(|&target| words[1].eq_ignore_ascii_case(target))
+}
+
 /// Request phrasings that are addressed to an assistant wherever they appear.
 const REQUEST_PHRASES: &[&str] = &["can you", "could you", "would you", "will you", "please", "i need you to", "i want you to"];
 
@@ -332,7 +351,12 @@ pub fn evaluate(inp: &Input) -> Verdict {
         return ignore("too_long");
     }
     let padded = format!(" {} ", t.join(" "));
-    let starts = STARTERS.contains(&t[0].as_str());
+    let starts = if t[0] == "tell" {
+        let word_refs: Vec<&str> = t.iter().map(|s| s.as_str()).collect();
+        tell_is_addressed_to_us(&word_refs)
+    } else {
+        STARTERS.contains(&t[0].as_str())
+    };
     let requests = REQUEST_PHRASES.iter().any(|p| padded.contains(&format!(" {p} ")));
     let question = inp.transcript.trim_end().ends_with('?') && t.len() >= 2;
     if starts || requests || question {
@@ -726,5 +750,524 @@ mod tests {
         engage_for(Duration::from_millis(1));
         assert!(is_engaged(Instant::now() + Duration::from_secs(4)));
         assert!(!is_engaged(Instant::now() + Duration::from_secs(6)));
+    }
+
+    const CORPUS: &str = include_str!("../tests/fixtures/directed_corpus.tsv");
+
+    struct CorpusItem<'a> {
+        line_no: usize,
+        transcript: &'a str,
+        expected: &'a str,
+        reason: &'a str,
+        kind: &'a str,
+    }
+
+    fn parse_directed_corpus(raw: &str) -> Vec<CorpusItem<'_>> {
+        let mut rows = Vec::new();
+        for (idx, line) in raw.lines().enumerate() {
+            let line = line.trim_end_matches(['\r', '\n']);
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('\t').collect();
+            assert!(
+                parts.len() >= 4,
+                "Line {} in directed_corpus.tsv has fewer than 4 columns: {:?}",
+                idx + 1,
+                line
+            );
+            rows.push(CorpusItem {
+                line_no: idx + 1,
+                transcript: parts[0],
+                expected: parts[1],
+                reason: parts[2],
+                kind: parts[3],
+            });
+        }
+        rows
+    }
+
+    #[test]
+    fn corpus_accept_reject_rates_are_reported_and_floors_hold() {
+        let rows = parse_directed_corpus(CORPUS);
+        let mut mismatches: Vec<String> = Vec::new();
+
+        let mut command_total = 0usize;
+        let mut command_accepted = 0usize;
+        let mut noise_total = 0usize;
+        let mut noise_ignored = 0usize;
+
+        for row in &rows {
+            let parses = crate::intent_parser::parse_deterministic(row.transcript).is_some();
+            let verdict = evaluate(&Input {
+                transcript: row.transcript,
+                origin: Origin::HotMic,
+                parses_as_command: parses,
+                spoken: &[],
+                dictation_active: false,
+                engaged: true,
+                window_enabled: false,
+            });
+
+            let expected_accept = row.expected.eq_ignore_ascii_case("accept");
+            let is_match = verdict.accept == expected_accept;
+
+            if !is_match {
+                mismatches.push(format!(
+                    "[DG] Mismatch line {}: transcript={:?} expected={} ({}) actual accept={} ({}) kind={}",
+                    row.line_no, row.transcript, row.expected, row.reason, verdict.accept, verdict.reason, row.kind
+                ));
+            }
+
+            if row.kind == "command" {
+                command_total += 1;
+                if verdict.accept {
+                    command_accepted += 1;
+                }
+            } else if matches!(row.kind, "tv" | "side_talk" | "other_assistant" | "filler" | "repetition") {
+                noise_total += 1;
+                if !verdict.accept {
+                    noise_ignored += 1;
+                }
+            }
+        }
+
+        println!("[DG] Evaluated {} corpus rows across all categories.", rows.len());
+        if mismatches.is_empty() {
+            println!("[DG] Mismatches: 0");
+        } else {
+            println!("[DG] Mismatches ({} total):", mismatches.len());
+            for m in &mismatches {
+                println!("{m}");
+            }
+        }
+
+        let command_rate = if command_total > 0 {
+            command_accepted as f32 / command_total as f32
+        } else {
+            0.0
+        };
+        let noise_rate = if noise_total > 0 {
+            noise_ignored as f32 / noise_total as f32
+        } else {
+            0.0
+        };
+
+        println!(
+            "[DG] Genuine commands accepted: {:.1}% ({}/{}) [floor: 90.0%]",
+            command_rate * 100.0,
+            command_accepted,
+            command_total
+        );
+        println!(
+            "[DG] Noise (TV/side/assistant/filler/loop) ignored: {:.1}% ({}/{}) [floor: 85.0%]",
+            noise_rate * 100.0,
+            noise_ignored,
+            noise_total
+        );
+
+        assert!(
+            command_rate >= 0.90,
+            "Genuine command acceptance floor (90%) not met: {:.1}% ({}/{})",
+            command_rate * 100.0,
+            command_accepted,
+            command_total
+        );
+        assert!(
+            noise_rate >= 0.85,
+            "Noise ignore floor (85%) not met: {:.1}% ({}/{})",
+            noise_rate * 100.0,
+            noise_ignored,
+            noise_total
+        );
+    }
+
+    #[test]
+    fn echo_verbatim_replay_is_ignored() {
+        let spoken = vec!["Here is your weather forecast for tomorrow morning.".to_string()];
+        let v = evaluate(&Input {
+            transcript: "Here is your weather forecast for tomorrow morning.",
+            origin: Origin::HotMic,
+            parses_as_command: false,
+            spoken: &spoken,
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(!v.accept, "Verbatim replay must not be accepted");
+        assert_eq!(v.reason, "echo");
+    }
+
+    #[test]
+    fn echo_partial_overlap_boundaries_under_and_over_sixty_percent() {
+        let spoken = vec!["weather forecast radar satellite".to_string()];
+
+        // 4 of 7 content words match: 4/7 = 57.1% (< 60%), starts with STARTER ("show") -> accepted
+        let v_under = evaluate(&Input {
+            transcript: "show weather forecast radar satellite maps today",
+            origin: Origin::HotMic,
+            parses_as_command: false,
+            spoken: &spoken,
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(v_under.accept, "Overlap under 60% (57.1%) should be accepted: {v_under:?}");
+        assert_ne!(v_under.reason, "echo");
+
+        // 4 of 6 content words match: 4/6 = 66.7% (>= 60%) -> ignored as echo
+        let v_over = evaluate(&Input {
+            transcript: "show weather forecast radar satellite maps",
+            origin: Origin::HotMic,
+            parses_as_command: false,
+            spoken: &spoken,
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(!v_over.accept, "Overlap over 60% (66.7%) should be ignored: {v_over:?}");
+        assert_eq!(v_over.reason, "echo");
+    }
+
+    #[test]
+    fn echo_command_resemblance_accepted_when_parses_as_command() {
+        let spoken = vec!["Opening Command Hub, sir.".to_string()];
+
+        // "open the command hub": content words ["open", "command", "hub"]. Shared with spoken: ["command", "hub"] = 2/3 (66.7%).
+        // With parses_as_command == true, the echo limit is 0.85, so 0.667 is accepted as a genuine command.
+        let v_cmd = evaluate(&Input {
+            transcript: "open the command hub",
+            origin: Origin::HotMic,
+            parses_as_command: true,
+            spoken: &spoken,
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(v_cmd.accept, "Command resembling recent speech should pass when parses_as_command is true");
+        assert_eq!(v_cmd.reason, "command");
+
+        // Without parses_as_command (false), echo threshold is 0.60, so 66.7% is ignored as echo.
+        let v_non_cmd = evaluate(&Input {
+            transcript: "open the command hub",
+            origin: Origin::HotMic,
+            parses_as_command: false,
+            spoken: &spoken,
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(!v_non_cmd.accept);
+        assert_eq!(v_non_cmd.reason, "echo");
+    }
+
+    #[test]
+    fn echo_old_speech_outside_window_does_not_count() {
+        let line = "Here is the summary of recent git commits in the repository.";
+        note_spoken(line);
+
+        // Within the 30-second window, recent_spoken includes the line
+        let now = Instant::now();
+        let recent = recent_spoken(now);
+        assert!(recent.iter().any(|s| s == line));
+
+        // Outside the 30-second window (e.g. 35 seconds later), recent_spoken excludes it
+        let future = now + Duration::from_secs(35);
+        let expired = recent_spoken(future);
+        assert!(!expired.iter().any(|s| s == line));
+
+        // When evaluated with the expired speech list, the utterance is not treated as an echo
+        let v = evaluate(&Input {
+            transcript: line,
+            origin: Origin::HotMic,
+            parses_as_command: false,
+            spoken: &expired,
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert_ne!(v.reason, "echo", "Expired speech outside window must not trigger echo rejection");
+    }
+
+    #[test]
+    fn all_documented_reasons_are_produced() {
+        let mut produced = std::collections::HashSet::new();
+
+        // 1. explicit_turn
+        let v = evaluate(&Input {
+            transcript: "anything",
+            origin: Origin::Direct,
+            parses_as_command: false,
+            spoken: &[],
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(v.accept && v.reason == "explicit_turn");
+        produced.insert(v.reason);
+
+        // 2. dictation
+        let v = evaluate(&Input {
+            transcript: "anything",
+            origin: Origin::HotMic,
+            parses_as_command: false,
+            spoken: &[],
+            dictation_active: true,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(v.accept && v.reason == "dictation");
+        produced.insert(v.reason);
+
+        // 3. foreign_wake
+        let v = evaluate(&Input {
+            transcript: "alexa what's the weather",
+            origin: Origin::HotMic,
+            parses_as_command: false,
+            spoken: &[],
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(!v.accept && v.reason == "foreign_wake");
+        produced.insert(v.reason);
+
+        // 4. echo
+        let spoken = vec!["Closing window now.".to_string()];
+        let v = evaluate(&Input {
+            transcript: "closing window now",
+            origin: Origin::HotMic,
+            parses_as_command: false,
+            spoken: &spoken,
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(!v.accept && v.reason == "echo");
+        produced.insert(v.reason);
+
+        // 5. outside_window
+        let v = evaluate(&Input {
+            transcript: "open youtube",
+            origin: Origin::HotMic,
+            parses_as_command: true,
+            spoken: &[],
+            dictation_active: false,
+            engaged: false,
+            window_enabled: true,
+        });
+        assert!(!v.accept && v.reason == "outside_window");
+        produced.insert(v.reason);
+
+        // 6. command
+        let v = evaluate(&Input {
+            transcript: "open notepad",
+            origin: Origin::HotMic,
+            parses_as_command: true,
+            spoken: &[],
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(v.accept && v.reason == "command");
+        produced.insert(v.reason);
+
+        // 7. empty
+        let v = evaluate(&Input {
+            transcript: "...",
+            origin: Origin::HotMic,
+            parses_as_command: false,
+            spoken: &[],
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(!v.accept && v.reason == "empty");
+        produced.insert(v.reason);
+
+        // 8. vocative
+        let v = evaluate(&Input {
+            transcript: "nexus good morning",
+            origin: Origin::HotMic,
+            parses_as_command: false,
+            spoken: &[],
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(v.accept && v.reason == "vocative");
+        produced.insert(v.reason);
+
+        // 9. repetition
+        let v = evaluate(&Input {
+            transcript: "I'm gonna say that. I'm gonna say that. I'm gonna say that.",
+            origin: Origin::HotMic,
+            parses_as_command: false,
+            spoken: &[],
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(!v.accept && v.reason == "repetition");
+        produced.insert(v.reason);
+
+        // 10. filler
+        let v = evaluate(&Input {
+            transcript: "hmm okay yeah",
+            origin: Origin::HotMic,
+            parses_as_command: false,
+            spoken: &[],
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(!v.accept && v.reason == "filler");
+        produced.insert(v.reason);
+
+        // 11. too_long
+        let v = evaluate(&Input {
+            transcript: "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen",
+            origin: Origin::HotMic,
+            parses_as_command: false,
+            spoken: &[],
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(!v.accept && v.reason == "too_long");
+        produced.insert(v.reason);
+
+        // 12. cues
+        let v = evaluate(&Input {
+            transcript: "could you open my notes",
+            origin: Origin::HotMic,
+            parses_as_command: false,
+            spoken: &[],
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(v.accept && v.reason == "cues");
+        produced.insert(v.reason);
+
+        // 13. domain_cue
+        let v = evaluate(&Input {
+            transcript: "something about the whatsapp message",
+            origin: Origin::HotMic,
+            parses_as_command: false,
+            spoken: &[],
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(v.accept && v.reason == "domain_cue");
+        produced.insert(v.reason);
+
+        // 14. no_cues
+        let v = evaluate(&Input {
+            transcript: "dinner is ready on the dining table",
+            origin: Origin::HotMic,
+            parses_as_command: false,
+            spoken: &[],
+            dictation_active: false,
+            engaged: true,
+            window_enabled: false,
+        });
+        assert!(!v.accept && v.reason == "no_cues");
+        produced.insert(v.reason);
+
+        let expected_reasons = [
+            "explicit_turn", "dictation", "foreign_wake", "echo", "outside_window",
+            "command", "empty", "vocative", "repetition", "filler",
+            "too_long", "cues", "domain_cue", "no_cues",
+        ];
+        for r in expected_reasons {
+            assert!(produced.contains(r), "Missing documented reason code: {r}");
+        }
+    }
+
+    #[test]
+    fn side_conversations_starting_with_tell_are_ignored() {
+        for t in [
+            "tell him I'll call back",
+            "tell her I said hi",
+            "tell them to wait",
+            "tell mom I'm late",
+            "tell the kids dinner is ready",
+            "Tell him, I'll call back.",
+            "tell",
+        ] {
+            let v = hot(t);
+            assert!(!v.accept, "{t:?} should be ignored, got accept={}", v.accept);
+            assert_eq!(v.reason, "no_cues", "{t:?} reason should be no_cues");
+        }
+    }
+
+    #[test]
+    fn addressed_tell_commands_are_accepted_with_reasons() {
+        let cues_cases = [
+            "tell me a joke",
+            "tell me what time it is",
+            "tell us the weather",
+            "tell claude to fix the build",
+            "tell codex to run the tests",
+        ];
+        for t in cues_cases {
+            let v = hot(t);
+            assert!(v.accept, "{t:?} should be accepted, got {:?}", v);
+            assert_eq!(v.reason, "cues", "{t:?} reason should be cues");
+        }
+
+        // Addressed with vocative "nexus" gets reason "vocative"
+        let vocative_cases = [
+            "tell nexus to open notepad",
+            "nexus tell him I'll call back",
+        ];
+        for t in vocative_cases {
+            let v = hot(t);
+            assert!(v.accept, "{t:?} should be accepted, got {:?}", v);
+            assert_eq!(v.reason, "vocative", "{t:?} reason should be vocative");
+        }
+    }
+
+    #[test]
+    fn tell_is_addressed_to_us_checks_valid_recipients() {
+        assert!(tell_is_addressed_to_us(&["tell", "me", "a", "joke"]));
+        assert!(tell_is_addressed_to_us(&["tell", "us", "the", "weather"]));
+        assert!(tell_is_addressed_to_us(&["tell", "nexus", "to", "open", "notepad"]));
+        assert!(tell_is_addressed_to_us(&["tell", "claude", "to", "fix", "the", "build"]));
+        assert!(tell_is_addressed_to_us(&["tell", "codex", "to", "run", "the", "tests"]));
+        assert!(tell_is_addressed_to_us(&["tell", "gemini", "explain"]));
+        assert!(tell_is_addressed_to_us(&["tell", "antigravity", "continue"]));
+        assert!(tell_is_addressed_to_us(&["tell", "cursor", "format"]));
+        assert!(tell_is_addressed_to_us(&["tell", "aider", "diff"]));
+        assert!(tell_is_addressed_to_us(&["tell", "opencode", "start"]));
+        assert!(tell_is_addressed_to_us(&["tell", "devin", "build"]));
+        assert!(tell_is_addressed_to_us(&["tell", "windsurf", "explain"]));
+        assert!(tell_is_addressed_to_us(&["tell", "kilo", "run"]));
+        assert!(tell_is_addressed_to_us(&["tell", "copilot", "suggest"]));
+        assert!(tell_is_addressed_to_us(&["tell", "agent", "proceed"]));
+
+        // Case insensitivity
+        assert!(tell_is_addressed_to_us(&["Tell", "Me", "a", "joke"]));
+        assert!(tell_is_addressed_to_us(&["TELL", "CLAUDE"]));
+
+        // Third-party recipients and side conversation
+        assert!(!tell_is_addressed_to_us(&["tell", "him", "I'll", "call", "back"]));
+        assert!(!tell_is_addressed_to_us(&["tell", "her", "I", "said", "hi"]));
+        assert!(!tell_is_addressed_to_us(&["tell", "them", "to", "wait"]));
+        assert!(!tell_is_addressed_to_us(&["tell", "mom", "I'm", "late"]));
+        assert!(!tell_is_addressed_to_us(&["tell", "the", "kids", "dinner", "is", "ready"]));
+        assert!(!tell_is_addressed_to_us(&["tell", "dad"]));
+        assert!(!tell_is_addressed_to_us(&["tell", "john"]));
+        assert!(!tell_is_addressed_to_us(&["tell", "my", "wife"]));
+        assert!(!tell_is_addressed_to_us(&["tell", "it"]));
+
+        // Bare "tell" or empty
+        assert!(!tell_is_addressed_to_us(&["tell"]));
+        assert!(!tell_is_addressed_to_us(&[]));
+
+        // Different starter
+        assert!(!tell_is_addressed_to_us(&["open", "notepad"]));
     }
 }

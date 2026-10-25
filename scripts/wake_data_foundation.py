@@ -46,6 +46,21 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
+def runtime_fingerprint():
+    profile = json.loads((OWW_DIR / "acoustic_profile.json").read_text(encoding="utf-8"))
+    spec_path = OWW_DIR / "dsp_spec.json"
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    return {
+        "startup_grace_milliseconds": 1500,
+        "refractory_milliseconds": 3000,
+        "smoothing_frames": 12,
+        "agc_target_rms": 0.035,
+        "agc_max_gain": 30.0,
+        "trainer_frontend": spec["aligned"],
+        "dsp_spec_sha256": file_sha256(spec_path),
+    }
+
+
 def fingerprint_models():
     models = []
     for name in MODEL_FILES:
@@ -59,17 +74,10 @@ def fingerprint_models():
         "sample_rate_hz": 16000,
         "classifier_input": [1, 16, 96],
         "classifier_output": [1, 1],
-        # Engine constants as implemented in src-tauri/src/wakeword_oww.rs. The
-        # threshold, high-pass, silence gate and pre-gain are NOT model properties:
-        # they come from acoustic_profile.json (AppData first, then resources).
-        "runtime": {
-            "threshold_source": "acoustic_profile.json kws_threshold",
-            "startup_grace_milliseconds": 1500,
-            "refractory_milliseconds": 3000,
-            "smoothing_frames": 12,
-            "agc_target_rms": 0.035,
-            "agc_max_gain": 30.0
-        },
+        # Derived from the files the runtime actually reads - these used to be
+        # hand-typed (and stale: 0.35 vs the calibrated 0.68), so the manifest
+        # could pass while describing a different system.
+        "runtime": runtime_fingerprint(),
         "models": models,
     }
 

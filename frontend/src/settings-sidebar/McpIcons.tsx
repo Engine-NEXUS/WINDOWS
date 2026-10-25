@@ -1,6 +1,12 @@
 import React from "react";
 
 export const McpIcons = {
+  // Official CodeRabbit orange mark from coderabbit.ai/brand, kept intact.
+  CodeRabbit: (props: React.SVGProps<SVGSVGElement>) => (
+    <svg width="24" height="24" viewBox="0 0 24 24" role="img" aria-label="CodeRabbit" {...props}>
+      <image href="/brands/coderabbit-orange-mark.svg" width="24" height="24" />
+    </svg>
+  ),
   // Connector Link / Clip Header Icon
   Clip: (props: React.SVGProps<SVGSVGElement>) => (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" {...props}>
@@ -61,11 +67,14 @@ export const McpIcons = {
     </svg>
   ),
 
-  // Render minimal geometric logo
+  // Render official architectural curved ribbon mark
   Render: (props: React.SVGProps<SVGSVGElement>) => (
-    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" {...props}>
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" role="img" aria-label="Render" {...props}>
       <rect width="24" height="24" rx="5" fill="#141416" />
-      <path d="M7 6H17V10H11V14H16V18H7V6Z" fill="#FFFFFF" />
+      <path
+        d="M15.744 17.514h-3.082v-5.696c0-1.748-1.417-3.165-3.165-3.165H7.135V5.571h2.362c3.443 0 6.247 2.804 6.247 6.247v5.696z"
+        fill="#46E3B7"
+      />
     </svg>
   ),
 
@@ -76,11 +85,14 @@ export const McpIcons = {
     </svg>
   ),
 
-  // WhatsApp Emerald Bubble
+  // WhatsApp Official Emerald Speech Bubble with 45° Handset
   WhatsApp: (props: React.SVGProps<SVGSVGElement>) => (
-    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" {...props}>
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" role="img" aria-label="WhatsApp" {...props}>
       <circle cx="12" cy="12" r="10" fill="#25D366" />
-      <path d="M8.5 7.5C8.3 7 8 7 7.7 7C7.5 7 7.2 7 7 7.2C6.7 7.5 6 8.1 6 9.4C6 10.7 7 12 7.1 12.2C7.3 12.4 9 15.2 11.7 16.3C14 17.2 14.5 17 15 17C15.6 16.9 16.8 16.2 17 15.5C17.3 14.8 17.3 14.2 17.2 14.1C17.1 14 16.8 13.9 16.4 13.7C15.9 13.4 13.9 12.4 13.5 12.3C13.2 12.1 13 12.1 12.8 12.4C12.5 12.8 12 13.4 11.8 13.6C11.6 13.8 11.4 13.8 11 13.6C10.6 13.4 9.4 13 8.2 11.9C7.2 11.1 6.6 10 6.4 9.6C6.2 9.2 6.4 9 6.6 8.8C6.8 8.6 7 8.3 7.2 8.1C7.4 7.9 7.4 7.7 7.6 7.5Z" fill="#FFFFFF" />
+      <path
+        d="M12.04 4.5c-4.14 0-7.5 3.36-7.5 7.5 0 1.33.35 2.62 1 3.76L4.5 19.5l3.87-1.01c1.1.6 2.35.92 3.67.92 4.14 0 7.5-3.36 7.5-7.5s-3.36-7.41-7.5-7.41zm4.39 10.59c-.19.52-.96.99-1.39 1.05-.4.06-.9.08-1.46-.1-.34-.11-.78-.25-1.34-.49-2.34-1.01-3.86-3.41-3.98-3.57-.12-.16-.96-1.27-.96-2.43 0-1.15.6-1.72.82-1.95.21-.23.47-.29.62-.29.16 0 .31 0 .45.01.14.01.34-.05.53.4.19.47.66 1.6.72 1.72.06.12.1.26.02.42-.08.16-.12.26-.24.4-.12.14-.25.31-.36.42-.12.12-.25.25-.11.49.14.24.63 1.03 1.34 1.66.92.82 1.7 1.07 1.94 1.19.24.12.38.1.52-.06.14-.16.6-.7.76-.94.16-.24.32-.2.53-.12.21.08 1.34.63 1.57.75.23.12.38.18.44.27.06.11.06.63-.13 1.15z"
+        fill="#FFFFFF"
+      />
     </svg>
   ),
 
@@ -92,7 +104,35 @@ export const McpIcons = {
     </svg>
   ),
 
-  // Checkmark circle
+  Telegram: (props: React.SVGProps<SVGSVGElement>) => (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" {...props}>
+      <circle cx="12" cy="12" r="11" fill="#26A5E4" />
+      <path d="M5.3 11.8 18.5 6.7c.6-.2 1.1.2.9 1l-2.2 10.2c-.1.7-.6.9-1.2.5l-3.4-2.5-1.7 1.6c-.2.2-.4.3-.6.3l.2-3.5 6.3-5.7c.3-.3-.1-.4-.4-.2l-7.8 4.9-3.3-1c-.7-.2-.7-.7 0-1z" fill="#fff" />
+    </svg>
+  ),
+  Spotify: (props: React.SVGProps<SVGSVGElement>) => (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" {...props}>
+      <circle cx="12" cy="12" r="11" fill="#1DB954" />
+      <path d="M5.5 9c4.7-1.4 9.9-.9 13.5 1.5M6.3 12c4-1.1 8.4-.6 11.6 1.4M7.2 14.8c3.4-.8 6.9-.4 9.7 1.2" stroke="#101a12" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  ),
+  Amazon: (props: React.SVGProps<SVGSVGElement>) => (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" {...props}>
+      <rect width="24" height="24" rx="5" fill="#232F3E" />
+      <path d="M12.6 14.4c-.8.7-1.5 1-2.5 1-1.4 0-2.2-.9-2.2-2.1 0-1.7 1.4-2.5 4.7-2.9v-.3c0-.7-.4-1.1-1.2-1.1-.8 0-1.3.4-1.4 1.1l-1.8-.2c.2-1.5 1.3-2.4 3.4-2.4 2.2 0 3 1 3 2.6v3.4c0 .6.2.9.5 1.3l-1.6 1.1c-.4-.4-.6-.8-.9-1.5zm0-2.8c-1.9.2-2.7.6-2.7 1.5 0 .6.4 1 1.1 1 1 0 1.6-.8 1.6-1.8v-.7z" fill="#fff" />
+      <path d="M5.6 17.8c3.9 2.3 8.5 2.5 12.3-.2m-1.9.2 2-.4-.8 2" stroke="#FF9900" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+
+  // Filled Green Checkmark Badge
+  CheckmarkBadge: (props: React.SVGProps<SVGSVGElement>) => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" role="img" aria-label="Connected" {...props}>
+      <circle cx="12" cy="12" r="10.5" fill="#22c55e" />
+      <path d="M7.5 12.5L10.5 15.5L16.5 9" stroke="#ffffff" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+
+  // Checkmark icon
   Checkmark: (props: React.SVGProps<SVGSVGElement>) => (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" {...props}>
       <polyline points="20 6 9 17 4 12" />
@@ -101,15 +141,15 @@ export const McpIcons = {
 
   // Dotted Clock circle for Standby
   Clock: (props: React.SVGProps<SVGSVGElement>) => (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeDasharray="2 3" strokeLinecap="round" strokeLinejoin="round" {...props}>
-      <circle cx="12" cy="12" r="9" />
-      <polyline points="12 7 12 12 15 15" strokeDasharray="none" />
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeDasharray="2.5 2.5" strokeLinecap="round" strokeLinejoin="round" role="img" aria-label="Standby" {...props}>
+      <circle cx="12" cy="12" r="9.5" />
+      <polyline points="12 7.5 12 12 15 14.5" strokeDasharray="none" />
     </svg>
   ),
 
   // Radial multi-tick spinner
   RadialSpinner: (props: React.SVGProps<SVGSVGElement>) => (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" {...props}>
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" role="img" aria-label="Connecting" {...props}>
       <line x1="12" y1="2" x2="12" y2="5" opacity="1.0" />
       <line x1="19.07" y1="4.93" x2="16.95" y2="7.05" opacity="0.88" />
       <line x1="22" y1="12" x2="19" y2="12" opacity="0.75" />
@@ -123,7 +163,7 @@ export const McpIcons = {
 
   // Information Encrypted Badge
   InfoShield: (props: React.SVGProps<SVGSVGElement>) => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}>
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" {...props}>
       <circle cx="12" cy="12" r="10" />
       <line x1="12" y1="16" x2="12" y2="12" />
       <line x1="12" y1="8" x2="12.01" y2="8" />

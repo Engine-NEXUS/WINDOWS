@@ -208,34 +208,9 @@ pub fn clear_api_key(service: &str) {
 }
 
 /// One-time migration: move API keys from settings.json to OS keychain.
-/// Runs on startup. Idempotent — skips services already in keychain.
-#[allow(dead_code)]
+/// Delegates to `api_keys::scrub_settings_file` to migrate and scrub all known services.
 pub fn migrate_api_keys_to_keychain(app_data_dir: &std::path::Path) {
-    let path = app_data_dir.join("settings.json");
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return;
-    };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return;
-    };
-    for service in ["groq", "gemini", "cerebras"] {
-        // Skip if already in keychain
-        if get_api_key(service).is_some() {
-            continue;
-        }
-        let camel = format!("{service}ApiKey");
-        let snake = format!("{service}_api_key");
-        if let Some(key) = json
-            .get(&camel)
-            .or_else(|| json.get(&snake))
-            .and_then(|v| v.as_str())
-        {
-            if !key.is_empty() {
-                set_api_key(service, key);
-                tracing::info!("vault: migrated {service} API key to keychain");
-            }
-        }
-    }
+    crate::api_keys::scrub_settings_file(app_data_dir);
 }
 
 /// Status for the dashboard: "live" | "expired" | "missing".
@@ -262,32 +237,27 @@ pub fn token_status(service: &str) -> &'static str {
     }
 }
 
-/// Fetch a fresh Google access token from the Worker (which owns OAuth +
-/// refresh server-side) and cache it in the vault. Assumed 1-hour life —
-/// the Worker refreshes on its end; we re-fetch when our copy is stale.
-async fn fetch_google_token_from_worker(
+/// Fetch a fresh provider access token from the Worker (which owns OAuth + refresh
+/// server-side). The route needs this device's credentials (see `worker_auth`); the
+/// Worker derives the owner from them, so no `user_id` is sent.
+async fn fetch_provider_token_from_worker(
     worker_url: &str,
-    user_id: &str,
+    provider: &str,
+    label: &str,
+    not_connected: &str,
 ) -> Result<String, String> {
-    let url = format!(
-        "{}/oauth/google-token?user_id={}",
-        worker_url.trim_end_matches('/'),
-        user_id
-    );
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("google token fetch: {e}"))?;
-    if resp.status() == 404 {
-        return Err("Google not connected. Connect Google in setup.".into());
+    let url = format!("{}/oauth/{}-token", worker_url.trim_end_matches('/'), provider);
+    let resp = crate::worker_auth::authed_get(&url, Duration::from_secs(10)).await?;
+    let status = resp.status();
+    if status == 404 {
+        return Err(not_connected.into());
     }
-    if !resp.status().is_success() {
-        return Err(format!("google token error {}", resp.status()));
+    if status == 401 || status == 403 || status == 503 {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(crate::worker_auth::describe_denial(status.as_u16(), &body));
+    }
+    if !status.is_success() {
+        return Err(format!("{label} token error {status}"));
     }
     let data: serde_json::Value = resp.json().await.map_err(|e| format!("token json: {e}"))?;
     data["token"]
@@ -296,37 +266,28 @@ async fn fetch_google_token_from_worker(
         .ok_or_else(|| "token field missing in worker response".to_string())
 }
 
-/// Fetch a fresh Swiggy access token from the Worker (OAuth + refresh
-/// server-side, same shape as Google) and cache it in the vault.
-async fn fetch_swiggy_token_from_worker(
-    worker_url: &str,
-    user_id: &str,
-) -> Result<String, String> {
-    let url = format!(
-        "{}/oauth/swiggy-token?user_id={}",
-        worker_url.trim_end_matches('/'),
-        user_id
-    );
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("swiggy token fetch: {e}"))?;
-    if resp.status() == 404 {
-        return Err("Swiggy not connected. Connect Swiggy in Settings, Connections tab.".into());
-    }
-    if !resp.status().is_success() {
-        return Err(format!("swiggy token error {}", resp.status()));
-    }
-    let data: serde_json::Value = resp.json().await.map_err(|e| format!("token json: {e}"))?;
-    data["token"]
-        .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| "token field missing in worker response".to_string())
+/// Fetch a fresh Google access token from the Worker and cache it in the vault.
+/// Assumed 1-hour life; we re-fetch when our copy is stale.
+async fn fetch_google_token_from_worker(worker_url: &str, _user_id: &str) -> Result<String, String> {
+    fetch_provider_token_from_worker(
+        worker_url,
+        "google",
+        "google",
+        "Google not connected. Connect Google in setup.",
+    )
+    .await
+}
+
+/// Fetch a fresh Swiggy access token from the Worker (OAuth + refresh server-side,
+/// same shape as Google) and cache it in the vault.
+async fn fetch_swiggy_token_from_worker(worker_url: &str, _user_id: &str) -> Result<String, String> {
+    fetch_provider_token_from_worker(
+        worker_url,
+        "swiggy",
+        "swiggy",
+        "Swiggy not connected. Connect Swiggy in Settings, Connections tab.",
+    )
+    .await
 }
 
 /// Refresh registry: services that can mint a fresh token without the user.
@@ -628,6 +589,18 @@ pub fn set_primary_google_account(email: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Tests that touch the Google account registry (a process-wide cache plus the mock keychain) take turns, and each
+/// starts from an empty registry, so one test's accounts can never leak into another's.
+#[cfg(test)]
+pub(crate) fn lock_accounts_for_test() -> std::sync::MutexGuard<'static, ()> {
+    static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    for a in get_google_accounts() {
+        let _ = remove_google_account(&a.email);
+    }
+    g
+}
+
 /// Disconnect and remove a Google account and its tokens.
 pub fn remove_google_account(email: &str) -> Result<(), String> {
     let mut accounts = get_google_accounts();
@@ -755,6 +728,7 @@ mod tests {
 
     #[test]
     fn google_account_registry_roundtrip_and_primary_switch() {
+        let _g = lock_accounts_for_test();
         let prof1 = GoogleAccountProfile {
             email: "user1@gmail.com".into(),
             name: "User One".into(),
@@ -852,5 +826,35 @@ mod tests {
         let parsed: GoogleAccountProfile = serde_json::from_value(legacy).expect("legacy profile parses");
         assert_eq!(parsed.phone, None);
         assert_eq!(parsed.address, None);
+    }
+
+    /// Regression: the keychain is read FIRST, but Settings used to write only
+    /// settings.json — a stale keychain key silently overrode a corrected one.
+    /// Boot sync makes the (trimmed) settings.json key win when they differ,
+    /// and leaves the keychain alone when settings.json has no key.
+    #[test]
+    fn test_api_key_sync_settings_json_wins_and_trims() {
+        let dir = std::env::temp_dir().join(format!("nexus-keysync-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        set_api_key("groq", "stale-old-key");
+        set_api_key("gemini", "keychain-only-key");
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"groqApiKey":"  fresh-new-key \n","geminiApiKey":""}"#,
+        )
+        .unwrap();
+
+        migrate_api_keys_to_keychain(&dir);
+
+        assert_eq!(get_api_key("groq").as_deref(), Some("fresh-new-key"));
+        assert_eq!(
+            get_api_key("gemini").as_deref(),
+            Some("keychain-only-key"),
+            "an emptied/stripped settings.json key must not wipe the keychain"
+        );
+        for svc in ["groq", "gemini", "cerebras"] {
+            clear_api_key(svc);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -37,6 +37,14 @@ pub enum ParsedIntent {
     /// "open settings" / "open command center" / "show preferences" / "configure NEXUS"
     #[serde(rename = "open_settings")]
     OpenSettings,
+    /// Open the CodeRabbit active pull requests hub.
+    /// "open coderabbit" / "show coderabbit" / "coderabbit"
+    #[serde(rename = "open_coderabbit_hub")]
+    OpenCodeRabbitHub,
+    /// Open the native GitHub Dashboard / feed window.
+    /// "open github dashboard" / "open github feed" / "show pr list" / "open github interface"
+    #[serde(rename = "open_github_dashboard")]
+    OpenGitHubDashboard { subpage: String },
     #[serde(rename = "search")]
     Search { query: String },
     #[serde(rename = "analyse_repo")]
@@ -189,6 +197,16 @@ pub enum ParsedIntent {
     /// "Shut down / restart / sleep / lock my laptop" (`kind` = power_cmd::PowerKind).
     #[serde(rename = "power_action")]
     PowerAction { kind: String },
+    /// "Delete the PDFs in downloads" / "move ... to documents" / "rename ..." / "make a folder ..." /
+    /// "what's in downloads" (Action Kernel, docs/features/140). `verb` = delete, move, copy, rename,
+    /// create_folder, list or find; `object` is the spoken object phrase, `folder` the source folder
+    /// alias, `dest` the destination folder phrase (or the new name for rename). Resolved to real
+    /// files by `action_kernel`, never executed from the spoken text.
+    #[serde(rename = "file_action")]
+    FileAction { verb: String, object: String, folder: Option<String>, dest: Option<String> },
+    /// "Undo that": reverse the newest file action.
+    #[serde(rename = "file_undo")]
+    FileUndo,
     /// "Reopen my session" / "reopen what I had open" (the pending last-session offer).
     #[serde(rename = "reopen_session")]
     ReopenSession,
@@ -295,6 +313,35 @@ pub enum ParsedIntent {
         agent: Option<String>,
         query: Option<String>,
     },
+    /// "Watch this session until it is complete and, if it is perfect, shut down my laptop."
+    /// `kind` = power_cmd::PowerKind::as_str; `agent` = None means the session in front.
+    #[serde(rename = "watch_then_power")]
+    WatchThenPower {
+        agent: Option<String>,
+        kind: String,
+        require_clean: bool,
+        deadline_mins: Option<u32>,
+        /// "claude and codex": two or more named agents (empty otherwise)
+        #[serde(default)]
+        agents: Vec<String>,
+        /// "all my agents" / "every agent running"
+        #[serde(default)]
+        all: bool,
+        /// "track all agents and tell me when they're done": no power action
+        #[serde(default)]
+        track_only: bool,
+        /// "... and commit and raise a PR" (asked, and held until the user says yes)
+        #[serde(default)]
+        followup: bool,
+    },
+    /// "Cancel the shutdown plan", "what are you watching", "make it sleep instead" (`command` =
+    /// power_plan::PlanCommand::as_str). Only about the plan NEXUS is holding; nothing else is claimed.
+    #[serde(rename = "watch_plan_command")]
+    WatchPlanCommand { command: String },
+    /// "Hook up Claude" / "remove the Codex hook" / "is the Claude hook installed"
+    /// (`hook_action` = agent_hooks::HookAction::as_str, `agent` = agent_hooks::Agent::name).
+    #[serde(rename = "agent_hook_command")]
+    AgentHookCommand { hook_action: String, agent: String },
     /// Play music or search for songs on Spotify / Apple Music.
     #[serde(rename = "play_music")]
     PlayMusic {
@@ -338,6 +385,8 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::WhatsappChat { .. } => "whatsapp_chat",
         ParsedIntent::OpenArchitect => "open_architect",
         ParsedIntent::OpenSettings => "open_settings",
+        ParsedIntent::OpenCodeRabbitHub => "open_coderabbit_hub",
+        ParsedIntent::OpenGitHubDashboard { .. } => "open_github_dashboard",
         ParsedIntent::Search { .. } => "search",
         ParsedIntent::AnalyseRepo { .. } => "analyse_repo",
         ParsedIntent::AnalysePr { .. } => "analyse_pr",
@@ -375,6 +424,8 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::Briefing => "briefing",
         ParsedIntent::ImportContacts => "import_contacts",
         ParsedIntent::PowerAction { .. } => "power_action",
+        ParsedIntent::FileAction { .. } => "file_action",
+        ParsedIntent::FileUndo => "file_undo",
         ParsedIntent::ReopenSession => "reopen_session",
         ParsedIntent::TimetableAdd { .. } => "timetable_add",
         ParsedIntent::TimetableShow => "timetable_show",
@@ -406,6 +457,9 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::CreateVoiceReminder { .. } => "create_voice_reminder",
         ParsedIntent::AnalyseChatDocs { .. } => "analyse_chat_docs",
         ParsedIntent::WatchAgentTask { .. } => "watch_agent_task",
+        ParsedIntent::WatchThenPower { .. } => "watch_then_power",
+        ParsedIntent::WatchPlanCommand { .. } => "watch_plan_command",
+        ParsedIntent::AgentHookCommand { .. } => "agent_hook_command",
         ParsedIntent::PlayMusic { .. } => "play_music",
         ParsedIntent::OpenMusicPlayer { .. } => "open_music_player",
         ParsedIntent::GitHubCommand { command } => match command {
@@ -459,31 +513,13 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
 /// nothing remains — bare "hey nexus" stays a greeting, never strips
 /// to empty. Longest prefixes first; word-boundary required.
 fn strip_wake_prefix(text: &str) -> Option<String> {
-    const PREFIXES: &[&str] = &[
-        "hello nexus",
-        "okay nexus",
-        "hey nexus",
-        "ok nexus",
-        "hi nexus",
-        "nexus",
-        // How Whisper writes "Nexus" at the start of a command (live log 2026-10-13: "next is open
-        // brave.", "nexes open ..."). Only ever tried after a direct parse failed, so a sentence that
-        // merely starts with "next is" cannot become a command unless the REST parses as one.
-        "next is",
-        "nex is",
-        "next us",
-        "next as",
-        "nexes",
-        "nexis",
-        "nexxus",
-    ];
     let mut current = text.trim();
     let mut stripped_any = false;
 
     loop {
         let mut found = false;
-        for prefix in PREFIXES {
-            if let Some(rest) = current.strip_prefix(prefix) {
+        for prefix in crate::wake_names::wake_prefixes() {
+            if let Some(rest) = current.strip_prefix(prefix.as_str()) {
                 // Word boundary check: string ended, whitespace, or punctuation (. , ! ? : - ;)
                 let after = rest.as_bytes().first().copied();
                 if after.is_none()
@@ -536,8 +572,33 @@ pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
     // fires when the first pass returned None, and strip never yields
     // empty (bare wake words keep their first-pass result).
     let lowered = transcript.trim().to_lowercase();
-    if let Some(stripped) = strip_wake_prefix(&lowered) {
+    if let Some(stripped) = strip_wake_prefix(&lowered).or_else(|| strip_misheard_prefix(&lowered)) {
         return parse_deterministic_inner(&stripped);
+    }
+    None
+}
+
+/// Spellings Whisper produces for "Nexus" at the start of a command (live log 2026-10-13:
+/// "next is open brave."). They are everyday words, so `wake_names` / `strip_wake_prefix` must NOT
+/// treat them as the wake word; this helper is only tried by the retry pass after a direct parse
+/// failed, so a sentence that merely starts with "next is" cannot become a command unless the REST
+/// parses as one.
+fn strip_misheard_prefix(text: &str) -> Option<String> {
+    const MISHEARD: &[&str] = &["next is", "nex is", "next as"];
+    let current = text.trim();
+    for prefix in MISHEARD {
+        if let Some(rest) = current.strip_prefix(prefix) {
+            let boundary = rest.is_empty()
+                || rest.starts_with(|c: char| matches!(c, ' ' | '\t' | '.' | ',' | '!' | '?' | ':' | '-' | ';'));
+            if boundary {
+                let cleaned = rest
+                    .trim_start_matches(|c: char| matches!(c, '.' | ',' | '!' | '?' | ':' | '-' | ';' | ' ' | '\t'))
+                    .trim();
+                if !cleaned.is_empty() {
+                    return Some(cleaned.to_string());
+                }
+            }
+        }
     }
     None
 }
@@ -598,6 +659,95 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
         });
     }
 
+    // --- CodeRabbit Review shortcut commands ---
+    let cr_norm = text
+        .replace("code rabbit", "coderabbit")
+        .replace("coderrabbit", "coderabbit")
+        .replace("code-rabbit", "coderabbit");
+    let cr_clean = cr_norm.trim();
+
+    if cr_clean.contains("coderabbit") {
+        // Check for specific PR number: e.g. "show coderabbit review for pr 24", "coderabbit pr 24", "check coderabbit 24"
+        let pr_num = cr_clean
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|s| !s.is_empty())
+            .find_map(|s| s.parse::<u32>().ok());
+
+        if let Some(pr_number) = pr_num {
+            return Some(ParseResult {
+                intent: ParsedIntent::AnalysePr {
+                    owner: None,
+                    repo: "ultron".to_string(),
+                    pr_number,
+                },
+                confidence: 1.0,
+                source: "deterministic".to_string(),
+            });
+        }
+
+        // If no PR number was specified ("open coderabbit", "show coderabbit", "coderabbit", "coderabbit review", etc.):
+        return Some(ParseResult {
+            intent: ParsedIntent::OpenCodeRabbitHub,
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    // --- GitHub Dashboard & Feed commands ---
+    // High-priority interceptor: intercepts feed, issues, and org dashboard phrases
+    // BEFORE open_app, power_cmd, or app_registry can ever treat them as desktop app targets.
+    // PR list phrases are handled by parse_github_command above.
+    if let Some(result) = parse_github_dashboard_command(&text) {
+        return Some(result);
+    }
+
+    // --- "Watch this session, and if it is perfect shut down my laptop" ---
+    // Claimed before the power and watch parsers (the sentence contains both) and before the compound
+    // split, which would cut it at "then".
+    if let Some(plan) = crate::watch_power::parse(&text) {
+        return Some(ParseResult {
+            intent: ParsedIntent::WatchThenPower {
+                agent: plan.agent,
+                kind: plan.kind.as_str().to_string(),
+                require_clean: plan.require_clean,
+                deadline_mins: plan.deadline_mins,
+                agents: plan.agents,
+                all: plan.all,
+                track_only: plan.track_only,
+                followup: plan.followup,
+            },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    // --- "hook up all agents" / "which agents are hooked up" ---
+    if let Some(action) = crate::agent_hooks::parse_all_command(&text) {
+        return Some(ParseResult {
+            intent: ParsedIntent::AgentHookCommand { hook_action: action.as_str().to_string(), agent: "all".to_string() },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    // --- Agent Stop hooks ("hook up claude", "remove the codex hook", "is the claude hook installed") ---
+    if let Some((action, agent)) = crate::agent_hooks::parse_command(&text) {
+        return Some(ParseResult {
+            intent: ParsedIntent::AgentHookCommand { hook_action: action.as_str().to_string(), agent: agent.name().to_string() },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    // --- Commands about the held plan ("cancel the shutdown plan", "what are you watching") ---
+    if let Some(cmd) = crate::power_plan::parse_command(&text) {
+        return Some(ParseResult {
+            intent: ParsedIntent::WatchPlanCommand { command: cmd.as_str() },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
     // --- Power commands ("shut down my laptop") ---
     // BEFORE every close/open parser: "shut down" is also a close-app verb, and
     // "shut down my laptop" must never become close_app("my laptop").
@@ -607,6 +757,13 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
             confidence: 1.0,
             source: "deterministic".to_string(),
         });
+    }
+
+    // --- File actions (Action Kernel): delete/move/copy/rename/create/list/undo ---
+    // Claimed before the open/close parsers; broad wipe phrases are claimed too so they are refused
+    // locally instead of reaching a chat model.
+    if let Some(intent) = crate::action_kernel::voice::parse(&text) {
+        return Some(ParseResult { intent, confidence: 1.0, source: "deterministic".to_string() });
     }
 
     if is_reopen_session_command(&text) {
@@ -884,6 +1041,11 @@ fn looks_like_github_phrase(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
+    let has_github = s.contains("github") || s.contains("git hub");
+    let has_feed = s.contains("feed") || s.contains("dashboard") || s.contains("overview") || s.contains("interface");
+    if has_github || (has_feed && (s.contains("code") || s.contains("dev") || s.contains("git") || s.contains("my") || s.contains("developer"))) {
+        return true;
+    }
     // Word-boundary checks so "pr" doesn't match inside "preview" / "process".
     // "pr" as a standalone token or followed by "s"/"list"/"number"/"#".
     let tokens: Vec<&str> = s.split_whitespace().collect();
@@ -901,7 +1063,199 @@ fn looks_like_github_phrase(s: &str) -> bool {
     let has_pull_bigram = tokens.windows(2).any(|w| {
         w[0] == "pull" && (w[1] == "request" || w[1] == "requests")
     });
-    has_pr || has_pull_request || has_pull_bigram || has_repo_phrase
+    has_pr || has_pull_request || has_repo_phrase || has_pull_bigram
+}
+
+/// Parse GitHub Dashboard, Feed, PR list, Issues, and Organization voice commands.
+/// High-priority interceptor that matches all feed/dashboard phrases BEFORE open_app
+/// or app-registry can ever guess an app target.
+fn parse_github_dashboard_command(text: &str) -> Option<ParseResult> {
+    let norm = text.trim().to_lowercase();
+    let norm = norm.replace("git hub", "github");
+    let norm = norm.replace("pullrequest", "pull request");
+    let norm = norm.replace("pullrequests", "pull requests");
+    let norm = norm.replace("pr's", "prs");
+    let norm = norm.replace("prs'", "prs");
+    let norm = norm.replace("repo's", "repos");
+    let norm = norm.replace("repos'", "repos");
+    let norm = norm.replace("org's", "orgs");
+    let norm = norm.replace("orgs'", "orgs");
+    let norm = norm.replace("issue's", "issues");
+    let norm = norm.replace("issues'", "issues");
+
+    // Don't intercept specific PR number analysis commands like "pr 24 in ultron" or "pr 24"
+    let has_pr_digits = norm.split_whitespace().any(|word| {
+        (word.starts_with("pr") && word[2..].chars().all(|c| c.is_ascii_digit() || c == '#'))
+            || (word.starts_with('#') && word[1..].chars().all(|c| c.is_ascii_digit()))
+    });
+    if has_pr_digits && (norm.contains("analyse") || norm.contains("analyze") || norm.contains("review") || norm.contains("in ") || norm.contains("for ")) {
+        return None;
+    }
+
+    // Strip leading conversational phrases & filler verbs
+    let mut stripped = norm.as_str();
+    for prefix in &[
+        "can you please ", "could you please ", "can you ", "could you ", "please ",
+        "hey ultron ", "ultron ", "hey nexus ", "nexus ",
+        "show me my ", "show me the ", "show me all ", "show me ", "show my ", "show the ", "show all ", "show ",
+        "open my ", "open the ", "open all ", "open ",
+        "give me my ", "give me the ", "give me all ", "give me ",
+        "get me my ", "get me the ", "get me ", "get ",
+        "bring up my ", "bring up the ", "bring up ",
+        "pull up my ", "pull up the ", "pull up ",
+        "pop up my ", "pop up the ", "pop up ",
+        "display my ", "display the ", "display ",
+        "view my ", "view the ", "view ",
+        "check out my ", "check out the ", "check out ", "check my ", "check the ", "check ",
+        "see my ", "see the ", "see ",
+        "launch my ", "launch the ", "launch ",
+        "take me to my ", "take me to the ", "take me to ",
+        "go to my ", "go to the ", "go to ",
+        "switch to my ", "switch to the ", "switch to ",
+        "navigate to my ", "navigate to the ", "navigate to ",
+        "load my ", "load the ", "load ",
+        "fetch my ", "fetch the ", "fetch ",
+        "access my ", "access the ", "access ",
+        "list all of the ", "list all of my ", "list all the ", "list all my ", "list all ",
+        "list of the ", "list of my ", "list of ",
+        "list the ", "list my ", "list ",
+        "what's on my ", "what is on my ", "what's on ", "what is on ",
+        "what's new on ", "what is new on ",
+        "what's happening on ", "what is happening on ",
+        "what needs my attention on ", "what needs attention on ",
+        "what requires attention on ", "what needs review on ",
+        "what are the open ", "what are my open ", "what are the ", "what are my ", "what are ",
+        "what is the ", "what is my ",
+        "do i have any ", "are there any ",
+        "what ", "which ",
+    ] {
+        if stripped.starts_with(prefix) {
+            stripped = &stripped[prefix.len()..];
+            break;
+        }
+    }
+    let stripped = stripped.trim();
+
+    // 1. Pull Requests Subpage Possibilities:
+    // Core targets: "prs", "pr list", "prs list", "pull requests", "pull request list",
+    // "open prs", "active prs", "all prs", "my prs", "github prs", "github pr list", etc.
+    let is_pr_target = match stripped {
+        "pr list" | "prs list" | "the pr list" | "the prs list"
+        | "pull request list" | "pull requests list" | "the pull request list" | "the pull requests list"
+        | "list of prs" | "list of pull requests" | "list of open prs" | "list of my prs"
+        | "list prs" | "list pull requests" | "list open prs" | "list all prs"
+        | "prs" | "pr" | "open prs" | "open pr" | "active prs" | "live prs" | "pending prs"
+        | "all prs" | "all open prs" | "my prs" | "my open prs"
+        | "pull requests" | "pull request" | "open pull requests" | "active pull requests" | "all pull requests" | "my pull requests"
+        | "github prs" | "github pr" | "github pr list" | "github prs list" | "github pull requests" | "github pull request list"
+        | "github open prs" | "github active prs"
+        | "prs are open" | "pull requests are open" | "open prs right now"
+        | "what prs are open" | "which prs are open" | "what are the open prs" | "what are my open prs"
+        | "prs that need review" | "prs to review" | "review prs" => true,
+        _ => false,
+    };
+
+    let is_pr_subpage = is_pr_target || regex_match(
+        &norm,
+        r"^(?:(?:show\s+(?:me\s+)?(?:the\s+|my\s+)?|open\s+(?:the\s+|my\s+)?|give\s+me\s+(?:the\s+|my\s+)?|get\s+(?:me\s+)?(?:the\s+|my\s+)?|bring\s+up\s+(?:the\s+|my\s+)?|pull\s+up\s+(?:the\s+|my\s+)?|view\s+(?:the\s+|my\s+)?|display\s+(?:the\s+|my\s+)?|check\s+(?:the\s+|my\s+)?|what\s+(?:are\s+|is\s+)?(?:the\s+|my\s+)?|list\s+(?:all\s+|of\s+)?|which\s+)?(?:(open|active|live|all|my)\s+)?(?:prs?|pull\s+requests?)(?:\s+list)?|github\s+(?:prs?|pull\s+requests?)(?:\s+list)?|(?:what|which|any)\s+prs?\s+(?:are\s+)?(?:open|active|live)?)$",
+    );
+
+    if is_pr_subpage {
+        return Some(ParseResult {
+            intent: ParsedIntent::OpenGitHubDashboard {
+                subpage: "pull_requests".to_string(),
+            },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    // 2. Issues Subpage Possibilities:
+    let is_issues_target = match stripped {
+        "issues" | "issue" | "issues list" | "the issues list" | "issue list"
+        | "open issues" | "active issues" | "all issues" | "my issues"
+        | "list issues" | "list of issues" | "list of open issues" | "list all issues"
+        | "github issues" | "github issue" | "github issues list" | "github issue list"
+        | "github open issues" | "my github issues"
+        | "issues are open" | "what issues are open" | "which issues are open"
+        | "what are the open issues" | "what are my open issues"
+        | "any open issues" | "are there any open issues" => true,
+        _ => false,
+    };
+
+    let is_issues_subpage = is_issues_target || regex_match(
+        &norm,
+        r"^(?:(?:show\s+(?:me\s+)?(?:the\s+|my\s+)?|open\s+(?:the\s+|my\s+)?|view\s+(?:the\s+|my\s+)?|check\s+(?:the\s+|my\s+)?|list\s+(?:all\s+|of\s+)?|what\s+(?:are\s+)?(?:the\s+|my\s+)?)?(?:github\s+issues?|issues?\s+list|open\s+issues?|my\s+issues?|all\s+issues?|issues?)|github\s+issues?|(?:what|which|any)\s+issues?\s+(?:are\s+)?(?:open|active|live)?)$",
+    );
+
+    if is_issues_subpage {
+        return Some(ParseResult {
+            intent: ParsedIntent::OpenGitHubDashboard {
+                subpage: "issues".to_string(),
+            },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    // 3. Organizations Subpage Possibilities:
+    let is_orgs_target = match stripped {
+        "orgs" | "organizations" | "orgs list" | "organizations list"
+        | "my orgs" | "my organizations" | "all orgs" | "all organizations"
+        | "list orgs" | "list organizations" | "list of orgs" | "list of organizations"
+        | "github orgs" | "github organizations" | "github orgs list" | "github organizations list"
+        | "my github orgs" | "my github organizations"
+        | "teams" | "my teams" | "github teams" | "teams list" => true,
+        _ => false,
+    };
+
+    let is_orgs_subpage = is_orgs_target || regex_match(
+        &norm,
+        r"^(?:(?:show\s+(?:me\s+)?(?:the\s+|my\s+)?|open\s+(?:the\s+|my\s+)?|view\s+(?:the\s+|my\s+)?|check\s+(?:the\s+|my\s+)?|list\s+(?:all\s+|of\s+)?)?(?:github\s+(?:orgs?|organizations?|teams?)|my\s+(?:orgs?|organizations?|teams?)|orgs?|organizations?|teams?)|github\s+(?:orgs?|organizations?|teams?))$",
+    );
+
+    if is_orgs_subpage {
+        return Some(ParseResult {
+            intent: ParsedIntent::OpenGitHubDashboard {
+                subpage: "organizations".to_string(),
+            },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    // 4. Feed / Dashboard Home View Possibilities:
+    let is_feed_target = match stripped {
+        "github feed" | "the github feed" | "my github feed" | "feed on github" | "feed in github" | "feed"
+        | "github dashboard" | "the github dashboard" | "my github dashboard" | "dashboard on github" | "dashboard in github" | "dashboard"
+        | "github interface" | "the github interface" | "my github interface" | "interface on github" | "interface"
+        | "github overview" | "the github overview" | "my github overview" | "overview on github" | "overview"
+        | "github home" | "github homepage" | "home on github"
+        | "github activity" | "github activities" | "activity on github" | "recent github activity" | "my github activity"
+        | "github updates" | "updates on github" | "my github updates"
+        | "github attention" | "needs attention on github"
+        | "github notifications" | "notifications on github" | "my github notifications"
+        | "github" | "my github" | "the github"
+        | "developer feed" | "dev feed" | "coding feed" | "developer dashboard" | "dev dashboard" => true,
+        _ => false,
+    };
+
+    let is_feed = is_feed_target || regex_match(
+        &norm,
+        r"^(?:(?:show\s+(?:me\s+)?(?:the\s+|my\s+)?|open\s+(?:the\s+|my\s+)?|give\s+me\s+(?:the\s+|my\s+)?|get\s+(?:me\s+)?(?:the\s+|my\s+)?|bring\s+up\s+(?:the\s+|my\s+)?|pull\s+up\s+(?:the\s+|my\s+)?|pop\s+up\s+(?:the\s+|my\s+)?|view\s+(?:the\s+|my\s+)?|display\s+(?:the\s+|my\s+)?|check\s+(?:out\s+)?(?:the\s+|my\s+)?|see\s+(?:the\s+|my\s+)?|launch\s+(?:the\s+|my\s+)?|what(?:'s|\s+is)\s+(?:on|new\s+on|happening\s+on)\s+)?github\s+(?:feed|dashboard|interface|overview|activity|updates|home|attention|notifications)|(?:my\s+)?github\s+(?:feed|dashboard|interface|overview|activity|updates|home|notifications)|(?:open|show|display|view|check|launch|bring\s+up|pull\s+up)\s+(?:my\s+)?github|what\s+needs\s+(?:my\s+)?attention\s+on\s+github|what\s+requires\s+attention\s+on\s+github|what(?:'s|\s+is)\s+on\s+my\s+github|(?:my\s+)?(?:developer|dev|coding)\s+(?:feed|dashboard))$",
+    );
+
+    if is_feed {
+        return Some(ParseResult {
+            intent: ParsedIntent::OpenGitHubDashboard {
+                subpage: "feed".to_string(),
+            },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    None
 }
 
 fn parse_open_command(text: &str) -> Option<ParseResult> {
@@ -1218,6 +1572,28 @@ const KNOWN_REPOS: &[&str] = &[
 
 /// Parse "PR <num> [in|of|for|from|on] <repo>" patterns.
 fn parse_pr_analyse(text: &str) -> Option<ParseResult> {
+    let bare_pr_patterns: &[&str] = &[
+        r"^(?:the\s+)?pr\s*#?\s*(\d+)$",
+        r"^(?:the\s+)?pull\s+request\s*#?\s*(\d+)$",
+        r"^(?:the\s+)?pr\s*number\s*#?\s*(\d+)$",
+    ];
+
+    for &pat in bare_pr_patterns {
+        if let Some(caps) = regex_captures(text, pat) {
+            if let Ok(pr_number) = caps[1].parse::<u32>() {
+                return Some(ParseResult {
+                    intent: ParsedIntent::AnalysePr {
+                        owner: None,
+                        repo: "ultron".to_string(),
+                        pr_number,
+                    },
+                    confidence: 1.0,
+                    source: "deterministic".to_string(),
+                });
+            }
+        }
+    }
+
     // Match: "PR <num> [in|of|for|from|on] <repo>" or "pull request <num> ..."
     // Also handles "PR number <num>" and "PR # <num>" (STT variations)
     // Also handles "the PR" (user says "analyse the pr 254 in zync")
@@ -3014,8 +3390,26 @@ fn parse_share_concern_command(text: &str) -> Option<ParseResult> {
 }
 
 fn parse_screen_analysis_command(text: &str) -> Option<ParseResult> {
-    let t = text.trim().to_lowercase();
+    // STT often returns a curly apostrophe ("what’s"), and people say
+    // "can you …" / "please …" — none of which the anchored regexes allowed.
+    let t = text.trim().to_lowercase().replace(['\u{2019}', '\u{2018}'], "'");
     let trimmed = t.trim_end_matches(['.', ',', '!', '?']).trim();
+    let trimmed = regex_captures(
+        trimmed,
+        r"^(?:(?:hey|ok|okay)\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:i\s+(?:want|need)\s+you\s+to\s+)?(.*)$",
+    )
+    .and_then(|c| c.get(1).map(|m| m.as_str().trim()))
+    .unwrap_or(trimmed);
+
+    // Settings-like phrases that merely contain "screen" are not analysis.
+    if regex_captures(
+        trimmed,
+        r"\bscreen\s+(?:time|saver|recording|record|share|sharing|brightness|resolution|lock|reader|capture)\b",
+    )
+    .is_some()
+    {
+        return None;
+    }
 
     // 1. Screen-anchored verb family: "analyse the screen", "analyze my
     //    screen", "read the screen", "scan my screen", "check the screen",
@@ -3025,10 +3419,20 @@ fn parse_screen_analysis_command(text: &str) -> Option<ParseResult> {
     {
         return Some(ParseResult::screen_analysis_result(text));
     }
-    // 2. "What is on my screen?" family.
+    // 1b. "look at my screen" / "show me my screen" / "tell me about the screen".
     if regex_captures(
         trimmed,
-        r"^what(?:'s| is)\s+(?:on|in|of)?\s*(?:my|the|this)?\s*screen\b.*$",
+        r"^(?:look\s+at|have\s+a\s+look\s+at|take\s+a\s+look\s+at|show\s+me|tell\s+me\s+about)\s+(?:my|the|this)\s+screen\b.*$",
+    )
+    .is_some()
+    {
+        return Some(ParseResult::screen_analysis_result(text));
+    }
+    // 2. "What is on my screen?" family ("whats" / "what's" / "what is";
+    //    screen or display).
+    if regex_captures(
+        trimmed,
+        r"^what(?:'s|s| is)\s+(?:on|in|of)?\s*(?:my|the|this)?\s*(?:screen|display)\b.*$",
     )
     .is_some()
     {
@@ -3396,6 +3800,9 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
             });
         }
     }
+
+    // GitHub feed/dashboard/overview phrases are handled by parse_github_dashboard_command
+    // which runs later. Do not intercept them here.
 
     // --- List PRs ---
     // Natural language patterns: "give me the pr list", "show live prs",
@@ -5034,6 +5441,26 @@ fn parse_greeting(text: &str) -> Option<ParseResult> {
     None
 }
 
+/// Does this sentence answer the question NEXUS is waiting on (and only that)? Live miss 2026-10-19: after "Shall I
+/// add the hook, sir?" the owner said "yes", the deterministic parser read it as a chat acknowledgement
+/// ("Very good, sir."), the frontend answered it locally, and the question never saw its answer. Pure.
+pub(crate) fn is_answer_to(pending: Option<&crate::memcore::offer::Offer>, transcript: &str) -> bool {
+    pending.map_or(false, |o| crate::memcore::offer::classify_for(o, transcript) != crate::memcore::offer::Reply::Other)
+}
+
+/// A very short utterance that is no command and no answer (a quiet "yes" heard as "dirt."): worth asking once more
+/// instead of throwing the question away and sending the noise to the cloud. Pure.
+pub(crate) fn is_mumble(transcript: &str) -> bool {
+    let words = transcript.split_whitespace().count();
+    (1..=3).contains(&words) && parse_deterministic(transcript).is_none()
+}
+
+/// `is_answer_to` for the question that is armed right now.
+pub(crate) fn answers_a_pending_offer(transcript: &str) -> bool {
+    let pending = if crate::memcore::offer::is_armed() { crate::memcore::offer::peek() } else { None };
+    is_answer_to(pending.as_ref(), transcript)
+}
+
 /// Pick a reply from a list, deterministically based on a hash of the input
 /// text. This gives variety (different replies for different inputs) while
 /// remaining deterministic (same input ΓåÆ same reply, no randomness).
@@ -5079,7 +5506,47 @@ fn parse_media(text: &str) -> Option<ParsedIntent> {
     if regex_match(text, r"^(?:stop\s+music|stop\s+media|stop\s+playback|stop)$") {
         return Some(ParsedIntent::MediaStop);
     }
+    // 5. Bare "play <title>" / "play <title> by <artist>" / "put on <title>". Last on purpose: every exact form above
+    //    (play, play/pause, play next ...) wins, and anything that is clearly not music is left to the other parsers.
+    if let Some(caps) = regex_captures(text, r"^(?:play|put\s+on)\s+(.+)$") {
+        let query = caps.get(1).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
+        if is_music_title(&query) {
+            return Some(ParsedIntent::PlayMusic { query: Some(query), player: None });
+        }
+    }
     None
+}
+
+/// Could "play <this>" be a song, album or artist? A title is short and is not a pronoun, a transport word, or an
+/// obvious video / game / streaming-site request.
+pub(crate) fn is_music_title(query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    let words: Vec<&str> = q.split_whitespace().collect();
+    if words.is_empty() || words.len() > 12 {
+        return false;
+    }
+    const NOT_A_TITLE: &[&str] = &[
+        "it", "that", "this", "again", "back", "now", "pause", "resume", "next", "previous", "last", "first",
+        "something", "anything", "songs", "music", "stop", "faster", "slower",
+    ];
+    if words.len() == 1 && NOT_A_TITLE.contains(&words[0]) {
+        return false;
+    }
+    if matches!(words[0], "it" | "that" | "this" | "them" | "those" | "these") {
+        return false;
+    }
+    let transport = |w: &str| matches!(w, "next" | "previous" | "last");
+    let unit = |w: &str| matches!(w, "song" | "track" | "one" | "songs" | "tracks");
+    if (transport(words[0]) && words.get(1).map_or(true, |w| unit(w)))
+        || (words[0] == "the" && words.get(1).is_some_and(|w| transport(w)) && words.get(2).map_or(true, |w| unit(w)))
+    {
+        return false;
+    }
+    const NOT_MUSIC: &[&str] = &[
+        "youtube", "netflix", "video", "videos", "movie", "movies", "game", "games", "chess", "minecraft", "trailer",
+        "podcast", "episode", "stream", "twitch", "prime", "hotstar", "reel", "reels", "clip",
+    ];
+    !words.iter().any(|w| NOT_MUSIC.contains(w))
 }
 
 // ΓöÇΓöÇΓöÇ Architecture mapper ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
@@ -5801,14 +6268,29 @@ fn parse_browser_force(text: &str) -> Option<ParseResult> {
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 /// Normalize common STT phonetic mishearings and soundalike phrases before
-/// deterministic intent parsing. Maps dialect variations and speech-recognition
-/// confabulations to canonical NEXUS command forms.
-pub fn normalize_phonetic_mishearings(text: &str) -> String {
-    let lower = text.to_lowercase();
-    let trimmed = lower.trim().trim_end_matches(['.', ',', '!', '?']).trim();
+    /// deterministic intent parsing. Maps dialect variations and speech-recognition
+    /// confabulations to canonical NEXUS command forms.
+    pub fn normalize_phonetic_mishearings(text: &str) -> String {
+        let lower = text.to_lowercase();
+        let trimmed = lower.trim().trim_end_matches(['.', ',', '!', '?']).trim();
 
-    // 1. Full-phrase exact matches (fast path for common short utterances)
-    match trimmed {
+        // Handle "next is ..." at the start as a "nexus ..." mishearing (Whisper
+        // often transcribes "nexus open X" as "next is open X").
+        if let Some(rest) = trimmed.strip_prefix("next is ") {
+            println!("[PHONETIC-NORM] Normalized STT mishearing '{}' → 'nexus {}'", trimmed, rest);
+            return format!("nexus {}", rest);
+        }
+        if let Some(rest) = trimmed.strip_prefix("nex is ") {
+            println!("[PHONETIC-NORM] Normalized STT mishearing '{}' → 'nexus {}'", trimmed, rest);
+            return format!("nexus {}", rest);
+        }
+        if let Some(rest) = trimmed.strip_prefix("next as ") {
+            println!("[PHONETIC-NORM] Normalized STT mishearing '{}' → 'nexus {}'", trimmed, rest);
+            return format!("nexus {}", rest);
+        }
+
+        // 1. Full-phrase exact matches (fast path for common short utterances)
+        match trimmed {
         "goes to mode" | "goes to mold" | "go to mode" | "post mode"
         | "post modern" | "postmodern" | "coast mode" | "gold mode"
         | "toast mode" | "host mode" | "dose mode" | "close mode"
@@ -5839,6 +6321,9 @@ pub fn normalize_phonetic_mishearings(text: &str) -> String {
 
         "open note pad" | "open not pad" => return "open notepad".to_string(),
 
+        // Real missed-command log 2026-10-20 ("openbread" twice) and the earlier "open brief" live miss.
+        "openbread" | "open bread" | "open brief" | "open braved" | "openbrave" => return "open brave".to_string(),
+
         "stand down" | "stop it now" => return "stop".to_string(),
 
         "cancel action" | "cancel task" | "cancel that" => return "cancel".to_string(),
@@ -5846,7 +6331,8 @@ pub fn normalize_phonetic_mishearings(text: &str) -> String {
         "open command center" | "nexus settings" | "nexus preferences"
         | "nexus config" => return "open settings".to_string(),
 
-        "comment hub" | "common hub" | "comma hub" | "comment center" | "common center" => return "command hub".to_string(),
+        "comment hub" | "common hub" | "comma hub" | "comment center" | "common center"
+        | "command hop" | "command roker" | "command rocker" | "command hug" => return "command hub".to_string(),
         "open comment hub" | "open common hub" | "open comment center" | "open common center" => return "open command hub".to_string(),
 
         "open mute up" | "open new tablet" | "open new table" | "open new tap"
@@ -6027,7 +6513,9 @@ pub fn normalize_phonetic_mishearings(text: &str) -> String {
         }
     }
 
-    out
+    // Mishearings this user corrected twice on separate occasions (Memory v2 M2): applied last, only to
+    // transcripts that start like a command.
+    crate::memcore::corrections::apply_learned(&out)
 }
 
 fn normalize_whitespace(s: &str) -> String {
@@ -6222,6 +6710,16 @@ fn regex_captures<'t>(text: &'t str, pattern: &str) -> Option<regex::Captures<'t
 #[tauri::command]
 pub async fn parse_transcript(transcript: String) -> Result<ParseResult, String> {
     tracing::info!("[intent_parser] parsing: {:?}", transcript);
+
+    // 0. A question is waiting for its answer ("Shall I, sir?"): "yes" must reach the orchestrator, where the offer
+    //    is answered, not be turned into a chat acknowledgement here (see `answers_a_pending_offer`).
+    if answers_a_pending_offer(&transcript) {
+        return Ok(ParseResult {
+            intent: ParsedIntent::Unknown { raw: transcript.clone() },
+            confidence: 0.0,
+            source: "offer-pending".to_string(),
+        });
+    }
 
     // 1. Try deterministic parser
     if let Some(result) = parse_deterministic(&transcript) {
@@ -6557,10 +7055,11 @@ mod tests {
 
     #[test]
     fn test_launch_spotify() {
+        // Spotify is a music player intent (so the default-player setting and transport controls apply).
         let result = parse_deterministic("launch spotify");
         assert!(result.is_some());
         let r = result.unwrap();
-        assert!(matches!(r.intent, ParsedIntent::OpenApp { .. }));
+        assert!(matches!(r.intent, ParsedIntent::OpenMusicPlayer { player: Some(ref p) } if p == "spotify"), "{:?}", r.intent);
     }
 
     #[test]
@@ -7105,8 +7604,45 @@ mod tests {
     }
 
     #[test]
+    fn a_yes_answers_the_question_that_is_waiting_but_only_then() {
+        use crate::memcore::offer::Offer;
+        let hook = Offer::HookSetup { agent: "antigravity".into() };
+        let power = Offer::Power { kind: "shutdown".into() };
+        for t in ["yes", "Yes.", "yeah", "sure", "okay", "go ahead", "no", "nope", "not now"] {
+            assert!(is_answer_to(Some(&hook), t), "{t}");
+        }
+        // a power question also takes the action itself
+        assert!(is_answer_to(Some(&power), "good night"));
+        // with nothing waiting, or for a sentence that is not an answer, the parser stays in charge
+        for t in ["yes", "okay"] {
+            assert!(!is_answer_to(None, t), "{t}");
+        }
+        for t in ["open chrome", "what time is it", "hook up antigravity", "sure what time is it", "yes open brave"] {
+            assert!(!is_answer_to(Some(&hook), t), "{t}");
+        }
+    }
+
+    /// "show the pr list" style phrases open the Pull Requests dashboard subpage (see
+    /// docs/GITHUB_DASHBOARD_SPEC.md); an explicit "list prs in <repo>" stays a ListPrs command.
+    fn is_pr_list_request(intent: &ParsedIntent) -> bool {
+        matches!(
+            intent,
+            ParsedIntent::GitHubCommand { command: crate::github_cmd::GitHubCommand::ListPrs { .. } }
+        ) || matches!(intent, ParsedIntent::OpenGitHubDashboard { subpage } if subpage == "pull_requests")
+    }
+
+    #[test]
+    fn only_a_short_non_command_is_a_mumble() {
+        for t in ["dirt.", "good.", "mm", "uh huh"] {
+            assert!(is_mumble(t), "{t}");
+        }
+        for t in ["", "open chrome", "hook up antigravity", "what is the weather like today", "open the pr list please now"] {
+            assert!(!is_mumble(t), "{t}");
+        }
+    }
+
+    #[test]
     fn test_pr_list_commands() {
-        use crate::github_cmd::GitHubCommand;
         // "open pr list" must NOT be parsed as OpenApp("pr list")
         // It should be ListPrs
         for cmd in &[
@@ -7142,12 +7678,7 @@ mod tests {
             assert!(result.is_some(), "failed to parse: {}", cmd);
             let r = result.unwrap();
             assert!(
-                matches!(
-                    r.intent,
-                    ParsedIntent::GitHubCommand {
-                        command: GitHubCommand::ListPrs { .. }
-                    }
-                ),
+                is_pr_list_request(&r.intent),
                 "expected ListPrs for: {}, got {:?}",
                 cmd,
                 r.intent
@@ -7157,7 +7688,6 @@ mod tests {
 
     #[test]
     fn test_pr_list_with_trailing_punctuation() {
-        use crate::github_cmd::GitHubCommand;
         // Groq whisper-large-v3-turbo appends trailing punctuation to
         // transcripts. Without strip_trailing_punctuation() the ListPrs
         // regex (anchored with $) fails and the permissive OpenApp
@@ -7184,12 +7714,7 @@ mod tests {
             assert!(result.is_some(), "failed to parse: {}", cmd);
             let r = result.unwrap();
             assert!(
-                matches!(
-                    r.intent,
-                    ParsedIntent::GitHubCommand {
-                        command: GitHubCommand::ListPrs { .. }
-                    }
-                ),
+                is_pr_list_request(&r.intent),
                 "expected ListPrs for: {}, got {:?} (trailing punctuation not stripped?)",
                 cmd,
                 r.intent
@@ -7814,13 +8339,10 @@ mod tests {
         ] {
             let result = parse_deterministic(phrase);
             assert!(result.is_some(), "should parse '{phrase}'");
-            if let ParsedIntent::GitHubCommand {
-                command: crate::github_cmd::GitHubCommand::ListPrs { .. },
-            } = result.unwrap().intent
-            {
-            } else {
-                panic!("expected ListPrs for '{phrase}'");
-            }
+            assert!(
+                is_pr_list_request(&result.unwrap().intent),
+                "expected ListPrs or the Pull Requests dashboard for '{phrase}'"
+            );
         }
         // …but a bare "everything" with no PR noun must NOT list PRs.
         let other = parse_deterministic("show me everything").map(|r| r.intent);
@@ -8270,6 +8792,37 @@ mod tests {
         assert_eq!(strip_wake_prefix("nexus"), None);
         assert_eq!(strip_wake_prefix("hey nexus"), None);
         assert_eq!(strip_wake_prefix(""), None);
+    }
+
+    /// STT writes the name many ways; the stripper shares the verifier's list
+    /// (`wake_names`), so every form the verifier accepts also strips.
+    #[test]
+    fn test_strip_wake_prefix_soundalike_forms() {
+        for (said, rest) in [
+            ("lexus open chrome", "open chrome"),
+            ("nixus open chrome", "open chrome"),
+            ("nexis, open chrome", "open chrome"),
+            ("nexxus open chrome", "open chrome"),
+            ("next us open chrome", "open chrome"),
+            ("next sis. open chrome", "open chrome"),
+            ("hey next us search for cats", "search for cats"),
+            ("okay lexus stop", "stop"),
+            ("nexus. nexus open chrome", "open chrome"),
+        ] {
+            assert_eq!(strip_wake_prefix(said), Some(rest.to_string()), "{said}");
+        }
+        // Word boundary still required; ordinary speech is untouched.
+        for keep in ["next usb drive", "nexuses are", "texas open chrome", "next song", "next is open chrome", "lexington"] {
+            assert_eq!(strip_wake_prefix(keep), None, "{keep}");
+        }
+        for (said, label) in [
+            ("lexus open chrome", "open_app"),
+            ("next us open chrome", "open_app"),
+            ("hey nixus search for cats", "search"),
+            ("next sis ghost mode", "enter_ghost_control"),
+        ] {
+            assert_eq!(wake_matrix_label(said), label, "{said}");
+        }
     }
 
     #[test]
@@ -9079,7 +9632,7 @@ mod tests {
 
         let res = parse_deterministic("open spot if I");
         assert!(res.is_some());
-        assert!(matches!(res.unwrap().intent, ParsedIntent::OpenApp { ref target } if target == "spotify"));
+        assert!(matches!(res.unwrap().intent, ParsedIntent::OpenMusicPlayer { player: Some(ref p) } if p == "spotify"));
     }
 
     #[test]
@@ -9257,6 +9810,16 @@ mod tests {
             "check my screen",
             "research on this for me",
             "research this screen",
+            // STT / phrasing variants
+            "whats on my screen",
+            "what\u{2019}s on my screen",
+            "what's on my display",
+            "can you analyse my screen",
+            "could you please read the screen",
+            "please describe my screen",
+            "i need you to check my screen",
+            "look at my screen",
+            "show me my screen",
         ] {
             let res = parse_deterministic(phrase);
             assert!(res.is_some(), "Expected screen_analysis for '{}'", phrase);
@@ -9275,6 +9838,10 @@ mod tests {
             "explain quantum computing",
             "what is on the menu",
             "what am i supposed to do",
+            "check my screen time",
+            "show me my screen time",
+            "read my screen reader settings",
+            "can you analyse servx",
         ] {
             let res = parse_deterministic(phrase);
             if let Some(ParsedIntent::NluResult { intent, .. }) = res.map(|r| r.intent) {
@@ -10287,5 +10854,224 @@ mod power_and_session_tests {
         assert!(matches!(ask.intent, ParsedIntent::NeedMoreInfo { .. }));
         let off = parse_deterministic("nexus i don't want you to control my cursor anymore").unwrap();
         assert!(matches!(off.intent, ParsedIntent::ExitGhostControl));
+    }
+
+    #[test]
+    fn test_coderabbit_variations_parse_to_analyse_pr() {
+        for phrase in [
+            "open coderabbit",
+            "open code rabbit",
+            "show coderabbit",
+            "show code rabbit",
+            "coderabbit",
+            "code rabbit",
+            "coderabbit review",
+            "open coderabbit review",
+            "show coderabbit review",
+            "check coderabbit review",
+        ] {
+            let res = parse_deterministic(phrase).unwrap_or_else(|| panic!("failed to parse {phrase:?}"));
+            assert!(
+                matches!(res.intent, ParsedIntent::OpenCodeRabbitHub),
+                "{phrase} should match OpenCodeRabbitHub, got {:?}",
+                res.intent
+            );
+        }
+
+        for phrase in [
+            "show coderabbit review for pr 24",
+            "check coderabbit review for pr 24",
+            "open coderabbit review for pr 24",
+            "show code rabbit review for pr 24",
+            "coderabbit pr 24",
+            "code rabbit pr 24",
+            "check coderabbit 24",
+        ] {
+            let res = parse_deterministic(phrase).unwrap_or_else(|| panic!("failed to parse {phrase:?}"));
+            assert!(
+                matches!(res.intent, ParsedIntent::AnalysePr { pr_number: 24, .. }),
+                "{phrase} should match AnalysePr with PR 24, got {:?}",
+                res.intent
+            );
+        }
+    }
+
+    #[test]
+    fn test_github_feed_and_pr_list_parsing() {
+        // Feed / Dashboard / Home view phrases
+        for phrase in [
+            "show me my github feed.",
+            "show me my github feed",
+            "show my github feed",
+            "open my github feed",
+            "open github feed",
+            "give me my github feed",
+            "pull up my github feed",
+            "bring up my github feed",
+            "display github feed",
+            "view my github feed",
+            "check my github feed",
+            "github feed",
+            "the github feed",
+            "my github feed",
+            "open github dashboard",
+            "show github dashboard",
+            "show me github dashboard",
+            "show my github dashboard",
+            "open my github dashboard",
+            "github dashboard",
+            "open github interface",
+            "show github interface",
+            "github interface",
+            "open github overview",
+            "show github overview",
+            "show me github overview",
+            "github overview",
+            "what's on my github",
+            "what is on my github",
+            "what's new on github",
+            "what is new on github",
+            "what needs my attention on github",
+            "what needs attention on github",
+            "github attention",
+            "github home",
+            "open github home",
+            "show github home",
+            "github activity",
+            "show my github activity",
+            "open github activity",
+            "github updates",
+            "show github updates",
+            "open my github",
+            "show my github",
+            "open github",
+            "show github",
+            "my github",
+            "take me to my github feed",
+            "go to github dashboard",
+            "feed on github",
+            "dashboard on github",
+            "developer feed",
+            "dev feed",
+            "coding feed",
+            "developer dashboard",
+            "dev dashboard",
+        ] {
+            let res = parse_deterministic(phrase).unwrap_or_else(|| panic!("failed to parse feed phrase {phrase:?}"));
+            match res.intent {
+                ParsedIntent::OpenGitHubDashboard { subpage } => {
+                    assert_eq!(subpage, "feed", "{phrase} should have subpage 'feed'");
+                }
+                other => panic!("{phrase} expected OpenGitHubDashboard feed, got {other:?}"),
+            }
+        }
+
+        // Pull Requests subpage phrases
+        for phrase in [
+            "open the pr list.",
+            "open the pr list",
+            "open pr list",
+            "show the pr list",
+            "show me the pr list",
+            "show me my pr list",
+            "show my pr list",
+            "give me the pr list",
+            "bring up the pr list",
+            "pull up the pr list",
+            "display the pr list",
+            "view the pr list",
+            "check the pr list",
+            "pr list",
+            "prs list",
+            "pull request list",
+            "pull requests list",
+            "open pull requests",
+            "show pull requests",
+            "show me pull requests",
+            "show open prs",
+            "show all open prs",
+            "show open pull requests",
+            "list prs",
+            "list all prs",
+            "list open prs",
+            "list of prs",
+            "list of pull requests",
+            "open prs",
+            "my prs",
+            "show my prs",
+            "what prs are open",
+            "which prs are open",
+            "all open prs",
+            "github prs",
+            "github pr list",
+            "github pull requests",
+            "open github prs",
+            "show github prs",
+            "take me to the pr list",
+            "prs that need review",
+        ] {
+            let res = parse_deterministic(phrase).unwrap_or_else(|| panic!("failed to parse pr phrase {phrase:?}"));
+            match res.intent {
+                ParsedIntent::OpenGitHubDashboard { subpage } => {
+                    assert_eq!(subpage, "pull_requests", "{phrase} should have subpage 'pull_requests'");
+                }
+                other => panic!("{phrase} expected OpenGitHubDashboard pull_requests, got {other:?}"),
+            }
+        }
+
+        // Issues subpage phrases
+        for phrase in [
+            "open github issues",
+            "show github issues",
+            "show me my github issues",
+            "github issues",
+            "open the issues list",
+            "show the issues list",
+            "issues list",
+            "open issues list",
+            "my issues",
+            "open issues",
+            "show issues",
+            "all issues",
+            "list of issues",
+            "list issues",
+            "what issues are open",
+            "github issue list",
+        ] {
+            let res = parse_deterministic(phrase).unwrap_or_else(|| panic!("failed to parse issues phrase {phrase:?}"));
+            match res.intent {
+                ParsedIntent::OpenGitHubDashboard { subpage } => {
+                    assert_eq!(subpage, "issues", "{phrase} should have subpage 'issues'");
+                }
+                other => panic!("{phrase} expected OpenGitHubDashboard issues, got {other:?}"),
+            }
+        }
+
+        // Organizations subpage phrases
+        for phrase in [
+            "open github organizations",
+            "open github orgs",
+            "show github organizations",
+            "show github orgs",
+            "show my organizations",
+            "my github organizations",
+            "my github orgs",
+            "github orgs",
+            "github organizations",
+            "orgs list",
+            "organizations list",
+            "my orgs",
+            "open orgs",
+            "github teams",
+            "my teams",
+        ] {
+            let res = parse_deterministic(phrase).unwrap_or_else(|| panic!("failed to parse orgs phrase {phrase:?}"));
+            match res.intent {
+                ParsedIntent::OpenGitHubDashboard { subpage } => {
+                    assert_eq!(subpage, "organizations", "{phrase} should have subpage 'organizations'");
+                }
+                other => panic!("{phrase} expected OpenGitHubDashboard organizations, got {other:?}"),
+            }
+        }
     }
 }

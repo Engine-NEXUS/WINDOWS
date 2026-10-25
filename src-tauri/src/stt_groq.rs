@@ -11,6 +11,12 @@ use reqwest::Client;
 
 const GROQ_STT_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 const GROQ_MODEL: &str = "whisper-large-v3-turbo";
+/// Slower, more accurate sibling of the production model. NOT used by the app;
+/// it exists so the evaluator can answer "is turbo costing us command accuracy?"
+/// (`stt_eval --engine groq-large`) before anyone changes the production default.
+pub const GROQ_MODEL_LARGE: &str = "whisper-large-v3";
+/// The production model id, exported for the evaluator.
+pub const GROQ_MODEL_TURBO: &str = GROQ_MODEL;
 
 /// Domain-vocabulary decoder bias for every NEXUS command transcription.
 ///
@@ -33,12 +39,23 @@ Open my chat with Mummy in WhatsApp. Chat with Amma. \
 Analyse Servx. Analyse Zync. GitHub pull request. Merge pull request. \
 List pull requests. Search for. Play pause. Next track. Previous track. \
 Memory audit. Forget everything. Take the mouse. Control my cursor. \
-Type this. Press enter. Click the button. Search the web. \
-Remember this button as. Click learned. Forget learned. \
+Type this. Press enter. Click the button. \
 Ghostwriter. Take a letter. Order food. Send message. \
 Deepgram Groq Supabase Eesha Prem Lakshya Congi Shopkart NEXUS \
 Shut down my laptop. Restart my laptop. Lock my laptop. \
+Practice unattended shutdown. Allow unattended shutdown. Turn off unattended shutdown. \
+Hook up Antigravity. Hook up OpenCode. \
 open close stop cancel navigate analyse search type click press scroll.";
+
+/// Generic command hints for turns that are NOT owner-verified (speaker
+/// verification is off by default, so this is most users' turns). Unlike
+/// [`NEXUS_VOCABULARY`] it names no private projects or people — only phrases
+/// every NEXUS user can say — so it cannot push a stranger's speech toward the
+/// developer's repo names. Opt-in (`sttCommandHints`): a decoder prompt can also
+/// make Whisper invent these words on silence, so it ships off until the
+/// scorecard's A/B (`stt_eval --bias commands` vs `--bias neutral`) shows the
+/// leak rate does not rise. Stays well inside Whisper's 224-token prompt window.
+pub const COMMAND_VOCABULARY: &str = "NEXUS. Open Chrome. Open WhatsApp. Open Spotify. Open settings. Close the window. New tab. Search for. Play. Pause. Next song. Stop. Cancel. Ghost mode. Exit ghost mode. List pull requests. Send a WhatsApp message.";
 
 /// Neutral English decoder instruction used when a turn has not been
 /// owner-verified. Unlike the owner vocabulary, it does not bias Whisper
@@ -58,7 +75,34 @@ pub const STT_VERBOSE_RESPONSE_FORMAT: &str = "verbose_json";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecoderBias {
     OwnerCommand,
+    /// Generic [`COMMAND_VOCABULARY`] for unenrolled turns, when enabled.
+    Commands,
     Neutral,
+}
+
+/// Which decoder bias a turn gets. Only a verified owner earns the private
+/// vocabulary; an unenrolled user (no voice profile — the default) can opt into
+/// the generic command hints; a stranger, an uncertain or a rejected voice never
+/// gets any bias.
+pub fn decoder_bias_for_turn(
+    ownership: crate::voice_profile::TurnOwnership,
+    command_hints: bool,
+) -> DecoderBias {
+    use crate::voice_profile::TurnOwnership as T;
+    match ownership {
+        T::Verified => DecoderBias::OwnerCommand,
+        T::Unenrolled if command_hints => DecoderBias::Commands,
+        _ => DecoderBias::Neutral,
+    }
+}
+
+/// Label recorded in `stt:turn_stats.decoder_bias`.
+pub fn decoder_bias_label(bias: DecoderBias) -> &'static str {
+    match bias {
+        DecoderBias::OwnerCommand => "owner",
+        DecoderBias::Commands => "commands",
+        DecoderBias::Neutral => "neutral",
+    }
 }
 
 /// Pure Groq multipart fields. Centralizing these values prevents one STT path
@@ -78,22 +122,10 @@ pub(crate) fn decoder_prompt(prompt: Option<&'static str>) -> &'static str {
     prompt.unwrap_or(NEUTRAL_DECODER_PROMPT)
 }
 
-/// Which decoder bias a turn gets. The NEXUS vocabulary nudges Whisper toward NEXUS commands,
-/// so it is withheld from a voice that is KNOWN not to be the owner (uncertain, rejected).
-/// With nobody enrolled there is no owner to protect: `Unenrolled` gets the vocabulary too.
-/// Before, every unenrolled turn got the neutral prompt, so "chat with mummy in WhatsApp" was
-/// heard as "chart with mommy and what so".
-pub(crate) fn decoder_bias_for(ownership: crate::voice_profile::TurnOwnership) -> DecoderBias {
-    use crate::voice_profile::TurnOwnership::*;
-    match ownership {
-        Verified | Unenrolled => DecoderBias::OwnerCommand,
-        Uncertain | Rejected => DecoderBias::Neutral,
-    }
-}
-
 pub(crate) fn decoder_bias_prompt(bias: DecoderBias) -> &'static str {
     match bias {
         DecoderBias::OwnerCommand => NEXUS_VOCABULARY,
+        DecoderBias::Commands => COMMAND_VOCABULARY,
         DecoderBias::Neutral => NEUTRAL_DECODER_PROMPT,
     }
 }
@@ -158,7 +190,7 @@ pub async fn transcribe_with_groq(
         return Err("No Groq API key provided".to_string());
     }
 
-    let wav_bytes = pcm_to_wav(samples, 16000);
+    let wav_bytes = crate::stt::encode_wav_for_upload(samples, 16000)?;
     tracing::info!(
         "stt-groq: sending {} bytes ({}ms audio) to Groq",
         wav_bytes.len(),
@@ -288,6 +320,35 @@ pub struct GroqSegment {
     pub avg_logprob: f32,
     #[serde(default)]
     pub no_speech_prob: f32,
+    /// Whisper's own repetition signal (gzip ratio of the segment text);
+    /// > ~2.4 means a looping/degenerate decode.
+    #[serde(default)]
+    pub compression_ratio: f32,
+}
+
+/// Thresholds for [`confidence_rejects`]. Whisper's reference decoder falls
+/// back/gives up at avg_logprob < -1.0 and compression_ratio > 2.4; we are
+/// stricter about *acting* than the decoder is about retrying, so the shipped
+/// values leave a margin. They are a starting point: calibrate them from the
+/// held-out set (`voice_scorecard.py` prints the sweep) before enabling the gate.
+pub const CONFIDENCE_MIN_AVG_LOGPROB: f32 = -1.2;
+pub const CONFIDENCE_MAX_COMPRESSION_RATIO: f32 = 2.6;
+
+/// True when Groq's own segment statistics say the transcript is not trustworthy:
+/// EVERY segment is below the log-probability floor, or ANY segment is a
+/// degenerate repetition. Empty segment list (no information) never rejects.
+/// `no_speech_prob` is deliberately not used: it reads 0.000 on every segment of
+/// `whisper-large-v3-turbo` (see `verify_confidence`).
+pub fn confidence_rejects(segments: &[GroqSegment]) -> bool {
+    confidence_rejects_with(segments, CONFIDENCE_MIN_AVG_LOGPROB, CONFIDENCE_MAX_COMPRESSION_RATIO)
+}
+
+pub fn confidence_rejects_with(segments: &[GroqSegment], min_logprob: f32, max_ratio: f32) -> bool {
+    if segments.is_empty() {
+        return false;
+    }
+    segments.iter().all(|s| s.avg_logprob < min_logprob)
+        || segments.iter().any(|s| s.compression_ratio > max_ratio)
 }
 
 /// Transcribe with structured segment metadata (`verbose_json`).
@@ -302,13 +363,25 @@ pub async fn transcribe_with_groq_verbose(
     client: &Client,
     prompt: Option<&'static str>,
 ) -> Result<(String, Vec<GroqSegment>), String> {
+    transcribe_with_groq_verbose_model(samples, api_key, client, prompt, GROQ_MODEL).await
+}
+
+/// [`transcribe_with_groq_verbose`] with an explicit model id (evaluator A/B).
+pub async fn transcribe_with_groq_verbose_model(
+    samples: &[i16],
+    api_key: &str,
+    client: &Client,
+    prompt: Option<&'static str>,
+    model: &'static str,
+) -> Result<(String, Vec<GroqSegment>), String> {
     if api_key.is_empty() {
         return Err("No Groq API key provided".to_string());
     }
 
-    let wav_bytes = pcm_to_wav(samples, 16000);
+    let wav_bytes = crate::stt::encode_wav_for_upload(samples, 16000)?;
 
-    let fields = transcription_fields("audio.wav", "audio/wav", prompt, true);
+    let mut fields = transcription_fields("audio.wav", "audio/wav", prompt, true);
+    fields.model = model;
     let form = groq_transcription_form(wav_bytes, &fields)?;
 
     crate::usage_counter::bump("stt");
@@ -362,6 +435,10 @@ pub async fn transcribe_with_groq_verbose(
                     .get("no_speech_prob")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0) as f32,
+                compression_ratio: seg
+                    .get("compression_ratio")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as f32,
             });
         }
     }
@@ -369,59 +446,9 @@ pub async fn transcribe_with_groq_verbose(
     Ok((text, segments))
 }
 
-/// Convert raw i16 PCM samples to a WAV file (16-bit, mono, given sample rate).
-fn pcm_to_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
-    let num_samples = samples.len();
-    let data_size = num_samples * 2;
-    let mut wav = Vec::with_capacity(44 + data_size);
-
-    // RIFF header
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36 + data_size as u32).to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-
-    // fmt chunk
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
-    wav.extend_from_slice(&sample_rate.to_le_bytes());
-    wav.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
-    wav.extend_from_slice(&2u16.to_le_bytes()); // block align
-    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-
-    // data chunk
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&(data_size as u32).to_le_bytes());
-
-    for &s in samples {
-        wav.extend_from_slice(&s.to_le_bytes());
-    }
-
-    wav
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_pcm_to_wav_header() {
-        let samples = vec![0i16; 160]; // 10ms of audio at 16kHz
-        let wav = pcm_to_wav(&samples, 16000);
-        assert_eq!(&wav[0..4], b"RIFF");
-        assert_eq!(&wav[8..12], b"WAVE");
-        assert_eq!(&wav[12..16], b"fmt ");
-        assert_eq!(&wav[36..40], b"data");
-        assert_eq!(wav.len(), 44 + 320); // 44 header + 160 samples * 2 bytes
-    }
-
-    #[test]
-    fn test_empty_samples() {
-        let samples: Vec<i16> = vec![];
-        let wav = pcm_to_wav(&samples, 16000);
-        assert_eq!(wav.len(), 44); // just the header
-    }
 
     #[test]
     fn test_groq_url_constant() {
@@ -453,15 +480,24 @@ mod tests {
         }
     }
 
+    /// Live miss 2026-10-19 18:21: Groq answered 400 "prompt length must be 896 characters or fewer, but provided
+    /// prompt contains 928 characters" for EVERY turn, so all speech silently fell back to the slow local model.
+    /// The word-count cap above is not the real limit; this is. Keep a margin for the next phrase someone adds.
     #[test]
-    fn decoder_bias_follows_ownership() {
-        use crate::voice_profile::TurnOwnership::*;
-        // Nobody enrolled: there is no owner to protect, so the NEXUS vocabulary applies.
-        assert_eq!(decoder_bias_for(Unenrolled), DecoderBias::OwnerCommand);
-        assert_eq!(decoder_bias_for(Verified), DecoderBias::OwnerCommand);
-        // A voice that is (or may be) someone else never gets command biasing.
-        assert_eq!(decoder_bias_for(Uncertain), DecoderBias::Neutral);
-        assert_eq!(decoder_bias_for(Rejected), DecoderBias::Neutral);
+    fn vocabulary_fits_groqs_prompt_character_limit() {
+        let chars = NEXUS_VOCABULARY.chars().count();
+        assert!(chars <= 860, "NEXUS_VOCABULARY is {chars} characters; Groq rejects the whole request above 896");
+        assert!(NEUTRAL_DECODER_PROMPT.chars().count() <= 860);
+    }
+
+    /// Live miss 2026-10-19: Whisper heard "practice unattended shutdown" as "practice unobtended
+    /// shutdown" and "Raktis unattended shutdown" with no hint in the prompt.
+    #[test]
+    fn vocabulary_teaches_the_unattended_shutdown_phrasing() {
+        let v = NEXUS_VOCABULARY.to_lowercase();
+        for phrase in ["practice unattended shutdown", "allow unattended shutdown", "turn off unattended shutdown", "hook up antigravity", "hook up opencode"] {
+            assert!(v.contains(phrase), "vocabulary missing: {phrase}");
+        }
     }
 
     #[test]
@@ -515,5 +551,102 @@ mod tests {
         let seg: GroqSegment = serde_json::from_value(v).unwrap();
         assert_eq!(seg.text, " Lots of children.");
         assert!((seg.no_speech_prob - 0.91).abs() < 1e-6);
+    }
+
+    /// Task ST: Vocabulary biasing contract for NEXUS_VOCABULARY:
+    /// - Under provider character limit (<= 860 < 896 cap)
+    /// - Contains the wake word ("NEXUS" / "nexus")
+    /// - Contains the ghost-mode phrases ("Ghost mode", "Ghost control", "Exit ghost mode")
+    /// - Contains no duplicate phrase entries
+    #[test]
+    fn test_nexus_vocabulary_prompt_contract() {
+        let chars = NEXUS_VOCABULARY.chars().count();
+        assert!(chars <= 860, "NEXUS_VOCABULARY exceeds character ceiling: {chars}");
+
+        let lower = NEXUS_VOCABULARY.to_lowercase();
+        // Wake word
+        assert!(lower.contains("nexus"), "NEXUS_VOCABULARY must contain the wake word");
+
+        // Ghost mode phrases
+        assert!(lower.contains("ghost mode"), "missing 'ghost mode'");
+        assert!(lower.contains("ghost control"), "missing 'ghost control'");
+        assert!(lower.contains("exit ghost mode"), "missing 'exit ghost mode'");
+
+        // No duplicate entries (sentence-level command phrases)
+        let phrases: Vec<&str> = NEXUS_VOCABULARY
+            .split('.')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut seen = std::collections::HashSet::new();
+        for phrase in phrases {
+            let lower_phrase = phrase.to_lowercase();
+            assert!(
+                seen.insert(lower_phrase.clone()),
+                "NEXUS_VOCABULARY contains duplicate entry: '{phrase}'"
+            );
+        }
+    }
+
+    /// Task ST: Upload encoding refuses an empty audio buffer (0 samples) to prevent wasted API calls.
+    #[test]
+    fn test_groq_refuses_empty_samples_buffer() {
+        let res = crate::stt::encode_wav_for_upload(&[], 16000);
+        assert!(res.is_err(), "Empty audio buffer must be refused before upload");
+    }
+
+    fn seg(logprob: f32, ratio: f32) -> GroqSegment {
+        GroqSegment { text: "x".into(), avg_logprob: logprob, no_speech_prob: 0.0, compression_ratio: ratio }
+    }
+
+    #[test]
+    fn test_confidence_rejects() {
+        // Confident, normal speech passes.
+        assert!(!confidence_rejects(&[seg(-0.3, 1.1)]));
+        assert!(!confidence_rejects(&[seg(-0.9, 1.6), seg(-1.1, 1.4)]));
+        // No metadata → no information → never reject (local fallback, parse gaps).
+        assert!(!confidence_rejects(&[]));
+        // Every segment below the floor → reject.
+        assert!(confidence_rejects(&[seg(-1.5, 1.2)]));
+        assert!(confidence_rejects(&[seg(-1.3, 1.0), seg(-1.9, 1.0)]));
+        // One confident segment saves a mixed transcript.
+        assert!(!confidence_rejects(&[seg(-1.5, 1.0), seg(-0.4, 1.0)]));
+        // A single looping segment rejects regardless of logprob.
+        assert!(confidence_rejects(&[seg(-0.2, 3.1)]));
+        // Missing compression_ratio parses as 0 (never trips).
+        let v: GroqSegment = serde_json::from_value(serde_json::json!({"text":"hi","avg_logprob":-0.5})).unwrap();
+        assert_eq!(v.compression_ratio, 0.0);
+    }
+    #[test]
+    fn test_decoder_bias_for_turn() {
+        use crate::voice_profile::TurnOwnership as T;
+        // Default (hints off) = exactly the previous behaviour.
+        assert_eq!(decoder_bias_for_turn(T::Verified, false), DecoderBias::OwnerCommand);
+        assert_eq!(decoder_bias_for_turn(T::Unenrolled, false), DecoderBias::Neutral);
+        // Hints on: only unenrolled turns change; the owner keeps the owner prompt.
+        assert_eq!(decoder_bias_for_turn(T::Unenrolled, true), DecoderBias::Commands);
+        assert_eq!(decoder_bias_for_turn(T::Verified, true), DecoderBias::OwnerCommand);
+        // Someone else's voice never receives a bias, setting or not.
+        for t in [T::Uncertain, T::Rejected] {
+            assert_eq!(decoder_bias_for_turn(t, true), DecoderBias::Neutral);
+            assert_eq!(decoder_bias_for_turn(t, false), DecoderBias::Neutral);
+        }
+        assert_eq!(decoder_bias_label(DecoderBias::Commands), "commands");
+        assert_eq!(decoder_bias_prompt(DecoderBias::Commands), COMMAND_VOCABULARY);
+    }
+
+    #[test]
+    fn test_command_vocabulary_is_generic_and_small() {
+        // No private names from the owner prompt.
+        for private in ["Servx", "Zync", "Eesha", "Prem", "Lakshya", "Congi", "Shopkart", "Supabase"] {
+            assert!(!COMMAND_VOCABULARY.contains(private), "{private}");
+        }
+        // Whisper's prompt window is 224 tokens; stay far below (≈ 1.5 tokens/word).
+        assert!(COMMAND_VOCABULARY.split_whitespace().count() * 2 < 224);
+        // ~1.5 tokens/word (the comment above); NEXUS_VOCABULARY's own budget (<= 140 words,
+        // <= 860 chars) is pinned by test_nexus_vocabulary_budget_and_coverage.
+        assert!(NEXUS_VOCABULARY.split_whitespace().count() * 3 / 2 < 224);
+        assert!(COMMAND_VOCABULARY.contains("NEXUS"));
     }
 }

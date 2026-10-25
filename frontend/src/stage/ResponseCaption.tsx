@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { initCaptionListener, onCaptionLineUpdate, CaptionLineEvent } from "../audio/captionScheduler";
+import { onSpeechStageLine, setSpeechCaptionReady, speechStageActive } from "../audio/speechStage";
 
 interface OrbRect {
   x: number;
@@ -16,17 +17,24 @@ interface OrbRect {
 export function ResponseCaption() {
   const [rect, setRect] = useState<OrbRect | null>(null);
   const [lineEvent, setLineEvent] = useState<CaptionLineEvent | null>(null);
+  useEffect(() => {
+    setSpeechCaptionReady(Boolean(rect));
+    return () => setSpeechCaptionReady(false);
+  }, [rect]);
 
   useEffect(() => {
     initCaptionListener();
     const unsub = onCaptionLineUpdate((event, done) => {
+      if (speechStageActive()) return;
       setLineEvent(event);
       if (done && event.phase === "cleared") {
         setLineEvent(null);
       }
     });
+    const unsubStage = onSpeechStageLine((event) => setLineEvent(event));
     return () => {
       unsub();
+      unsubStage();
     };
   }, []);
 

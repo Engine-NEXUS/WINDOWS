@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from "react";
 import "./voice-orb.js";
 import { getEnvelopeLevel } from "../audio/captionScheduler";
+import { getSpeechStageEnvelopeLevel, speechStageActive } from "../audio/speechStage";
 
 export type VoiceOrbState = "idle" | "listening" | "thinking" | "speaking" | "text";
 
@@ -165,8 +166,9 @@ export const VoiceOrb: React.FC<VoiceOrbProps> = ({
     if (state !== "speaking") return;
     let raf = 0;
     const pump = () => {
-      const v = getEnvelopeLevel();
-      if (v !== null && orbRef.current) orbRef.current.setLevel(v);
+      const v = speechStageActive() ? getSpeechStageEnvelopeLevel() : getEnvelopeLevel();
+      if (orbRef.current && speechStageActive()) orbRef.current.setLevel(v ?? 0);
+      else if (v !== null && orbRef.current) orbRef.current.setLevel(v);
       raf = requestAnimationFrame(pump);
     };
     raf = requestAnimationFrame(pump);

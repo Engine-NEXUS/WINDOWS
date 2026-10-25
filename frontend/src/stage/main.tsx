@@ -32,6 +32,38 @@ interface SpatialPin {
   pin_y: number;
 }
 
+/**
+ * Position an overlay element by direct CSSOM assignment. React's `style`
+ * prop is silently dropped in the stage window: its CSP injects a per-load
+ * nonce into style-src, which makes 'unsafe-inline' inert, so every
+ * rendered inline style vanishes (see OrbFrame.tsx; the orb hit this on
+ * 2026-10-04). Boxes/pins rendered via `style={{}}` collapsed to 0×0 or
+ * stacked at the top-left.
+ */
+function placeAt(
+  el: HTMLElement | null,
+  left: number,
+  top: number,
+  width?: number,
+  height?: number,
+): void {
+  if (!el) return;
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+  if (width !== undefined) el.style.width = `${width}px`;
+  if (height !== undefined) el.style.height = `${height}px`;
+}
+
+/** Register this layer's hitboxes under its own named source (Rust keeps one
+ * rect set per source, so the orb / loading / annotation canvas never clobber
+ * each other). The command requires `source`; omitting it was rejected and the
+ * error swallowed, so pins were never clickable. */
+function setSpatialHitboxes(rects: { x: number; y: number; w: number; h: number }[]): void {
+  invoke("stage_set_hitboxes", { source: "spatial", rects }).catch((e) => {
+    console.warn("[NEXUS] stage_set_hitboxes(spatial) failed:", e);
+  });
+}
+
 /** Truncate a pin label for the floating badge (≤18 chars). */
 function pinLabel(label: string): string {
   const t = label.trim();
@@ -45,9 +77,14 @@ function pinLabel(label: string): string {
  * content. 100% click-through except over pin hitboxes (registered in
  * Rust via stage_set_hitboxes so the cursor exception applies there).
  */
+/** Pins/boxes left on screen forever were re-photographed by the next
+ * analysis and never dismissed. They now expire on their own. */
+const SPATIAL_PIN_TTL_MS = 20_000;
+
 function SpatialAnnotationLayer() {
   const [pins, setPins] = useState<SpatialPin[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
+  const expiryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Rust dispatches annotations (physical px) + hover highlights from
   // the sidebar cards + clearing (empty pins array).
@@ -62,6 +99,15 @@ function SpatialAnnotationLayer() {
           const list = event.payload?.pins ?? [];
           setPins(list);
           setActiveId(null);
+          if (expiryRef.current) clearTimeout(expiryRef.current);
+          expiryRef.current = null;
+          if (list.length > 0) {
+            expiryRef.current = setTimeout(() => {
+              setPins([]);
+              setActiveId(null);
+              setSpatialHitboxes([]);
+            }, SPATIAL_PIN_TTL_MS);
+          }
           // Register pin hitboxes (physical px) so the cursor exception
           // lets the user click pins; everything else stays click-through.
           // Empty list = fully click-through again.
@@ -72,7 +118,7 @@ function SpatialAnnotationLayer() {
             w: Math.round(96 * dpr),
             h: Math.round(26 * dpr),
           }));
-          invoke("stage_set_hitboxes", { source: "spatial", rects }).catch(() => {});
+          setSpatialHitboxes(rects);
         },
       );
       const u2 = await listen<{ id?: number | null }>("stage:highlight_item", (event) => {
@@ -83,7 +129,8 @@ function SpatialAnnotationLayer() {
     })().catch(() => {});
     return () => {
       unlisteners.forEach((u) => u());
-      invoke("stage_set_hitboxes", { source: "spatial", rects: [] }).catch(() => {});
+      if (expiryRef.current) clearTimeout(expiryRef.current);
+      setSpatialHitboxes([]);
     };
   }, []);
 
@@ -114,12 +161,7 @@ function SpatialAnnotationLayer() {
   return (
     <>
       {/* SVG leader lines under the badges */}
-      <svg
-        style={{
-          position: "fixed", inset: 0, width: "100vw", height: "100vh",
-          pointerEvents: "none", zIndex: 99998,
-        }}
-      >
+      <svg className="spatial-leader-layer">
         {pins.map((p) => {
           const x1 = css(p.pin_x) + 14;
           const y1 = css(p.pin_y) + 24;
@@ -140,15 +182,7 @@ function SpatialAnnotationLayer() {
         <div
           key={`box-${p.id}`}
           className={`spatial-box ${activeId === p.id ? "spatial-box--active" : ""}`}
-          ref={(el) => {
-            if (el) {
-              el.style.position = "fixed";
-              el.style.left = `${css(p.x)}px`;
-              el.style.top = `${css(p.y)}px`;
-              el.style.width = `${css(p.width)}px`;
-              el.style.height = `${css(p.height)}px`;
-            }
-          }}
+          ref={(el) => placeAt(el, css(p.x), css(p.y), css(p.width), css(p.height))}
         />
       ))}
 
@@ -158,13 +192,7 @@ function SpatialAnnotationLayer() {
           key={`pin-${p.id}`}
           type="button"
           className={`spatial-pin ${activeId === p.id ? "spatial-pin--active" : ""}`}
-          ref={(el) => {
-            if (el) {
-              el.style.position = "fixed";
-              el.style.left = `${css(p.pin_x)}px`;
-              el.style.top = `${css(p.pin_y)}px`;
-            }
-          }}
+          ref={(el) => placeAt(el, css(p.pin_x), css(p.pin_y))}
           onClick={() => handlePinClick(p.id)}
           title={p.label}
         >
