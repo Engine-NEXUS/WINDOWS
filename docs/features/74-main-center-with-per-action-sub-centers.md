@@ -1,5 +1,12 @@
 # Feature 74: Main Center + Per-Action Sub-Centers — Implementation Plan
 
+> **Current implementation note (2026-10-19):** The original target contract
+> below is broader than the implemented `SubCenter` trait. The live typed
+> `ActionSpec` and policy boundary are described in
+> [command-center alignment](../architecture/12-command-center-alignment.md).
+> Center names still include legacy execution adapters; this document's phase
+> log remains history, not proof that all execution moved into center modules.
+
 ## 0. Contract (read first)
 
 - Every action = one sub-center module with one contract:

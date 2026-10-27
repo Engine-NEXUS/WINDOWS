@@ -42,7 +42,6 @@ open_maps_window
 open_settings_window
 orchestrator_github_clear_token
 orchestrator_status
-pause_wakeword
 preview_companion_hud
 proactive_snooze
 query_impact

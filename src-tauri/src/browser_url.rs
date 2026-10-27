@@ -31,6 +31,231 @@ pub fn get_active_browser_url() -> Option<String> {
     }
 }
 
+/// URL evidence for screen capture and foreground review. Unlike the legacy
+/// accessor, this never invents a URL from a window title. A missing URL is
+/// valid context; callers can still analyse the identified foreground window.
+pub(crate) fn get_verified_active_browser_url() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        get_browser_url_windows_verified()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        get_active_browser_url()
+    }
+}
+
+fn normalized_verified_web_url(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.len() > 4096 || raw.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let candidate = if raw.starts_with("https://") || raw.starts_with("http://") {
+        raw.to_string()
+    } else if raw.contains('.') && !raw.contains("://") && !raw.contains('@') {
+        // Chromium can omit the scheme in the address bar. The URL is used as
+        // optional context; if it cannot be parsed, capture remains possible.
+        format!("https://{raw}")
+    } else {
+        return None;
+    };
+    let url = reqwest::Url::parse(&candidate).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return None;
+    }
+    Some(url.to_string())
+}
+
+/// Extract the host (domain) from a URL string for logging.
+/// Returns None if the URL cannot be parsed.
+pub(crate) fn extract_host(url: &str) -> Option<String> {
+    reqwest::Url::parse(url).ok()?.host_str().map(|s| s.to_string())
+}
+
+fn is_address_bar_identity(name: &str, automation_id: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let id = automation_id.to_ascii_lowercase();
+    name.contains("address and search bar")
+        || name.contains("search or enter address")
+        || name.contains("enter web address")
+        || name.trim() == "address bar"
+        || id.contains("omnibox")
+        || id.contains("locationbar")
+}
+
+/// Read only the address bar belonging to the exact foreground browser HWND.
+/// Searching from the focused element can start inside the webpage, where an
+/// arbitrary Edit field is neither the address bar nor a safe page identity.
+#[cfg(target_os = "windows")]
+fn get_browser_url_windows_verified() -> Option<String> {
+    get_browser_url_windows_inner(true)
+}
+
+/// Same logic as `get_browser_url_windows_verified` but WITHOUT the
+/// `has_keyboard_focus()` rejection. Used as a relaxed fallback when the
+/// verified reader returns None (e.g., Chromium hasn't built its accessibility
+/// tree yet). Accepts the value only if `normalized_verified_web_url` parses
+/// it to an http(s) URL with a host.
+#[cfg(target_os = "windows")]
+fn get_browser_url_windows_relaxed() -> Option<String> {
+    get_browser_url_windows_inner(false)
+}
+
+/// Core URL extraction logic shared by verified and relaxed readers.
+/// If `require_no_focus` is true, rejects when the address bar has keyboard focus.
+#[cfg(target_os = "windows")]
+fn get_browser_url_windows_inner(require_no_focus: bool) -> Option<String> {
+    use uiautomation::controls::ControlType;
+    use uiautomation::types::Handle;
+    use uiautomation::{UIAutomation, UIElement};
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0 == 0 {
+        return None;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid); }
+    if pid == 0 || !is_browser_process(&get_process_name(pid)?) {
+        return None;
+    }
+    let automation = UIAutomation::new().ok()?;
+    let window = automation.element_from_handle(Handle::from(hwnd.0 as isize)).ok()?;
+
+    let location = automation
+        .create_matcher()
+        .from(window.clone())
+        .timeout(400)
+        .classname("LocationBarView")
+        .find_first()
+        .ok();
+    let edit = location.and_then(|bar| {
+        automation
+            .create_matcher()
+            .from(bar)
+            .timeout(300)
+            .control_type(ControlType::Edit)
+            .find_first()
+            .ok()
+    }).or_else(|| {
+        automation
+            .create_matcher()
+            .from(window)
+            .timeout(500)
+            .control_type(ControlType::Edit)
+            .filter_fn(Box::new(|element: &UIElement| {
+                Ok(is_address_bar_identity(
+                    &element.get_name().unwrap_or_default(),
+                    &element.get_automation_id().unwrap_or_default(),
+                ))
+            }))
+            .find_first()
+            .ok()
+    })?;
+
+    if require_no_focus && edit.has_keyboard_focus().unwrap_or(false) {
+        return None;
+    }
+    let url = normalized_verified_web_url(&read_url_from_edit(&edit)?)?;
+    if unsafe { GetForegroundWindow() }.0 != hwnd.0 {
+        return None;
+    }
+    Some(url)
+}
+
+/// Resolve the foreground browser URL using a multi-stage ladder.
+/// Each stage runs only if the previous gave None. All blocking UIA work
+/// runs inside `tokio::task::spawn_blocking`.
+/// Logs each stage with `println!("[REVERSE] url stage={} result={}", ...)`.
+/// Never prints more than scheme+host of the URL.
+#[cfg(target_os = "windows")]
+pub(crate) async fn resolve_foreground_url_for_command() -> Option<String> {
+    use crate::live::commands::keyboard::press_hotkey;
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    let initial_hwnd = unsafe { GetForegroundWindow() };
+    if initial_hwnd.0 == 0 {
+        return None;
+    }
+
+    // Helper to log result (scheme+host only)
+    let log_result = |stage: &str, result: &Option<String>| {
+        let display = result.as_ref().map(|u| {
+            if let Ok(parsed) = reqwest::Url::parse(u) {
+                format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""))
+            } else {
+                "invalid".to_string()
+            }
+        }).unwrap_or_else(|| "none".to_string());
+        println!("[REVERSE] url stage={} result={}", stage, display);
+    };
+
+    // Stage 0: Verified (once)
+    let result = tokio::task::spawn_blocking(|| get_browser_url_windows_verified()).await.ok().flatten();
+    log_result("verified", &result);
+    if let Some(url) = result {
+        return Some(url);
+    }
+
+    // Stages 1-3: Retry verified up to 3 times with 350ms delay
+    for _retry in 1..=3 {
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        // Check HWND hasn't changed
+        if unsafe { GetForegroundWindow() }.0 != initial_hwnd.0 {
+            println!("[REVERSE] url stage=verified_retry hwnd_changed");
+            return None;
+        }
+        let result = tokio::task::spawn_blocking(|| get_browser_url_windows_verified()).await.ok().flatten();
+        log_result("verified_retry", &result);
+        if let Some(url) = result {
+            return Some(url);
+        }
+    }
+
+    // Stage 4: Relaxed reader (no keyboard focus check)
+    if unsafe { GetForegroundWindow() }.0 != initial_hwnd.0 {
+        println!("[REVERSE] url stage=relaxed hwnd_changed");
+        return None;
+    }
+    let result = tokio::task::spawn_blocking(|| get_browser_url_windows_relaxed()).await.ok().flatten();
+    log_result("relaxed", &result);
+    if let Some(url) = result {
+        return Some(url);
+    }
+
+    // Stage 5: Ctrl+L to focus omnibox, read via relaxed reader, then Escape
+    if unsafe { GetForegroundWindow() }.0 != initial_hwnd.0 {
+        println!("[REVERSE] url stage=ctrl_l hwnd_changed");
+        return None;
+    }
+    // Send Ctrl+L
+    if press_hotkey(&["ctrl", "l"]).is_err() {
+        println!("[REVERSE] url stage=ctrl_l send_failed");
+        return None;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+
+    if unsafe { GetForegroundWindow() }.0 != initial_hwnd.0 {
+        println!("[REVERSE] url stage=ctrl_l hwnd_changed_after_ctrl_l");
+        // Still send Escape to restore focus
+        let _ = press_hotkey(&["escape"]);
+        return None;
+    }
+
+    let result = tokio::task::spawn_blocking(|| get_browser_url_windows_relaxed()).await.ok().flatten();
+    // ALWAYS send Escape to give focus back to the page
+    let _ = press_hotkey(&["escape"]);
+
+    log_result("ctrl_l", &result);
+    result
+}
+
+// Non-Windows stub: just call the existing accessor.
+#[cfg(not(target_os = "windows"))]
+pub(crate) async fn resolve_foreground_url_for_command() -> Option<String> {
+    get_active_browser_url()
+}
+
 /// Known browser executables (lowercase). Pure.
 pub fn is_browser_process(name: &str) -> bool {
     matches!(
@@ -261,6 +486,12 @@ fn get_foreground_window_title() -> Option<String> {
 #[cfg(target_os = "windows")]
 pub(crate) fn foreground_window_title() -> Option<String> {
     get_foreground_window_title()
+}
+
+/// macOS/Linux: NSWorkspace + AX title reads land with the Phase 1 port.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn foreground_window_title() -> Option<String> {
+    None
 }
 
 /// Foreground process executable name, lower-case (e.g. `brave.exe`).
@@ -531,6 +762,31 @@ mod tests {
     }
 
     #[test]
+    fn verified_url_requires_a_web_address() {
+        assert_eq!(
+            normalized_verified_web_url("https://example.com/path?x=1"),
+            Some("https://example.com/path?x=1".into())
+        );
+        assert_eq!(
+            normalized_verified_web_url("example.com/path"),
+            Some("https://example.com/path".into())
+        );
+        for value in ["brave://settings", "about:blank", "hello world", "search term", "user@example.com"] {
+            assert!(normalized_verified_web_url(value).is_none(), "{value}");
+        }
+    }
+
+    #[test]
+    fn only_address_bar_labels_are_accepted() {
+        assert!(is_address_bar_identity("Address and search bar", ""));
+        assert!(is_address_bar_identity("Search or enter address", ""));
+        assert!(is_address_bar_identity("", "OmniboxView"));
+        assert!(!is_address_bar_identity("Email address", ""));
+        assert!(!is_address_bar_identity("Shipping address", ""));
+        assert!(!is_address_bar_identity("Search this page", ""));
+    }
+
+    #[test]
     fn test_get_active_browser_url_does_not_crash() {
         // This test just verifies the function doesn't panic.
         // It may return None if no browser is foreground.
@@ -592,4 +848,51 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn normalized_verified_web_url_accepts_valid_http_urls() {
+        assert_eq!(
+            normalized_verified_web_url("https://example.com/path?x=1"),
+            Some("https://example.com/path?x=1".into())
+        );
+        assert_eq!(
+            normalized_verified_web_url("http://localhost:3000/foo"),
+            Some("http://localhost:3000/foo".into())
+        );
+        // Schemeless with host -> prepends https
+        assert_eq!(
+            normalized_verified_web_url("nextjs.org/docs"),
+            Some("https://nextjs.org/docs".into())
+        );
+        assert_eq!(
+            normalized_verified_web_url("github.com/user/repo"),
+            Some("https://github.com/user/repo".into())
+        );
+        assert_eq!(
+            normalized_verified_web_url("a.b/c?d=e"),
+            Some("https://a.b/c?d=e".into())
+        );
+    }
+
+    #[test]
+    fn normalized_verified_web_url_rejects_invalid() {
+        // Browser internal URLs
+        assert!(normalized_verified_web_url("chrome://settings").is_none());
+        assert!(normalized_verified_web_url("brave://settings").is_none());
+        assert!(normalized_verified_web_url("about:blank").is_none());
+        assert!(normalized_verified_web_url("about:newtab").is_none());
+        assert!(normalized_verified_web_url("edge://settings").is_none());
+        assert!(normalized_verified_web_url("firefox://settings").is_none());
+
+        // Internal whitespace -> reject (leading/trailing is trimmed)
+        assert!(normalized_verified_web_url("https://example.com/path with space").is_none());
+        assert!(normalized_verified_web_url("search term").is_none());
+        assert!(normalized_verified_web_url("user@example.com").is_none()); // email, not URL
+
+        // Empty / too long
+        assert!(normalized_verified_web_url("").is_none());
+        let long = "https://example.com/".repeat(300);
+        assert!(normalized_verified_web_url(&long).is_none());
+    }
+
 }

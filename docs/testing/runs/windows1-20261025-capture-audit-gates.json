@@ -1,0 +1,62 @@
+{
+  "revision": "c430a21c9000e00be131478a7a718f53b5f23baf",
+  "inputHash": "ca2daa4bff07a9b6f7dd6b3b797cc09dc5bee188e573fd74d769b2e2ffbe9cba",
+  "assessedCheckout": "C:\\Users\\Chitkul Lakshya\\.codex\\worktrees\\windows-readiness\\ULTRON",
+  "sourceFileHashes": {
+    "src-tauri/src/capture_audit.rs": "a5574cfc37c371e77cd0fa4fdb8b4aa86e1497229bfc1e4401d3614f5f72006e",
+    "src-tauri/src/wakeword_oww.rs": "02801a3a4773673e1dceee0deb3ddf206994f459a9a6f3e87493d3a8f3a1ff8a",
+    "scripts/capture_audit_summary.py": "98db710c3c197bb9e30fa543e478fa00d635df5a0a4c2f6ae6f7cf7cb4600723",
+    "scripts/capture_audit_summary_test.py": "be656b08fa827f7d2023a44235a62128ac4c8e1815c074a73fe4fdb9d6cd1a6d",
+    "scripts/capture_audit_mutation_check.py": "eac59a43a95114b982a570358f3bfddf932506c970cbb5499af5a976cd26287d"
+  },
+  "mainMatchesAssessedFiles": {
+    "src-tauri/src/capture_audit.rs": true,
+    "src-tauri/src/wakeword_oww.rs": true,
+    "scripts/capture_audit_summary.py": true,
+    "scripts/capture_audit_summary_test.py": true,
+    "scripts/capture_audit_mutation_check.py": true
+  },
+  "checks": {
+    "rustLibrary": {
+      "passed": 2532,
+      "failed": 0,
+      "ignored": 31
+    },
+    "rustIntegration": {
+      "passed": 19,
+      "failed": 0,
+      "ignored": 7
+    },
+    "frontend": {
+      "typecheck": "pass",
+      "testsPassed": 656,
+      "productionBuild": "pass"
+    },
+    "worker": {
+      "typecheck": "pass",
+      "testsPassed": 145
+    },
+    "pythonAutomated": {
+      "scripts": 29,
+      "server": 31,
+      "total": 60
+    },
+    "nlu": "pass:512 rows/8 sources",
+    "provenanceRegression": "pass",
+    "newAuditMutations": "6/6 killed",
+    "existingSpeakerMutations": "15/15 killed",
+    "ipc": "pass",
+    "turnEnds": "pass",
+    "hygiene": "pass",
+    "opacity": "pass",
+    "whitespace": "pass",
+    "deadCode": "pass:148 known findings, none new",
+    "quotedMarkerMutation": "1/1 killed",
+    "totalMutations": "23/23 killed",
+    "expectedCountMutation": "1/1 killed"
+  },
+  "freshRelease": "build starting; not yet verified",
+  "liveCaptureReconciliation": "not run",
+  "featureRawScore": 41,
+  "productionReady": false
+}

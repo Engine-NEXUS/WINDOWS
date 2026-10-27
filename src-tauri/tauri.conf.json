@@ -20,7 +20,7 @@
     },
     "security": {
       "csp": "default-src 'self'; connect-src 'self' wss: https: ipc: http://ipc.localhost; media-src 'self' blob: data: https: http:; img-src 'self' data: blob: https: http: asset: *; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:",
-      "capabilities": ["setup-settings-cap", "sidebar-cap", "settings-sidebar-cap", "stage-cap", "global-shortcut-cap"],
+      "capabilities": ["setup-settings-cap", "sidebar-cap", "settings-sidebar-cap", "stage-cap", "hand-cap", "global-shortcut-cap"],
       "assetProtocol": { "enable": false }
     },
     "macOSPrivateApi": true
@@ -29,7 +29,14 @@
     "active": true,
     "targets": "all",
     "resources": [
-      "resources/oww/**/*",
+      "resources/oww/melspectrogram.onnx",
+      "resources/oww/embedding_model.onnx",
+      "resources/oww/nexus.onnx",
+      "resources/oww/model_manifest.json",
+      "resources/oww/acoustic_profile.json",
+      "resources/oww/comfort_embedding.npy",
+      "resources/oww/nexus_config.yaml",
+      "resources/oww/commands/*",
       "resources/vad/*",
       "resources/smart_turn/*",
       "resources/server/stt_server.py",
@@ -40,7 +47,8 @@
       "resources/server/nlu/model/labels.json",
       "resources/server/nlu/model/tokenizer/*",
       "resources/agent_watch_sidecar/server.cjs",
-      "resources/agent_watch_sidecar/package.json"
+      "resources/agent_watch_sidecar/package.json",
+      "resources/activity-manager-extension/*"
     ],
     "icon": [
       "icons/32x32.png",

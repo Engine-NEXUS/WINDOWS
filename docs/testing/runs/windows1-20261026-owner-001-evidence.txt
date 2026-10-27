@@ -1,0 +1,22 @@
+[ORB-HOTKEY] Hotkey (CommandOrControl+Space) → agent idle, calling agent & waking orb to listening
+[TRACE] turn session=3 rms_max=0.5595 voiced=13/37 endpoint=silence_end path=groq filter=none owner=verified
+[TRACE] p0 receipt len=18 ghost=false owner=verified holders=none(free)
+[TRACE] p1 corrected="open open notepad."
+[MAIN-CMD] Transcript: 'open open notepad.' | Intent: open_app | Center: AppCenter | Evidence: Strong | Owner: Verified (score: 0.942)
+[SUB-ROUTE] SubCenter: AppCenter | Subsystem: LocalCommand | Action: open_app
+[ACTION] 'open open notepad.' → open_app → LocalCommand
+[SUB-PROC] SubCenter AppCenter executing local command: open_app
+[ORB-HOTKEY] Hotkey (CommandOrControl+Space) → agent idle, calling agent & waking orb to listening
+[STT-DROP] heard 'Open notepad. Open notepad.' -> blocked by repeat_loop
+[TRACE] p0 receipt len=0 ghost=false owner=verified holders=none(free)
+[TRACE] turn session=4 rms_max=0.8905 voiced=15/39 endpoint=silence_end path=groq filter=repeat_loop owner=verified
+[TRACE] p0 receipt len=0 ghost=false owner=unenrolled holders=none(free)
+[TRACE] turn session=5 rms_max=0.0000 voiced=0/100 endpoint=no_speech path=skipped filter=phantom owner=pending
+2026-10-25T18:36:02.182524Z  WARN wake: detection suppressed by hand-mode/meeting/TTS-mute state (1 chunks dropped so far) — if you are speaking and nothing happens, check hand mode / meeting mode / pause state
+[LAT] tts 908ms | total 908ms
+[ORB-HOTKEY] Hotkey (CommandOrControl+Space) → agent idle, calling agent & waking orb to listening
+2026-10-25T18:36:14.056095Z  WARN stage: blackout detected (window_gone=false, stale_beat=true) — incident #1
+2026-10-25T18:36:54.777247Z  WARN audio: mic has been silent for ~82s (callbacks 23250-26000, max RMS ever seen: 0.432059). Intel SST driver may need a restart. Try: 1) Unmute mic in Windows settings, 2) Disable 'Audio Enhancements' in mic properties, 3) Restart the app.
+2026-10-25T18:37:04.801034Z  WARN audio: mic has been silent for ~112s (callbacks 23250-27000, max RMS ever seen: 0.432059). Intel SST driver may need a restart. Try: 1) Unmute mic in Windows settings, 2) Disable 'Audio Enhancements' in mic properties, 3) Restart the app.
+2026-10-25T18:37:14.802597Z  WARN audio: mic has been silent for ~142s (callbacks 23250-28000, max RMS ever seen: 0.432059). Intel SST driver may need a restart. Try: 1) Unmute mic in Windows settings, 2) Disable 'Audio Enhancements' in mic properties, 3) Restart the app.
+2026-10-25T18:37:24.802294Z  WARN audio: mic has been silent for ~172s (callbacks 23250-29000, max RMS ever seen: 0.432059). Intel SST driver may need a restart. Try: 1) Unmute mic in Windows settings, 2) Disable 'Audio Enhancements' in mic properties, 3) Restart the app.

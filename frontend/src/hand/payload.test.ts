@@ -110,3 +110,10 @@ describe("statusLine", () => {
     expect(statusLine({ ...base, note: "disarmed (mouse)" })).toContain("disarmed (mouse)");
   });
 });
+
+describe("toPayload sequence", () => {
+  it("carries the frame counter when given and omits it otherwise", () => {
+    expect(toPayload(undefined, 1, 1, 1, 7).seq).toBe(7);
+    expect("seq" in toPayload(undefined, 1, 1)).toBe(false);
+  });
+});

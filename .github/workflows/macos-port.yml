@@ -1,0 +1,41 @@
+name: macOS port check
+
+# Compiler verification for the macOS port. This machine cannot produce
+# platform binaries without the Apple SDK, so every cfg(target_os = "macos")
+# implementation added to src-tauri must pass here before it is trusted
+# (docs/features/117: nothing has ever run on macOS).
+on:
+  push:
+    branches: [feat/action-kernel]
+  pull_request:
+    branches: [feat/action-kernel]
+  workflow_dispatch:
+
+jobs:
+  compile:
+    name: cargo check · aarch64-apple-darwin + tests
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: npm install (frontend)
+        run: npm --prefix frontend install
+
+      # The port gate: typecheck-only for the Apple-Silicon target, catching
+      # any unresolved-Windows-symbol regressions the static classifier
+      # reports as zero.
+      - name: cargo check --lib (aarch64-apple-darwin)
+        working-directory: src-tauri
+        run: cargo check --lib --target aarch64-apple-darwin
+
+      - name: cargo test --lib (macOS host)
+        working-directory: src-tauri
+        run: cargo test --lib

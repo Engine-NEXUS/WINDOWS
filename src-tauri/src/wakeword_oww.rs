@@ -711,8 +711,6 @@ pub(crate) mod engine {
         pub audio_features: AudioFeatures,
         /// Phase B: Audio preprocessor (high-pass filter + noise floor + VAD)
         pub preprocessor: AudioPreprocessor,
-        /// Phase D: Speaker verifier (optional, owner-only activation)
-        pub speaker_verifier: Option<crate::voice_profile::SpeakerVerifier>,
 
         pub sample_rate: i32,
         pub chunk_buffer: Vec<f32>,
@@ -897,7 +895,7 @@ pub(crate) mod engine {
         pub fn with_classifier(
             oww_dir: &Path,
             nexus_model_path: &Path,
-            app_data_dir: PathBuf,
+            _app_data_dir: PathBuf,
         ) -> anyhow::Result<Self> {
             let oww_dir = oww_dir.to_path_buf();
             tracing::info!("Loading openWakeWord classifier: {}", nexus_model_path.display());
@@ -943,24 +941,6 @@ pub(crate) mod engine {
                 classifier,
                 audio_features,
                 preprocessor: AudioPreprocessor::with_profile(&profile),
-                // Phase D: Load speaker profile if it exists (optional)
-                speaker_verifier: {
-                    let profile_path = app_data_dir.join("voice_profile.json");
-                    match crate::voice_profile::SpeakerVerifier::new(profile_path) {
-                        Ok(v) => {
-                            if v.is_enrolled() {
-                                tracing::info!("wake: speaker verification ENABLED (profile loaded)");
-                            } else {
-                                tracing::debug!("wake: speaker verification disabled (no profile enrolled)");
-                            }
-                            Some(v)
-                        }
-                        Err(e) => {
-                            tracing::warn!("wake: failed to load speaker profile: {e}");
-                            None
-                        }
-                    }
-                },
                 sample_rate: 16000,
                 chunk_buffer: Vec::with_capacity(OWW_CHUNK_SIZE),
                 threshold,
@@ -1406,72 +1386,6 @@ pub(crate) mod engine {
                         super::check_pre_trigger(&tail, CONFIRMATION_RMS_THRESHOLD, 3)
                     };
                     if raw_rms >= CONFIRMATION_RMS_THRESHOLD || pre_ok {
-                        // ─── Phase D: Speaker Verification ───────────────────
-                        // After the wake word is confirmed by RMS, check if the
-                        // speaker matches the enrolled voice profile. If a profile
-                        // is enrolled and the speaker doesn't match, reject the
-                        // wake silently (no TTS, no action).
-                        if let Some(ref verifier) = self.speaker_verifier {
-                            if verifier.is_enrolled() {
-                                // Extract embedding from the confirmation audio
-                                match self.audio_features.get_audio_features(&buf) {
-                                    Ok(features) => {
-                                        // The features are [16, 96] — use the mean
-                                        // as a 96-dim speaker embedding
-                                        let features_arr = match features.into_plain_array::<f32>() {
-                                            Ok(arr) => arr,
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "Speaker verification feature conversion failed: {e} \
-                                                     — accepting wake (fail-open)"
-                                                );
-                                                tracing::info!(
-                                                    "OWW wake confirmed! (probability: {:.3}, raw RMS: {:.6})",
-                                                    self.pending_probability, raw_rms
-                                                );
-                                                self.reset_after_trigger();
-                                                return true;
-                                            }
-                                        };
-                                        let feat_slice = features_arr.as_slice().unwrap_or(&[]);
-                                        let embedding: Vec<f32> = (0..96)
-                                            .map(|j| {
-                                                (0..16)
-                                                    .map(|i| {
-                                                        let idx = i * 96 + j;
-                                                        if idx < feat_slice.len() { feat_slice[idx] } else { 0.0 }
-                                                    })
-                                                    .sum::<f32>() / 16.0
-                                            })
-                                            .collect();
-                                        let (sim, verified) = verifier.verify(&embedding);
-                                        if !verified {
-                                            tracing::info!(
-                                                "OWW wake REJECTED by speaker verification \
-                                                 (similarity: {:.3} < threshold {:.3})",
-                                                sim, verifier.profile().map(|p| p.threshold).unwrap_or(0.45)
-                                            );
-                                            // Reset detection state
-                                            self.detections_buffer.clear();
-                                            self.last_fire_ms = Some(self.now_ms());
-                                            return false;
-                                        }
-                                        tracing::debug!(
-                                            "OWW wake ACCEPTED by speaker verification \
-                                             (similarity: {:.3} >= threshold {:.3})",
-                                            sim, verifier.profile().map(|p| p.threshold).unwrap_or(0.45)
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "Speaker verification embedding extraction failed: {e} \
-                                             — accepting wake (fail-open)"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-
                         tracing::info!(
                             "OWW wake confirmed! (probability: {:.3}, raw RMS: {:.6}, pre-trigger RMS: {:.6})",
                             self.pending_probability, raw_rms, pre_rms
@@ -1560,6 +1474,12 @@ pub(crate) mod engine {
         T: Copy,
     {
         use std::sync::atomic::{AtomicU64, Ordering};
+        // Some drivers keep delivering callbacks after pause(). Enrollment audio
+        // must never reach wake detection or native command capture.
+        if super::MIC_BATON_PASSED.load(Ordering::SeqCst) {
+            out_buf.lock().clear();
+            return;
+        }
         static CALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
         static SAMPLE_COUNT: AtomicU64 = AtomicU64::new(0);
         static LAST_NONSILENT_CB: AtomicU64 = AtomicU64::new(0);
@@ -1720,6 +1640,10 @@ pub(crate) mod engine {
                 // If capturing, append chunk to buffer and run RMS VAD.
                 // Skip KWS during capture (prevents double-trigger).
                 if super::STT_CAPTURING.load(Ordering::Relaxed) {
+                    // Serialize the buffer/session handoff with start and abort.
+                    // An abort may have won after the optimistic atomic read.
+                    let mut active_capture = super::ACTIVE_CAPTURE_ATTEMPT.lock();
+                    if !super::STT_CAPTURING.load(Ordering::Relaxed) { continue; }
                     // Already delivered as part of the capture seed (it was in the
                     // ring when the capture started): don't append it twice.
                     if chunk_end <= super::SEED_UPTO.load(Ordering::SeqCst) {
@@ -1827,7 +1751,11 @@ pub(crate) mod engine {
                         // Snapshot the turn packet here: counters reset below
                         // and a new capture may start before transcription ends.
                         crate::directed::snapshot_turn_origin(); // Phase 8: who opened THIS capture
-                        let session = super::CAPTURE_SESSION_ID.load(std::sync::atomic::Ordering::Relaxed);
+                        let Some((session, audit)) = active_capture.take() else {
+                            tracing::error!("stt-capture: missing lifecycle at endpoint; dropping untracked buffer");
+                            continue;
+                        };
+                        audit.stage("buffered");
                         let (rms_max, rms_mean) = super::buffer_rms_stats(&buffer);
                         let stats = super::TurnStats {
                             session,
@@ -1854,7 +1782,7 @@ pub(crate) mod engine {
                             stt_language: "pending",
                         };
                         std::thread::spawn(move || {
-                            super::transcribe_and_emit(session, stats, buffer);
+                            super::transcribe_and_emit(session, stats, buffer, audit);
                         });
                     }
 
@@ -2201,10 +2129,46 @@ pub fn verify_highconf_soundalike(text: &str, prob: f32) -> bool {
     })
 }
 
-/// Production accept decision: the two-key word gate OR the high-confidence soundalike tier.
+/// Whisper renderings of a short "nexus" ("Nick says", "Okay, next is", "in excess"). Common in
+/// long TV/conversation text, so they only count in a SHORT transcript (see
+/// `verify_short_mishearing`). Measured 2026-10-26 on 136 owner takes + 91 stage-1 false fires.
+const VERIFY_SHORT_MISHEARINGS: &[&str] =
+    &["next", "nick", "excess", "access", "xs", "nexif", "maxis", "flexus"];
+/// Longest transcript (in words) in which a mishearing may confirm the wake.
+pub const VERIFY_SHORT_MAX_WORDS: usize = 3;
+
+/// Short-transcript tier: a stage-1 candidate whose VAD-trimmed audio transcribes to at most
+/// `VERIFY_SHORT_MAX_WORDS` words, one of them a known mishearing of "nexus". A real wake is one
+/// short utterance; conversation that happens to contain "next" is longer. Pure (unit-tested).
+pub fn verify_short_mishearing(text: &str, prob: f32) -> bool {
+    let words = transcript_words(text);
+    if words.is_empty() || words.len() > VERIFY_SHORT_MAX_WORDS {
+        return false;
+    }
+    // The voice-accuracy programme pins these as news/TV phrases that must never wake NEXUS,
+    // at any probability: a bare "next" and a bare split pair ("next us").
+    if (words.len() == 1 && words[0] == "next") || is_bare_split_pair(&words) {
+        return false;
+    }
+    if words.iter().any(|w| VERIFY_SHORT_MISHEARINGS.contains(&w.as_str())) {
+        return true;
+    }
+    // "Let's start." / "Let's us." are Whisper's reading of a clipped "nexus" (measured live
+    // 2026-10-26: stage-1 0.80 both). Weaker evidence, so it needs a confident stage-1 score.
+    let lets = words.iter().any(|w| w == "lets")
+        || words.windows(2).any(|w| w[0] == "let" && w[1] == "s");
+    prob >= VERIFY_LETS_PROB_FLOOR && lets
+}
+/// Stage-1 probability needed for the "let's ..." reading to confirm a wake.
+pub const VERIFY_LETS_PROB_FLOOR: f32 = 0.75;
+
+/// Production accept decision: the two-key word gate OR the high-confidence soundalike tier OR
+/// the short-transcript mishearing tier.
 pub fn verify_transcript_accept(text: &str, prob: f32) -> bool {
     let gated = verify_transcript_gated(text, prob) && !is_bare_split_pair(&transcript_words(text));
-    gated || verify_highconf_soundalike(text, prob)
+    gated
+        || verify_highconf_soundalike(text, prob)
+        || verify_short_mishearing(text, prob)
 }
 
 /// Split a transcript into lowercase alphanumeric words.
@@ -2352,102 +2316,6 @@ pub(crate) fn vad_trim(audio: &[f32]) -> Vec<f32> {
     audio[start..end].to_vec()
 }
 
-/// Debug dump: save the exact bytes sent to Groq as a 16kHz mono PCM16 WAV
-/// at `%APPDATA%/com.nexus.assistant/verify_debug/verify_NN.wav` (rotating,
-/// keeps last 5). Lets the owner HEAR what the verifier heard — settles
-/// "did I say it / was it clipped / was it silence" without guessing.
-/// Dependency-free (hand-written 44-byte header). Best-effort: any IO error
-/// is logged and ignored, never blocks verification.
-#[cfg(not(feature = "mock-wake"))]
-static VERIFY_DUMP_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-/// Rotating counter for command-capture debug clips (P4, separate from the
-/// verifier's counter so the two streams never overwrite each other).
-#[cfg(not(feature = "mock-wake"))]
-static CAPTURE_DUMP_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-/// Debug dump for hotkey/wake command-capture buffers: same WAV encoding as
-/// the verifier dump, saved as `capture_NN.wav` (rotating, last 5).
-/// Best-effort: IO errors are logged and ignored, never block transcription.
-#[cfg(not(feature = "mock-wake"))]
-fn dump_capture_debug(samples: &[i16]) {
-    use std::sync::atomic::Ordering;
-    if samples.is_empty() {
-        return;
-    }
-    let base = std::env::var("APPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::env::var("HOME")
-                .map(|h| std::path::PathBuf::from(h).join(".config"))
-                .unwrap_or_default()
-        });
-    if base.as_os_str().is_empty() {
-        return;
-    }
-    let dir = base.join("com.nexus.assistant").join("verify_debug");
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let seq = CAPTURE_DUMP_SEQ.fetch_add(1, Ordering::Relaxed) % 5;
-    let path = dir.join(format!("capture_{seq:02}.wav"));
-    match std::fs::write(&path, encode_wav_pcm16(samples)) {
-        Ok(()) => tracing::info!("stt-capture: debug clip saved to {}", path.display()),
-        Err(e) => tracing::warn!("stt-capture: debug dump failed ({e})"),
-    }
-}
-
-#[cfg(not(feature = "mock-wake"))]
-fn dump_verify_debug(samples: &[i16]) {
-    use std::sync::atomic::Ordering;
-    if samples.is_empty() {
-        return;
-    }
-    let base = std::env::var("APPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::env::var("HOME")
-                .map(|h| std::path::PathBuf::from(h).join(".config"))
-                .unwrap_or_default()
-        });
-    if base.as_os_str().is_empty() {
-        return;
-    }
-    let dir = base.join("com.nexus.assistant").join("verify_debug");
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let seq = VERIFY_DUMP_SEQ.fetch_add(1, Ordering::Relaxed) % 5;
-    let path = dir.join(format!("verify_{seq:02}.wav"));
-    let wav = encode_wav_pcm16(samples);
-    match std::fs::write(&path, &wav) {
-        Ok(()) => tracing::info!("verify: debug clip saved to {}", path.display()),
-        Err(e) => tracing::warn!("verify: debug dump failed ({e})"),
-    }
-}
-
-#[cfg(not(feature = "mock-wake"))]
-fn encode_wav_pcm16(samples: &[i16]) -> Vec<u8> {
-    let data_len = (samples.len() * 2) as u32;
-    let mut wav = Vec::with_capacity(44 + samples.len() * 2);
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
-    wav.extend_from_slice(b"WAVEfmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&16000u32.to_le_bytes());
-    wav.extend_from_slice(&32000u32.to_le_bytes());
-    wav.extend_from_slice(&2u16.to_le_bytes());
-    wav.extend_from_slice(&16u16.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_len.to_le_bytes());
-    for &s in samples {
-        wav.extend_from_slice(&s.to_le_bytes());
-    }
-    wav
-}
-
 /// Global cpal stream handle for pause/resume (mic baton pass).
 /// Stored in a RwLock so the frontend can pause the wake-word engine
 /// before acquiring the mic via getUserMedia(), and resume it after
@@ -2588,6 +2456,9 @@ pub fn should_barge_attempt(tts_only_muted: bool, sustained_chunks: u32) -> bool
 /// Restarting while the frontend is recording disrupts the capture
 /// and causes empty transcripts.
 static MIC_BATON_PASSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// Pause acknowledgment waits for any wake dispatch already in progress.
+#[cfg(not(feature = "mock-wake"))]
+static WAKE_DISPATCH: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 // ─── Meet-parity stream health ─────────────────────────────────────
 // The terminal lesson from the Intel SST + Meet research: NEVER restart on
@@ -3023,15 +2894,23 @@ fn chunk_voice_flags(rms: f32, prob: Option<f32>) -> (bool, bool) {
 /// We use a channel instead of storing the AppHandle directly (which has a generic
 /// type parameter R that can't be stored in a static).
 #[cfg(not(feature = "mock-wake"))]
-static STT_CAPTURE_TX: OnceCell<std::sync::mpsc::Sender<(u64, TurnStats, Vec<f32>)>> = OnceCell::new();
+static STT_CAPTURE_TX: OnceCell<std::sync::mpsc::Sender<(u64, TurnStats, Vec<f32>, crate::capture_audit::Attempt)>> = OnceCell::new();
 
-/// Capture session generation. Incremented by `abort_stt_capture()` so the
+#[cfg(not(feature = "mock-wake"))]
+static ACTIVE_CAPTURE_ATTEMPT: once_cell::sync::Lazy<parking_lot::Mutex<Option<(u64, crate::capture_audit::Attempt)>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
+
+/// Capture session generation. Incremented by each accepted start and abort so the
 /// STT receiver thread can drop buffers that were already in flight when a
 /// second Ctrl+Space press cancelled the turn (Gap 3: without this, the
 /// receiver emits a `stt:transcript: ""` for the orphaned buffer and the
 /// frontend jitters through a phantom no-input retry). Buffers carry the
 /// session id they were taken under; anything stale is dropped silently.
 static CAPTURE_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn advance_capture_session(counter: &std::sync::atomic::AtomicU64) -> u64 {
+    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
 
 /// Pure stale-session predicate (unit-tested): true when a buffer tagged
 /// with `taken` belongs to a capture generation older than `current`.
@@ -3152,6 +3031,7 @@ pub struct TurnStats {
 pub struct SttTranscript {
     pub session: u64,
     pub text: String,
+    pub raw_text: String,
     pub ownership: &'static str,
     pub owner_score: f32,
     pub decoder_bias: &'static str,
@@ -3241,6 +3121,16 @@ pub fn start_stt_capture() {
 /// itself; everything else is an explicit user turn). Phase 8 directed-speech gate reads this.
 #[cfg(not(feature = "mock-wake"))]
 pub fn start_stt_capture_with_origin(origin: crate::directed::Origin) {
+    use crate::capture_audit::Outcome;
+    let mut audit = crate::capture_audit::begin(match origin {
+        crate::directed::Origin::Direct => "direct", _ => "hot_mic",
+    });
+    let mut active_capture = ACTIVE_CAPTURE_ATTEMPT.lock();
+    if MIC_BATON_PASSED.load(std::sync::atomic::Ordering::SeqCst) {
+        audit.finish(Outcome::MicHeld);
+        tracing::info!("stt-capture: held while frontend owns microphone");
+        return;
+    }
     let now_ms = mono_ms_nonzero();
     let last_ms = LAST_CAPTURE_START_MS.load(std::sync::atomic::Ordering::Relaxed);
     if is_duplicate_capture_start(
@@ -3259,8 +3149,17 @@ pub fn start_stt_capture_with_origin(origin: crate::directed::Origin) {
             now_ms.saturating_sub(last_ms),
             origin as u8
         );
+        audit.finish(Outcome::Duplicate);
         return;
     }
+    if let Some((_, mut previous)) = active_capture.take() {
+        previous.finish(Outcome::Superseded);
+    }
+    // Ordinary successive captures used to reuse the cancellation generation.
+    // Advance here as well, so late work cannot become the next turn's result.
+    let session = advance_capture_session(&CAPTURE_SESSION_ID);
+    audit.started(session);
+    *active_capture = Some((session, audit));
     LAST_CAPTURE_START_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
     crate::directed::set_capture_origin(origin);
     crate::proactive_policy::note_user_activity(); // idle signal for proactive speech (Phase 9)
@@ -3285,7 +3184,6 @@ pub fn start_stt_capture_with_origin(origin: crate::directed::Origin) {
         NOISE_FLOOR_BITS.load(std::sync::atomic::Ordering::Relaxed),
         std::sync::atomic::Ordering::Relaxed,
     );
-    STT_CAPTURING.store(true, std::sync::atomic::Ordering::Relaxed);
     STT_SPEECH_DETECTED.store(false, std::sync::atomic::Ordering::Relaxed);
     STT_SILENCE_CHUNKS.store(0, std::sync::atomic::Ordering::Relaxed);
     STT_TOTAL_CHUNKS.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -3296,7 +3194,8 @@ pub fn start_stt_capture_with_origin(origin: crate::directed::Origin) {
     }
     SMART_TURN_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     SMART_TURN_LAST_REQ.store(0, std::sync::atomic::Ordering::Relaxed);
-    tracing::info!("stt-capture: started (cpal-side capture, no baton pass)");
+    STT_CAPTURING.store(true, std::sync::atomic::Ordering::Release);
+    tracing::info!("stt-capture: started (session={session}, cpal-side capture, no baton pass)");
 }
 
 /// Mock builds have no audio path.
@@ -3526,7 +3425,9 @@ pub fn stt_capture_had_speech() -> bool {
 #[cfg(not(feature = "mock-wake"))]
 pub fn abort_stt_capture() -> SttAbortResult {
     use std::sync::atomic::Ordering;
-    let _ = CAPTURE_SESSION_ID.fetch_add(1, Ordering::SeqCst);
+    let mut active_capture = ACTIVE_CAPTURE_ATTEMPT.lock();
+    advance_capture_session(&CAPTURE_SESSION_ID);
+    crate::admin_privilege::invalidate_captured_turns();
     let was_capturing = STT_CAPTURING.swap(false, Ordering::SeqCst);
     let voiced = STT_VOICED_CHUNKS.load(Ordering::Relaxed);
     let total = STT_TOTAL_CHUNKS.load(Ordering::Relaxed);
@@ -3545,6 +3446,9 @@ pub fn abort_stt_capture() -> SttAbortResult {
     STT_TOTAL_CHUNKS.store(0, Ordering::Relaxed);
     STT_VOICED_CHUNKS.store(0, Ordering::Relaxed);
     STT_PAUSE_COUNT.store(0, Ordering::Relaxed);
+    if let Some((_, mut audit)) = active_capture.take() {
+        audit.finish(crate::capture_audit::Outcome::Cancelled);
+    }
 
     tracing::info!(
         "stt-capture: aborted (was_capturing={}, had_speech={}, elapsed={}ms)",
@@ -3566,12 +3470,15 @@ pub fn abort_stt_capture() -> SttAbortResult {
 /// receiver can drop it if `abort_stt_capture()` invalidated the generation
 /// while the buffer was in flight.
 #[cfg(not(feature = "mock-wake"))]
-fn transcribe_and_emit(session: u64, stats: TurnStats, buffer: Vec<f32>) {
+fn transcribe_and_emit(session: u64, stats: TurnStats, buffer: Vec<f32>, mut audit: crate::capture_audit::Attempt) {
     if let Some(tx) = STT_CAPTURE_TX.get() {
-        if tx.send((session, stats, buffer)).is_err() {
+        audit.stage("queued");
+        if let Err(mut error) = tx.send((session, stats, buffer, audit)) {
+            error.0.3.finish(crate::capture_audit::Outcome::ReceiverUnavailable);
             tracing::error!("stt-capture: STT receiver thread died, cannot send buffer");
         }
     } else {
+        audit.finish(crate::capture_audit::Outcome::ReceiverUnavailable);
         tracing::warn!("stt-capture: STT_CAPTURE_TX not initialized, dropping buffer");
     }
 }
@@ -3579,46 +3486,29 @@ fn transcribe_and_emit(session: u64, stats: TurnStats, buffer: Vec<f32>) {
 /// Pause the wake-word audio stream (release the OS mic lock).
 /// Called by the frontend via `pause_wakeword` IPC before getUserMedia().
 #[cfg(not(feature = "mock-wake"))]
-pub fn pause_stream() {
-    MIC_BATON_PASSED.store(true, std::sync::atomic::Ordering::Relaxed);
+pub fn pause_stream() -> Result<(), String> {
+    let _dispatch = WAKE_DISPATCH.lock();
+    MIC_BATON_PASSED.store(true, std::sync::atomic::Ordering::SeqCst);
+    abort_stt_capture(); // Invalidate queued transcripts before giving up the mic.
     use cpal::traits::StreamTrait;
     let guard = CPAL_STREAM.read();
-    if let Some(ref stream) = *guard {
-        match stream.0.pause() {
-            Ok(()) => tracing::info!("wake: cpal stream paused (mic baton pass — frontend acquiring mic)"),
-            Err(e) => tracing::warn!("wake: cpal stream pause failed: {e}"),
-        }
-    } else {
-        tracing::warn!("wake: pause_stream called but no stream stored");
-    }
+    let stream = guard.as_ref().ok_or("Wake microphone is unavailable")?;
+    stream.0.pause().map_err(|error| format!("Could not pause wake microphone: {error}"))?;
+    tracing::info!("wake: cpal stream paused (mic baton pass — frontend acquiring mic)");
+    Ok(())
 }
 
-/// Resume the wake-word audio stream (re-acquire the OS mic lock).
-/// Called by the frontend via `resume_wakeword` IPC after releasing the mic.
+/// Resume only after browser tracks are stopped. Report device failures to the UI.
 #[cfg(not(feature = "mock-wake"))]
-pub fn resume_stream() {
-    MIC_BATON_PASSED.store(false, std::sync::atomic::Ordering::Relaxed);
+pub fn resume_stream() -> Result<(), String> {
     use cpal::traits::StreamTrait;
+    reset_grace_period();
     let guard = CPAL_STREAM.read();
-    if let Some(ref stream) = *guard {
-        match stream.0.play() {
-            Ok(()) => {
-                tracing::info!("wake: cpal stream resumed (mic baton pass — frontend released mic)");
-                // Reset the startup grace period when the stream resumes.
-                // The Intel SST driver produces transient noise bursts when
-                // the stream starts/restarts, which false-triggers the wake
-                // word model. The STARTUP_GRACE_MS window in detect_chunk() ignores
-                // these, but only if the grace window was restarted.
-                // Without this reset, the grace period expires at app boot
-                // (5.7s before the stream starts) and never protects against
-                // stream-restart transients.
-                reset_grace_period();
-            }
-            Err(e) => tracing::warn!("wake: cpal stream resume failed: {e}"),
-        }
-    } else {
-        tracing::warn!("wake: resume_stream called but no stream stored");
-    }
+    let stream = guard.as_ref().ok_or("Wake microphone is unavailable")?;
+    stream.0.play().map_err(|error| format!("Could not resume wake microphone: {error}"))?;
+    MIC_BATON_PASSED.store(false, std::sync::atomic::Ordering::SeqCst);
+    tracing::info!("wake: cpal stream resumed (mic baton pass — frontend released mic)");
+    Ok(())
 }
 
 /// Reset the wake engine's startup grace period.
@@ -3656,9 +3546,9 @@ pub fn stt_capture_had_speech() -> bool {
     false
 }
 #[cfg(feature = "mock-wake")]
-pub fn pause_stream() {}
+pub fn pause_stream() -> Result<(), String> { Ok(()) }
 #[cfg(feature = "mock-wake")]
-pub fn resume_stream() {}
+pub fn resume_stream() -> Result<(), String> { Ok(()) }
 #[cfg(feature = "mock-wake")]
 pub fn mic_self_test_data() -> MicSelfTestReport {
     // No audio pipeline in mock mode — report unknown rather than dead
@@ -3688,6 +3578,7 @@ pub(crate) fn clear_tts_playing() {
 
 #[cfg(not(feature = "mock-wake"))]
 pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    crate::capture_audit::initialize();
     use tauri::{Emitter, Manager};
     use std::time::Instant;
 
@@ -4027,7 +3918,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     // Set up the STT capture channel: the audio callback sends captured audio
     // via STT_CAPTURE_TX, and this thread receives it, transcribes, and emits
     // the "stt:transcript" event to the frontend.
-    let (stt_tx, stt_rx) = std::sync::mpsc::channel::<(u64, TurnStats, Vec<f32>)>();
+    let (stt_tx, stt_rx) = std::sync::mpsc::channel::<(u64, TurnStats, Vec<f32>, crate::capture_audit::Attempt)>();
     let _ = STT_CAPTURE_TX.set(stt_tx);
 
     // UI level forwarder: drains the callback's level channel to the
@@ -4077,7 +3968,9 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                 }
             };
 
-            while let Ok((session, mut stats, buffer)) = stt_rx.recv() {
+            while let Ok((session, mut stats, buffer, mut audit)) = stt_rx.recv() {
+                use crate::capture_audit::Outcome;
+                audit.stage("received");
                 // Stale-session drop (Gap 3): a second Ctrl+Space press ran
                 // abort_stt_capture() while this buffer was in flight. Emit
                 // NOTHING on the transcript channel — not even "" — so the
@@ -4094,10 +3987,12 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     );
                     stats.endpoint = "aborted";
                     stats.filter = "stale_session";
+                    audit.finish(Outcome::Stale);
                     crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
                     continue;
                 }
                 if buffer.is_empty() {
+                    audit.finish(Outcome::EmptyBuffer);
                     tracing::warn!("stt-capture: empty buffer received");
                     crate::commands::emit_logged(&app_for_stt, "stt:transcript", "");
                     stats.endpoint = "empty_buffer";
@@ -4111,6 +4006,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                 // brain, e.g. a phantom "Architect" window). "" flows into
                 // the normal retry prompt, never into an action.
                 if is_phantom_capture(&buffer) {
+                    audit.finish(Outcome::Phantom);
                     tracing::info!(
                         "stt-capture: phantom capture ({} samples, <{} voiced chunks) — skipping Groq",
                         buffer.len(),
@@ -4119,6 +4015,10 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     crate::commands::emit_logged(&app_for_stt, "stt:transcript", "");
                     stats.filter = "phantom";
                     stats.stt_path = "skipped";
+                    let diagnostic_samples: Vec<i16> = buffer.iter()
+                        .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16).collect();
+                    crate::stt_diagnostics::save_capture(&app_for_stt, session, &diagnostic_samples, "", &stats);
+                    crate::stt_diagnostics::update_decision(&app_for_stt, session, "", "none", "phantom_drop");
                     crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
                     continue;
                 }
@@ -4144,7 +4044,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                 );
 
                 // Turn ownership is decided before any cloud STT call. Verified
-                // owner audio keeps the NEXUS decoder bias; every other turn
+                // owner audio uses the same neutral decoder policy; every other turn
                 // uses neutral English decoding. Rejected audio never reaches
                 // Groq, the router, speech, memory, or learning.
                 let (ownership, owner_score) = verify_turn_audio(&app_for_stt, &buffer);
@@ -4157,7 +4057,16 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                 stats.owner_score = owner_score;
                 stats.decoder_bias = decoder_bias;
                 stats.stt_language = "en";
-                if ownership == crate::voice_profile::TurnOwnership::Rejected {
+                audit.stage(match ownership {
+                    crate::voice_profile::TurnOwnership::Verified => "owner_verified",
+                    crate::voice_profile::TurnOwnership::Rejected => "owner_rejected",
+                    crate::voice_profile::TurnOwnership::Uncertain => "owner_uncertain",
+                    crate::voice_profile::TurnOwnership::Unenrolled => "owner_unenrolled",
+                });
+                if ownership == crate::voice_profile::TurnOwnership::Rejected
+                    || (crate::commands::read_speaker_verification(&app_for_stt)
+                        && ownership != crate::voice_profile::TurnOwnership::Verified)
+                {
                     tracing::info!(
                         "stt-capture: non-owner audio (score {:.3}) — ambient drop, no transcription",
                         owner_score
@@ -4167,6 +4076,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                         &SttTranscript {
                             session,
                             text: String::new(),
+                            raw_text: String::new(),
                             ownership: stats.owner,
                             owner_score,
                             decoder_bias,
@@ -4177,14 +4087,12 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     );
                     stats.stt_path = "owner_hold";
                     stats.filter = "non_owner";
+                    audit.finish(Outcome::OwnerHold);
+                    crate::stt_diagnostics::save_capture(&app_for_stt, session, &samples, "", &stats);
+                    crate::stt_diagnostics::update_decision(&app_for_stt, session, "", "none", "ambient_drop");
                     crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
                     continue;
                 }
-
-                // Debug dump (P4): save the exact command-capture audio so a
-                // mystery transcript (e.g. TV anime → Japanese) arrives with
-                // its audio attached. Rotating capture_00..04.wav, best-effort.
-                dump_capture_debug(&samples);
 
                 tracing::info!(
                     "stt-capture: {} samples ({}ms audio), starting transcription",
@@ -4193,6 +4101,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                 );
 
                 rt.block_on(async {
+                    audit.stage("transcribing");
                     let client = crate::stt::shared_client();
 
                     crate::stt::reset_turn_markers();
@@ -4205,9 +4114,28 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     )
                     .await;
 
+                    let stt_failed = transcript.is_err();
                     let raw_text = transcript.unwrap_or_default();
+                    // Start/abort share this barrier. Once a packet has passed
+                    // this check, neither can invalidate it halfway through
+                    // provenance registration and native event emission.
+                    let _delivery = ACTIVE_CAPTURE_ATTEMPT.lock();
+                    // An abort can happen while the cloud STT call is in
+                    // flight. A cancelled capture cannot mint an
+                    // Administrator provenance proof or reach the UI.
+                    if is_stale_session(
+                        session,
+                        CAPTURE_SESSION_ID.load(std::sync::atomic::Ordering::SeqCst),
+                    ) {
+                        stats.endpoint = "aborted";
+                        stats.filter = "stale_session";
+                        audit.finish(Outcome::Stale);
+                        crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
+                        return;
+                    }
+                    let raw_admin = crate::admin_privilege::parse_command(&raw_text).is_some();
                     let normalized = crate::intent_parser::normalize_phonetic_mishearings(&raw_text);
-                    let text = if normalized.is_empty() { raw_text } else { normalized };
+                    let text = if raw_admin || normalized.is_empty() { raw_text.clone() } else { normalized };
                     // A waiting question owns a bare "yes" / "no": hand it to the orchestrator unparsed, or the
                     // greeting parser would answer it as chat and the question would never see it.
                     let parsed = if crate::intent_parser::answers_a_pending_offer(&text) {
@@ -4223,6 +4151,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     let final_payload = SttTranscript {
                         session,
                         text,
+                        raw_text: raw_text.clone(),
                         ownership: stats.owner,
                         owner_score,
                         decoder_bias,
@@ -4231,13 +4160,26 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                         pre_parsed,
                     };
                     if !final_payload.text.is_empty() {
+                        if raw_admin {
+                            crate::admin_privilege::register_captured_turn(session, &final_payload.text);
+                        }
                         if let Ok(v) = serde_json::to_value(&final_payload) {
                             crate::stage::stash_transcript_if_not_ready(v);
                         }
                     }
-                    crate::commands::emit_logged(&app_for_stt, "stt:transcript", &final_payload);
                     stats.stt_path = crate::stt::last_stt_path_str();
                     stats.filter = crate::stt::last_filter_str();
+                    crate::stt_diagnostics::save_capture(&app_for_stt, session, &samples, &raw_text, &stats);
+                    // Unlike a routing/action success, this only proves the
+                    // native event emit completed. A missing frontend still
+                    // remains visible as delivered without dispatch entry.
+                    let delivered = app_for_stt.emit("stt:transcript", &final_payload).is_ok();
+                    let outcome = if !delivered { Outcome::DeliveryFailed }
+                        else if stt_failed { Outcome::SttError }
+                        else if stats.filter != "none" { Outcome::Filtered }
+                        else if final_payload.text.is_empty() { Outcome::EmptyTranscript }
+                        else { Outcome::Delivered };
+                    audit.finish(outcome);
                     crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
                 });
             }
@@ -4247,6 +4189,9 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     static LAST_NEURAL_FIRE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     while let Ok(candidate) = rx.recv() {
+        if MIC_BATON_PASSED.load(std::sync::atomic::Ordering::SeqCst) {
+            continue;
+        }
         let ring_end = candidate.ring_end;
         let now_ms = monotonic_ms();
         let last_fire = LAST_NEURAL_FIRE_MS.load(std::sync::atomic::Ordering::Relaxed);
@@ -4265,11 +4210,13 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         // BEFORE the cooldown store: a rejected stranger must not burn
         // the owner's 1.5s window. Uses a separate AudioFeatures instance
         // so the live engine's streaming buffers stay pristine.
-        // Fail-open on any error. A stage-2-verified candidate already passed
-        // this check when it was first seen — never repeat it.
+        // Voice Lock is fail closed: missing/corrupt profiles and model errors
+        // cannot turn a wake candidate into an owner command.
+        // A stage-2-verified candidate already passed this check when it was
+        // first seen — never repeat it.
         if !verified && crate::commands::read_speaker_verification(&app) {
             match verify_speaker_at_fire(&app, &candidate.audio) {
-                Some(false) => {
+                Some(false) | None => {
                     tracing::info!(
                         "wake-word: REJECTED by speaker verification (prob {:.3})",
                         candidate.prob
@@ -4278,9 +4225,6 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                 }
                 Some(true) => {
                     tracing::debug!("wake-word: ACCEPTED by speaker verification");
-                }
-                None => {
-                    // Not enrolled or error — fail-open, proceed to fire
                 }
             }
         }
@@ -4350,6 +4294,13 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     }
                 }
             }
+        }
+
+        // A candidate can finish speaker verification after enrollment starts.
+        // Serialize the last check with pause acknowledgment before any cue/turn.
+        let _dispatch = WAKE_DISPATCH.lock();
+        if MIC_BATON_PASSED.load(std::sync::atomic::Ordering::SeqCst) {
+            continue;
         }
 
         // ── Alexa-style barge-in: a wake that fires while TTS is
@@ -4422,7 +4373,10 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
             if !crate::stage::wait_until_ready(2000).await {
                 tracing::warn!("wake: stage not ready after 2 s - emitting the orb events anyway");
             }
-            crate::window_manager::wake_orb_src(&app_for_wake, "neural");
+            let _dispatch = WAKE_DISPATCH.lock();
+            if !MIC_BATON_PASSED.load(std::sync::atomic::Ordering::SeqCst) {
+                crate::window_manager::wake_orb_src(&app_for_wake, "neural");
+            }
         });
     }
     Ok(())
@@ -4438,35 +4392,43 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 /// Mean-pooled speaker embedding for turn-level authorship checks. Uses the
 /// same separate AudioFeatures instance and chunking as wake verification.
 fn turn_embedding(check: &mut SpeakerCheck, audio: &[f32]) -> Option<Vec<f32>> {
+    extract_speaker_embedding(&mut check.features, audio)
+}
+
+#[cfg(not(feature = "mock-wake"))]
+fn extract_speaker_embedding(features: &mut engine::AudioFeatures, audio: &[f32]) -> Option<Vec<f32>> {
     let chunk_size = engine::OWW_CHUNK_SIZE;
-    let num_chunks = 16;
-    let start = audio.len().saturating_sub(chunk_size * num_chunks);
-    let relevant = &audio[start..];
+    let relevant = crate::voice_profile::speaker_audio_window(audio)?;
+    features.reset();
 
     let mut last_features: Option<tract_onnx::prelude::Tensor> = None;
     for chunk in relevant.chunks(chunk_size) {
-        if chunk.len() < chunk_size {
-            break;
-        }
-        last_features = check.features.get_audio_features(chunk).ok();
+        let mut padded = vec![0.0; chunk_size];
+        padded[..chunk.len()].copy_from_slice(chunk);
+        last_features = Some(features.get_audio_features(&padded).ok()?);
     }
 
     let features = last_features?;
     let arr = features.into_plain_array::<f32>().ok()?;
-    let slice: &[f32] = arr.as_slice().unwrap_or(&[]);
-    Some(
-        (0..96)
-            .map(|j| {
-                (0..16)
-                    .map(|i| {
-                        let idx = i * 96 + j;
-                        if idx < slice.len() { slice[idx] } else { 0.0 }
-                    })
-                    .sum::<f32>()
-                    / 16.0
-            })
-            .collect(),
-    )
+    crate::voice_profile::pool_speaker_frames(arr.as_slice()?)
+}
+
+/// Enrollment uses exactly the normalization, shape, reset and pooling used
+/// for live speaker checks, rather than sending raw mel output to the model.
+#[cfg(not(feature = "mock-wake"))]
+pub(crate) fn enrollment_embeddings(resource_dir: &std::path::Path, clips: &[Vec<f32>]) -> anyhow::Result<Vec<Vec<f32>>> {
+    let oww_dir = engine::resolve_oww_dir(resource_dir)
+        .ok_or_else(|| anyhow::anyhow!("OWW models not found"))?;
+    let mut features = engine::AudioFeatures::new(&oww_dir)?;
+    clips.iter().enumerate().map(|(index, clip)| {
+        extract_speaker_embedding(&mut features, clip)
+            .ok_or_else(|| anyhow::anyhow!("Could not extract speaker embedding for clip {}", index + 1))
+    }).collect()
+}
+
+#[cfg(feature = "mock-wake")]
+pub(crate) fn enrollment_embeddings(_resource_dir: &std::path::Path, _clips: &[Vec<f32>]) -> anyhow::Result<Vec<Vec<f32>>> {
+    anyhow::bail!("Voice enrollment is unavailable in a mock-wake build")
 }
 
 /// Verify one captured turn against the enrolled voice profile. Unlike wake
@@ -4481,7 +4443,7 @@ pub(crate) fn verify_turn_audio<R: Runtime>(
     use crate::voice_profile::{classify_turn_owner, TurnOwnership};
 
     if !crate::commands::read_speaker_verification(app) {
-        return (TurnOwnership::Unenrolled, 1.0);
+        return (TurnOwnership::Unenrolled, 0.0);
     }
 
     fn init_check<R: Runtime>(app: &AppHandle<R>) -> Option<SpeakerCheck> {
@@ -4507,9 +4469,12 @@ pub(crate) fn verify_turn_audio<R: Runtime>(
         Ok(check) => check,
         Err(_) => return (TurnOwnership::Uncertain, 0.0),
     };
+    if check.verifier.reload().is_err() {
+        return (TurnOwnership::Uncertain, 0.0);
+    }
     let profile = match check.verifier.profile() {
         Some(profile) => profile.clone(),
-        None => return (TurnOwnership::Unenrolled, 1.0),
+        None => return (TurnOwnership::Unenrolled, 0.0),
     };
     let embedding = match turn_embedding(&mut check, audio) {
         Some(embedding) => embedding,
@@ -4521,7 +4486,7 @@ pub(crate) fn verify_turn_audio<R: Runtime>(
 
 /// Verify a wake candidate's speaker against the enrolled voice profile.
 /// Returns Some(true) if verified, Some(false) if rejected, None if
-/// verification is skipped (not enrolled) or fails (fail-open).
+/// verification cannot complete. The caller rejects `None` when Voice Lock is on.
 ///
 /// Uses a separate AudioFeatures instance (not the live engine's) so the
 /// streaming buffers stay pristine. Processes the last 16 chunks of audio
@@ -4546,6 +4511,7 @@ fn verify_speaker_at_fire<R: Runtime>(app: &AppHandle<R>, audio: &[f32]) -> Opti
     }
     let check = SPEAKER_CHECK.get()?;
     let mut check = check.lock().ok()?;
+    check.verifier.reload().ok()?;
 
     if !check.verifier.is_enrolled() {
         return None;
@@ -4786,8 +4752,6 @@ fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32, 
         .iter()
         .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
         .collect();
-    #[cfg(not(feature = "mock-wake"))]
-    dump_verify_debug(&samples);
     tracing::info!(
         "verify: cross-checking {} samples ({}ms) with STT...",
         samples.len(),
@@ -5423,6 +5387,66 @@ mod tests {
     use super::level_from_rms;
     use super::VerifyMode;
 
+    #[test]
+    #[cfg(not(feature = "mock-wake"))]
+    fn enrollment_mic_baton_blocks_native_capture() {
+        use std::sync::atomic::Ordering::SeqCst;
+        struct Restore(bool, bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                super::MIC_BATON_PASSED.store(self.0, SeqCst);
+                super::STT_CAPTURING.store(self.1, SeqCst);
+            }
+        }
+        let _restore = Restore(super::MIC_BATON_PASSED.swap(true, SeqCst), super::STT_CAPTURING.swap(false, SeqCst));
+        let session = super::CAPTURE_SESSION_ID.load(SeqCst);
+        super::start_stt_capture_with_origin(crate::directed::Origin::Direct);
+        assert!(!super::STT_CAPTURING.load(SeqCst), "enrollment must not open command capture");
+        assert_eq!(session, super::CAPTURE_SESSION_ID.load(SeqCst));
+    }
+
+    #[test]
+    #[cfg(not(feature = "mock-wake"))]
+    fn enrollment_pause_waits_for_in_flight_wake_dispatch() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let previous = super::MIC_BATON_PASSED.load(SeqCst);
+        let dispatch = super::WAKE_DISPATCH.lock();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let _ = super::pause_stream(); // No device required to test the barrier.
+            done_tx.send(()).unwrap();
+        });
+        started_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        let completed_early = done_rx.recv_timeout(std::time::Duration::from_millis(50)).is_ok();
+        drop(dispatch);
+        worker.join().unwrap();
+        super::MIC_BATON_PASSED.store(previous, SeqCst);
+        assert!(!completed_early, "pause must await the earlier wake dispatch before recording can begin");
+    }
+
+    #[test]
+    #[cfg(not(feature = "mock-wake"))]
+    fn enrollment_uses_live_models_and_resets_between_clips() {
+        let resource_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+        let tone = |frequency: f32| -> Vec<f32> {
+            (0..48_000).map(|index| {
+                if index < 9_600 {
+                    (index as f32 * frequency * std::f32::consts::TAU / 16_000.0).sin() * 0.2
+                } else { 0.0 }
+            }).collect()
+        };
+        let first = tone(220.0);
+        let embeddings = super::enrollment_embeddings(&resource_dir, &[first.clone(), tone(440.0), first]).unwrap();
+        assert_eq!(embeddings.len(), 3);
+        assert!(embeddings.iter().all(|embedding| embedding.len() == 96
+            && embedding.iter().all(|value| value.is_finite())
+            && embedding.iter().any(|value| *value != 0.0)));
+        assert!(embeddings[0].iter().zip(&embeddings[2]).all(|(a, b)| (a - b).abs() < 1e-6),
+            "an earlier clip must not contaminate a later embedding");
+    }
+
     /// Phase R: a second capture start while one is live and young must be ignored
     /// (it would clear the buffer + reset VAD); everything else must start normally.
     #[test]
@@ -5986,6 +6010,31 @@ mod tests {
 
     /// Ring keeps newest audio and evicts oldest beyond capacity.
     #[test]
+    fn test_verify_short_mishearing_tier() {
+        // measured Whisper renderings of a real "nexus" wake
+        for ok in ["Nick says.", "Okay, next is", "In excess.", "Access please", "xs wake up"] {
+            assert!(super::verify_transcript_accept(ok, 0.8), "should accept {ok:?}");
+        }
+        // the same words inside real sentences must still be rejected
+        for bad in [
+            "next up on the news tonight",
+            "you need access to the building now",
+            "so now how do you say next",
+            "in excess of ten thousand dollars",
+            "hello there how are you",
+        ] {
+            assert!(!super::verify_transcript_accept(bad, 0.8), "should reject {bad:?}");
+        }
+        assert!(!super::verify_short_mishearing("", 0.9));
+        // A bare "next" / "next us" stays rejected (pinned by old_two_key_gate_is_unchanged).
+        assert!(!super::verify_transcript_accept("Next.", 0.8));
+        assert!(super::verify_transcript_accept("Let's start.", 0.80));
+        assert!(super::verify_transcript_accept("Let's us.", 0.80));
+        assert!(!super::verify_transcript_accept("Let's start.", 0.70));
+        assert!(!super::verify_transcript_accept("let's go and get some food", 0.90));
+    }
+
+    #[test]
     fn test_verify_ring_cap() {
         let mut ring = std::collections::VecDeque::new();
         let cap = 40000;
@@ -6372,21 +6421,6 @@ mod tests {
         assert!(super::vad_trim(&[]).is_empty());
     }
 
-    /// Debug WAV encoder produces a valid 16kHz mono PCM16 file.
-    #[test]
-    fn test_encode_wav_pcm16_valid() {
-        let wav = super::encode_wav_pcm16(&[0i16, 32767, -32768, 1000]);
-        assert_eq!(wav.len(), 44 + 8);
-        assert_eq!(&wav[0..4], b"RIFF");
-        assert_eq!(&wav[8..12], b"WAVE");
-        assert_eq!(&wav[12..16], b"fmt ");
-        assert_eq!(&wav[24..28], 16000u32.to_le_bytes());
-        assert_eq!(&wav[36..40], b"data");
-        assert_eq!(&wav[40..44], 8u32.to_le_bytes());
-        assert_eq!(&wav[44..46], 0i16.to_le_bytes());
-        assert_eq!(&wav[46..48], 32767i16.to_le_bytes());
-    }
-
     /// Two-key floor constant is wired to the documented operating point.
     #[test]
     fn test_verify_gate_constants() {
@@ -6673,6 +6707,31 @@ mod tests {
         assert!(!super::is_stale_session(1, 1));
         assert!(super::is_stale_session(1, 2));
         assert!(super::is_stale_session(7, 9));
+    }
+
+    #[test]
+    fn successive_captures_invalidate_older_work_without_an_abort() {
+        use std::sync::atomic::AtomicU64;
+        let counter = AtomicU64::new(1);
+        let first = super::advance_capture_session(&counter);
+        let second = super::advance_capture_session(&counter);
+        assert!(second > first);
+        assert!(super::is_stale_session(first, second));
+        assert!(!super::is_stale_session(second, second));
+    }
+
+    #[test]
+    fn capture_generation_is_unique_under_concurrent_starts_and_aborts() {
+        use std::sync::{Arc, atomic::AtomicU64};
+        let counter = Arc::new(AtomicU64::new(1));
+        let threads: Vec<_> = (0..32).map(|_| {
+            let counter = counter.clone();
+            std::thread::spawn(move || super::advance_capture_session(&counter))
+        }).collect();
+        let mut ids: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 32);
     }
 
     /// Abort bumps the session generation so in-flight buffers die on arrival.

@@ -239,6 +239,18 @@ describe("processViaOrchestrator confirmation approvals", () => {
     useAssistant.setState({ pendingGithubCommand: null });
   });
 
+  it("holds a pending MCP approval when Voice Lock is on and capture provenance is missing", async () => {
+    invokeMock.mockImplementation((command: string) =>
+      Promise.resolve(command === "voice_lock_enabled" ? true : undefined),
+    );
+    useAssistant.setState({ pendingGithubCommand: { kind: "mcp", server: "whatsapp", tool: "send_message" } });
+    const held = await processViaOrchestrator("yes");
+    expect(held?.subsystem).toBe("ambient");
+    expect(invokeMock).toHaveBeenCalledWith("voice_lock_enabled");
+    expect(invokeMock).not.toHaveBeenCalledWith("orchestrator_mcp_confirm", expect.anything());
+    expect(useAssistant.getState().pendingGithubCommand).not.toBeNull();
+  });
+
   it("speaking 'cancel' aborts pending MCP command immediately", async () => {
     const { processViaOrchestrator } = await import("./orchestrator");
     useAssistant.setState({
@@ -310,7 +322,9 @@ describe("processViaOrchestrator ghost invoke timeout", () => {
 
   it("no timeout by default: slow backends still resolve (long-running safe)", async () => {
     const { processViaOrchestrator } = await import("./orchestrator");
-    invokeMock.mockResolvedValue({ request_id: "r1", subsystem: "x", handled_locally: true });
+    invokeMock.mockImplementation((command: string) => Promise.resolve(
+      command === "voice_lock_enabled" ? false : { request_id: "r1", subsystem: "x", handled_locally: true },
+    ));
     await expect(processViaOrchestrator("hi")).resolves.toMatchObject({ request_id: "r1" });
     expect(invokeMock).not.toHaveBeenCalledWith("orchestrator_cancel");
   });

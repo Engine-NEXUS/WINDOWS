@@ -19,6 +19,7 @@ use crate::google::types::{AlertUrgency, GoogleError};
 
 use super::google_io::{self, Account};
 use super::mailtriage::{self, MailMeta, Triage};
+use super::selfnames::SelfNames;
 use super::store::{Observation, Store, Tier, Trust};
 
 pub const TICK_SECS: u64 = 30;
@@ -192,6 +193,20 @@ fn speak_address<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
     crate::persona::address(name.as_deref(), friend)
 }
 
+/// Feature 151: stable event key for the Medium-tier cooldown — one key per
+/// logical mail event (the thread, or owner/repo + workflow for GitHub mail).
+fn notify_key_for(m: &MailMeta) -> Option<String> {
+    Some(crate::notify::event_key("mail", &m.thread_id, &m.from_email, &m.subject))
+}
+
+/// A batch summary carries an event key only when every mail in it is the same event;
+/// a mixed batch is already a summary of different things and must not be suppressed
+/// (or suppress a later mail) because of whichever happened to come first.
+fn batch_key(items: &[(Triage, MailMeta)]) -> Option<String> {
+    let first = notify_key_for(&items.first()?.1)?;
+    items.iter().all(|(_, m)| notify_key_for(m).as_deref() == Some(first.as_str())).then_some(first)
+}
+
 /// One alert per email, or a single summary when several arrive together.
 fn fire_alerts<R: Runtime>(app: &AppHandle<R>, items: &[(Triage, MailMeta)]) {
     if items.is_empty() {
@@ -201,14 +216,60 @@ fn fire_alerts<R: Runtime>(app: &AppHandle<R>, items: &[(Triage, MailMeta)]) {
     note_alert(&items[0].1.from_email, &mailtriage::sender_label(&items[0].1));
     let top = items.iter().map(|(t, _)| t.urgency).max_by_key(|u| mailtriage::urgency_rank(*u)).unwrap_or(AlertUrgency::Medium);
     if items.len() >= 3 {
-        let text = mailtriage::batch_text(items, address.as_deref());
-        crate::proactive_policy::submit(app, format!("mail_batch_{}", items[0].1.id), text, top);
+        let dir = app.path().app_data_dir().ok();
+        let names = dir.as_deref().map(SelfNames::load).unwrap_or_else(SelfNames::none);
+        let text = mailtriage::batch_text_with(items, address.as_deref(), &names);
+        crate::proactive_policy::submit_event(app, format!("mail_batch_{}", items[0].1.id), text, top, batch_key(items));
         return;
     }
-    for (t, m) in items {
-        let text = mailtriage::alert_text(t, m, address.as_deref());
-        crate::proactive_policy::submit(app, format!("mail_{}", m.id), text, t.urgency);
-    }
+    // Spawn one task to compute plain wording and submit alerts in order.
+    let app_clone = app.clone();
+    let items_clone = items.to_vec();
+    let address_clone = address.clone();
+    tauri::async_runtime::spawn(async move {
+        let dir = match app_clone.path().app_data_dir() {
+            Ok(d) => d,
+            Err(_) => {
+                // Fallback to original alert_text if we can't get app data dir
+                for (t, m) in items_clone {
+                    if let Some(fact) = crate::memcore::mailwording::github_failure_fact(&m) {
+                        match crate::notify_brain::observe_fact(&app_clone, &fact, false) {
+                            crate::notify_brain::Decision::Say(line) => {
+                                crate::notify_brain::say(&app_clone, "github", line);
+                            }
+                            crate::notify_brain::Decision::Silent => {}
+                        }
+                        continue;
+                    }
+                    let text = mailtriage::alert_text(&t, &m, address_clone.as_deref());
+                    crate::proactive_policy::submit_event(&app_clone, format!("mail_{}", m.id), text, t.urgency, notify_key_for(&m));
+                }
+                return;
+            }
+        };
+        let names = SelfNames::load(&dir);
+        for (t, m) in items_clone {
+            if let Some(fact) = crate::memcore::mailwording::github_failure_fact(&m) {
+                match crate::notify_brain::observe_fact(&app_clone, &fact, false) {
+                    crate::notify_brain::Decision::Say(line) => {
+                        crate::notify_brain::say(&app_clone, "github", line);
+                    }
+                    crate::notify_brain::Decision::Silent => {}
+                }
+                continue;
+            }
+            let key = notify_key_for(&m);
+            // A repeat inside its cooldown only becomes a card: skip the (possibly paid)
+            // plain-wording step and let the engine count it with the free template text.
+            let held = key.as_deref().is_some_and(|k| crate::proactive_policy::key_in_cooldown(k, t.urgency));
+            let text = if held {
+                mailtriage::alert_text_with(&t, &m, address_clone.as_deref(), &names)
+            } else {
+                crate::memcore::mailwording::plain_alert_text(&app_clone, &dir, &t, &m, address_clone.as_deref()).await.0
+            };
+            crate::proactive_policy::submit_event(&app_clone, format!("mail_{}", m.id), text, t.urgency, key);
+        }
+    });
 }
 
 // ─── Polling one account ────────────────────────────────────────────
@@ -430,6 +491,27 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_is_keyed_only_when_every_mail_is_the_same_event() {
+        let tri = |m: &MailMeta| (mailtriage::classify(m, &[]).expect("classified"), m.clone());
+        let gh = |id: &str, subj: &str| mail(id, "GitHub <notifications@github.com>", subj, &["INBOX"], 1);
+        // three runs of one workflow → one event → keyed (they collide with later runs)
+        let same: Vec<_> = ["[nexus-engine/window] Run failed: CI (#1)", "[nexus-engine/window] Run failed: CI (#2)", "[nexus-engine/window] Run failed: CI (#3)"]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| tri(&gh(&i.to_string(), s)))
+            .collect();
+        assert_eq!(batch_key(&same).as_deref(), Some("mail:gh:nexus-engine/window:run failed ci"));
+        // a mixed batch is a summary of different things → no key, so it can never be muted by item 0
+        let mixed = vec![
+            tri(&gh("a", "[nexus-engine/window] Run failed: CI (#1)")),
+            tri(&gh("b", "[nexus-engine/window] Run failed: Deploy (#1)")),
+            tri(&gh("c", "[nexus-engine/layout] Run failed: CI (#1)")),
+        ];
+        assert_eq!(batch_key(&mixed), None);
+        assert_eq!(batch_key(&[]), None);
+    }
+
+    #[test]
     fn triage_stores_medium_and_above_orders_by_urgency_and_never_repeats() {
         let s = Store::open_in_memory().unwrap();
         let metas = vec![
@@ -502,7 +584,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    static MOCK_GUARD: Mutex<()> = Mutex::new(());
+    use super::super::google_io::TEST_GUARD as MOCK_GUARD;
 
     struct MockGmail {
         log: Arc<Mutex<Vec<String>>>,
@@ -689,6 +771,60 @@ mod tests {
         });
         let log = mock.log.lock().unwrap().clone();
         assert!(log[0].contains("timeMin=2026-10-08T00%3A00%3A00%2B05%3A30") && log[0].contains("singleEvents=true"), "{log:?}");
+    }
+
+    #[test]
+    fn notify_brain_mail_failure_sequence() {
+        use crate::notify_brain::{Book, Fact, Kind, Obs, Line, Decision};
+
+        let mut book = Book::from_records(vec![]);
+        let now = 1_000_000u64;
+
+        // 1. First mail failure -> Say(Failed)
+        let f1 = Fact {
+            service: "github",
+            project: "zync".into(),
+            kind: Kind::Build,
+            obs: Obs::Failed,
+            run_ref: "mail_101".into(),
+        };
+        let d1 = book.observe(&f1, now, false);
+        assert_eq!(
+            d1,
+            Decision::Say(Line::Failed {
+                project: "zync".into(),
+                kind: Kind::Build,
+                count: 1,
+            })
+        );
+
+        // 2. Second mail failure with new id inside cooldown / not expired -> Silent
+        let f2 = Fact {
+            service: "github",
+            project: "zync".into(),
+            kind: Kind::Build,
+            obs: Obs::Failed,
+            run_ref: "mail_102".into(),
+        };
+        let d2 = book.observe(&f2, now + 60_000, false);
+        assert_eq!(d2, Decision::Silent);
+
+        // 3. Later Fixed -> Say(Fixed)
+        let f3 = Fact {
+            service: "github",
+            project: "zync".into(),
+            kind: Kind::Build,
+            obs: Obs::Fixed,
+            run_ref: "mail_103".into(),
+        };
+        let d3 = book.observe(&f3, now + 120_000, false);
+        assert_eq!(
+            d3,
+            Decision::Say(Line::Fixed {
+                project: "zync".into(),
+                kind: Kind::Build,
+            })
+        );
     }
 
     /// Live probe against the real Google account(s). Prints counts and

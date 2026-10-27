@@ -1,0 +1,11 @@
+{
+  "sourceRevision": "50dcda219018d3bbfff8be388b77610bee135749",
+  "buildIdentity": "031caf5848621e18",
+  "sourceHash": "086e534ae829a7abbdf1e793f584297e81b8f2c8c16625bcfeee03ea505572c4",
+  "processId": 28952,
+  "launchedAtUtc": "2026-10-25T12:10:07.8908304Z",
+  "executable": "C:\\Users\\Chitkul Lakshya\\.codex\\worktrees\\windows-readiness\\ULTRON\\src-tauri\\target\\release\\nexus.exe",
+  "stdoutLog": "C:\\Users\\Chitkul Lakshya\\AppData\\Roaming\\com.nexus.assistant\\nexus_readiness_031caf5848621e18_20261025T121007745Z.log",
+  "stderrLog": "C:\\Users\\Chitkul Lakshya\\AppData\\Roaming\\com.nexus.assistant\\nexus_readiness_031caf5848621e18_20261025T121007745Z_err.log",
+  "reason": "Restore assessed candidate after owner launched different D build"
+}

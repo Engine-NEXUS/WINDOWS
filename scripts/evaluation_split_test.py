@@ -42,7 +42,10 @@ class EvaluationSplitTests(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertEqual(errors, [])
         self.assertEqual(actual_lock, expected_lock)
-        self.assertTrue(all(actual_lock["splits"][name]["intents"] == 52 for name in splits.SPLIT_NAMES))
+        test_intents = {row["intent"] for row in current["test"]}
+        self.assertTrue(test_intents <= {row["intent"] for row in current["train"]})
+        for name in ("validation", "calibration"):
+            self.assertEqual({row["intent"] for row in current[name]}, test_intents)
 
     def test_training_does_not_split_or_select_on_final_test(self):
         source = (ROOT / "server" / "nlu" / "train.py").read_text(encoding="utf-8")

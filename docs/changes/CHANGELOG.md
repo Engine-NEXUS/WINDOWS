@@ -1,7 +1,74 @@
 # NEXUS — Changelog
 
+- 2026-10-26: [P4/P5 trial accounting and P6 source checkpoint](170-voice-trial-accounting-and-phase-closeout.md) — legacy qualification repaired; declared capture/lock/command/fidelity accounting, 90 script+31 server tests, frontend692/Worker145, 79 total mutations; real-device/corpus/full exact-source release gates remain open.
+
+- 2026-10-26: [Enrollment-isolated embedding scores](169-enrollment-isolated-embedding-scores.md) — P3 reproducible offline scores from exported vectors, template isolation, candidate source audit and median overflow repair; 63 script tests and 18 offline mutations pass; no runtime/build actions.
+
+- 2026-10-26: [Offline speaker-verifier benchmark infrastructure](168-offline-speaker-verifier-benchmark.md) — P3 score/split validation and calibration-only reporting; 47 Python tests and 8 mutations pass; corpus/model comparison pending, no runtime/build actions.
+
+- 2026-10-26: [Neutral command decoding and native local execution](167-neutral-decoding-and-native-local-execution.md) — consented same-clip prompt comparison reproduces repetition; native local execution gap repaired; full source/release verification in progress, speaker score41%.
+- 2026-10-27: [Deploy watchers](167-deploy-watchers.md) — Vercel/Render/Netlify production deploys, one line on failure and one on recovery (number 167 is shared with `167-neutral-decoding-and-native-local-execution.md`); unit-tested, not live-proven.
+
+- 2026-10-26: [Session overview: notification review, Focus Mode, owner-less GitHub commands, state machine, GitHub Actions watcher, work cards](session-2026-10-25-focus-github-notifications-overview.md) — index of records 157-166, review findings, verification state (2,623 Rust / 692 frontend tests, ratchet clean), nothing live-proven
+
+- 2026-10-25: [Voice Lock live failures and repairs](165-voice-lock-live-verification-fixes.md) — first candidate failed; accessible Save, stale-draft and async window fixes implemented; replacement verification running.
+
+- 2026-10-25: [Effective native Voice Lock and verified Save](164-voice-lock-native-state-ui.md) — P2 implemented at owner request; release/live proof pending.
+
+- 2026-10-25: [Native voice capture accounting](163-voice-capture-accounting.md) — first implementation phase of the Voice Lock evidence/reliability plan; automated gates pass; fresh release build and live proof pending.
+
+- 2026-10-25: [Voice enrollment wake isolation and all three phrases](156-voice-enrollment-wake-isolation.md) — owner live failure recorded; shared checks pass; replacement 031caf5848621e18 verified/running; owner recheck pending.
+
 > All commits in reverse chronological order, organized by feature area.
 > Each entry links to a detailed writeup of what changed and why.
+
+## Windows 1.0 readiness and Voice Lock (2026-10-24)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-10-24 | Shared gate repairs and fail-closed speaker verification; owner live proof pending | [155-windows-readiness-baseline-and-voice-lock.md](155-windows-readiness-baseline-and-voice-lock.md) |
+
+## Activity Manager website opt-in (2026-10-22)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-10-22 | Separate opt-in for focused website domains in Chrome, Brave, and Edge; local browser extension and encrypted 30-day site history | [154-activity-manager-browser-site-opt-in.md](154-activity-manager-browser-site-opt-in.md) |
+
+## Activity Manager app usage and local icons (2026-10-21)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-10-21 | Opt-in encrypted Windows app-time history with Today / 7 days / 30 days views and 86 locally bundled app icons | [153-activity-manager-local-icons-and-daily-weekly-view.md](153-activity-manager-local-icons-and-daily-weekly-view.md) |
+
+## Release provenance and grounded device turns (2026-10-20)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-10-20 | Refuse stale developer release launches; route native speech through Rust; opt-in encrypted STT evidence; ground current-device questions | [151-release-provenance-and-grounded-device-turns.md](151-release-provenance-and-grounded-device-turns.md) |
+
+## Narrated screen-tour visualization (2026-10-20)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-10-20 | Content-aware motion for the existing speech-synchronized tour, with geometry guards and reduced-motion fallback; live walkthrough pending | [150-screen-tour-visualization.md](150-screen-tour-visualization.md) |
+
+## Administrator control provenance (2026-10-19)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-10-19 | One-use native STT proof and separate session approval policy; Administrator access remains closed | [145-administrator-control-native-provenance.md](145-administrator-control-native-provenance.md), [build plan](../features/145-administrator-control-implementation.md) |
+
+## Cloudflare Free Device Links foundation (2026-10-19)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-10-19 | Registered-device pairing, phone verification control plane, hibernating signaling room, and still-closed Administrator session/export policy | [144-cloudflare-free-device-links-foundation.md](144-cloudflare-free-device-links-foundation.md) |
+
+## Command-center alignment (2026-10-19)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-10-19 | Typed action-center policy for single and compound turns; fail-closed NLU and compound eligibility; dependency-respecting step order | [141-command-center-alignment.md](141-command-center-alignment.md), [current architecture](../architecture/12-command-center-alignment.md) |
 
 ## Universal Agent Watcher & Cross-Platform Music Control (2026-10-15)
 

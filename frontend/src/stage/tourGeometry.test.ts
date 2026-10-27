@@ -5,6 +5,8 @@ import {
   MARGIN,
   physToCss,
   placeCallout,
+  motionFor,
+  visibleTarget,
   Rect,
   Size,
 } from "./tourGeometry";
@@ -145,5 +147,25 @@ describe("physToCss", () => {
   it("survives a zero monitor size", () => {
     const css = physToCss({ x: 1, y: 2, w: 3, h: 4 }, { w: 0, h: 0 }, { w: 100, h: 100 });
     expect(css).toEqual({ x: 1, y: 2, w: 3, h: 4 });
+  });
+});
+
+describe("tour motion and target validity", () => {
+  it("uses distinct restrained motion for visual content types", () => {
+    const target = { x: 200, y: 180, w: 280, h: 160 };
+    expect(motionFor("person", target, SCREEN)).toBe("ripple");
+    expect(motionFor("text_block", target, SCREEN)).toBe("scan");
+    expect(motionFor("chart", target, SCREEN)).toBe("trace");
+    expect(motionFor("ui_element", target, SCREEN)).toBe("beam");
+    expect(motionFor("unknown", target, SCREEN)).toBe("classic");
+    expect(motionFor("person", null, SCREEN)).toBe("classic");
+    expect(motionFor("person", { x: 0, y: 0, w: 1500, h: 900 }, SCREEN)).toBe("classic");
+  });
+
+  it("clips partially visible targets and rejects malformed model boxes", () => {
+    expect(visibleTarget({ x: -20, y: 50, w: 100, h: 70 }, SCREEN)).toEqual({ x: 0, y: 50, w: 80, h: 70 });
+    expect(visibleTarget({ x: -100, y: 50, w: 60, h: 70 }, SCREEN)).toBeNull();
+    expect(visibleTarget({ x: 20, y: 20, w: Number.NaN, h: 70 }, SCREEN)).toBeNull();
+    expect(visibleTarget({ x: 20, y: 20, w: 0, h: 70 }, SCREEN)).toBeNull();
   });
 });

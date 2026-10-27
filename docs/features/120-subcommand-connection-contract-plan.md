@@ -1,9 +1,39 @@
 # Feature Plan: 120 — Subcommand Connection Contract (Main Center never breaks)
 
+> **Current implementation note (2026-10-19):** The shared `ActionSpec` now
+> carries typed center, route, risk, confirmation-delegation and compound
+> eligibility. `prepare_action` checks single and compound steps. The four
+> historical `SubCenter::confirm_kind` implementations remain advisory; the
+> established executor confirmation flows are still the actual gates. See
+> [command-center alignment](../architecture/12-command-center-alignment.md).
+> The older H2b discussion below describes the 2026-10-14 baseline; the
+> current side-effect policy now defaults newly added actions to gated and
+> retains the explicit app/site-opening exception.
+
+## Current add-a-command contract
+
+1. Add the `ParsedIntent` variant, parser cases, and speech examples. Assign
+   it in the exhaustive `center_id_for` match. The display name comes from
+   `CenterId::as_str`; there is no `center_for` runtime registry now.
+2. Review its `ActionSpec` route, risk, confirmation delegation, and compound
+   eligibility. Unlisted actions are standalone-only; unknown NLU labels are
+   refused until added to `supported_nlu_label` and a real dispatch arm.
+3. Add required-slot validation to `center::validate` or the relevant center
+   validator. Preserve owner/evidence checks through `prepare_action` for both
+   single commands and every compound step.
+4. Implement or adapt the executor behind the existing orchestrator route.
+   A write that needs approval must use its one existing GitHub, MCP, file,
+   or other executor gate; `SubCenter::confirm_kind` is advisory only.
+5. Pin the center, route, risk, confirmation and compound behavior in tests.
+   Verify request IDs, cancellation, one turn closure, and speech playback
+   through the normal `orchestrator:event` path.
+
+The analysis and checklist below document the 2026-10-14 baseline. Their
+`center_for`, fail-open side-effect, and partial-compound claims are historical.
+
 **Date**: 2026-10-14
-**Status**: H1–H3 BUILT 2026-10-14 (phase-by-phase, double cross-checks; record:
-`docs/changes/119-plan-120-connection-contract-h1-h3.md`). H2b + confirm_kind
-wiring remain open (behavior changes, need approval).
+**Status at the time**: H1–H3 built (record:
+`docs/changes/119-plan-120-connection-contract-h1-h3.md`).
 **Grounding**: two analysis passes over `center.rs` (815 lines), `orchestrator.rs`
 `process_transcript` (~828–960) + `route_intent` (575–690), `command_center.rs`.
 

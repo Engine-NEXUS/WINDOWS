@@ -1,0 +1,49 @@
+{
+  "frontend/src/sidebar/sidebar.css": [
+    ".sidebar-card",
+    ".spatial-card",
+    ".spatial-dashboard",
+    ".analysis-card"
+  ],
+  "frontend/src/sidebar/stack.css": [
+    ".stack-view",
+    ".stack-card",
+    ".stack-summary"
+  ],
+  "frontend/src/sidebar/unified.css": [
+    ".unified-shell"
+  ],
+  "frontend/src/sidebar/kit/kit.css": [
+    ".kit-card",
+    ".kit-minibar"
+  ],
+  "frontend/src/sidebar/coderabbit.css": [
+    ".cr-loading-curtain",
+    ".cr-overlay-drawer"
+  ],
+  "frontend/src/sidebar/lens.css": [
+    ".lens-bubble",
+    ".nexus-zoom-viewer"
+  ],
+  "frontend/src/architect/architect.css": [
+    ".architect-app",
+    ".architect-analytics-col"
+  ],
+  "frontend/src/settings/settings.css": [
+    ".nx-settings",
+    ".nx-dev-toolbar-wide",
+    ".nx-footer"
+  ],
+  "frontend/src/settings-sidebar/settings-sidebar.css": [
+    ".settings-container"
+  ],
+  "frontend/src/settings-sidebar/hub/hub.css": [
+    ".hx-card"
+  ],
+  "frontend/src/pr-list/pr-list.css": [
+    ".gh-dashboard-shell"
+  ],
+  "frontend/src/companion-hud/companion-hud.css": [
+    ".hud"
+  ]
+}

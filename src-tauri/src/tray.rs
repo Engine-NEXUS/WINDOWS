@@ -80,9 +80,12 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> Result<(), tauri::Error> {
                 // Open the full settings window (SettingsApp — save/autostart/
                 // setup-wizard/clear-transcript). Covered by main-cap since
                 // the capability fix; the window had zero openers before.
-                if let Err(e) = crate::commands::open_settings_window(app.clone()) {
-                    tracing::warn!("tray: failed to open settings window: {e}");
-                }
+                let app_clone = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = crate::commands::open_settings_window(app_clone).await {
+                        tracing::warn!("tray: failed to open settings window: {e}");
+                    }
+                });
             }
             "autostart" => {
                 // Toggle the autostart check menu item

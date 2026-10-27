@@ -83,6 +83,8 @@ pub async fn github_profile<R: Runtime>(
 #[tauri::command]
 pub async fn github_profile_clear<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     crate::github_cmd::clear_github_token().await;
+    crate::auth_vault::clear_token("github");
+    crate::auth_vault::clear_api_key("github");
     if let Some(p) = cache_path(&app) {
         let _ = std::fs::remove_file(p);
     }

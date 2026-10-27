@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::google::types::AlertUrgency;
+use super::selfnames::SelfNames;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MailMeta {
@@ -182,17 +183,17 @@ fn any(hay: &str, needles: &[&str]) -> bool {
     needles.iter().any(|n| hay.contains(n))
 }
 
-const DB_DOMAINS: &[&str] = &[
+pub(crate) const DB_DOMAINS: &[&str] = &[
     "supabase.io", "supabase.com", "neon.tech", "planetscale.com", "mongodb.com", "cockroachlabs.cloud",
     "cockroachlabs.com", "render.com", "railway.app", "turso.tech", "upstash.com", "aiven.io",
 ];
-const DB_HIGH: &[&str] = &[
+pub(crate) const DB_HIGH: &[&str] = &[
     "will be paused", "has been paused", "was paused", "project paused", "paused due", "pausing",
     "will be deleted", "will be removed", "has been deleted", "scheduled for deletion", "deletion",
     "inactive", "inactivity", "suspended", "will be suspended", "restore your project", "payment failed",
     "exceeded", "over the limit", "read-only mode", "read only mode", "disk space",
 ];
-const DB_MEDIUM: &[&str] = &["usage", "quota", "billing", "invoice", "free tier", "free plan", "upgrade required"];
+pub(crate) const DB_MEDIUM: &[&str] = &["usage", "quota", "billing", "invoice", "free tier", "free plan", "upgrade required"];
 
 const GH_DOMAINS: &[&str] = &["github.com"];
 const GH_HIGH: &[&str] = &[
@@ -208,24 +209,24 @@ const HACK_DOMAINS: &[&str] = &[
     "devpost.com", "unstop.com", "mlh.io", "devfolio.co", "hackerearth.com", "dorahacks.io", "hackquest.io",
     "hack2skill.com", "lablab.ai", "taikai.network", "hackathon.com",
 ];
-const HACK_STATUS: &[&str] = &[
+pub(crate) const HACK_STATUS: &[&str] = &[
     "shortlisted", "you have been selected", "you've been selected", "you are selected", "selected for",
     "accepted", "finalist", "next round", "waitlist", "wait list", "regret to inform", "not selected",
     "application status", "congratulations",
 ];
-const HACK_DEADLINE: &[&str] = &[
+pub(crate) const HACK_DEADLINE: &[&str] = &[
     "deadline", "last date", "closes in", "closing soon", "closes on", "submission due", "due by", "submit by",
     "registration closes", "applications close",
 ];
-const HACK_RECEIVED: &[&str] = &["application received", "registration confirmed", "you're registered", "you are registered", "thanks for applying", "thank you for applying"];
+pub(crate) const HACK_RECEIVED: &[&str] = &["application received", "registration confirmed", "you're registered", "you are registered", "thanks for applying", "thank you for applying"];
 
-const EXAM_STRONG: &[&str] = &[
+pub(crate) const EXAM_STRONG: &[&str] = &[
     "hall ticket", "admit card", "exam schedule", "examination schedule", "exam timetable", "exam time table",
     "date sheet", "datesheet", "seating arrangement", "internal exam", "mid-sem", "midsem", "end-sem", "endsem",
     "semester exam", "re-exam", "backlog exam", "viva", "results declared", "result declared", "exam result",
     "revaluation", "exam fee", "exam form", "examination form",
 ];
-const EXAM_WEAK: &[&str] = &["exam", "examination", "result", "marks", "assessment", "internal test"];
+pub(crate) const EXAM_WEAK: &[&str] = &["exam", "examination", "result", "marks", "assessment", "internal test"];
 
 const DEADLINE_WORDS: &[&str] = &[
     "deadline", "due date", "last date", "due tomorrow", "due today", "expires", "expiring", "submit by",
@@ -360,17 +361,33 @@ fn clip(s: &str, max: usize) -> String {
 }
 
 /// Display name for a sender: the name if present, else the domain's first label.
+/// If `names.is_self` matches, replaced by "you" so the line never contains the owner's name.
+pub fn sender_label_with(m: &MailMeta, names: &SelfNames) -> String {
+    if (!m.from_name.trim().is_empty() && names.is_self(&m.from_name))
+        || (!m.from_email.trim().is_empty() && names.is_self(&m.from_email))
+    {
+        return "you".to_string();
+    }
+    let raw = if !m.from_name.trim().is_empty() {
+        clip(&m.from_name, 40)
+    } else {
+        let d = domain(&m.from_email);
+        let first = d.split('.').next().unwrap_or(d);
+        let mut c = first.chars();
+        match c.next() {
+            Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+            None => clip(&m.from_email, 40),
+        }
+    };
+    if names.is_self(&raw) {
+        "you".to_string()
+    } else {
+        raw
+    }
+}
+
 pub fn sender_label(m: &MailMeta) -> String {
-    if !m.from_name.trim().is_empty() {
-        return clip(&m.from_name, 40);
-    }
-    let d = domain(&m.from_email);
-    let first = d.split('.').next().unwrap_or(d);
-    let mut c = first.chars();
-    match c.next() {
-        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-        None => clip(&m.from_email, 40),
-    }
+    sender_label_with(m, &SelfNames::none())
 }
 
 /// Subject without "Re:"/"Fwd:" prefixes, clipped for speech.
@@ -386,31 +403,40 @@ pub fn subject_label(m: &MailMeta) -> String {
             break;
         }
     }
-    clip(s, 90)
+    clip(s, 60)
 }
 
 /// One spoken alert: "Sir, a database service warning from Supabase: Your project will be paused."
-pub fn alert_text(t: &Triage, m: &MailMeta, address: Option<&str>) -> String {
+pub fn alert_text_with(t: &Triage, m: &MailMeta, address: Option<&str>, names: &SelfNames) -> String {
     let who = address.map(|a| format!("{a}, ")).unwrap_or_default();
     capitalize(format!(
         "{who}{} from {}: {}.",
         t.category.phrase(),
-        sender_label(m),
+        sender_label_with(m, names),
         subject_label(m).trim_end_matches('.')
     ))
 }
 
+pub fn alert_text(t: &Triage, m: &MailMeta, address: Option<&str>) -> String {
+    alert_text_with(t, m, address, &SelfNames::none())
+}
+
 /// Several at once: one summary line instead of a barrage.
-pub fn batch_text(items: &[(Triage, MailMeta)], address: Option<&str>) -> String {
+pub fn batch_text_with(items: &[(Triage, MailMeta)], address: Option<&str>, names: &SelfNames) -> String {
     let who = address.map(|a| format!("{a}, ")).unwrap_or_default();
     let first = &items[0];
     capitalize(format!(
         "{who}{} important emails. The most urgent is {} from {}: {}. Say important emails for the rest.",
         items.len(),
         first.0.category.phrase(),
-        sender_label(&first.1),
+        sender_label_with(&first.1, names),
         subject_label(&first.1).trim_end_matches('.'),
     ))
+}
+
+#[cfg(test)]
+pub fn batch_text(items: &[(Triage, MailMeta)], address: Option<&str>) -> String {
+    batch_text_with(items, address, &SelfNames::none())
 }
 
 // ─── What is stored (encrypted, 7 days) ─────────────────────────────
@@ -683,5 +709,34 @@ mod tests {
     fn percent_encoding() {
         assert_eq!(pct_encode("2026-10-08T10:00:00+05:30"), "2026-10-08T10%3A00%3A00%2B05%3A30");
         assert_eq!(pct_encode("a b&c"), "a%20b%26c");
+    }
+
+    #[test]
+    fn alert_and_batch_text_with_self_sender_uses_you() {
+        let m = mail("Chitkul Lakshya <chitkullakshya@gmail.com>", "Re: Action required.", "", &["INBOX"]);
+        let t = Triage {
+            category: Category::Database,
+            urgency: AlertUrgency::High,
+            reason: "test".into(),
+        };
+        let names = SelfNames::from_parts(&["Chitkul Lakshya".into(), "chitkullakshya@gmail.com".into()]);
+        assert_eq!(sender_label_with(&m, &names), "you");
+        let a = alert_text_with(&t, &m, Some("sir"), &names);
+        assert_eq!(a, "Sir, a database service warning from you: Action required.");
+        assert!(!a.contains("Chitkul"));
+
+        let items = vec![(t.clone(), m.clone())];
+        let b = batch_text_with(&items, Some("sir"), &names);
+        assert!(b.contains("from you: Action required."));
+    }
+
+    #[test]
+    fn subject_label_clipped_to_60() {
+        let long_subj = "a".repeat(100);
+        let m = mail("Supabase <noreply@supabase.io>", &long_subj, "", &["INBOX"]);
+        let s = subject_label(&m);
+        // 60 characters of subject plus the ellipsis `clip` appends
+        assert_eq!(s.chars().count(), 61);
+        assert!(s.ends_with('…'), "{s}");
     }
 }

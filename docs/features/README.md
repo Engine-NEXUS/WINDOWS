@@ -7,7 +7,22 @@ Plans, specifications and records for every feature, from the original `prem224k
 > Files that predate this index but were missing from it are listed in **Additional documents** at the bottom.
 
 ---
+## Current Hand Mode refactor
+
+- [150 — Hand Mode production refactor implementation plan](150-hand-mode-production-refactor-implementation-plan.md) — ordered safety, feedback, frame freshness, output, tuning, and real-hardware release gates. Status: plan only.
+- [Hand Mode production refactor research](../research/hand-mode/02-production-refactor-research-2026-10-21.md) — source-backed defects, uncertain performance claims, and measurement contract.
+
+## Focus Mode, owner-less GitHub commands and notification state (2026-10-25/26)
+
+- [153 — Focus Mode, owner-less GitHub commands and the general notification brain](153-focus-mode-github-resolution-and-notification-programme.md) — plan, owner decisions, as-built design for four tracks (Hand Mode Focus Mode with exact restore, repo/PR resolution across user and org repos, failed/still failing/fixed notification state machine with a GitHub Actions watcher, 65 generated feature work cards), deviations, open work and the live verification protocol. Status: built and unit-tested, not live-proven; Vercel/Render/Netlify watchers designed, not built. Evidence: [research record](../research/focus-github-notification-research-2026-10-26.md); as-built index: [session overview](../changes/session-2026-10-25-focus-github-notifications-overview.md).
+
+## Notification brain (planning 2026-10-23; Phase A+B built 2026-10-24)
+
+- [151 — Notification brain: event keys, cooldown and short notifications](151-notification-brain-event-key-cooldown-and-short-notifications-plan.md) — code-verified root causes of repeated/verbose notifications; event-key + 5-min cooldown + hold-and-merge design through `proactive_policy`; all-category short templates; zero-AI-credit audit; borrowed patterns from ntfy/Apprise/Apple Intelligence. Status: plan only (owner-reviewed 2026-10-23); phases A+B built: [changes/157](../changes/157-notification-brain-phase-a-b.md), phase D built: [changes/158](../changes/158-notification-brain-phase-d-one-liners.md), phase E built: [changes/159](../changes/159-notification-brain-phase-e-funnel.md).
+
 ## Feature Index
+
+- [152 — Voice Lock evidence and reliability](152-voice-lock-evidence-and-reliability-plan.md) — P1 capture accounting building first; subsequent native-state UI, model benchmarking, transcription diagnosis and real-device acceptance gates. Research is a local application of ElevenLabs Architect guidance, not a remote Architect opinion.
 
 ### Voice & PR Analysis (prem224k — this session)
 
@@ -297,3 +312,5 @@ Listed automatically from the folder on 2026-10-17; descriptions are the documen
 | [97-screen-analysis-zero-delay-plan.md](97-screen-analysis-zero-delay-plan.md) | Screen-Analysis Zero-Delay Plan (2026-10-07) |
 | [98-volume-baseline-restore-plan.md](98-volume-baseline-restore-plan.md) | Speaker Volume Baseline Restore Plan (2026-10-07) |
 | [99-dual-engine-stt-nlu-alignment-and-accuracy-fix-spec.md](99-dual-engine-stt-nlu-alignment-and-accuracy-fix-spec.md) | Feature Spec 99: Dual-Engine STT ↔ BERT-Mini NLU Alignment & 50% Accuracy Fix |
+| [146-foreground-review-and-recreation.md](146-foreground-review-and-recreation.md) | Foreground app/website review followed by reference-bound recreation; release gates and current implementation state |
+| [150-hand-mode-production-refactor-implementation-plan.md](150-hand-mode-production-refactor-implementation-plan.md) | Hand Mode safety and latency refactor, with measurable Windows live release gates (plan only) |

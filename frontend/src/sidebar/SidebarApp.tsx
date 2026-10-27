@@ -10,6 +10,7 @@ import { GitHubConflictPanel } from "./GitHubConflictPanel";
 import { ConfirmationPanel } from "./ConfirmationPanel";
 import { CodeRabbitDashboard, SAMPLE_CODERABBIT_REVIEW } from "./CodeRabbitDashboard";
 import { topicTitle } from "./spatialShared";
+import { ZoomViewer } from "./ZoomViewer";
 
 /**
  * NEXUS Response Sidebar
@@ -97,13 +98,6 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
       .then((pending) => {
         console.log("[sidebar] get_pending_sidebar_content result:", pending ? `query=${pending.query?.length}chars text=${pending.text?.length}chars` : "null");
         if (pending) {
-          if (pending.backdrop) {
-            console.log("[sidebar] setting backdrop image");
-            document.documentElement.style.setProperty(
-              "--sidebar-backdrop-image",
-              `url(${pending.backdrop})`
-            );
-          }
           // If confirmation data is present, render confirmation panel
           if (pending.confirmation) {
             console.log("[sidebar] showing with confirmation data");
@@ -160,41 +154,11 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
     // sidebar:set_view and switches the mounted view. No listener here.)
 
     // "Fake blur" backdrop (Windows only — see sidebar_backdrop.rs).
-    // Rust captures + blurs the screen region behind the window right
-    // before it becomes visible and sends the result here as a data:
-    // URI. Set directly as a CSS variable (not React state) so it
-    // applies instantly without waiting on a render cycle.
-    listen<string>("sidebar:backdrop", (event) => {
-      document.documentElement.style.setProperty(
-        "--sidebar-backdrop-image",
-        `url(${event.payload})`
-      );
-    }).then((u) => unlisteners.push(u));
-
-    // Sample background luminance under sidebar to automatically adapt light/dark mode
-    // (reads the window's ACTUAL rect — layout-agnostic across views/docks)
-    const syncLuminanceAndHitbox = () => {
-      const dpr = window.devicePixelRatio || 1;
-      const w = Math.round(window.innerWidth * dpr);
-      const h = Math.round(window.innerHeight * dpr);
-      const x = Math.round((window.screenX || 0) * dpr);
-      const y = Math.max(0, Math.round((window.screenY || 0) * dpr));
-
-      invoke("get_screen_luminance", { x, y, w, h })
-        .then((res: any) => {
-          if (res?.mode) {
-            document.documentElement.setAttribute("data-glass-luminance", res.mode);
-          }
-        })
-        .catch(() => {});
-    };
-
-    syncLuminanceAndHitbox();
-    const probeInterval = setInterval(syncLuminanceAndHitbox, 1500);
+    // Event listener retained for Tauri event lifecycle compatibility.
+    listen<string>("sidebar:backdrop", () => {}).then((u) => unlisteners.push(u));
 
     return () => {
       unlisteners.forEach((u) => u());
-      clearInterval(probeInterval);
     };
   }, [show, hide]);
 
@@ -467,7 +431,7 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
               </div>
             </div>
             <div className="nexus-lightbox-body">
-              <img src={activeImage.src} alt={activeImage.alt} className="nexus-lightbox-img" />
+              <ZoomViewer src={activeImage.src} alt={activeImage.alt} />
             </div>
           </div>
         </div>

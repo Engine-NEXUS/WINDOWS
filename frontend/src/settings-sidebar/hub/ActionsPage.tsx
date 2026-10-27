@@ -3,12 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   AGENT_APPROVALS,
   TOOLS,
-  agentApprovalLabel,
   auditSummary,
   clampPolicy,
   effectLabel,
   fmtWhen,
-  modeLabel,
   purgeInDays,
   ruleLabel,
   trashLabel,
@@ -17,17 +15,15 @@ import {
   type AuditRow,
   type AgentApproval,
   type Effect,
-  type Mode,
   type Policy,
   type PolicyView,
   type TrashRow,
 } from "./actionsModel";
 
 /**
- * Actions & Permissions: what NEXUS may do to files by voice. The rules the page edits are the same
- * file the kernel reads on every command, so changes apply at once, without a restart. Places that
- * are never touched (Windows, other profiles, .git, .ssh, NEXUS's own data) are fixed in code and
- * are not listed here because no setting can unlock them.
+ * Actions & Permissions: what NEXUS may do to files by voice.
+ * Rules apply immediately to the kernel without restarting.
+ * Protected system directories are enforced in the Rust kernel and cannot be unlocked.
  */
 export function ActionsPage() {
   const [view, setView] = useState<PolicyView | null>(null);
@@ -92,7 +88,7 @@ export function ActionsPage() {
   if (!view) {
     return (
       <div className="hx-page">
-        {error ? <div className="hx-error">{error}</div> : <div className="hx-note">Loading…</div>}
+        {error ? <div className="hx-error">{error}</div> : <div className="hx-note">Loading policy matrix…</div>}
       </div>
     );
   }
@@ -100,67 +96,111 @@ export function ActionsPage() {
 
   return (
     <div className="hx-page">
-      <div className="hx-note">
-        Say “delete the PDFs in Downloads” and I read back exactly what I found, then wait for your yes. Nothing is
-        permanently deleted: it goes to a hidden trash folder inside the same folder, and “undo that” brings it back.
-        Windows, other users' profiles, .git, .ssh and my own data are never touched, whatever you set here.
-      </div>
-      {error && <div className="hx-error">{error}</div>}
+      {error && <div className="hx-error" onClick={() => setError(null)}>{error}</div>}
       {notice && <div className="hx-note">{notice}</div>}
 
-      <div className="hx-card hx-key">
-        <div className="hx-key-head">
-          <div>
-            <div className="hx-key-title">File commands by voice</div>
-            <div className="hx-key-sub">{p.enabled ? "On" : "Off: I will say they are switched off"}</div>
-          </div>
-          <input type="checkbox" checked={p.enabled} disabled={busy} onChange={(e) => save({ ...p, enabled: e.target.checked })} />
-        </div>
-        <div className="hx-seg">
-          {(["smart", "ask", "never_destructive"] as Mode[]).map((m) => (
-            <button
-              key={m}
-              type="button"
-              className={`hx-seg-btn ${p.mode === m ? "hx-seg-btn--on" : ""}`}
+      {/* ── Master Voice Action Toggle & Safety Tiers ── */}
+      <div className="hx-card" style={{ padding: "12px 14px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <div className="hx-switch-title">File Operations by Voice</div>
+          <label className="hx-toggle">
+            <input
+              type="checkbox"
+              checked={p.enabled}
               disabled={busy}
-              onClick={() => save({ ...p, mode: m })}
-            >
-              {m === "smart" ? "Smart" : m === "ask" ? "Ask first" : "Never delete"}
-            </button>
-          ))}
+              onChange={(e) => save({ ...p, enabled: e.target.checked })}
+            />
+            <span className="hx-toggle-slider" />
+          </label>
         </div>
-        <div className="hx-key-sub">{modeLabel(p.mode)}</div>
+
+        {/* 3-Tier Safety Level Bento Grid */}
+        <div className="hx-safety-grid">
+          <div
+            className={`hx-safety-card ${p.mode === "ask" ? "is-selected" : ""}`}
+            onClick={() => !busy && save({ ...p, mode: "ask" })}
+          >
+            <span className="hx-safety-icon">✋</span>
+            <span className="hx-safety-title">Ask First</span>
+            <span className="hx-safety-desc">Confirm writes & deletes</span>
+          </div>
+
+          <div
+            className={`hx-safety-card ${p.mode === "smart" ? "is-selected" : ""}`}
+            onClick={() => !busy && save({ ...p, mode: "smart" })}
+          >
+            <span className="hx-safety-icon">⚡</span>
+            <span className="hx-safety-title">Smart</span>
+            <span className="hx-safety-desc">Auto-read, ask delete</span>
+          </div>
+
+          <div
+            className={`hx-safety-card ${p.mode === "never_destructive" ? "is-selected" : ""}`}
+            onClick={() => !busy && save({ ...p, mode: "never_destructive" })}
+          >
+            <span className="hx-safety-icon">🔒</span>
+            <span className="hx-safety-title">Strict</span>
+            <span className="hx-safety-desc">Refuse all deletes</span>
+          </div>
+        </div>
       </div>
 
-      <div className="hx-card hx-key">
-        <div className="hx-key-title">Folders I may work in</div>
-        <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
-          <span className="hx-key-sub">Downloads, Desktop and Documents</span>
-          <input
-            type="checkbox"
-            checked={p.use_default_roots}
-            disabled={busy}
-            onChange={(e) => save({ ...p, use_default_roots: e.target.checked })}
-          />
-        </label>
-        {view.roots.map((r) => (
-          <div className="hx-key-mask" key={r}>{r}</div>
-        ))}
-        {view.roots.length === 0 && <div className="hx-key-sub">No folders yet, so every file command is refused.</div>}
-        {p.extra_roots.map((r) => (
-          <div className="hx-row-actions" key={r} style={{ justifyContent: "space-between" }}>
-            <span className="hx-key-sub">{r}</span>
-            <button className="hx-btn hx-btn--danger-ghost" disabled={busy} onClick={() => save({ ...p, extra_roots: p.extra_roots.filter((x) => x !== r) })}>
-              Remove
-            </button>
+      {/* ── Allowed Workspace Folders ── */}
+      <div className="hx-card" style={{ padding: "12px 14px" }}>
+        <div className="hx-switch-title">Workspace Roots</div>
+
+        {/* Standard User Folders Switch */}
+        <div className="hx-switch-card" style={{ marginTop: 10, background: "rgba(0, 0, 0, 0.2)" }}>
+          <div className="hx-switch-meta">
+            <div className="hx-switch-title">Default User Folders</div>
+            <div className="hx-switch-sub">Allow access to Downloads, Desktop, and Documents.</div>
           </div>
-        ))}
-        <div className="hx-row-actions">
+          <label className="hx-toggle">
+            <input
+              type="checkbox"
+              checked={p.use_default_roots}
+              disabled={busy}
+              onChange={(e) => save({ ...p, use_default_roots: e.target.checked })}
+            />
+            <span className="hx-toggle-slider" />
+          </label>
+        </div>
+
+        {/* Active Roots List */}
+        <div className="hx-root-chips">
+          {view.roots.map((r) => (
+            <div className="hx-root-chip" key={r}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span>📁</span>
+                <span>{r}</span>
+              </div>
+              {p.extra_roots.includes(r) && (
+                <button
+                  className="hx-btn hx-btn--tiny hx-btn--danger-ghost"
+                  disabled={busy}
+                  onClick={() => save({ ...p, extra_roots: p.extra_roots.filter((x) => x !== r) })}
+                  title="Remove folder boundary"
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          ))}
+          {view.roots.length === 0 && (
+            <div style={{ padding: 12, textAlign: "center", color: "rgba(255, 255, 255, 0.45)", fontSize: 12 }}>
+              No folder roots configured. Voice file commands will be refused until a boundary is added.
+            </div>
+          )}
+        </div>
+
+        {/* Add Extra Root Input */}
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
           <input
             className="hx-input"
-            placeholder="Add a folder, like D:\projects"
+            placeholder="Add a folder path, e.g. D:\PROJECTS\ULTRON"
             value={newRoot}
             onChange={(e) => setNewRoot(e.target.value)}
+            style={{ flex: 1 }}
           />
           <button
             className="hx-btn hx-btn--primary"
@@ -170,35 +210,168 @@ export function ActionsPage() {
               setNewRoot("");
             }}
           >
-            Add
+            + Add Folder
           </button>
         </div>
-        <div className="hx-key-sub">Say “in the projects folder” after adding D:\projects. A folder must exist, and drives or network shares are refused.</div>
       </div>
 
-      <div className="hx-card hx-key">
-        <div className="hx-key-title">Rules</div>
-        <div className="hx-key-sub">Checked in this order: Never, then Always ask, then Allow. The first match wins.</div>
-        {p.rules.map((r, i) => (
-          <div className="hx-row-actions" key={`${r.effect}${r.tool}${r.pattern}${i}`} style={{ justifyContent: "space-between" }}>
-            <span className="hx-key-sub">{ruleLabel(r)}</span>
-            <button className="hx-btn hx-btn--danger-ghost" disabled={busy} onClick={() => save({ ...p, rules: p.rules.filter((_, j) => j !== i) })}>
-              Remove
-            </button>
+      {/* ── Coding Agent Authority ── */}
+      <div className="hx-card" style={{ padding: "12px 14px" }}>
+        <div className="hx-switch-title">Coding Agent Authority</div>
+        <select
+          className="hx-input"
+          value={p.agent_approval}
+          disabled={busy}
+          onChange={(e) => save({ ...p, agent_approval: e.target.value as AgentApproval })}
+          style={{ marginTop: 8, width: "100%" }}
+        >
+          {AGENT_APPROVALS.map((a) => (
+            <option key={a} value={a}>
+              {a === "edit"
+                ? "Edit files freely in allowed roots (commands ask first)"
+                : a === "readonly"
+                  ? "Read-only inspection (cannot modify code)"
+                  : a === "standard"
+                    ? "Strict ask-first on every file edit"
+                    : "Unrestricted workspace autonomy"}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* ── Voice Undo & Quarantine Vault ── */}
+      <div className="hx-card" style={{ padding: "12px 14px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div className="hx-switch-title">Quarantine Vault ({trash.length})</div>
+            <div className="hx-switch-sub">Kept for {p.quarantine_days} days</div>
           </div>
-        ))}
-        <div className="hx-row-actions">
-          <select className="hx-input" value={ruleEffect} onChange={(e) => setRuleEffect(e.target.value as Effect)}>
+          <button
+            className="hx-btn hx-btn--accent"
+            disabled={busy}
+            onClick={() => run(() => invoke<string>("actions_undo"))}
+          >
+            ↺ Undo Last Action
+          </button>
+        </div>
+
+        {trash.length === 0 ? (
+          <div style={{ padding: "16px 0", textAlign: "center", color: "rgba(255, 255, 255, 0.45)", fontSize: 12 }}>
+            Quarantine vault is empty. No files have been deleted by voice recently.
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+            {trash.map((t) => (
+              <div
+                key={t.id}
+                style={{
+                  padding: "10px 12px",
+                  background: "rgba(0, 0, 0, 0.25)",
+                  border: "1px solid rgba(255, 255, 255, 0.06)",
+                  borderRadius: 8,
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>{trashLabel(t)}</div>
+                  <div className="hx-fact-meta">
+                    Quarantine remaining: {purgeInDays(t, now, p.quarantine_days)} days
+                  </div>
+                </div>
+                <button
+                  className="hx-btn hx-btn--tiny hx-btn--primary"
+                  disabled={busy}
+                  onClick={() => run(() => invoke<string>("actions_restore", { id: t.id }))}
+                >
+                  Restore File
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── Custom Pattern Rules ── */}
+      <div className="hx-card" style={{ padding: "12px 14px" }}>
+        <div className="hx-switch-title">Permission Overrides ({p.rules.length})</div>
+
+        {p.rules.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}>
+            {p.rules.map((r, i) => (
+              <div
+                key={`${r.effect}${r.tool}${r.pattern}${i}`}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  padding: "8px 12px",
+                  background: "rgba(0, 0, 0, 0.2)",
+                  borderRadius: 8,
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span
+                    className="hx-pill"
+                    style={{
+                      background:
+                        r.effect === "allow"
+                          ? "rgba(16, 185, 129, 0.15)"
+                          : r.effect === "ask"
+                            ? "rgba(242, 184, 89, 0.15)"
+                            : "rgba(239, 68, 68, 0.15)",
+                      color: r.effect === "allow" ? "#34d399" : r.effect === "ask" ? "#f2b859" : "#ff5a52",
+                    }}
+                  >
+                    {r.effect.toUpperCase()}
+                  </span>
+                  <span style={{ fontSize: 12.5, color: "#fff" }}>{ruleLabel(r)}</span>
+                </div>
+                <button
+                  className="hx-btn hx-btn--tiny hx-btn--danger-ghost"
+                  disabled={busy}
+                  onClick={() => save({ ...p, rules: p.rules.filter((_, j) => j !== i) })}
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Rule Builder Controls */}
+        <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }}>
+          <select
+            className="hx-input"
+            value={ruleEffect}
+            onChange={(e) => setRuleEffect(e.target.value as Effect)}
+            style={{ width: "110px" }}
+          >
             {(["deny", "ask", "allow"] as Effect[]).map((e) => (
               <option key={e} value={e}>{effectLabel(e)}</option>
             ))}
           </select>
-          <select className="hx-input" value={ruleTool} onChange={(e) => setRuleTool(e.target.value)}>
+
+          <select
+            className="hx-input"
+            value={ruleTool}
+            onChange={(e) => setRuleTool(e.target.value)}
+            style={{ width: "120px" }}
+          >
             {TOOLS.map((t) => (
-              <option key={t} value={t}>{t === "*" ? "any action" : t.replace("_", " ")}</option>
+              <option key={t} value={t}>{t === "*" ? "any tool" : t.replace("_", " ")}</option>
             ))}
           </select>
-          <input className="hx-input" placeholder="*.pdf" value={rulePattern} onChange={(e) => setRulePattern(e.target.value)} />
+
+          <input
+            className="hx-input"
+            placeholder="e.g. *.env or *.key"
+            value={rulePattern}
+            onChange={(e) => setRulePattern(e.target.value)}
+            style={{ flex: 1, minWidth: "120px" }}
+          />
+
           <button
             className="hx-btn hx-btn--primary"
             disabled={busy || !validPattern(rulePattern)}
@@ -207,59 +380,43 @@ export function ActionsPage() {
               setRulePattern("");
             }}
           >
-            Add
+            + Add Rule
           </button>
         </div>
       </div>
 
-      <div className="hx-card hx-key">
-        <div className="hx-key-title">Coding agents I start for you</div>
-        <select
-          className="hx-input"
-          value={p.agent_approval}
-          disabled={busy}
-          onChange={(e) => save({ ...p, agent_approval: e.target.value as AgentApproval })}
-        >
-          {AGENT_APPROVALS.map((a) => (
-            <option key={a} value={a}>{a === "edit" ? "Edit files only" : a === "readonly" ? "Read only" : a === "standard" ? "Ask first" : "Edit freely, ask before commands"}</option>
-          ))}
-        </select>
-        <div className="hx-key-sub">{agentApprovalLabel(p.agent_approval)}. There is no option that turns the agent's permission checks off.</div>
-      </div>
+      {/* ── Recent Activity Audit Trail ── */}
+      <div className="hx-card" style={{ padding: "12px 14px" }}>
+        <div className="hx-switch-title">Recent Activity ({audit.length})</div>
 
-      <div className="hx-card hx-key">
-        <div className="hx-key-head">
-          <div>
-            <div className="hx-key-title">Trash and undo</div>
-            <div className="hx-key-sub">Kept {p.quarantine_days} days, then removed for good (every removal is logged).</div>
+        {audit.length === 0 ? (
+          <div style={{ padding: "16px 0", textAlign: "center", color: "rgba(255, 255, 255, 0.45)", fontSize: 12 }}>
+            No recent file operations recorded.
           </div>
-          <button className="hx-btn" disabled={busy} onClick={() => run(() => invoke<string>("actions_undo"))}>
-            Undo last action
-          </button>
-        </div>
-        {trash.length === 0 && <div className="hx-key-sub">The trash is empty.</div>}
-        {trash.map((t) => (
-          <div className="hx-row-actions" key={t.id} style={{ justifyContent: "space-between" }}>
-            <span className="hx-key-sub">
-              {trashLabel(t)} · {purgeInDays(t, now, p.quarantine_days)} days left
-            </span>
-            <button className="hx-btn" disabled={busy} onClick={() => run(() => invoke<string>("actions_restore", { id: t.id }))}>
-              Restore
-            </button>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10, maxHeight: "240px", overflowY: "auto" }}>
+            {audit.map((a, i) => (
+              <div
+                key={`${a.ts}${i}`}
+                style={{
+                  padding: "8px 10px",
+                  background: "rgba(0, 0, 0, 0.2)",
+                  borderRadius: 6,
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  fontSize: 12,
+                }}
+              >
+                <div>
+                  <span style={{ color: "#fff", fontWeight: 500 }}>{auditSummary(a)}</span>
+                  {a.origin === "derived" && <span style={{ color: "rgba(255, 255, 255, 0.4)", marginLeft: 6 }}>(text trigger)</span>}
+                </div>
+                <span className="hx-fact-meta">{fmtWhen(a.ts)}</span>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
-
-      <div className="hx-card hx-key">
-        <div className="hx-key-title">Recent activity</div>
-        <div className="hx-key-sub">Kept on this PC for {p.audit_days} days. Phrases never leave the device.</div>
-        {audit.length === 0 && <div className="hx-key-sub">Nothing yet.</div>}
-        {audit.map((a, i) => (
-          <div className="hx-key-sub" key={`${a.ts}${i}`}>
-            {fmtWhen(a.ts)} · {auditSummary(a)}
-            {a.origin === "derived" ? " (text, not your voice)" : ""}
-          </div>
-        ))}
+        )}
       </div>
     </div>
   );

@@ -330,33 +330,6 @@ function correctSttTranscript(transcript: string): string {
     logFixes.push("so→(stripped)");
   }
 
-  // Fix known repo name mishearings.
-  // tiny.en (39M params) struggles with multi-word and hyphenated repo names.
-  // This map covers common phonetic mishearings for the user's repos.
-  // The Worker also does fuzzy matching, but fixing client-side means the
-  // user sees the corrected name in the orb/sidebar instead of the misheard one.
-  const repoCorrections: Array<[RegExp, string]> = [
-    // "ledger ai" mishearings: "lageria", "ledger a", "ledger i", "ledgeria", "leg daria"
-    [/\b(?:in|of|from|for)\s+(lageria|ledgeria|ledger\s*a|ledger\s*i|leg\s*daria|lager\s*ai|ledger\s*are)\b/gi, " in ledger-ai"],
-    // "servx" mishearings (existing)
-    [/\b(?:in|of|from|for)\s+(?:cervix|service|weeks|serve\s*x|ser\s*fixes|surf\s*x|ser\s*vicks)\b/gi, " in servx"],
-    // "zync" mishearings: "zinc", "sink", "sync", "zinck", "zin", "unzinc", "on zinc"
-    [/\b(?:in|of|from|for)\s+(zinc|sink|sync|zinck|zin|unzinc|on\s*zinc)\b/gi, " in zync"],
-    // "nexus" mishearings: "nexus", "nexa", "nexis", "nexus agent"
-    [/\b(?:in|of|from|for)\s+(nexa|nexis|nexus\s*agent)\b/gi, " in nexus"],
-  ];
-  for (const [pattern, replacement] of repoCorrections) {
-    const before = t;
-    t = t.replace(pattern, replacement);
-    if (t !== before) {
-      // Extract the repo name from the replacement for logging
-      const repoName = replacement.trim().replace(/^(?:in|of|from)\s+/, "");
-      logFixes.push(`repo→${repoName}`);
-    }
-  }
-
-
-
   if (logFixes.length > 0 || t !== transcript) {
     console.log(`[NEXUS] STT correction: "${transcript}" → "${t}"`);
   }
@@ -706,6 +679,8 @@ async function endTurn(): Promise<void> {
 }
 
 export interface SttTurnMetadata {
+  session?: number;
+  rawText?: string;
   ownership?: "verified" | "uncertain" | "rejected" | "unenrolled";
   ownerScore?: number;
   decoderBias?: string;
@@ -717,6 +692,12 @@ export interface SttTurnMetadata {
     confidence: number;
     source: string;
   };
+}
+
+export function isAdministratorControlText(text: string): boolean {
+  const spoken = text.trim().replace(/^(?:hey\s+)?nexus\s*,?\s+/i, "");
+  return /^(?:administrator\b|admin\b|as\s+(?:administrator|admin)\b|(?:start|open|end|close)\s+(?:administrator|admin)\s+session\b|(?:verify|authenticate)\s+me\s+as\s+administrator\b|exit\s+(?:administrator|admin)\s+mode\b|am\s+i\s+in\s+(?:administrator|admin)\s+mode\b)/i.test(spoken)
+    || /^(?:send|deliver)\s+the\s+review\s+to\s+(?:my|the\s+(?:administrator|admin))\s+laptop\b/i.test(spoken);
 }
 
 export async function processTranscript(
@@ -861,16 +842,29 @@ export async function processTranscript(
   clearParked();
   missStreak = 0;
   const provenance: TurnProvenance = {
+    session: turn.session,
     ownership: turn.ownership ?? "unenrolled",
     ownerScore: turn.ownerScore ?? 1,
     decoderBias: turn.decoderBias ?? "owner",
     language: turn.language ?? "en",
     initiation: useAssistant.getState().ghostActive ? "ghost" : "explicit",
+    rawText: turn.rawText ?? transcript,
   };
+
+  // Administrator syntax goes straight to Rust unchanged. Learned text
+  // corrections and the frontend's local intent runner are not authority for
+  // this role; Rust matches the exact text against a one-use native STT proof.
+  if (isAdministratorControlText(transcript)) {
+    useAssistant.getState().addUserMessage(transcript);
+    useAssistant.getState().setState("thinking");
+    await processViaOrchestrator(transcript, undefined, provenance);
+    return;
+  }
 
   // 1b. Post-process the transcript to fix common STT mishearings.
   let corrected = correctSttTranscript(transcript);
   corrected = applyLearnedCorrections(corrected);
+  provenance.correctedText = corrected;
 
   // Log successful transcript for self-learning
   void logSuccessfulTranscript(corrected);
@@ -880,6 +874,35 @@ export async function processTranscript(
 
   // 2. Add the transcript to the UI.
   useAssistant.getState().addUserMessage(corrected);
+
+  // Native microphone turns have one policy owner. Rust re-parses the raw and
+  // display text and applies the action contract before any local executor.
+  if (turn.session !== undefined) {
+    useAssistant.getState().setState("thinking");
+    const ghostTurn = useAssistant.getState().ghostActive;
+    try {
+      const result = await processViaOrchestrator(corrected, undefined, provenance, {
+        timeoutMs: ghostTurn ? GHOST_INVOKE_BUDGET_MS : undefined,
+      });
+      if (result) {
+        if (result.handled_locally && ghostTurn) {
+          const { closeHandledLocallyTurn } = await import("../net/ghostHotMic");
+          await closeHandledLocallyTurn();
+        }
+        return;
+      }
+    } catch (error) {
+      console.warn("[NEXUS] native turn failed:", error);
+    }
+    useAssistant.getState().setLoadingVisible(false);
+    useAssistant.getState().setVisible(true);
+    useAssistant.getState().setState("speaking");
+    useAssistant.getState().addAssistantMessage("I couldn't complete that turn. Please try again.");
+    await speak("I couldn't complete that turn. Please try again.").catch(() => {});
+    hideOrbIfIdle();
+    setTimeout(() => { void endTurn(); }, 550);
+    return;
+  }
 
   // 2b. INSTANT ACK for long-running queries — BEFORE intent parsing.
   const isLong = isLongRunningQuery(corrected);

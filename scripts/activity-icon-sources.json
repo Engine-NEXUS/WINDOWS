@@ -1,0 +1,310 @@
+{
+  "package": "@thesvg/mcp-server@0.8.4",
+  "icons": {
+    "androidstudio": {
+      "slug": "android-studio",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "antigravity": {
+      "slug": "antigravity-google",
+      "license": "MIT",
+      "variant": "color"
+    },
+    "anydesk": {
+      "slug": "anydesk",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "blackmagic": {
+      "slug": "blackmagic-design",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "blender": {
+      "slug": "blender",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "canva": {
+      "slug": "canva",
+      "license": "MIT",
+      "variant": "default"
+    },
+    "chatgpt": {
+      "slug": "openai-chatgpt",
+      "license": "MIT",
+      "variant": "mono"
+    },
+    "clipchamp": {
+      "slug": "microsoft-clipchamp",
+      "license": "MIT",
+      "variant": "default"
+    },
+    "cmake": {
+      "slug": "cmake",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "codex": {
+      "slug": "codex-openai",
+      "license": "MIT",
+      "variant": "color"
+    },
+    "copilot": {
+      "slug": "microsoft-copilot",
+      "license": "MIT",
+      "variant": "default"
+    },
+    "davinci": {
+      "slug": "davinci-resolve",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "deepnote": {
+      "slug": "deepnote",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "dribbble": {
+      "slug": "dribbble",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "figma": {
+      "slug": "figma",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "firebase": {
+      "slug": "firebase",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "gemini": {
+      "slug": "google-gemini",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "github": {
+      "slug": "github",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "gitlab": {
+      "slug": "gitlab",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "gmail": {
+      "slug": "gmail",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "googlecloud": {
+      "slug": "google-cloud",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "google": {
+      "slug": "google",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "googlecolab": {
+      "slug": "google-colab",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "googledrive": {
+      "slug": "google-drive",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "googlemeet": {
+      "slug": "google-meet",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "googlephotos": {
+      "slug": "google-photos",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "googlesheets": {
+      "slug": "google-sheets",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "jules": {
+      "slug": "google-jules",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "linkedin": {
+      "slug": "linkedin",
+      "license": "MIT",
+      "variant": "default"
+    },
+    "lottiefiles": {
+      "slug": "lottiefiles",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "lovable": {
+      "slug": "lovable",
+      "license": "MIT",
+      "variant": "default"
+    },
+    "microsofttodo": {
+      "slug": "microsoft-todo",
+      "license": "MIT",
+      "variant": "default"
+    },
+    "mongodb": {
+      "slug": "mongodb",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "netflix": {
+      "slug": "netflix",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "netlify": {
+      "slug": "netlify",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "notion": {
+      "slug": "notion",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "openai": {
+      "slug": "openai",
+      "license": "MIT",
+      "variant": "default"
+    },
+    "nodejs": {
+      "slug": "nodedotjs",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "onedrive": {
+      "slug": "microsoft-onedrive",
+      "license": "MIT",
+      "variant": "default"
+    },
+    "onenote": {
+      "slug": "microsoft-onenote",
+      "license": "MIT",
+      "variant": "default"
+    },
+    "outlook": {
+      "slug": "microsoft-outlook",
+      "license": "MIT",
+      "variant": "default"
+    },
+    "perplexity": {
+      "slug": "perplexity",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "powershell": {
+      "slug": "powershell",
+      "license": "MIT",
+      "variant": "default"
+    },
+    "powertoys": {
+      "slug": "powertoys",
+      "license": "MIT",
+      "variant": "default"
+    },
+    "qbittorrent": {
+      "slug": "qbittorrent",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "rainmeter": {
+      "slug": "rainmeter",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "render": {
+      "slug": "render",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "reddit": {
+      "slug": "reddit",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "rockstar": {
+      "slug": "rockstar-games",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "samsung": {
+      "slug": "samsung",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "signal": {
+      "slug": "signal",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "skype": {
+      "slug": "skype",
+      "license": "MIT",
+      "variant": "default"
+    },
+    "steam": {
+      "slug": "steam",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "supabase": {
+      "slug": "supabase",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "tailscale": {
+      "slug": "tailscale",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "telegram": {
+      "slug": "telegram",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "trae": {
+      "slug": "trae",
+      "license": "MIT",
+      "variant": "color"
+    },
+    "vercel": {
+      "slug": "vercel",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "windsurf": {
+      "slug": "windsurf",
+      "license": "CC0-1.0",
+      "variant": "default"
+    },
+    "xbox": {
+      "slug": "xbox",
+      "license": "MIT",
+      "variant": "default"
+    },
+    "zed": {
+      "slug": "zed",
+      "license": "MIT",
+      "variant": "default"
+    }
+  }
+}

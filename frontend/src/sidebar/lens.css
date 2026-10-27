@@ -1,0 +1,130 @@
+/* ── Lens & ZoomViewer styles for NEXUS Response Sidebar ── */
+
+.lens-container {
+  position: relative;
+  display: inline-block;
+  cursor: zoom-in;
+  border-radius: 8px;
+  overflow: visible;
+  line-height: 0;
+  outline: none;
+  max-width: 100%;
+}
+
+.lens-container:focus-visible {
+  outline: 2px solid var(--hub-accent, #0a84ff);
+  outline-offset: 2px;
+}
+
+.lens-container img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.lens-bubble {
+  position: absolute;
+  width: var(--lens-size, 140px);
+  height: var(--lens-size, 140px);
+  left: var(--lens-left, 0px);
+  top: var(--lens-top, 0px);
+  background-position: var(--lens-bg-x, 0px) var(--lens-bg-y, 0px);
+  background-size: var(--lens-bg-w, auto) var(--lens-bg-h, auto);
+  background-repeat: no-repeat;
+  background-color: var(--apple-surface-base, #141416);
+  border: 2px solid var(--hub-accent, #0a84ff);
+  border-radius: 50%;
+  box-shadow: 0 8px 24px #000000;
+  pointer-events: none;
+  z-index: 20;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lens-bubble {
+    transition: none !important;
+  }
+}
+
+/* ── ZoomViewer in Lightbox Modal ── */
+
+.nexus-zoom-viewer {
+  position: relative;
+  width: 100%;
+  height: 70vh;
+  min-height: 350px;
+  max-height: 80vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background-color: var(--apple-surface-base, #141416);
+  user-select: none;
+  touch-action: none;
+  outline: none;
+}
+
+.nexus-zoom-viewer:focus-visible {
+  outline: 1px solid var(--apple-border-strong, #38383a);
+}
+
+.nexus-zoom-img {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: none;
+  max-height: none;
+  transform-origin: 0 0;
+  user-select: none;
+  -webkit-user-drag: none;
+  border-radius: 4px;
+}
+
+/* ── ZoomViewer Toolbar ── */
+
+.nexus-zoom-toolbar {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 20px;
+  background-color: var(--apple-surface-raised, #242426);
+  border: 1px solid var(--apple-border-default, #38383a);
+  box-shadow: 0 4px 16px #000000;
+  z-index: 30;
+  pointer-events: auto;
+}
+
+.nexus-zoom-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 14px;
+  border: 1px solid var(--apple-border-default, #38383a);
+  background-color: var(--apple-surface-base, #1c1c1e);
+  color: var(--apple-text-primary, #ffffff);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.nexus-zoom-btn:hover {
+  background-color: var(--apple-surface-muted, #2c2c2e);
+}
+
+.nexus-zoom-readout {
+  font-size: 11.5px;
+  font-weight: 600;
+  font-family: "SF Mono", "Cascadia Code", Consolas, monospace;
+  color: var(--apple-text-secondary, #a1a1aa);
+  padding: 0 6px;
+  min-width: 48px;
+  text-align: center;
+}

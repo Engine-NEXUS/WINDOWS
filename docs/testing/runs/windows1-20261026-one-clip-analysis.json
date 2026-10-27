@@ -1,0 +1,69 @@
+{
+  "session": 6,
+  "capturedAt": 1792953656,
+  "sealedSha256": "8bf8bc28cfca965481e1d2ff6d6ea7408ad0b9ca017359fc81deca0f05ecabb0",
+  "pcmSha256": "b32fa90dad6518c4d86c482f1b4ea009b7beee2a5f9615e2c81aa8c309ee1c8a",
+  "sampleCount": 46080,
+  "durationMs": 2880,
+  "peak": 0.67529296875,
+  "clippingFraction": 0.0,
+  "energyIslandsSeconds": [
+    [
+      1.5,
+      1.6
+    ],
+    [
+      1.68,
+      2.0
+    ],
+    [
+      2.16,
+      2.34
+    ],
+    [
+      2.36,
+      2.38
+    ]
+  ],
+  "originalStats": {
+    "decoder_bias": "owner",
+    "endpoint": "silence_end",
+    "filter": "repeat_loop",
+    "owner": "verified",
+    "owner_score": 0.9539977312088013,
+    "rms_max": 0.6753188967704773,
+    "rms_mean": 0.057280286661434594,
+    "session": 6,
+    "stt_language": "en",
+    "stt_path": "groq",
+    "total_chunks": 35,
+    "voiced_chunks": 12
+  },
+  "replays": [
+    {
+      "condition": "neutral",
+      "repeat": 1,
+      "text": " Open note pad.",
+      "elapsedMs": 422
+    },
+    {
+      "condition": "neutral",
+      "repeat": 2,
+      "text": " Open note pad.",
+      "elapsedMs": 359
+    },
+    {
+      "condition": "owner",
+      "repeat": 1,
+      "text": " Open note pad. Open note pad.",
+      "elapsedMs": 359
+    },
+    {
+      "condition": "owner",
+      "repeat": 2,
+      "text": " Open note pad. Open note pad.",
+      "elapsedMs": 360
+    }
+  ],
+  "limits": "One diagnostic clip; not held-out accuracy, acoustic echo proof, threshold calibration or production readiness. No plaintext audio persisted."
+}

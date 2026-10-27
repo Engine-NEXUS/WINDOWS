@@ -1573,7 +1573,7 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-mod urlencoding {
+pub(crate) mod urlencoding {
     pub fn encode(s: &str) -> String {
         let mut result = String::with_capacity(s.len() * 3);
         for byte in s.bytes() {

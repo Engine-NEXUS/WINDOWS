@@ -1,0 +1,172 @@
+{
+  "recorded_at_utc": "2026-10-26T17:06:11.883168+00:00",
+  "source_checkpoint": {
+    "checkout": "D:/ULTRON",
+    "head_revision": "fd89438fef88dc8270998048d00d1d73baab8e27",
+    "dirty": true,
+    "source_hash": "6def3963dc8380f45294c0c1ab9b373727090def2f00eb842278ae5da78077f4",
+    "scope": "working-tree source checkpoint; not a new release or frozen all-shared-suite assessment",
+    "source_hash_matched_before_and_after_final_script_tests": true
+  },
+  "checks": {
+    "python_scripts": {
+      "passed": 90,
+      "log": "windows1-20261026-phase-closeout-script-tests.log"
+    },
+    "python_server": {
+      "passed": 31,
+      "command": "python -m pytest agent/tests memory/tests -q",
+      "cwd": "server"
+    },
+    "frontend": {
+      "passed": 692,
+      "files": 69,
+      "types_no_emit": "pass"
+    },
+    "worker": {
+      "passed": 145,
+      "files": 11,
+      "types_no_emit": "pass"
+    },
+    "nlu": "pass; 512 evaluation rows /8 sources",
+    "provenance_regression": "1 pass; fixture-only",
+    "ipc": "pass;236 commands/176 invoked,60+6 known one-sided",
+    "turn_end": "pass",
+    "hygiene": "pass;tracked files only",
+    "opacity": "pass;12 CSS surfaces",
+    "work_card_drift": "pass after final regeneration",
+    "whitespace": "pass whole tracked working tree; new documentation checked separately; CRLF warnings only"
+  },
+  "mutations": {
+    "trial": [
+      {
+        "name": "legacy_evidence_qualifies",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "padded_header_accepted",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "blank_record_dropped",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "negative_classes_merged",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "lock_off_qualifies",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "missing_capture_qualifies",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "unverified_capture_qualifies",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "unavailable_verifier_qualifies",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "invalid_command_qualifies",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "enrollment_or_calibration_qualifies",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "playback_becomes_live_proof",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "299_negatives_pass",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "90_percent_owner_passes",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "excluded_locked_actions_hidden",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "negative_action_gate_removed",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "unverified_action_gate_removed",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "duplicate_capture_accepted",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "partition_leakage_accepted",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "inconsistent_success_accepted",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "declared_report_promotes_readiness",
+        "killed_by_assertion": true
+      },
+      {
+        "name": "report_leaks_trial_rows",
+        "killed_by_assertion": true
+      }
+    ],
+    "p3_offline": {
+      "killed": 18,
+      "total": 18
+    },
+    "native_and_ui": {
+      "speaker_enrollment": 15,
+      "ui": 11,
+      "decoder_native_dispatch": 7,
+      "capture_audit": 6,
+      "async_window": 1
+    }
+  },
+  "files_sha256": {
+    "scripts/speaker_trial_summary.py": "48be4eb51817103dc121953c280724f7f2c96e8757e7f75d9c82fbcedc157b88",
+    "scripts/speaker_trial_summary_test.py": "518a8f5e939a991df9701c1d781864956146d9a90e8d15b32597945dd03c4506",
+    "scripts/voice_trial_evidence.py": "51b791793dce85c839d1adae069df07b636e443e2aee5475a8712c42792f4111",
+    "scripts/voice_trial_evidence_test.py": "e3410714c71e66d4fb34596f1e82a885cb0c275542600086627a5e00ece2c0cd",
+    "scripts/voice_trial_mutation_check.py": "8ecd2970443caecc5076354764a200ed97394bff861a745541b5e97c8dec297d"
+  },
+  "editor": {
+    "model": "opencode/glm-5.3-flash-free",
+    "session": "ses_e86e34b13ffeLmbFH7bfxPgKnp",
+    "legacy_patch": "delivered and reviewed;9 tests passed",
+    "supervisor_fixes": "3 new failing review regressions then narrow fixes",
+    "richer_reporter": "no files after several minutes; own request interrupted; authorized fallback implemented18 tests"
+  },
+  "failed_checks_retained": [
+    "initial server pytest wrong cwd: no tests, exit1; corrected run31 pass",
+    "initial trial mutation helper anchor expected2 but actual3; rejected run, corrected then21/21 pass",
+    "new legacy regressions fail old code; new supervisor tests fail first delegated version before fixes"
+  ],
+  "not_run": [
+    "complete application Rust library and integration suites",
+    "compile-dependent current dead-code audit",
+    "application/release build",
+    "fresh executable provenance verification",
+    "new voice/device/profile recovery trials",
+    "model/corpus comparison"
+  ],
+  "runtime_actions": false,
+  "diagnostic_recordings": 0,
+  "qualified_live_trials_added": 0,
+  "productionReady": false,
+  "score_percent": 41,
+  "phase_completion": "not complete: corpus, complete current Rust/dead-code, fresh release/provenance and real-device gates remain pending"
+}

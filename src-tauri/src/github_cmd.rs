@@ -58,7 +58,7 @@ impl CachedToken {
 
 /// Fetch the GitHub token from the Worker's `/oauth/github-token` endpoint.
 /// The Worker handles refresh logic internally — we just get a valid token.
-async fn fetch_token_from_worker(
+pub async fn fetch_token_from_worker(
     worker_url: &str,
     _user_id: &str,
 ) -> Result<String, String> {
@@ -96,7 +96,8 @@ async fn fetch_token_from_worker(
     Ok(token)
 }
 
-/// Get a valid GitHub token, fetching from the Worker if needed.
+/// Get a valid GitHub token, resolving via local auth_vault, GitHub CLI (`gh`),
+/// environment variables, or Worker OAuth.
 /// Uses the cached token if it's still valid.
 pub async fn get_github_token(worker_url: &str, user_id: &str) -> Result<String, String> {
     // Check cache first
@@ -109,13 +110,13 @@ pub async fn get_github_token(worker_url: &str, user_id: &str) -> Result<String,
         }
     }
 
-    // Fetch new token
-    let token = fetch_token_from_worker(worker_url, user_id).await?;
+    // Resolve token: auth vault -> gh CLI (`gh auth token`) -> GITHUB_TOKEN env -> worker
+    let server_opt = if worker_url.is_empty() { None } else { Some(worker_url) };
+    let user_opt = if user_id.is_empty() { None } else { Some(user_id) };
+    let token = crate::github_data::resolve_token(server_opt, user_opt).await?;
     let now = chrono::Utc::now().timestamp() as f64;
 
-    // Cache it (we don't know the exact expiry from the Worker response,
-    // so we assume 1 hour. The Worker's getValidGithubToken() handles
-    // refresh on its end, and we re-fetch if our cache is stale.)
+    // Cache it in memory for 1 hour
     {
         let mut guard = GITHUB_TOKEN.write().await;
         *guard = Some(CachedToken {
@@ -229,6 +230,10 @@ pub enum GitHubCommand {
     /// Get details of a specific PR.
     GetPr {
         repo: String,
+        pr_number: u64,
+    },
+    /// Find an open PR by number across all repositories the user has access to.
+    FindPr {
         pr_number: u64,
     },
 
@@ -549,6 +554,7 @@ impl GitHubExecutable for GitHubCommand {
             GitHubCommand::ListWorkflowRuns { .. } => false,
             GitHubCommand::RerunWorkflow { .. } => false,
             GitHubCommand::CancelWorkflow { .. } => true,
+            GitHubCommand::FindPr { .. } => false,
         }
     }
 
@@ -801,6 +807,9 @@ impl GitHubExecutable for GitHubCommand {
             }
             GitHubCommand::CancelWorkflow { repo, run_id } => {
                 execute_cancel_workflow(client, repo, *run_id).await
+            }
+            GitHubCommand::FindPr { pr_number } => {
+                execute_find_pr(client, *pr_number).await
             }
         }
     }
@@ -1113,6 +1122,152 @@ async fn execute_list_prs_account_wide(
     }
 }
 
+enum FindPrOutcome {
+    Hit(PrSummary),
+    RateLimitOrAccess,
+    None,
+}
+
+/// Find an open PR with the given number across all repositories the user has access to.
+async fn execute_find_pr(
+    client: &octocrab::Octocrab,
+    pr_number: u64,
+) -> GitHubResult {
+    let entries = crate::github_repo_index::entries().await;
+    let mut candidate_repos: Vec<crate::github_repo_index::RepoEntry> = entries
+        .into_iter()
+        .filter(|e| e.open_issues > 0)
+        .collect();
+    candidate_repos.sort_by(|a, b| b.open_issues.cmp(&a.open_issues));
+    candidate_repos.truncate(60);
+
+    let mut all_prs: Vec<PrSummary> = Vec::new();
+    let mut had_rate_limit_or_access = false;
+    const CONCURRENCY: usize = 10;
+
+    for chunk in candidate_repos.chunks(CONCURRENCY) {
+        let mut set = tokio::task::JoinSet::new();
+        for entry in chunk {
+            let client = client.clone();
+            let owner = entry.owner.clone();
+            let name = entry.name.clone();
+            let full_name = entry.full_name.clone();
+            set.spawn(async move {
+                match client.pulls(&owner, &name).get(pr_number).await {
+                    Ok(pr) => {
+                        if matches!(pr.state, Some(octocrab::models::IssueState::Open)) {
+                            FindPrOutcome::Hit(PrSummary {
+                                number: pr.number,
+                                title: pr.title.clone().unwrap_or_default(),
+                                author: pr.user.as_ref().map(|u| u.login.clone()).unwrap_or_default(),
+                                repo: full_name,
+                                state: "open".to_string(),
+                                created_at: pr.created_at.unwrap_or_default().to_rfc3339(),
+                                mergeable: None,
+                            })
+                        } else {
+                            FindPrOutcome::None
+                        }
+                    }
+                    Err(e) => {
+                        let status = match &e {
+                            octocrab::Error::GitHub { source, .. } => Some(source.status_code.as_u16()),
+                            _ => None,
+                        };
+                        if status == Some(403) || status == Some(429) {
+                            FindPrOutcome::RateLimitOrAccess
+                        } else {
+                            FindPrOutcome::None
+                        }
+                    }
+                }
+            });
+        }
+        while let Some(res) = set.join_next().await {
+            if let Ok(outcome) = res {
+                match outcome {
+                    FindPrOutcome::Hit(summary) => all_prs.push(summary),
+                    FindPrOutcome::RateLimitOrAccess => had_rate_limit_or_access = true,
+                    FindPrOutcome::None => {}
+                }
+            }
+        }
+    }
+
+    if all_prs.is_empty() && had_rate_limit_or_access {
+        return GitHubResult::Error {
+            message: "GitHub rate limit or access problem, sir.".to_string(),
+            status: Some(429),
+            is_auth_error: false,
+        };
+    }
+
+    GitHubResult::PrList {
+        repo: format!("PR #{}", pr_number),
+        state: "open".to_string(),
+        prs: all_prs,
+    }
+}
+
+/// Produce a speakable summary of repositories containing open PR `pr_number`.
+pub fn find_pr_summary(pr_number: u64, prs: &[PrSummary]) -> String {
+    fn repo_name(r: &str) -> &str {
+        r.split_once('/').map(|(_, name)| name).unwrap_or(r)
+    }
+    match prs {
+        [] => format!("No open PR {} in your repositories, sir.", pr_number),
+        [one] => format!("PR {} is open in {}", pr_number, repo_name(&one.repo)),
+        [a, b] => format!(
+            "PR {} is open in {} and {}",
+            pr_number,
+            repo_name(&a.repo),
+            repo_name(&b.repo)
+        ),
+        [a, b, rest @ ..] => format!(
+            "PR {} is open in {}, {} and {} more",
+            pr_number,
+            repo_name(&a.repo),
+            repo_name(&b.repo),
+            rest.len()
+        ),
+    }
+}
+
+/// Resolve or qualify a repository string against repository resolution.
+///
+/// If `repo` already contains '/', it passes through as `Ok(vec![repo.to_string()])`.
+/// If `repo` is empty, it returns `Ok(vec![String::new()])`.
+/// Otherwise, maps `Resolution`:
+/// - `One(e)` -> `Ok(vec![e.full_name])`
+/// - `Many(v)` -> `Ok(v.into_iter().take(5).map(|e| e.full_name).collect())`
+/// - `None` -> `Err("I couldn't find a repository called {repo}, sir.")`
+pub fn qualify_repo(
+    repo: &str,
+    resolution: crate::github_repo_index::Resolution,
+) -> Result<Vec<String>, String> {
+    if repo.is_empty() {
+        return Ok(vec![String::new()]);
+    }
+    if repo.contains('/') {
+        return Ok(vec![repo.to_string()]);
+    }
+
+    match resolution {
+        crate::github_repo_index::Resolution::One(e) => Ok(vec![e.full_name]),
+        crate::github_repo_index::Resolution::Many(v) => {
+            let list: Vec<String> = v.into_iter().take(5).map(|e| e.full_name).collect();
+            if list.is_empty() {
+                Err(format!("I couldn't find a repository called {}, sir.", repo))
+            } else {
+                Ok(list)
+            }
+        }
+        crate::github_repo_index::Resolution::None => {
+            Err(format!("I couldn't find a repository called {}, sir.", repo))
+        }
+    }
+}
+
 async fn execute_list_prs(
     client: &octocrab::Octocrab,
     repo: &str,
@@ -1124,7 +1279,21 @@ async fn execute_list_prs(
         return execute_list_prs_account_wide(client, state).await;
     }
 
-    let (owner, repo_name) = split_repo(repo);
+    let target_repos = if !repo.contains('/') {
+        let res = crate::github_repo_index::resolve_name(repo).await;
+        match qualify_repo(repo, res) {
+            Ok(repos) => repos,
+            Err(msg) => {
+                return GitHubResult::Error {
+                    message: msg,
+                    status: Some(404),
+                    is_auth_error: false,
+                };
+            }
+        }
+    } else {
+        vec![repo.to_string()]
+    };
 
     let state_enum = match state.to_lowercase().as_str() {
         "closed" => octocrab::params::State::Closed,
@@ -1132,47 +1301,55 @@ async fn execute_list_prs(
         _ => octocrab::params::State::Open,
     };
 
-    let prs = match client
-        .pulls(owner, repo_name)
-        .list()
-        .state(state_enum)
-        .per_page(20)
-        .send()
-        .await
-    {
-        Ok(page) => page,
-        Err(e) => return map_octocrab_error(e, &format!("list PRs in {}", repo)),
-    };
+    let mut all_summaries: Vec<PrSummary> = Vec::new();
+    for target in &target_repos {
+        let (owner, repo_name) = split_repo(target);
+        match client
+            .pulls(owner, repo_name)
+            .list()
+            .state(state_enum)
+            .per_page(20)
+            .send()
+            .await
+        {
+            Ok(page) => {
+                for pr in page.items {
+                    all_summaries.push(PrSummary {
+                        number: pr.number,
+                        title: pr.title.clone().unwrap_or_else(|| "(no title)".to_string()),
+                        author: pr.user.as_ref().map(|u| u.login.clone()).unwrap_or_else(|| "unknown".to_string()),
+                        repo: target.clone(),
+                        state: state.to_string(),
+                        created_at: pr.created_at.map(|d| d.to_rfc3339()).unwrap_or_default(),
+                        mergeable: None,
+                    });
+                }
+            }
+            Err(e) => {
+                if target_repos.len() == 1 {
+                    return map_octocrab_error(e, &format!("list PRs in {}", target));
+                }
+            }
+        }
+    }
 
-    if prs.items.is_empty() {
+    if all_summaries.is_empty() {
         return GitHubResult::Text {
             text: format!("There are no {} pull requests in {}.", state, repo),
         };
     }
 
-    // Build structured PR summaries for the sidebar.
-    // Sort by created_at descending (latest first).
-    let mut pr_summaries: Vec<PrSummary> = prs
-        .items
-        .iter()
-        .map(|pr| PrSummary {
-            number: pr.number,
-            title: pr.title.clone().unwrap_or_else(|| "(no title)".to_string()),
-            author: pr.user.as_ref().map(|u| u.login.clone()).unwrap_or_else(|| "unknown".to_string()),
-            repo: repo.to_string(),
-            state: state.to_string(),
-            created_at: pr.created_at.map(|d| d.to_rfc3339()).unwrap_or_default(),
-            mergeable: None, // not available in list view; fetched on demand
-        })
-        .collect();
-
     // Sort by created_at descending (latest first)
-    pr_summaries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    all_summaries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
     GitHubResult::PrList {
-        repo: repo.to_string(),
+        repo: if target_repos.len() == 1 {
+            target_repos[0].clone()
+        } else {
+            repo.to_string()
+        },
         state: state.to_string(),
-        prs: pr_summaries,
+        prs: all_summaries,
     }
 }
 
@@ -2166,6 +2343,66 @@ fn extract_conflict_blocks_from_patch(patch: &str) -> Vec<ConflictBlock> {
 
 // ─── Public API: execute_command ───────────────────────────────────────
 
+fn command_repo(cmd: &GitHubCommand) -> Option<&str> {
+    match cmd {
+        GitHubCommand::MergePr { repo, .. }
+        | GitHubCommand::ApprovePr { repo, .. }
+        | GitHubCommand::ClosePr { repo, .. }
+        | GitHubCommand::ListPrs { repo, .. }
+        | GitHubCommand::GetPr { repo, .. }
+        | GitHubCommand::CreatePr { repo, .. }
+        | GitHubCommand::UpdateBranch { repo, .. }
+        | GitHubCommand::RevertPr { repo, .. }
+        | GitHubCommand::ListPrFiles { repo, .. }
+        | GitHubCommand::CommentPr { repo, .. }
+        | GitHubCommand::AddCollaborator { repo, .. }
+        | GitHubCommand::RemoveCollaborator { repo, .. }
+        | GitHubCommand::ListCollaborators { repo, .. }
+        | GitHubCommand::SetBranchProtection { repo, .. }
+        | GitHubCommand::DeleteBranch { repo, .. }
+        | GitHubCommand::ListBranches { repo, .. }
+        | GitHubCommand::CreateRelease { repo, .. }
+        | GitHubCommand::ListReleases { repo, .. }
+        | GitHubCommand::DeleteRelease { repo, .. }
+        | GitHubCommand::ListWorkflows { repo, .. }
+        | GitHubCommand::ListWorkflowRuns { repo, .. }
+        | GitHubCommand::RerunWorkflow { repo, .. }
+        | GitHubCommand::CancelWorkflow { repo, .. } => Some(repo.as_str()),
+        _ => None,
+    }
+}
+
+fn with_resolved_repo(cmd: &GitHubCommand, resolved: String) -> GitHubCommand {
+    let mut c = cmd.clone();
+    match &mut c {
+        GitHubCommand::MergePr { repo, .. }
+        | GitHubCommand::ApprovePr { repo, .. }
+        | GitHubCommand::ClosePr { repo, .. }
+        | GitHubCommand::ListPrs { repo, .. }
+        | GitHubCommand::GetPr { repo, .. }
+        | GitHubCommand::CreatePr { repo, .. }
+        | GitHubCommand::UpdateBranch { repo, .. }
+        | GitHubCommand::RevertPr { repo, .. }
+        | GitHubCommand::ListPrFiles { repo, .. }
+        | GitHubCommand::CommentPr { repo, .. }
+        | GitHubCommand::AddCollaborator { repo, .. }
+        | GitHubCommand::RemoveCollaborator { repo, .. }
+        | GitHubCommand::ListCollaborators { repo, .. }
+        | GitHubCommand::SetBranchProtection { repo, .. }
+        | GitHubCommand::DeleteBranch { repo, .. }
+        | GitHubCommand::ListBranches { repo, .. }
+        | GitHubCommand::CreateRelease { repo, .. }
+        | GitHubCommand::ListReleases { repo, .. }
+        | GitHubCommand::DeleteRelease { repo, .. }
+        | GitHubCommand::ListWorkflows { repo, .. }
+        | GitHubCommand::ListWorkflowRuns { repo, .. }
+        | GitHubCommand::RerunWorkflow { repo, .. }
+        | GitHubCommand::CancelWorkflow { repo, .. } => *repo = resolved,
+        _ => {}
+    }
+    c
+}
+
 /// Execute a GitHub command. This is the main entry point called by
 /// the orchestrator when routing to `Subsystem::GitHub`.
 ///
@@ -2181,6 +2418,50 @@ pub async fn execute_command(
     command: &GitHubCommand,
     confirmed: bool,
 ) -> GitHubResult {
+    // Resolve bare repository names (without '/') if present.
+    // ListPrs handles multiple matches internally; for other single-repo commands,
+    // resolve to a single repo or return an informative error.
+    let resolved_cmd;
+    let cmd_ref = if let Some(bare_repo) = command_repo(command) {
+        if !bare_repo.is_empty()
+            && !bare_repo.contains('/')
+            && !matches!(command, GitHubCommand::ListPrs { .. })
+        {
+            match crate::github_repo_index::resolve_name(bare_repo).await {
+                crate::github_repo_index::Resolution::One(e) => {
+                    resolved_cmd = with_resolved_repo(command, e.full_name);
+                    &resolved_cmd
+                }
+                crate::github_repo_index::Resolution::Many(v) => {
+                    let owners: Vec<&str> = v.iter().take(3).map(|e| e.owner.as_str()).collect();
+                    let owners_str = if owners.len() == 2 {
+                        format!("{} and {}", owners[0], owners[1])
+                    } else if owners.len() >= 3 {
+                        format!("{}, {}, and {}", owners[0], owners[1], owners[2])
+                    } else {
+                        owners.join(", ")
+                    };
+                    return GitHubResult::Error {
+                        message: format!("I found {} under {}, sir. Which one?", bare_repo, owners_str),
+                        status: None,
+                        is_auth_error: false,
+                    };
+                }
+                crate::github_repo_index::Resolution::None => {
+                    return GitHubResult::Error {
+                        message: format!("I couldn't find a repository called {}, sir.", bare_repo),
+                        status: Some(404),
+                        is_auth_error: false,
+                    };
+                }
+            }
+        } else {
+            command
+        }
+    } else {
+        command
+    };
+
     // Build the octocrab client
     let client = match build_octocrab_client(worker_url, user_id).await {
         Ok(c) => c,
@@ -2194,22 +2475,22 @@ pub async fn execute_command(
     };
 
     // Pre-check (e.g., conflict detection for merge)
-    if let Err(conflict_result) = command.pre_check(&client).await {
+    if let Err(conflict_result) = cmd_ref.pre_check(&client).await {
         return conflict_result;
     }
 
     // If destructive and not confirmed, ask for confirmation
-    if command.is_destructive() && !confirmed {
-        if let Some(prompt) = command.confirmation_prompt() {
+    if cmd_ref.is_destructive() && !confirmed {
+        if let Some(prompt) = cmd_ref.confirmation_prompt() {
             return GitHubResult::NeedsConfirmation {
                 prompt,
-                command: command.clone(),
+                command: cmd_ref.clone(),
             };
         }
     }
 
     // Execute
-    command.execute(&client).await
+    cmd_ref.execute(&client).await
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────
@@ -2223,6 +2504,115 @@ mod tests {
         assert_eq!(split_repo("owner/repo"), ("owner", "repo"));
         assert_eq!(split_repo("Engine-NEXUS/NEXUS-Agent"), ("Engine-NEXUS", "NEXUS-Agent"));
         assert_eq!(split_repo("single"), ("", "single"));
+    }
+
+    #[test]
+    fn test_find_pr_summary() {
+        let make_pr = |repo: &str| PrSummary {
+            number: 34,
+            title: "Fix bug".into(),
+            author: "alice".into(),
+            repo: repo.into(),
+            state: "open".into(),
+            created_at: "2026-10-25T12:00:00Z".into(),
+            mergeable: None,
+        };
+
+        // 0 hits
+        assert_eq!(
+            find_pr_summary(34, &[]),
+            "No open PR 34 in your repositories, sir."
+        );
+
+        // 1 hit
+        let prs1 = vec![make_pr("chitkul/zync")];
+        assert_eq!(
+            find_pr_summary(34, &prs1),
+            "PR 34 is open in zync"
+        );
+
+        // 2 hits
+        let prs2 = vec![make_pr("chitkul/zync"), make_pr("chitkul/ledger-ai")];
+        assert_eq!(
+            find_pr_summary(34, &prs2),
+            "PR 34 is open in zync and ledger-ai"
+        );
+
+        // 3 hits
+        let prs3 = vec![
+            make_pr("chitkul/zync"),
+            make_pr("chitkul/ledger-ai"),
+            make_pr("acme/servx"),
+        ];
+        assert_eq!(
+            find_pr_summary(34, &prs3),
+            "PR 34 is open in zync, ledger-ai and 1 more"
+        );
+
+        // 5 hits
+        let prs5 = vec![
+            make_pr("chitkul/zync"),
+            make_pr("chitkul/ledger-ai"),
+            make_pr("acme/servx"),
+            make_pr("acme/nexus"),
+            make_pr("acme/web"),
+        ];
+        assert_eq!(
+            find_pr_summary(34, &prs5),
+            "PR 34 is open in zync, ledger-ai and 3 more"
+        );
+    }
+
+    #[test]
+    fn test_qualify_repo_already_qualified() {
+        let res = qualify_repo("owner/repo", crate::github_repo_index::Resolution::None);
+        assert_eq!(res, Ok(vec!["owner/repo".to_string()]));
+    }
+
+    #[test]
+    fn test_qualify_repo_empty() {
+        let res = qualify_repo("", crate::github_repo_index::Resolution::None);
+        assert_eq!(res, Ok(vec![String::new()]));
+    }
+
+    #[test]
+    fn test_qualify_repo_one() {
+        let entry = crate::github_repo_index::RepoEntry {
+            full_name: "acme/zync".into(),
+            owner: "acme".into(),
+            name: "zync".into(),
+            owner_type: "Organization".into(),
+            open_issues: 3,
+        };
+        let res = qualify_repo("zync", crate::github_repo_index::Resolution::One(entry));
+        assert_eq!(res, Ok(vec!["acme/zync".to_string()]));
+    }
+
+    #[test]
+    fn test_qualify_repo_many() {
+        let e1 = crate::github_repo_index::RepoEntry {
+            full_name: "chitkul/zync".into(),
+            owner: "chitkul".into(),
+            name: "zync".into(),
+            owner_type: "User".into(),
+            open_issues: 1,
+        };
+        let e2 = crate::github_repo_index::RepoEntry {
+            full_name: "acme/zync".into(),
+            owner: "acme".into(),
+            name: "zync".into(),
+            owner_type: "Organization".into(),
+            open_issues: 5,
+        };
+        let res = qualify_repo("zync", crate::github_repo_index::Resolution::Many(vec![e1, e2]));
+        assert_eq!(res, Ok(vec!["chitkul/zync".to_string(), "acme/zync".to_string()]));
+    }
+
+    #[test]
+    fn test_qualify_repo_none() {
+        let res = qualify_repo("zync", crate::github_repo_index::Resolution::None);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), "I couldn't find a repository called zync, sir.");
     }
 
     #[test]

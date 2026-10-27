@@ -160,7 +160,17 @@ pub async fn route_question(
     client: &reqwest::Client,
 ) -> Option<RouterResponse> {
     let prompt = build_prompt(transcript, dialog_context);
-    cascade(SYSTEM_PROMPT, 500, &prompt, transcript, keys, client).await
+    // Each provider has its own 15s request timeout (:306/:370), so a hung
+    // cascade could stall a spoken turn for ~45s across three down providers.
+    // The caller needs an answer inside a spoken-turn budget: cap the WHOLE
+    // cascade at 15s and the caller falls back to the Worker.
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        cascade(SYSTEM_PROMPT, 500, &prompt, transcript, keys, client),
+    )
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Ask the same free providers for a non-spoken, structured answer with the caller's own system prompt

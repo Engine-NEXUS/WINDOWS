@@ -81,9 +81,38 @@ fn synthesize_blocking(text: &str) -> Result<(Vec<f32>, u32), String> {
     crate::tts_wav::decode_wav(&bytes).ok_or_else(|| "system voice returned an unsupported audio format".to_string())
 }
 
-#[cfg(not(windows))]
+/// macOS: the built-in system voice via `say`, written as a WAV and decoded,
+/// so the same envelope/word-timing path wraps the instant safety net.
+#[cfg(target_os = "macos")]
+fn synthesize_blocking(text: &str) -> Result<(Vec<f32>, u32), String> {
+    let dir = std::env::temp_dir().join("nexus-say");
+    let _ = std::fs::create_dir_all(&dir);
+    let wav = dir.join(format!("line-{}.wav", std::process::id()));
+    let res = std::process::Command::new("say")
+        .args(["--file-format=WAVE", "-o"])
+        .arg(&wav)
+        .arg(text)
+        .output()
+        .map_err(|e| format!("macOS say: {e}"))
+        .and_then(|out| {
+            if out.status.success() {
+                let bytes = std::fs::read(&wav).map_err(|e| format!("macOS say wav: {e}"))?;
+                crate::tts_wav::decode_wav(&bytes)
+                    .ok_or_else(|| "macOS say returned an unsupported audio format".to_string())
+            } else {
+                Err(format!(
+                    "macOS say failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ))
+            }
+        });
+    let _ = std::fs::remove_file(&wav);
+    res
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn synthesize_blocking(_text: &str) -> Result<(Vec<f32>, u32), String> {
-    Err("the Windows voice is only available on Windows".into())
+    Err("the system voice is only implemented on Windows and macOS".into())
 }
 
 #[cfg(test)]

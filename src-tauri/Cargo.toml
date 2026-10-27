@@ -39,7 +39,7 @@ tauri-plugin-store = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-positioner = "2"
 
-tokio = { version = "1", features = ["rt", "sync", "macros", "time", "fs", "io-util", "process"] }
+tokio = { version = "1", features = ["rt", "sync", "macros", "time", "fs", "io-util", "process", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -150,8 +150,8 @@ arboard = "3.4"
 # auth_vault.rs — one login per service group, auto-refresh on 401.
 # `windows-native` is required: without a platform feature keyring 3.x falls
 # back to an in-memory mock store and nothing reaches Credential Manager.
-keyring = { version = "3", features = ["windows-native"] }
-
+# Per-OS keyring gating lives in the [target.'cfg(...)'.dependencies] sections
+# below (windows-native / apple-native).
 # Telegram remote (owner-only bridge, long-polling, no public IP needed).
 teloxide = { version = "0.17", default-features = false, features = ["macros", "native-tls"] }
 webrtc-vad = "0.4.0"
@@ -177,6 +177,7 @@ windows = { version = "0.36", features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_ProcessStatus",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_Debug", # MessageBeep: arm/disarm cue for hand mode
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
@@ -193,6 +194,7 @@ windows = { version = "0.36", features = [
 ] }
 # Registry access for App Paths + Uninstall keys (app discovery)
 winreg = "0.55"
+keyring = { version = "3", features = ["windows-native"] }
 # UI Automation for active browser URL detection (Architecture Mapper)
 uiautomation = "0.25"
 # WebView2 COM bindings for the PermissionRequested handler (auto-approve mic
@@ -201,8 +203,13 @@ webview2-com = "0.38"
 windows-core = "0.61"
 
 # Linux-specific: D-Bus / MPRIS media control & native notifications via zbus
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5"
+# No platform feature on Linux: keyring falls back to its mock store (as today).
+keyring = "3"
 
 [features]
 default = ["wakeword-oww"]
@@ -262,6 +269,9 @@ codegen-units = 1
 opt-level = "z"
 strip = true
 panic = "abort"
+
+[dev-dependencies]
+tempfile = "3"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tauri-plugin-global-shortcut = "2"

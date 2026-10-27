@@ -246,7 +246,7 @@ mod voice_profile_commands {
         let profile = voice_profile::VoiceProfile::load(&profile_path)
             .map_err(|e| e.to_string())?;
         Ok(voice_profile::VoiceProfileStatus {
-            enrolled: true,
+            enrolled: profile.is_valid(),
             num_clips: profile.num_clips,
             threshold: profile.threshold,
             created_at: profile.created_at,
@@ -420,7 +420,7 @@ mod voice_profile_commands {
         Ok(captured)
     }
 
-    /// IPC: Delete the voice profile (disables speaker verification).
+    /// IPC: Delete the profile; an enabled Voice Lock continues to fail closed.
     #[tauri::command]
     pub fn delete_voice_profile<R: Runtime>(
         app: tauri::AppHandle<R>,
@@ -428,10 +428,8 @@ mod voice_profile_commands {
         let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
         let profile_path = voice_profile::resolve_profile_path(&dir);
 
-        if profile_path.exists() {
-            std::fs::remove_file(&profile_path).map_err(|e| e.to_string())?;
-            tracing::info!("Voice profile deleted");
-        }
+        voice_profile::delete_profile_file(&profile_path).map_err(|e| e.to_string())?;
+        tracing::info!("Voice profile deleted");
         Ok(())
     }
 }
@@ -474,7 +472,7 @@ mod oww_voice_profile_commands {
         let profile = voice_profile::VoiceProfile::load(&profile_path)
             .map_err(|e| e.to_string())?;
         Ok(voice_profile::VoiceProfileStatus {
-            enrolled: true,
+            enrolled: profile.is_valid(),
             num_clips: profile.num_clips,
             threshold: profile.threshold,
             created_at: profile.created_at,
@@ -485,99 +483,43 @@ mod oww_voice_profile_commands {
     }
 
     /// IPC: Enroll the user's voice for speaker verification.
-    /// Accepts 3+ audio clips (16kHz mono f32) and extracts embeddings
-    /// using the OWW embedding model.
+    /// Accepts ten audio clips (16kHz mono f32): five enrollment recordings
+    /// and five held-out owner recordings for provisional calibration.
     #[tauri::command]
-    pub fn enroll_voice<R: Runtime>(
+    pub async fn enroll_voice<R: Runtime>(
         app: tauri::AppHandle<R>,
         clips: Vec<Vec<f32>>,
         threshold: Option<f32>,
     ) -> Result<Vec<String>, String> {
+        if threshold.is_some() {
+            return Err("Manual speaker thresholds are no longer supported".to_string());
+        }
+        if clips.len() != 10 || clips.iter().any(|clip| {
+            !(16_000..=80_000).contains(&clip.len())
+                || clip.iter().any(|sample| !sample.is_finite() || sample.abs() > 1.0)
+        }) {
+            return Err("Record ten valid 1–5 second clips: five for enrollment and five held out".to_string());
+        }
         let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let profile_path = voice_profile::resolve_profile_path(&dir);
 
         let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
-        let oww_dir = resource_dir.join("oww");
-        let embedding_model_path = oww_dir.join("embedding_model.onnx");
-        let mel_model_path = oww_dir.join("melspectrogram.onnx");
+        let embeddings = tauri::async_runtime::spawn_blocking(move || {
+            crate::wakeword_oww::enrollment_embeddings(&resource_dir, &clips)
+        }).await.map_err(|error| format!("Enrollment worker failed: {error}"))?
+            .map_err(|error| error.to_string())?;
 
-        if !embedding_model_path.exists() {
-            return Err("OWW embedding model not found".to_string());
+        if embeddings.len() != 10 {
+            return Err("Could not extract all ten voice embeddings".to_string());
         }
 
-        // Load the OWW models for embedding extraction
-        use tract_onnx::prelude::*;
-        let mel_model = tract_onnx::onnx()
-            .model_for_path(&mel_model_path)
-            .map_err(|e| format!("Failed to load mel model: {e}"))?
-            .into_optimized()
-            .map_err(|e| format!("Failed to optimize mel model: {e}"))?
-            .into_runnable()
-            .map_err(|e| format!("Failed to make mel model runnable: {e}"))?;
-
-        let embedding_model = tract_onnx::onnx()
-            .model_for_path(&embedding_model_path)
-            .map_err(|e| format!("Failed to load embedding model: {e}"))?
-            .into_optimized()
-            .map_err(|e| format!("Failed to optimize embedding model: {e}"))?
-            .into_runnable()
-            .map_err(|e| format!("Failed to make embedding model runnable: {e}"))?;
-
-        // Extract embeddings from each clip
-        let mut embeddings: Vec<Vec<f32>> = Vec::new();
-        for (i, clip) in clips.iter().enumerate() {
-            // Ensure 16kHz mono f32
-            if clip.is_empty() {
-                continue;
-            }
-
-            // Scale to int16 magnitude (OWW mel expects this)
-            let scaled: Vec<f32> = clip.iter().map(|s| s * 32768.0).collect();
-
-            // Run mel spectrogram
-            let mel_input = Tensor::from_shape(&[1, scaled.len()], &scaled)
-                .map_err(|e| format!("Mel input shape error: {e}"))?;
-            let mel_output = mel_model.run(tvec!(mel_input.into()))
-                .map_err(|e| format!("Mel model run error: {e}"))?;
-            let mel_features = mel_output[0].clone().into_tensor();
-
-            // Run embedding model
-            let emb_output = embedding_model.run(tvec!(mel_features.into()))
-                .map_err(|e| format!("Embedding model run error: {e}"))?;
-            let emb_tensor = emb_output[0].clone().into_tensor();
-
-            // Convert to plain array and average to get 96-dim embedding
-            let emb_arr = emb_tensor.into_plain_array::<f32>()
-                .map_err(|e| format!("Embedding array conversion error: {e}"))?;
-            let emb_slice = emb_arr.as_slice().unwrap_or(&[]);
-
-            // The embedding model outputs [1, 16, 96] — average over 16 frames
-            let embedding: Vec<f32> = (0..96)
-                .map(|j| {
-                    (0..16)
-                        .map(|i| {
-                            let idx = i * 96 + j;
-                            if idx < emb_slice.len() { emb_slice[idx] } else { 0.0 }
-                        })
-                        .sum::<f32>() / 16.0
-                })
-                .collect();
-
-            embeddings.push(embedding.clone());
-            tracing::debug!("Enrollment clip {} → embedding ({} dims)", i, embedding.len());
-        }
-
-        if embeddings.is_empty() {
-            return Err("No valid embeddings extracted from clips".to_string());
-        }
-
-        // Create verifier and enroll
-        let mut verifier = voice_profile::SpeakerVerifier::new(profile_path)
+        let calibrated_threshold = voice_profile::calibrate_owner_threshold(&embeddings[..5], &embeddings[5..])
             .map_err(|e| e.to_string())?;
-        let threshold = threshold.unwrap_or(voice_profile::DEFAULT_THRESHOLD);
+        // Held-out recordings never enter the stored profile.
+        let mut verifier = voice_profile::SpeakerVerifier::for_enrollment(profile_path);
         verifier
-            .enroll(embeddings, threshold, vec!["nexus".to_string(), "hey nexus".to_string()])
+            .enroll(embeddings[..5].to_vec(), calibrated_threshold, vec!["nexus".to_string(), "hey nexus".to_string(), "ok nexus".to_string()])
             .map_err(|e| e.to_string())?;
 
         let captured: Vec<String> = verifier
@@ -585,11 +527,11 @@ mod oww_voice_profile_commands {
             .map(|p| p.wake_variants.clone())
             .unwrap_or_default();
 
-        tracing::info!("Voice profile enrolled ({} clips, threshold {:.2})", clips.len(), threshold);
+        tracing::info!("Voice profile enrolled (5 clips + 5 held out, threshold {:.2})", calibrated_threshold);
         Ok(captured)
     }
 
-    /// IPC: Delete the voice profile (disables speaker verification).
+    /// IPC: Delete the profile; an enabled Voice Lock continues to fail closed.
     #[tauri::command]
     pub fn delete_voice_profile<R: Runtime>(
         app: tauri::AppHandle<R>,
@@ -597,10 +539,8 @@ mod oww_voice_profile_commands {
         let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
         let profile_path = voice_profile::resolve_profile_path(&dir);
 
-        if profile_path.exists() {
-            std::fs::remove_file(&profile_path).map_err(|e| e.to_string())?;
-            tracing::info!("Voice profile deleted");
-        }
+        voice_profile::delete_profile_file(&profile_path).map_err(|e| e.to_string())?;
+        tracing::info!("Voice profile deleted");
         Ok(())
     }
 }
@@ -678,13 +618,6 @@ pub struct MeetingStatus {
 }
 
 // ─── Response Sidebar window ─────────────────────────────────────────
-
-/// Pending backdrop for the settings sidebar — stored when the window is
-/// first shown, fetched by the frontend on mount (same pattern as
-/// PENDING_SIDEBAR for the response sidebar). This handles the race
-/// condition where the backdrop event is emitted before the React app
-/// has mounted and registered its event listener.
-static PENDING_SETTINGS_BACKDROP: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// IPC: Show the response sidebar window (positioned at bottom-right).
 /// Called when a server response is incoming (n8n/Ollama/Hermes).
@@ -1274,6 +1207,7 @@ pub(crate) fn finish_sidebar<R: Runtime>(
             }
         }
     }
+    #[cfg(target_os = "windows")]
     crate::dwm_corners::round_corners(win);
     #[cfg(target_os = "macos")]
     {
@@ -1409,17 +1343,6 @@ pub async fn show_settings_sidebar<R: Runtime>(
     // Unified delegate — Command Hub view, default center modal.
     let prep = prepare_sidebar(&app, "settings", None).await?;
 
-    // Capture backdrop BEFORE showing (uses geometry we just set in prepare_sidebar).
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(data_uri) = capture_and_emit_backdrop(&app, &prep) {
-            tracing::info!("settings-sidebar: backdrop captured ({} bytes)", data_uri.len());
-            *PENDING_SETTINGS_BACKDROP.lock().unwrap() = Some(data_uri.clone());
-        } else {
-            tracing::warn!("settings-sidebar: backdrop capture failed or skipped (already_visible={})", prep.already_visible);
-        }
-    }
-
     finish_sidebar(&app, &prep.win, "settings", None)?;
     spawn_sidebar_live_blur(&app, &prep.win);
 
@@ -1471,16 +1394,6 @@ pub async fn show_coderabbit_hub<R: Runtime>(
     Ok(())
 }
 
-/// IPC: Fetch the pending settings backdrop (called by the frontend on mount).
-/// Returns the blurred desktop image as a data URI, or null if none pending.
-/// Clears the pending data after returning. This handles the race condition
-/// where the backdrop is captured before the React app has mounted.
-#[tauri::command]
-pub fn get_pending_settings_backdrop() -> Result<Option<String>, String> {
-    let mut pending = PENDING_SETTINGS_BACKDROP.lock().unwrap();
-    Ok(pending.take())
-}
-
 // ─── Loading indicator (stage-hosted, see orchestrator::show_loading/
 // hide_loading and window_manager::emit_loading_rect) ──────────────────
 
@@ -1489,7 +1402,8 @@ pub fn get_pending_settings_backdrop() -> Result<Option<String>, String> {
 /// IPC: Open the settings window.
 /// Creates the window on-demand if it doesn't exist (saves ~250 MB RAM at idle).
 #[tauri::command]
-pub fn open_settings_window<R: Runtime>(
+// WebView2 creation must run off the Windows synchronous IPC/UI thread.
+pub async fn open_settings_window<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
     let win = crate::dyn_windows::get_or_create_window(&app, crate::dyn_windows::WindowConfig::settings())?;
@@ -1731,6 +1645,10 @@ pub struct NexusSettings {
     /// Google Places API (New) key ("nearest pharmacy"). Optional.
     #[serde(default)]
     pub places_api_key: String,
+    /// Logo.dev publishable key (`pk_...`) for brand logos (img.logo.dev).
+    /// Optional; without it brand-logo lookups return nothing (no network).
+    #[serde(default)]
+    pub logo_dev_publishable_key: String,
     /// Moonshine STT model architecture.
     /// Options: "small_streaming" (123M, 7.84% WER, default for family),
     ///          "medium_streaming" (245M, 6.65% WER, ~400 MB — opt-in),
@@ -1842,6 +1760,12 @@ pub struct NexusSettings {
     /// Touchpad-style gestures with 3 fingers: flick = next/previous tab, flick up = window switcher. Default on.
     #[serde(default = "default_true")]
     pub hand_gestures: bool,
+    /// Pause unneeded background work while Hand Mode runs. Default on.
+    #[serde(default = "default_true")]
+    pub hand_focus_mode: bool,
+    /// Lower other heavy apps while Hand Mode runs. Default on.
+    #[serde(default = "default_true")]
+    pub hand_focus_lower_apps: bool,
     /// 4 fingers together: virtual desktops, Task View, show desktop. Default off until the finger-spread
     /// threshold has been checked on the user's own hand (see the `[HAND] pose ... spread=` log).
     #[serde(default)]
@@ -1877,6 +1801,9 @@ pub struct NexusSettings {
     /// Must live in this struct or `save_settings` erases it.
     #[serde(default)]
     pub stt_log_confidence: bool,
+    /// Opt-in encrypted native STT clips and turn trace, retained for 24 h.
+    #[serde(default)]
+    pub stt_diagnostics: bool,
     /// Vision model for the screen tour (empty = built-in ladder:
     /// gemini-3.8-flash → gemini-3.5-flash → gemini-3.5-flash-lite → 2.5).
     #[serde(default)]
@@ -1946,6 +1873,17 @@ pub struct NexusSettings {
     /// Google account with the right access is connected.
     #[serde(default = "default_memcore")]
     pub memcore_mail: bool,
+    /// Watch GitHub Actions runs for recently pushed repositories.
+    #[serde(default = "default_memcore")]
+    pub memcore_github_watch: bool,
+    /// Watch latest production deploys (Vercel, Render, Netlify) and announce failure/recovery.
+    #[serde(default = "default_memcore")]
+    pub memcore_deploy_watch: bool,
+    /// Speak important emails in plain words (GitHub on device; unusual emails
+    /// via a free cloud model using sender + subject only). Default OFF: the cloud
+    /// step is opt-in; on-device wording (GitHub + categories) always runs.
+    #[serde(default)]
+    pub memcore_mail_plain: bool,
     /// Read-only WhatsApp watcher (priority people). OFF until the
     /// read-receipt check in docs/testing/whatsapp-read-receipt-test.md is done.
     #[serde(default)]
@@ -2239,6 +2177,7 @@ impl Default for NexusSettings {
             deepgram_api_key: String::new(),
             routes_api_key: String::new(),
             places_api_key: String::new(),
+            logo_dev_publishable_key: String::new(),
             moonshine_model: crate::lazy_stt::DEFAULT_MOONSHINE_MODEL.to_string(),
             tts_emotion: "auto".to_string(),
             vision_provider: "auto".to_string(),
@@ -2265,6 +2204,8 @@ impl Default for NexusSettings {
             hand_with_ghost: false,
             hand_snap: true,
             hand_gestures: true,
+            hand_focus_mode: true,
+            hand_focus_lower_apps: true,
             hand_gestures_desktop: false,
             hand_sensitivity: 0.0,
             waves_horizontal_pct: 0.5,
@@ -2275,6 +2216,7 @@ impl Default for NexusSettings {
             loading_size: 80,
             screen_tour: true,
             stt_log_confidence: false,
+            stt_diagnostics: false,
             tour_model: String::new(),
             gemini_vision_daily_limit: default_gemini_vision_daily_limit(),
             persona_mode: default_persona_mode(),
@@ -2292,6 +2234,9 @@ impl Default for NexusSettings {
             wake_sound_volume: default_wake_sound_volume(),
             memcore_timetable: default_memcore(),
             memcore_mail: default_memcore(),
+            memcore_github_watch: default_memcore(),
+            memcore_deploy_watch: default_memcore(),
+            memcore_mail_plain: false,
             memcore_whatsapp: false,
             memcore_whatsapp_speak: false,
             memcore_leave_by: default_memcore(),
@@ -2363,6 +2308,12 @@ pub fn list_tts_voices() -> Result<Vec<TtsVoiceInfo>, String> {
     Ok(voices)
 }
 
+fn parse_settings_content(content: &str) -> NexusSettings {
+    let mut settings: NexusSettings = serde_json::from_str(content).unwrap_or_default();
+    settings.speaker_verification = voice_profile::voice_lock_from_settings(content);
+    settings
+}
+
 /// IPC: Get the current settings (merged with defaults for missing fields).
 #[tauri::command]
 pub fn get_settings<R: Runtime>(
@@ -2370,7 +2321,7 @@ pub fn get_settings<R: Runtime>(
 ) -> Result<NexusSettings, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let path = dir.join("settings.json");
-    if !path.exists() {
+    if !path.try_exists().map_err(|e| e.to_string())? {
         return Ok(NexusSettings::default());
     }
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
@@ -2422,7 +2373,15 @@ pub fn get_settings<R: Runtime>(
 #[tauri::command]
 pub fn save_settings<R: Runtime>(
     app: tauri::AppHandle<R>,
+    settings: NexusSettings,
+) -> Result<(), String> {
+    save_settings_with_voice_intent(app, settings, None)
+}
+
+fn save_settings_with_voice_intent<R: Runtime>(
+    app: tauri::AppHandle<R>,
     mut settings: NexusSettings,
+    voice_lock_change: Option<bool>,
 ) -> Result<(), String> {
     // Keys are pasted by hand: a trailing space/newline makes every provider
     // answer 401 while the Settings card still looks configured.
@@ -2439,6 +2398,17 @@ pub fn save_settings<R: Runtime>(
     crate::auth_vault::set_api_key("cerebras", &settings.cerebras_api_key);
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    settings.speaker_verification = voice_profile::voice_lock_after_settings_save(
+        read_speaker_verification(&app), voice_lock_change,
+    );
+    if voice_lock_change == Some(true) {
+        let profile_path = voice_profile::resolve_profile_path(&dir);
+        let profile = voice_profile::VoiceProfile::load(&profile_path)
+            .map_err(|_| "Enroll a valid voice profile before enabling Voice Lock".to_string())?;
+        if !profile.is_valid() {
+            return Err("Enroll a valid voice profile before enabling Voice Lock".to_string());
+        }
+    }
     let path = dir.join("settings.json");
     // API keys are managed by `api_keys::*`: an EMPTY key in the payload never
     // wipes what is on disk (and a deleted key cannot be resurrected by a
@@ -2453,6 +2423,7 @@ pub fn save_settings<R: Runtime>(
     settings.deepgram_api_key = crate::api_keys::handle_save_key(&crate::api_keys::KeychainKeyStore, "deepgram", "deepgramApiKey", &existing, &settings.deepgram_api_key);
     settings.routes_api_key = crate::api_keys::handle_save_key(&crate::api_keys::KeychainKeyStore, "google_maps", "routesApiKey", &existing, &settings.routes_api_key);
     settings.places_api_key = crate::api_keys::handle_save_key(&crate::api_keys::KeychainKeyStore, "google_places", "placesApiKey", &existing, &settings.places_api_key);
+    settings.logo_dev_publishable_key = crate::api_keys::handle_save_key(&crate::api_keys::KeychainKeyStore, "logo_dev", "logoDevPublishableKey", &existing, &settings.logo_dev_publishable_key);
     // The Worker URL receives every transcript and the device token: never accept
     // plain http (except localhost) or a malformed value from the UI.
     if !settings.server_url.is_empty() {
@@ -2570,12 +2541,34 @@ pub fn settings_patch<R: Runtime>(
 ) -> Result<(), String> {
     let current = get_settings(app.clone())?;
     let merged = apply_settings_patch(&current, &patch)?;
-    save_settings(app, merged)
+    let voice_lock_change = patch.get("speakerVerification").and_then(serde_json::Value::as_bool);
+    save_settings_with_voice_intent(app, merged, voice_lock_change)
 }
 
 #[cfg(test)]
 mod settings_voice_tests {
     use super::*;
+
+    #[test]
+    fn settings_window_command_returns_future() {
+        fn requires_future<F, Fut>(_: F)
+        where
+            F: FnOnce(tauri::AppHandle<tauri::Wry>) -> Fut,
+            Fut: std::future::Future<Output = Result<(), String>>,
+        {}
+        requires_future(open_settings_window::<tauri::Wry>);
+    }
+
+
+    #[test]
+    fn corrupt_settings_do_not_offer_an_unlocked_default_to_the_ui() {
+        let current = parse_settings_content("corrupt settings");
+        assert!(current.speaker_verification);
+        let unrelated = serde_json::json!({"themeMode": "light"}).as_object().unwrap().clone();
+        assert!(apply_settings_patch(&current, &unrelated).unwrap().speaker_verification);
+        let recovery = serde_json::json!({"speakerVerification": false}).as_object().unwrap().clone();
+        assert!(!apply_settings_patch(&current, &recovery).unwrap().speaker_verification);
+    }
 
     fn with_voice(edge: &str, selected: &str, offline: &str) -> NexusSettings {
         let mut s = NexusSettings::default();
@@ -2729,6 +2722,7 @@ pub fn read_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>, service: &str)
         "deepgram" => "deepgramApiKey",
         "google_maps" | "routes" => "routesApiKey",
         "google_places" | "places" => "placesApiKey",
+        "logo_dev" => "logoDevPublishableKey",
         _ => "groqApiKey",
     };
     let snake = match service {
@@ -2737,6 +2731,7 @@ pub fn read_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>, service: &str)
         "deepgram" => "deepgram_api_key",
         "google_maps" | "routes" => "routes_api_key",
         "google_places" | "places" => "places_api_key",
+        "logo_dev" => "logo_dev_publishable_key",
         _ => "groq_api_key",
     };
     let val = json.get(camel)
@@ -3121,18 +3116,19 @@ pub fn refresh_app_registry() -> Result<String, String> {
 /// Called by the frontend before acquiring the microphone via getUserMedia()
 /// to avoid OS-level mic lock contention (Intel Smart Sound Technology).
 #[tauri::command]
-pub fn pause_wakeword() -> Result<(), String> {
-    crate::wakeword_oww::pause_stream();
-    Ok(())
+pub async fn pause_wakeword() -> Result<(), String> {
+    // Pause can wait for a wake dispatch; never block the UI event loop it uses.
+    tauri::async_runtime::spawn_blocking(crate::wakeword_oww::pause_stream)
+        .await.map_err(|error| format!("Wake pause worker failed: {error}"))?
 }
 
 /// IPC: Resume the wake-word engine's cpal stream.
 /// Called by the frontend after releasing the microphone so the wake-word
 /// engine can resume listening for "NEXUS".
 #[tauri::command]
-pub fn resume_wakeword() -> Result<(), String> {
-    crate::wakeword_oww::resume_stream();
-    Ok(())
+pub async fn resume_wakeword() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(crate::wakeword_oww::resume_stream)
+        .await.map_err(|error| format!("Wake resume worker failed: {error}"))?
 }
 
 /// IPC: Mic self-test — is the mic healthy, quiet, or dead?
@@ -3318,13 +3314,22 @@ pub fn read_ghost_turn_gap_ms<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u
 /// Defaults to FALSE. Set `"speakerVerification": true` to enable.
 pub fn read_speaker_verification<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let dir = app.path().app_data_dir();
-    let Ok(dir) = dir else { return false; };
-    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else { return false; };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return false; };
-    json.get("speakerVerification")
-        .or_else(|| json.get("speaker_verification"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+    let Ok(dir) = dir else { return true; };
+    let path = dir.join("settings.json");
+    match path.try_exists() {
+        Ok(false) => return false,
+        Err(_) => return true,
+        Ok(true) => {},
+    }
+    let Ok(content) = std::fs::read_to_string(path) else { return true; };
+    voice_profile::voice_lock_from_settings(&content)
+}
+
+/// A single source of truth for frontend voice routing, including corrupt
+/// settings recovery where the lock remains closed.
+#[tauri::command]
+pub fn voice_lock_enabled<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> bool {
+    read_speaker_verification(&app)
 }
 
 // ─── Restored IPC commands (clobbered by a stale commands.rs rewrite) ───
@@ -3781,70 +3786,6 @@ pub async fn vision_test_key<R: Runtime>(app: AppHandle<R>) -> Result<serde_json
     }
 }
 
-/// IPC: Runtime health snapshot (Connections tab System Status panel).
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HealthStatus {
-    pub memory_mb: u64,
-    pub uptime_sec: u64,
-    pub stt_port: bool,
-    pub nlu_port: bool,
-    pub worker_reachable: bool,
-    pub groq_key: bool,
-    pub gemini_key: bool,
-}
-
-#[tauri::command]
-pub async fn get_health_status<R: Runtime>(app: AppHandle<R>) -> HealthStatus {
-    let memory_mb = process_memory_mb();
-    let uptime_sec = BOOT_INSTANT
-        .get()
-        .map(|b| b.elapsed().as_secs())
-        .unwrap_or(0);
-    let stt_port = crate::lazy_stt::is_stt_responsive();
-    // In-process model now (nlu_local.rs) — "responsive" means "loaded",
-    // not "sidecar port open". First call may load from disk, so run it
-    // off the async executor thread like any other blocking I/O here.
-    let nlu_port = tokio::task::spawn_blocking(crate::nlu_local::is_loaded)
-        .await
-        .unwrap_or(false);
-    let worker_reachable = crate::tts_network::check_network().await;
-    let groq_key = !read_groq_api_key(&app).is_empty() || !read_api_key(&app, "groq").is_empty();
-    let gemini_key = !read_api_key(&app, "gemini").is_empty();
-    HealthStatus {
-        memory_mb,
-        uptime_sec,
-        stt_port,
-        nlu_port,
-        worker_reachable,
-        groq_key,
-        gemini_key,
-    }
-}
-
-static BOOT_INSTANT: once_cell::sync::OnceCell<std::time::Instant> = once_cell::sync::OnceCell::new();
-
-/// Record boot time (called from lib.rs setup) for the health panel.
-pub fn note_boot() {
-    let _ = BOOT_INSTANT.set(std::time::Instant::now());
-}
-
-/// Best-effort process working-set via sysinfo (matches app_registry usage).
-/// All failures map to 0 and the UI just shows "—".
-fn process_memory_mb() -> u64 {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-    let pid = std::process::id();
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
-        true,
-        ProcessRefreshKind::new().with_memory(),
-    );
-    sys.process(sysinfo::Pid::from_u32(pid))
-        .map(|p| p.memory() / (1024 * 1024))
-        .unwrap_or(0)
-}
-
 /// IPC: Export settings (secrets stay in the OS keychain — never in the file).
 #[tauri::command]
 pub fn export_settings<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
@@ -3854,7 +3795,7 @@ pub fn export_settings<R: Runtime>(app: AppHandle<R>) -> Result<String, String> 
     let mut json: serde_json::Value =
         serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
     // Secrets live in the keychain — strip any legacy disk copies.
-    for key in ["groqApiKey", "geminiApiKey", "cerebrasApiKey", "deepgramApiKey", "routesApiKey", "placesApiKey"] {
+    for key in ["groqApiKey", "geminiApiKey", "cerebrasApiKey", "deepgramApiKey", "routesApiKey", "placesApiKey", "logoDevPublishableKey"] {
         json[key] = serde_json::json!("");
     }
     serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
@@ -4103,6 +4044,56 @@ mod nexus_settings_tests {
         assert_eq!(reserialized.get("vadSilero"), Some(&serde_json::json!(true)));
         assert_eq!(reserialized.get("turnEagerness"), Some(&serde_json::json!(0.85)));
         assert_eq!(reserialized.get("calibrationDevPersist"), Some(&serde_json::json!("custom_val")));
+    }
+
+    #[test]
+    fn memcore_mail_plain_defaults_to_off() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("memcoreMailPlain");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert!(!parsed.memcore_mail_plain, "the cloud rewrite is opt-in");
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("memcoreMailPlain"), Some(&serde_json::json!(false)));
+    }
+
+    #[test]
+    fn hand_focus_mode_defaults_to_true_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("handFocusMode");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert!(parsed.hand_focus_mode, "handFocusMode must default to true");
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("handFocusMode"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn hand_focus_lower_apps_defaults_to_true_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("handFocusLowerApps");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert!(parsed.hand_focus_lower_apps, "handFocusLowerApps must default to true");
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("handFocusLowerApps"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn memcore_github_watch_defaults_to_true_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("memcoreGithubWatch");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert!(parsed.memcore_github_watch, "memcoreGithubWatch must default to true");
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("memcoreGithubWatch"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn memcore_deploy_watch_defaults_to_true_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("memcoreDeployWatch");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert!(parsed.memcore_deploy_watch, "memcoreDeployWatch must default to true");
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("memcoreDeployWatch"), Some(&serde_json::json!(true)));
     }
 }
 

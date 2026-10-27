@@ -1,0 +1,57 @@
+{
+  "updatedAt": "2026-10-26T16:04:31.996037+00:00",
+  "revision": "f0988d95afbfac06176c923c2227e7e79e841013",
+  "sourceHash": "d7b49eebf14f49913b36ec7a125e59195915e41d4950a1ac703190b84c1e475a",
+  "checkout": "C:/Users/Chitkul Lakshya/.codex/worktrees/windows-readiness/ULTRON",
+  "feature": "Speaker verification / owner check",
+  "score": 41,
+  "productionReady": false,
+  "diagnosticEvidence": "windows1-20261026-one-clip-analysis.json",
+  "priorCandidate": "0b10fd3a1416a540 failed requested voice action; PID4564 stopped after diagnostics Off",
+  "checks": {
+    "redRegression": "failed on old owner prompt as expected",
+    "rustLibrary": {
+      "passed": 2537,
+      "failed": 0,
+      "ignored": 31
+    },
+    "integration": {
+      "passed": 19,
+      "failed": 0,
+      "ignored": 7
+    },
+    "deadCode": "pass:148 known findings, none new",
+    "frontend": 687,
+    "frontendTypecheckAndBuild": "pass",
+    "worker": 145,
+    "workerTypes": "pass",
+    "pythonScripts": 29,
+    "pythonAgentAndMemory": 31,
+    "nlu": "512 evaluation rows / 8 sources, valid",
+    "repositoryGuards": "IPC, turn-end, hygiene, opacity, provenance regression, whitespace pass",
+    "mutations": "40/40 killed: new7 + UI11 + async1 + audit6 + speaker15",
+    "totalRustIgnored": 38,
+    "allSharedGates": "pass"
+  },
+  "freshRelease": {
+    "identity": "d846dd346c470b60",
+    "builtAt": "2026-10-26T15:20:56.995Z",
+    "duration": "46m14s",
+    "executableSha256": "e7210e43bdbaa737b7b7786ed2a16e3c5427272740a921be7f72c3491dc46007",
+    "provenance": "verified before launch; historical evidence, not a new runtime check"
+  },
+  "liveReplacement": "Startup and native configuration observed before interruption; no repaired owner action trial completed.",
+  "runtime": {
+    "lastObservedPid": 8460,
+    "lastObservedAt": "2026-10-26T15:23:52.622Z",
+    "lastObservedVoiceLock": true,
+    "initialVoiceLockBeforeControlledTrial": false,
+    "profileClips": 5,
+    "sttDiagnostics": false,
+    "currentState": "not rechecked; runtime is now owner-controlled",
+    "recordingConsent": "one clip only, completed; diagnostics Off in last readback"
+  },
+  "pipelineSession": "65109 completed successfully before the edits-only instruction",
+  "pending": "Owner manually controls builds and app runtime. Repaired owner action, stage health, non-owner/replay, profile recovery, enrollment attribution and ten-start accounting remain pending. No readiness promotion.",
+  "runtimeControl": "Owner explicitly requested edits only: do not start, stop, restart or rebuild NEXUS; no automated runtime/settings changes."
+}

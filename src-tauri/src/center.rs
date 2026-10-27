@@ -3,6 +3,127 @@ use crate::voice_profile::TurnOwnership;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Typed identity for the action families. `as_str` supplies display names
+/// for existing logs and speech metadata; policy uses this type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CenterId {
+    App, Browser, System, Media, YouTube, Message, Commerce, GitHub,
+    Architect, Ghost, Hand, Google, Memory, File, Dictation, Greeting, Knowledge,
+}
+
+impl CenterId {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::App => "AppCenter", Self::Browser => "BrowserCenter",
+            Self::System => "SystemCenter", Self::Media => "MediaCenter",
+            Self::YouTube => "YouTubeCenter", Self::Message => "MessageCenter",
+            Self::Commerce => "CommerceCenter", Self::GitHub => "GitHubCenter",
+            Self::Architect => "ArchitectCenter", Self::Ghost => "GhostCenter",
+            Self::Hand => "HandCenter", Self::Google => "GoogleCenter",
+            Self::Memory => "MemoryCenter", Self::File => "FileCenter",
+            Self::Dictation => "DictationCenter", Self::Greeting => "GreetingCenter",
+            Self::Knowledge => "KnowledgeCenter",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmationPolicy { None, ExistingGate }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompoundPolicy { Allowed, StandaloneOnly }
+
+/// One policy and routing snapshot for a parsed action. Legacy centers use
+/// the same snapshot while their execution still delegates to existing code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionSpec {
+    pub center: CenterId,
+    pub route: crate::orchestrator::Subsystem,
+    pub risk: crate::action_kernel::Risk,
+    pub confirmation: ConfirmationPolicy,
+    pub compound: CompoundPolicy,
+}
+
+pub fn action_spec(intent: &ParsedIntent) -> ActionSpec {
+    let route = crate::orchestrator::route_intent(intent);
+    let compound = match intent {
+        ParsedIntent::OpenApp { .. } | ParsedIntent::OpenUrl { .. }
+        | ParsedIntent::WhatsappChat { .. }
+        | ParsedIntent::MediaPlayPause | ParsedIntent::MediaNext
+        | ParsedIntent::MediaPrevious | ParsedIntent::MediaStop
+        | ParsedIntent::Greeting { .. } | ParsedIntent::Search { .. }
+        | ParsedIntent::AnalyseRepo { .. } | ParsedIntent::AnalysePr { .. }
+        | ParsedIntent::AnalyseLatestPr { .. } | ParsedIntent::CheckBranch { .. }
+        | ParsedIntent::OrderFood { .. } | ParsedIntent::SearchProduct { .. }
+        | ParsedIntent::SendWhatsAppMessage { .. } => CompoundPolicy::Allowed,
+        // Every other action, including any new intent, needs an explicit
+        // review before it can be composed with another action.
+        _ => CompoundPolicy::StandaloneOnly,
+    };
+    let confirmation = match intent {
+        ParsedIntent::GitHubCommand { .. } | ParsedIntent::OrderFood { .. }
+        | ParsedIntent::SendWhatsAppMessage { .. } | ParsedIntent::FileAction { .. }
+        | ParsedIntent::PowerAction { .. } => ConfirmationPolicy::ExistingGate,
+        _ => ConfirmationPolicy::None,
+    };
+    ActionSpec {
+        center: center_id_for(intent), route,
+        risk: crate::action_kernel::risk_of_intent(intent), confirmation, compound,
+    }
+}
+
+/// NLU labels are data, not executable authority. New labels need an explicit
+/// entry here and a corresponding dispatcher before they can run.
+pub fn supported_nlu_label(label: &str) -> bool {
+    matches!(label,
+        "youtube_search" | "youtube_journal" | "system_minimize_window"
+        | "system_maximize_window" | "system_click_element" | "click_element"
+        | "focus_app" | "browser_new_tab" | "type_text" | "cancel_action"
+        | "screen_analysis" | "screen_annotation" | "reverse_engineer"
+    )
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PolicyVerdict {
+    Ready(ActionSpec),
+    Clarify(Validity),
+    AmbientDrop,
+}
+
+pub fn prepare_action(
+    intent: &ParsedIntent,
+    transcript: &str,
+    source: &str,
+    turn: &TurnContext,
+    ghost_active: bool,
+    has_dialog_context: bool,
+    skip_validation: bool,
+) -> PolicyVerdict {
+    match action_disposition(intent, transcript, source, turn.ownership, ghost_active) {
+        ActionDisposition::AmbientDrop => return PolicyVerdict::AmbientDrop,
+        ActionDisposition::Clarify => return PolicyVerdict::Clarify(Validity::Invalid {
+            reason: "uncertain_command",
+            prompt: "I wasn't sure which action you meant, sir. Please say it again.".into(),
+        }),
+        ActionDisposition::Allow => {}
+    }
+    if let ParsedIntent::NluResult { intent: label, .. } = intent {
+        if !supported_nlu_label(label) {
+            return PolicyVerdict::Clarify(Validity::Invalid {
+                reason: "unsupported_nlu_action",
+                prompt: "I can't perform that action yet, sir.".into(),
+            });
+        }
+    }
+    if !skip_validation {
+        let validity = validate(intent, transcript, has_dialog_context);
+        if validity != Validity::Ok {
+            return PolicyVerdict::Clarify(validity);
+        }
+    }
+    PolicyVerdict::Ready(action_spec(intent))
+}
+
 /// Result of validating required dialog slots and invariants for a sub-center.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Validity {
@@ -70,35 +191,39 @@ fn source_strength(source: &str) -> u8 {
 /// Whether executing this intent can change external state, spend quota/API
 /// calls, move the cursor, type text, or open a window.
 pub fn is_side_effect(intent: &ParsedIntent) -> bool {
-    matches!(
-        intent,
-        ParsedIntent::OpenArchitect
-            | ParsedIntent::FileAction { .. }
-            | ParsedIntent::FileUndo
-            | ParsedIntent::GitHubCommand { .. }
-            | ParsedIntent::OrderFood { .. }
-            | ParsedIntent::SearchProduct { .. }
-            | ParsedIntent::SendWhatsAppMessage { .. }
-            | ParsedIntent::AnalyseRepo { .. }
-            | ParsedIntent::AnalysePr { .. }
-            | ParsedIntent::AnalyseLatestPr { .. }
-            | ParsedIntent::CheckBranch { .. }
-            | ParsedIntent::Search { .. }
-            | ParsedIntent::ScreenClick { .. }
-            | ParsedIntent::GhostAction { .. }
-            | ParsedIntent::ScreenRead { .. }
-            | ParsedIntent::BrowserTab { .. }
-            | ParsedIntent::BrowserCloseTab { .. }
-            | ParsedIntent::BrowserSearch { .. }
-            | ParsedIntent::BrowserSearchFocus
-            | ParsedIntent::WatchScreenEmail
-            | ParsedIntent::StartDictation
-            | ParsedIntent::StopDictation
-            | ParsedIntent::EnterHandMode
-            | ParsedIntent::HandMouseLive { .. }
-            | ParsedIntent::PointerClick { .. }
-            | ParsedIntent::NluResult { .. }
-    )
+    match intent {
+        ParsedIntent::GitHubCommand { command } => {
+            !matches!(command,
+                crate::github_cmd::GitHubCommand::ListPrs { .. }
+                | crate::github_cmd::GitHubCommand::GetPr { .. }
+                | crate::github_cmd::GitHubCommand::ListPrFiles { .. }
+                | crate::github_cmd::GitHubCommand::ListCollaborators { .. }
+                | crate::github_cmd::GitHubCommand::ListOrgMembers { .. }
+                | crate::github_cmd::GitHubCommand::ListOutsideCollaborators { .. }
+                | crate::github_cmd::GitHubCommand::ListBranches { .. }
+                | crate::github_cmd::GitHubCommand::ListReleases { .. }
+                | crate::github_cmd::GitHubCommand::ListWorkflows { .. }
+                | crate::github_cmd::GitHubCommand::ListWorkflowRuns { .. }
+                | crate::github_cmd::GitHubCommand::FindPr { .. })
+        }
+        // These remain available to an unenrolled user's clear request.
+        // App/site opening is an explicit Ghost policy exception.
+        ParsedIntent::OpenApp { .. } | ParsedIntent::OpenUrl { .. }
+        | ParsedIntent::OpenSettings | ParsedIntent::OpenCodeRabbitHub
+        | ParsedIntent::OpenGitHubDashboard { .. }
+        | ParsedIntent::MediaPlayPause | ParsedIntent::MediaNext
+        | ParsedIntent::MediaPrevious | ParsedIntent::MediaStop
+        | ParsedIntent::PlayMusic { .. } | ParsedIntent::OpenMusicPlayer { .. }
+        | ParsedIntent::Greeting { .. } | ParsedIntent::NeedMoreInfo { .. }
+        | ParsedIntent::Unknown { .. } | ParsedIntent::MemoryAudit
+        | ParsedIntent::Briefing | ParsedIntent::TimetableShow
+        | ParsedIntent::MailDigest | ParsedIntent::WhatsappRead { .. }
+        | ParsedIntent::PeopleList | ParsedIntent::CalendarAgenda { .. }
+        | ParsedIntent::ReviewForeground
+        | ParsedIntent::ListBlockedContacts | ParsedIntent::ShareConcern { .. } => false,
+        // Any new variant is side-effecting until explicitly reviewed above.
+        _ => true,
+    }
 }
 
 pub fn command_evidence(
@@ -109,7 +234,11 @@ pub fn command_evidence(
     let strength = source_strength(source);
     match intent {
         ParsedIntent::Unknown { .. } => CommandEvidence::None,
-        ParsedIntent::Greeting { .. } | ParsedIntent::NeedMoreInfo { .. } => CommandEvidence::Strong,
+        ParsedIntent::Greeting { .. }
+        | ParsedIntent::NeedMoreInfo { .. }
+        | ParsedIntent::OpenSettings
+        | ParsedIntent::OpenCodeRabbitHub
+        | ParsedIntent::OpenGitHubDashboard { .. } => CommandEvidence::Strong,
         ParsedIntent::OpenArchitect => {
             if strength >= 3 {
                 CommandEvidence::Strong
@@ -120,7 +249,12 @@ pub fn command_evidence(
             }
         }
         ParsedIntent::AnalyseRepo { repo, .. } => {
-            if repo.trim().is_empty() || !owner_repo_token(transcript) {
+            if matches!(
+                crate::github_repo_index::peek(repo),
+                Some(crate::github_repo_index::Resolution::One(_))
+            ) {
+                CommandEvidence::Strong
+            } else if repo.trim().is_empty() || !owner_repo_token(transcript) {
                 // Pattern-4 style inference ("analyse <arbitrary words>") is a
                 // repository guess, not repository evidence.
                 if strength >= 3 {
@@ -147,9 +281,14 @@ pub fn command_evidence(
         }
         ParsedIntent::GitHubCommand { command } => {
             let has_repo = !format!("{command:?}").contains("repo: \"\"");
-            if has_repo && strength >= 3 {
+            let is_list_prs = matches!(
+                command,
+                crate::github_cmd::GitHubCommand::ListPrs { .. }
+                    | crate::github_cmd::GitHubCommand::FindPr { .. }
+            );
+            if (has_repo || is_list_prs) && strength >= 3 {
                 CommandEvidence::Strong
-            } else if has_repo {
+            } else if has_repo || is_list_prs {
                 CommandEvidence::Medium
             } else {
                 CommandEvidence::Weak
@@ -185,6 +324,13 @@ pub fn action_disposition(
 
     let evidence = command_evidence(intent, transcript, source);
     if evidence == CommandEvidence::None {
+        if is_side_effect(intent) {
+            return if ghost_active {
+                ActionDisposition::AmbientDrop
+            } else {
+                ActionDisposition::Clarify
+            };
+        }
         return match ownership {
             TurnOwnership::Verified => ActionDisposition::Allow,
             TurnOwnership::Unenrolled if !ghost_active => ActionDisposition::Allow,
@@ -247,8 +393,10 @@ pub struct TurnContext {
     #[serde(default)]
     pub ownership: TurnOwnership,
     #[serde(default)]
+    #[serde(alias = "ownerScore")]
     pub owner_score: f32,
     #[serde(default)]
+    #[serde(alias = "decoderBias")]
     #[allow(dead_code)]
     pub decoder_bias: String,
     #[serde(default)]
@@ -256,6 +404,55 @@ pub struct TurnContext {
     pub language: String,
     #[serde(default)]
     pub session: u64,
+    /// Original STT text before frontend display corrections. Never trusted as
+    /// authority, but used to catch an action invented by a correction.
+    #[serde(default)]
+    #[serde(alias = "rawText")]
+    pub raw_text: String,
+    #[serde(default)]
+    #[serde(alias = "correctedText")]
+    pub corrected_text: String,
+}
+
+/// A correction may normalize spelling, but it must not turn a different
+/// command or target into an executable action without a repeat.
+pub fn correction_needs_repeat(raw: &str, corrected: &str, intent: &ParsedIntent) -> bool {
+    if raw.trim().is_empty() || corrected.trim().is_empty()
+        || matches!(intent, ParsedIntent::Unknown { .. } | ParsedIntent::Greeting { .. }
+            | ParsedIntent::NeedMoreInfo { .. }) {
+        return false;
+    }
+    let normalize = |s: &str| {
+        let cleaned: String = s.to_ascii_lowercase().replace("analyze", "analyse")
+            .chars().filter(|c| c.is_ascii_alphanumeric() || c.is_ascii_whitespace())
+            .collect();
+        cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    normalize(raw) != normalize(corrected)
+}
+
+#[cfg(test)]
+mod transcript_provenance_tests {
+    use super::{correction_needs_repeat, TurnContext};
+    use crate::intent_parser::ParsedIntent;
+    #[test]
+    fn client_provenance_aliases_deserialize() {
+        let ctx: TurnContext = serde_json::from_value(serde_json::json!({
+            "session": 42, "ownership": "unenrolled", "ownerScore": 0.6,
+            "decoderBias": "neutral", "rawText": "open zink", "correctedText": "open zync"
+        })).unwrap();
+        assert_eq!(ctx.session, 42);
+        assert_eq!(ctx.raw_text, "open zink");
+        assert_eq!(ctx.corrected_text, "open zync");
+        assert_eq!(ctx.decoder_bias, "neutral");
+    }
+    #[test]
+    fn correction_cannot_invent_app_or_repo_target() {
+        let app = ParsedIntent::OpenApp { target: "Chrome".into() };
+        assert!(correction_needs_repeat("open chroma", "open Chrome", &app));
+        assert!(!correction_needs_repeat("Open Chrome.", "open chrome", &app));
+        assert!(!correction_needs_repeat("analyze my screen", "analyse my screen", &app));
+    }
 }
 
 /// Common contract for all action sub-centers (Feature 74 & 75).
@@ -263,50 +460,46 @@ pub trait SubCenter: Send + Sync {
     #[allow(dead_code)]
     fn name(&self) -> &'static str;
     fn validate(&self, action: &str, slots: &Value) -> Validity;
-    /// Confirmation policy (plan 120 H3 verdict: KEPT but explicitly
-    /// not-yet-wired). The repeat-back/GatePrompt copy in the impls is real,
-    /// reviewed policy — deleting it would destroy work a future confirm flow
-    /// should reuse. But today NO production caller consults this method
-    /// (only unit tests), and `center::validate` does not dispatch to it for
-    /// deterministic intents. Do NOT rely on it for safety until a caller is
-    /// wired; gating decisions live in `is_side_effect` + orchestrator/MCP
-    /// confirm flows. New centers: implement it (keep the policy warm), and
-    /// wire the caller as a separate approved change.
+    /// Legacy repeat-back copy retained for migration reference. This method
+    /// is advisory only; `ActionSpec::confirmation` identifies the existing
+    /// executor gate, which remains the sole place that opens a confirmation.
     #[allow(dead_code)]
     fn confirm_kind(&self, action: &str, slots: &Value) -> ConfirmKind;
 }
 
-/// Route parsed intent to its corresponding sub-center name (Feature 74 registry decision tree).
-pub fn center_for(intent: &ParsedIntent) -> &'static str {
+/// Assign each parsed intent to exactly one typed action center.
+pub fn center_id_for(intent: &ParsedIntent) -> CenterId {
     match intent {
         ParsedIntent::OpenApp { .. }
         | ParsedIntent::OpenUrl { .. }
         | ParsedIntent::CloseApp { .. }
         | ParsedIntent::OpenSettings
-        | ParsedIntent::OpenGitHubDashboard { .. } => "AppCenter",
+        | ParsedIntent::OpenGitHubDashboard { .. } => CenterId::App,
 
         ParsedIntent::BrowserTab { .. }
         | ParsedIntent::BrowserCloseTab { .. }
         | ParsedIntent::BrowserSearch { .. }
-        | ParsedIntent::BrowserSearchFocus => "BrowserCenter",
+        | ParsedIntent::BrowserSearchFocus => CenterId::Browser,
 
         ParsedIntent::MediaPlayPause
         | ParsedIntent::MediaNext
         | ParsedIntent::MediaPrevious
         | ParsedIntent::MediaStop
         | ParsedIntent::PlayMusic { .. }
-        | ParsedIntent::OpenMusicPlayer { .. } => "MediaCenter",
+        | ParsedIntent::OpenMusicPlayer { .. } => CenterId::Media,
 
         ParsedIntent::WhatsappChat { .. }
         | ParsedIntent::SendWhatsAppMessage { .. }
-        | ParsedIntent::AnalyseChatDocs { .. } => "MessageCenter",
+        | ParsedIntent::AnalyseChatDocs { .. } => CenterId::Message,
 
         ParsedIntent::OrderFood { .. }
-        | ParsedIntent::SearchProduct { .. } => "CommerceCenter",
+        | ParsedIntent::SearchProduct { .. } => CenterId::Commerce,
 
-        ParsedIntent::GitHubCommand { .. } => "GitHubCenter",
+        ParsedIntent::GitHubCommand { .. } => CenterId::GitHub,
 
         ParsedIntent::OpenArchitect
+        | ParsedIntent::ReviewForeground
+        | ParsedIntent::RecreateLastReview
         | ParsedIntent::OpenCodeRabbitHub
         | ParsedIntent::AnalyseRepo { .. }
         | ParsedIntent::AnalysePr { .. }
@@ -318,34 +511,34 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
         | ParsedIntent::WatchAgentTask { .. }
         | ParsedIntent::WatchThenPower { .. }
         | ParsedIntent::WatchPlanCommand { .. }
-        | ParsedIntent::AgentHookCommand { .. } => "ArchitectCenter",
+        | ParsedIntent::AgentHookCommand { .. } => CenterId::Architect,
 
-        ParsedIntent::Search { .. } => "KnowledgeCenter",
+        ParsedIntent::Search { .. } => CenterId::Knowledge,
 
         ParsedIntent::EnterGhostwriter { .. }
         | ParsedIntent::StartDictation
-        | ParsedIntent::StopDictation => "DictationCenter",
+        | ParsedIntent::StopDictation => CenterId::Dictation,
 
         ParsedIntent::EnterHandMode
         | ParsedIntent::ExitHandMode
         | ParsedIntent::HandMouseLive { .. }
-        | ParsedIntent::PointerClick { .. } => "HandCenter",
+        | ParsedIntent::PointerClick { .. } => CenterId::Hand,
 
         ParsedIntent::EnterGhostControl
         | ParsedIntent::ExitGhostControl
         | ParsedIntent::GhostAction { .. }
         | ParsedIntent::ScreenClick { .. }
-        | ParsedIntent::ScreenRead { .. } => "GhostCenter",
+        | ParsedIntent::ScreenRead { .. } => CenterId::Ghost,
 
-        ParsedIntent::FileAction { .. } | ParsedIntent::FileUndo => "FileCenter",
+        ParsedIntent::FileAction { .. } | ParsedIntent::FileUndo => CenterId::File,
 
         ParsedIntent::Greeting { .. }
-        | ParsedIntent::NeedMoreInfo { .. } => "GreetingCenter",
+        | ParsedIntent::NeedMoreInfo { .. } => CenterId::Greeting,
 
         ParsedIntent::WatchScreenEmail
         | ParsedIntent::Directions { .. }
         | ParsedIntent::PlacesSearch { .. }
-        | ParsedIntent::ScanInternshipEmails => "GoogleCenter",
+        | ParsedIntent::ScanInternshipEmails => CenterId::Google,
 
         ParsedIntent::MemoryAudit
         | ParsedIntent::Briefing
@@ -370,33 +563,33 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
         | ParsedIntent::BlockContact { .. }
         | ParsedIntent::UnblockContact { .. }
         | ParsedIntent::ListBlockedContacts
-        | ParsedIntent::CreateVoiceReminder { .. } => "MemoryCenter",
+        | ParsedIntent::CreateVoiceReminder { .. } => CenterId::Memory,
 
         ParsedIntent::PersonaFriend
         | ParsedIntent::PersonaButler
-        | ParsedIntent::ShareConcern { .. } => "GreetingCenter",
+        | ParsedIntent::ShareConcern { .. } => CenterId::Greeting,
 
         ParsedIntent::NluResult { intent: name, .. } => {
             if name.starts_with("youtube_") {
-                "YouTubeCenter"
+                CenterId::YouTube
             } else if name.starts_with("system_") || name == "inspect_window" || name == "click_element" {
-                "SystemCenter"
+                CenterId::System
             } else if name.starts_with("browser_") {
-                "BrowserCenter"
+                CenterId::Browser
             } else if name.starts_with("whatsapp_") {
-                "MessageCenter"
+                CenterId::Message
             } else if name == "type_text" || name == "press_key" || name == "press_hotkey" {
-                "DictationCenter"
+                CenterId::Dictation
             } else if name == "focus_app" {
-                "AppCenter"
-            } else if name == "screen_analysis" {
-                "GhostCenter"
+                CenterId::App
+            } else if name == "screen_analysis" || name == "screen_annotation" || name == "reverse_engineer" || name == "cancel_action" {
+                CenterId::Ghost
             } else {
-                "NluCenter"
+                CenterId::Knowledge
             }
         }
 
-        ParsedIntent::Unknown { .. } => "KnowledgeCenter",
+        ParsedIntent::Unknown { .. } => CenterId::Knowledge,
     }
 }
 
@@ -454,10 +647,14 @@ pub fn validate(intent: &ParsedIntent, transcript: &str, has_dialog_context: boo
                 Validity::Ok
             }
         }
-        ParsedIntent::BrowserSearch { query } if query.trim().is_empty() => Validity::NeedSlot {
-            slot: "query",
-            prompt: "What should I search for in the browser, sir?".to_string(),
-        },
+        ParsedIntent::BrowserTab { index } => crate::browser_center::BrowserCenter::new()
+            .validate("browser_tab", &serde_json::json!({"index": index})),
+        ParsedIntent::BrowserCloseTab { index } => crate::browser_center::BrowserCenter::new()
+            .validate("browser_close_tab", &serde_json::json!({"index": index})),
+        ParsedIntent::BrowserSearch { query } => crate::browser_center::BrowserCenter::new()
+            .validate("browser_search", &serde_json::json!({"query": query})),
+        ParsedIntent::BrowserSearchFocus => crate::browser_center::BrowserCenter::new()
+            .validate("browser_search_focus", &Value::Null),
         ParsedIntent::Search { query } if query.trim().is_empty() => Validity::NeedSlot {
             slot: "query",
             prompt: "What would you like me to look up, sir?".to_string(),
@@ -491,24 +688,12 @@ pub fn validate(intent: &ParsedIntent, transcript: &str, has_dialog_context: boo
 
 /// All 17 action sub-centers in the NEXUS Command Center architecture.
 #[allow(dead_code)]
-pub const ALL_SUB_CENTERS: &[&str] = &[
-    "AppCenter",
-    "BrowserCenter",
-    "SystemCenter",
-    "MediaCenter",
-    "YouTubeCenter",
-    "MessageCenter",
-    "CommerceCenter",
-    "GitHubCenter",
-    "ArchitectCenter",
-    "GhostCenter",
-    "HandCenter",
-    "GoogleCenter",
-    "MemoryCenter",
-    "FileCenter",
-    "DictationCenter",
-    "GreetingCenter",
-    "KnowledgeCenter",
+pub const ALL_SUB_CENTERS: &[CenterId] = &[
+    CenterId::App, CenterId::Browser, CenterId::System, CenterId::Media,
+    CenterId::YouTube, CenterId::Message, CenterId::Commerce, CenterId::GitHub,
+    CenterId::Architect, CenterId::Ghost, CenterId::Hand, CenterId::Google,
+    CenterId::Memory, CenterId::File, CenterId::Dictation, CenterId::Greeting,
+    CenterId::Knowledge,
 ];
 
 // ─── Unit Tests ──────────────────────────────────────────────────────────────
@@ -598,26 +783,126 @@ mod tests {
     }
 
     #[test]
-    fn test_center_for_routing() {
-        assert_eq!(center_for(&ParsedIntent::OpenSettings), "AppCenter");
-        assert_eq!(center_for(&ParsedIntent::MediaPlayPause), "MediaCenter");
-        assert_eq!(center_for(&ParsedIntent::EnterGhostControl), "GhostCenter");
+    fn test_center_id_routing() {
+        assert_eq!(center_id_for(&ParsedIntent::OpenSettings).as_str(), "AppCenter");
+        assert_eq!(center_id_for(&ParsedIntent::MediaPlayPause).as_str(), "MediaCenter");
+        assert_eq!(center_id_for(&ParsedIntent::EnterGhostControl).as_str(), "GhostCenter");
         let ghost = ParsedIntent::GhostAction {
             task: crate::ghost_center::parse("save").unwrap(),
         };
-        assert_eq!(center_for(&ghost), "GhostCenter");
+        assert_eq!(center_id_for(&ghost).as_str(), "GhostCenter");
         assert!(is_side_effect(&ghost));
         assert_eq!(validate(&ghost, "save", false), Validity::Ok);
-        assert_eq!(center_for(&ParsedIntent::EnterHandMode), "HandCenter");
-        assert_eq!(center_for(&ParsedIntent::HandMouseLive { live: true }), "HandCenter");
+        assert_eq!(center_id_for(&ParsedIntent::EnterHandMode).as_str(), "HandCenter");
+        assert_eq!(center_id_for(&ParsedIntent::HandMouseLive { live: true }).as_str(), "HandCenter");
     }
 
-    /// Plan 120 H1: every `center_for` output must be a registered sub-center.
+    #[test]
+    fn action_spec_pins_route_and_compound_safety() {
+        let browser = action_spec(&ParsedIntent::BrowserSearch { query: "cats".into() });
+        assert_eq!(browser.center, CenterId::Browser);
+        assert_eq!(browser.route, crate::orchestrator::Subsystem::LocalCommand);
+        assert_eq!(browser.compound, CompoundPolicy::StandaloneOnly);
+
+        let knowledge = action_spec(&ParsedIntent::Search { query: "cats".into() });
+        assert_eq!(knowledge.center, CenterId::Knowledge);
+        assert_eq!(knowledge.route, crate::orchestrator::Subsystem::WorkerBackend);
+        assert_eq!(knowledge.compound, CompoundPolicy::Allowed);
+
+        let message = action_spec(&ParsedIntent::SendWhatsAppMessage {
+            contact: "Alex".into(), message: "Hello".into(),
+        });
+        assert_eq!(message.center, CenterId::Message);
+        assert_eq!(message.route, crate::orchestrator::Subsystem::Mcp);
+        assert_eq!(message.confirmation, ConfirmationPolicy::ExistingGate);
+
+        let review = action_spec(&ParsedIntent::ReviewForeground);
+        assert_eq!(review.center, CenterId::Architect);
+        assert_eq!(review.route, crate::orchestrator::Subsystem::LocalCommand);
+        assert_eq!(review.risk, crate::action_kernel::Risk::Read);
+        assert_eq!(review.compound, CompoundPolicy::StandaloneOnly);
+        let recreate = action_spec(&ParsedIntent::RecreateLastReview);
+        assert_eq!(recreate.center, CenterId::Architect);
+        assert_eq!(recreate.route, crate::orchestrator::Subsystem::LocalCommand);
+        assert_eq!(recreate.risk, crate::action_kernel::Risk::Destructive);
+        assert_eq!(recreate.compound, CompoundPolicy::StandaloneOnly);
+
+        let file = action_spec(&ParsedIntent::FileUndo);
+        assert_eq!(file.compound, CompoundPolicy::StandaloneOnly);
+        assert_eq!(
+            action_spec(&ParsedIntent::CloseApp { target: "Chrome".into() }).compound,
+            CompoundPolicy::StandaloneOnly
+        );
+        assert_eq!(
+            action_spec(&ParsedIntent::GitHubCommand {
+                command: crate::github_cmd::GitHubCommand::ClosePr {
+                    repo: "o/r".into(), pr_number: 1,
+                },
+            }).compound,
+            CompoundPolicy::StandaloneOnly
+        );
+    }
+
+    #[test]
+    fn one_policy_checks_slots_owner_and_nlu_allowlist() {
+        let mut turn = TurnContext::default();
+        turn.ownership = TurnOwnership::Verified;
+        let bad_tab = ParsedIntent::BrowserTab { index: 12 };
+        assert!(matches!(
+            prepare_action(&bad_tab, "switch to tab 12", "deterministic", &turn, false, false, false),
+            PolicyVerdict::Clarify(Validity::Invalid { .. })
+        ));
+        let unknown_label = ParsedIntent::NluResult {
+            intent: "system_unreviewed_action".into(), slots: Value::Null, confidence: 1.0,
+        };
+        assert!(matches!(
+            prepare_action(&unknown_label, "do something", "nlu", &turn, false, false, false),
+            PolicyVerdict::Clarify(Validity::Invalid { reason: "unsupported_nlu_action", .. })
+        ));
+        assert!(matches!(
+            prepare_action(
+                &ParsedIntent::CloseApp { target: "Chrome".into() },
+                "close Chrome", "", &turn, false, false, false,
+            ),
+            PolicyVerdict::Clarify(Validity::Invalid { reason: "uncertain_command", .. })
+        ));
+        assert!(!is_side_effect(&ParsedIntent::OpenApp { target: "Chrome".into() }));
+        assert!(is_side_effect(&ParsedIntent::CloseApp { target: "Chrome".into() }));
+    }
+
+    #[test]
+    #[ignore = "manual same-machine routing latency comparison"]
+    fn routing_policy_latency_probe() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let intent = ParsedIntent::OpenApp { target: "Chrome".into() };
+        let mut turn = TurnContext::default();
+        turn.ownership = TurnOwnership::Verified;
+        let count = 100_000;
+        let before = Instant::now();
+        for _ in 0..count {
+            black_box(action_disposition(&intent, "open Chrome", "deterministic", turn.ownership, false));
+            black_box(validate(&intent, "open Chrome", false));
+            black_box(crate::orchestrator::route_intent(&intent));
+            black_box(center_id_for(&intent).as_str());
+            black_box(crate::action_kernel::risk_of_intent(&intent));
+        }
+        let legacy_ns = before.elapsed().as_nanos() / count;
+        let after = Instant::now();
+        for _ in 0..count {
+            black_box(prepare_action(&intent, "open Chrome", "deterministic", &turn, false, false, false));
+        }
+        let aligned_ns = after.elapsed().as_nanos() / count;
+        println!("routing policy ns/turn: legacy={legacy_ns} aligned={aligned_ns}");
+    }
+
+    /// Plan 120 H1: every `CenterId` output must be a registered sub-center.
     /// Coverage of *variants* is compiler-forced (exhaustive match, no wildcard);
     /// this pins the *spelling* — a typo'd center name fails here, not silently
     /// at runtime. One sample intent per center; extend when adding a center.
     #[test]
-    fn test_center_for_names_are_registered() {
+    fn test_center_id_names_are_registered() {
         let samples: &[(&str, ParsedIntent)] = &[
             ("AppCenter", ParsedIntent::OpenSettings),
             ("BrowserCenter", ParsedIntent::BrowserSearch { query: "x".into() }),
@@ -664,32 +949,28 @@ mod tests {
             ("KnowledgeCenter", ParsedIntent::Unknown { raw: "x".into() }),
         ];
         for (expected, intent) in samples {
-            let got = center_for(intent);
+            let got = center_id_for(intent).as_str();
             assert_eq!(got, *expected);
             assert!(
-                ALL_SUB_CENTERS.contains(&got),
-                "center_for returned unregistered center '{got}'"
+                ALL_SUB_CENTERS.contains(&center_id_for(intent)),
+                "center_id_for returned unregistered center '{got}'"
             );
         }
         // The registry itself stays clean: no duplicates, no dead entries —
         // every name must be produced by at least one sample above.
         let mut seen = std::collections::HashSet::new();
         for name in ALL_SUB_CENTERS {
-            assert!(seen.insert(name), "duplicate center '{name}' in ALL_SUB_CENTERS");
+            assert!(seen.insert(name), "duplicate center '{}' in ALL_SUB_CENTERS", name.as_str());
             assert!(
-                samples.iter().any(|(e, _)| e == name),
-                "registered center '{name}' has no routing sample (dead entry?)"
+                samples.iter().any(|(e, _)| e == &name.as_str()),
+                "registered center '{}' has no routing sample (dead entry?)", name.as_str()
             );
         }
     }
 
     /// Plan 120 H2: the side-effect list is safety-critical. `is_side_effect`
-    /// FAILS OPEN (unlisted = false = Allow for unenrolled voices), so this
-    /// pins the must-gate set in both directions: removing a gated intent, or
-    /// silently relying on the default for a new state-changing runner, forces
-    /// a deliberate test edit. Rule for new intents: if it changes external
-    /// state, spends quota/API, moves the cursor, types, or opens a window
-    /// beyond a plain app-open, list it in `is_side_effect` AND extend this test.
+    /// Defaults to side-effecting; this pins explicit exceptions and known
+    /// write actions so a change to the safe list is deliberate.
     #[test]
     fn test_side_effect_membership_is_pinned() {
         let must_gate: &[ParsedIntent] = &[
@@ -705,18 +986,12 @@ mod tests {
             ParsedIntent::StartDictation,
             ParsedIntent::WatchScreenEmail,
             ParsedIntent::Search { query: "x".into() },
+            ParsedIntent::CloseApp { target: "Chrome".into() },
+            ParsedIntent::BlockContact { target: "A".into(), platform: "whatsapp".into(), duration_days: None },
+            ParsedIntent::MemoryForgetAll,
+            ParsedIntent::CalendarAdd { text: "meeting".into() },
+            ParsedIntent::CodeProject { source: "desktop".into(), prompt: None },
         ];
-        // NOTE (H2b, needs product approval — NOT pinned yet): these change
-        // external state/quota by the `is_side_effect` doc definition but are
-        // unlisted, so unenrolled weak-evidence turns Allow them today:
-        // RunOnLocalhost (spawns servers), CloseApp (kills processes),
-        // BlockContact/UnblockContact, MemoryForget/ForgetAll (deletion),
-        // TimetableCommit, CalendarAdd, CreateVoiceReminder, AnalyseChatDocs,
-        // ScanInternshipEmails, Directions/PlacesSearch (API spend, cf. Search
-        // which IS listed), EnterGhostControl/ExitGhostControl (cursor
-        // takeover), CodeProject/CodingAgentTask. OpenApp/OpenUrl are
-        // deliberately unlisted (Ghost Oct-13 directive: unenrolled opens run).
-        // Gating any of these changes live behavior — approve per item first.
         for intent in must_gate {
             assert!(
                 is_side_effect(intent),
@@ -728,6 +1003,7 @@ mod tests {
             ParsedIntent::Greeting { reply: "x".into() },
             ParsedIntent::MemoryAudit,
             ParsedIntent::OpenSettings,
+            ParsedIntent::OpenGitHubDashboard { subpage: "feed".into() },
             ParsedIntent::Unknown { raw: "x".into() },
         ];
         for intent in pure {
@@ -910,6 +1186,39 @@ mod director_tests {
     }
 
     #[test]
+    fn test_analyse_repo_cached_bare_repo_yields_strong_evidence() {
+        let unique_name = "unique-repo-feat161";
+        crate::github_repo_index::seed_cache_for_test(vec![
+            crate::github_repo_index::RepoEntry {
+                full_name: format!("acme/{unique_name}"),
+                owner: "acme".into(),
+                name: unique_name.into(),
+                owner_type: "User".into(),
+                open_issues: 1,
+            },
+        ]);
+
+        let intent = ParsedIntent::AnalyseRepo {
+            owner: None,
+            repo: unique_name.to_string(),
+        };
+        assert_eq!(
+            command_evidence(&intent, &format!("analyse {unique_name}"), "deterministic"),
+            CommandEvidence::Strong
+        );
+        assert_eq!(
+            action_disposition(
+                &intent,
+                &format!("analyse {unique_name}"),
+                "deterministic",
+                TurnOwnership::Unenrolled,
+                false
+            ),
+            ActionDisposition::Allow
+        );
+    }
+
+    #[test]
     fn test_ghost_mode_unenrolled_strong_command_allowed() {
         let tab_cmd = ParsedIntent::NluResult {
             intent: "browser_new_tab".to_string(),
@@ -1043,6 +1352,18 @@ mod director_tests {
         assert_eq!(
             action_disposition(&live("type_text"), "type hi", "nlu", TurnOwnership::Unenrolled, false),
             ActionDisposition::Clarify
+        );
+    }
+
+    #[test]
+    fn test_find_pr_is_pure_and_strong_evidence() {
+        let find_intent = ParsedIntent::GitHubCommand {
+            command: crate::github_cmd::GitHubCommand::FindPr { pr_number: 34 },
+        };
+        assert!(!is_side_effect(&find_intent), "FindPr must be pure (read-only)");
+        assert_eq!(
+            command_evidence(&find_intent, "analyse pr 34", "deterministic"),
+            CommandEvidence::Strong
         );
     }
 }

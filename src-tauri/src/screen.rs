@@ -335,6 +335,9 @@ mod win {
 #[cfg(target_os = "windows")]
 pub use win::{click_element, foreground_window_element, list_actionables, list_actionables_legacy};
 
+#[cfg(not(target_os = "windows"))]
+pub use unix_extra::{list_actionables, primary_monitor_size};
+
 #[cfg(target_os = "windows")]
 mod win_extra {
     /// Primary monitor size in physical px (matches GetWindowRect space,
@@ -357,6 +360,24 @@ mod win_extra {
 
 #[cfg(target_os = "windows")]
 pub use win_extra::primary_monitor_size;
+
+#[cfg(not(target_os = "windows"))]
+mod unix_extra {
+    use super::UiElement;
+
+    /// macOS: AXUIElement structure reading lands with the Phase 3 port.
+    /// Until then grounding falls back to hotkeys/coarse clicks instead of
+    /// being a build break.
+    pub fn list_actionables() -> Vec<UiElement> {
+        Vec::new()
+    }
+
+    /// Primary display in macOS POINTS (probe via `screen_capture_mac`), so
+    /// the capture path's coordinate space matches the vision stack's math.
+    pub fn primary_monitor_size() -> Option<(i32, i32)> {
+        Some(crate::screen_capture_mac::primary_points())
+    }
+}
 
 /// Switch browser tab by index (1-based): Ctrl+1..8, Ctrl+9 = last.
 /// Hotkeys beat grounding for tabs — 100% reliable, instant.

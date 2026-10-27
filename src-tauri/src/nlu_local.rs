@@ -229,14 +229,6 @@ fn get_model() -> Option<Arc<NluModel>> {
     loaded
 }
 
-/// True when the in-process model is loaded and classifying (triggers a
-/// load attempt if one hasn't happened yet). Used by the health/diagnostics
-/// panel — the in-process equivalent of the old Python sidecar's port-open
-/// check, except "responsive" now means "loaded", not "process reachable".
-pub fn is_loaded() -> bool {
-    get_model().is_some()
-}
-
 /// Force a fresh load from disk, replacing whatever is cached. Called by
 /// the OTA model updater (`nlu_update.rs`) after a successful download —
 /// the in-process equivalent of the old Python server's `POST /reload`.

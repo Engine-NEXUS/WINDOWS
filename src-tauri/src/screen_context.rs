@@ -7,10 +7,12 @@
 //! endpoint (no key; only the clean video URL is sent). It also decides the
 //! screen REGION to capture: the page content only (UI Automation `Document`
 //! for browsers, else the window), so tabs / URL bar / taskbar never reach
-//! the model. Everything pure here is unit-tested; the Windows probes and the
-//! oEmbed call are thin glue around it.
+//! the model. The page URL is OPTIONAL: it enriches the answer, it never
+//! decides whether a capture may happen. Everything pure here is unit-tested;
+//! the Windows probes and the oEmbed call are thin glue around it.
 
 use std::collections::HashMap;
+use sha2::{Digest, Sha256};
 
 /// Physical-px rectangle on the primary monitor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,11 +51,19 @@ pub enum ContentKind {
 pub struct ScreenContext {
     pub app: String,
     pub window_title: String,
+    /// UTC time when the live foreground OS probe completed.
+    pub captured_at_utc: Option<String>,
     /// Privacy-trimmed URL (scheme + host + path; YouTube keeps only the id).
     pub url: Option<String>,
+    /// Hash of the complete foreground URL, including query/fragment. This
+    /// detects a changed page without putting private URL parts in prompts.
+    pub url_fingerprint: Option<[u8; 32]>,
     pub youtube: Option<YoutubeMeta>,
     pub kind: ContentKind,
     pub region: Region,
+    /// The region came from a valid OS window/document rectangle rather than
+    /// the unknown-target full-monitor fallback.
+    pub region_verified: bool,
     /// Region is the full monitor (no crop happened).
     pub full_screen: bool,
     /// Title/URL/app matched the sensitive-window denylist (bank, password
@@ -255,17 +265,70 @@ pub fn build_context(
 ) -> ScreenContext {
     let url = raw.url.as_deref().and_then(sanitize_url);
     let region = choose_region(raw, mw, mh);
+    let region_verified = raw.document_rect
+        .and_then(|(x, y, w, h)| clamp_region(x, y, w, h, mw, mh))
+        .or_else(|| raw.window_rect.and_then(|(x, y, w, h)| {
+            clamp_region(x, y, w, h, mw, mh)
+        }))
+        .is_some();
     ScreenContext {
         app: raw.app.clone(),
         window_title: raw.title.trim().to_string(),
+        captured_at_utc: None,
         kind: classify_content(&raw.app, url.as_deref()),
         full_screen: region.is_full(mw, mh),
+        region_verified,
         sensitive: is_sensitive(&raw.app, &raw.title, raw.url.as_deref()),
         youtube,
         url,
+        url_fingerprint: raw.url.as_deref().map(|u| Sha256::digest(u.as_bytes()).into()),
         region,
         ocr_lines: Vec::new(),
     }
+}
+
+/// A screen may be captured only when the foreground probe identified a
+/// concrete, non-sensitive target. Probe failure must not become permission to
+/// upload an unidentified full-monitor image.
+///
+/// The page URL is NOT part of that bar. A browser address bar is
+/// occasionally unreadable (an internal page such as `chrome://settings`, a
+/// busy renderer, a UI Automation tree that does not expose the field), and
+/// the URL probe alone must never refuse the analysis of a window whose app,
+/// title and region are known. A desktop application has no URL at all.
+pub fn capture_block_reason(ctx: &ScreenContext) -> Option<&'static str> {
+    if ctx.sensitive {
+        Some("This window is sensitive, so I won't analyse it.")
+    } else if ctx.app.trim().is_empty() || ctx.window_title.trim().is_empty()
+        || !ctx.region_verified
+    {
+        Some("I couldn't identify the foreground window. Please try again.")
+    } else {
+        None
+    }
+}
+
+fn same_capture_target(expected: &ScreenContext, current: &ScreenContext) -> bool {
+    capture_block_reason(current).is_none()
+        && expected.app == current.app
+        && expected.window_title == current.window_title
+        // A missing URL in both probes is valid. If it appears or disappears
+        // between probes, the target is uncertain and capture must retry.
+        && expected.url == current.url
+        && expected.url_fingerprint == current.url_fingerprint
+        && expected.region == current.region
+}
+
+/// Recheck focus immediately before a capture. This has no OCR or network
+/// side effects; a timed-out probe fails closed.
+pub async fn foreground_still_matches(expected: &ScreenContext, mw: i32, mh: i32) -> bool {
+    let Ok(Ok(raw)) = tokio::time::timeout(
+        std::time::Duration::from_millis(3500),
+        tokio::task::spawn_blocking(probe_blocking),
+    ).await else {
+        return false;
+    };
+    same_capture_target(expected, &build_context(&raw, None, mw, mh))
 }
 
 /// Compact the WinRT OCR text into distinct non-empty lines for the prompt
@@ -299,6 +362,9 @@ impl ScreenContext {
             "Context about what the user is looking at (from the operating system — trust it over guesses):"
                 .to_string(),
         ];
+        if let Some(captured) = &self.captured_at_utc {
+            lines.push(format!("- Evidence source: live foreground OS probe, captured at {captured}."));
+        }
         if !self.app.is_empty() {
             lines.push(format!("- App: {}", self.app));
         }
@@ -307,6 +373,12 @@ impl ScreenContext {
         }
         if let Some(u) = &self.url {
             lines.push(format!("- Page URL: {u}"));
+        } else if matches!(self.kind, ContentKind::BrowserPage | ContentKind::Video) {
+            // Be honest instead of letting the model invent a URL.
+            lines.push(
+                "- Page URL: not exposed by the browser — identify the page from what is visible only."
+                    .to_string(),
+            );
         }
         if let Some(y) = &self.youtube {
             lines.push(format!("- YouTube video title: {}", y.title));
@@ -350,7 +422,10 @@ fn probe_blocking() -> RawContext {
     let title = crate::browser_url::foreground_window_title().unwrap_or_default();
     let is_browser = crate::browser_url::is_browser_process(&app);
     let url = if is_browser {
-        crate::browser_url::get_active_browser_url()
+        // Verified probe: anchored to the EXACT foreground window and read
+        // from that browser's own address bar. A missing URL is fine — the
+        // capture policy no longer depends on it.
+        crate::browser_url::get_verified_active_browser_url()
     } else {
         None
     };
@@ -400,9 +475,9 @@ async fn fetch_oembed(video_id: &str) -> Option<YoutubeMeta> {
     Some(meta)
 }
 
-/// Gather the context for the tour. Never fails: a slow/failed probe or
-/// lookup just yields less context (and a full-screen capture).
-pub async fn collect(mw: i32, mh: i32) -> ScreenContext {
+/// Freeze the foreground target before any acknowledgement or NEXUS window
+/// can affect focus. No OCR, screenshot, or network work runs here.
+pub async fn collect_target(mw: i32, mh: i32) -> ScreenContext {
     let raw = match tokio::time::timeout(
         std::time::Duration::from_millis(3500),
         tokio::task::spawn_blocking(probe_blocking),
@@ -411,36 +486,69 @@ pub async fn collect(mw: i32, mh: i32) -> ScreenContext {
     {
         Ok(Ok(raw)) => raw,
         _ => {
-            tracing::warn!("screen_context: probes timed out — capturing full screen with no context");
+            tracing::warn!("screen_context: probes timed out — refusing unidentified capture");
             RawContext::default()
         }
     };
-    // Sensitive windows never leave the machine: skip the lookup entirely.
-    let sensitive = is_sensitive(&raw.app, &raw.title, raw.url.as_deref());
-    let youtube = if sensitive {
-        None
-    } else if let Some(id) = raw.url.as_deref().and_then(youtube_video_id) {
-        fetch_oembed(&id).await
-    } else {
-        None
-    };
-    let ctx = build_context(&raw, youtube, mw, mh);
+    let mut context = build_context(&raw, None, mw, mh);
+    context.captured_at_utc = Some(chrono::Utc::now().to_rfc3339());
+    context
+}
+
+/// Add public video metadata and local OCR clues after the short spoken
+/// acknowledgement. Every capture remains scoped to the frozen target.
+/// Feature 98 P3 text clues come from Windows WinRT OCR; off Windows the
+/// vision model proceeds without local text grounding (Vision-framework
+/// OCR lands with the Phase 3 port).
+#[cfg(target_os = "windows")]
+fn capture_ocr_clue_rects(
+    x: i32, y: i32, w: i32, h: i32,
+) -> Option<(String, Vec<(i32, i32, i32, i32)>)> {
+    crate::ocr::capture_region_text_rects(x, y, w, h)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn capture_ocr_clue_rects(
+    _x: i32, _y: i32, _w: i32, _h: i32,
+) -> Option<(String, Vec<(i32, i32, i32, i32)>)> {
+    None
+}
+
+/// Add public video metadata and local OCR clues after the short spoken
+/// acknowledgement. Every capture remains scoped to the frozen target.
+pub async fn enrich_target(mut ctx: ScreenContext, mw: i32, mh: i32) -> ScreenContext {
+    if capture_block_reason(&ctx).is_some()
+        || !foreground_still_matches(&ctx, mw, mh).await
+    {
+        return ctx;
+    }
+    if let Some(id) = ctx.url.as_deref().and_then(youtube_video_id) {
+        ctx.youtube = fetch_oembed(&id).await;
+    }
     // Feature 98 P3: ground-truth text clues from local WinRT OCR (fast,
     // free, ~25ms) so the vision model can cross-reference on-screen text
     // (names, handles, chyrons) for public-figure recognition.
-    let ocr = tokio::time::timeout(
-        std::time::Duration::from_millis(1200),
-        tokio::task::spawn_blocking(crate::ocr::capture_screen_text),
-    )
-    .await
-    .ok()
-    .and_then(|r| r.ok())
-    .and_then(|r| r);
-    let ocr_lines = match ocr {
+    let ocr = if foreground_still_matches(&ctx, mw, mh).await {
+        let region = ctx.region;
+        tokio::time::timeout(
+            std::time::Duration::from_millis(1200),
+            tokio::task::spawn_blocking(move || {
+                capture_ocr_clue_rects(
+                    region.x, region.y, region.w, region.h,
+                )
+            }),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .and_then(|r| r)
+    } else {
+        None
+    };
+    ctx.ocr_lines = match ocr {
         Some((text, _)) => compact_ocr_lines(&text, 10),
         None => Vec::new(),
     };
-    let ctx = ScreenContext { ocr_lines, ..ctx };
     tracing::info!(
         "screen_context: app='{}' kind={:?} region={:?} full={} youtube={} sensitive={}",
         ctx.app,
@@ -651,7 +759,189 @@ mod tests {
     fn unknown_context_is_full_screen_and_harmless() {
         let ctx = ScreenContext::unknown(1920, 1080);
         assert!(ctx.full_screen && !ctx.sensitive);
+        assert!(!ctx.region_verified);
+        assert!(capture_block_reason(&ctx).is_some());
         assert_eq!(ctx.kind, ContentKind::Unknown);
         assert!(ctx.prompt_block().contains("unknown"));
+    }
+
+    #[test]
+    fn capture_requires_a_stable_bounded_nonsensitive_target() {
+        let raw = RawContext {
+            app: "brave.exe".into(),
+            title: "Example".into(),
+            url: Some("https://example.com/".into()),
+            window_rect: Some((10, 20, 900, 700)),
+            ..Default::default()
+        };
+        let expected = build_context(&raw, None, 1920, 1080);
+        assert!(expected.region_verified);
+        assert_eq!(capture_block_reason(&expected), None);
+        assert!(same_capture_target(&expected, &expected));
+
+        let mut changed = raw.clone();
+        changed.title = "Another tab".into();
+        assert!(!same_capture_target(&expected, &build_context(&changed, None, 1920, 1080)));
+        changed = raw.clone();
+        changed.url = Some("https://example.com/other".into());
+        assert!(!same_capture_target(&expected, &build_context(&changed, None, 1920, 1080)));
+        changed = raw.clone();
+        changed.url = Some("https://example.com/?private=other".into());
+        let query_changed = build_context(&changed, None, 1920, 1080);
+        assert_eq!(expected.url, query_changed.url);
+        assert!(!same_capture_target(&expected, &query_changed));
+        changed = raw.clone();
+        changed.window_rect = Some((25, 20, 900, 700));
+        assert!(!same_capture_target(&expected, &build_context(&changed, None, 1920, 1080)));
+        changed = raw.clone();
+        changed.window_rect = None;
+        assert!(capture_block_reason(&build_context(&changed, None, 1920, 1080)).is_some());
+        changed = raw;
+        changed.title = "Bank account sign in".into();
+        assert!(capture_block_reason(&build_context(&changed, None, 1920, 1080)).is_some());
+    }
+
+    // ─── The URL is optional for capture ────────────────────────────────
+
+    #[test]
+    fn brave_without_a_url_is_still_capturable() {
+        // The address bar can be unreadable (internal page, busy renderer,
+        // a UI Automation tree that does not expose the field). The window
+        // is still identified: app, title and a verified region.
+        let raw = RawContext {
+            app: "brave.exe".into(),
+            title: "Brave — Settings".into(),
+            url: None,
+            document_rect: Some((0, 82, 1920, 950)),
+            window_rect: Some((0, 0, 1920, 1032)),
+        };
+        let ctx = build_context(&raw, None, 1920, 1080);
+        assert_eq!(ctx.kind, ContentKind::BrowserPage);
+        assert!(ctx.url.is_none());
+        assert!(ctx.region_verified);
+        assert!(!ctx.full_screen);
+        assert_eq!(capture_block_reason(&ctx), None);
+        assert!(same_capture_target(&ctx, &ctx));
+        // The model is told the URL is unknown instead of being left to guess.
+        assert!(ctx.prompt_block().contains("not exposed by the browser"));
+    }
+
+    #[test]
+    fn desktop_app_without_a_url_is_still_capturable() {
+        let raw = RawContext {
+            app: "code.exe".into(),
+            title: "main.rs — nexus".into(),
+            url: None,
+            document_rect: None,
+            window_rect: Some((100, 50, 1200, 800)),
+        };
+        let ctx = build_context(&raw, None, 1920, 1080);
+        assert_eq!(ctx.kind, ContentKind::App);
+        assert!(ctx.url.is_none());
+        assert!(ctx.region_verified);
+        assert_eq!(capture_block_reason(&ctx), None);
+        assert!(same_capture_target(&ctx, &ctx));
+    }
+
+    #[test]
+    fn missing_app_title_or_region_still_denies() {
+        let mut raw = RawContext {
+            app: "brave.exe".into(),
+            title: "Example".into(),
+            url: None,
+            document_rect: None,
+            window_rect: Some((10, 20, 900, 700)),
+        };
+        assert_eq!(capture_block_reason(&build_context(&raw, None, 1920, 1080)), None);
+
+        let mut no_app = raw.clone();
+        no_app.app = String::new();
+        assert!(capture_block_reason(&build_context(&no_app, None, 1920, 1080)).is_some());
+
+        let mut no_title = raw.clone();
+        no_title.title = "   ".into();
+        assert!(capture_block_reason(&build_context(&no_title, None, 1920, 1080)).is_some());
+
+        let mut no_region = raw.clone();
+        no_region.window_rect = None;
+        assert!(capture_block_reason(&build_context(&no_region, None, 1920, 1080)).is_some());
+
+        raw.window_rect = Some((0, 0, 50, 50)); // too small to be a real crop
+        assert!(capture_block_reason(&build_context(&raw, None, 1920, 1080)).is_some());
+    }
+
+    #[test]
+    fn sensitive_window_still_denies_without_a_url() {
+        let raw = RawContext {
+            app: "brave.exe".into(),
+            title: "Chase Bank — Sign in".into(),
+            url: None,
+            document_rect: None,
+            window_rect: Some((10, 20, 900, 700)),
+        };
+        let ctx = build_context(&raw, None, 1920, 1080);
+        assert!(ctx.sensitive);
+        assert!(capture_block_reason(&ctx).is_some());
+        assert!(!same_capture_target(&ctx, &ctx));
+
+        let wallet = RawContext {
+            app: "1password.exe".into(),
+            title: "Vault".into(),
+            url: None,
+            document_rect: None,
+            window_rect: Some((10, 20, 900, 700)),
+        };
+        assert!(capture_block_reason(&build_context(&wallet, None, 1920, 1080)).is_some());
+    }
+
+    #[test]
+    fn changed_title_or_region_still_fails_the_recheck() {
+        let raw = RawContext {
+            app: "brave.exe".into(),
+            title: "Example".into(),
+            url: None,
+            document_rect: Some((0, 82, 1920, 950)),
+            window_rect: Some((0, 0, 1920, 1032)),
+        };
+        let expected = build_context(&raw, None, 1920, 1080);
+
+        let mut changed = raw.clone();
+        changed.title = "Another tab".into();
+        assert!(!same_capture_target(&expected, &build_context(&changed, None, 1920, 1080)));
+
+        changed = raw.clone();
+        changed.document_rect = Some((0, 82, 1900, 900));
+        changed.window_rect = Some((0, 0, 1900, 1032));
+        assert!(!same_capture_target(&expected, &build_context(&changed, None, 1920, 1080)));
+
+        changed = raw.clone();
+        changed.app = "msedge.exe".into();
+        assert!(!same_capture_target(&expected, &build_context(&changed, None, 1920, 1080)));
+    }
+
+    #[test]
+    fn an_unreadable_address_bar_requires_a_retry_if_probe_results_change() {
+        // When only one probe resolves the URL, a tab change cannot be ruled
+        // out. A consistently unreadable URL is still capturable.
+        let raw = RawContext {
+            app: "brave.exe".into(),
+            title: "Example".into(),
+            url: Some("https://example.com/".into()),
+            document_rect: Some((0, 82, 1920, 950)),
+            window_rect: Some((0, 0, 1920, 1032)),
+        };
+        let with_url = build_context(&raw, None, 1920, 1080);
+
+        let mut without_url = raw.clone();
+        without_url.url = None;
+        let without = build_context(&without_url, None, 1920, 1080);
+        assert!(!same_capture_target(&with_url, &without));
+        assert!(!same_capture_target(&without, &with_url));
+        assert!(same_capture_target(&without, &without));
+
+        // Two DIFFERENT urls are still a change of target.
+        let mut other = raw.clone();
+        other.url = Some("https://example.com/other".into());
+        assert!(!same_capture_target(&with_url, &build_context(&other, None, 1920, 1080)));
     }
 }

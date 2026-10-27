@@ -42,12 +42,22 @@ static LAST_SET: AtomicI64 = AtomicI64::new(i64::MIN);
 static LAST_SET_MS: AtomicU64 = AtomicU64::new(0);
 /// Hand mode was started by a Ghost session (so ending Ghost ends it too).
 static STARTED_BY_GHOST: AtomicBool = AtomicBool::new(false);
+/// Epoch lease for Focus Mode while Hand Mode runs.
+static FOCUS_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 const MOUSE_TAKEOVER_PX: i32 = 40;
 const SNAP_RADIUS_PX: i32 = 36;
 const HUD_EMIT_EVERY: Duration = Duration::from_millis(50);
 const METRICS_EVERY: Duration = Duration::from_secs(5);
 const NO_FRAMES_WARN: Duration = Duration::from_secs(12);
+/// Armed and no frame at all for this long: the camera froze. Disarm (which releases a held drag).
+/// Frames arrive at least every few hundred ms even with no hand in view (every 3rd frame at 6 fps).
+const FRAME_STALL_DISARM: Duration = Duration::from_secs(2);
+
+/// True when an armed session has gone silent long enough that the pointer must be released.
+fn frames_stalled(armed: bool, silent_for: Duration) -> bool {
+    armed && silent_for > FRAME_STALL_DISARM
+}
 const TRACE_MAX_BYTES: u64 = 20_000_000;
 
 pub fn active() -> bool {
@@ -91,6 +101,25 @@ pub struct FrameIn {
     #[serde(default)]
     pub t_capture_epoch_ms: Option<f64>,
     pub infer_ms: f64,
+    /// Per-window frame counter (1, 2, 3 ...). Absent from older builds of the page.
+    #[serde(default)]
+    pub seq: Option<u64>,
+}
+
+/// A frame older than this is never allowed to move the pointer (camera capture to arrival).
+const MAX_FRAME_AGE_MS: f64 = 3000.0;
+
+/// Whether a frame may change pointer or gesture state: its sequence must advance (a restarted
+/// window begins again at 1) and its capture age must be sane. Frames without a sequence pass.
+fn accept_frame(last_seq: u64, seq: Option<u64>, age_ms: f64) -> bool {
+    if age_ms > MAX_FRAME_AGE_MS {
+        return false;
+    }
+    match seq {
+        None => true,
+        Some(1) => true,
+        Some(n) => n > last_seq,
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -137,6 +166,30 @@ enum Out {
     Stop,
 }
 
+/// Most messages the output thread takes from its queue in one go.
+const OUT_BATCH_MAX: usize = 256;
+/// A click's nearest-control lookup may take this long; past it the click lands where the hand pointed.
+const SNAP_DEADLINE: Duration = Duration::from_millis(150);
+
+/// Bounds what the output thread replays after a stall: runs of moves collapse to the newest one,
+/// discrete actions keep their order, and a stop drops everything except releases (a held button is
+/// always let go) before the stop itself.
+fn coalesce(batch: Vec<Out>) -> Vec<Out> {
+    if batch.iter().any(|m| matches!(m, Out::Stop)) {
+        let mut out: Vec<Out> = batch.into_iter().filter(|m| matches!(m, Out::Release(..))).collect();
+        out.push(Out::Stop);
+        return out;
+    }
+    let mut out: Vec<Out> = Vec::with_capacity(batch.len());
+    for m in batch {
+        if matches!(m, Out::Move(..)) && matches!(out.last(), Some(Out::Move(..))) {
+            out.pop();
+        }
+        out.push(m);
+    }
+    out
+}
+
 #[derive(Default)]
 struct Metrics {
     frames: u64,
@@ -163,6 +216,8 @@ struct Session {
     engine: Engine,
     started: Instant,
     last_frame: Instant,
+    last_seq: u64,
+    stale_rejected: u64,
     last_emit: Instant,
     fps_window: (Instant, u32, f64),
     out: mpsc::Sender<Out>,
@@ -239,9 +294,9 @@ fn guard_now() -> Option<String> {
     guard_decision(&title, &process, target_elevated, self_elevated)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn guard_now() -> Option<String> {
-    Some("hand mouse output is Windows-only".to_string())
+    Some("hand mouse output is not implemented on this platform".to_string())
 }
 
 #[cfg(target_os = "windows")]
@@ -252,9 +307,70 @@ fn cursor_pos() -> Option<(i32, i32)> {
     unsafe { GetCursorPos(&mut pt).as_bool().then_some((pt.x, pt.y)) }
 }
 
-#[cfg(not(target_os = "windows"))]
+/// macOS: enigo posts CGEvents, which the OS drops unless the binary holds the
+/// Accessibility permission. `AXIsProcessTrusted` asks Genetics-free C — no
+/// prompt is raised, the settings-UI flow stays the user's job (the guard
+/// message points there). Then the same protection gate as Windows applies:
+/// protected/elevated foreground windows refuse the same way.
+#[cfg(target_os = "macos")]
+fn ax_trusted() -> bool {
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> u8;
+    }
+    unsafe { AXIsProcessTrusted() != 0 }
+}
+
+#[cfg(target_os = "macos")]
+fn guard_now() -> Option<String> {
+    if !ax_trusted() {
+        return Some("Accessibility permission missing (System Settings → Privacy & Security → Accessibility)".to_string());
+    }
+    let title = crate::browser_url::foreground_window_title().unwrap_or_default();
+    let process = crate::browser_url::foreground_process_name().unwrap_or_default();
+    guard_decision(&title, &process, false, false)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn guard_now() -> Option<String> {
+    Some("hand mouse output is not implemented on this platform".to_string())
+}
+
+/// Where is the real cursor? On macOS this is a plain CoreGraphics call — the
+/// same points coordinate space enigo's `Coordinate::Abs` posts in, so engine
+/// seeding and the takeover check see consistent values.
+#[cfg(target_os = "macos")]
 fn cursor_pos() -> Option<(i32, i32)> {
-    None
+    #[repr(C)]
+    struct MacPoint {
+        x: f64,
+        y: f64,
+    }
+    #[repr(C)]
+    struct MacSize {
+        w: f64,
+        h: f64,
+    }
+    #[repr(C)]
+    struct MacRect {
+        origin: MacPoint,
+        size: MacSize,
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventCreate(unknown: *const core::ffi::c_void) -> *mut core::ffi::c_void;
+        fn CGEventGetLocation(ev: *mut core::ffi::c_void) -> MacRect;
+        fn CFRelease(cf: *mut core::ffi::c_void);
+    }
+    unsafe {
+        let ev = CGEventCreate(std::ptr::null());
+        if ev.is_null() {
+            return None;
+        }
+        let r = CGEventGetLocation(ev);
+        CFRelease(ev);
+        Some((r.origin.x.round() as i32, r.origin.y.round() as i32))
+    }
 }
 
 // ── keyboard output for gestures ──────────────────────────────────────────────────────────────
@@ -434,6 +550,14 @@ fn spawn_output_thread(snap: bool) -> mpsc::Sender<Out> {
                         return;
                     }
                 };
+                let mut batch = vec![msg];
+                while batch.len() < OUT_BATCH_MAX {
+                    match rx.try_recv() {
+                        Ok(m) => batch.push(m),
+                        Err(_) => break,
+                    }
+                }
+                for msg in coalesce(batch) {
                 match msg {
                     Out::Stop => {
                         release_alt(&mut alt_since, true);
@@ -446,7 +570,7 @@ fn spawn_output_thread(snap: bool) -> mpsc::Sender<Out> {
                             tracing::info!("hand: click blocked ({why})");
                             continue;
                         }
-                        let (x, y) = if snap { snapped(x, y) } else { (x, y) };
+                        let (x, y) = if snap { snapped_within(x, y, SNAP_DEADLINE) } else { (x, y) };
                         mv(&mut e, x, y);
                         let _ = e.button(to_btn(b), Direction::Click);
                     }
@@ -469,10 +593,33 @@ fn spawn_output_thread(snap: bool) -> mpsc::Sender<Out> {
                         }
                     }
                 }
+                }
             }
         })
         .ok();
     tx
+}
+
+static SNAP_BUSY: AtomicBool = AtomicBool::new(false);
+
+/// Runs the lookup off the output thread. A slow or hung UI Automation provider costs one deadline,
+/// never a stalled pointer or a delayed release; a late answer is dropped, and at most one lookup is
+/// ever outstanding (while one is still running, further clicks land where the hand pointed).
+fn snapped_within(x: i32, y: i32, deadline: Duration) -> (i32, i32) {
+    if SNAP_BUSY.swap(true, Ordering::AcqRel) {
+        return (x, y);
+    }
+    let (tx, rx) = mpsc::channel();
+    let spawned = std::thread::Builder::new().name("hand-snap".into()).spawn(move || {
+        let r = snapped(x, y);
+        SNAP_BUSY.store(false, Ordering::Release);
+        let _ = tx.send(r);
+    });
+    if spawned.is_err() {
+        SNAP_BUSY.store(false, Ordering::Release);
+        return (x, y);
+    }
+    rx.recv_timeout(deadline).unwrap_or((x, y))
 }
 
 /// Nearest-control correction for one click (UI Automation, once per click, never per frame).
@@ -669,6 +816,14 @@ pub async fn hand_frame<R: Runtime>(app: AppHandle<R>, frame: FrameIn) -> Result
     let mut g = SESSION.lock();
     let Some(s) = g.as_mut() else { return Ok(()) };
     let now = Instant::now();
+    let age = now_epoch_ms() - frame.t_capture_epoch_ms.unwrap_or(frame.t_epoch_ms);
+    if !accept_frame(s.last_seq, frame.seq, age) {
+        s.stale_rejected += 1;
+        return Ok(());
+    }
+    if let Some(n) = frame.seq {
+        s.last_seq = n;
+    }
     s.last_frame = now;
 
     let hand = frame.lm.as_deref().and_then(to_hand);
@@ -747,7 +902,7 @@ pub async fn hand_frame<R: Runtime>(app: AppHandle<R>, frame: FrameIn) -> Result
             }
 
             println!(
-                "[HAND] fps={:.1} hand={pct}% capture_to_rust_p50={lat}ms infer_p50={inf}ms lead={:.0}ms armed={} live={} clicks={} drags={} scrolls={} gpu_busy={}",
+                "[HAND] fps={:.1} hand={pct}% capture_to_rust_p50={lat}ms infer_p50={inf}ms lead={:.0}ms armed={} live={} clicks={} drags={} scrolls={} gpu_busy={} stale={}",
                 s.fps_window.2,
                 s.lat_ema * 0.7,
                 s.engine.is_armed(),
@@ -755,7 +910,8 @@ pub async fn hand_frame<R: Runtime>(app: AppHandle<R>, frame: FrameIn) -> Result
                 m.clicks,
                 m.drags,
                 m.scrolls,
-                s.gpu_busy
+                s.gpu_busy,
+                s.stale_rejected
             );
             m.frames = 0;
             m.with_hand = 0;
@@ -984,6 +1140,8 @@ pub fn start<R: Runtime>(app: &AppHandle<R>) -> Result<bool, String> {
         engine,
         started: now,
         last_frame: now,
+        last_seq: 0,
+        stale_rejected: 0,
         last_emit: now,
         fps_window: (now, 0, 0.0),
         out: spawn_output_thread(read_bool(app, "handSnap", true)),
@@ -1003,6 +1161,11 @@ pub fn start<R: Runtime>(app: &AppHandle<R>) -> Result<bool, String> {
         covered: false,
         covered_notified: false,
     });
+    if read_bool(app, "handFocusMode", true) {
+        let ep = crate::focus_mode::acquire("hand");
+        FOCUS_EPOCH.store(ep, Ordering::SeqCst);
+        println!("[FOCUS] on");
+    }
     // Show the chip at once; the camera and the model take a few seconds.
     {
         let mut g = SESSION.lock();
@@ -1041,6 +1204,11 @@ pub fn stop<R: Runtime>(app: &AppHandle<R>, reason: &str) {
     }
     let _ = s.out.send(Out::Stop);
     STARTED_BY_GHOST.store(false, Ordering::Relaxed);
+    let epoch = FOCUS_EPOCH.swap(0, Ordering::SeqCst);
+    if epoch != 0 {
+        crate::focus_mode::release(epoch);
+        println!("[FOCUS] off");
+    }
     let _ = crate::dyn_windows::destroy_window(app, "hand");
     let _ = app.emit("hand:stopped", ());
     println!("[HAND] mode OFF ({reason})");
@@ -1113,6 +1281,7 @@ fn spawn_watchdog<R: Runtime>(app: AppHandle<R>) {
             if !active() {
                 return;
             }
+            crate::focus_mode::heartbeat();
             ticks = ticks.wrapping_add(1);
             if ticks % 25 == 0 {
                 refresh_monitors(&app); // about every 2 s: plugging a monitor mid-session just works
@@ -1132,6 +1301,11 @@ fn spawn_watchdog<R: Runtime>(app: AppHandle<R>) {
                 warned = true;
                 println!("[HAND] WARN no frames for {}s: camera busy or model missing?", silent_for.as_secs());
             }
+            if frames_stalled(armed, silent_for) {
+                println!("[HAND] camera stalled {}ms while armed: releasing and disarming", silent_for.as_millis());
+                disarm(&app, "camera-stalled");
+                continue;
+            }
             if armed && LIVE.load(Ordering::Relaxed) {
                 let last = LAST_SET.load(Ordering::Relaxed);
                 if last != i64::MIN {
@@ -1150,6 +1324,62 @@ fn spawn_watchdog<R: Runtime>(app: AppHandle<R>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn kinds(v: &[Out]) -> Vec<&'static str> {
+        v.iter()
+            .map(|m| match m {
+                Out::Move(..) => "move",
+                Out::Click(..) => "click",
+                Out::Press(..) => "press",
+                Out::Release(..) => "release",
+                Out::Scroll(..) => "scroll",
+                Out::Gesture(..) => "gesture",
+                Out::Stop => "stop",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn queued_moves_collapse_to_the_newest_and_actions_keep_order() {
+        let b = vec![Out::Move(1, 1), Out::Move(2, 2), Out::Move(3, 3), Out::Click(3, 3, Button::Left), Out::Move(4, 4), Out::Move(5, 5), Out::Release(5, 5)];
+        let c = coalesce(b);
+        assert_eq!(kinds(&c), ["move", "click", "move", "release"]);
+        assert!(matches!(c[0], Out::Move(3, 3)));
+        assert!(matches!(c[2], Out::Move(5, 5)));
+    }
+
+    #[test]
+    fn a_stop_drops_pending_motion_but_keeps_releases() {
+        let b = vec![Out::Move(1, 1), Out::Press(1, 1), Out::Release(2, 2), Out::Click(2, 2, Button::Left), Out::Stop];
+        assert_eq!(kinds(&coalesce(b)), ["release", "stop"]);
+    }
+
+    #[test]
+    fn a_hung_snap_lookup_cannot_hold_the_caller() {
+        // Simulate a busy lookup: the caller must return the original point at once.
+        SNAP_BUSY.store(true, Ordering::SeqCst);
+        let t = Instant::now();
+        assert_eq!(snapped_within(10, 20, Duration::from_millis(150)), (10, 20));
+        assert!(t.elapsed() < Duration::from_millis(100));
+        SNAP_BUSY.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn stale_duplicate_and_out_of_order_frames_are_rejected() {
+        assert!(accept_frame(5, Some(6), 40.0));
+        assert!(!accept_frame(5, Some(5), 40.0), "duplicate");
+        assert!(!accept_frame(5, Some(4), 40.0), "out of order");
+        assert!(!accept_frame(5, Some(6), 3500.0), "too old");
+        assert!(accept_frame(5, None, 40.0), "older page build without a sequence");
+        assert!(accept_frame(900, Some(1), 40.0), "restarted window begins again at 1");
+    }
+
+    #[test]
+    fn a_frozen_camera_disarms_only_an_armed_session() {
+        assert!(!frames_stalled(true, Duration::from_millis(1500)));
+        assert!(frames_stalled(true, Duration::from_millis(2100)));
+        assert!(!frames_stalled(false, Duration::from_secs(60)));
+    }
 
     #[test]
     fn landmarks_need_exactly_21_points() {

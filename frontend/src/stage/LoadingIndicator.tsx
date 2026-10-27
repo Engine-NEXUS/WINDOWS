@@ -34,6 +34,8 @@ export function LoadingIndicator() {
   const animRef = useRef<any>(null);
 
   const [rect, setRect] = useState<LoadingRect | null>(null);
+  /** Mirror of `rect` for event listeners (stale closure reads). */
+  const rectRef = useRef<LoadingRect | null>(null);
   const [visible, setVisible] = useState(false);
   const [calibrating, setCalibrating] = useState(false);
   const [calibSize, setCalibSize] = useState(80);
@@ -71,11 +73,17 @@ export function LoadingIndicator() {
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
       unlisten = await listen<LoadingRect>("stage:loading_rect", (event) => {
-        if (event.payload) setRect(event.payload);
+        if (event.payload) {
+          rectRef.current = event.payload;
+          setRect(event.payload);
+        }
       });
       try {
         const pending = await tauriInvoke("get_pending_loading_rect");
-        if (pending) setRect(pending as LoadingRect);
+        if (pending) {
+          rectRef.current = pending as LoadingRect;
+          setRect(pending as LoadingRect);
+        }
       } catch {
         /* non-Tauri (tests) — no-op */
       }
@@ -92,11 +100,22 @@ export function LoadingIndicator() {
       const { listen } = await import("@tauri-apps/api/event");
       unlisten = await listen<boolean>("stage:loading_visible", (event) => {
         setVisible(event.payload === true);
+        if (event.payload === true && rectRef.current === null) {
+          // F2 probe (live log 2026-10-19): visible=true must come with a
+          // rect; without it the component renders null and the user sees
+          // no spinner at all. This warning splits "event never arrived"
+          // from "rect never arrived" in one live run.
+          console.warn(
+            "[LOADING] stage:loading_visible=true but no rect is known — spinner cannot render (rect event missed?)"
+          );
+        }
       });
     })();
     return () => {
       unlisten?.();
     };
+    // rectRef is read inside the listener via ref, not state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Calibration mirror: only react to the "loading" target (Wakeup/Waves

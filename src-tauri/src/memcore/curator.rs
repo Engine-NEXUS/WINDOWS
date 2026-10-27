@@ -149,6 +149,11 @@ pub fn start_curator<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(600)).await;
         loop {
+            if crate::focus_mode::paused() {
+                crate::focus_mode::defer_log("curator");
+                tokio::time::sleep(std::time::Duration::from_secs(15 * 60)).await;
+                continue;
+            }
             if let Ok(dir) = app.path().app_data_dir() {
                 if super::enabled(&dir) {
                     let now = chrono::Utc::now().timestamp();

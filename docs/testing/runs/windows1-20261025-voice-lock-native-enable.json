@@ -1,0 +1,31 @@
+{
+  "checkedAtUtc": "2026-10-25T12:44:05.769021+00:00",
+  "processId": 17928,
+  "releaseIdentity": "3d1932b68b2c0f15",
+  "sourceHash": "e2d75af994bf244d84af46bd4d0da83aeb2c1ea2ca222dfd4a78b2c030492ce9",
+  "ownerReport": "Saved successfully",
+  "nativeReadbackBefore": {
+    "voice_lock_enabled": false,
+    "get_settings.speakerVerification": false
+  },
+  "profileStatus": {
+    "enrolled": true,
+    "num_clips": 5,
+    "threshold": 0.92640746,
+    "wake_variants": [
+      "nexus",
+      "hey nexus",
+      "ok nexus"
+    ]
+  },
+  "authorizedNativePatch": {
+    "speakerVerification": true
+  },
+  "nativeReadbackAfter": {
+    "voice_lock_enabled": true,
+    "get_settings.speakerVerification": true
+  },
+  "purpose": "Diagnostic owner trial on current D build; does not inherit assessed snapshot suite passes",
+  "uiSaveDiscrepancy": "unresolved; no reproduced UI click/save trace yet",
+  "nextTrial": "owner-002 pending; Ctrl+Space; Open Notepad once"
+}

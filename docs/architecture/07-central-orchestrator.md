@@ -1,5 +1,9 @@
 # 07 — Central Orchestrator Architecture
 
+> **Current alignment (2026-10-19):** This is the original lifecycle design.
+> For the live 17-center contract, compound planning, and speech timeline,
+> read [12-command-center-alignment.md](12-command-center-alignment.md).
+
 > **Status**: Implemented 2026-09-02
 > **Files**: `src-tauri/src/orchestrator.rs`, `frontend/src/net/orchestrator.ts`
 > **Tests**: 36 orchestrator tests, 156 total (all passing)

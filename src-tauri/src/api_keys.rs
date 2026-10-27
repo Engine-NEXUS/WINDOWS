@@ -42,6 +42,7 @@ pub const KEY_SERVICES: &[(&str, &str, &str)] = &[
     ("deepgram", "Deepgram", "deepgramApiKey"),
     ("google_maps", "Google Maps & Routes", "routesApiKey"),
     ("google_places", "Google Places", "placesApiKey"),
+    ("logo_dev", "Logo.dev", "logoDevPublishableKey"),
 ];
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -103,6 +104,7 @@ pub fn legacy_fields_for(service: &str) -> &'static [&'static str] {
         "deepgram" => &["deepgram_api_key"],
         "google_maps" => &["routes_api_key", "googleMapsApiKey", "google_maps_api_key"],
         "google_places" => &["places_api_key", "googlePlacesApiKey", "google_places_api_key"],
+        "logo_dev" => &["logo_dev_publishable_key"],
         _ => &[],
     }
 }

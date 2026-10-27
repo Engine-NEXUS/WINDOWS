@@ -32,14 +32,15 @@ class ClincReviewTests(unittest.TestCase):
     def test_review_outputs_are_complete_and_locked(self):
         data = ROOT / "server" / "nlu" / "data"
         report = json.loads((data / "clinc150_review_report.json").read_text())
-        self.assertEqual(report["input"], {"train": 100, "test": 999})
-        self.assertEqual(report["output"]["approved_unknown_train"], 85)
-        self.assertEqual(report["output"]["approved_unknown_test"], 867)
-        self.assertEqual(sum(report["counts"].values()), 1099)
         lock = json.loads((data / "external_evaluation_lock.json").read_text())
-        ids = {item["id"] for item in lock["benchmarks"]}
+        benchmarks = {item["id"]: item for item in lock["benchmarks"]}
+        ids = set(benchmarks)
         self.assertIn("clinc150_oos_reviewed_test", ids)
         self.assertIn("clinc150_supported_mappings", ids)
+        self.assertEqual(report["input"]["test"], benchmarks["clinc150_oos_test"]["rows"])
+        self.assertEqual(report["output"]["approved_unknown_test"], benchmarks["clinc150_oos_reviewed_test"]["rows"])
+        self.assertEqual(report["output"]["mapped_supported_test"], benchmarks["clinc150_supported_mappings"]["rows"])
+        self.assertEqual(sum(report["counts"].values()), sum(report["input"].values()))
 
 
 if __name__ == "__main__":

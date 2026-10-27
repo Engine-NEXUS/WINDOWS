@@ -213,6 +213,7 @@ fn cache_entry_usable(
         let voice = cloud_voice.to_string();
         tracing::info!("[TTS] cached ack is the local voice but the cloud voice works again; refreshing cache ({voice})");
         tokio::spawn(async move {
+            crate::focus_mode::wait_until_clear("tts_cache_refresh").await;
             pregenerate_cache(&cache, &voice).await;
             CACHE_REFRESHING.store(false, Ordering::SeqCst);
         });
@@ -396,6 +397,7 @@ const CACHED_PHRASES: &[&str] = &[
     "On it sir",
     "Right away sir",
     "Working on it sir",
+    "Give me a minute sir",
     "Let me check that sir",
     "Didn't understand that sir",
     "Didn't catch that sir",
@@ -451,6 +453,7 @@ pub async fn pregenerate_cache(
     voice: &str,
 ) {
     let cache_start = std::time::Instant::now();
+    crate::focus_mode::wait_until_clear("tts_pregenerate_cache").await;
     let (mut from_disk, mut from_edge, mut from_local) = (0usize, 0usize, 0usize);
     // 2026-10-15 log: 29 back-to-back cloud requests drew "429 Too Many Requests", and the throttle then
     // also hit the user's first real reply. Pace the cloud requests and stop using it for this pass at
@@ -572,7 +575,7 @@ pub async fn speak_text(
 
     meeting.set_tts_playing(true);
     let my_generation = TTS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    crate::speech_sync::register_intent(my_generation as u64, request_id, source_center, kind);
+    crate::speech_sync::register_intent(my_generation as u64, request_id.clone(), source_center, kind);
 
     // Read settings
     let edge_voice = crate::commands::read_edge_tts_voice(&app);
@@ -678,6 +681,17 @@ pub async fn speak_text(
         tts_volume_pct,
         my_generation
     );
+    // Playback-start signal (ack deadline guard, live log 2026-10-19): the
+    // frontend guarantees an ack within 2 s (net/orchestrator.ts) because a
+    // dynamic repeat-back ack must synthesize live — once the Edge synth
+    // stalled ~27 s, leaving the turn silent with a pinned orb and no
+    // loader. Emit here, AFTER synthesis/cache-hit, right before rodio
+    // starts: the only truthful "audio is actually playing now" moment the
+    // frontend can observe (its own tts-started fires BEFORE synthesis).
+    crate::commands::emit_logged(&app, "tts:playback_started", serde_json::json!({
+        "requestId": request_id.clone(),
+        "voiceId": voice_id,
+    }));
     // Save and set system volume with RAII lease
     let volume_lease = if tts_volume_pct > 0 {
         let target = tts_volume_pct as f32 / 100.0;
@@ -802,6 +816,7 @@ pub async fn set_voice_preference(
         cache.lock().await.clear();
         let cloud_id = persona.cloud_id.to_string();
         tokio::spawn(async move {
+            crate::focus_mode::wait_until_clear("tts_cache_refresh").await;
             pregenerate_cache(&cache, &cloud_id).await;
         });
     }

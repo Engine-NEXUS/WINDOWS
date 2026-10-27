@@ -287,7 +287,7 @@ fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus
     // The Worker derives the owner from this device's credentials, not from a user_id.
     let status_url = format!("{}/oauth/status", worker_url.trim_end_matches('/'));
 
-    match http_get_authed(&status_url, 10000) {
+    let (mut github, google) = match http_get_authed(&status_url, 10000) {
         Ok((status, body)) if status >= 200 && status < 300 => {
             let latency = get_last_latency().unwrap_or(0);
 
@@ -360,7 +360,44 @@ fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus
                 },
             )
         }
+    };
+
+    if !github.connected {
+        let has_local = crate::auth_vault::get_token("github").is_some()
+            || crate::auth_vault::get_api_key("github").is_some()
+            || std::env::var("GITHUB_TOKEN").is_ok();
+        let has_cli = if !has_local {
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                let mut cmd = std::process::Command::new("gh");
+                cmd.args(["auth", "token"]);
+                cmd.creation_flags(0x08000000);
+                cmd.output().map(|o| o.status.success()).unwrap_or(false)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                std::process::Command::new("gh")
+                    .args(["auth", "token"])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+            }
+        } else {
+            false
+        };
+
+        if has_local || has_cli {
+            github = ServiceStatus {
+                name: "GitHub".into(),
+                connected: true,
+                detail: "GitHub authenticated (local credential / CLI keyring active)".into(),
+                latency_ms: Some(0),
+            };
+        }
     }
+
+    (github, google)
 }
 
 /// Check TTS configuration.

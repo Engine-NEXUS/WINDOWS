@@ -70,8 +70,8 @@ pub const STT_TEMPERATURE: &str = "0";
 pub const STT_RESPONSE_FORMAT: &str = "json";
 pub const STT_VERBOSE_RESPONSE_FORMAT: &str = "verbose_json";
 
-/// Decoder bias selected from turn ownership. Owner-verified captures may use
-/// the NEXUS vocabulary; all other captures use the neutral English prompt.
+/// Decoder policy is independent of speaker authority. Captured commands use
+/// neutral decoding while the legacy vocabulary remains available for comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecoderBias {
     OwnerCommand,
@@ -84,13 +84,18 @@ pub enum DecoderBias {
 /// vocabulary; an unenrolled user (no voice profile — the default) can opt into
 /// the generic command hints; a stranger, an uncertain or a rejected voice never
 /// gets any bias.
+// Same-clip replay on 2026-10-26: owner vocabulary duplicated a single command
+// twice in two runs; neutral decoding did not. Keep this off pending independent
+// corpus evidence. This is a decoder policy, never an owner-verification bypass.
+const USE_OWNER_COMMAND_VOCABULARY: bool = false;
+
 pub fn decoder_bias_for_turn(
     ownership: crate::voice_profile::TurnOwnership,
     command_hints: bool,
 ) -> DecoderBias {
     use crate::voice_profile::TurnOwnership as T;
     match ownership {
-        T::Verified => DecoderBias::OwnerCommand,
+        T::Verified if USE_OWNER_COMMAND_VOCABULARY => DecoderBias::OwnerCommand,
         T::Unenrolled if command_hints => DecoderBias::Commands,
         _ => DecoderBias::Neutral,
     }
@@ -480,6 +485,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn captured_commands_use_neutral_decoder_even_after_owner_verification() {
+        use crate::voice_profile::TurnOwnership::*;
+        for ownership in [Verified, Unenrolled, Uncertain, Rejected] {
+            assert_eq!(decoder_bias_prompt(decoder_bias_for_turn(ownership, false)), NEUTRAL_DECODER_PROMPT,
+                "speaker identity must not seed repeated executable command phrases");
+        }
+    }
+
+    #[test]
+    fn decoder_bias_follows_ownership() {
+        use crate::voice_profile::TurnOwnership::*;
+        // Speaker authority and decoder bias are separate; all live captures are neutral.
+        assert_eq!(decoder_bias_for_turn(Unenrolled, false), DecoderBias::Neutral);
+        assert_eq!(decoder_bias_for_turn(Verified, false), DecoderBias::Neutral);
+        // A voice that is (or may be) someone else never gets command biasing.
+        assert_eq!(decoder_bias_for_turn(Uncertain, false), DecoderBias::Neutral);
+        assert_eq!(decoder_bias_for_turn(Rejected, false), DecoderBias::Neutral);
+    }
+
     /// Live miss 2026-10-19 18:21: Groq answered 400 "prompt length must be 896 characters or fewer, but provided
     /// prompt contains 928 characters" for EVERY turn, so all speech silently fell back to the slow local model.
     /// The word-count cap above is not the real limit; this is. Keep a margin for the next phrase someone adds.
@@ -622,11 +647,11 @@ mod tests {
     fn test_decoder_bias_for_turn() {
         use crate::voice_profile::TurnOwnership as T;
         // Default (hints off) = exactly the previous behaviour.
-        assert_eq!(decoder_bias_for_turn(T::Verified, false), DecoderBias::OwnerCommand);
+        assert_eq!(decoder_bias_for_turn(T::Verified, false), DecoderBias::Neutral);
         assert_eq!(decoder_bias_for_turn(T::Unenrolled, false), DecoderBias::Neutral);
         // Hints on: only unenrolled turns change; the owner keeps the owner prompt.
         assert_eq!(decoder_bias_for_turn(T::Unenrolled, true), DecoderBias::Commands);
-        assert_eq!(decoder_bias_for_turn(T::Verified, true), DecoderBias::OwnerCommand);
+        assert_eq!(decoder_bias_for_turn(T::Verified, true), DecoderBias::Neutral);
         // Someone else's voice never receives a bias, setting or not.
         for t in [T::Uncertain, T::Rejected] {
             assert_eq!(decoder_bias_for_turn(t, true), DecoderBias::Neutral);

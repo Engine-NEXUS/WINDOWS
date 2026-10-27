@@ -28,6 +28,7 @@ import { existsSync, mkdirSync, rmSync, statSync, writeFileSync, copyFileSync, r
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { platform, arch } from "node:os";
+import { sourceHash, recordBuild, verifyBuild } from "./scripts/build-provenance.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const ROOT = resolve(dirname(__filename));
@@ -606,6 +607,7 @@ function cmdBuild() {
   run("npm", ["--prefix", "frontend", "install"], { allowFail: true, stdio: "ignore" });
   // Hand mode: MediaPipe wasm + hand model into frontend/public/hand (git-ignored, ~17 MB).
   run("node", ["scripts/sync-hand-assets.mjs"], { allowFail: true });
+  const buildSource = sourceHash();
   run("npm", ["--prefix", "frontend", "run", "build"]);
 
   info("Building Rust release binary (custom-protocol + admin-brain)...");
@@ -623,7 +625,11 @@ function cmdBuild() {
   const binPath = join(ROOT, "src-tauri", "target", "release", `nexus${ext}`);
   if (existsSync(binPath)) {
     const sizeMB = (statSync(binPath).size / 1024 / 1024).toFixed(1);
+    const identity = recordBuild(buildSource);
     ok(`Binary built: ${binPath} (${sizeMB} MB)`);
+    ok(`Build identity: ${identity.identity}`);
+  } else {
+    throw new Error(`Release build reported success but executable is missing: ${binPath}`);
   }
 }
 
@@ -637,12 +643,20 @@ function cmdDev() {
 }
 
 function cmdRun() {
+  const buildRequested = process.argv.includes("--build") || process.argv.includes("-Build");
+  if (buildRequested) cmdBuild();
   const ext = IS_WIN ? ".exe" : "";
   const binPath = join(ROOT, "src-tauri", "target", "release", `nexus${ext}`);
   if (!existsSync(binPath)) {
     err("Release binary not found. Run: nexus build");
     process.exit(1);
   }
+  let buildIdentity;
+  try { buildIdentity = verifyBuild({ warnStale: true }); }
+  catch (error) { err(error.message); process.exit(1); }
+  for (const w of buildIdentity.warnings || []) warn(`REMINDER: ${w} (launching the last build anyway)`);
+  info(`Release identity ${buildIdentity.identity} (${buildIdentity.builtAt})`);
+  info(`Executable: ${binPath}`);
 
   if (IS_WIN) {
     // Windows: use run.ps1 for the unified color-coded console experience.
@@ -657,9 +671,6 @@ function cmdRun() {
       // Check for --debug or -Debug flag
       if (process.argv.includes("--debug") || process.argv.includes("-Debug")) {
         psArgs.push("-Debug");
-      }
-      if (process.argv.includes("--build") || process.argv.includes("-Build")) {
-        psArgs.push("-Build");
       }
       if (process.argv.includes("--verbose") || process.argv.includes("-Verbose") || process.argv.includes("-v") || process.argv.includes("--watch-debug")) {
         psArgs.push("-VerboseLogs");

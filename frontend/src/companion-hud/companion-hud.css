@@ -5,12 +5,21 @@
    Row 2: Radix UI Slider with animated NumberFlow live badge
    ═══════════════════════════════════════════════════════════════ */
 
-:root {
-  --hud-bg: rgba(15, 23, 42, 0.48);
-  --hud-border: rgba(255, 255, 255, 0.22);
+:root,
+[data-theme="dark"] {
+  --hud-bg: #15151b;
+  --hud-border: rgba(255, 255, 255, 0.16);
   --hud-accent: #259ed6;
   --hud-text: rgba(255, 255, 255, 0.95);
   --hud-dim: rgba(200, 215, 235, 0.70);
+}
+
+[data-theme="light"] {
+  --hud-bg: #ffffff;
+  --hud-border: rgba(0, 0, 0, 0.16);
+  --hud-accent: #259ed6;
+  --hud-text: #111827;
+  --hud-dim: rgba(0, 0, 0, 0.60);
 }
 
 * {
@@ -41,10 +50,7 @@ body,
   background: var(--hud-bg);
   border: 1px solid var(--hud-border);
   border-radius: 18px;
-  box-shadow:
-    inset 0 1px 1.5px rgba(255, 255, 255, 0.35),
-    0 16px 40px rgba(0, 0, 0, 0.55);
-  backdrop-filter: blur(28px) saturate(180%);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
   display: flex;
   flex-direction: column;
   justify-content: space-between;

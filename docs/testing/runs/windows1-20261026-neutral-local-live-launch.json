@@ -1,0 +1,14 @@
+{
+  "revision": "f0988d95afbfac06176c923c2227e7e79e841013",
+  "executable": "e7210e43bdbaa737b7b7786ed2a16e3c5427272740a921be7f72c3491dc46007",
+  "rustLog": "info,capture_audit=info",
+  "replacedPid": 19708,
+  "at": "2026-10-26T15:22:48.6000387Z",
+  "replacedPath": "D:/ULTRON/src-tauri/target/release/nexus.exe",
+  "identity": "d846dd346c470b60",
+  "source": "d7b49eebf14f49913b36ec7a125e59195915e41d4950a1ac703190b84c1e475a",
+  "pid": 8460,
+  "path": "C:\\Users\\Chitkul Lakshya\\.codex\\worktrees\\windows-readiness\\ULTRON\\src-tauri\\target\\release\\nexus.exe",
+  "replacedManifestDeclaredIdentity": "3d1932b68b2c0f15",
+  "replacedBuildAttribution": "Old D: manifest declaration only; old runtime provenance was not verified and is not assessed evidence."
+}

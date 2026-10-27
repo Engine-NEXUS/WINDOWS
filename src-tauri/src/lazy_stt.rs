@@ -414,20 +414,12 @@ pub const DEFAULT_MOONSHINE_MODEL: &str = "small_streaming";
 /// Read the Moonshine model name from settings.json. Falls back to
 /// `DEFAULT_MOONSHINE_MODEL`; a user's explicit choice always wins.
 fn read_moonshine_model() -> String {
-    // Try %APPDATA%/com.nexus.assistant/settings.json
-    let path = if let Ok(appdata) = std::env::var("APPDATA") {
-        std::path::PathBuf::from(appdata)
-            .join("com.nexus.assistant")
-            .join("settings.json")
-    } else if let Ok(home) = std::env::var("HOME") {
-        std::path::PathBuf::from(home)
-            .join(".config")
-            .join("com.nexus.assistant")
-            .join("settings.json")
-    } else {
+    // Try <NEXUS data dir>/settings.json
+    let path = crate::app_dirs::nexus_data_dir().map(|d| d.join("settings.json"));
+
+    let Some(path) = path else {
         return DEFAULT_MOONSHINE_MODEL.to_string();
     };
-
     let Ok(content) = std::fs::read_to_string(&path) else {
         return DEFAULT_MOONSHINE_MODEL.to_string();
     };

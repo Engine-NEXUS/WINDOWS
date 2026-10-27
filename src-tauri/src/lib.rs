@@ -16,11 +16,23 @@ pub(crate) mod vad;
 pub(crate) mod directed;
 // Phase 9: when proactive alerts may speak (breakpoints, urgency, meeting policy)
 pub(crate) mod proactive_policy;
+// Feature 151: event keys — deterministic identity for the notification cooldown brain
+pub(crate) mod notify;
+pub(crate) mod notify_brain;
+pub(crate) mod github_repo_index;
 pub(crate) mod screen_context;
+mod device_grounding;
+pub(crate) mod foreground_review;
+pub(crate) mod rea_browser;
 pub(crate) mod usage_counter;
 pub(crate) mod api_keys;
+pub(crate) mod brand_logo;
 pub(crate) mod github_profile;
 pub(crate) mod screen_tour;
+pub(crate) mod site_probe;
+pub(crate) mod reverse_scroll;
+pub(crate) mod app_probe;
+pub(crate) mod reverse_engineer;
 // Kokoro-82M local TTS (replaces Piper) — see docs/research/jarvis-landscape/09
 pub(crate) mod tts_kokoro;
 #[cfg(not(target_os = "linux"))]
@@ -41,6 +53,7 @@ pub mod wake_eval;
 pub mod voice_eval;
 // Phase D: Speaker verification module (voice profile enrollment + cosine similarity)
 pub(crate) mod voice_profile;
+pub(crate) mod capture_audit;
 pub(crate) mod acoustic_profile;
 mod network;
 mod tray;
@@ -54,6 +67,9 @@ pub mod intent_parser;
 mod nlu_client;
 mod nlu_local;
 mod admin_config;
+mod admin_privilege;
+mod device_activity;
+mod activity_sites;
 #[cfg(feature = "admin-brain")]
 mod brain_client;
 #[cfg(feature = "admin-brain")]
@@ -62,6 +78,7 @@ mod brain_monitor;
 mod lazy_brain;
 mod lazy_stt;
 mod stt;
+mod stt_diagnostics;
 pub mod stt_groq;
 pub(crate) mod stt_deepgram;
 mod stt_learning;
@@ -83,6 +100,8 @@ mod tts_bench;
 mod pipeline_bench;
 mod volume;
 mod keep_awake;
+pub(crate) mod focus_mode;
+pub(crate) mod focus_throttle;
 mod agent_watch;
 // Phase D: Speaker verification is now wired via voice_profile module.
 // The OWW engine uses the existing embedding_model.onnx for speaker embeddings.
@@ -96,7 +115,8 @@ mod symbol_extractor;
 mod dyn_windows;
 mod diagnostics;
 pub(crate) mod orchestrator;
-pub(crate) mod github_cmd;
+pub mod github_cmd;
+pub(crate) mod github_data;
 pub(crate) mod live;
 pub(crate) mod router;
 pub(crate) mod mcp_client;
@@ -106,6 +126,11 @@ pub(crate) mod identity_state;
 pub(crate) mod worker_auth;
 pub(crate) mod boot;
 pub(crate) mod ghostwriter;
+pub(crate) mod app_dirs;
+
+#[cfg(target_os = "macos")]
+pub(crate) mod screen_capture_mac;
+
 pub mod screen;
 pub mod shortcuts;
 pub(crate) mod telegram;
@@ -120,15 +145,17 @@ pub(crate) mod power_plan;
 pub(crate) mod agent_hooks;
 // The verdict engine, the observer and the watch runner (doc 142 W2/W3/W5).
 pub(crate) mod session_verdict;
+pub(crate) mod agent_followup;
 pub(crate) mod session_observer;
 pub(crate) mod watch_runner;
 pub(crate) mod agent_tracker;
 pub(crate) mod agent_outcomes;
-pub(crate) mod agent_followup;
-pub(crate) mod window_tile;
 pub(crate) mod howto;
 pub(crate) mod power_close;
+pub(crate) mod window_tile;
 pub(crate) mod latency;
+#[cfg(test)]
+mod luminance_probe;
 pub(crate) mod coder;
 pub(crate) mod dictation;
 pub(crate) mod dictation_text;
@@ -163,7 +190,6 @@ mod dwm_corners;
 #[cfg(target_os = "windows")]
 mod sidebar_backdrop;
 pub(crate) mod live_glass;
-pub(crate) mod luminance_probe;
 
 use tauri::{Emitter, Listener, Manager};
 #[cfg(not(target_os = "windows"))]
@@ -410,6 +436,7 @@ pub fn run() {
 
     builder.setup(|app| {
         crate::boot::mark("setup_begin");
+        stt_diagnostics::start_retention_sweep(app.handle());
         // Stage FIRST (docs/features/123, P3): WebView2's cold start (~8 s) now overlaps the rest of setup
         // (preflight audit, memory, registries) instead of following it.
         // ─── Stage: the always-on home for the orb + loading indicator ──
@@ -434,7 +461,8 @@ pub fn run() {
         // user's original volume back before anything speaks.
         if let Some(dir) = audit_dir.clone() {
             volume::init(dir.clone());
-            // Plaintext API keys left in settings.json by older versions move to the keychain and are blanked (verified by read-back).
+            focus_throttle::recover_on_start(&dir);
+            device_activity::start(&dir);
             crate::api_keys::scrub_settings_file(&dir);
             // One-time memory cleanup (junk episodes/turns/poisoned brief; originals backed up).
             let learned_dir = dir.clone();
@@ -713,7 +741,6 @@ pub fn run() {
             architect::start_foreground_tracker();
 
             // Boot-time housekeeping (Phase B–D modules).
-            commands::note_boot();
             if let Ok(app_data) = app.path().app_data_dir() {
                 usage_counter::init(&app_data);
                 tts::init_disk_cache(&app_data); // persisted stock voice lines (instant acks, no re-render per boot)
@@ -738,6 +765,7 @@ pub fn run() {
                 });
             }
             webhook::spawn_listener(app.handle().clone());
+            focus_throttle::spawn(app.handle());
             keep_awake::start_working_poller(); // screen stays awake while a ghost drill/request is running
             agent_watch::start_idle_monitor(); // kills the Node sidecar after 10 min with no active watch
             google::sentinel::start_sentinel_poller(app.handle().clone());
@@ -749,6 +777,8 @@ pub fn run() {
             memcore::review::start_reviewer(app.handle().clone()); // optional, default off: suggests profile facts for approval
             memcore::scheduler::start(app.handle().clone()); // timetable slot reminders
             memcore::mailwatch::start(app.handle().clone()); // Gmail history.list watcher (idle until Google is connected)
+            memcore::github_watch::start(app.handle().clone()); // GitHub Actions watcher (idle until GitHub token present)
+            memcore::deploy_watch::start(app.handle().clone()); // Deploy watcher (idle until deploy tokens present)
             memcore::leavewatch::start(app.handle().clone()); // leave-by reminders (needs calendar + Routes key + saved home)
             memcore::leases::start(app.handle().clone()); // temporary action leases (auto-unblock)
             memcore::wa::start(app.handle().clone()); // WhatsApp priority watcher (read-only; off unless memcoreWhatsapp)
@@ -770,6 +800,7 @@ pub fn run() {
             let prewarm_cache2 = prewarm_cache.clone();
             let prewarm_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                crate::focus_mode::wait_until_clear("tts_prewarm").await;
                 tracing::info!("tts: startup cache pre-generation starting...");
                 // the equipped persona's cloud voice (was hardcoded Ava: acks and replies disagreed after a restart)
                 let voice = commands::read_edge_tts_voice(&prewarm_app);
@@ -793,6 +824,7 @@ pub fn run() {
                 }
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                    crate::focus_mode::wait_until_clear("offline_voice_sync").await;
                     if tts_network::check_network_now().await {
                         if let Some(engine) = tts::kokoro_engine_handle() {
                             tts_swap::sync_selected_voice(&h, engine);
@@ -964,6 +996,7 @@ pub fn run() {
                 // Small delay: let the app finish first-paint before a
                 // potential ~35 MB model download saturates the connection.
                 tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+                crate::focus_mode::wait_until_clear("nlu_update_check").await;
                 nlu_update::spawn_update_check(update_handle);
             });
 
@@ -1019,11 +1052,8 @@ pub fn run() {
                     Some((url, uid, _)) => (url, uid),
                     None => {
                         // Try reading from config file
-                        let config_path = std::env::var("APPDATA")
-                            .ok()
-                            .map(|d| std::path::Path::new(&d)
-                                .join("com.nexus.assistant")
-                                .join("nexus-config.json"));
+                        let config_path = crate::app_dirs::nexus_data_dir()
+                            .map(|d| d.join("nexus-config.json"));
                         match config_path.and_then(|p| std::fs::read_to_string(p).ok()) {
                             Some(content) => {
                                 let server_url = extract_json_string(&content, "serverUrl")
@@ -1096,6 +1126,12 @@ pub fn run() {
             commands::save_server_config,
             commands::get_server_config,
             worker_auth::worker_request,
+            device_activity::device_activity_status,
+            device_activity::device_activity_set_enabled,
+            device_activity::device_activity_clear,
+            device_activity::device_activity_set_sites_enabled,
+            device_activity::device_activity_browser_token,
+            device_activity::device_activity_open_extension_folder,
             commands::claim_profile,
             commands::get_identity_status,
             commands::refresh_identity_status,
@@ -1121,9 +1157,9 @@ pub fn run() {
             commands::test_wake_orb,
             commands::preview_wake_sound,
             commands::get_settings,
+            commands::voice_lock_enabled,
             commands::save_settings,
             commands::settings_patch,
-            commands::get_health_status,
             commands::export_settings,
             commands::import_settings,
             commands::memory_recall,
@@ -1157,7 +1193,6 @@ pub fn run() {
             commands::vision_key_status,
             commands::vision_test_key,
             commands::list_tts_voices,
-            commands::get_pending_settings_backdrop,
             commands::set_autostart,
             commands::is_autostart_enabled,
             commands::check_mic_permission,
@@ -1174,6 +1209,10 @@ pub fn run() {
             commands::set_sidebar_dock,
             commands::get_pending_sidebar_view,
             commands::get_pending_spatial,
+            reverse_engineer::get_pending_stack,
+            foreground_review::get_last_foreground_review,
+            foreground_review::delete_foreground_review,
+            orchestrator::recreate_review_in_folder,
             commands::get_pending_annotation,
             commands::show_pr_list_sidebar,
             commands::hide_pr_list_sidebar,
@@ -1193,6 +1232,7 @@ pub fn run() {
             api_keys::api_keys_count,
             github_profile::github_profile,
             github_profile::github_profile_clear,
+            github_data::github_get_dashboard_data,
             proactive_policy::proactive_snooze,
             commands::stop_stt_capture,
             commands::stt_capture_had_speech,
@@ -1206,6 +1246,8 @@ pub fn run() {
             commands::google_credentials_status,
             stt::transcribe_audio,
             stt::stt_filter_stats,
+            stt_diagnostics::stt_diagnostics_list,
+            stt_diagnostics::stt_diagnostics_delete,
             stt_stream::stt_stream_start,
             stt_stream::stt_stream_push_chunk,
             stt_stream::stt_stream_stop,
@@ -1246,7 +1288,6 @@ pub fn run() {
             architect::cancel_architect_analysis,
             architect::query_impact,
             // Agent-completion watcher (Claude Code, Gemini CLI, Codex, Aider, Hermes, opencode)
-            agent_watch::agent_watch_list_adapters,
             agent_watch::agent_watch_unavailable_reason,
             agent_watch::agent_watch_stop,
             agent_watch::agent_watch_list_watches,
@@ -1276,7 +1317,6 @@ pub fn run() {
             // Selective hitbox registry (live_glass) & Adaptive Luminance commands.
             // NOTE: the DWM Acrylic path was removed per ADR-05 (docs/architecture/06).
             live_glass::register_glass_hitboxes,
-            luminance_probe::get_screen_luminance,
         ])
         .build(tauri::generate_context!())
         .expect("error while building NEXUS application")
@@ -1287,6 +1327,8 @@ pub fn run() {
             tauri::RunEvent::Exit => {
                 volume::force_restore_volume();
                 keep_awake::force_clear();
+                focus_throttle::restore_now();
+                focus_mode::force_release("app_exit");
             }
             _ => {}
         });

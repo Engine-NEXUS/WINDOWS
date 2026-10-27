@@ -12,7 +12,6 @@ jobs:
         include:
           - { os: windows-latest,  target: "",                              bundle: "nsis" }
           - { os: macos-14,        target: "aarch64-apple-darwin",          bundle: "dmg" }
-          - { os: macos-13,        target: "x86_64-apple-darwin",           bundle: "dmg" }
           - { os: ubuntu-22.04,    target: "",                              bundle: "appimage,deb" }
     runs-on: ${{ matrix.os }}
     steps:

@@ -383,6 +383,10 @@ pub fn spawn_monitor<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
         .name("vault-monitor".into())
         .spawn(move || loop {
             std::thread::sleep(Duration::from_secs(90));
+            if crate::focus_mode::paused() {
+                crate::focus_mode::defer_log("auth_vault_monitor");
+                continue;
+            }
             let mut changed: Vec<String> = Vec::new();
             {
                 let mut known = LAST_KNOWN.write();
@@ -792,6 +796,7 @@ mod tests {
 
     #[test]
     fn google_profile_phone_address_roundtrip_and_legacy_compat() {
+        let _g = lock_accounts_for_test();
         // New fields survive the keychain round-trip.
         let prof = GoogleAccountProfile {
             email: "user3@gmail.com".into(),

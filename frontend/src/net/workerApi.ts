@@ -3,8 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 /**
  * Calls to the NEXUS Cloudflare Worker's authenticated `/oauth/*` routes.
  *
- * The Worker only answers an approved device: every request needs the device bearer token
- * plus the profile and device ids. Those live in Rust (the token is in the OS keyring), so
+ * Every request needs the device bearer token plus the profile and device ids.
+ * OAuth routes also require the Worker entitlement; Device Links accepts a
+ * registered pending device without granting its cloud-AI entitlement.
+ * Those credentials live in Rust (the token is in the OS keyring), so
  * the web view never makes these requests itself — it asks the `worker_request` command,
  * which attaches the credentials and only talks to the configured Worker.
  *

@@ -1,0 +1,78 @@
+{
+  "releaseIdentity": "3d1932b68b2c0f15",
+  "processId": 17928,
+  "ownerReportedAttempts": 10,
+  "logWindowUtc": [
+    "2026-10-25T14:37:00Z",
+    "2026-10-25T14:39:00Z"
+  ],
+  "completedCapturesFound": 7,
+  "verifiedCaptures": 7,
+  "unmatchedReportedAttempts": 3,
+  "trials": [
+    {
+      "captureOrdinal": 1,
+      "precedingTimestampUtc": "2026-10-25T14:37:47.663372Z",
+      "verification": "verified",
+      "filter": "none",
+      "condition": "unassigned: cannot map seven captures to reported five near/five distant attempts",
+      "executableAction": "not independently observed"
+    },
+    {
+      "captureOrdinal": 2,
+      "precedingTimestampUtc": "2026-10-25T14:37:55.018873Z",
+      "verification": "verified",
+      "filter": "none",
+      "condition": "unassigned: cannot map seven captures to reported five near/five distant attempts",
+      "executableAction": "not independently observed"
+    },
+    {
+      "captureOrdinal": 3,
+      "precedingTimestampUtc": "2026-10-25T14:38:00.924370Z",
+      "verification": "verified",
+      "filter": "none",
+      "condition": "unassigned: cannot map seven captures to reported five near/five distant attempts",
+      "executableAction": "not independently observed"
+    },
+    {
+      "captureOrdinal": 4,
+      "precedingTimestampUtc": "2026-10-25T14:38:08.625052Z",
+      "verification": "verified",
+      "filter": "none",
+      "condition": "unassigned: cannot map seven captures to reported five near/five distant attempts",
+      "executableAction": "not independently observed"
+    },
+    {
+      "captureOrdinal": 5,
+      "precedingTimestampUtc": "2026-10-25T14:38:16.015811Z",
+      "verification": "verified",
+      "filter": "repeat_loop",
+      "condition": "unassigned: cannot map seven captures to reported five near/five distant attempts",
+      "executableAction": "not independently observed"
+    },
+    {
+      "captureOrdinal": 6,
+      "precedingTimestampUtc": "2026-10-25T14:38:22.458124Z",
+      "verification": "verified",
+      "filter": "none",
+      "condition": "unassigned: cannot map seven captures to reported five near/five distant attempts",
+      "executableAction": "not independently observed"
+    },
+    {
+      "captureOrdinal": 7,
+      "precedingTimestampUtc": "2026-10-25T14:38:28.670261Z",
+      "verification": "verified",
+      "filter": "none",
+      "condition": "unassigned: cannot map seven captures to reported five near/five distant attempts",
+      "executableAction": "not independently observed"
+    }
+  ],
+  "negativeTrials": 0,
+  "accuracyConclusion": "Seven captured turns verified; no 10/10 claim, no complete near/distant rates, no non-owner proof, no frozen-source acceptance.",
+  "interactionFailures": [
+    "Duplicated app verbs/targets",
+    "One transcript became hook up opencode despite requested Notepad test; intended speech not independently captured",
+    "One repeat_loop filter blocked transcript"
+  ],
+  "sourceProof": "Current D build diagnosis only; all-suite results belong to frozen source50dc, not this build"
+}

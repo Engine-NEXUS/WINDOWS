@@ -148,3 +148,61 @@ CREATE INDEX IF NOT EXISTS idx_events_at       ON profile_events(at);
 -- user_devices was defined but never read or written by any code path
 -- (verified 2026-10-03) — superseded by the Feature 88 `devices` table.
 DROP TABLE IF EXISTS user_devices;
+
+-- Device Links are independent of the approved Workers AI entitlement.
+-- Phone numbers are unique and never used as bearer credentials.
+CREATE TABLE IF NOT EXISTS link_phone_bindings (
+  device_id TEXT PRIMARY KEY REFERENCES devices(device_id),
+  phone TEXT NOT NULL UNIQUE,
+  verified_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS link_phone_challenges (
+  challenge_id TEXT PRIMARY KEY,
+  device_id TEXT NOT NULL REFERENCES devices(device_id),
+  phone TEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  encrypted_code TEXT NOT NULL,
+  created_at REAL NOT NULL,
+  expires_at REAL NOT NULL,
+  claimed_at REAL,
+  sent_at REAL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  consumed_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_link_phone_challenges_device_time
+  ON link_phone_challenges(device_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_link_phone_challenges_outbox
+  ON link_phone_challenges(sent_at, expires_at);
+CREATE INDEX IF NOT EXISTS idx_link_phone_challenges_expiry
+  ON link_phone_challenges(expires_at);
+CREATE TABLE IF NOT EXISTS link_sms_gateway_state (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  last_seen_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS device_link_requests (
+  request_id TEXT PRIMARY KEY,
+  source_device_id TEXT NOT NULL REFERENCES devices(device_id),
+  target_device_id TEXT NOT NULL REFERENCES devices(device_id),
+  code_hash TEXT NOT NULL,
+  created_at REAL NOT NULL,
+  expires_at REAL NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  accepted_at REAL,
+  rejected_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_device_link_requests_target
+  ON device_link_requests(target_device_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_device_link_requests_expiry
+  ON device_link_requests(expires_at);
+CREATE TABLE IF NOT EXISTS device_links (
+  link_id TEXT PRIMARY KEY,
+  device_a TEXT NOT NULL REFERENCES devices(device_id),
+  device_b TEXT NOT NULL REFERENCES devices(device_id),
+  created_at REAL NOT NULL,
+  revoked_at REAL,
+  CHECK (device_a < device_b),
+  UNIQUE(device_a, device_b)
+);
+CREATE INDEX IF NOT EXISTS idx_device_links_a ON device_links(device_a, revoked_at);
+CREATE INDEX IF NOT EXISTS idx_device_links_b ON device_links(device_b, revoked_at);
+CREATE INDEX IF NOT EXISTS idx_device_links_revoked ON device_links(revoked_at);

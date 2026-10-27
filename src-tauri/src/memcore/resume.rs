@@ -234,6 +234,10 @@ pub fn start_recorder<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(SAMPLE_SECS)).await;
+            if crate::focus_mode::paused() {
+                crate::focus_mode::defer_log("resume_recorder");
+                continue;
+            }
             let Ok(dir) = app.path().app_data_dir() else { continue };
             if !super::flag(&dir, "memcoreActivity", true) {
                 continue;

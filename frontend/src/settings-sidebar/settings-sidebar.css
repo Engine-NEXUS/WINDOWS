@@ -53,10 +53,6 @@ html, body {
   color: #17212e;
 }
 
-/* Backdrop image disabled in solid opaque theme */
-.settings-container::after {
-  display: none;
-}
 
 /* Specular edge sheen */
 .settings-container::before {
@@ -173,19 +169,14 @@ html, body {
   gap: 16px;
   padding-right: 4px;
   padding-bottom: 8px;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
 }
 
 .settings-scroll::-webkit-scrollbar {
-  width: 4px;
-}
-
-.settings-scroll::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.settings-scroll::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
-  border-radius: 2px;
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 
 /* ─── Settings sections ─── */
@@ -372,30 +363,24 @@ html, body {
 
 /* Liquid glass highlight button (Display tab: animation placement) */
 .settings-btn--liquid-glass {
-  background: rgba(37, 158, 214, 0.22) !important;
-  border: 1.5px solid rgba(255, 255, 255, 0.35) !important;
+  background: var(--nx-bg-elevated) !important;
+  border: 1.5px solid var(--nx-border) !important;
   border-radius: 10px !important;
-  color: #ffffff !important;
+  color: var(--nx-text-primary) !important;
   font-weight: 600 !important;
   font-size: 13px !important;
   padding: 10px 16px !important;
   letter-spacing: -0.01em;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6), 0 0 12px rgba(255, 255, 255, 0.25) !important;
-  box-shadow:
-    inset 0 1px 1.5px rgba(255, 255, 255, 0.5),
-    0 8px 24px rgba(0, 0, 0, 0.35) !important;
-  backdrop-filter: blur(16px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25) !important;
   cursor: pointer;
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
 }
 
 .settings-btn--liquid-glass:hover {
-  background: rgba(37, 158, 214, 0.35) !important;
-  border-color: rgba(255, 255, 255, 0.60) !important;
+  background: var(--nx-bg-hover) !important;
+  border-color: var(--nx-border-focus) !important;
   transform: translateY(-1px);
-  box-shadow:
-    inset 0 1px 2px rgba(255, 255, 255, 0.7),
-    0 12px 28px rgba(37, 158, 214, 0.35) !important;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3) !important;
 }
 
 .settings-btn--liquid-glass:active {
@@ -403,17 +388,15 @@ html, body {
 }
 
 .settings-btn--glass {
-  background: rgba(255, 255, 255, 0.08) !important;
-  border: 1px solid rgba(255, 255, 255, 0.22) !important;
-  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.25) !important;
-  color: #ffffff !important;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6) !important;
-  backdrop-filter: blur(12px);
+  background: var(--nx-bg-card) !important;
+  border: 1px solid var(--nx-border) !important;
+  box-shadow: none !important;
+  color: var(--nx-text-primary) !important;
 }
 
 .settings-btn--glass:hover {
-  background: rgba(255, 255, 255, 0.16) !important;
-  border-color: rgba(255, 255, 255, 0.38) !important;
+  background: var(--nx-bg-hover) !important;
+  border-color: var(--nx-border-focus) !important;
 }
 
 /* ─── Status badge ─── */
@@ -516,11 +499,14 @@ html, body {
   padding-right: 4px;
 }
 
-.persona-grid::-webkit-scrollbar { width: 4px; }
-.persona-grid::-webkit-scrollbar-track { background: transparent; }
-.persona-grid::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
-  border-radius: 2px;
+.persona-grid {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+.persona-grid::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 
 .persona-card {
@@ -648,11 +634,14 @@ html, body {
   padding-right: 4px;
 }
 
-.voice-list::-webkit-scrollbar { width: 4px; }
-.voice-list::-webkit-scrollbar-track { background: transparent; }
-.voice-list::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
-  border-radius: 2px;
+.voice-list {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+.voice-list::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 
 .voice-empty {
@@ -978,4 +967,185 @@ html, body {
   font-weight: 600;
   cursor: pointer;
   padding: 4px 0 4px 4px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   LIGHT THEME OVERRIDES (Crisp, High-Contrast Typography & Cards)
+   ═══════════════════════════════════════════════════════════════ */
+:root[data-theme="light"] {
+  --sidebar-text: #0f172a;
+  --sidebar-dim: #475569;
+  --sidebar-faint: #64748b;
+  --sidebar-card-bg: #ffffff;
+  --sidebar-card-border: rgba(0, 0, 0, 0.08);
+}
+
+:root[data-theme="light"] .settings-container {
+  background-color: #f8f9fa;
+  border-color: rgba(0, 0, 0, 0.1);
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .settings-title {
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .settings-hint {
+  color: #64748b;
+}
+
+:root[data-theme="light"] .settings-tab {
+  color: #64748b;
+}
+
+:root[data-theme="light"] .settings-tab:hover {
+  color: #0f172a;
+  background: rgba(0, 0, 0, 0.05);
+}
+
+:root[data-theme="light"] .settings-tab--active {
+  color: #0f172a;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+:root[data-theme="light"] .settings-section-title {
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .setting-label {
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .setting-desc {
+  color: #475569;
+}
+
+:root[data-theme="light"] .settings-input {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .settings-input::placeholder {
+  color: #94a3b8;
+}
+
+:root[data-theme="light"] .settings-toggle {
+  background: #cbd5e1;
+}
+
+:root[data-theme="light"] .settings-toggle--on {
+  background: #2563eb;
+}
+
+:root[data-theme="light"] .settings-slider {
+  background: #e2e8f0;
+}
+
+:root[data-theme="light"] .settings-slider::-webkit-slider-thumb {
+  background: #2563eb;
+}
+
+:root[data-theme="light"] .settings-btn {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .settings-btn--glass {
+  background: #ffffff;
+  border-color: rgba(0, 0, 0, 0.1);
+  color: #0f172a;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+:root[data-theme="light"] .settings-btn--glass:hover:not(:disabled) {
+  background: #f8fafc;
+  border-color: rgba(0, 0, 0, 0.18);
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .settings-btn--active {
+  background: #2563eb !important;
+  color: #ffffff !important;
+  border-color: #2563eb !important;
+}
+
+:root[data-theme="light"] .persona-card {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+}
+
+:root[data-theme="light"] .persona-card:hover {
+  background: #f8fafc;
+  border-color: rgba(0, 0, 0, 0.16);
+}
+
+:root[data-theme="light"] .persona-card--active {
+  border-color: #2563eb;
+  background: rgba(37, 99, 235, 0.06);
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.25), 0 4px 14px rgba(37, 99, 235, 0.12);
+}
+
+:root[data-theme="light"] .persona-name {
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .persona-accent {
+  color: #64748b;
+}
+
+:root[data-theme="light"] .persona-desc {
+  color: #475569;
+}
+
+:root[data-theme="light"] .persona-play-btn {
+  background: #f1f5f9;
+  border-color: rgba(0, 0, 0, 0.1);
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .persona-play-btn:hover:not(:disabled) {
+  background: #e2e8f0;
+}
+
+:root[data-theme="light"] .voice-name {
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .voice-provider {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+:root[data-theme="light"] .voice-play-btn {
+  background: #f1f5f9;
+  border-color: rgba(0, 0, 0, 0.1);
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .voice-row:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+:root[data-theme="light"] .voice-row--selected {
+  background: rgba(37, 99, 235, 0.08);
+}
+
+:root[data-theme="light"] .auth-card {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .auth-note {
+  color: #475569;
+}
+
+:root[data-theme="light"] .setting-badge {
+  background: #f1f5f9;
+  color: #334155;
+  border-color: rgba(0, 0, 0, 0.08);
 }

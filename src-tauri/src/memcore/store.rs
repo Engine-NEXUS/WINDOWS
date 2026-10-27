@@ -459,6 +459,15 @@ impl Store {
                key TEXT PRIMARY KEY,
                shown INTEGER NOT NULL DEFAULT 0,
                last_shown INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE IF NOT EXISTS entity_state(
+               id TEXT PRIMARY KEY,
+               failing INTEGER NOT NULL,
+               since_ms INTEGER NOT NULL,
+               fail_count INTEGER NOT NULL,
+               last_ref TEXT NOT NULL,
+               spoken_failure INTEGER NOT NULL,
+               last_spoken_ms INTEGER NOT NULL,
+               last_seen_ms INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS egress(
                id INTEGER PRIMARY KEY,
                ts INTEGER NOT NULL,
@@ -594,7 +603,7 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))
             .unwrap_or(0);
         let _ = self.conn.execute_batch(
-            "DELETE FROM records; DELETE FROM records_fts; DELETE FROM audit; DELETE FROM egress; DELETE FROM corrections; DELETE FROM command_log; DELETE FROM routines; DELETE FROM routine_offers; DELETE FROM pending; DELETE FROM review_rejected;
+            "DELETE FROM records; DELETE FROM records_fts; DELETE FROM audit; DELETE FROM egress; DELETE FROM corrections; DELETE FROM command_log; DELETE FROM routines; DELETE FROM routine_offers; DELETE FROM pending; DELETE FROM review_rejected; DELETE FROM entity_state;
              DELETE FROM meta WHERE k != 'schema_version';",
         );
         self.audit(now, "wipe", "", "", "", "", actor);
@@ -1078,8 +1087,9 @@ impl Store {
         rows.flatten().collect()
     }
 
-    /// Drop bookkeeping that only ever grows: refused-suggestion markers older than a year and
-    /// routine-offer counters not shown for six months. Returns rows removed.
+    /// Drop bookkeeping that only ever grows: refused-suggestion markers older than a year,
+    /// routine-offer counters not shown for six months, and entity_state not seen for 30 days.
+    /// Returns rows removed.
     pub fn housekeeping(&self, now: i64) -> usize {
         let a = self
             .conn
@@ -1089,10 +1099,18 @@ impl Store {
             .conn
             .execute("DELETE FROM routine_offers WHERE last_shown < ?1", params![now - 180 * 24 * 3600])
             .unwrap_or(0);
-        if a + b > 0 {
+        let now_ms = if now > 1_000_000_000_000 { now } else { now.saturating_mul(1000) };
+        let c = self
+            .conn
+            .execute(
+                "DELETE FROM entity_state WHERE last_seen_ms < ?1",
+                params![now_ms.saturating_sub(30 * 24 * 3600 * 1000)],
+            )
+            .unwrap_or(0);
+        if a + b + c > 0 {
             self.flush();
         }
-        a + b
+        a + b + c
     }
 
     /// Exact-key value lookup within a tier.
@@ -1414,6 +1432,62 @@ impl Store {
         }
         Ok(count)
     }
+
+    pub fn entities_load(&self) -> Vec<EntityRecord> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT id, failing, since_ms, fail_count, last_ref, spoken_failure, last_spoken_ms, last_seen_ms FROM entity_state",
+        ) else {
+            return vec![];
+        };
+        let Ok(rows) = stmt.query_map([], |r| {
+            let failing_int: i64 = r.get(1)?;
+            let spoken_int: i64 = r.get(5)?;
+            Ok(EntityRecord {
+                id: r.get(0)?,
+                failing: failing_int != 0,
+                since_ms: r.get::<_, i64>(2)? as u64,
+                fail_count: r.get::<_, i64>(3)? as u32,
+                last_ref: r.get(4)?,
+                spoken_failure: spoken_int != 0,
+                last_spoken_ms: r.get::<_, i64>(6)? as u64,
+                last_seen_ms: r.get::<_, i64>(7)? as u64,
+            })
+        }) else {
+            return vec![];
+        };
+        rows.filter_map(Result::ok).collect()
+    }
+
+    pub fn entity_save(&self, e: &EntityRecord) -> bool {
+        let res = self.conn.execute(
+            "INSERT INTO entity_state(id, failing, since_ms, fail_count, last_ref, spoken_failure, last_spoken_ms, last_seen_ms)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET
+               failing = excluded.failing,
+               since_ms = excluded.since_ms,
+               fail_count = excluded.fail_count,
+               last_ref = excluded.last_ref,
+               spoken_failure = excluded.spoken_failure,
+               last_spoken_ms = excluded.last_spoken_ms,
+               last_seen_ms = excluded.last_seen_ms",
+            params![
+                e.id,
+                if e.failing { 1i64 } else { 0i64 },
+                e.since_ms as i64,
+                e.fail_count as i64,
+                e.last_ref,
+                if e.spoken_failure { 1i64 } else { 0i64 },
+                e.last_spoken_ms as i64,
+                e.last_seen_ms as i64,
+            ],
+        );
+        if res.is_ok() {
+            self.dirty.set(true);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// An action lease representing a temporary timed operation with automatic expiration.
@@ -1427,6 +1501,19 @@ pub struct ActionLease {
     pub expires_at: i64,
     pub created_at: i64,
     pub status: String,
+}
+
+/// Persisted state of one monitored entity (e.g. GitHub repo CI runs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityRecord {
+    pub id: String,
+    pub failing: bool,
+    pub since_ms: u64,
+    pub fail_count: u32,
+    pub last_ref: String,
+    pub spoken_failure: bool,
+    pub last_spoken_ms: u64,
+    pub last_seen_ms: u64,
 }
 
 #[cfg(test)]
@@ -1771,5 +1858,47 @@ mod tests {
         s.create_action_lease(&lease2).unwrap();
         assert_eq!(s.cancel_action_leases_for("Prem Sai", "instagram").unwrap(), 1);
         assert!(s.list_active_action_leases().unwrap().is_empty());
+    }
+
+    #[test]
+    fn entity_state_round_trip_and_prune() {
+        let s = Store::open_in_memory().unwrap();
+        let now_ms = 1_700_000_000_000u64;
+        let old_ms = now_ms - 31 * 24 * 3600 * 1000;
+        let e_old = EntityRecord {
+            id: "github:zync:build".into(),
+            failing: true,
+            since_ms: old_ms,
+            fail_count: 2,
+            last_ref: "run_1".into(),
+            spoken_failure: true,
+            last_spoken_ms: old_ms,
+            last_seen_ms: old_ms,
+        };
+        let e_new = EntityRecord {
+            id: "github:nexus:pr".into(),
+            failing: false,
+            since_ms: now_ms,
+            fail_count: 0,
+            last_ref: "run_2".into(),
+            spoken_failure: false,
+            last_spoken_ms: 0,
+            last_seen_ms: now_ms,
+        };
+        assert!(s.entity_save(&e_old));
+        assert!(s.entity_save(&e_new));
+        let loaded = s.entities_load();
+        assert_eq!(loaded.len(), 2);
+
+        // Pruning via housekeeping: e_old is > 30 days old and gets dropped
+        let removed = s.housekeeping((now_ms / 1000) as i64);
+        assert_eq!(removed, 1);
+        let remaining = s.entities_load();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "github:nexus:pr");
+
+        // Wipe also clears entity_state
+        s.wipe("user", (now_ms / 1000) as i64);
+        assert_eq!(s.entities_load().len(), 0);
     }
 }

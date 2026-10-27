@@ -1,0 +1,34 @@
+{
+  "assessedAt": "2026-10-25T16:14:28.896705+00:00",
+  "checkout": "D:\\ULTRON",
+  "baseRevision": "fd89438fef88dc8270998048d00d1d73baab8e27",
+  "dirtyCheckout": true,
+  "scope": "P2 frontend native-state observation and verified Save; concurrent primary edits preserved",
+  "fileHashes": {
+    "frontend/src/settings/voiceLockState.ts": "9ad83d12e21033b11d5edaddabad396c89160b1d1e82b666eaa5ccd9ab20b2b4",
+    "frontend/src/settings/voiceLockState.test.ts": "50b83d38557ded3ed95d327abeeedefe1bd55350decca3428bb2c097984840af",
+    "frontend/src/settings/VoiceLockStatus.tsx": "bb5f3be9520e347baed84834c1cbe6409e5faaa75c078b70116331d8032e83df",
+    "frontend/src/settings/VoiceLockStatus.test.tsx": "9d52080b2e94851e629062c0cb7ee3f129ff415249b3232f8099ed1d60692cf8",
+    "frontend/src/settings/SettingsApp.tsx": "785ae96b2a2903ef9a18bd0b2db098517efa9d7cee11c5b646942d4c7862c06b",
+    "frontend/src/settings-sidebar/SettingsSidebarApp.tsx": "e2982c36860c2a8725c50c4c9b838503b5caff5ad3cb156050e44ea33fd6e475",
+    "scripts/voice_lock_ui_mutation_check.py": "281106e0fc065859ae5ae222dde0d62d6ff6f453983141df7fa3446e558e765a"
+  },
+  "checks": {
+    "focusedNewTests": 22,
+    "frontendTests": 682,
+    "frontendTestFiles": 69,
+    "typecheckAndProductionBuild": "pass",
+    "safetyMutations": "7/7 killed",
+    "ipc": "pass",
+    "turnEnds": "pass",
+    "repositoryHygiene": "pass",
+    "scopedWhitespace": "pass"
+  },
+  "fullNativeWorkerPythonSweep": "not rerun for P2; no native/Worker/Python runtime changes in this phase",
+  "p1Release": "separate frozen tree; compiling when last checked",
+  "freshP2Release": "not built",
+  "liveSettingsWalkthrough": "not run",
+  "featureScore": 41,
+  "productionReady": false,
+  "laterFrozenAssessment": "windows1-20261025-voice-lock-ui-frozen-assessment.json"
+}

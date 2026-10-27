@@ -1,0 +1,47 @@
+.hub-voice-enrollment {
+  margin: 16px 0 24px;
+  padding: 16px;
+  border: 1px solid var(--nx-border);
+  border-radius: 12px;
+}
+
+.hub-voice-enrollment .setup-section h2 {
+  font-size: 16px;
+  margin: 0 0 8px;
+}
+
+.hub-voice-enrollment .setup-hint {
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+
+.hub-voice-enrollment .setup-error,
+.hub-voice-enrollment .setup-saved {
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+.hub-voice-enrollment .setup-error { color: var(--nx-error); }
+.hub-voice-enrollment .setup-saved { color: var(--nx-success); }
+.hub-voice-enrollment .voice-status { margin-bottom: 12px; }
+.hub-voice-enrollment .voice-status-enrolled { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.hub-voice-enrollment .setup-badge { font-size: 13px; }
+.hub-voice-enrollment .setup-badge--ok { color: var(--nx-success); }
+.hub-voice-enrollment .setup-badge--warn { color: var(--nx-text-secondary); }
+
+.hub-voice-enrollment .setup-btn {
+  padding: 8px 12px;
+  border: 1px solid var(--nx-border);
+  border-radius: 8px;
+  background: var(--nx-bg);
+  color: var(--nx-text-primary);
+  cursor: pointer;
+}
+
+.hub-voice-enrollment .setup-btn:disabled { opacity: 0.5; cursor: default; }
+.hub-voice-enrollment .setup-btn--danger { color: var(--nx-error); }
+.hub-voice-enrollment .voice-enroll-progress { margin: 12px 0; padding: 12px; border: 1px solid var(--nx-border); border-radius: 8px; }
+.hub-voice-enrollment .voice-enroll-recording { color: var(--nx-error); }
+.hub-voice-enrollment .voice-enroll-bar { height: 4px; margin-top: 10px; background: var(--nx-border); border-radius: 2px; overflow: hidden; }
+.hub-voice-enrollment .voice-enroll-bar-fill { height: 100%; background: var(--nx-accent-blue); }

@@ -7,10 +7,13 @@
 
 ## Start here
 
+- **Current Voice Lock work:** [implementation plan](features/152-voice-lock-evidence-and-reliability-plan.md), [Architect-guided local research](research/elevenlabs-architect-guided-nexus-review.md), and [live work card](testing/speaker-verification-work-card.md). Capture accounting is the first implementation phase; production proof remains pending.
+
 1. [`../README.md`](../README.md) — what NEXUS is, what leaves the device, how to build.
 2. [`../QUICKSTART.md`](../QUICKSTART.md) — install, first launch, things to try.
 3. [`../AGENTS.md`](../AGENTS.md) — current state, pitfalls, and what has / has not been verified live.
 4. [architecture/07-central-orchestrator.md](architecture/07-central-orchestrator.md) — the turn pipeline: one owner for request lifecycle, routing, cancellation.
+   [architecture/12-command-center-alignment.md](architecture/12-command-center-alignment.md) records the current action-center contract and compound execution boundary.
 5. [memory-core/README.md](memory-core/README.md) — the on-device memory, Google sign-in and WhatsApp watcher.
 6. [research/deployment/](research/deployment/) — production-readiness paper, English-only execution plan, rollout rings runbook.
 
@@ -57,7 +60,7 @@ The project began as a "thin client + fat server" design (n8n, Ollama, faster-wh
 | MCP | [mcp/README.md](mcp/README.md) | Status page 00 is a 2026-09-18 snapshot |
 | Research | [research/README.md](research/README.md) | Many sub-folders; start with deployment/ |
 | Ghost mode | [research/ghost-mode/README.md](research/ghost-mode/README.md) and [features/70-ghost-mode-complete.md](features/70-ghost-mode-complete.md) | Desktop control program |
-| Hand mode | [features/118-hand-mode-master-compendium.md](features/118-hand-mode-master-compendium.md) | Camera pointer |
+| Hand mode | [features/118-hand-mode-master-compendium.md](features/118-hand-mode-master-compendium.md), [production refactor plan](features/150-hand-mode-production-refactor-implementation-plan.md), [research](research/hand-mode/02-production-refactor-research-2026-10-21.md) | Current interaction record; planned safety, latency, and live release gates |
 | Voice, connectivity, RAM | [features/136-voice-connectivity-and-ram-master-compendium.md](features/136-voice-connectivity-and-ram-master-compendium.md) | Owner decisions at the end |
 | Action Kernel | [features/140-agent-grade-computer-control-research-and-nexus-action-kernel-plan.md](features/140-agent-grade-computer-control-research-and-nexus-action-kernel-plan.md) | Voice file control, quarantine and undo |
 | Production readiness | [research/deployment/](research/deployment/) | SLOs, failure modes, rollout runbook |

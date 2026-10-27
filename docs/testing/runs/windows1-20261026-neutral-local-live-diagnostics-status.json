@@ -1,0 +1,33 @@
+{
+  "at": "2026-10-26T15:23:14.454Z",
+  "command": "diagnostics-status",
+  "elapsedMs": 209,
+  "value": {
+    "enabled": false,
+    "oneClip": null,
+    "clips": [
+      {
+        "session": 6,
+        "captured_at": 1792953656,
+        "raw_text": "",
+        "corrected_text": "",
+        "intent": "",
+        "decision": "pending",
+        "stats": {
+          "decoder_bias": "owner",
+          "endpoint": "silence_end",
+          "filter": "repeat_loop",
+          "owner": "verified",
+          "owner_score": 0.9539977312088012,
+          "rms_max": 0.6753188967704773,
+          "rms_mean": 0.057280286661434594,
+          "session": 6,
+          "stt_language": "en",
+          "stt_path": "groq",
+          "total_chunks": 35,
+          "voiced_chunks": 12
+        }
+      }
+    ]
+  }
+}

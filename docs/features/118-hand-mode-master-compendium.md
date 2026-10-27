@@ -3,6 +3,8 @@
 One document that ties together everything done for Hand Mode (the camera as a pointer), the intent resolver, screens and
 OS adaptation, and the touchpad-style gestures. Details live in the linked files; this is the map plus the reasoning.
 
+**Next work (plan only, 2026-10-21):** [production refactor implementation plan](150-hand-mode-production-refactor-implementation-plan.md) and its [research record](../research/hand-mode/02-production-refactor-research-2026-10-21.md). They add stale-action, camera-stall, and live release gates; they do not claim that this refactor is built.
+
 | Document | What it holds |
 |---|---|
 | [114](114-camera-attention-and-hand-gestures-plan.md) | Camera attention (Look and Talk) and gesture ideas, early plan |

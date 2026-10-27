@@ -70,7 +70,7 @@ if (!handlerBlock) {
 }
 const registered = new Set();
 for (const raw of handlerBlock[1].split("\n")) {
-  const line = raw.replace(/\/\/.*$/, "").trim();
+  const line = raw.replace(/\/\/[^\r\n]*/, "").trim();
   if (!line) continue;
   for (const part of line.split(",")) {
     const t = part.trim();

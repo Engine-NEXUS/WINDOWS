@@ -1,0 +1,23 @@
+{
+  "date": "2026-10-25",
+  "note": "Build attribution correction: the owner supplied console logs showing nexus start replaced the assessed candidate with D: release 6f4e1063a38683a3 at 16:54, followed by 3d1932b68b2c0f15 at 17:36. Earlier owner enrollment/wake/cancellation reports remain observations, but exact assessed-build attribution is unconfirmed and must be repeated. The Notepad turn at 17:37:41 was owner=unenrolled with Voice Lock off; it is excluded from locked accuracy counts. Current device setting was confirmed false; a profile file exists. Candidate 031caf5848621e18 was restored with unique logs, PID 28952. No score increase or queue advancement.",
+  "notepadTrial": {
+    "status": "excluded",
+    "verification": "unenrolled",
+    "voiceLockReadBack": false,
+    "release": "3d1932b68b2c0f15",
+    "observedDispatch": "open_app",
+    "visualActionConfirmation": "not separately supplied"
+  },
+  "otherObservedFailures": [
+    {
+      "release": "6f4e1063a38683a3",
+      "failure": "Repeated correction repeat requests for same app phrase"
+    },
+    {
+      "release": "6f4e1063a38683a3",
+      "failure": "Ghost invocation timeout, stage blackout and failed recreated-window heartbeat"
+    }
+  ],
+  "restoredSession": "windows1-20261025-enrollment-v2-restored-session.json"
+}

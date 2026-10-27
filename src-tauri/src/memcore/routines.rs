@@ -409,6 +409,11 @@ pub fn start_suggester<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(150)).await;
         loop {
+            if crate::focus_mode::paused() {
+                crate::focus_mode::defer_log("routines_suggester");
+                tokio::time::sleep(std::time::Duration::from_secs(3 * 3600)).await;
+                continue;
+            }
             if let Ok(dir) = app.path().app_data_dir() {
                 if super::enabled(&dir) && super::flag(&dir, "memcoreRoutines", true) {
                     let tz = chrono::Local::now().offset().local_minus_utc() as i64;

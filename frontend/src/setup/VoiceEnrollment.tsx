@@ -1,14 +1,14 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { ENROLLMENT_PHRASES, enrollmentDelay, withEnrollmentMicrophone } from "./enrollmentSession";
 
 /**
  * Voice Enrollment component for the NEXUS setup page.
  *
- * Records 5 audio clips of the user saying "NEXUS", extracts speaker
- * embeddings locally via the Rust backend, and saves a voice profile.
+ * Records five enrollment clips and five held-out calibration clips.
  *
  * The voice profile is stored locally and never leaves the device.
- * When enabled, only the enrolled user's voice can wake NEXUS.
+ * Voice Lock remains off until the user enables it after enrollment.
  */
 
 interface VoiceProfileStatus {
@@ -19,10 +19,10 @@ interface VoiceProfileStatus {
   updated_at: number;
 }
 
-const NUM_CLIPS = 5;
+const NUM_CLIPS = ENROLLMENT_PHRASES.length;
 const CLIP_DURATION_MS = 3000; // 3 seconds per clip
 
-export function VoiceEnrollment() {
+export function VoiceEnrollment({ onStatusChange }: { onStatusChange?: (enrolled: boolean) => void } = {}) {
   const [status, setStatus] = useState<VoiceProfileStatus | null>(null);
   const [enrolling, setEnrolling] = useState(false);
   const [currentClip, setCurrentClip] = useState(0);
@@ -34,24 +34,27 @@ export function VoiceEnrollment() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const recorderRef = useRef<ScriptProcessorNode | null>(null);
-  const clipBufferRef = useRef<Float32Array[]>([]);
+  const enrollmentRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
 
   // Load status on mount
   const refreshStatus = useCallback(async () => {
     try {
       const s = await invoke<VoiceProfileStatus>("get_voice_profile_status");
       setStatus(s);
+      onStatusChange?.(s.enrolled);
     } catch (err) {
-      console.error("Failed to get voice profile status:", err);
+      setError(`Could not read voice profile: ${String(err)}`);
+      onStatusChange?.(false);
     }
-  }, []);
+  }, [onStatusChange]);
 
   useEffect(() => {
     refreshStatus();
   }, [refreshStatus]);
 
   // Get microphone stream at 16kHz mono
-  const getStream = useCallback(async (): Promise<MediaStream> => {
+  const getStream = useCallback(async (signal: AbortSignal): Promise<MediaStream> => {
     if (mediaStreamRef.current) return mediaStreamRef.current;
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -61,13 +64,18 @@ export function VoiceEnrollment() {
         noiseSuppression: true,
       },
     });
+    if (signal.aborted) {
+      stream.getTracks().forEach((track) => track.stop());
+      signal.throwIfAborted();
+    }
     mediaStreamRef.current = stream;
     return stream;
   }, []);
 
   // Record a single clip
-  const recordClip = useCallback(async (): Promise<Float32Array> => {
-    const stream = await getStream();
+  const recordClip = useCallback(async (signal: AbortSignal): Promise<Float32Array> => {
+    const stream = await getStream(signal);
+    signal.throwIfAborted();
     const audioCtx = new AudioContext({ sampleRate: 16000, latencyHint: "interactive" });
     audioCtxRef.current = audioCtx;
 
@@ -78,7 +86,6 @@ export function VoiceEnrollment() {
     recorderRef.current = processor;
 
     const chunks: Float32Array[] = [];
-    clipBufferRef.current = chunks;
 
     processor.onaudioprocess = (e) => {
       const input = e.inputBuffer.getChannelData(0);
@@ -89,13 +96,16 @@ export function VoiceEnrollment() {
     source.connect(processor);
     processor.connect(audioCtx.destination);
 
-    // Record for CLIP_DURATION_MS
-    await new Promise((resolve) => setTimeout(resolve, CLIP_DURATION_MS));
-
-    // Cleanup
-    processor.disconnect();
-    source.disconnect();
-    await audioCtx.close();
+    try {
+      await enrollmentDelay(CLIP_DURATION_MS, signal);
+    } finally {
+      processor.onaudioprocess = null;
+      processor.disconnect();
+      source.disconnect();
+      if (audioCtx.state !== "closed") await audioCtx.close();
+      if (audioCtxRef.current === audioCtx) audioCtxRef.current = null;
+      recorderRef.current = null;
+    }
 
     // Concatenate all chunks
     const totalLen = chunks.reduce((sum, c) => sum + c.length, 0);
@@ -108,81 +118,87 @@ export function VoiceEnrollment() {
     return result;
   }, [getStream]);
 
-  // Start enrollment
+  const stopMicrophone = useCallback(async () => {
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+    recorderRef.current?.disconnect();
+    const context = audioCtxRef.current;
+    if (context && context.state !== "closed") await context.close();
+    audioCtxRef.current = null;
+  }, []);
+
+  // One native pause covers countdowns, all ten clips, and profile processing.
   const handleEnroll = useCallback(async () => {
+    if (enrollmentRef.current) return;
+    const controller = new AbortController();
+    enrollmentRef.current = controller;
+    const { signal } = controller;
     setEnrolling(true);
     setError(null);
     setSuccess(null);
     setCurrentClip(0);
 
     try {
-      const collectedClips: Float32Array[] = [];
-
-      for (let i = 0; i < NUM_CLIPS; i++) {
-        setCurrentClip(i + 1);
-
-        // Countdown 3-2-1
-        for (let c = 3; c > 0; c--) {
-          setCountdown(c);
-          await new Promise((r) => setTimeout(r, 1000));
-        }
-        setCountdown(0);
-        setRecording(true);
-
-        // Record
-        const clip = await recordClip();
-        collectedClips.push(clip);
-        setRecording(false);
-
-        // Small pause between clips
-        await new Promise((r) => setTimeout(r, 500));
+      await withEnrollmentMicrophone(signal,
+        () => invoke("pause_wakeword"),
+        async () => {
+          const collectedClips: Float32Array[] = [];
+          for (let i = 0; i < NUM_CLIPS; i++) {
+            signal.throwIfAborted();
+            setCurrentClip(i + 1);
+            for (let c = 3; c > 0; c--) {
+              setCountdown(c);
+              await enrollmentDelay(1000, signal);
+            }
+            setCountdown(0);
+            setRecording(true);
+            collectedClips.push(await recordClip(signal));
+            setRecording(false);
+            await enrollmentDelay(500, signal);
+          }
+          signal.throwIfAborted();
+          await invoke("enroll_voice", {
+            clips: collectedClips.map((clip) => Array.from(clip)),
+            threshold: null,
+          });
+        },
+        stopMicrophone,
+        () => invoke("resume_wakeword"),
+      );
+      if (mountedRef.current) {
+        setSuccess("Profile enrolled with a threshold measured from five held-out clips. Live non-owner trials are still required.");
+        await refreshStatus();
       }
-
-      // Send to backend for enrollment
-      // Convert Float32Array to regular number[] for serde
-      const clipsData = collectedClips.map((c) => Array.from(c));
-
-      await invoke("enroll_voice", {
-        clips: clipsData,
-        threshold: 0.5,
-      });
-
-      setSuccess("Voice profile enrolled successfully!");
-      await refreshStatus();
     } catch (err) {
-      setError(`Enrollment failed: ${err instanceof Error ? err.message : String(err)}`);
+      if (mountedRef.current) setError(`Enrollment failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      setEnrolling(false);
-      setRecording(false);
-      setCountdown(0);
-      // Stop the mic stream
-      if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach((t) => t.stop());
-        mediaStreamRef.current = null;
+      enrollmentRef.current = null;
+      if (mountedRef.current) {
+        setEnrolling(false);
+        setRecording(false);
+        setCountdown(0);
       }
     }
-  }, [recordClip, refreshStatus]);
+  }, [recordClip, refreshStatus, stopMicrophone]);
 
   // Delete profile
   const handleDelete = useCallback(async () => {
     try {
       await invoke("delete_voice_profile");
-      setSuccess("Voice profile deleted.");
+      setSuccess("Profile deleted. If Voice Lock was on, voice turns remain blocked until you re-enroll or turn it off in Command Hub.");
       await refreshStatus();
     } catch (err) {
       setError(`Failed to delete: ${err instanceof Error ? err.message : String(err)}`);
     }
   }, [refreshStatus]);
 
-  // Cleanup on unmount
+  // Abort waits/recording on navigation. The session's finally releases the baton.
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach((t) => t.stop());
-      }
-      if (audioCtxRef.current) {
-        audioCtxRef.current.close().catch(() => {});
-      }
+      mountedRef.current = false;
+      enrollmentRef.current?.abort(new Error("Enrollment cancelled"));
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     };
   }, []);
 
@@ -190,8 +206,10 @@ export function VoiceEnrollment() {
     <section className="setup-section">
       <h2>Voice Lock</h2>
       <p className="setup-hint">
-        Enroll your voice so only <strong>you</strong> can wake NEXUS by saying "NEXUS".
-        Your voice profile is stored locally and never leaves this device.
+        Record your voice so NEXUS can check who is speaking. The profile stays
+        encrypted on this device. Keep Voice Lock off until the live owner and
+        non-owner trials are complete. Record “Nexus”, “Hey Nexus”, and “OK Nexus”
+        as prompted. Wake listening is paused throughout enrollment.
       </p>
 
       {error && <div className="setup-error">{error}</div>}
@@ -203,7 +221,7 @@ export function VoiceEnrollment() {
           {status.enrolled ? (
             <div className="voice-status-enrolled">
               <span className="setup-badge setup-badge--ok">
-                Voice Lock Active ({status.num_clips} clips)
+                Profile enrolled ({status.num_clips} clips)
               </span>
               <button
                 className="setup-btn setup-btn--small setup-btn--danger"
@@ -215,7 +233,7 @@ export function VoiceEnrollment() {
             </div>
           ) : (
             <span className="setup-badge setup-badge--warn">
-              No voice profile — any speaker can wake NEXUS
+              No valid voice profile enrolled
             </span>
           )}
         </div>
@@ -225,7 +243,7 @@ export function VoiceEnrollment() {
       {enrolling && (
         <div className="voice-enroll-progress">
           <div className="voice-enroll-clip">
-            Clip {currentClip} of {NUM_CLIPS}
+            Clip {currentClip} of {NUM_CLIPS} — {currentClip <= 5 ? "enrollment" : "held-out calibration"}
           </div>
           {countdown > 0 ? (
             <div className="voice-enroll-countdown">
@@ -233,7 +251,7 @@ export function VoiceEnrollment() {
             </div>
           ) : recording ? (
             <div className="voice-enroll-recording">
-              🎙️ Say "NEXUS" now!
+              🎙️ Say “{ENROLLMENT_PHRASES[currentClip - 1]}” now{currentClip >= 8 ? " from a different distance" : ""}!
             </div>
           ) : (
             <div className="voice-enroll-wait">Processing...</div>

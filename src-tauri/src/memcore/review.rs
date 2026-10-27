@@ -364,6 +364,11 @@ pub fn start_reviewer<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(300)).await;
         loop {
+            if crate::focus_mode::paused() {
+                crate::focus_mode::defer_log("memcore_review");
+                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                continue;
+            }
             if let Ok(dir) = app.path().app_data_dir() {
                 if super::enabled(&dir)
                     && super::flag(&dir, "memcoreReview", false)

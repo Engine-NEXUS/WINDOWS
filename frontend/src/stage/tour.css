@@ -2,6 +2,26 @@
    Everything dynamic is class/SVG-attribute/CSSOM — the stage CSP drops
    inline `style` props. Click-through: pointer-events none throughout. */
 
+.tour-svg,
+.tour-callout {
+  --tour-accent: #2f7dff;
+  --tour-accent-2: #a855f7;
+  --tour-glow: rgba(47, 125, 255, 0.85);
+  --tour-card-bg: #10141e;
+  --tour-card-fg: #ffffff;
+  --tour-card-border: rgba(255, 255, 255, 0.2);
+}
+
+:root[data-theme="light"] .tour-svg,
+:root[data-theme="light"] .tour-callout {
+  --tour-accent: #1558d6;
+  --tour-accent-2: #7c3aed;
+  --tour-glow: rgba(47, 125, 255, 0.85);
+  --tour-card-bg: #ffffff;
+  --tour-card-fg: #111827;
+  --tour-card-border: rgba(0, 0, 0, 0.15);
+}
+
 .tour-svg {
   position: fixed;
   left: 0;
@@ -11,27 +31,350 @@
   overflow: visible;
 }
 
-.tour-ring {
-  fill: rgba(110, 170, 255, 0.1);
-  stroke: rgba(140, 200, 255, 0.95);
-  stroke-width: 2.5;
-  opacity: 0;
-  filter: drop-shadow(0 0 10px rgba(110, 170, 255, 0.75));
-  transition: opacity 180ms ease;
-}
-.tour-svg.in .tour-ring {
-  opacity: 1;
-  animation: tour-ring-pulse 1.8s ease-in-out infinite;
+/* Base annotation styling */
+.ann {
+  pointer-events: none;
 }
 
-.tour-leader {
-  fill: none;
-  stroke: rgba(140, 200, 255, 0.9);
-  stroke-width: 2;
+/* 1. Ring */
+.ann--ring,
+.tour-ring {
+  fill: color-mix(in srgb, var(--tour-accent) 6%, transparent);
+  stroke: var(--tour-accent);
+  stroke-width: 3.5;
   stroke-linecap: round;
   stroke-dasharray: 1;
   stroke-dashoffset: 1;
-  filter: drop-shadow(0 0 6px rgba(110, 170, 255, 0.6));
+  opacity: 0;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+  transition: opacity 180ms ease, stroke-dashoffset 380ms ease-out;
+}
+.tour-svg.in .ann--ring,
+.tour-svg.in .tour-ring {
+  opacity: 1;
+  stroke-dashoffset: 0;
+  animation: tour-ring-pulse 1.8s ease-in-out infinite 400ms;
+}
+
+/* 2. Underline */
+.ann--underline {
+  fill: none;
+  stroke: var(--tour-accent);
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  opacity: 0;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+  transition: stroke-dashoffset 360ms ease-out, opacity 180ms ease;
+}
+.ann--underline-glow {
+  stroke-width: 8;
+  stroke: var(--tour-glow);
+  opacity: 0;
+  filter: blur(3px);
+}
+.tour-svg.in .ann--underline {
+  opacity: 1;
+  stroke-dashoffset: 0;
+}
+.tour-svg.in .ann--underline-glow {
+  opacity: 0.45;
+  stroke-dashoffset: 0;
+}
+
+/* 3. Bracket */
+.ann--bracket {
+  fill: none;
+  stroke: var(--tour-accent);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  opacity: 0;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+  transition: stroke-dashoffset 340ms ease-out, opacity 180ms ease;
+}
+.tour-svg.in .ann--bracket {
+  opacity: 1;
+  stroke-dashoffset: 0;
+}
+
+/* 4. Circle */
+.ann--circle {
+  fill: none;
+  stroke: var(--tour-accent);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  stroke-dasharray: 1.05 0.1;
+  stroke-dashoffset: 1.05;
+  opacity: 0;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+  transition: stroke-dashoffset 420ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 180ms ease;
+}
+.tour-svg.in .ann--circle {
+  opacity: 1;
+  stroke-dashoffset: 0;
+}
+
+/* 5. Arrow */
+.ann--arrow-stem {
+  stroke: var(--tour-accent);
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  opacity: 0;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+  transition: stroke-dashoffset 300ms ease-out, opacity 160ms ease;
+}
+.ann--arrow-head {
+  fill: var(--tour-accent);
+  opacity: 0;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+  transition: opacity 160ms ease 180ms;
+}
+.ann--arrow-dot {
+  fill: var(--tour-accent);
+  opacity: 0;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: opacity 160ms ease 180ms;
+}
+.tour-svg.in .ann--arrow-stem {
+  opacity: 1;
+  stroke-dashoffset: 0;
+}
+.tour-svg.in .ann--arrow-head {
+  opacity: 1;
+}
+.tour-svg.in .ann--arrow-dot {
+  opacity: 1;
+  animation: ann-pulse 1.4s ease-in-out infinite 300ms;
+}
+
+/* 6. Highlight */
+.ann--highlight {
+  fill: color-mix(in srgb, var(--tour-accent-2) 22%, transparent);
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: left;
+  transform: scaleX(0);
+  filter: drop-shadow(0 0 8px var(--tour-glow));
+  transition: transform 320ms cubic-bezier(0.16, 1, 0.3, 1), opacity 180ms ease;
+}
+.tour-svg.in .ann--highlight {
+  opacity: 1;
+  transform: scaleX(1);
+}
+:root[data-theme="light"] .ann--highlight {
+  mix-blend-mode: multiply;
+}
+
+/* 7. Spotlight */
+.ann--spotlight {
+  fill: rgba(0, 0, 0, 0.62);
+  opacity: 0;
+  transition: opacity 280ms ease;
+}
+.ann--spotlight-ring {
+  fill: none;
+  stroke: var(--tour-accent);
+  stroke-width: 2;
+  opacity: 0;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+  transition: opacity 280ms ease;
+}
+.tour-svg.in .ann--spotlight {
+  opacity: 1;
+}
+.tour-svg.in .ann--spotlight-ring {
+  opacity: 1;
+}
+
+/* 8. Scan */
+.ann--scan-box {
+  fill: color-mix(in srgb, var(--tour-accent) 8%, transparent);
+  stroke: var(--tour-accent);
+  stroke-width: 2.5;
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+.ann--scan-line {
+  stroke: var(--tour-accent-2);
+  stroke-width: 4;
+  stroke-linecap: round;
+  opacity: 0;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+  transform-box: fill-box;
+}
+.tour-svg.in .ann--scan-box {
+  opacity: 0.8;
+}
+.tour-svg.in .ann--scan-line {
+  opacity: 1;
+  animation: ann-scan-sweep 1.4s ease-in-out 2 forwards;
+}
+
+/* 9. Lens */
+.ann--lens-connector {
+  stroke: var(--tour-accent);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+  transition: stroke-dashoffset 300ms ease;
+}
+.ann--lens-dot {
+  fill: var(--tour-accent);
+  opacity: 0;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+  transition: opacity 200ms ease;
+}
+.ann--lens-bg {
+  fill: #0c0f17;
+  stroke: none;
+}
+:root[data-theme="light"] .ann--lens-bg {
+  fill: #f3f4f6;
+}
+.ann--lens-rim-under {
+  fill: none;
+  stroke: #ffffff;
+  stroke-width: 3;
+}
+.ann--lens-rim {
+  fill: none;
+  stroke: var(--tour-accent);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+}
+.ann--lens-beam {
+  fill: none;
+  stroke: var(--tour-accent-2);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  stroke-dasharray: 0.22 0.78;
+  stroke-dashoffset: 1;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+}
+.tour-svg.in .ann--lens-connector {
+  stroke-dashoffset: 0;
+}
+.tour-svg.in .ann--lens-dot {
+  opacity: 1;
+}
+.tour-svg.in .ann--lens-beam {
+  animation: tour-travel 3.5s linear infinite;
+}
+
+/* 10. Connect */
+.ann--connect-box {
+  fill: color-mix(in srgb, var(--tour-accent) 8%, transparent);
+  stroke: var(--tour-accent);
+  stroke-width: 2.5;
+  opacity: 0;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+  transition: opacity 200ms ease;
+}
+.ann--connect-line {
+  fill: none;
+  stroke: var(--tour-accent);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+  transition: stroke-dashoffset 350ms ease;
+}
+.ann--connect-beam {
+  fill: none;
+  stroke: var(--tour-accent-2);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  stroke-dasharray: 0.18 0.82;
+  stroke-dashoffset: 1;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+}
+.ann--connect-dot {
+  fill: var(--tour-accent);
+  opacity: 0;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+  transition: opacity 200ms ease 150ms;
+}
+.tour-svg.in .ann--connect-box {
+  opacity: 1;
+}
+.tour-svg.in .ann--connect-line {
+  stroke-dashoffset: 0;
+}
+.tour-svg.in .ann--connect-beam {
+  animation: tour-travel 2s linear infinite;
+}
+.tour-svg.in .ann--connect-dot {
+  opacity: 1;
+}
+
+/* 11. Pin */
+.ann--pin {
+  opacity: 0;
+  transform-origin: 0 0;
+  transition: opacity 160ms ease;
+}
+.ann-pin-shape {
+  fill: var(--tour-card-bg);
+  stroke: var(--tour-accent);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+}
+.ann-pin-num {
+  fill: var(--tour-card-fg);
+  font-size: 12px;
+  font-weight: 700;
+  font-family: system-ui, -apple-system, sans-serif;
+  user-select: none;
+}
+.tour-svg.in .ann--pin {
+  opacity: 1;
+  animation: ann-pin-drop 380ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Smooth hand-off pointer trail */
+.ann-pointer {
+  opacity: 0;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
+  transform: translate(0, 0);
+  transition: transform 420ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 200ms ease;
+}
+.ann-pointer.in {
+  opacity: 1;
+}
+.ann-pointer.ann-pointer--go {
+  transform: translate(var(--dx, 0px), var(--dy, 0px));
+}
+.ann-pointer-dot {
+  fill: var(--tour-accent);
+}
+.ann-pointer-ring {
+  fill: color-mix(in srgb, var(--tour-accent) 22%, transparent);
+  stroke: var(--tour-accent);
+  stroke-width: 1.5;
+}
+
+/* Leader line, arrow and dot (existing) */
+.tour-leader {
+  fill: none;
+  stroke: var(--tour-accent);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
 }
 .tour-svg.in .tour-leader {
   stroke-dashoffset: 0;
@@ -39,14 +382,15 @@
 }
 
 .tour-arrow {
-  fill: rgba(150, 210, 255, 1);
+  fill: var(--tour-accent);
   opacity: 0;
-  filter: drop-shadow(0 0 6px rgba(110, 170, 255, 0.8));
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
   transition: opacity 160ms ease 200ms;
 }
 .tour-dot {
-  fill: rgba(150, 210, 255, 1);
+  fill: var(--tour-accent);
   opacity: 0;
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 1.2px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 9px var(--tour-glow));
   transition: opacity 160ms ease 200ms;
 }
 .tour-svg.in .tour-arrow,
@@ -54,6 +398,7 @@
   opacity: 1;
 }
 
+/* Callout Card (SOLID background, blur-fade entrance) */
 .tour-callout {
   position: fixed;
   left: 0;
@@ -62,21 +407,24 @@
   box-sizing: border-box;
   padding: 14px 38px 14px 52px;
   border-radius: 16px;
-  background: rgba(16, 20, 30, 0.86);
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: var(--tour-card-bg);
+  border: 1px solid var(--tour-card-border);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.18);
-  color: #fff;
+  color: var(--tour-card-fg);
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   pointer-events: none;
   z-index: 99991;
   opacity: 0;
   scale: 0.96;
-  transition: opacity 180ms ease, scale 180ms ease;
+  filter: blur(8px);
+  transition: opacity 200ms ease, scale 200ms ease, filter 200ms ease;
 }
 .tour-callout.in {
   opacity: 1;
   scale: 1;
+  filter: blur(0);
   pointer-events: auto;
+  transition: opacity 240ms ease, scale 240ms ease, filter 240ms ease;
 }
 
 .tour-callout-close {
@@ -134,30 +482,76 @@
   line-height: 1.25;
   margin-bottom: 4px;
 }
+.tour-callout-intent {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--tour-accent);
+  background: rgba(140, 200, 255, 0.12);
+  border: 1px solid rgba(140, 200, 255, 0.25);
+  border-radius: 6px;
+  padding: 2px 7px;
+  margin-bottom: 6px;
+}
 .tour-callout-text {
   font-size: 13.5px;
   line-height: 1.4;
   color: rgba(255, 255, 255, 0.88);
 }
 
+.tour-callout-progress {
+  display: flex;
+  gap: 4px;
+  margin-top: 10px;
+  width: 100%;
+}
+.tour-progress-seg {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.18);
+  transition: background 200ms ease;
+}
+.tour-progress-seg.active {
+  background: var(--tour-accent);
+}
+
+/* Animations */
 @keyframes tour-ring-pulse {
   0%, 100% { stroke-opacity: 1; }
   50% { stroke-opacity: 0.55; }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .tour-svg.in .tour-ring { animation: none; }
-  .tour-callout, .tour-ring, .tour-arrow, .tour-dot { transition: none; }
-  .tour-svg.in .tour-leader { transition: none; }
-  .tour-callout { scale: 1; }
+@keyframes tour-travel {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
 }
 
-/* Light theme: the tour callout becomes a light card (ring/leader keep the blue accent). */
+@keyframes ann-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.4); }
+}
+
+@keyframes ann-scan-sweep {
+  0% { transform: translateY(0); opacity: 0.7; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { transform: translateY(var(--scan-dist, 60px)); opacity: 0.8; }
+}
+
+@keyframes ann-pin-drop {
+  0% { transform: translateY(-28px) scale(0.6); opacity: 0; }
+  100% { transform: translateY(0) scale(1); opacity: 1; }
+}
+
+/* Light theme overrides */
 :root[data-theme="light"] .tour-callout {
-  background: rgba(250, 250, 250, 0.96);
+  background: #ffffff;
   border-color: rgba(60, 60, 67, 0.22);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
-  color: #1c1c1e;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15);
+  color: #111827;
 }
 :root[data-theme="light"] .tour-callout-text {
   color: rgba(28, 28, 30, 0.78);
@@ -166,6 +560,89 @@
   opacity: 0.55;
 }
 :root[data-theme="light"] .tour-callout-num {
-  background: rgba(10, 132, 214, 0.14);
-  border-color: rgba(10, 132, 214, 0.6);
+  background: rgba(21, 88, 214, 0.14);
+  border-color: rgba(21, 88, 214, 0.6);
+  color: #1558d6;
+}
+:root[data-theme="light"] .tour-callout-intent {
+  background: rgba(21, 88, 214, 0.08);
+  border-color: rgba(21, 88, 214, 0.2);
+}
+:root[data-theme="light"] .tour-callout-close {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.15);
+  color: rgba(0, 0, 0, 0.6);
+}
+:root[data-theme="light"] .tour-progress-seg {
+  background: rgba(0, 0, 0, 0.12);
+}
+:root[data-theme="light"] .tour-progress-seg.active {
+  background: var(--tour-accent);
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .tour-svg.in .tour-ring,
+  .tour-svg.in .ann--ring,
+  .tour-svg.in .ann--arrow-dot,
+  .tour-svg.in .ann--scan-line,
+  .tour-svg.in .ann--lens-beam,
+  .tour-svg.in .ann--connect-beam,
+  .tour-svg.in .ann--pin {
+    animation: none !important;
+  }
+  .ann, .ann--underline, .ann--bracket, .ann--circle, .ann--arrow-stem,
+  .ann--highlight, .ann--spotlight, .ann--spotlight-ring, .ann--scan-box,
+  .ann--lens-connector, .ann--lens-rim-under, .ann--connect-line, .ann--connect-box {
+    stroke-dashoffset: 0 !important;
+    transform: none !important;
+    opacity: 1 !important;
+    transition: none !important;
+  }
+  .ann-pointer {
+    display: none !important;
+    transition: none !important;
+  }
+  .tour-callout, .tour-ring, .tour-arrow, .tour-dot {
+    transition: none !important;
+    scale: 1 !important;
+    filter: none !important;
+  }
+  .tour-svg.in .tour-leader {
+    transition: none !important;
+    stroke-dashoffset: 0 !important;
+  }
+}
+
+/* High contrast */
+@media (forced-colors: active) {
+  .ann--ring, .ann--underline, .ann--bracket, .ann--circle, .ann--arrow-stem,
+  .ann--arrow-head, .ann--spotlight-ring, .ann--scan-box, .ann--scan-line,
+  .ann--lens-rim, .ann--lens-rim-under, .ann--lens-connector, .ann--connect-box, .ann--connect-line,
+  .ann-pin-shape, .tour-ring, .tour-leader, .tour-arrow {
+    stroke: Highlight;
+  }
+  .ann-pin-num, .ann--arrow-dot, .ann--lens-dot, .tour-dot, .ann-pointer-dot {
+    fill: CanvasText;
+  }
+  .ann-pointer-ring {
+    stroke: Highlight;
+    fill: transparent;
+  }
+  .tour-callout {
+    border: 2px solid CanvasText;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .tour-ring, .tour-leader, .ann--ring { stroke: #ffffff; filter: none; }
+  .tour-callout { border: 2px solid #ffffff; background: #10141e; }
+  :root[data-theme="light"] .tour-ring,
+  :root[data-theme="light"] .tour-leader,
+  :root[data-theme="light"] .ann--ring { stroke: #003a60; filter: none; }
+  :root[data-theme="light"] .tour-callout {
+    border: 2px solid #10141e;
+    background: #ffffff;
+    color: #10141e;
+  }
 }

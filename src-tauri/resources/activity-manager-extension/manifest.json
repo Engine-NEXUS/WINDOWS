@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Nexus Activity Manager",
+  "version": "0.1.0",
+  "description": "Optionally sends the focused website domain to Nexus on this computer.",
+  "incognito": "not_allowed",
+  "permissions": ["tabs", "storage", "alarms"],
+  "host_permissions": ["http://127.0.0.1:39221/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "Nexus Activity Manager" }
+}

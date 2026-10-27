@@ -16,6 +16,9 @@ const CALENDAR_DEFAULT: &str = "https://www.googleapis.com/calendar/v3/calendars
 /// Test hook: point the Gmail/Calendar calls at a local mock server.
 #[cfg(test)]
 pub static TEST_BASE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// Tests that point `TEST_BASE` at a mock take this guard first, so suites in different modules cannot swap the base under each other.
+#[cfg(test)]
+pub static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn gmail_base() -> String {
     #[cfg(test)]

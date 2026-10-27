@@ -713,6 +713,19 @@ fn skip_report(r: &SkipReason) -> Report {
     Report { spoken: r.spoken(), skipped: true, committed: false, pushed: false, pr_opened: false, pr_url: None }
 }
 
+/// What NEXUS says about a decision (before anything runs, or instead of running).
+pub fn describe(decision: &Decision) -> String {
+    match decision {
+        Decision::Skip(r) => r.spoken(),
+        Decision::Run(s) => format!(
+            "Committing {} to a new branch {}, then opening a draft pull request against {}.",
+            plural(s.paths.len()),
+            s.branch,
+            s.base
+        ),
+    }
+}
+
 /// `pr` is None when no PR was attempted (the git side failed, or `origin` is not a GitHub repository).
 pub fn describe_outcome(o: &GitOutcome, pr: Option<&PrOutcome>) -> Report {
     let n = plural(o.file_count);
@@ -752,11 +765,15 @@ pub fn describe_outcome(o: &GitOutcome, pr: Option<&PrOutcome>) -> Report {
 /// thread. `worker_url` / `user_id` are the same values the GitHub commands use elsewhere.
 pub async fn run_followup(runner: Arc<dyn GitRunner>, step: FollowUp, verdict: Verdict, worker_url: &str, user_id: &str) -> Report {
     let r2 = runner.clone();
-    let joined = tokio::task::spawn_blocking(move || match prepare(r2.as_ref(), &step, &verdict) {
-        Decision::Skip(reason) => Err(reason),
-        Decision::Run(steps) => {
-            let outcome = execute_git(r2.as_ref(), &steps);
-            Ok((steps, outcome))
+    let joined = tokio::task::spawn_blocking(move || {
+        let decision = prepare(r2.as_ref(), &step, &verdict);
+        tracing::info!("agent-followup: {}", describe(&decision));
+        match decision {
+            Decision::Skip(reason) => Err(reason),
+            Decision::Run(steps) => {
+                let outcome = execute_git(r2.as_ref(), &steps);
+                Ok((steps, outcome))
+            }
         }
     })
     .await;

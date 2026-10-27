@@ -39,6 +39,29 @@ pub fn shared_vision_client() -> reqwest::Client {
     SHARED_VISION_CLIENT.clone()
 }
 
+/// Per-request timeout used only by the narrated screen tour: a tour answer
+/// needs 6-20 s, so the shared 4 s client made the tour impossible. Click
+/// grounding keeps `shared_vision_client` (fast 4 s).
+pub const TOUR_REQUEST_TIMEOUT_SECS: u64 = 20;
+
+// Tour-only pooled client — built exactly like `SHARED_VISION_CLIENT`
+// (same keep-alive/connect settings) but with the long per-request timeout
+// a whole model ladder needs.
+static TOUR_VISION_CLIENT: once_cell::sync::Lazy<reqwest::Client> =
+    once_cell::sync::Lazy::new(|| {
+        reqwest::Client::builder()
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .connect_timeout(std::time::Duration::from_secs(3))
+            .timeout(std::time::Duration::from_secs(TOUR_REQUEST_TIMEOUT_SECS))
+            .build()
+            .unwrap_or_default()
+    });
+
+pub fn tour_vision_client() -> reqwest::Client {
+    TOUR_VISION_CLIENT.clone()
+}
+
 // ─── Feature 98 P6: perceptual frame-hash result cache ──────────────────
 //
 // Repeating a visual query on an unchanged screen (identical capture hash
@@ -223,21 +246,66 @@ pub fn capture_plain_jpeg_base64_w(max_w: u32) -> Option<(String, i32, i32)> {
     Some((b64, mw, mh))
 }
 
+/// Capture one screen rectangle (physical px) as a native-resolution RGBA image.
+/// No resizing, no JPEG encoding. Returns the raw pixels for sharp crops.
+pub fn capture_region_rgba(x: i32, y: i32, w: i32, h: i32) -> Option<image::RgbaImage> {
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let bgra = capture_bgra(x, y, w, h)?;
+    let img = image::RgbaImage::from_raw(w as u32, h as u32, bgra_to_rgba(bgra))?;
+    Some(img)
+}
+
+/// Windows: the GDI capture in `sidebar_backdrop`. macOS: the Phase 2 v0
+/// `screencapture` path in `screen_capture_mac`. Elsewhere: None — every
+/// caller degrades to None safely.
+fn capture_bgra(x: i32, y: i32, w: i32, h: i32) -> Option<Vec<u8>> {
+    #[cfg(target_os = "windows")]
+    {
+        crate::sidebar_backdrop::capture_region_bgra_public(x, y, w, h)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        crate::screen_capture_mac::capture_bgra(x, y, w, h)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = (x, y, w, h);
+        None
+    }
+}
+
 /// Capture one screen rectangle (physical px), downscale to `max_w`, JPEG,
 /// base64. The narrated tour sends only the page-content region (no browser
 /// tabs / URL bar / taskbar) at higher effective resolution. None on failure.
 pub fn capture_region_jpeg_base64(x: i32, y: i32, w: i32, h: i32, max_w: u32) -> Option<String> {
-    if w <= 0 || h <= 0 {
-        return None;
-    }
-    let bgra = crate::sidebar_backdrop::capture_region_bgra_public(x, y, w, h)?;
-    let img = image::RgbaImage::from_raw(w as u32, h as u32, bgra_to_rgba(bgra))?;
-    let scale = (max_w as f32 / w as f32).min(1.0);
+    let img = capture_region_rgba(x, y, w, h)?;
+    jpeg_base64_from_rgba(&img, max_w)
+}
+
+/// One capture, two products: the downscaled JPEG that goes to the vision
+/// model and the native-resolution pixels used for sharp sidebar crops.
+pub fn capture_region_pair(
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    max_w: u32,
+) -> Option<(String, image::RgbaImage)> {
+    let img = capture_region_rgba(x, y, w, h)?;
+    let b64 = jpeg_base64_from_rgba(&img, max_w)?;
+    Some((b64, img))
+}
+
+fn jpeg_base64_from_rgba(img: &image::RgbaImage, max_w: u32) -> Option<String> {
+    let (fw, fh) = img.dimensions();
+    let scale = (max_w as f32 / fw as f32).min(1.0);
     let (tw, th) = (
-        ((w as f32 * scale) as u32).max(1),
-        ((h as f32 * scale) as u32).max(1),
+        ((fw as f32 * scale) as u32).max(1),
+        ((fh as f32 * scale) as u32).max(1),
     );
-    let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
+    let small = image::imageops::resize(img, tw, th, image::imageops::FilterType::Triangle);
     let mut jpeg = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 70)
         .encode_image(&image::DynamicImage::ImageRgba8(small))
@@ -313,7 +381,7 @@ pub fn capture_gridded_jpeg_base64_w(max_w: u32) -> Option<(String, i32, i32)> {
     if mw <= 0 || mh <= 0 {
         return None;
     }
-    let bgra = crate::sidebar_backdrop::capture_region_bgra_public(0, 0, mw, mh)?;
+    let bgra = capture_bgra(0, 0, mw, mh)?;
     let img = image::RgbaImage::from_raw(mw as u32, mh as u32, bgra_to_rgba(bgra))?;
     let scale = (max_w as f32 / mw as f32).min(1.0);
     let (tw, th) = (
@@ -334,9 +402,32 @@ pub fn capture_gridded_jpeg_base64_w(max_w: u32) -> Option<(String, i32, i32)> {
     ))
 }
 
-/// Standard-capture wrapper (1024px).
-pub fn capture_gridded_jpeg_base64() -> Option<(String, i32, i32)> {
-    capture_gridded_jpeg_base64_w(VISION_MAX_W)
+/// Spatial analysis of an explicit, verified foreground region. The returned
+/// coordinates are relative to that region, never the full monitor.
+pub fn capture_gridded_region_jpeg_base64_w(
+    region: crate::screen_context::Region,
+    max_w: u32,
+) -> Option<String> {
+    if region.w <= 0 || region.h <= 0 {
+        return None;
+    }
+    let bgra = capture_bgra(
+        region.x, region.y, region.w, region.h,
+    )?;
+    let img = image::RgbaImage::from_raw(
+        region.w as u32, region.h as u32, bgra_to_rgba(bgra),
+    )?;
+    let scale = (max_w as f32 / region.w as f32).min(1.0);
+    let tw = ((region.w as f32 * scale) as u32).max(1);
+    let th = ((region.h as f32 * scale) as u32).max(1);
+    let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
+    let gridded = overlay_axis_grid(small);
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 60)
+        .encode_image(&image::DynamicImage::ImageRgba8(gridded))
+        .ok()?;
+    use base64::Engine;
+    Some(base64::engine::general_purpose::STANDARD.encode(jpeg))
 }
 
 /// Ask Groq vision for element coordinates. Tries each vision model in
@@ -351,7 +442,7 @@ pub async fn locate_via_vision(
     if description.trim().is_empty() || api_key.is_empty() {
         return None;
     }
-    let (b64, w, h) = capture_gridded_jpeg_base64()
+    let (b64, w, h) = capture_gridded_jpeg_base64_w(VISION_MAX_W)
         .or_else(capture_primary_jpeg_base64)?;
     let prompt = build_locate_prompt(description);
     let data_uri = format!("data:image/jpeg;base64,{b64}");
@@ -994,6 +1085,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tour_client_timeout_is_the_locked_20s_cap() {
+        // The tour runs its own pooled client with the long cap;
+        // the shared client stays at the fast 4 s for click grounding.
+        assert_eq!(TOUR_REQUEST_TIMEOUT_SECS, 20);
+        assert!(
+            std::time::Duration::from_secs(TOUR_REQUEST_TIMEOUT_SECS)
+                > std::time::Duration::from_secs(4)
+        );
+    }
+
+    #[test]
     fn test_best_computer_use_resolution() {
         // 16:9 monitor (1920x1080) -> (1366, 768)
         assert_eq!(best_computer_use_resolution(1920, 1080), (1366, 768));
@@ -1224,6 +1326,339 @@ mod tests {
         assert!(!parsed.is_email_visible);
         assert_eq!(parsed.current_deadline, None);
     }
+
+    /// Check whether a predicted point lies inside a rectangle expanded by `margin` pixels on each side.
+    fn point_in_expanded_rect(px: i32, py: i32, rx: i32, ry: i32, rw: i32, rh: i32, margin: i32) -> bool {
+        let min_x = rx - margin;
+        let max_x = rx + rw + margin;
+        let min_y = ry - margin;
+        let max_y = ry + rh + margin;
+        px >= min_x && px <= max_x && py >= min_y && py <= max_y
+    }
+
+    /// Compute the median of a slice of floats. Returns None if the slice is empty.
+    fn median(values: &[f64]) -> Option<f64> {
+        if values.is_empty() {
+            return None;
+        }
+        let mut sorted = values.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mid = sorted.len() / 2;
+        if sorted.len() % 2 == 1 {
+            Some(sorted[mid])
+        } else {
+            Some((sorted[mid - 1] + sorted[mid]) / 2.0)
+        }
+    }
+
+    #[test]
+    fn test_point_in_expanded_rect_inside() {
+        // Control rect at (100, 100) with size 50x30, expanded by 8px -> [92, 158] x [92, 138]
+        assert!(point_in_expanded_rect(125, 115, 100, 100, 50, 30, 8));
+        // Corners of unexpanded rect
+        assert!(point_in_expanded_rect(100, 100, 100, 100, 50, 30, 8));
+        assert!(point_in_expanded_rect(150, 130, 100, 100, 50, 30, 8));
+        // Point in the expanded margin (between 0 and 8px away)
+        assert!(point_in_expanded_rect(95, 100, 100, 100, 50, 30, 8));
+    }
+
+    #[test]
+    fn test_point_in_expanded_rect_outside() {
+        // [92, 158] x [92, 138]
+        assert!(!point_in_expanded_rect(91, 115, 100, 100, 50, 30, 8)); // 1px left of expanded border
+        assert!(!point_in_expanded_rect(159, 115, 100, 100, 50, 30, 8)); // 1px right of expanded border
+        assert!(!point_in_expanded_rect(125, 91, 100, 100, 50, 30, 8)); // 1px above expanded border
+        assert!(!point_in_expanded_rect(125, 139, 100, 100, 50, 30, 8)); // 1px below expanded border
+        assert!(!point_in_expanded_rect(0, 0, 100, 100, 50, 30, 8));
+    }
+
+    #[test]
+    fn test_point_in_expanded_rect_border() {
+        // [92, 158] x [92, 138]
+        assert!(point_in_expanded_rect(92, 115, 100, 100, 50, 30, 8)); // left border
+        assert!(point_in_expanded_rect(158, 115, 100, 100, 50, 30, 8)); // right border
+        assert!(point_in_expanded_rect(125, 92, 100, 100, 50, 30, 8)); // top border
+        assert!(point_in_expanded_rect(125, 138, 100, 100, 50, 30, 8)); // bottom border
+        assert!(point_in_expanded_rect(92, 92, 100, 100, 50, 30, 8)); // top-left corner
+        assert!(point_in_expanded_rect(158, 138, 100, 100, 50, 30, 8)); // bottom-right corner
+    }
+
+    #[test]
+    fn test_point_in_expanded_rect_negative() {
+        // Rect at (-100, -80) size 40x30, margin 8 -> [-108, -52] x [-88, -42]
+        assert!(point_in_expanded_rect(-80, -65, -100, -80, 40, 30, 8)); // inside
+        assert!(point_in_expanded_rect(-108, -65, -100, -80, 40, 30, 8)); // left border
+        assert!(point_in_expanded_rect(-52, -42, -100, -80, 40, 30, 8)); // bottom-right corner
+        assert!(!point_in_expanded_rect(-109, -65, -100, -80, 40, 30, 8)); // outside left
+        assert!(!point_in_expanded_rect(-51, -65, -100, -80, 40, 30, 8)); // outside right
+    }
+
+    #[test]
+    fn test_median_empty_list() {
+        let empty: [f64; 0] = [];
+        assert_eq!(median(&empty), None);
+    }
+
+    #[test]
+    fn test_median_odd_even_and_negative() {
+        assert_eq!(median(&[42.0]), Some(42.0));
+        assert_eq!(median(&[10.0, 50.0, 20.0]), Some(20.0));
+        assert_eq!(median(&[10.0, 20.0, 30.0, 40.0]), Some(25.0));
+        assert_eq!(median(&[-30.0, -10.0, -20.0]), Some(-20.0));
+    }
+
+    #[test]
+    #[ignore = "calls the real vision providers (uses a little free quota) and opens Notepad; run by hand"]
+    #[cfg(target_os = "windows")]
+    fn live_vision_accuracy_against_uia_ground_truth() {
+        use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+
+        struct WindowGuard {
+            hwnd: isize,
+            child: Option<std::process::Child>,
+        }
+
+        impl Drop for WindowGuard {
+            fn drop(&mut self) {
+                if self.hwnd != 0 {
+                    // SAFETY: posting WM_CLOSE to a window opened by this test.
+                    unsafe {
+                        let _ = PostMessageW(HWND(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                    }
+                }
+                if let Some(mut child) = self.child.take() {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+
+        // 1. Open Notepad and bring it to the foreground
+        let known_hwnds: std::collections::HashSet<isize> = crate::window_tile::list_top_windows()
+            .into_iter()
+            .filter(|w| w.exe == "notepad.exe" || w.title.to_lowercase().contains("notepad"))
+            .map(|w| w.hwnd)
+            .collect();
+
+        let child = match std::process::Command::new("notepad.exe").spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                println!("[PROOF] SKIPPED: failed to spawn notepad.exe: {e}");
+                return;
+            }
+        };
+
+        let start = std::time::Instant::now();
+        let mut notepad_hwnd: Option<isize> = None;
+        while start.elapsed() < std::time::Duration::from_secs(5) {
+            let wins = crate::window_tile::list_top_windows();
+            if let Some(w) = wins.iter().find(|w| {
+                (w.exe == "notepad.exe" || w.title.to_lowercase().contains("notepad"))
+                    && !known_hwnds.contains(&w.hwnd)
+            }) {
+                notepad_hwnd = Some(w.hwnd);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+
+        if notepad_hwnd.is_none() {
+            let wins = crate::window_tile::list_top_windows();
+            if let Some(w) = wins.iter().find(|w| w.exe == "notepad.exe" || w.title.to_lowercase().contains("notepad")) {
+                notepad_hwnd = Some(w.hwnd);
+            }
+        }
+
+        let Some(hwnd) = notepad_hwnd else {
+            println!("[PROOF] SKIPPED: notepad window not found within 5 s");
+            return;
+        };
+
+        let _guard = WindowGuard {
+            hwnd,
+            child: Some(child),
+        };
+
+        crate::live::commands::window::focus_window(HWND(hwnd));
+        let _ = crate::live::commands::window::wait_and_focus_app("Notepad", 2000);
+        std::thread::sleep(std::time::Duration::from_millis(700));
+
+        // 2. Enumerate actionable controls from UI Automation
+        let actionables = crate::screen::list_actionables();
+        let (mw, mh) = crate::screen::primary_monitor_size().unwrap_or((1920, 1080));
+
+        let mut seen_names = std::collections::HashSet::new();
+        let mut primary_controls: Vec<crate::screen::UiElement> = Vec::new();
+        let mut caption_controls: Vec<crate::screen::UiElement> = Vec::new();
+
+        for el in actionables {
+            let name_trimmed = el.name.trim();
+            let char_count = name_trimmed.chars().count();
+            if char_count < 3 || char_count > 40 {
+                continue;
+            }
+            if el.w < 12 || el.h < 12 {
+                continue;
+            }
+            if el.x < 0 || el.y < 0 || (el.x + el.w) > mw || (el.y + el.h) > mh {
+                continue;
+            }
+            let lower_name = name_trimmed.to_lowercase();
+            if !seen_names.insert(lower_name.clone()) {
+                continue;
+            }
+
+            // Skip document / text-edit area
+            let is_doc_or_edit = lower_name.contains("text editor")
+                || lower_name.contains("document")
+                || lower_name == "rich edit control"
+                || (el.kind.eq_ignore_ascii_case("edit") && (el.h > 80 || el.w > 300));
+            if is_doc_or_edit {
+                continue;
+            }
+
+            let is_caption = matches!(lower_name.as_str(), "minimize" | "maximize" | "restore" | "close");
+            if is_caption {
+                caption_controls.push(el);
+            } else {
+                primary_controls.push(el);
+            }
+        }
+
+        let mut selected_controls: Vec<crate::screen::UiElement> = Vec::new();
+        for el in primary_controls {
+            if selected_controls.len() >= 8 {
+                break;
+            }
+            selected_controls.push(el);
+        }
+        if selected_controls.len() < 8 {
+            for el in caption_controls {
+                if selected_controls.len() >= 8 {
+                    break;
+                }
+                selected_controls.push(el);
+            }
+        }
+
+        if selected_controls.len() < 3 {
+            println!("[PROOF] SKIPPED: only {} usable controls", selected_controls.len());
+            return;
+        }
+
+        // 3. API keys and configuration
+        let groq_key = crate::auth_vault::get_api_key("groq").unwrap_or_default();
+        let gemini_key = crate::auth_vault::get_api_key("gemini").unwrap_or_default();
+        if groq_key.trim().is_empty() && gemini_key.trim().is_empty() {
+            println!("[PROOF] SKIPPED: no vision key");
+            return;
+        }
+
+        let temp_usage_dir = std::env::temp_dir().join(format!("nexus_vision_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_usage_dir);
+        struct TempUsageGuard(std::path::PathBuf);
+        impl Drop for TempUsageGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _temp_guard = TempUsageGuard(temp_usage_dir.clone());
+
+        let client = shared_vision_client();
+        let order_setting = if gemini_key.trim().is_empty() && !groq_key.trim().is_empty() {
+            "groq"
+        } else {
+            "auto"
+        };
+
+        // 4. Measure accuracy for each selected control
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(r) => r,
+            Err(e) => {
+                println!("[PROOF] SKIPPED: failed to create tokio runtime: {e}");
+                return;
+            }
+        };
+
+        struct Meas {
+            dist: i64,
+            hit: bool,
+            ms: u64,
+        }
+
+        let (measurements, answered_any) = rt.block_on(async {
+            let mut records: Vec<Meas> = Vec::new();
+            let mut answered = false;
+
+            for (idx, el) in selected_controls.iter().enumerate() {
+                if idx > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                }
+
+                let description = format!("the {} {}", el.name, el.kind);
+                let t0 = std::time::Instant::now();
+                let target = locate_with_fallback(
+                    &description,
+                    &groq_key,
+                    &gemini_key,
+                    order_setting,
+                    &temp_usage_dir,
+                    &client,
+                )
+                .await;
+                let elapsed_ms = t0.elapsed().as_millis() as u64;
+
+                let cx = el.x + el.w / 2;
+                let cy = el.y + el.h / 2;
+
+                let (pred_x, pred_y, dist, hit, provider) = if let Some(t) = target {
+                    answered = true;
+                    let px = t.el.x;
+                    let py = t.el.y;
+                    let dx = (px - cx) as f64;
+                    let dy = (py - cy) as f64;
+                    let d = (dx * dx + dy * dy).sqrt().round() as i64;
+                    let is_hit = point_in_expanded_rect(px, py, el.x, el.y, el.w, el.h, 8);
+                    (px, py, d, is_hit, if t.fell_back { "fallback" } else { "primary" }.to_string())
+                } else {
+                    (-1, -1, -1, false, "none".to_string())
+                };
+
+                println!(
+                    "[PROOF] vision name=\"{}\" kind={} uia=({},{},{},{}) pred=({},{}) dist={} hit={} ms={} provider={}",
+                    el.name, el.kind, el.x, el.y, el.w, el.h, pred_x, pred_y, dist, hit, elapsed_ms, provider
+                );
+
+                records.push(Meas {
+                    dist,
+                    hit,
+                    ms: elapsed_ms,
+                });
+            }
+
+            (records, answered)
+        });
+
+        // 5. Final summary
+        let hits = measurements.iter().filter(|m| m.hit).count();
+        let total = measurements.len();
+        let dist_vals: Vec<f64> = measurements.iter().filter(|m| m.dist >= 0).map(|m| m.dist as f64).collect();
+        let med_dist = median(&dist_vals).map(|d| d.round() as i64).unwrap_or(0);
+        let ms_vals: Vec<f64> = measurements.iter().map(|m| m.ms as f64).collect();
+        let med_ms = median(&ms_vals).map(|m| m.round() as u64).unwrap_or(0);
+
+        println!(
+            "[PROOF] vision hit_rate={}/{} median_dist_px={} median_ms={}",
+            hits, total, med_dist, med_ms
+        );
+
+        assert!(
+            answered_any,
+            "no vision provider answered any control request (all returned None)"
+        );
+    }
 }
 
 // ─── Semantic Document & Email Extraction ────────────────────────────
@@ -1327,6 +1762,14 @@ pub struct SpatialAnalysisItem {
     pub summary: String,
     #[serde(default)]
     pub details: Vec<SpatialDetailRow>,
+    /// Small crop from the same captured frame, kept in memory for the sidebar.
+    /// Never persisted or fetched from a remote image URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_data_url: Option<String>,
+    /// Brand logo (small PNG data URL) for a recognisable product/app item,
+    /// resolved by `brand_logo`. Never the screenshot itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo_data_url: Option<String>,
 }
 
 fn default_confidence() -> f32 {
@@ -1341,6 +1784,199 @@ pub struct SpatialAnalysisPayload {
     pub overview: String,
     pub items: Vec<SpatialAnalysisItem>,
     pub provider_used: String, // "gemini" | "groq"
+    /// The analysed frame, displayed above the cards so users can verify the
+    /// review belongs to the page they were looking at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_image_data_url: Option<String>,
+}
+
+/// Attach bounded visual crops to the cards using the exact frame that was
+/// analysed. A second screen capture could show a different window and attach
+/// the wrong person's image to a card. Crops live only in the current payload.
+pub fn attach_spatial_thumbnails(payload: &mut SpatialAnalysisPayload, jpeg_b64: &str) -> usize {
+    use base64::Engine;
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(jpeg_b64) else {
+        return 0;
+    };
+    if bytes.len() > 4_000_000 {
+        return 0;
+    }
+    let Ok(frame) = image::load_from_memory(&bytes) else {
+        return 0;
+    };
+    let frame = frame.to_rgb8();
+    let (fw, fh) = frame.dimensions();
+    if fw == 0 || fh == 0 {
+        return 0;
+    }
+    payload.screen_image_data_url = Some(format!("data:image/jpeg;base64,{jpeg_b64}"));
+    let mut attached = 0;
+    for item in &mut payload.items {
+        let b = &item.box_2d;
+        let x0 = (fw as u64 * b.xmin as u64 / 1000).min(fw as u64) as u32;
+        let y0 = (fh as u64 * b.ymin as u64 / 1000).min(fh as u64) as u32;
+        let x1 = (fw as u64 * b.xmax as u64 / 1000).min(fw as u64) as u32;
+        let y1 = (fh as u64 * b.ymax as u64 / 1000).min(fh as u64) as u32;
+        if x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+        let crop = image::imageops::crop_imm(&frame, x0, y0, x1 - x0, y1 - y0).to_image();
+        let scale = (360.0 / crop.width() as f32)
+            .min(240.0 / crop.height() as f32)
+            .min(1.0);
+        let tw = ((crop.width() as f32 * scale) as u32).max(1);
+        let th = ((crop.height() as f32 * scale) as u32).max(1);
+        let thumb = image::imageops::resize(&crop, tw, th, image::imageops::FilterType::Triangle);
+        let mut jpeg = Vec::new();
+        if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 70)
+            .encode_image(&image::DynamicImage::ImageRgb8(thumb))
+            .is_ok()
+            && jpeg.len() <= 100_000
+        {
+            item.image_data_url = Some(format!(
+                "data:image/jpeg;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(jpeg)
+            ));
+            attached += 1;
+        }
+    }
+    attached
+}
+
+/// Compute the padded crop rectangle in physical pixels from a normalized box.
+/// `pad_frac` is applied on each side (e.g. 0.12 = 12%). Returns None for
+/// degenerate or zero-area boxes, or if the frame has zero dimensions. Pure.
+pub fn padded_crop_rect(
+    fw: u32,
+    fh: u32,
+    b: &SpatialBoundingBox,
+    pad_frac: f32,
+) -> Option<(u32, u32, u32, u32)> {
+    if fw == 0 || fh == 0 {
+        return None;
+    }
+    let x0 = (fw as f32 * b.xmin as f32 / 1000.0).round() as i32;
+    let y0 = (fh as f32 * b.ymin as f32 / 1000.0).round() as i32;
+    let x1 = (fw as f32 * b.xmax as f32 / 1000.0).round() as i32;
+    let y1 = (fh as f32 * b.ymax as f32 / 1000.0).round() as i32;
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let w = x1 - x0;
+    let h = y1 - y0;
+    let pad_w = (w as f32 * pad_frac).round() as i32;
+    let pad_h = (h as f32 * pad_frac).round() as i32;
+    let x0 = (x0 - pad_w).clamp(0, fw as i32 - 1) as u32;
+    let y0 = (y0 - pad_h).clamp(0, fh as i32 - 1) as u32;
+    let x1 = (x1 + pad_w).clamp(1, fw as i32) as u32;
+    let y1 = (y1 + pad_h).clamp(1, fh as i32) as u32;
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some((x0, y0, x1 - x0, y1 - y0))
+}
+
+/// Compute final dimensions for a crop:
+/// - If crop width < `min_upscale_below`, upscale by 2x with Lanczos3.
+/// - Then scale down (never up) to fit within `max_w` x `max_h`, preserving aspect.
+/// Returns (width, height). Never returns 0 dimensions. Pure.
+pub fn fit_dims(
+    w: u32,
+    h: u32,
+    min_upscale_below: u32,
+    max_w: u32,
+    max_h: u32,
+) -> (u32, u32) {
+    let (mut tw, mut th) = (w, h);
+    if w < min_upscale_below {
+        tw = w.saturating_mul(2);
+        th = h.saturating_mul(2);
+    }
+    let scale_w = max_w as f32 / tw as f32;
+    let scale_h = max_h as f32 / th as f32;
+    let scale = scale_w.min(scale_h).min(1.0);
+    let final_w = ((tw as f32 * scale) as u32).max(1);
+    let final_h = ((th as f32 * scale) as u32).max(1);
+    (final_w, final_h)
+}
+
+/// Attach sharp crops from a native-resolution capture, plus a downscaled
+/// overview screenshot. The old `attach_spatial_thumbnails` is kept for
+/// other callers.
+pub fn attach_spatial_thumbnails_native(
+    payload: &mut SpatialAnalysisPayload,
+    native: &image::RgbaImage,
+    overview_b64_jpeg: &str,
+) -> usize {
+    use base64::Engine;
+    let (fw, fh) = native.dimensions();
+    if fw == 0 || fh == 0 {
+        return 0;
+    }
+
+    // Screenshot at the top: downscale native to width <= 1400, JPEG q85.
+    // If encoding fails or exceeds 900_000 bytes, fall back to overview_b64_jpeg.
+    let scale_overview = (1400.0 / fw as f32).min(1.0);
+    let (ow, oh) = (
+        ((fw as f32 * scale_overview) as u32).max(1),
+        ((fh as f32 * scale_overview) as u32).max(1),
+    );
+    let overview_img = image::imageops::resize(native, ow, oh, image::imageops::FilterType::Triangle);
+    let mut overview_jpeg = Vec::new();
+    let overview_data_url = if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut overview_jpeg, 85)
+        .encode_image(&image::DynamicImage::ImageRgba8(overview_img))
+        .is_ok()
+        && overview_jpeg.len() <= 900_000
+    {
+        format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&overview_jpeg)
+        )
+    } else {
+        format!("data:image/jpeg;base64,{overview_b64_jpeg}")
+    };
+    payload.screen_image_data_url = Some(overview_data_url);
+
+    let mut attached = 0;
+    for item in &mut payload.items {
+        let b = &item.box_2d;
+        let Some((cx, cy, cw, ch)) = padded_crop_rect(fw, fh, b, 0.12) else {
+            continue;
+        };
+        let crop = image::imageops::crop_imm(native, cx, cy, cw, ch).to_image();
+        let (mut tw, mut th) = fit_dims(crop.width(), crop.height(), 320, 640, 480);
+        let mut needs_upscale = crop.width() < 320;
+        let mut quality = 88;
+        for attempt in 0..3 {
+            let thumb = if needs_upscale {
+                image::imageops::resize(&crop, tw, th, image::imageops::FilterType::Lanczos3)
+            } else {
+                image::imageops::resize(&crop, tw, th, image::imageops::FilterType::Triangle)
+            };
+            let mut jpeg = Vec::new();
+            if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, quality)
+                .encode_image(&image::DynamicImage::ImageRgba8(thumb))
+                .is_ok()
+                && jpeg.len() <= 120_000
+            {
+                item.image_data_url = Some(format!(
+                    "data:image/jpeg;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(&jpeg)
+                ));
+                attached += 1;
+                break;
+            }
+            if attempt < 2 {
+                // Next retry: halve dimensions, lower quality
+                tw = (tw / 2).max(1);
+                th = (th / 2).max(1);
+                needs_upscale = false; // after halving, use Triangle
+                quality = 65;
+            }
+        }
+        // If still not encoded after retries, skip this item (leave image_data_url as None)
+    }
+    attached
 }
 
 /// Max items rendered on the stage/sidebar (clutter + token budget).
@@ -1359,15 +1995,15 @@ User request: \"{}\"\n\n\
 Decompose the visible content into up to {} distinct visual elements worth analysing. \
 For EACH element reply with one item containing:\n\
 - id: sequential 1-based number\n\
-- label: specific name (e.g. \"MrBeast\", \"Elon Musk\", \"Revenue Chart\", \"Submit Button\")\n\
+- label: a screen-grounded name (e.g. \"Revenue Chart\", \"Submit Button\", \"Person 1\")\n\
 - category: one of [object, ui_element, text_block, chart, diagram, code, product, food, person, other]\n\
 - box_2d: [ymin, xmin, ymax, xmax] integers 0-1000 framing the element tightly\n\
 - confidence: 0.0-1.0\n\
 - summary: one rich sentence of what it is / its value\n\
 - details: 2-5 rows of deep specifics ({{\"title\": ..., \"value\": ...}}) — nutrition/specs/text snippets/meaning, whatever fits the content\n\n\
-If a person is a recognized public figure, celebrity, YouTuber, streamer, influencer, \
-politician, or athlete, name them by their full recognized name (e.g. \"Marques Brownlee\", \
-\"Joe Rogan\", \"Narendra Modi\") and state their role/title in the summary.\n\n\
+For a person, describe only visible attributes and actions. Never infer identity from a face. \
+Use a name only when visible text explicitly associates it with that person; attribute any \
+research claim to its source and say when the association is uncertain.\n\n\
 Also reply with a top-level title (one line describing the screen) and overview (1-2 sentences).\n\
 Reply with ONLY a raw JSON object:\n\
 {{\"title\": ..., \"overview\": ..., \"items\": [ ... ]}}",
@@ -1509,6 +2145,8 @@ pub fn parse_spatial_json(text: &str) -> Option<SpatialAnalysisPayload> {
                 .trim()
                 .to_string(),
             details,
+            image_data_url: None,
+            logo_data_url: None,
         });
     }
     if items.is_empty() {
@@ -1529,6 +2167,7 @@ pub fn parse_spatial_json(text: &str) -> Option<SpatialAnalysisPayload> {
             .to_string(),
         items,
         provider_used: String::new(), // set by the engine layer
+        screen_image_data_url: None,
     })
 }
 
@@ -1881,7 +2520,27 @@ pub(crate) async fn gemini_json_with_image<T>(
 pub async fn analyze_screen_spatial<R: Runtime>(
     app: &tauri::AppHandle<R>,
     user_prompt: &str,
+    target: &crate::screen_context::ScreenContext,
     on_captured: impl FnOnce() + Send,
+) -> Result<SpatialAnalysisPayload, SpatialError> {
+    let (sw, sh) = crate::screen::primary_monitor_size().ok_or(SpatialError::CaptureFailed)?;
+    if !crate::screen_context::foreground_still_matches(target, sw, sh).await {
+        return Err(SpatialError::CaptureFailed);
+    }
+    let region = target.region;
+    let Some(b64) = capture_gridded_region_jpeg_base64_w(region, VISION_MAX_W) else {
+        return Err(SpatialError::CaptureFailed);
+    };
+    // The screenshot is taken: only now is it safe to speak ("Analyzing…" and
+    // its word-by-word caption are stage overlays that BitBlt would photograph).
+    on_captured();
+    analyze_screen_spatial_image(app, user_prompt, &b64, true).await
+}
+
+/// Analyse a frame already captured by the orchestrator. This lets a saved
+/// foreground review use one clean frame for its hero image and item crops.
+pub async fn analyze_screen_spatial_image<R: Runtime>(
+    app: &tauri::AppHandle<R>, user_prompt: &str, b64: &str, gridded: bool,
 ) -> Result<SpatialAnalysisPayload, SpatialError> {
     let groq_key = crate::commands::read_groq_api_key(app);
     let gemini_key = crate::commands::read_api_key(app, "gemini");
@@ -1892,12 +2551,6 @@ pub async fn analyze_screen_spatial<R: Runtime>(
         .path()
         .app_data_dir()
         .map_err(|_: tauri::Error| SpatialError::CaptureFailed)?;
-    let Some((b64, _, _)) = capture_gridded_jpeg_base64() else {
-        return Err(SpatialError::CaptureFailed);
-    };
-    // The screenshot is taken: only now is it safe to speak ("Analyzing…" and
-    // its word-by-word caption are stage overlays that BitBlt would photograph).
-    on_captured();
     // Feature 98 P6: identical screen within 60s replays the cached answer
     // (<30ms, zero quota burn).
     let hash = frame_hash(&b64);
@@ -1905,7 +2558,14 @@ pub async fn analyze_screen_spatial<R: Runtime>(
         tracing::info!("vision: spatial cache hit (unchanged screen) — 0 quota");
         return Ok(cached);
     }
-    let prompt = build_spatial_prompt(user_prompt);
+    let prompt = if gridded {
+        build_spatial_prompt(user_prompt)
+    } else {
+        build_spatial_prompt(user_prompt).replace(
+            "A faint red grid is overlaid on the screenshot every 100 units, edges running 0 (top/left) to 1000 (bottom/right) — read positions off the grid.",
+            "The screenshot has no grid. Return positions normalized to 0-1000 from top-left to bottom-right.",
+        )
+    };
     // Feature 98: pooled shared client (Phase 5) + clamped timeout 20s → 4s.
     let client = shared_vision_client();
 
@@ -1948,8 +2608,9 @@ pub async fn analyze_screen_spatial<R: Runtime>(
             }
         };
         match step {
-            SpatialStep::Found(payload) => {
+            SpatialStep::Found(mut payload) => {
                 record_use(&usage_dir, label);
+                attach_spatial_thumbnails(&mut payload, &b64);
                 frame_cache_put(hash, payload.clone());
                 tracing::info!(
                     "vision: spatial analysis via {} ({} items)",
@@ -1979,6 +2640,35 @@ pub async fn analyze_screen_spatial<R: Runtime>(
 #[cfg(test)]
 mod spatial_tests {
     use super::*;
+
+    #[test]
+    fn thumbnails_are_cropped_from_the_analysed_frame() {
+        use base64::Engine;
+        let mut frame = image::RgbImage::new(100, 50);
+        for (x, _, pixel) in frame.enumerate_pixels_mut() {
+            *pixel = if x < 50 { image::Rgb([240, 10, 10]) } else { image::Rgb([10, 10, 240]) };
+        }
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .encode_image(&image::DynamicImage::ImageRgb8(frame))
+            .unwrap();
+        let source = base64::engine::general_purpose::STANDARD.encode(jpeg);
+        let mut payload = parse_spatial_json(
+            r#"{"items":[{"label":"Left","box_2d":[0,0,1000,400]},{"label":"Right","box_2d":[0,600,1000,1000]}]}"#,
+        ).unwrap();
+        assert_eq!(attach_spatial_thumbnails(&mut payload, &source), 2);
+        let crop_bytes = |index: usize| {
+            let uri = payload.items[index].image_data_url.as_ref().unwrap();
+            assert!(uri.starts_with("data:image/jpeg;base64,"));
+            let encoded = uri.strip_prefix("data:image/jpeg;base64,").unwrap();
+            base64::engine::general_purpose::STANDARD.decode(encoded).unwrap()
+        };
+        let left = image::load_from_memory(&crop_bytes(0)).unwrap().to_rgb8();
+        let right = image::load_from_memory(&crop_bytes(1)).unwrap().to_rgb8();
+        assert!(left.get_pixel(10, 10)[0] > left.get_pixel(10, 10)[2]);
+        assert!(right.get_pixel(10, 10)[2] > right.get_pixel(10, 10)[0]);
+        assert_eq!(attach_spatial_thumbnails(&mut payload, "invalid"), 0);
+    }
 
     #[test]
     fn test_has_usable_vision_key_follows_provider_order() {
@@ -2183,6 +2873,227 @@ mod spatial_tests {
         assert_eq!(spatial_provider_order(""), vec!["gemini"]);
         assert_eq!(spatial_provider_order("GROQ"), vec!["groq"]);
         assert_eq!(spatial_provider_order("gemini"), vec!["gemini"]);
+    }
+
+    #[test]
+    fn test_padded_crop_rect_normal() {
+        let b = SpatialBoundingBox { ymin: 200, xmin: 300, ymax: 600, xmax: 700 };
+        // 1000x1000 frame, box at (300,200)-(700,600) = 400x400, 12% pad = 48 each side
+        let rect = padded_crop_rect(1000, 1000, &b, 0.12).unwrap();
+        assert_eq!(rect, (252, 152, 496, 496)); // clamped to frame
+    }
+
+    #[test]
+    fn test_padded_crop_rect_edge_clamped() {
+        let b = SpatialBoundingBox { ymin: 0, xmin: 0, ymax: 100, xmax: 100 };
+        // At top-left edge, padding should clamp to 0
+        let rect = padded_crop_rect(1000, 1000, &b, 0.12).unwrap();
+        assert_eq!(rect.0, 0); // x0 clamped
+        assert_eq!(rect.1, 0); // y0 clamped
+        assert!(rect.2 > 100); // width expanded by padding on right/bottom
+        assert!(rect.3 > 100);
+    }
+
+    #[test]
+    fn test_padded_crop_rect_zero_area_none() {
+        let b = SpatialBoundingBox { ymin: 100, xmin: 100, ymax: 100, xmax: 100 };
+        assert!(padded_crop_rect(1000, 1000, &b, 0.12).is_none());
+    }
+
+    #[test]
+    fn test_padded_crop_rect_inverted_none() {
+        let b = SpatialBoundingBox { ymin: 500, xmin: 500, ymax: 100, xmax: 100 };
+        assert!(padded_crop_rect(1000, 1000, &b, 0.12).is_none());
+    }
+
+    #[test]
+    fn test_padded_crop_rect_zero_frame_none() {
+        let b = SpatialBoundingBox { ymin: 100, xmin: 100, ymax: 200, xmax: 200 };
+        assert!(padded_crop_rect(0, 1000, &b, 0.12).is_none());
+        assert!(padded_crop_rect(1000, 0, &b, 0.12).is_none());
+    }
+
+    #[test]
+    fn test_fit_dims_upscale() {
+        // 100x60 crop -> upscaled x2 = 200x120
+        assert_eq!(fit_dims(100, 60, 320, 640, 480), (200, 120));
+    }
+
+    #[test]
+    fn test_fit_dims_no_upscale() {
+        // 400x300 stays (above 320, fits in 640x480)
+        assert_eq!(fit_dims(400, 300, 320, 640, 480), (400, 300));
+    }
+
+    #[test]
+    fn test_fit_dims_downscale() {
+        // 2000x1000 -> 640x320 (aspect preserved)
+        assert_eq!(fit_dims(2000, 1000, 320, 640, 480), (640, 320));
+    }
+
+    #[test]
+    fn test_fit_dims_aspect_preserved() {
+        // 500x100: width >= 320 so no upscale, fits in 640x480 so stays 500x100
+        let (w, h) = fit_dims(500, 100, 320, 640, 480);
+        assert_eq!((w, h), (500, 100));
+        // Aspect ratio preserved: 500/100 = 5
+        assert!((w as f32 / h as f32 - 5.0).abs() < 0.01);
+        // Test a case that actually downscales: 2000x1000 -> 640x320 (aspect 2:1)
+        let (w2, h2) = fit_dims(2000, 1000, 320, 640, 480);
+        assert_eq!((w2, h2), (640, 320));
+        assert!((w2 as f32 / h2 as f32 - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_fit_dims_never_zero() {
+        assert_eq!(fit_dims(1, 1, 320, 640, 480), (2, 2));
+        assert_eq!(fit_dims(10, 1, 320, 640, 480), (20, 2));
+    }
+
+    #[test]
+    fn test_attach_spatial_thumbnails_native_sharp_crops() {
+        use base64::Engine;
+        // Synthetic 2000x1200 gradient image
+        let mut native = image::RgbaImage::new(2000, 1200);
+        for (x, y, pixel) in native.enumerate_pixels_mut() {
+            let r = ((x as f32 / 2000.0) * 255.0) as u8;
+            let g = ((y as f32 / 1200.0) * 255.0) as u8;
+            *pixel = image::Rgba([r, g, 128, 255]);
+        }
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .encode_image(&image::DynamicImage::ImageRgba8(native.clone()))
+            .unwrap();
+        let overview_b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg);
+
+        let mut payload = parse_spatial_json(
+            r#"{"items":[{"label":"Left","box_2d":[0,0,1000,500]},{"label":"Right","box_2d":[0,500,1000,1000]}]}"#,
+        ).unwrap();
+        let attached = attach_spatial_thumbnails_native(&mut payload, &native, &overview_b64);
+        assert_eq!(attached, 2);
+        for item in &payload.items {
+            let uri = item.image_data_url.as_ref().unwrap();
+            assert!(uri.starts_with("data:image/jpeg;base64,"));
+            let encoded = uri.strip_prefix("data:image/jpeg;base64,").unwrap();
+            let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+            assert!(bytes.len() <= 120_000, "thumb too large: {} bytes", bytes.len());
+            let img = image::load_from_memory(&bytes).unwrap();
+            assert!(img.width() <= 640, "thumb width {} > 640", img.width());
+        }
+        // screen_image_data_url width == 1400
+        let screen_uri = payload.screen_image_data_url.as_ref().unwrap();
+        let screen_encoded = screen_uri.strip_prefix("data:image/jpeg;base64,").unwrap();
+        let screen_bytes = base64::engine::general_purpose::STANDARD.decode(screen_encoded).unwrap();
+        let screen_img = image::load_from_memory(&screen_bytes).unwrap();
+        assert_eq!(screen_img.width(), 1400);
+    }
+
+    #[test]
+    fn test_attach_spatial_thumbnails_native_degenerate_skipped() {
+        use base64::Engine;
+        let native = image::RgbaImage::new(2000, 1200);
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .encode_image(&image::DynamicImage::ImageRgba8(native.clone()))
+            .unwrap();
+        let overview_b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg);
+
+        // One valid, one degenerate (zero-area) box
+        let mut payload = parse_spatial_json(
+            r#"{"items":[{"label":"Valid","box_2d":[100,100,300,300]},{"label":"Degenerate","box_2d":[500,500,500,500]}]}"#,
+        ).unwrap();
+        let attached = attach_spatial_thumbnails_native(&mut payload, &native, &overview_b64);
+        assert_eq!(attached, 1);
+        assert!(payload.items[0].image_data_url.is_some());
+        // Degenerate item should not have image_data_url
+    }
+
+    #[test]
+    fn test_attach_spatial_thumbnails_native_sharpness_vs_old() {
+        use base64::Engine;
+        // Build a 2000x1200 image with a fine 2-px black/white checker
+        // inside one item's box (center region ~400x400 px at native)
+        let mut native = image::RgbaImage::new(2000, 1200);
+        for (x, y, pixel) in native.enumerate_pixels_mut() {
+            // Checker pattern in center region (600-1000, 300-700)
+            if x >= 600 && x < 1000 && y >= 300 && y < 700 {
+                let checker = ((x / 2) + (y / 2)) % 2;
+                *pixel = if checker == 0 {
+                    image::Rgba([0, 0, 0, 255])
+                } else {
+                    image::Rgba([255, 255, 255, 255])
+                };
+            } else {
+                *pixel = image::Rgba([128, 128, 128, 255]);
+            }
+        }
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .encode_image(&image::DynamicImage::ImageRgba8(native.clone()))
+            .unwrap();
+        let overview_b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg);
+
+        // Native function
+        let mut payload_native = parse_spatial_json(
+            r#"{"items":[{"label":"Checker","box_2d":[300,150,583,500]}]}"#,
+        ).unwrap();
+        attach_spatial_thumbnails_native(&mut payload_native, &native, &overview_b64);
+        let native_uri = payload_native.items[0].image_data_url.as_ref().unwrap();
+        let native_encoded = native_uri.strip_prefix("data:image/jpeg;base64,").unwrap();
+        let native_bytes = base64::engine::general_purpose::STANDARD.decode(native_encoded).unwrap();
+        let native_img = image::load_from_memory(&native_bytes).unwrap().to_luma8();
+
+        // Old function: downscale to 768px first, then crop
+        let scale_768 = 768.0 / 2000.0;
+        let (tw, th) = ((2000.0 * scale_768) as u32, (1200.0 * scale_768) as u32);
+        let small = image::imageops::resize(&native, tw, th, image::imageops::FilterType::Triangle);
+        let mut small_jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut small_jpeg, 70)
+            .encode_image(&image::DynamicImage::ImageRgba8(small))
+            .unwrap();
+        let small_b64 = base64::engine::general_purpose::STANDARD.encode(&small_jpeg);
+        let mut payload_old = parse_spatial_json(
+            r#"{"items":[{"label":"Checker","box_2d":[300,150,583,500]}]}"#,
+        ).unwrap();
+        attach_spatial_thumbnails(&mut payload_old, &small_b64);
+        let old_uri = payload_old.items[0].image_data_url.as_ref().unwrap();
+        let old_encoded = old_uri.strip_prefix("data:image/jpeg;base64,").unwrap();
+        let old_bytes = base64::engine::general_purpose::STANDARD.decode(old_encoded).unwrap();
+        let old_img = image::load_from_memory(&old_bytes).unwrap().to_luma8();
+
+        // Compute mean absolute neighbour-pixel difference (local contrast)
+        fn mean_neighbour_diff(img: &image::GrayImage) -> f32 {
+            let (w, h) = img.dimensions();
+            if w < 2 || h < 2 {
+                return 0.0;
+            }
+            let mut sum = 0u64;
+            let mut count = 0u64;
+            for y in 0..h {
+                for x in 0..w - 1 {
+                    let diff = (img.get_pixel(x, y)[0] as i16 - img.get_pixel(x + 1, y)[0] as i16).abs() as u64;
+                    sum += diff;
+                    count += 1;
+                }
+            }
+            for y in 0..h - 1 {
+                for x in 0..w {
+                    let diff = (img.get_pixel(x, y)[0] as i16 - img.get_pixel(x, y + 1)[0] as i16).abs() as u64;
+                    sum += diff;
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                return 0.0;
+            }
+            (sum as f32 / count as f32) / 255.0
+        }
+
+        let native_contrast = mean_neighbour_diff(&native_img);
+        let old_contrast = mean_neighbour_diff(&old_img);
+        // Native must have clearly higher contrast (> 20/255 = ~0.078 more)
+        assert!(native_contrast > old_contrast + 20.0 / 255.0,
+            "native contrast {} not > old contrast {} + 0.078", native_contrast, old_contrast);
     }
 }
 

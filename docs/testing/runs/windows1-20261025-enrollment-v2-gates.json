@@ -1,0 +1,65 @@
+{
+  "sourceRevision": "50dcda219018d3bbfff8be388b77610bee135749",
+  "sourceHash": "086e534ae829a7abbdf1e793f584297e81b8f2c8c16625bcfeee03ea505572c4",
+  "native": {
+    "libraryPassed": 2524,
+    "integrationPassed": 19,
+    "failures": 0,
+    "ignored": 38
+  },
+  "frontend": {
+    "testsPassed": 656,
+    "typecheck": "pass",
+    "build": "pass"
+  },
+  "worker": {
+    "testsPassed": 145,
+    "typecheck": "pass"
+  },
+  "python": {
+    "testsPassed": 48
+  },
+  "nlu": {
+    "status": "pass",
+    "evaluationRows": 512,
+    "sources": 8
+  },
+  "provenanceRegression": "pass",
+  "safetyMutations": {
+    "killed": 15,
+    "total": 15
+  },
+  "repositoryGuards": "pass",
+  "deadCode": {
+    "status": "pass",
+    "knownFindings": 148,
+    "newFindings": 0
+  },
+  "isolatedLatency": {
+    "status": "pass",
+    "bestOfThreeMs": 1193,
+    "budgetMs": 5000,
+    "otherBuildActive": true
+  },
+  "windowsKeyringPrerequisite": {
+    "status": "pass",
+    "separateProcesses": 2,
+    "probeDeleted": true,
+    "ownerAccuracyProof": false
+  },
+  "freshRelease": {
+    "status": "pass",
+    "identity": "031caf5848621e18",
+    "provenanceBeforeAndAfterStartup": "pass",
+    "processId": 28248,
+    "restoredProcessId": 28952
+  },
+  "ownerReenrollment": {
+    "status": "pass: owner reports ten clips without waking NEXUS",
+    "accuracyTrialsCounted": 0,
+    "normalWakeRecovery": "pass: owner reports all three wake normally with Voice Lock off",
+    "cancellationRecovery": "pass: countdown and recording navigation; owner report",
+    "buildAttribution": "unconfirmed; repeat required"
+  },
+  "productionReady": false
+}

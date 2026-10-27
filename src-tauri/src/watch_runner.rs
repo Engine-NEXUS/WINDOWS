@@ -883,7 +883,7 @@ async fn tidy_up<R: Runtime>(app: AppHandle<R>) {
     }
     if !notes.is_empty() {
         notes.dedup();
-        crate::proactive_policy::submit(&app, format!("watchpower_tidy_{}", agent_hooks::now_ms()), notes.join(" "), crate::google::types::AlertUrgency::Medium);
+        crate::proactive_policy::submit_event(&app, format!("watchpower_tidy_{}", agent_hooks::now_ms()), notes.join(" "), crate::google::types::AlertUrgency::Medium, Some("watchpower:tidy".into()));
     }
 
     // the screen goes off only when nobody is using the laptop

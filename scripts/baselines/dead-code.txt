@@ -36,11 +36,11 @@ command_center.rs: field transcript
 command_center.rs: function has_pending_compound
 command_center.rs: function read_checkpoint
 command_center.rs: function sweep_stale_checkpoints
+commands.rs: function parse_settings_content
 dyn_windows.rs: field hidden_title
 ghost.rs: function point_at_target
 ghost.rs: function point_off
 ghostwriter.rs: field channel
-github_cmd.rs: method required_scopes
 google/auth.rs: associated function is_authenticated
 google/auth.rs: constant GOOGLE_SCOPES
 google/calendar.rs: associated function calculate_free_busy_buffer
@@ -88,14 +88,10 @@ lazy_brain.rs: function is_brain_running
 lazy_brain.rs: function kill_brain
 live/commands/mouse.rs: function double_click_at
 live/commands/mouse.rs: function drag_to
-live/commands/mouse.rs: function scroll
 live/commands/whatsapp.rs: function full_send_flow
 live/mod.rs: enum LiveIntent
 live/state.rs: method app_context
 live/state.rs: method has_pending_text
-luminance_probe.rs: associated item mode
-luminance_probe.rs: associated item new
-luminance_probe.rs: method as_str
 mcp_client.rs: field id
 meeting_detect.rs: method set_paused
 memcore/mailwatch.rs: field 0
@@ -135,8 +131,6 @@ tts_kokoro.rs: constant MAX_PHONEME_CHARS
 tts_kokoro.rs: function unknown_phonemes
 tts_network.rs: constant NETWORK_CHECK_TIMEOUT
 turn_detect.rs: function should_end_turn
-vision.rs: field fell_back
-vision.rs: field raced
 vision.rs: function best_computer_use_resolution
 vision.rs: function build_email_extraction_prompt
 vision.rs: function denormalize_computer_use_coord
@@ -146,5 +140,9 @@ vision.rs: function resolve_named_target
 vision.rs: struct ScreenEmailContext
 voice_catalog.rs: function find_by_kokoro_voice
 voice_catalog.rs: function read_manifest
+voice_profile.rs: method acceptance_threshold
+voice_profile.rs: method delete
+voice_profile.rs: method implicit_enroll
+voice_profile.rs: method num_embeddings
 wakeword_oww.rs: function verify_transcript
 youtube_center.rs: constant ACTIONS

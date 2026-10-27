@@ -7,6 +7,7 @@ import { ArchitectApp } from "../architect/ArchitectApp";
 import { PrListApp } from "../pr-list/PrListApp";
 import { SpatialView } from "./SpatialDashboard";
 import { AnnotateView } from "./AnnotatePalette";
+import { StackView } from "./StackView";
 import "./unified.css";
 
 /**
@@ -21,17 +22,31 @@ import "./unified.css";
  * stores survive across mounts; display:none keeps remount flicker at
  * zero and makes switches feel instant).
  */
-export type SidebarView = "assistant" | "settings" | "architect" | "pr-list" | "spatial" | "annotate";
+export type SidebarView = "assistant" | "settings" | "architect" | "pr-list" | "spatial" | "annotate" | "stack";
 
-const VIEWS: SidebarView[] = ["assistant", "settings", "architect", "pr-list", "spatial", "annotate"];
+const VIEWS: SidebarView[] = ["assistant", "settings", "architect", "pr-list", "spatial", "annotate", "stack"];
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
 }
 
 export function UnifiedSidebar() {
-  const [view, setView] = useState<SidebarView>("assistant");
-  const [mounted, setMounted] = useState<Set<SidebarView>>(() => new Set<SidebarView>(["assistant"]));
+  const [view, setView] = useState<SidebarView>(() => {
+    if (!isTauri()) {
+      const p = new URLSearchParams(window.location.search).get("view") as SidebarView;
+      if (p && VIEWS.includes(p)) return p;
+      return "settings"; // In browser dev, default to Command Hub!
+    }
+    return "assistant";
+  });
+  const [mounted, setMounted] = useState<Set<SidebarView>>(() => {
+    if (!isTauri()) {
+      const p = new URLSearchParams(window.location.search).get("view") as SidebarView;
+      if (p && VIEWS.includes(p)) return new Set<SidebarView>([p]);
+      return new Set<SidebarView>(["settings"]);
+    }
+    return new Set<SidebarView>(["assistant"]);
+  });
 
   // Rust emits sidebar:set_view { view, dock } on every show / navigation.
   // FRESH-WINDOW RACE: that event can fire before this component mounts —
@@ -128,6 +143,11 @@ export function UnifiedSidebar() {
         {mounted.has("annotate") && (
           <div className="unified-view" style={{ display: view === "annotate" ? "flex" : "none" }}>
             <AnnotateView onDock={dock} />
+          </div>
+        )}
+        {mounted.has("stack") && (
+          <div className="unified-view" style={{ display: view === "stack" ? "flex" : "none" }}>
+            <StackView onDock={dock} />
           </div>
         )}
       </div>

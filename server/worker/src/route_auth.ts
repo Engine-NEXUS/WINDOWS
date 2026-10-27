@@ -18,7 +18,7 @@
  * through a single-use server-side state nonce instead.
  */
 
-import { resolveProfile, type IdentityStore } from "./identity";
+import { resolveProfile, sha256Hex, timingSafeEqualHex, type IdentityStore } from "./identity";
 
 export const PROFILE_HEADER = "X-Nexus-Profile-Id";
 export const DEVICE_HEADER = "X-Nexus-Device-Id";
@@ -26,6 +26,42 @@ export const DEVICE_HEADER = "X-Nexus-Device-Id";
 export type CallerAuth =
   | { ok: true; profileId: string; deviceId: string; ownerKey: string }
   | { ok: false; status: 401 | 403 | 503; code: string };
+
+/**
+ * Device Links authenticate an installed device, not its Workers AI grant.
+ * A pending profile can link laptops, while a revoked device cannot. This
+ * intentionally does not call resolveProfile, whose strict entitlement gate
+ * is for cloud AI and credential routes.
+ */
+export async function authenticateLinkedDevice(
+  store: IdentityStore,
+  request: Request,
+): Promise<{ ok: true; profileId: string; deviceId: string } | { ok: false; status: 401 | 403 | 503; code: string }> {
+  const profileId = request.headers.get(PROFILE_HEADER)?.trim() || "";
+  const deviceId = request.headers.get(DEVICE_HEADER)?.trim() || "";
+  const bearer = request.headers.get("Authorization") || "";
+  if (!profileId || !deviceId || !bearer.startsWith("Bearer ")) {
+    return { ok: false, status: 401, code: "auth_required" };
+  }
+  const token = bearer.slice(7);
+  if (!token || token.length > 512) return { ok: false, status: 401, code: "bad_token" };
+  try {
+    const profile = await store.getProfile(profileId);
+    if (!profile) return { ok: false, status: 401, code: "unknown_profile" };
+    if (profile.status === "revoked" || profile.status === "suspended") {
+      return { ok: false, status: 403, code: profile.status };
+    }
+    const device = await store.getDeviceForProfile(deviceId, profileId);
+    if (!device) return { ok: false, status: 401, code: "unknown_device" };
+    if (device.status !== "active") return { ok: false, status: 403, code: "revoked" };
+    if (!timingSafeEqualHex(await sha256Hex(token), device.device_token_hash)) {
+      return { ok: false, status: 401, code: "bad_token" };
+    }
+    return { ok: true, profileId, deviceId };
+  } catch {
+    return { ok: false, status: 503, code: "lookup_failed" };
+  }
+}
 
 /**
  * Authenticate the caller as an approved device and decide which key owns the data.

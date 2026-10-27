@@ -88,15 +88,7 @@ pub fn load_credentials(dir: &Path) -> Option<WorkerCredentials> {
 /// The app data dir without an `AppHandle`, derived from the environment like
 /// `nlu_update::downloaded_model_dir_envless` (used by callers that have no handle).
 pub fn app_data_dir_envless() -> Option<PathBuf> {
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        return Some(PathBuf::from(appdata).join("com.nexus.assistant"));
-    }
-    let home = std::env::var("HOME").ok()?;
-    #[cfg(target_os = "macos")]
-    let base = PathBuf::from(home).join("Library").join("Application Support");
-    #[cfg(not(target_os = "macos"))]
-    let base = PathBuf::from(home).join(".config");
-    Some(base.join("com.nexus.assistant"))
+    crate::app_dirs::nexus_data_dir()
 }
 
 /// Credentials without an `AppHandle`.
@@ -149,19 +141,19 @@ pub fn describe_denial(status: u16, body: &str) -> String {
 
 // ---- Frontend bridge ----
 
-/// Only these Worker paths may be reached from the web view.
-const ALLOWED_PREFIX: &str = "/oauth/";
+/// Only these Worker paths may be reached from the web view. The SMS gateway
+/// and signaling upgrade have separate, non-WebView authentication paths.
+const LINK_ROUTES: &[&str] = &[
+    "/v1/links/phone", "/v1/links/phone/start", "/v1/links/phone/confirm",
+    "/v1/links/request", "/v1/links/pending", "/v1/links/accept",
+    "/v1/links/reject",
+    "/v1/links/list", "/v1/links/revoke",
+];
 
 /// Validate and normalise a path the web view asks for. Strips `user_id` (the Worker
 /// derives the owner from the device credentials) and refuses anything that could
 /// escape `/oauth/` or point at another host.
 pub fn sanitize_proxy_path(path: &str) -> Result<String, String> {
-    if !path.starts_with(ALLOWED_PREFIX) {
-        return Err("worker_request only reaches /oauth/ routes".into());
-    }
-    if path.starts_with("/oauth/callback") {
-        return Err("/oauth/callback is browser-only".into());
-    }
     if path.contains("..")
         || path.contains("//")
         || path.contains('\\')
@@ -174,6 +166,11 @@ pub fn sanitize_proxy_path(path: &str) -> Result<String, String> {
         Some((r, q)) => (r, Some(q)),
         None => (path, None),
     };
+    if !((route.starts_with("/oauth/") && route != "/oauth/callback")
+        || LINK_ROUTES.contains(&route))
+    {
+        return Err("worker_request only reaches approved OAuth and Device Links routes".into());
+    }
     let kept: Vec<&str> = query
         .map(|q| {
             q.split('&')
@@ -303,6 +300,9 @@ mod tests {
             "//evil.example/oauth/x",
             "/oauth/../v1/admin/profiles/list",
             "/oauth/callback?code=1",
+            "/v1/links/sms/next",
+            "/v1/links/signal/abc",
+            "/v1/links/phone/start/extra",
             "/oauth/status#x",
             "/oauth/sta tus",
             "/oauth/status\r\nX: y",
@@ -310,6 +310,13 @@ mod tests {
             "",
         ] {
             assert!(sanitize_proxy_path(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn proxy_allows_only_device_link_control_routes() {
+        for path in LINK_ROUTES {
+            assert_eq!(sanitize_proxy_path(path).unwrap(), *path);
         }
     }
 

@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { resolve } from "path";
+import { rmSync } from "fs";
 
 // Tauri expects assets at fixed paths; clear base, default port 5173.
 //
@@ -24,8 +25,23 @@ import { resolve } from "path";
 // Silero VAD files (model + worklet) live in public/ so Vite serves them
 // as-is without any transformation. ONNX WASM runtime is loaded from CDN
 // to avoid the known Vite+onnxruntime-web dynamic import incompatibility.
+// Design-reference files that live in public/ for dev use but must not be embedded in the release
+// executable (nothing in src/ loads them).
+const DEV_ONLY_PUBLIC_FILES = ["v2.mp4"];
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    {
+      name: "drop-dev-only-public-files",
+      apply: "build",
+      closeBundle() {
+        for (const name of DEV_ONLY_PUBLIC_FILES) {
+          rmSync(resolve(__dirname, "dist", name), { force: true });
+        }
+      },
+    },
+  ],
   base: "./",
   clearScreen: false,
   server: {
@@ -50,9 +66,9 @@ export default defineConfig({
         companionHud: resolve(__dirname, "companion-hud.html"),
         orbStudio: resolve(__dirname, "orb-studio.html"),
         hand: resolve(__dirname, "hand.html"),
-        captionShowcase: resolve(__dirname, "caption-showcase.html"),
-        pebbleShowcase: resolve(__dirname, "pebble-showcase.html"),
-        captionTuner: resolve(__dirname, "caption-tuner.html"),
+        // caption-showcase / pebble-showcase / caption-tuner are design playgrounds: the Vite dev
+        // server still serves them on demand, but they are not shipped in the release bundle.
+        githubDashboard: resolve(__dirname, "github-dashboard.html"),
       },
     },
   },

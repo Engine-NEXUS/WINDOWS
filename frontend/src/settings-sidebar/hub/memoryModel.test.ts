@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { leaveBySummary, activitySummary, ageLabel, categoryLabel, fmtDays, fmtSlotTime, fmtTime, groupRows, keyLabel, mailSummary, selftestSummary, sourceLabel, whatsappSummary, describeCorrection, routineUse, stepsLine, describePending, type MemoryRow, type WhatsappSelfTest } from "./memoryModel";
+import { leaveBySummary, activitySummary, ageLabel, categoryLabel, fmtDays, fmtSlotTime, fmtTime, groupRows, keyLabel, mailSummary, selftestSummary, sourceLabel, whatsappSummary, describeCorrection, routineUse, stepsLine, describePending, type MemoryRow, type WhatsappSelfTest, type MemoryStatus, type MemoryFlag } from "./memoryModel";
 
 const row = (over: Partial<MemoryRow>): MemoryRow => ({
   id: 1,
@@ -110,6 +110,20 @@ describe("memoryModel", () => {
     expect(activitySummary({ activity: true, resume_points: 0 })).toBe("On — nothing recorded yet.");
     expect(activitySummary({ activity: true, resume_points: 1 })).toContain("1 point kept");
     expect(activitySummary({ activity: true, resume_points: 12 })).toContain("12 points kept");
+  });
+
+  it("recognizes github_watch in status and flag key", () => {
+    const st: Pick<MemoryStatus, "github_watch"> = { github_watch: true };
+    expect(st.github_watch).toBe(true);
+    const flagKey: MemoryFlag = "memcoreGithubWatch";
+    expect(flagKey).toBe("memcoreGithubWatch");
+  });
+
+  it("recognizes deploy_watch in status and flag key", () => {
+    const st: Pick<MemoryStatus, "deploy_watch"> = { deploy_watch: true };
+    expect(st.deploy_watch).toBe(true);
+    const flagKey: MemoryFlag = "memcoreDeployWatch";
+    expect(flagKey).toBe("memcoreDeployWatch");
   });
 });
 

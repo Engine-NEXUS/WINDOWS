@@ -1,6 +1,10 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { initBrowserDevMocks } from "../settings/devMocks";
 import { UnifiedSidebar } from "./UnifiedSidebar";
+
+initBrowserDevMocks();
+
 // View styles — all four views live in this ONE window now.
 import "./sidebar.css";
 import "./coderabbit.css";

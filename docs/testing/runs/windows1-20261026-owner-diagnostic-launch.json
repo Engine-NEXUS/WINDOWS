@@ -1,0 +1,11 @@
+{
+  "executable": "4a47ca0248975454aed3cc7a6bf963f0d22380a7b7d863c51f26cd1df0589cc3",
+  "source": "342c6f390461e0c69d0c6aa6b66536d84d9cd2c16423f0f8e35604d206dc9124",
+  "identity": "0b10fd3a1416a540",
+  "reason": "Owner action failed; lifecycle audit hidden by inherited warn filter; preserve prior logs and restart same candidate",
+  "at": "2026-10-25T18:37:28.8055509Z",
+  "pid": 4564,
+  "rustLog": "info,capture_audit=info",
+  "previousPid": 12064,
+  "path": "C:\\Users\\Chitkul Lakshya\\.codex\\worktrees\\windows-readiness\\ULTRON\\src-tauri\\target\\release\\nexus.exe"
+}

@@ -269,7 +269,111 @@ mod windows_impl {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), target_os = "macos"))]
+mod unix_impl {
+    use std::time::{Duration, Instant};
+
+    /// System Events is the only no-objc path for frontmost app/AX actions.
+    /// First use raises the one-time Accessibility permission prompt; a
+    /// refusal surfaces as Err and callers degrade to a spoken "I couldn't".
+    fn run_osa(script: &str) -> Result<String, String> {
+        let out = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .map_err(|e| format!("osascript: {e}"))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        }
+    }
+
+    /// "{AppName, WindowTitle}" comma list → "AppName WindowTitle".
+    fn foreground_identity() -> Option<String> {
+        let out = run_osa(
+            r#"tell application "System Events"
+                set p to first application process whose frontmost is true
+                if exists window 1 of p then
+                    return {name of p, name of window 1 of p}
+                end if
+                return name of p
+            end tell"#,
+        )
+        .ok()?;
+        let combined = out.split(',').map(|p| p.trim()).collect::<Vec<_>>().join(" ");
+        let combined = combined.trim().to_string();
+        if combined.is_empty() {
+            None
+        } else {
+            Some(combined)
+        }
+    }
+
+    pub fn get_foreground_window_title() -> Option<String> {
+        foreground_identity()
+    }
+
+    pub fn is_foreground_app(partial: &str) -> bool {
+        let want = partial.to_lowercase();
+        foreground_identity()
+            .map(|t| t.to_lowercase())
+            .is_some_and(|t| t.contains(&want))
+    }
+
+    pub fn focus_app_by_title(partial_title: &str) -> bool {
+        let app = partial_title.trim();
+        if app.is_empty() {
+            return false;
+        }
+        let app = app.replace('"', "'");
+        let script = format!(
+            "tell application \"System Events\" to set frontmost of (first application process whose name contains \"{app}\") to true"
+        );
+        run_osa(&script).is_ok()
+    }
+
+    pub fn wait_and_focus_app(partial_title: &str, timeout_ms: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        // The app may be launching without a window yet; keep trying until it
+        // can take focus or the budget runs out.
+        loop {
+            if focus_app_by_title(partial_title) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(120));
+        }
+    }
+
+    pub fn minimize_foreground_window() -> bool {
+        run_osa(
+            "tell application \"System Events\" to perform action \"AXMinimize\" of window 1 of (first application process whose frontmost is true)",
+        )
+        .is_ok()
+    }
+
+    pub fn maximize_foreground_window() -> bool {
+        run_osa(
+            "tell application \"System Events\" to perform action \"AXZoomWindow\" of window 1 of (first application process whose frontmost is true)",
+        )
+        .is_ok()
+    }
+
+    /// No UAC/UIPI concept — never elevated-blocked.
+    pub fn our_process_elevated() -> bool {
+        false
+    }
+
+    /// No UAC/UIPI concept — never elevated-blocked.
+    pub fn window_process_elevated(_hwnd: ()) -> bool {
+        false
+    }
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 mod unix_impl {
     /// On Unix, focus is managed by the window manager.
     /// For now, we just return true (no-op).

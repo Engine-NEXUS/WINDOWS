@@ -13,6 +13,8 @@ export interface FramePayload {
   /** When the camera captured the frame (epoch ms); Rust measures the real pipeline delay from it. */
   t_capture_epoch_ms: number;
   infer_ms: number;
+  /** Frame counter of this window; Rust drops duplicates and out-of-order frames. */
+  seq?: number;
 }
 
 export function toPayload(
@@ -20,6 +22,7 @@ export function toPayload(
   tEpochMs: number,
   inferMs: number,
   captureEpochMs: number = tEpochMs,
+  seq?: number,
 ): FramePayload {
   const ok = hand && hand.length === 21 && hand.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
   return {
@@ -27,6 +30,7 @@ export function toPayload(
     t_epoch_ms: tEpochMs,
     t_capture_epoch_ms: captureEpochMs,
     infer_ms: inferMs,
+    ...(seq === undefined ? {} : { seq }),
   };
 }
 

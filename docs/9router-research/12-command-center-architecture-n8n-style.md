@@ -1,5 +1,9 @@
 # 12 — Command Center Architecture (n8n-Style Orchestration)
 
+> **Historical research design:** The five broad sub-centers and the "current
+> flat" comparison below predate the implemented 17 action families and
+> compound executor. See [the current command-center alignment](../architecture/12-command-center-alignment.md).
+
 > **User's request:** "A main command center similar to the n8n flow.
 > The main command center divides each task to its own sub-center,
 > organizing the implementation backend into one state. Main center

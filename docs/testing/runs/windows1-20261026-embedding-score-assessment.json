@@ -1,0 +1,113 @@
+{
+  "recorded_at_utc": "2026-10-26T16:41:12.853102+00:00",
+  "scope": "offline synthetic embedding-score software checks only",
+  "python_script_tests": 63,
+  "scalar_benchmark_tests": 19,
+  "embedding_tests": 15,
+  "mutations": [
+    {
+      "name": "allow_cross_split",
+      "killed_by_assertion": true
+    },
+    {
+      "name": "tune_on_acceptance",
+      "killed_by_assertion": true
+    },
+    {
+      "name": "accept_impostor_tie",
+      "killed_by_assertion": true
+    },
+    {
+      "name": "allow_incomplete_classes",
+      "killed_by_assertion": true
+    },
+    {
+      "name": "allow_unpaired_models",
+      "killed_by_assertion": true
+    },
+    {
+      "name": "allow_identity_relabelling",
+      "killed_by_assertion": true
+    },
+    {
+      "name": "change_acceptance_boundary",
+      "killed_by_assertion": true
+    },
+    {
+      "name": "disable_input_fingerprint",
+      "killed_by_assertion": true
+    },
+    {
+      "name": "restore_overflowing_median",
+      "killed_by_assertion": true
+    },
+    {
+      "name": "allow_enrollment_group_leak",
+      "killed_by_assertion": true
+    },
+    {
+      "name": "allow_impostor_enrollment",
+      "killed_by_assertion": true
+    },
+    {
+      "name": "allow_two_enrollment_clips",
+      "killed_by_assertion": true
+    },
+    {
+      "name": "allow_multiple_owners",
+      "killed_by_assertion": true
+    },
+    {
+      "name": "allow_duplicate_enrollment_sample",
+      "killed_by_assertion": true
+    },
+    {
+      "name": "use_all_trials_in_template",
+      "killed_by_assertion": true
+    },
+    {
+      "name": "use_min_instead_of_max_cosine",
+      "killed_by_assertion": true
+    },
+    {
+      "name": "remove_scaled_normalization",
+      "killed_by_assertion": true
+    },
+    {
+      "name": "leak_embeddings_in_report",
+      "killed_by_assertion": true
+    }
+  ],
+  "checks": {
+    "ipc": "pass",
+    "turn_end": "pass",
+    "repository_hygiene": "pass; tracked-file scope",
+    "window_opacity": "pass; 12 CSS surfaces",
+    "work_card_drift": "pass after regeneration and final docs",
+    "whitespace": "pass whole working tree; CRLF conversion warnings only"
+  },
+  "sha256": {
+    "scripts/speaker_benchmark.py": "78e791736a24f74f4a6f73709b2f1ed25ced43d71e34232a3463e8aad260827f",
+    "scripts/speaker_benchmark_test.py": "35db9b93fbc3d9067bc3a5cb8f7cf317cf88f3e157b07bdaf8abcabef14dfe55",
+    "scripts/speaker_embedding_scores.py": "f16380544dceb1af5bfc78788a2f315c88f2aa7517ac5cd6b8d7ad2cf0506195",
+    "scripts/speaker_embedding_scores_test.py": "feb7dc3cc19047cb044f4e9465453303237c5cc620fa8f77258d34492ddc0306",
+    "scripts/speaker_embedding_mutation_check.py": "ec3daff0b321c23c010e451232a7fb9eaba3089b70d92c52cba53bb0277ff9b6"
+  },
+  "opencode": {
+    "model": "opencode/glm-5.3-flash-free",
+    "main_session": "ses_e86f28ea2ffeXEXnJBDn2zM6Lu",
+    "main_result": "repeated instruction compaction, no edits; own request interrupted",
+    "isolated_session": "ses_e86f083abffeAAqwmlPPYXYW2N",
+    "isolated_result": "exit 0 after reads, no requested output files",
+    "implementation": "authorized supervisor fallback"
+  },
+  "regression_observed_red_before_fix": "finite latency median overflow",
+  "runtime_actions": false,
+  "application_build": false,
+  "shared_application_suites": "not rerun for Python/docs-only work",
+  "model_downloads": false,
+  "model_selected": false,
+  "qualified_corpus_trials": 0,
+  "readiness_percent": 41,
+  "test_log": "docs/testing/runs/windows1-20261026-embedding-script-tests.log"
+}

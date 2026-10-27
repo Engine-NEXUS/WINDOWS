@@ -267,7 +267,7 @@ fn play_track_macos(player: &str, query: &str, display: &str) -> Result<String, 
         Ok(format!("Playing {} on Apple Music, sir.", query))
     } else {
         // Spotify URI deep-link search & activate
-        let encoded = urlencoding::encode(query);
+        let encoded = crate::command_executor::urlencoding::encode(query);
         let uri = format!("spotify:search:{encoded}");
         let script = format!(
             r#"tell application "Spotify"

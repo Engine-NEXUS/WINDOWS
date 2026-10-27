@@ -399,14 +399,14 @@ pub async fn transcribe_audio(
     }
 
     if plan.contains(&SttEngine::Groq) {
-        // Primary: Groq cloud STT (~247ms, free) — with the NEXUS domain
-        // vocabulary so rare entities (Servx, Zync, Eesha) win decoder bets.
+        // Use the shared neutral decoder default. The legacy command vocabulary
+        // duplicated a single owner utterance in controlled same-clip replays.
         // P0 measurement (opt-in `sttLogConfidence`): same request as verbose_json so Whisper's
         // per-segment confidence can be logged for every command turn. Never changes the result,
         // except that the (separate, A/B-gated) confidence gate still applies.
         let gate = crate::commands::read_stt_confidence_gate(&app);
         let groq_result = if crate::commands::read_stt_log_confidence(&app) {
-            match crate::stt_groq::transcribe_with_groq_verbose(&samples, &groq_key, &state.client, Some(crate::stt_groq::NEXUS_VOCABULARY)).await {
+            match crate::stt_groq::transcribe_with_groq_verbose(&samples, &groq_key, &state.client, None).await {
                 Ok((text, segments)) => {
                     tracing::info!("{}", format_confidence_line(&text, &segments, samples.len()));
                     if gate && !text.trim().is_empty() && crate::stt_groq::confidence_rejects(&segments) {
@@ -419,7 +419,7 @@ pub async fn transcribe_audio(
                 Err(e) => Err(e),
             }
         } else {
-            groq_turn(&samples, &groq_key, &state.client, Some(crate::stt_groq::NEXUS_VOCABULARY), gate).await
+            groq_turn(&samples, &groq_key, &state.client, None, gate).await
         };
         match groq_result {
             Ok(text) => {

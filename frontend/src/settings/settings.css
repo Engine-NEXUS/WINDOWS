@@ -4,25 +4,215 @@
 
 @import "../theme/tokens.css";
 
-* {
+*, *::before, *::after {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
 }
 
-html, body, #root {
-  height: 100%;
+*::-webkit-scrollbar,
+*::-webkit-scrollbar-thumb,
+*::-webkit-scrollbar-track {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  background: transparent !important;
+}
+
+html, body {
   font-family: var(--nx-font);
   background: transparent !important;
   color: var(--nx-text-primary);
   -webkit-font-smoothing: antialiased;
+  overflow: hidden !important;
+  height: 100vh !important;
+  max-height: 100vh !important;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+
+#root {
+  height: 100vh !important;
+  max-height: 100vh !important;
+  overflow: hidden !important;
+}
+
+/* ── Browser Dev Host Styling (Zero Scrollbars — Fluid Window) ── */
+body.is-browser-dev {
+  height: 100vh !important;
+  max-height: 100vh !important;
+  background: #090d16 !important;
+  background-image:
+    radial-gradient(circle at 50% 15%, rgba(99, 102, 241, 0.15) 0%, transparent 60%),
+    radial-gradient(circle at 15% 85%, rgba(56, 189, 248, 0.1) 0%, transparent 50%),
+    linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px) !important;
+  background-size: 100% 100%, 100% 100%, 24px 24px, 24px 24px !important;
+  overflow: hidden !important;
+}
+
+body.is-browser-dev.is-popup {
+  background: transparent !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+}
+
+body.is-browser-dev.is-popup .nx-settings {
+  width: 100%;
+  height: 100vh;
+  border-radius: 0;
+  max-width: none;
+  max-height: none;
+}
+
+.nx-dev-viewport {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  height: 100vh;
+  max-height: 100vh;
   overflow: hidden;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.nx-dev-viewport.nx-dev-preset-full {
+  padding: 8px 12px;
+}
+
+.nx-dev-toolbar-wide {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  max-width: 1100px;
+  padding: 8px 16px;
+  background: var(--nx-bg-card);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  gap: 12px;
+  flex-wrap: wrap;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+.nx-dev-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.nx-dev-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 8px #10b981;
+}
+
+.nx-dev-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: #ffffff;
+}
+
+.nx-dev-dim-badge {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.6);
+  background: rgba(255, 255, 255, 0.08);
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.nx-dev-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.nx-dev-button-group {
+  display: inline-flex;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.nx-dev-pill-btn {
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.nx-dev-pill-btn:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.nx-dev-pill-btn.is-active {
+  background: #3b82f6;
+  color: #ffffff;
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgba(59, 130, 246, 0.4);
+}
+
+.nx-dev-popup-action {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.nx-dev-window-frame {
+  flex-shrink: 0;
+  border-radius: 14px;
+  border-width: var(--nx-window-border-width, 1.5px) !important;
+  border-style: solid !important;
+  border-color: var(--nx-window-border-color, var(--hx-rim, rgba(255, 255, 255, 0.15))) !important;
+  box-shadow:
+    0 32px 72px rgba(0, 0, 0, 0.8),
+    0 8px 24px rgba(0, 0, 0, 0.5),
+    0 0 28px var(--nx-window-border-glow, transparent) !important;
+  overflow: hidden;
+  position: relative;
+  transition: width 0.25s cubic-bezier(0.16, 1, 0.3, 1), height 0.25s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.15s ease, border-width 0.05s ease, box-shadow 0.15s ease;
+  background: #0a0a0c;
+}
+
+.nx-dev-window-frame .hx {
+  width: 100% !important;
+  height: 100% !important;
+  border-radius: 14px;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+.nx-dev-window-frame .nx-settings {
+  width: 100% !important;
+  height: 100% !important;
+  border-radius: 14px;
 }
 
 /* ── Layout ──────────────────────────────────────────────────── */
 .nx-settings {
   display: flex;
-  height: 100vh;
+  height: 100%;
+  width: 100%;
   overflow: hidden;
   background: var(--nx-bg);
   border: var(--nx-glass-border);
@@ -416,35 +606,20 @@ html, body, #root {
   padding: var(--nx-space-4) var(--nx-space-8);
   border-top: 1px solid var(--nx-border);
   background: var(--nx-bg-card);
-  backdrop-filter: var(--nx-glass-blur);
-  -webkit-backdrop-filter: var(--nx-glass-blur);
   flex-shrink: 0;
 }
 
-/* ── Scrollbar ───────────────────────────────────────────────── */
-.nx-content::-webkit-scrollbar { width: 6px; }
-.nx-content::-webkit-scrollbar-track { background: transparent; }
-.nx-content::-webkit-scrollbar-thumb {
-  background: var(--nx-border);
-  border-radius: 3px;
-}
-
-/* ── Voice Persona Matrix (Feature 83) ───────────────────────── */
+/* ── Scrollbars Suppressed (Zero Visible Scrollbars) ──────────── */
+.nx-content,
 .nx-persona-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 10px;
-  max-height: 440px;
-  overflow-y: auto;
-  padding-right: 4px;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
 }
-
-.nx-persona-grid::-webkit-scrollbar { width: 4px; }
-.nx-persona-grid::-webkit-scrollbar-track { background: transparent; }
-.nx-persona-grid::-webkit-scrollbar-thumb {
-  background: var(--nx-border);
-  border-radius: 2px;
+.nx-content::-webkit-scrollbar,
+.nx-persona-grid::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 
 .nx-persona-card {
@@ -574,4 +749,308 @@ html, body, #root {
 .nx-persona-play-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Magic UI Animated Theme Toggler & View Transitions API
+   ═══════════════════════════════════════════════════════════════ */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+::view-transition-old(root) {
+  z-index: 1;
+}
+::view-transition-new(root) {
+  z-index: 9999;
+}
+[data-magicui-theme-vt="active"]::view-transition-new(root) {
+  clip-path: var(--magicui-theme-vt-clip-from, circle(0% at 50% 50%));
+}
+
+.nx-animated-theme-toggler {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+  border-radius: 9999px;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  outline: none;
+  user-select: none;
+}
+.nx-animated-theme-toggler:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.24);
+  transform: translateY(-1px);
+}
+:root[data-theme="light"] .nx-animated-theme-toggler {
+  background: #f1f3f5;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  color: #111827;
+}
+:root[data-theme="light"] .nx-animated-theme-toggler:hover {
+  background: #e5e7eb;
+  border-color: rgba(0, 0, 0, 0.2);
+}
+.nx-theme-icon-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+}
+.nx-theme-label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Modern Option Card & Switch Design System (Black & White Modes)
+   ═══════════════════════════════════════════════════════════════ */
+.nx-option-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-radius: 14px;
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  position: relative;
+  overflow: hidden;
+  outline: none;
+
+  /* Pitch Black Mode default */
+  background: #141418;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+.nx-option-card:hover:not(.is-disabled) {
+  background: #1c1c24;
+  border-color: rgba(255, 255, 255, 0.2);
+  transform: translateY(-1px);
+}
+
+.nx-option-card.is-selected {
+  background: rgba(59, 130, 246, 0.08);
+  border-color: #3b82f6;
+  box-shadow: 0 0 16px rgba(59, 130, 246, 0.18), inset 0 0 0 1px #3b82f6;
+}
+
+.nx-option-card.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* Light Mode Card */
+:root[data-theme="light"] .nx-option-card {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05), 0 4px 12px rgba(0, 0, 0, 0.02);
+}
+
+:root[data-theme="light"] .nx-option-card:hover:not(.is-disabled) {
+  background: #fbfbfc;
+  border-color: rgba(0, 0, 0, 0.18);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+}
+
+:root[data-theme="light"] .nx-option-card.is-selected {
+  background: rgba(37, 99, 235, 0.04);
+  border-color: #2563eb;
+  box-shadow: 0 0 14px rgba(37, 99, 235, 0.12), inset 0 0 0 1px #2563eb;
+}
+
+/* Left Icon Container */
+.nx-option-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 18px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #f1f5f9;
+  transition: all 0.18s ease;
+}
+
+.nx-option-card.is-selected .nx-option-icon {
+  background: rgba(59, 130, 246, 0.15);
+  border-color: rgba(59, 130, 246, 0.35);
+  color: #60a5fa;
+}
+
+:root[data-theme="light"] .nx-option-icon {
+  background: #f1f5f9;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  color: #1e293b;
+}
+
+:root[data-theme="light"] .nx-option-card.is-selected .nx-option-icon {
+  background: rgba(37, 99, 235, 0.1);
+  border-color: rgba(37, 99, 235, 0.25);
+  color: #2563eb;
+}
+
+/* Center Meta (Title & Microcopy) */
+.nx-option-meta {
+  flex: 1;
+  min-width: 0;
+  margin: 0 14px;
+  display: flex;
+  flex-direction: column;
+}
+
+.nx-option-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nx-option-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: #f8fafc;
+  letter-spacing: -0.01em;
+}
+
+:root[data-theme="light"] .nx-option-title {
+  color: #0f172a;
+}
+
+.nx-option-badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(59, 130, 246, 0.16);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+:root[data-theme="light"] .nx-option-badge {
+  background: rgba(37, 99, 235, 0.1);
+  color: #2563eb;
+  border-color: rgba(37, 99, 235, 0.2);
+}
+
+.nx-option-desc {
+  font-size: 11.5px;
+  line-height: 1.4;
+  margin-top: 2px;
+  color: rgba(255, 255, 255, 0.55);
+  white-space: normal;
+}
+
+:root[data-theme="light"] .nx-option-desc {
+  color: rgba(0, 0, 0, 0.55);
+}
+
+.nx-option-extra {
+  margin-top: 6px;
+}
+
+/* Right Selection Checkmark Badge (Reference Image 1) */
+.nx-option-check {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: 1.5px solid rgba(255, 255, 255, 0.22);
+  background: transparent;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.nx-option-card.is-selected .nx-option-check {
+  background: #3b82f6;
+  border-color: #3b82f6;
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.5);
+}
+
+:root[data-theme="light"] .nx-option-check {
+  border-color: rgba(0, 0, 0, 0.22);
+}
+
+:root[data-theme="light"] .nx-option-card.is-selected .nx-option-check {
+  background: #2563eb;
+  border-color: #2563eb;
+  box-shadow: 0 0 8px rgba(37, 99, 235, 0.35);
+}
+
+.nx-option-check-glyph {
+  font-size: 12px;
+  font-weight: 800;
+  color: #ffffff;
+  line-height: 1;
+}
+
+/* Right Tactile Switch Toggle (Reference Images 3-5) */
+.nx-option-switch {
+  width: 44px;
+  height: 24px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.16);
+  position: relative;
+  flex-shrink: 0;
+  transition: background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease;
+  cursor: pointer;
+}
+
+.nx-option-switch-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #ffffff;
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.nx-option-switch.is-on {
+  background: #3b82f6;
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.4);
+}
+
+.nx-option-switch.is-on .nx-option-switch-thumb {
+  transform: translateX(20px);
+}
+
+:root[data-theme="light"] .nx-option-switch {
+  background: #e2e8f0;
+}
+
+:root[data-theme="light"] .nx-option-switch.is-on {
+  background: #2563eb;
+  box-shadow: 0 0 10px rgba(37, 99, 235, 0.3);
+}
+
+/* Responsive grid for side-by-side radio option cards */
+.nx-options-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
 }

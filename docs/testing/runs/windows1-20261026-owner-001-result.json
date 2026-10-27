@@ -1,0 +1,44 @@
+{
+  "at": "2026-10-25T18:38:40.278692+00:00",
+  "release": "0b10fd3a1416a540",
+  "revision": "3e5b4a803b2a22bc28986189377942f127234fa7",
+  "pid": 12064,
+  "ownerReport": "Command was rejected or nothing happened",
+  "requested": "one Ctrl+Space Open Notepad attempt",
+  "nativeReadback": {
+    "effectiveVoiceLock": true,
+    "savedVoiceLock": true,
+    "profileEnrolled": true,
+    "clips": 5
+  },
+  "observed": [
+    {
+      "session": 3,
+      "owner": "verified",
+      "score": 0.942,
+      "text": "open open notepad.",
+      "route": "open_app / LocalCommand",
+      "actionSuccess": "unconfirmed"
+    },
+    {
+      "session": 4,
+      "owner": "verified",
+      "filter": "repeat_loop",
+      "rawText": "Open notepad. Open notepad.",
+      "action": "blocked by transcription filter"
+    },
+    {
+      "session": 5,
+      "owner": "pending",
+      "endpoint": "no_speech",
+      "filter": "phantom"
+    }
+  ],
+  "additionalHotkey": "another call is logged before stage blackout; terminal outcome not established",
+  "failure": "user-visible requested action failed or was absent; stage watchdog blackout at 2026-10-25T18:36:14.056095Z",
+  "accounting": "RUST_LOG=warn inherited at launch suppressed INFO capture_audit; no structured lifecycle records. Cannot reconcile report to one unique controlled trial. No formal acceptance/rejection rate.",
+  "conclusion": "Not evidence of owner rejection by Voice Lock; two observed speech captures were owner-verified. Command fidelity and stage health remain unresolved.",
+  "recovery": "same verified binary restarted as PID4564 with RUST_LOG=info,capture_audit=info; original logs preserved, native lock On/profile5 survive restart, microphone telemetry nonzero. One fresh exactly-once attempt requested.",
+  "score": 41,
+  "productionReady": false
+}
