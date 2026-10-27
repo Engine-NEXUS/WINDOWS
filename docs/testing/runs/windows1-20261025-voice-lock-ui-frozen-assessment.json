@@ -1,0 +1,64 @@
+{
+  "revision": "9c3f0320a5c7df359c6a9769e8492ed48baf8fcd",
+  "sourceHash": "2317997e0df6a01873674f7174b4c4d60a3d67ec327f90c290b2308c501519d8",
+  "checkout": "C:\\Users\\Chitkul Lakshya\\.codex\\worktrees\\windows-readiness\\ULTRON",
+  "updatedAt": "2026-10-25T16:33:16.542296+00:00",
+  "scope": "P1 native capture accounting plus P2 effective-native Voice Lock state; no concurrent hand-focus settings",
+  "checks": {
+    "frontendTypecheckAndBuild": "pass",
+    "frontendTests": 678,
+    "workerTypecheck": "pass",
+    "workerTests": 145,
+    "pythonScripts": 29,
+    "pythonServer": 31,
+    "nlu": "pass:512 rows/8 sources",
+    "provenanceRegression": "pass",
+    "ipc": "pass",
+    "turnEnds": "pass",
+    "hygiene": "pass",
+    "opacity": "pass",
+    "whitespace": "pass",
+    "uiMutations": "7/7 killed",
+    "auditMutations": "6/6 killed",
+    "speakerMutations": "15/15 killed",
+    "rustLibraryAndIntegration": {
+      "libraryPassed": 2532,
+      "integrationPassed": 19,
+      "failed": 0,
+      "ignored": 38,
+      "features": [
+        "custom-protocol",
+        "admin-brain"
+      ]
+    },
+    "deadCode": "pass:148 known findings, none new"
+  },
+  "release": {
+    "identity": "021cba2bac4e4bed",
+    "build": "pass:42m51s",
+    "provenance": "pass before launch",
+    "launchedPid": 31624,
+    "processStoppedAfterDeadlock": true
+  },
+  "liveSettingsChecks": {
+    "initialStatus": "pass: UIA On, native/saved true, five-clip profile valid",
+    "unsavedToggle": "pass: draft Off while native remains true",
+    "saveOff": "pass: UIA/native/saved false",
+    "saveOn": "pass: UIA/native/saved true",
+    "reopen": "pass: Escape then Ctrl+Shift+S; UIA/native On",
+    "crossWindow": "failed: synchronous legacy opener hung process; watchdog blackout; Responding=false",
+    "profileFailure": "pending",
+    "slowOrRefusedSave": "pending"
+  },
+  "ownerVoiceTrials": "not run on this candidate",
+  "productionReady": false,
+  "score": 41,
+  "p1OnlyBuild": "stopped intentionally before completion; never launched or verified",
+  "knownFailures": [
+    "Saved text exposed in accessibility tree before any Save (visually hidden using opacity only)",
+    "open_settings_window synchronous WebView creation hung the Windows UI thread"
+  ],
+  "visualEvidenceLimit": "Sky screenshots did not match the UIA-rendered Command Hub; visual confirmation is unproven, not counted as passed",
+  "originalLockRestored": true,
+  "profileUntouched": true
+}

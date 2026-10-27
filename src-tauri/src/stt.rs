@@ -355,12 +355,12 @@ pub async fn transcribe_audio(
     }
 
     if plan.contains(&SttEngine::Groq) {
-        // Primary: Groq cloud STT (~247ms, free) — with the NEXUS domain
-        // vocabulary so rare entities (Servx, Zync, Eesha) win decoder bets.
+        // Use the shared neutral decoder default. The legacy command vocabulary
+        // duplicated a single owner utterance in controlled same-clip replays.
         // P0 measurement (opt-in `sttLogConfidence`): same request as verbose_json so Whisper's
         // per-segment confidence can be logged for every command turn. Never changes the result.
         let groq_result = if crate::commands::read_stt_log_confidence(&app) {
-            match crate::stt_groq::transcribe_with_groq_verbose(&samples, &groq_key, &state.client, Some(crate::stt_groq::NEXUS_VOCABULARY)).await {
+            match crate::stt_groq::transcribe_with_groq_verbose(&samples, &groq_key, &state.client, None).await {
                 Ok((text, segments)) => {
                     tracing::info!("{}", format_confidence_line(&text, &segments, samples.len()));
                     Ok(text)
@@ -368,7 +368,7 @@ pub async fn transcribe_audio(
                 Err(e) => Err(e),
             }
         } else {
-            crate::stt_groq::transcribe_with_groq(&samples, &groq_key, &state.client, Some(crate::stt_groq::NEXUS_VOCABULARY)).await
+            crate::stt_groq::transcribe_with_groq(&samples, &groq_key, &state.client, None).await
         };
         match groq_result {
             Ok(text) => {
@@ -704,14 +704,15 @@ pub(crate) fn encode_wav_for_upload(samples: &[i16], sample_rate: u32) -> Result
 static FILTER_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static FILTER_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Filter + count one transcript. Drop-in for `apply_hallucination_filter`
-/// at production call sites (tests keep calling the pure fn directly).
-/// May this audio go to Groq? Privacy mode (`localSttOnly`) never reaches the cloud.
-/// Pure + unit-tested so the routing cannot silently regress again.
+/// May this audio go to Groq? Privacy mode (`localSttOnly`) never reaches the cloud. Kept as a one-line check for
+/// the tests that pin the privacy rule; production decides through `choose_route`, which has the same rule.
+#[cfg(test)]
 pub fn groq_allowed(local_only: bool, groq_key_empty: bool) -> bool {
     !local_only && !groq_key_empty
 }
 
+/// Filter + count one transcript. Drop-in for `apply_hallucination_filter`
+/// at production call sites (tests keep calling the pure fn directly).
 pub fn filter_transcript_counted(text: &str) -> String {
     use std::sync::atomic::Ordering;
     FILTER_TOTAL.fetch_add(1, Ordering::Relaxed);

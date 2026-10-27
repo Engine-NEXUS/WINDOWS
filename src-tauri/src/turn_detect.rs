@@ -318,7 +318,7 @@ mod tests {
         assert!((all - (-18163.902603)).abs() < 5.0, "total sum {all}");
     }
 
-    /// Sanity + latency. NOTE: probabilities are NOT pinned to a reference value — this quantized
+    /// Model sanity. NOTE: probabilities are NOT pinned to a reference value — this quantized
     /// model is unstable on out-of-distribution input (a pure tone gave 0.118 in Python onnxruntime
     /// vs 0.171 in Rust `ort` from byte-identical features). On real speech clips the two runtimes
     /// agreed to ~0.01 (see docs/research/jarvis-landscape/03-smart-turn-prototype-2026-10-04.md).
@@ -329,9 +329,23 @@ mod tests {
             .join("resources/smart_turn/smart-turn-v3.2-cpu.onnx");
         let det = TurnDetector::load(&path).expect("model must load");
         let wave = synth();
+        let p = det.predict(&wave).unwrap();
+        assert!(p.is_finite() && (0.0..=1.0).contains(&p), "prob out of range: {p}");
+    }
+
+    /// Run alone on an otherwise idle machine. Wall-clock latency is not a
+    /// deterministic library-suite assertion while other ONNX sessions and
+    /// system processes can consume the same CPU and paging resources.
+    #[test]
+    #[ignore = "run in isolation to measure steady-state Smart Turn latency"]
+    fn isolated_model_latency_budget() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources/smart_turn/smart-turn-v3.2-cpu.onnx");
+        let det = TurnDetector::load(&path).expect("model must load");
+        let wave = synth();
         // The first call pays one-off session warm-up and, in a parallel test run, CPU contention
         // from other tests; the endpoint check cares about steady state, so time the best of three.
-        let p = det.predict(&wave).unwrap();
+        det.predict(&wave).unwrap();
         let ms = (0..3)
             .map(|_| {
                 let t0 = std::time::Instant::now();
@@ -340,10 +354,7 @@ mod tests {
             })
             .min()
             .unwrap();
-        println!("smart-turn predict (best of 3): {ms} ms, p={p}");
-        assert!(p.is_finite() && (0.0..=1.0).contains(&p), "prob out of range: {p}");
-        // Alone this is ~50 ms. In the full lib run, ONNX sessions left behind by earlier tests keep spinning
-        // threads and the same call measured 2.2 s, so the bound only guards against "absurdly slow".
+        println!("smart-turn predict (best of 3): {ms} ms");
         assert!(ms < 5000, "inference too slow for an endpoint check: {ms} ms");
     }
 

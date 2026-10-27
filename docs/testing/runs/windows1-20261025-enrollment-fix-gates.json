@@ -1,0 +1,57 @@
+{
+  "sourceRevision": "ade0bfdddd99d52efe14da089d33ee5b7493d8a0",
+  "sourceHash": "328ab8cd23bf39fde595a16ee15dbd18ecbaf81f2c5c7ec4c76203a2c604cf11",
+  "frontend": {
+    "typecheck": "pass",
+    "build": "pass",
+    "testsPassed": 655
+  },
+  "worker": {
+    "typecheck": "pass",
+    "testsPassed": 145
+  },
+  "python": {
+    "testsPassed": 48,
+    "warnings": "194 third-party sounddevice NumPy deprecations"
+  },
+  "nlu": {
+    "status": "pass",
+    "evaluationRows": 512,
+    "registeredSources": 8
+  },
+  "provenanceRegression": "pass",
+  "safetyMutationsKilled": 14,
+  "safetyMutationsTotal": 14,
+  "repositoryGuards": "pass",
+  "native": {
+    "libraryPassed": 2524,
+    "integrationPassed": 19,
+    "failures": 0,
+    "ignored": 38,
+    "newEnrollmentRegressions": "both passed",
+    "compileWarnings": [
+      "window_tile WINDOW_STYLE",
+      "app_probe facts",
+      "missed_intent_logger still_missed"
+    ]
+  },
+  "deadCode": {
+    "status": "pass",
+    "knownFindings": 148,
+    "newFindings": 0
+  },
+  "isolatedLatency": {
+    "status": "pass",
+    "bestOfThreeMs": 742,
+    "budgetMs": 5000
+  },
+  "freshRelease": "building; not yet provenance-verified",
+  "ownerLiveRetest": "not run",
+  "productionReady": false,
+  "windowsKeyringPrerequisite": {
+    "status": "pass",
+    "separateProcesses": 2,
+    "probeDeleted": true,
+    "ownerAccuracyProof": false
+  }
+}

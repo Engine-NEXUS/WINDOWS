@@ -1,0 +1,18 @@
+[PREFLIGHT] [OK] Layer 1 (Frontend & Animation): Bundle stage.html (1 KB) fresh | WebGL 6,240 particles | CSP Nonce verified
+[PREFLIGHT] [OK] Layer 2a (Audio Hardware): Host: WASAPI | Input Device: 'Microphone Array (Intel® Smart Sound Technology for Digital Microphones)' (48000Hz, 2ch)
+[PREFLIGHT] [OK] Layer 2b (Wake-Word Models): All 3 openWakeWord models verified in C:\Users\Chitkul Lakshya\.codex\worktrees\windows-readiness\ULTRON\src-tauri\resources\oww
+[PREFLIGHT] [OK] Layer 2c (TTS Engines): Edge-TTS cloud primary [ONLINE] + Kokoro-82M offline fallback [STANDBY]
+[PREFLIGHT] [OK] Layer 3 (Main Command Center): Deterministic Grammar (4/4 tests) | Compound Splitter [OK] | Directed Gate [OK]
+[PREFLIGHT] [OK] Layer 4 (15 Action Sub-Centers): 15/15 Sub-Centers Registered — Apps indexed: 0 | Crawler: Ready | UFO UIA: Ready | YouTube Engine: Ready
+[PREFLIGHT] [OK] Layer 5 (Auth & Credentials): Groq present, Gemini present; Cerebras missing (optional, fastest 9Router lane) | GitHub Vault: Not set
+2026-10-25T11:19:11.735033Z  WARN app registry: healed 101 inflated installer usage count(s) and dropped 0 poisoned resolution entries
+2026-10-25T11:19:12.361638Z  WARN Tier 3: model file command_close.onnx not found at \\?\C:\Users\Chitkul Lakshya\.codex\worktrees\windows-readiness\ULTRON\src-tauri\target\release\resources\oww\commands\command_close.onnx — skipping
+2026-10-25T11:19:12.366703Z  WARN Tier 3: model file command_search.onnx not found at \\?\C:\Users\Chitkul Lakshya\.codex\worktrees\windows-readiness\ULTRON\src-tauri\target\release\resources\oww\commands\command_search.onnx — skipping
+2026-10-25T11:19:12.367487Z  WARN Tier 3: model file command_play.onnx not found at \\?\C:\Users\Chitkul Lakshya\.codex\worktrees\windows-readiness\ULTRON\src-tauri\target\release\resources\oww\commands\command_play.onnx — skipping
+2026-10-25T11:19:12.368258Z  WARN Tier 3: model file command_open.onnx not found at \\?\C:\Users\Chitkul Lakshya\.codex\worktrees\windows-readiness\ULTRON\src-tauri\target\release\resources\oww\commands\command_open.onnx — skipping
+2026-10-25T11:19:12.566891Z  WARN 9router health: groq alive but models missing from menu: ["qwen/qwen3-32b"] — cascade will skip them
+[BOOT] stage ready after 1s (incl. 1s settle)
+[BOOT] hello (boot, hour 16)
+[BOOT] skip briefing: already briefed today (2026-10-25)
+2026-10-25T11:19:14.148066Z  WARN wake: detection suppressed by hand-mode/meeting/TTS-mute state (1 chunks dropped so far) — if you are speaking and nothing happens, check hand mode / meeting mode / pause state
+ERROR: The system was unable to find the specified registry key or value.

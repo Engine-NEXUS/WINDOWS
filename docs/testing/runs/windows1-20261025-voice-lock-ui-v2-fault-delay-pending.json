@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-25T18:32:07.807Z",
+  "command": "inspect-ipc",
+  "elapsedMs": 89,
+  "value": {
+    "fetchInstalled": true,
+    "stats": {
+      "mode": "fault-save-delay",
+      "intercepted": 1,
+      "pending": 1
+    }
+  }
+}

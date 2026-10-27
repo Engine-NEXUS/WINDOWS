@@ -54,8 +54,8 @@ pub const STT_TEMPERATURE: &str = "0";
 pub const STT_RESPONSE_FORMAT: &str = "json";
 pub const STT_VERBOSE_RESPONSE_FORMAT: &str = "verbose_json";
 
-/// Decoder bias selected from turn ownership. Owner-verified captures may use
-/// the NEXUS vocabulary; all other captures use the neutral English prompt.
+/// Decoder policy is independent of speaker authority. Captured commands use
+/// neutral decoding while the legacy vocabulary remains available for comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecoderBias {
     OwnerCommand,
@@ -79,13 +79,17 @@ pub(crate) fn decoder_prompt(prompt: Option<&'static str>) -> &'static str {
     prompt.unwrap_or(NEUTRAL_DECODER_PROMPT)
 }
 
-/// Only a verified owner gets command vocabulary. For an unenrolled voice,
-/// vocabulary can turn background speech into a plausible executable command.
+// Same-clip replay on 2026-10-26: owner vocabulary duplicated a single command
+// twice in two runs; neutral decoding did not. Keep this off pending independent
+// corpus evidence. This is a decoder policy, never an owner-verification bypass.
+const USE_OWNER_COMMAND_VOCABULARY: bool = false;
+
+/// Ownership never requires command-shaped decoder hints.
 pub(crate) fn decoder_bias_for(ownership: crate::voice_profile::TurnOwnership) -> DecoderBias {
     use crate::voice_profile::TurnOwnership::*;
     match ownership {
-        Verified => DecoderBias::OwnerCommand,
-        Unenrolled | Uncertain | Rejected => DecoderBias::Neutral,
+        Verified if USE_OWNER_COMMAND_VOCABULARY => DecoderBias::OwnerCommand,
+        Verified | Unenrolled | Uncertain | Rejected => DecoderBias::Neutral,
     }
 }
 
@@ -367,7 +371,9 @@ pub async fn transcribe_with_groq_verbose(
     Ok((text, segments))
 }
 
-/// Convert raw i16 PCM samples to a WAV file (16-bit, mono, given sample rate).
+/// Convert raw i16 PCM samples to a WAV file (16-bit, mono, given sample rate). Tests only; production calls
+/// `crate::stt::pcm_to_wav` directly.
+#[cfg(test)]
 fn pcm_to_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
     crate::stt::pcm_to_wav(samples, sample_rate)
 }
@@ -425,11 +431,20 @@ mod tests {
     }
 
     #[test]
+    fn captured_commands_use_neutral_decoder_even_after_owner_verification() {
+        use crate::voice_profile::TurnOwnership::*;
+        for ownership in [Verified, Unenrolled, Uncertain, Rejected] {
+            assert_eq!(decoder_bias_prompt(decoder_bias_for(ownership)), NEUTRAL_DECODER_PROMPT,
+                "speaker identity must not seed repeated executable command phrases");
+        }
+    }
+
+    #[test]
     fn decoder_bias_follows_ownership() {
         use crate::voice_profile::TurnOwnership::*;
-        // Nobody enrolled: there is no owner to protect, so the NEXUS vocabulary applies.
+        // Speaker authority and decoder bias are separate; all live captures are neutral.
         assert_eq!(decoder_bias_for(Unenrolled), DecoderBias::Neutral);
-        assert_eq!(decoder_bias_for(Verified), DecoderBias::OwnerCommand);
+        assert_eq!(decoder_bias_for(Verified), DecoderBias::Neutral);
         // A voice that is (or may be) someone else never gets command biasing.
         assert_eq!(decoder_bias_for(Uncertain), DecoderBias::Neutral);
         assert_eq!(decoder_bias_for(Rejected), DecoderBias::Neutral);

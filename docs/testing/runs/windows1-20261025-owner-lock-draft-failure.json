@@ -1,0 +1,13 @@
+{
+  "ownerReport": "Voice Lock stays on but the command does not execute",
+  "status": "inconclusive; excluded from accuracy counts",
+  "observedProcess": {
+    "pid": 17928,
+    "path": "D:/ULTRON/src-tauri/target/release/nexus.exe",
+    "releaseIdentity": "3d1932b68b2c0f15"
+  },
+  "persistedSpeakerVerification": false,
+  "finding": "Command Hub update only stages draft fields; handleSave calls settings_patch. Prior test instruction omitted Save.",
+  "historicalAssessedSession": "PID28952 no longer running; its retained log contains unenrolled captures, not verified owner trials.",
+  "nextStep": "Owner switches on and clicks Save; verify persisted lock before command; resolve build attribution before acceptance measurement."
+}

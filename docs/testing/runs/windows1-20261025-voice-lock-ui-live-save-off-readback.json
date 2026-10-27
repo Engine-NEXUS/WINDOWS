@@ -1,0 +1,10 @@
+{
+  "at": "2026-10-25T17:06:24.294Z",
+  "command": "readback",
+  "value": {
+    "effectiveVoiceLock": false,
+    "savedVoiceLock": false,
+    "profileEnrolled": true,
+    "clips": 5
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "at": "2026-10-26T15:23:52.622Z",
+  "command": "lock-test-on",
+  "elapsedMs": 131,
+  "value": {
+    "effectiveVoiceLock": true,
+    "savedVoiceLock": true,
+    "profileEnrolled": true
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "builtAt": "2026-10-25T11:18:43.662Z",
+  "source": "086e534ae829a7abbdf1e793f584297e81b8f2c8c16625bcfeee03ea505572c4",
+  "frontend": "56b76a513a63ec7001b682d9bd0d276f6f10dd982f115db517f43fdf55b2f9fd",
+  "executable": "ed7ed1027e764aa0989cd99a812d14a822df6efdc0da7d032b1423e183c7df7f",
+  "executablePath": "C:\\Users\\Chitkul Lakshya\\.codex\\worktrees\\windows-readiness\\ULTRON\\src-tauri\\target\\release\\nexus.exe",
+  "identity": "031caf5848621e18"
+}

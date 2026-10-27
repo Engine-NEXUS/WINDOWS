@@ -1,0 +1,68 @@
+{
+  "recorded_at_utc": "2026-10-26T16:20:54.450981+00:00",
+  "scope": "offline synthetic score-tool tests only",
+  "opencode": {
+    "model": "opencode/glm-5.3-flash-free",
+    "session": "ses_e8703f62fffeta9giAOWq5HhEs",
+    "result": "no response or edits after approximately five minutes; own request interrupted; authorized local fallback used"
+  },
+  "python_script_tests": 47,
+  "benchmark_tests": 18,
+  "mutations": [
+    {
+      "name": "allow_cross_split",
+      "killed": true,
+      "exit_code": 1
+    },
+    {
+      "name": "tune_on_acceptance",
+      "killed": true,
+      "exit_code": 1
+    },
+    {
+      "name": "accept_calibration_impostor_tie",
+      "killed": true,
+      "exit_code": 1
+    },
+    {
+      "name": "allow_incomplete_classes",
+      "killed": true,
+      "exit_code": 1
+    },
+    {
+      "name": "allow_unpaired_models",
+      "killed": true,
+      "exit_code": 1
+    },
+    {
+      "name": "allow_identity_relabelling",
+      "killed": true,
+      "exit_code": 1
+    },
+    {
+      "name": "change_acceptance_boundary",
+      "killed": true,
+      "exit_code": 1
+    },
+    {
+      "name": "disable_input_fingerprint",
+      "killed": true,
+      "exit_code": 1
+    }
+  ],
+  "files": {
+    "scripts/speaker_benchmark.py": "9395b01001023c1d510fdc2c25619af14c617601536b2a84f6fde672e294638c",
+    "scripts/speaker_benchmark_test.py": "7a6dcfc8ed17dfc18f2f587209ebd994947f224e5b89cebfbb77fc1f60464a80"
+  },
+  "nexus_runtime_actions": false,
+  "nexus_build": false,
+  "model_selected": false,
+  "qualified_corpus_trials": 0,
+  "readiness_percent": 41,
+  "guards": {
+    "repository_hygiene": "pass; tracked-file scope",
+    "work_card_drift": "pass",
+    "whole_tree_whitespace": "pass; existing CRLF conversion warnings"
+  },
+  "shared_application_suites": "not rerun for Python/docs-only phase"
+}

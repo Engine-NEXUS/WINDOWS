@@ -389,6 +389,7 @@ pub fn request_swap<R: Runtime>(app: AppHandle<R>, key: String, engine: crate::t
         return;
     }
     tauri::async_runtime::spawn(async move {
+        crate::focus_mode::wait_until_clear("tts_swap_download").await;
         loop {
             let next = QUEUE.lock().ok().and_then(|mut q| q.take());
             if let Some(k) = next {

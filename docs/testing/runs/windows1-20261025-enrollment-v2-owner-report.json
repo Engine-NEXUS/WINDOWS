@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-25",
+  "sourceRevision": "50dcda219018d3bbfff8be388b77610bee135749",
+  "buildIdentity": "031caf5848621e18",
+  "proofKind": "OWNER",
+  "ownerReport": "All ten clips completed without waking NEXUS",
+  "result": "pass: enrollment wake isolation interaction",
+  "accuracyTrialsCounted": 0,
+  "normalWakeRecovery": {
+    "status": "pass",
+    "ownerReport": "All three wake normally",
+    "phrases": [
+      "Nexus",
+      "Hey Nexus",
+      "OK Nexus"
+    ],
+    "voiceLock": "off for this check"
+  },
+  "cancellationRecovery": {
+    "status": "pass",
+    "ownerReport": "Both cancellation checks passed",
+    "cases": [
+      "navigation during countdown",
+      "navigation during recording"
+    ],
+    "voiceLock": "off"
+  },
+  "productionReady": false,
+  "buildAttribution": "UNCONFIRMED: later-supplied console shows different builds; repeat on assessed candidate",
+  "candidateProofStatus": "not accepted as exact-revision proof"
+}

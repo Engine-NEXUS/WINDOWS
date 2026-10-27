@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useVoiceLockState, VoiceLockStatus } from "./VoiceLockStatus";
+import { applyNativeLockToDraft, clearSubmittedFields, type VoiceLockState } from "./voiceLockState";
 
 import { stopTts, type VoicePersona, ICONIC_PERSONAS } from "../audio/ttsPlayer";
 import { initThemeSync, applyThemeMode, resolveThemeMode } from "../sidebar/theme";
@@ -30,6 +32,7 @@ interface Settings {
   meetingModeAuto: boolean;
   suppressTtsInMeetings: boolean;
   localSttOnly: boolean;
+  sttDiagnostics?: boolean;
   serverUrl: string;
   userId: string;
   deviceId: string;
@@ -90,6 +93,18 @@ export function SettingsApp() {
   const [tab, setTab] = useState<Tab>("general");
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [saved, setSaved] = useState(false);
+  const voiceLock = useVoiceLockState();
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  useEffect(() => {
+    setSettings(previous => {
+      const next = applyNativeLockToDraft(previous, dirtyFields.current, voiceLock.state.effective);
+      settingsRef.current = next;
+      return next;
+    });
+  }, [voiceLock.state.effective]);
+
+  const [saveError, setSaveError] = useState<string | null>(null);
   const dirtyFields = useRef<Set<keyof Settings>>(new Set());
   const [serverConnected, setServerConnected] = useState(false);
 
@@ -115,7 +130,13 @@ export function SettingsApp() {
   useEffect(() => {
     invoke<Partial<Settings>>("get_settings").then((s) => {
       if (s) {
-        setSettings({ ...DEFAULT_SETTINGS, ...s });
+        setSettings(prev => {
+          const loaded = { ...DEFAULT_SETTINGS, ...s };
+          for (const key of dirtyFields.current) Object.assign(loaded, { [key]: prev[key] });
+          const reconciled = applyNativeLockToDraft(loaded, dirtyFields.current, voiceLock.state.effective);
+          settingsRef.current = reconciled;
+          return reconciled;
+        });
         if (s.themeMode) {
           applyThemeMode(resolveThemeMode(s.themeMode), false);
         }
@@ -136,38 +157,36 @@ export function SettingsApp() {
 
   const update = useCallback(<K extends keyof Settings>(key: K, value: Settings[K]) => {
     dirtyFields.current.add(key);
-    setSettings((prev) => ({ ...prev, [key]: value }));
+    settingsRef.current = { ...settingsRef.current, [key]: value };
+    setSettings(settingsRef.current);
     setSaved(false);
   }, []);
 
   const handleSave = async () => {
+    if (voiceLock.state.saving) return;
+    setSaved(false);
+    setSaveError(null);
+    const snapshot = { ...settingsRef.current };
+    const changed = [...dirtyFields.current];
     try {
-      if (settings.themeMode) {
-        applyThemeMode(settings.themeMode);
-      }
-      // Patch only fields edited here, so this window cannot overwrite a
-      // Telegram chat ID or another setting changed in the Command Hub.
-      const changed = [...dirtyFields.current];
-      if (changed.length) {
-        const patch = Object.fromEntries(changed.map((key) => [key, settings[key]]));
-        await invoke("settings_patch", { patch });
-        dirtyFields.current.clear();
-      }
-      // Sync autostart setting with the OS
-      try {
-        await invoke("set_autostart", { enabled: settings.autostart });
-      } catch (e) {
-        console.warn("set_autostart failed:", e);
-      }
-      setSaved(true);
+      if (snapshot.themeMode) applyThemeMode(snapshot.themeMode);
+      const patch = Object.fromEntries(changed.map(key => [key, snapshot[key]]));
+      await voiceLock.save(patch);
+      // Edits made while IPC was pending still need their own Save.
+      const submitted = Object.fromEntries(changed.map(key => [key, snapshot[key]])) as Partial<Settings>;
+      clearSubmittedFields<Partial<Settings>>(dirtyFields.current, submitted, settingsRef.current);
+      try { await invoke("set_autostart", { enabled: snapshot.autostart }); }
+      catch (error) { console.warn("set_autostart failed:", error); }
+      setSaved(dirtyFields.current.size === 0);
       setTimeout(() => setSaved(false), 2000);
-    } catch {
-      // Settings command not available yet — ignore
+    } catch (error) {
+      setSaveError(String(error));
     }
   };
 
   const handleReset = () => {
     dirtyFields.current = new Set(Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[]);
+    settingsRef.current = DEFAULT_SETTINGS;
     setSettings(DEFAULT_SETTINGS);
     setSaved(false);
   };
@@ -222,7 +241,8 @@ export function SettingsApp() {
           <h1 className="nx-content-title">
             {TABS.find((t) => t.id === tab)?.label}
           </h1>
-          {saved && <span className="nx-badge nx-badge--ok">Saved</span>}
+          {saved && voiceLock.state.saveVerified && !voiceLock.state.error && voiceLock.state.effective !== null && settings.speakerVerification === voiceLock.state.effective && <span className="nx-badge nx-badge--ok">Saved</span>}
+          {saveError && <span role="alert" style={{ color: "var(--nx-error)", fontSize: 12 }}>{saveError}</span>}
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--nx-space-5)" }}>
@@ -239,7 +259,7 @@ export function SettingsApp() {
             <AudioTab settings={settings} update={update} />
           )}
           {tab === "wake" && (
-            <WakeTab settings={settings} update={update} />
+            <WakeTab settings={settings} update={update} voiceLock={voiceLock} />
           )}
           {tab === "privacy" && (
             <PrivacyTab settings={settings} update={update} />
@@ -257,7 +277,7 @@ export function SettingsApp() {
       {/* Footer */}
       <div className="nx-footer" style={{ position: "absolute", bottom: 0, right: 0, left: "200px" }}>
         <button className="nx-btn" onClick={handleReset}>Reset to Defaults</button>
-        <button className="nx-btn nx-btn--primary" onClick={handleSave}>Save</button>
+        <button className="nx-btn nx-btn--primary" onClick={handleSave} disabled={voiceLock.state.saving}>{voiceLock.state.saving ? "Saving…" : "Save"}</button>
       </div>
     </div>
   );
@@ -604,7 +624,7 @@ function AudioTab({ settings, update }: { settings: Settings; update: <K extends
   );
 }
 
-function WakeTab({ settings, update }: { settings: Settings; update: <K extends keyof Settings>(k: K, v: Settings[K]) => void }) {
+function WakeTab({ settings, update, voiceLock }: { voiceLock: VoiceLockState; settings: Settings; update: <K extends keyof Settings>(k: K, v: Settings[K]) => void }) {
   return (
     <>
       <section className="nx-section">
@@ -644,17 +664,23 @@ function WakeTab({ settings, update }: { settings: Settings; update: <K extends 
 
       <section className="nx-section">
         <div className="nx-section-title">Speaker Verification</div>
+        <VoiceLockStatus model={voiceLock} draft={settings.speakerVerification} />
         <div className="nx-row">
           <div className="nx-row-label">
             <span className="nx-row-name">Voice lock</span>
-            <span className="nx-row-hint">Only respond to your enrolled voice profile</span>
+            <span className="nx-row-hint">Check captured voice turns against your enrolled profile</span>
           </div>
-          <Toggle on={settings.speakerVerification} onClick={() => update("speakerVerification", !settings.speakerVerification)} />
+          <button className={`nx-toggle ${settings.speakerVerification ? "nx-toggle--on" : ""}`}
+            type="button" role="switch" aria-label="Draft Voice Lock" aria-checked={settings.speakerVerification}
+            disabled={voiceLock.state.saving || (!settings.speakerVerification && !voiceLock.state.profileReady)}
+            onClick={() => update("speakerVerification", !settings.speakerVerification)}>
+            <span className="nx-toggle-knob" />
+          </button>
         </div>
         <div className="nx-row">
           <div className="nx-row-label">
             <span className="nx-row-name">Voice enrollment</span>
-            <span className="nx-row-hint">Record 5 clips of your voice saying "NEXUS"</span>
+            <span className="nx-row-hint">Record five enrollment and five held-out calibration clips</span>
           </div>
           <button className="nx-btn" onClick={() => invoke("open_setup_window").catch(() => {})}>
             Enroll →
@@ -688,6 +714,17 @@ function PrivacyTab({ settings, update }: { settings: Settings; update: <K exten
 
       <section className="nx-section">
         <div className="nx-section-title">Data Privacy</div>
+        <div className="nx-row">
+          <div className="nx-row-label">
+            <span className="nx-row-name">Temporary STT diagnostics</span>
+            <span className="nx-row-hint">Encrypted local microphone clips and turn evidence; deleted after 24 hours.</span>
+          </div>
+          <Toggle on={settings.sttDiagnostics === true} onClick={() => update("sttDiagnostics", !settings.sttDiagnostics)} />
+        </div>
+        <div className="nx-row">
+          <div className="nx-row-label"><span className="nx-row-name">Delete STT diagnostics</span></div>
+          <button className="nx-btn nx-btn--danger nx-btn--small" onClick={() => invoke("stt_diagnostics_delete").catch(() => {})}>Delete</button>
+        </div>
         <div className="nx-row">
           <div className="nx-row-label">
             <span className="nx-row-name">Local STT only</span>

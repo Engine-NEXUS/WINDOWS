@@ -402,20 +402,12 @@ pub fn spawn_prewarm(app_data_dir: std::path::PathBuf) {
 /// members with 8GB laptops can set "small_streaming" (123M, 7.84% WER)
 /// in Settings to reduce RAM usage.
 fn read_moonshine_model() -> String {
-    // Try %APPDATA%/com.nexus.assistant/settings.json
-    let path = if let Ok(appdata) = std::env::var("APPDATA") {
-        std::path::PathBuf::from(appdata)
-            .join("com.nexus.assistant")
-            .join("settings.json")
-    } else if let Ok(home) = std::env::var("HOME") {
-        std::path::PathBuf::from(home)
-            .join(".config")
-            .join("com.nexus.assistant")
-            .join("settings.json")
-    } else {
+    // Try <NEXUS data dir>/settings.json
+    let path = crate::app_dirs::nexus_data_dir().map(|d| d.join("settings.json"));
+
+    let Some(path) = path else {
         return "medium_streaming".to_string();
     };
-
     let Ok(content) = std::fs::read_to_string(&path) else {
         return "medium_streaming".to_string();
     };

@@ -1,0 +1,58 @@
+{
+  "revision": "3e5b4a803b2a22bc28986189377942f127234fa7",
+  "sourceHash": "342c6f390461e0c69d0c6aa6b66536d84d9cd2c16423f0f8e35604d206dc9124",
+  "updatedAt": "2026-10-25T18:34:30.791095+00:00",
+  "previousCandidate": "021cba2bac4e4bed failed live verification; retained separately",
+  "checks": {
+    "frontendTypecheckAndBuild": "pass",
+    "frontendTests": 687,
+    "focusedTests": 31,
+    "uiMutations": "11/11 killed",
+    "asyncWindowContract": "pass;1/1 mutation killed",
+    "workerTypecheck": "pass",
+    "workerTests": 145,
+    "pythonScripts": 29,
+    "pythonServer": 31,
+    "rustLibraryAndIntegration": {
+      "libraryPassed": 2533,
+      "integrationPassed": 19,
+      "failed": 0,
+      "ignored": 38
+    },
+    "repositoryGuards": "pass: IPC, turn-end, hygiene, opacity, NLU, provenance regression, whitespace",
+    "auditSpeakerMutations": "6/6 audit + 15/15 speaker killed",
+    "deadCode": "pass:148 known, none new",
+    "totalFreshMutations": "33/33 killed (11 UI, 1 window contract, 6 audit, 15 speaker)"
+  },
+  "freshRelease": {
+    "identity": "0b10fd3a1416a540",
+    "pid": 12064,
+    "buildDuration": "61m37s",
+    "provenance": "verified before launch and after device checks",
+    "executableSha256": "4a47ca0248975454aed3cc7a6bf963f0d22380a7b7d863c51f26cd1df0589cc3"
+  },
+  "liveVerification": {
+    "shippingSettingsFlow": "pass",
+    "method": "Computer Use UIA + native IPC + browser-rendered screenshots",
+    "standaloneOpenMs": 640,
+    "nativeInitialAndFinalLock": true,
+    "profileClipsInitialAndFinal": 5,
+    "controlledFaults": "confirmed fetch interception: false ack, refusal, 8-second delay, profile-status failure; removed afterward",
+    "excluded": "first invoke-wrapper attempt was ineffective; no fault proof from it",
+    "voiceAccuracy": "pending; zero new accuracy trials inferred",
+    "prototypeLegacyView": "not separately exercised",
+    "report": "windows1-20261025-voice-lock-ui-v2-assessment.md"
+  },
+  "productionReady": false,
+  "featureScore": 41,
+  "nativeCaptureExclusion": "WDA_EXCLUDEFROMCAPTURE is intentional; browser-rendered capture is used for Audio UI verification",
+  "ownerFollowUp": {
+    "result": "failed user-facing action; two owner-verified speech captures, no formal rate",
+    "newKnownFailure": "duplicated/repeat-filtered command plus later stage watchdog blackout",
+    "structuredAccounting": "unavailable on PID12064 due inherited warn filter",
+    "currentPid": 4564,
+    "sameRelease": "0b10fd3a1416a540",
+    "next": "fresh one-attempt run under explicit info/capture_audit logging",
+    "evidence": "windows1-20261026-owner-001-result.json"
+  }
+}

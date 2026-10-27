@@ -138,21 +138,6 @@ pub fn speech_stage_ack(window: tauri::WebviewWindow, utterance_id: u64) {
     }
 }
 
-#[tauri::command]
-pub fn speech_stage_snapshot(window: tauri::WebviewWindow) -> Result<SpeechSnapshot, String> {
-    if !enabled() {
-        return Err("Speech timeline disabled by rollback flag".into());
-    }
-    if window.label() != "stage" {
-        return Err("Only the NEXUS stage may read speech playback".into());
-    }
-    let state = STATE.0.lock().unwrap();
-    Ok(SpeechSnapshot {
-        frame: state.current.clone(),
-        tracks: state.tracks.clone(),
-    })
-}
-
 fn publish(mut frame: SpeechFrame) -> bool {
     let (lock, cv) = &*STATE;
     let mut state = lock.lock().unwrap();

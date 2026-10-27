@@ -236,22 +236,26 @@ pub fn start_network_monitor(app: tauri::AppHandle) {
             // goes Edge automatically via tts_engine_for, and the hub pill
             // updates live through the cloud-restored event.
             if probe_due() {
-                let app_clone = app.clone();
-                let handle = tauri::async_runtime::handle();
-                let _ = handle.spawn(async move {
-                    use tauri::Emitter;
-                    if check_network_now().await && is_network_up() {
-                        let _ = app_clone.emit("voice:status", cloud_restored_payload());
-                        // cloud is back: make sure the equipped persona's offline voice is installed
-                        // (it could not be downloaded while offline). No-op when already present.
-                        if let Some(engine) = crate::tts::kokoro_engine_handle() {
-                            crate::tts_swap::sync_selected_voice(&app_clone, engine);
+                if crate::focus_mode::paused() {
+                    crate::focus_mode::defer_log("tts_network_probe");
+                } else {
+                    let app_clone = app.clone();
+                    let handle = tauri::async_runtime::handle();
+                    let _ = handle.spawn(async move {
+                        use tauri::Emitter;
+                        if check_network_now().await && is_network_up() {
+                            let _ = app_clone.emit("voice:status", cloud_restored_payload());
+                            // cloud is back: make sure the equipped persona's offline voice is installed
+                            // (it could not be downloaded while offline). No-op when already present.
+                            if let Some(engine) = crate::tts::kokoro_engine_handle() {
+                                crate::tts_swap::sync_selected_voice(&app_clone, engine);
+                            }
+                            tracing::info!(
+                                "[tts_net] watchdog: cloud restored — next synthesis goes Edge"
+                            );
                         }
-                        tracing::info!(
-                            "[tts_net] watchdog: cloud restored — next synthesis goes Edge"
-                        );
-                    }
-                });
+                    });
+                }
             }
 
             // Check if it's time to unload Kokoro
