@@ -10,6 +10,8 @@ export interface OverlayView {
   chipClass: string;
   /** Ripple to play at the ring/cursor position for this action, if any. */
   ripple: boolean;
+  /** Where the ripple goes in CSS px: exactly where the click landed. Null = nowhere on this screen. */
+  ripplePos: { x: number; y: number } | null;
 }
 
 const NO_RIPPLE = new Set(["armed", "disarmed"]);
@@ -60,10 +62,33 @@ export function chipText(s: HudState): string {
   return `HAND · palm, fist, palm, fist${n > 0 ? `  ${n}/3` : ""}${suffix}`;
 }
 
+/**
+ * Where a click ripple belongs. The engine reports the exact physical position the click landed on; the
+ * tracked hand cursor is only a fallback (it is monitor-relative and not set for every action). The
+ * overlay covers the primary monitor only, so a click elsewhere gets no ripple.
+ */
+export function ripplePosition(
+  s: HudState,
+  viewport: { w: number; h: number },
+  dpr = 1,
+): { x: number; y: number } | null {
+  const scale = dpr > 0 ? dpr : 1;
+  if (s.action_pos) {
+    const x = s.action_pos[0] / scale;
+    const y = s.action_pos[1] / scale;
+    return x >= 0 && y >= 0 && x <= viewport.w && y <= viewport.h ? { x, y } : null;
+  }
+  if (!s.primary) return null;
+  const sx = s.screen[0] > 0 ? viewport.w / s.screen[0] : 1;
+  const sy = s.screen[1] > 0 ? viewport.h / s.screen[1] : 1;
+  return { x: s.cursor[0] * sx, y: s.cursor[1] * sy };
+}
+
 export function overlayModel(
   s: HudState,
   viewport: { w: number; h: number },
   newAction: boolean,
+  dpr = 1,
 ): OverlayView {
   const sx = s.screen[0] > 0 ? viewport.w / s.screen[0] : 1;
   const sy = s.screen[1] > 0 ? viewport.h / s.screen[1] : 1;
@@ -80,12 +105,14 @@ export function overlayModel(
       ? "hand-chip hand-chip--live"
       : "hand-chip hand-chip--preview";
 
+  const ripple = newAction && !!s.last_action && !NO_RIPPLE.has(s.last_action) && gestureLabel(s.last_action) === null;
   return {
     ring,
     ringClass,
     chip: chipText(s),
     chipClass,
-    ripple: newAction && !!s.last_action && !NO_RIPPLE.has(s.last_action) && gestureLabel(s.last_action) === null,
+    ripple,
+    ripplePos: ripple ? ripplePosition(s, viewport, dpr) : null,
   };
 }
 

@@ -131,6 +131,9 @@ struct HudState {
     /// Last decision, e.g. "click", "drag", "scroll", with a counter so the HUD can flash on repeats.
     last_action: Option<&'static str>,
     action_seq: u64,
+    /// Physical screen position (virtual desktop) where the last click/press/release landed, so the HUD
+    /// can play its ripple exactly there instead of guessing from the tracked hand.
+    action_pos: Option<(i32, i32)>,
     note: Option<String>,
     /// Camera frames per second as last measured by the hand window (0 = unknown). Under 15 the overlay
     /// says the room is too dark: webcams cut their frame rate in dim light.
@@ -226,6 +229,7 @@ struct Session {
     trace_bytes: u64,
     esc_armed: bool,
     last_action: Option<&'static str>,
+    action_pos: Option<(i32, i32)>,
     action_seq: u64,
     note: Option<String>,
     /// Smoothed capture-to-Rust delay (ms): what the pointer prediction leads by.
@@ -749,6 +753,7 @@ fn apply<R: Runtime>(app: &AppHandle<R>, s: &mut Session, actions: Vec<Action>) 
             Action::Click { x, y, button } => {
                 s.metrics.clicks += 1;
                 s.last_action = Some(if button == Button::Left { "click" } else { "right_click" });
+                s.action_pos = Some((x, y));
                 s.action_seq += 1;
                 if live {
                     let _ = s.out.send(Out::Click(x, y, button));
@@ -757,6 +762,7 @@ fn apply<R: Runtime>(app: &AppHandle<R>, s: &mut Session, actions: Vec<Action>) 
             Action::DragStart { x, y } => {
                 s.metrics.drags += 1;
                 s.last_action = Some("drag");
+                s.action_pos = Some((x, y));
                 s.action_seq += 1;
                 if live {
                     let _ = s.out.send(Out::Press(x, y));
@@ -764,6 +770,7 @@ fn apply<R: Runtime>(app: &AppHandle<R>, s: &mut Session, actions: Vec<Action>) 
             }
             Action::DragEnd { x, y } => {
                 s.last_action = Some("drop");
+                s.action_pos = Some((x, y));
                 s.action_seq += 1;
                 if live {
                     let _ = s.out.send(Out::Release(x, y));
@@ -788,6 +795,7 @@ fn hud<R: Runtime>(app: &AppHandle<R>, s: &Session, snap: Snapshot) {
         fps: s.fps_window.2,
         last_action: s.last_action,
         action_seq: s.action_seq,
+        action_pos: s.action_pos,
         note: s.note.clone(),
         cam_fps: s.cam_fps,
         gpu_busy: s.gpu_busy,
@@ -1151,6 +1159,7 @@ pub fn start<R: Runtime>(app: &AppHandle<R>) -> Result<bool, String> {
         esc_armed: false,
         last_action: None,
         action_seq: 0,
+        action_pos: None,
         note: Some("starting camera…".into()),
         lat_ema: 0.0,
         cam_fps: 0.0,

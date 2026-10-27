@@ -51,7 +51,7 @@ export function HandOverlay() {
       lastState.current = s;
       const newAction = s.action_seq !== lastSeq;
       lastSeq = s.action_seq;
-      const v = overlayModel(s, { w: window.innerWidth, h: window.innerHeight }, newAction);
+      const v = overlayModel(s, { w: window.innerWidth, h: window.innerHeight }, newAction, window.devicePixelRatio || 1);
       const ring = ringRef.current;
       const chip = chipRef.current;
       const label = newAction ? gestureLabel(s.last_action) : null;
@@ -73,10 +73,8 @@ export function HandOverlay() {
         }
       }
       const ripple = rippleRef.current;
-      if (ripple && v.ripple) {
-        const sx = s.screen[0] > 0 ? window.innerWidth / s.screen[0] : 1;
-        const sy = s.screen[1] > 0 ? window.innerHeight / s.screen[1] : 1;
-        ripple.style.transform = `translate3d(${s.cursor[0] * sx - 30}px, ${s.cursor[1] * sy - 30}px, 0)`;
+      if (ripple && v.ripple && v.ripplePos) {
+        ripple.style.transform = `translate3d(${v.ripplePos.x - 30}px, ${v.ripplePos.y - 30}px, 0)`;
         ripple.setAttribute("class", "hand-ripple");
         void ripple.getBoundingClientRect(); // restart the animation on repeats
         ripple.setAttribute("class", "hand-ripple on");

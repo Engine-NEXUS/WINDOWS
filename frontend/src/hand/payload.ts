@@ -118,6 +118,8 @@ export interface HudState {
   fps: number;
   last_action: string | null;
   action_seq: number;
+  /** Physical screen position where the last click/press/release landed (virtual desktop px). */
+  action_pos?: [number, number] | null;
   note: string | null;
   /** Camera frames per second as measured by the hand window (0 = unknown). */
   cam_fps: number;
