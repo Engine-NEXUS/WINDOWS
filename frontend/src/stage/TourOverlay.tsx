@@ -1,6 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import "./tour.css";
-import { arrowHead, physToCss, placeCallout, Placement, Rect } from "./tourGeometry";
+import { arrowHead, physToCss, placeCallout, Placement, Rect, visibleTarget } from "./tourGeometry";
+import { Annotation } from "./annotations/Annotation";
+import { DrawStyle, normalizeDraw } from "./annotations/drawKit";
+import { resetPointerTrail } from "./annotations/pointerTrail";
 
 async function invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
   const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
@@ -25,12 +28,17 @@ interface CalloutPayload {
   total: number;
   title: string;
   text: string;
+  category?: string;
   /** physical px, same contract as ghost:ring */
   x: number;
   y: number;
   width: number;
   height: number;
   has_target: boolean;
+  draw?: string;
+  intent?: string;
+  link?: { x: number; y: number; width: number; height: number } | null;
+  thumb?: string | null;
 }
 interface TourStartPayload {
   request_id: string;
@@ -45,13 +53,45 @@ interface OrbRectPayload {
 }
 
 const LEAVE_MS = 200;
-const RING_OUTSET = 4;
+
+function formatIntent(intent?: string): string | null {
+  if (!intent) return null;
+  switch (intent.trim().toLowerCase()) {
+    case "explain":
+      return "Explaining";
+    case "find":
+      return "Finding";
+    case "compare":
+      return "Comparing";
+    case "summarize":
+    case "summarise":
+      return "Summarising";
+    case "decide":
+      return "Deciding";
+    case "debug":
+      return "Debugging";
+    default:
+      return intent.charAt(0).toUpperCase() + intent.slice(1);
+  }
+}
+
+const SHOW_LEADER_STYLES: readonly DrawStyle[] = [
+  "ring",
+  "circle",
+  "highlight",
+  "underline",
+  "bracket",
+  "pin",
+  "scan",
+  "spotlight",
+];
 
 export function TourOverlay() {
   const [callout, setCallout] = useState<CalloutPayload | null>(null);
-  const [placed, setPlaced] = useState<{ p: Placement; target: Rect | null } | null>(null);
+  const [placed, setPlaced] = useState<{ p: Placement; target: Rect | null; link: Rect | null } | null>(null);
   const [entered, setEntered] = useState(false);
   const [leaving, setLeaving] = useState(false);
+  const [viewport, setViewport] = useState(() => ({ w: window.innerWidth, h: window.innerHeight }));
 
   const boxRef = useRef<HTMLDivElement | null>(null);
   const monitorRef = useRef<{ w: number; h: number } | null>(null);
@@ -75,6 +115,7 @@ export function TourOverlay() {
   };
   const handleDismiss = () => {
     tourIdRef.current = null;
+    resetPointerTrail();
     wipe();
     void invoke("orchestrator_cancel").catch(() => {});
   };
@@ -90,9 +131,16 @@ export function TourOverlay() {
   }, []);
 
   useEffect(() => {
+    const onResize = () => setViewport({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
     let unlisteners: (() => void)[] = [];
     let alive = true;
-    const stale = (id: string) => tourIdRef.current !== null && id !== tourIdRef.current;
+    // A late event after tour_end must never revive the old callout.
+    const stale = (id: string) => tourIdRef.current !== id;
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
       const subs = await Promise.all([
@@ -101,6 +149,7 @@ export function TourOverlay() {
           if (!p) return;
           tourIdRef.current = p.request_id;
           monitorRef.current = p.screen_w > 0 && p.screen_h > 0 ? { w: p.screen_w, h: p.screen_h } : null;
+          resetPointerTrail();
           wipe();
         }),
         listen<CalloutPayload>("screen:callout", (e) => {
@@ -129,6 +178,7 @@ export function TourOverlay() {
           const p = e.payload;
           if (!p || stale(p.request_id)) return;
           tourIdRef.current = null;
+          resetPointerTrail();
           wipe();
         }),
         listen<OrbRectPayload>("stage:orb_rect", (e) => {
@@ -153,11 +203,25 @@ export function TourOverlay() {
   useLayoutEffect(() => {
     const el = boxRef.current;
     if (!el || !callout) return;
-    const viewport = { w: window.innerWidth, h: window.innerHeight };
     const dpr = window.devicePixelRatio || 1;
     const monitor = monitorRef.current ?? { w: viewport.w * dpr, h: viewport.h * dpr };
     const target = callout.has_target
-      ? physToCss({ x: callout.x, y: callout.y, w: callout.width, h: callout.height }, monitor, viewport)
+      ? visibleTarget(physToCss({ x: callout.x, y: callout.y, w: callout.width, h: callout.height }, monitor, viewport), viewport)
+      : null;
+    const link = callout.link
+      ? visibleTarget(
+          physToCss(
+            {
+              x: callout.link.x,
+              y: callout.link.y,
+              w: callout.link.width,
+              h: callout.link.height,
+            },
+            monitor,
+            viewport,
+          ),
+          viewport,
+        )
       : null;
     const p = placeCallout(
       target,
@@ -166,7 +230,7 @@ export function TourOverlay() {
       orbRef.current ? [orbRef.current] : [],
     );
     el.style.transform = `translate(${p.box.x}px, ${p.box.y}px)`;
-    setPlaced({ p, target });
+    setPlaced({ p, target, link });
 
     // Register interactive hitbox for the callout box (physical px)
     const calloutRect = {
@@ -179,35 +243,42 @@ export function TourOverlay() {
 
     const raf = requestAnimationFrame(() => setEntered(true));
     return () => cancelAnimationFrame(raf);
-  }, [callout]);
+  }, [callout, viewport]);
 
   if (!callout) return null;
 
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
   const live = entered && !leaving;
   const leader = placed?.p.leader ?? null;
   const target = placed?.target ?? null;
+  const link = placed?.link ?? null;
+
+  const drawStyle = normalizeDraw(callout.draw, callout.category, target, viewport, {
+    hasLink: !!link,
+    hasThumb: !!callout.thumb,
+  });
+  const showLeader = leader && SHOW_LEADER_STYLES.includes(drawStyle);
+  const intentLabel = formatIntent(callout.intent);
 
   return (
     <>
       <svg
-        className={`tour-svg${live ? " in" : ""}`}
-        width={vw}
-        height={vh}
+        className={`tour-svg tour-svg--${drawStyle}${live ? " in" : ""}`}
+        width={viewport.w}
+        height={viewport.h}
         key={`svg-${callout.idx}`}
+        aria-hidden="true"
       >
-        {target && (
-          <rect
-            className="tour-ring"
-            x={target.x - RING_OUTSET}
-            y={target.y - RING_OUTSET}
-            width={target.w + 2 * RING_OUTSET}
-            height={target.h + 2 * RING_OUTSET}
-            rx={12}
-          />
-        )}
-        {leader && (
+        <Annotation
+          {...{ style: drawStyle }}
+          target={target}
+          link={link}
+          thumb={callout.thumb ?? null}
+          viewport={viewport}
+          live={live}
+          idx={callout.idx}
+          orb={orbRef.current}
+        />
+        {showLeader && (
           <>
             <path
               className="tour-leader"
@@ -238,7 +309,18 @@ export function TourOverlay() {
           <span className="tour-callout-of">/{callout.total}</span>
         </span>
         <div className="tour-callout-title">{callout.title}</div>
+        {intentLabel && <div className="tour-callout-intent">{intentLabel}</div>}
         <div className="tour-callout-text">{callout.text}</div>
+        {callout.total > 1 && (
+          <div className="tour-callout-progress" aria-hidden="true">
+            {Array.from({ length: callout.total }).map((_, i) => (
+              <div
+                key={i}
+                className={`tour-progress-seg${i <= callout.idx ? " active" : ""}`}
+              />
+            ))}
+          </div>
+        )}
       </div>
     </>
   );

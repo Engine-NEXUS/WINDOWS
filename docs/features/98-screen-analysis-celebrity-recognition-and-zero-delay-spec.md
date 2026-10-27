@@ -1,5 +1,7 @@
 # Feature Spec 98: Screen Analysis — Celebrity Recognition & Zero-Delay Pipeline
 
+> **Historical prompt proposal:** Feature 146 supersedes this document's facial-likeness identification instructions. The current screen-analysis prompt describes visible people and uses names only when on-screen text explicitly associates them; additional public facts require sources. The performance investigation below remains useful as historical context, but its model-health and timing claims were point-in-time observations and must be remeasured before release.
+
 **Target Systems**: `src-tauri/src/vision.rs`, `src-tauri/src/screen_tour.rs`, `src-tauri/src/orchestrator.rs`, `src-tauri/src/screen_context.rs`, `src-tauri/src/ocr.rs`  
 **Related Docs**: `docs/features/97-screen-analysis-zero-delay-plan.md`, `docs/research/screen-tour/04-celebrity-recognition-and-zero-delay-architecture-2026-10-07.md`  
 **Status**: Ready for Implementation by Muse Spark

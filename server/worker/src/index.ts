@@ -39,7 +39,7 @@ import {
   gateTranscript, recordDenial, denialStatus, DENIAL_ERROR,
 } from "./entitlement";
 import {
-  authenticateCaller, ownerKeyFor, createOAuthState, consumeOAuthState,
+  authenticateCaller, authenticateLinkedDevice, ownerKeyFor, createOAuthState, consumeOAuthState,
   escapeHtml, timingSafeEqualStr, corsHeaders, type CallerAuth,
 } from "./route_auth";
 import {
@@ -47,6 +47,8 @@ import {
   revokeProfileCascade, revokeDevice, setEntitlement, listProfileEvents,
   type AdminBody,
 } from "./admin";
+import { cleanupLinkProofs, handleDeviceLink, handleSmsGateway } from "./device_links";
+export { LinkSignalRoom } from "./link_signal";
 // NOTE: ./models was deleted (audit M3) — it was imported but every symbol
 // was shadowed by local consts below, so edits to it silently did nothing.
 
@@ -67,6 +69,10 @@ interface Env {
   NEXUS_ADMIN_TOKEN?: string;  // gates POST /models/nlu/publish
   NEXUS_ADMIN_IDENTITY_TOKEN?: string;  // gates /v1/admin/* (Feature 88, W2)
   MIGRATION_MODE?: string;     // identity migration: off | strict | revoke-legacy (Feature 88)
+  NEXUS_LINK_CODE_PEPPER?: string;
+  NEXUS_SMS_GATEWAY_TOKEN?: string;
+  NEXUS_SMS_CODE_KEY?: string;
+  LINK_SIGNAL?: DurableObjectNamespace;
 }
 
 // ---- OAuth configuration ----
@@ -1949,6 +1955,36 @@ export default {
       return json(withProtocolVersion({ revoked: true } as Record<string, unknown>));
     }
 
+    // Device Links are available to registered devices regardless of their
+    // separate Workers AI entitlement. SMS gateway has its own secret.
+    if (path.startsWith("/v1/links/sms/")) {
+      try { return await handleSmsGateway(request, env, cors); }
+      catch { return json({ error: "links_unavailable" }, 503); }
+    }
+    if (path.startsWith("/v1/links/signal/") && method === "GET") {
+      const caller = await authenticateLinkedDevice(d1Store(env), request);
+      if (!caller.ok) return json({ error: caller.code }, caller.status);
+      if (!env.LINK_SIGNAL) return json({ error: "signaling_unavailable" }, 503);
+      const linkId = path.slice("/v1/links/signal/".length);
+      if (!/^[0-9a-f-]{36}$/.test(linkId)) return json({ error: "invalid_link" }, 400);
+      try {
+        const link = await env.DB.prepare("SELECT link_id FROM device_links WHERE link_id = ? AND (device_a = ? OR device_b = ?) AND revoked_at IS NULL")
+          .bind(linkId, caller.deviceId, caller.deviceId).first();
+        if (!link) return json({ error: "link_not_found" }, 404);
+        const headers = new Headers(request.headers);
+        headers.set("X-Nexus-Signal-Device", caller.deviceId);
+        headers.delete("Authorization");
+        const room = env.LINK_SIGNAL.get(env.LINK_SIGNAL.idFromName(linkId));
+        return room.fetch(new Request(request, { headers }));
+      } catch { return json({ error: "signaling_unavailable" }, 503); }
+    }
+    if (path.startsWith("/v1/links/")) {
+      const caller = await authenticateLinkedDevice(d1Store(env), request);
+      if (!caller.ok) return json({ error: caller.code }, caller.status);
+      try { return await handleDeviceLink(request, env, caller, cors); }
+      catch { return json({ error: "links_unavailable" }, 503); }
+    }
+
     // ---- Feature 88: admin control plane (Phase 1: CLI only) ----
     if (path.startsWith("/v1/admin/")) {
       if (!adminAuth(request, env)) return json({ error: "admin auth required" }, 401);
@@ -2167,6 +2203,9 @@ export default {
     }
 
     return json({ error: "not found" }, 404);
+  },
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    await cleanupLinkProofs(env.DB);
   },
 };
 

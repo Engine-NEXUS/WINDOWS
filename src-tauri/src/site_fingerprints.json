@@ -1,0 +1,5755 @@
+{
+  "version": 1,
+  "technologies": [
+    {
+      "id": "react",
+      "name": "React",
+      "category": "frontend-framework",
+      "website": "https://react.dev",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "data-reactroot",
+          "weight": 0.85,
+          "evidence": "data-reactroot attribute on root element"
+        },
+        {
+          "kind": "script_text",
+          "contains": "ReactDOM",
+          "weight": 0.28,
+          "evidence": "ReactDOM in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "createElement",
+          "weight": 0.28,
+          "evidence": "createElement in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "regex": "react\\.development\\.js|react\\.production\\.min\\.js",
+          "weight": 0.6,
+          "evidence": "React dev/prod script name"
+        }
+      ]
+    },
+    {
+      "id": "preact",
+      "name": "Preact",
+      "category": "frontend-framework",
+      "website": "https://preactjs.com",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "preact",
+          "weight": 0.28,
+          "evidence": "preact in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "createElement",
+          "weight": 0.28,
+          "evidence": "createElement in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "preact",
+          "weight": 0.75,
+          "evidence": "preact script src"
+        }
+      ]
+    },
+    {
+      "id": "vue",
+      "name": "Vue.js",
+      "category": "frontend-framework",
+      "website": "https://vuejs.org",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "data-v-",
+          "weight": 0.8,
+          "evidence": "Vue scoped style attribute"
+        },
+        {
+          "kind": "script_text",
+          "contains": "createApp",
+          "weight": 0.28,
+          "evidence": "createApp in bundle (Vue 3) (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "new Vue",
+          "weight": 0.6,
+          "evidence": "new Vue in bundle (Vue 2)"
+        },
+        {
+          "kind": "script_text",
+          "regex": "vue\\.runtime|vue\\.common\\.js|vue\\.global",
+          "weight": 0.65,
+          "evidence": "Vue runtime script name"
+        }
+      ]
+    },
+    {
+      "id": "nuxt",
+      "name": "Nuxt",
+      "category": "meta-framework",
+      "website": "https://nuxt.com",
+      "implies": [
+        "vue"
+      ],
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "__NUXT__",
+          "weight": 0.9,
+          "evidence": "__NUXT__ global in HTML"
+        },
+        {
+          "kind": "script_src",
+          "contains": "/_nuxt/",
+          "weight": 0.9,
+          "evidence": "assets from /_nuxt/"
+        },
+        {
+          "kind": "html",
+          "contains": "nuxt:",
+          "weight": 0.5,
+          "evidence": "nuxt: attributes in HTML"
+        }
+      ]
+    },
+    {
+      "id": "angular",
+      "name": "Angular",
+      "category": "frontend-framework",
+      "website": "https://angular.io",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "ng-version",
+          "weight": 0.9,
+          "evidence": "ng-version attribute on root"
+        },
+        {
+          "kind": "script_text",
+          "contains": "@angular/core",
+          "weight": 0.8,
+          "evidence": "@angular/core in bundle"
+        },
+        {
+          "kind": "script_text",
+          "contains": "Zone.js",
+          "weight": 0.5,
+          "evidence": "Zone.js in bundle"
+        }
+      ]
+    },
+    {
+      "id": "angularjs",
+      "name": "AngularJS",
+      "category": "frontend-framework",
+      "website": "https://angularjs.org",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "ng-app",
+          "weight": 0.85,
+          "evidence": "ng-app directive"
+        },
+        {
+          "kind": "script_text",
+          "contains": "angular.module",
+          "weight": 0.8,
+          "evidence": "angular.module in bundle"
+        },
+        {
+          "kind": "script_src",
+          "contains": "angular.js",
+          "weight": 0.7,
+          "evidence": "angular.js script src"
+        }
+      ]
+    },
+    {
+      "id": "svelte",
+      "name": "Svelte",
+      "category": "frontend-framework",
+      "website": "https://svelte.dev",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "svelte",
+          "weight": 0.28,
+          "evidence": "svelte in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "regex": "svelte\\.js|svelte\\.min\\.js",
+          "weight": 0.6,
+          "evidence": "Svelte script name"
+        }
+      ]
+    },
+    {
+      "id": "sveltekit",
+      "name": "SvelteKit",
+      "category": "meta-framework",
+      "website": "https://kit.svelte.dev",
+      "implies": [
+        "svelte"
+      ],
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "__SVELTEKIT__",
+          "weight": 0.9,
+          "evidence": "__SVELTEKIT__ global"
+        },
+        {
+          "kind": "script_src",
+          "contains": "/_app/immutable/",
+          "weight": 0.85,
+          "evidence": "assets from /_app/immutable/"
+        },
+        {
+          "kind": "script_text",
+          "contains": "kit_start",
+          "weight": 0.6,
+          "evidence": "kit_start in bundle"
+        }
+      ]
+    },
+    {
+      "id": "nextjs",
+      "name": "Next.js",
+      "category": "meta-framework",
+      "website": "https://nextjs.org",
+      "implies": [
+        "react",
+        "nodejs"
+      ],
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "__NEXT_DATA__",
+          "weight": 0.95,
+          "evidence": "__NEXT_DATA__ script in HTML"
+        },
+        {
+          "kind": "script_src",
+          "regex": "/_next/static/",
+          "weight": 0.9,
+          "evidence": "assets from /_next/static/"
+        },
+        {
+          "kind": "header",
+          "name": "x-powered-by",
+          "contains": "Next.js",
+          "weight": 0.95,
+          "evidence": "X-Powered-By: Next.js"
+        }
+      ]
+    },
+    {
+      "id": "remix",
+      "name": "Remix",
+      "category": "meta-framework",
+      "website": "https://remix.run",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "__remix",
+          "weight": 0.85,
+          "evidence": "__remix global or manifest"
+        },
+        {
+          "kind": "link_href",
+          "contains": "/build/",
+          "weight": 0.6,
+          "evidence": "build assets in link href"
+        },
+        {
+          "kind": "script_text",
+          "contains": "remix",
+          "weight": 0.28,
+          "evidence": "remix in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "gatsby",
+      "name": "Gatsby",
+      "category": "meta-framework",
+      "website": "https://www.gatsbyjs.com",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "gatsby-",
+          "weight": 0.7,
+          "evidence": "gatsby- prefixed attributes/ids"
+        },
+        {
+          "kind": "script_src",
+          "contains": "/page-data/",
+          "weight": 0.85,
+          "evidence": "page-data in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "___gatsby",
+          "weight": 0.7,
+          "evidence": "___gatsby global"
+        }
+      ]
+    },
+    {
+      "id": "astro",
+      "name": "Astro",
+      "category": "meta-framework",
+      "website": "https://astro.build",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "astro:",
+          "weight": 0.7,
+          "evidence": "astro: attributes in HTML"
+        },
+        {
+          "kind": "script_src",
+          "contains": "/_astro/",
+          "weight": 0.85,
+          "evidence": "assets from /_astro/"
+        },
+        {
+          "kind": "meta",
+          "name": "generator",
+          "contains": "Astro",
+          "weight": 0.9,
+          "evidence": "Astro generator meta"
+        }
+      ]
+    },
+    {
+      "id": "solid",
+      "name": "SolidJS",
+      "category": "frontend-framework",
+      "website": "https://www.solidjs.com",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "createSignal",
+          "weight": 0.28,
+          "evidence": "createSignal in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "onCleanup",
+          "weight": 0.28,
+          "evidence": "onCleanup in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "solid",
+          "weight": 0.65,
+          "evidence": "solid script src"
+        }
+      ]
+    },
+    {
+      "id": "qwik",
+      "name": "Qwik",
+      "category": "frontend-framework",
+      "website": "https://qwik.builder.io",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "q:version",
+          "weight": 0.85,
+          "evidence": "q:version attribute"
+        },
+        {
+          "kind": "script_text",
+          "contains": "qwik",
+          "weight": 0.28,
+          "evidence": "qwik in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "qwik",
+          "weight": 0.7,
+          "evidence": "qwik script src"
+        }
+      ]
+    },
+    {
+      "id": "ember",
+      "name": "Ember.js",
+      "category": "frontend-framework",
+      "website": "https://emberjs.com",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "ember-application",
+          "weight": 0.8,
+          "evidence": "ember-application class"
+        },
+        {
+          "kind": "script_text",
+          "contains": "EmberApplication",
+          "weight": 0.7,
+          "evidence": "EmberApplication in bundle"
+        },
+        {
+          "kind": "script_src",
+          "contains": "ember",
+          "weight": 0.6,
+          "evidence": "ember script src"
+        }
+      ]
+    },
+    {
+      "id": "backbone",
+      "name": "Backbone.js",
+      "category": "frontend-framework",
+      "website": "https://backbonejs.org",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "Backbone",
+          "weight": 0.28,
+          "evidence": "Backbone global in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "backbone",
+          "weight": 0.7,
+          "evidence": "backbone script src"
+        }
+      ]
+    },
+    {
+      "id": "jquery",
+      "name": "jQuery",
+      "category": "frontend-framework",
+      "website": "https://jquery.com",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "jQuery",
+          "weight": 0.28,
+          "evidence": "jQuery global (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "regex": "jquery.*\\.js",
+          "weight": 0.8,
+          "evidence": "jquery.js script src"
+        }
+      ]
+    },
+    {
+      "id": "alpine",
+      "name": "Alpine.js",
+      "category": "frontend-framework",
+      "website": "https://alpinejs.dev",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "x-data",
+          "weight": 0.85,
+          "evidence": "x-data directive"
+        },
+        {
+          "kind": "script_text",
+          "contains": "Alpine",
+          "weight": 0.28,
+          "evidence": "Alpine global (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "alpine",
+          "weight": 0.7,
+          "evidence": "alpine script src"
+        }
+      ]
+    },
+    {
+      "id": "htmx",
+      "name": "htmx",
+      "category": "frontend-framework",
+      "website": "https://htmx.org",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "hx-",
+          "weight": 0.85,
+          "evidence": "hx- attributes"
+        },
+        {
+          "kind": "script_text",
+          "contains": "htmx",
+          "weight": 0.28,
+          "evidence": "htmx in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "htmx",
+          "weight": 0.7,
+          "evidence": "htmx script src"
+        }
+      ]
+    },
+    {
+      "id": "lit",
+      "name": "Lit",
+      "category": "frontend-framework",
+      "website": "https://lit.dev",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "LitElement",
+          "weight": 0.28,
+          "evidence": "LitElement in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "@lit/reactive-element",
+          "weight": 0.6,
+          "evidence": "lit reactive element import"
+        },
+        {
+          "kind": "script_src",
+          "contains": "lit",
+          "weight": 0.6,
+          "evidence": "lit script src"
+        }
+      ]
+    },
+    {
+      "id": "stimulus",
+      "name": "Stimulus",
+      "category": "frontend-framework",
+      "website": "https://stimulus.hotwired.dev",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "data-controller",
+          "weight": 0.85,
+          "evidence": "data-controller attribute"
+        },
+        {
+          "kind": "script_text",
+          "contains": "Stimulus",
+          "weight": 0.28,
+          "evidence": "Stimulus in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "stimulus",
+          "weight": 0.7,
+          "evidence": "stimulus script src"
+        }
+      ]
+    },
+    {
+      "id": "turbo",
+      "name": "Turbo",
+      "category": "frontend-framework",
+      "website": "https://turbo.hotwired.dev",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "data-turbo",
+          "weight": 0.8,
+          "evidence": "data-turbo attribute"
+        },
+        {
+          "kind": "script_text",
+          "contains": "Turbo",
+          "weight": 0.28,
+          "evidence": "Turbo in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "turbo",
+          "weight": 0.7,
+          "evidence": "turbo script src"
+        }
+      ]
+    },
+    {
+      "id": "livewire",
+      "name": "Livewire",
+      "category": "frontend-framework",
+      "website": "https://laravel-livewire.com",
+      "implies": [
+        "php",
+        "laravel"
+      ],
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "wire:",
+          "weight": 0.85,
+          "evidence": "wire: attributes"
+        },
+        {
+          "kind": "script_text",
+          "contains": "livewire",
+          "weight": 0.28,
+          "evidence": "livewire in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "livewire",
+          "weight": 0.7,
+          "evidence": "livewire script src"
+        }
+      ]
+    },
+    {
+      "id": "inertia",
+      "name": "Inertia.js",
+      "category": "frontend-framework",
+      "website": "https://inertiajs.com",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-inertia",
+          "weight": 0.9,
+          "evidence": "X-Inertia header"
+        },
+        {
+          "kind": "meta",
+          "name": "inertia",
+          "contains": "true",
+          "weight": 0.7,
+          "evidence": "inertia meta tag present"
+        },
+        {
+          "kind": "script_text",
+          "contains": "Inertia",
+          "weight": 0.28,
+          "evidence": "Inertia in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "tailwind",
+      "name": "Tailwind CSS",
+      "category": "css-framework",
+      "website": "https://tailwindcss.com",
+      "signals": [
+        {
+          "kind": "css_text",
+          "contains": "--tw-",
+          "weight": 0.85,
+          "evidence": "Tailwind CSS variables (--tw-)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "tailwindcss",
+          "weight": 0.28,
+          "evidence": "tailwindcss in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "html",
+          "contains": "tailwind",
+          "weight": 0.28,
+          "evidence": "tailwind in class names (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "bootstrap",
+      "name": "Bootstrap",
+      "category": "css-framework",
+      "website": "https://getbootstrap.com",
+      "signals": [
+        {
+          "kind": "css_text",
+          "contains": ".btn-",
+          "weight": 0.5,
+          "evidence": "Bootstrap button classes in CSS"
+        },
+        {
+          "kind": "script_text",
+          "contains": "bootstrap",
+          "weight": 0.28,
+          "evidence": "bootstrap in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "link_href",
+          "contains": "bootstrap",
+          "weight": 0.7,
+          "evidence": "bootstrap in stylesheet href"
+        },
+        {
+          "kind": "html",
+          "contains": "container-fluid",
+          "weight": 0.4,
+          "evidence": "container-fluid class"
+        }
+      ]
+    },
+    {
+      "id": "bulma",
+      "name": "Bulma",
+      "category": "css-framework",
+      "website": "https://bulma.io",
+      "signals": [
+        {
+          "kind": "link_href",
+          "contains": "bulma",
+          "weight": 0.75,
+          "evidence": "bulma in stylesheet href"
+        },
+        {
+          "kind": "html",
+          "contains": "is-",
+          "weight": 0.3,
+          "evidence": "is- prefixed classes"
+        },
+        {
+          "kind": "script_text",
+          "contains": "bulma",
+          "weight": 0.28,
+          "evidence": "bulma in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "foundation",
+      "name": "Foundation",
+      "category": "css-framework",
+      "website": "https://get.foundation",
+      "signals": [
+        {
+          "kind": "link_href",
+          "contains": "foundation",
+          "weight": 0.75,
+          "evidence": "foundation in stylesheet href"
+        },
+        {
+          "kind": "html",
+          "contains": "grid-x",
+          "weight": 0.4,
+          "evidence": "grid-x class"
+        },
+        {
+          "kind": "script_text",
+          "contains": "Foundation",
+          "weight": 0.28,
+          "evidence": "Foundation in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "material-ui",
+      "name": "Material UI (MUI)",
+      "category": "ui-library",
+      "website": "https://mui.com",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "@mui/material",
+          "weight": 0.8,
+          "evidence": "@mui/material import"
+        },
+        {
+          "kind": "script_text",
+          "contains": "makeStyles",
+          "weight": 0.28,
+          "evidence": "makeStyles in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "html",
+          "contains": "MuiButton",
+          "weight": 0.28,
+          "evidence": "MuiButton class (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "chakra-ui",
+      "name": "Chakra UI",
+      "category": "ui-library",
+      "website": "https://chakra-ui.com",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "@chakra-ui",
+          "weight": 0.8,
+          "evidence": "@chakra-ui import"
+        },
+        {
+          "kind": "html",
+          "contains": "chakra-",
+          "weight": 0.5,
+          "evidence": "chakra- prefixed classes"
+        },
+        {
+          "kind": "script_src",
+          "contains": "chakra-ui",
+          "weight": 0.6,
+          "evidence": "chakra-ui script src"
+        }
+      ]
+    },
+    {
+      "id": "ant-design",
+      "name": "Ant Design",
+      "category": "ui-library",
+      "website": "https://ant.design",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "antd",
+          "weight": 0.28,
+          "evidence": "antd import (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "html",
+          "contains": "ant-",
+          "weight": 0.4,
+          "evidence": "ant- prefixed classes"
+        },
+        {
+          "kind": "link_href",
+          "contains": "antd",
+          "weight": 0.6,
+          "evidence": "antd in stylesheet"
+        }
+      ]
+    },
+    {
+      "id": "radix-ui",
+      "name": "Radix UI",
+      "category": "ui-library",
+      "website": "https://www.radix-ui.com",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "@radix-ui",
+          "weight": 0.8,
+          "evidence": "@radix-ui import"
+        },
+        {
+          "kind": "script_src",
+          "contains": "radix-ui",
+          "weight": 0.6,
+          "evidence": "radix-ui script src"
+        }
+      ]
+    },
+    {
+      "id": "shadcn-ui",
+      "name": "shadcn/ui",
+      "category": "ui-library",
+      "website": "https://ui.shadcn.com",
+      "implies": [
+        "react",
+        "tailwind",
+        "radix-ui"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "cn(",
+          "weight": 0.4,
+          "evidence": "cn utility function"
+        },
+        {
+          "kind": "html",
+          "contains": "class=\"",
+          "weight": 0.2,
+          "evidence": "className with Tailwind"
+        }
+      ]
+    },
+    {
+      "id": "mantine",
+      "name": "Mantine",
+      "category": "ui-library",
+      "website": "https://mantine.dev",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "@mantine",
+          "weight": 0.8,
+          "evidence": "@mantine import"
+        },
+        {
+          "kind": "link_href",
+          "contains": "mantine",
+          "weight": 0.6,
+          "evidence": "mantine in stylesheet"
+        }
+      ]
+    },
+    {
+      "id": "semantic-ui",
+      "name": "Semantic UI",
+      "category": "ui-library",
+      "website": "https://semantic-ui.com",
+      "signals": [
+        {
+          "kind": "link_href",
+          "contains": "semantic",
+          "weight": 0.7,
+          "evidence": "semantic in stylesheet"
+        },
+        {
+          "kind": "html",
+          "contains": "ui ",
+          "weight": 0.3,
+          "evidence": "ui prefixed classes"
+        },
+        {
+          "kind": "script_text",
+          "contains": "semantic",
+          "weight": 0.28,
+          "evidence": "semantic in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "font-awesome",
+      "name": "Font Awesome",
+      "category": "icons",
+      "website": "https://fontawesome.com",
+      "signals": [
+        {
+          "kind": "link_href",
+          "contains": "fontawesome",
+          "weight": 0.8,
+          "evidence": "fontawesome in stylesheet"
+        },
+        {
+          "kind": "link_href",
+          "contains": "font-awesome",
+          "weight": 0.8,
+          "evidence": "font-awesome in stylesheet"
+        },
+        {
+          "kind": "html",
+          "contains": "fa-",
+          "weight": 0.5,
+          "evidence": "fa- icon classes"
+        },
+        {
+          "kind": "script_src",
+          "contains": "fontawesome",
+          "weight": 0.7,
+          "evidence": "fontawesome script src"
+        }
+      ]
+    },
+    {
+      "id": "material-icons",
+      "name": "Material Icons",
+      "category": "icons",
+      "website": "https://fonts.google.com/icons",
+      "signals": [
+        {
+          "kind": "link_href",
+          "contains": "material-icons",
+          "weight": 0.8,
+          "evidence": "material-icons in stylesheet"
+        },
+        {
+          "kind": "html",
+          "contains": "material-icons",
+          "weight": 0.6,
+          "evidence": "material-icons class"
+        }
+      ]
+    },
+    {
+      "id": "lucide",
+      "name": "Lucide",
+      "category": "icons",
+      "website": "https://lucide.dev",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "lucide",
+          "weight": 0.28,
+          "evidence": "lucide import (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "lucide",
+          "weight": 0.7,
+          "evidence": "lucide script src"
+        }
+      ]
+    },
+    {
+      "id": "framer-motion",
+      "name": "Framer Motion",
+      "category": "animation",
+      "website": "https://www.framer.com/motion",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "framer-motion",
+          "weight": 0.8,
+          "evidence": "framer-motion import"
+        },
+        {
+          "kind": "script_text",
+          "contains": "motion.div",
+          "weight": 0.5,
+          "evidence": "motion.div usage"
+        }
+      ]
+    },
+    {
+      "id": "gsap",
+      "name": "GSAP",
+      "category": "animation",
+      "website": "https://greensock.com/gsap",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "gsap",
+          "weight": 0.28,
+          "evidence": "gsap in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "gsap",
+          "weight": 0.7,
+          "evidence": "gsap script src"
+        }
+      ]
+    },
+    {
+      "id": "threejs",
+      "name": "Three.js",
+      "category": "animation",
+      "website": "https://threejs.org",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "THREE",
+          "weight": 0.28,
+          "evidence": "THREE global (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "three",
+          "weight": 0.7,
+          "evidence": "three script src"
+        }
+      ]
+    },
+    {
+      "id": "lottie",
+      "name": "Lottie",
+      "category": "animation",
+      "website": "https://airbnb.io/lottie",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "lottie",
+          "weight": 0.28,
+          "evidence": "lottie in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "lottie",
+          "weight": 0.7,
+          "evidence": "lottie script src"
+        }
+      ]
+    },
+    {
+      "id": "swiper",
+      "name": "Swiper",
+      "category": "animation",
+      "website": "https://swiperjs.com",
+      "signals": [
+        {
+          "kind": "link_href",
+          "contains": "swiper",
+          "weight": 0.7,
+          "evidence": "swiper in stylesheet"
+        },
+        {
+          "kind": "script_text",
+          "contains": "Swiper",
+          "weight": 0.28,
+          "evidence": "Swiper in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "swiper",
+          "weight": 0.7,
+          "evidence": "swiper script src"
+        }
+      ]
+    },
+    {
+      "id": "aos",
+      "name": "AOS (Animate On Scroll)",
+      "category": "animation",
+      "website": "https://michalsnik.github.io/aos",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "data-aos",
+          "weight": 0.85,
+          "evidence": "data-aos attributes"
+        },
+        {
+          "kind": "script_text",
+          "contains": "AOS.init",
+          "weight": 0.7,
+          "evidence": "AOS.init in bundle"
+        },
+        {
+          "kind": "script_src",
+          "contains": "aos",
+          "weight": 0.7,
+          "evidence": "aos script src"
+        }
+      ]
+    },
+    {
+      "id": "lenis",
+      "name": "Lenis",
+      "category": "animation",
+      "website": "https://lenis.darkroom.engineering",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "lenis",
+          "weight": 0.28,
+          "evidence": "lenis in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "lenis",
+          "weight": 0.7,
+          "evidence": "lenis script src"
+        }
+      ]
+    },
+    {
+      "id": "locomotive-scroll",
+      "name": "Locomotive Scroll",
+      "category": "animation",
+      "website": "https://github.com/locomotivemtl/locomotive-scroll",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "LocomotiveScroll",
+          "weight": 0.75,
+          "evidence": "LocomotiveScroll in bundle"
+        },
+        {
+          "kind": "script_src",
+          "contains": "locomotive-scroll",
+          "weight": 0.7,
+          "evidence": "locomotive-scroll script src"
+        }
+      ]
+    },
+    {
+      "id": "webpack",
+      "name": "webpack",
+      "category": "build-tool",
+      "website": "https://webpack.js.org",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "__webpack_require__",
+          "weight": 0.9,
+          "evidence": "__webpack_require__ in bundle"
+        },
+        {
+          "kind": "script_text",
+          "contains": "webpackChunk",
+          "weight": 0.28,
+          "evidence": "webpackChunk in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "webpack",
+          "weight": 0.5,
+          "evidence": "webpack in script src"
+        }
+      ]
+    },
+    {
+      "id": "vite",
+      "name": "Vite",
+      "category": "build-tool",
+      "website": "https://vitejs.dev",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "/@vite/",
+          "weight": 0.7,
+          "evidence": "/@vite/ in bundle"
+        },
+        {
+          "kind": "script_src",
+          "contains": "/@id/",
+          "weight": 0.5,
+          "evidence": "/@id/ in script src"
+        },
+        {
+          "kind": "html",
+          "contains": "vite-",
+          "weight": 0.4,
+          "evidence": "vite- prefixed attributes"
+        }
+      ]
+    },
+    {
+      "id": "parcel",
+      "name": "Parcel",
+      "category": "build-tool",
+      "website": "https://parceljs.org",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "parcelRequire",
+          "weight": 0.28,
+          "evidence": "parcelRequire in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "parcel",
+          "weight": 0.6,
+          "evidence": "parcel in script src"
+        }
+      ]
+    },
+    {
+      "id": "turbopack",
+      "name": "Turbopack",
+      "category": "build-tool",
+      "website": "https://turbo.build/pack",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "turbopack",
+          "weight": 0.28,
+          "evidence": "turbopack in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "header",
+          "name": "x-turbopack",
+          "weight": 0.9,
+          "evidence": "X-Turbopack header"
+        }
+      ]
+    },
+    {
+      "id": "rollup",
+      "name": "Rollup",
+      "category": "build-tool",
+      "website": "https://rollupjs.org",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "rollup",
+          "weight": 0.28,
+          "evidence": "rollup in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "redux",
+      "name": "Redux",
+      "category": "state-management",
+      "website": "https://redux.js.org",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "redux",
+          "weight": 0.28,
+          "evidence": "redux in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "createStore",
+          "weight": 0.28,
+          "evidence": "createStore in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "mobx",
+      "name": "MobX",
+      "category": "state-management",
+      "website": "https://mobx.js.org",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "mobx",
+          "weight": 0.28,
+          "evidence": "mobx in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "makeAutoObservable",
+          "weight": 0.6,
+          "evidence": "makeAutoObservable in bundle"
+        }
+      ]
+    },
+    {
+      "id": "zustand",
+      "name": "Zustand",
+      "category": "state-management",
+      "website": "https://zustand.docs.pmnd.rs",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "zustand",
+          "weight": 0.28,
+          "evidence": "zustand in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "create(",
+          "weight": 0.3,
+          "evidence": "create hook pattern"
+        }
+      ]
+    },
+    {
+      "id": "apollo-graphql",
+      "name": "Apollo GraphQL",
+      "category": "state-management",
+      "website": "https://www.apollographql.com",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "@apollo/client",
+          "weight": 0.8,
+          "evidence": "@apollo/client import"
+        },
+        {
+          "kind": "script_text",
+          "contains": "ApolloClient",
+          "weight": 0.28,
+          "evidence": "ApolloClient in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "axios",
+      "name": "Axios",
+      "category": "state-management",
+      "website": "https://axios-http.com",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "axios",
+          "weight": 0.28,
+          "evidence": "axios in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "axios",
+          "weight": 0.7,
+          "evidence": "axios script src"
+        }
+      ]
+    },
+    {
+      "id": "wordpress",
+      "name": "WordPress",
+      "category": "cms",
+      "website": "https://wordpress.org",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "wp-content",
+          "weight": 0.9,
+          "evidence": "wp-content path in HTML"
+        },
+        {
+          "kind": "html",
+          "contains": "wp-includes",
+          "weight": 0.85,
+          "evidence": "wp-includes path in HTML"
+        },
+        {
+          "kind": "meta",
+          "name": "generator",
+          "contains": "WordPress",
+          "weight": 0.95,
+          "evidence": "WordPress generator meta"
+        },
+        {
+          "kind": "script_src",
+          "contains": "wp-embed",
+          "weight": 0.7,
+          "evidence": "wp-embed script"
+        },
+        {
+          "kind": "cookie",
+          "name": "wordpress_",
+          "weight": 0.8,
+          "evidence": "wordpress_ cookie prefix"
+        }
+      ]
+    },
+    {
+      "id": "woocommerce",
+      "name": "WooCommerce",
+      "category": "ecommerce",
+      "website": "https://woocommerce.com",
+      "implies": [
+        "wordpress"
+      ],
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "woocommerce",
+          "weight": 0.28,
+          "evidence": "woocommerce in HTML (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "wc_",
+          "weight": 0.6,
+          "evidence": "wc_ prefixed variables"
+        },
+        {
+          "kind": "cookie",
+          "name": "woocommerce_",
+          "weight": 0.8,
+          "evidence": "woocommerce_ cookie prefix"
+        }
+      ]
+    },
+    {
+      "id": "elementor",
+      "name": "Elementor",
+      "category": "cms",
+      "website": "https://elementor.com",
+      "implies": [
+        "wordpress"
+      ],
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "elementor",
+          "weight": 0.28,
+          "evidence": "elementor in HTML (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "elementor",
+          "weight": 0.28,
+          "evidence": "elementor in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "yoast",
+      "name": "Yoast SEO",
+      "category": "cms",
+      "website": "https://yoast.com",
+      "implies": [
+        "wordpress"
+      ],
+      "signals": [
+        {
+          "kind": "meta",
+          "name": "generator",
+          "contains": "Yoast",
+          "weight": 0.8,
+          "evidence": "Yoast in generator meta"
+        },
+        {
+          "kind": "script_text",
+          "contains": "yoast",
+          "weight": 0.28,
+          "evidence": "yoast in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "shopify",
+      "name": "Shopify",
+      "category": "ecommerce",
+      "website": "https://www.shopify.com",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "Shopify",
+          "weight": 0.28,
+          "evidence": "Shopify in HTML (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "cdn.shopify.com",
+          "weight": 0.95,
+          "evidence": "cdn.shopify.com in script src"
+        },
+        {
+          "kind": "link_href",
+          "contains": "cdn.shopify.com",
+          "weight": 0.9,
+          "evidence": "cdn.shopify.com in link href"
+        },
+        {
+          "kind": "cookie",
+          "name": "_shopify_y",
+          "weight": 0.85,
+          "evidence": "_shopify_y cookie"
+        },
+        {
+          "kind": "cookie",
+          "name": "_shopify_s",
+          "weight": 0.8,
+          "evidence": "_shopify_s cookie"
+        },
+        {
+          "kind": "header",
+          "name": "x-shopify-stage",
+          "weight": 0.9,
+          "evidence": "X-Shopify-Stage header"
+        }
+      ]
+    },
+    {
+      "id": "wix",
+      "name": "Wix",
+      "category": "cms",
+      "website": "https://www.wix.com",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "wix",
+          "weight": 0.28,
+          "evidence": "wix in HTML (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "link_href",
+          "contains": "static.wixstatic.com",
+          "weight": 0.95,
+          "evidence": "static.wixstatic.com in link href"
+        },
+        {
+          "kind": "script_src",
+          "contains": "static.wixstatic.com",
+          "weight": 0.9,
+          "evidence": "static.wixstatic.com in script src"
+        },
+        {
+          "kind": "header",
+          "name": "x-wix-request-id",
+          "weight": 0.9,
+          "evidence": "X-Wix-Request-Id header"
+        }
+      ]
+    },
+    {
+      "id": "squarespace",
+      "name": "Squarespace",
+      "category": "cms",
+      "website": "https://www.squarespace.com",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "squarespace",
+          "weight": 0.28,
+          "evidence": "squarespace in HTML (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "squarespace",
+          "weight": 0.8,
+          "evidence": "squarespace in script src"
+        },
+        {
+          "kind": "header",
+          "name": "x-squarespace-id",
+          "weight": 0.9,
+          "evidence": "X-Squarespace-Id header"
+        }
+      ]
+    },
+    {
+      "id": "webflow",
+      "name": "Webflow",
+      "category": "cms",
+      "website": "https://webflow.com",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "webflow",
+          "weight": 0.28,
+          "evidence": "webflow in HTML (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "webflow",
+          "weight": 0.8,
+          "evidence": "webflow in script src"
+        },
+        {
+          "kind": "header",
+          "name": "x-webflow-id",
+          "weight": 0.9,
+          "evidence": "X-Webflow-Id header"
+        }
+      ]
+    },
+    {
+      "id": "ghost",
+      "name": "Ghost",
+      "category": "cms",
+      "website": "https://ghost.org",
+      "signals": [
+        {
+          "kind": "meta",
+          "name": "generator",
+          "contains": "Ghost",
+          "weight": 0.9,
+          "evidence": "Ghost generator meta"
+        },
+        {
+          "kind": "html",
+          "contains": "ghost-",
+          "weight": 0.5,
+          "evidence": "ghost- prefixed classes"
+        },
+        {
+          "kind": "script_src",
+          "contains": "ghost",
+          "weight": 0.6,
+          "evidence": "ghost in script src"
+        }
+      ]
+    },
+    {
+      "id": "drupal",
+      "name": "Drupal",
+      "category": "cms",
+      "website": "https://www.drupal.org",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "drupal",
+          "weight": 0.28,
+          "evidence": "drupal in HTML (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "meta",
+          "name": "generator",
+          "contains": "Drupal",
+          "weight": 0.9,
+          "evidence": "Drupal generator meta"
+        },
+        {
+          "kind": "cookie",
+          "name": "SESS",
+          "weight": 0.5,
+          "evidence": "SESS cookie"
+        },
+        {
+          "kind": "script_src",
+          "contains": "drupal",
+          "weight": 0.6,
+          "evidence": "drupal in script src"
+        }
+      ]
+    },
+    {
+      "id": "joomla",
+      "name": "Joomla",
+      "category": "cms",
+      "website": "https://www.joomla.org",
+      "signals": [
+        {
+          "kind": "meta",
+          "name": "generator",
+          "contains": "Joomla",
+          "weight": 0.9,
+          "evidence": "Joomla generator meta"
+        },
+        {
+          "kind": "html",
+          "contains": "joomla",
+          "weight": 0.28,
+          "evidence": "joomla in HTML (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "joomla",
+          "weight": 0.6,
+          "evidence": "joomla in script src"
+        }
+      ]
+    },
+    {
+      "id": "magento",
+      "name": "Magento (Adobe Commerce)",
+      "category": "ecommerce",
+      "website": "https://magento.com",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "Magento",
+          "weight": 0.28,
+          "evidence": "Magento in HTML (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "mage",
+          "weight": 0.7,
+          "evidence": "mage in script src"
+        },
+        {
+          "kind": "cookie",
+          "name": "mage-",
+          "weight": 0.7,
+          "evidence": "mage- cookie prefix"
+        }
+      ]
+    },
+    {
+      "id": "bigcommerce",
+      "name": "BigCommerce",
+      "category": "ecommerce",
+      "website": "https://www.bigcommerce.com",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "bigcommerce",
+          "weight": 0.28,
+          "evidence": "bigcommerce in HTML (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "bigcommerce",
+          "weight": 0.8,
+          "evidence": "bigcommerce in script src"
+        },
+        {
+          "kind": "header",
+          "name": "x-bc-",
+          "weight": 0.8,
+          "evidence": "X-BC- header prefix"
+        }
+      ]
+    },
+    {
+      "id": "prestashop",
+      "name": "PrestaShop",
+      "category": "ecommerce",
+      "website": "https://www.prestashop.com",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "PrestaShop",
+          "weight": 0.28,
+          "evidence": "PrestaShop in HTML (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "meta",
+          "name": "generator",
+          "contains": "PrestaShop",
+          "weight": 0.9,
+          "evidence": "PrestaShop generator meta"
+        },
+        {
+          "kind": "cookie",
+          "name": "PrestaShop-",
+          "weight": 0.7,
+          "evidence": "PrestaShop- cookie prefix"
+        }
+      ]
+    },
+    {
+      "id": "contentful",
+      "name": "Contentful",
+      "category": "headless-cms",
+      "website": "https://www.contentful.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "cdn.contentful.com",
+          "weight": 0.9,
+          "evidence": "cdn.contentful.com in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "contentful",
+          "weight": 0.28,
+          "evidence": "contentful in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "sanity",
+      "name": "Sanity",
+      "category": "headless-cms",
+      "website": "https://www.sanity.io",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "cdn.sanity.io",
+          "weight": 0.9,
+          "evidence": "cdn.sanity.io in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "sanity",
+          "weight": 0.28,
+          "evidence": "sanity in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "strapi",
+      "name": "Strapi",
+      "category": "headless-cms",
+      "website": "https://strapi.io",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "strapi",
+          "weight": 0.28,
+          "evidence": "strapi in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "header",
+          "name": "x-strapi",
+          "weight": 0.8,
+          "evidence": "X-Strapi header"
+        }
+      ]
+    },
+    {
+      "id": "prismic",
+      "name": "Prismic",
+      "category": "headless-cms",
+      "website": "https://prismic.io",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "prismic",
+          "weight": 0.8,
+          "evidence": "prismic in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "prismic",
+          "weight": 0.28,
+          "evidence": "prismic in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "storyblok",
+      "name": "Storyblok",
+      "category": "headless-cms",
+      "website": "https://www.storyblok.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "storyblok",
+          "weight": 0.8,
+          "evidence": "storyblok in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "storyblok",
+          "weight": 0.28,
+          "evidence": "storyblok in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "medium",
+      "name": "Medium",
+      "category": "cms",
+      "website": "https://medium.com",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "medium",
+          "weight": 0.28,
+          "evidence": "medium in HTML (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "meta",
+          "name": "generator",
+          "contains": "Medium",
+          "weight": 0.8,
+          "evidence": "Medium generator meta"
+        },
+        {
+          "kind": "link_href",
+          "contains": "medium.com",
+          "weight": 0.7,
+          "evidence": "medium.com in link href"
+        }
+      ]
+    },
+    {
+      "id": "vercel",
+      "name": "Vercel",
+      "category": "hosting",
+      "website": "https://vercel.com",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-vercel-id",
+          "weight": 0.95,
+          "evidence": "X-Vercel-Id header"
+        },
+        {
+          "kind": "header",
+          "name": "x-vercel-cache",
+          "weight": 0.9,
+          "evidence": "X-Vercel-Cache header"
+        },
+        {
+          "kind": "url",
+          "regex": "\\.vercel\\.app$",
+          "weight": 0.9,
+          "evidence": ".vercel.app domain"
+        }
+      ]
+    },
+    {
+      "id": "netlify",
+      "name": "Netlify",
+      "category": "hosting",
+      "website": "https://www.netlify.com",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-nf-request-id",
+          "weight": 0.95,
+          "evidence": "X-NF-Request-Id header"
+        },
+        {
+          "kind": "url",
+          "regex": "\\.netlify\\.app$",
+          "weight": 0.9,
+          "evidence": ".netlify.app domain"
+        },
+        {
+          "kind": "header",
+          "name": "server",
+          "contains": "Netlify",
+          "weight": 0.8,
+          "evidence": "Server: Netlify header"
+        }
+      ]
+    },
+    {
+      "id": "cloudflare-cdn",
+      "name": "Cloudflare CDN/Proxy",
+      "category": "cdn",
+      "website": "https://www.cloudflare.com",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "cf-ray",
+          "weight": 0.99,
+          "evidence": "CF-Ray header"
+        },
+        {
+          "kind": "header",
+          "name": "cf-cache-status",
+          "weight": 0.9,
+          "evidence": "CF-Cache-Status header"
+        },
+        {
+          "kind": "header",
+          "name": "server",
+          "contains": "cloudflare",
+          "weight": 0.95,
+          "evidence": "Server: cloudflare header"
+        }
+      ]
+    },
+    {
+      "id": "cloudflare-pages",
+      "name": "Cloudflare Pages",
+      "category": "hosting",
+      "website": "https://pages.cloudflare.com",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "cf-ray",
+          "weight": 0.9,
+          "evidence": "CF-Ray header"
+        },
+        {
+          "kind": "url",
+          "regex": "\\.pages\\.dev$",
+          "weight": 0.9,
+          "evidence": ".pages.dev domain"
+        }
+      ]
+    },
+    {
+      "id": "aws-cloudfront",
+      "name": "AWS CloudFront",
+      "category": "cdn",
+      "website": "https://aws.amazon.com/cloudfront",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-amz-cf-id",
+          "weight": 0.95,
+          "evidence": "X-Amz-Cf-Id header"
+        },
+        {
+          "kind": "header",
+          "name": "x-amz-cf-pop",
+          "weight": 0.9,
+          "evidence": "X-Amz-Cf-Pop header"
+        },
+        {
+          "kind": "header",
+          "name": "via",
+          "contains": "cloudfront",
+          "weight": 0.8,
+          "evidence": "Via: cloudfront header"
+        }
+      ]
+    },
+    {
+      "id": "aws-s3",
+      "name": "AWS S3 Static Hosting",
+      "category": "hosting",
+      "website": "https://aws.amazon.com/s3",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-amz-id-2",
+          "weight": 0.9,
+          "evidence": "X-Amz-Id-2 header"
+        },
+        {
+          "kind": "header",
+          "name": "x-amz-request-id",
+          "weight": 0.9,
+          "evidence": "X-Amz-Request-Id header"
+        },
+        {
+          "kind": "url",
+          "regex": "s3\\.amazonaws\\.com|s3-website",
+          "weight": 0.8,
+          "evidence": "S3 domain pattern"
+        }
+      ]
+    },
+    {
+      "id": "amazon-api-gateway",
+      "name": "Amazon API Gateway",
+      "category": "backend-framework",
+      "website": "https://aws.amazon.com/api-gateway",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-amz-apigw-id",
+          "weight": 0.95,
+          "evidence": "X-Amz-Apigw-Id header"
+        },
+        {
+          "kind": "header",
+          "name": "x-amzn-requestid",
+          "weight": 0.9,
+          "evidence": "X-Amzn-RequestId header"
+        }
+      ]
+    },
+    {
+      "id": "fastly",
+      "name": "Fastly",
+      "category": "cdn",
+      "website": "https://www.fastly.com",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-served-by",
+          "weight": 0.9,
+          "evidence": "X-Served-By header (Fastly)"
+        },
+        {
+          "kind": "header",
+          "name": "x-cache",
+          "contains": "fastly",
+          "weight": 0.8,
+          "evidence": "X-Cache: fastly header"
+        },
+        {
+          "kind": "header",
+          "name": "via",
+          "contains": "fastly",
+          "weight": 0.8,
+          "evidence": "Via: fastly header"
+        }
+      ]
+    },
+    {
+      "id": "akamai",
+      "name": "Akamai",
+      "category": "cdn",
+      "website": "https://www.akamai.com",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-akamai-transformed",
+          "weight": 0.9,
+          "evidence": "X-Akamai-Transformed header"
+        },
+        {
+          "kind": "header",
+          "name": "server",
+          "contains": "Akamai",
+          "weight": 0.9,
+          "evidence": "Server: Akamai header"
+        },
+        {
+          "kind": "header",
+          "name": "via",
+          "contains": "akamai",
+          "weight": 0.8,
+          "evidence": "Via: akamai header"
+        }
+      ]
+    },
+    {
+      "id": "google-cloud-firebase",
+      "name": "Google Cloud / Firebase Hosting",
+      "category": "hosting",
+      "website": "https://firebase.google.com/docs/hosting",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-google-cache-control",
+          "weight": 0.8,
+          "evidence": "X-Google-Cache-Control header"
+        },
+        {
+          "kind": "url",
+          "regex": "\\.firebaseapp\\.com$|\\.web\\.app$",
+          "weight": 0.9,
+          "evidence": "Firebase hosting domains"
+        },
+        {
+          "kind": "header",
+          "name": "server",
+          "contains": "Google Frontend",
+          "weight": 0.8,
+          "evidence": "Server: Google Frontend"
+        }
+      ]
+    },
+    {
+      "id": "github-pages",
+      "name": "GitHub Pages",
+      "category": "hosting",
+      "website": "https://pages.github.com",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-github-request-id",
+          "weight": 0.95,
+          "evidence": "X-GitHub-Request-Id header"
+        },
+        {
+          "kind": "url",
+          "regex": "\\.github\\.io$",
+          "weight": 0.9,
+          "evidence": ".github.io domain"
+        },
+        {
+          "kind": "header",
+          "name": "server",
+          "contains": "GitHub",
+          "weight": 0.8,
+          "evidence": "Server: GitHub header"
+        }
+      ]
+    },
+    {
+      "id": "render",
+      "name": "Render",
+      "category": "hosting",
+      "website": "https://render.com",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-render-origin-server",
+          "weight": 0.9,
+          "evidence": "X-Render-Origin-Server header"
+        },
+        {
+          "kind": "url",
+          "regex": "\\.onrender\\.com$",
+          "weight": 0.9,
+          "evidence": ".onrender.com domain"
+        }
+      ]
+    },
+    {
+      "id": "flyio",
+      "name": "Fly.io",
+      "category": "hosting",
+      "website": "https://fly.io",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "fly-request-id",
+          "weight": 0.95,
+          "evidence": "Fly-Request-Id header"
+        },
+        {
+          "kind": "header",
+          "name": "via",
+          "contains": "fly",
+          "weight": 0.8,
+          "evidence": "Via: fly header"
+        }
+      ]
+    },
+    {
+      "id": "heroku",
+      "name": "Heroku",
+      "category": "hosting",
+      "website": "https://www.heroku.com",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-request-id",
+          "weight": 0.5,
+          "evidence": "X-Request-Id header (generic)"
+        },
+        {
+          "kind": "url",
+          "regex": "\\.herokuapp\\.com$",
+          "weight": 0.9,
+          "evidence": ".herokuapp.com domain"
+        },
+        {
+          "kind": "header",
+          "name": "server",
+          "contains": "Cowboy",
+          "weight": 0.6,
+          "evidence": "Server: Cowboy (Heroku default)"
+        }
+      ]
+    },
+    {
+      "id": "digitalocean",
+      "name": "DigitalOcean App Platform",
+      "category": "hosting",
+      "website": "https://www.digitalocean.com/products/app-platform",
+      "signals": [
+        {
+          "kind": "url",
+          "regex": "\\.ondigitalocean\\.app$",
+          "weight": 0.9,
+          "evidence": ".ondigitalocean.app domain"
+        }
+      ]
+    },
+    {
+      "id": "azure-frontdoor",
+      "name": "Azure Front Door",
+      "category": "cdn",
+      "website": "https://azure.microsoft.com/en-us/services/frontdoor",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-azure-ref",
+          "weight": 0.95,
+          "evidence": "X-Azure-Ref header"
+        },
+        {
+          "kind": "header",
+          "name": "x-cache",
+          "contains": "Azure",
+          "weight": 0.8,
+          "evidence": "X-Cache: Azure header"
+        }
+      ]
+    },
+    {
+      "id": "azure-app-service",
+      "name": "Azure App Service",
+      "category": "hosting",
+      "website": "https://azure.microsoft.com/en-us/services/app-service",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-powered-by",
+          "contains": "ASP.NET",
+          "weight": 0.8,
+          "evidence": "X-Powered-By: ASP.NET"
+        },
+        {
+          "kind": "url",
+          "regex": "\\.azurewebsites\\.net$",
+          "weight": 0.9,
+          "evidence": ".azurewebsites.net domain"
+        }
+      ]
+    },
+    {
+      "id": "azure-static-web-apps",
+      "name": "Azure Static Web Apps",
+      "category": "hosting",
+      "website": "https://azure.microsoft.com/en-us/services/app-service/static",
+      "signals": [
+        {
+          "kind": "url",
+          "regex": "\\.azurestaticapps\\.net$",
+          "weight": 0.9,
+          "evidence": ".azurestaticapps.net domain"
+        }
+      ]
+    },
+    {
+      "id": "nginx",
+      "name": "nginx",
+      "category": "web-server",
+      "website": "https://nginx.org",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "server",
+          "contains": "nginx",
+          "weight": 0.95,
+          "evidence": "Server: nginx header"
+        },
+        {
+          "kind": "header",
+          "name": "x-nginx-cache",
+          "weight": 0.7,
+          "evidence": "X-Nginx-Cache header"
+        }
+      ]
+    },
+    {
+      "id": "apache",
+      "name": "Apache HTTP Server",
+      "category": "web-server",
+      "website": "https://httpd.apache.org",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "server",
+          "contains": "Apache",
+          "weight": 0.95,
+          "evidence": "Server: Apache header"
+        }
+      ]
+    },
+    {
+      "id": "iis",
+      "name": "Microsoft IIS",
+      "category": "web-server",
+      "website": "https://www.iis.net",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "server",
+          "contains": "Microsoft-IIS",
+          "weight": 0.95,
+          "evidence": "Server: Microsoft-IIS header"
+        },
+        {
+          "kind": "header",
+          "name": "x-powered-by",
+          "contains": "ASP.NET",
+          "weight": 0.8,
+          "evidence": "X-Powered-By: ASP.NET"
+        }
+      ]
+    },
+    {
+      "id": "litespeed",
+      "name": "LiteSpeed",
+      "category": "web-server",
+      "website": "https://www.litespeedtech.com",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "server",
+          "contains": "LiteSpeed",
+          "weight": 0.95,
+          "evidence": "Server: LiteSpeed header"
+        },
+        {
+          "kind": "header",
+          "name": "x-litespeed-cache",
+          "weight": 0.8,
+          "evidence": "X-LiteSpeed-Cache header"
+        }
+      ]
+    },
+    {
+      "id": "caddy",
+      "name": "Caddy",
+      "category": "web-server",
+      "website": "https://caddyserver.com",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "server",
+          "contains": "Caddy",
+          "weight": 0.95,
+          "evidence": "Server: Caddy header"
+        }
+      ]
+    },
+    {
+      "id": "envoy",
+      "name": "Envoy Proxy",
+      "category": "web-server",
+      "website": "https://www.envoyproxy.io",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "server",
+          "contains": "envoy",
+          "weight": 0.9,
+          "evidence": "Server: envoy header"
+        },
+        {
+          "kind": "header",
+          "name": "x-envoy-",
+          "weight": 0.8,
+          "evidence": "X-Envoy- header prefix"
+        }
+      ]
+    },
+    {
+      "id": "nodejs",
+      "name": "Node.js",
+      "category": "backend-language",
+      "website": "https://nodejs.org",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-powered-by",
+          "contains": "Express",
+          "weight": 0.6,
+          "evidence": "X-Powered-By: Express (implies Node)"
+        }
+      ]
+    },
+    {
+      "id": "express",
+      "name": "Express",
+      "category": "backend-framework",
+      "website": "https://expressjs.com",
+      "implies": [
+        "nodejs"
+      ],
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-powered-by",
+          "contains": "Express",
+          "weight": 0.9,
+          "evidence": "X-Powered-By: Express header"
+        }
+      ]
+    },
+    {
+      "id": "php",
+      "name": "PHP",
+      "category": "backend-language",
+      "website": "https://www.php.net",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-powered-by",
+          "contains": "PHP",
+          "weight": 0.9,
+          "evidence": "X-Powered-By: PHP header"
+        },
+        {
+          "kind": "cookie",
+          "name": "PHPSESSID",
+          "weight": 0.8,
+          "evidence": "PHPSESSID cookie"
+        }
+      ]
+    },
+    {
+      "id": "laravel",
+      "name": "Laravel",
+      "category": "backend-framework",
+      "website": "https://laravel.com",
+      "implies": [
+        "php"
+      ],
+      "signals": [
+        {
+          "kind": "cookie",
+          "name": "laravel_session",
+          "weight": 0.85,
+          "evidence": "laravel_session cookie"
+        },
+        {
+          "kind": "header",
+          "name": "x-powered-by",
+          "contains": "Laravel",
+          "weight": 0.7,
+          "evidence": "X-Powered-By: Laravel header"
+        },
+        {
+          "kind": "script_text",
+          "contains": "laravel",
+          "weight": 0.28,
+          "evidence": "laravel in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "django",
+      "name": "Django",
+      "category": "backend-framework",
+      "website": "https://www.djangoproject.com",
+      "signals": [
+        {
+          "kind": "cookie",
+          "name": "csrftoken",
+          "weight": 0.6,
+          "evidence": "csrftoken cookie"
+        },
+        {
+          "kind": "cookie",
+          "name": "sessionid",
+          "weight": 0.5,
+          "evidence": "sessionid cookie"
+        },
+        {
+          "kind": "header",
+          "name": "x-frame-options",
+          "contains": "SAMEORIGIN",
+          "weight": 0.3,
+          "evidence": "X-Frame-Options: SAMEORIGIN (common Django default)"
+        }
+      ]
+    },
+    {
+      "id": "rails",
+      "name": "Ruby on Rails",
+      "category": "backend-framework",
+      "website": "https://rubyonrails.org",
+      "signals": [
+        {
+          "kind": "cookie",
+          "name": "_session_id",
+          "weight": 0.5,
+          "evidence": "_session_id cookie"
+        },
+        {
+          "kind": "header",
+          "name": "x-request-id",
+          "weight": 0.4,
+          "evidence": "X-Request-Id header"
+        },
+        {
+          "kind": "header",
+          "name": "x-runtime",
+          "weight": 0.6,
+          "evidence": "X-Runtime header"
+        }
+      ]
+    },
+    {
+      "id": "aspnet",
+      "name": "ASP.NET Core",
+      "category": "backend-framework",
+      "website": "https://dotnet.microsoft.com/apps/aspnet",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-powered-by",
+          "contains": "ASP.NET",
+          "weight": 0.85,
+          "evidence": "X-Powered-By: ASP.NET header"
+        },
+        {
+          "kind": "cookie",
+          "name": ".AspNetCore.",
+          "weight": 0.7,
+          "evidence": ".AspNetCore. cookie prefix"
+        }
+      ]
+    },
+    {
+      "id": "spring",
+      "name": "Spring Boot",
+      "category": "backend-framework",
+      "website": "https://spring.io/projects/spring-boot",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-application-context",
+          "weight": 0.8,
+          "evidence": "X-Application-Context header"
+        },
+        {
+          "kind": "cookie",
+          "name": "JSESSIONID",
+          "weight": 0.5,
+          "evidence": "JSESSIONID cookie (common but not unique)"
+        }
+      ]
+    },
+    {
+      "id": "flask",
+      "name": "Flask",
+      "category": "backend-framework",
+      "website": "https://flask.palletsprojects.com",
+      "signals": [
+        {
+          "kind": "cookie",
+          "name": "session",
+          "weight": 0.4,
+          "evidence": "session cookie (generic)"
+        },
+        {
+          "kind": "header",
+          "name": "server",
+          "contains": "Werkzeug",
+          "weight": 0.7,
+          "evidence": "Server: Werkzeug (Flask dev server)"
+        }
+      ]
+    },
+    {
+      "id": "supabase",
+      "name": "Supabase",
+      "category": "database-baas",
+      "website": "https://supabase.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "supabase",
+          "weight": 0.8,
+          "evidence": "supabase in script src"
+        },
+        {
+          "kind": "header",
+          "name": "apikey",
+          "weight": 0.6,
+          "evidence": "apikey header (Supabase client)"
+        }
+      ]
+    },
+    {
+      "id": "firebase",
+      "name": "Firebase",
+      "category": "database-baas",
+      "website": "https://firebase.google.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "firebase",
+          "weight": 0.8,
+          "evidence": "firebase in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "firebase",
+          "weight": 0.28,
+          "evidence": "firebase in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "url",
+          "regex": "\\.firebaseio\\.com$|\\.firebasedatabase\\.app$",
+          "weight": 0.8,
+          "evidence": "Firebase Realtime DB domains"
+        }
+      ]
+    },
+    {
+      "id": "appwrite",
+      "name": "Appwrite",
+      "category": "database-baas",
+      "website": "https://appwrite.io",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "appwrite",
+          "weight": 0.8,
+          "evidence": "appwrite in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "Appwrite",
+          "weight": 0.28,
+          "evidence": "Appwrite in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "pocketbase",
+      "name": "PocketBase",
+      "category": "database-baas",
+      "website": "https://pocketbase.io",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "pocketbase",
+          "weight": 0.8,
+          "evidence": "pocketbase in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "pb_",
+          "weight": 0.5,
+          "evidence": "pb_ prefixed variables"
+        }
+      ]
+    },
+    {
+      "id": "hasura",
+      "name": "Hasura",
+      "category": "database-baas",
+      "website": "https://hasura.io",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-hasura-",
+          "weight": 0.8,
+          "evidence": "X-Hasura- header prefix"
+        },
+        {
+          "kind": "script_text",
+          "contains": "hasura",
+          "weight": 0.28,
+          "evidence": "hasura in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "google-analytics",
+      "name": "Google Analytics (UA/GA4)",
+      "category": "analytics",
+      "website": "https://analytics.google.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "google-analytics.com/analytics.js",
+          "weight": 0.9,
+          "evidence": "analytics.js script (UA)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "googletagmanager.com/gtag/js",
+          "weight": 0.9,
+          "evidence": "gtag.js script (GA4)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "gtag(",
+          "weight": 0.8,
+          "evidence": "gtag() function call"
+        },
+        {
+          "kind": "cookie",
+          "name": "_ga",
+          "weight": 0.85,
+          "evidence": "_ga cookie"
+        },
+        {
+          "kind": "cookie",
+          "name": "_gid",
+          "weight": 0.7,
+          "evidence": "_gid cookie"
+        },
+        {
+          "kind": "cookie",
+          "name": "_gat",
+          "weight": 0.7,
+          "evidence": "_gat cookie"
+        }
+      ]
+    },
+    {
+      "id": "google-tag-manager",
+      "name": "Google Tag Manager",
+      "category": "tag-manager",
+      "website": "https://tagmanager.google.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "googletagmanager.com/gtm.js",
+          "weight": 0.95,
+          "evidence": "gtm.js script"
+        },
+        {
+          "kind": "html",
+          "contains": "GTM-",
+          "weight": 0.8,
+          "evidence": "GTM- container ID in HTML"
+        },
+        {
+          "kind": "script_text",
+          "contains": "dataLayer",
+          "weight": 0.28,
+          "evidence": "dataLayer in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "plausible",
+      "name": "Plausible Analytics",
+      "category": "analytics",
+      "website": "https://plausible.io",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "plausible.io",
+          "weight": 0.95,
+          "evidence": "plausible.io in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "plausible",
+          "weight": 0.28,
+          "evidence": "plausible in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "fathom",
+      "name": "Fathom Analytics",
+      "category": "analytics",
+      "website": "https://usefathom.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "fathom",
+          "weight": 0.9,
+          "evidence": "fathom in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "fathom",
+          "weight": 0.28,
+          "evidence": "fathom in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "matomo",
+      "name": "Matomo (Piwik)",
+      "category": "analytics",
+      "website": "https://matomo.org",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "matomo",
+          "weight": 0.9,
+          "evidence": "matomo in script src"
+        },
+        {
+          "kind": "script_src",
+          "contains": "piwik",
+          "weight": 0.8,
+          "evidence": "piwik in script src (legacy)"
+        },
+        {
+          "kind": "cookie",
+          "name": "_pk_id",
+          "weight": 0.8,
+          "evidence": "_pk_id cookie"
+        },
+        {
+          "kind": "cookie",
+          "name": "_pk_ses",
+          "weight": 0.7,
+          "evidence": "_pk_ses cookie"
+        }
+      ]
+    },
+    {
+      "id": "mixpanel",
+      "name": "Mixpanel",
+      "category": "analytics",
+      "website": "https://mixpanel.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "mixpanel",
+          "weight": 0.9,
+          "evidence": "mixpanel in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "mixpanel",
+          "weight": 0.28,
+          "evidence": "mixpanel in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "cookie",
+          "name": "mp_",
+          "weight": 0.6,
+          "evidence": "mp_ cookie prefix"
+        }
+      ]
+    },
+    {
+      "id": "amplitude",
+      "name": "Amplitude",
+      "category": "analytics",
+      "website": "https://amplitude.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "amplitude",
+          "weight": 0.9,
+          "evidence": "amplitude in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "amplitude",
+          "weight": 0.28,
+          "evidence": "amplitude in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "segment",
+      "name": "Segment",
+      "category": "analytics",
+      "website": "https://segment.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "cdn.segment.com",
+          "weight": 0.9,
+          "evidence": "cdn.segment.com in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "analytics.identify",
+          "weight": 0.7,
+          "evidence": "analytics.identify in bundle"
+        }
+      ]
+    },
+    {
+      "id": "hotjar",
+      "name": "Hotjar",
+      "category": "analytics",
+      "website": "https://www.hotjar.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "hotjar",
+          "weight": 0.9,
+          "evidence": "hotjar in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "hj(",
+          "weight": 0.7,
+          "evidence": "hj() function call"
+        },
+        {
+          "kind": "cookie",
+          "name": "_hjSession",
+          "weight": 0.7,
+          "evidence": "_hjSession cookie"
+        }
+      ]
+    },
+    {
+      "id": "microsoft-clarity",
+      "name": "Microsoft Clarity",
+      "category": "analytics",
+      "website": "https://clarity.microsoft.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "clarity",
+          "weight": 0.9,
+          "evidence": "clarity in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "clarity",
+          "weight": 0.28,
+          "evidence": "clarity in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "posthog",
+      "name": "PostHog",
+      "category": "analytics",
+      "website": "https://posthog.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "posthog",
+          "weight": 0.9,
+          "evidence": "posthog in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "posthog",
+          "weight": 0.28,
+          "evidence": "posthog in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "heap",
+      "name": "Heap",
+      "category": "analytics",
+      "website": "https://heap.io",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "heap",
+          "weight": 0.9,
+          "evidence": "heap in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "heap",
+          "weight": 0.28,
+          "evidence": "heap in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "fullstory",
+      "name": "FullStory",
+      "category": "analytics",
+      "website": "https://www.fullstory.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "fullstory",
+          "weight": 0.9,
+          "evidence": "fullstory in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "FS.",
+          "weight": 0.6,
+          "evidence": "FS. global"
+        }
+      ]
+    },
+    {
+      "id": "meta-pixel",
+      "name": "Meta Pixel (Facebook Pixel)",
+      "category": "advertising",
+      "website": "https://www.facebook.com/business/tools/meta-pixel",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "connect.facebook.net/en_US/fbevents.js",
+          "weight": 0.95,
+          "evidence": "fbevents.js script"
+        },
+        {
+          "kind": "script_text",
+          "contains": "fbq(",
+          "weight": 0.9,
+          "evidence": "fbq() function call"
+        },
+        {
+          "kind": "html",
+          "contains": "fbq(",
+          "weight": 0.8,
+          "evidence": "fbq() in inline script"
+        },
+        {
+          "kind": "cookie",
+          "name": "_fbp",
+          "weight": 0.85,
+          "evidence": "_fbp cookie"
+        }
+      ]
+    },
+    {
+      "id": "tiktok-pixel",
+      "name": "TikTok Pixel",
+      "category": "advertising",
+      "website": "https://ads.tiktok.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "analytics.tiktok.com",
+          "weight": 0.9,
+          "evidence": "analytics.tiktok.com in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "ttq(",
+          "weight": 0.8,
+          "evidence": "ttq() function call"
+        }
+      ]
+    },
+    {
+      "id": "linkedin-insight",
+      "name": "LinkedIn Insight Tag",
+      "category": "advertising",
+      "website": "https://www.linkedin.com/insights",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "snap.licdn.com",
+          "weight": 0.9,
+          "evidence": "snap.licdn.com in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "linkedin_",
+          "weight": 0.7,
+          "evidence": "linkedin_ in bundle"
+        }
+      ]
+    },
+    {
+      "id": "google-ads",
+      "name": "Google Ads Conversion Tracking",
+      "category": "advertising",
+      "website": "https://ads.google.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "googleadservices.com",
+          "weight": 0.9,
+          "evidence": "googleadservices.com in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "google_trackConversion",
+          "weight": 0.8,
+          "evidence": "google_trackConversion function"
+        }
+      ]
+    },
+    {
+      "id": "adsense",
+      "name": "Google AdSense",
+      "category": "advertising",
+      "website": "https://www.google.com/adsense",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "pagead2.googlesyndication.com",
+          "weight": 0.9,
+          "evidence": "pagead2.googlesyndication.com in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "adsbygoogle",
+          "weight": 0.28,
+          "evidence": "adsbygoogle in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "x-twitter-pixel",
+      "name": "X/Twitter Pixel",
+      "category": "advertising",
+      "website": "https://ads.twitter.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "static.ads-twitter.com",
+          "weight": 0.9,
+          "evidence": "static.ads-twitter.com in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "twq(",
+          "weight": 0.8,
+          "evidence": "twq() function call"
+        }
+      ]
+    },
+    {
+      "id": "stripe",
+      "name": "Stripe",
+      "category": "payments",
+      "website": "https://stripe.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "js.stripe.com",
+          "weight": 0.95,
+          "evidence": "js.stripe.com in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "Stripe(",
+          "weight": 0.8,
+          "evidence": "Stripe() constructor"
+        },
+        {
+          "kind": "cookie",
+          "name": "__stripe_mid",
+          "weight": 0.8,
+          "evidence": "__stripe_mid cookie"
+        },
+        {
+          "kind": "cookie",
+          "name": "__stripe_sid",
+          "weight": 0.7,
+          "evidence": "__stripe_sid cookie"
+        }
+      ]
+    },
+    {
+      "id": "paypal",
+      "name": "PayPal",
+      "category": "payments",
+      "website": "https://www.paypal.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "paypal.com/sdk/js",
+          "weight": 0.9,
+          "evidence": "paypal.com/sdk/js in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "paypal",
+          "weight": 0.28,
+          "evidence": "paypal in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "razorpay",
+      "name": "Razorpay",
+      "category": "payments",
+      "website": "https://razorpay.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "checkout.razorpay.com",
+          "weight": 0.9,
+          "evidence": "checkout.razorpay.com in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "razorpay",
+          "weight": 0.28,
+          "evidence": "razorpay in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "square",
+      "name": "Square",
+      "category": "payments",
+      "website": "https://squareup.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "squarecdn.com",
+          "weight": 0.9,
+          "evidence": "squarecdn.com in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "Square",
+          "weight": 0.28,
+          "evidence": "Square in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "adyen",
+      "name": "Adyen",
+      "category": "payments",
+      "website": "https://www.adyen.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "adyen.com",
+          "weight": 0.9,
+          "evidence": "adyen.com in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "adyen",
+          "weight": 0.28,
+          "evidence": "adyen in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "auth0",
+      "name": "Auth0",
+      "category": "auth",
+      "website": "https://auth0.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "cdn.auth0.com",
+          "weight": 0.9,
+          "evidence": "cdn.auth0.com in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "auth0",
+          "weight": 0.7,
+          "evidence": "auth0 in bundle"
+        },
+        {
+          "kind": "cookie",
+          "name": "auth0",
+          "weight": 0.6,
+          "evidence": "auth0 cookie prefix"
+        }
+      ]
+    },
+    {
+      "id": "okta",
+      "name": "Okta",
+      "category": "auth",
+      "website": "https://www.okta.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "okta.com",
+          "weight": 0.9,
+          "evidence": "okta.com in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "okta",
+          "weight": 0.28,
+          "evidence": "okta in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "clerk",
+      "name": "Clerk",
+      "category": "auth",
+      "website": "https://clerk.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "clerk",
+          "weight": 0.9,
+          "evidence": "clerk in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "clerk",
+          "weight": 0.28,
+          "evidence": "clerk in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "cookie",
+          "name": "__clerk",
+          "weight": 0.8,
+          "evidence": "__clerk cookie prefix"
+        }
+      ]
+    },
+    {
+      "id": "firebase-auth",
+      "name": "Firebase Authentication",
+      "category": "auth",
+      "website": "https://firebase.google.com/docs/auth",
+      "implies": [
+        "firebase"
+      ],
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "firebase/auth",
+          "weight": 0.8,
+          "evidence": "firebase/auth in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "signInWithEmailAndPassword",
+          "weight": 0.6,
+          "evidence": "Firebase Auth methods"
+        }
+      ]
+    },
+    {
+      "id": "nextauth",
+      "name": "NextAuth.js",
+      "category": "auth",
+      "website": "https://next-auth.js.org",
+      "implies": [
+        "nextjs"
+      ],
+      "signals": [
+        {
+          "kind": "cookie",
+          "name": "next-auth.",
+          "weight": 0.9,
+          "evidence": "next-auth. cookie prefix"
+        },
+        {
+          "kind": "cookie",
+          "name": "__Secure-next-auth.",
+          "weight": 0.85,
+          "evidence": "__Secure-next-auth. cookie"
+        },
+        {
+          "kind": "script_text",
+          "contains": "next-auth",
+          "weight": 0.6,
+          "evidence": "next-auth in bundle"
+        }
+      ]
+    },
+    {
+      "id": "google-signin",
+      "name": "Google Sign-In",
+      "category": "auth",
+      "website": "https://developers.google.com/identity",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "apis.google.com/js/platform.js",
+          "weight": 0.9,
+          "evidence": "platform.js script"
+        },
+        {
+          "kind": "script_src",
+          "contains": "accounts.google.com/gsi/client",
+          "weight": 0.9,
+          "evidence": "Google Identity Services script"
+        },
+        {
+          "kind": "script_text",
+          "contains": "google.accounts.id",
+          "weight": 0.8,
+          "evidence": "google.accounts.id in bundle"
+        }
+      ]
+    },
+    {
+      "id": "apple-signin",
+      "name": "Sign in with Apple",
+      "category": "auth",
+      "website": "https://developer.apple.com/sign-in-with-apple",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "appleid.cdn-apple.com",
+          "weight": 0.9,
+          "evidence": "appleid.cdn-apple.com in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "AppleID.auth",
+          "weight": 0.7,
+          "evidence": "AppleID.auth in bundle"
+        }
+      ]
+    },
+    {
+      "id": "algolia",
+      "name": "Algolia",
+      "category": "search",
+      "website": "https://www.algolia.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "cdn.jsdelivr.net/npm/algoliasearch",
+          "weight": 0.8,
+          "evidence": "algoliasearch in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "algoliasearch",
+          "weight": 0.28,
+          "evidence": "algoliasearch in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "instantsearch",
+          "weight": 0.28,
+          "evidence": "instantsearch in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "elasticsearch",
+      "name": "Elasticsearch",
+      "category": "search",
+      "website": "https://www.elastic.co/elasticsearch",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "elasticsearch",
+          "weight": 0.28,
+          "evidence": "elasticsearch in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "typesense",
+      "name": "Typesense",
+      "category": "search",
+      "website": "https://typesense.org",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "typesense",
+          "weight": 0.8,
+          "evidence": "typesense in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "typesense",
+          "weight": 0.28,
+          "evidence": "typesense in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "intercom",
+      "name": "Intercom",
+      "category": "chat-support",
+      "website": "https://www.intercom.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "intercom",
+          "weight": 0.9,
+          "evidence": "intercom in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "Intercom",
+          "weight": 0.28,
+          "evidence": "Intercom in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "cookie",
+          "name": "intercom-",
+          "weight": 0.7,
+          "evidence": "intercom- cookie prefix"
+        }
+      ]
+    },
+    {
+      "id": "zendesk",
+      "name": "Zendesk",
+      "category": "chat-support",
+      "website": "https://www.zendesk.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "zendesk",
+          "weight": 0.9,
+          "evidence": "zendesk in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "Zendesk",
+          "weight": 0.28,
+          "evidence": "Zendesk in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "crisp",
+      "name": "Crisp",
+      "category": "chat-support",
+      "website": "https://crisp.chat",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "crisp",
+          "weight": 0.9,
+          "evidence": "crisp in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "CRISP",
+          "weight": 0.28,
+          "evidence": "CRISP in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "drift",
+      "name": "Drift",
+      "category": "chat-support",
+      "website": "https://www.drift.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "drift",
+          "weight": 0.9,
+          "evidence": "drift in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "drift",
+          "weight": 0.28,
+          "evidence": "drift in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "tawkto",
+      "name": "Tawk.to",
+      "category": "chat-support",
+      "website": "https://www.tawk.to",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "tawk.to",
+          "weight": 0.95,
+          "evidence": "tawk.to in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "Tawk_API",
+          "weight": 0.8,
+          "evidence": "Tawk_API in bundle"
+        }
+      ]
+    },
+    {
+      "id": "hubspot",
+      "name": "HubSpot",
+      "category": "email-marketing",
+      "website": "https://www.hubspot.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "js.hs-scripts.com",
+          "weight": 0.95,
+          "evidence": "js.hs-scripts.com in script src"
+        },
+        {
+          "kind": "script_src",
+          "contains": "js.hsforms.net",
+          "weight": 0.9,
+          "evidence": "js.hsforms.net in script src"
+        },
+        {
+          "kind": "cookie",
+          "name": "hubspotutk",
+          "weight": 0.85,
+          "evidence": "hubspotutk cookie"
+        },
+        {
+          "kind": "script_text",
+          "contains": "hbspt",
+          "weight": 0.28,
+          "evidence": "hbspt in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "mailchimp",
+      "name": "Mailchimp",
+      "category": "email-marketing",
+      "website": "https://mailchimp.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "mailchimp",
+          "weight": 0.8,
+          "evidence": "mailchimp in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "mailchimp",
+          "weight": 0.28,
+          "evidence": "mailchimp in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "klaviyo",
+      "name": "Klaviyo",
+      "category": "email-marketing",
+      "website": "https://www.klaviyo.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "klaviyo",
+          "weight": 0.8,
+          "evidence": "klaviyo in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "klaviyo",
+          "weight": 0.28,
+          "evidence": "klaviyo in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "cookie",
+          "name": "klaviyo",
+          "weight": 0.6,
+          "evidence": "klaviyo cookie"
+        }
+      ]
+    },
+    {
+      "id": "sentry",
+      "name": "Sentry",
+      "category": "monitoring",
+      "website": "https://sentry.io",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "sentry.io",
+          "weight": 0.9,
+          "evidence": "sentry.io in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "Sentry",
+          "weight": 0.28,
+          "evidence": "Sentry in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "sentry.init",
+          "weight": 0.7,
+          "evidence": "sentry.init call"
+        }
+      ]
+    },
+    {
+      "id": "datadog-rum",
+      "name": "Datadog RUM",
+      "category": "monitoring",
+      "website": "https://www.datadoghq.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "datadoghq-browser-rum",
+          "weight": 0.9,
+          "evidence": "datadoghq-browser-rum in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "DD_RUM",
+          "weight": 0.7,
+          "evidence": "DD_RUM in bundle"
+        }
+      ]
+    },
+    {
+      "id": "logrocket",
+      "name": "LogRocket",
+      "category": "monitoring",
+      "website": "https://logrocket.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "logrocket",
+          "weight": 0.9,
+          "evidence": "logrocket in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "LogRocket",
+          "weight": 0.28,
+          "evidence": "LogRocket in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "newrelic",
+      "name": "New Relic Browser",
+      "category": "monitoring",
+      "website": "https://newrelic.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "newrelic",
+          "weight": 0.9,
+          "evidence": "newrelic in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "NREUM",
+          "weight": 0.28,
+          "evidence": "NREUM global (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "bugsnag",
+      "name": "Bugsnag",
+      "category": "monitoring",
+      "website": "https://www.bugsnag.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "bugsnag",
+          "weight": 0.9,
+          "evidence": "bugsnag in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "Bugsnag",
+          "weight": 0.28,
+          "evidence": "Bugsnag in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "recaptcha",
+      "name": "reCAPTCHA",
+      "category": "security",
+      "website": "https://www.google.com/recaptcha",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "google.com/recaptcha",
+          "weight": 0.95,
+          "evidence": "recaptcha script src"
+        },
+        {
+          "kind": "script_src",
+          "contains": "recaptcha.net",
+          "weight": 0.9,
+          "evidence": "recaptcha.net script src"
+        },
+        {
+          "kind": "html",
+          "contains": "g-recaptcha",
+          "weight": 0.8,
+          "evidence": "g-recaptcha class"
+        }
+      ]
+    },
+    {
+      "id": "hcaptcha",
+      "name": "hCaptcha",
+      "category": "security",
+      "website": "https://www.hcaptcha.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "hcaptcha.com",
+          "weight": 0.95,
+          "evidence": "hcaptcha.com script src"
+        },
+        {
+          "kind": "html",
+          "contains": "h-captcha",
+          "weight": 0.8,
+          "evidence": "h-captcha class"
+        }
+      ]
+    },
+    {
+      "id": "cloudflare-turnstile",
+      "name": "Cloudflare Turnstile",
+      "category": "security",
+      "website": "https://www.cloudflare.com/products/turnstile",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "challenges.cloudflare.com/turnstile",
+          "weight": 0.95,
+          "evidence": "turnstile script src"
+        },
+        {
+          "kind": "html",
+          "contains": "cf-turnstile",
+          "weight": 0.8,
+          "evidence": "cf-turnstile class"
+        }
+      ]
+    },
+    {
+      "id": "cookiebot",
+      "name": "Cookiebot",
+      "category": "cookie-consent",
+      "website": "https://www.cookiebot.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "consent.cookiebot.com",
+          "weight": 0.95,
+          "evidence": "consent.cookiebot.com script"
+        },
+        {
+          "kind": "script_text",
+          "contains": "Cookiebot",
+          "weight": 0.28,
+          "evidence": "Cookiebot in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "onetrust",
+      "name": "OneTrust",
+      "category": "cookie-consent",
+      "website": "https://www.onetrust.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "onetrust",
+          "weight": 0.9,
+          "evidence": "onetrust in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "OneTrust",
+          "weight": 0.28,
+          "evidence": "OneTrust in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "cookie",
+          "name": "OptanonConsent",
+          "weight": 0.8,
+          "evidence": "OptanonConsent cookie"
+        }
+      ]
+    },
+    {
+      "id": "termly",
+      "name": "Termly",
+      "category": "cookie-consent",
+      "website": "https://termly.io",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "termly",
+          "weight": 0.9,
+          "evidence": "termly in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "Termly",
+          "weight": 0.28,
+          "evidence": "Termly in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "google-fonts",
+      "name": "Google Fonts",
+      "category": "fonts",
+      "website": "https://fonts.google.com",
+      "signals": [
+        {
+          "kind": "link_href",
+          "contains": "fonts.googleapis.com",
+          "weight": 0.95,
+          "evidence": "fonts.googleapis.com in link href"
+        },
+        {
+          "kind": "link_href",
+          "contains": "fonts.gstatic.com",
+          "weight": 0.9,
+          "evidence": "fonts.gstatic.com in link href"
+        }
+      ]
+    },
+    {
+      "id": "adobe-fonts",
+      "name": "Adobe Fonts (Typekit)",
+      "category": "fonts",
+      "website": "https://fonts.adobe.com",
+      "signals": [
+        {
+          "kind": "link_href",
+          "contains": "use.typekit.net",
+          "weight": 0.95,
+          "evidence": "use.typekit.net in link href"
+        },
+        {
+          "kind": "script_src",
+          "contains": "use.typekit.net",
+          "weight": 0.9,
+          "evidence": "use.typekit.net in script src"
+        }
+      ]
+    },
+    {
+      "id": "google-maps",
+      "name": "Google Maps Embed/API",
+      "category": "maps",
+      "website": "https://developers.google.com/maps",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "maps.googleapis.com",
+          "weight": 0.95,
+          "evidence": "maps.googleapis.com in script src"
+        },
+        {
+          "kind": "script_src",
+          "contains": "maps.google.com",
+          "weight": 0.9,
+          "evidence": "maps.google.com in script src"
+        },
+        {
+          "kind": "html",
+          "contains": "google.maps",
+          "weight": 0.7,
+          "evidence": "google.maps in inline script"
+        }
+      ]
+    },
+    {
+      "id": "mapbox",
+      "name": "Mapbox",
+      "category": "maps",
+      "website": "https://www.mapbox.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "api.mapbox.com",
+          "weight": 0.9,
+          "evidence": "api.mapbox.com in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "mapboxgl",
+          "weight": 0.28,
+          "evidence": "mapboxgl in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "leaflet",
+      "name": "Leaflet",
+      "category": "maps",
+      "website": "https://leafletjs.com",
+      "signals": [
+        {
+          "kind": "link_href",
+          "contains": "leaflet",
+          "weight": 0.8,
+          "evidence": "leaflet in link href"
+        },
+        {
+          "kind": "script_src",
+          "contains": "leaflet",
+          "weight": 0.8,
+          "evidence": "leaflet in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "L.map",
+          "weight": 0.7,
+          "evidence": "L.map in bundle"
+        }
+      ]
+    },
+    {
+      "id": "youtube-embed",
+      "name": "YouTube Embed",
+      "category": "video",
+      "website": "https://www.youtube.com",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "youtube.com/embed",
+          "weight": 0.9,
+          "evidence": "youtube.com/embed iframe"
+        },
+        {
+          "kind": "html",
+          "contains": "youtube-nocookie.com/embed",
+          "weight": 0.9,
+          "evidence": "youtube-nocookie.com/embed iframe"
+        },
+        {
+          "kind": "script_src",
+          "contains": "youtube.com/iframe_api",
+          "weight": 0.8,
+          "evidence": "YouTube iframe API script"
+        }
+      ]
+    },
+    {
+      "id": "vimeo-embed",
+      "name": "Vimeo Embed",
+      "category": "video",
+      "website": "https://vimeo.com",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "player.vimeo.com/video",
+          "weight": 0.9,
+          "evidence": "player.vimeo.com/video iframe"
+        },
+        {
+          "kind": "script_src",
+          "contains": "vimeo.com/player.js",
+          "weight": 0.8,
+          "evidence": "Vimeo player.js script"
+        }
+      ]
+    },
+    {
+      "id": "optimizely",
+      "name": "Optimizely",
+      "category": "ab-testing",
+      "website": "https://www.optimizely.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "optimizely",
+          "weight": 0.9,
+          "evidence": "optimizely in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "optimizely",
+          "weight": 0.28,
+          "evidence": "optimizely in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "vwo",
+      "name": "VWO",
+      "category": "ab-testing",
+      "website": "https://vwo.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "vwo",
+          "weight": 0.9,
+          "evidence": "vwo in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "VWO",
+          "weight": 0.28,
+          "evidence": "VWO in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "launchdarkly",
+      "name": "LaunchDarkly",
+      "category": "ab-testing",
+      "website": "https://launchdarkly.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "launchdarkly",
+          "weight": 0.9,
+          "evidence": "launchdarkly in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "LDClient",
+          "weight": 0.28,
+          "evidence": "LDClient in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "lodash",
+      "name": "Lodash",
+      "category": "programming-language",
+      "website": "https://lodash.com",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "lodash",
+          "weight": 0.28,
+          "evidence": "lodash in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "_ =",
+          "weight": 0.4,
+          "evidence": "_ variable assignment"
+        }
+      ]
+    },
+    {
+      "id": "momentjs",
+      "name": "Moment.js",
+      "category": "programming-language",
+      "website": "https://momentjs.com",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "moment",
+          "weight": 0.28,
+          "evidence": "moment in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_src",
+          "contains": "moment",
+          "weight": 0.7,
+          "evidence": "moment in script src"
+        }
+      ]
+    },
+    {
+      "id": "polyfill-io",
+      "name": "Polyfill.io",
+      "category": "programming-language",
+      "website": "https://polyfill.io",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "polyfill.io",
+          "weight": 0.9,
+          "evidence": "polyfill.io in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "polyfill",
+          "weight": 0.28,
+          "evidence": "polyfill in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "gatsby-image",
+      "name": "Gatsby Image",
+      "category": "cms",
+      "website": "https://www.gatsbyjs.com/docs/reference/built-in-components/gatsby-image",
+      "implies": [
+        "gatsby"
+      ],
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "gatsby-image",
+          "weight": 0.7,
+          "evidence": "gatsby-image component"
+        },
+        {
+          "kind": "script_text",
+          "contains": "gatsby-plugin-image",
+          "weight": 0.6,
+          "evidence": "gatsby-plugin-image in bundle"
+        }
+      ]
+    },
+    {
+      "id": "next-image",
+      "name": "Next.js Image Optimization",
+      "category": "meta-framework",
+      "website": "https://nextjs.org/docs/api-reference/next/image",
+      "implies": [
+        "nextjs"
+      ],
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "next/image",
+          "weight": 0.6,
+          "evidence": "next/image import usage"
+        },
+        {
+          "kind": "script_text",
+          "contains": "next/image",
+          "weight": 0.6,
+          "evidence": "next/image in bundle"
+        }
+      ]
+    },
+    {
+      "id": "vercel-analytics",
+      "name": "Vercel Analytics",
+      "category": "analytics",
+      "website": "https://vercel.com/analytics",
+      "implies": [
+        "vercel"
+      ],
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "/_vercel/insights",
+          "weight": 0.9,
+          "evidence": "/_vercel/insights script"
+        },
+        {
+          "kind": "script_text",
+          "contains": "vercel/analytics",
+          "weight": 0.7,
+          "evidence": "@vercel/analytics import"
+        }
+      ]
+    },
+    {
+      "id": "vercel-speed-insights",
+      "name": "Vercel Speed Insights",
+      "category": "analytics",
+      "website": "https://vercel.com/docs/speed-insights",
+      "implies": [
+        "vercel"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "@vercel/speed-insights",
+          "weight": 0.7,
+          "evidence": "@vercel/speed-insights import"
+        }
+      ]
+    },
+    {
+      "id": "netlify-analytics",
+      "name": "Netlify Analytics",
+      "category": "analytics",
+      "website": "https://www.netlify.com/products/analytics",
+      "implies": [
+        "netlify"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "netlify-analytics",
+          "weight": 0.6,
+          "evidence": "netlify-analytics in bundle"
+        }
+      ]
+    },
+    {
+      "id": "cloudflare-analytics",
+      "name": "Cloudflare Web Analytics",
+      "category": "analytics",
+      "website": "https://www.cloudflare.com/web-analytics",
+      "implies": [
+        "cloudflare-cdn"
+      ],
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "cloudflareinsights.com",
+          "weight": 0.9,
+          "evidence": "cloudflareinsights.com script"
+        },
+        {
+          "kind": "script_text",
+          "contains": "cloudflareInsights",
+          "weight": 0.7,
+          "evidence": "cloudflareInsights in bundle"
+        }
+      ]
+    },
+    {
+      "id": "umami",
+      "name": "Umami Analytics",
+      "category": "analytics",
+      "website": "https://umami.is",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "umami",
+          "weight": 0.9,
+          "evidence": "umami in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "umami",
+          "weight": 0.28,
+          "evidence": "umami in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "goatcounter",
+      "name": "GoatCounter",
+      "category": "analytics",
+      "website": "https://www.goatcounter.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "goatcounter",
+          "weight": 0.9,
+          "evidence": "goatcounter in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "goatcounter",
+          "weight": 0.28,
+          "evidence": "goatcounter in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "clarity",
+      "name": "Microsoft Clarity",
+      "category": "analytics",
+      "website": "https://clarity.microsoft.com",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "clarity.ms",
+          "weight": 0.9,
+          "evidence": "clarity.ms script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "clarity",
+          "weight": 0.28,
+          "evidence": "clarity in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "sentry-tracing",
+      "name": "Sentry Tracing",
+      "category": "monitoring",
+      "website": "https://docs.sentry.io/platforms/javascript/tracing",
+      "implies": [
+        "sentry"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "Sentry.startTransaction",
+          "weight": 0.7,
+          "evidence": "Sentry tracing API"
+        }
+      ]
+    },
+    {
+      "id": "datadog-logs",
+      "name": "Datadog Logs",
+      "category": "monitoring",
+      "website": "https://docs.datadoghq.com/logs",
+      "implies": [
+        "datadog-rum"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "DD_LOGS",
+          "weight": 0.6,
+          "evidence": "DD_LOGS in bundle"
+        }
+      ]
+    },
+    {
+      "id": "csp",
+      "name": "Content Security Policy",
+      "category": "security",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "content-security-policy",
+          "weight": 0.9,
+          "evidence": "Content-Security-Policy header present"
+        }
+      ]
+    },
+    {
+      "id": "hsts",
+      "name": "HSTS",
+      "category": "security",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Strict-Transport-Security",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "strict-transport-security",
+          "weight": 0.9,
+          "evidence": "Strict-Transport-Security header present"
+        }
+      ]
+    },
+    {
+      "id": "x-frame-options",
+      "name": "X-Frame-Options",
+      "category": "security",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Frame-Options",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-frame-options",
+          "weight": 0.8,
+          "evidence": "X-Frame-Options header present"
+        }
+      ]
+    },
+    {
+      "id": "x-content-type-options",
+      "name": "X-Content-Type-Options",
+      "category": "security",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Content-Type-Options",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-content-type-options",
+          "weight": 0.8,
+          "evidence": "X-Content-Type-Options header present"
+        }
+      ]
+    },
+    {
+      "id": "referrer-policy",
+      "name": "Referrer Policy",
+      "category": "security",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Referrer-Policy",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "referrer-policy",
+          "weight": 0.7,
+          "evidence": "Referrer-Policy header present"
+        }
+      ]
+    },
+    {
+      "id": "permissions-policy",
+      "name": "Permissions Policy",
+      "category": "security",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Permissions-Policy",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "permissions-policy",
+          "weight": 0.7,
+          "evidence": "Permissions-Policy header present"
+        }
+      ]
+    },
+    {
+      "id": "coep",
+      "name": "Cross-Origin Embedder Policy",
+      "category": "security",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cross-Origin-Embedder-Policy",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "cross-origin-embedder-policy",
+          "weight": 0.7,
+          "evidence": "Cross-Origin-Embedder-Policy header present"
+        }
+      ]
+    },
+    {
+      "id": "coop",
+      "name": "Cross-Origin Opener Policy",
+      "category": "security",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cross-Origin-Opener-Policy",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "cross-origin-opener-policy",
+          "weight": 0.7,
+          "evidence": "Cross-Origin-Opener-Policy header present"
+        }
+      ]
+    },
+    {
+      "id": "corp",
+      "name": "Cross-Origin Resource Policy",
+      "category": "security",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cross-Origin-Resource-Policy",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "cross-origin-resource-policy",
+          "weight": 0.7,
+          "evidence": "Cross-Origin-Resource-Policy header present"
+        }
+      ]
+    },
+    {
+      "id": "trusted-types",
+      "name": "Trusted Types",
+      "category": "security",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Trusted-Types",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "trusted-types",
+          "weight": 0.7,
+          "evidence": "Trusted-Types header present"
+        }
+      ]
+    },
+    {
+      "id": "expect-ct",
+      "name": "Expect-CT",
+      "category": "security",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Expect-CT",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "expect-ct",
+          "weight": 0.6,
+          "evidence": "Expect-CT header present"
+        }
+      ]
+    },
+    {
+      "id": "feature-policy",
+      "name": "Feature Policy (deprecated)",
+      "category": "security",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Feature-Policy",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "feature-policy",
+          "weight": 0.6,
+          "evidence": "Feature-Policy header present (deprecated)"
+        }
+      ]
+    },
+    {
+      "id": "gzip",
+      "name": "Gzip Compression",
+      "category": "web-server",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Compression",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "content-encoding",
+          "contains": "gzip",
+          "weight": 0.9,
+          "evidence": "Content-Encoding: gzip"
+        }
+      ]
+    },
+    {
+      "id": "brotli",
+      "name": "Brotli Compression",
+      "category": "web-server",
+      "website": "https://github.com/google/brotli",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "content-encoding",
+          "contains": "br",
+          "weight": 0.9,
+          "evidence": "Content-Encoding: br"
+        }
+      ]
+    },
+    {
+      "id": "zstd",
+      "name": "Zstandard Compression",
+      "category": "web-server",
+      "website": "https://github.com/facebook/zstd",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "content-encoding",
+          "contains": "zstd",
+          "weight": 0.8,
+          "evidence": "Content-Encoding: zstd"
+        }
+      ]
+    },
+    {
+      "id": "http2",
+      "name": "HTTP/2",
+      "category": "web-server",
+      "website": "https://http2.github.io",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "alt-svc",
+          "contains": "h2",
+          "weight": 0.5,
+          "evidence": "Alt-Svc: h2 header"
+        }
+      ]
+    },
+    {
+      "id": "http3",
+      "name": "HTTP/3 (QUIC)",
+      "category": "web-server",
+      "website": "https://httpwg.org/specs/rfc9114.html",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "alt-svc",
+          "contains": "h3",
+          "weight": 0.5,
+          "evidence": "Alt-Svc: h3 header"
+        }
+      ]
+    },
+    {
+      "id": "early-hints",
+      "name": "Early Hints (103)",
+      "category": "web-server",
+      "website": "https://httpwg.org/specs/rfc8297.html",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "link",
+          "contains": "rel=preload",
+          "weight": 0.4,
+          "evidence": "Link: rel=preload in headers"
+        }
+      ]
+    },
+    {
+      "id": "preload",
+      "name": "Resource Preloading",
+      "category": "build-tool",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTML/Attributes/rel/preload",
+      "signals": [
+        {
+          "kind": "link_href",
+          "contains": "rel=preload",
+          "weight": 0.7,
+          "evidence": "rel=preload link"
+        }
+      ]
+    },
+    {
+      "id": "prefetch",
+      "name": "Resource Prefetching",
+      "category": "build-tool",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTML/Attributes/rel/prefetch",
+      "signals": [
+        {
+          "kind": "link_href",
+          "contains": "rel=prefetch",
+          "weight": 0.7,
+          "evidence": "rel=prefetch link"
+        }
+      ]
+    },
+    {
+      "id": "preconnect",
+      "name": "Preconnect",
+      "category": "build-tool",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTML/Attributes/rel/preconnect",
+      "signals": [
+        {
+          "kind": "link_href",
+          "contains": "rel=preconnect",
+          "weight": 0.7,
+          "evidence": "rel=preconnect link"
+        }
+      ]
+    },
+    {
+      "id": "dns-prefetch",
+      "name": "DNS Prefetch",
+      "category": "build-tool",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTML/Attributes/rel/dns-prefetch",
+      "signals": [
+        {
+          "kind": "link_href",
+          "contains": "rel=dns-prefetch",
+          "weight": 0.6,
+          "evidence": "rel=dns-prefetch link"
+        }
+      ]
+    },
+    {
+      "id": "modulepreload",
+      "name": "Module Preload",
+      "category": "build-tool",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/HTML/Attributes/rel/modulepreload",
+      "signals": [
+        {
+          "kind": "link_href",
+          "contains": "rel=modulepreload",
+          "weight": 0.7,
+          "evidence": "rel=modulepreload link"
+        }
+      ]
+    },
+    {
+      "id": "service-worker",
+      "name": "Service Worker",
+      "category": "build-tool",
+      "website": "https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "serviceWorker.register",
+          "weight": 0.8,
+          "evidence": "serviceWorker.register in bundle"
+        },
+        {
+          "kind": "header",
+          "name": "service-worker",
+          "weight": 0.5,
+          "evidence": "Service-Worker header"
+        }
+      ]
+    },
+    {
+      "id": "pwa",
+      "name": "Progressive Web App",
+      "category": "build-tool",
+      "website": "https://web.dev/progressive-web-apps",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "manifest.json",
+          "weight": 0.6,
+          "evidence": "manifest.json link"
+        },
+        {
+          "kind": "link_href",
+          "contains": "manifest.json",
+          "weight": 0.7,
+          "evidence": "manifest.json in link href"
+        },
+        {
+          "kind": "script_text",
+          "contains": "serviceWorker",
+          "weight": 0.28,
+          "evidence": "serviceWorker in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "web-vitals",
+      "name": "Web Vitals Library",
+      "category": "analytics",
+      "website": "https://github.com/GoogleChrome/web-vitals",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "web-vitals",
+          "weight": 0.8,
+          "evidence": "web-vitals in script src"
+        },
+        {
+          "kind": "script_text",
+          "contains": "web-vitals",
+          "weight": 0.7,
+          "evidence": "web-vitals in bundle"
+        }
+      ]
+    },
+    {
+      "id": "core-js",
+      "name": "core-js",
+      "category": "programming-language",
+      "website": "https://github.com/zloirock/core-js",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "core-js",
+          "weight": 0.6,
+          "evidence": "core-js in bundle"
+        },
+        {
+          "kind": "script_src",
+          "contains": "core-js",
+          "weight": 0.6,
+          "evidence": "core-js in script src"
+        }
+      ]
+    },
+    {
+      "id": "regenerator-runtime",
+      "name": "regenerator-runtime",
+      "category": "programming-language",
+      "website": "https://github.com/facebook/regenerator",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "regeneratorRuntime",
+          "weight": 0.7,
+          "evidence": "regeneratorRuntime in bundle"
+        }
+      ]
+    },
+    {
+      "id": "babel-polyfill",
+      "name": "@babel/polyfill (legacy)",
+      "category": "programming-language",
+      "website": "https://babeljs.io/docs/en/babel-polyfill",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "@babel/polyfill",
+          "weight": 0.6,
+          "evidence": "@babel/polyfill import"
+        }
+      ]
+    },
+    {
+      "id": "typescript",
+      "name": "TypeScript",
+      "category": "programming-language",
+      "website": "https://www.typescriptlang.org",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "typescript",
+          "weight": 0.28,
+          "evidence": "typescript in bundle (source maps) (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "html",
+          "contains": "tsconfig",
+          "weight": 0.28,
+          "evidence": "tsconfig reference (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "eslint",
+      "name": "ESLint",
+      "category": "build-tool",
+      "website": "https://eslint.org",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "eslint",
+          "weight": 0.28,
+          "evidence": "eslint in bundle (dev) (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "prettier",
+      "name": "Prettier",
+      "category": "build-tool",
+      "website": "https://prettier.io",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "prettier",
+          "weight": 0.28,
+          "evidence": "prettier in bundle (dev) (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "jest",
+      "name": "Jest",
+      "category": "build-tool",
+      "website": "https://jestjs.io",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "jest",
+          "weight": 0.28,
+          "evidence": "jest in bundle (dev) (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "vitest",
+      "name": "Vitest",
+      "category": "build-tool",
+      "website": "https://vitest.dev",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "vitest",
+          "weight": 0.28,
+          "evidence": "vitest in bundle (dev) (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "playwright",
+      "name": "Playwright",
+      "category": "build-tool",
+      "website": "https://playwright.dev",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "playwright",
+          "weight": 0.28,
+          "evidence": "playwright in bundle (dev) (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "cypress",
+      "name": "Cypress",
+      "category": "build-tool",
+      "website": "https://www.cypress.io",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "cypress",
+          "weight": 0.28,
+          "evidence": "cypress in bundle (dev) (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "storybook",
+      "name": "Storybook",
+      "category": "build-tool",
+      "website": "https://storybook.js.org",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "storybook",
+          "weight": 0.28,
+          "evidence": "storybook in bundle (dev) (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "svelte-headless-ui",
+      "name": "Headless UI (Svelte)",
+      "category": "ui-library",
+      "website": "https://headlessui.com",
+      "implies": [
+        "svelte"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "@headlessui/svelte",
+          "weight": 0.8,
+          "evidence": "@headlessui/svelte import"
+        }
+      ]
+    },
+    {
+      "id": "react-headless-ui",
+      "name": "Headless UI (React)",
+      "category": "ui-library",
+      "website": "https://headlessui.com",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "@headlessui/react",
+          "weight": 0.8,
+          "evidence": "@headlessui/react import"
+        }
+      ]
+    },
+    {
+      "id": "vue-headless-ui",
+      "name": "Headless UI (Vue)",
+      "category": "ui-library",
+      "website": "https://headlessui.com",
+      "implies": [
+        "vue"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "@headlessui/vue",
+          "weight": 0.8,
+          "evidence": "@headlessui/vue import"
+        }
+      ]
+    },
+    {
+      "id": "react-hook-form",
+      "name": "React Hook Form",
+      "category": "ui-library",
+      "website": "https://react-hook-form.com",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "react-hook-form",
+          "weight": 0.7,
+          "evidence": "react-hook-form import"
+        },
+        {
+          "kind": "script_text",
+          "contains": "useForm",
+          "weight": 0.28,
+          "evidence": "useForm hook (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "formik",
+      "name": "Formik",
+      "category": "ui-library",
+      "website": "https://formik.org",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "formik",
+          "weight": 0.28,
+          "evidence": "formik import (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "useFormik",
+          "weight": 0.28,
+          "evidence": "useFormik hook (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "zod",
+      "name": "Zod",
+      "category": "programming-language",
+      "website": "https://zod.dev",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "zod",
+          "weight": 0.28,
+          "evidence": "zod import (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "z.infer",
+          "weight": 0.5,
+          "evidence": "z.infer usage"
+        }
+      ]
+    },
+    {
+      "id": "yup",
+      "name": "Yup",
+      "category": "programming-language",
+      "website": "https://github.com/jquense/yup",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "yup",
+          "weight": 0.28,
+          "evidence": "yup import (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": ".shape(",
+          "weight": 0.4,
+          "evidence": "Yup schema"
+        }
+      ]
+    },
+    {
+      "id": "react-query",
+      "name": "TanStack Query (React Query)",
+      "category": "state-management",
+      "website": "https://tanstack.com/query",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "@tanstack/react-query",
+          "weight": 0.8,
+          "evidence": "@tanstack/react-query import"
+        },
+        {
+          "kind": "script_text",
+          "contains": "useQuery",
+          "weight": 0.28,
+          "evidence": "useQuery hook (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "queryClient",
+          "weight": 0.28,
+          "evidence": "queryClient usage (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "swr",
+      "name": "SWR",
+      "category": "state-management",
+      "website": "https://swr.vercel.app",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "swr",
+          "weight": 0.28,
+          "evidence": "swr import (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "useSWR",
+          "weight": 0.28,
+          "evidence": "useSWR hook (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "rtk-query",
+      "name": "RTK Query",
+      "category": "state-management",
+      "website": "https://redux-toolkit.js.org/rtk-query/overview",
+      "implies": [
+        "redux"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "@reduxjs/toolkit/query",
+          "weight": 0.7,
+          "evidence": "@reduxjs/toolkit/query import"
+        }
+      ]
+    },
+    {
+      "id": "vue-query",
+      "name": "TanStack Query (Vue)",
+      "category": "state-management",
+      "website": "https://tanstack.com/query",
+      "implies": [
+        "vue"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "@tanstack/vue-query",
+          "weight": 0.8,
+          "evidence": "@tanstack/vue-query import"
+        }
+      ]
+    },
+    {
+      "id": "pinia",
+      "name": "Pinia",
+      "category": "state-management",
+      "website": "https://pinia.vuejs.org",
+      "implies": [
+        "vue"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "pinia",
+          "weight": 0.28,
+          "evidence": "pinia import (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "defineStore",
+          "weight": 0.28,
+          "evidence": "defineStore usage (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "vuex",
+      "name": "Vuex",
+      "category": "state-management",
+      "website": "https://vuex.vuejs.org",
+      "implies": [
+        "vue"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "vuex",
+          "weight": 0.28,
+          "evidence": "vuex import (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "createStore",
+          "weight": 0.28,
+          "evidence": "createStore usage (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "recoil",
+      "name": "Recoil",
+      "category": "state-management",
+      "website": "https://recoiljs.org",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "recoil",
+          "weight": 0.28,
+          "evidence": "recoil import (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "atom(",
+          "weight": 0.5,
+          "evidence": "atom usage"
+        }
+      ]
+    },
+    {
+      "id": "jotai",
+      "name": "Jotai",
+      "category": "state-management",
+      "website": "https://jotai.org",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "jotai",
+          "weight": 0.28,
+          "evidence": "jotai import (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "atom(",
+          "weight": 0.5,
+          "evidence": "atom usage"
+        }
+      ]
+    },
+    {
+      "id": "xstate",
+      "name": "XState",
+      "category": "state-management",
+      "website": "https://xstate.js.org",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "xstate",
+          "weight": 0.28,
+          "evidence": "xstate import (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "script_text",
+          "contains": "createMachine",
+          "weight": 0.28,
+          "evidence": "createMachine usage (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "react-router",
+      "name": "React Router",
+      "category": "frontend-framework",
+      "website": "https://reactrouter.com",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "react-router",
+          "weight": 0.7,
+          "evidence": "react-router import"
+        },
+        {
+          "kind": "script_text",
+          "contains": "useNavigate",
+          "weight": 0.28,
+          "evidence": "useNavigate hook (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "wouter",
+      "name": "Wouter",
+      "category": "frontend-framework",
+      "website": "https://github.com/molefrog/wouter",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "wouter",
+          "weight": 0.28,
+          "evidence": "wouter import (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "vue-router",
+      "name": "Vue Router",
+      "category": "frontend-framework",
+      "website": "https://router.vuejs.org",
+      "implies": [
+        "vue"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "vue-router",
+          "weight": 0.7,
+          "evidence": "vue-router import"
+        },
+        {
+          "kind": "script_text",
+          "contains": "useRouter",
+          "weight": 0.28,
+          "evidence": "useRouter hook (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "svelte-routing",
+      "name": "Svelte Routing",
+      "category": "frontend-framework",
+      "website": "https://github.com/EmilTholin/svelte-routing",
+      "implies": [
+        "svelte"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "svelte-routing",
+          "weight": 0.7,
+          "evidence": "svelte-routing import"
+        }
+      ]
+    },
+    {
+      "id": "tanstack-router",
+      "name": "TanStack Router",
+      "category": "frontend-framework",
+      "website": "https://tanstack.com/router",
+      "implies": [
+        "react"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "@tanstack/router",
+          "weight": 0.8,
+          "evidence": "@tanstack/router import"
+        }
+      ]
+    },
+    {
+      "id": "remix-router",
+      "name": "Remix Router",
+      "category": "frontend-framework",
+      "website": "https://remix.run/docs/en/main/router",
+      "implies": [
+        "remix"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "@remix-run/router",
+          "weight": 0.7,
+          "evidence": "@remix-run/router import"
+        }
+      ]
+    },
+    {
+      "id": "next-router",
+      "name": "Next.js Router (App Router)",
+      "category": "meta-framework",
+      "website": "https://nextjs.org/docs/app/building-your-application/routing",
+      "implies": [
+        "nextjs"
+      ],
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "next/navigation",
+          "weight": 0.7,
+          "evidence": "next/navigation import"
+        }
+      ]
+    },
+    {
+      "id": "astro-routes",
+      "name": "Astro File-based Routing",
+      "category": "meta-framework",
+      "website": "https://docs.astro.build/en/core-concepts/routing",
+      "implies": [
+        "astro"
+      ],
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "astro:",
+          "weight": 0.5,
+          "evidence": "Astro file routing patterns"
+        }
+      ]
+    },
+    {
+      "id": "markdown",
+      "name": "Markdown Content",
+      "category": "cms",
+      "website": "https://www.markdownguide.org",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": ".md",
+          "weight": 0.3,
+          "evidence": ".md file references"
+        }
+      ]
+    },
+    {
+      "id": "mdx",
+      "name": "MDX",
+      "category": "cms",
+      "website": "https://mdxjs.com",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "mdx",
+          "weight": 0.28,
+          "evidence": "mdx import (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "html",
+          "contains": ".mdx",
+          "weight": 0.4,
+          "evidence": ".mdx file references"
+        }
+      ]
+    },
+    {
+      "id": "remark",
+      "name": "Remark",
+      "category": "cms",
+      "website": "https://remark.js.org",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "remark",
+          "weight": 0.28,
+          "evidence": "remark in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "rehype",
+      "name": "Rehype",
+      "category": "cms",
+      "website": "https://github.com/rehypejs/rehype",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "rehype",
+          "weight": 0.28,
+          "evidence": "rehype in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "unified",
+      "name": "Unified",
+      "category": "cms",
+      "website": "https://unifiedjs.com",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "unified",
+          "weight": 0.28,
+          "evidence": "unified in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "gray-matter",
+      "name": "gray-matter",
+      "category": "cms",
+      "website": "https://github.com/jonschlinkert/gray-matter",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "gray-matter",
+          "weight": 0.5,
+          "evidence": "gray-matter in bundle"
+        }
+      ]
+    },
+    {
+      "id": "front-matter",
+      "name": "front-matter",
+      "category": "cms",
+      "website": "https://github.com/jxson/front-matter",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "front-matter",
+          "weight": 0.5,
+          "evidence": "front-matter in bundle"
+        }
+      ]
+    },
+    {
+      "id": "sharp",
+      "name": "Sharp (Image Processing)",
+      "category": "build-tool",
+      "website": "https://sharp.pixelplumbing.com",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "sharp",
+          "weight": 0.28,
+          "evidence": "sharp in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "imagemin",
+      "name": "imagemin",
+      "category": "build-tool",
+      "website": "https://github.com/imagemin/imagemin",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "imagemin",
+          "weight": 0.28,
+          "evidence": "imagemin in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "svg-sprite",
+      "name": "SVG Sprite",
+      "category": "icons",
+      "website": "https://github.com/svg-sprite/svg-sprite",
+      "signals": [
+        {
+          "kind": "html",
+          "contains": "symbol id=",
+          "weight": 0.6,
+          "evidence": "SVG symbol sprite"
+        },
+        {
+          "kind": "link_href",
+          "contains": "sprite",
+          "weight": 0.5,
+          "evidence": "sprite in link href"
+        }
+      ]
+    },
+    {
+      "id": "iconify",
+      "name": "Iconify",
+      "category": "icons",
+      "website": "https://iconify.design",
+      "signals": [
+        {
+          "kind": "script_src",
+          "contains": "iconify",
+          "weight": 0.8,
+          "evidence": "iconify in script src"
+        },
+        {
+          "kind": "html",
+          "contains": "data-icon=",
+          "weight": 0.7,
+          "evidence": "data-icon attribute"
+        }
+      ]
+    },
+    {
+      "id": "feather-icons",
+      "name": "Feather Icons",
+      "category": "icons",
+      "website": "https://feathericons.com",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "feather",
+          "weight": 0.28,
+          "evidence": "feather in bundle (weak hint: needs a second signal)"
+        },
+        {
+          "kind": "html",
+          "contains": "feather-",
+          "weight": 0.5,
+          "evidence": "feather- classes"
+        }
+      ]
+    },
+    {
+      "id": "heroicons",
+      "name": "Heroicons",
+      "category": "icons",
+      "website": "https://heroicons.com",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "heroicons",
+          "weight": 0.28,
+          "evidence": "heroicons in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    },
+    {
+      "id": "tabler-icons",
+      "name": "Tabler Icons",
+      "category": "icons",
+      "website": "https://tabler-icons.io",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "tabler-icons",
+          "weight": 0.6,
+          "evidence": "tabler-icons in bundle"
+        }
+      ]
+    },
+    {
+      "id": "phosphor-icons",
+      "name": "Phosphor Icons",
+      "category": "icons",
+      "website": "https://phosphoricons.com",
+      "signals": [
+        {
+          "kind": "script_text",
+          "contains": "phosphor",
+          "weight": 0.28,
+          "evidence": "phosphor in bundle (weak hint: needs a second signal)"
+        }
+      ]
+    }
+  ]
+}

@@ -1,5 +1,7 @@
 # NEXUS Cloudflare Worker — Fully Serverless
 
+> **2026-10-19 status:** This README's older endpoint diagram predates canonical device identity and Device Links. For the current pairing routes, Free-plan limits, required secrets, and deployment gate, read [change 144](../../docs/changes/144-cloudflare-free-device-links-foundation.md) and [architecture 13](../../docs/architecture/13-admin-and-device-links.md). The new schema and Worker have **not** been applied to the live Cloudflare account in this implementation pass. Administrator access and file transfer remain unavailable.
+
 No server needed. No sidecar. No n8n. No Ollama. Just the NEXUS laptop +
 this Worker + Cloudflare D1.
 

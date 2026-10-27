@@ -34,14 +34,6 @@ fn engine() -> Option<OcrEngine> {
     OcrEngine::TryCreateFromLanguage(&lang).ok()
 }
 
-/// Capture the primary monitor and OCR all visible text.
-/// Returns (full_text, line_rects) — rects are PHYSICAL px (x, y, w, h).
-/// None on any failure (capture, engine, decode).
-pub fn capture_screen_text() -> Option<(String, Vec<(i32, i32, i32, i32)>)> {
-    let (mw, mh) = crate::screen::primary_monitor_size()?;
-    capture_region_text_rects(0, 0, mw, mh)
-}
-
 /// OCR one screen region (physical px). Rects are relative to the region's top-left corner.
 pub fn capture_region_text_rects(x: i32, y: i32, mw: i32, mh: i32) -> Option<(String, Vec<(i32, i32, i32, i32)>)> {
     if mw <= 0 || mh <= 0 {
@@ -142,7 +134,8 @@ pub fn capture_region_text(x: i32, y: i32, w: i32, h: i32) -> Option<String> {
 /// OCR text only (no rects) — convenience wrapper.
 #[allow(dead_code)]
 pub fn capture_screen_text_only() -> Option<String> {
-    capture_screen_text().map(|(t, _)| t)
+    let (mw, mh) = crate::screen::primary_monitor_size()?;
+    capture_region_text_rects(0, 0, mw, mh).map(|(t, _)| t)
 }
 
 #[cfg(test)]
@@ -155,7 +148,8 @@ mod tests {
     #[test]
     #[ignore]
     fn test_ocr_probe_live_screen() {
-        let out = capture_screen_text();
+        let out = crate::screen::primary_monitor_size()
+            .and_then(|(mw, mh)| capture_region_text_rects(0, 0, mw, mh));
         match out {
             Some((text, rects)) => {
                 let first: String = text.lines().next().unwrap_or("").to_string();

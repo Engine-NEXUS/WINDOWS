@@ -18,12 +18,25 @@ binding = "DB"
 database_name = "nexus-db"
 database_id = "4bca5d1b-55e1-4a30-bbf9-ca28cf96e3ea"
 
+# Free-plan SQLite Durable Object: hibernating signaling only, never file bytes.
+[[durable_objects.bindings]]
+name = "LINK_SIGNAL"
+class_name = "LinkSignalRoom"
+
+[[migrations]]
+tag = "device-links-v1"
+new_sqlite_classes = ["LinkSignalRoom"]
+
 # ---- Environment variables (non-secret) ----
 [vars]
 # Identity gate (Feature 88). "off" lets any caller who names a user_id use the AI path and
 # spend quota; "strict" requires an approved device (claim -> admin approve -> bearer token).
 # Deploy "strict" only after existing devices have claimed a profile, or they get 401/403.
 MIGRATION_MODE = "strict"
+
+# One daily cleanup of expired OTP and pair-code metadata (no D1 presence polling).
+[triggers]
+crons = ["0 3 * * *"]
 # OAuth client IDs/secrets are set as secrets:
 #   npx wrangler secret put GOOGLE_CLIENT_ID
 #   npx wrangler secret put GOOGLE_CLIENT_SECRET

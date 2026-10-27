@@ -48,6 +48,129 @@ pub fn screen_ack(seed: u8) -> &'static str {
     SCREEN_ACKS[seed as usize % SCREEN_ACKS.len()]
 }
 
+// ─── Drawing style & intent ────────────────────────────────────────────
+
+/// How the overlay should draw the pointer for one item (optional `draw`
+/// callout field). The frontend owns the actual drawing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrawStyle {
+    Ring,
+    Underline,
+    Bracket,
+    Circle,
+    Arrow,
+    Highlight,
+    Spotlight,
+    Scan,
+    Lens,
+    Connect,
+    Pin,
+}
+
+impl DrawStyle {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DrawStyle::Ring => "ring",
+            DrawStyle::Underline => "underline",
+            DrawStyle::Bracket => "bracket",
+            DrawStyle::Circle => "circle",
+            DrawStyle::Arrow => "arrow",
+            DrawStyle::Highlight => "highlight",
+            DrawStyle::Spotlight => "spotlight",
+            DrawStyle::Scan => "scan",
+            DrawStyle::Lens => "lens",
+            DrawStyle::Connect => "connect",
+            DrawStyle::Pin => "pin",
+        }
+    }
+
+    /// Tolerant parse: trimmed, case-insensitive. Pure.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "ring" => Some(DrawStyle::Ring),
+            "underline" => Some(DrawStyle::Underline),
+            "bracket" => Some(DrawStyle::Bracket),
+            "circle" => Some(DrawStyle::Circle),
+            "arrow" => Some(DrawStyle::Arrow),
+            "highlight" => Some(DrawStyle::Highlight),
+            "spotlight" => Some(DrawStyle::Spotlight),
+            "scan" => Some(DrawStyle::Scan),
+            "lens" => Some(DrawStyle::Lens),
+            "connect" => Some(DrawStyle::Connect),
+            "pin" => Some(DrawStyle::Pin),
+            _ => None,
+        }
+    }
+
+    /// Sensible pointer for a model item category. Pure.
+    pub fn default_for_category(category: &str) -> Self {
+        match category.trim().to_ascii_lowercase().as_str() {
+            "person" | "product" | "food" | "object" | "other" | "" => DrawStyle::Ring,
+            "ui_element" => DrawStyle::Arrow,
+            "text_block" | "code" => DrawStyle::Highlight,
+            "chart" | "diagram" => DrawStyle::Bracket,
+            _ => DrawStyle::Ring,
+        }
+    }
+}
+
+impl Default for DrawStyle {
+    fn default() -> Self {
+        DrawStyle::Ring
+    }
+}
+
+/// What the user really wants from the screen answer. Shapes the narration
+/// and the order/relationship of the items. Pure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Intent {
+    Explain,
+    Find,
+    Compare,
+    Summarize,
+    Decide,
+    Debug,
+}
+
+impl Intent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Intent::Explain => "explain",
+            Intent::Find => "find",
+            Intent::Compare => "compare",
+            Intent::Summarize => "summarize",
+            Intent::Decide => "decide",
+            Intent::Debug => "debug",
+        }
+    }
+
+    /// Tolerant parse (trimmed, case-insensitive; accepts the near variants
+    /// a model may emit). Pure.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "explain" | "explaining" | "explains" | "explanation" | "describe" | "description"
+            | "analyse" | "analyze" | "analysis" => Some(Intent::Explain),
+            "find" | "finding" | "locate" | "locating" | "search" => Some(Intent::Find),
+            "compare" | "comparing" | "comparison" => Some(Intent::Compare),
+            "summarize" | "summarise" | "summarizing" | "summarising" | "summary" => {
+                Some(Intent::Summarize)
+            }
+            "decide" | "deciding" | "decision" | "choose" | "recommend" | "recommendation" => {
+                Some(Intent::Decide)
+            }
+            "debug" | "debugging" | "debugged" | "diagnose" | "diagnosing" | "diagnosis"
+            | "error" | "troubleshoot" | "troubleshooting" => Some(Intent::Debug),
+            _ => None,
+        }
+    }
+}
+
+impl Default for Intent {
+    fn default() -> Self {
+        Intent::Explain
+    }
+}
+
 // ─── Script types ──────────────────────────────────────────────────────
 
 /// One thing to point at and explain.
@@ -61,11 +184,28 @@ pub struct TourItem {
     /// False when the box covers most of the screen: no ring/pointer, the
     /// callout appears in its default zone.
     pub has_target: bool,
+    /// Overlay pointer style for this item.
+    pub draw: DrawStyle,
+    /// 0-based index (in `TourScript::items`, after renumbering) of the item
+    /// this one relates to. Only meaningful for `DrawStyle::Connect`, and
+    /// never its own index.
+    pub link_to: Option<usize>,
+    /// Small crop data URL, sent with the callout only for `DrawStyle::Lens`.
+    pub thumb: Option<String>,
+    /// Detected technology ids this item plausibly uses (reverse-engineer
+    /// mode). Lowercased, de-duplicated, at most 4 — empty for a normal tour.
+    pub stack_refs: Vec<String>,
+    /// Main website domain of a recognisable product/app/service the item
+    /// shows (e.g. `gmail.com`), already cross-checked against the item's own
+    /// text; resolved to a logo by `brand_logo`. None when absent or doubtful.
+    pub brand: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TourScript {
     pub title: String,
+    /// What the user really wants (explain / find / compare / …).
+    pub intent: Intent,
     /// Spoken first: the direct answer in ≤ OVERVIEW_MAX_WORDS words.
     pub overview: String,
     /// Longer written answer for the sidebar header (may be empty).
@@ -90,6 +230,7 @@ impl TourScript {
             },
             items: self.items.iter().map(|i| i.spatial.clone()).collect(),
             provider_used: "gemini".to_string(),
+            screen_image_data_url: None,
         }
     }
 }
@@ -117,26 +258,47 @@ read from the screen. For code or an error, say what it does or the likely cause
 person as described by the page) — NEVER the browser, tabs, address bar, taskbar, ads or cookie \
 banners unless one of those is the subject. Order by importance. At most {max_items} items; the \
 overview already names the rest.\n\
-4. People & Public Figures: Actively identify and NAME any public figures, celebrities, \
-YouTubers, streamers, influencers, politicians, athletes, tech leaders, and notable creators \
-visible on screen (e.g. 'Elon Musk', 'MrBeast', 'Marques Brownlee', 'Joe Rogan', 'Narendra Modi', \
-'Sam Altman'). State their full recognized name in 'label' and 'callout_title', and their role/title \
-in 'summary' and 'details'. Cross-reference visual facial likeness with any on-screen text clues \
-(channel names, video titles, chyrons, interview badges, handles). Only use generic descriptors \
-('an audience member', 'a passerby') for private, non-famous individuals.\n\
+4. People: describe each visible person and their on-screen action. Do not infer who someone is \
+from their face. A visible caption or page label may be reported as text; associate a name with a \
+person only if the screen explicitly makes that connection. If uncertain, use 'Person 1' and say \
+what is visible. Never invent a biography or private facts.\n\
 5. Describe only what you can see or what the context above states. If text is unreadable or \
-something is unknown, say so instead of guessing.\n\n\
+something is unknown, say so instead of guessing.\n\
+6. Narrate like a helpful guide: answer directly, then give each pointed item one concrete reason \
+it matters to the user's question. Vary sentence openings instead of repeating 'This is' or \
+'I can see'. Mention a visible relationship between items only when the image supports it. \
+Do not add filler, directions to click, or a repeated honorific to every line.\n\
+7. Choose HOW to point at each item (the \"draw\" field): \"ring\" is the default for objects, \
+people and products; use \"highlight\" or \"underline\" for text; \"bracket\" for charts, diagrams \
+or code blocks; \"arrow\" for a small control or button; \"circle\" for one small thing among \
+many; \"spotlight\" when one region should dominate (use for at most one item); \"scan\" to sweep \
+a table, list or code block; \"lens\" to magnify tiny text or a fine detail (the box must be \
+small); \"connect\" to relate two items (then set \"link_to\" to the other item's id); \"pin\" \
+for numbered steps.\n\
+8. Decide the user's real INTENT — explain, find a thing, compare things, summarize, decide \
+between options, or debug an error — and let it shape the answer: for \"find\" the first item must \
+be the thing found; for \"compare\" use \"connect\" between the two compared items; for \"decide\" \
+end with a clear recommendation in \"overview\"; for \"debug\" point at the error first and say \
+the likely cause.\n\n\
 Reply with ONLY a raw JSON object:\n\
-{{\"title\": ..., \"overview\": ..., \"answer\": ..., \"items\": [{{\"id\": 1, \"label\": ..., \
+{{\"title\": ..., \"intent\": \"explain|find|compare|summarize|decide|debug\", \"overview\": ..., \
+\"answer\": ..., \"items\": [{{\"id\": 1, \"label\": ..., \
 \"category\": ..., \"box_2d\": [ymin, xmin, ymax, xmax], \"confidence\": 0.0-1.0, \"spoken\": ..., \
-\"callout_title\": ..., \"callout_text\": ..., \"summary\": ..., \
+\"callout_title\": ..., \"callout_text\": ..., \"draw\": \"<style>\", \"link_to\": <id or null>, \
+\"brand\": <domain or null>, \"summary\": ..., \
 \"details\": [{{\"title\": ..., \"value\": ...}}]}}]}}\n\n\
 Field rules:\n\
 - title: a short name for what this is (e.g. \"Healthiest nuts — Women's Health\").\n\
+- intent: what the user really wants — explain, find, compare, summarize, decide or debug.\n\
 - overview: spoken, at most {ov} words, the direct answer / what this is (plain words, no markdown).\n\
 - answer: written for a sidebar, at most {ans} words — the fuller answer (lists welcome).\n\
 - box_2d: integers 0-1000 normalised to the image (0,0 = top-left); frame the thing tightly.\n\
 - category: one of [object, ui_element, text_block, chart, diagram, code, product, food, person, other].\n\
+- draw: one of [ring, underline, bracket, circle, arrow, highlight, spotlight, scan, lens, connect, pin].\n\
+- link_to: for \"connect\" only — the id of the other item; otherwise omit or null.\n\
+- brand: only when the item is a recognisable product, app, service or company (its logo or icon is \
+shown, e.g. \"gmail.com\", \"slack.com\", \"github.com\"): its main website domain, lowercase, no \
+scheme or path, and the label must contain that brand's name. Otherwise null. Never guess.\n\
 - label: the specific name (\"Walnuts\", \"Hazelnuts\"), not a type (\"item\").\n\
 - spoken: ONE sentence, at most {sp} words, said while this item is pointed at: what it is plus one \
 useful fact. Plain words, no markdown, no coordinates.\n\
@@ -151,6 +313,68 @@ screen or stated by the context (names, numbers, prices, claims).",
         sp = SPOKEN_MAX_WORDS,
         ct = CALLOUT_TITLE_MAX_WORDS,
         cx = CALLOUT_TEXT_MAX_WORDS,
+    )
+}
+
+/// Reverse-engineer prompt: the base tour prompt (same JSON contract and
+/// spoken word budgets) plus a mode block that asks HOW each section is
+/// built and ties it to the detected stack. `techs` are `(id, display name)`
+/// pairs from the scanner; `prior_sections` are the section names already
+/// covered by earlier viewports. Pure.
+pub fn build_reverse_prompt(
+    user_prompt: &str,
+    context_block: &str,
+    stack_brief: &str,
+    techs: &[(String, String)],
+    viewport_idx: usize,
+    viewport_total_hint: usize,
+    prior_sections: &[String],
+) -> String {
+    let base = build_tour_prompt(user_prompt, context_block);
+    let known = if techs.is_empty() {
+        "none".to_string()
+    } else {
+        techs
+            .iter()
+            .map(|(id, name)| format!("{} ({})", id.trim(), name.trim()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let stack = {
+        let s = stack_brief.trim();
+        if s.is_empty() { "none detected".to_string() } else { s.to_string() }
+    };
+    let prior = {
+        let joined = prior_sections
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("; ");
+        if joined.is_empty() { "none".to_string() } else { joined }
+    };
+    format!(
+        "{base}\n\n\
+REVERSE ENGINEER MODE. The user wants to understand how this website is built. This image is \
+section {idx} of about {total} of the page (scrolled top to bottom). Detected technology stack \
+(from the page's code, not from the image): {stack}. Known technology ids you may reference: \
+{known}.\n\
+For each item explain HOW it is built and how one could recreate it: layout technique (grid, flex, \
+sticky, full-bleed hero…), the component type (nav, carousel, pricing table, form…), notable \
+visual effects/animations, and where the screen supports it, which detected technology likely \
+produces it. Only claim a technology link when the screen or the stack list plausibly supports it; \
+otherwise leave \"stack_refs\" empty. Never present a guess as fact: say 'likely' when inferring. \
+Do not repeat sections already covered: {prior}. At most 4 items. If this looks like the page \
+footer or the last section, say so in the overview. Start the overview by naming the section \
+(for example \"The hero section…\").\n\
+Add to every item an optional field \"stack_refs\": array of technology ids from the list above \
+(at most 3).",
+        idx = viewport_idx + 1,
+        total = viewport_total_hint,
+        stack = stack,
+        known = known,
+        prior = prior,
+        base = base,
     )
 }
 
@@ -272,6 +496,77 @@ fn str_field(v: &serde_json::Value, key: &str) -> String {
         .to_string()
 }
 
+/// The brand's own name inside a domain: `gmail.com` -> `gmail`,
+/// `mail.google.co.uk` -> `google`. None for shapes that are not a plain
+/// hostname. Pure.
+fn brand_name_of_domain(domain: &str) -> Option<String> {
+    let labels: Vec<&str> = domain.split('.').collect();
+    if labels.len() < 2 || labels.iter().any(|l| l.is_empty()) {
+        return None;
+    }
+    let mut end = labels.len() - 1; // drop the TLD
+    if end >= 2 && matches!(labels[end - 1], "co" | "com" | "org" | "net" | "gov" | "ac") {
+        end -= 1; // two-part suffix such as co.uk
+    }
+    let name = labels[end - 1];
+    if name.len() < 3 {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// Optional per-item `brand` (a website domain). Kept only when it is a plain
+/// lowercase hostname AND the brand's name appears in the item's own text, so
+/// a model guess can never put the wrong company's logo on a card. Pure.
+fn parse_brand(raw: &serde_json::Value, label: &str, callout_title: &str, summary: &str) -> Option<String> {
+    let d = raw.get("brand")?.as_str()?.trim().to_ascii_lowercase();
+    let d = d
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("www.")
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_string();
+    if d.is_empty()
+        || d.len() > 253
+        || !d.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
+    {
+        return None;
+    }
+    let name = brand_name_of_domain(&d)?;
+    let squash = |t: &str| -> String {
+        t.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase()
+    };
+    let hay = format!("{}{}{}", squash(label), squash(callout_title), squash(summary));
+    if hay.contains(&squash(&name)) {
+        Some(d)
+    } else {
+        None
+    }
+}
+
+/// Optional per-item `stack_refs`: trimmed, lowercased, de-duplicated,
+/// empties dropped, at most 4. Missing/malformed → empty. Pure.
+fn parse_stack_refs(raw: &serde_json::Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let Some(arr) = raw.get("stack_refs").and_then(|v| v.as_array()) else {
+        return out;
+    };
+    for entry in arr {
+        let Some(s) = entry.as_str() else { continue };
+        let s = s.trim().to_ascii_lowercase();
+        if s.is_empty() || out.iter().any(|x| *x == s) {
+            continue;
+        }
+        out.push(s);
+        if out.len() >= 4 {
+            break;
+        }
+    }
+    out
+}
+
 /// Parse + validate a model response into a tour script: tolerant of fences,
 /// prose and truncation; caps items, drops degenerate/duplicate boxes,
 /// enforces every word budget deterministically, renumbers ids. `None` when
@@ -291,7 +586,11 @@ pub fn validate_script(text: &str) -> Option<TourScript> {
         };
 
     let mut items: Vec<TourItem> = Vec::new();
-    for raw in raw_items.iter() {
+    // Per kept item: the model's id and the id it wants to link to. Links are
+    // resolved only after renumbering, because items can be dropped.
+    let mut raw_ids: Vec<u32> = Vec::new();
+    let mut raw_links: Vec<Option<u32>> = Vec::new();
+    for (ordinal, raw) in raw_items.iter().enumerate() {
         if items.len() >= MAX_ITEMS {
             break;
         }
@@ -356,24 +655,58 @@ pub fn validate_script(text: &str) -> Option<TourScript> {
             })
             .unwrap_or_default();
         let has_target = box_area_fraction(&box_2d) <= 0.8;
+        let category = {
+            let c = str_field(raw, "category");
+            if c.is_empty() { "other".to_string() } else { c }
+        };
+        let draw = {
+            let d = str_field(raw, "draw");
+            let mut d = DrawStyle::parse(&d)
+                .unwrap_or_else(|| DrawStyle::default_for_category(&category));
+            let area = box_area_fraction(&box_2d);
+            // A magnifier over most of the screen is meaningless; a
+            // spotlight over most of it is not a spotlight.
+            if d == DrawStyle::Lens && area > 0.30 {
+                d = DrawStyle::Ring;
+            }
+            if d == DrawStyle::Spotlight && area > 0.60 {
+                d = DrawStyle::Ring;
+            }
+            d
+        };
+        let raw_id = raw
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .unwrap_or((ordinal + 1) as u32);
+        let raw_link = raw.get("link_to").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let label_for_brand = label.clone();
+        let callout_title_for_brand = callout_title.clone();
+        let summary_for_brand = summary.clone();
         items.push(TourItem {
             spatial: SpatialAnalysisItem {
                 id: 0, // renumbered below
                 label,
-                category: {
-                    let c = str_field(raw, "category");
-                    if c.is_empty() { "other".to_string() } else { c }
-                },
+                category,
                 box_2d,
                 confidence: raw.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.9) as f32,
                 summary: if summary.is_empty() { spoken.clone() } else { summary },
                 details,
+                image_data_url: None,
+                logo_data_url: None,
             },
             spoken,
             callout_title,
             callout_text,
             has_target,
+            draw,
+            link_to: None, // resolved after renumbering
+            thumb: None,
+            stack_refs: parse_stack_refs(raw),
+            brand: parse_brand(raw, &label_for_brand, &callout_title_for_brand, &summary_for_brand),
         });
+        raw_ids.push(raw_id);
+        raw_links.push(raw_link);
     }
     if items.is_empty() {
         return None;
@@ -398,6 +731,32 @@ pub fn validate_script(text: &str) -> Option<TourScript> {
     for (n, it) in items.iter_mut().enumerate() {
         it.spatial.id = (n + 1) as u32;
     }
+    raw_ids.truncate(items.len());
+    raw_links.truncate(items.len());
+    // Resolve `link_to` (model ids → 0-based indices after renumbering);
+    // drop links to a missing item or to the item itself.
+    for i in 0..items.len() {
+        items[i].link_to = raw_links[i]
+            .and_then(|target| raw_ids.iter().position(|id| *id == target))
+            .filter(|j| *j != i);
+    }
+    // Keep at most one spotlight; a connect without a link is just a ring.
+    let mut seen_spotlight = false;
+    for it in items.iter_mut() {
+        let mut draw = it.draw;
+        if draw == DrawStyle::Spotlight {
+            if seen_spotlight {
+                draw = DrawStyle::Ring;
+            } else {
+                seen_spotlight = true;
+            }
+        }
+        if draw == DrawStyle::Connect && it.link_to.is_none() {
+            draw = DrawStyle::Ring;
+        }
+        it.draw = draw;
+    }
+    let intent = Intent::parse(&str_field(&head, "intent")).unwrap_or(Intent::Explain);
     let title = {
         let t = str_field(&head, "title");
         if t.is_empty() { "Screen Tour".to_string() } else { t }
@@ -411,7 +770,23 @@ pub fn validate_script(text: &str) -> Option<TourScript> {
             a
         }
     };
-    Some(TourScript { title, overview, answer, items, region: (0, 0, 0, 0) })
+    Some(TourScript { title, intent, overview, answer, items, region: (0, 0, 0, 0) })
+}
+
+/// `validate_script`, then keep only `stack_refs` that name a detected
+/// technology (exact match after lowercasing). Unknown refs are dropped, so
+/// the overlay can never highlight a card that does not exist. Pure.
+pub fn validate_script_for_stack(text: &str, known_ids: &[String]) -> Option<TourScript> {
+    let mut script = validate_script(text)?;
+    let known: Vec<String> = known_ids
+        .iter()
+        .map(|id| id.trim().to_ascii_lowercase())
+        .filter(|id| !id.is_empty())
+        .collect();
+    for item in script.items.iter_mut() {
+        item.stack_refs.retain(|r| known.iter().any(|k| k == r));
+    }
+    Some(script)
 }
 
 // ─── Narration plan ────────────────────────────────────────────────────
@@ -635,25 +1010,52 @@ pub fn tour_enabled<R: Runtime>(app: &AppHandle<R>) -> bool {
 /// dpr, the same contract as `ghost:ring`). The model's 0–1000 box is
 /// relative to the captured `region` (cropped page content or the whole
 /// monitor), so it is scaled to the region and offset by its origin. Only the
-/// CURRENT item is ever sent.
+/// CURRENT item is ever sent. `link` is the same mapping for the item this
+/// one connects to (null when there is no valid link); `thumb` is included
+/// only for a `Lens` item.
 pub fn callout_json(
     request_id: &str,
-    item: &TourItem,
+    script: &TourScript,
     idx: usize,
-    total: usize,
     region: (i32, i32, i32, i32),
 ) -> serde_json::Value {
+    let Some(item) = script.items.get(idx) else {
+        return serde_json::Value::Null;
+    };
     let (rx, ry, rw, rh) = region;
-    let (bx, by, w, h) = denormalize_spatial_box(&item.spatial.box_2d, rw, rh);
-    let (x, y) = (rx + bx, ry + by);
+    let map_box = |b: &SpatialBoundingBox| {
+        let (bx, by, w, h) = denormalize_spatial_box(b, rw, rh);
+        serde_json::json!({
+            "x": rx + bx, "y": ry + by, "width": w, "height": h
+        })
+    };
+    let (x, y, w, h) = {
+        let (bx, by, bw, bh) = denormalize_spatial_box(&item.spatial.box_2d, rw, rh);
+        (rx + bx, ry + by, bw, bh)
+    };
+    let link = item
+        .link_to
+        .and_then(|j| script.items.get(j))
+        .map(|target| map_box(&target.spatial.box_2d));
+    let thumb = if item.draw == DrawStyle::Lens {
+        item.thumb.clone()
+    } else {
+        None
+    };
     serde_json::json!({
         "request_id": request_id,
         "idx": idx,
-        "total": total,
+        "total": script.items.len(),
         "title": item.callout_title,
         "text": item.callout_text,
+        "category": item.spatial.category,
         "x": x, "y": y, "width": w, "height": h,
         "has_target": item.has_target,
+        "draw": item.draw.as_str(),
+        "intent": script.intent.as_str(),
+        "link": link,
+        "thumb": thumb,
+        "stack_refs": item.stack_refs,
     })
 }
 
@@ -673,20 +1075,23 @@ pub fn tour_model_setting(settings_json: Option<&str>) -> Option<String> {
 const TOUR_MAX_OUTPUT_TOKENS: u32 = 8192;
 
 /// Whole-ladder wall-clock cap (each request also has its own timeout).
-/// Feature 98: clamped 75s → 6s. A slower answer is worse than the local
-/// OCR fallback — the tour must never hang the turn.
-const TOUR_TOTAL_TIMEOUT_SECS: u64 = 6;
+/// The old 6 s clamp made the tour impossible (a tour answer needs 6-20 s),
+/// so the whole ladder may take up to 25 s; each request is capped at
+/// `vision::TOUR_REQUEST_TIMEOUT_SECS`.
+pub const TOUR_TOTAL_TIMEOUT_SECS: u64 = 25;
 
-/// Ask Gemini for the tour script for an already-captured image of `region`
-/// (screen px). Strong model first, lite fallback (see
-/// `vision::tour_model_ladder`); shared quota ledger. The returned script's
-/// `region` is set so boxes map back to real screen pixels.
-pub async fn analyze_tour_image<R: Runtime>(
+/// Speak one reassurance line if the model has not answered by then.
+pub const SLOW_NOTICE_AFTER_SECS: u64 = 6;
+
+/// Shared Gemini pass for a tour script: key/quota gates, model ladder, own
+/// pooled client, whole-ladder timeout, quota bookkeeping, `region` stamped on
+/// the script. The caller supplies the prompt and the validator.
+async fn analyze_tour_script<R: Runtime>(
     app: &AppHandle<R>,
-    user_prompt: &str,
-    context_block: &str,
+    prompt: &str,
     b64: &str,
     region: (i32, i32, i32, i32),
+    parse: impl Fn(&str) -> Option<TourScript>,
 ) -> Result<TourScript, String> {
     let key = crate::commands::read_api_key(app, "gemini");
     if key.is_empty() {
@@ -701,17 +1106,17 @@ pub async fn analyze_tour_image<R: Runtime>(
     }
     let settings = std::fs::read_to_string(usage_dir.join("settings.json")).ok();
     let models = crate::vision::tour_model_ladder(tour_model_setting(settings.as_deref()).as_deref());
-    // Feature 98: pooled shared client (Phase 5) + clamped timeout 45s → 4s.
-    let client = crate::vision::shared_vision_client();
-    let prompt = build_tour_prompt(user_prompt, context_block);
+    // The tour needs a long per-request timeout (a tour answer needs 6-20 s),
+    // so it runs on its own pooled client — click grounding keeps the fast 4 s one.
+    let client = crate::vision::tour_vision_client();
     let call = crate::vision::gemini_json_with_image(
-        &prompt,
+        prompt,
         b64,
         &key,
         &client,
         TOUR_MAX_OUTPUT_TOKENS,
         &models,
-        validate_script,
+        parse,
     );
     let step = tokio::time::timeout(std::time::Duration::from_secs(TOUR_TOTAL_TIMEOUT_SECS), call)
         .await
@@ -731,11 +1136,66 @@ pub async fn analyze_tour_image<R: Runtime>(
     }
 }
 
+/// Ask Gemini for the tour script for an already-captured image of `region`
+/// (screen px). Strong model first, lite fallback (see
+/// `vision::tour_model_ladder`); shared quota ledger. The returned script's
+/// `region` is set so boxes map back to real screen pixels.
+pub async fn analyze_tour_image<R: Runtime>(
+    app: &AppHandle<R>,
+    user_prompt: &str,
+    context_block: &str,
+    b64: &str,
+    region: (i32, i32, i32, i32),
+) -> Result<TourScript, String> {
+    let prompt = build_tour_prompt(user_prompt, context_block);
+    analyze_tour_script(app, &prompt, b64, region, validate_script).await
+}
+
+/// Reverse-engineer pass: same Gemini flow as `analyze_tour_image`, with the
+/// section prompt and a stack-aware validator (refs outside `techs` are
+/// dropped). `region` still maps the model's boxes back to screen pixels.
+pub async fn analyze_reverse_image<R: Runtime>(
+    app: &AppHandle<R>,
+    user_prompt: &str,
+    context_block: &str,
+    stack_brief: &str,
+    techs: &[(String, String)],
+    viewport_idx: usize,
+    viewport_total_hint: usize,
+    prior_sections: &[String],
+    b64: &str,
+    region: (i32, i32, i32, i32),
+) -> Result<TourScript, String> {
+    let prompt = build_reverse_prompt(
+        user_prompt,
+        context_block,
+        stack_brief,
+        techs,
+        viewport_idx,
+        viewport_total_hint,
+        prior_sections,
+    );
+    let ids: Vec<String> = techs.iter().map(|(id, _)| id.clone()).collect();
+    analyze_tour_script(app, &prompt, b64, region, move |text| {
+        validate_script_for_stack(text, &ids)
+    })
+    .await
+}
+
 // ─── Tests ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_notice_comes_before_the_cap() {
+        // The reassurance line must fire while we are still waiting on the
+        // model, and the ladder's total cap must give each request room.
+        assert!(SLOW_NOTICE_AFTER_SECS < TOUR_TOTAL_TIMEOUT_SECS);
+        assert!(crate::vision::TOUR_REQUEST_TIMEOUT_SECS <= TOUR_TOTAL_TIMEOUT_SECS);
+        assert!(TOUR_TOTAL_TIMEOUT_SECS >= 20);
+    }
 
     fn good_json() -> String {
         r#"{"title":"Dry Fruits Shop","overview":"A product page listing three dry fruits with prices.",
@@ -918,27 +1378,28 @@ mod tests {
     #[test]
     fn callout_json_is_physical_px_current_only() {
         let s = validate_script(&good_json()).unwrap();
-        let j = callout_json("r1", &s.items[0], 0, 3, (0, 0, 1920, 1080));
+        let j = callout_json("r1", &s, 0, (0, 0, 1920, 1080));
         assert_eq!(j["idx"], 0);
         assert_eq!(j["x"], 96); // 50/1000 * 1920
         assert_eq!(j["y"], 108); // 100/1000 * 1080
         assert_eq!(j["width"], 480);
         assert_eq!(j["has_target"], true);
         assert_eq!(j["title"], "Almonds");
+        assert_eq!(j["category"], "product");
     }
 
     #[test]
     fn callout_json_maps_a_cropped_region_back_to_screen_px() {
         // Page content only: 1920x950 at (0, 82) — the browser chrome was cut off.
         let s = validate_script(&good_json()).unwrap();
-        let j = callout_json("r1", &s.items[0], 0, 3, (0, 82, 1920, 950));
+        let j = callout_json("r1", &s, 0, (0, 82, 1920, 950));
         assert_eq!(j["x"], 96); // 50/1000 * 1920 + 0
         assert_eq!(j["y"], 82 + 95); // 100/1000 * 950 = 95, offset by the 82-px toolbar
         assert_eq!(j["width"], 480);
         assert_eq!(j["height"], 285); // 300/1000 * 950
 
         // A region that does not start at the origin on x either.
-        let j2 = callout_json("r1", &s.items[0], 0, 3, (460, 180, 1000, 600));
+        let j2 = callout_json("r1", &s, 0, (460, 180, 1000, 600));
         assert_eq!(j2["x"], 460 + 50); // 50/1000 * 1000
         assert_eq!(j2["y"], 180 + 60); // 100/1000 * 600
     }
@@ -1194,7 +1655,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_is_answer_first_ignores_chrome_and_names_public_figures() {
+    fn prompt_is_answer_first_ignores_chrome_and_requires_grounded_people() {
         let p = build_tour_prompt("what am i seeing", "ctx");
         let lower = p.to_lowercase();
         // Answer the implicit question and enumerate.
@@ -1203,18 +1664,333 @@ mod tests {
         // Not the browser chrome.
         assert!(lower.contains("never the browser"));
         assert!(lower.contains("address bar"));
-        // People: public figures are actively NAMED (visual likeness +
-        // on-screen text clues); only private individuals stay generic.
-        assert!(lower.contains("actively identify and name"));
-        assert!(lower.contains("public figures"));
-        assert!(lower.contains("youtubers"));
-        assert!(lower.contains("elon musk"));
-        assert!(lower.contains("cross-reference"));
-        assert!(lower.contains("private, non-famous"));
-        assert!(lower.contains("title") && lower.contains("channel"));
+        // Text can be quoted; a face alone cannot establish identity.
+        assert!(lower.contains("do not infer who someone is from their face"));
+        assert!(lower.contains("person 1"));
+        assert!(lower.contains("never invent a biography"));
+        assert!(lower.contains("vary sentence openings"));
         // Budgets are stated numerically.
         assert!(p.contains(&OVERVIEW_MAX_WORDS.to_string()));
         assert!(p.contains(&SPOKEN_MAX_WORDS.to_string()));
         assert!(p.contains(&ANSWER_MAX_WORDS.to_string()));
+    }
+
+    // ── Draw style & intent ──
+
+    #[test]
+    fn draw_style_round_trip_and_category_defaults() {
+        for name in [
+            "ring", "underline", "bracket", "circle", "arrow", "highlight", "spotlight", "scan",
+            "lens", "connect", "pin",
+        ] {
+            let d = DrawStyle::parse(name).unwrap_or_else(|| panic!("parse {name}"));
+            assert_eq!(d.as_str(), name);
+            assert_eq!(DrawStyle::parse(&format!("  {}  ", name.to_uppercase())), Some(d));
+        }
+        assert_eq!(DrawStyle::parse("blob"), None);
+        assert_eq!(DrawStyle::parse(""), None);
+        assert_eq!(DrawStyle::default(), DrawStyle::Ring);
+        for c in ["person", "product", "food", "object", "other", ""] {
+            assert_eq!(DrawStyle::default_for_category(c), DrawStyle::Ring, "{c}");
+        }
+        assert_eq!(DrawStyle::default_for_category("ui_element"), DrawStyle::Arrow);
+        assert_eq!(DrawStyle::default_for_category("text_block"), DrawStyle::Highlight);
+        assert_eq!(DrawStyle::default_for_category("code"), DrawStyle::Highlight);
+        assert_eq!(DrawStyle::default_for_category("chart"), DrawStyle::Bracket);
+        assert_eq!(DrawStyle::default_for_category("diagram"), DrawStyle::Bracket);
+    }
+
+    #[test]
+    fn intent_parse_is_tolerant() {
+        assert_eq!(Intent::default(), Intent::Explain);
+        assert_eq!(Intent::parse("Summarise"), Some(Intent::Summarize));
+        assert_eq!(Intent::parse(" summary "), Some(Intent::Summarize));
+        assert_eq!(Intent::parse("DEBUGGING"), Some(Intent::Debug));
+        assert_eq!(Intent::parse("explaining"), Some(Intent::Explain));
+        assert_eq!(Intent::parse("comparison"), Some(Intent::Compare));
+        assert_eq!(Intent::parse("locate"), Some(Intent::Find));
+        assert_eq!(Intent::parse("recommend"), Some(Intent::Decide));
+        assert_eq!(Intent::parse("???"), None);
+        for i in [
+            Intent::Explain,
+            Intent::Find,
+            Intent::Compare,
+            Intent::Summarize,
+            Intent::Decide,
+            Intent::Debug,
+        ] {
+            assert_eq!(Intent::parse(i.as_str()), Some(i));
+        }
+    }
+
+    #[test]
+    fn connect_and_link_survive_validation() {
+        let raw = r#"{"intent":"compare","items":[
+          {"id":1,"label":"A","category":"product","box_2d":[100,100,300,400],"spoken":"A.","draw":"connect","link_to":2},
+          {"id":2,"label":"B","category":"product","box_2d":[500,500,700,800],"spoken":"B."}]}"#;
+        let s = validate_script(raw).unwrap();
+        assert_eq!(s.intent, Intent::Compare);
+        assert_eq!(s.items[0].draw, DrawStyle::Connect);
+        assert_eq!(s.items[0].link_to, Some(1));
+        // No draw on item 2 → the category default.
+        assert_eq!(s.items[1].draw, DrawStyle::Ring);
+    }
+
+    #[test]
+    fn connect_without_link_becomes_ring_and_self_links_are_dropped() {
+        let raw = r#"{"items":[
+          {"id":1,"label":"A","box_2d":[100,100,300,400],"spoken":"A.","draw":"connect"},
+          {"id":2,"label":"B","box_2d":[500,500,700,800],"spoken":"B.","draw":"connect","link_to":2}]}"#;
+        let s = validate_script(raw).unwrap();
+        assert_eq!(s.items[0].draw, DrawStyle::Ring);
+        assert_eq!(s.items[0].link_to, None);
+        assert_eq!(s.items[1].draw, DrawStyle::Ring);
+        assert_eq!(s.items[1].link_to, None);
+    }
+
+    #[test]
+    fn lens_on_a_large_box_and_extra_spotlights_fall_back_to_ring() {
+        let raw = r#"{"items":[
+          {"label":"Big","box_2d":[0,0,600,1000],"spoken":"Big.","draw":"lens"},
+          {"label":"S1","box_2d":[100,100,300,300],"spoken":"S1.","draw":"spotlight"},
+          {"label":"S2","box_2d":[500,500,700,700],"spoken":"S2.","draw":"spotlight"}]}"#;
+        let s = validate_script(raw).unwrap();
+        assert_eq!(s.items[0].draw, DrawStyle::Ring);
+        assert_eq!(s.items[1].draw, DrawStyle::Spotlight);
+        assert_eq!(s.items[2].draw, DrawStyle::Ring);
+        // A spotlight over more than 60 % of the region is not a spotlight.
+        let huge = r#"{"items":[{"label":"Huge","box_2d":[0,0,700,1000],"spoken":"H.","draw":"spotlight"}]}"#;
+        assert_eq!(validate_script(huge).unwrap().items[0].draw, DrawStyle::Ring);
+    }
+
+    #[test]
+    fn unknown_draw_falls_back_by_category() {
+        for (cat, want) in [
+            ("chart", DrawStyle::Bracket),
+            ("diagram", DrawStyle::Bracket),
+            ("code", DrawStyle::Highlight),
+            ("text_block", DrawStyle::Highlight),
+            ("ui_element", DrawStyle::Arrow),
+            ("person", DrawStyle::Ring),
+            ("food", DrawStyle::Ring),
+            ("mystery", DrawStyle::Ring),
+        ] {
+            let raw = format!(
+                "{{\"items\":[{{\"label\":\"X\",\"category\":\"{cat}\",\"box_2d\":[100,100,300,400],\"spoken\":\"X.\",\"draw\":\"sparkle\"}}]}}"
+            );
+            let s = validate_script(&raw).unwrap();
+            assert_eq!(s.items[0].draw, want, "{cat}");
+        }
+    }
+
+    #[test]
+    fn intent_defaults_to_explain_and_survives_validation() {
+        let none = r#"{"items":[{"label":"A","box_2d":[100,100,300,400],"spoken":"A."}]}"#;
+        assert_eq!(validate_script(none).unwrap().intent, Intent::Explain);
+        let summarise = r#"{"intent":"Summarise","items":[{"label":"A","box_2d":[100,100,300,400],"spoken":"A."}]}"#;
+        assert_eq!(validate_script(summarise).unwrap().intent, Intent::Summarize);
+        let junk = r#"{"intent":"nonsense","items":[{"label":"A","box_2d":[100,100,300,400],"spoken":"A."}]}"#;
+        assert_eq!(validate_script(junk).unwrap().intent, Intent::Explain);
+    }
+
+    #[test]
+    fn link_ids_survive_renumbering_when_an_earlier_item_is_dropped() {
+        let raw = r#"{"items":[
+          {"id":1,"label":"Dot","box_2d":[10,10,15,15],"spoken":"tiny"},
+          {"id":2,"label":"A","box_2d":[100,100,300,400],"spoken":"First."},
+          {"id":3,"label":"C","category":"text_block","box_2d":[500,500,700,800],"spoken":"Third.","draw":"connect","link_to":2}]}"#;
+        let s = validate_script(raw).unwrap();
+        assert_eq!(s.items.len(), 2);
+        assert_eq!(s.items[1].spatial.id, 2); // renumbered here; model id was 3
+        assert_eq!(s.items[1].spatial.label, "C");
+        assert_eq!(s.items[1].draw, DrawStyle::Connect);
+        assert_eq!(s.items[1].link_to, Some(0));
+    }
+
+    #[test]
+    fn prompt_asks_for_draw_style_and_intent() {
+        let p = build_tour_prompt("explain my screen", "ctx");
+        let lower = p.to_lowercase();
+        for needle in ["spotlight", "lens", "connect", "intent", "link_to", "\"draw\""] {
+            assert!(lower.contains(needle), "prompt missing {needle}");
+        }
+        // Existing budgets survive the extension.
+        assert!(p.contains(&OVERVIEW_MAX_WORDS.to_string()));
+        assert!(p.contains(&SPOKEN_MAX_WORDS.to_string()));
+        assert!(p.contains(&CALLOUT_TITLE_MAX_WORDS.to_string()));
+        assert!(p.contains(&CALLOUT_TEXT_MAX_WORDS.to_string()));
+        assert!(p.contains(&ANSWER_MAX_WORDS.to_string()));
+        assert!(p.contains(&MAX_ITEMS.to_string()));
+    }
+
+    #[test]
+    fn callout_json_carries_draw_intent_link_and_lens_thumb() {
+        let raw = r#"{"intent":"compare","items":[
+          {"id":1,"label":"A","box_2d":[100,100,300,400],"spoken":"A.","draw":"connect","link_to":2},
+          {"id":2,"label":"B","box_2d":[500,500,700,800],"spoken":"B."}]}"#;
+        let s = validate_script(raw).unwrap();
+        let j = callout_json("r1", &s, 0, (0, 0, 1920, 1080));
+        assert_eq!(j["draw"], "connect");
+        assert_eq!(j["intent"], "compare");
+        assert_eq!(j["link"]["x"], 960); // 500/1000 * 1920
+        assert_eq!(j["link"]["y"], 540);
+        assert_eq!(j["link"]["width"], 576); // 300/1000 * 1920
+        assert_eq!(j["link"]["height"], 216); // 200/1000 * 1080
+        assert!(j["thumb"].is_null());
+        // Existing fields unchanged.
+        assert_eq!(j["total"], 2);
+        assert_eq!(j["has_target"], true);
+
+        let raw = r#"{"items":[
+          {"label":"Fine print","box_2d":[100,100,200,250],"spoken":"Small.","draw":"lens"},
+          {"label":"Other","box_2d":[400,400,600,600],"spoken":"O."}]}"#;
+        let mut s = validate_script(raw).unwrap();
+        s.items[0].thumb = Some("data:image/jpeg;base64,abc".to_string());
+        s.items[1].thumb = Some("data:image/jpeg;base64,def".to_string());
+        let lens = callout_json("r1", &s, 0, (0, 0, 1920, 1080));
+        assert_eq!(lens["thumb"], "data:image/jpeg;base64,abc");
+        assert_eq!(lens["link"], serde_json::Value::Null);
+        let other = callout_json("r1", &s, 1, (0, 0, 1920, 1080));
+        assert!(other["thumb"].is_null());
+    }
+
+    // ── Reverse-engineer mode ──
+
+    #[test]
+    fn stack_refs_are_trimmed_lowercased_deduped_and_capped() {
+        let raw = r#"{"items":[{"label":"Hero","box_2d":[100,100,300,400],"spoken":"Hero.",
+          "stack_refs":["NextJS","tailwind"," NEXTJS ","","react","vue","svelte"]}]}"#;
+        let s = validate_script(raw).unwrap();
+        assert_eq!(s.items[0].stack_refs, vec!["nextjs", "tailwind", "react", "vue"]);
+
+        let plain = r#"{"items":[{"label":"B","box_2d":[100,100,300,400],"spoken":"B."}]}"#;
+        assert!(validate_script(plain).unwrap().items[0].stack_refs.is_empty());
+    }
+
+    #[test]
+    fn brand_is_kept_only_when_its_name_is_in_the_items_own_text() {
+        let raw = r#"{"items":[
+          {"label":"Gmail Trigger","box_2d":[100,100,300,400],"spoken":"Entry.","brand":"gmail.com"},
+          {"label":"Slack Notification","box_2d":[500,100,700,400],"spoken":"Posts.","brand":"https://www.Slack.com/"},
+          {"label":"FilterSender","box_2d":[100,500,300,800],"spoken":"Splits.","brand":"google.com"},
+          {"label":"OpenRouter Chat Model","box_2d":[500,500,700,800],"spoken":"Model.","brand":"openrouter.ai"}]}"#;
+        let s = validate_script(raw).unwrap();
+        assert_eq!(s.items[0].brand.as_deref(), Some("gmail.com"));
+        assert_eq!(s.items[1].brand.as_deref(), Some("slack.com"));
+        assert_eq!(s.items[2].brand, None, "a brand whose name is not in the label is dropped");
+        assert_eq!(s.items[3].brand.as_deref(), Some("openrouter.ai"));
+    }
+
+    #[test]
+    fn brand_rejects_malformed_domains_and_missing_field() {
+        let raw = r#"{"items":[
+          {"label":"Gmail A","box_2d":[100,100,300,400],"spoken":"A.","brand":"gmail"},
+          {"label":"Gmail B","box_2d":[500,100,700,400],"spoken":"B.","brand":"gm ail.com"},
+          {"label":"Gmail C","box_2d":[100,500,300,800],"spoken":"C.","brand":"127.0.0.1"},
+          {"label":"Gmail D","box_2d":[500,500,700,800],"spoken":"D.","brand":null},
+          {"label":"Gmail E","box_2d":[100,900,300,990],"spoken":"E."}]}"#;
+        let s = validate_script(raw).unwrap();
+        for it in &s.items {
+            assert_eq!(it.brand, None, "{}", it.spatial.label);
+        }
+    }
+
+    #[test]
+    fn brand_name_of_domain_handles_two_part_suffixes() {
+        assert_eq!(brand_name_of_domain("gmail.com").as_deref(), Some("gmail"));
+        assert_eq!(brand_name_of_domain("mail.google.co.uk").as_deref(), Some("google"));
+        assert_eq!(brand_name_of_domain("a.io"), None);
+        assert_eq!(brand_name_of_domain("localhost"), None);
+    }
+
+    #[test]
+    fn prompt_asks_for_a_brand_field() {
+        let p = build_tour_prompt("explain", "ctx");
+        assert!(p.contains("\"brand\""));
+    }
+
+    #[test]
+    fn validate_script_for_stack_keeps_known_ids_case_insensitively() {
+        let raw = r#"{"items":[
+          {"label":"Hero","box_2d":[100,100,300,400],"spoken":"Hero.",
+           "stack_refs":["nextjs","tailwind","unknown","react"]},
+          {"label":"Plain","box_2d":[500,500,700,800],"spoken":"Plain."}]}"#;
+        let known = vec!["NextJS".to_string(), "TAILWIND".to_string(), "react".to_string()];
+        let s = validate_script_for_stack(raw, &known).unwrap();
+        assert_eq!(s.items[0].stack_refs, vec!["nextjs", "tailwind", "react"]);
+        assert!(s.items[1].stack_refs.is_empty());
+        // An empty known set drops every ref.
+        let none = validate_script_for_stack(raw, &[]).unwrap();
+        assert!(none.items[0].stack_refs.is_empty());
+    }
+
+    #[test]
+    fn callout_json_carries_stack_refs() {
+        let raw = r#"{"items":[{"label":"Hero","box_2d":[100,100,300,400],"spoken":"H.",
+          "stack_refs":["nextjs","tailwind"]}]}"#;
+        let s = validate_script(raw).unwrap();
+        let j = callout_json("r1", &s, 0, (0, 0, 1000, 1000));
+        assert_eq!(j["stack_refs"], serde_json::json!(["nextjs", "tailwind"]));
+
+        let plain = r#"{"items":[{"label":"A","box_2d":[100,100,300,400],"spoken":"A."}]}"#;
+        let p = validate_script(plain).unwrap();
+        assert_eq!(
+            callout_json("r1", &p, 0, (0, 0, 1000, 1000))["stack_refs"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn reverse_prompt_carries_sections_stack_and_contract() {
+        let techs = vec![
+            ("nextjs".to_string(), "Next.js".to_string()),
+            ("tailwind".to_string(), "Tailwind CSS".to_string()),
+        ];
+        let prior = vec![
+            "Hero: headline and call to action".to_string(),
+            "Features grid".to_string(),
+        ];
+        let p = build_reverse_prompt(
+            "reverse engineer this website",
+            "ctx",
+            "Next.js 15, Tailwind CSS, Vercel.",
+            &techs,
+            1,
+            5,
+            &prior,
+        );
+        for needle in [
+            "REVERSE ENGINEER MODE",
+            "section 2 of about 5",
+            "nextjs",
+            "Next.js",
+            "tailwind",
+            "Tailwind CSS",
+            "Next.js 15, Tailwind CSS, Vercel.",
+            "Hero: headline and call to action",
+            "Features grid",
+            "stack_refs",
+            "box_2d",
+            "at most 3",
+        ] {
+            assert!(p.contains(needle), "reverse prompt missing {needle}");
+        }
+        // The base rules and spoken budgets survive unchanged.
+        assert!(p.contains("callout_text"));
+        assert!(p.contains(&OVERVIEW_MAX_WORDS.to_string()));
+        assert!(p.contains(&SPOKEN_MAX_WORDS.to_string()));
+        assert!(p.contains(&CALLOUT_TITLE_MAX_WORDS.to_string()));
+        assert!(p.contains(&ANSWER_MAX_WORDS.to_string()));
+    }
+
+    #[test]
+    fn reverse_prompt_handles_empty_stack_and_history() {
+        let p = build_reverse_prompt("how is this built", "", "", &[], 0, 1, &[]);
+        assert!(p.contains("section 1 of about 1"));
+        assert!(p.contains(
+            "Detected technology stack (from the page's code, not from the image): none detected."
+        ));
+        assert!(p.contains("Known technology ids you may reference: none."));
+        assert!(p.contains("Do not repeat sections already covered: none."));
     }
 }
