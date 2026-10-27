@@ -24,7 +24,8 @@
 //! ordered `PlanStep`s, per-step `StepResult`s, and a run summary.
 //! When a step hits a confirmation gate, the remaining steps are
 //! stashed in `PENDING_COMPOUND` and resumed by
-//! `orchestrator_mcp_confirm` after the user approves.
+//! `orchestrator_mcp_confirm` or `orchestrator_github_execute`
+//! after the user approves.
 //!
 //! ## Sequential vs parallel
 //!
@@ -33,14 +34,14 @@
 
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::center::TurnContext;
 use crate::intent_parser::{parse_deterministic, ParsedIntent};
-use crate::orchestrator::{route_intent, Subsystem};
+use crate::orchestrator::Subsystem;
 
 // ─── Types ─────────────────────────────────────────────────────────────
 
@@ -51,6 +52,10 @@ pub struct PlanStep {
     pub step_id: usize,
     /// The sub-transcript for this step (e.g. "order pizza").
     pub transcript: String,
+    /// Parser provenance is needed to apply the same evidence policy as a
+    /// single turn, including after a confirmation pause/checkpoint restore.
+    #[serde(default)]
+    pub source: String,
     /// The parsed intent for this step.
     pub intent: ParsedIntent,
     /// Which subsystem will execute this step.
@@ -138,7 +143,8 @@ impl TaskPlan {
 }
 
 /// Pending compound task — remaining steps stashed while a confirmation
-/// gate is open. Resumed by `orchestrator_mcp_confirm`.
+/// gate is open. Resumed by `orchestrator_mcp_confirm` or
+/// `orchestrator_github_execute`.
 #[derive(Debug)]
 pub struct PendingCompound {
     /// Steps not yet executed (the gated step is NOT included — it's
@@ -154,6 +160,11 @@ pub struct PendingCompound {
     /// Provenance inherited from the turn that created the compound, so
     /// resumed steps keep the original ownership decision.
     pub turn: TurnContext,
+    /// For GitHub steps requiring confirmation: the command payload in JSON
+    /// form as emitted in OrchestratorEvent::Confirm and sent back by the frontend.
+    pub github_command: Option<serde_json::Value>,
+    /// When this pending compound was stashed.
+    pub created: Instant,
 }
 
 static PENDING_COMPOUND: Mutex<Option<PendingCompound>> = Mutex::new(None);
@@ -262,6 +273,9 @@ pub fn sweep_stale_checkpoints(app_data_dir: &std::path::Path) -> usize {
     swept
 }
 
+/// Maximum age of a pending GitHub compound before it expires (10 minutes).
+pub const PENDING_GITHUB_TTL: Duration = Duration::from_secs(10 * 60);
+
 /// Stash a pending compound task (overwrites any previous — only one
 /// active request exists at a time).
 fn set_pending_compound(p: PendingCompound) {
@@ -274,6 +288,53 @@ pub fn take_pending_compound(request_id: &str) -> Option<PendingCompound> {
     match guard.as_ref() {
         Some(p) if p.request_id == request_id => guard.take(),
         _ => None,
+    }
+}
+
+/// Take the pending compound if it matches the GitHub command and has not expired.
+/// An expired matching compound is dropped; a non-matching compound is left untouched.
+pub fn take_pending_compound_for_github(command: &serde_json::Value) -> Option<PendingCompound> {
+    take_pending_compound_for_github_at(command, Instant::now())
+}
+
+/// Take the pending compound at a specific point in time (allows testing TTL expiration).
+pub fn take_pending_compound_for_github_at(
+    command: &serde_json::Value,
+    now: Instant,
+) -> Option<PendingCompound> {
+    let mut guard = match PENDING_COMPOUND.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    match guard.as_ref() {
+        Some(p) if p.github_command.as_ref() == Some(command) => {
+            let is_expired = now
+                .checked_duration_since(p.created)
+                .map(|dur| dur >= PENDING_GITHUB_TTL)
+                .unwrap_or(false);
+            if is_expired {
+                guard.take();
+                None
+            } else {
+                guard.take()
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Drop the pending compound if it matches the GitHub command (used on user decline).
+pub fn drop_pending_compound_for_github(command: &serde_json::Value) -> bool {
+    let mut guard = match PENDING_COMPOUND.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    match guard.as_ref() {
+        Some(p) if p.github_command.as_ref() == Some(command) => {
+            guard.take();
+            true
+        }
+        _ => false,
     }
 }
 
@@ -350,12 +411,11 @@ pub fn split_compound(transcript: &str) -> Vec<String> {
 ///
 /// Returns `None` when:
 /// - the transcript isn't compound (< 2 parts after splitting), or
-/// - any part fails deterministic parsing (fall back to single-intent
-///   path — the Worker/9Router can still answer it), or
-/// - any part routes to Architect (window-managed, not composable).
+/// - any part fails deterministic parsing, or
+/// - any part is standalone-only (including file actions and Architect).
 ///
-/// This is intentionally conservative: a bad compound split should never
-/// produce a worse outcome than today's single-intent path.
+/// The orchestrator refuses an unplannable compound instead of executing a
+/// partial first clause or sending the whole line to cloud chat.
 pub fn build_plan(transcript: &str, task_id: &str) -> Option<TaskPlan> {
     let parts = split_compound(transcript);
     if parts.len() < 2 {
@@ -365,10 +425,11 @@ pub fn build_plan(transcript: &str, task_id: &str) -> Option<TaskPlan> {
     let mut steps = Vec::with_capacity(parts.len());
     for (i, part) in parts.iter().enumerate() {
         let parsed = parse_deterministic(part)?;
-        let subsystem = route_intent(&parsed.intent);
-        // A file action never runs inside a compound: a delete needs its own read-back and its own yes
-        // (Action Kernel), so the whole line falls back to the single-intent path.
-        if matches!(parsed.intent, ParsedIntent::FileAction { .. } | ParsedIntent::FileUndo) {
+        let spec = crate::center::action_spec(&parsed.intent);
+        let subsystem = spec.route.clone();
+        // Standalone actions (including file deletes) keep their own
+        // read-back and confirmation flow outside a compound.
+        if spec.compound == crate::center::CompoundPolicy::StandaloneOnly {
             return None;
         }
         // Architect is window-managed by the frontend — can't compose.
@@ -378,6 +439,7 @@ pub fn build_plan(transcript: &str, task_id: &str) -> Option<TaskPlan> {
         steps.push(PlanStep {
             step_id: i,
             transcript: part.clone(),
+            source: parsed.source,
             intent: parsed.intent,
             subsystem,
             depends_on: if i == 0 { vec![] } else { vec![i - 1] },
@@ -391,6 +453,27 @@ pub fn build_plan(transcript: &str, task_id: &str) -> Option<TaskPlan> {
         steps,
         results: Vec::new(),
     })
+}
+
+/// A concrete refusal for a compound that the planner could not approve.
+/// Called only after both deterministic and admin-brain planning fail.
+pub fn plan_rejection_explanation(transcript: &str) -> String {
+    for part in split_compound(transcript) {
+        if let Some(parsed) = parse_deterministic(&part) {
+            let spec = crate::center::action_spec(&parsed.intent);
+            if spec.compound == crate::center::CompoundPolicy::StandaloneOnly {
+                let kind = match parsed.intent {
+                    ParsedIntent::FileAction { .. } | ParsedIntent::FileUndo => "file action",
+                    ParsedIntent::PowerAction { .. } => "power action",
+                    ParsedIntent::GitHubCommand { .. } => "GitHub action",
+                    ParsedIntent::CloseApp { .. } => "close-app action",
+                    _ => "action",
+                };
+                return format!("The {kind} in this command must be requested separately, sir.");
+            }
+        }
+    }
+    "I couldn't safely plan every step of that command, sir. Please say the actions separately.".into()
 }
 
 /// Async variant of `build_plan` — admin machines can let the Qwen
@@ -432,7 +515,11 @@ pub async fn build_plan_with_brain(transcript: &str, task_id: &str) -> Option<Ta
                     None => return None,
                 },
             };
-            let subsystem = route_intent(&parsed.intent);
+            let spec = crate::center::action_spec(&parsed.intent);
+            let subsystem = spec.route.clone();
+            if spec.compound == crate::center::CompoundPolicy::StandaloneOnly {
+                return None;
+            }
             if subsystem == Subsystem::Architect
                 || subsystem == Subsystem::None
                 || subsystem == Subsystem::CommandCenter
@@ -442,6 +529,7 @@ pub async fn build_plan_with_brain(transcript: &str, task_id: &str) -> Option<Ta
             steps.push(PlanStep {
                 step_id: i,
                 transcript: part.clone(),
+                source: parsed.source,
                 intent: parsed.intent,
                 subsystem,
                 depends_on: if i == 0 { vec![] } else { vec![i - 1] },
@@ -465,7 +553,10 @@ pub(crate) enum StepOutcome {
     Done(StepResult),
     /// Step hit a confirmation gate — Confirm event already emitted,
     /// remaining steps must pause.
-    AwaitingConfirmation(StepResult),
+    AwaitingConfirmation {
+        result: StepResult,
+        github_command: Option<serde_json::Value>,
+    },
 }
 
 /// Map a `ParsedIntent` to the local `command_executor::Intent`.
@@ -532,6 +623,31 @@ pub(crate) async fn execute_step<R: Runtime>(
         ));
     }
 
+    // A compound's top-level Unknown parse cannot authorize its component
+    // commands. Each step receives the same owner, evidence and slot checks
+    // used by process_transcript before any executor is called.
+    match crate::center::prepare_action(
+        &step.intent, &step.transcript, &step.source, turn,
+        crate::ghost::session_active(), false, false,
+    ) {
+        crate::center::PolicyVerdict::Ready(spec)
+            if spec.compound == crate::center::CompoundPolicy::Allowed
+                && spec.route == step.subsystem => {}
+        crate::center::PolicyVerdict::Clarify(validity) => {
+            let reason = match validity {
+                crate::center::Validity::NeedSlot { prompt, .. }
+                | crate::center::Validity::Invalid { prompt, .. }
+                | crate::center::Validity::Unheard { prompt } => prompt,
+                crate::center::Validity::Ok => "I couldn't validate that step, sir.".into(),
+            };
+            return StepOutcome::Done(mk(StepStatus::Failed, reason.clone(), Some(reason)));
+        }
+        _ => {
+            let reason = "I can't safely run that step in a multi-step command, sir.".to_string();
+            return StepOutcome::Done(mk(StepStatus::Failed, reason.clone(), Some(reason)));
+        }
+    }
+
     match step.subsystem {
         Subsystem::LocalCommand => {
             let Some(local) = to_local_intent(&step.intent) else {
@@ -568,11 +684,14 @@ pub(crate) async fn execute_step<R: Runtime>(
             )
             .await
             {
-                Ok(None) | Ok(Some(_)) if gated => StepOutcome::AwaitingConfirmation(mk(
-                    StepStatus::AwaitingConfirmation,
-                    "Awaiting your confirmation, sir.".to_string(),
-                    None,
-                )),
+                Ok(None) | Ok(Some(_)) if gated => StepOutcome::AwaitingConfirmation {
+                    result: mk(
+                        StepStatus::AwaitingConfirmation,
+                        "Awaiting your confirmation, sir.".to_string(),
+                        None,
+                    ),
+                    github_command: None,
+                },
                 Ok(Some(text)) => StepOutcome::Done(mk(StepStatus::Succeeded, text, None)),
                 Ok(None) => StepOutcome::Done(mk(StepStatus::Succeeded, "Done, sir.".to_string(), None)),
                 Err(e) => StepOutcome::Done(mk(StepStatus::Failed, e.clone(), Some(e))),
@@ -602,7 +721,8 @@ pub(crate) async fn execute_step<R: Runtime>(
         Subsystem::GitHub => {
             // Read-only GitHub ops run inline. Destructive ops emit the
             // existing Confirm flow — the frontend's github_execute path
-            // handles it; remaining compound steps are dropped (v1 limit).
+            // handles it, stashing remaining compound steps in PENDING_COMPOUND
+            // to be resumed on user approval.
             let crate::intent_parser::ParsedIntent::GitHubCommand { command } = &step.intent else {
                 return StepOutcome::Done(mk(
                     StepStatus::Unsupported,
@@ -645,15 +765,18 @@ pub(crate) async fn execute_step<R: Runtime>(
                         &crate::orchestrator::OrchestratorEvent::Confirm {
                             prompt: prompt.clone(),
                             request_id: request_id.to_string(),
-                            command: cmd_json,
+                            command: cmd_json.clone(),
                         },
                     )
                     .ok();
-                    StepOutcome::AwaitingConfirmation(mk(
-                        StepStatus::AwaitingConfirmation,
-                        prompt.clone(),
-                        None,
-                    ))
+                    StepOutcome::AwaitingConfirmation {
+                        result: mk(
+                            StepStatus::AwaitingConfirmation,
+                            prompt.clone(),
+                            None,
+                        ),
+                        github_command: Some(cmd_json),
+                    }
                 }
                 crate::github_cmd::GitHubResult::MergeConflict { message, .. } => {
                     StepOutcome::Done(mk(StepStatus::Failed, message.clone(), Some(message)))
@@ -729,7 +852,8 @@ pub async fn execute_plan<R: Runtime>(
         if let Ok(dir) = app.path().app_data_dir() {
             write_checkpoint(&dir, &plan, i);
         }
-        if crate::orchestrator::is_cancelled_pub(cancel_flag) {            let step = plan.steps[i].clone();
+        if crate::orchestrator::is_cancelled_pub(cancel_flag) {
+            let step = plan.steps[i].clone();
             plan.results.push(StepResult {
                 step_id: step.step_id,
                 subsystem: step.subsystem.clone(),
@@ -758,7 +882,7 @@ pub async fn execute_plan<R: Runtime>(
                 let step = &batch[idx];
                 match outcome {
                     StepOutcome::Done(res) => {
-                        let failed = res.status == StepStatus::Failed;
+                        let failed = matches!(res.status, StepStatus::Failed | StepStatus::Unsupported | StepStatus::Skipped);
                         plan.results.push(res);
                         if failed && !step.optional {
                             for remaining in plan.steps.iter().skip(end) {
@@ -775,8 +899,11 @@ pub async fn execute_plan<R: Runtime>(
                             break;
                         }
                     }
-                    StepOutcome::AwaitingConfirmation(res) => {
-                        plan.results.push(res);
+                    StepOutcome::AwaitingConfirmation {
+                        result,
+                        github_command,
+                    } => {
+                        plan.results.push(result);
                         let mut remaining = batch[idx + 1..].to_vec();
                         remaining.extend_from_slice(&plan.steps[end..]);
                         set_pending_compound(PendingCompound {
@@ -785,6 +912,8 @@ pub async fn execute_plan<R: Runtime>(
                             request_id: request_id.to_string(),
                             transcript: plan.transcript.clone(),
                             turn: turn.clone(),
+                            github_command,
+                            created: Instant::now(),
                         });
                         if let Ok(dir) = app.path().app_data_dir() {
                             clear_checkpoint(&dir, &plan.task_id);
@@ -818,7 +947,7 @@ pub async fn execute_plan<R: Runtime>(
 
         match outcome {
                 StepOutcome::Done(res) => {
-                    let failed = res.status == StepStatus::Failed;
+                    let failed = matches!(res.status, StepStatus::Failed | StepStatus::Unsupported | StepStatus::Skipped);
                     plan.results.push(res);
                     if failed && !step.optional {
                         // Abort remaining steps — mark them skipped.
@@ -835,9 +964,12 @@ pub async fn execute_plan<R: Runtime>(
                     break;
                 }
             }
-            StepOutcome::AwaitingConfirmation(res) => {
-                plan.results.push(res);
-                // Stash remaining steps — resumed by orchestrator_mcp_confirm.
+            StepOutcome::AwaitingConfirmation {
+                result,
+                github_command,
+            } => {
+                plan.results.push(result);
+                // Stash remaining steps — resumed by orchestrator_mcp_confirm or orchestrator_github_execute.
                 let remaining = plan.steps[i + 1..].to_vec();
                 set_pending_compound(PendingCompound {
                     remaining_steps: remaining,
@@ -845,6 +977,8 @@ pub async fn execute_plan<R: Runtime>(
                     request_id: request_id.to_string(),
                     transcript: plan.transcript.clone(),
                     turn: turn.clone(),
+                    github_command,
+                    created: Instant::now(),
                 });
                 if let Ok(dir) = app.path().app_data_dir() {
                     clear_checkpoint(&dir, &plan.task_id);
@@ -886,11 +1020,13 @@ pub async fn execute_plan<R: Runtime>(
     }
 }
 
-/// A step is parallel-safe if it is side-effect-free and never hits a
-/// confirmation gate: WorkerBackend Q&A only. LocalCommand opens apps,
-/// Mcp/GitHub mutate external state — always sequential. Pure.
+/// Only an explicitly dependency-free read query may run in parallel. The
+/// current "then" planner links every later step to its predecessor, so its
+/// plans always execute in order.
 pub fn is_parallel_safe(step: &PlanStep) -> bool {
-    matches!(step.subsystem, Subsystem::WorkerBackend)
+    step.depends_on.is_empty()
+        && step.subsystem == Subsystem::WorkerBackend
+        && matches!(&step.intent, ParsedIntent::Search { .. })
 }
 
 /// End index (exclusive) of the maximal parallel-safe run from `start`.
@@ -942,9 +1078,9 @@ async fn execute_batch<R: Runtime>(
 
 /// Resume a pending compound after the gated step was confirmed.
 ///
-/// Called by `orchestrator_mcp_confirm` after the MCP call succeeds.
-/// Runs the remaining steps, merges them with the prior results and
-/// the confirmed step's text, returns the merged response.
+/// Called by `orchestrator_mcp_confirm` or `orchestrator_github_execute`
+/// after the confirmed call succeeds. Runs the remaining steps, merges them
+/// with the prior results and the confirmed step's text, returns the merged response.
 pub async fn resume_compound<R: Runtime>(
     app: &AppHandle<R>,
     pending: PendingCompound,
@@ -952,10 +1088,15 @@ pub async fn resume_compound<R: Runtime>(
     cancel_flag: Arc<AtomicBool>,
 ) -> PlanOutcome {
     let total = pending.prior_results.len() + 1 + pending.remaining_steps.len();
+    let is_github = pending.github_command.is_some();
     let mut results = pending.prior_results;
     results.push(StepResult {
         step_id: results.len(),
-        subsystem: Subsystem::Mcp,
+        subsystem: if is_github {
+            Subsystem::GitHub
+        } else {
+            Subsystem::Mcp
+        },
         status: StepStatus::Succeeded,
         text: confirmed_step_text,
         error: None,
@@ -994,8 +1135,8 @@ pub async fn resume_compound<R: Runtime>(
             }
             // Nested confirmation inside a resumed compound — v1 treats
             // the task as done at this point (the Confirm was emitted).
-            StepOutcome::AwaitingConfirmation(res) => {
-                results.push(res);
+            StepOutcome::AwaitingConfirmation { result, .. } => {
+                results.push(result);
                 break;
             }
         }
@@ -1147,9 +1288,17 @@ mod tests {
     }
 
     #[test]
+    fn then_plan_never_batches_dependent_cloud_steps() {
+        let plan = build_plan("search for cats then search for dogs", "ordered").unwrap();
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps[1].depends_on, vec![0]);
+        assert_eq!(batch_end(&plan.steps, 0), 1);
+        assert_eq!(batch_end(&plan.steps, 1), 1);
+    }
+
+    #[test]
     fn test_build_plan_unparseable_part_returns_none() {
-        // "gibberish xyzzy" won't parse → whole thing falls back to
-        // single-intent path (Worker/9Router answers the full text).
+        // An unparseable step makes the whole compound unplannable.
         let plan = build_plan("open chrome then gibberish xyzzy foobar", "t3");
         assert!(plan.is_none());
     }
@@ -1163,6 +1312,7 @@ mod tests {
             "open chrome then move my latest screenshot to documents",
         ] {
             assert!(build_plan(t, "tf").is_none(), "{t}");
+            assert!(plan_rejection_explanation(t).contains("file action"), "{t}");
         }
     }
 
@@ -1179,6 +1329,23 @@ mod tests {
         let plan = plan.unwrap();
         assert_eq!(plan.steps[0].subsystem, Subsystem::LocalCommand);
         assert_eq!(plan.steps[1].subsystem, Subsystem::Mcp);
+    }
+
+    #[test]
+    fn local_step_policy_matches_executor_adapter() {
+        let supported = [
+            ParsedIntent::OpenApp { target: "Chrome".into() },
+            ParsedIntent::WhatsappChat { contact: "Alex".into() },
+            ParsedIntent::MediaNext,
+            ParsedIntent::Greeting { reply: "Hello".into() },
+        ];
+        for intent in supported {
+            assert_eq!(crate::center::action_spec(&intent).compound, crate::center::CompoundPolicy::Allowed);
+            assert!(to_local_intent(&intent).is_some());
+        }
+        let unsupported = ParsedIntent::BrowserTab { index: 2 };
+        assert_eq!(crate::center::action_spec(&unsupported).compound, crate::center::CompoundPolicy::StandaloneOnly);
+        assert!(to_local_intent(&unsupported).is_none());
     }
 
     #[test]
@@ -1282,14 +1449,19 @@ mod tests {
         assert!(merged.contains("swiggy unavailable"));
     }
 
+    static TEST_COMPOUND_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn test_pending_compound_roundtrip() {
+        let _guard = TEST_COMPOUND_LOCK.lock().unwrap();
         let pending = PendingCompound {
             remaining_steps: vec![],
             prior_results: vec![],
             request_id: "req-xyz".to_string(),
             transcript: "test".to_string(),
             turn: TurnContext::default(),
+            github_command: None,
+            created: Instant::now(),
         };
         set_pending_compound(pending);
         assert!(has_pending_compound("req-xyz"));
@@ -1302,12 +1474,15 @@ mod tests {
 
     #[test]
     fn test_pending_compound_wrong_request_id() {
+        let _guard = TEST_COMPOUND_LOCK.lock().unwrap();
         let pending = PendingCompound {
             remaining_steps: vec![],
             prior_results: vec![],
             request_id: "req-a".to_string(),
             transcript: "test".to_string(),
             turn: TurnContext::default(),
+            github_command: None,
+            created: Instant::now(),
         };
         set_pending_compound(pending);
         assert!(take_pending_compound("req-b").is_none());
@@ -1315,9 +1490,183 @@ mod tests {
         assert!(take_pending_compound("req-a").is_some());
     }
 
+    #[test]
+    fn test_pending_compound_github_roundtrip_once() {
+        let _guard = TEST_COMPOUND_LOCK.lock().unwrap();
+        let cmd = serde_json::json!({
+            "command": "merge_pull_request",
+            "repo": "owner/repo",
+            "pr_number": 5
+        });
+        let pending = PendingCompound {
+            remaining_steps: vec![],
+            prior_results: vec![],
+            request_id: "req-gh-1".to_string(),
+            transcript: "merge pr 5 then open pr list".to_string(),
+            turn: TurnContext::default(),
+            github_command: Some(cmd.clone()),
+            created: Instant::now(),
+        };
+        set_pending_compound(pending);
+
+        // Taking it with an equal command works once
+        let taken = take_pending_compound_for_github(&cmd);
+        assert!(taken.is_some());
+        assert_eq!(taken.as_ref().unwrap().request_id, "req-gh-1");
+
+        // Taking again returns None
+        assert!(take_pending_compound_for_github(&cmd).is_none());
+    }
+
+    #[test]
+    fn test_pending_compound_github_different_command_does_not_take() {
+        let _guard = TEST_COMPOUND_LOCK.lock().unwrap();
+        let cmd1 = serde_json::json!({
+            "command": "merge_pull_request",
+            "repo": "owner/repo",
+            "pr_number": 5
+        });
+        let cmd2 = serde_json::json!({
+            "command": "merge_pull_request",
+            "repo": "owner/repo",
+            "pr_number": 6
+        });
+        let pending = PendingCompound {
+            remaining_steps: vec![],
+            prior_results: vec![],
+            request_id: "req-gh-2".to_string(),
+            transcript: "test".to_string(),
+            turn: TurnContext::default(),
+            github_command: Some(cmd1.clone()),
+            created: Instant::now(),
+        };
+        set_pending_compound(pending);
+
+        // A different command does not take it
+        assert!(take_pending_compound_for_github(&cmd2).is_none());
+
+        // Still there for the matching command
+        let taken = take_pending_compound_for_github(&cmd1);
+        assert!(taken.is_some());
+        assert_eq!(taken.as_ref().unwrap().request_id, "req-gh-2");
+    }
+
+    #[test]
+    fn test_pending_compound_github_expired_is_dropped() {
+        let _guard = TEST_COMPOUND_LOCK.lock().unwrap();
+        let cmd = serde_json::json!({
+            "command": "merge_pull_request",
+            "repo": "owner/repo",
+            "pr_number": 7
+        });
+        let pending = PendingCompound {
+            remaining_steps: vec![],
+            prior_results: vec![],
+            request_id: "req-gh-3".to_string(),
+            transcript: "test".to_string(),
+            turn: TurnContext::default(),
+            github_command: Some(cmd.clone()),
+            created: Instant::now(),
+        };
+        set_pending_compound(pending);
+
+        // Advance simulated clock past PENDING_GITHUB_TTL (10 minutes)
+        let future = Instant::now() + PENDING_GITHUB_TTL + Duration::from_secs(1);
+        let taken = take_pending_compound_for_github_at(&cmd, future);
+        assert!(taken.is_none());
+
+        // Expired compound was removed from PENDING_COMPOUND
+        assert!(take_pending_compound_for_github(&cmd).is_none());
+    }
+
+    #[test]
+    fn test_pending_compound_github_decline_clears() {
+        let _guard = TEST_COMPOUND_LOCK.lock().unwrap();
+        let cmd = serde_json::json!({
+            "command": "merge_pull_request",
+            "repo": "owner/repo",
+            "pr_number": 8
+        });
+        let pending = PendingCompound {
+            remaining_steps: vec![],
+            prior_results: vec![],
+            request_id: "req-gh-4".to_string(),
+            transcript: "test".to_string(),
+            turn: TurnContext::default(),
+            github_command: Some(cmd.clone()),
+            created: Instant::now(),
+        };
+        set_pending_compound(pending);
+
+        // Decline path clears it
+        let dropped = drop_pending_compound_for_github(&cmd);
+        assert!(dropped);
+
+        // No longer there
+        assert!(take_pending_compound_for_github(&cmd).is_none());
+    }
+
+    #[test]
+    fn test_pending_compound_mcp_unaffected_by_github() {
+        let _guard = TEST_COMPOUND_LOCK.lock().unwrap();
+        let gh_cmd = serde_json::json!({
+            "command": "merge_pull_request",
+            "repo": "owner/repo",
+            "pr_number": 9
+        });
+        let pending_mcp = PendingCompound {
+            remaining_steps: vec![],
+            prior_results: vec![],
+            request_id: "req-mcp-lookup".to_string(),
+            transcript: "order food then check music".to_string(),
+            turn: TurnContext::default(),
+            github_command: None,
+            created: Instant::now(),
+        };
+        set_pending_compound(pending_mcp);
+
+        // GitHub take must not take or clear MCP compound
+        assert!(take_pending_compound_for_github(&gh_cmd).is_none());
+
+        // MCP request-id lookup still works
+        let taken = take_pending_compound("req-mcp-lookup");
+        assert!(taken.is_some());
+        assert_eq!(taken.as_ref().unwrap().request_id, "req-mcp-lookup");
+    }
+
+    #[test]
+    fn test_pending_compound_github_remaining_steps_in_order() {
+        let _guard = TEST_COMPOUND_LOCK.lock().unwrap();
+        let cmd = serde_json::json!({
+            "command": "merge_pull_request",
+            "repo": "owner/repo",
+            "pr_number": 10
+        });
+        let step1 = mk_step(1, Subsystem::LocalCommand);
+        let step2 = mk_step(2, Subsystem::WorkerBackend);
+        let step3 = mk_step(3, Subsystem::LocalCommand);
+
+        let pending = PendingCompound {
+            remaining_steps: vec![step1, step2, step3],
+            prior_results: vec![],
+            request_id: "req-gh-steps".to_string(),
+            transcript: "merge then open app then search then close".to_string(),
+            turn: TurnContext::default(),
+            github_command: Some(cmd.clone()),
+            created: Instant::now(),
+        };
+        set_pending_compound(pending);
+
+        let taken = take_pending_compound_for_github(&cmd).expect("compound taken");
+        assert_eq!(taken.remaining_steps.len(), 3);
+        assert_eq!(taken.remaining_steps[0].step_id, 1);
+        assert_eq!(taken.remaining_steps[1].step_id, 2);
+        assert_eq!(taken.remaining_steps[2].step_id, 3);
+    }
+
     fn mk_step(id: usize, subsystem: Subsystem) -> PlanStep {
         let intent = match subsystem {
-            Subsystem::WorkerBackend => ParsedIntent::Unknown { raw: "q".into() },
+            Subsystem::WorkerBackend => ParsedIntent::Search { query: "q".into() },
             Subsystem::LocalCommand => ParsedIntent::OpenApp { target: "x".into() },
             Subsystem::Mcp => ParsedIntent::OpenApp { target: "y".into() },
             _ => ParsedIntent::Unknown { raw: "z".into() },
@@ -1325,6 +1674,7 @@ mod tests {
         PlanStep {
             step_id: id,
             transcript: "t".into(),
+            source: "deterministic".into(),
             intent,
             subsystem,
             depends_on: vec![],
@@ -1333,8 +1683,14 @@ mod tests {
     }
 
     #[test]
-    fn test_is_parallel_safe_worker_only() {
+    fn test_is_parallel_safe_only_independent_search() {
         assert!(is_parallel_safe(&mk_step(0, Subsystem::WorkerBackend)));
+        let mut dependent = mk_step(1, Subsystem::WorkerBackend);
+        dependent.depends_on = vec![0];
+        assert!(!is_parallel_safe(&dependent));
+        dependent.depends_on.clear();
+        dependent.intent = ParsedIntent::AnalyseRepo { owner: None, repo: "example".into() };
+        assert!(!is_parallel_safe(&dependent));
         assert!(!is_parallel_safe(&mk_step(0, Subsystem::LocalCommand)));
         assert!(!is_parallel_safe(&mk_step(0, Subsystem::Mcp)));
         assert!(!is_parallel_safe(&mk_step(0, Subsystem::GitHub)));

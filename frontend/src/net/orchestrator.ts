@@ -28,6 +28,94 @@ function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
 }
 
+// ─── Ack deadline guard (live log 2026-10-19) ───────────────────────────
+// A dynamic repeat-back ack ("Pulling up PR 11 in windows, sir.") is NOT in
+// the pre-rendered phrase cache — Rust synthesizes it live, and once the
+// Edge synth stalled ~27 s: the turn went silent, `hideOrbAfterSpeech`
+// (TTS-end-gated) never fired, so the orb stayed pinned on screen and the
+// loading transition never completed visually. This guard guarantees the
+// user hears SOMETHING within ACK_TTS_DEADLINE_MS: if Rust never emits
+// "tts:playback_started" (fired at the actual rodio playback site in
+// tts.rs), the stuck synth is cancelled — the Rust generation gate then
+// drops the late audio ("stop requested during synthesis") — and a
+// pre-rendered stock ack speaks instantly instead.
+const ACK_TTS_DEADLINE_MS = 2000;
+/** Exact keys of tts.rs `CACHED_PHRASES` pre-rendered at boot → instant playback. */
+const STOCK_ACK_PHRASES = [
+  "On it sir",
+  "Right away sir",
+  "Working on it sir",
+  "Let me check that sir",
+  "One moment sir",
+];
+
+// While a long turn loafs (worker retry chains once ran ~55 s), the orb
+// must not sit on screen with no audio playing behind it — the top-right
+// loading indicator carries the visual. ORB_SILENT_HIDE_MS gives the ack
+// enough room, then hides the orb even if the speech lifecycle hung.
+const ORB_SILENT_HIDE_MS = 4000;
+
+let ackGuardTimer: ReturnType<typeof setTimeout> | null = null;
+let ackGuardRequestId: string | null = null;
+let orbSilentHideTimer: ReturnType<typeof setTimeout> | null = null;
+/** Set by the Rust "tts:playback_started" event — the ONLY trustworthy
+ *  "audio is actually playing now" signal (the frontend's own tts-started
+ *  is emitted before synthesis even begins). */
+let speechBecameAudible = false;
+
+function armAckDeadlineGuard(requestId: string | undefined, sourceCenter: string | undefined): void {
+  if (!isTauri()) return; // dev browser / tests: inert
+  ackGuardRequestId = requestId ?? null;
+  if (ackGuardTimer) clearTimeout(ackGuardTimer);
+  ackGuardTimer = setTimeout(() => {
+    ackGuardTimer = null;
+    if (speechBecameAudible) return;
+    const s = useAssistant.getState();
+    if (s.ghostActive) return;
+    console.warn(
+      `[NEXUS] ack: no audio within ${ACK_TTS_DEADLINE_MS}ms — superseding slow synth with a pre-rendered stock ack`
+    );
+    // stopTts(true): bumps the generation so the late synth can never play
+    // (Rust's generation gate skips it), clears the speech arbiter so this
+    // fallback isn't dropped by the "ack → drop" rule, and cancels rodio.
+    stopTts(true);
+    void speak(STOCK_ACK_PHRASES[Math.floor(Math.random() * STOCK_ACK_PHRASES.length)], undefined, {
+      requestId,
+      sourceCenter,
+      kind: "ack",
+    });
+  }, ACK_TTS_DEADLINE_MS);
+}
+
+/** Belt-and-braces for the orb: if loading is on but NO audio ever became
+ *  audible (guard fallback lost the race too), hide the orb — the spinner
+ *  carries the turn visually. The result/error events re-show the orb. */
+function armOrbSilentHideObserver(): void {
+  if (!isTauri()) return;
+  if (orbSilentHideTimer) clearTimeout(orbSilentHideTimer);
+  orbSilentHideTimer = setTimeout(() => {
+    orbSilentHideTimer = null;
+    const s = useAssistant.getState();
+    if (s.ghostActive) return;
+    if (s.ttsActive || speechBecameAudible) return;
+    console.warn(
+      "[NEXUS] loading: orb visible with no audio after 4s — hiding (loading indicator carries the turn)"
+    );
+    s.setVisible(false);
+  }, ORB_SILENT_HIDE_MS);
+}
+
+function clearAckDeadlineGuards(): void {
+  if (ackGuardTimer) {
+    clearTimeout(ackGuardTimer);
+    ackGuardTimer = null;
+  }
+  if (orbSilentHideTimer) {
+    clearTimeout(orbSilentHideTimer);
+    orbSilentHideTimer = null;
+  }
+}
+
 /** Orchestrator event shape (mirrors Rust OrchestratorEvent enum). */
 interface OrchestratorEvent {
   type:
@@ -449,6 +537,12 @@ export async function initOrchestratorListener(): Promise<void> {
             // then transitions to the loading indicator once it's ready.
             // State-aware (never mid-speech, never mid-ghost).
             hideOrbAfterSpeech(600);
+            // Belt-and-braces: if the ack audio never becomes audible, the
+            // orb must not park on screen — the spinner carries the turn.
+            armOrbSilentHideObserver();
+          } else if (!ev.visible) {
+            // The loading window closed — no stale guard may fire later.
+            clearAckDeadlineGuards();
           }
         }
         break;
@@ -468,6 +562,9 @@ export async function initOrchestratorListener(): Promise<void> {
         if (ev.text) {
           store.setState("speaking");
           store.addAssistantMessage(ev.text);
+          // Deadline guard: a dynamic‑ack synth that never starts playing
+          // must fall back to a pre-rendered stock line (≤2 s, guaranteed).
+          armAckDeadlineGuard(ev.request_id, ev.source_center);
           void speak(ev.text, undefined, { requestId: ev.request_id, sourceCenter: ev.source_center, kind: "ack" });
           // Hide the orb after TTS actually finishes (if not in ghost
           // mode) — the zoom plays fully instead of sliding down mid-speech.
@@ -520,6 +617,10 @@ export async function initOrchestratorListener(): Promise<void> {
         // Clear the long-running in-flight flag so subsequent voice
         // commands aren't incorrectly deduped/queued.
         clearLongRunningInFlight();
+
+        // The result supersedes the ack — no pending deadline/guard may fire
+        // into the result's speech.
+        clearAckDeadlineGuards();
 
         // Hide loading (Rust already does this, but update store too)
         store.setLoadingVisible(false);
@@ -585,6 +686,7 @@ export async function initOrchestratorListener(): Promise<void> {
             noteGhostTurnClosed();
           }).catch(() => {});
           clearLongRunningInFlight();
+          clearAckDeadlineGuards();
           store.setLoadingVisible(false);
           store.setAwaitingInput(false);
           break;
@@ -595,6 +697,7 @@ export async function initOrchestratorListener(): Promise<void> {
         }).catch(() => {});
         currentRequestId = null;
         clearLongRunningInFlight();
+        clearAckDeadlineGuards();
         store.setLoadingVisible(false);
         store.setAwaitingInput(false);
         const curStore = useAssistant.getState();
@@ -622,6 +725,7 @@ export async function initOrchestratorListener(): Promise<void> {
           noteGhostTurnClosed();
         }).catch(() => {});
         clearLongRunningInFlight();
+        clearAckDeadlineGuards();
         currentRequestId = ev.request_id;
         store.setLoadingVisible(false);
         store.setVisible(true);
@@ -737,9 +841,23 @@ export async function initOrchestratorListener(): Promise<void> {
     }
   });
 
+  // Playback-start truth (ack deadline guard): Rust fires this at the rodio
+  // playback site in tts.rs — post-synthesis, post-cache-hit — so it is the
+  // only trustworthy "audio is actually playing now" signal. The frontend's
+  // own tts-started (ttsPlayer.playKokoro) fires BEFORE synthesis begins,
+  // which is exactly what let a stalled synth look like live speech.
+  await listen<{ requestId?: string }>("tts:playback_started", (event) => {
+    speechBecameAudible = true;
+    const payload = event.payload;
+    if (ackGuardTimer && (!payload?.requestId || payload.requestId === ackGuardRequestId)) {
+      clearTimeout(ackGuardTimer);
+      ackGuardTimer = null;
+      console.log("[NEXUS] ack: audio playback confirmed — deadline guard cancelled");
+    }
+  });
+
   console.log("[NEXUS] orchestrator: event listener ready");
 }
-
 /**
  * Process a transcript through the central orchestrator.
  *
@@ -755,11 +873,14 @@ export async function initOrchestratorListener(): Promise<void> {
  * the orchestrator handles all of that.
  */
 export interface TurnProvenance {
+  session?: number;
   ownership?: "verified" | "uncertain" | "rejected" | "unenrolled";
   ownerScore?: number;
   decoderBias?: string;
   language?: string;
   initiation?: "explicit" | "ghost";
+  rawText?: string;
+  correctedText?: string;
 }
 
 export interface OrchestratorCallOpts {
@@ -829,6 +950,15 @@ export async function processViaOrchestrator(
       subsystem: "ambient",
       handled_locally: true,
     };
+  }
+  // A recorder path without verified provenance cannot submit a voice
+  // command or answer a pending confirmation while Voice Lock is enabled.
+  if (turn?.ownership !== "verified") {
+    const locked = await invoke<boolean>("voice_lock_enabled").catch(() => true);
+    if (locked) {
+      console.warn("[NEXUS] Voice Lock held a turn without verified provenance");
+      return { request_id: "voice-lock-hold", subsystem: "ambient", handled_locally: true };
+    }
   }
   if (pendingCmd) {
     clearConfirmListeningTimer();

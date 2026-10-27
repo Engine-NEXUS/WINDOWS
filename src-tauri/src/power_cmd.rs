@@ -691,7 +691,37 @@ fn execute(kind: PowerKind) -> Result<(), String> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+/// macOS: System Events answers for shut down / restart / sleep / log out;
+/// the screen lock is the system lock-screen keystroke (Cmd+Ctrl+Q). The
+/// first call raises the one-time Automation (TCC) prompt.
+#[cfg(target_os = "macos")]
+fn execute(kind: PowerKind) -> Result<(), String> {
+    let osa = |script: &str| -> Result<(), String> {
+        std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .status()
+            .map_err(|e| e.to_string())
+            .and_then(|st| {
+                if st.success() {
+                    Ok(())
+                } else {
+                    Err(format!("osascript exited {st}"))
+                }
+            })
+    };
+    match kind {
+        PowerKind::Shutdown => osa("tell application \"System Events\" to shut down"),
+        PowerKind::Restart => osa("tell application \"System Events\" to restart"),
+        PowerKind::SignOut => osa("tell application \"System Events\" to log out"),
+        PowerKind::Sleep => osa("tell application \"System Events\" to sleep"),
+        PowerKind::Lock => {
+            osa("tell application \"System Events\" to keystroke \"q\" using {command down, control down}")
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn execute(_kind: PowerKind) -> Result<(), String> {
     Err("power commands are only supported on Windows".into())
 }

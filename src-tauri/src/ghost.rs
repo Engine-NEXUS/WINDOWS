@@ -812,8 +812,15 @@ mod tests {
         }
     }
 
+    /// Serializes the four tests that exercise the process-global
+    /// FOLLOWUP_QUEUE. Rust runs tests on parallel threads; without this
+    /// lock two queue tests can interleave their clear/enqueue steps and
+    /// observe each other's fixtures (grpc-style flake).
+    static QUEUE_SELFTEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
     #[test]
     fn test_followup_queue_cap_drops_newest() {
+        let _q_lock = QUEUE_SELFTEST_LOCK.lock();
         FOLLOWUP_QUEUE.lock().clear();
         // GeneralAction appends (never supersedes) — use neutral phrasing.
         for i in 0..FOLLOWUP_CAP + 2 {
@@ -835,6 +842,7 @@ mod tests {
 
     #[test]
     fn test_enqueue_supersedes_same_slot() {
+        let _q_lock = QUEUE_SELFTEST_LOCK.lock();
         FOLLOWUP_QUEUE.lock().clear();
         // F3: "open Brave" then "open Chrome" → only Chrome pending.
         let (kept, depth) = enqueue_command("open brave".to_string());
@@ -857,6 +865,7 @@ mod tests {
 
     #[test]
     fn test_enqueue_appends_different_slots_fifo() {
+        let _q_lock = QUEUE_SELFTEST_LOCK.lock();
         FOLLOWUP_QUEUE.lock().clear();
         enqueue_command("open brave".to_string());
         enqueue_command("create a new tab".to_string());
@@ -893,6 +902,7 @@ mod tests {
 
     #[test]
     fn test_drop_followups_purges_queue() {
+        let _q_lock = QUEUE_SELFTEST_LOCK.lock();
         FOLLOWUP_QUEUE.lock().clear();
         enqueue_command("open brave".to_string());
         enqueue_command("create a new tab".to_string());

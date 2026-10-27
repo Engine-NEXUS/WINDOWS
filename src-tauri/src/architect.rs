@@ -70,6 +70,11 @@ static LAST_FOREGROUND: Mutex<Option<ForegroundCache>> = parking_lot::const_mute
 pub fn start_foreground_tracker() {
     std::thread::spawn(|| {
         loop {
+            if crate::focus_mode::paused() {
+                crate::focus_mode::defer_log("architect_foreground_tracker");
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                continue;
+            }
             if let Some((title, proc_name)) = get_foreground_window_info() {
                 // Skip NEXUS windows (orb, sidebar, architect, loading, settings, setup)
                 let is_nexus = proc_name == "nexus.exe"

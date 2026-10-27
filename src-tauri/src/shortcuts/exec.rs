@@ -126,14 +126,125 @@ pub fn send_events(events: &[KeyEvent]) -> Result<(), String> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn send_events(_events: &[KeyEvent]) -> Result<(), String> {
-    Err("keyboard shortcuts are only implemented on Windows".into())
+/// One chord on macOS = the same down/up sequence sent through enigo's `Key::Raw`,
+/// which posts CGEvents with the platform's virtual key codes (Accessibility
+/// permission required; without it the OS silently drops the keys, so callers'
+/// verification steps still catch a failed press).
+#[cfg(target_os = "macos")]
+fn send_chord(chord: &Chord) -> Result<(), String> {
+    send_events(&key_events(chord))
 }
 
-#[cfg(not(target_os = "windows"))]
+/// CG virtual key codes, per `Events.h` (`kVK_ANSI_*`, `kVK_Tab`, …). Windows
+/// sends VK codes, so `send_events` translates: the accent keys and F-keys sit
+/// in different ranges, and Up/Down swap when read as a Windows-style arrow
+/// block, which is exactly the asymmetry the table bakes in.
+#[cfg(target_os = "macos")]
+fn vk_to_mac(vk: u16) -> Option<u16> {
+    Some(match vk {
+        // Whitespace/control keys
+        0x08 => 51,   // Backspace      kVK_Delete
+        0x09 => 48,   // Tab            kVK_Tab
+        0x0D => 36,   // Enter          kVK_Return
+        0x1B => 53,   // Esc            kVK_Escape
+        0x20 => 49,   // Space          kVK_Space
+        // Editing keys
+        0x2D => 114,  // Insert         kVK_Help
+        0x2E => 117,  // Delete         kVK_ForwardDelete
+        0x21 => 116,  // PageUp         kVK_PageUp
+        0x22 => 121,  // PageDown       kVK_PageDown
+        0x23 => 119,  // End            kVK_End
+        0x24 => 115,  // Home           kVK_Home
+        // Arrow block
+        0x25 => 123,  // Left           kVK_LeftArrow
+        0x26 => 126,  // Up             kVK_UpArrow
+        0x27 => 124,  // Right          kVK_RightArrow
+        0x28 => 125,  // Down           kVK_DownArrow
+        // Modifiers (Windows sends the generic VK; mac needs the concrete key)
+        0x10 => 56,   // Shift          kVK_Shift
+        0x11 => 59,   // Control        kVK_Control
+        0x12 => 58,   // Alt/Option     kVK_Option
+        0x5B => 55,   // Win/Command    kVK_Command
+        // OEM punctuation (matched to `keys.rs::parse_chord`)
+        0xBA => 41,   // ;              kVK_ANSI_Semicolon
+        0xBB => 24,   // =/+            kVK_ANSI_Equal
+        0xBD => 27,   // -/_            kVK_ANSI_Minus
+        0xBC => 43,   // ,              kVK_ANSI_Comma
+        0xBE => 47,   // .              kVK_ANSI_Period
+        0xBF => 44,   // /              kVK_ANSI_Slash
+        0xC0 => 50,   // `              kVK_ANSI_Grave
+        0xDB => 33,   // [              kVK_ANSI_LeftBracket
+        0xDC => 42,   // \              kVK_ANSI_Backslash
+        0xDD => 30,   // ]              kVK_ANSI_RightBracket
+        0xDE => 39,   // '              kVK_ANSI_Quote
+        0x6B => 69,   // NumAdd         kVK_ANSI_KeypadPlus
+        0x6D => 78,   // NumSubtract    kVK_ANSI_KeypadMinus
+        // Function keys F1..F12 (Windows 0x70.. — mac has no contiguous range)
+        0x70 => 122, 0x71 => 120, 0x72 => 99, 0x73 => 118,
+        0x74 => 96,   // F5
+        0x75 => 97, 0x76 => 98, 0x77 => 100, 0x78 => 101, 0x79 => 109,
+        0x7A => 103,  // F11
+        0x7B => 111,  // F12
+        // Letters: each maps independently (no linear offset)
+        0x41 => 0,    // A
+        0x42 => 11,   // B
+        0x43 => 8,    // C
+        0x44 => 2,    // D
+        0x45 => 14,   // E
+        0x46 => 3,    // F
+        0x47 => 5,    // G
+        0x48 => 4,    // H
+        0x49 => 34,   // I
+        0x4A => 38,   // J
+        0x4B => 40,   // K
+        0x4C => 37,   // L
+        0x4D => 46,   // M
+        0x4E => 45,   // N
+        0x4F => 31,   // O
+        0x50 => 35,   // P
+        0x51 => 12,   // Q
+        0x52 => 15,   // R
+        0x53 => 1,    // S
+        0x54 => 17,   // T
+        0x55 => 32,   // U
+        0x56 => 9,    // V
+        0x57 => 13,   // W
+        0x58 => 7,    // X
+        0x59 => 16,   // Y
+        0x5A => 6,    // Z
+        // Digits row
+        0x30 => 29, 0x31 => 18, 0x32 => 19, 0x33 => 20, 0x34 => 21,
+        0x35 => 23,   // 5
+        0x36 => 22, 0x37 => 26, 0x38 => 28,
+        0x39 => 25,   // 9
+        _ => return None,
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub fn send_events(events: &[KeyEvent]) -> Result<(), String> {
+    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+    if events.is_empty() {
+        return Ok(());
+    }
+    let mut e = Enigo::new(&Settings::default()).map_err(|err| err.to_string())?;
+    for ev in events {
+        let code = vk_to_mac(ev.vk)
+            .ok_or_else(|| format!("virtual key 0x{:02X} has no macOS mapping yet", ev.vk))?;
+        let dir = if ev.up { Direction::Release } else { Direction::Press };
+        e.key(Key::Raw(code), dir).map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn send_chord(_chord: &Chord) -> Result<(), String> {
-    Err("keyboard shortcuts are only implemented on Windows".into())
+    Err("keyboard shortcuts are only implemented on Windows and macOS".into())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn send_events(_events: &[KeyEvent]) -> Result<(), String> {
+    Err("keyboard shortcuts are only implemented on Windows and macOS".into())
 }
 
 /// Perform `action` in the application that is in front right now. Blocking (≤ ~0.8 s when it verifies a
@@ -262,5 +373,44 @@ mod tests {
         if std::env::var("NEXUS_SHORTCUTS_LEGACY").is_err() {
             assert!(enabled());
         }
+    }
+
+    // macOS key translation: CI-verified on the aarch64 runner (the table is
+    // cfg'd out on Windows builds, where CG codes are meaningless).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn vk_to_mac_is_unique_and_exact_per_keys_rs_output() {
+        let used: &[u16] = &[
+            0x08, 0x09, 0x0D, 0x1B, 0x20, 0x2D, 0x2E, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+            0x28, 0x10, 0x11, 0x12, 0x5B, 0xBA, 0xBB, 0xBD, 0xBC, 0xBE, 0xBF, 0xC0, 0xDB, 0xDC,
+            0xDD, 0xDE, 0x6B, 0x6D, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79,
+            0x7A, 0x7B, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C,
+            0x4D, 0x4E, 0x4F, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A,
+            0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+        ];
+        // Every key `keys.rs` can emit must translate.
+        for &vk in used {
+            assert!(vk_to_mac(vk).is_some(), "unmapped vk 0x{vk:02X}");
+        }
+        // …to distinct mac codes (two VKs landing on one code would type the wrong key).
+        let mut codes: Vec<u16> = used.iter().filter_map(|&vk| vk_to_mac(vk)).collect();
+        codes.sort_unstable();
+        let n = codes.len();
+        codes.dedup();
+        assert_eq!(codes.len(), n, "two VKs map to the same CG code");
+        // Spot checks against Events.h.
+        assert_eq!(vk_to_mac(0x09), Some(48)); // Tab -> kVK_Tab
+        assert_eq!(vk_to_mac(0x12), Some(58)); // Alt -> kVK_Option
+        assert_eq!(vk_to_mac(0x11), Some(59)); // Ctrl -> kVK_Control
+        assert_eq!(vk_to_mac(0x5B), Some(55)); // Win -> kVK_Command
+        assert_eq!(vk_to_mac(0x25), Some(123)); // Left
+        assert_eq!(vk_to_mac(0x26), Some(126)); // Up (arrow block is NOT linear on mac)
+        assert_eq!(vk_to_mac(0x28), Some(125)); // Down
+        assert_eq!(vk_to_mac(0x41), Some(0)); // A
+        assert_eq!(vk_to_mac(0x5A), Some(6)); // Z
+        assert_eq!(vk_to_mac(0x34), Some(21)); // 4
+        assert_eq!(vk_to_mac(0x74), Some(96)); // F5
+        assert_eq!(vk_to_mac(0xBB), Some(24)); // '='
+        assert_eq!(vk_to_mac(0x6B), Some(69)); // NumAdd
     }
 }

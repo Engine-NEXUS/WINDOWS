@@ -33,6 +33,12 @@ pub enum ParsedIntent {
     WhatsappChat { contact: String },
     #[serde(rename = "open_architect")]
     OpenArchitect,
+    /// Inspect the foreground website or app and save a review reference.
+    #[serde(rename = "review_foreground")]
+    ReviewForeground,
+    /// Build from the most recently completed foreground review.
+    #[serde(rename = "recreate_last_review")]
+    RecreateLastReview,
     /// Open the settings sidebar (command center).
     /// "open settings" / "open command center" / "show preferences" / "configure NEXUS"
     #[serde(rename = "open_settings")]
@@ -452,6 +458,8 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::ListBlockedContacts => "list_blocked_contacts",
         ParsedIntent::RunOnLocalhost => "run_on_localhost",
         ParsedIntent::CodeProject { .. } => "code_project",
+        ParsedIntent::ReviewForeground => "review_foreground",
+        ParsedIntent::RecreateLastReview => "recreate_last_review",
         ParsedIntent::CodingAgentTask { .. } => "coding_agent_task",
         ParsedIntent::ScanInternshipEmails => "scan_internship_emails",
         ParsedIntent::CreateVoiceReminder { .. } => "create_voice_reminder",
@@ -491,6 +499,7 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
             GitHubCommand::ListWorkflowRuns { .. } => "list_workflow_runs",
             GitHubCommand::RerunWorkflow { .. } => "rerun_workflow",
             GitHubCommand::CancelWorkflow { .. } => "cancel_workflow",
+            GitHubCommand::FindPr { .. } => "find_pr",
         },
     }
 }
@@ -668,10 +677,9 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
 
         if let Some(pr_number) = pr_num {
             return Some(ParseResult {
-                intent: ParsedIntent::AnalysePr {
-                    owner: None,
-                    repo: "ultron".to_string(),
-                    pr_number,
+                // No repo is named: look the number up across the owner's repos, as "analyse PR 34" does.
+                intent: ParsedIntent::GitHubCommand {
+                    command: crate::github_cmd::GitHubCommand::FindPr { pr_number: pr_number as u64 },
                 },
                 confidence: 1.0,
                 source: "deterministic".to_string(),
@@ -684,13 +692,6 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
             confidence: 1.0,
             source: "deterministic".to_string(),
         });
-    }
-
-    // --- GitHub Dashboard & Feed commands ---
-    // High-priority interceptor: intercepts all feed, PR list, issues, and org dashboard phrases
-    // BEFORE open_app, power_cmd, or app_registry can ever treat them as desktop app targets.
-    if let Some(result) = parse_github_dashboard_command(&text) {
-        return Some(result);
     }
 
     // --- "Watch this session, and if it is perfect shut down my laptop" ---
@@ -711,6 +712,13 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
             confidence: 1.0,
             source: "deterministic".to_string(),
         });
+    }
+
+    // --- GitHub Dashboard & Feed commands ---
+    // High-priority interceptor: intercepts all feed, PR list, issues, and org dashboard phrases
+    // BEFORE open_app, power_cmd, or app_registry can ever treat them as desktop app targets.
+    if let Some(result) = parse_github_dashboard_command(&text) {
+        return Some(result);
     }
 
     // --- "hook up all agents" / "which agents are hooked up" ---
@@ -768,6 +776,12 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
 
     // --- Social block/unblock commands ("block Prem Sai for 5 days on Instagram") ---
     if let Some(result) = parse_social_block_command(&text) {
+        return Some(result);
+    }
+
+    // --- Foreground review and its later reference-bound recreation. These
+    // must win before generic coding and screen-analysis grammars. ---
+    if let Some(result) = parse_foreground_review_command(&text) {
         return Some(result);
     }
 
@@ -879,6 +893,13 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
     // Must precede analyse/github commands so text payloads containing "analysis",
     // "servx", "send", "pr" never misfire as repo or action commands.
     if let Some(result) = parse_type_dictation_command(&text) {
+        return Some(result);
+    }
+
+    // --- Reverse engineer this website / app (Feature 152) ---
+    // "nexus reverse engineer this website", "what is this site built with".
+    // Must precede parse_screen_analysis_command so a stack question is not a screen tour.
+    if let Some(result) = parse_reverse_engineer_command(&text) {
         return Some(result);
     }
 
@@ -1216,7 +1237,58 @@ fn parse_github_dashboard_command(text: &str) -> Option<ParseResult> {
         });
     }
 
-    // 4. Feed / Dashboard Home View Possibilities:
+    // 4. Repositories Subpage Possibilities:
+    let is_repos_target = match stripped {
+        "repos" | "repo" | "repositories" | "repository"
+        | "repos list" | "repositories list" | "the repos list" | "the repositories list"
+        | "my repos" | "my repositories" | "all repos" | "all repositories"
+        | "list repos" | "list repositories" | "list of repos" | "list of repositories"
+        | "github repos" | "github repositories" | "github repos list" | "github repositories list"
+        | "my github repos" | "my github repositories" => true,
+        _ => false,
+    };
+
+    let is_repos_subpage = is_repos_target || regex_match(
+        &norm,
+        r"^(?:(?:show\s+(?:me\s+)?(?:the\s+|my\s+)?|open\s+(?:the\s+|my\s+)?|view\s+(?:the\s+|my\s+)?|check\s+(?:the\s+|my\s+)?|list\s+(?:all\s+|of\s+)?)?(?:(?:my\s+)?github\s+(?:repos|repositories)|my\s+(?:repos|repositories)|repos|repositories)|(?:my\s+)?github\s+(?:repos|repositories))$",
+    );
+
+    if is_repos_subpage {
+        return Some(ParseResult {
+            intent: ParsedIntent::OpenGitHubDashboard {
+                subpage: "repos".to_string(),
+            },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    // 5. Starred Repositories Subpage Possibilities:
+    let is_starred_target = match stripped {
+        "starred" | "starred repos" | "starred repositories"
+        | "my starred" | "my starred repos" | "my starred repositories"
+        | "github starred" | "github starred repos" | "github starred repositories"
+        | "my github starred" | "my github starred repos" | "my github starred repositories"
+        | "stars" | "my stars" | "github stars" | "my github stars" => true,
+        _ => false,
+    };
+
+    let is_starred_subpage = is_starred_target || regex_match(
+        &norm,
+        r"^(?:(?:show\s+(?:me\s+)?(?:the\s+|my\s+)?|open\s+(?:the\s+|my\s+)?|view\s+(?:the\s+|my\s+)?|check\s+(?:the\s+|my\s+)?|list\s+(?:all\s+|of\s+)?)?(?:(?:my\s+)?github\s+starred(?:\s+(?:repos|repositories))?|my\s+starred(?:\s+(?:repos|repositories))?|starred(?:\s+(?:repos|repositories))?)|(?:my\s+)?github\s+starred(?:\s+(?:repos|repositories))?)$",
+    );
+
+    if is_starred_subpage {
+        return Some(ParseResult {
+            intent: ParsedIntent::OpenGitHubDashboard {
+                subpage: "starred".to_string(),
+            },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
+    // 6. Feed / Dashboard Home View Possibilities:
     let is_feed_target = match stripped {
         "github feed" | "the github feed" | "my github feed" | "feed on github" | "feed in github" | "feed"
         | "github dashboard" | "the github dashboard" | "my github dashboard" | "dashboard on github" | "dashboard in github" | "dashboard"
@@ -1572,12 +1644,10 @@ fn parse_pr_analyse(text: &str) -> Option<ParseResult> {
 
     for &pat in bare_pr_patterns {
         if let Some(caps) = regex_captures(text, pat) {
-            if let Ok(pr_number) = caps[1].parse::<u32>() {
+            if let Ok(pr_number) = caps[1].parse::<u64>() {
                 return Some(ParseResult {
-                    intent: ParsedIntent::AnalysePr {
-                        owner: None,
-                        repo: "ultron".to_string(),
-                        pr_number,
+                    intent: ParsedIntent::GitHubCommand {
+                        command: crate::github_cmd::GitHubCommand::FindPr { pr_number },
                     },
                     confidence: 1.0,
                     source: "deterministic".to_string(),
@@ -1671,7 +1741,13 @@ fn parse_pr_analyse(text: &str) -> Option<ParseResult> {
 /// Fuzzy-match a repo name against known repos using Levenshtein distance.
 /// Returns the matched repo name if within threshold, None otherwise.
 fn fuzzy_match_repo_name(repo: &str) -> Option<String> {
-    for &known in KNOWN_REPOS {
+    let cached = crate::github_repo_index::cached_names();
+    let candidates: Vec<&str> = if !cached.is_empty() {
+        cached.iter().map(|s| s.as_str()).collect()
+    } else {
+        KNOWN_REPOS.to_vec()
+    };
+    for known in candidates {
         let dist = levenshtein(repo, known);
         // Threshold: 2 for short repos (≤6 chars), 3 for longer.
         // STT mishearings are primarily handled in the frontend
@@ -1701,6 +1777,42 @@ fn fuzzy_match_repo_name(repo: &str) -> Option<String> {
 /// - "pr in <repo>" → latest PR in repo (no "the" / "latest")
 /// - "pr [of|by|from] <author> in <repo>" → latest PR by author in repo
 fn parse_latest_pr_analyse(text: &str) -> Option<ParseResult> {
+    let lower_text = text.to_lowercase();
+    let has_latest_word = lower_text.split_whitespace().any(|w| {
+        matches!(
+            w.trim_matches(|c: char| !c.is_alphanumeric()),
+            "latest" | "newest" | "last" | "recent"
+        )
+    });
+    let make_result = |owner: Option<String>, repo: String, confidence: f32, source: &str| -> ParseResult {
+        if has_latest_word {
+            ParseResult {
+                intent: ParsedIntent::AnalyseLatestPr {
+                    owner,
+                    repo,
+                    author: None,
+                },
+                confidence,
+                source: source.to_string(),
+            }
+        } else {
+            let full_repo = match owner {
+                Some(o) => format!("{}/{}", o, repo),
+                None => repo,
+            };
+            ParseResult {
+                intent: ParsedIntent::GitHubCommand {
+                    command: crate::github_cmd::GitHubCommand::ListPrs {
+                        repo: full_repo,
+                        state: "open".to_string(),
+                    },
+                },
+                confidence,
+                source: source.to_string(),
+            }
+        }
+    };
+
     // Must contain "pr" or "pull request" but NOT followed by a number
     // (if followed by a number, it's a specific PR, handled by parse_pr_analyse)
 
@@ -1778,19 +1890,9 @@ fn parse_latest_pr_analyse(text: &str) -> Option<ParseResult> {
     // Pattern 2: "in <repo>" (no author)
     if let Some(caps) = regex_captures(after_pr, r"^in\s+(.+)$") {
         let repo_part = caps[1].trim();
-
         if let Some((owner, repo)) = parse_owner_repo(repo_part) {
-            return Some(ParseResult {
-                intent: ParsedIntent::AnalyseLatestPr {
-                    owner: Some(owner),
-                    repo,
-                    author: None,
-                },
-                confidence: 1.0,
-                source: "deterministic".to_string(),
-            });
+            return Some(make_result(Some(owner), repo, 1.0, "deterministic"));
         }
-
         let repo = clean_repo_name(repo_part);
         if !repo.is_empty() {
             let lower_repo = repo.to_lowercase();
@@ -1799,69 +1901,28 @@ fn parse_latest_pr_analyse(text: &str) -> Option<ParseResult> {
             } else {
                 repo
             };
-            return Some(ParseResult {
-                intent: ParsedIntent::AnalyseLatestPr {
-                    owner: None,
-                    repo: final_repo,
-                    author: None,
-                },
-                confidence: 0.95,
-                source: "deterministic".to_string(),
-            });
+            return Some(make_result(None, final_repo, 0.95, "deterministic"));
         }
     }
 
     // Pattern 3: "of <repo>" (when "of" is followed by a known repo)
-    // This is ambiguous — "of prem" could be author "prem" or repo "prem"
-    // Only treat as repo if it matches a KNOWN_REPO
     if let Some(caps) = regex_captures(after_pr, r"^of\s+(.+)$") {
         let repo_part = caps[1].trim();
         let lower_repo = repo_part.to_lowercase();
         if KNOWN_REPOS.contains(&lower_repo.as_str()) {
-            return Some(ParseResult {
-                intent: ParsedIntent::AnalyseLatestPr {
-                    owner: None,
-                    repo: repo_part.to_string(),
-                    author: None,
-                },
-                confidence: 0.9,
-                source: "deterministic".to_string(),
-            });
+            return Some(make_result(None, repo_part.to_string(), 0.9, "deterministic"));
         }
-        // If not a known repo, "of <word>" is likely an author — but we need a repo too
-        // Check if there's "in <repo>" after the author
-        // This is already handled by Pattern 1 above
     }
 
-    // Pattern 4: Just "<repo>" (no preposition) — e.g. "latest pr zync"
-    // This handles "analyse latest pr zync" where "latest" was stripped and "pr" was stripped,
-    // leaving just "zync"
+    // Pattern 4: Just "<repo>" (no preposition)
     let repo = clean_repo_name(after_pr);
     if !repo.is_empty() {
         let lower_repo = repo.to_lowercase();
-        // Only accept if it's a known repo or fuzzy-matches one — otherwise
-        // "pr something" could be garbage
         if KNOWN_REPOS.contains(&lower_repo.as_str()) {
-            return Some(ParseResult {
-                intent: ParsedIntent::AnalyseLatestPr {
-                    owner: None,
-                    repo,
-                    author: None,
-                },
-                confidence: 0.85,
-                source: "deterministic".to_string(),
-            });
+            return Some(make_result(None, repo, 0.85, "deterministic"));
         }
         if let Some(fuzzy_repo) = fuzzy_match_repo_name(&lower_repo) {
-            return Some(ParseResult {
-                intent: ParsedIntent::AnalyseLatestPr {
-                    owner: None,
-                    repo: fuzzy_repo,
-                    author: None,
-                },
-                confidence: 0.8,
-                source: "fuzzy".to_string(),
-            });
+            return Some(make_result(None, fuzzy_repo, 0.8, "fuzzy"));
         }
     }
 
@@ -3381,41 +3442,227 @@ fn parse_share_concern_command(text: &str) -> Option<ParseResult> {
     None
 }
 
+/// Polite lead-ins that STT puts in front of a real command. They are removed
+/// only from the FRONT of one sentence candidate, and whatever remains must
+/// still satisfy the strict anchored review/recreate grammar below, so a
+/// starter can never turn a foreign sentence into a review request.
+const REVIEW_POLITE_STARTERS: &[&str] = &[
+    "please", "can you", "could you", "would you", "will you",
+];
+
+/// A negated order is never a review request, whatever wording precedes it
+/// ("do not analyse this website").
+const REVIEW_NEGATION_LEADS: &[&str] = &[
+    "do not", "don't", "dont", "never", "no need", "not", "stop", "cancel",
+];
+
+/// Reduce one sentence candidate to the exact command phrase, or reject it.
+/// This only removes a leading wake word, polite starters and sentence
+/// punctuation — the anchored grammar still decides what a command is.
+fn review_command_candidate(candidate: &str) -> Option<String> {
+    let mut t = candidate.trim().to_lowercase();
+    t = t
+        .trim_end_matches(['.', ',', '!', '?', ';', ':'])
+        .trim()
+        .to_string();
+
+    // A leading wake word ("Nexus, review this webpage").
+    if let Some(rest) = t.strip_prefix("nexus") {
+        let rest = rest.trim_start_matches(|c: char| {
+            c.is_whitespace() || matches!(c, '.' | ',' | '!' | '?' | ';' | ':')
+        });
+        if !rest.is_empty() {
+            t = rest.to_string();
+        }
+    }
+
+    // Polite starters, possibly stacked ("please, can you analyse this app").
+    loop {
+        let mut changed = false;
+        for &starter in REVIEW_POLITE_STARTERS {
+            if let Some(rest) = t.strip_prefix(starter) {
+                let rest = rest
+                    .trim_start_matches(|c: char| {
+                        c.is_whitespace() || matches!(c, '.' | ',' | '!' | '?' | ';' | ':')
+                    })
+                    .trim_start();
+                if rest.len() < t.len() {
+                    t = rest.to_string();
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    if t.is_empty() {
+        return None;
+    }
+    // A negated order is never a review request.
+    if REVIEW_NEGATION_LEADS.iter().any(|&lead| t.starts_with(lead)) {
+        return None;
+    }
+    Some(t)
+}
+
+/// "analyse this website" / "review this app" and its later reference-bound
+/// "recreate it". Both grammars stay strictly anchored — the candidate must
+/// be the whole command — so repo/PR analysis, "review the app permissions"
+/// and "recreate my voice" never reach an intent here. STT often emits a
+/// harmless sentence before the real command ("Sure. Analyse this website."),
+/// so every sentence candidate is offered to the same anchored grammar; the
+/// screen-analysis splitter is reused for exactly that reason.
+fn parse_foreground_review_command(text: &str) -> Option<ParseResult> {
+    for candidate in sentence_candidates(text) {
+        let Some(t) = review_command_candidate(&candidate) else { continue };
+        let intent = if regex_match(
+            &t,
+            r"^(?:analyse|analyze|review|inspect)\s+(?:this|the|current|foreground)(?:\s+(?:current|foreground))?\s+(?:app|application|website|web\s*site|webpage|web\s*page|site)(?:\s+(?:for\s+me|first))?$",
+        ) {
+            ParsedIntent::ReviewForeground
+        } else if regex_match(
+            &t,
+            r"^(?:recreate|rebuild|replicate)\s+(?:it|that|this\s+(?:app|application|website|web\s*site|webpage|web\s*page|site))$",
+        ) {
+            ParsedIntent::RecreateLastReview
+        } else {
+            continue;
+        };
+        return Some(ParseResult {
+            intent,
+            confidence: 1.0,
+            source: "deterministic-foreground-review".to_string(),
+        });
+    }
+    None
+}
+
+/// Sentence candidates for the ^-anchored screen grammars. STT often emits
+/// multi-sentence transcripts where transcribed noise precedes the real
+/// command (live 2026-10-20 15:01:29: "once tell the number. analyze my
+/// screen." — every anchored family missed the junk-prefixed whole, NLU was
+/// down, and the turn fell through to the cloud Worker with "I can't see your
+/// screen"). Test each sentence on its own as well as the whole; mirrors the
+/// last-sentence fallback the agent-hooks grammar already has
+/// (agent_hooks::last_sentence). Every candidate still runs the same anchor
+/// guards, so misfire negatives ("analyse servx", "draw the curtains") stay safe.
+fn sentence_candidates(text: &str) -> Vec<String> {
+    fn clean(s: &str) -> String {
+        s.trim().trim_end_matches([',', ';', ':', '.', '!', '?']).trim().to_string()
+    }
+    let whole = clean(&text.to_lowercase());
+    let mut out: Vec<String> = Vec::new();
+    if !whole.is_empty() {
+        out.push(whole.clone());
+    }
+    for seg in whole.split(|c| matches!(c, '.' | '!' | '?')) {
+        let s = clean(seg);
+        if !s.is_empty() && !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    out
+}
+
 fn parse_screen_analysis_command(text: &str) -> Option<ParseResult> {
-    let t = text.trim().to_lowercase();
-    let trimmed = t.trim_end_matches(['.', ',', '!', '?']).trim();
-
-    // 1. Screen-anchored verb family: "analyse the screen", "analyze my
-    //    screen", "read the screen", "scan my screen", "check the screen",
-    //    "describe my screen" — screen REQUIRED so repo/PR analyse never fires.
-    if regex_captures(trimmed, r"^(?:analyse|analyze|analysis|describe|read|scan|check)\b[^;]*\bscreen\b.*$")
+    for candidate in sentence_candidates(text) {
+        // Keep natural polite/wake-word variants on the same local route.
+        // The reducer also refuses a leading negation, while the anchored
+        // patterns below still require an explicit screen/seeing request.
+        let Some(trimmed) = review_command_candidate(&candidate) else { continue };
+        // 1. Screen-anchored verb family: "analyse the screen", "analyze my
+        //    screen", "read the screen", "scan my screen", "check the screen",
+        //    "describe my screen" — screen REQUIRED so repo/PR analyse never fires.
+        if regex_captures(
+            &trimmed,
+            r"^(?:analyse|analyze|analysis|describe|read|scan|check)\b[^;]*\bscreen\b.*$",
+        )
         .is_some()
-    {
-        return Some(ParseResult::screen_analysis_result(text));
-    }
-    // 2. "What is on my screen?" family.
-    if regex_captures(
-        trimmed,
-        r"^what(?:'s| is)\s+(?:on|in|of)?\s*(?:my|the|this)?\s*screen\b.*$",
-    )
-    .is_some()
-    {
-        return Some(ParseResult::screen_analysis_result(text));
-    }
-    // 3. "What do I see / what am I looking at / explain what I see" family.
-    if regex_captures(
-        trimmed,
-        r"^(?:what\s+(?:do|can|am)\s+i\s+(?:see|seeing|looking\s+at)|(?:explain|tell\s+me|describe)\s+what\s+(?:i\s+(?:can\s+)?see|i\s+am\s+(?:looking\s+at|seeing)|am\s+i\s+(?:seeing|looking\s+at)))(?:\s+(?:here|right\s+now|now))?$",
-    )
-    .is_some()
-    {
-        return Some(ParseResult::screen_analysis_result(text));
-    }
-    // 4. Research family — this/screen REQUIRED (general research → Worker).
-    if regex_captures(trimmed, r"^research\b.*(?:\bthis\b|\bscreen\b).*$").is_some() {
-        return Some(ParseResult::screen_analysis_result(text));
+        {
+            return Some(ParseResult::screen_analysis_result(text));
+        }
+        // 2. "What is on my screen?" family.
+        if regex_captures(
+            &trimmed,
+            r"^what(?:'s| is)\s+(?:on|in|of)?\s*(?:my|the|this)?\s*screen\b.*$",
+        )
+        .is_some()
+        {
+            return Some(ParseResult::screen_analysis_result(text));
+        }
+        // "Explain/tell me/describe what is on my screen" is the same
+        // visual tour, not a generic question for the cloud Worker.
+        if regex_captures(
+            &trimmed,
+            r"^(?:explain|describe|tell\s+me)\s+what(?:'s| is)\s+on\s+(?:my|the|this)\s+screen\b.*$",
+        )
+        .is_some()
+        {
+            return Some(ParseResult::screen_analysis_result(text));
+        }
+        // 3. "What do I see / what am I looking at / explain what I see" family.
+        if regex_captures(
+            &trimmed,
+            r"^(?:what\s+(?:do|can|am)\s+i\s+(?:see|seeing|looking\s+at)|(?:explain|tell\s+me|describe)\s+what\s+(?:i\s+(?:can\s+)?see|i\s+am\s+(?:looking\s+at|seeing)|am\s+i\s+(?:seeing|looking\s+at)))(?:\s+(?:here|right\s+now|now))?$",
+        )
+        .is_some()
+        {
+            return Some(ParseResult::screen_analysis_result(text));
+        }
+        // 4. Research family — this/screen REQUIRED (general research → Worker).
+        if regex_captures(&trimmed, r"^research\b.*(?:\bthis\b|\bscreen\b).*$").is_some() {
+            return Some(ParseResult::screen_analysis_result(text));
+        }
     }
 
+    None
+}
+
+/// "Nexus, reverse engineer this website": the voice trigger for the stack scan + scrolling tour
+/// (`reverse_engineer.rs`). Website/app words are REQUIRED for the question forms, and anything that
+/// names code (repo, PR, file, binary…) is refused so "reverse engineer this repo" stays elsewhere.
+fn parse_reverse_engineer_command(text: &str) -> Option<ParseResult> {
+    for candidate in sentence_candidates(text) {
+        let Some(trimmed) = review_command_candidate(&candidate) else { continue };
+        if regex_captures(
+            &trimmed,
+            r"\b(?:repo|repository|pull\s+request|pr|github|function|file|binary|exe|firmware|malware)\b",
+        )
+        .is_some()
+        {
+            continue;
+        }
+        const SITE: &str = r"(?:web\s*site|website|site|page|web\s*app|app|application)";
+        let patterns = [
+            // 1. The explicit verb (STT also hears "reverse and gineer").
+            r"^(?:please\s+)?(?:nexus\s+)?reverse[\s-]*(?:engineer(?:ing)?|and\s+gin+eer?)\b.*$".to_string(),
+            // 2. "what tech stack does this site use", "which framework is this website using".
+            format!(
+                r"^(?:what|which)\b[^;]*\b(?:tech(?:nology)?(?:\s+stack)?|technologies|stack|frameworks?|libraries|cms)\b[^;]*\b(?:this|the|that)\s+{SITE}\b.*$"
+            ),
+            // 3. "what is this website built with".
+            format!(
+                r"^(?:what|which)\s+(?:is|was)\s+(?:this|the|that)\s+{SITE}\s+(?:built|made|created|developed|coded)\s+(?:with|using|on|in)\b.*$"
+            ),
+            // 4. "how was this site built", "how did they build this website".
+            format!(r"^how\s+(?:was|is)\s+(?:this|the|that)\s+{SITE}\s+(?:built|made|created|developed|coded)\b.*$"),
+            format!(
+                r"^how\s+did\s+(?:they|someone|people)\s+(?:build|make|create|code)\s+(?:this|the|that)\s+{SITE}\b.*$"
+            ),
+            // 5. "break down / tear down / dissect this website".
+            format!(r"^(?:break\s*down|tear\s*down|dissect|decompile|deconstruct)\s+(?:this|the|that)\s+{SITE}\b.*$"),
+            // 6. "analyse the stack of this website" / "analyse this website's stack".
+            format!(
+                r"^(?:analy[sz]e|scan|inspect|check)\b[^;]*(?:\b{SITE}\b[^;]*\bstack\b|\bstack\b[^;]*\b{SITE}\b).*$"
+            ),
+        ];
+        if patterns.iter().any(|p| regex_captures(&trimmed, p).is_some()) {
+            return Some(ParseResult::reverse_engineer_result(text));
+        }
+    }
     None
 }
 
@@ -3427,44 +3674,55 @@ fn parse_screen_analysis_command(text: &str) -> Option<ParseResult> {
 /// - The annotate/draw family MUST contain "screen"/"display"/"this" —
 ///   "draw the curtains" still falls through.
 fn parse_screen_annotation_command(text: &str) -> Option<ParseResult> {
-    let t = text.trim().to_lowercase();
-    let trimmed = t.trim_end_matches(['.', ',', '!', '?']).trim();
-
-    // 1. Annotate/draw family: "annotate my screen", "draw on the screen",
-    //    "mark up this display", "sketch on the screen" — screen/display/this REQUIRED.
-    if regex_captures(
-        trimmed,
-        r"^(?:annotate|draw|mark\s*up|markup|sketch)\b[^;]*\b(?:screen|display|this)\b.*$",
-    )
-    .is_some()
-    {
-        return Some(ParseResult::screen_annotation_result(text));
-    }
-    // 2. Architecture family: "create an architecture diagram",
-    //    "make an arch diagram", "build a diagram of this" — architecture/arch/diagram REQUIRED.
-    if regex_captures(
-        trimmed,
-        r"^(?:create|make|build|draw)\b[^;]*\b(?:architecture|arch|diagram)\b.*$",
-    )
-    .is_some()
-    {
-        return Some(ParseResult::screen_annotation_result(text));
-    }
-    // 3. Element-adding family: "add an arrow to the screen",
-    //    "add a checkbox on this", "add text to my screen" — element + anchor REQUIRED.
-    if regex_captures(
-        trimmed,
-        r"^add\b[^;]*\b(?:arrow|text|checkbox|note|pointer)\b[^;]*\b(?:screen|display|this)\b.*$",
-    )
-    .is_some()
-    {
-        return Some(ParseResult::screen_annotation_result(text));
+    for trimmed in sentence_candidates(text) {
+        // 1. Annotate/draw family: "annotate my screen", "draw on the screen",
+        //    "mark up this display", "sketch on the screen" — screen/display/this REQUIRED.
+        if regex_captures(
+            &trimmed,
+            r"^(?:annotate|draw|mark\s*up|markup|sketch)\b[^;]*\b(?:screen|display|this)\b.*$",
+        )
+        .is_some()
+        {
+            return Some(ParseResult::screen_annotation_result(text));
+        }
+        // 2. Architecture family: "create an architecture diagram",
+        //    "make an arch diagram", "build a diagram of this" — architecture/arch/diagram REQUIRED.
+        if regex_captures(
+            &trimmed,
+            r"^(?:create|make|build|draw)\b[^;]*\b(?:architecture|arch|diagram)\b.*$",
+        )
+        .is_some()
+        {
+            return Some(ParseResult::screen_annotation_result(text));
+        }
+        // 3. Element-adding family: "add an arrow to the screen",
+        //    "add a checkbox on this", "add text to my screen" — element + anchor REQUIRED.
+        if regex_captures(
+            &trimmed,
+            r"^add\b[^;]*\b(?:arrow|text|checkbox|note|pointer)\b[^;]*\b(?:screen|display|this)\b.*$",
+        )
+        .is_some()
+        {
+            return Some(ParseResult::screen_annotation_result(text));
+        }
     }
 
     None
 }
 
 impl ParseResult {
+    fn reverse_engineer_result(text: &str) -> Self {
+        Self {
+            intent: ParsedIntent::NluResult {
+                intent: "reverse_engineer".to_string(),
+                slots: serde_json::json!({ "prompt": text.trim() }),
+                confidence: 1.0,
+            },
+            confidence: 1.0,
+            source: "deterministic-reverse-engineer".to_string(),
+        }
+    }
+
     fn screen_analysis_result(text: &str) -> Self {
         Self {
             intent: ParsedIntent::NluResult {
@@ -3810,7 +4068,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
             if let Some((repo, _)) = extract_repo(text) {
                 return Some(ParseResult {
                     intent: ParsedIntent::GitHubCommand {
-                        command: GitHubCommand::ListPrs { repo, state },
+                        command: crate::github_cmd::GitHubCommand::ListPrs { repo, state },
                     },
                     confidence: 0.9,
                     source: "deterministic".to_string(),
@@ -3825,7 +4083,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
                 );
                 return Some(ParseResult {
                     intent: ParsedIntent::GitHubCommand {
-                        command: GitHubCommand::ListPrs { repo, state },
+                        command: crate::github_cmd::GitHubCommand::ListPrs { repo, state },
                     },
                     confidence: 0.85,
                     source: "deterministic".to_string(),
@@ -3844,7 +4102,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
         if !repo.is_empty() {
             return Some(ParseResult {
                 intent: ParsedIntent::GitHubCommand {
-                    command: GitHubCommand::ListPrs { repo, state },
+                    command: crate::github_cmd::GitHubCommand::ListPrs { repo, state },
                 },
                 confidence: 0.95,
                 source: "deterministic".to_string(),
@@ -3868,7 +4126,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
             if let Some((repo, _)) = extract_repo(text) {
                 return Some(ParseResult {
                     intent: ParsedIntent::GitHubCommand {
-                        command: GitHubCommand::ListPrs { repo, state },
+                        command: crate::github_cmd::GitHubCommand::ListPrs { repo, state },
                     },
                     confidence: 0.9,
                     source: "deterministic".to_string(),
@@ -3878,7 +4136,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
                 let repo = format!("{}/{}", repo_id.owner, repo_id.repo);
                 return Some(ParseResult {
                     intent: ParsedIntent::GitHubCommand {
-                        command: GitHubCommand::ListPrs { repo, state },
+                        command: crate::github_cmd::GitHubCommand::ListPrs { repo, state },
                     },
                     confidence: 0.85,
                     source: "deterministic".to_string(),
@@ -3895,7 +4153,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
         if !repo.is_empty() {
             return Some(ParseResult {
                 intent: ParsedIntent::GitHubCommand {
-                    command: GitHubCommand::ListPrs { repo, state },
+                    command: crate::github_cmd::GitHubCommand::ListPrs { repo, state },
                 },
                 confidence: 0.95,
                 source: "deterministic".to_string(),
@@ -3913,7 +4171,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
             if let Some((repo, _)) = extract_repo(text) {
                 return Some(ParseResult {
                     intent: ParsedIntent::GitHubCommand {
-                        command: GitHubCommand::ListPrs { repo, state },
+                        command: crate::github_cmd::GitHubCommand::ListPrs { repo, state },
                     },
                     confidence: 0.9,
                     source: "deterministic".to_string(),
@@ -3924,7 +4182,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
                 let repo = format!("{}/{}", repo_id.owner, repo_id.repo);
                 return Some(ParseResult {
                     intent: ParsedIntent::GitHubCommand {
-                        command: GitHubCommand::ListPrs { repo, state },
+                        command: crate::github_cmd::GitHubCommand::ListPrs { repo, state },
                     },
                     confidence: 0.85,
                     source: "deterministic".to_string(),
@@ -3941,7 +4199,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
         if !repo.is_empty() {
             return Some(ParseResult {
                 intent: ParsedIntent::GitHubCommand {
-                    command: GitHubCommand::ListPrs { repo, state },
+                    command: crate::github_cmd::GitHubCommand::ListPrs { repo, state },
                 },
                 confidence: 0.95,
                 source: "deterministic".to_string(),
@@ -6604,7 +6862,7 @@ fn is_url_like(s: &str) -> bool {
 }
 
 /// Levenshtein edit distance.
-fn levenshtein(a: &str, b: &str) -> usize {
+pub(crate) fn levenshtein(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
     let m = a.len();
@@ -7064,6 +7322,48 @@ mod tests {
     }
 
     #[test]
+    fn test_find_pr_no_repo_and_with_repo() {
+        for phrase in [
+            "analyse pr 34",
+            "analyse the pr 34",
+            "analyse pull request 34",
+        ] {
+            let res = parse_deterministic(phrase).unwrap_or_else(|| panic!("failed to parse {phrase:?}"));
+            assert!(
+                matches!(
+                    res.intent,
+                    ParsedIntent::GitHubCommand {
+                        command: crate::github_cmd::GitHubCommand::FindPr { pr_number: 34 }
+                    }
+                ),
+                "expected FindPr for {phrase:?}, got {:?}",
+                res.intent
+            );
+        }
+
+        let bare_res = parse_pr_analyse("pr 34").expect("parse_pr_analyse for 'pr 34'");
+        assert!(
+            matches!(
+                bare_res.intent,
+                ParsedIntent::GitHubCommand {
+                    command: crate::github_cmd::GitHubCommand::FindPr { pr_number: 34 }
+                }
+            ),
+            "expected FindPr for 'pr 34', got {:?}",
+            bare_res.intent
+        );
+
+        let repo_res = parse_deterministic("analyse pr 34 in zync").expect("analyse pr 34 in zync");
+        match repo_res.intent {
+            ParsedIntent::AnalysePr { repo, pr_number, .. } => {
+                assert_eq!(repo, "zync");
+                assert_eq!(pr_number, 34);
+            }
+            other => panic!("expected AnalysePr with repo zync, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_analyse_pr_with_in() {
         let result = parse_deterministic("analyse PR 23 in servx");
         assert!(result.is_some());
@@ -7464,6 +7764,44 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn test_plain_pr_command_parses_to_list_prs() {
+        let result = parse_deterministic("analyse the pr in zync");
+        assert!(result.is_some());
+        let res = result.unwrap();
+        match res.intent {
+            ParsedIntent::GitHubCommand {
+                command: crate::github_cmd::GitHubCommand::ListPrs { repo, state },
+            } => {
+                assert_eq!(repo, "zync");
+                assert_eq!(state, "open");
+            }
+            other => panic!("expected ListPrs for plain PR query, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_latest_or_author_pr_command_parses_to_analyse_latest_pr() {
+        let res1 = parse_deterministic("analyse the latest pr in zync").expect("parse res1");
+        match res1.intent {
+            ParsedIntent::AnalyseLatestPr { repo, author, .. } => {
+                assert_eq!(repo, "zync");
+                assert_eq!(author, None);
+            }
+            other => panic!("expected AnalyseLatestPr, got {:?}", other),
+        }
+
+        let res2 = parse_deterministic("analyse the pr by prem in servx").expect("parse res2");
+        match res2.intent {
+            ParsedIntent::AnalyseLatestPr { repo, author, .. } => {
+                assert_eq!(repo, "servx");
+                assert_eq!(author.as_deref(), Some("prem"));
+            }
+            other => panic!("expected AnalyseLatestPr with author, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_empty_input() {
         let result = parse_deterministic("");
         assert!(result.is_none());
@@ -7600,8 +7938,10 @@ mod tests {
     #[test]
     fn test_pr_list_commands() {
         use crate::github_cmd::GitHubCommand;
-        // "open pr list" must NOT be parsed as OpenApp("pr list")
-        // It should be ListPrs
+        // Dashboard-first decision (subpage router): noun phrases that NAME
+        // the PR view open the GitHub Dashboard's pull-requests page. The
+        // original purpose still holds either way: "open pr list" must
+        // NEVER fall to the permissive OpenApp fallback (→ cached app).
         for cmd in &[
             "open pr list",
             "open the pr list",
@@ -7616,21 +7956,32 @@ mod tests {
             "get pr list",
             "get me the pr list",
             "get me prs",
-            "tell me the pr list",
             "what prs are open",
             "show open prs",
             "show live prs",
-            "latest prs",
             "give me prs",
             "show prs",
             "get prs",
             "fetch prs",
             "display prs",
-            "bring me the pr list",
             "pull up the pr list",
-            "show merged prs",
-            "merged prs",
         ] {
+            let result = parse_deterministic(cmd);
+            assert!(result.is_some(), "failed to parse: {}", cmd);
+            let r = result.unwrap();
+            assert!(
+                matches!(
+                    r.intent,
+                    ParsedIntent::OpenGitHubDashboard { ref subpage } if subpage == "pull_requests"
+                ),
+                "expected dashboard pull_requests for: {}, got {:?}",
+                cmd,
+                r.intent
+            );
+        }
+        // List-content asks (spoken flow: "tell me …", state filters, latest)
+        // keep the Worker-side ListPrs command.
+        for cmd in &["tell me the pr list", "latest prs", "bring me the pr list", "show merged prs", "merged prs"] {
             let result = parse_deterministic(cmd);
             assert!(result.is_some(), "failed to parse: {}", cmd);
             let r = result.unwrap();
@@ -7652,10 +8003,12 @@ mod tests {
     fn test_pr_list_with_trailing_punctuation() {
         use crate::github_cmd::GitHubCommand;
         // Groq whisper-large-v3-turbo appends trailing punctuation to
-        // transcripts. Without strip_trailing_punctuation() the ListPrs
-        // regex (anchored with $) fails and the permissive OpenApp
-        // fallback catches "the pr list." → resolves to a cached app
-        // (Dribbble). This test guards against that regression.
+        // transcripts. Without strip_trailing_punctuation() the dashboard
+        // subpage router (and the old ListPrs regex before it) fails and
+        // the permissive OpenApp fallback catches "the pr list." → resolves
+        // to a cached app (Dribbble). This test guards against that
+        // regression; the PR-noun phrases now land on the dashboard's
+        // pull-requests page.
         for cmd in &[
             "open the pr list.",
             "open the pr list?",
@@ -7673,6 +8026,21 @@ mod tests {
             "fetch prs.",
             "display prs.",
         ] {
+            let result = parse_deterministic(cmd);
+            assert!(result.is_some(), "failed to parse: {}", cmd);
+            let r = result.unwrap();
+            assert!(
+                matches!(
+                    r.intent,
+                    ParsedIntent::OpenGitHubDashboard { ref subpage } if subpage == "pull_requests"
+                ),
+                "expected dashboard pull_requests for: {}, got {:?} (trailing punctuation not stripped?)",
+                cmd,
+                r.intent
+            );
+        }
+        // Spoken-flow wording keeps parsing to ListPrs despite punctuation.
+        for cmd in &["tell me the pr list.", "latest prs.", "show merged prs."] {
             let result = parse_deterministic(cmd);
             assert!(result.is_some(), "failed to parse: {}", cmd);
             let r = result.unwrap();
@@ -8295,15 +8663,27 @@ mod tests {
 
     #[test]
     fn test_parse_list_prs_pull_request_wording() {
-        // "pull requests" is a full alternative to "prs".
+        // "pull requests" is a full alternative to "prs". Dashboard-first
+        // decision: bare noun phrases open the dashboard's pull-requests
+        // page; content/state asks keep the spoken ListPrs flow.
         for phrase in [
             "show me the prs",
             "show me the pull requests",
+            "pull up the pull request list",
+        ] {
+            let result = parse_deterministic(phrase);
+            assert!(result.is_some(), "should parse '{phrase}'");
+            if let ParsedIntent::OpenGitHubDashboard { subpage } = result.unwrap().intent {
+                assert_eq!(subpage, "pull_requests", "wrong subpage for '{phrase}'");
+            } else {
+                panic!("expected dashboard pull_requests for '{phrase}'");
+            }
+        }
+        for phrase in [
             "show me the pull requests and all",
             "show the pull requests in owner/repo",
             "give me all the pull requests",
             "show prs and all of them",
-            "pull up the pull request list",
         ] {
             let result = parse_deterministic(phrase);
             assert!(result.is_some(), "should parse '{phrase}'");
@@ -8314,6 +8694,25 @@ mod tests {
             } else {
                 panic!("expected ListPrs for '{phrase}'");
             }
+        }
+        // Repo-scoped and state-filtered wording must survive intact.
+        let repo_list = parse_deterministic("show the pull requests in owner/repo");
+        if let Some(ParsedIntent::GitHubCommand {
+            command: crate::github_cmd::GitHubCommand::ListPrs { repo, .. },
+        }) = repo_list.map(|r| r.intent)
+        {
+            assert_eq!(repo, "owner/repo");
+        } else {
+            panic!("expected repo-scoped ListPrs");
+        }
+        let all_list = parse_deterministic("give me all the pull requests");
+        if let Some(ParsedIntent::GitHubCommand {
+            command: crate::github_cmd::GitHubCommand::ListPrs { state, .. },
+        }) = all_list.map(|r| r.intent)
+        {
+            assert_eq!(state, "all");
+        } else {
+            panic!("expected state=all ListPrs");
         }
         // …but a bare "everything" with no PR noun must NOT list PRs.
         let other = parse_deterministic("show me everything").map(|r| r.intent);
@@ -9669,6 +10068,106 @@ mod tests {
         assert!(matches!(bare.unwrap().intent, ParsedIntent::StartDictation));
     }
 
+    #[test]
+    fn foreground_review_and_recreation_are_distinct_commands() {
+        for phrase in ["analyse this website", "analyze the current app", "Nexus, review this webpage"] {
+            assert!(matches!(parse_deterministic(phrase).unwrap().intent, ParsedIntent::ReviewForeground), "{phrase}");
+        }
+        for phrase in ["recreate it", "rebuild this website", "replicate that"] {
+            assert!(matches!(parse_deterministic(phrase).unwrap().intent, ParsedIntent::RecreateLastReview), "{phrase}");
+        }
+        for phrase in ["analyse my repo", "review this PR", "recreate my voice", "review the app permissions"] {
+            assert!(parse_foreground_review_command(phrase).is_none(), "{phrase}");
+        }
+    }
+
+    /// Live 2026-10-20 routing class: STT emitted a harmless sentence before the
+    /// real command, and every anchored family missed the junk-prefixed whole.
+    /// The foreground-review grammar must survive that prefix, and a polite
+    /// starter ("please", "can you", "could you") must not hide the command.
+    #[test]
+    fn foreground_review_survives_a_leading_sentence_and_polite_starters() {
+        for phrase in [
+            "analyse this website",
+            "Sure, this is the page. Analyse this website.",
+            "please analyse this website",
+            "please, can you analyse this website",
+            "can you please analyze this webpage",
+            "could you review this app",
+            "please, could you analyze this website",
+            "Sure. Please could you inspect the current website?",
+        ] {
+            let res = parse_deterministic(phrase)
+                .unwrap_or_else(|| panic!("no deterministic intent for '{phrase}'"));
+            assert!(
+                matches!(&res.intent, ParsedIntent::ReviewForeground),
+                "'{phrase}' -> {:?}",
+                res.intent
+            );
+        }
+    }
+
+    /// Recreation stays its own command and never rides in on a review phrase.
+    #[test]
+    fn foreground_recreation_survives_a_leading_sentence_but_stays_distinct() {
+        for phrase in [
+            "recreate it",
+            "Sure. Please recreate it.",
+            "could you rebuild this website",
+            "Nexus, replicate that",
+        ] {
+            let res = parse_deterministic(phrase)
+                .unwrap_or_else(|| panic!("no deterministic intent for '{phrase}'"));
+            assert!(
+                matches!(&res.intent, ParsedIntent::RecreateLastReview),
+                "'{phrase}' -> {:?}",
+                res.intent
+            );
+        }
+        // A review phrase must not be turned into a recreation.
+        for phrase in ["analyse this website", "please review this app"] {
+            let res = parse_deterministic(phrase)
+                .unwrap_or_else(|| panic!("no deterministic intent for '{phrase}'"));
+            assert!(
+                matches!(&res.intent, ParsedIntent::ReviewForeground),
+                "'{phrase}' -> {:?}",
+                res.intent
+            );
+        }
+    }
+
+    /// Repo/PR analysis, an app-permission review, a voice recreation and a
+    /// negated order are never a foreground review — with or without a polite
+    /// starter in front.
+    #[test]
+    fn foreground_review_rejects_unrelated_and_negated_orders() {
+        for phrase in [
+            "analyse my repo",
+            "analyse pr 24 in servx",
+            "review this PR",
+            "review the app permissions",
+            "review app permissions",
+            "recreate my voice",
+            "do not analyze this website",
+            "please do not analyse this website",
+        ] {
+            assert!(
+                parse_foreground_review_command(phrase).is_none(),
+                "'{phrase}' must not be a foreground review"
+            );
+            if let Some(res) = parse_deterministic(phrase) {
+                assert!(
+                    !matches!(
+                        &res.intent,
+                        ParsedIntent::ReviewForeground | ParsedIntent::RecreateLastReview
+                    ),
+                    "'{phrase}' -> {:?}",
+                    res.intent
+                );
+            }
+        }
+    }
+
     /// Doc 07 P2: window control + named-element click are deterministic,
     /// zero-model-cost, bare commands — never fall through to NLU/Worker.
     #[test]
@@ -9726,6 +10225,52 @@ mod tests {
     }
 
     #[test]
+    fn test_reverse_engineer_phrases() {
+        for phrase in [
+            "reverse engineer this website",
+            "nexus reverse engineer this website",
+            "Nexus, reverse-engineer this site",
+            "reverse engineer this app",
+            "reverse engineer this",
+            "please reverse engineer this page for me",
+            "what is this website built with",
+            "what tech stack does this site use",
+            "which framework is this website using",
+            "what technologies does this web app use",
+            "how was this website built",
+            "how did they build this site",
+            "break down this website",
+            "tear down this site",
+            "analyse the tech stack of this website",
+            "scan this website's stack",
+        ] {
+            let res = parse_deterministic(phrase);
+            match res.map(|r| r.intent) {
+                Some(ParsedIntent::NluResult { intent, .. }) => {
+                    assert_eq!(intent, "reverse_engineer", "'{}'", phrase)
+                }
+                other => panic!("Expected reverse_engineer for '{}', got {:?}", phrase, other),
+            }
+        }
+        // Misfire guards: code targets, generic questions and plain screen analysis stay elsewhere.
+        for phrase in [
+            "reverse engineer this repo",
+            "reverse engineer this binary",
+            "what is the tech stack of this repository",
+            "how do i build a website",
+            "how was your day",
+            "what is a framework",
+            "analyse my screen",
+            "what's on my screen",
+            "please do not reverse engineer this website",
+        ] {
+            if let Some(ParsedIntent::NluResult { intent, .. }) = parse_deterministic(phrase).map(|r| r.intent) {
+                assert_ne!(intent, "reverse_engineer", "'{}' must not trigger reverse_engineer", phrase);
+            }
+        }
+    }
+
+    #[test]
     fn test_screen_analysis_phrases() {
         // Phase 1 expanded triggers (2026-10-01): analyse + screen, what's
         // on screen, what do I see, describe/read/scan/check + screen, and
@@ -9744,6 +10289,12 @@ mod tests {
             "what can i see",
             "explain what i can see",
             "tell me what i can see",
+            "explain what i am seeing",
+            "explain what is on my screen",
+            "tell me what's on my screen",
+            "describe what is on this screen",
+            "please, can you analyse my screen",
+            "nexus, explain what i am seeing",
             "describe my screen",
             "read my screen",
             "scan my screen",
@@ -9768,10 +10319,65 @@ mod tests {
             "explain quantum computing",
             "what is on the menu",
             "what am i supposed to do",
+            "please do not analyse my screen",
+            "don't explain what is on my screen",
         ] {
             let res = parse_deterministic(phrase);
             if let Some(ParsedIntent::NluResult { intent, .. }) = res.map(|r| r.intent) {
                 assert_ne!(intent, "screen_analysis", "'{}' must not trigger screen_analysis", phrase);
+            }
+        }
+    }
+
+    #[test]
+    fn test_screen_analysis_survives_stt_noise_sentences() {
+        // Live 2026-10-20 15:01:29: Whisper emitted the two-sentence
+        // transcript "once tell the number. analyze my screen." — the
+        // ^-anchored families missed the junk-prefixed whole, NLU was down,
+        // and the turn fell through to the cloud Worker ("I can't see your
+        // screen"). Sentence candidates fix the entry gate.
+        for phrase in [
+            "once tell the number. analyze my screen.",
+            "analyze my screen. thank you.",
+            "okay so. what is on my screen",
+            "hmm. research this screen for me",
+        ] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "Expected a parse for '{}'", phrase);
+            if let ParsedIntent::NluResult { intent, .. } = res.unwrap().intent {
+                assert_eq!(intent, "screen_analysis", "'{}'", phrase);
+            } else {
+                panic!("Expected screen_analysis for '{}'", phrase);
+            }
+        }
+        // Noise sentences with NO screen command must still fall through.
+        for phrase in [
+            "once tell the number.",
+            "hook up open. open. thank you, steven.",
+            "analyse servx. servx is fine.",
+        ] {
+            let res = parse_deterministic(phrase);
+            if let Some(ParsedIntent::NluResult { intent, .. }) = res.map(|r| r.intent) {
+                assert_ne!(intent, "screen_analysis", "'{}' must not trigger screen_analysis", phrase);
+            }
+        }
+    }
+
+    #[test]
+    fn test_screen_annotation_survives_stt_noise_sentences() {
+        for phrase in ["okay now. annotate my screen", "hold on. draw on the screen"] {
+            let res = parse_deterministic(phrase);
+            assert!(res.is_some(), "Expected a parse for '{}'", phrase);
+            if let ParsedIntent::NluResult { intent, .. } = res.unwrap().intent {
+                assert_eq!(intent, "screen_annotation", "'{}'", phrase);
+            } else {
+                panic!("Expected screen_annotation for '{}'", phrase);
+            }
+        }
+        for phrase in ["draw the curtains. all done", "open architecture mapper. now"] {
+            let res = parse_deterministic(phrase);
+            if let Some(ParsedIntent::NluResult { intent, .. }) = res.map(|r| r.intent) {
+                assert_ne!(intent, "screen_annotation", "'{}' must not trigger screen_annotation", phrase);
             }
         }
     }
@@ -10815,8 +11421,11 @@ mod power_and_session_tests {
         ] {
             let res = parse_deterministic(phrase).unwrap_or_else(|| panic!("failed to parse {phrase:?}"));
             assert!(
-                matches!(res.intent, ParsedIntent::AnalysePr { pr_number: 24, .. }),
-                "{phrase} should match AnalysePr with PR 24, got {:?}",
+                matches!(
+                    res.intent,
+                    ParsedIntent::GitHubCommand { command: crate::github_cmd::GitHubCommand::FindPr { pr_number: 24 } }
+                ),
+                "{phrase} should look PR 24 up across repos, got {:?}",
                 res.intent
             );
         }
@@ -10997,6 +11606,53 @@ mod power_and_session_tests {
                     assert_eq!(subpage, "organizations", "{phrase} should have subpage 'organizations'");
                 }
                 other => panic!("{phrase} expected OpenGitHubDashboard organizations, got {other:?}"),
+            }
+        }
+
+        // Repositories subpage phrases
+        for phrase in [
+            "open github repos",
+            "open github repositories",
+            "show github repos",
+            "show my repos",
+            "show my repositories",
+            "my github repos",
+            "my github repositories",
+            "github repos",
+            "github repositories",
+            "repos list",
+            "repositories list",
+            "my repos",
+            "open repos",
+        ] {
+            let res = parse_deterministic(phrase).unwrap_or_else(|| panic!("failed to parse repos phrase {phrase:?}"));
+            match res.intent {
+                ParsedIntent::OpenGitHubDashboard { subpage } => {
+                    assert_eq!(subpage, "repos", "{phrase} should have subpage 'repos'");
+                }
+                other => panic!("{phrase} expected OpenGitHubDashboard repos, got {other:?}"),
+            }
+        }
+
+        // Starred subpage phrases
+        for phrase in [
+            "open github starred",
+            "show github starred",
+            "show my starred repos",
+            "my github starred",
+            "github starred",
+            "github starred repos",
+            "starred repos",
+            "my starred",
+            "open starred",
+            "my stars",
+        ] {
+            let res = parse_deterministic(phrase).unwrap_or_else(|| panic!("failed to parse starred phrase {phrase:?}"));
+            match res.intent {
+                ParsedIntent::OpenGitHubDashboard { subpage } => {
+                    assert_eq!(subpage, "starred", "{phrase} should have subpage 'starred'");
+                }
+                other => panic!("{phrase} expected OpenGitHubDashboard starred, got {other:?}"),
             }
         }
     }

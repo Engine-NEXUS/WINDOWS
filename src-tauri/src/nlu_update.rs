@@ -61,13 +61,7 @@ fn usable_model_dir(dir: PathBuf) -> Option<PathBuf> {
 /// data dir from environment the same way `lazy_stt.rs` does. Used by
 /// `nlu_local::resolve_nlu_dir` (no AppHandle in that call path).
 pub fn downloaded_model_dir_envless() -> Option<PathBuf> {
-    let base = if let Ok(appdata) = std::env::var("APPDATA") {
-        PathBuf::from(appdata).join("com.nexus.assistant")
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".config").join("com.nexus.assistant")
-    } else {
-        return None;
-    };
+    let base = crate::app_dirs::nexus_data_dir()?;
     usable_model_dir(base.join("nlu_model"))
 }
 

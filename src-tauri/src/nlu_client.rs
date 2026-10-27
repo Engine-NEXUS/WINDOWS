@@ -128,6 +128,11 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value, raw: &str) 
         }
         "open_architect" => Some(ParsedIntent::OpenArchitect),
         "open_settings" => Some(ParsedIntent::OpenSettings),
+        "open_coderabbit_hub" => Some(ParsedIntent::OpenCodeRabbitHub),
+        "open_github_dashboard" => {
+            let subpage = slots.get("subpage").and_then(|v| v.as_str()).unwrap_or("feed");
+            Some(ParsedIntent::OpenGitHubDashboard { subpage: subpage.to_string() })
+        }
         "search" => {
             let query = slots.get("query").and_then(|v| v.as_str()).unwrap_or("");
             if query.is_empty() { return None; }

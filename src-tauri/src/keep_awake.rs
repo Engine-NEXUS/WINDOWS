@@ -240,12 +240,49 @@ fn clear_awake() -> Result<(), String> {
     if prev.0 != 0 { Ok(()) } else { Err("SetThreadExecutionState (clear) failed".into()) }
 }
 
-#[cfg(not(target_os = "windows"))]
+/// macOS: a `caffeinate -dis` child holds the display + idle assertions while
+/// it lives. The watchdog's periodic re-assert doubles as a respawn check in
+/// case the child died; `clear` kills it, so the screen sleeps immediately.
+#[cfg(target_os = "macos")]
+static CAFFEINATE: Mutex<Option<std::process::Child>> = Mutex::new(None);
+
+#[cfg(target_os = "macos")]
+fn assert_awake() -> Result<(), String> {
+    let mut slot = CAFFEINATE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ch) = slot.as_mut() {
+        match ch.try_wait() {
+            Ok(None) => return Ok(()),
+            _ => {
+                *slot = None;
+            }
+        }
+    }
+    let child = std::process::Command::new("caffeinate")
+        .args(["-dis"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("caffeinate: {e}"))?;
+    *slot = Some(child);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn clear_awake() -> Result<(), String> {
+    let mut slot = CAFFEINATE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(mut ch) = slot.take() {
+        let _ = ch.kill();
+        let _ = ch.wait();
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn assert_awake() -> Result<(), String> {
     Err("keep_awake: unsupported platform".to_string())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn clear_awake() -> Result<(), String> {
     Err("keep_awake: unsupported platform".to_string())
 }

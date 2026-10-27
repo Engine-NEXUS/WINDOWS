@@ -20,7 +20,10 @@ const YES_WORDS = new Set([
   "agree", "agreed", "affirmative", "absolutely", "definitely", "certainly", "correct", "right", "alright",
 ]);
 
-const YES_PHRASES = ["go ahead", "do it", "go for it", "that's right", "thats right", "sounds good", "of course"];
+const YES_PHRASES = [
+  "go ahead", "do it", "go for it", "that's right", "thats right", "sounds good", "of course", "please do", "do that",
+  "go on", "by all means", "sure thing", "make it so", "that would be great", "that would be good",
+];
 
 const NO_WORDS = new Set([
   "no", "nope", "nah", "cancel", "abort", "stop", "don't", "dont", "never", "disapprove", "disapproved",
@@ -31,7 +34,7 @@ const NO_WORDS = new Set([
 const FILLER = new Set([
   "please", "now", "sir", "thanks", "thank", "you", "it", "that", "this", "go", "ahead", "for", "do", "the",
   "then", "with", "to", "of", "course", "fine", "good", "great", "kindly", "nexus", "mind", "thats", "that's",
-  "sounds", "its", "it's",
+  "sounds", "its", "it's", "by", "all", "means", "on", "make", "so", "would", "be", "thing", "great", "good",
   // verbs of the pending commands: "yes send it", "ok merge it"
   "send", "merge", "close", "order", "place", "delete", "book", "publish", "post", "submit", "execute", "run",
   "approve", "confirm",

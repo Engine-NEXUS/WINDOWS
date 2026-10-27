@@ -46,3 +46,22 @@ describe("isConfirmExpired", () => {
     expect(isConfirmExpired(1_000, 1_000 + PENDING_CONFIRM_TTL_MS + 1)).toBe(true);
   });
 });
+
+describe("more ways to say yes", () => {
+  it("accepts the everyday affirmations", () => {
+    for (const t of [
+      "yup", "yep", "sure", "do it", "absolutely", "definitely", "of course", "sounds good", "please do", "do that",
+      "go on", "by all means", "sure thing", "make it so", "that would be great", "yes sir", "alright", "Nexus, yes",
+    ]) {
+      expect(classifyConfirmReply(t), t).toBe("yes");
+    }
+  });
+  it("still refuses and still ignores real commands", () => {
+    for (const t of ["absolutely not", "of course not", "definitely not", "no thanks"]) {
+      expect(classifyConfirmReply(t), t).toBe("no");
+    }
+    for (const t of ["sure what time is it", "okay open notepad", "go on and open chrome"]) {
+      expect(classifyConfirmReply(t), t).toBe("other");
+    }
+  });
+});

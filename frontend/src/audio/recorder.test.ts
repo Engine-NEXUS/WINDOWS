@@ -11,9 +11,25 @@ import {
   __testMissStreak,
   __testSetMissStreak,
   hideOrbIfIdle,
+  isAdministratorControlText,
   nextMissAction,
   processTranscript,
 } from "./recorder";
+
+describe("Administrator capture routing", () => {
+  it("sends explicit role commands to Rust without frontend text rewriting", () => {
+    for (const phrase of [
+      "Nexus, administrator, analyse PR 24 in owner/repo and send it to my laptop",
+      "Start administrator session",
+      "Am I in admin mode?",
+      "send the review to my laptop",
+    ]) {
+      expect(isAdministratorControlText(phrase)).toBe(true);
+    }
+    expect(isAdministratorControlText("open browser")).toBe(false);
+    expect(isAdministratorControlText("administer medicine")).toBe(false);
+  });
+});
 
 describe("hideOrbIfIdle (Main Center UI-director rule, doc 74 P2)", () => {
   beforeEach(() => {
@@ -63,6 +79,32 @@ describe("processTranscript provenance gating", () => {
     expect(__testMissStreak()).toBe(0);
     await vi.advanceTimersByTimeAsync(550);
     expect(useAssistant.getState().state).toBe("idle");
+  });
+
+  it("sends native raw and corrected text to Rust without local execution", async () => {
+    const previous = (window as any).__TAURI_INTERNALS__;
+    (window as any).__TAURI_INTERNALS__ = {};
+    invokeMock.mockClear();
+    invokeMock.mockImplementation((command: string) => command === "orchestrator_process"
+      ? Promise.resolve({ request_id: "native-1", subsystem: "local_command", handled_locally: false })
+      : Promise.resolve(undefined));
+    try {
+      await processTranscript("analyze my screen.", {
+        session: 42, rawText: "analyze my screen.", ownership: "unenrolled",
+        decoderBias: "neutral", language: "en",
+      });
+      expect(invokeMock).toHaveBeenCalledWith("orchestrator_process", expect.objectContaining({
+        transcript: "analyse my screen.",
+        turnContext: expect.objectContaining({
+          session: 42, rawText: "analyze my screen.", correctedText: "analyse my screen.",
+        }),
+      }));
+      expect(invokeMock.mock.calls.some(([command]) => command === "execute_command")).toBe(false);
+    } finally {
+      if (previous === undefined) delete (window as any).__TAURI_INTERNALS__;
+      else (window as any).__TAURI_INTERNALS__ = previous;
+      invokeMock.mockReset().mockResolvedValue(undefined);
+    }
   });
 });
 

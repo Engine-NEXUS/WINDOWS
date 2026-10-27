@@ -245,6 +245,7 @@ pub fn init() {
         .spawn(move || {
             // Only scan if the cache is NOT from today
             if !cache_from_today {
+                crate::focus_mode::wait_until_clear_sync("app_registry_daily_scan");
                 refresh_from_os(&registry);
             }
 
@@ -255,6 +256,7 @@ pub fn init() {
                 let last = registry.last_scan_date.read().clone();
                 if last.as_deref() != Some(today.as_str()) {
                     tracing::info!("app registry: new day detected ({}), refreshing...", today);
+                    crate::focus_mode::wait_until_clear_sync("app_registry_daily_scan");
                     refresh_from_os(&registry);
                 }
             }
@@ -799,6 +801,11 @@ pub fn init_window_cache() {
         .name("window-cache".into())
         .spawn(|| {
             loop {
+                if crate::focus_mode::paused() {
+                    crate::focus_mode::defer_log("window_cache");
+                    std::thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
                 refresh_window_cache();
                 std::thread::sleep(Duration::from_secs(2));
             }

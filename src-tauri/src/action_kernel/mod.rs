@@ -149,9 +149,12 @@ pub fn risk_of_intent(intent: &crate::intent_parser::ParsedIntent) -> Risk {
     use crate::intent_parser::ParsedIntent as P;
     match intent {
         // sends something to the outside world or cannot be taken back
-        P::SendWhatsAppMessage { .. } | P::OrderFood { .. } | P::GitHubCommand { .. } => Risk::Irreversible,
+        P::SendWhatsAppMessage { .. } | P::OrderFood { .. } => Risk::Irreversible,
+        P::GitHubCommand { .. } if crate::center::is_side_effect(intent) => Risk::Irreversible,
+        P::GitHubCommand { .. } => Risk::Read,
         // can lose unsaved work, switch the machine off, or run an agent that edits files
-        P::PowerAction { .. } | P::CloseApp { .. } | P::CodingAgentTask { .. } => Risk::Destructive,
+        P::PowerAction { .. } | P::CloseApp { .. } | P::CodingAgentTask { .. }
+        | P::RecreateLastReview => Risk::Destructive,
         P::FileAction { verb, .. } => match verb.as_str() {
             "delete" => Risk::Destructive,
             "list" | "find" => Risk::Read,

@@ -26,12 +26,10 @@ pub struct MissedIntentRecord {
     pub reason: String,
 }
 
-/// Resolves path to %APPDATA%/com.nexus.assistant/missed_intents.jsonl
+/// Resolves path to the NEXUS data dir (…/com.nexus.assistant/missed_intents.jsonl)
 pub fn get_missed_intents_file_path() -> PathBuf {
-    std::env::var("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("com.nexus.assistant")
+    crate::app_dirs::nexus_data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
         .join("missed_intents.jsonl")
 }
 
