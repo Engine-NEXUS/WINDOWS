@@ -338,7 +338,7 @@ const CATEGORIES: McpCategory[] = [
 export function McpServersPanel({
   className = "",
   style = {},
-  onClose,
+  onClose: _onClose,
 }: {
   className?: string;
   style?: React.CSSProperties;
@@ -428,8 +428,6 @@ export function McpServersPanel({
     [vault, cards, githubConnected, coderabbit, available, settings.telegramChatId],
   );
 
-  const connectedCount = Object.values(states).filter((state) => state === "connected").length;
-  const activeSegments = Math.ceil((connectedCount / MCP_REGISTRY.length) * 5);
   const cardFor = (id: string) => cards.find((card) => card.server === id);
 
   const groupedProviders = useMemo(() => {
@@ -514,47 +512,6 @@ export function McpServersPanel({
 
   return (
     <section className={`mcp-panel ${className}`} style={style} aria-label="MCP">
-      <header className="mcp-header">
-        <div className="mcp-header-title-wrap">
-          <McpIcons.Clip />
-          <h2 className="mcp-header-title">MCP</h2>
-        </div>
-        <div className="mcp-header-actions">
-          <button
-            type="button"
-            className="mcp-icon-button"
-            onClick={() => void refresh()}
-            disabled={checking}
-            aria-label="Refresh MCP status"
-            title="Refresh MCP status"
-          >
-            ↻
-          </button>
-          <div
-            className="mcp-segment-bar"
-            role="status"
-            aria-label={`${connectedCount} of ${MCP_REGISTRY.length} verified connections`}
-          >
-            {[0, 1, 2, 3, 4].map((index) => (
-              <span
-                key={index}
-                className={`mcp-segment-pill ${index < activeSegments ? "mcp-segment-pill--active" : ""}`}
-              />
-            ))}
-          </div>
-          {onClose && (
-            <button
-              type="button"
-              className="mcp-icon-button"
-              onClick={onClose}
-              aria-label="Close MCP panel"
-            >
-              ×
-            </button>
-          )}
-        </div>
-      </header>
-
       <div className="mcp-list">
         {CATEGORIES.map((category) => {
           const providers = groupedProviders[category] || [];

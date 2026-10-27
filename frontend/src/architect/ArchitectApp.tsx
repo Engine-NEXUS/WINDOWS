@@ -198,13 +198,6 @@ export function ArchitectApp({ onDock = () => {} }: { onDock?: (d: string) => vo
       .then((pending) => {
         console.log("[architect] get_pending_architect_repo returned:", pending ? `owner=${pending.owner}, repo=${pending.repo}, has_phase1=${!!pending.phase1_data}` : "null");
         if (!pending) return;
-        // Set the backdrop image for the liquid-glass card
-        if (pending.backdrop) {
-          document.documentElement.style.setProperty(
-            "--sidebar-backdrop-image",
-            `url(${pending.backdrop})`
-          );
-        }
         // If Phase 1 data was pre-computed by open_architect_with_auto_detect,
         // render it immediately — no need to call analyze_repo_phase1 again.
         if (pending.phase1_data) {
@@ -230,13 +223,8 @@ export function ArchitectApp({ onDock = () => {} }: { onDock?: (d: string) => vo
       })
       .catch((e) => console.error("[architect] get_pending_architect_repo FAILED:", e));
 
-    // Listen for backdrop updates (live blur loop + window reuse)
-    listen<string>("sidebar:backdrop", (event) => {
-      document.documentElement.style.setProperty(
-        "--sidebar-backdrop-image",
-        `url(${event.payload})`
-      );
-    }).then((u) => { if (mounted) unlisteners.push(u); else u(); });
+    // Listen for backdrop updates (event listener retained for lifecycle compatibility)
+    listen<string>("sidebar:backdrop", () => {}).then((u) => { if (mounted) unlisteners.push(u); else u(); });
 
     listen<{ owner: string; repo: string }>("architect:set-repo", (event) => {
       setRepo(event.payload.owner, event.payload.repo);

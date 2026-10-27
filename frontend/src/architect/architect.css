@@ -67,8 +67,6 @@ html, body, #root {
   flex-direction: column;
   position: relative;
   background-color: var(--apple-surface-base);
-  backdrop-filter: blur(28px) saturate(190%);
-  -webkit-backdrop-filter: blur(28px) saturate(190%);
   border: 1px solid var(--apple-border-strong);
   border-top: 1px solid var(--apple-border-strong);
   border-radius: 18px;
@@ -80,50 +78,10 @@ html, body, #root {
   color: var(--apple-text-primary);
 }
 
-/* Frosted glass backdrop layer */
-.architect-app::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: 18px;
-  background: var(--apple-surface-base);
-  backdrop-filter: blur(28px) saturate(190%);
-  -webkit-backdrop-filter: blur(28px) saturate(190%);
-  opacity: 0.95;
-  transition: opacity 0.3s ease-out;
-  pointer-events: none;
-  z-index: 0;
-}
-
-/* Specular edge sheen — bright rim where light catches the glass */
-.architect-app::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: 18px;
-  padding: 1.5px;
-  background: linear-gradient(
-    135deg,
-    rgba(255, 255, 255, 0.35) 0%,
-    rgba(255, 255, 255, 0.08) 30%,
-    transparent 50%,
-    rgba(255, 255, 255, 0.05) 70%,
-    rgba(255, 255, 255, 0.2) 100%
-  );
-  -webkit-mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  pointer-events: none;
-  z-index: 1;
-}
-
 /* ── Header ────────────────────────────────────────────────────── */
 .architect-header {
   min-height: 56px;
   background: transparent;
-  backdrop-filter: none;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   display: flex;
   align-items: center;
@@ -332,7 +290,6 @@ html, body, #root {
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   padding: 14px 16px;
-  backdrop-filter: blur(16px);
   cursor: pointer;
   transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
   color: #ffffff;
@@ -510,7 +467,6 @@ html, body, #root {
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.14);
   padding: 10px 12px;
-  backdrop-filter: blur(12px);
   cursor: pointer;
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   color: #ffffff;
@@ -623,8 +579,7 @@ html, body, #root {
 }
 
 .architect-analytics-col {
-  background: rgba(20, 20, 28, 0.72);
-  backdrop-filter: blur(20px);
+  background: var(--apple-surface-muted);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -667,12 +622,14 @@ html, body, #root {
   gap: 6px;
 }
 
-.architect-analytics-body::-webkit-scrollbar {
-  width: 4px;
+.architect-analytics-body {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
 }
-.architect-analytics-body::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 2px;
+.architect-analytics-body::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 
 .architect-analytics-item {
@@ -813,7 +770,7 @@ html, body, #root {
   color: var(--apple-text-secondary);
 }
 [data-theme="light"] .architect-file-node {
-  background: rgba(255, 255, 255, 0.75);
+  background: var(--apple-surface-raised);
   border: 1px solid rgba(0, 0, 0, 0.12);
   color: var(--apple-text-primary);
 }
@@ -822,7 +779,7 @@ html, body, #root {
   border-top: 1px solid rgba(0, 0, 0, 0.08);
 }
 [data-theme="light"] .architect-analytics-col {
-  background: rgba(255, 255, 255, 0.65);
+  background: var(--apple-surface-muted);
 }
 [data-theme="light"] .architect-analytics-header {
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);

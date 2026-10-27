@@ -315,6 +315,152 @@ export const ApiKeyIcons = {
     </svg>
   ),
 
+  // DeepSeek official oceanic blue with stylized leaping dolphin/whale mark
+  DeepSeek: ({ size = 28, className = "", ...props }: LogoProps) => (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      className={className}
+      role="img"
+      aria-label="DeepSeek"
+      {...props}
+    >
+      <rect width="32" height="32" rx="7" fill="#1C64F2" />
+      <g transform="translate(6, 6) scale(0.83)" fill="#FFFFFF">
+        <path d="M12.5 3C7.25 3 3 7.25 3 12.5C3 17.75 7.25 22 12.5 22C14.8 22 16.9 21.2 18.5 19.8L21.7 23L23 21.7L19.8 18.5C21.2 16.9 22 14.8 22 12.5C22 7.25 17.75 3 12.5 3ZM12.5 5C16.65 5 20 8.35 20 12.5C20 14.3 19.3 16 18.1 17.2L16.5 15.6C17.1 14.7 17.5 13.6 17.5 12.5C17.5 9.75 15.25 7.5 12.5 7.5C11.4 7.5 10.3 7.9 9.4 8.5L7.8 6.9C9.1 5.7 10.7 5 12.5 5Z" />
+      </g>
+    </svg>
+  ),
+
+  // xAI Grok official minimalist geometric glyph
+  xAI: ({ size = 28, className = "", ...props }: LogoProps) => (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      className={className}
+      role="img"
+      aria-label="xAI Grok"
+      {...props}
+    >
+      <rect width="32" height="32" rx="7" fill="#000000" stroke="rgba(255,255,255,0.2)" strokeWidth="1" />
+      <path
+        d="M9 8L15.2 16.5L9 24H11.2L16.2 17.8L20.8 24H23L16.5 15.2L22.4 8H20.2L15.5 13.8L11.2 8H9Z"
+        fill="#FFFFFF"
+      />
+    </svg>
+  ),
+
+  // Mistral AI official orange-to-red stair-step block mark
+  Mistral: ({ size = 28, className = "", ...props }: LogoProps) => (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      className={className}
+      role="img"
+      aria-label="Mistral AI"
+      {...props}
+    >
+      <rect width="32" height="32" rx="7" fill="#0D0D11" stroke="rgba(255,105,0,0.3)" strokeWidth="1" />
+      <g transform="translate(6, 6) scale(0.625)" fill="#FF6900">
+        <rect x="0" y="0" width="6.4" height="6.4" fill="#FF5000" />
+        <rect x="25.6" y="0" width="6.4" height="6.4" fill="#FF5000" />
+        <rect x="0" y="6.4" width="12.8" height="6.4" fill="#FF6900" />
+        <rect x="19.2" y="6.4" width="12.8" height="6.4" fill="#FF6900" />
+        <rect x="0" y="12.8" width="32" height="6.4" fill="#FF8200" />
+        <rect x="0" y="19.2" width="6.4" height="6.4" fill="#FFA000" />
+        <rect x="12.8" y="19.2" width="6.4" height="6.4" fill="#FFA000" />
+        <rect x="25.6" y="19.2" width="6.4" height="6.4" fill="#FFA000" />
+        <rect x="0" y="25.6" width="6.4" height="6.4" fill="#FFB700" />
+        <rect x="25.6" y="25.6" width="6.4" height="6.4" fill="#FFB700" />
+      </g>
+    </svg>
+  ),
+
+  // OpenRouter official turquoise-cyan nexus connectivity logo
+  OpenRouter: ({ size = 28, className = "", ...props }: LogoProps) => (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      className={className}
+      role="img"
+      aria-label="OpenRouter"
+      {...props}
+    >
+      <rect width="32" height="32" rx="7" fill="#0E121E" stroke="rgba(56,189,248,0.35)" strokeWidth="1" />
+      <circle cx="16" cy="16" r="8" stroke="#38BDF8" strokeWidth="2.2" strokeDasharray="3 3" />
+      <circle cx="16" cy="16" r="3.5" fill="#38BDF8" />
+      <circle cx="16" cy="7" r="2" fill="#818CF8" />
+      <circle cx="25" cy="16" r="2" fill="#818CF8" />
+      <circle cx="16" cy="25" r="2" fill="#818CF8" />
+      <circle cx="7" cy="16" r="2" fill="#818CF8" />
+    </svg>
+  ),
+
+  // Perplexity official teal woven infinity asterism
+  Perplexity: ({ size = 28, className = "", ...props }: LogoProps) => (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      className={className}
+      role="img"
+      aria-label="Perplexity"
+      {...props}
+    >
+      <rect width="32" height="32" rx="7" fill="#13232C" stroke="rgba(34,197,94,0.3)" strokeWidth="1" />
+      <g transform="translate(7, 7) scale(0.75)" stroke="#22C55E" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" fill="none">
+        <path d="M12 2V22M2 12H22M5 5L19 19M19 5L5 19" />
+      </g>
+    </svg>
+  ),
+
+  // Cohere official warm coral organic logo
+  Cohere: ({ size = 28, className = "", ...props }: LogoProps) => (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      className={className}
+      role="img"
+      aria-label="Cohere"
+      {...props}
+    >
+      <rect width="32" height="32" rx="7" fill="#1A1817" stroke="rgba(217,92,62,0.35)" strokeWidth="1" />
+      <circle cx="12" cy="14" r="5" fill="#D95C3E" />
+      <circle cx="19" cy="19" r="6" fill="#39594C" />
+      <circle cx="21" cy="12" r="3.5" fill="#D39872" />
+    </svg>
+  ),
+
+  // Ollama official friendly minimalist geometric llama glyph
+  Ollama: ({ size = 28, className = "", ...props }: LogoProps) => (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      className={className}
+      role="img"
+      aria-label="Ollama"
+      {...props}
+    >
+      <rect width="32" height="32" rx="7" fill="#FFFFFF" />
+      <g transform="translate(6, 4) scale(0.65)" fill="#111827">
+        <path d="M14 2C13 2 12 3 12 4V10L9 11C7.5 11.5 6 13 6 15V22C6 24 7 26 9 27V29C9 30 10 30 10 29V27H19V29C19 30 20 30 20 29V27C22 26 23 24 23 22V17C23 15 22 13 20 12L16 11V4C16 3 15 2 14 2ZM11 7C11.5 7 12 7.5 12 8C12 8.5 11.5 9 11 9C10.5 9 10 8.5 10 8C10 7.5 10.5 7 11 7ZM17 7C17.5 7 18 7.5 18 8C18 8.5 17.5 9 17 9C16.5 9 16 8.5 16 8C16 7.5 16.5 7 17 7Z" />
+      </g>
+    </svg>
+  ),
+
   // Fallback high-tech cipher key badge
   GenericKey: ({ size = 28, className = "", ...props }: LogoProps) => {
     const id = React.useId().replace(/:/g, "");
@@ -375,23 +521,38 @@ export function ApiKeyIcon({
   if (norm.includes("gemini")) {
     return <ApiKeyIcons.Gemini size={size} className={className} />;
   }
+  if (norm.includes("openai") || norm.includes("chatgpt") || norm.includes("gpt")) {
+    return <ApiKeyIcons.OpenAI size={size} className={className} />;
+  }
+  if (norm.includes("anthropic") || norm.includes("claude")) {
+    return <ApiKeyIcons.Anthropic size={size} className={className} />;
+  }
+  if (norm.includes("deepseek")) {
+    return <ApiKeyIcons.DeepSeek size={size} className={className} />;
+  }
+  if (norm.includes("xai") || norm.includes("grok") || norm.includes("twitter")) {
+    return <ApiKeyIcons.xAI size={size} className={className} />;
+  }
+  if (norm.includes("mistral") || norm.includes("codestral")) {
+    return <ApiKeyIcons.Mistral size={size} className={className} />;
+  }
+  if (norm.includes("openrouter")) {
+    return <ApiKeyIcons.OpenRouter size={size} className={className} />;
+  }
+  if (norm.includes("perplexity") || norm.includes("sonar")) {
+    return <ApiKeyIcons.Perplexity size={size} className={className} />;
+  }
+  if (norm.includes("cohere") || norm.includes("command")) {
+    return <ApiKeyIcons.Cohere size={size} className={className} />;
+  }
+  if (norm.includes("ollama") || norm.includes("local") || norm.includes("custom")) {
+    return <ApiKeyIcons.Ollama size={size} className={className} />;
+  }
   if (norm.includes("cerebras")) {
     return <ApiKeyIcons.Cerebras size={size} className={className} />;
   }
   if (norm.includes("deepgram")) {
     return <ApiKeyIcons.Deepgram size={size} className={className} />;
-  }
-  if (norm.includes("googleplaces") || norm.includes("places")) {
-    return <ApiKeyIcons.GooglePlaces size={size} className={className} />;
-  }
-  if (norm.includes("googlemaps") || norm.includes("maps") || norm.includes("routes")) {
-    return <ApiKeyIcons.GoogleMaps size={size} className={className} />;
-  }
-  if (norm.includes("openai") || norm.includes("chatgpt")) {
-    return <ApiKeyIcons.OpenAI size={size} className={className} />;
-  }
-  if (norm.includes("anthropic") || norm.includes("claude")) {
-    return <ApiKeyIcons.Anthropic size={size} className={className} />;
   }
   if (norm.includes("elevenlabs") || norm.includes("eleven")) {
     return <ApiKeyIcons.ElevenLabs size={size} className={className} />;

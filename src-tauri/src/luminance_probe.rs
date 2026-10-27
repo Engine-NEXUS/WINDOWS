@@ -176,12 +176,6 @@ pub fn probe_screen_luminance(x: i32, y: i32, w: i32, h: i32) -> LuminanceResult
     }
 }
 
-/// IPC command: returns the probed luminance mode and average value for a rect.
-#[tauri::command]
-pub fn get_screen_luminance(x: i32, y: i32, w: i32, h: i32) -> Result<LuminanceResult, String> {
-    Ok(probe_screen_luminance(x, y, w, h))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -149,15 +149,7 @@ html, body, #root {
   position: relative;
   display: flex;
   flex-direction: column;
-  /* The blurred backdrop image is now rendered by ::after (see below)
-     with a CSS opacity transition for smooth crossfading between live
-     capture frames. This prevents the jarring "frame swap" effect that
-     occurred when background-image was set directly on .sidebar-card.
-     --sidebar-backdrop-image is set on <html> from JS (SidebarApp.tsx)
-     when the "sidebar:backdrop" event arrives from Rust. */
   background-color: var(--apple-surface-base);
-  backdrop-filter: blur(28px) saturate(190%);
-  -webkit-backdrop-filter: blur(28px) saturate(190%);
   border: 1px solid var(--apple-border-strong);
   border-radius: 18px;
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.4);
@@ -236,56 +228,6 @@ html, body, #root {
   padding: 0;
 }
 
-/* Blurred backdrop layer — ADR-05 screenshot-capture blur (docs/architecture/06).
-   Rust captures the desktop region behind this window (sidebar_backdrop.rs),
-   blurs it in-process, and streams JPEG frames via `sidebar:backdrop`
-   (spawn_sidebar_live_blur, 1 FPS change-gated) → JS sets
-   --sidebar-backdrop-image on <html> (SidebarApp.tsx). This is the real
-   transparency: the live desktop shows through blurred — a blue flower
-   wallpaper reads as sapphire bokeh (feature 84 §4). The gradient overlay
-   ensures text behind is frosted but readable (Start Menu style).
-   Solid-black mode (2026-10-01): background-image:none + #060608 — REMOVED
-   per user instruction to restore real transparency. */
-.sidebar-card::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: 18px;
-  background-image:
-    linear-gradient(180deg, rgba(8, 8, 10, 0.65) 0%, rgba(8, 8, 10, 0.45) 100%),
-    var(--sidebar-backdrop-image, none);
-  background-size: cover;
-  background-position: center;
-  /* Crossfade: when a new image arrives, the browser can't transition
-     background-image directly, but the element re-paints smoothly
-     because we keep opacity stable. The key win is that we're not
-     flashing — the old image stays visible until the new one paints,
-     then they blend during the compositor's natural paint cycle.
-     A short transition on filter adds a subtle softness during swaps. */
-  opacity: 1;
-  transition: opacity 0.3s ease-out;
-  pointer-events: none;
-  z-index: 0;
-}
-
-/* Over bright captured backdrops, keep white text readable (luminance
-   probe sets data-glass-luminance live — SidebarApp.tsx, 1.5s cadence). */
-html[data-glass-luminance="light"] .sidebar-card {
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
-}
-
-/* ── Fallback ──────────────────────────────────────────────────── */
-/* Linux: WebKitGTK's backdrop-filter support is unreliable, and this
-   window has no native blur to fall back on either — use a solid
-   dark background so text stays readable. */
-@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
-  .sidebar-card {
-    background: #1a1a1c;
-  }
-  .sidebar-card::before {
-    display: none;
-  }
-}
 
 /* ── Topic title (research/analyse responses only) ─────────────── */
 .sidebar-topic-title {
@@ -305,103 +247,149 @@ html[data-glass-luminance="light"] .sidebar-card {
 
 /* ═══════════════════════════════════════════════════════════════
    Feature 86 — Spatial Dashboard (cards matching stage pins)
-   Liquid-glass cards on the translucent dark panel.
+   100% Solid Opaque surfaces for transparent Tauri window panels
    ═══════════════════════════════════════════════════════════════ */
 .spatial-dashboard {
-  position: relative;
-  z-index: 2;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  background-color: var(--hub-bg);
+  color: var(--hub-text);
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 4px 2px;
-  height: 100%;
-  user-select: text;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.spatial-scroll-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.spatial-phone-col {
+  width: 100%;
+  max-width: 380px;
+  margin: 0 auto;
+  padding: 14px 14px 28px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
 .spatial-dashboard--empty {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
   align-items: center;
   justify-content: center;
-  color: rgba(255, 255, 255, 0.45);
+  color: var(--hub-text-dim);
   font-size: 13px;
+  text-align: center;
+  padding: 32px 24px;
+}
+
+.spatial-empty-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 32px 24px;
+  color: var(--hub-text-dim);
+  font-size: 14px;
 }
 
 .spatial-topic {
   font-size: 16px;
   font-weight: 700;
-  color: #ffffff;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+  color: var(--hub-text);
   line-height: 1.35;
 }
 
 .spatial-overview {
   font-size: 12px;
   line-height: 1.55;
-  color: rgba(255, 255, 255, 0.65);
+  color: var(--hub-text-dim);
+}
+
+.spatial-hero-provider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.spatial-screen-image {
+  display: block;
+  width: 100%;
+  max-height: 220px;
+  object-fit: contain;
+  border: 1px solid var(--hub-border);
+  border-radius: 12px;
+  background-color: var(--kit-tile-bg);
 }
 
 .spatial-cards {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding-right: 4px;
-}
-
-.spatial-cards::-webkit-scrollbar { width: 4px; }
-.spatial-cards::-webkit-scrollbar-track { background: transparent; }
-.spatial-cards::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
-  border-radius: 2px;
+  width: 100%;
 }
 
 .spatial-card {
-  background: rgba(28, 28, 34, 0.72);
-  border: 1px solid rgba(255, 255, 255, 0.10);
+  background-color: var(--hub-card-2);
+  border: 1px solid var(--hub-border);
   border-radius: 14px;
-  padding: 14px 16px;
+  padding: 12px 14px;
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 10px;
+  box-sizing: border-box;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .spatial-card:hover,
 .spatial-card--active {
-  border-color: rgba(100, 210, 255, 0.65);
-  box-shadow:
-    0 0 0 1px rgba(100, 210, 255, 0.30),
-    0 8px 28px rgba(37, 158, 214, 0.25);
+  border-color: var(--hub-accent);
+  box-shadow: 0 0 0 1px var(--hub-accent);
 }
 
 .spatial-card-header {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .spatial-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 30px;
+  min-width: 26px;
   height: 22px;
   padding: 0 6px;
-  border-radius: 11px;
-  background: linear-gradient(135deg, #5a9eff, #259ed6);
+  border-radius: 6px;
+  background-color: var(--hub-accent);
   color: #ffffff;
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.02em;
-  box-shadow: 0 2px 8px rgba(37, 158, 214, 0.5);
+  font-family: monospace;
   flex-shrink: 0;
+  box-sizing: border-box;
 }
 
 .spatial-label {
   font-size: 13.5px;
-  font-weight: 700;
-  color: #ffffff;
+  font-weight: 600;
+  color: var(--hub-text);
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -410,28 +398,32 @@ html[data-glass-luminance="light"] .sidebar-card {
 }
 
 .spatial-category {
-  font-size: 9.5px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: rgba(100, 210, 255, 0.85);
-  background: rgba(100, 210, 255, 0.10);
-  padding: 3px 8px;
-  border-radius: 9999px;
   flex-shrink: 0;
 }
 
 .spatial-summary {
   font-size: 12px;
-  line-height: 1.55;
-  color: rgba(255, 255, 255, 0.78);
+  line-height: 1.5;
+  color: var(--hub-text-dim);
+}
+
+.spatial-card-image {
+  display: block;
+  width: 100%;
+  max-height: 240px;
+  object-fit: contain;
+  border-radius: 12px;
+  border: 1px solid var(--hub-border);
+  background-color: var(--kit-tile-bg);
+  box-sizing: border-box;
 }
 
 .spatial-detail-grid {
   display: flex;
   flex-direction: column;
   gap: 0;
-  margin-top: 2px;
+  margin: 4px 0 0;
+  padding: 0;
 }
 
 .spatial-detail-row {
@@ -439,8 +431,8 @@ html[data-glass-luminance="light"] .sidebar-card {
   align-items: baseline;
   justify-content: space-between;
   gap: 10px;
-  padding: 5px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 4px 0;
+  border-bottom: 1px solid var(--hub-border);
 }
 
 .spatial-detail-row:last-child {
@@ -448,22 +440,25 @@ html[data-glass-luminance="light"] .sidebar-card {
 }
 
 .spatial-detail-title {
-  color: rgba(255, 255, 255, 0.45);
+  color: var(--hub-text-dim);
   font-size: 11px;
+  font-weight: 400;
   flex-shrink: 0;
+  margin: 0;
 }
 
 .spatial-detail-value {
-  color: #ffffff;
+  color: var(--hub-text);
   font-weight: 600;
   font-size: 11.5px;
   text-align: right;
   word-break: break-word;
+  margin: 0;
 }
 
 .spatial-provider {
   font-size: 9.5px;
-  color: rgba(255, 255, 255, 0.3);
+  color: var(--hub-text-faint);
   text-align: center;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -512,7 +507,6 @@ html[data-glass-luminance="light"] .sidebar-card {
   font-size: 17px;
   font-weight: 700;
   cursor: pointer;
-  backdrop-filter: blur(8px);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
 }
 
@@ -555,7 +549,6 @@ html[data-glass-luminance="light"] .sidebar-card {
   font-size: 11.5px;
   font-weight: 600;
   cursor: pointer;
-  backdrop-filter: blur(8px);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
 }
 
@@ -694,7 +687,8 @@ html[data-glass-luminance="light"] .sidebar-card {
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 4px;
-  scrollbar-width: none; /* Hide scrollbar in Firefox */
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
   user-select: text;
   -webkit-user-select: text;
   position: relative;
@@ -702,17 +696,9 @@ html[data-glass-luminance="light"] .sidebar-card {
 }
 
 .sidebar-response::-webkit-scrollbar {
-  display: none; /* Hide scrollbar in Chrome/Safari */
-}
-.sidebar-response::-webkit-scrollbar-track {
-  background: transparent;
-}
-.sidebar-response::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.16);
-  border-radius: 4px;
-}
-.sidebar-response::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.32);
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 
 /* ── Rich Markdown Body ────────────────────────────────────────── */
@@ -923,15 +909,13 @@ html[data-copy-enabled="false"] .nexus-copy-code-btn {
   font-family: "SF Mono", "Cascadia Code", Consolas, monospace;
   font-size: var(--sidebar-code-font);
   line-height: 1.55;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
 }
 .nexus-code-block pre::-webkit-scrollbar {
-  height: 4px;
-}
-.nexus-code-block pre::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.16);
-  border-radius: 2px;
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 
 /* Syntax Highlighting Colors (Apple Developer / SF theme) */
@@ -968,11 +952,8 @@ html[data-copy-enabled="false"] .nexus-copy-code-btn {
   margin: 14px 0;
   overflow-x: auto;
   border-radius: 8px;
-  border: 1px solid #000000;
-  background: rgba(0, 0, 0, 0.5);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
   /* Natural horizontal scroll for wide tables (e.g. 3-column bug tables) */
   scroll-behavior: smooth;
   -webkit-overflow-scrolling: touch;
@@ -980,11 +961,9 @@ html[data-copy-enabled="false"] .nexus-copy-code-btn {
 }
 
 .nexus-table-wrapper::-webkit-scrollbar {
-  height: 5px;
-}
-.nexus-table-wrapper::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.16);
-  border-radius: 3px;
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 
 .nexus-table {
@@ -1209,8 +1188,6 @@ html[data-copy-enabled="false"] .nexus-copy-code-btn {
 
 .analysis-card {
   background: var(--apple-surface-muted);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
   border: 1px solid var(--apple-border-default);
   border-radius: 10px;
   padding: 12px 14px;
@@ -1851,3 +1828,120 @@ html[data-copy-enabled="false"] .nexus-copy-code-btn {
 
 
 /* CodeRabbit workstation styles moved to coderabbit.css */
+
+.foreground-review {
+  display: grid;
+  gap: 12px;
+  color: var(--hub-text);
+  overflow-wrap: anywhere;
+}
+
+.foreground-review h3 {
+  margin: 12px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--hub-text);
+}
+
+.foreground-review p {
+  margin: 2px 0;
+  line-height: 1.45;
+  color: var(--hub-text-dim);
+}
+
+.foreground-review__meta {
+  display: grid;
+  gap: 3px;
+}
+
+.foreground-review__meta strong {
+  color: var(--hub-text);
+}
+
+.foreground-review__meta span,
+.foreground-review__source,
+.foreground-review__page small,
+.foreground-review__claim small {
+  font-size: 11px;
+  color: var(--hub-text-dim);
+}
+
+.foreground-review__claim,
+.foreground-review__page {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--hub-border);
+  border-radius: 10px;
+  background-color: var(--hub-card-2);
+}
+
+.foreground-review__claim strong,
+.foreground-review__page strong {
+  color: var(--hub-text);
+}
+
+.foreground-review__claim span {
+  font-size: 11px;
+  margin-left: 6px;
+  color: var(--hub-text-dim);
+}
+
+.foreground-review__page img {
+  width: 100%;
+  height: auto;
+  border-radius: 7px;
+  border: 1px solid var(--hub-border);
+  background-color: var(--kit-tile-bg);
+}
+
+.foreground-review__warnings {
+  padding: 8px 10px;
+  border-left: 3px solid var(--kit-c2);
+  background-color: var(--hub-card-2);
+  border-radius: 6px;
+}
+
+.foreground-review input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 36px;
+  border-radius: 8px;
+  padding: 6px 10px;
+  color: var(--hub-text);
+  background-color: var(--hub-card-2);
+  border: 1px solid var(--hub-border);
+  font-size: 13px;
+}
+
+.foreground-review input:focus {
+  outline: none;
+  border-color: var(--hub-accent);
+}
+
+.foreground-review__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.foreground-review__actions button {
+  padding: 8px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--hub-text);
+  background-color: var(--hub-card-2);
+  border: 1px solid var(--hub-border);
+  font-size: 12px;
+  font-weight: 500;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.foreground-review__actions button:hover:not(:disabled) {
+  border-color: var(--hub-accent);
+}
+
+.foreground-review__actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

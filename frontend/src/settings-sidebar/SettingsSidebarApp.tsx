@@ -1,9 +1,12 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, Component, type ErrorInfo } from "react";
 import { HandModeSection } from "./HandModeSection";
 import { AgentWatchSection } from "./AgentWatchSection";
 import { invoke } from "@tauri-apps/api/core";
-import { isPlausibleGeminiKey } from "./keyFormat";
+import { useVoiceLockState, VoiceLockStatus, VerifiedSaveStatus } from "../settings/VoiceLockStatus";
+import { applyNativeLockToDraft, clearSubmittedFields, type VoiceLockState } from "../settings/voiceLockState";
 import { identityBanner } from "../setup/identityBanner";
+import { VoiceEnrollment } from "../setup/VoiceEnrollment";
+import "./voiceEnrollmentHub.css";
 import {
   setSidecarBaseUrl,
   getOAuthStatus,
@@ -18,9 +21,13 @@ import { ApiKeysPage } from "./hub/ApiKeysPage";
 import { MemoryPage } from "./hub/MemoryPage";
 import { WAKE_SOUNDS, clampWakeVolume, normalizeWakeSound } from "./wakeSounds";
 import { ActionsPage } from "./hub/ActionsPage";
+import { DeviceLinksPage } from "./hub/DeviceLinksPage";
+import { ActivityManagerPage } from "./hub/ActivityManagerPage";
 import { useAccounts, useInsights } from "./hub/useHubData";
 import { McpServersPanel } from "./McpServersPanel";
 import { ApiKeyIcon } from "./ApiKeyIcons";
+import { OptionCard, SwitchCard } from "../theme/OptionCard";
+import { AppearancePage, initWindowBorderColor } from "./hub/AppearancePage";
 
 /**
  * NEXUS Settings Sidebar
@@ -46,6 +53,7 @@ interface Settings {
   meetingModeAuto: boolean;
   suppressTtsInMeetings: boolean;
   localSttOnly: boolean;
+  sttDiagnostics?: boolean;
   serverUrl: string;
   userId: string;
   deviceId: string;
@@ -86,6 +94,9 @@ interface Settings {
   memcoreReview?: boolean;
   memcoreTimetable?: boolean;
   memcoreMail?: boolean;
+  memcoreMailPlain?: boolean;
+  memcoreGithubWatch?: boolean;
+  memcoreDeployWatch?: boolean;
   memcoreWhatsapp?: boolean;
   memcoreWhatsappSpeak?: boolean;
   memcoreLeaveBy?: boolean;
@@ -117,6 +128,8 @@ interface Settings {
   handSnap?: boolean;
   handGestures?: boolean;
   handGesturesDesktop?: boolean;
+  handFocusMode?: boolean;
+  handFocusLowerApps?: boolean;
   handSensitivity?: number;
   // Ghost waves placement (ghost sessions reposition the orb window to this rect)
   wavesHorizontalPct?: number;
@@ -200,6 +213,8 @@ const DEFAULT_SETTINGS: Settings = {
   handSnap: true,
   handGestures: true,
   handGesturesDesktop: false,
+  handFocusMode: true,
+  handFocusLowerApps: true,
   handSensitivity: 0,
   wavesHorizontalPct: 0.5,
   wavesVerticalPct: 1.0,
@@ -216,11 +231,67 @@ const PAGE_TITLES: Record<HubPage, string> = {
   keys: "API Keys",
   memory: "Memory",
   actions: "Actions & Permissions",
+  "device-links": "Device Links",
+  activity: "Activity Manager",
   audio: "Audio",
   display: "Display",
   connections: "MCP",
   advanced: "Advanced",
+  appearance: "Appearance",
 };
+
+interface SubpageErrorBoundaryProps {
+  children: React.ReactNode;
+  page: string;
+  onReset: () => void;
+}
+
+interface SubpageErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class SubpageErrorBoundary extends Component<SubpageErrorBoundaryProps, SubpageErrorBoundaryState> {
+  constructor(props: SubpageErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error(`[Command Hub Subpage Error on "${this.props.page}"]:`, error, errorInfo);
+  }
+
+  componentDidUpdate(prevProps: SubpageErrorBoundaryProps) {
+    if (prevProps.page !== this.props.page && this.state.hasError) {
+      this.setState({ hasError: false, error: null });
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="hx-page" style={{ padding: "16px 14px" }}>
+          <div className="hx-card hx-key" style={{ padding: "16px", border: "1px solid rgba(255, 90, 82, 0.3)" }}>
+            <div className="hx-key-title" style={{ color: "var(--hx-danger, #ff5a52)", marginBottom: 8, fontSize: 14 }}>
+              ⚠️ Unable to display {this.props.page} subpage
+            </div>
+            <div className="hx-key-sub" style={{ marginBottom: 16, fontFamily: "monospace", fontSize: 11, wordBreak: "break-all" }}>
+              {this.state.error?.message || "An unexpected error occurred while rendering this subpage."}
+            </div>
+            <button type="button" className="hx-btn hx-btn--primary" onClick={this.props.onReset}>
+              ‹ Return to Command Hub
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string) => void }) {
   const dirtyFields = useRef<Set<keyof Settings>>(new Set());
@@ -228,6 +299,17 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
   const [insightsKey, setInsightsKey] = useState(0);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [saved, setSaved] = useState(false);
+  const voiceLock = useVoiceLockState();
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  useEffect(() => {
+    setSettings(previous => {
+      const next = applyNativeLockToDraft(previous, dirtyFields.current, voiceLock.state.effective);
+      settingsRef.current = next;
+      return next;
+    });
+  }, [voiceLock.state.effective]);
+
   const [toast, setToast] = useState<string | null>(null);
 
   // Toast from the calibration round-trip (save/cancel re-open the hub).
@@ -253,42 +335,26 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
 
   // Load settings from Rust on mount
   useEffect(() => {
+    initWindowBorderColor();
     invoke<Partial<Settings>>("get_settings").then((s) => {
       // API keys are managed on the API Keys page (keychain); the form never
       // holds them, so a Save can neither resurrect nor wipe a key.
-      if (s) setSettings({ ...DEFAULT_SETTINGS, ...s, groqApiKey: "", geminiApiKey: "", cerebrasApiKey: "" });
+      if (s) setSettings(prev => {
+        const loaded = { ...DEFAULT_SETTINGS, ...s, groqApiKey: "", geminiApiKey: "", cerebrasApiKey: "" };
+        for (const key of dirtyFields.current) Object.assign(loaded, { [key]: prev[key] });
+        const reconciled = applyNativeLockToDraft(loaded, dirtyFields.current, voiceLock.state.effective);
+        settingsRef.current = reconciled;
+        return reconciled;
+      });
     }).catch(() => {});
   }, []);
 
-  // Fetch pending backdrop on mount — handles the fresh-window case where
-  // the backdrop was captured before the React app loaded (same pattern as
-  // the response sidebar's get_pending_sidebar_content).
-  useEffect(() => {
-    invoke<string | null>("get_pending_settings_backdrop")
-      .then((backdrop) => {
-        if (backdrop && backdrop.startsWith("data:image/")) {
-          document.documentElement.style.setProperty(
-            "--sidebar-backdrop-image",
-            `url("${backdrop}")`,
-          );
-        }
-      })
-      .catch(() => {});
-  }, []);
-
-  // Listen for live sidebar:backdrop events — Rust captures the desktop
-  // behind the window every 1s, blurs it, and sends it as a data URI.
-  // We set it as a CSS variable on <html> so the ::after layer renders it.
+  // Listen for live sidebar:backdrop events (listener retained for lifecycle compatibility)
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     (async () => {
       const { listen } = await import("@tauri-apps/api/event");
-      unlisten = await listen<string>("sidebar:backdrop", (ev) => {
-        const dataUri = ev.payload;
-        if (typeof dataUri === "string" && dataUri.startsWith("data:image/")) {
-          document.documentElement.style.setProperty("--sidebar-backdrop-image", `url("${dataUri}")`);
-        }
-      });
+      unlisten = await listen<string>("sidebar:backdrop", () => {});
     })();
     return () => { unlisten?.(); };
   }, []);
@@ -308,27 +374,32 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
 
   const update = useCallback(<K extends keyof Settings>(key: K, value: Settings[K]) => {
     dirtyFields.current.add(key);
-    setSettings((prev) => ({ ...prev, [key]: value }));
+    settingsRef.current = { ...settingsRef.current, [key]: value };
+    setSettings(settingsRef.current);
     setSaved(false);
   }, []);
 
   const handleSave = async () => {
+    if (voiceLock.state.saving) return;
+    setSaved(false);
+    const snapshot = { ...settingsRef.current };
+    const changed = [...dirtyFields.current];
     try {
-      const changed = [...dirtyFields.current];
-      if (changed.length) {
-        const patch = Object.fromEntries(changed.map((key) => [key, settings[key]]));
-        await invoke("settings_patch", { patch });
-        dirtyFields.current.clear();
-      }
-      setSaved(true);
+      const patch = Object.fromEntries(changed.map(key => [key, snapshot[key]]));
+      await voiceLock.save(patch);
+      // Edits made while IPC was pending still need their own Save.
+      const submitted = Object.fromEntries(changed.map(key => [key, snapshot[key]])) as Partial<Settings>;
+      clearSubmittedFields<Partial<Settings>>(dirtyFields.current, submitted, settingsRef.current);
+      setSaved(dirtyFields.current.size === 0);
       setTimeout(() => setSaved(false), 2000);
-    } catch (e) {
-      console.error("save_settings failed:", e);
+    } catch (error) {
+      setToast(String(error));
     }
   };
 
   const handleReset = () => {
     dirtyFields.current = new Set(Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[]);
+    settingsRef.current = DEFAULT_SETTINGS;
     setSettings(DEFAULT_SETTINGS);
     setSaved(false);
   };
@@ -371,32 +442,33 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
       {toast && <div className="hx-toast">{toast}</div>}
 
       <div className="hx-scroll">
-        {page === "home" && (
-          <HubHome acc={acc} insights={insights} themeMode={themeMode} onTheme={handleTheme} onOpen={setPage} />
-        )}
-        {page === "keys" && <ApiKeysPage onChanged={() => setInsightsKey((k) => k + 1)} />}
-        {page === "memory" && <MemoryPage onFlagChanged={(flag, on) => update(flag, on)} />}
-        {page === "actions" && <ActionsPage />}
-        {page === "connections" && (
-          <div style={{ padding: "12px 14px 24px", height: "100%", boxSizing: "border-box" }}>
-            <McpServersPanel style={{ minHeight: "560px", maxHeight: "100%" }} />
-          </div>
-        )}
-        {isLegacyPage && (
-          <div className="hx-legacy">
-            {page === "display" && <DisplayTab settings={settings} update={update} />}
-            {page === "audio" && <AudioTab settings={settings} update={update} />}
-            {page === "advanced" && <><AgentWatchSection /><AdvancedSystemStatus /><AuthTab settings={settings} update={update} /></>}
-          </div>
-        )}
+        <SubpageErrorBoundary page={page} onReset={() => setPage("home")}>
+          {page === "home" && (
+            <HubHome acc={acc} insights={insights} themeMode={themeMode} onTheme={handleTheme} onOpen={setPage} />
+          )}
+          {page === "keys" && <ApiKeysPage onChanged={() => setInsightsKey((k) => k + 1)} />}
+          {page === "memory" && <MemoryPage onFlagChanged={(flag, on) => update(flag, on)} />}
+          {page === "actions" && <ActionsPage />}
+          {page === "device-links" && <DeviceLinksPage onOpenActivity={() => setPage("activity")} />}
+          {page === "activity" && <ActivityManagerPage />}
+          {page === "connections" && <McpServersPanel />}
+          {page === "appearance" && <AppearancePage themeMode={themeMode} onTheme={handleTheme} />}
+          {isLegacyPage && (
+            <div className="hx-legacy">
+              {page === "display" && <DisplayTab settings={settings} update={update} />}
+              {page === "audio" && <AudioTab settings={settings} update={update} voiceLock={voiceLock} />}
+              {page === "advanced" && <><AgentWatchSection /><AdvancedSystemStatus /><AuthTab settings={settings} update={update} /></>}
+            </div>
+          )}
+        </SubpageErrorBoundary>
       </div>
 
       {isLegacyPage && (
         <div className="hx-footer">
-          <span className={`hx-saved ${saved ? "hx-saved--on" : ""}`}>✓ Saved</span>
+          <VerifiedSaveStatus model={voiceLock} draft={settings.speakerVerification} saved={saved} />
           <div className="hx-footer-actions">
             <button className="hx-btn" onClick={handleReset}>Reset</button>
-            <button className="hx-btn hx-btn--primary" onClick={handleSave}>Save</button>
+            <button className="hx-btn hx-btn--primary" onClick={handleSave} disabled={voiceLock.state.saving}>{voiceLock.state.saving ? "Saving…" : "Save"}</button>
           </div>
         </div>
       )}
@@ -474,9 +546,9 @@ function DisplayTab({ settings, update }: {
   return (
     <>
       <div className="settings-section">
-        <div className="settings-section-title">Orb Color Theme</div>
+        <div className="settings-section-title">Orb Aura</div>
         <div className="setting-desc" style={{ marginBottom: 10 }}>
-          Customize your visual aura for listening and idle states. Visual morphologies can be customized in the 3D Studio.
+          Accent color for active and idle states.
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 8, marginBottom: 12 }}>
           {COLOR_PRESETS.map((p) => {
@@ -523,8 +595,8 @@ function DisplayTab({ settings, update }: {
         </div>
         <div className="setting-row" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div>
-            <div className="setting-label">Custom Hex Color</div>
-            <div className="setting-desc">Enter or pick any bespoke color value</div>
+            <div className="setting-label">Hex Color</div>
+            <div className="setting-desc">Custom hex code</div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
@@ -552,152 +624,80 @@ function DisplayTab({ settings, update }: {
       </div>
 
       <div className="settings-section">
-        <div className="settings-section-title">Orb Screen Position</div>
+        <div className="settings-section-title">Screen Anchor</div>
         <div className="setting-desc" style={{ marginBottom: 12 }}>
-          Choose where NEXUS appears. The sleek black slider smoothly glides into view from your chosen screen edge.
+          Desktop docking edge.
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <button
-            type="button"
-            className={`settings-btn ${currentPos === "top" ? "settings-btn--primary" : "settings-btn--glass"}`}
-            style={{
-              padding: "12px 14px",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: 6,
-              borderRadius: 10,
-              cursor: "pointer",
-              border: currentPos === "top" ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
-              background: currentPos === "top" ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
-              color: "#fff",
-              transition: "all 0.15s ease",
-            }}
+        <div className="nx-options-grid">
+          <OptionCard
+            icon="⬒"
+            title="Top Anchor"
+            desc="Screen top bezel"
+            selected={currentPos === "top"}
             onClick={() => onPositionSelect("top")}
-          >
-            <span style={{ fontSize: 18 }}>⬒</span>
-            <span style={{ fontWeight: 600, fontSize: 13 }}>Top (Default)</span>
-            <span style={{ fontSize: 11, opacity: 0.7 }}>Slides down from top edge</span>
-          </button>
-          <button
-            type="button"
-            className={`settings-btn ${currentPos === "bottom" ? "settings-btn--primary" : "settings-btn--glass"}`}
-            style={{
-              padding: "12px 14px",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: 6,
-              borderRadius: 10,
-              cursor: "pointer",
-              border: currentPos === "bottom" ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
-              background: currentPos === "bottom" ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
-              color: "#fff",
-              transition: "all 0.15s ease",
-            }}
+          />
+          <OptionCard
+            icon="⬓"
+            title="Bottom Anchor"
+            desc="Taskbar edge"
+            selected={currentPos === "bottom"}
             onClick={() => onPositionSelect("bottom")}
-          >
-            <span style={{ fontSize: 18 }}>⬓</span>
-            <span style={{ fontWeight: 600, fontSize: 13 }}>Bottom</span>
-            <span style={{ fontSize: 11, opacity: 0.7 }}>Slides up from taskbar</span>
-          </button>
+          />
         </div>
       </div>
 
       <div className="settings-section">
-        <div className="settings-section-title">Orb Capsule &amp; Scoop Style</div>
+        <div className="settings-section-title">Capsule Geometry</div>
         <div className="setting-desc" style={{ marginBottom: 12 }}>
-          Choose your container geometry. Classic is a solid pitch-black 10px capsule box; Pebble Scoop is an organic catenary curve dropping smoothly from the screen bezel.
+          Bezel container style.
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <button
-            type="button"
-            className={`settings-btn ${currentCapsuleStyle === "classic" ? "settings-btn--primary" : "settings-btn--glass"}`}
-            style={{
-              padding: "12px 14px",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: 6,
-              borderRadius: 10,
-              cursor: "pointer",
-              border: currentCapsuleStyle === "classic" ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
-              background: currentCapsuleStyle === "classic" ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
-              color: "#fff",
-              transition: "all 0.15s ease",
-            }}
+        <div className="nx-options-grid">
+          <OptionCard
+            icon="⬝"
+            title="Classic Capsule"
+            desc="Pitch-black capsule"
+            selected={currentCapsuleStyle === "classic"}
             onClick={() => onCapsuleStyleSelect("classic")}
-          >
-            <span style={{ fontSize: 18 }}>⬝</span>
-            <span style={{ fontWeight: 600, fontSize: 13 }}>Classic Capsule</span>
-            <span style={{ fontSize: 11, opacity: 0.7 }}>10px pitch-black box</span>
-          </button>
-          <button
-            type="button"
-            className={`settings-btn ${currentCapsuleStyle === "pebble" ? "settings-btn--primary" : "settings-btn--glass"}`}
-            style={{
-              padding: "12px 14px",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: 6,
-              borderRadius: 10,
-              cursor: "pointer",
-              border: currentCapsuleStyle === "pebble" ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
-              background: currentCapsuleStyle === "pebble" ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
-              color: "#fff",
-              transition: "all 0.15s ease",
-            }}
+          />
+          <OptionCard
+            icon="◗"
+            title="Fluid Scoop"
+            desc="Catenary curve"
+            selected={currentCapsuleStyle === "pebble"}
             onClick={() => onCapsuleStyleSelect("pebble")}
-          >
-            <span style={{ fontSize: 18 }}>◗</span>
-            <span style={{ fontWeight: 600, fontSize: 13 }}>Fluid Pebble Scoop</span>
-            <span style={{ fontSize: 11, opacity: 0.7 }}>Catenary bezel scoop</span>
-          </button>
+          />
         </div>
 
         {currentCapsuleStyle === "pebble" && (
           <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: "rgba(255,255,255,0.6)" }}>
-              Wakeup Thread Animation Mode
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: "var(--hx-dim)" }}>
+              Wakeup Animation
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 6 }}>
+            <div>
               {[
-                { id: 1, name: "🧵 Elastic Thread Stretch & Snap", desc: "Catenary stretch, harmonic damping (User Choice)" },
-                { id: 2, name: "🏹 Bowstring Pluck & Rebound", desc: "Plunge, sharp overshoot and high-freq ring" },
-                { id: 3, name: "💧 Liquid Meniscus Extrusion", desc: "Critically damped fluid mercury extrusion" },
-                { id: 4, name: "🌅 Horizon Split & Wing Flare", desc: "Expands horizontally with wing specular gleam" },
-                { id: 5, name: "〰️ Acoustic Harmonic Ripple", desc: "Standing acoustic ripples on catenary curve" },
+                { id: 1, icon: "🧵", name: "Elastic Stretch & Snap", desc: "Harmonic damping" },
+                { id: 2, icon: "🏹", name: "Bowstring Pluck", desc: "Sharp overshoot" },
+                { id: 3, icon: "💧", name: "Liquid Extrusion", desc: "Fluid mercury droplet" },
+                { id: 4, icon: "🌅", name: "Horizon Split", desc: "Wing specular gleam" },
+                { id: 5, icon: "〰️", name: "Acoustic Ripple", desc: "Harmonic ripples" },
               ].map((m) => (
-                <button
+                <OptionCard
                   key={m.id}
-                  type="button"
-                  className={`settings-btn ${currentWakeupMode === m.id ? "settings-btn--primary" : "settings-btn--glass"}`}
-                  style={{
-                    padding: "8px 12px",
-                    textAlign: "left",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 2,
-                    borderRadius: 8,
-                    cursor: "pointer",
-                    border: currentWakeupMode === m.id ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.1)",
-                    background: currentWakeupMode === m.id ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.04)",
-                  }}
+                  icon={m.icon}
+                  title={m.name}
+                  desc={m.desc}
+                  selected={currentWakeupMode === m.id}
                   onClick={() => onCapsuleStyleSelect("pebble", m.id, currentInteriorGenesis)}
-                >
-                  <span style={{ fontSize: 12, fontWeight: 600, color: "#fff" }}>{m.name}</span>
-                  <span style={{ fontSize: 11, opacity: 0.65 }}>{m.desc}</span>
-                </button>
+                />
               ))}
             </div>
 
-            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: "rgba(255,255,255,0.6)", marginTop: 4 }}>
-              Orb Interior Genesis
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: "var(--hx-dim)", marginTop: 4 }}>
+              Interior Genesis
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
               {[
-                { id: 2, name: "Spark Burst (Selected)" },
+                { id: 2, name: "Spark Burst" },
                 { id: 0, name: "Core Bloom" },
                 { id: 1, name: "Droplet Roll" },
                 { id: 3, name: "Helix Weave" },
@@ -754,10 +754,9 @@ function DisplayTab({ settings, update }: {
       </div>
 
       <div className="settings-section">
-        <div className="settings-section-title">Sidebar Docking</div>
+        <div className="settings-section-title">Sidebar Placement</div>
         <div className="setting-desc" style={{ marginBottom: 8 }}>
-          Choose where the NEXUS panel is pinned: right edge, left edge, or
-          floating as a centered modal. Works from any tab, any view.
+          Screen position and docking.
         </div>
         <div style={{ display: "flex", gap: 6 }}>
           <button
@@ -791,9 +790,9 @@ function DisplayTab({ settings, update }: {
       </div>
 
       <div className="settings-section">
-        <div className="settings-section-title">Orb 3D Morphology Studio</div>
+        <div className="settings-section-title">3D Morphology Studio</div>
         <div className="setting-desc" style={{ marginBottom: 10 }}>
-          Configure 3D particle morphologies for Thinking, Speaking, and Listening.
+          Real-time particle dynamics.
         </div>
         <button
           type="button"
@@ -844,16 +843,25 @@ interface VoiceStatus {
   sync_state: "ready" | "cloud_only" | "downloading";
 }
 
-function AudioTab({ settings, update }: {
+function AudioTab({ settings, update, voiceLock }: {
+  voiceLock: VoiceLockState;
   settings: Settings;
   update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
 }) {
   const volume = settings.ttsVolume ?? 75;
+  const [profileReady, setProfileReady] = useState(false);
+  const handleProfileStatus = useCallback((ready: boolean) => { setProfileReady(ready); void voiceLock.refresh(); }, [voiceLock]);
+  useEffect(() => { void voiceLock.refresh(); }, [voiceLock]);
   const [personas, setPersonas] = useState<VoicePersona[]>([]);
   const [previewing, setPreviewing] = useState<string | null>(null);
+  const [wakePreviewError, setWakePreviewError] = useState<string | null>(null);
   const [equipping, setEquipping] = useState<string | null>(null);
   const [sync, setSync] = useState<Record<string, { state: "ready" | "cloud_only" | "downloading"; progress?: number; phase?: string }>>({});
   const [transport, setTransport] = useState<"cloud" | "local">("cloud");
+  const [diagnostics, setDiagnostics] = useState<Array<{
+    session: number; captured_at: number; raw_text: string; corrected_text: string;
+    intent: string; decision: string; stats: Record<string, unknown>;
+  }> | null>(null);
 
   // Fetch persona catalog + current sync state + transport on mount.
   useEffect(() => {
@@ -967,7 +975,7 @@ function AudioTab({ settings, update }: {
           </span>
         </div>
         <div className="setting-desc" style={{ marginBottom: 8 }}>
-          Tap ▶ for a demo. Tap a card to equip it — cloud switches instantly, the offline twin syncs in the background.
+          Equip instant cloud &amp; offline voices.
         </div>
         <div className="persona-grid">
           {personas.length === 0 && (
@@ -1007,8 +1015,8 @@ function AudioTab({ settings, update }: {
         <div className="settings-section-title">Orb Visual Morphology</div>
         <div className="setting-row" style={{ alignItems: "center" }}>
           <div>
-            <div className="setting-label">Orb Animation Customization</div>
-            <div className="setting-desc">Configure particle geometry for thinking, speaking, and listening states.</div>
+            <div className="setting-label">Orb Animation</div>
+            <div className="setting-desc">3D WebGL particle morphologies</div>
           </div>
           <div className="setting-control">
             <button
@@ -1033,68 +1041,72 @@ function AudioTab({ settings, update }: {
       <HandModeSection settings={settings} update={update} />
 
       <div className="settings-section">
-        <div className="settings-section-title">Personality</div>
-        <div className="setting-row">
-          <div>
-            <div className="setting-label">Tone mode</div>
-            <div className="setting-desc">Butler is formal ("sir"). Friend uses your name, talks casually, counsels honestly.</div>
-          </div>
-          <div className="setting-control">
-            <select
-              className="settings-input"
-              value={settings.personaMode ?? "butler"}
-              onChange={(e) => update("personaMode", e.target.value)}
-            >
-              <option value="butler">Butler (formal)</option>
-              <option value="friend">Friend (casual)</option>
-            </select>
-          </div>
+        <div className="settings-section-title">Personality & Tone</div>
+        <div className="setting-desc" style={{ marginBottom: 12 }}>
+          Greeting style and conversational demeanor.
+        </div>
+        <div className="nx-options-grid">
+          <OptionCard
+            icon="🎩"
+            title="Formal Butler"
+            desc="Formal address ('sir', polite counsel)"
+            selected={(settings.personaMode ?? "butler") === "butler"}
+            onClick={() => update("personaMode", "butler")}
+          />
+          <OptionCard
+            icon="🤝"
+            title="Casual Partner"
+            desc="Casual address (first name, honest counsel)"
+            selected={(settings.personaMode ?? "butler") === "friend"}
+            onClick={() => update("personaMode", "friend")}
+          />
         </div>
       </div>
 
       <div className="settings-section">
         <div className="settings-section-title">Wake Sound</div>
+        <SwitchCard
+          icon="🔔"
+          title="Earcon Audio Cue"
+          desc="Play an immediate chime cue when NEXUS wakes up."
+          checked={settings.wakeSound !== false}
+          onChange={(checked) => update("wakeSound", checked)}
+        />
+        {settings.wakeSound !== false && (
+          <div style={{ marginTop: 10 }}>
+            {WAKE_SOUNDS.map((w) => {
+              const chosen = normalizeWakeSound(settings.wakeSoundStyle) === w.key;
+              return (
+                <OptionCard
+                  key={w.key}
+                  icon="🎵"
+                  title={w.label}
+                  desc={w.blurb}
+                  selected={chosen}
+                  onClick={() => update("wakeSoundStyle", w.key)}
+                />
+              );
+            })}
+            <button
+              type="button"
+              className="settings-btn"
+              onClick={() => {
+                setWakePreviewError(null);
+                void invoke("preview_wake_sound", {
+                  style: normalizeWakeSound(settings.wakeSoundStyle),
+                  volume: clampWakeVolume(settings.wakeSoundVolume),
+                }).catch((error) => setWakePreviewError(String(error)));
+              }}
+            >
+              Play selected sound
+            </button>
+            {wakePreviewError && <div role="alert" className="setting-desc">{wakePreviewError}</div>}
+          </div>
+        )}
         <div className="setting-row">
           <div>
-            <div className="setting-label">Play a sound when NEXUS wakes</div>
-            <div className="setting-desc">So you know it heard you without looking at the screen. Silent during meetings.</div>
-          </div>
-          <div className="setting-control">
-            <div
-              className={`settings-toggle ${settings.wakeSound !== false ? "settings-toggle--on" : ""}`}
-              onClick={() => update("wakeSound", settings.wakeSound === false)}
-            />
-          </div>
-        </div>
-        {WAKE_SOUNDS.map((w) => {
-          const chosen = normalizeWakeSound(settings.wakeSoundStyle) === w.key;
-          return (
-            <div className="setting-row" key={w.key}>
-              <div>
-                <div className="setting-label">
-                  {chosen ? "● " : "○ "}
-                  {w.label}
-                </div>
-                <div className="setting-desc">{w.blurb}</div>
-              </div>
-              <div className="setting-control">
-                <button
-                  className="settings-btn settings-btn--glass"
-                  onClick={() => invoke("preview_wake_sound", { style: w.key, volume: clampWakeVolume(settings.wakeSoundVolume) }).catch(() => {})}
-                >
-                  ▶ Play
-                </button>
-                <button className="settings-btn settings-btn--glass" disabled={chosen} onClick={() => update("wakeSoundStyle", w.key)}>
-                  {chosen ? "Selected" : "Use this"}
-                </button>
-              </div>
-            </div>
-          );
-        })}
-        <div className="setting-row">
-          <div>
-            <div className="setting-label">Wake sound level</div>
-            <div className="setting-desc">On top of your system volume</div>
+            <div className="setting-label">Sound volume</div>
+            <div className="setting-desc">Chime output level</div>
           </div>
           <div className="setting-control">
             <input
@@ -1114,8 +1126,8 @@ function AudioTab({ settings, update }: {
         <div className="settings-section-title">Speech Volume</div>
         <div className="setting-row">
           <div>
-            <div className="setting-label">Default NEXUS volume</div>
-            <div className="setting-desc">Sets system volume before speaking, restores after. 0 = disabled.</div>
+            <div className="setting-label">Output volume</div>
+            <div className="setting-desc">NEXUS speech output level</div>
           </div>
           <div className="setting-control">
             <input
@@ -1132,7 +1144,7 @@ function AudioTab({ settings, update }: {
         <div className="setting-row">
           <div>
             <div className="setting-label">Voice emotion</div>
-            <div className="setting-desc">Auto picks per reply (errors sad, success cheerful)</div>
+            <div className="setting-desc">Contextual inflection</div>
           </div>
           <div className="setting-control">
             <select
@@ -1154,10 +1166,40 @@ function AudioTab({ settings, update }: {
 
       <div className="settings-section">
         <div className="settings-section-title">STT Provider</div>
+        <SwitchCard
+          icon="🎙️"
+          title="Temporary STT diagnostics"
+          desc="Store encrypted microphone clips and turn evidence locally for up to 24 hours. Off by default."
+          checked={settings.sttDiagnostics === true}
+          onChange={(checked) => update("sttDiagnostics", checked)}
+        />
+        <button className="settings-input" type="button" onClick={() => {
+          void invoke<typeof diagnostics>("stt_diagnostics_list")
+            .then((items) => setDiagnostics(items ?? []))
+            .catch(() => setDiagnostics([]));
+        }}>View recent STT turn evidence</button>
+        {diagnostics && (
+          <div style={{ maxHeight: 260, overflowY: "auto", fontSize: 12, marginTop: 8 }}>
+            {diagnostics.length === 0 ? "No retained diagnostic turns." : diagnostics.slice(-20).reverse().map((item) => (
+              <div key={`${item.captured_at}-${item.session}`} style={{ marginBottom: 10, padding: 8, border: "1px solid currentColor", borderRadius: 6 }}>
+                <strong>{new Date(item.captured_at * 1000).toLocaleString()} · {item.decision} · {item.intent}</strong>
+                <div>Raw: {item.raw_text || "(none)"}</div>
+                <div>Corrected: {item.corrected_text || "(none)"}</div>
+                <div>Capture: {JSON.stringify(item.stats)}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        <button className="settings-input" type="button" onClick={() => {
+          void invoke<number>("stt_diagnostics_delete").then((count) => {
+            setDiagnostics([]);
+            window.alert(`Deleted ${count} encrypted STT diagnostic clip(s).`);
+          }).catch(() => window.alert("Could not delete STT diagnostics."));
+        }}>Delete STT diagnostics now</button>
         <div className="setting-row">
           <div>
             <div className="setting-label">Local STT only</div>
-            <div className="setting-desc">Audio never leaves your device</div>
+            <div className="setting-desc">On-device processing</div>
           </div>
           <div className="setting-control">
             <div
@@ -1169,19 +1211,36 @@ function AudioTab({ settings, update }: {
         <div className="setting-row">
           <div>
             <div className="setting-label">Speaker verification</div>
-            <div className="setting-desc">Only enrolled voice can wake NEXUS</div>
+            <div className="setting-desc">Enroll a profile below before turning on Voice Lock.</div>
           </div>
           <div className="setting-control">
             <div
               className={`settings-toggle ${settings.speakerVerification ? "settings-toggle--on" : ""}`}
-              onClick={() => update("speakerVerification", !settings.speakerVerification)}
+              role="switch"
+              aria-label="Draft Voice Lock"
+              aria-checked={settings.speakerVerification}
+              aria-disabled={voiceLock.state.saving || (!settings.speakerVerification && !profileReady)}
+              tabIndex={0}
+              onClick={() => {
+                if (!voiceLock.state.saving && (settings.speakerVerification || profileReady)) update("speakerVerification", !settings.speakerVerification);
+              }}
+              onKeyDown={(event) => {
+                if (!voiceLock.state.saving && (event.key === "Enter" || event.key === " ") && (settings.speakerVerification || profileReady)) {
+                  event.preventDefault();
+                  update("speakerVerification", !settings.speakerVerification);
+                }
+              }}
             />
           </div>
+        </div>
+        <div className="hub-voice-enrollment">
+          <VoiceLockStatus model={voiceLock} draft={settings.speakerVerification} />
+          <VoiceEnrollment onStatusChange={handleProfileStatus} />
         </div>
         <div className="setting-row">
           <div>
             <div className="setting-label">Moonshine model</div>
-            <div className="setting-desc">Local STT accuracy vs RAM tradeoff</div>
+            <div className="setting-desc">Accuracy vs RAM tradeoff</div>
           </div>
           <div className="setting-control">
             <select
@@ -1189,9 +1248,9 @@ function AudioTab({ settings, update }: {
               value={settings.moonshineModel ?? "medium_streaming"}
               onChange={(e) => update("moonshineModel", e.target.value)}
             >
-              <option value="medium_streaming">Medium v2 (245M, 6.65% WER, ~400MB)</option>
-              <option value="small_streaming">Small v2 (123M, 7.84% WER, ~300MB)</option>
-              <option value="tiny_streaming">Tiny (34M, 12% WER, ~100MB)</option>
+              <option value="medium_streaming">Medium v2 (245M, ~400MB)</option>
+              <option value="small_streaming">Small v2 (123M, ~300MB)</option>
+              <option value="tiny_streaming">Tiny (34M, ~100MB)</option>
             </select>
           </div>
         </div>
@@ -1364,29 +1423,6 @@ function AuthTab({ settings, update }: {
         </div>
       )}
 
-      <div className="settings-section">
-        <div className="settings-section-title">Window Theme</div>
-        <div className="setting-desc" style={{ marginBottom: 8 }}>
-          Liquid frosted glass — dark or light theme across all windows, analyses, and mapper.
-        </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          {(["light", "dark"] as const).map((m) => (
-            <button
-              key={m}
-              className={`settings-btn ${((settings.themeMode ?? "dark") === m) ? "settings-btn--primary" : ""}`}
-              style={{ flex: 1, textTransform: "capitalize" }}
-              onClick={() => {
-                update("themeMode", m);
-                void import("../sidebar/theme").then(({ applyThemeMode }) => applyThemeMode(m)).catch(() => {});
-                invoke("settings_patch", { patch: { themeMode: m } }).catch(() => {});
-              }}
-            >
-              {m === "light" ? "☀ Light (Frosted Glass)" : "🌙 Dark (Liquid Glass)"}
-            </button>
-          ))}
-        </div>
-      </div>
-
       {/* Profile header card (carbon copy): primary/first account, Add Account link */}
       <div className="hub-card hub-profile">
         {(() => {
@@ -1395,7 +1431,7 @@ function AuthTab({ settings, update }: {
             return (
               <div className="hub-profile--empty">
                 <div className="hub-profile-name">No account yet</div>
-                <div className="hub-profile-email">Connect Google for Gmail, Calendar, Sentinel watch, &amp; Photos.</div>
+                <div className="hub-profile-email">Gmail, Calendar &amp; Photos sync.</div>
               </div>
             );
           }
@@ -1454,7 +1490,7 @@ function AuthTab({ settings, update }: {
                 ) : (
                   <button
                     className="hub-link hub-link--sm"
-                    title="Re-consent with phone & address scopes (optional, never required)"
+                    title="Phone & address scopes"
                     onClick={(e) => { e.stopPropagation(); void handleExtendGoogle(); }}
                   >
                     {extendingGoogle ? "Opening Google…" : "Add phone & address"}
@@ -1480,7 +1516,7 @@ function AuthTab({ settings, update }: {
             style={{ fontSize: 10, opacity: 0.7 }}
             onClick={() => setShowCustomCreds(!showCustomCreds)}
           >
-            {showCustomCreds ? "Hide Developer Credentials" : "Custom Developer OAuth Credentials"}
+            {showCustomCreds ? "Hide Developer Credentials" : "Custom Developer Credentials"}
           </button>
           {credStatus && !credStatus.configured && (
             <div className="hx-error" style={{ marginTop: 8, fontSize: 11 }}>
@@ -1495,9 +1531,7 @@ function AuthTab({ settings, update }: {
           {showCustomCreds && (
             <div className="auth-card" style={{ marginTop: 8, padding: 12 }}>
               <div style={{ fontSize: 11, color: "rgba(255,255,255,0.7)", marginBottom: 8 }}>
-                Required to sign in with Google. In Google Cloud Console: create an OAuth client of type
-                <b> Desktop app</b>, enable the <b>Gmail API</b> and <b>Google Calendar API</b>, add your Gmail address under
-                <b> Test users</b> on the consent screen, then paste the Client ID and Client Secret here:
+                Google Cloud Desktop OAuth credentials:
               </div>
               <input
                 type="text"
@@ -1561,92 +1595,14 @@ function AuthTab({ settings, update }: {
         </div>
       </div>
 
-      <div className="settings-section">
-        <div className="settings-section-title">API Keys</div>
 
-        <div className="auth-card">
-          <div className="auth-card-header">
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <ApiKeyIcon service="gemini" size={24} />
-              <span className="auth-card-title">Gemini API Key</span>
-            </div>
-            <GeminiKeyPill />
-          </div>
-          <input
-            type="password"
-            className="settings-input"
-            placeholder="AIza..."
-            value={settings.geminiApiKey ?? ""}
-            onChange={(e) => update("geminiApiKey", e.target.value)}
-          />
-          {(settings.geminiApiKey ?? "").trim() !== "" &&
-            !isPlausibleGeminiKey(settings.geminiApiKey ?? "") && (
-              <div className="setting-desc" style={{ marginTop: 4, color: "#ffd479" }}>
-                Doesn&apos;t look like a Gemini key — should start with AIza… (39 chars). Hit Test to verify.
-              </div>
-            )}
-          <div className="setting-desc" style={{ marginTop: 4 }}>
-            Powers spatial screen analysis + ghost vision grounding. Free tier covers ~500 vision calls/day.{" "}
-            <a
-              href="#"
-              onClick={(e) => {
-                e.preventDefault();
-                import("@tauri-apps/plugin-shell").then(({ open }) => {
-                  open("https://aistudio.google.com/apikey").catch(() => {});
-                });
-              }}
-            >
-              Get a free key
-            </a>
-          </div>
-          <GeminiKeyTest />
-        </div>
-
-        <div className="auth-card">
-          <div className="auth-card-header">
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <ApiKeyIcon service="groq" size={24} />
-              <span className="auth-card-title">Groq API Key</span>
-            </div>
-          </div>
-          <input
-            type="password"
-            className="settings-input"
-            placeholder="gsk_..."
-            value={settings.groqApiKey}
-            onChange={(e) => update("groqApiKey", e.target.value)}
-          />
-        </div>
-
-        <div className="auth-card">
-          <div className="auth-card-header">
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <ApiKeyIcon service="cerebras" size={24} />
-              <span className="auth-card-title">Cerebras API Key</span>
-            </div>
-          </div>
-          <input
-            type="password"
-            className="settings-input"
-            placeholder="csk-..."
-            value={settings.cerebrasApiKey ?? ""}
-            onChange={(e) => update("cerebrasApiKey", e.target.value)}
-          />
-        </div>
-        <div className="setting-desc" style={{ marginTop: 4 }}>
-          Keys stay on this device (OS keychain) — never uploaded, never in Cloudflare.
-        </div>
-      </div>
 
       <div className="settings-section">
         <div className="settings-section-title">Ghost Vision</div>
-        <div className="setting-desc" style={{ marginBottom: 8 }}>
-          Spatial screen analysis (“analyse the screen”) needs a Gemini key — add it under API Keys above.
-        </div>
         <div className="setting-row">
           <div>
             <div className="setting-label">Vision provider</div>
-            <div className="setting-desc">Who sees custom buttons UIA can't. Gemini is the sole vision engine (Groq retired vision).</div>
+            <div className="setting-desc">Primary vision engine</div>
           </div>
           <div className="setting-control">
             <select
@@ -1663,7 +1619,7 @@ function AuthTab({ settings, update }: {
         <div className="setting-row">
           <div>
             <div className="setting-label">Vision speed</div>
-            <div className="setting-desc">Single provider active — sequential only. Racing returns if a second vision engine appears.</div>
+            <div className="setting-desc">Execution mode</div>
           </div>
           <div className="setting-control">
             <select
@@ -1682,74 +1638,7 @@ function AuthTab({ settings, update }: {
   );
 }
 
-function GeminiKeyPill() {
-  const [present, setPresent] = useState<boolean | null>(null);
 
-  useEffect(() => {
-    invoke<{ gemini_present?: boolean }>("vision_key_status")
-      .then((s) => setPresent(!!s?.gemini_present))
-      .catch(() => setPresent(null));
-  }, []);
-
-  if (present === null) return null;
-  return present ? (
-    <span className="status-badge status-badge--connected">✓ Saved</span>
-  ) : (
-    <span className="status-badge status-badge--disconnected">○ Missing</span>
-  );
-}
-
-function GeminiKeyTest() {
-  const [state, setState] = useState<"idle" | "testing" | "ok" | "fail">("idle");
-  const [detail, setDetail] = useState<string>("");
-
-  const runTest = () => {
-    setState("testing");
-    setDetail("");
-    invoke<{ ok?: boolean; detail?: string }>("vision_test_key")
-      .then((r) => {
-        if (r?.ok) {
-          setState("ok");
-          setDetail("");
-        } else {
-          setState("fail");
-          setDetail(
-            r?.detail === "no-key"
-              ? "Save a key first, then test."
-              : r?.detail === "quota-exhausted"
-                ? "Key valid but daily quota is spent."
-                : r?.detail === "network-error"
-                  ? "Network unreachable — check connection."
-                  : "Key rejected — check for typos."
-          );
-        }
-      })
-      .catch(() => {
-        setState("fail");
-        setDetail("Test call failed.");
-      });
-  };
-
-  return (
-    <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8 }}>
-      <button
-        className="settings-btn settings-btn--glass"
-        disabled={state === "testing"}
-        onClick={runTest}
-      >
-        {state === "testing" ? "Testing…" : "Test Key"}
-      </button>
-      {state === "ok" && (
-        <span className="status-badge status-badge--connected">✓ Valid</span>
-      )}
-      {state === "fail" && (
-        <span className="status-badge status-badge--disconnected">
-          ✗ {detail || "Invalid"}
-        </span>
-      )}
-    </div>
-  );
-}
 
 function VisionQuota() {
   const [quota, setQuota] = useState<{
@@ -1793,18 +1682,14 @@ function VisionQuota() {
 
 function AdvancedSystemStatus() {
   const [identity, setIdentity] = useState<{ state: string; profileId?: string; deviceName?: string } | null>(null);
-  const [health, setHealth] = useState<{
-    memoryMb: number; uptimeSec: number; sttPort: boolean; nluPort: boolean;
-    workerReachable: boolean; groqKey: boolean; geminiKey: boolean;
-  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const refresh = useCallback(async () => {
-    const [identityResult, healthResult] = await Promise.allSettled([
-      invoke<{ state: string; profileId?: string; deviceName?: string }>("get_identity_status"),
-      invoke<typeof health>("get_health_status"),
-    ]);
-    if (identityResult.status === "fulfilled") setIdentity(identityResult.value);
-    if (healthResult.status === "fulfilled") setHealth(healthResult.value);
+    try {
+      const res = await invoke<{ state: string; profileId?: string; deviceName?: string }>("get_identity_status");
+      setIdentity(res);
+    } catch {
+      /* ignore */
+    }
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);
   const banner = identity ? identityBanner(identity) : null;
@@ -1823,12 +1708,6 @@ function AdvancedSystemStatus() {
         catch (e) { setError(e instanceof Error ? e.message : String(e)); }
       }}>Disconnect this device</button>}
     </div>
-    {health && <div className="auth-card">
-      <div className="auth-card-title">System status</div>
-      <div className="setting-desc">Memory {health.memoryMb} MB · Uptime {Math.floor(health.uptimeSec / 60)} min</div>
-      <div className="setting-desc">Speech {health.sttPort ? "running" : "idle"} · Local understanding {health.nluPort ? "running" : "idle"} · Worker {health.workerReachable ? "online" : "offline"}</div>
-      <div className="setting-desc">Groq key {health.groqKey ? "present" : "missing"} · Gemini key {health.geminiKey ? "present" : "missing"}</div>
-    </div>}
     {error && <div className="hx-error" role="alert">{error}</div>}
   </div>;
 }

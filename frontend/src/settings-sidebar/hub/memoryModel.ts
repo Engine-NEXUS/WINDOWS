@@ -50,6 +50,12 @@ export interface MemoryStatus {
   slots: number;
   /** Inbox watching + calendar are on. */
   mail: boolean;
+  /** Say important emails in plain words (GitHub on device; unusual via cloud). */
+  mail_plain?: boolean;
+  /** Watch GitHub Actions runs of recent repos and announce failure/recovery. */
+  github_watch?: boolean;
+  /** Watch latest production deploys (Vercel, Render, Netlify) and announce failure/recovery. */
+  deploy_watch?: boolean;
   /** A Google account with mail access is connected. */
   google_connected: boolean;
   /** Important emails currently filed. */
@@ -186,6 +192,9 @@ export type MemoryFlag =
   | "memcoreReview"
   | "memcoreTimetable"
   | "memcoreMail"
+  | "memcoreMailPlain"
+  | "memcoreGithubWatch"
+  | "memcoreDeployWatch"
   | "memcoreWhatsapp"
   | "memcoreWhatsappSpeak"
   | "memcoreLeaveBy"

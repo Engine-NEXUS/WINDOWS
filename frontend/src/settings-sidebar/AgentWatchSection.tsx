@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 interface WatchInfo {
   id: string;
@@ -35,16 +36,15 @@ const ACTIVE_STATUSES = new Set(["starting", "working", "blocked", "login_requir
  */
 export function AgentWatchSection() {
   const [reason, setReason] = useState<string | null>(null);
-  const [adapters, setAdapters] = useState<string[]>([]);
   const [watches, setWatches] = useState<WatchInfo[]>([]);
 
   useEffect(() => {
     invoke<string | null>("agent_watch_unavailable_reason").then(setReason).catch(() => {});
-    invoke<string[]>("agent_watch_list_adapters").then(setAdapters).catch(() => {});
   }, []);
 
   useEffect(() => {
     let alive = true;
+    const unlisten: Array<() => void> = [];
     const poll = () => {
       invoke<{ watches: WatchInfo[] }>("agent_watch_list_watches")
         .then((r) => {
@@ -53,9 +53,21 @@ export function AgentWatchSection() {
         .catch(() => {});
     };
     poll();
+    const attach = (subscription: Promise<() => void>) => {
+      void subscription.then((stop) => {
+        if (alive) unlisten.push(stop);
+        else stop();
+      }).catch(() => {});
+    };
+    attach(listen("agent_watch:done", poll));
+    attach(listen("agent_watch:error", poll));
+    attach(listen("agent_watch:login_required", poll));
+    attach(listen("agent_watch:progress", poll));
+    attach(listen("agent_watch:stopped", poll));
     const id = setInterval(poll, 4000);
     return () => {
       alive = false;
+      unlisten.forEach((stop) => stop());
       clearInterval(id);
     };
   }, []);
@@ -70,22 +82,17 @@ export function AgentWatchSection() {
 
   return (
     <div className="settings-section">
-      <div className="settings-section-title">Universal Agent Watcher</div>
-      <div className="setting-row">
-        <div>
-          <div className="setting-label">{reason ? "Unavailable" : "Ready"}</div>
-          <div className="setting-desc">
-            {reason ??
-              "Say “Nexus, watch over this”, “watch over Antigravity”, “watch over Claude”, or “update me when the response is received and Claude has stopped running” — NEXUS keeps your machine awake and speaks the moment the task is finished."}
-          </div>
-        </div>
-      </div>
-      {!reason && adapters.length > 0 && (
+      <div className="settings-section-title">Agent Watcher</div>
+      {reason ? (
         <div className="setting-row">
           <div>
-            <div className="setting-label">Covered tools</div>
-            <div className="setting-desc">{adapters.map((a) => TOOL_NAMES[a] ?? a).join(", ")}</div>
+            <div className="setting-label">Unavailable</div>
+            <div className="setting-desc">{reason}</div>
           </div>
+        </div>
+      ) : (
+        <div className="setting-row">
+          <div className="setting-label">Active</div>
         </div>
       )}
       {watches.length > 0 && (

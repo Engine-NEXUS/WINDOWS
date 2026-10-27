@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
-import { formatCount, initialOf, requestsSubtitle, type HubAccount, type UsageStats } from "./hubModel";
+import { initialOf, type HubAccount, type UsageStats } from "./hubModel";
 
-export type HubPage = "home" | "keys" | "memory" | "actions" | "audio" | "display" | "connections" | "advanced";
+export type HubPage = "home" | "keys" | "memory" | "actions" | "device-links" | "activity" | "audio" | "display" | "connections" | "advanced" | "appearance";
 
 interface AccountsApi {
   accounts: HubAccount[];
@@ -105,10 +105,8 @@ function Row({ icon, title, sub, onClick, right }: { icon: ReactNode; title: str
   );
 }
 
-const val = (n: number | null) => (n === null ? "–" : formatCount(n));
-
 /** Profile-style home: accounts card, insights card, grouped rows. */
-export function HubHome({ acc, insights, themeMode, onTheme, onOpen }: Props) {
+export function HubHome({ acc, insights: _insights, themeMode, onTheme: _onTheme, onOpen }: Props) {
   const [confirm, setConfirm] = useState<string | null>(null);
   const hasGithub = acc.accounts.some((a) => a.provider === "github");
 
@@ -200,67 +198,38 @@ export function HubHome({ acc, insights, themeMode, onTheme, onOpen }: Props) {
           )}
         </div>
       </div>
-      <div className="hx-footnote">Removing an account only disconnects it from NEXUS — it does not delete it at Google or GitHub.</div>
 
-      {/* ── Insights ── */}
-      <div className="hx-card hx-insights">
-        <div className="hx-insights-head">
-          <span className="hx-row-icon">{ICONS.chart}</span>
-          <span className="hx-row-title">Your Command Hub Insights</span>
-        </div>
-        <div className="hx-stats">
-          <div className="hx-stat">
-            <div className="hx-stat-value">{val(insights.keyCount)}</div>
-            <div className="hx-stat-label">API keys</div>
-            <div className="hx-stat-sub hx-stat-sub--placeholder">&nbsp;</div>
-          </div>
-          <div className="hx-stat">
-            <div className="hx-stat-value">{val(insights.mcp)}</div>
-            <div className="hx-stat-label">MCP connected</div>
-            <div className="hx-stat-sub hx-stat-sub--placeholder">&nbsp;</div>
-          </div>
-          <div className="hx-stat">
-            <div className="hx-stat-value">{insights.usage ? formatCount(insights.usage.today) : "–"}</div>
-            <div className="hx-stat-label">Requests today</div>
-            <div className="hx-stat-sub">{requestsSubtitle(insights.usage) || "\u00A0"}</div>
-          </div>
-        </div>
-      </div>
-
-      {/* ── Set up ── */}
-      <div className="hx-section">How do you set up NEXUS?</div>
-      <Row icon={ICONS.key} title="API Keys" sub="Add, replace or delete your keys" onClick={() => onOpen("keys")} />
-      <Row icon={ICONS.chart} title="Memory" sub="What I remember, and what I send to the cloud" onClick={() => onOpen("memory")} />
-      <Row icon={ICONS.chart} title="Actions & Permissions" sub="What I may do to your files, the trash, and undo" onClick={() => onOpen("actions")} />
+      {/* ── Settings Navigation ── */}
+      <Row icon={ICONS.key} title="API Keys & Models" sub="Groq, Gemini & Providers" onClick={() => onOpen("keys")} />
+      <Row icon={ICONS.chart} title="Memory Core" sub="Vault & Cloud Recall" onClick={() => onOpen("memory")} />
+      <Row icon={ICONS.chart} title="Actions & Permissions" sub="Safety & Boundaries" onClick={() => onOpen("actions")} />
+      <Row icon={ICONS.plug} title="Device Links" sub="Laptop Mesh" onClick={() => onOpen("device-links")} />
+      <Row icon={ICONS.chart} title="Activity Manager" sub="Daily and weekly app usage" onClick={() => onOpen("activity")} />
       <Row
         icon={ICONS.orb}
-        title="Customize Voice Orb"
-        sub="3D particle patterns for thinking, speaking and listening"
+        title="Voice Orb 3D Studio"
+        sub="3D Morphologies"
         onClick={() => {
-          import("@tauri-apps/api/core").then(({ invoke }) => {
-            invoke("open_orb_studio_window").catch(() => {});
-          });
+          const isTauri = typeof (window as any).__TAURI_INTERNALS__ !== "undefined" && !(window as any).__TAURI_DEV_STANDALONE__;
+          if (isTauri) {
+            import("@tauri-apps/api/core").then(({ invoke }) => {
+              invoke("open_orb_studio_window").catch(() => {});
+            });
+          } else {
+            onOpen("display");
+          }
         }}
       />
-      <Row icon={ICONS.audio} title="Audio" sub="Voice, volume, wake word and speech" onClick={() => onOpen("audio")} />
-      <Row icon={ICONS.display} title="Display" sub="Orb position, size, colour and 3D studio" onClick={() => onOpen("display")} />
-      <Row icon={ICONS.plug} title="MCP" sub="MCP servers, developer tools and bridges" onClick={() => onOpen("connections")} />
-      <Row icon={ICONS.advanced} title="Advanced" sub="Sign-in credentials and vision settings" onClick={() => onOpen("advanced")} />
+      <Row icon={ICONS.audio} title="Audio & Personas" sub="Voices & Earcons" onClick={() => onOpen("audio")} />
+      <Row icon={ICONS.display} title="Display & Position" sub="Notch & Aura" onClick={() => onOpen("display")} />
+      <Row icon={ICONS.plug} title="MCP Integrations" sub="Tools & Bridges" onClick={() => onOpen("connections")} />
+      <Row icon={ICONS.advanced} title="Advanced" sub="Diagnostics & Auth" onClick={() => onOpen("advanced")} />
 
-      <div className="hx-section">Adjust the theme to your preferences</div>
       <Row
         icon={ICONS.theme}
-        title="Change Theme"
-        sub="Light mode or dark mode"
-        right={
-          <span className="hx-seg" role="group" aria-label="Theme">
-            {(["light", "dark"] as const).map((m) => (
-              <button key={m} className={`hx-seg-btn ${themeMode === m ? "hx-seg-btn--on" : ""}`} onClick={() => onTheme(m)}>
-                {m === "light" ? "Light" : "Dark"}
-              </button>
-            ))}
-          </span>
-        }
+        title="Appearance"
+        sub={themeMode === "dark" ? "Pitch Dark · Themes & FX" : "Pure White · Themes & FX"}
+        onClick={() => onOpen("appearance")}
       />
     </div>
   );

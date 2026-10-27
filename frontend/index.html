@@ -50,6 +50,27 @@
         font-size: 13px;
         color: var(--text-dim);
       }
+      .nav-links {
+        margin-top: 12px;
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+      }
+      .nav-link-pill {
+        padding: 6px 14px;
+        border-radius: 20px;
+        background: rgba(59, 130, 246, 0.18);
+        border: 1px solid rgba(59, 130, 246, 0.4);
+        color: #93c5fd;
+        text-decoration: none;
+        font-size: 12px;
+        font-weight: 500;
+        transition: all 0.15s ease;
+      }
+      .nav-link-pill:hover {
+        background: rgba(59, 130, 246, 0.3);
+        transform: translateY(-1px);
+      }
       .stage-viewport {
         position: relative;
         width: 100%;
@@ -184,6 +205,10 @@
     <header>
       <h1>NEXUS Voice Orb Playground</h1>
       <p>Interactive local preview for WebGL particle states & audio reactivity</p>
+      <div class="nav-links">
+        <a class="nav-link-pill" href="/settings.html">⚡ Open Command Hub</a>
+        <a class="nav-link-pill" href="/sidebar.html">🪟 Unified Sidebar</a>
+      </div>
     </header>
 
     <div class="stage-viewport">

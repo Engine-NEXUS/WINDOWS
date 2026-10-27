@@ -2,26 +2,18 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   ageLabel,
-  groupRows,
   keyLabel,
   sourceLabel,
   type EgressEntry,
-  activitySummary,
-  ageLabel as ageLabelFn,
   categoryLabel,
   fmtDays,
   fmtSlotTime,
-  leaveBySummary,
-  mailSummary,
   selftestSummary,
-  whatsappSummary,
+  describeCorrection,
+  routineUse,
   type MailRow,
   type PersonRow,
   type WhatsappSelfTest,
-  describeCorrection,
-  describePending,
-  routineUse,
-  stepsLine,
   type CorrectionRow,
   type PendingRow,
   type RoutinesView,
@@ -30,13 +22,12 @@ import {
   type MemoryStatus,
   type TimetableSlot,
 } from "./memoryModel";
+import { SwitchCard } from "../../theme/OptionCard";
 
-/**
- * Memory page: what NEXUS remembers (with where each item came from), what
- * was sent to cloud models in the last 7 days, and the name-redaction switch.
- * All data lives on this PC; nothing here talks to the network.
- */
+type MemoryTab = "privacy" | "facts" | "people" | "egress";
+
 export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFlag, on: boolean) => void }) {
+  const [activeTab, setActiveTab] = useState<MemoryTab>("privacy");
   const [status, setStatus] = useState<MemoryStatus | null>(null);
   const [rows, setRows] = useState<MemoryRow[]>([]);
   const [egress, setEgress] = useState<EgressEntry[]>([]);
@@ -48,11 +39,12 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
   const [mail, setMail] = useState<MailRow[]>([]);
   const [people, setPeople] = useState<PersonRow[]>([]);
   const [selftest, setSelftest] = useState<WhatsappSelfTest | null>(null);
-  const [hasRoutesKey, setHasRoutesKey] = useState(false);
-  const [showEgress, setShowEgress] = useState(false);
+  const [_hasRoutesKey, setHasRoutesKey] = useState(false);
   const [confirm, setConfirm] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [factFilter, setFactFilter] = useState<string>("all");
+  const [searchQuery, setSearchQuery] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -82,12 +74,12 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
       setError(String(e));
     }
   }, []);
+
   useEffect(() => {
     void load();
   }, [load]);
 
   const now = Math.floor(Date.now() / 1000);
-  const groups = useMemo(() => groupRows(rows), [rows]);
 
   const forget = async (row: MemoryRow) => {
     setBusy(true);
@@ -103,8 +95,6 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
     }
   };
 
-  // Same read-modify-write the rest of the hub uses: the form never holds
-  // API keys, so saving blank keys neither wipes nor resurrects them.
   const setFlag = async (flag: MemoryFlag, on: boolean) => {
     setBusy(true);
     setError(null);
@@ -113,7 +103,6 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
       await invoke("save_settings", {
         settings: { ...s, [flag]: on, groqApiKey: "", geminiApiKey: "", cerebrasApiKey: "" },
       });
-      // Keep the hub's own settings form in step so its Save cannot revert this.
       onFlagChanged?.(flag, on);
       await load();
     } catch (e) {
@@ -177,10 +166,11 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
   };
 
   const saveRoutine = async () => {
+    if (!routineName.trim()) return;
     setBusy(true);
     setError(null);
     try {
-      await invoke("memcore_routine_save", { name: routineName });
+      await invoke("memcore_routine_save", { name: routineName.trim() });
       setRoutineName("");
       await load();
     } catch (e) {
@@ -245,474 +235,565 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
     }
   };
 
-  const renderRow = (r: MemoryRow) => (
-    <div className="hx-card hx-key" key={r.id}>
-      <div className="hx-key-head">
-        <div>
-          <div className="hx-key-title">{keyLabel(r)}</div>
-          <div className="hx-key-sub">
-            {sourceLabel(r.source)} · {ageLabel(now, r.created)}
-            {r.tier === "fact" && r.trust !== "user_said" ? ` · last used ${ageLabel(now, r.last_seen)}` : ""}
-          </div>
-        </div>
-        {r.pinned && <span className="hx-pill hx-pill--on">Pinned</span>}
-      </div>
-      <div className="hx-key-mask">{r.value}</div>
-      {confirm === `${r.id}` ? (
-        <div className="hx-row-actions">
-          <span className="hx-confirm">Forget this?</span>
-          <button className="hx-btn" onClick={() => setConfirm(null)}>
-            No
-          </button>
-          <button className="hx-btn hx-btn--danger" disabled={busy} onClick={() => forget(r)}>
-            Forget
-          </button>
-        </div>
-      ) : (
-        <div className="hx-row-actions">
-          <button className="hx-btn hx-btn--danger-ghost" onClick={() => setConfirm(`${r.id}`)}>
-            Forget
-          </button>
-        </div>
-      )}
-    </div>
-  );
+  // Filtered facts list
+  const filteredRows = useMemo(() => {
+    return rows.filter((r) => {
+      if (factFilter === "pinned" && !r.pinned) return false;
+      if (factFilter === "fact" && r.tier !== "fact") return false;
+      if (factFilter === "profile" && r.tier !== "profile") return false;
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        return (
+          r.key.toLowerCase().includes(q) ||
+          r.value.toLowerCase().includes(q) ||
+          (r.source && r.source.toLowerCase().includes(q))
+        );
+      }
+      return true;
+    });
+  }, [rows, factFilter, searchQuery]);
 
   return (
     <div className="hx-page">
-      <div className="hx-note">
-        Everything below is stored only on this PC
-        {status?.encrypted ? ", encrypted with a key held in Windows Credential Manager." : ", but NOT encrypted: the Windows key store could not hold the encryption key."}{" "}
-        Say “forget everything” to erase it all.
+      {error && <div className="hx-error" onClick={() => setError(null)}>{error}</div>}
+
+      {/* ── KPI Metrics Bento ── */}
+      <div className="hx-metrics-bento">
+        <div className="hx-metric-card">
+          <div className="hx-metric-head">
+            <span className="hx-metric-lbl">Facts Stored</span>
+            <svg className="hx-metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7M9 21h6" />
+            </svg>
+          </div>
+          <div className="hx-metric-val">{status ? status.facts : "–"}</div>
+        </div>
+
+        <div className="hx-metric-card">
+          <div className="hx-metric-head">
+            <span className="hx-metric-lbl">Episodes</span>
+            <svg className="hx-metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </svg>
+          </div>
+          <div className="hx-metric-val">{status ? status.episodes : "–"}</div>
+        </div>
+
+        <div className="hx-metric-card">
+          <div className="hx-metric-head">
+            <span className="hx-metric-lbl">Cloud Egress (7d)</span>
+            <svg className="hx-metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+            </svg>
+          </div>
+          <div className="hx-metric-val">{status ? status.egress_7d : "–"}</div>
+        </div>
+
+        <div className="hx-metric-card">
+          <div className="hx-metric-head">
+            <span className="hx-metric-lbl">Local Security</span>
+            <svg className="hx-metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+          </div>
+          <div className="hx-metric-val" style={{ fontSize: "14px", color: status?.encrypted ? "#34d399" : "#fbbf24" }}>
+            {status?.encrypted ? "Encrypted" : "Local Plain"}
+          </div>
+        </div>
       </div>
-      {error && <div className="hx-error">{error}</div>}
 
-      {status && !status.enabled && (
-        <div className="hx-card hx-key">
-          <div className="hx-key-title">Memory Core is off</div>
-          <div className="hx-key-sub">Set memcore to true in settings.json to turn it on. Nothing is stored in the new store while it is off.</div>
-        </div>
-      )}
+      {/* ── Segmented Navigation ── */}
+      <div className="hx-tab-nav">
+        <button
+          type="button"
+          className={`hx-tab-btn ${activeTab === "privacy" ? "is-active" : ""}`}
+          onClick={() => setActiveTab("privacy")}
+        >
+          🛡️ Privacy & AI
+        </button>
+        <button
+          type="button"
+          className={`hx-tab-btn ${activeTab === "facts" ? "is-active" : ""}`}
+          onClick={() => setActiveTab("facts")}
+        >
+          🧠 Facts Vault ({rows.length})
+        </button>
+        <button
+          type="button"
+          className={`hx-tab-btn ${activeTab === "people" ? "is-active" : ""}`}
+          onClick={() => setActiveTab("people")}
+        >
+          👥 People & Agenda ({people.length + slots.length})
+        </button>
+        <button
+          type="button"
+          className={`hx-tab-btn ${activeTab === "egress" ? "is-active" : ""}`}
+          onClick={() => setActiveTab("egress")}
+        >
+          🌐 Cloud Egress ({egress.length})
+        </button>
+      </div>
 
-      {status && (
-        <div className="hx-card hx-key">
-          <div className="hx-key-head">
-            <div>
-              <div className="hx-key-title">Summary</div>
-              <div className="hx-key-sub">
-                {status.facts} facts · {status.episodes} conversations · {status.egress_7d} cloud sends in 7 days
+      {/* ── TAB 1: PRIVACY & INTELLIGENCE ── */}
+      {activeTab === "privacy" && status && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+          {/* Anonymize Names */}
+          <SwitchCard
+            icon="🛡️"
+            title="Anonymize Names"
+            desc="Replaces real names with tokens before cloud sends."
+            checked={status.redact_names}
+            disabled={busy}
+            onChange={(c) => setFlag("memcoreRedactNames", c)}
+          />
+
+          {/* Context & Work Awareness */}
+          <SwitchCard
+            icon="💻"
+            title="Workspace Context"
+            desc="Resumes IDE windows where you left off."
+            checked={status.activity}
+            disabled={busy}
+            onChange={(c) => setFlag("memcoreActivity", c)}
+            extraAction={
+              status.resume_points > 0 ? (
+                <button
+                  className="hx-btn hx-btn--tiny hx-btn--danger-ghost"
+                  style={{ marginTop: 2 }}
+                  disabled={busy}
+                  onClick={clearActivity}
+                >
+                  Clear Points
+                </button>
+              ) : null
+            }
+          />
+
+          {/* Morning Briefing */}
+          <SwitchCard
+            icon="🌅"
+            title="Daily Morning Briefing"
+            desc="Brief morning summary of tasks and commits."
+            checked={status.briefing}
+            disabled={busy}
+            onChange={(c) => setFlag("memcoreBriefing", c)}
+          />
+
+          {/* Inbox Priority Guard */}
+          <SwitchCard
+            icon="📬"
+            title="Priority Inbox Monitor"
+            desc="Monitors Gmail for exams, PRs, and database alerts."
+            checked={status.mail}
+            disabled={busy}
+            onChange={(c) => setFlag("memcoreMail", c)}
+          />
+
+          {/* Plain-word Email Alerts */}
+          <SwitchCard
+            icon="🗣️"
+            title="Say Important Emails in Plain Words"
+            desc="Off by default. When on, emails the on-device rules can't phrase are re-worded by a free cloud model (sender and subject only). GitHub, database, hackathon and exam notices are always done on your device."
+            checked={status.mail_plain === true}
+            disabled={busy}
+            onChange={(c) => setFlag("memcoreMailPlain", c)}
+          />
+
+          {/* GitHub Actions Build Watcher */}
+          <SwitchCard
+            icon="🔨"
+            title="Tell me when builds fail"
+            desc="Watches the latest GitHub Actions runs of the repos you push to; says it once when a build fails and once when it is green again. Needs your GitHub sign-in."
+            checked={status.github_watch !== false}
+            disabled={busy}
+            onChange={(c) => setFlag("memcoreGithubWatch", c)}
+          />
+
+          {/* Deploy Watcher */}
+          <SwitchCard
+            icon="🚀"
+            title="Tell me when deploys fail"
+            desc="Watches the latest production deploy of your Vercel, Render and Netlify projects; says it once when one fails and once when it is live again. Needs the token you saved in Connections."
+            checked={status.deploy_watch !== false}
+            disabled={busy}
+            onChange={(c) => setFlag("memcoreDeployWatch", c)}
+          />
+
+          {/* WhatsApp Priority Voice Guard */}
+          <SwitchCard
+            icon="💬"
+            title="WhatsApp Priority Guard"
+            desc="Voice alerts for VIP contacts only."
+            checked={!!status.whatsapp}
+            disabled={busy}
+            onChange={(c) => setFlag("memcoreWhatsapp", c)}
+            extraAction={
+              <div style={{ display: "flex", gap: "6px", alignItems: "center", marginTop: 4 }}>
+                <button className="hx-btn hx-btn--tiny" disabled={busy} onClick={runSelftest}>
+                  Test Link
+                </button>
+                {selftest && <span className="hx-fact-meta">{selftestSummary(selftest)}</span>}
               </div>
-            </div>
-            <span className={`hx-pill ${status.encrypted ? "hx-pill--on" : ""}`}>
-              {status.encrypted ? "Encrypted" : "Plain file"}
-            </span>
-          </div>
-          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
-            <span className="hx-key-sub">Hide people's names from cloud models (shown to them as “Person A”)</span>
-            <input
-              type="checkbox"
-              checked={status.redact_names}
-              disabled={busy}
-              onChange={(e) => setFlag("memcoreRedactNames", e.target.checked)}
-            />
-          </label>
-          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
-            <span className="hx-key-sub">Remember which window I was working in, so I can say where you left off</span>
-            <input
-              type="checkbox"
-              checked={status.activity}
-              disabled={busy}
-              onChange={(e) => setFlag("memcoreActivity", e.target.checked)}
-            />
-          </label>
-          <div className="hx-key-sub">{activitySummary(status)}</div>
-          {status.resume_points > 0 && (
-            <div className="hx-row-actions">
-              <button className="hx-btn hx-btn--danger-ghost" disabled={busy} onClick={clearActivity}>
-                Clear activity history
-              </button>
-            </div>
-          )}
-          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
-            <span className="hx-key-sub">Watch my inbox for important mail (exams, hackathons, GitHub, database notices) and read my calendar</span>
-            <input
-              type="checkbox"
-              checked={status.mail}
-              disabled={busy}
-              onChange={(e) => setFlag("memcoreMail", e.target.checked)}
-            />
-          </label>
-          <div className="hx-key-sub">{mailSummary(status)}</div>
-          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
-            <span className="hx-key-sub">Tell me when a priority person messages me on WhatsApp (read-only; never marks chats read)</span>
-            <input
-              type="checkbox"
-              checked={!!status.whatsapp}
-              disabled={busy}
-              onChange={(e) => setFlag("memcoreWhatsapp", e.target.checked)}
-            />
-          </label>
-          <div className="hx-key-sub">{whatsappSummary(status)}</div>
-          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
-            <span className="hx-key-sub">Speak message text aloud (the text goes to the cloud voice service; the sidebar card stays on this PC)</span>
-            <input
-              type="checkbox"
-              checked={!!status.whatsapp_speak}
-              disabled={busy}
-              onChange={(e) => setFlag("memcoreWhatsappSpeak", e.target.checked)}
-            />
-          </label>
-          <div className="hx-row-actions">
-            <button className="hx-btn" disabled={busy} onClick={runSelftest}>
-              Check WhatsApp connection
-            </button>
-          </div>
-          {selftest && <div className="hx-key-sub">{selftestSummary(selftest)}</div>}
-          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
-            <span className="hx-key-sub">Tell me when to leave for calendar events that have an address (uses live traffic)</span>
-            <input
-              type="checkbox"
-              checked={status.leave_by !== false}
-              disabled={busy}
-              onChange={(e) => setFlag("memcoreLeaveBy", e.target.checked)}
-            />
-          </label>
-          <div className="hx-key-sub">{leaveBySummary(status, hasRoutesKey)}</div>
-          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
-            <span className="hx-key-sub">Remind me at my timetable times (“It's time for DSA. Shall I start?”)</span>
-            <input
-              type="checkbox"
-              checked={status.timetable}
-              disabled={busy}
-              onChange={(e) => setFlag("memcoreTimetable", e.target.checked)}
-            />
-          </label>
-          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
-            <span className="hx-key-sub">
-              Always tell cloud assistants what you asked me to remember (health, money and ID topics are never
-              included automatically)
-            </span>
-            <input
-              type="checkbox"
-              checked={status.profile !== false}
-              disabled={busy}
-              onChange={(e) => setFlag("memcoreProfile", e.target.checked)}
-            />
-          </label>
-          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
-            <span className="hx-key-sub">
-              Notice commands I see you repeat together, and offer to save them as one phrase (never without asking)
-            </span>
-            <input
-              type="checkbox"
-              checked={status.routines !== false}
-              disabled={busy}
-              onChange={(e) => setFlag("memcoreRoutines", e.target.checked)}
-            />
-          </label>
-          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
-            <span className="hx-key-sub">
-              Let a free cloud AI read a redacted copy of recent cloud conversations (never commands handled on this PC)
-              and suggest things to remember. Off by default. Nothing is saved until you approve it below, and each
-              request appears in “Sent to cloud models”.
-            </span>
-            <input
-              type="checkbox"
-              checked={status.review === true}
-              disabled={busy}
-              onChange={(e) => setFlag("memcoreReview", e.target.checked)}
-            />
-          </label>
-          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
-            <span className="hx-key-sub">Say a short “where you left off” once a day, a little after startup</span>
-            <input
-              type="checkbox"
-              checked={status.briefing}
-              disabled={busy}
-              onChange={(e) => setFlag("memcoreBriefing", e.target.checked)}
-            />
-          </label>
-          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
-            <span className="hx-key-sub">
-              Remember which apps, folders and browser windows are open, and offer to reopen them after a restart
-            </span>
-            <input
-              type="checkbox"
-              checked={status.session !== false}
-              disabled={busy}
-              onChange={(e) => setFlag("memcoreSession", e.target.checked)}
-            />
-          </label>
-          <label className="hx-row-actions" style={{ justifyContent: "space-between" }}>
-            <span className="hx-key-sub">Check my connections at startup and mention anything that is broken</span>
-            <input
-              type="checkbox"
-              checked={status.health !== false}
-              disabled={busy}
-              onChange={(e) => setFlag("memcoreHealth", e.target.checked)}
-            />
-          </label>
+            }
+          />
+
+          {/* Live Traffic Event Departure */}
+          <SwitchCard
+            icon="🚗"
+            title="Travel Departure Alerts"
+            desc="Live traffic warnings for upcoming events."
+            checked={status.leave_by !== false}
+            disabled={busy}
+            onChange={(c) => setFlag("memcoreLeaveBy", c)}
+          />
+
+          {/* Timetable Reminders */}
+          <SwitchCard
+            icon="⏰"
+            title="Timetable Reminders"
+            desc="Starts scheduled focus blocks proactively."
+            checked={status.timetable}
+            disabled={busy}
+            onChange={(c) => setFlag("memcoreTimetable", c)}
+          />
+
+          {/* Adaptive Macros */}
+          <SwitchCard
+            icon="⚡"
+            title="Adaptive Voice Macros"
+            desc="Auto-detects repeated multi-step commands."
+            checked={status.routines !== false}
+            disabled={busy}
+            onChange={(c) => setFlag("memcoreRoutines", c)}
+          />
+
+          {/* Session Restore */}
+          <SwitchCard
+            icon="🔄"
+            title="Session Restore"
+            desc="Restores workspace tabs and apps after restart."
+            checked={status.session !== false}
+            disabled={busy}
+            onChange={(c) => setFlag("memcoreSession", c)}
+          />
+
+          {/* System Health Probe */}
+          <SwitchCard
+            icon="🩺"
+            title="System Health Check"
+            desc="Self-tests audio and network ports on launch."
+            checked={status.health !== false}
+            disabled={busy}
+            onChange={(c) => setFlag("memcoreHealth", c)}
+          />
         </div>
       )}
 
-      <div className="hx-section">Important mail ({mail.length})</div>
-      {mail.length === 0 && (
-        <div className="hx-key-sub">
-          Nothing filed. Only sender, subject and Gmail's own short preview are ever read — never the full message.
-        </div>
-      )}
-      {mail.map((m) => (
-        <div className="hx-card hx-key" key={m.key}>
-          <div className="hx-key-head">
-            <div>
-              <div className="hx-key-title">{m.subject || "(no subject)"}</div>
-              <div className="hx-key-sub">
-                {m.sender} · {ageLabelFn(Math.floor(Date.now() / 1000), Math.floor(m.ts_ms / 1000))}
+      {/* ── TAB 2: FACTS VAULT ── */}
+      {activeTab === "facts" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          {/* Search & Filter Bar */}
+          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+            <input
+              type="text"
+              className="hx-input"
+              placeholder="Search memories, facts, preferences..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              style={{ flex: 1 }}
+            />
+            <div className="hx-category-tabs" style={{ margin: 0 }}>
+              {(["all", "pinned", "fact", "profile"] as const).map((f) => (
+                <button
+                  key={f}
+                  type="button"
+                  className={`hx-cat-btn ${factFilter === f ? "is-active" : ""}`}
+                  onClick={() => setFactFilter(f)}
+                >
+                  {f === "all" ? "All" : f === "pinned" ? "Pinned" : f === "fact" ? "Facts" : "Profile"}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Pending Facts for Approval */}
+          {pending.length > 0 && (
+            <div className="hx-card" style={{ padding: 12, border: "1px solid #f2b859" }}>
+              <div className="hx-switch-title" style={{ color: "#f2b859" }}>
+                ⏳ Pending Review ({pending.length})
               </div>
-            </div>
-            <span className={`hx-pill ${m.urgency === "high" ? "hx-pill--on" : ""}`}>{categoryLabel(m.category)}</span>
-          </div>
-          <div className="hx-key-sub">Why: {m.reason}</div>
-          {confirm === `mail:${m.key}` ? (
-            <div className="hx-row-actions">
-              <span className="hx-confirm">Stop alerts from {m.email}?</span>
-              <button className="hx-btn" onClick={() => setConfirm(null)}>
-                No
-              </button>
-              <button className="hx-btn hx-btn--danger" disabled={busy} onClick={() => muteSender(m.email)}>
-                Mute
-              </button>
-            </div>
-          ) : (
-            <div className="hx-row-actions">
-              <button className="hx-btn hx-btn--danger-ghost" onClick={() => setConfirm(`mail:${m.key}`)}>
-                Not important
-              </button>
-            </div>
-          )}
-        </div>
-      ))}
-
-      <div className="hx-section">WhatsApp priority people ({people.length})</div>
-      {people.length === 0 && (
-        <div className="hx-key-sub">
-          Nobody learned yet. NEXUS learns from how often you message each other and how fast you reply — never from what is said.
-        </div>
-      )}
-      {people.slice(0, 15).map((p) => (
-        <div className="hx-card hx-key" key={p.jid}>
-          <div className="hx-key-head">
-            <div>
-              <div className="hx-key-title">{p.name}</div>
-              <div className="hx-key-sub">
-                Score {p.score} · {p.why}
-              </div>
-            </div>
-            {p.vip && <span className="hx-pill hx-pill--on">VIP</span>}
-            {p.muted && <span className="hx-pill">Muted</span>}
-          </div>
-          <div className="hx-row-actions">
-            <button className="hx-btn" disabled={busy} onClick={() => flagPerson(p.jid, "vip", !p.vip)}>
-              {p.vip ? "Remove VIP" : "Make VIP"}
-            </button>
-            <button className="hx-btn hx-btn--danger-ghost" disabled={busy} onClick={() => flagPerson(p.jid, "mute", !p.muted)}>
-              {p.muted ? "Unmute" : "Mute"}
-            </button>
-          </div>
-        </div>
-      ))}
-
-      {(pending.length > 0 || status?.review === true) && (
-        <>
-          <div className="hx-section">Waiting for your OK ({pending.length})</div>
-          <div className="hx-key-sub">
-            Suggested by the background review. Approving stores it as something you told me; refusing means it is not
-            suggested again. Suggestions you ignore disappear after two weeks.
-          </div>
-          {pending.length === 0 && <div className="hx-key-sub">Nothing waiting.</div>}
-          {pending.map((p) => (
-            <div className="hx-card hx-key" key={p.id}>
-              <div className="hx-key-head">
-                <div>
-                  <div className="hx-key-title">{describePending(p)}</div>
-                  {p.reason && <div className="hx-key-sub">{p.reason}</div>}
+              <div className="hx-switch-sub">Suggested from recent interactions. Choose whether to store or discard.</div>
+              {pending.map((p) => (
+                <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>{p.key}</div>
+                    <div className="hx-switch-sub">{p.value}</div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button className="hx-btn hx-btn--tiny hx-btn--primary" onClick={() => decide(p.id, true)}>Approve</button>
+                    <button className="hx-btn hx-btn--tiny hx-btn--danger-ghost" onClick={() => decide(p.id, false)}>Discard</button>
+                  </div>
                 </div>
+              ))}
+            </div>
+          )}
+
+          {/* Facts List */}
+          {filteredRows.length === 0 && (
+            <div className="hx-card" style={{ padding: 24, textAlign: "center", color: "rgba(255, 255, 255, 0.45)" }}>
+              No facts match your query. NEXUS learns your habits and projects automatically as you speak.
+            </div>
+          )}
+
+          {filteredRows.map((r) => (
+            <div className="hx-fact-card" key={r.id}>
+              <div className="hx-fact-head">
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span className="hx-fact-key">{keyLabel(r)}</span>
+                  {r.pinned && <span className="hx-pill hx-pill--on">Pinned</span>}
+                  <span className="hx-badge" style={{ background: "rgba(255, 255, 255, 0.08)" }}>{r.tier}</span>
+                </div>
+                {confirm === `${r.id}` ? (
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <span style={{ fontSize: 11, color: "#ff5a52" }}>Erase?</span>
+                    <button className="hx-btn hx-btn--tiny" onClick={() => setConfirm(null)}>Cancel</button>
+                    <button className="hx-btn hx-btn--tiny hx-btn--danger" disabled={busy} onClick={() => forget(r)}>
+                      Yes, Forget
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    className="hx-btn hx-btn--tiny hx-btn--danger-ghost"
+                    onClick={() => setConfirm(`${r.id}`)}
+                    title="Remove this memory"
+                  >
+                    Forget
+                  </button>
+                )}
               </div>
-              <div className="hx-row-actions">
-                <button className="hx-btn" disabled={busy} onClick={() => decide(p.id, false)}>
-                  No
-                </button>
-                <button className="hx-btn" disabled={busy} onClick={() => decide(p.id, true)}>
-                  Yes, remember
-                </button>
+              <div className="hx-fact-val">{r.value}</div>
+              <div className="hx-fact-meta">
+                <span>{sourceLabel(r.source)}</span>
+                <span>•</span>
+                <span>Added {ageLabel(now, r.created)}</span>
+                {r.uses ? <span>• Used {r.uses} times</span> : null}
               </div>
             </div>
           ))}
-        </>
-      )}
-
-      <div className="hx-section">Routines ({routinesView.routines.length})</div>
-      {status?.curator_note && <div className="hx-key-sub">{status.curator_note}</div>}
-      <div className="hx-key-sub">
-        Say a routine’s name and I run its commands one after another. Only opening apps, sites and music is ever
-        saved this way. Say “delete the … routine” or remove it here.
-      </div>
-      {routinesView.suggestion && (
-        <div className="hx-card hx-key">
-          <div className="hx-key-head">
-            <div>
-              <div className="hx-key-title">I noticed a pattern</div>
-              <div className="hx-key-sub">You often {routinesView.suggestion.text}. Give it a name to make it one phrase.</div>
-            </div>
-          </div>
-          <div className="hx-row-actions">
-            <input
-              type="text"
-              value={routineName}
-              placeholder="e.g. study mode"
-              maxLength={30}
-              onChange={(e) => setRoutineName(e.target.value)}
-              style={{ flex: 1 }}
-            />
-            <button className="hx-btn" disabled={busy || routineName.trim().length < 3} onClick={saveRoutine}>
-              Save
-            </button>
-          </div>
         </div>
       )}
-      {routinesView.routines.length === 0 && !routinesView.suggestion && (
-        <div className="hx-key-sub">None yet. When I notice commands you repeat together I will offer one.</div>
-      )}
-      {routinesView.routines.map((r) => (
-        <div className="hx-card hx-key" key={r.name}>
-          <div className="hx-key-head">
+
+      {/* ── TAB 3: PEOPLE & TIMETABLE ── */}
+      {activeTab === "people" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+          {/* Priority People */}
+          <div>
+            <div className="hx-section-title">Priority People & Contacts ({people.length})</div>
+            <div className="hx-section-desc">Contacts whose messages trigger voice alerts and executive summaries.</div>
+            {people.length === 0 ? (
+              <div className="hx-card" style={{ padding: 16, color: "rgba(255, 255, 255, 0.45)", fontSize: 12 }}>
+                No priority people detected yet. People are indexed automatically when you frequently collaborate with them.
+              </div>
+            ) : (
+              <div className="hx-people-grid" style={{ marginTop: 8 }}>
+                {people.map((p) => (
+                  <div className="hx-person-card" key={p.jid}>
+                    <div className="hx-person-top">
+                      <div className="hx-person-avatar">{p.name ? p.name.charAt(0).toUpperCase() : "P"}</div>
+                      <div className="hx-person-info">
+                        <div className="hx-person-name">{p.name || p.jid}</div>
+                        <div className="hx-person-role">{p.why || "Collaborator"}</div>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
+                      <span className="hx-fact-meta">Affinity: {p.score}%</span>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          className={`hx-btn hx-btn--tiny ${p.vip ? "hx-btn--primary" : ""}`}
+                          onClick={() => flagPerson(p.jid, "vip", !p.vip)}
+                        >
+                          {p.vip ? "★ VIP" : "☆ Mark VIP"}
+                        </button>
+                        <button
+                          className={`hx-btn hx-btn--tiny ${p.muted ? "hx-btn--danger" : ""}`}
+                          onClick={() => flagPerson(p.jid, "mute", !p.muted)}
+                        >
+                          {p.muted ? "Unmute" : "Mute"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Important Mail */}
+          <div>
+            <div className="hx-section-title">Important Emails ({mail.length})</div>
+            <div className="hx-section-desc">Critical notifications from GitHub, databases, and deadlines filed for 7 days.</div>
+            {mail.length === 0 ? (
+              <div className="hx-card" style={{ padding: 16, color: "rgba(255, 255, 255, 0.45)", fontSize: 12 }}>
+                No important emails filed. Senders and short snippets are analyzed only when new mail arrives.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                {mail.map((m) => (
+                  <div className="hx-card" key={m.key} style={{ padding: "10px 14px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>{m.subject || "(no subject)"}</span>
+                        <span className="hx-pill hx-pill--on" style={{ fontSize: 9.5 }}>{categoryLabel(m.category)}</span>
+                      </div>
+                      <button
+                        className="hx-btn hx-btn--tiny hx-btn--danger-ghost"
+                        onClick={() => muteSender(m.email)}
+                        title={`Mute notifications from ${m.email}`}
+                      >
+                        Mute Sender
+                      </button>
+                    </div>
+                    <div className="hx-fact-meta" style={{ marginTop: 4 }}>
+                      From: {m.sender} ({m.email}) • {ageLabel(now, Math.floor(m.ts_ms / 1000))}
+                    </div>
+                    <div style={{ fontSize: 12, color: "rgba(255, 255, 255, 0.7)", marginTop: 4 }}>
+                      {m.snippet}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Timetable Agenda */}
+          <div>
+            <div className="hx-section-title">Timetable Agenda Slots ({slots.length})</div>
+            <div className="hx-section-desc">Recurring schedules NEXUS watches to proactively prepare workspaces.</div>
+            {slots.length === 0 ? (
+              <div className="hx-card" style={{ padding: 16, color: "rgba(255, 255, 255, 0.45)", fontSize: 12 }}>
+                No agenda slots created. Say "remind me every day at 10 AM for standup" to create one.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                {slots.map((s) => (
+                  <div className="hx-card" key={s.id} style={{ padding: "10px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>{s.title}</div>
+                      <div className="hx-fact-meta" style={{ marginTop: 2 }}>
+                        ⏰ {fmtSlotTime(s)} • {fmtDays(s.days)}
+                      </div>
+                    </div>
+                    <button
+                      className="hx-btn hx-btn--tiny hx-btn--danger-ghost"
+                      onClick={() => removeSlot(s.id)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Voice Routines */}
+          <div>
+            <div className="hx-section-title">Repeating Voice Macros ({routinesView.routines.length})</div>
+            <div className="hx-section-desc">Chains of actions executed from a single spoken phrase.</div>
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <input
+                className="hx-input"
+                placeholder="New routine trigger phrase, e.g. Start Work"
+                value={routineName}
+                onChange={(e) => setRoutineName(e.target.value)}
+                style={{ flex: 1 }}
+              />
+              <button
+                className="hx-btn hx-btn--primary"
+                disabled={busy || !routineName.trim()}
+                onClick={saveRoutine}
+              >
+                Save Routine
+              </button>
+            </div>
+            {routinesView.routines.length === 0 ? (
+              <div className="hx-card" style={{ padding: 16, color: "rgba(255, 255, 255, 0.45)", fontSize: 12, marginTop: 8 }}>
+                No custom voice macros saved yet.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                {routinesView.routines.map((r) => (
+                  <div className="hx-card" key={r.name} style={{ padding: "10px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>"{r.name}"</div>
+                      <div className="hx-fact-meta">{routineUse(r)} • {r.steps.join(" → ")}</div>
+                    </div>
+                    <button
+                      className="hx-btn hx-btn--tiny hx-btn--danger-ghost"
+                      onClick={() => removeRoutine(r.name)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Voice Corrections */}
+          {corrections.length > 0 && (
             <div>
-              <div className="hx-key-title">{r.name}</div>
-              <div className="hx-key-sub">
-                {stepsLine(r.steps)} · {routineUse(r)}
+              <div className="hx-section-title">Voice Hearing Corrections ({corrections.length})</div>
+              <div className="hx-section-desc">Phonetic mishearings automatically adapted from your clarifications.</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                {corrections.map((c) => (
+                  <div className="hx-card" key={c.heard} style={{ padding: "10px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>{describeCorrection(c)}</div>
+                      <div className="hx-fact-meta">Last seen {ageLabel(now, Math.floor(c.last_seen / 1000))}</div>
+                    </div>
+                    <button
+                      className="hx-btn hx-btn--tiny hx-btn--danger-ghost"
+                      onClick={() => removeCorrection(c.heard)}
+                    >
+                      Forget
+                    </button>
+                  </div>
+                ))}
               </div>
             </div>
-          </div>
-          {confirm === `routine:${r.name}` ? (
-            <div className="hx-row-actions">
-              <span className="hx-confirm">Delete this routine?</span>
-              <button className="hx-btn" onClick={() => setConfirm(null)}>
-                No
-              </button>
-              <button className="hx-btn hx-btn--danger" disabled={busy} onClick={() => removeRoutine(r.name)}>
-                Delete
-              </button>
-            </div>
-          ) : (
-            <div className="hx-row-actions">
-              <button className="hx-btn hx-btn--danger-ghost" onClick={() => setConfirm(`routine:${r.name}`)}>
-                Delete
-              </button>
-            </div>
           )}
-        </div>
-      ))}
-
-      <div className="hx-section">Words I learned to fix ({corrections.length})</div>
-      <div className="hx-key-sub">
-        When I mishear a command and you correct me (“no, I said open brave”) or repeat it with one word changed, I
-        note it. After it happens on two separate occasions I apply it to later commands. Remove any you don’t want.
-      </div>
-      {corrections.length === 0 && <div className="hx-key-sub">Nothing yet.</div>}
-      {corrections.map((c) => (
-        <div className="hx-card hx-key" key={`${c.heard}->${c.meant}`}>
-          <div className="hx-key-head">
-            <div className="hx-key-sub">{describeCorrection(c)}</div>
-          </div>
-          {confirm === `fix:${c.heard}` ? (
-            <div className="hx-row-actions">
-              <span className="hx-confirm">Forget this correction?</span>
-              <button className="hx-btn" onClick={() => setConfirm(null)}>
-                No
-              </button>
-              <button className="hx-btn hx-btn--danger" disabled={busy} onClick={() => removeCorrection(c.heard)}>
-                Forget
-              </button>
-            </div>
-          ) : (
-            <div className="hx-row-actions">
-              <button className="hx-btn hx-btn--danger-ghost" onClick={() => setConfirm(`fix:${c.heard}`)}>
-                Forget
-              </button>
-            </div>
-          )}
-        </div>
-      ))}
-
-      <div className="hx-section">Timetable ({slots.length})</div>
-      {slots.length === 0 && (
-        <div className="hx-key-sub">
-          Empty. Show me a timetable picture on screen and say “add this to my timetable”, or copy it and say “add the
-          copied picture to my timetable”. You confirm before anything is saved.
         </div>
       )}
-      {slots.map((s) => (
-        <div className="hx-card hx-key" key={s.id}>
-          <div className="hx-key-head">
-            <div>
-              <div className="hx-key-title">{s.title}</div>
-              <div className="hx-key-sub">
-                {fmtDays(s.days)} · {fmtSlotTime(s)}
-                {s.section ? ` · ${s.section}` : ""}
-              </div>
-            </div>
-          </div>
-          {confirm === `slot:${s.id}` ? (
-            <div className="hx-row-actions">
-              <span className="hx-confirm">Remove this slot?</span>
-              <button className="hx-btn" onClick={() => setConfirm(null)}>
-                No
-              </button>
-              <button className="hx-btn hx-btn--danger" disabled={busy} onClick={() => removeSlot(s.id)}>
-                Remove
-              </button>
+
+      {/* ── TAB 4: CLOUD EGRESS TRANSPARENCY ── */}
+      {activeTab === "egress" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+
+          {egress.length === 0 ? (
+            <div className="hx-card" style={{ padding: 24, textAlign: "center", color: "rgba(255, 255, 255, 0.45)" }}>
+              No cloud transmissions in the last 7 days. Everything was resolved entirely on this machine.
             </div>
           ) : (
-            <div className="hx-row-actions">
-              <button className="hx-btn hx-btn--danger-ghost" onClick={() => setConfirm(`slot:${s.id}`)}>
-                Remove
-              </button>
-            </div>
+            egress.map((e, idx) => (
+              <div className="hx-card" key={idx} style={{ padding: "12px 14px", display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span className="hx-pill hx-pill--on" style={{ fontSize: 10 }}>{e.route}</span>
+                  <span className="hx-fact-meta">{ageLabel(now, Math.floor(e.ts / 1000))}</span>
+                </div>
+                <div style={{ fontSize: 12.5, fontWeight: 600, color: "#ffffff" }}>
+                  Request: <span style={{ fontWeight: 400, color: "rgba(255, 255, 255, 0.85)" }}>{e.request}</span>
+                </div>
+                {e.memory && (
+                  <div style={{ fontSize: 11, color: "rgba(255, 255, 255, 0.6)", background: "rgba(0, 0, 0, 0.2)", padding: "6px 8px", borderRadius: 6 }}>
+                    Attached Memory: {e.memory}
+                  </div>
+                )}
+              </div>
+            ))
           )}
         </div>
-      ))}
-
-      <div className="hx-section">You told me ({groups.told.length})</div>
-      {groups.told.length === 0 && <div className="hx-key-sub">Nothing yet. Say “remember that my dog is Bruno”.</div>}
-      {groups.told.map(renderRow)}
-
-      <div className="hx-section">I picked up ({groups.learned.length})</div>
-      {groups.learned.length === 0 && <div className="hx-key-sub">Nothing learned yet. Unused items fade away on their own.</div>}
-      {groups.learned.map(renderRow)}
-
-      <div className="hx-section">Recent conversations ({groups.episodes.length})</div>
-      {groups.episodes.slice(0, 10).map(renderRow)}
-
-      <div className="hx-section">Sent to cloud models (last 7 days)</div>
-      <div className="hx-row-actions">
-        <button className="hx-btn" onClick={() => setShowEgress((v) => !v)}>
-          {showEgress ? "Hide" : `Show ${egress.length} sends`}
-        </button>
-      </div>
-      {showEgress &&
-        egress.map((e, i) => (
-          <div className="hx-card hx-key" key={`${e.ts}-${i}`}>
-            <div className="hx-key-sub">
-              {new Date(e.ts * 1000).toLocaleString()} · {e.route}
-            </div>
-            <div className="hx-key-title">You said</div>
-            <div className="hx-key-mask">{e.request}</div>
-            <div className="hx-key-title">Memory sent with it</div>
-            <div className="hx-key-mask" style={{ whiteSpace: "pre-wrap" }}>
-              {e.memory || "(nothing)"}
-            </div>
-          </div>
-        ))}
+      )}
     </div>
   );
 }

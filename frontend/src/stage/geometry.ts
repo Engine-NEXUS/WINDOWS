@@ -24,7 +24,7 @@ export const LOADING_INSET_Y_PX = 9;
 
 export const PANEL_SIZES: Record<string, { w: number; h: number }> = {
   sidebar: { w: 400, h: 1000 },
-  "pr-list": { w: 500, h: 1000 },
+  "pr-list": { w: 400, h: 1000 },
   architect: { w: 900, h: 1000 },
 };
 

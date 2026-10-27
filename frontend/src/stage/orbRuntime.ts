@@ -372,6 +372,7 @@ export type SttTurnOwnership = "verified" | "uncertain" | "rejected" | "unenroll
 export interface SttTranscriptTurn {
   session?: number;
   text?: string;
+  raw_text?: string;
   ownership?: SttTurnOwnership;
   owner_score?: number;
   decoder_bias?: string;
@@ -395,6 +396,8 @@ async function setupSttTranscriptListener() {
         typeof payload === "string"
           ? undefined
           : {
+              session: payload.session,
+              rawText: payload.raw_text ?? transcript,
               ownership: payload.ownership ?? "unenrolled",
               ownerScore: payload.owner_score ?? 1,
               decoderBias: payload.decoder_bias ?? "owner",
