@@ -46,25 +46,33 @@ if ($IsWindows -or $env:OS -eq "Windows_NT") {
 
 Write-Host "==> Installing frontend deps" -ForegroundColor Cyan
 npm --prefix frontend install
+if ($LASTEXITCODE -ne 0) { throw "Frontend dependency install failed" }
+$buildSource = node "$root\scripts\build-provenance.mjs" source
+if ($LASTEXITCODE -ne 0) { exit 1 }
 
 Write-Host "==> Building frontend" -ForegroundColor Cyan
 npm --prefix frontend run build
 
 Write-Host "==> Building Tauri app" -ForegroundColor Cyan
 if (Get-Command "cargo-tauri" -ErrorAction SilentlyContinue) {
-  $tauriArgs = @("tauri", "build")
+  $tauriArgs = @("tauri", "build", "--features", "custom-protocol,admin-brain")
   if ($Target)  { $tauriArgs += "--target"; $tauriArgs += $Target }
   if ($Bundles) { $tauriArgs += "--bundles"; $tauriArgs += $Bundles }
   Push-Location src-tauri
     cargo @tauriArgs
   Pop-Location
 } else {
-  Write-Host "==> Building release binary via Cargo (features: custom-protocol)" -ForegroundColor DarkGray
+  Write-Host "==> Building release binary via Cargo (features: custom-protocol,admin-brain)" -ForegroundColor DarkGray
   Push-Location src-tauri
-    $cargoBuildArgs = @("build", "--release", "--features", "custom-protocol")
+    $cargoBuildArgs = @("build", "--release", "--features", "custom-protocol,admin-brain")
     if ($Target) { $cargoBuildArgs += "--target"; $cargoBuildArgs += $Target }
     cargo @cargoBuildArgs
   Pop-Location
+}
+if ($LASTEXITCODE -ne 0) { throw "Release build failed; build record was not updated" }
+if (-not $Target) {
+  node "$root\scripts\build-provenance.mjs" record $buildSource
+  if ($LASTEXITCODE -ne 0) { throw "Release identity could not be recorded" }
 }
 
 Write-Host "==> Artifacts:" -ForegroundColor Green

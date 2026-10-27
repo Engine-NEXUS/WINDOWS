@@ -85,18 +85,32 @@ trap {
 
 # ─── Build if requested ────────────────────────────────────────────────────
 if ($Build) {
+  $buildSource = node "$ProjectRoot\scripts\build-provenance.mjs" source
+  if ($LASTEXITCODE -ne 0) { exit 1 }
   Write-Log "BUILD" "Building frontend..." $C_SYS
   npm --prefix frontend run build 2>&1 | Out-Host
-  Write-Log "BUILD" "Building Rust (release + custom-protocol)..." $C_SYS
+  if ($LASTEXITCODE -ne 0) { Write-Log "BUILD" "Frontend build FAILED" $C_ERR; exit 1 }
+  Write-Log "BUILD" "Building Rust (release + custom-protocol,admin-brain)..." $C_SYS
   Push-Location src-tauri
-  cargo build --release --features custom-protocol 2>&1 | Out-Host
+  cargo build --release --features custom-protocol,admin-brain 2>&1 | Out-Host
   Pop-Location
   if ($LASTEXITCODE -ne 0) {
     Write-Log "BUILD" "Build FAILED" $C_ERR
     exit 1
   }
+  node "$ProjectRoot\scripts\build-provenance.mjs" record $buildSource | Out-Host
+  if ($LASTEXITCODE -ne 0) { Write-Log "BUILD" "Build record FAILED; refusing to launch" $C_ERR; exit 1 }
   Write-Log "BUILD" "Build complete." $C_SYS
 }
+
+# Check before stopping an existing app. A stale or unrecorded executable must
+# never replace a working NEXUS session just because this script was launched.
+$buildRecordJson = node "$ProjectRoot\scripts\build-provenance.mjs" verify --warn-stale
+if ($LASTEXITCODE -ne 0) { exit 1 }
+$buildRecord = $buildRecordJson | ConvertFrom-Json
+foreach ($w in @($buildRecord.warnings)) { if ($w) { Write-Log "BUILD" "REMINDER: $w (launching the last build anyway)" $C_ERR } }
+Write-Log "BUILD" "Identity $($buildRecord.identity) built $($buildRecord.builtAt)" $C_SYS
+Write-Log "BUILD" "Executable $($buildRecord.executablePath)" $C_SYS
 
 # ─── Kill any existing instances ───────────────────────────────────────────
 Write-Log "INIT" "Killing existing NEXUS instances..." $C_SYS

@@ -4,7 +4,6 @@
 analyze_repo_fast
 calibration_dev_persist
 cancel_architect_analysis
-close_settings_window
 diary_summary
 enrich_phase1
 export_settings
@@ -43,7 +42,6 @@ open_maps_window
 open_settings_window
 orchestrator_github_clear_token
 orchestrator_status
-pause_wakeword
 preview_companion_hud
 proactive_snooze
 query_impact
@@ -56,7 +54,6 @@ set_meeting_detection
 shortcut_do
 show_calibration_hud
 show_pr_list_sidebar
-show_sidebar_view
 show_sidebar_with_confirmation
 stage_hide
 stage_hide_kill
