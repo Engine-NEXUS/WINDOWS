@@ -1,0 +1,10 @@
+{
+  "at": "2026-10-25T18:40:38.129Z",
+  "command": "diagnostics-arm-one",
+  "elapsedMs": 114,
+  "value": {
+    "armed": true,
+    "enabled": true,
+    "timeoutSeconds": 90
+  }
+}

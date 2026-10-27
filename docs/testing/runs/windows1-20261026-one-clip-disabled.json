@@ -1,0 +1,9 @@
+{
+  "at": "2026-10-25T18:41:08.295Z",
+  "command": "diagnostics-off",
+  "elapsedMs": 130,
+  "value": {
+    "enabled": false,
+    "reason": "explicit cleanup"
+  }
+}

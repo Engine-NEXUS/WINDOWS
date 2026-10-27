@@ -1,0 +1,11 @@
+{
+  "trialId": "owner-001",
+  "candidate": "031caf5848621e18",
+  "status": "excluded: supplied result was different release, lock off; replacement trial pending",
+  "instructionPreparedAtUtc": "2026-10-25T11:32:39.473002+00:00",
+  "capture": "Ctrl+Space",
+  "command": "open Notepad",
+  "condition": "owner; normal speaking position; actual noise/distance to confirm",
+  "verification": "not observed",
+  "executableAction": "not observed"
+}

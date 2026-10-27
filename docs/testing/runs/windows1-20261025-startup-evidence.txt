@@ -1,0 +1,26 @@
+Startup evidence only; no owner voice, audible or visual acceptance proof.
+Source: 954c57471be0564f69763f73b43e0868f50c74ca
+Build: 812a5b3333669e02
+PID at launch: 13408
+Launched UTC: 2026-10-25T07:02:23.7959830Z
+
+[PREFLIGHT] [OK] Layer 1 (Frontend & Animation): Bundle stage.html (1 KB) fresh | WebGL 6,240 particles | CSP Nonce verified
+[PREFLIGHT] [OK] Layer 2a (Audio Hardware): Host: WASAPI | Input Device: 'Microphone Array (Intel® Smart Sound Technology for Digital Microphones)' (48000Hz, 2ch)
+[PREFLIGHT] [OK] Layer 2b (Wake-Word Models): All 3 openWakeWord models verified in C:\Users\Chitkul Lakshya\.codex\worktrees\windows-readiness\ULTRON\src-tauri\resources\oww
+[PREFLIGHT] [OK] Layer 2c (TTS Engines): Edge-TTS cloud primary [ONLINE] + Kokoro-82M offline fallback [STANDBY]
+[PREFLIGHT] [OK] Layer 3 (Main Command Center): Deterministic Grammar (4/4 tests) | Compound Splitter [OK] | Directed Gate [OK]
+[PREFLIGHT] [OK] Layer 4 (15 Action Sub-Centers): 15/15 Sub-Centers Registered — Apps indexed: 0 | Crawler: Ready | UFO UIA: Ready | YouTube Engine: Ready
+[PREFLIGHT] [OK] Layer 5 (Auth & Credentials): Groq present, Gemini present; Cerebras missing (optional, fastest 9Router lane) | GitHub Vault: Not set
+2026-10-25T07:02:25.608936Z  WARN app registry: healed 101 inflated installer usage count(s) and dropped 0 poisoned resolution entries
+2026-10-25T07:02:25.688730Z  WARN Tier 3: model file command_close.onnx not found at \\?\C:\Users\Chitkul Lakshya\.codex\worktrees\windows-readiness\ULTRON\src-tauri\target\release\resources\oww\commands\command_close.onnx — skipping
+2026-10-25T07:02:25.689109Z  WARN Tier 3: model file command_open.onnx not found at \\?\C:\Users\Chitkul Lakshya\.codex\worktrees\windows-readiness\ULTRON\src-tauri\target\release\resources\oww\commands\command_open.onnx — skipping
+2026-10-25T07:02:25.689354Z  WARN Tier 3: model file command_search.onnx not found at \\?\C:\Users\Chitkul Lakshya\.codex\worktrees\windows-readiness\ULTRON\src-tauri\target\release\resources\oww\commands\command_search.onnx — skipping
+2026-10-25T07:02:25.689573Z  WARN Tier 3: model file command_play.onnx not found at \\?\C:\Users\Chitkul Lakshya\.codex\worktrees\windows-readiness\ULTRON\src-tauri\target\release\resources\oww\commands\command_play.onnx — skipping
+2026-10-25T07:02:25.998925Z  WARN 9router health: groq alive but models missing from menu: ["qwen/qwen3-32b"] — cascade will skip them
+[BOOT] stage ready after 2s (incl. 1s settle)
+[BOOT] no hello (boot): one was spoken less than 2h ago
+[BOOT] skip briefing: already briefed today (2026-10-25)
+
+Startup stderr:
+ERROR: The system was unable to find the specified registry key or value.
+

@@ -1,0 +1,10 @@
+{
+  "sourceRevision": "954c57471be0564f69763f73b43e0868f50c74ca",
+  "sourceHash": "3087f61760442b846c71baaba710b625cf5ebe961e81fa5d4677c381e150ce5e",
+  "buildIdentity": "812a5b3333669e02",
+  "executable": "C:\\Users\\Chitkul Lakshya\\.codex\\worktrees\\windows-readiness\\ULTRON\\src-tauri\\target\\release\\nexus.exe",
+  "processId": 13408,
+  "launchedAtUtc": "2026-10-25T07:02:23.7959830Z",
+  "stdoutLog": "C:\\Users\\Chitkul Lakshya\\AppData\\Roaming\\com.nexus.assistant\\nexus_readiness_812a5b3333669e02_20261025T070223Z.log",
+  "stderrLog": "C:\\Users\\Chitkul Lakshya\\AppData\\Roaming\\com.nexus.assistant\\nexus_readiness_812a5b3333669e02_20261025T070223Z_err.log"
+}

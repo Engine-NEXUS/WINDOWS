@@ -1,0 +1,18 @@
+{
+  "requests": 1,
+  "terminals": 1,
+  "captures_started": 1,
+  "expected_starts": 1,
+  "expected_count_match": true,
+  "outcomes": {
+    "delivered": 1
+  },
+  "unfinished": [],
+  "errors": [],
+  "dispatch_entries": 1,
+  "uncorrelated_dispatches": [],
+  "unexpected_dispatches": [],
+  "action_successes_confirmed": 0,
+  "complete": true,
+  "note": "Complete means lifecycle accounting only; no speaker-accuracy or executed-action claim."
+}

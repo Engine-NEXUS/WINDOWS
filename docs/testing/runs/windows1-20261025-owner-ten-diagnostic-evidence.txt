@@ -1,0 +1,56 @@
+[ORB-HOTKEY] Hotkey (CommandOrControl+Space) → agent idle, calling agent & waking orb to listening
+2026-10-25T14:37:44.259431Z  INFO barge-in: audio cut + turn cancelled (hotkey-wake)
+2026-10-25T14:37:44.272723Z  INFO stt-capture: started (cpal-side capture, no baton pass)
+2026-10-25T14:37:47.661079Z  INFO stt-capture: transcript = 'open notepad.', intent = Some("open_app")
+[TRACE] turn session=1 rms_max=0.4343 voiced=11/33 endpoint=silence_end path=groq filter=none owner=verified
+2026-10-25T14:37:47.679001Z  INFO debug_trace: turn session=1 rms_max=0.4343 voiced=11/33 endpoint=silence_end path=groq filter=none owner=verified
+[MAIN-CMD] Transcript: 'open notepad.' | Intent: open_app | Center: AppCenter | Evidence: Strong | Owner: Verified (score: 0.949)
+[ORB-HOTKEY] Hotkey (CommandOrControl+Space) → agent idle, calling agent & waking orb to listening
+2026-10-25T14:37:51.952056Z  INFO barge-in: audio cut + turn cancelled (hotkey-wake)
+2026-10-25T14:37:51.955560Z  INFO stt-capture: started (cpal-side capture, no baton pass)
+2026-10-25T14:37:55.017337Z  INFO stt-capture: transcript = 'open open notepad.', intent = Some("open_app")
+[TRACE] turn session=1 rms_max=0.3330 voiced=12/31 endpoint=silence_end path=groq filter=none owner=verified
+2026-10-25T14:37:55.030047Z  INFO debug_trace: turn session=1 rms_max=0.3330 voiced=12/31 endpoint=silence_end path=groq filter=none owner=verified
+[MAIN-CMD] Transcript: 'open open notepad.' | Intent: open_app | Center: AppCenter | Evidence: Strong | Owner: Verified (score: 0.931)
+[ORB-HOTKEY] Hotkey (CommandOrControl+Space) → agent idle, calling agent & waking orb to listening
+2026-10-25T14:37:59.365561Z  INFO barge-in: audio cut + turn cancelled (hotkey-wake)
+2026-10-25T14:37:59.368560Z  INFO stt-capture: started (cpal-side capture, no baton pass)
+2026-10-25T14:38:00.922730Z  INFO stt-capture: transcript = 'hook up opencode.', intent = Some("agent_hook_command")
+[TRACE] turn session=1 rms_max=0.2147 voiced=3/12 endpoint=silence_end path=groq filter=none owner=verified
+2026-10-25T14:38:00.932275Z  INFO debug_trace: turn session=1 rms_max=0.2147 voiced=3/12 endpoint=silence_end path=groq filter=none owner=verified
+[TRACE] p1 corrected="hook up opencode."
+2026-10-25T14:38:00.933743Z  INFO debug_trace: p1 corrected="hook up opencode."
+2026-10-25T14:38:00.941542Z  INFO orchestrator: processing transcript: "hook up opencode."
+[MAIN-CMD] Transcript: 'hook up opencode.' | Intent: agent_hook_command | Center: ArchitectCenter | Evidence: Strong | Owner: Verified (score: 0.961)
+[ORB-HOTKEY] Hotkey (CommandOrControl+Space) → agent idle, calling agent & waking orb to listening
+2026-10-25T14:38:05.475158Z  INFO barge-in: audio cut + turn cancelled (hotkey-wake)
+2026-10-25T14:38:05.479231Z  INFO stt-capture: started (cpal-side capture, no baton pass)
+2026-10-25T14:38:05.535247Z  INFO barge-in: audio cut + turn cancelled (ipc-cancel)
+2026-10-25T14:38:08.623463Z  INFO stt-capture: transcript = 'open notepad.', intent = Some("open_app")
+[TRACE] turn session=1 rms_max=0.4130 voiced=12/31 endpoint=silence_end path=groq filter=none owner=verified
+2026-10-25T14:38:08.634629Z  INFO debug_trace: turn session=1 rms_max=0.4130 voiced=12/31 endpoint=silence_end path=groq filter=none owner=verified
+[MAIN-CMD] Transcript: 'open notepad.' | Intent: open_app | Center: AppCenter | Evidence: Strong | Owner: Verified (score: 0.951)
+[ORB-HOTKEY] Hotkey (CommandOrControl+Space) → agent idle, calling agent & waking orb to listening
+2026-10-25T14:38:12.722445Z  INFO barge-in: audio cut + turn cancelled (hotkey-wake)
+2026-10-25T14:38:12.725742Z  INFO stt-capture: started (cpal-side capture, no baton pass)
+[STT-DROP] heard 'Open over. Open over.' -> blocked by repeat_loop
+2026-10-25T14:38:16.014712Z  INFO stt-capture: transcript = '', intent = None
+[TRACE] turn session=1 rms_max=0.5648 voiced=11/30 endpoint=silence_end path=groq filter=repeat_loop owner=verified
+2026-10-25T14:38:16.022722Z  INFO debug_trace: turn session=1 rms_max=0.5648 voiced=11/30 endpoint=silence_end path=groq filter=repeat_loop owner=verified
+2026-10-25T14:38:16.042319Z  INFO stt-capture: started (cpal-side capture, no baton pass)
+2026-10-25T14:38:18.233650Z  INFO stt-capture: aborted (was_capturing=true, had_speech=false, elapsed=2240ms)
+2026-10-25T14:38:18.245667Z  INFO barge-in: audio cut + turn cancelled (ipc-cancel)
+[ORB-HOTKEY] Hotkey (CommandOrControl+Space) → agent idle, calling agent & waking orb to listening
+2026-10-25T14:38:18.981281Z  INFO barge-in: audio cut + turn cancelled (hotkey-wake)
+2026-10-25T14:38:18.984292Z  INFO stt-capture: started (cpal-side capture, no baton pass)
+2026-10-25T14:38:22.456322Z  INFO stt-capture: transcript = 'open note. open note pad.', intent = Some("open_app")
+[TRACE] turn session=2 rms_max=0.5991 voiced=14/30 endpoint=silence_end path=groq filter=none owner=verified
+2026-10-25T14:38:22.467099Z  INFO debug_trace: turn session=2 rms_max=0.5991 voiced=14/30 endpoint=silence_end path=groq filter=none owner=verified
+[ORB-HOTKEY] Hotkey (CommandOrControl+Space) → agent idle, calling agent & waking orb to listening
+2026-10-25T14:38:25.537173Z  INFO barge-in: audio cut + turn cancelled (hotkey-wake)
+2026-10-25T14:38:25.543036Z  INFO stt-capture: started (cpal-side capture, no baton pass)
+2026-10-25T14:38:25.588909Z  INFO barge-in: audio cut + turn cancelled (ipc-cancel)
+2026-10-25T14:38:28.667485Z  INFO stt-capture: transcript = 'open open open notepad.', intent = Some("open_app")
+[TRACE] turn session=2 rms_max=0.6073 voiced=14/31 endpoint=silence_end path=groq filter=none owner=verified
+2026-10-25T14:38:28.682741Z  INFO debug_trace: turn session=2 rms_max=0.6073 voiced=14/31 endpoint=silence_end path=groq filter=none owner=verified
+[MAIN-CMD] Transcript: 'open open open notepad.' | Intent: open_app | Center: AppCenter | Evidence: Strong | Owner: Verified (score: 0.942)

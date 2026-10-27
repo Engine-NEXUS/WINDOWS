@@ -19,3 +19,5 @@ This directory contains the system architecture designs, data flow graphs, compo
 | 09 | **[09-request-flow-evolution.md](09-request-flow-evolution.md)** | Evolution of request routing from decentralized IPC to the unified central orchestrator. |
 | 10 | **[10-github-subcommand-system.md](10-github-subcommand-system.md)** | 28 typed GitHub subcommands via octocrab, destructive action confirmation gates, and natural language mapping. |
 | 11 | **[11-complete-system-flows.md](11-complete-system-flows.md)** | Master system catalog containing 16 detailed ASCII sequence diagrams for all voice, MCP, AI, and OS flows. |
+| 12 | **[12-command-center-alignment.md](12-command-center-alignment.md)** | Current typed action contract, turn ownership, compound policy, and legacy adapter boundary. |
+| 13 | **[13-admin-and-device-links.md](13-admin-and-device-links.md)** | Cloudflare Free Device Links data flow and the still-closed Administrator verification boundary. |

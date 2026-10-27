@@ -1,0 +1,19 @@
+{
+  "plugin": "elevenlabs@elevenlabs",
+  "version": "0.4.0",
+  "installed": true,
+  "enabled": true,
+  "marketplace": "https://github.com/elevenlabs/plugin.git",
+  "mcpAuthenticated": false,
+  "cliOAuthError": "Invalid redirect_uri",
+  "standaloneFailedConfigRemoved": true,
+  "toolsAvailableInCurrentChat": false,
+  "architectRequestSubmitted": false,
+  "opinionReceived": false,
+  "blockers": [
+    "Installed plugin not loaded into current chat tools",
+    "CLI OAuth callback rejected",
+    "Browser composer operations repeatedly timed out"
+  ],
+  "nextStep": "Reload Codex, then connect installed ElevenLabs plugin through host controls"
+}

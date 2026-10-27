@@ -1,0 +1,7 @@
+[2m2026-10-25T12:44:35.581748Z[0m [32m INFO[0m stt-capture: transcript = 'open over open load pad.', intent = Some("open_app")
+[TRACE] turn session=1 rms_max=0.2698 voiced=11/32 endpoint=silence_end path=groq filter=none owner=verified
+[TRACE] p1 corrected="open over open load pad."
+[2m2026-10-25T12:44:35.598065Z[0m [32m INFO[0m debug_trace: p1 corrected="open over open load pad."
+[2m2026-10-25T12:44:35.609135Z[0m [32m INFO[0m orchestrator: processing transcript: "open over open load pad."
+[MAIN-CMD] Transcript: 'open over open load pad.' | Intent: open_app | Center: AppCenter | Evidence: Strong | Owner: Verified (score: 0.944)
+[ACTION] 'open over open load pad.' → open_app → LocalCommand

@@ -36,7 +36,7 @@
 <body>
   <div class="container">
     <h1>Privacy Policy for NEXUS Assistant</h1>
-    <p>Last updated: October 17, 2026</p>
+    <p>Last updated: October 19, 2026</p>
     <p class="note"><strong>Pre-release draft.</strong> NEXUS is under active development and this policy describes the current development build. It has not been reviewed by a lawyer. It will change as the product does, and the date above will change with it.</p>
 
     <h2>1. The short version</h2>
@@ -45,10 +45,13 @@
     <h2>2. What stays on your device</h2>
     <ul>
       <li><strong>Wake-word detection.</strong> The microphone is monitored on-device for the wake word. Audio is sent anywhere only after the wake word or the hotkey starts a turn.</li>
+      <li><strong>Temporary STT diagnostics.</strong> Off by default. If you enable it in Audio or Privacy settings, NEXUS stores native microphone clips, raw and corrected transcripts, turn statistics, and chosen intent in encrypted local records. The key must be available in the OS credential store. Records are removed after 24 hours by a periodic sweep, and you can delete them immediately in settings. This setting does not change which STT provider processes the live turn.</li>
       <li><strong>Memory.</strong> Facts you told NEXUS, short conversation summaries (30 days), where you left off (7 days), timetable slots you confirmed, and previews of important mail (7 days) are kept in a database encrypted with AES-256-GCM. The key is held in the operating-system credential store. If no credential store is available, the file is kept unencrypted and the app says so. Encryption protects against disk theft and other user accounts, not against malware running as you.</li>
       <li><strong>Camera (Hand mode).</strong> Only when you turn it on. Video frames are processed on-device; only landmark numbers are used and no frames are stored.</li>
       <li><strong>File actions.</strong> Voice file operations are logged locally (an audit log) and deleted files are moved to a <code>.nexus-trash</code> folder, not erased, until you remove them.</li>
       <li><strong>Settings and API keys.</strong> API keys you add are stored in the OS credential store. In this build a legacy plaintext copy may also exist in <code>settings.json</code>; removing it is a planned fix.</li>
+      <li><strong>Administrator identity.</strong> Administrator voice and face enrollment are planned but not available in this build. A Device Link does not enable Administrator access. The next source build removes rotating raw WAV debug saves from the wake and command capture paths; older installed builds and previously saved clips may still have files under <code>%APPDATA%\com.nexus.assistant\verify_debug</code>.</li>
+      <li><strong>Device Links Activity Manager.</strong> Off by default. On supported Windows devices, you may choose to record estimated active minutes by foreground app name for 30 days in an encrypted local file. It does not record window titles, browser sites, or URLs. Activity sharing with other laptops is not available yet.</li>
     </ul>
 
     <h2>3. What is sent to third parties</h2>
@@ -60,6 +63,8 @@
       <tr><td>Google Gemini (vision)</td><td>Screenshots or images (screen analysis, timetable import, click-target grounding)</td><td>Only when you ask NEXUS to look at your screen or an image</td></tr>
       <tr><td>Microsoft Edge text-to-speech</td><td>The text NEXUS speaks, including names that appear in alerts</td><td>Whenever NEXUS speaks online</td></tr>
       <tr><td>NEXUS Cloudflare Worker (operated by the NEXUS team)</td><td>Transcripts, device identifier, usage counters; OAuth tokens for GitHub, Google and Swiggy connections made through the Worker</td><td>Cloud-routed turns and when you connect those accounts. Processed with Cloudflare Workers AI and stored in Cloudflare D1.</td></tr>
+      <tr><td>NEXUS Cloudflare Worker and D1 (Device Links, after deployment)</td><td>Your verified phone number, device identifiers and names, pair requests and link status. Verification codes are hashed for checking and encrypted only while waiting for SMS dispatch. Neither file contents nor app activity history is stored in D1.</td><td>When you choose phone verification or pair laptops. File transfer and activity sharing are unavailable.</td></tr>
+      <tr><td>Administrator-controlled SMS gateway phone and its mobile carrier (after setup)</td><td>Phone number and one-time verification code in an SMS</td><td>Only when you request phone verification. The gateway has not been tested with a real phone in this build.</td></tr>
       <tr><td>GitHub</td><td>API requests using your token (PR diffs, repository metadata)</td><td>When you use GitHub commands</td></tr>
       <tr><td>Google APIs (Gmail, Calendar, Maps/Places/Routes, Contacts)</td><td>API requests using your Google token and, for Maps, a spoken origin or destination</td><td>When you connect Google and use those features</td></tr>
       <tr><td>Swiggy, Amazon and WhatsApp bridges</td><td>Search terms, order and message content you ask for</td><td>Only when you use those commands. The WhatsApp bridge is a local, unofficial client.</td></tr>
@@ -76,6 +81,8 @@
       <li>Memory: conversation summaries 30 days, resume points and mail previews 7 days, facts until you remove them. Say "forget …", use the Memory page, or wipe memory entirely (this also discards the encryption key).</li>
       <li>Cloud-send log: 7 days, stored encrypted on your device.</li>
       <li>Worker: OAuth tokens are kept until you disconnect the provider or an administrator removes your device. Daily usage counters are kept per device.</li>
+      <li>Device Links: remove your verified phone number or revoke a laptop link in the Command Hub. Unused SMS challenges and pair codes expire after 10 minutes; a daily Worker cleanup removes expired proof rows and link records 30 days after revocation when Cloudflare is available. Existing links remain until revoked separately.</li>
+      <li>Activity Manager: opt in or out, or clear its history, in the Device Links page. App-only daily estimates stay encrypted on your laptop for 30 days. Turning recording off stops new samples but leaves existing history until it expires.</li>
       <li>Disconnect any account from the Command Hub; remove API keys from the API Keys page.</li>
       <li>Optional name redaction replaces people's names in memory sent to the cloud with placeholders.</li>
     </ul>

@@ -1,0 +1,17 @@
+{
+  "releaseIdentity": "3d1932b68b2c0f15",
+  "processId": 17928,
+  "trialId": "owner-002",
+  "status": "diagnostic owner-verification acceptance observed; not frozen-candidate acceptance",
+  "timestampUtc": "2026-10-25T12:44:35Z",
+  "speaker": "owner (owner reports done after single-attempt instruction)",
+  "verification": "verified",
+  "similarity": 0.944,
+  "profileThresholdPreviouslyRead": 0.92640746,
+  "intendedCommand": "Open Notepad",
+  "recognizedCommand": "open over open load pad",
+  "requestedActionSuccess": "not confirmed; transcript target differs",
+  "negativeTrials": 0,
+  "ownerAcceptanceRateClaim": "none: only one diagnostic attempt",
+  "nextChecks": "More owner attempts at varied conditions; playback rejection separately; live non-owner proof pending availability"
+}

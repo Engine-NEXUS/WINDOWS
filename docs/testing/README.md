@@ -4,6 +4,7 @@ This directory contains repeatable testing procedures and release gates. Histori
 
 | Area | Document | Purpose |
 |---|---|---|
+| Windows Voice Lock | [Speaker verification work card](speaker-verification-work-card.md), [evidence/reliability plan](../features/152-voice-lock-evidence-and-reliability-plan.md) | Exact-source gates and live owner/non-owner/recovery proof; P1 native capture audit reconciliation with scripts/capture_audit_summary.py |
 | NLU/BERT-Mini | [NLU Future Testing and Model Promotion Playbook](./nlu-future-testing-and-model-promotion-playbook.md) | Complete dataset, model, slot, OOS, safety, voice, external-data, training, promotion, and rollback procedure |
 | Data foundations | [Data Foundation and Wake-Model Gates](./data-foundation-and-wake-model-gates.md) | NLU provenance, frozen evaluation hashes, wake-audio grouped splits, model fingerprints, and three-pass verification |
 | NLU Phase 1 | [Phase 1 Evaluation Split Analysis](./phase-1-nlu-evaluation-split-analysis-2026-09-14.md) | Completed phrase-family-separated train, validation, calibration, final-test, and quarantine architecture with three-pass verification |
@@ -26,6 +27,9 @@ This directory contains repeatable testing procedures and release gates. Histori
 | Wake word | [Wake-Word Testing Strategy](../wake-word/11-testing-strategy.md) | Wake-word model validation procedure |
 | Wake word Tier 3 | [Tier 3 Testing Strategy](../wake-word/19-tier3-testing-strategy.md) | Wake-word Tier 3 validation |
 | Changelog Snapshot | [Comprehensive Changelog 2026-09-14](./comprehensive-changelog-2026-09-14.md) | Multi-phase training and audit retrospective |
+| Work cards | [Feature work cards](./work-cards/README.md) and [process map](./feature-process-map.md) | One generated production card per in-scope feature in queue order, plus which processes each feature runs as (`node scripts/make-work-cards.mjs`) |
+| Focus / GitHub / notifications programme | [Feature 153](../features/153-focus-mode-github-resolution-and-notification-programme.md) | Live verification protocol (section 6) for Focus Mode, owner-less repo and PR commands, and the notification state machine; none of it is live-proven yet |
+| Notification brain | [Notification Brain Research, Changes and Testing](./notification-brain-testing-and-research.md) | Feature 151: root causes of repeated/verbose notifications, event-key + cooldown + one-liner design (phases A/B/D/E built, unit-tested), prior art, zero-credit audit, live verification protocol, and the open Phase C/F work |
 
 
 ## Release Verification Matrix (100% Passing)
