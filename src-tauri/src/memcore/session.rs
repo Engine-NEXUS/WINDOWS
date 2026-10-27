@@ -520,11 +520,31 @@ mod win {
         out
     }
 
+    /// Roaming root where editor products keep `User/globalStorage`:
+    /// `%APPDATA%` on Windows, `~/Library/Application Support` on macOS,
+    /// `~/.config` elsewhere.
+    fn editor_roaming_root() -> Option<std::path::PathBuf> {
+        #[cfg(target_os = "windows")]
+        {
+            std::env::var("APPDATA").ok().map(std::path::PathBuf::from)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            std::env::var("HOME").ok().map(|h| {
+                std::path::PathBuf::from(h).join("Library").join("Application Support")
+            })
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".config"))
+        }
+    }
+
     fn editor_storage_json() -> String {
-        let Ok(appdata) = std::env::var("APPDATA") else { return String::new() };
+        let Some(root) = editor_roaming_root() else { return String::new() };
         let mut all = String::new();
         for sub in ["Code", "Cursor", "Antigravity", "Windsurf", "VSCodium"] {
-            let p = std::path::Path::new(&appdata).join(sub).join("User").join("globalStorage").join("storage.json");
+            let p = root.join(sub).join("User").join("globalStorage").join("storage.json");
             if let Ok(s) = std::fs::read_to_string(p) {
                 // Merge by parsing separately and concatenating folder lists later.
                 all.push_str(&s);
@@ -655,6 +675,10 @@ pub fn start_recorder(dir: std::path::PathBuf) {
         .name("session-snapshot".into())
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(SNAPSHOT_EVERY_SECS));
+            if crate::focus_mode::paused() {
+                crate::focus_mode::defer_log("session_snapshot");
+                continue;
+            }
             // Do not record while the user is away for a long time: nothing changed and
             // the lock screen would only look like an empty desktop.
             if resume::user_idle_secs().map(|s| s >= 30 * 60).unwrap_or(false) {

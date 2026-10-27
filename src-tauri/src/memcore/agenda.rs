@@ -603,7 +603,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
-    static MOCK_GUARD: Mutex<()> = Mutex::new(());
+    use super::super::google_io::TEST_GUARD as MOCK_GUARD;
 
     enum MockReply {
         Json(u16, String),

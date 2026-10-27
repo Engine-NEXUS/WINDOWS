@@ -20,6 +20,12 @@ pub mod health;
 pub mod hygiene;
 pub mod mailtriage;
 pub mod mailwatch;
+pub mod github_watch;
+pub mod deploy_watch;
+#[cfg(test)]
+pub(crate) mod test_http;
+pub mod mailwording;
+pub mod selfnames;
 pub mod names;
 pub mod offer;
 pub mod leavewatch;
@@ -306,6 +312,12 @@ pub struct Status {
     pub slots: usize,
     /// Inbox watching + calendar are on.
     pub mail: bool,
+    /// Say important emails in plain words (GitHub on device; unusual via cloud).
+    pub mail_plain: bool,
+    /// Watch GitHub Actions runs of recent repos and announce failure/recovery.
+    pub github_watch: bool,
+    /// Watch latest production deploys (Vercel, Render, Netlify) and announce failure/recovery.
+    pub deploy_watch: bool,
     /// A Google account with mail access is connected.
     pub google_connected: bool,
     /// Important emails currently filed (7 days).
@@ -354,6 +366,9 @@ pub fn status(app_data_dir: &Path) -> Status {
     let briefing = flag(app_data_dir, "memcoreBriefing", true);
     let timetable = flag(app_data_dir, "memcoreTimetable", true);
     let mail = flag(app_data_dir, "memcoreMail", true);
+    let mail_plain = flag(app_data_dir, "memcoreMailPlain", false);
+    let github_watch = flag(app_data_dir, "memcoreGithubWatch", true);
+    let deploy_watch = flag(app_data_dir, "memcoreDeployWatch", true);
     let whatsapp = flag(app_data_dir, "memcoreWhatsapp", false);
     let whatsapp_speak = flag(app_data_dir, "memcoreWhatsappSpeak", false);
     let leave_by = flag(app_data_dir, "memcoreLeaveBy", true);
@@ -392,6 +407,9 @@ pub fn status(app_data_dir: &Path) -> Status {
             timetable,
             slots,
             mail,
+            mail_plain,
+            github_watch,
+            deploy_watch,
             google_connected,
             mail_items,
             google_needs_signin,
@@ -420,6 +438,9 @@ pub fn status(app_data_dir: &Path) -> Status {
             timetable,
             slots: 0,
             mail,
+            mail_plain,
+            github_watch,
+            deploy_watch,
             google_connected,
             mail_items: 0,
             google_needs_signin,
@@ -795,14 +816,14 @@ mod tests {
             row("fact", "employer", "Acme", "derived", now - 3 * 86_400),
             row("episode", "ep:1", "open chrome", "derived", now - 86_400),
         ];
-        let st = Status { enabled: true, encrypted: true, facts: 2, episodes: 1, egress_7d: 4, redact_names: false, activity: true, resume_points: 12, briefing: true, timetable: true, slots: 0, mail: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true, profile: true, routines: true, review: false, pending: 0, curator_note: String::new() };
+        let st = Status { enabled: true, encrypted: true, facts: 2, episodes: 1, egress_7d: 4, redact_names: false, activity: true, resume_points: 12, briefing: true, timetable: true, slots: 0, mail: true, mail_plain: true, github_watch: true, deploy_watch: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true, profile: true, routines: true, review: false, pending: 0, curator_note: String::new() };
         let md = card_markdown(&rows, &st, now);
         assert!(md.contains("### You told me") && md.contains("**dog name**"), "{md}");
         assert!(md.contains("\\[x\\]\\(http") || md.contains("\\[x\\]("), "markdown must be escaped: {md}");
         assert!(md.contains("### I picked up") && md.contains("last used 3d ago"), "{md}");
         assert!(md.contains("Recent conversations (1)") && md.contains("yesterday"), "{md}");
         assert!(md.contains("encrypted: **yes**") && md.contains("**4** turns"), "{md}");
-        let empty = card_markdown(&[], &Status { enabled: true, encrypted: false, facts: 0, episodes: 0, egress_7d: 0, redact_names: false, activity: true, resume_points: 0, briefing: true, timetable: true, slots: 0, mail: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true, profile: true, routines: true, review: false, pending: 0, curator_note: String::new() }, now);
+        let empty = card_markdown(&[], &Status { enabled: true, encrypted: false, facts: 0, episodes: 0, egress_7d: 0, redact_names: false, activity: true, resume_points: 0, briefing: true, timetable: true, slots: 0, mail: true, mail_plain: true, github_watch: true, deploy_watch: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true, profile: true, routines: true, review: false, pending: 0, curator_note: String::new() }, now);
         assert!(empty.contains("Nothing yet"), "{empty}");
     }
 

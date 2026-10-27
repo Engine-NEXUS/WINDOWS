@@ -691,7 +691,16 @@ fn fire<R: Runtime>(app: &AppHandle<R>, alerts: &[WaAlert]) {
     note_alert(top);
     let urgency = alerts.iter().map(|a| a.urgency).max_by_key(|u| super::mailtriage::urgency_rank(*u)).unwrap_or(AlertUrgency::Medium);
     let text = alert_text(alerts, speak_address(app).as_deref());
-    crate::proactive_policy::submit(app, format!("wa_{}", top.jid), text, urgency);
+    // Feature 151 Phase E: each fire carries a unique id and one stable event
+    // key per chat. The old `wa_{jid}` id landed in the engine's permanent
+    // id-dedup set, so after its first alert a chat stayed silent until
+    // restart. Now Medium repeats coalesce into one line per 5-minute window
+    // (with a count-up after the lull) and High priority people still break
+    // through.
+    let stamp = chrono::Utc::now().timestamp_millis();
+    let id = format!("wa_{}_{}", top.jid, stamp);
+    let key = format!("wa:{}", top.jid);
+    crate::proactive_policy::submit_event(app, id, text, urgency, Some(key));
 }
 
 pub fn start<R: Runtime>(app: AppHandle<R>) {

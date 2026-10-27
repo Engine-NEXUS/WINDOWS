@@ -334,29 +334,8 @@ fn sidecar_url(path: &str) -> String {
     format!("http://127.0.0.1:{AGENT_WATCH_PORT}{path}")
 }
 
-/// List adapters known to the sidecar (falls back to `KNOWN_ADAPTERS` if
-/// the sidecar isn't up yet — starting it just to answer this would add
-/// needless latency to opening a settings panel).
-pub async fn list_adapters() -> Vec<String> {
-    if !is_sidecar_responsive() {
-        return KNOWN_ADAPTERS.iter().map(|s| s.to_string()).collect();
-    }
-    let client = client();
-    match client.get(sidecar_url("/adapters")).send().await {
-        Ok(resp) => match resp.json::<serde_json::Value>().await {
-            Ok(json) => json
-                .get("adapters")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_else(|| KNOWN_ADAPTERS.iter().map(|s| s.to_string()).collect()),
-            Err(_) => KNOWN_ADAPTERS.iter().map(|s| s.to_string()).collect(),
-        },
-        Err(_) => KNOWN_ADAPTERS.iter().map(|s| s.to_string()).collect(),
-    }
-}
-
-/// Start watching an agent. `adapter_type` must be one returned by
-/// `list_adapters()`. `prompt`, if given, is sent as the task once the
+/// Start watching an agent. `adapter_type` must be in `KNOWN_ADAPTERS`.
+/// `prompt`, if given, is sent as the task once the
 /// session is up (works for both the adapters' non-interactive automation
 /// mode and their interactive mode — either way it's the one line the
 /// caller asked the agent to do). Returns the sidecar-issued watch id.
@@ -469,10 +448,11 @@ async fn poll_watch_until_done<R: tauri::Runtime>(
             }
             "error" => {
                 let err = json.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
+                tracing::warn!("agent_watch {id} error: {err}");
                 crate::proactive_policy::submit(
                     &app,
                     format!("agent_watch_error_{id}"),
-                    format!("Your {adapter_type} session ran into trouble, sir: {err}"),
+                    format!("Your {adapter_type} session hit an error, sir."),
                     AlertUrgency::High,
                 );
                 let _ = app.emit("agent_watch:error", &json);
@@ -617,18 +597,6 @@ pub async fn stop_watch(id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Current status + buffered output for one watch, for a UI that wants to
-/// show live progress without waiting for completion.
-pub async fn get_watch(id: String) -> Result<serde_json::Value, String> {
-    let client = client();
-    let resp = client
-        .get(sidecar_url(&format!("/watch/{id}")))
-        .send()
-        .await
-        .map_err(|e| format!("failed to reach agent-watch sidecar: {e}"))?;
-    resp.json().await.map_err(|e| format!("bad response: {e}"))
-}
-
 /// Every watch the sidecar knows about (id/type/status/timestamps, no
 /// output), for a Settings panel to list. Empty, not an error, when the
 /// sidecar isn't running — a UI polling this while idle shouldn't need to
@@ -649,33 +617,13 @@ pub async fn list_watches() -> Result<serde_json::Value, String> {
 // --- Tauri commands --------------------------------------------------
 
 #[tauri::command]
-pub async fn agent_watch_list_adapters() -> Vec<String> {
-    list_adapters().await
-}
-
-#[tauri::command]
 pub fn agent_watch_unavailable_reason() -> Option<String> {
     sidecar_unavailable_reason()
 }
 
 #[tauri::command]
-pub async fn agent_watch_start<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    adapter_type: String,
-    workdir: Option<String>,
-    prompt: Option<String>,
-) -> Result<String, String> {
-    start_watch(app, adapter_type, workdir, prompt).await
-}
-
-#[tauri::command]
 pub async fn agent_watch_stop(id: String) -> Result<(), String> {
     stop_watch(id).await
-}
-
-#[tauri::command]
-pub async fn agent_watch_status(id: String) -> Result<serde_json::Value, String> {
-    get_watch(id).await
 }
 
 #[tauri::command]

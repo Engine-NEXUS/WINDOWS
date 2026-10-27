@@ -285,6 +285,10 @@ pub fn start_sentinel_poller<R: Runtime>(app: AppHandle<R>) {
         println!("[SENTINEL] Background proactive sentinel poller online (interval: 15s)");
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+            if crate::focus_mode::paused() {
+                crate::focus_mode::defer_log("sentinel_poller");
+                continue;
+            }
             poll_sentinel_targets(&app).await;
         }
     });
