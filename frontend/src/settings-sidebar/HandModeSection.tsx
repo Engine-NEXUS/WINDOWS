@@ -1,24 +1,96 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { SwitchCard } from "../theme/OptionCard";
 
-type HandKey = "handMode" | "handMousePreview" | "handWithGhost" | "handSnap" | "handShowCamera" | "handGestures" | "handGesturesDesktop";
+type HandKey =
+  | "handMode"
+  | "handMousePreview"
+  | "handWithGhost"
+  | "handSnap"
+  | "handShowCamera"
+  | "handGestures"
+  | "handGesturesDesktop"
+  | "handFocusMode"
+  | "handFocusLowerApps";
 
 interface Props {
   settings: Partial<Record<HandKey, boolean>>;
   update: (key: HandKey, value: boolean) => void;
 }
 
-const ROWS: { key: HandKey; label: string; desc: string; fallback: boolean }[] = [
-  { key: "handMode", label: "Allow hand mode", desc: "Lets \"hand mode\" turn the camera on. The camera is only on while the mode is.", fallback: true },
-  { key: "handMousePreview", label: "Preview only (never click)", desc: "Off (default): after palm, fist, palm, fist the cursor follows your hand. On: it only shows what it would click.", fallback: false },
-  { key: "handSnap", label: "Snap clicks to the nearest control", desc: "A pinch just outside a button lands on the button.", fallback: true },
-  { key: "handGestures", label: "Gestures: tabs and windows", desc: "Three fingers up, then flick right/left = next/previous tab; flick up = window switcher (drop the pose to pick).", fallback: true },
-  { key: "handGesturesDesktop", label: "Gestures: desktops (4 fingers together)", desc: "Flick right/left = other virtual desktop, up = Task View, down = show desktop. Off until you have checked it on your hand.", fallback: false },
-  { key: "handShowCamera", label: "Show camera picture (debug)", desc: "A small window with the camera and the hand skeleton. Off by default: nothing is shown.", fallback: false },
-  { key: "handWithGhost", label: "Start with Ghost mode", desc: "Turns hand mode on with Ghost mode and off with it.", fallback: false },
+const ROWS: {
+  key: HandKey;
+  icon: string;
+  label: string;
+  desc: string;
+  fallback: boolean;
+}[] = [
+  {
+    key: "handMode",
+    icon: "✋",
+    label: "Allow Hand Tracking",
+    desc: "Use camera-based hand tracking for spatial gesture control.",
+    fallback: true,
+  },
+  {
+    key: "handMousePreview",
+    icon: "🎯",
+    label: "Pointer Preview Only",
+    desc: "Display tracking crosshair without registering clicks.",
+    fallback: false,
+  },
+  {
+    key: "handSnap",
+    icon: "🧲",
+    label: "Magnetic Snap",
+    desc: "Smart snapping to nearest buttons and interactive controls.",
+    fallback: true,
+  },
+  {
+    key: "handGestures",
+    icon: "📑",
+    label: "Tab & Window Gestures",
+    desc: "Three-finger pinch and swipe for app and tab switching.",
+    fallback: true,
+  },
+  {
+    key: "handGesturesDesktop",
+    icon: "🖥️",
+    label: "Virtual Desktop Gestures",
+    desc: "Four-finger horizontal swipe across virtual workspaces.",
+    fallback: false,
+  },
+  {
+    key: "handShowCamera",
+    icon: "📷",
+    label: "Camera Skeleton Overlay",
+    desc: "Show real-time visual landmarks and 21-point hand skeleton.",
+    fallback: false,
+  },
+  {
+    key: "handWithGhost",
+    icon: "👻",
+    label: "Auto-Start with Ghost Mode",
+    desc: "Automatically activate hand control when entering Ghost mode.",
+    fallback: false,
+  },
+  {
+    key: "handFocusMode",
+    icon: "⚡",
+    label: "Focus mode (pause background work while Hand Mode is on)",
+    desc: "Pause unneeded background tasks to keep cursor motion glitch-free.",
+    fallback: true,
+  },
+  {
+    key: "handFocusLowerApps",
+    icon: "📉",
+    label: "Lower other heavy apps while Hand Mode is on (restored exactly afterwards)",
+    desc: "Reduce CPU priority and efficiency class of heavy apps so the camera pointer stays smooth.",
+    fallback: true,
+  },
 ];
 
-/** Command Hub card for hand mode (camera pointer). Toggles save with the rest of Settings. */
+/** Modern boxed option cards for hand mode (camera pointer). */
 export function HandModeSection({ settings, update }: Props) {
   const [active, setActive] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -29,10 +101,10 @@ export function HandModeSection({ settings, update }: Props) {
       .catch(() => {});
   }, []);
 
-  const toggle = async () => {
+  const toggleMaster = async (nextVal: boolean) => {
     setBusy(true);
     try {
-      if (active) {
+      if (!nextVal) {
         await invoke("hand_stop");
         setActive(false);
       } else {
@@ -47,33 +119,52 @@ export function HandModeSection({ settings, update }: Props) {
   };
 
   return (
-    <div className="settings-section">
-      <div className="settings-section-title">Hand Mode (camera pointer)</div>
-      <div className="setting-row" style={{ alignItems: "center" }}>
-        <div>
-          <div className="setting-label">{active ? "Hand mode is on" : "Hand mode is off"}</div>
-          <div className="setting-desc">Say "hand mode". Show palm, fist, palm, fist to arm the pointer.</div>
-        </div>
-        <div className="setting-control">
-          <button className="settings-btn" disabled={busy || (!active && settings.handMode === false)} onClick={toggle}>
-            {active ? "Turn off" : "Turn on"}
-          </button>
-        </div>
+    <div className="settings-section" style={{ border: "none", padding: 0 }}>
+      <div
+        className="settings-section-title"
+        style={{
+          fontSize: "12px",
+          fontWeight: 700,
+          textTransform: "uppercase",
+          letterSpacing: "0.06em",
+          color: "var(--hx-dim)",
+          marginBottom: "10px",
+          display: "flex",
+          alignItems: "center",
+          gap: "6px",
+        }}
+      >
+        <span>✋</span> Hand & Gesture Control
       </div>
-      {ROWS.map((r) => {
-        const on = settings[r.key] ?? r.fallback;
-        return (
-          <div className="setting-row" key={r.key}>
-            <div>
-              <div className="setting-label">{r.label}</div>
-              <div className="setting-desc">{r.desc}</div>
-            </div>
-            <div className="setting-control">
-              <div className={`settings-toggle ${on ? "settings-toggle--on" : ""}`} onClick={() => update(r.key, !on)} />
-            </div>
-          </div>
-        );
-      })}
+
+      {/* Master Active Status Switch Card */}
+      <SwitchCard
+        icon={active ? "🟢" : "⚪"}
+        title={active ? "Hand Tracking Active" : "Hand Tracking Inactive"}
+        desc="Real-time spatial pointer and gesture recognition engine."
+        badge={active ? "LIVE" : "OFF"}
+        checked={active}
+        disabled={busy || (!active && settings.handMode === false)}
+        onChange={toggleMaster}
+        className={active ? "is-selected" : ""}
+      />
+
+      {/* Individual Feature Switch Cards */}
+      <div style={{ marginTop: "10px" }}>
+        {ROWS.map((r) => {
+          const on = settings[r.key] ?? r.fallback;
+          return (
+            <SwitchCard
+              key={r.key}
+              icon={r.icon}
+              title={r.label}
+              desc={r.desc}
+              checked={on}
+              onChange={(next) => update(r.key, next)}
+            />
+          );
+        })}
+      </div>
     </div>
   );
 }

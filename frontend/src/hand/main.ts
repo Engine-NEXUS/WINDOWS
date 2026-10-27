@@ -46,6 +46,7 @@ type Source = "track" | "rvfc";
 type LatencyKind = "capture" | "track-lower-bound" | "arrival";
 
 let inflight = false;
+let frameSeq = 0;
 let frameIdx = 0;
 let lastHandMs = Date.now();
 let lastSeq = 0;
@@ -360,7 +361,7 @@ async function boot() {
     win.processed++;
     win.e2e.push(Math.max(0, Date.now() - cap));
     inflight = true;
-    invoke("hand_frame", { frame: toPayload(hand, now, infer, cap) })
+    invoke("hand_frame", { frame: toPayload(hand, now, infer, cap, ++frameSeq) })
       .catch(() => {})
       .finally(() => {
         inflight = false;
