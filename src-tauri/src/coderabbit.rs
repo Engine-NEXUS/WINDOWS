@@ -340,7 +340,9 @@ pub async fn coderabbit_review_pr_data(
     pr_number: u32,
     repo: Option<String>,
 ) -> Result<CodeRabbitReviewData, String> {
-    let repo_name = repo.unwrap_or_else(|| "ultron".to_string());
+    let Some(repo_name) = repo.filter(|r| !r.trim().is_empty()) else {
+        return Err("Which repository is that PR in?".to_string());
+    };
 
     // 1. Try CodeRabbit CLI pullrequest inspection if installed
     if let Some(path) = cli_path() {
@@ -564,13 +566,6 @@ pub fn get_active_prs_mock() -> Vec<CodeRabbitPrSummary> {
             updated_at: "5 hours ago".into(),
         },
     ]
-}
-
-#[tauri::command]
-pub fn get_coderabbit_active_prs(
-    _repo: Option<String>,
-) -> Result<Vec<CodeRabbitPrSummary>, String> {
-    Ok(get_active_prs_mock())
 }
 
 #[tauri::command]

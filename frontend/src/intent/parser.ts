@@ -32,6 +32,7 @@ export type Intent =
   | { action: "open_architect" }
   | { action: "open_settings" }
   | { action: "open_coderabbit_hub" }
+  | { action: "open_github_dashboard"; subpage?: string }
   | { action: "search"; query: string }
   | { action: "analyse_repo"; owner?: string; repo: string }
   | { action: "analyse_pr"; owner?: string; repo: string; pr_number: number }
@@ -580,10 +581,24 @@ export function parseIntent(transcript: string): Intent {
   const crNorm = text.replace(/code\s*rabbit/g, "coderabbit").replace(/coderrabbit/g, "coderabbit");
   if (crNorm.includes("coderabbit")) {
     const prMatch = crNorm.match(/\b(?:pr|pull\s*request)?\s*#?(\d+)\b/i);
-    if (prMatch && prMatch[1]) {
-      return { action: "analyse_pr", repo: "ultron", pr_number: parseInt(prMatch[1], 10) };
+    // A PR number without a repo is resolved by the native parser (FindPr); never guess a repo here.
+    if (!(prMatch && prMatch[1])) {
+      return { action: "open_coderabbit_hub" };
     }
-    return { action: "open_coderabbit_hub" };
+  }
+
+  // --- GitHub Dashboard, Feed, PR List, Issues & Orgs ---
+  if (/^(?:open|show|give\s+me|bring\s+up|pull\s+up|view|display|check)\s+(?:me\s+)?(?:the\s+|my\s+)?(?:pr\s+list|pull\s+requests?\s+list|prs?|pull\s+requests?)$/i.test(text) || /^(?:pr\s+list|prs\s+list|pull\s+requests?)$/i.test(text)) {
+    return { action: "open_github_dashboard", subpage: "pull_requests" };
+  }
+  if (/^(?:open|show|view|check)\s+(?:me\s+)?(?:the\s+|my\s+)?(?:issues?\s+list|issues?)$/i.test(text) || /^(?:issues|issues\s+list)$/i.test(text)) {
+    return { action: "open_github_dashboard", subpage: "issues" };
+  }
+  if (/^(?:open|show|view|check)\s+(?:me\s+)?(?:the\s+|my\s+)?(?:organizations?|orgs?)$/i.test(text) || /^(?:organizations|orgs)$/i.test(text)) {
+    return { action: "open_github_dashboard", subpage: "organizations" };
+  }
+  if (/^(?:open|show|display|view|check|bring\s+up|pull\s+up)\s+(?:me\s+)?(?:the\s+|my\s+)?github\s+(?:feed|dashboard|interface|overview|activity|updates|home)$/i.test(text) || /^(?:github\s+feed|github\s+dashboard|github\s+interface|github\s+overview)$/i.test(text)) {
+    return { action: "open_github_dashboard", subpage: "feed" };
   }
 
   // --- Open Architecture Mapper ---

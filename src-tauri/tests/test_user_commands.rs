@@ -2,6 +2,7 @@
 // Run: cargo test --test test_user_commands -- --nocapture
 
 use nexus_lib::intent_parser::{parse_deterministic, ParsedIntent, ParseResult};
+use nexus_lib::github_cmd::GitHubCommand;
 
 #[allow(dead_code)]
 fn get_result(input: &str) -> String {
@@ -19,10 +20,12 @@ fn test_analyse_pr_in_zync_no_number() {
     assert!(matches!(
         result,
         Some(ParseResult {
-            intent: ParsedIntent::AnalyseLatestPr { ref repo, author: None, .. },
+            intent: ParsedIntent::GitHubCommand {
+                command: GitHubCommand::ListPrs { ref repo, ref state },
+            },
             ..
-        }) if repo == "zync"
-    ), "Expected AnalyseLatestPr {{repo: zync, author: None}}, got {:?}", result.as_ref().map(|r| format!("{:?}", r.intent)));
+        }) if repo == "zync" && state == "open"
+    ), "Expected ListPrs {{repo: zync, state: open}}, got {:?}", result.as_ref().map(|r| format!("{:?}", r.intent)));
     println!("✅ analyse the pr in zync → {:?}", result.as_ref().map(|r| format!("{:?}", r.intent)));
 }
 
@@ -55,17 +58,41 @@ fn test_check_latest_branch_servx_by_eesha() {
 // ─── Latest PR variations ───
 
 #[test]
+fn test_plain_pr_in_repo_lists_prs() {
+    let cases = vec![
+        ("analyse the pr in zync", "zync"),
+        ("analyse pr in zync", "zync"),
+        ("analyse the pull request in zync", "zync"),
+        ("analyse the pr of zync", "zync"),
+    ];
+
+    for (input, expected_repo) in cases {
+        let result = parse_deterministic(input);
+        assert!(
+            matches!(
+                &result,
+                Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs { repo, state },
+                    },
+                    ..
+                }) if repo == expected_repo && state == "open"
+            ),
+            "expected ListPrs for {}, got {:?}",
+            input,
+            result.as_ref().map(|r| format!("{:?}", r.intent))
+        );
+    }
+}
+
+#[test]
 fn test_latest_pr_variations() {
     let cases = vec![
         // (input, expected_repo, expected_author)
-        ("analyse the pr in zync", "zync", None),
         ("analyse the latest pr in zync", "zync", None),
         ("analyse latest pr zync", "zync", None),
-        ("analyse pr in zync", "zync", None),
         ("analyse newest pr in zync", "zync", None),
-        ("analyse the pull request in zync", "zync", None),
         ("analyse latest pull request in zync", "zync", None),
-        ("analyse the pr of zync", "zync", None),
         ("analyse recent pr in zync", "zync", None),
         ("analyse the pr by prem in servx", "servx", Some("prem")),
         ("analyse pr by prem in servx", "servx", Some("prem")),

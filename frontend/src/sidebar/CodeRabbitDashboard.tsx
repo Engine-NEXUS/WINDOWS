@@ -306,7 +306,7 @@ export const CodeRabbitDashboard: React.FC<CodeRabbitDashboardProps> = ({ data }
     setLoadingPr(prNum);
     // Voice feedback acknowledgment "On it, sir."
     try {
-      await invoke("speak_line", { text: "On it, sir." });
+      await invoke("speak_text", { text: "On it, sir." });
     } catch {
       // Ignored in browser fallback
     }
