@@ -176,14 +176,6 @@ fn save_card(dir: &std::path::Path, text: &str) {
     crate::memcore::with_store(dir, |store| store.meta_set(CARD_KEY, &card.to_string()));
 }
 
-// This module is not wired into lib.rs yet; register this command when the
-// return-review coordinator is restored during lifecycle feature work.
-pub fn get_return_review<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Option<serde_json::Value> {
-    let dir = app.path().app_data_dir().ok()?;
-    crate::memcore::with_store(&dir, |store| store.meta_get(CARD_KEY)).flatten()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-}
-
 fn heartbeat(dir: &std::path::Path) {
     if AWAY.load(Ordering::Acquire) { return; }
     let Some(idle_secs) = crate::memcore::resume::user_idle_secs() else { return };

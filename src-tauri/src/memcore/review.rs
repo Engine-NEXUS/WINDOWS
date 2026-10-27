@@ -632,7 +632,7 @@ mod tests {
         let stored = super::super::recall(&dir, "sister", 5).unwrap();
         assert!(stored.iter().any(|(k, v)| k == "sister_name" && v == "Asha"));
         // An approved fact counts as told by the user, so it is in the always-on profile.
-        let pack = super::super::context_pack(&dir, "weather", super::super::DEFAULT_BUDGET).unwrap();
+        let pack = super::super::context_pack(&dir, "weather", 2600).unwrap();
         assert!(pack.contains("sister_name: Asha"), "{pack}");
 
         // The refused suggestion is not suggested again.

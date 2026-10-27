@@ -209,7 +209,6 @@ pub fn clear_api_key(service: &str) {
 
 /// One-time migration: move API keys from settings.json to OS keychain.
 /// Delegates to `api_keys::scrub_settings_file` to migrate and scrub all known services.
-#[expect(dead_code, reason = "legacy migration helper delegating to api_keys::scrub_settings_file")]
 pub fn migrate_api_keys_to_keychain(app_data_dir: &std::path::Path) {
     crate::api_keys::scrub_settings_file(app_data_dir);
 }
@@ -832,5 +831,35 @@ mod tests {
         let parsed: GoogleAccountProfile = serde_json::from_value(legacy).expect("legacy profile parses");
         assert_eq!(parsed.phone, None);
         assert_eq!(parsed.address, None);
+    }
+
+    /// Regression: the keychain is read FIRST, but Settings used to write only
+    /// settings.json — a stale keychain key silently overrode a corrected one.
+    /// Boot sync makes the (trimmed) settings.json key win when they differ,
+    /// and leaves the keychain alone when settings.json has no key.
+    #[test]
+    fn test_api_key_sync_settings_json_wins_and_trims() {
+        let dir = std::env::temp_dir().join(format!("nexus-keysync-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        set_api_key("groq", "stale-old-key");
+        set_api_key("gemini", "keychain-only-key");
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"groqApiKey":"  fresh-new-key \n","geminiApiKey":""}"#,
+        )
+        .unwrap();
+
+        migrate_api_keys_to_keychain(&dir);
+
+        assert_eq!(get_api_key("groq").as_deref(), Some("fresh-new-key"));
+        assert_eq!(
+            get_api_key("gemini").as_deref(),
+            Some("keychain-only-key"),
+            "an emptied/stripped settings.json key must not wipe the keychain"
+        );
+        for svc in ["groq", "gemini", "cerebras"] {
+            clear_api_key(svc);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

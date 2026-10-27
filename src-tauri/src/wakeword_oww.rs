@@ -28,6 +28,26 @@
 
 use tauri::{AppHandle, Manager, Runtime};
 
+/// Settings → detection threshold. `wakeSensitivity` ("low" | "medium" | "high")
+/// shifts the calibrated threshold (`acoustic_profile.json` `kws_threshold`,
+/// 0.68 as shipped): medium is exactly the calibrated value, high is more
+/// willing to wake (more false alarms), low is stricter. Unknown labels mean
+/// medium. Clamped so a bad profile can never disable or trivialise the gate.
+#[allow(dead_code)]
+pub fn sensitivity_threshold(base: f32, label: &str) -> f32 {
+    let offset = match label.trim().to_ascii_lowercase().as_str() {
+        "high" => -0.08,
+        "low" => 0.07,
+        _ => 0.0,
+    };
+    (base + offset).clamp(0.40, 0.90)
+}
+
+#[cfg(feature = "mock-wake")]
+pub fn apply_wake_sensitivity(_label: &str) {}
+#[cfg(feature = "mock-wake")]
+pub fn apply_wake_dsp(_label: &str) {}
+
 #[cfg(feature = "mock-wake")]
 pub fn run<R: Runtime>(_app: AppHandle<R>) -> Result<(), String> {
     tracing::info!("wake-word: mock mode (no native listener)");
@@ -42,6 +62,7 @@ pub fn set_meeting_state(_state: std::sync::Arc<crate::meeting_detect::MeetingSt
 #[cfg(feature = "mock-wake")]
 pub(crate) fn clear_tts_playing() {}
 
+// `pub(crate)`: the offline evaluator (`voice_eval.rs`) drives the REAL engine.
 #[cfg(not(feature = "mock-wake"))]
 pub(crate) mod engine {
     use std::path::{Path, PathBuf};
@@ -379,11 +400,6 @@ pub(crate) mod engine {
     /// Startup / stream-restart grace (audio time) during which detections are ignored.
     pub const STARTUP_GRACE_MS: u64 = 1500;
 
-    /// AGC: quiet speech is amplified toward this RMS before the classifier.
-    pub const AGC_TARGET_RMS: f32 = 0.035;
-    /// AGC: maximum gain applied to quiet speech.
-    pub const AGC_MAX_GAIN: f32 = 30.0;
-
     /// Pre-computed ambient comfort noise embedding (matches openWakeWord reference specification).
     /// Used to initialize and flush feature buffers without triggering LayerNorm variance collapse.
     pub const COMFORT_EMBEDDING: [f32; 96] = [
@@ -699,6 +715,9 @@ pub(crate) mod engine {
         pub sample_rate: i32,
         pub chunk_buffer: Vec<f32>,
         pub threshold: f32,
+        /// Calibrated threshold from the acoustic profile; `threshold` is this
+        /// shifted by the user's `wakeSensitivity` (see `set_sensitivity`).
+        pub base_threshold: f32,
         pub detections_buffer: CircularBuffer<DETECTION_BUFFER_SIZE, f32>,
         /// Clock time (`now_ms`) of the last stage-1 fire, for the refractory period.
         pub last_fire_ms: Option<u64>,
@@ -738,6 +757,9 @@ pub(crate) mod engine {
         pub webrtc_vad: SendVad,
         /// Adaptive acoustic profile loaded for the host microphone.
         pub acoustic_profile: crate::acoustic_profile::AcousticProfile,
+        /// Front-end parameters (high-pass / gate / AGC) — see `wake_dsp`.
+        pub dsp: crate::wake_dsp::DspParams,
+        pub dsp_profile: crate::wake_dsp::DspProfile,
     }
 
     /// Send-safe wrapper for webrtc_vad::Vad (see field docs).
@@ -817,7 +839,33 @@ pub(crate) mod engine {
     }
 
     impl WakeEngine {
-        pub fn new(resource_dir: PathBuf, app_data_dir: PathBuf) -> anyhow::Result<Self> {
+        /// Select the front-end chain (`wakeDspProfile`): "legacy" (default, the
+        /// previous runtime behaviour) or "aligned" (exactly what the trainer
+        /// feeds the classifier). Rebuilds the high-pass filter for the new cutoff.
+        pub fn set_dsp(&mut self, label: &str) {
+            let profile = crate::wake_dsp::DspProfile::from_label(label);
+            let params = crate::wake_dsp::DspParams::resolve(profile, &self.acoustic_profile);
+            if profile != self.dsp_profile {
+                tracing::info!("wake-engine: front-end '{}' → '{}'", self.dsp_profile.label(), profile.label());
+            }
+            self.dsp_profile = profile;
+            self.dsp = params;
+            self.preprocessor.high_pass = HighPassFilter::new(params.highpass_hz, 16000.0);
+        }
+
+        /// Apply the user's wake sensitivity on top of the calibrated threshold.
+        pub fn set_sensitivity(&mut self, label: &str) {
+            let t = super::sensitivity_threshold(self.base_threshold, label);
+            if (t - self.threshold).abs() > f32::EPSILON {
+                tracing::info!(
+                    "wake-engine: sensitivity '{}' → threshold {:.2} (calibrated {:.2})",
+                    label, t, self.base_threshold
+                );
+            }
+            self.threshold = t;
+        }
+
+        pub fn new(resource_dir: PathBuf, #[allow(unused_variables)] app_data_dir: PathBuf) -> anyhow::Result<Self> {
             let oww_dir = resolve_oww_dir(&resource_dir).ok_or_else(|| {
                 anyhow::anyhow!(
                     "oww model files not found. Checked resource_dir/oww, \
@@ -896,6 +944,7 @@ pub(crate) mod engine {
                 sample_rate: 16000,
                 chunk_buffer: Vec::with_capacity(OWW_CHUNK_SIZE),
                 threshold,
+                base_threshold: threshold,
                 detections_buffer: CircularBuffer::<DETECTION_BUFFER_SIZE, f32>::new(),
                 last_fire_ms: None,
                 command_classifiers,
@@ -915,6 +964,8 @@ pub(crate) mod engine {
                         webrtc_vad::VadMode::Quality,
                     ),
                 ),
+                dsp: crate::wake_dsp::DspParams::resolve(crate::wake_dsp::DspProfile::Legacy, &profile),
+                dsp_profile: crate::wake_dsp::DspProfile::Legacy,
                 acoustic_profile: profile,
             })
         }
@@ -1017,10 +1068,7 @@ pub(crate) mod engine {
             };
 
             // ─── Energy gate + Automatic Gain Control (AGC) ────────────
-            let silence_rms_threshold = self.acoustic_profile.silence_rms_threshold;
-            let target_rms = AGC_TARGET_RMS;
-            let max_gain = AGC_MAX_GAIN;
-            let _pre_gain = self.acoustic_profile.pre_gain;
+            let silence_rms_threshold = self.dsp.silence_rms;
 
             let rms = if chunk.is_empty() {
                 0.0
@@ -1082,18 +1130,15 @@ pub(crate) mod engine {
                 let _ = voiced;
             }
 
-            // AGC: amplify quiet speech to target RMS with calibrated pre-gain
-            // This ensures consistent model input across different laptop microphones.
-            let pre_gain = self.acoustic_profile.pre_gain.max(1.0);
-            let (chunk, agc_gain): (Vec<f32>, f32) = if rms < target_rms {
-                let target_gain = (target_rms / rms).min(max_gain);
-                let gain = target_gain.max(pre_gain);
-                tracing::trace!("wake: AGC gain={:.1}x (RMS {:.6} → {:.6})", gain, rms, target_rms);
-                (chunk.iter().map(|&s| (s * gain).clamp(-1.0, 1.0)).collect(), gain)
-            } else if pre_gain > 1.0 {
-                (chunk.iter().map(|&s| (s * pre_gain).clamp(-1.0, 1.0)).collect(), pre_gain)
+            // AGC (see `wake_dsp::agc_gain`): lift quiet speech toward the target RMS.
+            // `legacy` = the original runtime chain (per-device pre-gain as a minimum
+            // gain on everything); `aligned` = what the classifier was trained on.
+            let agc_gain = crate::wake_dsp::agc_gain(rms, &self.dsp);
+            let chunk: Vec<f32> = if (agc_gain - 1.0).abs() < f32::EPSILON {
+                chunk
             } else {
-                (chunk, 1.0)
+                tracing::trace!("wake: AGC gain={:.1}x (RMS {:.6})", agc_gain, rms);
+                chunk.iter().map(|&s| (s * agc_gain).clamp(-1.0, 1.0)).collect()
             };
 
             // Get audio features (melspectrogram → embedding)
@@ -1576,9 +1621,20 @@ pub(crate) mod engine {
                 // drain) so the snapshot is always fresh. Cost: one 1280-
                 // float memcpy per 80ms — negligible.
                 {
+                    let sum_sq: f32 = chunk.iter().map(|s| s * s).sum();
+                    let rms = (sum_sq / chunk.len().max(1) as f32).sqrt();
+                    let prev = f32::from_bits(super::NOISE_FLOOR_BITS.load(Ordering::Relaxed));
+                    super::NOISE_FLOOR_BITS.store(
+                        super::track_noise_floor(prev, rms).to_bits(),
+                        Ordering::Relaxed,
+                    );
+                }
+                let chunk_end = {
                     let mut ring = super::VERIFY_RING.lock();
                     super::push_capped(&mut ring, &chunk, super::VERIFY_RING_CAP);
-                }
+                    super::RING_TOTAL.fetch_add(chunk.len() as u64, Ordering::SeqCst)
+                        + chunk.len() as u64
+                };
 
                 // ── Rust-side STT capture ──────────────────────────────
                 // If capturing, append chunk to buffer and run RMS VAD.
@@ -1588,6 +1644,11 @@ pub(crate) mod engine {
                     // An abort may have won after the optimistic atomic read.
                     let mut active_capture = super::ACTIVE_CAPTURE_ATTEMPT.lock();
                     if !super::STT_CAPTURING.load(Ordering::Relaxed) { continue; }
+                    // Already delivered as part of the capture seed (it was in the
+                    // ring when the capture started): don't append it twice.
+                    if chunk_end <= super::SEED_UPTO.load(Ordering::SeqCst) {
+                        continue;
+                    }
                     {
                         let mut cap = super::STT_CAPTURE_BUFFER.lock();
                         cap.extend(chunk.iter().copied());
@@ -1616,32 +1677,17 @@ pub(crate) mod engine {
                         }
                     }
 
-                    let underway = super::STT_SPEECH_DETECTED.load(Ordering::Relaxed);
-                    // Neural VAD when loaded (vadSilero), else the RMS hysteresis — see chunk_voice_flags.
-                    // While the wake sound is audible the mic hears it (no echo cancellation): the audio is still
-                    // buffered, but it must not count as speech or arm the endpoint.
-                    let (cont_voice, start_voice) = if crate::wake_cue::window_active_now() {
-                        (false, false)
+                    // Neural VAD (vadSilero) when loaded, else the noise-floor-aware energy hysteresis
+                    // (`capture_vad_update`). While the wake sound is audible the mic hears it (no echo
+                    // cancellation): the audio is still buffered, but it must not count as speech or arm
+                    // the endpoint.
+                    if crate::wake_cue::window_active_now() {
+                        super::capture_vad_apply(false, false);
+                    } else if let Some(p) = super::silero_chunk_prob(&chunk) {
+                        let (cont_voice, start_voice) = super::chunk_voice_flags(rms, Some(p));
+                        super::capture_vad_apply(cont_voice, start_voice);
                     } else {
-                        super::chunk_voice_flags(rms, super::silero_chunk_prob(&chunk))
-                    };
-                    if if underway { cont_voice } else { start_voice } {
-                        // Speech resumed after a real pause (2+ silent chunks)?
-                        // Count it — hesitant speakers get a patient endpoint.
-                        if underway
-                            && super::STT_SILENCE_CHUNKS.load(Ordering::Relaxed) >= 2
-                        {
-                            super::STT_PAUSE_COUNT.fetch_add(1, Ordering::Relaxed);
-                        }
-                        super::STT_SPEECH_DETECTED.store(true, Ordering::Relaxed);
-                        super::STT_SILENCE_CHUNKS.store(0, Ordering::Relaxed);
-                        // TRUE voice energy (above the speech threshold, not the
-                        // hysteresis band): arms the silence endpoint (F1).
-                        if start_voice {
-                            super::STT_VOICED_CHUNKS.fetch_add(1, Ordering::Relaxed);
-                        }
-                    } else if underway {
-                        super::STT_SILENCE_CHUNKS.fetch_add(1, Ordering::Relaxed);
+                        super::capture_vad_update(rms);
                     }
 
                     let total = super::STT_TOTAL_CHUNKS.fetch_add(1, Ordering::Relaxed);
@@ -1649,16 +1695,15 @@ pub(crate) mod engine {
                     let speech_detected = super::STT_SPEECH_DETECTED.load(Ordering::Relaxed);
                     // Adaptive endpoint: 240ms in Ghost Mode, 400ms normally,
                     // relaxing to patient thresholds once mid-turn pauses are detected.
+                    let pauses = super::STT_PAUSE_COUNT.load(Ordering::Relaxed);
                     let silence_limit = if crate::ghost::session_active() {
-                        if super::STT_PAUSE_COUNT.load(Ordering::Relaxed) >= 1 {
+                        if pauses >= 1 {
                             super::STT_SILENCE_CHUNK_LIMIT_GHOST_PATIENT
                         } else {
                             super::STT_SILENCE_CHUNK_LIMIT_GHOST
                         }
-                    } else if super::STT_PAUSE_COUNT.load(Ordering::Relaxed) >= 2 {
-                        super::STT_SILENCE_CHUNK_LIMIT_PATIENT
                     } else {
-                        super::STT_SILENCE_CHUNK_LIMIT
+                        super::silence_limit_for(pauses)
                     };
 
                     // Stop conditions (pure predicate, F1):
@@ -1847,6 +1892,9 @@ pub(crate) mod engine {
                             let _ = wake_tx.send(super::WakeCandidate {
                                 audio,
                                 prob: 0.0,
+                                verified: false,
+                                // No wake word was heard: nothing to seed from.
+                                ring_end: 0,
                             });
                         }
                     }
@@ -1882,9 +1930,16 @@ pub(crate) mod engine {
                     // the verifier thread (two-key gate needs both).
                     let prob = eng.pending_probability;
                     drop(eng);
-                    let audio: Vec<f32> =
-                        super::VERIFY_RING.lock().iter().copied().collect();
-                    let _ = wake_tx.send(super::WakeCandidate { audio, prob });
+                    // Snapshot the audio AND the stream position under one lock so
+                    // `ring_end` is exactly the end of the last sample in `audio`.
+                    let (audio, ring_end): (Vec<f32>, u64) = {
+                        let ring = super::VERIFY_RING.lock();
+                        (
+                            ring.iter().copied().collect(),
+                            super::RING_TOTAL.load(Ordering::SeqCst),
+                        )
+                    };
+                    let _ = wake_tx.send(super::WakeCandidate { audio, prob, verified: false, ring_end });
                 }
             }
         }
@@ -1895,6 +1950,27 @@ pub(crate) mod engine {
 use once_cell::sync::OnceCell;
 #[cfg(not(feature = "mock-wake"))]
 static WAKE_TX: OnceCell<std::sync::mpsc::Sender<WakeCandidate>> = OnceCell::new();
+/// The running engine, so Settings can change sensitivity without a restart.
+#[cfg(not(feature = "mock-wake"))]
+static ENGINE_HANDLE: OnceCell<std::sync::Arc<parking_lot::Mutex<engine::WakeEngine>>> =
+    OnceCell::new();
+
+/// Apply a new `wakeSensitivity` to the live engine (no-op before it starts;
+/// `run()` applies the saved value at startup).
+#[cfg(not(feature = "mock-wake"))]
+pub fn apply_wake_sensitivity(label: &str) {
+    if let Some(e) = ENGINE_HANDLE.get() {
+        e.lock().set_sensitivity(label);
+    }
+}
+
+/// Apply a new `wakeDspProfile` ("legacy" | "aligned") to the live engine.
+#[cfg(not(feature = "mock-wake"))]
+pub fn apply_wake_dsp(label: &str) {
+    if let Some(e) = ENGINE_HANDLE.get() {
+        e.lock().set_dsp(label);
+    }
+}
 /// Global meeting/privacy state — checked on every audio chunk.
 /// Set up in `lib.rs` before the wake engine starts.
 #[cfg(not(feature = "mock-wake"))]
@@ -1931,18 +2007,33 @@ pub struct WakeCandidate {
     pub audio: Vec<f32>,
     /// Stage-1 smoothed score that fired (pending_probability at trigger).
     pub prob: f32,
+    /// True only for the self-send a successful stage-2 verification makes:
+    /// the audio was already confirmed, so the receiver fires it immediately
+    /// (no cooldown, no re-verification). Carrying this on the candidate itself
+    /// (instead of a shared flag) means a verified wake can never be eaten by
+    /// the cooldown, nor leave a stale "verified" token for an unrelated
+    /// candidate to consume.
+    pub verified: bool,
+    /// Position of the end of the detecting chunk in the audio stream
+    /// (`RING_TOTAL` when it fired); 0 = unknown, then the capture starts fresh.
+    /// A verified self-send carries the original candidate's value.
+    pub ring_end: u64,
 }
+/// Total 16 kHz samples ever pushed into `VERIFY_RING` (monotonic). Lets a wake
+/// candidate say *where in the audio stream* it was detected, so the command
+/// capture can start from that exact point instead of from "whenever the
+/// receiver thread got around to it".
+#[cfg(not(feature = "mock-wake"))]
+static RING_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Ring-total up to which audio was already handed to the capture as a seed;
+/// the audio callback skips chunks that end at or before it (no duplicates).
+#[cfg(not(feature = "mock-wake"))]
+static SEED_UPTO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Only one verification may be in flight at a time (prevents double-fire).
 #[cfg(not(feature = "mock-wake"))]
 static VERIFY_IN_FLIGHT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-/// Set by the verifier thread when a candidate is accepted: the next trip
-/// through the wake loop fires immediately WITHOUT re-verifying (the audio
-/// was already confirmed). Consumed via swap(false) — single fire guaranteed.
-#[cfg(not(feature = "mock-wake"))]
-static VERIFIED_BYPASS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 /// Speaker verification state — lazily initialized on first candidate.
 /// Holds a separate AudioFeatures instance (not the live engine's) so the
 /// streaming buffers stay pristine during verification.
@@ -1992,26 +2083,10 @@ pub fn verify_transcript(text: &str) -> bool {
     verify_transcript_gated(text, 1.0)
 }
 
-/// Transcript words that always confirm, at any stage-1 probability.
-/// (The bare word fires whether whispered or shouted.)
-const VERIFY_EXACT_WORDS: &[&str] = &["nexus"];
-/// Near-matches (STT confusions within phoneme-edit-distance ~1, measured on
-/// 30 owner takes + 100-combo matrix: lexus 37%, NIXUS/NIXIS dominant spellings
-/// (K02/K06/K10/BN05/BN11/A20), nexat/nexo truncations, nexas/nekus artifacts).
-/// Require stage-1 prob ≥ 0.6 (two-key) — no single weak signal wakes alone.
-/// Deliberately EXCLUDES texas/next/access (constant on news/TV — accepting
-/// them would reopen the FA gate v30+verifier just closed).
-const VERIFY_NEAR_WORDS: &[&str] = &[
-    "lexus", "nexis", "nixus", "nixis", "nexas", "nexuss", "nekus", "lexis",
-    "nexat", "nexo", "nexos", "nex", "knex", "mexus", "mexis",
-];
+// Name forms (exact vs near, incl. split pairs like "next us") live in
+// `crate::wake_names`, shared with `intent_parser::strip_wake_prefix`.
 /// Stage-1 probability floor for near-matches.
 pub const VERIFY_NEAR_PROB_FLOOR: f32 = 0.6;
-
-/// Consecutive-candidate cooldown. A pending verified bypass is exempt (see the wake loop).
-pub fn cooldown_blocks(now_ms: u64, last_fire_ms: u64, bypass_pending: bool) -> bool {
-    !bypass_pending && now_ms >= last_fire_ms && now_ms - last_fire_ms < 1500
-}
 
 /// Stage-1 probability at/above which a verify FAILURE (STT error, timeout, too-short audio)
 /// still fires. Below it the candidate is suppressed: a cold local STT server used to time out
@@ -2070,6 +2145,11 @@ pub fn verify_short_mishearing(text: &str, prob: f32) -> bool {
     if words.is_empty() || words.len() > VERIFY_SHORT_MAX_WORDS {
         return false;
     }
+    // The voice-accuracy programme pins these as news/TV phrases that must never wake NEXUS,
+    // at any probability: a bare "next" and a bare split pair ("next us").
+    if (words.len() == 1 && words[0] == "next") || is_bare_split_pair(&words) {
+        return false;
+    }
     if words.iter().any(|w| VERIFY_SHORT_MISHEARINGS.contains(&w.as_str())) {
         return true;
     }
@@ -2085,7 +2165,8 @@ pub const VERIFY_LETS_PROB_FLOOR: f32 = 0.75;
 /// Production accept decision: the two-key word gate OR the high-confidence soundalike tier OR
 /// the short-transcript mishearing tier.
 pub fn verify_transcript_accept(text: &str, prob: f32) -> bool {
-    verify_transcript_gated(text, prob)
+    let gated = verify_transcript_gated(text, prob) && !is_bare_split_pair(&transcript_words(text));
+    gated
         || verify_highconf_soundalike(text, prob)
         || verify_short_mishearing(text, prob)
 }
@@ -2099,20 +2180,25 @@ fn transcript_words(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Two-key transcript gate: exact words fire at any probability;
-/// near-matches additionally require `prob >= VERIFY_NEAR_PROB_FLOOR`.
-/// Pure function (unit-tested).
+/// Two-key transcript gate: the exact name fires at any probability; near forms
+/// (`wake_names::NEAR_WORDS` / `NEAR_PAIRS`) additionally require `prob >= VERIFY_NEAR_PROB_FLOOR`.
+/// Pure function (unit-tested). The PRODUCTION decision is `verify_transcript_accept`, which also
+/// refuses a bare split pair (see `is_bare_split_pair`).
 pub fn verify_transcript_gated(text: &str, prob: f32) -> bool {
-    let words = transcript_words(text);
-    if words.iter().any(|w| VERIFY_EXACT_WORDS.contains(&w.as_str())) {
-        return true;
+    use crate::wake_names::{classify, NameMatch};
+    match classify(&transcript_words(text)) {
+        NameMatch::Exact => true,
+        NameMatch::Near => prob >= VERIFY_NEAR_PROB_FLOOR,
+        NameMatch::None => false,
     }
-    if prob >= VERIFY_NEAR_PROB_FLOOR
-        && words.iter().any(|w| VERIFY_NEAR_WORDS.contains(&w.as_str()))
-    {
-        return true;
-    }
-    false
+}
+
+/// True when the only name evidence is a split pair ("next us", "necks us", "next sis"): everyday
+/// news/TV phrases, so they count only behind a greeting (`verify_highconf_soundalike`) — never on
+/// their own, at any probability. Pure.
+fn is_bare_split_pair(words: &[String]) -> bool {
+    use crate::wake_names::{classify, NameMatch, NEAR_WORDS};
+    classify(words) == NameMatch::Near && !words.iter().any(|w| NEAR_WORDS.contains(&w.as_str()))
 }
 
 /// Confidence veto threshold: suppress only when EVERY segment looks like
@@ -2192,7 +2278,7 @@ fn check_pre_trigger(
 /// passes the gate or the trimmed span is suspiciously short (<0.3s).
 /// Unused under `mock-wake` (verifier compiled out) — allowed, not dead.
 #[allow(dead_code)]
-fn vad_trim(audio: &[f32]) -> Vec<f32> {
+pub(crate) fn vad_trim(audio: &[f32]) -> Vec<f32> {
     const FRAME: usize = 320; // 20ms @16kHz
     const GATE: f32 = 0.02; // speech-body floor (above mic-noise/SST floor)
     const MARGIN: usize = 4800; // ~300ms each side (v3: keep context —
@@ -3094,6 +3180,10 @@ pub fn start_stt_capture_with_origin(origin: crate::directed::Origin) {
         // so no phonemes are lost — the user has already finished the wake
         // word and is just starting to say the command.
     }
+    CAPTURE_FLOOR_BITS.store(
+        NOISE_FLOOR_BITS.load(std::sync::atomic::Ordering::Relaxed),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     STT_SPEECH_DETECTED.store(false, std::sync::atomic::Ordering::Relaxed);
     STT_SILENCE_CHUNKS.store(0, std::sync::atomic::Ordering::Relaxed);
     STT_TOTAL_CHUNKS.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -3106,6 +3196,207 @@ pub fn start_stt_capture_with_origin(origin: crate::directed::Origin) {
     SMART_TURN_LAST_REQ.store(0, std::sync::atomic::Ordering::Relaxed);
     STT_CAPTURING.store(true, std::sync::atomic::Ordering::Release);
     tracing::info!("stt-capture: started (session={session}, cpal-side capture, no baton pass)");
+}
+
+/// Mock builds have no audio path.
+#[cfg(feature = "mock-wake")]
+pub fn start_stt_capture_seeded(_offset_ms: i32, _ring_end: u64) {}
+
+/// Which slice of the verify ring a capture seed uses. Pure (unit-tested).
+///
+/// `total_now`: samples ever pushed; `ring_len`: samples currently in the ring
+/// (the newest `ring_len` of them); `ring_end`: stream position of the end of
+/// the detecting chunk; `offset`: samples to shift the start (negative reaches
+/// back into the wake word — experimental, default 0).
+/// Returns `(start_index_in_ring, count)`, or `None` when there is nothing to seed.
+#[allow(dead_code)]
+fn seed_slice(total_now: u64, ring_len: usize, ring_end: u64, offset: i64) -> Option<(usize, usize)> {
+    if ring_end == 0 || ring_end > total_now {
+        return None;
+    }
+    let ring_start = total_now.saturating_sub(ring_len as u64);
+    let want = (ring_end as i64 + offset).clamp(ring_start as i64, total_now as i64) as u64;
+    let count = (total_now - want) as usize;
+    if count == 0 {
+        return None;
+    }
+    Some(((want - ring_start) as usize, count))
+}
+
+/// Like [`start_stt_capture`], but the capture begins with the audio that
+/// arrived after the wake word was detected (`ring_end`, shifted by
+/// `offset_ms`, clamped to ±400 ms). The seed is replayed through the same
+/// speech/silence tracking a live chunk gets, so a command that was already
+/// finished by the time the capture starts ends on the next chunk instead of
+/// waiting out the 8 s no-speech timeout.
+///
+/// Holds the ring lock, which the audio callback also takes before touching the
+/// capture, so no chunk is lost or counted twice (`SEED_UPTO`).
+#[cfg(not(feature = "mock-wake"))]
+pub fn start_stt_capture_seeded(offset_ms: i32, ring_end: u64) {
+    use std::sync::atomic::Ordering;
+    if ring_end == 0 {
+        start_stt_capture();
+        return;
+    }
+    let ring = VERIFY_RING.lock();
+    let total_now = RING_TOTAL.load(Ordering::SeqCst);
+    let offset = offset_ms.clamp(-400, 400) as i64 * 16;
+    let seed: Vec<f32> = match seed_slice(total_now, ring.len(), ring_end, offset) {
+        Some((start, count)) => ring.iter().skip(start).take(count).copied().collect(),
+        None => Vec::new(),
+    };
+
+    {
+        let mut buf = STT_CAPTURE_BUFFER.lock();
+        buf.clear();
+        buf.extend_from_slice(&seed);
+    }
+    CAPTURE_FLOOR_BITS.store(NOISE_FLOOR_BITS.load(Ordering::Relaxed), Ordering::Relaxed);
+    STT_SPEECH_DETECTED.store(false, Ordering::Relaxed);
+    STT_SILENCE_CHUNKS.store(0, Ordering::Relaxed);
+    STT_TOTAL_CHUNKS.store(0, Ordering::Relaxed);
+    STT_VOICED_CHUNKS.store(0, Ordering::Relaxed);
+    STT_PAUSE_COUNT.store(0, Ordering::Relaxed);
+    for chunk in seed.chunks(engine::OWW_CHUNK_SIZE) {
+        let sum_sq: f32 = chunk.iter().map(|s| s * s).sum();
+        capture_vad_update((sum_sq / chunk.len() as f32).sqrt());
+        STT_TOTAL_CHUNKS.fetch_add(1, Ordering::Relaxed);
+    }
+    SEED_UPTO.store(total_now, Ordering::SeqCst);
+    STT_CAPTURING.store(true, Ordering::Relaxed);
+    drop(ring);
+
+    tracing::info!(
+        "stt-capture: started (seeded {} samples = {}ms after the detection point, offset {}ms)",
+        seed.len(),
+        seed.len() / 16,
+        offset_ms
+    );
+}
+
+/// Slow minimum-tracking estimate of the room's noise floor (RMS per 80 ms
+/// chunk), updated by the audio callback for every chunk. f32 bits in an atomic.
+#[cfg(not(feature = "mock-wake"))]
+static NOISE_FLOOR_BITS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0x3B44_9BA6); // 0.003
+/// The floor frozen at capture start (so the user's own speech cannot drag the
+/// thresholds up mid-turn).
+#[cfg(not(feature = "mock-wake"))]
+static CAPTURE_FLOOR_BITS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0x3B44_9BA6);
+
+/// Default room noise floor the fixed thresholds were tuned for.
+pub const DEFAULT_NOISE_FLOOR: f32 = 0.003;
+
+/// One step of the noise-floor tracker. Falls fast to a quieter chunk, rises
+/// slowly (~50 s time constant) so a few seconds of speech barely move it.
+/// Pure (unit-tested).
+pub fn track_noise_floor(prev: f32, rms: f32) -> f32 {
+    if !rms.is_finite() || !prev.is_finite() {
+        return DEFAULT_NOISE_FLOOR;
+    }
+    let r = rms.clamp(0.0, 0.2);
+    let next = if r < prev { prev * 0.8 + r * 0.2 } else { prev * 0.9985 + r * 0.0015 };
+    next.clamp(0.0005, 0.05)
+}
+
+/// Speech-start / keep-going RMS thresholds for a given noise floor.
+///
+/// The fixed 0.010 / 0.006 pair assumed a quiet room: next to a fan or open
+/// window at an RMS of ~0.008 the capture never fell below the "silent" level,
+/// so every turn ran to the 10 s cap. The pair now scales with the measured
+/// floor but NEVER drops below the old values, so a quiet room behaves exactly
+/// as before. Pure (unit-tested).
+pub fn endpoint_thresholds(floor: f32) -> (f32, f32) {
+    let f = if floor.is_finite() { floor.clamp(0.0005, 0.05) } else { DEFAULT_NOISE_FLOOR };
+    let speech = (f * 3.34).clamp(STT_SPEECH_RMS_THRESHOLD, 0.05);
+    let silence = (f * 2.0).clamp(STT_SILENCE_RMS_THRESHOLD, speech * 0.8);
+    (speech, silence)
+}
+
+/// Silent-chunk limit before a confirmed turn ends: patient once the speaker
+/// has paused mid-turn twice.
+fn silence_limit_for(pauses: u32) -> u32 {
+    if pauses >= 2 { STT_SILENCE_CHUNK_LIMIT_PATIENT } else { STT_SILENCE_CHUNK_LIMIT }
+}
+
+/// Offline mirror of the live endpointer (`capture_vad_update` + the stop
+/// predicate in the audio callback), used by the evaluator to see where a
+/// recorded command would be cut. A unit test drives it and the live atomics
+/// with the same chunk sequence so the two cannot drift apart.
+#[derive(Debug, Clone)]
+pub struct EndpointSim {
+    speech: bool,
+    silence: u32,
+    voiced: u32,
+    pauses: u32,
+    total: u32,
+    hi: f32,
+    lo: f32,
+    /// Replace the 5-chunk silence limit (for sweeps); `None` = production.
+    pub silence_limit_override: Option<u32>,
+}
+
+impl EndpointSim {
+    pub fn new(noise_floor: f32) -> Self {
+        let (hi, lo) = endpoint_thresholds(noise_floor);
+        Self { speech: false, silence: 0, voiced: 0, pauses: 0, total: 0, hi, lo, silence_limit_override: None }
+    }
+
+    /// Feed one 80 ms chunk's RMS; true = the capture would stop here.
+    pub fn step(&mut self, rms: f32) -> bool {
+        let thresh = if self.speech { self.lo } else { self.hi };
+        if rms > thresh {
+            if self.speech && self.silence >= 2 {
+                self.pauses += 1;
+            }
+            self.speech = true;
+            self.silence = 0;
+            if rms > self.hi {
+                self.voiced += 1;
+            }
+        } else if self.speech {
+            self.silence += 1;
+        }
+        let total_before = self.total;
+        self.total += 1;
+        let limit = self.silence_limit_override.unwrap_or_else(|| silence_limit_for(self.pauses));
+        should_stop_capture(self.speech, self.voiced, self.silence, limit, total_before)
+    }
+}
+
+/// Per-chunk speech/silence tracking for the command capture (shared by the
+/// live audio callback and the seed replay so both behave identically).
+/// Hysteresis: a high threshold STARTS speech (rejects noise), a lower one
+/// keeps it going (boundary chatter must not stall or stretch the turn).
+#[cfg(not(feature = "mock-wake"))]
+fn capture_vad_update(rms: f32) {
+    use std::sync::atomic::Ordering;
+    let (hi, lo) = endpoint_thresholds(f32::from_bits(CAPTURE_FLOOR_BITS.load(Ordering::Relaxed)));
+    capture_vad_apply(rms > lo, rms > hi);
+}
+
+/// Advance the capture endpoint counters from one chunk's voice flags: `cont_voice` keeps a
+/// turn that is already underway alive, `start_voice` (true voice energy, above the speech
+/// threshold rather than the hysteresis band) starts one and arms the silence endpoint (F1).
+fn capture_vad_apply(cont_voice: bool, start_voice: bool) {
+    use std::sync::atomic::Ordering;
+    let underway = STT_SPEECH_DETECTED.load(Ordering::Relaxed);
+    if if underway { cont_voice } else { start_voice } {
+        // Speech resumed after a real pause (2+ silent chunks)? Count it —
+        // hesitant speakers get a patient endpoint.
+        if underway && STT_SILENCE_CHUNKS.load(Ordering::Relaxed) >= 2 {
+            STT_PAUSE_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        STT_SPEECH_DETECTED.store(true, Ordering::Relaxed);
+        STT_SILENCE_CHUNKS.store(0, Ordering::Relaxed);
+        if start_voice {
+            STT_VOICED_CHUNKS.fetch_add(1, Ordering::Relaxed);
+        }
+    } else if underway {
+        STT_SILENCE_CHUNKS.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Result of `abort_stt_capture()` (second Ctrl+Space press while listening).
@@ -3199,7 +3490,6 @@ pub fn pause_stream() -> Result<(), String> {
     let _dispatch = WAKE_DISPATCH.lock();
     MIC_BATON_PASSED.store(true, std::sync::atomic::Ordering::SeqCst);
     abort_stt_capture(); // Invalidate queued transcripts before giving up the mic.
-    VERIFIED_BYPASS.store(false, std::sync::atomic::Ordering::SeqCst);
     use cpal::traits::StreamTrait;
     let guard = CPAL_STREAM.read();
     let stream = guard.as_ref().ok_or("Wake microphone is unavailable")?;
@@ -3316,8 +3606,11 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     let (cmd_tx, cmd_rx) =
         std::sync::mpsc::channel::<engine::CommandIntent>();
     wake_engine.command_tx = Some(cmd_tx);
+    wake_engine.set_sensitivity(&crate::commands::read_wake_sensitivity(&app));
+    wake_engine.set_dsp(&crate::commands::read_wake_dsp_profile(&app));
 
     let engine = std::sync::Arc::new(parking_lot::Mutex::new(wake_engine));
+    let _ = ENGINE_HANDLE.set(engine.clone());
 
     let (tx, rx) = std::sync::mpsc::channel::<WakeCandidate>();
     let _ = WAKE_TX.set(tx);
@@ -3755,10 +4048,11 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                 // uses neutral English decoding. Rejected audio never reaches
                 // Groq, the router, speech, memory, or learning.
                 let (ownership, owner_score) = verify_turn_audio(&app_for_stt, &buffer);
-                let decoder_bias = match crate::stt_groq::decoder_bias_for(ownership) {
-                    crate::stt_groq::DecoderBias::OwnerCommand => "owner",
-                    crate::stt_groq::DecoderBias::Neutral => "neutral",
-                };
+                let bias_choice = crate::stt_groq::decoder_bias_for_turn(
+                    ownership,
+                    crate::commands::read_stt_command_hints(&app_for_stt),
+                );
+                let decoder_bias = crate::stt_groq::decoder_bias_label(bias_choice);
                 stats.owner = ownership.as_str();
                 stats.owner_score = owner_score;
                 stats.decoder_bias = decoder_bias;
@@ -3811,8 +4105,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     let client = crate::stt::shared_client();
 
                     crate::stt::reset_turn_markers();
-                    let bias = crate::stt_groq::decoder_bias_for(ownership);
-                    let vocabulary = Some(crate::stt_groq::decoder_bias_prompt(bias));
+                    let vocabulary = Some(crate::stt_groq::decoder_bias_prompt(bias_choice));
                     let transcript = crate::stt::transcribe_samples(
                         &samples,
                         &client,
@@ -3897,20 +4190,19 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 
     while let Ok(candidate) = rx.recv() {
         if MIC_BATON_PASSED.load(std::sync::atomic::Ordering::SeqCst) {
-            VERIFIED_BYPASS.store(false, std::sync::atomic::Ordering::SeqCst);
             continue;
         }
+        let ring_end = candidate.ring_end;
         let now_ms = monotonic_ms();
         let last_fire = LAST_NEURAL_FIRE_MS.load(std::sync::atomic::Ordering::Relaxed);
-        // A VERIFIED candidate's self-send must never be eaten by the cooldown the
-        // candidate itself started (a fast cloud verify finishes inside 1.5 s; the
-        // dropped self-send left VERIFIED_BYPASS armed and a LATER unverified
-        // candidate then fired without verification).
-        let bypass_pending = VERIFIED_BYPASS.load(std::sync::atomic::Ordering::SeqCst);
-        if cooldown_blocks(now_ms, last_fire, bypass_pending) {
-            tracing::debug!("wake-word: consecutive candidate suppressed by 1.5s cooldown");
-            continue;
-        }
+        let verified = match candidate_gate(candidate.verified, now_ms, last_fire) {
+            CandidateGate::Suppress => {
+                tracing::debug!("wake-word: consecutive candidate suppressed by 1.5s cooldown");
+                continue;
+            }
+            CandidateGate::FireVerified => true,
+            CandidateGate::Proceed => false,
+        };
         // Open the wake-sound output now (verification can take 250 ms+), so the cue at the fire is instant.
         crate::wake_cue::prewarm();
 
@@ -3920,10 +4212,9 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         // so the live engine's streaming buffers stay pristine.
         // Voice Lock is fail closed: missing/corrupt profiles and model errors
         // cannot turn a wake candidate into an owner command.
-        // A Whisper-verified candidate's self-send carries no audio and was already
-        // speaker-checked when first dispatched; re-checking it always failed and
-        // left the bypass armed, so each wake needed a second "Nexus".
-        if !bypass_pending && crate::commands::read_speaker_verification(&app) {
+        // A stage-2-verified candidate already passed this check when it was
+        // first seen — never repeat it.
+        if !verified && crate::commands::read_speaker_verification(&app) {
             match verify_speaker_at_fire(&app, &candidate.audio) {
                 Some(false) | None => {
                     tracing::info!(
@@ -3941,21 +4232,25 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 
         // ── Stage-2 verifier dispatch ──────────────────────────────
         // The old body below fires immediately; it now runs ONLY when the
-        // verifier accepts (via VERIFIED_BYPASS), when verification is
+        // verifier accepts (a `verified` candidate), when verification is
         // disabled, or when a worker can't be spawned (fail-open).
         // A rejected candidate simply never reaches the fire path.
         {
             use std::sync::atomic::Ordering;
-            // A previously accepted candidate is waiting: fire now, no re-verify.
-            if VERIFIED_BYPASS.swap(false, Ordering::SeqCst) {
-                tracing::info!("verify: previously accepted candidate → firing");
+            // The stage-2 verifier accepted this audio: fire now, no re-verify.
+            if verified {
+                tracing::info!("verify: verified candidate → firing");
                 if let Ok(dir) = app.path().app_data_dir() {
                     crate::diary::log_event(&dir, "wake", "trigger (verified)");
                 }
             } else if VERIFY_IN_FLIGHT.swap(true, Ordering::SeqCst) {
                 tracing::debug!("verify: candidate dropped (already in flight)");
                 continue;
-            } else if should_instant_fire(crate::commands::read_verify_wake(&app), candidate.prob) {
+            } else if should_instant_fire(
+                read_verify_mode(&app),
+                crate::commands::read_wake_verify_high(&app),
+                candidate.prob,
+            ) {
                 // Instant fire ONLY for real stage-1 detections. A prob-0.0
                 // candidate (v4 barge-in "exact-only verify") has ZERO neural
                 // evidence — firing it here sent phantom "confidence 0.0%"
@@ -3985,7 +4280,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                 match std::thread::Builder::new()
                     .name("wake-verify".into())
                     .spawn(move || {
-                        verify_candidate(&app_for_verify, candidate.audio, candidate.prob);
+                        verify_candidate(&app_for_verify, candidate.audio, candidate.prob, candidate.ring_end);
                         VERIFY_IN_FLIGHT.store(false, Ordering::SeqCst);
                     }) {
                     Ok(_) => {
@@ -4005,7 +4300,6 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         // Serialize the last check with pause acknowledgment before any cue/turn.
         let _dispatch = WAKE_DISPATCH.lock();
         if MIC_BATON_PASSED.load(std::sync::atomic::Ordering::SeqCst) {
-            VERIFIED_BYPASS.store(false, std::sync::atomic::Ordering::SeqCst);
             continue;
         }
 
@@ -4024,34 +4318,34 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         // so it's delivering audio. We capture from the same stream — no baton
         // pass, no getUserMedia. This fixes the Intel SST driver issue where
         // getUserMedia returns silence but cpal is still working.
-        start_stt_capture();
+        // Seeded with whatever the user said AFTER the detection point while we
+        // were verifying / starting up, so a one-breath "NEXUS open Chrome"
+        // keeps "open Chrome". Never includes the wake word itself (that
+        // poisoned Groq in the 2026-09-25 prefix-pad incident).
+        start_stt_capture_seeded(crate::commands::read_wake_seed_offset_ms(&app), ring_end);
 
         // Only pre-start the local faster-whisper sidecar if Groq cloud STT
         // will NOT be used. This saves ~64-128MB RAM when Groq is configured.
         // Groq is used when: a key exists AND localSttOnly is false.
-        let groq_vault = crate::auth_vault::get_api_key("groq").unwrap_or_default();
         let data_dir = app.path().app_data_dir().ok();
         let settings_path = data_dir.as_ref().map(|d| d.join("settings.json"));
         let (groq_key, local_only) = match settings_path {
             Some(p) if p.exists() => {
                 let content = std::fs::read_to_string(&p).unwrap_or_default();
                 let json: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
-                let key = if !groq_vault.is_empty() {
-                    groq_vault
-                } else {
+                let key = crate::auth_vault::get_api_key("groq").unwrap_or_else(|| {
+                    let content = std::fs::read_to_string(&p).unwrap_or_default();
+                    let json: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
                     json.get("groqApiKey")
                         .or_else(|| json.get("groq_api_key"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string()
-                };
-                let local = json.get("localSttOnly")
-                    .or_else(|| json.get("local_stt_only"))
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                });
+                let local = crate::commands::local_stt_only_from_json(&json);
                 (key, local)
             }
-            _ => (groq_vault, false),
+            _ => (String::new(), crate::commands::DEFAULT_LOCAL_STT_ONLY),
         };
 
         if groq_key.is_empty() || local_only {
@@ -4092,7 +4386,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 /// loop to fire ONLY on a transcript match. Runs on a dedicated thread
 /// (never the audio path). Fail-open: STT errors, timeouts, and too-short
 /// audio all fire anyway — only a confident non-match suppresses the wake.
-/// Signalling uses VERIFIED_BYPASS + a self-send on WAKE_TX so the single
+/// Signalling is a self-send on WAKE_TX of a `verified` candidate so the single
 /// existing fire path (the wake loop body) stays the only place that fires.
 #[cfg(not(feature = "mock-wake"))]
 /// Mean-pooled speaker embedding for turn-level authorship checks. Uses the
@@ -4232,16 +4526,142 @@ fn verify_speaker_at_fire<R: Runtime>(app: &AppHandle<R>, audio: &[f32]) -> Opti
     Some(verified)
 }
 
-/// Instant-fire decision for the candidate receiver. `verify_wake` is the
-/// user's STT-cross-check setting; `prob` is the candidate's stage-1
-/// probability. A candidate with essentially no neural evidence (the
-/// prob-0.0 barge-in / verify-bypass candidates) must NEVER take the
-/// instant path — it has no stage-1 detection behind it at all, and firing
+/// Cooldown between candidate fires (consecutive frames of one utterance
+/// collapse into a single wake).
+const CANDIDATE_COOLDOWN_MS: u64 = 1500;
+
+/// What the candidate receiver does with a newly arrived candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateGate {
+    /// Inside the cooldown after a recent candidate: drop it.
+    Suppress,
+    /// Already confirmed by stage 2: fire immediately.
+    FireVerified,
+    /// A fresh stage-1 candidate: run the normal checks.
+    Proceed,
+}
+
+/// Pure admission rule. The cooldown clock is stamped when a candidate STARTS
+/// verification, so a verified wake normally arrives 0.25–2 s later — inside
+/// the cooldown. It must therefore bypass it: the cooldown exists to merge
+/// duplicate stage-1 frames, not to discard a wake the user already confirmed.
+fn candidate_gate(verified: bool, now_ms: u64, last_fire_ms: u64) -> CandidateGate {
+    if verified {
+        CandidateGate::FireVerified
+    } else if now_ms.saturating_sub(last_fire_ms) < CANDIDATE_COOLDOWN_MS {
+        CandidateGate::Suppress
+    } else {
+        CandidateGate::Proceed
+    }
+}
+
+/// Minimum stage-1 probability that counts as acoustic evidence of the wake
+/// word. Candidates below it (the prob-0.0 barge-in candidates) have none.
+const STAGE1_EVIDENCE_FLOOR: f32 = 0.3;
+
+/// May the verifier FAIL OPEN (fire anyway) when it cannot get a transcript
+/// (STT error, timeout, cold engine, clip too short)? Only with real neural
+/// evidence behind the candidate. A barge-in candidate has none: failing open
+/// there fired phantom "confidence 0.0%" wakes whenever speech played over TTS
+/// and the STT call failed.
+fn fail_open_allowed_for_plan(prob: f32) -> bool {
+    prob >= STAGE1_EVIDENCE_FLOOR
+}
+
+/// What the verifier does before spending time on a transcription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerifyPlan {
+    /// Run the STT cross-check as usual.
+    Transcribe,
+    /// The only available engine is a cold local sidecar (model load takes
+    /// 10–20 s — the user would stare at a dead orb until the verifier's
+    /// timeout): skip the check and fire on the neural evidence alone.
+    SkipFire,
+    /// Same, but there is no neural evidence to fire on: drop the candidate.
+    SkipSuppress,
+}
+
+/// `local_path`: the verifier's transcription would use the local sidecar
+/// (no Groq key, or local-only mode). `local_ready`: that sidecar answers now.
+/// With a Groq key the cloud engine is used and local readiness is irrelevant.
+fn verify_plan(local_path: bool, local_ready: bool, prob: f32) -> VerifyPlan {
+    if local_path && !local_ready {
+        if fail_open_allowed_for_plan(prob) {
+            VerifyPlan::SkipFire
+        } else {
+            VerifyPlan::SkipSuppress
+        }
+    } else {
+        VerifyPlan::Transcribe
+    }
+}
+
+/// How the stage-2 STT cross-check ("speech check") is applied to a stage-1 candidate.
+///
+/// * `Off`    - fire on the neural detection alone (fastest; relies on the classifier).
+/// * `Always` - every candidate is checked by STT (the original behaviour and the default).
+/// * `Tiered` - a candidate the classifier is VERY sure about (`prob >= high`) fires at once; only the
+///   uncertain middle band is checked. The check measurably hurts sure candidates: in the 2026-09-19
+///   99-case review ~28 of 34 misses were STT confabulation on clips stage 1 had scored 0.93-0.9996
+///   (docs/wake-word/22-hundred-combo-review.md). `high` is chosen from data with
+///   `wake_calibrate.py --verify`, not guessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyMode {
+    Off,
+    Always,
+    Tiered,
+}
+
+/// Provisional `high` for Tiered mode until `wake_calibrate.py --verify` has chosen one from real clips.
+pub const DEFAULT_VERIFY_HIGH: f32 = 0.97;
+
+/// `raw`: the `wakeVerifyMode` setting (case/space tolerant) when present;
+/// `legacy_verify_wake`: the older boolean `verifyWake` (true = check every candidate).
+/// An unknown or missing `wakeVerifyMode` falls back to the legacy flag, so existing settings files keep
+/// their behaviour.
+pub fn verify_mode_from(raw: Option<&str>, legacy_verify_wake: bool) -> VerifyMode {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("off") => VerifyMode::Off,
+        Some("always") => VerifyMode::Always,
+        Some("tiered") => VerifyMode::Tiered,
+        _ if legacy_verify_wake => VerifyMode::Always,
+        _ => VerifyMode::Off,
+    }
+}
+
+/// Keep `high` inside a sane band: it can neither disable the classifier's own threshold nor make the
+/// instant path unreachable.
+pub fn clamp_verify_high(high: f32) -> f32 {
+    if high.is_finite() {
+        high.clamp(0.80, 0.9999)
+    } else {
+        DEFAULT_VERIFY_HIGH
+    }
+}
+
+fn read_verify_mode<R: Runtime>(app: &AppHandle<R>) -> VerifyMode {
+    verify_mode_from(
+        crate::commands::read_wake_verify_mode(app).as_deref(),
+        crate::commands::read_verify_wake(app),
+    )
+}
+
+/// Instant-fire decision for the candidate receiver: `true` = wake now, no STT round trip.
+/// `prob` is the candidate's stage-1 probability. A candidate with essentially no neural
+/// evidence (the prob-0.0 barge-in / verify-bypass candidates) must NEVER take the
+/// instant path in ANY mode - it has no stage-1 detection behind it at all, and firing
 /// it unverified produced phantom "confidence 0.0%" wakes whenever
 /// sustained speech (TV) played during TTS. Those candidates are routed to
 /// the STT gate instead.
-fn should_instant_fire(verify_wake: bool, prob: f32) -> bool {
-    !verify_wake && prob >= 0.3
+fn should_instant_fire(mode: VerifyMode, high: f32, prob: f32) -> bool {
+    if prob < STAGE1_EVIDENCE_FLOOR {
+        return false;
+    }
+    match mode {
+        VerifyMode::Off => true,
+        VerifyMode::Always => false,
+        VerifyMode::Tiered => prob >= clamp_verify_high(high),
+    }
 }
 
 /// Extra TTS-interrupt phrases beyond `ghost::STOP_PHRASES` (whole-utterance matches only).
@@ -4268,13 +4688,14 @@ fn barge_stop_decision(prob: f32, transcript: &str) -> bool {
 }
 
 #[cfg(not(feature = "mock-wake"))]
-fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32) {    // Signal the main loop to fire (consumed once via swap).
+fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32, ring_end: u64) {    // Signal the main loop to fire (consumed once via swap).
     let fire = || {
-        VERIFIED_BYPASS.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(tx) = WAKE_TX.get() {
             let _ = tx.send(WakeCandidate {
                 audio: Vec::new(),
                 prob: 0.0,
+                verified: true,
+                ring_end,
             });
         }
     };
@@ -4297,6 +4718,23 @@ fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32) 
     if audio.len() < 8000 {
         fail_open(&format!("candidate too short ({} samples)", audio.len()));
         return;
+    }
+
+    // A cold local engine cannot answer inside the verifier's budget: don't
+    // make the user wait for the timeout. Warm it for the command that follows.
+    let local_path = crate::stt::stt_uses_local_path(app);
+    let plan = verify_plan(local_path, !local_path || crate::lazy_stt::is_stt_responsive(), prob);
+    match plan {
+        VerifyPlan::Transcribe => {}
+        VerifyPlan::SkipFire => {
+            crate::lazy_stt::ensure_stt_running();
+            fail_open("local STT engine is cold");
+            return;
+        }
+        VerifyPlan::SkipSuppress => {
+            fail_open("local STT engine is cold");
+            return;
+        }
     }
 
     // VAD-trim: cut leading/trailing silence so Whisper hears the word, not
@@ -4330,7 +4768,7 @@ fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32) 
         Ok(rt) => rt,
         Err(e) => {
             tracing::error!("verify: runtime build failed ({e})");
-            fail_open("runtime build failed");
+            fail_open(&format!("runtime build failed ({e})"));
             return;
         }
     };
@@ -4947,6 +5385,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::level_from_rms;
+    use super::VerifyMode;
 
     #[test]
     #[cfg(not(feature = "mock-wake"))]
@@ -5550,7 +5989,9 @@ mod tests {
         for text in [
             "",
             "   ",
-            "next us",
+            "next is the budget",
+            "next test",
+            "texas",
             "thank you for watching",
             "alexa play music",
             "ok google",
@@ -5571,7 +6012,7 @@ mod tests {
     #[test]
     fn test_verify_short_mishearing_tier() {
         // measured Whisper renderings of a real "nexus" wake
-        for ok in ["Nick says.", "Okay, next is", "In excess.", "Access please", "Next.", "xs wake up"] {
+        for ok in ["Nick says.", "Okay, next is", "In excess.", "Access please", "xs wake up"] {
             assert!(super::verify_transcript_accept(ok, 0.8), "should accept {ok:?}");
         }
         // the same words inside real sentences must still be rejected
@@ -5585,6 +6026,8 @@ mod tests {
             assert!(!super::verify_transcript_accept(bad, 0.8), "should reject {bad:?}");
         }
         assert!(!super::verify_short_mishearing("", 0.9));
+        // A bare "next" / "next us" stays rejected (pinned by old_two_key_gate_is_unchanged).
+        assert!(!super::verify_transcript_accept("Next.", 0.8));
         assert!(super::verify_transcript_accept("Let's start.", 0.80));
         assert!(super::verify_transcript_accept("Let's us.", 0.80));
         assert!(!super::verify_transcript_accept("Let's start.", 0.70));
@@ -5619,6 +6062,261 @@ mod tests {
 
     // ─── Verifier v2 tests ──────────────────────────────────────────
 
+    /// B9: the noise floor follows the room without being dragged up by speech.
+    #[test]
+    fn test_track_noise_floor() {
+        use super::track_noise_floor as t;
+        // Falls quickly toward a quieter room.
+        let mut f = 0.02;
+        for _ in 0..30 {
+            f = t(f, 0.002);
+        }
+        assert!(f < 0.0025, "{f}");
+        // 3 s of loud speech (37 chunks at 0.1) barely moves a quiet floor.
+        let mut f = 0.003;
+        for _ in 0..37 {
+            f = t(f, 0.1);
+        }
+        assert!(f < 0.01, "speech must not raise the floor much, got {f}");
+        // A persistently noisy room is learned within a couple of minutes.
+        let mut f = 0.003;
+        for _ in 0..3000 {
+            f = t(f, 0.012);
+        }
+        assert!(f > 0.01, "{f}");
+        // Garbage in never poisons the estimate.
+        assert_eq!(t(0.003, f32::NAN), super::DEFAULT_NOISE_FLOOR);
+        assert!(t(0.003, 5.0) <= 0.05);
+    }
+
+    /// B9: thresholds scale up with a noisy floor, never below today's values.
+    #[test]
+    fn test_endpoint_thresholds() {
+        use super::endpoint_thresholds as th;
+        let (hi, lo) = th(0.003);
+        assert!((hi - 0.01).abs() < 1e-3 && (lo - 0.006).abs() < 1e-3, "{hi} {lo}");
+        // Quiet rooms keep the old thresholds (never more sensitive than before).
+        assert_eq!(th(0.0005), (0.01, 0.006));
+        assert_eq!(th(0.001), (0.01, 0.006));
+        // A fan at ~0.008 RMS: "silence" is now above the fan, so the turn can end.
+        let (hi, lo) = th(0.008);
+        assert!(lo > 0.008 && hi > lo, "{hi} {lo}");
+        // Always ordered and bounded.
+        for f in [0.0, 0.0005, 0.003, 0.01, 0.03, 0.05, 1.0, f32::NAN] {
+            let (hi, lo) = th(f);
+            assert!(lo <= hi * 0.8 + 1e-6 && hi <= 0.05 && lo >= 0.006, "{f}: {hi} {lo}");
+        }
+    }
+
+    /// B9: the offline endpointer must behave exactly like the live atomics.
+    #[test]
+    fn test_endpoint_sim_matches_live_path() {
+        use std::sync::atomic::Ordering;
+        use super::{EndpointSim, STT_SPEECH_DETECTED, STT_SILENCE_CHUNKS, STT_VOICED_CHUNKS,
+                    STT_PAUSE_COUNT, STT_TOTAL_CHUNKS, CAPTURE_FLOOR_BITS};
+        // Silence, speech with a pause, hesitant second phrase, long tail.
+        let mut seq: Vec<f32> = vec![0.002; 5];
+        seq.extend(vec![0.08; 6]);
+        seq.extend(vec![0.001; 3]);
+        seq.extend(vec![0.07; 4]);
+        seq.extend(vec![0.0015; 3]);
+        seq.extend(vec![0.06; 3]);
+        seq.extend(vec![0.001; 20]);
+        for floor in [0.003f32, 0.008] {
+            // reset live state
+            super::abort_stt_capture();
+            CAPTURE_FLOOR_BITS.store(floor.to_bits(), Ordering::Relaxed);
+            let mut sim = EndpointSim::new(floor);
+            for (i, &rms) in seq.iter().enumerate() {
+                let sim_stop = sim.step(rms);
+                super::capture_vad_update(rms);
+                let total = STT_TOTAL_CHUNKS.fetch_add(1, Ordering::Relaxed);
+                let live_stop = super::should_stop_capture(
+                    STT_SPEECH_DETECTED.load(Ordering::Relaxed),
+                    STT_VOICED_CHUNKS.load(Ordering::Relaxed),
+                    STT_SILENCE_CHUNKS.load(Ordering::Relaxed),
+                    super::silence_limit_for(STT_PAUSE_COUNT.load(Ordering::Relaxed)),
+                    total,
+                );
+                assert_eq!(sim_stop, live_stop, "floor {floor}, chunk {i}");
+                if live_stop {
+                    break;
+                }
+            }
+            super::abort_stt_capture();
+        }
+        CAPTURE_FLOOR_BITS.store(super::DEFAULT_NOISE_FLOOR.to_bits(), Ordering::Relaxed);
+    }
+
+    /// B9 end to end: next to a fan the old fixed thresholds never end the turn.
+    #[test]
+    fn test_endpoint_sim_noisy_room_ends_turn() {
+        use super::EndpointSim;
+        // 6 chunks of speech at 0.1, then a fan at 0.008 RMS forever.
+        let mut seq = vec![0.1f32; 6];
+        seq.extend(vec![0.008; 40]);
+        let stop_at = |floor: f32| {
+            let mut sim = EndpointSim::new(floor);
+            seq.iter().position(|&r| sim.step(r))
+        };
+        // Floor unaware (old behaviour: thresholds for a quiet room) → runs on.
+        let quiet = stop_at(0.003);
+        assert!(quiet.map_or(true, |i| i >= 40), "old thresholds hang: {quiet:?}");
+        // Floor-aware → ends ~400 ms after speech stops.
+        let aware = stop_at(0.008).expect("must end");
+        assert!((10..=12).contains(&aware), "{aware}");
+    }
+
+    /// B2: which part of the ring a capture seed takes.
+    #[test]
+    fn test_seed_slice() {
+        use super::seed_slice;
+        // 100k samples ever pushed, ring holds the newest 40k (positions 60k..100k).
+        // Detection ended at 90k: the seed is the 10k samples after it.
+        assert_eq!(seed_slice(100_000, 40_000, 90_000, 0), Some((30_000, 10_000)));
+        // Detection just happened (nothing after it yet) → nothing to seed.
+        assert_eq!(seed_slice(100_000, 40_000, 100_000, 0), None);
+        // Unknown position (0) or one from the future → no seed.
+        assert_eq!(seed_slice(100_000, 40_000, 0, 0), None);
+        assert_eq!(seed_slice(100_000, 40_000, 100_001, 0), None);
+        // Detection older than the ring: the seed is capped at what the ring holds.
+        assert_eq!(seed_slice(100_000, 40_000, 10_000, 0), Some((0, 40_000)));
+        // Negative offset reaches back into the word; clamped at the ring start.
+        assert_eq!(seed_slice(100_000, 40_000, 90_000, -1_600), Some((28_400, 11_600)));
+        assert_eq!(seed_slice(100_000, 40_000, 61_000, -5_000), Some((0, 40_000)));
+        // Positive offset skips samples; past "now" → nothing.
+        assert_eq!(seed_slice(100_000, 40_000, 90_000, 1_600), Some((31_600, 8_400)));
+        assert_eq!(seed_slice(100_000, 40_000, 99_000, 5_000), None);
+        // Short history (ring not full yet).
+        assert_eq!(seed_slice(5_000, 5_000, 3_000, 0), Some((3_000, 2_000)));
+    }
+
+    /// B2: the seed is replayed through the speech tracker, and the chunks the
+    /// audio callback already saw are marked so they are not appended twice.
+    #[test]
+    fn test_seeded_capture_keeps_post_detection_speech() {
+        use std::sync::atomic::Ordering;
+        const CH: usize = 1280;
+        let reset = || {
+            super::VERIFY_RING.lock().clear();
+            super::RING_TOTAL.store(0, Ordering::SeqCst);
+            super::SEED_UPTO.store(0, Ordering::SeqCst);
+            super::abort_stt_capture();
+        };
+        reset();
+        // 12 chunks of room tone, the wake word ends (detection) …
+        let push = |amp: f32, n: usize| {
+            for _ in 0..n {
+                let c = vec![amp; CH];
+                let mut ring = super::VERIFY_RING.lock();
+                super::push_capped(&mut ring, &c, super::VERIFY_RING_CAP);
+                super::RING_TOTAL.fetch_add(CH as u64, Ordering::SeqCst);
+            }
+        };
+        push(0.0, 12);
+        let ring_end = super::RING_TOTAL.load(Ordering::SeqCst);
+        // … then 6 chunks of command speech arrived while verification ran.
+        push(0.2, 6);
+
+        super::start_stt_capture_seeded(0, ring_end);
+        assert!(super::STT_CAPTURING.load(Ordering::Relaxed));
+        assert_eq!(super::STT_CAPTURE_BUFFER.lock().len(), 6 * CH, "only post-detection audio");
+        assert!(super::STT_CAPTURE_BUFFER.lock().iter().all(|&x| x == 0.2), "no wake-word audio");
+        assert!(super::STT_SPEECH_DETECTED.load(Ordering::Relaxed));
+        assert_eq!(super::STT_VOICED_CHUNKS.load(Ordering::Relaxed), 6);
+        assert_eq!(super::STT_TOTAL_CHUNKS.load(Ordering::Relaxed), 6);
+        assert_eq!(super::SEED_UPTO.load(Ordering::SeqCst), super::RING_TOTAL.load(Ordering::SeqCst));
+        assert!(super::stt_capture_had_speech(), "a seeded turn already counts as having speech");
+
+        // Nothing after the detection point → fresh, empty capture; unknown position too.
+        reset();
+        push(0.0, 3);
+        let end = super::RING_TOTAL.load(Ordering::SeqCst);
+        super::start_stt_capture_seeded(0, end);
+        assert!(super::STT_CAPTURE_BUFFER.lock().is_empty());
+        assert!(super::STT_CAPTURING.load(Ordering::Relaxed));
+        reset();
+        push(0.2, 3);
+        super::start_stt_capture_seeded(0, 0);
+        assert!(super::STT_CAPTURE_BUFFER.lock().is_empty(), "ring_end 0 = unknown = fresh capture");
+        reset();
+    }
+
+    /// B8: wakeSensitivity actually moves the threshold; medium is the
+    /// calibrated value untouched.
+    #[test]
+    fn test_sensitivity_threshold() {
+        use super::sensitivity_threshold as t;
+        assert!((t(0.68, "medium") - 0.68).abs() < 1e-6);
+        assert!((t(0.68, "high") - 0.60).abs() < 1e-6);
+        assert!((t(0.68, "low") - 0.75).abs() < 1e-6);
+        assert!((t(0.68, "HIGH ") - 0.60).abs() < 1e-6, "case/space tolerant");
+        assert!((t(0.68, "garbage") - 0.68).abs() < 1e-6, "unknown → medium");
+        // A degenerate profile can neither disable the gate nor trivialise it.
+        assert_eq!(t(0.95, "low"), 0.90);
+        assert_eq!(t(0.30, "high"), 0.40);
+    }
+
+    /// B3: a cold local engine must not stall the wake until the timeout.
+    #[test]
+    fn test_verify_plan_cold_local_engine() {
+        use super::{verify_plan, VerifyPlan::*};
+        // Cloud STT (Groq key): local readiness is irrelevant.
+        assert_eq!(verify_plan(false, false, 0.9), Transcribe);
+        assert_eq!(verify_plan(false, true, 0.9), Transcribe);
+        // Local path, engine up: normal cross-check.
+        assert_eq!(verify_plan(true, true, 0.9), Transcribe);
+        // Local path, engine cold: fire on neural evidence, drop evidence-free candidates.
+        assert_eq!(verify_plan(true, false, 0.9), SkipFire);
+        assert_eq!(verify_plan(true, false, 0.3), SkipFire);
+        assert_eq!(verify_plan(true, false, 0.0), SkipSuppress);
+    }
+
+    /// B3: barge-in candidates (prob 0.0) never fail open.
+    #[test]
+    fn test_fail_open_needs_neural_evidence() {
+        assert!(super::fail_open_allowed_for_plan(0.36));
+        assert!(super::fail_open_allowed_for_plan(0.99));
+        assert!(!super::fail_open_allowed_for_plan(0.0));
+        assert!(!super::fail_open_allowed_for_plan(0.29));
+        // Same threshold the instant path uses.
+        assert!(super::should_instant_fire(VerifyMode::Off, 0.97, 0.3));
+        assert!(!super::should_instant_fire(VerifyMode::Off, 0.97, 0.29));
+    }
+
+    /// B1: a verified wake arrives inside the cooldown that its own
+    /// candidate started; it must still fire. Unverified duplicates inside the
+    /// window are still merged, and nothing outside it is lost.
+    #[test]
+    fn test_candidate_gate_verified_wake_bypasses_cooldown() {
+        use super::{candidate_gate, CandidateGate::*};
+        // Candidate stamped the clock at t=10_000; verification finished 400 ms later.
+        assert_eq!(candidate_gate(true, 10_400, 10_000), FireVerified);
+        assert_eq!(candidate_gate(true, 10_001, 10_000), FireVerified);
+        // A second raw frame of the same utterance is still suppressed...
+        assert_eq!(candidate_gate(false, 10_400, 10_000), Suppress);
+        assert_eq!(candidate_gate(false, 11_499, 10_000), Suppress);
+        // ...and a fresh candidate after the window proceeds.
+        assert_eq!(candidate_gate(false, 11_500, 10_000), Proceed);
+        assert_eq!(candidate_gate(false, 5_000, 0), Proceed);
+        // Clock going backwards never panics or wedges.
+        assert_eq!(candidate_gate(false, 9_000, 10_000), Suppress);
+    }
+
+    /// B1: the verified signal rides on the candidate; no shared flag exists
+    /// that a later unrelated candidate could consume without verification.
+    #[test]
+    fn test_unverified_candidate_never_inherits_a_verified_token() {
+        let stale = super::WakeCandidate { audio: Vec::new(), prob: 0.0, verified: true, ring_end: 0 };
+        let fresh = super::WakeCandidate { audio: vec![0.0; 10], prob: 0.7, verified: false, ring_end: 10 };
+        assert!(stale.verified && !fresh.verified);
+        assert_eq!(
+            super::candidate_gate(fresh.verified, 50_000, 0),
+            super::CandidateGate::Proceed,
+            "an unrelated candidate goes through normal verification"
+        );
+    }
+
     /// Two-key gate: exact "nexus" fires at ANY stage-1 probability.
     #[test]
     fn test_gated_exact_fires_at_any_prob() {
@@ -5645,6 +6343,10 @@ mod tests {
             "LEXUS",
             "nexo",
             "hey nixus",
+            "next us",
+            "Next, sis.",
+            "nexxus",
+            "nixes",
         ] {
             assert!(
                 !super::verify_transcript_gated(word, 0.59),
@@ -5668,7 +6370,9 @@ mod tests {
             "texas",
             "hey texas",
             "next",
-            "next us",
+            // "next us" is a *near* form since B4 (owner "nexus" is often heard
+            // that way): it needs prob >= 0.6, so it never fires at 0.59 — see
+            // test_gated_near_needs_high_prob.
             "next episode",
             "hey alexis", // whole-word: "alexis" != "lexis"
             "thank you",
@@ -5731,13 +6435,45 @@ mod tests {
     #[test]
     fn test_should_instant_fire_never_fires_zero_evidence() {
         // Barge-in candidate (prob 0.0): never instant, verify or drop.
-        assert!(!super::should_instant_fire(false, 0.0));
-        assert!(!super::should_instant_fire(true, 0.0));
+        for mode in [VerifyMode::Off, VerifyMode::Always, VerifyMode::Tiered] {
+            assert!(!super::should_instant_fire(mode, 0.97, 0.0), "{mode:?}");
+        }
         // Real stage-1 detections (model threshold 0.68): instant when the
         // user disabled the STT cross-check.
-        assert!(super::should_instant_fire(false, 0.978));
-        assert!(super::should_instant_fire(false, 0.68));
-        assert!(!super::should_instant_fire(true, 0.978));
+        assert!(super::should_instant_fire(VerifyMode::Off, 0.97, 0.978));
+        assert!(super::should_instant_fire(VerifyMode::Off, 0.97, 0.68));
+        assert!(!super::should_instant_fire(VerifyMode::Always, 0.97, 0.978));
+    }
+
+    /// E4: tiered verification - sure candidates skip the STT round trip, uncertain ones keep it.
+    #[test]
+    fn test_tiered_verification_truth_table() {
+        let t = |p: f32| super::should_instant_fire(VerifyMode::Tiered, 0.97, p);
+        assert!(t(0.9996), "a sure candidate fires without STT (the confabulation cases)");
+        assert!(t(0.97), "boundary is inclusive");
+        assert!(!t(0.9699), "just below the band: check with STT");
+        assert!(!t(0.68), "a threshold-level candidate is checked");
+        assert!(!t(0.0), "no evidence is never instant");
+        // `high` is clamped: a bad setting can neither make everything instant nor nothing.
+        assert!(super::should_instant_fire(VerifyMode::Tiered, 0.10, 0.81), "clamped up to 0.80, not 0.10");
+        assert!(!super::should_instant_fire(VerifyMode::Tiered, 0.10, 0.79));
+        assert!(!super::should_instant_fire(VerifyMode::Tiered, 5.0, 0.99), "clamped down to 0.9999");
+        assert!(super::should_instant_fire(VerifyMode::Tiered, f32::NAN, 0.98), "NaN -> default 0.97");
+    }
+
+    /// E4: the new wakeVerifyMode setting overrides the legacy boolean; nothing else changes behaviour.
+    #[test]
+    fn test_verify_mode_setting_and_legacy_fallback() {
+        use super::verify_mode_from as m;
+        assert_eq!(m(Some("tiered"), true), VerifyMode::Tiered);
+        assert_eq!(m(Some(" Tiered "), false), VerifyMode::Tiered, "case/space tolerant, wins over legacy");
+        assert_eq!(m(Some("off"), true), VerifyMode::Off);
+        assert_eq!(m(Some("always"), false), VerifyMode::Always);
+        // Missing or unknown -> the old boolean, so existing settings files behave exactly as before.
+        assert_eq!(m(None, true), VerifyMode::Always);
+        assert_eq!(m(None, false), VerifyMode::Off);
+        assert_eq!(m(Some("garbage"), true), VerifyMode::Always);
+        assert_eq!(m(Some(""), false), VerifyMode::Off);
     }
 
     // ─── v3 confidence-gate tests ───────────────────────────────────
@@ -5747,6 +6483,7 @@ mod tests {
             text: text.to_string(),
             avg_logprob: -0.1,
             no_speech_prob: no_speech,
+            compression_ratio: 0.0,
         }
     }
 
@@ -6316,16 +7053,5 @@ mod verify_policy_tests {
         assert!(!fail_open_allowed(0.89));
         assert!(fail_open_allowed(0.9));
         assert!(fail_open_allowed(0.979));
-    }
-
-    #[test]
-    fn cooldown_never_eats_a_verified_bypass() {
-        // Fast cloud verify: the self-send arrives 300 ms after the cooldown was stamped.
-        assert!(cooldown_blocks(10_300, 10_000, false));
-        assert!(!cooldown_blocks(10_300, 10_000, true));
-        // Normal expiry still works.
-        assert!(!cooldown_blocks(11_600, 10_000, false));
-        // Clock going backwards must not block forever.
-        assert!(!cooldown_blocks(5, 10_000, false));
     }
 }

@@ -471,7 +471,7 @@ mod tests {
         assert!(hotkey.contains("crate::wake_cue::play_for_wake(&handle)"), "Ctrl+Space must play the cue");
         // the cue must come before capture starts, or the echo window would not be armed in time
         let cue = wake.find("crate::wake_cue::play_for_wake(&app)").unwrap();
-        let start = wake[cue..].find("start_stt_capture();").map(|i| i + cue).unwrap();
+        let start = wake[cue..].find("start_stt_capture_seeded(").map(|i| i + cue).unwrap();
         assert!(cue < start);
         // and it must NOT be in the paths that re-listen without a wake
         for quiet in [include_str!("../../frontend/src/net/ghostHotMic.ts"), include_str!("../../frontend/src/audio/recorder.ts")] {

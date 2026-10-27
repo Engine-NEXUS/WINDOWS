@@ -202,7 +202,22 @@ pub async fn stage_hide<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 /// us (logged once per incarnation) — answers "is the current UI even in
 /// this binary?" without devtools.
 #[tauri::command]
-pub fn stage_heartbeat(client: Option<String>) -> Result<(), String> {
+pub fn stage_heartbeat<R: Runtime>(app: AppHandle<R>, client: Option<String>) -> Result<(), String> {
+    stage_heartbeat_inner(client)?;
+    // `ghost:session` fires only on enter/exit, so after a watchdog rebuild the
+    // overlay never learned that a session was still live — no waves, no
+    // hot-mic loop — while Rust stayed Active with Esc armed. Re-announce the
+    // live session on every beat: the frontend listener is idempotent
+    // (it only acts when `ghostActive` changes), and doing it per beat (2s)
+    // also covers the first beat racing ahead of the listener's registration.
+    if crate::ghost::session_active() {
+        let _ = app.emit("ghost:session", serde_json::json!({ "active": true }));
+    }
+    Ok(())
+}
+
+/// Test-only helper: set the heartbeat timestamp without an AppHandle.
+pub fn stage_heartbeat_inner(_client: Option<String>) -> Result<(), String> {
     let mut beat = LAST_BEAT.lock();
     let first_or_stale = beat
         .map(|t| t.elapsed().as_secs() > HEARTBEAT_STALE_SECS)
@@ -210,10 +225,6 @@ pub fn stage_heartbeat(client: Option<String>) -> Result<(), String> {
     *beat = Some(std::time::Instant::now());
     drop(beat);
     if first_or_stale {
-        tracing::info!(
-            "stage: frontend alive (client={})",
-            client.as_deref().unwrap_or("unknown")
-        );
         crate::boot::mark("stage_alive");
     }
     Ok(())
@@ -604,7 +615,7 @@ mod tests {
     fn readiness_and_stash_follow_the_heartbeat() {
         note_window_destroyed();
         assert!(!is_ready(), "no beat => not ready");
-        stage_heartbeat(Some("test".into())).unwrap();
+        stage_heartbeat_inner(Some("test".into())).unwrap();
         assert!(is_ready());
         note_window_destroyed();
         assert!(!is_ready(), "a destroyed window must stop counting as ready at once");
@@ -615,7 +626,7 @@ mod tests {
         assert_eq!(got["text"], "open notepad");
         assert!(stage_take_pending_transcript().is_none(), "take clears it");
 
-        stage_heartbeat(None).unwrap();
+        stage_heartbeat_inner(None).unwrap();
         stash_transcript_if_not_ready(serde_json::json!({"text": "ignored"}));
         assert!(stage_take_pending_transcript().is_none(), "no stash while the stage is alive");
         note_window_destroyed();

@@ -256,6 +256,34 @@ pub(crate) async fn resolve_foreground_url_for_command() -> Option<String> {
     get_active_browser_url()
 }
 
+/// Known browser executables (lowercase). Pure.
+pub fn is_browser_process(name: &str) -> bool {
+    matches!(
+        name.trim().to_lowercase().as_str(),
+        "chrome.exe" | "brave.exe" | "msedge.exe" | "firefox.exe" | "opera.exe" | "vivaldi.exe"
+    )
+}
+
+/// True when a known browser holds the foreground window.
+///
+/// Unlike `get_active_browser_url` this needs no readable address bar: a fresh
+/// new tab has an empty omnibox, so the URL read returned `None` and queued
+/// ghost steps ("search almonds" right after "new tab") were skipped with
+/// "Target window lost" although the browser was plainly in front.
+pub fn foreground_is_browser() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        get_foreground_process_id()
+            .and_then(get_process_name)
+            .map(|name| is_browser_process(&name))
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        get_active_browser_url().is_some()
+    }
+}
+
 // ─── Windows: UI Automation ──────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
@@ -288,7 +316,10 @@ fn get_browser_url_windows() -> Option<String> {
     // use get_focused_element() which returns the focused element in the
     // foreground window (the browser). We then walk up to find the root
     // browser element, or just search for Edit controls from there.
-    let browser = automation.get_focused_element().ok()
+    // Root at the foreground WINDOW: with focus inside the page the focused
+    // element is a page node whose subtree has no address bar.
+    let browser = crate::screen::foreground_window_element(&automation)
+        .or_else(|| automation.get_focused_element().ok())
         .or_else(|| {
             // Fallback: find the first window element from root
             automation
@@ -476,13 +507,7 @@ pub(crate) fn foreground_process_path() -> Option<std::path::PathBuf> {
     get_process_path(get_foreground_process_id()?)
 }
 
-/// True for the browsers whose page content we can locate.
-pub(crate) fn is_browser_process(name: &str) -> bool {
-    matches!(
-        name,
-        "chrome.exe" | "brave.exe" | "msedge.exe" | "firefox.exe" | "opera.exe" | "vivaldi.exe"
-    )
-}
+
 
 /// Foreground window rect in physical px: (x, y, w, h).
 #[cfg(target_os = "windows")]
@@ -725,6 +750,16 @@ pub fn extract_gmail_account_index_from_url(url: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_browser_process_known_browsers_only() {
+        for n in ["chrome.exe", "Brave.exe", "MSEDGE.EXE", " firefox.exe ", "opera.exe", "vivaldi.exe"] {
+            assert!(is_browser_process(n), "{n}");
+        }
+        for n in ["notepad.exe", "explorer.exe", "code.exe", "whatsapp.exe", "", "chrome"] {
+            assert!(!is_browser_process(n), "{n}");
+        }
+    }
 
     #[test]
     fn verified_url_requires_a_web_address() {

@@ -437,19 +437,6 @@ impl SkipReason {
     }
 }
 
-/// What NEXUS says about a decision (before anything runs, or instead of running).
-pub fn describe(decision: &Decision) -> String {
-    match decision {
-        Decision::Skip(r) => r.spoken(),
-        Decision::Run(s) => format!(
-            "Committing {} to a new branch {}, then opening a draft pull request against {}.",
-            plural(s.paths.len()),
-            s.branch,
-            s.base
-        ),
-    }
-}
-
 // ─── Running git ─────────────────────────────────────────────────────
 
 pub trait GitRunner: Send + Sync {
@@ -726,6 +713,19 @@ fn skip_report(r: &SkipReason) -> Report {
     Report { spoken: r.spoken(), skipped: true, committed: false, pushed: false, pr_opened: false, pr_url: None }
 }
 
+/// What NEXUS says about a decision (before anything runs, or instead of running).
+pub fn describe(decision: &Decision) -> String {
+    match decision {
+        Decision::Skip(r) => r.spoken(),
+        Decision::Run(s) => format!(
+            "Committing {} to a new branch {}, then opening a draft pull request against {}.",
+            plural(s.paths.len()),
+            s.branch,
+            s.base
+        ),
+    }
+}
+
 /// `pr` is None when no PR was attempted (the git side failed, or `origin` is not a GitHub repository).
 pub fn describe_outcome(o: &GitOutcome, pr: Option<&PrOutcome>) -> Report {
     let n = plural(o.file_count);
@@ -794,6 +794,19 @@ pub async fn run_followup(runner: Arc<dyn GitRunner>, step: FollowUp, verdict: V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What NEXUS says about a decision (before anything runs, or instead of running).
+    fn describe(decision: &Decision) -> String {
+        match decision {
+            Decision::Skip(r) => r.spoken(),
+            Decision::Run(s) => format!(
+                "Committing {} to a new branch {}, then opening a draft pull request against {}.",
+                plural(s.paths.len()),
+                s.branch,
+                s.base
+            ),
+        }
+    }
     use std::process::ExitStatus;
     use std::sync::Mutex;
 

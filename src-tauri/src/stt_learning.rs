@@ -53,6 +53,13 @@ pub struct LearnedCorrection {
     pub first_seen: u64,
     /// Unix timestamp of most recent observation.
     pub last_seen: u64,
+    /// Times this correction was actually APPLIED to a live transcript (not
+    /// merely observed). Lets a stale or harmful correction be spotted.
+    #[serde(default)]
+    pub hits: u32,
+    /// Unix timestamp of the most recent application.
+    #[serde(default)]
+    pub last_hit: u64,
 }
 
 /// The JSON file structure.
@@ -199,6 +206,8 @@ impl SttLearningState {
                 auto_apply: false,
                 first_seen: now_unix(),
                 last_seen: now_unix(),
+                hits: 0,
+                last_hit: 0,
             });
 
             entry.count += 1;
@@ -241,6 +250,26 @@ impl SttLearningState {
             .filter(|c| c.auto_apply)
             .cloned()
             .collect()
+    }
+
+    /// Count one application of the `from` -> `to` correction. Returns false
+    /// when no such correction exists.
+    pub async fn record_hit(&self, from: &str, to: &str) -> bool {
+        let found = {
+            let mut corrections = self.corrections.lock().await;
+            match corrections.values_mut().find(|c| c.from == from && c.to == to) {
+                Some(c) => {
+                    c.hits = c.hits.saturating_add(1);
+                    c.last_hit = now_unix();
+                    true
+                }
+                None => false,
+            }
+        };
+        if found {
+            self.save_to_file().await;
+        }
+        found
     }
 
     /// Save corrections to the JSON file.
@@ -420,6 +449,16 @@ pub async fn log_successful_transcript(
     Ok(())
 }
 
+/// IPC: the frontend applied the `from` -> `to` correction to a transcript.
+#[tauri::command]
+pub async fn record_correction_hit(
+    from: String,
+    to: String,
+    state: tauri::State<'_, SttLearningState>,
+) -> Result<bool, String> {
+    Ok(state.record_hit(&from, &to).await)
+}
+
 /// IPC: Get all corrections that are ready for auto-apply.
 /// The frontend calls this at startup and applies them in correctSttTranscript().
 #[tauri::command]
@@ -531,5 +570,15 @@ mod tests {
         assert_eq!(diffs[1].from_word, "zink");
         assert_eq!(diffs[1].to_word, "zync");
         assert_eq!(diffs[1].context_before, "open");
+    }
+
+    #[test]
+    fn test_old_correction_files_without_hits_still_load() {
+        // Files written before the hit counter existed must keep working.
+        let json = r#"{"corrections":[{"from":"zink","to":"zync","context_before":"in","count":3,
+            "auto_apply":true,"first_seen":1,"last_seen":2}]}"#;
+        let f: CorrectionFile = serde_json::from_str(json).expect("old file parses");
+        assert_eq!(f.corrections[0].hits, 0);
+        assert_eq!(f.corrections[0].last_hit, 0);
     }
 }

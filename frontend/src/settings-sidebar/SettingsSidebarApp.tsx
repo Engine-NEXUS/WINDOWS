@@ -4,6 +4,8 @@ import { AgentWatchSection } from "./AgentWatchSection";
 import { invoke } from "@tauri-apps/api/core";
 import { useVoiceLockState, VoiceLockStatus, VerifiedSaveStatus } from "../settings/VoiceLockStatus";
 import { applyNativeLockToDraft, clearSubmittedFields, type VoiceLockState } from "../settings/voiceLockState";
+import { isPlausibleGeminiKey } from "./keyFormat";
+import { groqKeyHint, GROQ_KEY_URL } from "./keyHints";
 import { identityBanner } from "../setup/identityBanner";
 import { VoiceEnrollment } from "../setup/VoiceEnrollment";
 import "./voiceEnrollmentHub.css";
@@ -78,7 +80,7 @@ interface Settings {
   geminiApiKey?: string;
   // Cerebras API key (9Router — fastest free provider, ~80ms)
   cerebrasApiKey?: string;
-  // Moonshine STT model (medium_streaming=6.65% WER, small_streaming=7.84%)
+  // Moonshine STT model (small_streaming=7.84% WER ≈300MB default; medium_streaming=6.65% ≈400MB)
   moonshineModel?: string;
   // TTS voice emotion (auto = heuristics per reply; prosody via rate/pitch)
   ttsEmotion?: string;
@@ -113,6 +115,12 @@ interface Settings {
   telegramChatId?: string;
   // Ghost FIFO queue: speak "Queued, sir." once per session at depth 2+ (D5/D6)
   ghostDepthAck?: boolean;
+  sttConfidenceGate?: boolean;
+  sttCommandHints?: boolean;
+  wakeSeedOffsetMs?: number;
+  wakeDspProfile?: string;
+  wakeVerifyMode?: string;
+  wakeVerifyHigh?: number;
   // Ghost FIFO queue: per-step watchdog timeout, ms (D7)
   ghostStepTimeoutMs?: number;
   // Ghost FIFO queue: inter-command gap τ, ms (D4)
@@ -167,7 +175,7 @@ const DEFAULT_SETTINGS: Settings = {
   speakerVerification: false,
   meetingModeAuto: true,
   suppressTtsInMeetings: true,
-  localSttOnly: true,
+  localSttOnly: false,
   serverUrl: "",
   userId: "",
   deviceId: "",
@@ -192,7 +200,7 @@ const DEFAULT_SETTINGS: Settings = {
   orbListenMode: 1,
   geminiApiKey: "",
   cerebrasApiKey: "",
-  moonshineModel: "medium_streaming",
+  moonshineModel: "small_streaming",
   ttsEmotion: "auto",
   personaMode: "butler",
   themeMode: "dark",
@@ -200,6 +208,12 @@ const DEFAULT_SETTINGS: Settings = {
   visionRace: "sequential",
   telegramChatId: "",
   ghostDepthAck: true,
+  sttConfidenceGate: false,
+  sttCommandHints: false,
+  wakeSeedOffsetMs: 0,
+  wakeDspProfile: "legacy",
+  wakeVerifyMode: "",
+  wakeVerifyHigh: 0.97,
   ghostStepTimeoutMs: 15000,
   ghostTurnGapMs: 1000,
   ghostEngagementSecs: 0,
@@ -1210,6 +1224,47 @@ function AudioTab({ settings, update, voiceLock }: {
         </div>
         <div className="setting-row">
           <div>
+            <div className="setting-label">Wake word speech check</div>
+            <div className="setting-desc">Always: every wake is double-checked by speech recognition (fewest false wakes, can miss real ones). Tiered: skip the check when the wake model is very sure. Off: wake on the model alone (fastest). Pick with your voice scorecard.</div>
+          </div>
+          <div className="setting-control">
+            <select
+              className="settings-input"
+              value={settings.wakeVerifyMode || ((settings as { verifyWake?: boolean }).verifyWake === false ? "off" : "always")}
+              onChange={(e) => update("wakeVerifyMode", e.target.value)}
+            >
+              <option value="always">Always</option>
+              <option value="tiered">Tiered</option>
+              <option value="off">Off</option>
+            </select>
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Command hints for speech</div>
+            <div className="setting-desc">Experimental. Tells Groq the commands NEXUS understands. Can help "open Chrome"-style phrases; can also make it hear commands in noise. Compare with your voice scorecard.</div>
+          </div>
+          <div className="setting-control">
+            <div
+              className={`settings-toggle ${settings.sttCommandHints ? "settings-toggle--on" : ""}`}
+              onClick={() => update("sttCommandHints", !settings.sttCommandHints)}
+            />
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Reject low-confidence speech</div>
+            <div className="setting-desc">Experimental. Drops Groq transcripts the engine itself is unsure about. Turn on only after your voice scorecard shows it helps.</div>
+          </div>
+          <div className="setting-control">
+            <div
+              className={`settings-toggle ${settings.sttConfidenceGate ? "settings-toggle--on" : ""}`}
+              onClick={() => update("sttConfidenceGate", !settings.sttConfidenceGate)}
+            />
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
             <div className="setting-label">Speaker verification</div>
             <div className="setting-desc">Enroll a profile below before turning on Voice Lock.</div>
           </div>
@@ -1245,7 +1300,7 @@ function AudioTab({ settings, update, voiceLock }: {
           <div className="setting-control">
             <select
               className="settings-input"
-              value={settings.moonshineModel ?? "medium_streaming"}
+              value={settings.moonshineModel ?? "small_streaming"}
               onChange={(e) => update("moonshineModel", e.target.value)}
             >
               <option value="medium_streaming">Medium v2 (245M, ~400MB)</option>
@@ -1593,9 +1648,84 @@ function AuthTab({ settings, update }: {
             )}
           </div>
         </div>
+
+        <div className="auth-card">
+          <div className="auth-card-header">
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <ApiKeyIcon service="gemini" size={24} />
+              <span className="auth-card-title">Gemini API Key</span>
+            </div>
+            <GeminiKeyPill />
+          </div>
+          <input
+            type="password"
+            className="settings-input"
+            placeholder="AIza..."
+            value={settings.geminiApiKey ?? ""}
+            onChange={(e) => update("geminiApiKey", e.target.value)}
+          />
+          {(settings.geminiApiKey ?? "").trim() !== "" &&
+            !isPlausibleGeminiKey(settings.geminiApiKey ?? "") && (
+              <div className="setting-desc" style={{ marginTop: 4, color: "#ffd479" }}>
+                Doesn&apos;t look like a Gemini key — should start with AIza… (39 chars). Hit Test to verify.
+              </div>
+            )}
+          <div className="setting-desc" style={{ marginTop: 4 }}>
+            Powers spatial screen analysis + ghost vision grounding. Free tier covers ~500 vision calls/day.{" "}
+            <a
+              href="#"
+              onClick={(e) => {
+                e.preventDefault();
+                import("@tauri-apps/plugin-shell").then(({ open }) => {
+                  open("https://aistudio.google.com/apikey").catch(() => {});
+                });
+              }}
+            >
+              Get a free key
+            </a>
+          </div>
+          <GeminiKeyTest />
+        </div>
+
+        <div className="auth-card">
+          <div className="auth-card-header">
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <ApiKeyIcon service="groq" size={24} />
+              <span className="auth-card-title">Groq API Key</span>
+            </div>
+          </div>
+          <input
+            type="password"
+            className="settings-input"
+            placeholder="gsk_..."
+            value={settings.groqApiKey}
+            onChange={(e) => update("groqApiKey", e.target.value)}
+          />
+          <GroqKeyHint
+            hint={groqKeyHint(settings.groqApiKey, settings.localSttOnly)}
+            onEnableCloud={() => update("localSttOnly", false)}
+          />
+        </div>
+
+        <div className="auth-card">
+          <div className="auth-card-header">
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <ApiKeyIcon service="cerebras" size={24} />
+              <span className="auth-card-title">Cerebras API Key</span>
+            </div>
+          </div>
+          <input
+            type="password"
+            className="settings-input"
+            placeholder="csk-..."
+            value={settings.cerebrasApiKey ?? ""}
+            onChange={(e) => update("cerebrasApiKey", e.target.value)}
+          />
+        </div>
+        <div className="setting-desc" style={{ marginTop: 4 }}>
+          Keys stay on this device (OS keychain + your local settings file) — never uploaded, never in Cloudflare.
+        </div>
       </div>
-
-
 
       <div className="settings-section">
         <div className="settings-section-title">Ghost Vision</div>
@@ -1638,7 +1768,130 @@ function AuthTab({ settings, update }: {
   );
 }
 
+function GeminiKeyPill() {
+  const [present, setPresent] = useState<boolean | null>(null);
 
+  useEffect(() => {
+    invoke<{ gemini_present?: boolean }>("vision_key_status")
+      .then((s) => setPresent(!!s?.gemini_present))
+      .catch(() => setPresent(null));
+  }, []);
+
+  if (present === null) return null;
+  return present ? (
+    <span className="status-badge status-badge--connected">✓ Saved</span>
+  ) : (
+    <span className="status-badge status-badge--disconnected">○ Missing</span>
+  );
+}
+
+function openExternal(url: string) {
+  import("@tauri-apps/plugin-shell")
+    .then(({ open }) => open(url).catch(() => {}))
+    .catch(() => {
+      window.open(url, "_blank");
+    });
+}
+
+/** Guidance under the Groq key: where to get one, and the local-only trap. */
+function GroqKeyHint({
+  hint,
+  onEnableCloud,
+}: {
+  hint: ReturnType<typeof groqKeyHint>;
+  onEnableCloud: () => void;
+}) {
+  if (hint === "get-key") {
+    return (
+      <div className="setting-desc" style={{ marginTop: 4 }}>
+        Free cloud speech-to-text + fast chat. Without a key NEXUS still works: speech runs locally.{" "}
+        <a
+          href="#"
+          onClick={(e) => {
+            e.preventDefault();
+            openExternal(GROQ_KEY_URL);
+          }}
+        >
+          Get a free key
+        </a>
+      </div>
+    );
+  }
+  if (hint === "local-only-blocks") {
+    return (
+      <div className="setting-desc" style={{ marginTop: 4, color: "#ffd479" }}>
+        “Local STT only” is on, so this key isn&apos;t used for speech yet — your voice stays on this PC.{" "}
+        <a
+          href="#"
+          onClick={(e) => {
+            e.preventDefault();
+            onEnableCloud();
+          }}
+        >
+          Turn it off to use cloud speech
+        </a>{" "}
+        (then press Save).
+      </div>
+    );
+  }
+  return (
+    <div className="setting-desc" style={{ marginTop: 4 }}>
+      Cloud speech-to-text is on. Falls back to local speech if Groq is unreachable.
+    </div>
+  );
+}
+
+function GeminiKeyTest() {
+  const [state, setState] = useState<"idle" | "testing" | "ok" | "fail">("idle");
+  const [detail, setDetail] = useState<string>("");
+
+  const runTest = () => {
+    setState("testing");
+    setDetail("");
+    invoke<{ ok?: boolean; detail?: string }>("vision_test_key")
+      .then((r) => {
+        if (r?.ok) {
+          setState("ok");
+          setDetail("");
+        } else {
+          setState("fail");
+          setDetail(
+            r?.detail === "no-key"
+              ? "Save a key first, then test."
+              : r?.detail === "quota-exhausted"
+                ? "Key valid but daily quota is spent."
+                : r?.detail === "network-error"
+                  ? "Network unreachable — check connection."
+                  : "Key rejected — check for typos."
+          );
+        }
+      })
+      .catch(() => {
+        setState("fail");
+        setDetail("Test call failed.");
+      });
+  };
+
+  return (
+    <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8 }}>
+      <button
+        className="settings-btn settings-btn--glass"
+        disabled={state === "testing"}
+        onClick={runTest}
+      >
+        {state === "testing" ? "Testing…" : "Test Key"}
+      </button>
+      {state === "ok" && (
+        <span className="status-badge status-badge--connected">✓ Valid</span>
+      )}
+      {state === "fail" && (
+        <span className="status-badge status-badge--disconnected">
+          ✗ {detail || "Invalid"}
+        </span>
+      )}
+    </div>
+  );
+}
 
 function VisionQuota() {
   const [quota, setQuota] = useState<{

@@ -522,31 +522,13 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
 /// nothing remains — bare "hey nexus" stays a greeting, never strips
 /// to empty. Longest prefixes first; word-boundary required.
 fn strip_wake_prefix(text: &str) -> Option<String> {
-    const PREFIXES: &[&str] = &[
-        "hello nexus",
-        "okay nexus",
-        "hey nexus",
-        "ok nexus",
-        "hi nexus",
-        "nexus",
-        // How Whisper writes "Nexus" at the start of a command (live log 2026-10-13: "next is open
-        // brave.", "nexes open ..."). Only ever tried after a direct parse failed, so a sentence that
-        // merely starts with "next is" cannot become a command unless the REST parses as one.
-        "next is",
-        "nex is",
-        "next us",
-        "next as",
-        "nexes",
-        "nexis",
-        "nexxus",
-    ];
     let mut current = text.trim();
     let mut stripped_any = false;
 
     loop {
         let mut found = false;
-        for prefix in PREFIXES {
-            if let Some(rest) = current.strip_prefix(prefix) {
+        for prefix in crate::wake_names::wake_prefixes() {
+            if let Some(rest) = current.strip_prefix(prefix.as_str()) {
                 // Word boundary check: string ended, whitespace, or punctuation (. , ! ? : - ;)
                 let after = rest.as_bytes().first().copied();
                 if after.is_none()
@@ -599,8 +581,33 @@ pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
     // fires when the first pass returned None, and strip never yields
     // empty (bare wake words keep their first-pass result).
     let lowered = transcript.trim().to_lowercase();
-    if let Some(stripped) = strip_wake_prefix(&lowered) {
+    if let Some(stripped) = strip_wake_prefix(&lowered).or_else(|| strip_misheard_prefix(&lowered)) {
         return parse_deterministic_inner(&stripped);
+    }
+    None
+}
+
+/// Spellings Whisper produces for "Nexus" at the start of a command (live log 2026-10-13:
+/// "next is open brave."). They are everyday words, so `wake_names` / `strip_wake_prefix` must NOT
+/// treat them as the wake word; this helper is only tried by the retry pass after a direct parse
+/// failed, so a sentence that merely starts with "next is" cannot become a command unless the REST
+/// parses as one.
+fn strip_misheard_prefix(text: &str) -> Option<String> {
+    const MISHEARD: &[&str] = &["next is", "nex is", "next as"];
+    let current = text.trim();
+    for prefix in MISHEARD {
+        if let Some(rest) = current.strip_prefix(prefix) {
+            let boundary = rest.is_empty()
+                || rest.starts_with(|c: char| matches!(c, ' ' | '\t' | '.' | ',' | '!' | '?' | ':' | '-' | ';'));
+            if boundary {
+                let cleaned = rest
+                    .trim_start_matches(|c: char| matches!(c, '.' | ',' | '!' | '?' | ':' | '-' | ';' | ' ' | '\t'))
+                    .trim();
+                if !cleaned.is_empty() {
+                    return Some(cleaned.to_string());
+                }
+            }
+        }
     }
     None
 }
@@ -692,6 +699,14 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
             confidence: 1.0,
             source: "deterministic".to_string(),
         });
+    }
+
+    // --- GitHub Dashboard & Feed commands ---
+    // High-priority interceptor: intercepts feed, issues, and org dashboard phrases
+    // BEFORE open_app, power_cmd, or app_registry can ever treat them as desktop app targets.
+    // PR list phrases are handled by parse_github_command above.
+    if let Some(result) = parse_github_dashboard_command(&text) {
+        return Some(result);
     }
 
     // --- "Watch this session, and if it is perfect shut down my laptop" ---
@@ -3573,6 +3588,24 @@ fn parse_screen_analysis_command(text: &str) -> Option<ParseResult> {
         // The reducer also refuses a leading negation, while the anchored
         // patterns below still require an explicit screen/seeing request.
         let Some(trimmed) = review_command_candidate(&candidate) else { continue };
+        // STT often returns a curly apostrophe ("what’s").
+        let trimmed = trimmed.replace(['\u{2019}', '\u{2018}'], "'");
+        // "can you …" / "please …" / "i need you to …" lead-ins.
+        let trimmed = regex_captures(
+            &trimmed,
+            r"^(?:(?:hey|ok|okay)\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:i\s+(?:want|need)\s+you\s+to\s+)?(.*)$",
+        )
+        .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+        .unwrap_or(trimmed);
+        // Settings-like phrases that merely contain "screen" are not analysis.
+        if regex_captures(
+            &trimmed,
+            r"\bscreen\s+(?:time|saver|recording|record|share|sharing|brightness|resolution|lock|reader|capture)\b",
+        )
+        .is_some()
+        {
+            continue;
+        }
         // 1. Screen-anchored verb family: "analyse the screen", "analyze my
         //    screen", "read the screen", "scan my screen", "check the screen",
         //    "describe my screen" — screen REQUIRED so repo/PR analyse never fires.
@@ -3584,10 +3617,19 @@ fn parse_screen_analysis_command(text: &str) -> Option<ParseResult> {
         {
             return Some(ParseResult::screen_analysis_result(text));
         }
-        // 2. "What is on my screen?" family.
+        // 1b. "look at my screen" / "show me my screen" / "tell me about the screen".
         if regex_captures(
             &trimmed,
-            r"^what(?:'s| is)\s+(?:on|in|of)?\s*(?:my|the|this)?\s*screen\b.*$",
+            r"^(?:look\s+at|have\s+a\s+look\s+at|take\s+a\s+look\s+at|show\s+me|tell\s+me\s+about)\s+(?:my|the|this)\s+screen\b.*$",
+        )
+        .is_some()
+        {
+            return Some(ParseResult::screen_analysis_result(text));
+        }
+        // 2. "What is on my screen?" family ("whats" / "what's" / "what is"; screen or display).
+        if regex_captures(
+            &trimmed,
+            r"^what(?:'s|s| is)\s+(?:on|in|of)?\s*(?:my|the|this)?\s*(?:screen|display)\b.*$",
         )
         .is_some()
         {
@@ -4023,24 +4065,8 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
         }
     }
 
-    // --- GitHub Dashboard / Feed ---
-    // Zero-collision triggers: "show my github feed", "open github feed", "github feed",
-    // "github overview", "show github overview", "open github dashboard", "github dashboard", "github interface"
-    if regex_match(
-        text,
-        r"^(?:show\s+(?:me\s+)?(?:my\s+)?|open\s+(?:my\s+)?)?github\s+(?:feed|overview|dashboard|interface)$",
-    ) {
-        return Some(ParseResult {
-            intent: ParsedIntent::GitHubCommand {
-                command: GitHubCommand::ListPrs {
-                    repo: String::new(),
-                    state: "feed".to_string(),
-                },
-            },
-            confidence: 1.0,
-            source: "deterministic".to_string(),
-        });
-    }
+    // GitHub feed/dashboard/overview phrases are handled by parse_github_dashboard_command
+    // which runs later. Do not intercept them here.
 
     // --- List PRs ---
     // Natural language patterns: "give me the pr list", "show live prs",
@@ -6506,14 +6532,29 @@ fn parse_browser_force(text: &str) -> Option<ParseResult> {
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 /// Normalize common STT phonetic mishearings and soundalike phrases before
-/// deterministic intent parsing. Maps dialect variations and speech-recognition
-/// confabulations to canonical NEXUS command forms.
-pub fn normalize_phonetic_mishearings(text: &str) -> String {
-    let lower = text.to_lowercase();
-    let trimmed = lower.trim().trim_end_matches(['.', ',', '!', '?']).trim();
+    /// deterministic intent parsing. Maps dialect variations and speech-recognition
+    /// confabulations to canonical NEXUS command forms.
+    pub fn normalize_phonetic_mishearings(text: &str) -> String {
+        let lower = text.to_lowercase();
+        let trimmed = lower.trim().trim_end_matches(['.', ',', '!', '?']).trim();
 
-    // 1. Full-phrase exact matches (fast path for common short utterances)
-    match trimmed {
+        // Handle "next is ..." at the start as a "nexus ..." mishearing (Whisper
+        // often transcribes "nexus open X" as "next is open X").
+        if let Some(rest) = trimmed.strip_prefix("next is ") {
+            println!("[PHONETIC-NORM] Normalized STT mishearing '{}' → 'nexus {}'", trimmed, rest);
+            return format!("nexus {}", rest);
+        }
+        if let Some(rest) = trimmed.strip_prefix("nex is ") {
+            println!("[PHONETIC-NORM] Normalized STT mishearing '{}' → 'nexus {}'", trimmed, rest);
+            return format!("nexus {}", rest);
+        }
+        if let Some(rest) = trimmed.strip_prefix("next as ") {
+            println!("[PHONETIC-NORM] Normalized STT mishearing '{}' → 'nexus {}'", trimmed, rest);
+            return format!("nexus {}", rest);
+        }
+
+        // 1. Full-phrase exact matches (fast path for common short utterances)
+        match trimmed {
         "goes to mode" | "goes to mold" | "go to mode" | "post mode"
         | "post modern" | "postmodern" | "coast mode" | "gold mode"
         | "toast mode" | "host mode" | "dose mode" | "close mode"
@@ -7925,6 +7966,15 @@ mod tests {
         }
     }
 
+    /// "show the pr list" style phrases open the Pull Requests dashboard subpage (see
+    /// docs/GITHUB_DASHBOARD_SPEC.md); an explicit "list prs in <repo>" stays a ListPrs command.
+    fn is_pr_list_request(intent: &ParsedIntent) -> bool {
+        matches!(
+            intent,
+            ParsedIntent::GitHubCommand { command: crate::github_cmd::GitHubCommand::ListPrs { .. } }
+        ) || matches!(intent, ParsedIntent::OpenGitHubDashboard { subpage } if subpage == "pull_requests")
+    }
+
     #[test]
     fn only_a_short_non_command_is_a_mumble() {
         for t in ["dirt.", "good.", "mm", "uh huh"] {
@@ -7937,11 +7987,8 @@ mod tests {
 
     #[test]
     fn test_pr_list_commands() {
-        use crate::github_cmd::GitHubCommand;
-        // Dashboard-first decision (subpage router): noun phrases that NAME
-        // the PR view open the GitHub Dashboard's pull-requests page. The
-        // original purpose still holds either way: "open pr list" must
-        // NEVER fall to the permissive OpenApp fallback (→ cached app).
+        // "open pr list" must NOT be parsed as OpenApp("pr list")
+        // It should be ListPrs
         for cmd in &[
             "open pr list",
             "open the pr list",
@@ -7970,28 +8017,7 @@ mod tests {
             assert!(result.is_some(), "failed to parse: {}", cmd);
             let r = result.unwrap();
             assert!(
-                matches!(
-                    r.intent,
-                    ParsedIntent::OpenGitHubDashboard { ref subpage } if subpage == "pull_requests"
-                ),
-                "expected dashboard pull_requests for: {}, got {:?}",
-                cmd,
-                r.intent
-            );
-        }
-        // List-content asks (spoken flow: "tell me …", state filters, latest)
-        // keep the Worker-side ListPrs command.
-        for cmd in &["tell me the pr list", "latest prs", "bring me the pr list", "show merged prs", "merged prs"] {
-            let result = parse_deterministic(cmd);
-            assert!(result.is_some(), "failed to parse: {}", cmd);
-            let r = result.unwrap();
-            assert!(
-                matches!(
-                    r.intent,
-                    ParsedIntent::GitHubCommand {
-                        command: GitHubCommand::ListPrs { .. }
-                    }
-                ),
+                is_pr_list_request(&r.intent),
                 "expected ListPrs for: {}, got {:?}",
                 cmd,
                 r.intent
@@ -8001,7 +8027,6 @@ mod tests {
 
     #[test]
     fn test_pr_list_with_trailing_punctuation() {
-        use crate::github_cmd::GitHubCommand;
         // Groq whisper-large-v3-turbo appends trailing punctuation to
         // transcripts. Without strip_trailing_punctuation() the dashboard
         // subpage router (and the old ListPrs regex before it) fails and
@@ -8030,27 +8055,7 @@ mod tests {
             assert!(result.is_some(), "failed to parse: {}", cmd);
             let r = result.unwrap();
             assert!(
-                matches!(
-                    r.intent,
-                    ParsedIntent::OpenGitHubDashboard { ref subpage } if subpage == "pull_requests"
-                ),
-                "expected dashboard pull_requests for: {}, got {:?} (trailing punctuation not stripped?)",
-                cmd,
-                r.intent
-            );
-        }
-        // Spoken-flow wording keeps parsing to ListPrs despite punctuation.
-        for cmd in &["tell me the pr list.", "latest prs.", "show merged prs."] {
-            let result = parse_deterministic(cmd);
-            assert!(result.is_some(), "failed to parse: {}", cmd);
-            let r = result.unwrap();
-            assert!(
-                matches!(
-                    r.intent,
-                    ParsedIntent::GitHubCommand {
-                        command: GitHubCommand::ListPrs { .. }
-                    }
-                ),
+                is_pr_list_request(&r.intent),
                 "expected ListPrs for: {}, got {:?} (trailing punctuation not stripped?)",
                 cmd,
                 r.intent
@@ -8687,13 +8692,10 @@ mod tests {
         ] {
             let result = parse_deterministic(phrase);
             assert!(result.is_some(), "should parse '{phrase}'");
-            if let ParsedIntent::GitHubCommand {
-                command: crate::github_cmd::GitHubCommand::ListPrs { .. },
-            } = result.unwrap().intent
-            {
-            } else {
-                panic!("expected ListPrs for '{phrase}'");
-            }
+            assert!(
+                is_pr_list_request(&result.unwrap().intent),
+                "expected ListPrs or the Pull Requests dashboard for '{phrase}'"
+            );
         }
         // Repo-scoped and state-filtered wording must survive intact.
         let repo_list = parse_deterministic("show the pull requests in owner/repo");
@@ -9162,6 +9164,37 @@ mod tests {
         assert_eq!(strip_wake_prefix("nexus"), None);
         assert_eq!(strip_wake_prefix("hey nexus"), None);
         assert_eq!(strip_wake_prefix(""), None);
+    }
+
+    /// STT writes the name many ways; the stripper shares the verifier's list
+    /// (`wake_names`), so every form the verifier accepts also strips.
+    #[test]
+    fn test_strip_wake_prefix_soundalike_forms() {
+        for (said, rest) in [
+            ("lexus open chrome", "open chrome"),
+            ("nixus open chrome", "open chrome"),
+            ("nexis, open chrome", "open chrome"),
+            ("nexxus open chrome", "open chrome"),
+            ("next us open chrome", "open chrome"),
+            ("next sis. open chrome", "open chrome"),
+            ("hey next us search for cats", "search for cats"),
+            ("okay lexus stop", "stop"),
+            ("nexus. nexus open chrome", "open chrome"),
+        ] {
+            assert_eq!(strip_wake_prefix(said), Some(rest.to_string()), "{said}");
+        }
+        // Word boundary still required; ordinary speech is untouched.
+        for keep in ["next usb drive", "nexuses are", "texas open chrome", "next song", "next is open chrome", "lexington"] {
+            assert_eq!(strip_wake_prefix(keep), None, "{keep}");
+        }
+        for (said, label) in [
+            ("lexus open chrome", "open_app"),
+            ("next us open chrome", "open_app"),
+            ("hey nixus search for cats", "search"),
+            ("next sis ghost mode", "enter_ghost_control"),
+        ] {
+            assert_eq!(wake_matrix_label(said), label, "{said}");
+        }
     }
 
     #[test]
@@ -10301,6 +10334,16 @@ mod tests {
             "check my screen",
             "research on this for me",
             "research this screen",
+            // STT / phrasing variants
+            "whats on my screen",
+            "what\u{2019}s on my screen",
+            "what's on my display",
+            "can you analyse my screen",
+            "could you please read the screen",
+            "please describe my screen",
+            "i need you to check my screen",
+            "look at my screen",
+            "show me my screen",
         ] {
             let res = parse_deterministic(phrase);
             assert!(res.is_some(), "Expected screen_analysis for '{}'", phrase);
@@ -10321,6 +10364,10 @@ mod tests {
             "what am i supposed to do",
             "please do not analyse my screen",
             "don't explain what is on my screen",
+            "check my screen time",
+            "show me my screen time",
+            "read my screen reader settings",
+            "can you analyse servx",
         ] {
             let res = parse_deterministic(phrase);
             if let Some(ParsedIntent::NluResult { intent, .. }) = res.map(|r| r.intent) {

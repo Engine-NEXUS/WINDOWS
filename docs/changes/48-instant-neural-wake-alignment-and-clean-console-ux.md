@@ -1,3 +1,5 @@
+> **Correction (change 91):** the `read_verify_wake` default described below did not stick - in the current code `verifyWake` defaults to **true** (`commands.rs`). The speech check is on unless the user turns it off.
+
 # Change 48: Instant Neural Wake Alignment & Clean Console UX
 
 **Document ID:** `48-instant-neural-wake-alignment-and-clean-console-ux`  

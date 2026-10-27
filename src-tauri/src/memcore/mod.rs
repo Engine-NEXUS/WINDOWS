@@ -56,7 +56,6 @@ use store::{Observation, Store, Tier, Trust};
 
 /// Context-pack budget in chars: the always-on profile (<= `profile::PROFILE_CAP`) plus about 1,200 for
 /// the question-specific facts and recent episodes (plan 95: 800 -> 2000; Memory v2 M1: 2000 -> 2600).
-pub const DEFAULT_BUDGET: usize = 2600;
 const MAX_PACK_FACTS: usize = 8;
 const MAX_PACK_EPISODES: usize = 3;
 
@@ -690,11 +689,11 @@ mod tests {
         mirror_core_fact(&d, "work_email", "lakshya@example.com");
         mirror_core_fact(&d, "dog_name", "Bruno");
         mirror_episode(&d, "open chrome please");
-        let pack = context_pack(&d, "what pizza do I like", DEFAULT_BUDGET).unwrap();
+        let pack = context_pack(&d, "what pizza do I like", 2600).unwrap();
         assert!(pack.contains("favorite_pizza_topping: pepperoni"), "{pack}");
         assert!(pack.contains("past: open chrome please"), "{pack}");
         // Email is redacted before it can leave the device.
-        let all = context_pack(&d, "email", DEFAULT_BUDGET).unwrap();
+        let all = context_pack(&d, "email", 2600).unwrap();
         assert!(!all.contains("lakshya@example.com"), "{all}");
         // Budget is honoured and never splits a multi-byte char.
         let tiny = context_pack(&d, "pizza", 20).unwrap();
@@ -710,8 +709,8 @@ mod tests {
         mirror_learned_fact(&d, "favorite_snack", "chips");
         let prefix = "About the user (they told you this):\n- dog_name: Bruno\n- employer: Acme";
 
-        let a = context_pack_with(&d, "what is my dog name", DEFAULT_BUDGET, true).unwrap();
-        let b = context_pack_with(&d, "weather tomorrow", DEFAULT_BUDGET, true).unwrap();
+        let a = context_pack_with(&d, "what is my dog name", 2600, true).unwrap();
+        let b = context_pack_with(&d, "weather tomorrow", 2600, true).unwrap();
         // Same prefix whatever is asked: that is what lets providers cache it.
         assert!(a.starts_with(prefix), "{a}");
         assert!(b.starts_with(prefix), "{b}");
@@ -720,7 +719,7 @@ mod tests {
         // Sensitive and mined facts are never always-on...
         assert!(!b.contains("peanuts") && !b.contains("chips"), "{b}");
         // ...but a question that asks for them still finds them.
-        let c = context_pack_with(&d, "am I allergic to anything", DEFAULT_BUDGET, true).unwrap();
+        let c = context_pack_with(&d, "am I allergic to anything", 2600, true).unwrap();
         assert!(c.contains("allergy: peanuts"), "{c}");
     }
 
@@ -728,11 +727,11 @@ mod tests {
     fn the_profile_can_be_switched_off() {
         let d = tmpdir("profile_off");
         mirror_core_fact(&d, "dog_name", "Bruno");
-        let off = context_pack_with(&d, "weather tomorrow", DEFAULT_BUDGET, false);
+        let off = context_pack_with(&d, "weather tomorrow", 2600, false);
         assert!(off.map_or(true, |p| !p.contains("About the user")));
         std::fs::write(d.join("settings.json"), r#"{"memcoreProfile": false}"#).unwrap();
         assert!(!status(&d).profile);
-        let via_setting = context_pack(&d, "weather tomorrow", DEFAULT_BUDGET);
+        let via_setting = context_pack(&d, "weather tomorrow", 2600);
         assert!(via_setting.map_or(true, |p| !p.contains("About the user")));
     }
 
@@ -789,10 +788,10 @@ mod tests {
         let d = tmpdir("redact_pack");
         std::fs::write(d.join("contacts.json"), r#"{"Asha": "+9111"}"#).unwrap();
         mirror_core_fact(&d, "sister_name", "Asha");
-        let plain = context_pack(&d, "sister", DEFAULT_BUDGET).unwrap();
+        let plain = context_pack(&d, "sister", 2600).unwrap();
         assert!(plain.contains("Asha"), "{plain}");
         std::fs::write(d.join("settings.json"), r#"{"memcoreRedactNames": true}"#).unwrap();
-        let masked = context_pack(&d, "sister", DEFAULT_BUDGET).unwrap();
+        let masked = context_pack(&d, "sister", 2600).unwrap();
         assert!(!masked.contains("Asha") && masked.contains("Person A"), "{masked}");
     }
 
@@ -1100,10 +1099,10 @@ mod recall_baseline {
         let mut micros: Vec<u128> = vec![];
         let mut max_chars = 0usize;
         for (q, key) in &questions {
-            let off = context_pack_with(&d, q, DEFAULT_BUDGET, false).unwrap_or_default();
+            let off = context_pack_with(&d, q, 2600, false).unwrap_or_default();
             without += present(&off, key) as usize;
             let t = Instant::now();
-            let on = context_pack_with(&d, q, DEFAULT_BUDGET, true).unwrap_or_default();
+            let on = context_pack_with(&d, q, 2600, true).unwrap_or_default();
             micros.push(t.elapsed().as_micros());
             with += present(&on, key) as usize;
             max_chars = max_chars.max(on.chars().count());
@@ -1112,7 +1111,7 @@ mod recall_baseline {
         let p50 = micros[micros.len() / 2];
         let p95 = micros[(micros.len() * 95) / 100];
         let profile_chars = {
-            let off = context_pack_with(&d, "zzz nothing matches", DEFAULT_BUDGET, true).unwrap_or_default();
+            let off = context_pack_with(&d, "zzz nothing matches", 2600, true).unwrap_or_default();
             off.chars().count()
         };
         println!("PACK PRESENCE (100-fact store, {} questions: dev + held-out)", questions.len());
@@ -1122,7 +1121,7 @@ mod recall_baseline {
         println!("  profile alone is {profile_chars} chars (cap {})", profile::PROFILE_CAP);
 
         assert!(with >= without, "the profile must never hide a fact");
-        assert!(max_chars <= DEFAULT_BUDGET, "pack over budget: {max_chars}");
+        assert!(max_chars <= 2600, "pack over budget: {max_chars}");
         assert!(p95 < 100_000, "context_pack p95 {p95} us is far slower than expected (debug build)");
     }
 }

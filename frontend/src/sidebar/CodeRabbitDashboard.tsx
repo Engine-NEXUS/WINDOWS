@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { speak } from "../audio/ttsPlayer";
 
 export interface CodeRabbitFinding {
   id: string;
@@ -306,7 +307,7 @@ export const CodeRabbitDashboard: React.FC<CodeRabbitDashboardProps> = ({ data }
     setLoadingPr(prNum);
     // Voice feedback acknowledgment "On it, sir."
     try {
-      await invoke("speak_text", { text: "On it, sir." });
+      await speak("On it, sir.");
     } catch {
       // Ignored in browser fallback
     }

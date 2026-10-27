@@ -36,6 +36,7 @@ command_center.rs: field transcript
 command_center.rs: function has_pending_compound
 command_center.rs: function read_checkpoint
 command_center.rs: function sweep_stale_checkpoints
+commands.rs: function parse_settings_content
 dyn_windows.rs: field hidden_title
 ghost.rs: function point_at_target
 ghost.rs: function point_off
@@ -143,8 +144,5 @@ voice_profile.rs: method acceptance_threshold
 voice_profile.rs: method delete
 voice_profile.rs: method implicit_enroll
 voice_profile.rs: method num_embeddings
-wakeword_oww.rs: associated function new
-wakeword_oww.rs: field impulsive_ratio
 wakeword_oww.rs: function verify_transcript
-wakeword_oww.rs: method floor
 youtube_center.rs: constant ACTIONS

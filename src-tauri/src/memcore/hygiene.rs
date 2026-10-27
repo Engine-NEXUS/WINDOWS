@@ -150,9 +150,43 @@ pub fn admit_conversation_turn(transcript: &str, response: &str, completed: bool
 }
 
 /// A stored brief line (goal/active task/key point) is only worth sending if it is itself quality text.
+/// Briefs are summaries, not full transcripts, so we use a lower MIN_WORDS (2 instead of 3).
 pub fn brief_line_ok(line: &str) -> bool {
     let t = line.trim();
-    t.is_empty() || (transcript_quality(t).is_ok() && !reply_is_unhelpful(t))
+    if t.is_empty() {
+        return true;
+    }
+    // Quick unhelpful check (same as transcripts)
+    if reply_is_unhelpful(t) {
+        return false;
+    }
+    // Hallucination check (same as transcripts)
+    if crate::stt::looks_hallucinated(t) {
+        return false;
+    }
+    let w = words(t);
+    let content: Vec<&String> = w.iter().filter(|x| x.chars().count() >= 2).collect();
+    // Briefs can be shorter than full transcripts (2 content words minimum)
+    const BRIEF_MIN_WORDS: usize = 2;
+    if content.len() < BRIEF_MIN_WORDS {
+        return false;
+    }
+    if w.len() > MAX_WORDS {
+        return false;
+    }
+    let mut uniq: Vec<&String> = content.clone();
+    uniq.sort();
+    uniq.dedup();
+    if content.len() >= 6 && (uniq.len() as f32) / (content.len() as f32) < 0.5 {
+        return false;
+    }
+    if !t.chars().any(|c| c.is_alphabetic()) {
+        return false;
+    }
+    if !w.iter().any(|x| x.chars().count() >= 3 && !STOP.contains(&x.as_str())) {
+        return false;
+    }
+    true
 }
 
 const CLEANUP_FLAG: &str = "hygiene_v1_done";

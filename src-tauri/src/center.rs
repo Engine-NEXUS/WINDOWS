@@ -1293,6 +1293,68 @@ mod director_tests {
         );
     }
 
+    fn live(intent: &str) -> ParsedIntent {
+        ParsedIntent::NluResult {
+            intent: intent.to_string(),
+            slots: serde_json::json!({}),
+            confidence: 1.0,
+        }
+    }
+
+    /// Regression: with speaker verification off (every turn `Unenrolled`) an
+    /// explicit ghost-session command must run, not be dropped as ambient.
+    #[test]
+    fn test_ghost_unenrolled_explicit_commands_are_allowed() {
+        for source in [
+            "deterministic",
+            "deterministic-live",
+            "deterministic-dictation",
+            "deterministic-screen-analysis",
+        ] {
+            assert_eq!(
+                action_disposition(
+                    &live("browser_new_tab"),
+                    "new tab",
+                    source,
+                    TurnOwnership::Unenrolled,
+                    true
+                ),
+                ActionDisposition::Allow,
+                "source {source}"
+            );
+        }
+    }
+
+    /// The ghost mic is hot: narrative speech stays ambient, and a voice that is
+    /// positively not the owner is never obeyed.
+    #[test]
+    fn test_ghost_unenrolled_narrative_still_dropped() {
+        let unknown = ParsedIntent::Unknown {
+            raw: "we should probably leave soon".to_string(),
+        };
+        assert_eq!(
+            action_disposition(&unknown, "we should probably leave soon", "none", TurnOwnership::Unenrolled, true),
+            ActionDisposition::AmbientDrop
+        );
+        assert_eq!(
+            action_disposition(&live("type_text"), "type hi", "deterministic-live", TurnOwnership::Rejected, true),
+            ActionDisposition::AmbientDrop
+        );
+    }
+
+    /// Outside ghost the original behavior is unchanged.
+    #[test]
+    fn test_non_ghost_unenrolled_unchanged() {
+        assert_eq!(
+            action_disposition(&live("browser_new_tab"), "new tab", "deterministic-live", TurnOwnership::Unenrolled, false),
+            ActionDisposition::Allow
+        );
+        assert_eq!(
+            action_disposition(&live("type_text"), "type hi", "nlu", TurnOwnership::Unenrolled, false),
+            ActionDisposition::Clarify
+        );
+    }
+
     #[test]
     fn test_find_pr_is_pure_and_strong_evidence() {
         let find_intent = ParsedIntent::GitHubCommand {

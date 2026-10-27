@@ -1006,6 +1006,92 @@ function cmdWake() {
     return;
   }
 
+  // ── Phase E: data audit, reusable data, scoring (see docs/research/voice-accuracy/02-runbook-…) ──
+  const scriptsDir = join(ROOT, "scripts");
+  const needScript = (name) => {
+    const f = join(scriptsDir, name);
+    if (!existsSync(f)) {
+      err("Script not found: " + f);
+      process.exit(1);
+    }
+    return f;
+  };
+  const ensurePy = (mod, pipName, why) => {
+    const chk = spawnSync(py, ["-c", `import ${mod}`], { encoding: "utf-8" });
+    if (chk.status !== 0) {
+      info(`Installing ${pipName} (${why})...`);
+      run(py, ["-m", "pip", "install", pipName], { allowFail: true, hint: "If pip fails, create a venv: python -m venv .venv" });
+    }
+  };
+
+  if (sub === "improve") {
+    // nexus wake improve [--skip-fetch] [--skip-synth] [--promote]
+    // One command: before-score -> data -> audit (stops for your by-ear review) -> train -> after-score -> verdict report.
+    ensurePy("onnxruntime", "onnxruntime", "wake front end");
+    ensurePy("torch", "torch", "classifier training");
+    ensurePy("onnx", "onnx", "model export");
+    run(py, [needScript("wake_improve.py"), ...process.argv.slice(4)], { cwd: ROOT, allowFail: true });
+    return;
+  }
+
+  if (sub === "audit") {
+    // nexus wake audit            -> inventory + out-of-fold scoring, writes the review queue
+    // nexus wake audit review     -> listen to flagged clips (worst first), decide by ear
+    // nexus wake audit status     -> how many flagged clips still need a decision (exit 1 while any do)
+    ensurePy("onnxruntime", "onnxruntime", "wake front end");
+    const act = process.argv[4]?.toLowerCase();
+    const audit = needScript("wake_label_audit.py");
+    if (act === "status") {
+      run(py, [audit, "status"], { cwd: ROOT });
+    } else if (act === "review") {
+      ensurePy("sounddevice", "sounddevice", "audio playback");
+      run(py, [needScript("wake_audition.py"), "review", "--queue", join(ROOT, "wake_word_data", "audit_flags.jsonl")], { cwd: ROOT });
+    } else {
+      info("Step 1/2: inventory (by origin; no Whisper)...");
+      run(py, [audit, "inventory"], { cwd: ROOT });
+      info("Step 2/2: out-of-fold scoring (finds negatives that sound like NEXUS, positives that do not)...");
+      run(py, [audit, "score", ...process.argv.slice(4)], { cwd: ROOT });
+    }
+    return;
+  }
+
+  if (sub === "fetch") {
+    // nexus wake fetch list | get <id…> [--max-gb N] | prepare [--max-hours N] | sources
+    const act = process.argv[4] || "list";
+    if (act === "prepare") {
+      ensurePy("soundfile", "soundfile", "read LibriSpeech FLAC");
+    }
+    run(py, [needScript("wake_data_fetch.py"), act, ...process.argv.slice(5)], { cwd: ROOT });
+    return;
+  }
+
+  if (sub === "synth" && ["voices", "positives", "negatives"].includes(process.argv[4])) {
+    ensurePy("piper", "piper-tts", "synthetic wake-word voices (GPL-3 tool; its audio output is not affected)");
+    run(py, [needScript("wake_data_synth.py"), ...process.argv.slice(4)], { cwd: ROOT });
+    return;
+  }
+
+  if (sub === "score") {
+    // nexus wake score [--model <candidate.onnx>] [--json before.json] [--baseline before.json] [--stage2]
+    ensurePy("onnxruntime", "onnxruntime", "wake front end");
+    run(py, [needScript("wake_score.py"), ...process.argv.slice(4)], { cwd: ROOT });
+    return;
+  }
+
+  if (sub === "threshold" || sub === "verify") {
+    // nexus wake threshold <wake_sweep.jsonl>     pick kws_threshold from a `wake_eval --sweep` file
+    // nexus wake verify <wake_stage2.jsonl>       pick the speech-check policy from a `wake_eval --stage2` file
+    const extra = process.argv.slice(4);
+    run(py, [needScript("wake_calibrate.py"), ...extra, ...(sub === "verify" ? ["--verify"] : [])], { cwd: ROOT });
+    return;
+  }
+
+  if (sub === "devices") {
+    info("Note: these 'devices' are SYNTHETIC filters applied to your training clips (bluetooth band-pass, fan hum, far-field) - not real microphones. For real-device accuracy record with scripts/voice_eval_set.py on each mic.");
+    run(py, [needScript("test_device_invariance.py"), ...process.argv.slice(4)], { cwd: ROOT });
+    return;
+  }
+
   if (sub === "compare" || (sub === "test" && process.argv.slice(4).includes("--compare"))) {
     const compareScript = join(ROOT, "scripts", "test_wake_compare.py");
     if (!existsSync(compareScript)) {
@@ -1034,18 +1120,6 @@ function cmdWake() {
     return;
   }
 
-  if (sub === "devices") {
-    // test_wake_live.py has no --devices flag; the device benchmark is its own script.
-    const devScript = join(ROOT, "scripts", "test_device_invariance.py");
-    if (!existsSync(devScript)) {
-      err("Device benchmark script not found: " + devScript);
-      process.exit(1);
-    }
-    info("Starting simulated microphone-profile benchmark...");
-    run(py, [devScript, ...process.argv.slice(4)], { cwd: ROOT });
-    return;
-  }
-
   if (sub === "test" || sub === "live" || sub === "benchmark") {
     const testScript = join(ROOT, "scripts", "test_wake_live.py");
     if (!existsSync(testScript)) {
@@ -1067,12 +1141,12 @@ function cmdWake() {
       err("Train script not found: " + trainScript);
       process.exit(1);
     }
-    info("Starting wake word neural classifier training...");
-    run(py, [trainScript], { cwd: ROOT });
+    info("Starting wake word neural classifier training (writes a CANDIDATE; add --promote to replace the live model, --dry-run to only count)...");
+    run(py, [trainScript, ...process.argv.slice(4)], { cwd: ROOT });
     return;
   }
 
-  if (sub === "synth" || sub === "synthesize") {
+  if (sub === "synth-accents" || sub === "synth" || sub === "synthesize") {
     const synthScript = join(ROOT, "scripts", "synthesize_wake_accents.py");
     if (!existsSync(synthScript)) {
       err("Synth script not found: " + synthScript);
@@ -1117,10 +1191,16 @@ function cmdWake() {
     info("  nexus wake test                  (real-time live microphone listening test)");
     info("  nexus wake test --compare        (simultaneous wake test & live speech transcription comparison)");
     info("  nexus wake test --batch          (benchmark model against all 3,000 dataset WAVs)");
-    info("  nexus wake devices               (benchmark model across 5 simulated microphone profiles)");
+    info("  nexus wake devices               (benchmark model across 5 SYNTHETIC mic filters - not real devices)");
     info("  nexus wake replay [--split test] (score the REAL Rust engine: recall, false fires/hour, thresholds)");
-    info("  nexus wake train                 (train device-invariant wake neural model)");
-    info("  nexus wake synth                 (synthesize multi-accent training samples via neural TTS)");
+    info("  nexus wake improve [--promote]   (EVERYTHING: score shipped -> data -> audit -> train -> score candidate -> verdict report)");
+    info("  nexus wake audit                 (find mislabeled clips by audio, not Whisper) / audit review / audit status");
+    info("  nexus wake fetch list|get <id>|prepare   (permissively-licensed public speech/noise/TV data)");
+    info("  nexus wake synth voices|positives|negatives   (Piper TTS voices: thousands of synthetic speakers)");
+    info("  nexus wake train [--dry-run] [--promote]  (refuses until the audit queue is reviewed)");
+    info("  nexus wake score [--model cand.onnx] [--json f] [--baseline f]   (REAL accuracy: recall + false alarms/hour)");
+    info("  nexus wake threshold <sweep.jsonl> / verify <stage2.jsonl>   (pick threshold / speech-check policy from data)");
+    info("  nexus wake synth-accents         (older: multi-accent edge-tts samples)");
     info("  nexus wake ingest                (ingest & screen open-source noise corpora)");
     info("  nexus wake record 300            (record 300 positive wake words)");
     info("  nexus wake record negative 100   (record 100 negative soundalikes)");
@@ -1193,7 +1273,7 @@ ${C.cyan}Commands:${C.reset}
   ${C.green}collect${C.reset}  Collect real voice samples for NLU training (speak phrases → transcribe → save)
   ${C.green}wake${C.reset}     Record wake word audio samples for wake model training (nexus wake record 300)
   ${C.green}stats${C.reset}    Inspect dataset category coverage, voice health, and training recommendations
-  ${C.green}data${C.reset}     Validate NLU provenance/evaluation locks and wake data/model manifests
+  ${C.green}data${C.reset}     Validate NLU provenance/evaluation locks and wake data/model manifests (structural only - no accuracy; use "wake score")
   ${C.green}mcp check${C.reset} Verify every registered MCP server end to end (read-only, no sends)
   ${C.green}help${C.reset}     Show this help
 
@@ -1208,6 +1288,9 @@ ${C.cyan}Examples:${C.reset}
   ${IS_WIN ? "nexus" : "./nexus"} collect     # speak phrases → save real voice samples for training
   ${IS_WIN ? "nexus" : "./nexus"} wake record 300 # record 300 real wake word samples ("NEXUS")
   ${IS_WIN ? "nexus" : "./nexus"} wake stats  # inspect wake word audio dataset statistics
+  ${IS_WIN ? "nexus" : "./nexus"} wake improve # the whole loop + a before/after verdict report to review
+  ${IS_WIN ? "nexus" : "./nexus"} wake audit  # find poisoned/mislabeled wake clips, then "wake audit review"
+  ${IS_WIN ? "nexus" : "./nexus"} wake score  # measure real wake-word recall + false alarms per hour
   ${IS_WIN ? "nexus" : "./nexus"} data nlu validate
   ${IS_WIN ? "nexus" : "./nexus"} data wake validate
 

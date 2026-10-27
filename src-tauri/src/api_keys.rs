@@ -134,7 +134,8 @@ pub fn apply_key_field(json: &mut serde_json::Value, service: &str, key: Option<
 /// For each known service and candidate field:
 /// - if store already holds the SAME value -> blank the file field ("");
 /// - if store has nothing -> set, verify with get, and blank if read-back matches;
-/// - if store holds a DIFFERENT value -> leave file alone and count as conflict;
+/// - if store holds a DIFFERENT value -> SETTINGS.JSON WINS: overwrite keychain with
+///   the (trimmed) settings.json value, verify read-back, then blank the file field;
 /// - if read-back fails -> leave file alone and count as failed.
 pub fn scrub_plaintext_keys(json: &mut serde_json::Value, store: &dyn KeyStore) -> ScrubReport {
     let Some(obj) = json.as_object_mut() else {
@@ -149,7 +150,7 @@ pub fn scrub_plaintext_keys(json: &mut serde_json::Value, store: &dyn KeyStore) 
 
         for field in all_fields {
             let val = match obj.get(field).and_then(|v| v.as_str()) {
-                Some(s) if !s.is_empty() => s.to_string(),
+                Some(s) if !s.trim().is_empty() => s.trim().to_string(),
                 _ => continue,
             };
 
@@ -159,7 +160,14 @@ pub fn scrub_plaintext_keys(json: &mut serde_json::Value, store: &dyn KeyStore) 
                         obj.insert(field.to_string(), serde_json::Value::String(String::new()));
                         report.scrubbed += 1;
                     } else {
-                        report.conflicts += 1;
+                        // SETTINGS.JSON WINS: overwrite stale keychain value
+                        store.set(service, &val);
+                        if store.get(service).as_deref() == Some(&val) {
+                            obj.insert(field.to_string(), serde_json::Value::String(String::new()));
+                            report.scrubbed += 1;
+                        } else {
+                            report.failed += 1;
+                        }
                     }
                 }
                 None => {
@@ -471,19 +479,19 @@ mod tests {
     }
 
     #[test]
-    fn scrub_with_different_stored_value_conflicts_and_leaves_file_untouched() {
+    fn scrub_with_different_stored_value_file_wins_and_scrubs() {
         let store = MockKeyStore::default();
         store.set("groq", "gsk_store_value_123");
         let mut json = serde_json::json!({
             "groqApiKey": "gsk_file_value_different"
         });
-        let before = json.clone();
         let report = scrub_plaintext_keys(&mut json, &store);
-        assert_eq!(report.conflicts, 1);
-        assert_eq!(report.scrubbed, 0);
+        // File wins: store is updated to file value, file field is scrubbed
+        assert_eq!(report.conflicts, 0);
+        assert_eq!(report.scrubbed, 1);
         assert_eq!(report.failed, 0);
-        assert_eq!(json, before);
-        assert_eq!(store.get("groq").as_deref(), Some("gsk_store_value_123"));
+        assert_eq!(json["groqApiKey"], "");
+        assert_eq!(store.get("groq").as_deref(), Some("gsk_file_value_different"));
     }
 
     #[test]
