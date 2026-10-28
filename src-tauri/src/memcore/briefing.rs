@@ -12,6 +12,8 @@ use std::sync::Mutex;
 
 use super::agenda::AgendaItem;
 use super::mailtriage::{self, Category, StoredMail};
+use super::mailwording;
+use super::selfnames::SelfNames;
 use super::resume::{self, Kind, Sample};
 use super::store::Tier;
 
@@ -223,9 +225,44 @@ pub fn describe(s: &Sample) -> String {
     }
 }
 
+/// Keeps the owner's own name (and a GitHub actor, who is usually the owner) out of the spoken briefing,
+/// and gives CI failures the same short wording the live notifications use.
+pub fn scrub_mail(items: Vec<MailItem>, names: &SelfNames) -> Vec<MailItem> {
+    items
+        .into_iter()
+        .map(|mut m| {
+            if let Some(short) = mailwording::short_ci_wording(&m.subject) {
+                m.sender.clear();
+                m.subject = short;
+                m.deadline = None;
+                m.category = None;
+            } else if names.is_self(&m.sender) {
+                m.sender.clear();
+            }
+            m
+        })
+        .collect()
+}
+
+fn is_short_ci(subject: &str) -> bool {
+    subject.starts_with("Build failed in ") || subject.starts_with("PR failed in ")
+}
+
 pub fn mail_line(m: &MailItem) -> String {
     let who = clip(&m.sender, 40);
     let subj = clip(&m.subject, 60);
+    if who.trim().is_empty() {
+        if is_short_ci(&m.subject) {
+            return subj;
+        }
+        if let Some(cat) = m.category.as_deref().and_then(Category::from_str) {
+            return format!("{}: “{subj}”", cat.phrase());
+        }
+        return match m.deadline.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+            Some(d) => format!("an email about “{subj}”, deadline {d}"),
+            None => format!("an email about “{subj}”"),
+        };
+    }
     if let Some(cat) = m.category.as_deref().and_then(Category::from_str) {
         return format!("{} from {who}: “{subj}”", cat.phrase());
     }
@@ -435,6 +472,7 @@ fn gather<R: tauri::Runtime>(
         .map(|w| MailItem { sender: w.sender, subject: w.subject, deadline: w.initial_deadline_raw, category: None })
         .collect();
     mail.extend(important_mail(dir, now));
+    let mail = scrub_mail(mail, &SelfNames::load(dir));
     Input {
         now,
         hour: chrono::Local::now().hour(),
@@ -1097,5 +1135,26 @@ mod session_greeting_tests {
     #[test]
     fn nothing_to_say_is_still_silence() {
         assert!(build(&base()).is_none());
+    }
+
+    #[test]
+    fn the_owners_own_name_is_never_spoken_and_ci_mail_uses_the_short_line() {
+        let names = SelfNames::from_parts(&["Chitkul Lakshya".to_string()]);
+        let items = vec![
+            MailItem { sender: "Chitkul Lakshya".into(), subject: "[Engine-NEXUS/WINDOWS] Run failed: pages build and deployment".into(), deadline: None, category: Some("github".into()) },
+            MailItem { sender: "Chitkul Lakshya".into(), subject: "Assignment 3".into(), deadline: Some("Friday".into()), category: None },
+            MailItem { sender: "Prof. Rao".into(), subject: "Exam".into(), deadline: None, category: None },
+        ];
+        let lines: Vec<String> = scrub_mail(items, &names).iter().map(mail_line).collect();
+        assert!(lines[0].starts_with("Build failed in "), "{lines:?}");
+        assert!(lines[1].starts_with("an email about “Assignment 3”"), "{lines:?}");
+        assert!(lines[2].contains("Prof. Rao"), "someone else is still named: {lines:?}");
+        assert!(lines.iter().all(|l| !l.contains("Chitkul") && !l.contains("Lakshya")), "{lines:?}");
+        // Nothing to hide: an empty name set keeps a plain sender.
+        let kept = scrub_mail(
+            vec![MailItem { sender: "Prof. Rao".into(), subject: "Exam".into(), deadline: None, category: None }],
+            &SelfNames::none(),
+        );
+        assert_eq!(kept[0].sender, "Prof. Rao");
     }
 }
