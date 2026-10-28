@@ -5719,6 +5719,25 @@ pub(crate) fn is_mumble(transcript: &str) -> bool {
     (1..=3).contains(&words) && parse_deterministic(transcript).is_none()
 }
 
+/// A statement of 4+ words that is not a command or a question, heard while a yes/no question is open: much
+/// more likely a mis-heard answer than a new request. The caller asks once more instead of sending it to the cloud
+/// (live 2026-10-28: a hallucinated "It's very nice to know…" was answered with an unrelated paragraph).
+pub(crate) fn is_stray_statement(transcript: &str) -> bool {
+    let words: Vec<&str> = transcript.split_whitespace().collect();
+    if words.len() < 4 || parse_deterministic(transcript).is_some() {
+        return false;
+    }
+    let first = words[0]
+        .trim_matches(|c: char| !c.is_alphabetic())
+        .to_lowercase();
+    !matches!(
+        first.as_str(),
+        "what" | "whats" | "how" | "why" | "when" | "where" | "who" | "which" | "can" | "could" | "would"
+            | "will" | "is" | "are" | "do" | "does" | "did" | "tell" | "show" | "open" | "nexus" | "please"
+            | "play" | "search" | "close" | "stop" | "cancel" | "no" | "not"
+    )
+}
+
 /// `is_answer_to` for the question that is armed right now.
 pub(crate) fn answers_a_pending_offer(transcript: &str) -> bool {
     let pending = if crate::memcore::offer::is_armed() { crate::memcore::offer::peek() } else { None };
@@ -7963,6 +7982,14 @@ mod tests {
         }
         for t in ["open chrome", "what time is it", "hook up antigravity", "sure what time is it", "yes open brave"] {
             assert!(!is_answer_to(Some(&hook), t), "{t}");
+        }
+    }
+
+    #[test]
+    fn stray_statements_are_told_apart_from_questions_and_commands() {
+        assert!(is_stray_statement("It's very nice to know that it's not a person"));
+        for t in ["what is the capital of france", "open chrome and go to youtube", "yes", "do it", "tell me about rust please"] {
+            assert!(!is_stray_statement(t), "{t}");
         }
     }
 

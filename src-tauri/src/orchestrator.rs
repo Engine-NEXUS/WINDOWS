@@ -874,7 +874,9 @@ pub async fn process_transcript<R: Runtime>(
             }
             _ => {
                 // A quiet "yes" heard as "dirt." must not lose the question and go to the cloud: ask once more.
-                if crate::intent_parser::is_mumble(&transcript) && offer::reask_once() {
+                if (crate::intent_parser::is_mumble(&transcript) || crate::intent_parser::is_stray_statement(&transcript))
+                    && offer::reask_once()
+                {
                     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
                     return say_and_finish(&app, request_id, "Sorry sir, was that a yes or a no?".into());
                 }
@@ -2319,6 +2321,9 @@ pub async fn process_transcript<R: Runtime>(
                             _ => "Here is the response in the sidebar, sir.".to_string(),
                         };
                         (spoken, true)
+                    } else if let Some(short) = crate::howto::spoken_summary(&text) {
+                        // A long chat answer: two sentences aloud, everything in the sidebar.
+                        (short, true)
                     } else {
                         (text.clone(), false)
                     };
@@ -8920,6 +8925,15 @@ async fn try_power_and_howto<R: Runtime>(
     app: &AppHandle<R>,
     transcript: &str,
 ) -> Option<Result<ProcessResult, String>> {
+    if crate::memcore::account_seed::is_name_question(transcript) {
+        if let Ok(dir) = app.path().app_data_dir() {
+            crate::memcore::account_seed::seed(&dir); // the account may have been connected since boot
+            if let Some(line) = crate::memcore::account_seed::name_answer(&dir) {
+                let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                return Some(say_and_finish(app, request_id, line));
+            }
+        }
+    }
     if let Some(card) = crate::howto::static_card(transcript) {
         let (request_id, _) = install_new_request(Subsystem::LocalCommand);
         let app2 = app.clone();

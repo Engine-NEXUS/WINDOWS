@@ -11,6 +11,7 @@
 //! `memcore` setting (default on) turns the whole thing off.
 
 pub mod agenda;
+pub mod account_seed;
 pub mod briefing;
 pub mod corrections;
 pub mod curator;
@@ -338,6 +339,8 @@ pub struct Status {
     pub health: bool,
     /// The always-on profile (what you told NEXUS, minus sensitive topics) is sent with cloud requests.
     pub profile: bool,
+    /// The owner's name is learned from the connected Google account (older UIs omit this: on).
+    pub account_seed: bool,
     /// NEXUS may notice command sequences you repeat and offer to turn them into one phrase.
     pub routines: bool,
     /// Optional background review of cloud conversations is on (off unless the user switched it on).
@@ -374,6 +377,7 @@ pub fn status(app_data_dir: &Path) -> Status {
     let session = flag(app_data_dir, "memcoreSession", true);
     let health = flag(app_data_dir, "memcoreHealth", true);
     let profile = flag(app_data_dir, "memcoreProfile", true);
+    let account_seed = flag(app_data_dir, "memcoreAccountSeed", true);
     let routines = flag(app_data_dir, "memcoreRoutines", true);
     let review = flag(app_data_dir, "memcoreReview", false);
     let pending = review::list(app_data_dir).len();
@@ -419,6 +423,7 @@ pub fn status(app_data_dir: &Path) -> Status {
             session,
             health,
             profile,
+            account_seed,
             routines,
             review,
             pending,
@@ -450,6 +455,7 @@ pub fn status(app_data_dir: &Path) -> Status {
             session,
             health,
             profile,
+            account_seed,
             routines,
             review,
             pending,
@@ -815,14 +821,14 @@ mod tests {
             row("fact", "employer", "Acme", "derived", now - 3 * 86_400),
             row("episode", "ep:1", "open chrome", "derived", now - 86_400),
         ];
-        let st = Status { enabled: true, encrypted: true, facts: 2, episodes: 1, egress_7d: 4, redact_names: false, activity: true, resume_points: 12, briefing: true, timetable: true, slots: 0, mail: true, mail_plain: true, github_watch: true, deploy_watch: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true, profile: true, routines: true, review: false, pending: 0, curator_note: String::new() };
+        let st = Status { enabled: true, encrypted: true, facts: 2, episodes: 1, egress_7d: 4, redact_names: false, activity: true, resume_points: 12, briefing: true, timetable: true, slots: 0, mail: true, mail_plain: true, github_watch: true, deploy_watch: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true, profile: true, account_seed: true, routines: true, review: false, pending: 0, curator_note: String::new() };
         let md = card_markdown(&rows, &st, now);
         assert!(md.contains("### You told me") && md.contains("**dog name**"), "{md}");
         assert!(md.contains("\\[x\\]\\(http") || md.contains("\\[x\\]("), "markdown must be escaped: {md}");
         assert!(md.contains("### I picked up") && md.contains("last used 3d ago"), "{md}");
         assert!(md.contains("Recent conversations (1)") && md.contains("yesterday"), "{md}");
         assert!(md.contains("encrypted: **yes**") && md.contains("**4** turns"), "{md}");
-        let empty = card_markdown(&[], &Status { enabled: true, encrypted: false, facts: 0, episodes: 0, egress_7d: 0, redact_names: false, activity: true, resume_points: 0, briefing: true, timetable: true, slots: 0, mail: true, mail_plain: true, github_watch: true, deploy_watch: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true, profile: true, routines: true, review: false, pending: 0, curator_note: String::new() }, now);
+        let empty = card_markdown(&[], &Status { enabled: true, encrypted: false, facts: 0, episodes: 0, egress_7d: 0, redact_names: false, activity: true, resume_points: 0, briefing: true, timetable: true, slots: 0, mail: true, mail_plain: true, github_watch: true, deploy_watch: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true, profile: true, account_seed: true, routines: true, review: false, pending: 0, curator_note: String::new() }, now);
         assert!(empty.contains("Nothing yet"), "{empty}");
     }
 

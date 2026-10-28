@@ -748,6 +748,7 @@ pub fn run() {
                 // Last session's resume points, captured BEFORE the recorder
                 // writes anything for this session (boot briefing reads them).
                 memcore::briefing::snapshot_at_boot(&app_data);
+                memcore::account_seed::seed(&app_data); // owner's name from the Google account (fills a gap only)
                 // What was open when the PC last went off becomes the pending
                 // "shall I reopen it?" offer; only then may the 1-minute
                 // snapshots start overwriting the rolling one.

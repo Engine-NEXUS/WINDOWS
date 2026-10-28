@@ -1884,6 +1884,9 @@ pub struct NexusSettings {
     /// step is opt-in; on-device wording (GitHub + categories) always runs.
     #[serde(default)]
     pub memcore_mail_plain: bool,
+    /// Learn the owner's name from the connected Google account (fills a gap only; never overwrites).
+    #[serde(default = "default_memcore")]
+    pub memcore_account_seed: bool,
     /// Read-only WhatsApp watcher (priority people). OFF until the
     /// read-receipt check in docs/testing/whatsapp-read-receipt-test.md is done.
     #[serde(default)]
@@ -2269,6 +2272,7 @@ pub struct TtsVoiceInfo {
 pub fn list_tts_voices() -> Result<Vec<TtsVoiceInfo>, String> {
     let edge_voices = [
         ("en-US-AvaNeural",        "Ava",       "Female"),
+            memcore_account_seed: default_memcore(),
         ("en-US-AndrewNeural",     "Andrew",    "Male"),
         ("en-US-AndrewMultilingualNeural", "Andrew ML", "Male"),
         ("en-US-EmmaNeural",       "Emma",      "Female"),

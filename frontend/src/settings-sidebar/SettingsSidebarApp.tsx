@@ -92,6 +92,7 @@ interface Settings {
   memcoreActivity?: boolean;
   memcoreBriefing?: boolean;
   memcoreProfile?: boolean;
+  memcoreAccountSeed?: boolean;
   memcoreRoutines?: boolean;
   memcoreReview?: boolean;
   memcoreTimetable?: boolean;

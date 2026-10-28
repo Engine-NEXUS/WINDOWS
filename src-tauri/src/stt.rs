@@ -847,6 +847,26 @@ pub fn stt_filter_stats() -> (u64, u64) {
     hallucination_stats()
 }
 
+/// True when the text ends with the same full sentence said twice in a row after at least one other
+/// sentence ("It's very nice to know that it's not a person. It's a person. It's a person."): the
+/// Whisper hallucination that is not an exact k-block loop because the first sentence differs.
+/// Needs 3+ sentences and a 3+ word repeated sentence, so ordinary speech and emphatic repeats pass.
+fn repeats_a_sentence_at_the_end(text: &str) -> bool {
+    let sentences: Vec<String> = text
+        .split(|c: char| matches!(c, '.' | '!' | '?'))
+        .map(|s| {
+            s.split_whitespace()
+                .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\''))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase()
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+    let n = sentences.len();
+    n >= 3 && sentences[n - 1] == sentences[n - 2] && sentences[n - 1].split_whitespace().count() >= 3
+}
+
 /// True if the word list is k≥2 repeats of one identical block (block ≥2
 /// words). Pure — matrix-tested below.
 fn is_repetition_loop(words: &[&str]) -> bool {
@@ -1043,7 +1063,7 @@ fn evaluate_transcript(text: &str) -> Result<String, u8> {
     // Blocks are ≥2 words: single-word repeats ("stop stop stop stop")
     // pass through so emphatic real commands still work.
     let words: Vec<&str> = lower.split_whitespace().collect();
-    if is_repetition_loop(&words) {
+    if is_repetition_loop(&words) || repeats_a_sentence_at_the_end(&lower) {
         tracing::info!("stt: filtered repetition loop hallucination: '{}'", text);
         return Err(R_REPEAT);
     }
@@ -1261,6 +1281,19 @@ mod tests {
 
     /// n× repetition loops (live misses 2026-09-29 21:00): 2× half-splits
     /// AND 3×+ loops filter; emphatic single-word repeats still pass.
+    #[test]
+    fn a_repeated_closing_sentence_is_a_hallucination() {
+        // Live 2026-10-28 12:49: the owner said a short answer; Groq returned this and it went to the cloud.
+        assert_eq!(
+            apply_hallucination_filter("It's very nice to know that it's not a person. It's a person. It's a person."),
+            ""
+        );
+        // Real speech with a repeated clause but no repeated closing sentence, and two-sentence emphasis, pass.
+        for ok in ["Open the file. Save it. Close it.", "I said no. No."] {
+            assert_eq!(apply_hallucination_filter(ok), ok, "'{ok}' must pass");
+        }
+    }
+
     #[test]
     fn test_repetition_loop_nx() {
         for junk in [

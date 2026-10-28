@@ -180,6 +180,45 @@ pub fn looks_procedural(answer: &str) -> bool {
     list_lines >= 3
 }
 
+/// Longest chat reply that is read aloud whole.
+pub const SPOKEN_CHAT_MAX_CHARS: usize = 260;
+
+/// A chat answer longer than `SPOKEN_CHAT_MAX_CHARS` is spoken as its first two sentences (never cut mid-word);
+/// the full text goes to the sidebar. `None` = short enough, speak it as is.
+pub fn spoken_summary(answer: &str) -> Option<String> {
+    let answer = answer.trim();
+    if answer.chars().count() <= SPOKEN_CHAT_MAX_CHARS {
+        return None;
+    }
+    let mut out = String::new();
+    let mut sentences = 0;
+    let mut rest = answer;
+    while sentences < 2 {
+        let end = rest
+            .char_indices()
+            .find(|&(i, c)| matches!(c, '.' | '!' | '?') && rest[i + c.len_utf8()..].starts_with(char::is_whitespace))
+            .map(|(i, c)| i + c.len_utf8());
+        let Some(end) = end else { break };
+        let piece = rest[..end].trim();
+        if !out.is_empty() && out.chars().count() + piece.chars().count() + 1 > SPOKEN_CHAT_MAX_CHARS {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(piece);
+        rest = rest[end..].trim_start();
+        sentences += 1;
+    }
+    if out.is_empty() || out.chars().count() > SPOKEN_CHAT_MAX_CHARS {
+        // One endless sentence: cut at a word boundary.
+        let cut: String = answer.chars().take(SPOKEN_CHAT_MAX_CHARS).collect();
+        let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(h, _)| h);
+        out = format!("{}.", cut.trim_end_matches([',', ';', ':']));
+    }
+    Some(out)
+}
+
 /// Speak or show? A how-to question or a procedure-shaped answer, longer than a short reply, goes to the
 /// sidebar; everything else is spoken exactly as before.
 pub fn delivery_for(transcript: &str, answer: &str) -> Delivery {
@@ -199,6 +238,17 @@ mod tests {
 
     /// The reply that was read aloud for ~18 s on 2026-10-17 (the model's wording, slightly shortened).
     const LOG_REPLY: &str = "If you want to shut down your laptop, press and hold the power button until the shutdown menu appears, then select \u{201c}Shut down,\u{201d} or on Windows you can press Ctrl + Alt + Delete and click the power icon, then choose Shut down. Let me know if you need more help.";
+
+    #[test]
+    fn long_chat_replies_are_cut_to_two_sentences_and_short_ones_are_untouched() {
+        assert_eq!(spoken_summary("It is 5 pm."), None);
+        let long = "The repository is a code project, not an individual person. It holds the source for the assistant and its build scripts. It also has docs, tests, and a lot of other material that goes on for a good while and keeps going. More text follows here to push this past the limit so the cap has to apply to it for sure, and then some extra words.";
+        let s = spoken_summary(long).unwrap();
+        assert_eq!(s, "The repository is a code project, not an individual person. It holds the source for the assistant and its build scripts.");
+        let endless = "word ".repeat(100);
+        let e = spoken_summary(&endless).unwrap();
+        assert!(e.chars().count() <= SPOKEN_CHAT_MAX_CHARS + 1 && e.ends_with('.'));
+    }
 
     #[test]
     fn howto_questions_are_detected_with_their_topic() {

@@ -22,6 +22,7 @@ import { useAssistant } from "../store/assistant";
 import { speak, stopTts } from "../audio/ttsPlayer";
 import { useSidebar } from "../sidebar/sidebarStore";
 import { clearLongRunningInFlight, isLocalAckGiven } from "./wsBridge";
+import { DeferredAck } from "./ackDefer";
 import { invoke } from "@tauri-apps/api/core";
 
 function isTauri(): boolean {
@@ -54,6 +55,9 @@ const STOCK_ACK_PHRASES = [
 // loading indicator carries the visual. ORB_SILENT_HIDE_MS gives the ack
 // enough room, then hides the orb even if the speech lifecycle hung.
 const ORB_SILENT_HIDE_MS = 4000;
+
+/** Holds the stock ack back so a fast answer never cuts it (see ackDefer.ts). */
+const deferredAck = new DeferredAck();
 
 let ackGuardTimer: ReturnType<typeof setTimeout> | null = null;
 let ackGuardRequestId: string | null = null;
@@ -106,6 +110,7 @@ function armOrbSilentHideObserver(): void {
 }
 
 function clearAckDeadlineGuards(): void {
+  deferredAck.cancel();
   if (ackGuardTimer) {
     clearTimeout(ackGuardTimer);
     ackGuardTimer = null;
@@ -564,11 +569,16 @@ export async function initOrchestratorListener(): Promise<void> {
           store.addAssistantMessage(ev.text);
           // Deadline guard: a dynamic‑ack synth that never starts playing
           // must fall back to a pre-rendered stock line (≤2 s, guaranteed).
-          armAckDeadlineGuard(ev.request_id, ev.source_center);
-          void speak(ev.text, undefined, { requestId: ev.request_id, sourceCenter: ev.source_center, kind: "ack" });
-          // Hide the orb after TTS actually finishes (if not in ghost
-          // mode) — the zoom plays fully instead of sliding down mid-speech.
-          hideOrbAfterSpeech(1500);
+          const ackText = ev.text;
+          const ackReq = ev.request_id;
+          const ackCenter = ev.source_center;
+          deferredAck.schedule(() => {
+            armAckDeadlineGuard(ackReq, ackCenter);
+            void speak(ackText, undefined, { requestId: ackReq, sourceCenter: ackCenter, kind: "ack" });
+            // Hide the orb after TTS actually finishes (if not in ghost
+            // mode) — the zoom plays fully instead of sliding down mid-speech.
+            hideOrbAfterSpeech(1500);
+          });
         }
         break;
       }
@@ -644,12 +654,20 @@ export async function initOrchestratorListener(): Promise<void> {
         if (ev.text) {
           const spokenFor = ev.request_id;
           pendingSpeechCloseFor = spokenFor;
-          speak(ev.text, () => {
-            finishSpokenResult(spokenFor);
-          }, { requestId: spokenFor, sourceCenter: ev.source_center, kind: "result" }).catch((err) => {
-            console.warn("[NEXUS] orchestrator: result TTS failed:", err);
-            finishSpokenResult(spokenFor);
-          });
+          const resultText = ev.text;
+          const resultCenter = ev.source_center;
+          const speakResult = () => {
+            speak(resultText, () => {
+              finishSpokenResult(spokenFor);
+            }, { requestId: spokenFor, sourceCenter: resultCenter, kind: "result" }).catch((err) => {
+              console.warn("[NEXUS] orchestrator: result TTS failed:", err);
+              finishSpokenResult(spokenFor);
+            });
+          };
+          // An ack that is already audible finishes first; speaking stops whatever is playing.
+          const ackWait = deferredAck.waitMs();
+          if (ackWait > 0) setTimeout(speakResult, ackWait);
+          else speakResult();
         } else {
           // Empty result text: no TTS to gate on — close the handshake now
           // or the orb parks in `speaking` forever (the backend withholds

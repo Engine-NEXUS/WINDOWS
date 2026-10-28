@@ -380,6 +380,16 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
             onChange={(c) => setFlag("memcoreBriefing", c)}
           />
 
+          {/* Owner's name from the Google account */}
+          <SwitchCard
+            icon="🪪"
+            title="Know Who I Am"
+            desc="Learns your name from your Google account (name only). Never overwrites what you told me."
+            checked={status.account_seed ?? true}
+            disabled={busy}
+            onChange={(c) => setFlag("memcoreAccountSeed", c)}
+          />
+
           {/* Inbox Priority Guard */}
           <SwitchCard
             icon="📬"
