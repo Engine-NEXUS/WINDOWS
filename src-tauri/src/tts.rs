@@ -59,6 +59,8 @@ impl Drop for LiveSpeech {
 /// Windows voice speaks it instead (measured: 10-45 ms; the local voice took 6-20 s per line in the
 /// 2026-10-15 logs). A cold local engine never gets the chance: it loads in the background.
 const LOCAL_FIRST_AUDIO_BUDGET_MS: u64 = 2_000;
+/// Pause before the single retry of a failed cloud sentence in a streamed reply.
+const EDGE_RETRY_PAUSE_MS: u64 = 450;
 
 /// A healthy cloud voice answers in 0.2-0.6 s. Waiting 8 s for one that hangs (then another 2 s for the
 /// local voice) outlasted the orb's 10 s "stuck speaking" watchdog; 4 s keeps the worst case under it.
@@ -533,10 +535,25 @@ pub async fn pregenerate_cache(
 /// to stop the current audio immediately.
 static TTS_GENERATION: AtomicUsize = AtomicUsize::new(0);
 
+/// The generation the last stop produced. A hotkey, a barge-in, the frontend and the stage all ask for a stop
+/// within about 20 ms of each other; only the first has anything to cancel, and a later one must not cancel a
+/// line that began after it (the acknowledgement of the turn that the press just started).
+static LAST_STOP_GENERATION: std::sync::Mutex<usize> = std::sync::Mutex::new(usize::MAX);
+
+/// Does a stop request still have a playing or pending utterance to cancel? Pure.
+fn stop_has_work(current: usize, last_stop: usize) -> bool {
+    current != last_stop
+}
+
 /// IPC: Stop any currently-playing TTS audio and immediately restore system volume.
 #[tauri::command]
 pub fn stop_tts() -> Result<(), String> {
-    TTS_GENERATION.fetch_add(1, Ordering::SeqCst);
+    {
+        let mut last = LAST_STOP_GENERATION.lock().unwrap_or_else(|e| e.into_inner());
+        if stop_has_work(TTS_GENERATION.load(Ordering::SeqCst), *last) {
+            *last = TTS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+        }
+    }
     crate::speech_sync::cancel_current();
     tracing::info!("tts: stop requested (generation {})", TTS_GENERATION.load(Ordering::SeqCst));
     // Deferred: the frontend calls stopTts() right before every speak(), so restoring instantly would
@@ -1315,26 +1332,22 @@ async fn speak_streaming(
     let gen = my_generation;
     tokio::spawn(async move {
         // If the cloud voice dies MID-reply (2026-10-15 log: chunk 1 failed twice, the rest of the answer
-        // was never spoken and the orb sat silent for 10 s), the remaining sentences are spoken by the
-        // Windows voice. A voice change is better than a half-spoken answer; it only happens on failure.
-        let mut fallback_to_system = false;
+        // was never spoken and the orb sat silent for 10 s), the remaining sentences are finished in the
+        // owner's local twin voice, and only if that also fails in the Windows voice (2026-10-28 log: the
+        // briefing's tail was read by the Windows voice, a third voice nobody chose). A voice change is
+        // better than a half-spoken answer; it happens at most once per reply, and only on failure.
+        let mut engine = ChunkEngine::start(utterance_local, utterance_system);
         for s in rest {
             if TTS_GENERATION.load(Ordering::SeqCst) > gen {
                 break;
             }
-            let res = if fallback_to_system {
-                synthesize_chunk_owned(&s, &voice_owned, &state_ref, emotion, true, true).await
-            } else {
-                synthesize_chunk_owned(&s, &voice_owned, &state_ref, emotion, utterance_local, utterance_system).await
-            };
-            let res = match res {
-                Err(e) if !fallback_to_system && !utterance_system => {
-                    tracing::warn!("tts: streaming chunk failed ({e}); finishing the reply with the Windows voice");
-                    fallback_to_system = true;
-                    synthesize_chunk_owned(&s, &voice_owned, &state_ref, emotion, true, true).await
-                }
-                other => other,
-            };
+            let mut res = synthesize_chunk_with(engine, &s, &voice_owned, &state_ref, emotion).await;
+            while let Err(e) = &res {
+                let Some(next) = engine.after_failure() else { break };
+                tracing::warn!("tts: streaming chunk failed ({e}); finishing the reply with {}", next.label());
+                engine = next;
+                res = synthesize_chunk_with(engine, &s, &voice_owned, &state_ref, emotion).await;
+            }
             match res {
                 Ok(triple) => {
                     if stream_tx.send(Some(triple)).is_err() {
@@ -1353,6 +1366,58 @@ async fn speak_streaming(
     // Consumer: single rodio Sink, append chunks as they arrive.
     let first = Some((first_audio, first_sr, first_caption));
     play_audio_streamed(first, stream_rx, my_generation, app).await
+}
+
+/// Which voice speaks the rest of a streamed reply. Falls one step at a time, never back up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkEngine {
+    Cloud,
+    LocalTwin,
+    WindowsVoice,
+}
+
+impl ChunkEngine {
+    /// The engine chunk 0 was voiced by.
+    fn start(local: bool, system: bool) -> Self {
+        if system {
+            Self::WindowsVoice
+        } else if local {
+            Self::LocalTwin
+        } else {
+            Self::Cloud
+        }
+    }
+
+    /// The next voice to try after a failure: cloud, then the local twin, then the Windows voice last.
+    fn after_failure(self) -> Option<Self> {
+        match self {
+            Self::Cloud => Some(Self::LocalTwin),
+            Self::LocalTwin => Some(Self::WindowsVoice),
+            Self::WindowsVoice => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Cloud => "the cloud voice",
+            Self::LocalTwin => "the local twin voice",
+            Self::WindowsVoice => "the Windows voice",
+        }
+    }
+}
+
+async fn synthesize_chunk_with(
+    engine: ChunkEngine,
+    sentence: &str,
+    voice_id: &str,
+    state: &TtsStateRef,
+    emotion: crate::tts_edge::TtsEmotion,
+) -> Result<(Vec<f32>, u32, CaptionTrack), String> {
+    match engine {
+        ChunkEngine::Cloud => synthesize_chunk_owned(sentence, voice_id, state, emotion, false, false).await,
+        ChunkEngine::LocalTwin => synthesize_chunk_owned(sentence, voice_id, state, emotion, true, false).await,
+        ChunkEngine::WindowsVoice => synthesize_chunk_owned(sentence, voice_id, state, emotion, true, true).await,
+    }
 }
 
 /// Minimal shared refs for the streaming producer task.
@@ -1384,7 +1449,7 @@ async fn synthesize_chunk_owned(
     // a transport failure flips the cached network flag so the NEXT utterance starts on the local
     // voice from its first word.
     if force_system {
-        return system_voice_line(sentence, "same voice as the first sentence").await;
+        return system_voice_line(sentence, "last resort: cloud and local voices both failed").await;
     }
     if force_local || !crate::tts_network::is_network_up() || crate::tts_health::edge_degraded() {
         return synthesize_local(sentence).await;
@@ -1414,6 +1479,11 @@ async fn synthesize_chunk_owned(
             }
         }
         tracing::warn!("tts: edge chunk attempt {attempt}/2 failed ({last_err})");
+        // The 2026-10-28 failure was "no audio was received" in the burst of connections right after boot; an
+        // instant second try meets the same congestion, a short pause usually does not.
+        if attempt == 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(EDGE_RETRY_PAUSE_MS)).await;
+        }
     }
     let Some((samples, sr, boundaries)) = edge_ok else {
         return Err(format!("edge-tts failed after retry: {last_err}"));
@@ -2148,5 +2218,32 @@ mod first_clause_tests {
         assert_eq!(c.len(), 3);
         assert_eq!(c[2], "Shall I open it?");
         assert_eq!(plan_chunks("Done, sir."), vec!["Done, sir."]);
+    }
+}
+
+#[cfg(test)]
+mod voice_continuity_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_cloud_sentence_falls_to_the_local_twin_before_the_windows_voice() {
+        assert_eq!(ChunkEngine::Cloud.after_failure(), Some(ChunkEngine::LocalTwin));
+        assert_eq!(ChunkEngine::LocalTwin.after_failure(), Some(ChunkEngine::WindowsVoice));
+        assert_eq!(ChunkEngine::WindowsVoice.after_failure(), None);
+    }
+
+    #[test]
+    fn the_reply_starts_on_the_voice_chunk_zero_used() {
+        assert_eq!(ChunkEngine::start(false, false), ChunkEngine::Cloud);
+        assert_eq!(ChunkEngine::start(true, false), ChunkEngine::LocalTwin);
+        assert_eq!(ChunkEngine::start(true, true), ChunkEngine::WindowsVoice);
+        assert_eq!(ChunkEngine::start(false, true), ChunkEngine::WindowsVoice);
+    }
+
+    #[test]
+    fn a_second_stop_with_nothing_new_playing_cancels_nothing() {
+        assert!(stop_has_work(7, usize::MAX), "first stop ever");
+        assert!(!stop_has_work(8, 8), "the burst after a stop: the generation it made is still current");
+        assert!(stop_has_work(9, 8), "a line began after the last stop, so a stop must cancel it");
     }
 }

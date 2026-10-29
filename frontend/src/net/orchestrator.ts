@@ -20,6 +20,7 @@
 import { classifyConfirmReply, isConfirmExpired } from "./confirmReply";
 import { useAssistant } from "../store/assistant";
 import { speak, stopTts } from "../audio/ttsPlayer";
+import { speechKindForResult } from "../audio/speechArbiter";
 import { useSidebar } from "../sidebar/sidebarStore";
 import { clearLongRunningInFlight, isLocalAckGiven } from "./wsBridge";
 import { DeferredAck } from "./ackDefer";
@@ -588,6 +589,8 @@ export async function initOrchestratorListener(): Promise<void> {
         // Unlike result turns, this must not call finishSpokenResult: closing
         // here would require another wake word for the user's repeat.
         currentRequestId = ev.request_id;
+        // A stock ack still waiting on its delay must not start over the question or its reply window.
+        deferredAck.cancel();
         clearClarificationRequest();
         clarificationRequestId = ev.request_id;
         store.setLoadingVisible(false);
@@ -659,14 +662,23 @@ export async function initOrchestratorListener(): Promise<void> {
           const speakResult = () => {
             speak(resultText, () => {
               finishSpokenResult(spokenFor);
-            }, { requestId: spokenFor, sourceCenter: resultCenter, kind: "result" }).catch((err) => {
+            }, { requestId: spokenFor, sourceCenter: resultCenter, kind: speechKindForResult(spokenFor) }).catch((err) => {
               console.warn("[NEXUS] orchestrator: result TTS failed:", err);
               finishSpokenResult(spokenFor);
             });
           };
           // An ack that is already audible finishes first; speaking stops whatever is playing.
           const ackWait = deferredAck.waitMs();
-          if (ackWait > 0) setTimeout(speakResult, ackWait);
+          if (ackWait > 0) {
+            setTimeout(() => {
+              // A newer turn may have started while the ack played: this result must not cut into it.
+              if (currentRequestId !== spokenFor) {
+                finishSpokenResult(spokenFor);
+                return;
+              }
+              speakResult();
+            }, ackWait);
+          }
           else speakResult();
         } else {
           // Empty result text: no TTS to gate on — close the handshake now
@@ -781,6 +793,8 @@ export async function initOrchestratorListener(): Promise<void> {
         // processViaOrchestrator can re-invoke with confirmed=true.
         clearLongRunningInFlight();
         clearConfirmListeningTimer();
+        // A stock ack still waiting on its delay must not start over the confirmation prompt.
+        deferredAck.cancel();
         store.setLoadingVisible(false);
         store.setVisible(true);
         store.setState("speaking");
