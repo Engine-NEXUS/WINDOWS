@@ -1,5 +1,7 @@
 # NEXUS — Changelog
 
+- 2026-10-29: [UI plan Phase 3a - CodeRabbit, Assistant view and stage chips on theme tokens](175-ui-phase-3a-coderabbit-assistant-and-stage-chips.md) — CodeRabbit panel and Assistant view follow Light/Dark (were fixed dark / white-on-white); stage chips documented as solid dark with `--stage-*` tokens; contrast gate 144 pairs; new hard-coded colour ratchet in CI. 761 frontend tests pass; checked in the dev browser, not the live app.
+
 - 2026-10-29: [UI plan Phase 2 - dock buttons and chrome](174-ui-phase-2-dock-buttons-and-chrome.md) — one shared dock control with SVG icons and accessible names, visible in light and dark (was invisible); global keyboard focus ring; thin themed scrollbars; 24 px minimum hit targets. 761 frontend tests pass; checked in the dev browser, not the live app.
 
 - 2026-10-29: [UI plan Phase 1 - token foundation and theme switching](173-ui-phase-1-tokens-and-theme-switching.md) — semantic `--ui-*` tokens, real System theme that follows Windows, theme set before first paint in every window, contrast fixed at the source, new CI contrast gate (78 pairs). 757 frontend tests pass; not run in the live app.
