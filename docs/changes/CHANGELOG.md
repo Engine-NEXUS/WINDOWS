@@ -1,5 +1,7 @@
 # NEXUS — Changelog
 
+- 2026-10-29: [Voice flow audit, speech continuity and one owner for the loading state](172-voice-flow-loading-state-and-speech-continuity.md) — review findings fixed; failed cloud sentence finishes in the local twin voice, background speech queues behind answers, repeated stops idempotent; loading routed through the main center, orb echo removed, orb stays in the thinking pose after an ack, duplicate result-style acks removed, background-task chip for CodeRabbit/AI reviews. Rust 2813 + frontend 751 pass; not rebuilt or run live.
+
 - 2026-10-28: [Notification-to-sidebar research](../research/notification-to-sidebar/README.md), [phased implementation plan](../features/notification-to-sidebar-implementation-plan.md), and [coding prompt](../features/notification-to-sidebar-implementation-prompt.md) — documentation-only proposal for compact top alerts opening exact sidebar context; native/custom UI boundaries, platform limits, tests and owner-only runtime/build constraints recorded. No implementation, live test or queue promotion.
 
 - 2026-10-28: [Detailed Windows readiness and Voice Lock handover](../research/windows-readiness-voice-lock-handover-2026-10-28/README.md) — five linked Markdown documents consolidate research, plans, source edits, file inventory, failures, test/mutation/release history and pending gates. Documentation validation only; no functional rerun, app build/runtime operation or readiness-score change.
