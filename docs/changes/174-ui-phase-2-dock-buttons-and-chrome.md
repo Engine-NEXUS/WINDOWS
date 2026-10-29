@@ -34,7 +34,7 @@ on top of Phase 1 ([173](173-ui-phase-1-tokens-and-theme-switching.md)). Source 
 
 ## Not done / open
 
-- **Assistant view dock control.** The report proposed a visible dock control there. That view was deliberately built with no dock buttons (drag the strip, or arrow keys; AGENTS.md "no navigation"), and the owner's request mentions "no dock button", which can be read two ways. Left unchanged until the intent is confirmed.
+- **Assistant view dock control: decided, keep none.** The report proposed a visible dock control there; the owner chose to keep that view without dock buttons (drag the strip, or arrow keys). No change made.
 - The Phase 2 plan's Playwright check is not set up (Playwright is not a dependency); the audit above was run once by hand in the dev browser. The automated both-theme screenshot and size/name checks belong to Phase 6.
 - The remaining `outline: none` rules are not deleted; the global ring overrides them for keyboard focus. Removing them is Phase 3 clean-up per view.
 - The real windows (Hub in the app, Architect, PR list, Annotate) were not rendered; only the dev pages were.
