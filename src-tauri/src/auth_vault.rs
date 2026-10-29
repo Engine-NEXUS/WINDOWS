@@ -209,6 +209,7 @@ pub fn clear_api_key(service: &str) {
 
 /// One-time migration: move API keys from settings.json to OS keychain.
 /// Delegates to `api_keys::scrub_settings_file` to migrate and scrub all known services.
+#[cfg(test)]
 pub fn migrate_api_keys_to_keychain(app_data_dir: &std::path::Path) {
     crate::api_keys::scrub_settings_file(app_data_dir);
 }

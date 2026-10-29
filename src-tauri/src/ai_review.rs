@@ -454,8 +454,11 @@ pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>, repo: String, pr: u32)
     }
     let job = AiJob { state: AiState::Running, started_ms: now_ms(), report: None, error: None };
     jobs().lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone(), job.clone());
+    let task_id = format!("ai-review:{}#{pr}", repo.to_lowercase());
+    crate::background_tasks::start(&app, &task_id, "ai-review", &format!("AI analysis of PR {pr}"));
     tauri::async_runtime::spawn(async move {
         let result = analyse(&app, &repo, pr).await;
+        crate::background_tasks::finish(&app, &task_id);
         let line = finish_line(pr, &result);
         {
             let mut g = jobs().lock().unwrap_or_else(|e| e.into_inner());

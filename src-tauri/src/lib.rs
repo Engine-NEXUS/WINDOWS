@@ -5,6 +5,12 @@
 //! and window positioning (bottom-center sidebar).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// `--features mock-wake` compiles the wake-word engine out, so everything only that engine uses is unused by design.
+// The default and shipped builds (and the dead-code ratchet, which runs without this feature) are unaffected.
+#![cfg_attr(
+    feature = "mock-wake",
+    expect(dead_code, reason = "mock-wake compiles the wake-word engine out; the code only it uses is unused")
+)]
 
 mod window_manager;
 // Smart Turn end-of-turn model — standalone prototype, not yet wired into capture.
@@ -24,6 +30,7 @@ pub(crate) mod notify_hub;
 pub(crate) mod coderabbit_review;
 pub(crate) mod coderabbit_phrases;
 pub(crate) mod ai_review;
+pub(crate) mod background_tasks;
 pub(crate) mod notify_activation;
 pub(crate) mod notify_native;
 pub(crate) mod notify_open;
@@ -1110,8 +1117,6 @@ pub fn run() {
             orchestrator::orchestrator_cancel,
             orchestrator::orchestrator_done,
             orchestrator::orchestrator_status,
-            orchestrator::orchestrator_show_loading,
-            orchestrator::orchestrator_hide_loading,
             orchestrator::orchestrator_github_execute,
             orchestrator::orchestrator_github_clear_token,
             orchestrator::orchestrator_mcp_confirm,
@@ -1125,6 +1130,7 @@ pub fn run() {
             coderabbit_review::coderabbit_job,
             coderabbit_review::coderabbit_review_start,
             ai_review::ai_review_start,
+            background_tasks::background_tasks_list,
             ai_review::ai_review_job,
             coderabbit_review::coderabbit_set_context,
             notify_hub::notify_close_event,

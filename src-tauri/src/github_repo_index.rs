@@ -538,7 +538,6 @@ pub fn seed_cache_for_test(entries: Vec<RepoEntry>) {
 
 /// Clear the in-memory cache for unit tests.
 #[cfg(test)]
-#[expect(dead_code, reason = "cleanup helper for unit tests")]
 pub fn clear_cache_for_test() {
     if let Ok(mut guard) = CACHE.lock() {
         *guard = None;

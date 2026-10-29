@@ -9,7 +9,6 @@ admin_config.rs: function min_confidence
 admin_config.rs: function retrain_threshold
 architect.rs: field process_name
 architect.rs: variant AiExplanation
-auth_vault.rs: function migrate_api_keys_to_keychain
 brain_client.rs: field corrected_repo
 brain_client.rs: function brain_get_pronunciation_map
 brain_client.rs: function is_brain_available
@@ -26,17 +25,14 @@ center.rs: constant ALL_SUB_CENTERS
 center.rs: enum ConfirmKind
 center.rs: field decoder_bias
 center.rs: field language
-center.rs: function loading_should_show
 center.rs: method confirm_kind
 center.rs: method name
 center.rs: struct Receipt
-center.rs: variant Loading
 command_center.rs: constant CHECKPOINT_STALE_SECS
 command_center.rs: field transcript
 command_center.rs: function has_pending_compound
 command_center.rs: function read_checkpoint
 command_center.rs: function sweep_stale_checkpoints
-commands.rs: function parse_settings_content
 dyn_windows.rs: field hidden_title
 ghost.rs: function point_at_target
 ghost.rs: function point_off

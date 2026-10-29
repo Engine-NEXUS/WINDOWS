@@ -180,9 +180,17 @@ export const useAssistant = create<AssistantStore>((set) => ({
       return { state: s };
     });
   },
-  setVisible: (v) => set((st) => {
+  setVisible: (v) => {
+    if (!v) {
+      // Who hid the orb? One line per hide with the three nearest callers, so the next report of "the orb
+      // disappeared at the ack" can be matched to a cause instead of guessed (2026-10-29 loading-state research).
+      const callers = (new Error().stack ?? "").split("\n").slice(2, 5).map((l) => l.trim().replace(/^at /, "")).join(" < ");
+      console.log(`[ORB] setVisible(false) from ${callers || "unknown"}`);
+    }
+    set((st) => {
       return { visible: st.ghostActive ? true : v };
-    }),
+    });
+  },
   setLoadingVisible: (v) => {
     const now = Date.now();
     const prev = loadingSnap;

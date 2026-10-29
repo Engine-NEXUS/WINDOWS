@@ -472,8 +472,11 @@ pub async fn start_review<R: tauri::Runtime>(app: tauri::AppHandle<R>, repo: Str
     }
     let job = Job { state: JobState::Running, started_ms: now_ms(), finished_ms: None, report: None };
     jobs().lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone(), job.clone());
+    let task_id = format!("coderabbit:{}#{pr}", repo.to_lowercase());
+    crate::background_tasks::start(&app, &task_id, "coderabbit", &format!("CodeRabbit is reviewing PR {pr}"));
     tauri::async_runtime::spawn(async move {
         let report = report_for_pr(&repo, pr, true).await;
+        crate::background_tasks::finish(&app, &task_id);
         let state = if report.source == Source::None { JobState::Failed } else { JobState::Done };
         let line = finish_line(pr, &report);
         {
@@ -759,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn the_real_not_available_error_is_surfaced_as_codeRabbits_own_message() {
+    fn the_real_not_available_error_is_surfaced_as_coderabbits_own_message() {
         let e = parse_review_ndjson(REAL_REMOTE_FAIL).unwrap_err();
         assert!(e.contains("not available in the active CodeRabbit organization"), "{e}");
     }

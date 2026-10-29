@@ -454,7 +454,7 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
 mod tests {
     use super::*;
     use crate::memcore::test_http::start_mock_server;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
 
     #[test]

@@ -603,8 +603,8 @@ pub(crate) async fn run<R: Runtime>(
     prompt: String,
 ) -> Result<crate::orchestrator::ProcessResult, String> {
     use crate::orchestrator::{
-        clear_active_request, emit, end_tour_fetch, hide_loading, install_new_request,
-        is_cancelled_pub, local_result, narrate_tour_script, show_loading, speak_line,
+        clear_active_request, emit, end_tour_fetch, install_new_request,
+        is_cancelled_pub, local_result, narrate_tour_script, speak_line,
         OrchestratorEvent, OrchestratorState, Subsystem,
     };
     use crate::reverse_scroll::{
@@ -715,7 +715,7 @@ pub(crate) async fn run<R: Runtime>(
                 request_id: rid.clone(),
             },
         );
-        speak_line(&app, ack_text.to_string(), &rid);
+        // The Ack event above speaks the line; a `speak_line` Result for it closed the turn (see run_screen_tour).
         emit(
             &app,
             &OrchestratorEvent::Loading {
@@ -723,7 +723,7 @@ pub(crate) async fn run<R: Runtime>(
                 request_id: rid.clone(),
             },
         );
-        show_loading(&app);
+        crate::center::direct_ui(&app, crate::center::UiDirective::Loading(true));
     }
     let _ = app.emit(
         "reverse:progress",
@@ -1104,7 +1104,7 @@ pub(crate) async fn run<R: Runtime>(
     // Cleanup & finish (success, error, cancel all flow here)
     // -----------------------------------------------------------------------
     end_tour_fetch(&app, &rid, spoken);
-    hide_loading(&app);
+    crate::center::direct_ui(&app, crate::center::UiDirective::LoadingEnd(rid.clone()));
 
     let was_cancelled = is_cancelled_pub(&cancel);
 

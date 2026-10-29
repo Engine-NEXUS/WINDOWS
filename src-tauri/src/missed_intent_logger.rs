@@ -154,15 +154,6 @@ pub(crate) struct ReplayReport {
 }
 
 #[cfg(test)]
-impl ReplayReport {
-    /// Convenient view over `still_unmatched` matching the `still missed x<count>` vocabulary.
-    #[inline]
-    pub(crate) fn still_missed(&self) -> &[(String, usize)] {
-        &self.still_unmatched
-    }
-}
-
-#[cfg(test)]
 #[derive(Deserialize)]
 struct TranscriptOnly {
     transcript: String,

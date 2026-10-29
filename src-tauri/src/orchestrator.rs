@@ -2245,7 +2245,7 @@ pub async fn process_transcript<R: Runtime>(
                     request_id: request_id.clone(),
                 },
             );
-            show_loading(&app);
+            crate::center::direct_ui(&app, crate::center::UiDirective::Loading(true));
 
             // Dispatch to Worker backend
             println!(
@@ -2288,7 +2288,7 @@ pub async fn process_transcript<R: Runtime>(
                     request_id: request_id.clone(),
                 },
             );
-            hide_loading(&app);
+            crate::center::direct_ui(&app, crate::center::UiDirective::LoadingEnd(request_id.clone()));
 
             match result {
                 Ok((text, analysis, dialog_state)) => {
@@ -2398,7 +2398,7 @@ pub async fn process_transcript<R: Runtime>(
                     })
                 }
                 Err(e) => {
-                    hide_loading(&app);
+                    crate::center::direct_ui(&app, crate::center::UiDirective::LoadingEnd(request_id.clone()));
                     // Offline clarity (P3.1): a network-dropped Worker turn
                     // speaks an attributed line (never raw error JSON) and
                     // names what still works locally.
@@ -2456,7 +2456,7 @@ pub async fn process_transcript<R: Runtime>(
                     request_id: request_id.clone(),
                 },
             );
-            show_loading(&app);
+            crate::center::direct_ui(&app, crate::center::UiDirective::Loading(true));
 
             // The architect subsystem is triggered via the existing
             // `open_architect_window` command. The frontend will call it
@@ -2495,7 +2495,7 @@ pub async fn process_transcript<R: Runtime>(
                     request_id: request_id.clone(),
                 },
             );
-            show_loading(&app);
+            crate::center::direct_ui(&app, crate::center::UiDirective::Loading(true));
 
             // Get session info for token fetch
             let session_info = network::get_session_info()
@@ -2529,7 +2529,7 @@ pub async fn process_transcript<R: Runtime>(
                             request_id: request_id.clone(),
                         },
                     );
-                    hide_loading(&app);
+                    crate::center::direct_ui(&app, crate::center::UiDirective::LoadingEnd(request_id.clone()));
 
                     match result {
                         Ok((text, analysis, dialog_state)) => {
@@ -2550,7 +2550,7 @@ pub async fn process_transcript<R: Runtime>(
                             });
                         }
                         Err(e) => {
-                            hide_loading(&app);
+                            crate::center::direct_ui(&app, crate::center::UiDirective::LoadingEnd(request_id.clone()));
                             emit(
                                 &app,
                                 &OrchestratorEvent::Error {
@@ -2588,7 +2588,7 @@ pub async fn process_transcript<R: Runtime>(
                     request_id: request_id.clone(),
                 },
             );
-            hide_loading(&app);
+            crate::center::direct_ui(&app, crate::center::UiDirective::LoadingEnd(request_id.clone()));
 
             // Emit the appropriate event based on the result type
             match &gh_result {
@@ -2798,7 +2798,7 @@ pub async fn process_transcript<R: Runtime>(
                         request_id: request_id.clone(),
                     },
                 );
-                show_loading(&app);
+                crate::center::direct_ui(&app, crate::center::UiDirective::Loading(true));
             }
 
             println!(
@@ -2839,7 +2839,7 @@ pub async fn process_transcript<R: Runtime>(
                         request_id: request_id.clone(),
                     },
                 );
-                hide_loading(&app);
+                crate::center::direct_ui(&app, crate::center::UiDirective::LoadingEnd(request_id.clone()));
             }
 
             match mcp_outcome {
@@ -4702,7 +4702,7 @@ pub(crate) fn end_tour_fetch<R: Runtime>(app: &AppHandle<R>, request_id: &str, s
                 request_id: request_id.to_string(),
             },
         );
-        hide_loading(app);
+        crate::center::direct_ui(app, crate::center::UiDirective::LoadingEnd(request_id.to_string()));
     }
 }
 
@@ -4765,7 +4765,8 @@ async fn run_screen_tour<R: Runtime>(
                 request_id: rid.clone(),
             },
         );
-        speak_line(app, ack_text, &rid);
+        // The Ack event above is what speaks the line. A second `speak_line` here sent the same words again as a
+        // Result, which the frontend treats as a finished turn: it cleared the request and the spinner.
         let _ = app.emit(
             "screen:tour_phase",
             serde_json::json!({ "phase": "fetching", "request_id": rid }),
@@ -4774,7 +4775,7 @@ async fn run_screen_tour<R: Runtime>(
             app,
             &OrchestratorEvent::Loading { visible: true, request_id: rid.clone() },
         );
-        show_loading(app);
+        crate::center::direct_ui(app, crate::center::UiDirective::Loading(true));
     }
 
     // 2. Enrich the frozen target with local OCR and public video metadata
@@ -4879,7 +4880,10 @@ async fn run_screen_tour<R: Runtime>(
             r = &mut analyze => break r,
             _ = &mut slow, if !slow_said => {
                 slow_said = true;
-                if spoken { speak_line(app, "Give me a minute, sir.".to_string(), &rid); }
+                if spoken {
+                    // An interim acknowledgement, not a Result: the turn is still running.
+                    emit(app, &OrchestratorEvent::Ack { text: "Give me a minute, sir.".to_string(), request_id: rid.clone() });
+                }
             }
         }
     };
@@ -7621,7 +7625,7 @@ async fn run_counsel_turn<R: Runtime>(
             })
         }
         Err(e) => {
-            hide_loading(&app);
+            crate::center::direct_ui(&app, crate::center::UiDirective::LoadingEnd(request_id.clone()));
             speak_line(&app, e.clone(), &request_id);
             clear_active_request(&request_id);
             Ok(local_result(request_id, Subsystem::LocalCommand))
@@ -9409,7 +9413,7 @@ async fn run_command_center<R: Runtime>(
             request_id: request_id.clone(),
         },
     );
-    show_loading(&app);
+    crate::center::direct_ui(&app, crate::center::UiDirective::Loading(true));
 
     println!(
         "[SUB-PROC] CommandCenter executing compound plan ({} steps): '{}'",
@@ -9443,7 +9447,7 @@ async fn run_command_center<R: Runtime>(
             request_id: request_id.clone(),
         },
     );
-    hide_loading(&app);
+    crate::center::direct_ui(&app, crate::center::UiDirective::LoadingEnd(request_id.clone()));
 
     tracing::info!(
         "command_center: request {} done — {:?} — {} steps, {} ok, {} failed, awaiting={}",
@@ -9539,9 +9543,13 @@ pub async fn orchestrator_cancel() -> Result<(), String> {
 
 /// IPC: Signal that a request is done (called by frontend after TTS finishes).
 #[tauri::command]
-pub async fn orchestrator_done(
+pub async fn orchestrator_done<R: Runtime>(
+    app: AppHandle<R>,
     request_id: String,
 ) -> Result<(), String> {
+    // The turn is over: whatever spinner it still owns goes with it. The frontend used to do this by echoing its own
+    // store back into Rust; the hide is scoped to this request, so a newer turn keeps its spinner.
+    crate::center::direct_ui(&app, crate::center::UiDirective::LoadingEnd(request_id.clone()));
     signal_done(&request_id);
     Ok(())
 }
@@ -9838,7 +9846,7 @@ pub async fn orchestrator_mcp_confirm<R: Runtime>(
             request_id: request_id.clone(),
         },
     );
-    show_loading(&app);
+    crate::center::direct_ui(&app, crate::center::UiDirective::Loading(true));
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -9882,7 +9890,7 @@ pub async fn orchestrator_mcp_confirm<R: Runtime>(
             request_id: request_id.clone(),
         },
     );
-    hide_loading(&app);
+    crate::center::direct_ui(&app, crate::center::UiDirective::LoadingEnd(request_id.clone()));
 
     if !result.ok {
         let err = result
@@ -10021,25 +10029,34 @@ pub fn show_loading<R: Runtime>(app: &AppHandle<R>) {
 /// get_or_create_window. Falls back to destroy if hide fails.
 pub fn hide_loading<R: Runtime>(app: &AppHandle<R>) {
     crate::commands::emit_logged(app, "stage:loading_visible", false);
-    tracing::info!("orchestrator: loading indicator hidden");
+    // The active request is logged so a hide that lands on the wrong turn can be told from the right one in
+    // the log (2026-10-29 loading-state research: two "hidden" lines per turn, no way to tell whose).
+    tracing::info!("orchestrator: loading indicator hidden (active request: {})", active_request_id().as_deref().unwrap_or("none"));
 }
 
-/// IPC: Show loading indicator (can be called from frontend if needed).
-#[tauri::command]
-pub async fn orchestrator_show_loading<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<(), String> {
-    show_loading(&app);
-    Ok(())
+/// The id of the request that currently owns the pipeline, if any.
+pub(crate) fn active_request_id() -> Option<String> {
+    ACTIVE_REQUEST.lock().unwrap().as_ref().map(|r| r.id.clone())
 }
 
-/// IPC: Hide loading indicator (can be called from frontend if needed).
-#[tauri::command]
-pub async fn orchestrator_hide_loading<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<(), String> {
-    hide_loading(&app);
-    Ok(())
+/// Does a hide asked for by `requested` still apply? A turn's own hide must not take the spinner away from a
+/// newer turn that has started since (a barge-in followed by a fresh command). No active request: apply, a hide
+/// of an already hidden spinner is harmless. Pure.
+pub(crate) fn loading_hide_applies(active: Option<&str>, requested: &str) -> bool {
+    active.map_or(true, |a| a == requested)
+}
+
+/// Hide the loading indicator on behalf of one turn; skipped when another turn has taken over.
+pub fn hide_loading_for<R: Runtime>(app: &AppHandle<R>, request_id: &str) {
+    let active = active_request_id();
+    if !loading_hide_applies(active.as_deref(), request_id) {
+        tracing::info!(
+            "orchestrator: loading hide for request {request_id} skipped - request {} owns the spinner now",
+            active.as_deref().unwrap_or("none")
+        );
+        return;
+    }
+    hide_loading(app);
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────
@@ -10987,5 +11004,25 @@ mod tests {
             places_line("pharmacy", Some("12 High St"), &[p("Boots", "5 Mill Rd, London", Some(true)), p("Lloyds", "x", None)]),
             "Top result for pharmacy near 12 High St: Boots, 5 Mill Rd, open now. Also Lloyds."
         );
+    }
+}
+
+#[cfg(test)]
+mod loading_hide_scope_tests {
+    use super::loading_hide_applies;
+
+    #[test]
+    fn a_turns_own_hide_applies_when_it_still_owns_the_pipeline() {
+        assert!(loading_hide_applies(Some("a1"), "a1"));
+    }
+
+    #[test]
+    fn a_late_hide_from_an_older_turn_cannot_take_the_spinner_from_a_newer_one() {
+        assert!(!loading_hide_applies(Some("b2"), "a1"));
+    }
+
+    #[test]
+    fn with_no_active_request_a_hide_is_harmless_and_applies() {
+        assert!(loading_hide_applies(None, "a1"));
     }
 }

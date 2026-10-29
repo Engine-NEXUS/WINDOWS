@@ -328,7 +328,6 @@ function useGhostOrbShown(ghostActive: boolean): { shown: boolean; parked: boole
 export function OrbFrame() {
   const assistantVisible = useAssistant((s) => s.visible);
   const state = useAssistant((s) => s.state);
-  const loadingVisible = useAssistant((s) => s.loadingVisible);
   const ghostActive = useAssistant((s) => s.ghostActive);
   const orbPosition = useAssistant((s) => s.orbPosition || "top");
   const capsuleStyle = useAssistant((s) => s.orbCapsuleStyle || "classic");
@@ -653,16 +652,10 @@ export function OrbFrame() {
     tauriInvoke("set_orb_interactive", { interactive: true }).catch(() => {});
   }, [state]);
 
-  // Loading indicator visibility (separate stage-hosted component —
-  // LoadingIndicator.tsx listens for the same events independently; this
-  // just drives the Rust-side rect/visibility emit).
-  useEffect(() => {
-    if (loadingVisible && !ghostActive) {
-      tauriInvoke("orchestrator_show_loading").catch(() => {});
-    } else {
-      tauriInvoke("orchestrator_hide_loading").catch(() => {});
-    }
-  }, [loadingVisible, ghostActive]);
+  // The loading spinner is owned by Rust (`show_loading` / `hide_loading_for`, and `orchestrator_done` at the end
+  // of a turn); LoadingIndicator.tsx renders from those stage events. This component used to echo every store
+  // change back into Rust, which produced two "shown" and two "hidden" lines per turn and an unscoped hide that
+  // could take the spinner from a newer turn (2026-10-29 loading-state research, step 3).
 
   // Particle entrance/exit (no-slide, plan §1.3): assemble() on every
   // false→true, disperse() on every true→false. Ghost-mode's own exit
