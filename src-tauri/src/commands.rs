@@ -2146,7 +2146,7 @@ fn default_orb_position() -> String {
 }
 
 fn default_orb_capsule_style() -> String {
-    "classic".to_string()
+    "pebble".to_string()
 }
 
 fn default_orb_wakeup_mode() -> u32 {

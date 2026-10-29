@@ -522,7 +522,7 @@ function DisplayTab({ settings, update }: {
   };
 
   const currentPos = settings.orbPosition || "top";
-  const currentCapsuleStyle = settings.orbCapsuleStyle || "classic";
+  const currentCapsuleStyle = settings.orbCapsuleStyle || "pebble";
   const currentWakeupMode = settings.orbWakeupMode ?? 1;
   const currentInteriorGenesis = settings.orbInteriorGenesis ?? 2;
 
