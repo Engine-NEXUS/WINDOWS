@@ -7,7 +7,11 @@
 
 ## Start here
 
-- **Current Voice Lock work:** [implementation plan](features/152-voice-lock-evidence-and-reliability-plan.md), [Architect-guided local research](research/elevenlabs-architect-guided-nexus-review.md), and [live work card](testing/speaker-verification-work-card.md). Capture accounting is the first implementation phase; production proof remains pending.
+- **Notification-to-sidebar proposal (2026-10-28):** [platform research](research/notification-to-sidebar/README.md), [detailed phased plan](features/notification-to-sidebar-implementation-plan.md), and [reusable coding prompt](features/notification-to-sidebar-implementation-prompt.md). Planning only; no new UI, runtime or queue change.
+
+- **Detailed work handover (2026-10-28):** [Windows readiness and Voice Lock research, plans, edits, file inventory, test/release history, failures and remaining gates](research/windows-readiness-voice-lock-handover-2026-10-28/README.md). Five linked documents; historical results are source-attributed and no new readiness claim is made.
+
+- **Current Voice Lock work:** [implementation plan](features/152-voice-lock-evidence-and-reliability-plan.md), [Architect-guided local research](research/elevenlabs-architect-guided-nexus-review.md), and [live work card](testing/speaker-verification-work-card.md). The P1–P6 source work and evidence tools are documented; actual corpus, exact-release and device acceptance gates remain open.
 
 1. [`../README.md`](../README.md) — what NEXUS is, what leaves the device, how to build.
 2. [`../QUICKSTART.md`](../QUICKSTART.md) — install, first launch, things to try.

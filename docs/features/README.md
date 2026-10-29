@@ -7,6 +7,12 @@ Plans, specifications and records for every feature, from the original `prem224k
 > Files that predate this index but were missing from it are listed in **Additional documents** at the bottom.
 
 ---
+## Proposed notification-to-sidebar interaction
+
+- [Detailed N0–N6 implementation plan](notification-to-sidebar-implementation-plan.md) — exact-event routing, compact top card, sidebar handoff, work-area geometry, policy, native fallback and acceptance tests. Proposal only.
+- [Reusable source-only coding prompt](notification-to-sidebar-implementation-prompt.md) — first assignment limited to N0/N1; GLM editor and supervisor review/testing; owner retains runtime/build control.
+- [Platform research and source investigation](../research/notification-to-sidebar/README.md).
+
 ## Current Hand Mode refactor
 
 - [150 — Hand Mode production refactor implementation plan](150-hand-mode-production-refactor-implementation-plan.md) — ordered safety, feedback, frame freshness, output, tuning, and real-hardware release gates. Status: plan only.
