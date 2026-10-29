@@ -39,6 +39,7 @@ add("frontend", "Turn-end choke-point gate", "frontend", "node ../scripts/check-
 add("frontend", "Hygiene gate self-test", "frontend", "node ../scripts/check-repo-hygiene.mjs --selftest");
 add("frontend", "Hygiene gate", "frontend", "node ../scripts/check-repo-hygiene.mjs");
 add("frontend", "Theme contrast gate", "frontend", "node ../scripts/check-theme-contrast.mjs");
+add("frontend", "Hard-coded colour ratchet", "frontend", "node ../scripts/check-hardcoded-colors.mjs");
 add("frontend", "IPC + event contract gate", "frontend", "node ../scripts/check-ipc-contract.mjs");
 add("frontend", "Window opacity registry", ".", "node scripts/check-window-opacity.mjs");
 add("frontend", "Work-card drift", ".", "node scripts/make-work-cards.mjs --check");

@@ -46,6 +46,10 @@ jobs:
       - name: Theme contrast gate
         run: node ../scripts/check-theme-contrast.mjs
 
+      # Colours live in theme/tokens.css; a stylesheet may not add hex/rgb/hsl values (baseline may only shrink).
+      - name: Hard-coded colour ratchet
+        run: node ../scripts/check-hardcoded-colors.mjs
+
       # Commands defined/registered/invoked and events emitted/listened must agree;
       # the one-sided leftovers are frozen in scripts/baselines/ and may only shrink.
       - name: IPC + event contract gate
