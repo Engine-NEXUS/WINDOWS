@@ -465,6 +465,17 @@ pub(crate) fn extract_github_owner_repo(subject: &str) -> Option<(String, String
 }
 
 /// Extract the first owner/repo token from the subject (repo name only).
+/// Short spoken wording for a GitHub CI failure subject ("Build failed in zync"). No person is named:
+/// on GitHub mail the From name is the actor, who is usually the owner.
+pub fn short_ci_wording(subject: &str) -> Option<String> {
+    let repo = extract_github_repo(subject)?;
+    match detect_github_failure_kind(subject)? {
+        Kind::Pr => Some(format!("PR failed in {repo}")),
+        Kind::Build => Some(format!("Build failed in {repo}")),
+        Kind::Deploy => None,
+    }
+}
+
 pub(crate) fn extract_github_repo(subject: &str) -> Option<String> {
     extract_github_owner_repo(subject).map(|(_, repo)| repo)
 }

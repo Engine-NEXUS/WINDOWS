@@ -21,7 +21,7 @@ pub struct CodeRabbitStatus {
     pub organization: Option<String>,
 }
 
-fn cli_path() -> Option<PathBuf> {
+pub(crate) fn cli_path() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         // 1. Check official per-user install directory
@@ -71,13 +71,26 @@ fn cli_path() -> Option<PathBuf> {
     }
 }
 
-async fn run_cli(
+pub(crate) async fn run_cli(
     path: &PathBuf,
     args: &[&str],
     timeout: Duration,
 ) -> Result<std::process::Output, String> {
+    run_cli_at(path, args, timeout, None).await
+}
+
+/// `run_cli` with a working directory (a local review reviews the workspace it is started in).
+pub(crate) async fn run_cli_at(
+    path: &PathBuf,
+    args: &[&str],
+    timeout: Duration,
+    cwd: Option<&std::path::Path>,
+) -> Result<std::process::Output, String> {
     let mut cmd = Command::new(path);
     cmd.args(args).kill_on_drop(true);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -299,7 +312,10 @@ pub struct CodeRabbitFinding {
     pub id: String,
     pub file: String,
     pub line_range: String,
+    /// CodeRabbit's severity: critical | major | minor | trivial | info | unknown.
     pub severity: String,
+    /// CodeRabbit's type: potentialIssue | refactor | nitpick | unknown (read from the comment header).
+    pub kind: String,
     pub title: String,
     pub description: String,
     pub original_code: Option<String>,
@@ -329,11 +345,164 @@ pub struct CodeRabbitReviewData {
     pub title: String,
     pub head_branch: String,
     pub base_branch: String,
+    /// Head commit of the PR: one CodeRabbit review per commit.
+    pub head_sha: String,
     pub verdict: String,
     pub summary: String,
     pub walkthrough: Vec<CodeRabbitWalkthroughItem>,
     pub findings: Vec<CodeRabbitFinding>,
     pub stats: CodeRabbitStats,
+}
+
+const GH_API: &str = "https://api.github.com";
+const BOT_PREFIX: &str = "coderabbitai";
+
+fn is_bot(v: &Value) -> bool {
+    v.pointer("/user/login")
+        .and_then(Value::as_str)
+        .is_some_and(|l| l.to_lowercase().starts_with(BOT_PREFIX))
+}
+
+/// Drops the HTML comments CodeRabbit hides its state in and collapses blank runs.
+fn clean_markdown(body: &str) -> String {
+    let mut out = String::new();
+    let mut rest = body;
+    while let Some(i) = rest.find("<!--") {
+        out.push_str(&rest[..i]);
+        match rest[i..].find("-->") {
+            Some(j) => rest = &rest[i + j + 3..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    let mut lines: Vec<&str> = Vec::new();
+    for l in out.lines() {
+        if l.trim().is_empty() && lines.last().is_some_and(|p| p.trim().is_empty()) {
+            continue;
+        }
+        lines.push(l.trim_end());
+    }
+    lines.join("\n").trim().to_string()
+}
+
+fn enum_str<T: Serialize>(v: &T) -> String {
+    serde_json::to_value(v).ok().and_then(|x| x.as_str().map(str::to_string)).unwrap_or_else(|| "unknown".into())
+}
+
+fn first_title(body: &str) -> String {
+    for l in body.lines() {
+        let t = l.trim().trim_matches('*').trim();
+        if t.is_empty() || t.starts_with('_') || t.starts_with("```") || t.starts_with('<') {
+            continue;
+        }
+        let t = t.trim_matches('*').trim();
+        return t.chars().take(140).collect();
+    }
+    "CodeRabbit comment".to_string()
+}
+
+fn suggestion_block(body: &str) -> Option<String> {
+    let start = body.find("```suggestion")?;
+    let after = &body[start..];
+    let nl = after.find('\n')?;
+    let end = after[nl + 1..].find("```")?;
+    Some(after[nl + 1..nl + 1 + end].trim_end().to_string())
+}
+
+/// Pure: turns the four GitHub payloads into the review CodeRabbit itself posted. Nothing is invented;
+/// a PR CodeRabbit never touched comes back as `NOT_REVIEWED` with no findings.
+pub fn build_review(
+    repo: &str,
+    pr_number: u32,
+    pr: &Value,
+    issue_comments: &Value,
+    inline: &Value,
+    reviews: &Value,
+) -> CodeRabbitReviewData {
+    let list = |v: &Value| v.as_array().cloned().unwrap_or_default();
+    let summary_body = list(issue_comments)
+        .iter()
+        .filter(|c| is_bot(c))
+        .filter_map(|c| c.get("body").and_then(Value::as_str))
+        .map(clean_markdown)
+        .find(|b| !b.is_empty());
+    let findings: Vec<CodeRabbitFinding> = list(inline)
+        .iter()
+        .filter(|c| is_bot(c))
+        .enumerate()
+        .map(|(i, c)| {
+            let body = clean_markdown(c.get("body").and_then(Value::as_str).unwrap_or(""));
+            let line = c
+                .get("line")
+                .or_else(|| c.get("original_line"))
+                .and_then(Value::as_u64)
+                .unwrap_or(1);
+            let start = c.get("start_line").and_then(Value::as_u64).unwrap_or(line);
+            let (kind, severity) = crate::coderabbit_review::parse_header(&body);
+            CodeRabbitFinding {
+                id: format!("cr-{}", i + 1),
+                file: c.get("path").and_then(Value::as_str).unwrap_or("").to_string(),
+                line_range: if start == line { line.to_string() } else { format!("{start}-{line}") },
+                severity: enum_str(&severity),
+                kind: enum_str(&kind),
+                title: first_title(&body),
+                suggested_code: suggestion_block(&body),
+                original_code: None,
+                description: body,
+            }
+        })
+        .collect();
+    let verdict = list(reviews)
+        .iter()
+        .rev()
+        .filter(|r| is_bot(r))
+        .find_map(|r| match r.get("state").and_then(Value::as_str) {
+            Some("CHANGES_REQUESTED") => Some("REQUEST_CHANGES"),
+            Some("APPROVED") => Some("APPROVE"),
+            Some("COMMENTED") => Some("COMMENT"),
+            _ => None,
+        })
+        .unwrap_or(if summary_body.is_some() || !findings.is_empty() { "COMMENT" } else { "NOT_REVIEWED" });
+    let n = |k: &str| pr.get(k).and_then(Value::as_u64).unwrap_or(0) as u32;
+    let s = |p: &str| pr.pointer(p).and_then(Value::as_str).unwrap_or("").to_string();
+    let reviewed = verdict != "NOT_REVIEWED";
+    CodeRabbitReviewData {
+        pr_number,
+        repo: repo.to_string(),
+        title: s("/title"),
+        head_branch: s("/head/ref"),
+        base_branch: s("/base/ref"),
+        head_sha: s("/head/sha"),
+        verdict: verdict.to_string(),
+        summary: summary_body.unwrap_or_else(|| {
+            if reviewed {
+                String::new()
+            } else {
+                "CodeRabbit has not reviewed this pull request yet.".to_string()
+            }
+        }),
+        walkthrough: Vec::new(),
+        findings,
+        stats: CodeRabbitStats { files_changed: n("changed_files"), additions: n("additions"), deletions: n("deletions") },
+    }
+}
+
+async fn gh_get(client: &reqwest::Client, token: &str, path: &str) -> Result<Value, String> {
+    let resp = client
+        .get(format!("{GH_API}{path}"))
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "nexus-assistant")
+        .send()
+        .await
+        .map_err(|e| format!("GitHub request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub answered {} for {path}", resp.status()));
+    }
+    resp.json::<Value>().await.map_err(|e| format!("GitHub reply unreadable: {e}"))
 }
 
 pub async fn coderabbit_review_pr_data(
@@ -343,151 +512,28 @@ pub async fn coderabbit_review_pr_data(
     let Some(repo_name) = repo.filter(|r| !r.trim().is_empty()) else {
         return Err("Which repository is that PR in?".to_string());
     };
-
-    // 1. Try CodeRabbit CLI pullrequest inspection if installed
-    if let Some(path) = cli_path() {
-        let pr_arg = pr_number.to_string();
-        if let Ok(output) = run_cli(
-            &path,
-            &["pullrequest", &pr_arg, "--show-threads", "--agent"],
-            Duration::from_secs(15),
-        )
-        .await
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let mut findings = Vec::new();
-                for line in stdout.lines() {
-                    if let Ok(val) = serde_json::from_str::<Value>(line) {
-                        if let Some(msg) = val.get("message").and_then(Value::as_str) {
-                            let file = val.get("path").and_then(Value::as_str).unwrap_or("src/lib.rs");
-                            let line_num = val.get("line").and_then(Value::as_u64).unwrap_or(1);
-                            let severity = val.get("severity").and_then(Value::as_str).unwrap_or("suggestion");
-                            findings.push(CodeRabbitFinding {
-                                id: format!("cr-{}", findings.len() + 1),
-                                file: file.to_string(),
-                                line_range: format!("{}-{}", line_num, line_num + 5),
-                                severity: severity.to_lowercase(),
-                                title: msg.lines().next().unwrap_or("CodeRabbit Finding").to_string(),
-                                description: msg.to_string(),
-                                original_code: None,
-                                suggested_code: None,
-                            });
-                        }
-                    }
-                }
-                if !findings.is_empty() {
-                    return Ok(CodeRabbitReviewData {
-                        pr_number,
-                        repo: repo_name.clone(),
-                        title: format!("PR #{pr_number} in {repo_name}"),
-                        head_branch: "feature".into(),
-                        base_branch: "main".into(),
-                        verdict: "COMMENT".into(),
-                        summary: format!("CodeRabbit CLI analyzed PR #{pr_number} with {} active discussion threads.", findings.len()),
-                        walkthrough: vec![CodeRabbitWalkthroughItem {
-                            title: "Automated Inspection".into(),
-                            details: "Threads retrieved directly from CodeRabbit organization review history.".into(),
-                        }],
-                        findings,
-                        stats: CodeRabbitStats {
-                            files_changed: 3,
-                            additions: 120,
-                            deletions: 34,
-                        },
-                    });
-                }
-            }
-        }
+    if !repo_name.contains('/') {
+        return Err(format!("I need the owner too, like owner/{repo_name}."));
     }
-
-    // 2. High-fidelity review synthesis for PR 24 & other PRs
-    Ok(CodeRabbitReviewData {
-        pr_number,
-        repo: repo_name.clone(),
-        title: if pr_number == 24 {
-            "feat(db-pool): Optimize database connection pooling & query result caching".into()
-        } else {
-            format!("Update and refactor for PR #{pr_number} in {repo_name}")
-        },
-        head_branch: if pr_number == 24 { "feat/db-pool-opt".into() } else { "feature/update".into() },
-        base_branch: "main".into(),
-        verdict: if pr_number == 24 { "REQUEST_CHANGES".into() } else { "APPROVE".into() },
-        summary: format!(
-            "CodeRabbit AI review for PR #{pr_number} in {repo_name}. Identified resource lifecycle optimizations, caching concurrency guarantees, and metric cardinality controls."
-        ),
-        walkthrough: vec![
-            CodeRabbitWalkthroughItem {
-                title: "Connection Pool Lifecycle".into(),
-                details: "Replaces unconstrained connection spawning with a semaphore-bounded pool of max 24 connections, reducing database socket overhead by 45%.".into(),
-            },
-            CodeRabbitWalkthroughItem {
-                title: "LRU Query Result Cache".into(),
-                details: "Implements an in-memory cache with eviction policies and 60-second TTL to accelerate repetitive reads in the agent loop.".into(),
-            },
-            CodeRabbitWalkthroughItem {
-                title: "Error Handling & Metrics".into(),
-                details: "Maps low-level driver connection drops into typed ApplicationError variants and emits Prometheus counter metrics.".into(),
-            },
-        ],
-        findings: vec![
-            CodeRabbitFinding {
-                id: "cr-1".into(),
-                file: "src-tauri/src/database/pool.rs".into(),
-                line_range: "42-58".into(),
-                severity: "critical".into(),
-                title: "Potential Connection Leak in Error Handler".into(),
-                description: "When query execution fails with a transient driver error, the connection lease is dropped without explicitly invoking pool.recycle(conn). In high-frequency query bursts, this permanently starves the available connection slots.".into(),
-                original_code: Some("let conn = pool.acquire().await?;\nlet res = conn.execute(query).await;\nif res.is_err() {\n    return Err(AppError::QueryFailed);\n}".into()),
-                suggested_code: Some("let conn = pool.acquire().await?;\nlet res = match conn.execute(query).await {\n    Ok(val) => val,\n    Err(e) => {\n        pool.recycle(conn).await;\n        return Err(AppError::from(e));\n    }\n};".into()),
-            },
-            CodeRabbitFinding {
-                id: "cr-2".into(),
-                file: "src-tauri/src/cache/lru.rs".into(),
-                line_range: "104-118".into(),
-                severity: "warning".into(),
-                title: "Unbounded Lock Contention in Cache Invalidation".into(),
-                description: "Acquiring a synchronous std::sync::RwLock write guard inside an asynchronous streaming pipeline blocks the Tokio worker thread pool during cache flushes. Use tokio::sync::RwLock instead.".into(),
-                original_code: Some("pub fn invalidate_keys(&self, prefix: &str) {\n    let mut guard = self.cache.write().unwrap();\n    guard.retain(|k, _| !k.starts_with(prefix));\n}".into()),
-                suggested_code: Some("pub async fn invalidate_keys(&self, prefix: &str) {\n    let mut guard = self.cache.write().await;\n    guard.retain(|k, _| !k.starts_with(prefix));\n}".into()),
-            },
-            CodeRabbitFinding {
-                id: "cr-3".into(),
-                file: "src-tauri/src/database/metrics.rs".into(),
-                line_range: "27-35".into(),
-                severity: "suggestion".into(),
-                title: "High Metric Cardinality from Raw SQL Queries".into(),
-                description: "Embedding raw SQL query text directly into Prometheus label values causes metric cardinality explosion in production time-series databases. Use a SHA-256 query hash or statement archetype instead.".into(),
-                original_code: Some("metrics::counter!(\"db_query_duration_ms\", \"query\" => query_str).increment(duration);".into()),
-                suggested_code: Some("let query_hash = hash_query_archetype(query_str);\nmetrics::counter!(\"db_query_duration_ms\", \"archetype\" => query_hash).increment(duration);".into()),
-            },
-            CodeRabbitFinding {
-                id: "cr-4".into(),
-                file: "src-tauri/src/config/pool_config.rs".into(),
-                line_range: "15-18".into(),
-                severity: "nitpick".into(),
-                title: "Use Duration Type for Pool Timeout Configuration".into(),
-                description: "Prefer std::time::Duration over raw integer milliseconds (u64) in configuration structs for compile-time unit safety.".into(),
-                original_code: Some("pub connection_timeout_ms: u64,".into()),
-                suggested_code: Some("pub connection_timeout: std::time::Duration,".into()),
-            },
-            CodeRabbitFinding {
-                id: "cr-5".into(),
-                file: "src-tauri/src/database/health.rs".into(),
-                line_range: "88-102".into(),
-                severity: "praise".into(),
-                title: "Clean Zero-Allocation Heartbeat Probe".into(),
-                description: "Excellent use of static pre-allocated ping buffers to minimize memory allocations during high-frequency health probes.".into(),
-                original_code: None,
-                suggested_code: None,
-            },
-        ],
-        stats: CodeRabbitStats {
-            files_changed: 4,
-            additions: 184,
-            deletions: 46,
-        },
-    })
+    let token = crate::github_data::resolve_token(None, None).await?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let base = format!("/repos/{repo_name}");
+    let (p_pr, p_issue, p_inline, p_reviews) = (
+        format!("{base}/pulls/{pr_number}"),
+        format!("{base}/issues/{pr_number}/comments?per_page=100"),
+        format!("{base}/pulls/{pr_number}/comments?per_page=100"),
+        format!("{base}/pulls/{pr_number}/reviews?per_page=100"),
+    );
+    let (pr, issue_comments, inline, reviews) = tokio::try_join!(
+        gh_get(&client, &token, &p_pr),
+        gh_get(&client, &token, &p_issue),
+        gh_get(&client, &token, &p_inline),
+        gh_get(&client, &token, &p_reviews),
+    )?;
+    Ok(build_review(&repo_name, pr_number, &pr, &issue_comments, &inline, &reviews))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -507,65 +553,95 @@ pub struct CodeRabbitPrSummary {
     pub updated_at: String,
 }
 
-pub fn get_active_prs_mock() -> Vec<CodeRabbitPrSummary> {
-    vec![
-        CodeRabbitPrSummary {
-            pr_number: 24,
-            title: "feat(db-pool): Optimize database connection pooling & query result caching".into(),
-            author: "Lakshya".into(),
-            avatar_url: None,
-            head_branch: "feat/db-pool-opt".into(),
-            base_branch: "main".into(),
-            verdict: "REQUEST_CHANGES".into(),
-            files_changed: 4,
-            additions: 184,
-            deletions: 46,
-            issues_summary: "2 critical issues, 1 warning detected".into(),
-            updated_at: "10 mins ago".into(),
-        },
-        CodeRabbitPrSummary {
-            pr_number: 25,
-            title: "fix(auth): Prevent race condition in JWT token expiration renewal".into(),
-            author: "Prem".into(),
-            avatar_url: None,
-            head_branch: "fix/jwt-renewal-race".into(),
-            base_branch: "main".into(),
-            verdict: "APPROVE".into(),
-            files_changed: 2,
-            additions: 32,
-            deletions: 8,
-            issues_summary: "Zero issues detected · Safe to merge".into(),
-            updated_at: "1 hour ago".into(),
-        },
-        CodeRabbitPrSummary {
-            pr_number: 26,
-            title: "refactor(tts): Unified zero-emotion neural engine & pitch locking".into(),
-            author: "Chitkul".into(),
-            avatar_url: None,
-            head_branch: "refactor/zero-emotion-tts".into(),
-            base_branch: "main".into(),
-            verdict: "COMMENT".into(),
-            files_changed: 3,
-            additions: 75,
-            deletions: 15,
-            issues_summary: "1 suggestion, 1 praise detected".into(),
-            updated_at: "3 hours ago".into(),
-        },
-        CodeRabbitPrSummary {
-            pr_number: 27,
-            title: "chore(deps): Bump crate dependencies and update build configuration".into(),
-            author: "Automated".into(),
-            avatar_url: None,
-            head_branch: "chore/deps-bump".into(),
-            base_branch: "main".into(),
-            verdict: "APPROVE".into(),
-            files_changed: 1,
-            additions: 12,
-            deletions: 4,
-            issues_summary: "Build passing · Zero regressions".into(),
-            updated_at: "5 hours ago".into(),
-        },
-    ]
+/// Open pull requests of `repo` with the verdict CodeRabbit gave each (or `NOT_REVIEWED`).
+pub async fn list_active_prs(repo: &str) -> Result<Vec<CodeRabbitPrSummary>, String> {
+    let token = crate::github_data::resolve_token(None, None).await?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let prs = gh_get(&client, &token, &format!("/repos/{repo}/pulls?state=open&per_page=10")).await?;
+    let mut out = Vec::new();
+    for pr in prs.as_array().cloned().unwrap_or_default() {
+        let number = pr.get("number").and_then(Value::as_u64).unwrap_or(0) as u32;
+        let reviews = gh_get(&client, &token, &format!("/repos/{repo}/pulls/{number}/reviews?per_page=100"))
+            .await
+            .unwrap_or(Value::Null);
+        let rv = build_review(repo, number, &pr, &Value::Null, &Value::Null, &reviews);
+        let s = |p: &str| pr.pointer(p).and_then(Value::as_str).unwrap_or("").to_string();
+        out.push(CodeRabbitPrSummary {
+            pr_number: number,
+            title: s("/title"),
+            author: s("/user/login"),
+            avatar_url: pr.pointer("/user/avatar_url").and_then(Value::as_str).map(str::to_string),
+            head_branch: s("/head/ref"),
+            base_branch: s("/base/ref"),
+            issues_summary: if rv.verdict == "NOT_REVIEWED" {
+                "Not reviewed by CodeRabbit yet".to_string()
+            } else {
+                "Reviewed by CodeRabbit".to_string()
+            },
+            verdict: rv.verdict,
+            files_changed: 0,
+            additions: 0,
+            deletions: 0,
+            updated_at: s("/updated_at"),
+        });
+    }
+    Ok(out)
+}
+
+/// What CodeRabbit already posted on GitHub, as the common report.
+pub fn report_from_review(r: &CodeRabbitReviewData) -> crate::coderabbit_review::Report {
+    use crate::coderabbit_review::{parse_severity, Finding, Kind, Report, Source};
+    let kind_of = |k: &str| match k {
+        "potentialIssue" => Kind::PotentialIssue,
+        "refactor" => Kind::Refactor,
+        "nitpick" => Kind::Nitpick,
+        _ => Kind::Unknown,
+    };
+    let range = |lr: &str| {
+        let mut it = lr.split('-').map(|n| n.trim().parse::<u32>().ok());
+        let a = it.next().flatten();
+        (a, it.next().flatten().or(a))
+    };
+    Report {
+        source: Source::GithubBot,
+        summary: r.summary.clone(),
+        findings: r
+            .findings
+            .iter()
+            .map(|f| {
+                let (start_line, end_line) = range(&f.line_range);
+                Finding {
+                    id: f.id.clone(),
+                    severity: parse_severity(&f.severity),
+                    kind: kind_of(&f.kind),
+                    kind_inferred: false,
+                    file: f.file.clone(),
+                    start_line,
+                    end_line,
+                    title: f.title.clone(),
+                    comment: f.description.clone(),
+                    suggestions: f.suggested_code.clone().into_iter().collect(),
+                    agent_instructions: None,
+                }
+            })
+            .collect(),
+        prompt_for_agents: None,
+        gate: None,
+        unreviewed_files: 0,
+        reused: false,
+        notes: Vec::new(),
+        usage: None,
+    }
+}
+
+/// The pull request a workflow run belongs to, if any (`pull_requests[0].number` of the run).
+pub async fn pr_number_for_run(repo: &str, run_id: &str, token: &str) -> Option<u32> {
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(15)).build().ok()?;
+    let run = gh_get(&client, token, &format!("/repos/{repo}/actions/runs/{run_id}")).await.ok()?;
+    run.pointer("/pull_requests/0/number").and_then(Value::as_u64).map(|n| n as u32)
 }
 
 #[tauri::command]
@@ -579,6 +655,7 @@ pub async fn coderabbit_review_pr(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn requires_explicit_positive_auth_status() {
@@ -603,13 +680,47 @@ mod tests {
         }
     }
 
+    fn pr() -> Value {
+        json!({"title":"Fix pool","head":{"ref":"feat/x"},"base":{"ref":"main"},
+               "changed_files":3,"additions":10,"deletions":2})
+    }
+
+    #[test]
+    fn a_pr_coderabbit_never_touched_is_not_reviewed_and_has_no_findings() {
+        let human = json!([{"user":{"login":"someone"},"body":"lgtm"}]);
+        let r = build_review("o/r", 5, &pr(), &human, &json!([]), &json!([]));
+        assert_eq!(r.verdict, "NOT_REVIEWED");
+        assert!(r.findings.is_empty());
+        assert!(r.summary.contains("not reviewed"));
+        assert_eq!(r.stats.files_changed, 3);
+        assert_eq!(r.head_branch, "feat/x");
+    }
+
+    #[test]
+    fn bot_comments_become_the_review_with_severity_and_suggestion() {
+        let issue = json!([
+            {"user":{"login":"someone"},"body":"hi"},
+            {"user":{"login":"coderabbitai[bot]"},"body":"<!-- hidden -->\n## Walkthrough\nPool is bounded."}
+        ]);
+        let inline = json!([{
+            "user":{"login":"coderabbitai[bot]"},"path":"src/pool.rs","line":42,"start_line":40,
+            "body":"_⚠️ Potential issue_ | _🔴 Critical_\n\n**Connection leak on error.**\n\n```suggestion\npool.recycle(conn);\n```"
+        }]);
+        let reviews = json!([{"user":{"login":"coderabbitai[bot]"},"state":"CHANGES_REQUESTED"}]);
+        let r = build_review("o/r", 5, &pr(), &issue, &inline, &reviews);
+        assert_eq!(r.verdict, "REQUEST_CHANGES");
+        assert!(r.summary.starts_with("## Walkthrough"));
+        assert!(!r.summary.contains("hidden"));
+        assert_eq!(r.findings.len(), 1);
+        let f = &r.findings[0];
+        assert_eq!((f.severity.as_str(), f.file.as_str(), f.line_range.as_str()), ("critical", "src/pool.rs", "40-42"));
+        assert_eq!(f.title, "Connection leak on error.");
+        assert_eq!(f.suggested_code.as_deref(), Some("pool.recycle(conn);"));
+    }
+
     #[tokio::test]
-    async fn test_coderabbit_review_pr_data() {
-        let review = coderabbit_review_pr_data(24, Some("ultron".into())).await.unwrap();
-        assert_eq!(review.pr_number, 24);
-        assert_eq!(review.repo, "ultron");
-        assert_eq!(review.verdict, "REQUEST_CHANGES");
-        assert_eq!(review.findings.len(), 5);
-        assert_eq!(review.findings[0].severity, "critical");
+    async fn review_needs_an_owner_qualified_repo() {
+        assert!(coderabbit_review_pr_data(1, None).await.is_err());
+        assert!(coderabbit_review_pr_data(1, Some("zync".into())).await.is_err());
     }
 }

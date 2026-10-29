@@ -19,7 +19,7 @@
 // On Win:   nexus setup       (nexus.cmd shim)
 // ==============================================================================
 
-import { execSync, spawnSync } from "node:child_process";
+import { execSync, spawn, spawnSync } from "node:child_process";
 // Suppress the Node DEP0190 deprecation warning about shell:true with args.
 // We control all arguments (no user input) — the warning is a false positive
 // for our use case of launching .cmd shims like npm.cmd on Windows.
@@ -640,6 +640,52 @@ function cmdDev() {
   const tauriCli = has("cargo-tauri") ? ["cargo", "tauri", "dev"]
     : ["npx", "--prefix", join(ROOT, "frontend"), "tauri", "dev"];
   run(tauriCli[0], tauriCli.slice(1), { cwd: join(ROOT, "src-tauri") });
+}
+
+// `nexus notify <scenario>`: run one notification scenario in the RUNNING NEXUS (second launch with a private flag;
+// the running instance picks it up through its single-instance callback). Starts/stops/rebuilds nothing.
+// Keep in sync with SCENARIOS in src-tauri/src/notify_selftest.rs (a Rust test checks every name appears here).
+const NOTIFY_SCENARIOS = {
+  "pr-failed": 'spoken "PR failed in selftest" + a Windows notification; click it for the animation and the CodeRabbit sidebar',
+  "build-failed": 'spoken "Build failed in selftest-build" + a Windows notification',
+  "still-failing": "NO new notification or speech; the open alert then shows 2 failing runs",
+  "recovered": 'spoken "selftest is green again" + a Windows notification; detail shows Recovered',
+  "expired-soon": 'notification now; clicking it after 15 s shows "This alert has expired."',
+  "same-name": "two notifications alice/selftest and bob/selftest; each opens its own owner",
+  "ambiguous": "spoken line only, no notification (a repo with several owners is not clickable)",
+  "open": "no toast needed: plays the click animation and opens the latest alert in the sidebar",
+};
+
+function cmdNotify() {
+  const name = process.argv[3];
+  if (!name || name === "list" || name === "--help" || name === "-h") {
+    console.log("Usage: nexus notify <scenario>   (NEXUS must already be running via 'nexus start')");
+    console.log("Run in this order for the full cycle: pr-failed, still-failing, recovered.");
+    console.log("");
+    for (const [n, what] of Object.entries(NOTIFY_SCENARIOS)) console.log(`  ${n.padEnd(14)} ${what}`);
+    return;
+  }
+  if (!(name in NOTIFY_SCENARIOS)) {
+    err(`Unknown scenario '${name}'. Run: nexus notify list`);
+    process.exit(1);
+  }
+  const ext = IS_WIN ? ".exe" : "";
+  const binPath = join(ROOT, "src-tauri", "target", "release", `nexus${ext}`);
+  if (!existsSync(binPath)) {
+    err("Release binary not found. Run: nexus build");
+    process.exit(1);
+  }
+  if (IS_WIN) {
+    let running = "";
+    try { running = execSync('tasklist /FI "IMAGENAME eq nexus.exe" /NH', { encoding: "utf-8" }); } catch { /* treated as not running */ }
+    if (!/nexus\.exe/i.test(running)) {
+      err("NEXUS is not running. Start it first with: nexus start");
+      process.exit(1);
+    }
+  }
+  info(`Sending scenario '${name}' to the running NEXUS (watch its console for [NOTIFY-TEST] lines)`);
+  const child = spawn(binPath, ["--notify-test", name], { detached: true, stdio: "ignore" });
+  child.unref();
 }
 
 function cmdRun() {
@@ -1275,6 +1321,7 @@ ${C.cyan}Commands:${C.reset}
   ${C.green}stats${C.reset}    Inspect dataset category coverage, voice health, and training recommendations
   ${C.green}data${C.reset}     Validate NLU provenance/evaluation locks and wake data/model manifests (structural only - no accuracy; use "wake score")
   ${C.green}mcp check${C.reset} Verify every registered MCP server end to end (read-only, no sends)
+  ${C.green}notify${C.reset}   Trigger a test notification in the RUNNING app (nexus notify list)
   ${C.green}help${C.reset}     Show this help
 
 ${C.cyan}Examples:${C.reset}
@@ -1332,6 +1379,7 @@ switch (command) {
   case "audit":   cmdAudit(); break;
   case "collect": cmdCollect(); break;
   case "wake":    cmdWake(); break;
+  case "notify":  cmdNotify(); break;
   // TEMPORARY: ghost voice-entry tracer (see cmdTraceGhost).
   case "trace-ghost": cmdTraceGhost(); break;
   case "stats":

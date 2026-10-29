@@ -210,6 +210,7 @@ pub fn is_side_effect(intent: &ParsedIntent) -> bool {
         // App/site opening is an explicit Ghost policy exception.
         ParsedIntent::OpenApp { .. } | ParsedIntent::OpenUrl { .. }
         | ParsedIntent::OpenSettings | ParsedIntent::OpenCodeRabbitHub
+        | ParsedIntent::CodeRabbitReviewThis | ParsedIntent::AiReviewThis
         | ParsedIntent::OpenGitHubDashboard { .. }
         | ParsedIntent::MediaPlayPause | ParsedIntent::MediaNext
         | ParsedIntent::MediaPrevious | ParsedIntent::MediaStop
@@ -238,6 +239,8 @@ pub fn command_evidence(
         | ParsedIntent::NeedMoreInfo { .. }
         | ParsedIntent::OpenSettings
         | ParsedIntent::OpenCodeRabbitHub
+        | ParsedIntent::CodeRabbitReviewThis
+        | ParsedIntent::AiReviewThis
         | ParsedIntent::OpenGitHubDashboard { .. } => CommandEvidence::Strong,
         ParsedIntent::OpenArchitect => {
             if strength >= 3 {
@@ -501,6 +504,8 @@ pub fn center_id_for(intent: &ParsedIntent) -> CenterId {
         | ParsedIntent::ReviewForeground
         | ParsedIntent::RecreateLastReview
         | ParsedIntent::OpenCodeRabbitHub
+        | ParsedIntent::CodeRabbitReviewThis
+        | ParsedIntent::AiReviewThis
         | ParsedIntent::AnalyseRepo { .. }
         | ParsedIntent::AnalysePr { .. }
         | ParsedIntent::AnalyseLatestPr { .. }

@@ -1,5 +1,9 @@
 # NEXUS — Changelog
 
+- 2026-10-28: [Notification-to-sidebar research](../research/notification-to-sidebar/README.md), [phased implementation plan](../features/notification-to-sidebar-implementation-plan.md), and [coding prompt](../features/notification-to-sidebar-implementation-prompt.md) — documentation-only proposal for compact top alerts opening exact sidebar context; native/custom UI boundaries, platform limits, tests and owner-only runtime/build constraints recorded. No implementation, live test or queue promotion.
+
+- 2026-10-28: [Detailed Windows readiness and Voice Lock handover](../research/windows-readiness-voice-lock-handover-2026-10-28/README.md) — five linked Markdown documents consolidate research, plans, source edits, file inventory, failures, test/mutation/release history and pending gates. Documentation validation only; no functional rerun, app build/runtime operation or readiness-score change.
+
 - 2026-10-26: [P4/P5 trial accounting and P6 source checkpoint](170-voice-trial-accounting-and-phase-closeout.md) — legacy qualification repaired; declared capture/lock/command/fidelity accounting, 90 script+31 server tests, frontend692/Worker145, 79 total mutations; real-device/corpus/full exact-source release gates remain open.
 
 - 2026-10-26: [Enrollment-isolated embedding scores](169-enrollment-isolated-embedding-scores.md) — P3 reproducible offline scores from exported vectors, template isolation, candidate source audit and median overflow repair; 63 script tests and 18 offline mutations pass; no runtime/build actions.

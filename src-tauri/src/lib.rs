@@ -19,6 +19,16 @@ pub(crate) mod proactive_policy;
 // Feature 151: event keys — deterministic identity for the notification cooldown brain
 pub(crate) mod notify;
 pub(crate) mod notify_brain;
+pub(crate) mod notify_event;
+pub(crate) mod notify_hub;
+pub(crate) mod coderabbit_review;
+pub(crate) mod coderabbit_phrases;
+pub(crate) mod ai_review;
+pub(crate) mod notify_activation;
+pub(crate) mod notify_native;
+pub(crate) mod notify_open;
+pub(crate) mod notify_selftest;
+pub(crate) mod work_area;
 pub(crate) mod github_repo_index;
 pub(crate) mod screen_context;
 mod device_grounding;
@@ -368,9 +378,20 @@ pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             tracing::info!("single-instance: secondary launch attempt with args: {:?}", args);
+            // `nexus notify <scenario>`: run one notification scenario in this (running) instance.
+            if let Some(scenario) = crate::notify_selftest::parse_args(&args) {
+                let app_clone = app.clone();
+                std::thread::spawn(move || crate::notify_selftest::run(&app_clone, scenario));
+                return;
+            }
             // Handle deep-link redirects on Windows/Linux (passed as CLI arg)
             if let Some(url) = args.iter().find(|a| a.starts_with("nexus://")) {
-                tracing::info!("single-instance: deep-link callback: {}", url);
+                tracing::info!("single-instance: deep-link callback received");
+                if let Some(event_id) = crate::notify_activation::parse_activation(url) {
+                    let app_clone = app.clone();
+                    tauri::async_runtime::spawn(crate::notify_hub::activate(app_clone, event_id));
+                    return;
+                }
                 if url == "nexus://settings" {
                     // Open settings sidebar via deep link
                     let app_clone = app.clone();
@@ -748,6 +769,7 @@ pub fn run() {
                 // Last session's resume points, captured BEFORE the recorder
                 // writes anything for this session (boot briefing reads them).
                 memcore::briefing::snapshot_at_boot(&app_data);
+                memcore::account_seed::seed(&app_data); // owner's name from the Google account (fills a gap only)
                 // What was open when the PC last went off becomes the pending
                 // "shall I reopen it?" offer; only then may the 1-minute
                 // snapshots start overwriting the rolling one.
@@ -916,7 +938,10 @@ pub fn run() {
             let _ = app.deep_link().on_open_url(move |event| {
                 for url in event.urls() {
                     let url_str = url.as_str();
-                    if url_str.starts_with("nexus://oauth/") {
+                    if let Some(event_id) = crate::notify_activation::parse_activation(url_str) {
+                        let app_clone = handle.clone();
+                        tauri::async_runtime::spawn(crate::notify_hub::activate(app_clone, event_id));
+                    } else if url_str.starts_with("nexus://oauth/") {
                         let _ = handle.emit("deep-link://oauth-callback", url_str);
                     } else if url_str == "nexus://settings" {
                         // Deep link to open settings sidebar
@@ -1095,6 +1120,15 @@ pub fn run() {
             coderabbit::coderabbit_login,
             coderabbit::coderabbit_logout,
             coderabbit::coderabbit_review_pr,
+            coderabbit_review::coderabbit_report,
+            coderabbit_review::coderabbit_usage,
+            coderabbit_review::coderabbit_job,
+            coderabbit_review::coderabbit_review_start,
+            ai_review::ai_review_start,
+            ai_review::ai_review_job,
+            coderabbit_review::coderabbit_set_context,
+            notify_hub::notify_close_event,
+            notify_hub::notify_event_ready,
             mcp_client::mcp_connect_state,
             stage::stage_show,
             stage::stage_hide,

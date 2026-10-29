@@ -1004,9 +1004,10 @@ pub fn sidebar_geometry(
             }
         }
         "coderabbit" => {
-            let w = (monitor_w - 80.0).min(1340.0).max(1080.0);
-            let h = (monitor_h - 60.0).min(920.0).max(720.0);
-            center_xy(w, h)
+            // CodeRabbit-panel width (595) with the same full-height rule as every other sidebar view.
+            let w = 595.0_f64.min((monitor_w - 20.0).max(320.0));
+            let h = (monitor_h - 40.0).min(1040.0).max(400.0);
+            if docked { dock_x(w, h) } else { center_xy(w, h) }
         }
         "pr-list" | "github-dashboard" => {
             // Exact same size as Settings — 400px wide, covering from top margin down to screen edge.
@@ -1126,6 +1127,13 @@ pub(crate) struct SidebarPrepared<R: Runtime> {
 /// MUST be awaited from an async context — `get_or_create_window` may
 /// build a WebView, and `WebviewWindowBuilder::build()` dispatches to the
 /// main thread (a sync command would deadlock there).
+/// The whole monitor (position included). Sidebar panels are sized from it, exactly as before the multi-monitor
+/// fix: top margin 20, bottom margin 20, full height. Only the ORIGIN is new (monitors left of or above the primary).
+fn work_rect(monitor: &tauri::window::Monitor) -> crate::work_area::PRect {
+    let (p, s) = (monitor.position(), monitor.size());
+    crate::work_area::PRect { x: p.x, y: p.y, w: s.width as i32, h: s.height as i32 }
+}
+
 pub(crate) async fn prepare_sidebar<R: Runtime>(
     app: &tauri::AppHandle<R>,
     view: &str,
@@ -1134,32 +1142,12 @@ pub(crate) async fn prepare_sidebar<R: Runtime>(
     let win = crate::dyn_windows::get_or_create_window(app, crate::dyn_windows::WindowConfig::sidebar())?;
     let already_visible = win.is_visible().unwrap_or(false);
 
+    // Placement comes from the monitor's WORK AREA (origin included, so monitors left of / above the primary and
+    // taskbars on any edge are respected) and is set in physical pixels, converted once in `work_area`.
     if let Ok(Some(monitor)) = win.current_monitor().or_else(|_| win.primary_monitor()) {
-        let scale = monitor.scale_factor();
-        let mw = monitor.size().width as f64 / scale;
-        let mh = monitor.size().height as f64 / scale;
-        let (x, y, w, h) = sidebar_geometry(view, dock, mw, mh);
-        let _ = win.set_size(tauri::LogicalSize::new(w, h));
-        let _ = win.set_position(tauri::LogicalPosition::new(x, y));
-
-        // ── Physical clamp (scale-mismatch drift fix) ──
-        // Tauri converts a Logical position through the WINDOW's scale
-        // factor, which can disagree with the monitor's (fresh windows
-        // realize at 1.0 before DPI context attaches). That drift pushed
-        // the right dock past the screen edge. Clamp the final PHYSICAL
-        // rect into the monitor's physical bounds — correct on every
-        // monitor/DPI combination regardless of which side drifted.
-        let mon_w = monitor.size().width as i32;
-        let mon_h = monitor.size().height as i32;
-        let pw = (w * scale).round() as i32;
-        let ph = (h * scale).round() as i32;
-        if let Ok(cur) = win.outer_position() {
-            let cx = cur.x.clamp(0, (mon_w - pw).max(0));
-            let cy = cur.y.clamp(0, (mon_h - ph).max(0));
-            if cx != cur.x || cy != cur.y {
-                let _ = win.set_position(tauri::PhysicalPosition::new(cx, cy));
-            }
-        }
+        let rect = crate::work_area::sidebar_rect(view, dock, work_rect(&monitor), monitor.scale_factor());
+        let _ = win.set_size(tauri::PhysicalSize::new(rect.w as u32, rect.h as u32));
+        let _ = win.set_position(tauri::PhysicalPosition::new(rect.x, rect.y));
     }
 
     set_active_sidebar_view(view);
@@ -1171,15 +1159,8 @@ pub(crate) async fn prepare_sidebar<R: Runtime>(
     // This avoids the race where win.outer_position()/inner_size() haven't
     // propagated yet when capture_backdrop runs immediately after.
     let capture_geom = if let Ok(Some(monitor)) = win.current_monitor().or_else(|_| win.primary_monitor()) {
-        let scale = monitor.scale_factor();
-        let mw = monitor.size().width as f64 / scale;
-        let mh = monitor.size().height as f64 / scale;
-        let (x, y, w, h) = sidebar_geometry(view, dock, mw, mh);
-        let pw = (w * scale).round() as i32;
-        let ph = (h * scale).round() as i32;
-        let phys_x = ((x * scale).round() as i32).clamp(0, (monitor.size().width as i32 - pw).max(0));
-        let phys_y = ((y * scale).round() as i32).clamp(0, (monitor.size().height as i32 - ph).max(0));
-        Some((phys_x, phys_y, pw, ph))
+        let r = crate::work_area::sidebar_rect(view, dock, work_rect(&monitor), monitor.scale_factor());
+        Some((r.x, r.y, r.w, r.h))
     } else {
         None
     };
@@ -1359,7 +1340,81 @@ pub fn hide_settings_sidebar<R: Runtime>(
     Ok(())
 }
 
-/// Show the CodeRabbit active pull requests hub in a 1340x920 centered workstation window.
+/// Views an alert may replace without a way back: the plain assistant view and the CodeRabbit view. Any other view
+/// (settings, architect, PR list...) is work the owner opened and is restored by Back.
+pub fn is_pinned_view(view: &str) -> bool {
+    !matches!(view, "assistant" | "coderabbit")
+}
+
+/// The sidebar view showing now and whether a notification may treat it as pinned work to restore.
+pub fn active_sidebar_view_for_notify<R: Runtime>(app: &tauri::AppHandle<R>) -> (Option<String>, bool) {
+    let view = ACTIVE_SIDEBAR_VIEW.lock().map(|v| v.clone()).unwrap_or_default();
+    let open = app.get_webview_window("sidebar").is_some();
+    if !open || view.is_empty() {
+        return (None, false);
+    }
+    // The plain assistant view and the CodeRabbit view are replaceable by an alert; any other view is work the
+    // owner opened and is restored by Back.
+    let pinned = is_pinned_view(&view);
+    (Some(view), pinned)
+}
+
+/// Shows a notification's detail in the existing right-docked sidebar (cold mount reads PENDING_SIDEBAR, a live
+/// window receives `sidebar:analysis`). The payload is built in Rust from validated ledger state.
+pub async fn show_event_detail<R: Runtime>(app: tauri::AppHandle<R>, payload: serde_json::Value) -> Result<(), String> {
+    let window_existed = app.get_webview_window("sidebar").is_some();
+    use crate::notify_hub::{DETAIL_DOCK, DETAIL_VIEW};
+    let prep = prepare_sidebar(&app, DETAIL_VIEW, Some(DETAIL_DOCK)).await?;
+    let backdrop = capture_and_emit_backdrop(&app, &prep);
+    {
+        let mut pending = PENDING_SIDEBAR.lock().unwrap();
+        *pending = Some(PendingSidebar {
+            // Must not contain the word "coderabbit": that routes the payload to the PR-list panel instead.
+            query: "GitHub alert".to_string(),
+            text: String::new(),
+            backdrop,
+            analysis: Some(payload.clone()),
+            confirmation: None,
+        });
+    }
+    finish_sidebar(&app, &prep.win, DETAIL_VIEW, Some(DETAIL_DOCK))?;
+    spawn_sidebar_live_blur(&app, &prep.win);
+    if window_existed {
+        let _ = app.emit("sidebar:analysis", serde_json::json!({ "query": "GitHub alert", "text": "", "analysis": payload }));
+    }
+    Ok(())
+}
+
+/// Opens the CodeRabbit panel straight on one pull request's review (used when its CI fails).
+pub async fn show_coderabbit_pr<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    repo: String,
+    pr_number: u32,
+) -> Result<(), String> {
+    let review = crate::coderabbit::coderabbit_review_pr_data(pr_number, Some(repo.clone())).await?;
+    let payload = serde_json::to_value(&review).map_err(|e| e.to_string())?;
+    let window_existed = app.get_webview_window("sidebar").is_some();
+    let prep = prepare_sidebar(&app, "coderabbit", Some("center")).await?;
+    let backdrop = capture_and_emit_backdrop(&app, &prep);
+    {
+        let mut pending = PENDING_SIDEBAR.lock().unwrap();
+        *pending = Some(PendingSidebar {
+            query: "CodeRabbit review".to_string(),
+            text: format!("CodeRabbit review for PR {pr_number} in {repo}."),
+            backdrop,
+            analysis: Some(payload.clone()),
+            confirmation: None,
+        });
+    }
+    finish_sidebar(&app, &prep.win, "coderabbit", Some("center"))?;
+    spawn_sidebar_live_blur(&app, &prep.win);
+    if window_existed {
+        let _ = app.emit("sidebar:analysis", payload);
+    }
+    Ok(())
+}
+
+/// Show the CodeRabbit active pull requests hub (595 x 975 panel, centred).
 pub async fn show_coderabbit_hub<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
@@ -1367,9 +1422,19 @@ pub async fn show_coderabbit_hub<R: Runtime>(
     let prep = prepare_sidebar(&app, "coderabbit", Some("center")).await?;
     let backdrop = capture_and_emit_backdrop(&app, &prep);
 
-    let active_prs = crate::coderabbit::get_active_prs_mock();
+    // Real open PRs of the repo with the most open work; an unreachable GitHub shows an empty list.
+    let repo = crate::github_repo_index::entries()
+        .await
+        .into_iter()
+        .max_by_key(|e| e.open_issues)
+        .map(|e| e.full_name);
+    let active_prs = match &repo {
+        Some(r) => crate::coderabbit::list_active_prs(r).await.unwrap_or_default(),
+        None => Vec::new(),
+    };
     let payload = serde_json::json!({
         "mode": "pr_list",
+        "repo": repo,
         "activePrs": active_prs
     });
 
@@ -1377,7 +1442,7 @@ pub async fn show_coderabbit_hub<R: Runtime>(
         let mut pending = PENDING_SIDEBAR.lock().unwrap();
         *pending = Some(PendingSidebar {
             query: "CodeRabbit AI — Active Pull Requests".to_string(),
-            text: "Here are the active pull requests in ultron, sir.".to_string(),
+            text: "Here are the open pull requests, sir.".to_string(),
             backdrop: backdrop.clone(),
             analysis: Some(payload.clone()),
             confirmation: None,
@@ -1844,6 +1909,9 @@ pub struct NexusSettings {
     /// cloud request. Memory page switch; the egress log shows exactly what was sent.
     #[serde(default = "default_memcore")]
     pub memcore_profile: bool,
+    /// Learn the owner's name from the connected Google account (fills a gap only; never overwrites).
+    #[serde(default = "default_memcore")]
+    pub memcore_account_seed: bool,
     /// Play a short "I heard you" sound the instant NEXUS wakes (wake word or Ctrl+Space).
     #[serde(default = "default_memcore")]
     pub wake_sound: bool,
@@ -1879,6 +1947,18 @@ pub struct NexusSettings {
     /// Watch latest production deploys (Vercel, Render, Netlify) and announce failure/recovery.
     #[serde(default = "default_memcore")]
     pub memcore_deploy_watch: bool,
+    /// Open the CodeRabbit panel on a PR whose CI just failed.
+    #[serde(default = "default_memcore")]
+    pub coderabbit_auto_open: bool,
+    /// Tell the owner about GitHub failures/recoveries with a Windows notification-center toast (default on).
+    #[serde(default = "default_memcore")]
+    pub notify_native: bool,
+    /// Failure toasts ask Windows to show them even while Do Not Disturb is on (Windows asks the owner once).
+    #[serde(default = "default_memcore")]
+    pub notify_urgent: bool,
+    /// Start a FREE CodeRabbit review automatically when an alert opens (default OFF: NEXUS asks first and shows the count).
+    #[serde(default)]
+    pub coderabbit_auto_review: bool,
     /// Speak important emails in plain words (GitHub on device; unusual emails
     /// via a free cloud model using sender + subject only). Default OFF: the cloud
     /// step is opt-in; on-device wording (GitHub + categories) always runs.
@@ -2226,6 +2306,7 @@ impl Default for NexusSettings {
             memcore_activity: default_memcore(),
             memcore_briefing: default_memcore(),
             memcore_profile: default_memcore(),
+            memcore_account_seed: default_memcore(),
             memcore_routines: default_memcore(),
             memcore_review: false,
             watch_power: default_watch_power(),
@@ -2236,6 +2317,10 @@ impl Default for NexusSettings {
             memcore_mail: default_memcore(),
             memcore_github_watch: default_memcore(),
             memcore_deploy_watch: default_memcore(),
+            coderabbit_auto_open: default_memcore(),
+            notify_native: true,
+            notify_urgent: true,
+            coderabbit_auto_review: false,
             memcore_mail_plain: false,
             memcore_whatsapp: false,
             memcore_whatsapp_speak: false,
@@ -3853,6 +3938,16 @@ pub fn import_settings<R: Runtime>(app: AppHandle<R>, json_str: String) -> Resul
 #[cfg(test)]
 mod sidebar_geometry_tests {
     use super::sidebar_geometry;
+
+    #[test]
+    fn only_the_assistant_and_coderabbit_views_are_replaceable_by_an_alert() {
+        use super::is_pinned_view;
+        assert!(!is_pinned_view("assistant"));
+        assert!(!is_pinned_view("coderabbit"));
+        for v in ["settings", "architect", "pr-list", "github-dashboard", "maps", "stack"] {
+            assert!(is_pinned_view(v), "{v}");
+        }
+    }
 
     #[test]
     fn assistant_defaults_to_right_dock() {

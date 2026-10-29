@@ -289,6 +289,20 @@ async fn poll_once(
     Ok(out)
 }
 
+/// A PR check just failed and was announced: open the CodeRabbit panel on that PR so its review is in front of the owner.
+/// Quiet when the repo or PR cannot be identified.
+async fn open_failed_pr_review<R: Runtime>(app: &AppHandle<R>, project: &str, run_ref: &str, token: &str) {
+    let crate::github_repo_index::Resolution::One(entry) = crate::github_repo_index::resolve_name(project).await else {
+        return;
+    };
+    let Some(pr) = crate::coderabbit::pr_number_for_run(&entry.full_name, run_ref, token).await else {
+        return;
+    };
+    if let Err(e) = crate::commands::show_coderabbit_pr(app.clone(), entry.full_name.clone(), pr).await {
+        tracing::warn!("[GITHUB-WATCH] could not open the CodeRabbit review: {e}");
+    }
+}
+
 fn speak_address<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
     let friend = crate::persona::is_friend(&crate::commands::read_persona_mode(app));
     let name = app
@@ -387,7 +401,23 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
                         if let crate::notify_brain::Decision::Say(line) =
                             crate::notify_brain::observe_fact(&app, &fact, baseline)
                         {
-                            crate::notify_brain::say(&app, "github", line);
+                            crate::notify_brain::say(&app, "github", line.clone());
+                            // A clickable card only for a repository that resolves to exactly one owner.
+                            if let crate::github_repo_index::Resolution::One(entry) =
+                                crate::github_repo_index::resolve_name(&fact.project).await
+                            {
+                                crate::notify_hub::publish_github(&app, &entry.full_name, &fact, &line);
+                            }
+                            if fact.kind == Kind::Pr
+                                && fact.obs == Obs::Failed
+                                && crate::memcore::flag(&dir, "coderabbitAutoOpen", true)
+                            {
+                                let (app2, token2) = (app.clone(), token.clone());
+                                let (project, run_ref) = (fact.project.clone(), fact.run_ref.clone());
+                                tauri::async_runtime::spawn(async move {
+                                    open_failed_pr_review(&app2, &project, &run_ref, &token2).await;
+                                });
+                            }
                         }
                     }
                     let delay = next_delay_secs(0, false, state.rate_limit_remaining);

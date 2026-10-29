@@ -2,6 +2,11 @@
 
 All research documents organized by topic.
 
+## Notification-to-sidebar interaction
+
+- [Cross-platform research and source investigation](notification-to-sidebar/README.md) — Windows/macOS/Linux capabilities, native versus app-owned cards, NEXUS integration findings, effort assessment and unknowns.
+- [Implementation plan](../features/notification-to-sidebar-implementation-plan.md) and [coding prompt](../features/notification-to-sidebar-implementation-prompt.md) — source contracts first; no implementation or device proof claimed.
+
 ## Landscape & Audit
 - [Vision-Grounded Gmail Engine & Proactive Watch Architecture](vision-grounded-gmail-engine-and-proactive-watch-architecture-2026-09-29.md) — 3-tier hybrid perception (browser URL hash + VLM fallback), native Gmail Engine watch state machine, and proactive deadline diffing
 - [Voice & Ghost Mode Root Cause Analysis & Flow Hardening](voice-and-ghost-mode-root-cause-analysis-and-flow-hardening-2026-09-29.md) — Deep audit of ghost waves, strict motion invariants, browser search & typing (Ctrl+L/dictation), app-open TTS latency (<5ms), and complete GitHub intent isolation
@@ -35,6 +40,8 @@ All research documents organized by topic.
 - [05 · Feature-Impact Study](rea-teardown/05-feature-impact-study-2026-10-19.md) — strategy + estimated % boost per existing feature (screen analysis ~30 %, text-evidence ~25 %, ghost grounding 10-15 %, PR/repo 5-10 %), learnings, honest zeros, build-first order
 
 ## Voice Lock and Architect-guided review
+
+- **[Detailed Windows readiness / Voice Lock handover — 2026-10-28](windows-readiness-voice-lock-handover-2026-10-28/README.md)** — complete research, decisions, P1–P6 plan, implementation inventory, test/mutation/build history, failed experiments, GLM attribution and pending proof. Documentation consolidation only.
 
 - [NEXUS review using ElevenLabs Architect guidance](elevenlabs-architect-guided-nexus-review.md) — local source/evidence review using the installed vendor playbooks; no remote MCP consultation claimed.
 - [External Architect review brief](elevenlabs-architect-review-brief.md) — prepared questions and connection-attempt limitations.

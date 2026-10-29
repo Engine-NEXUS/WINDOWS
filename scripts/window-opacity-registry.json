@@ -5,6 +5,9 @@
     ".spatial-dashboard",
     ".analysis-card"
   ],
+  "frontend/src/stage/notify-expand.css": [
+    ".nx-expand"
+  ],
   "frontend/src/sidebar/stack.css": [
     ".stack-view",
     ".stack-card",
@@ -18,8 +21,7 @@
     ".kit-minibar"
   ],
   "frontend/src/sidebar/coderabbit.css": [
-    ".cr-loading-curtain",
-    ".cr-overlay-drawer"
+    ".crp"
   ],
   "frontend/src/sidebar/lens.css": [
     ".lens-bubble",

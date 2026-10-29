@@ -4,6 +4,7 @@ This directory contains repeatable testing procedures and release gates. Histori
 
 | Area | Document | Purpose |
 |---|---|---|
+| Detailed readiness handover | [2026-10-28 five-document record](../research/windows-readiness-voice-lock-handover-2026-10-28/README.md) | Source-attributed implementation/test/release history, failures, mutation inventory and every remaining P1–P6 gate |
 | Windows Voice Lock | [Speaker verification work card](speaker-verification-work-card.md), [evidence/reliability plan](../features/152-voice-lock-evidence-and-reliability-plan.md) | Exact-source gates and live owner/non-owner/recovery proof; P1 native capture audit reconciliation with scripts/capture_audit_summary.py |
 | NLU/BERT-Mini | [NLU Future Testing and Model Promotion Playbook](./nlu-future-testing-and-model-promotion-playbook.md) | Complete dataset, model, slot, OOS, safety, voice, external-data, training, promotion, and rollback procedure |
 | Data foundations | [Data Foundation and Wake-Model Gates](./data-foundation-and-wake-model-gates.md) | NLU provenance, frozen evaluation hashes, wake-audio grouped splits, model fingerprints, and three-pass verification |
@@ -32,7 +33,9 @@ This directory contains repeatable testing procedures and release gates. Histori
 | Notification brain | [Notification Brain Research, Changes and Testing](./notification-brain-testing-and-research.md) | Feature 151: root causes of repeated/verbose notifications, event-key + cooldown + one-liner design (phases A/B/D/E built, unit-tested), prior art, zero-credit audit, live verification protocol, and the open Phase C/F work |
 
 
-## Release Verification Matrix (100% Passing)
+## Historical release verification matrix — older snapshot
+
+The522 Rust /20 frontend /49 Worker counts below are retained historical figures, not current release acceptance. Use the dated assessments and the linked handover to identify source, build, ignored tests, failed attempts and still-unrun gates.
 
 | Subsystem / Suite | Command | Tests Run | Result | Duration |
 |---|---|---|---|---|

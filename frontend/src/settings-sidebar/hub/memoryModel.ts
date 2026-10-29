@@ -36,6 +36,8 @@ export interface MemoryStatus {
   briefing: boolean;
   /** The always-on profile is sent with cloud requests (older builds omit this: treat as on). */
   profile?: boolean;
+  /** The owner's name is learned from the Google account (older builds omit this: on). */
+  account_seed?: boolean;
   /** NEXUS may offer to save command sequences you repeat as one phrase (older builds omit this: on). */
   routines?: boolean;
   /** Optional background review of cloud conversations (older builds omit this: off). */
@@ -188,6 +190,7 @@ export type MemoryFlag =
   | "memcoreActivity"
   | "memcoreBriefing"
   | "memcoreProfile"
+  | "memcoreAccountSeed"
   | "memcoreRoutines"
   | "memcoreReview"
   | "memcoreTimetable"

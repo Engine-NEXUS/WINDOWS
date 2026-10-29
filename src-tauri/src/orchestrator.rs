@@ -276,6 +276,7 @@ fn pick_ack_opener() -> &'static str {
 fn ack_for(intent: &ParsedIntent) -> String {
     match intent {
         ParsedIntent::OpenCodeRabbitHub => "CodeRabbit active pull requests, sir.".to_string(),
+        ParsedIntent::CodeRabbitReviewThis | ParsedIntent::AiReviewThis => String::new(),
         ParsedIntent::OpenGitHubDashboard { subpage } => match subpage.as_str() {
             "feed" => "GitHub feed, sir.".to_string(),
             "pull_requests" | "open" => "Your pull requests, sir.".to_string(),
@@ -664,6 +665,8 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         // Settings sidebar, CodeRabbit Hub, and GitHub Dashboard — handled locally (no Worker round-trip)
         ParsedIntent::OpenSettings
         | ParsedIntent::OpenCodeRabbitHub
+        | ParsedIntent::CodeRabbitReviewThis
+        | ParsedIntent::AiReviewThis
         | ParsedIntent::OpenGitHubDashboard { .. } => Subsystem::LocalCommand,
 
         // GitHub sub-command system — typed operations via octocrab
@@ -874,7 +877,9 @@ pub async fn process_transcript<R: Runtime>(
             }
             _ => {
                 // A quiet "yes" heard as "dirt." must not lose the question and go to the cloud: ask once more.
-                if crate::intent_parser::is_mumble(&transcript) && offer::reask_once() {
+                if (crate::intent_parser::is_mumble(&transcript) || crate::intent_parser::is_stray_statement(&transcript))
+                    && offer::reask_once()
+                {
                     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
                     return say_and_finish(&app, request_id, "Sorry sir, was that a yes or a no?".into());
                 }
@@ -1562,6 +1567,12 @@ pub async fn process_transcript<R: Runtime>(
             ParsedIntent::OpenCodeRabbitHub => {
                 return run_open_coderabbit_hub(app).await;
             }
+            ParsedIntent::CodeRabbitReviewThis => {
+                return run_coderabbit_review_this(app).await;
+            }
+            ParsedIntent::AiReviewThis => {
+                return run_ai_review_this(app).await;
+            }
             _ => {}
         }
     }
@@ -1903,6 +1914,12 @@ pub async fn process_transcript<R: Runtime>(
             }
             ParsedIntent::OpenCodeRabbitHub => {
                 return run_open_coderabbit_hub(app).await;
+            }
+            ParsedIntent::CodeRabbitReviewThis => {
+                return run_coderabbit_review_this(app).await;
+            }
+            ParsedIntent::AiReviewThis => {
+                return run_ai_review_this(app).await;
             }
             ParsedIntent::OpenGitHubDashboard { subpage } => {
                 return run_open_github_dashboard(app, subpage.clone()).await;
@@ -2319,6 +2336,9 @@ pub async fn process_transcript<R: Runtime>(
                             _ => "Here is the response in the sidebar, sir.".to_string(),
                         };
                         (spoken, true)
+                    } else if let Some(short) = crate::howto::spoken_summary(&text) {
+                        // A long chat answer: two sentences aloud, everything in the sidebar.
+                        (short, true)
                     } else {
                         (text.clone(), false)
                     };
@@ -5537,6 +5557,12 @@ async fn run_offer_reply<R: Runtime>(
             }
         }
         (Offer::OpenApp { .. }, _) => "Understood, sir. I won't open anything.".to_string(),
+        (Offer::CodeRabbitReview { repo, pr }, Reply::Yes) => match crate::coderabbit_review::start_review(app.clone(), repo, pr).await {
+            Ok(_) => crate::coderabbit_review::next_working_line().to_string(),
+            Err(why) => why,
+        },
+        (Offer::CodeRabbitReview { .. }, Reply::Later) => "Very well, sir. Ask me again whenever you want the review.".to_string(),
+        (Offer::CodeRabbitReview { .. }, _) => "Understood, sir. I won't use a review.".to_string(),
         (Offer::FileConfirm, _) => {
             crate::action_kernel::pending::clear();
             "Understood, sir. I left everything as it was.".to_string()
@@ -8426,6 +8452,43 @@ async fn run_open_coderabbit_hub<R: Runtime>(
     })
 }
 
+/// "Give me the CodeRabbit review": resolves the open PR, then ASKS (with the free-review count) before spending
+/// one. The review itself starts only from `Offer::CodeRabbitReview` Yes or the on-screen button.
+async fn run_coderabbit_review_this<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    use tauri::Emitter;
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Some((repo, pr)) = crate::coderabbit_review::current_context() else {
+        return say_and_finish(&app, request_id, "Open a pull request first, sir, then ask me again.".to_string());
+    };
+    if crate::coderabbit_review::is_running(&repo, pr) {
+        return say_and_finish(&app, request_id, format!("CodeRabbit is already reviewing PR {pr}, sir. I'll tell you when it finishes."));
+    }
+    let usage = crate::coderabbit_review::account().await.and_then(|a| a.2);
+    if let crate::coderabbit_review::Start::Refused(why) = crate::coderabbit_review::start_decision(false, usage.as_ref()) {
+        return say_and_finish(&app, request_id, why);
+    }
+    let Some(u) = usage else {
+        return say_and_finish(&app, request_id, "I could not read your CodeRabbit usage, sir.".to_string());
+    };
+    let line = crate::coderabbit_review::consent_line(&u, pr, &repo);
+    crate::memcore::offer::set(crate::memcore::offer::Offer::CodeRabbitReview { repo: repo.clone(), pr }, true);
+    let _ = app.emit("coderabbit:consent", serde_json::json!({ "repo": repo, "prNumber": pr, "line": line }));
+    say_and_finish(&app, request_id, line)
+}
+
+/// "Have Gemini look at this PR": the analysis with the owner's own API key. Not CodeRabbit, and said so.
+async fn run_ai_review_this<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Some((repo, pr)) = crate::coderabbit_review::current_context() else {
+        return say_and_finish(&app, request_id, "Open a pull request first, sir, then ask me again.".to_string());
+    };
+    let line = match crate::ai_review::start(app.clone(), repo, pr) {
+        Ok(_) => "On it, sir. I'm reading it with your own AI key. This is not CodeRabbit; I'll tell you when it's done.".to_string(),
+        Err(e) => e,
+    };
+    say_and_finish(&app, request_id, line)
+}
+
 /// Open the native GitHub Dashboard / feed in a centered 720px window.
 async fn run_open_github_dashboard<R: Runtime>(
     app: AppHandle<R>,
@@ -8920,6 +8983,15 @@ async fn try_power_and_howto<R: Runtime>(
     app: &AppHandle<R>,
     transcript: &str,
 ) -> Option<Result<ProcessResult, String>> {
+    if crate::memcore::account_seed::is_name_question(transcript) {
+        if let Ok(dir) = app.path().app_data_dir() {
+            crate::memcore::account_seed::seed(&dir); // the account may have been connected since boot
+            if let Some(line) = crate::memcore::account_seed::name_answer(&dir) {
+                let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                return Some(say_and_finish(app, request_id, line));
+            }
+        }
+    }
     if let Some(card) = crate::howto::static_card(transcript) {
         let (request_id, _) = install_new_request(Subsystem::LocalCommand);
         let app2 = app.clone();
@@ -9054,6 +9126,7 @@ fn may_answer_offer(
                 | Offer::AddEvent { .. }
                 | Offer::ClearTimetable
                 | Offer::ReopenSession
+                | Offer::CodeRabbitReview { .. }
         ),
     }
 }

@@ -191,6 +191,8 @@ windows = { version = "0.36", features = [
     "Media_SpeechSynthesis", # the Windows built-in voice: instant safety-net speech
     "Storage_Streams",
     "Globalization",
+    "UI_Notifications", # native toast fallback (notify_native)
+    "Data_Xml_Dom",
 ] }
 # Registry access for App Paths + Uninstall keys (app discovery)
 winreg = "0.55"
