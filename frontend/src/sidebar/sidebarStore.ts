@@ -105,7 +105,7 @@ export interface ForegroundReviewMeta {
   warnings: string[];
 }
 
-import type { CodeRabbitReviewData } from "./CodeRabbitDashboard";
+import type { CodeRabbitReviewData } from "./CodeRabbitPanel";
 import type { StackPayload, StackProgress, StackLogoPatch } from "./stackTypes";
 
 /** Overlay late-arriving logos onto a stack payload without touching anything else. */

@@ -8,7 +8,11 @@ import { stopTts } from "../audio/ttsPlayer";
 import { AnalysisDashboard } from "./AnalysisDashboard";
 import { GitHubConflictPanel } from "./GitHubConflictPanel";
 import { ConfirmationPanel } from "./ConfirmationPanel";
-import { CodeRabbitDashboard, SAMPLE_CODERABBIT_REVIEW } from "./CodeRabbitDashboard";
+import { CodeRabbitPanel } from "./CodeRabbitPanel";
+import { EventDetailView } from "./EventDetailView";
+import { useArrowDock } from "./dockKeys";
+
+const EMPTY_CODERABBIT = { mode: "pr_list", activePrs: [] } as const;
 import { topicTitle } from "./spatialShared";
 import { ZoomViewer } from "./ZoomViewer";
 
@@ -107,7 +111,7 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
             useSidebar.getState().showCodeRabbit(pending.analysis);
           } else if (pending.query?.toLowerCase().includes("coderabbit")) {
             console.log("[sidebar] showing CodeRabbit sample/review for query");
-            useSidebar.getState().showCodeRabbit(pending.analysis || SAMPLE_CODERABBIT_REVIEW);
+            useSidebar.getState().showCodeRabbit(pending.analysis || EMPTY_CODERABBIT);
           } else if (pending.analysis) {
             // If analysis data is present, use the rich dashboard view
             console.log("[sidebar] showing with analysis data");
@@ -124,7 +128,7 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
 
     listen<{ query: string; text: string }>("sidebar:show", (event) => {
       if (event.payload.query?.toLowerCase().includes("coderabbit")) {
-        useSidebar.getState().showCodeRabbit(SAMPLE_CODERABBIT_REVIEW);
+        useSidebar.getState().showCodeRabbit(EMPTY_CODERABBIT as any);
       } else {
         show(event.payload.query, event.payload.text);
       }
@@ -134,7 +138,7 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
     listen<{ query: string; text: string; analysis: any }>("sidebar:analysis", (event) => {
       const { query: q, text: t, analysis } = event.payload;
       if (analysis?.findings || (analysis && analysis.verdict) || q?.toLowerCase().includes("coderabbit")) {
-        useSidebar.getState().showCodeRabbit(analysis || SAMPLE_CODERABBIT_REVIEW);
+        useSidebar.getState().showCodeRabbit(analysis || EMPTY_CODERABBIT);
       } else if (analysis) {
         useSidebar.getState().showAnalysis(q, t, analysis);
       } else {
@@ -300,45 +304,22 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
     responseScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   };
 
+  const isEventDetail = (analysisData as any)?.mode === "event_detail";
   const isCodeRabbit = Boolean(
+    isEventDetail ||
     codeRabbitData ||
       (analysisData && ((analysisData as any).findings || (analysisData as any).activePrs || (analysisData as any).mode === "pr_list")) ||
       query?.toLowerCase().includes("coderabbit")
   );
 
+  // Left/Right arrows move the window (assistant and alert views sit right, the CodeRabbit list centred).
+  useArrowDock(isEventDetail ? "right" : isCodeRabbit ? "center" : "right", onDock);
+
   return (
     <div id="sidebar-app" className={visible ? "sidebar--visible" : "sidebar--hidden"}>
         <div className={`sidebar-card ${confirmationData ? "mode--confirmation" : ""} ${isCodeRabbit ? "mode--coderabbit" : ""} font-size--${fontSize}`}>
-          {/* ── Header row: drag region + dock controls (Left/Right) ────── */}
-          {!isCodeRabbit && (
-            <header className="sidebar-header-row" data-tauri-drag-region>
-              <div className="sidebar-header-spacer" data-tauri-drag-region />
-              <div className="sidebar-dock-controls">
-                <button
-                  type="button"
-                  className="sidebar-dock-btn"
-                  onClick={() => {
-                    invoke("show_sidebar_view", { view: "coderabbit", dock: "center" }).catch(() => {});
-                    useSidebar.getState().showAnalysis(
-                      "CodeRabbit AI — Active Pull Requests",
-                      "Here are the active pull requests in ultron, sir.",
-                      { mode: "pr_list", activePrs: SAMPLE_CODERABBIT_REVIEW } as any
-                    );
-                  }}
-                  title="Open CodeRabbit AI Hub"
-                  style={{ fontSize: 11, width: "auto", padding: "0 7px", gap: 4 }}
-                >
-                  <span>🐰</span> CodeRabbit
-                </button>
-                <button type="button" className="sidebar-dock-btn" onClick={() => onDock("left")} title="Dock Left">
-                  ◧
-                </button>
-                <button type="button" className="sidebar-dock-btn" onClick={() => onDock("right")} title="Dock Right">
-                  ◨
-                </button>
-              </div>
-            </header>
-          )}
+          {/* No title bar and no dock buttons: drag the window by this strip, or click it and press the arrow keys. */}
+          <div className="sidebar-drag-strip" data-tauri-drag-region />
 
           {/* ── Topic title — ONLY for research / analyse responses ────── */}
           {/* The search/research topic heads the information block here;
@@ -364,10 +345,12 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
                   hide();
                 }}
               />
+            ) : (analysisData as any)?.mode === "event_detail" ? (
+              <EventDetailView data={analysisData as any} />
             ) : codeRabbitData ? (
-              <CodeRabbitDashboard data={codeRabbitData} />
+              <CodeRabbitPanel data={codeRabbitData} />
             ) : analysisData && ((analysisData as any).findings || (analysisData as any).activePrs || (analysisData as any).mode === "pr_list") ? (
-              <CodeRabbitDashboard data={analysisData as any} />
+              <CodeRabbitPanel data={analysisData as any} />
             ) : analysisData ? (
               <AnalysisDashboard data={analysisData} />
             ) : (

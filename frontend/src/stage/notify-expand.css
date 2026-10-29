@@ -1,0 +1,20 @@
+/* The clicked notification growing from the toast position into the sidebar's rectangle (solid, never interactive). */
+.nx-expand {
+  position: fixed;
+  box-sizing: border-box;
+  background: #151515;
+  color: #f1f1f1;
+  border: 1px solid #2b2b30;
+  border-left: 3px solid #8ab4ff;
+  border-radius: 12px;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  overflow: hidden;
+  padding: 16px 18px;
+  font: 600 14px/1.4 "Segoe UI", system-ui, sans-serif;
+  z-index: 40;
+}
+.nx-expand--failed { border-left-color: #ff7a4d; }
+.nx-expand--recovered { border-left-color: #5fd38a; }
+.nx-expand-title { display: block; }
+@media (prefers-reduced-motion: reduce) { .nx-expand { transition: none !important; } }
