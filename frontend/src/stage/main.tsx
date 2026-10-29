@@ -11,6 +11,7 @@ import { TourOverlay } from "./TourOverlay";
 import { HandOverlay } from "./HandOverlay";
 import { NotifyExpand } from "./NotifyExpand";
 import { BackgroundTaskChip } from "./BackgroundTaskChip";
+import { CaptionLiveRegion } from "./CaptionLiveRegion";
 import { initThemeSync } from "../sidebar/theme";
 
 initThemeSync(); // Light/Dark follows the Command Hub setting (orb, callouts)
@@ -380,6 +381,7 @@ function StageApp() {
       <BackgroundTaskChip />
       <ResponseCaption />
       <LiveCaption />
+      <CaptionLiveRegion />
     </div>
   );
 }

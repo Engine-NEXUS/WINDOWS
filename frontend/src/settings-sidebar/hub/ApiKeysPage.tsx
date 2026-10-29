@@ -471,6 +471,7 @@ export function ApiKeysPage({ onChanged }: { onChanged: () => void }) {
             type="button"
             className={`hx-cat-btn ${categoryFilter === t.id ? "is-active" : ""}`}
             onClick={() => setCategoryFilter(t.id)}
+            aria-pressed={categoryFilter === t.id}
           >
             {t.label}
           </button>

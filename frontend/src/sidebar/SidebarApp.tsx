@@ -364,7 +364,13 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
 
           {/* ── Floating Scroll to Top button ──────────────────────────── */}
           {showScrollTop && !confirmationData && !isCodeRabbit && (
-            <button type="button" className="sidebar-scroll-top-btn" onClick={scrollToTop} title="Scroll to top">
+            <button
+              type="button"
+              className="sidebar-scroll-top-btn"
+              onClick={scrollToTop}
+              title="Scroll to top"
+              aria-label="Scroll to top"
+            >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <polyline points="18 15 12 9 6 15" />
               </svg>
@@ -393,6 +399,7 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
                   className="nexus-lightbox-btn"
                   onClick={() => openExternal(activeImage.src).catch(() => window.open(activeImage.src, "_blank"))}
                   title="Open in external browser"
+                  aria-label="Open in external browser"
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
@@ -405,6 +412,7 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
                   className="nexus-lightbox-btn nexus-lightbox-close"
                   onClick={() => setActiveImage(null)}
                   title="Close (Esc)"
+                  aria-label="Close"
                 >
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <line x1="18" y1="6" x2="6" y2="18" />

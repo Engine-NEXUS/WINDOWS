@@ -240,6 +240,8 @@ export function LoadingIndicator() {
 
   return (
     <div
+      role="status"
+      aria-label="NEXUS is working"
       data-interactive
       className={`loading-indicator${calibrating ? " loading-indicator--calibrating" : ""}`}
       onPointerDown={handlePointerDown}

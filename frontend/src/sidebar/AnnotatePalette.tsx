@@ -132,6 +132,7 @@ export function AnnotateView({ onDock = () => {} }: { onDock?: (d: string) => vo
             key={t.id}
             type="button"
             title={t.hint}
+            aria-label={t.hint}
             className={`annotate-tool ${tool === t.id ? "annotate-tool--active" : ""}`}
             onClick={() => pickTool(t.id)}
           >
@@ -146,6 +147,7 @@ export function AnnotateView({ onDock = () => {} }: { onDock?: (d: string) => vo
             key={c}
             type="button"
             title={c}
+            aria-label={`Color ${c}`}
             className={`annotate-swatch ${color === c ? "annotate-swatch--active" : ""}`}
             style={{ background: c }}
             onClick={() => pickColor(c)}

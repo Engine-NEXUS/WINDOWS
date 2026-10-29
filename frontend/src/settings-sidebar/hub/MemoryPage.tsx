@@ -309,6 +309,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
           type="button"
           className={`hx-tab-btn ${activeTab === "privacy" ? "is-active" : ""}`}
           onClick={() => setActiveTab("privacy")}
+          aria-pressed={activeTab === "privacy"}
         >
           🛡️ Privacy & AI
         </button>
@@ -316,6 +317,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
           type="button"
           className={`hx-tab-btn ${activeTab === "facts" ? "is-active" : ""}`}
           onClick={() => setActiveTab("facts")}
+          aria-pressed={activeTab === "facts"}
         >
           🧠 Facts Vault ({rows.length})
         </button>
@@ -323,6 +325,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
           type="button"
           className={`hx-tab-btn ${activeTab === "people" ? "is-active" : ""}`}
           onClick={() => setActiveTab("people")}
+          aria-pressed={activeTab === "people"}
         >
           👥 People & Agenda ({people.length + slots.length})
         </button>
@@ -330,6 +333,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
           type="button"
           className={`hx-tab-btn ${activeTab === "egress" ? "is-active" : ""}`}
           onClick={() => setActiveTab("egress")}
+          aria-pressed={activeTab === "egress"}
         >
           🌐 Cloud Egress ({egress.length})
         </button>
@@ -520,6 +524,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
                   type="button"
                   className={`hx-cat-btn ${factFilter === f ? "is-active" : ""}`}
                   onClick={() => setFactFilter(f)}
+                  aria-pressed={factFilter === f}
                 >
                   {f === "all" ? "All" : f === "pinned" ? "Pinned" : f === "fact" ? "Facts" : "Profile"}
                 </button>

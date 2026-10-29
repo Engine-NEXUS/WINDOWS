@@ -332,7 +332,13 @@ export function ArchitectApp({ onDock = () => {} }: { onDock?: (d: string) => vo
       {errorMsg && (
         <div className="architect-error-banner">
           ⚠️ {errorMsg}
-          <button type="button" className="architect-error-close" onClick={() => setErrorMsg(null)}>
+          <button
+            type="button"
+            className="architect-error-close"
+            onClick={() => setErrorMsg(null)}
+            title="Close error"
+            aria-label="Close error"
+          >
             ✕
           </button>
         </div>

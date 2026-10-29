@@ -314,6 +314,7 @@ export function AppearancePage({ themeMode, onTheme }: AppearancePageProps) {
                 type="button"
                 className={`hx-anim-card ${isSelected ? "is-selected" : ""}`}
                 onClick={() => handleSelectVariant(a.id)}
+                aria-pressed={isSelected}
               >
                 <span className="hx-anim-icon">{a.icon}</span>
                 <span className="hx-anim-name">{a.name}</span>
@@ -346,6 +347,7 @@ export function AppearancePage({ themeMode, onTheme }: AppearancePageProps) {
                     onClick={() => handleSelectColor(c.hex)}
                     title={c.name}
                     aria-label={c.name}
+                    aria-pressed={isSelected}
                   >
                     {c.id === "default" ? (
                       <span className="hx-swatch-default-icon">⊘</span>
@@ -370,6 +372,7 @@ export function AppearancePage({ themeMode, onTheme }: AppearancePageProps) {
                 onClick={() => colorInputRef.current?.click()}
                 title="Custom color"
                 aria-label="Pick custom color"
+                aria-pressed={selectedColor.startsWith("#") && !BORDER_COLORS.some((c) => c.hex.toLowerCase() === selectedColor.toLowerCase())}
               >
                 {selectedColor.startsWith("#") && !BORDER_COLORS.some((c) => c.hex.toLowerCase() === selectedColor.toLowerCase()) ? (
                   <span className="hx-swatch-circle" style={{ background: selectedColor }} />
