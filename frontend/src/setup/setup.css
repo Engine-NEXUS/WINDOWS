@@ -49,7 +49,7 @@ html, body, #root {
   z-index: 1000;
   user-select: none;
   border-bottom: 1px solid var(--nx-border);
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--ui-surface-card);
 }
 
 /* ── Welcome step ────────────────────────────────────────────── */
@@ -259,7 +259,7 @@ html, body, #root {
 
 .setup-provider-icon--github {
   background: #1F2937;
-  color: #FFFFFF;
+  color: var(--stage-text);
 }
 
 .setup-provider-info p {
@@ -749,7 +749,7 @@ html, body, #root {
 .installer-btn-proceed {
   width: 100%;
   background: #000000;
-  color: #ffffff;
+  color: var(--stage-text);
   border: none;
   border-radius: 6px;
   padding: 14px;

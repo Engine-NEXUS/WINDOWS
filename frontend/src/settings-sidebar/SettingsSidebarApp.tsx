@@ -585,7 +585,7 @@ function DisplayTab({ settings, update }: {
                   border: isSelected ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
                   background: isSelected ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
                   cursor: "pointer",
-                  color: "#fff",
+                  color: "var(--ui-text-primary)",
                   fontSize: 12,
                   fontWeight: isSelected ? 600 : 400,
                   transition: "all 0.15s ease",
@@ -625,7 +625,7 @@ function DisplayTab({ settings, update }: {
                 width: 32,
                 height: 32,
                 borderRadius: 6,
-                border: "1px solid rgba(255,255,255,0.2)",
+                border: "1px solid var(--ui-border-strong)",
                 cursor: "pointer",
                 background: "transparent",
               }}
@@ -819,7 +819,7 @@ function DisplayTab({ settings, update }: {
             width: "100%",
             padding: "10px 14px",
             borderRadius: 10,
-            color: "#ffffff",
+            color: "var(--ui-text-primary)",
             fontWeight: 600,
             fontSize: 13,
             cursor: "pointer",
@@ -1589,7 +1589,7 @@ function AuthTab({ settings, update }: {
           )}
           {showCustomCreds && (
             <div className="auth-card" style={{ marginTop: 8, padding: 12 }}>
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.7)", marginBottom: 8 }}>
+              <div style={{ fontSize: 11, color: "var(--ui-text-secondary)", marginBottom: 8 }}>
                 Google Cloud Desktop OAuth credentials:
               </div>
               <input

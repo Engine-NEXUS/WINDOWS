@@ -78,7 +78,7 @@ export function DeviceLinksPage({ onOpenActivity }: { onOpenActivity?: () => voi
           <div className="hx-switch-title">
             <span>Verified Phone</span>
             {binding && (
-              <span className="hx-pill hx-pill--on" style={{ fontSize: 10, background: "rgba(16, 185, 129, 0.2)", color: "#34d399" }}>
+              <span className="hx-pill hx-pill--on" style={{ fontSize: 10, background: "color-mix(in srgb, var(--ui-success-solid) 20%, transparent)", color: "var(--ui-success-text)" }}>
                 ✓ Verified
               </span>
             )}
@@ -86,9 +86,9 @@ export function DeviceLinksPage({ onOpenActivity }: { onOpenActivity?: () => voi
         </div>
 
         {binding ? (
-          <div style={{ marginTop: 12, padding: "12px 14px", background: "rgba(0, 0, 0, 0.25)", borderRadius: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ marginTop: 12, padding: "12px 14px", background: "var(--ui-surface-sunken)", borderRadius: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: "#fff", letterSpacing: "0.02em" }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--ui-text-primary)", letterSpacing: "0.02em" }}>
                 📱 {binding.phone}
               </div>
               <div className="hx-fact-meta" style={{ marginTop: 3 }}>
@@ -138,8 +138,8 @@ export function DeviceLinksPage({ onOpenActivity }: { onOpenActivity?: () => voi
             </div>
 
             {challengeId && (
-              <div style={{ marginTop: 8, padding: 12, background: "rgba(0, 0, 0, 0.3)", borderRadius: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: "#fff" }}>Enter 6-Digit SMS Code:</div>
+              <div style={{ marginTop: 8, padding: 12, background: "var(--ui-surface-sunken)", borderRadius: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "var(--ui-text-primary)" }}>Enter 6-Digit SMS Code:</div>
                 <div style={{ display: "flex", gap: 8 }}>
                   <input
                     aria-label="SMS verification code"
@@ -208,11 +208,11 @@ export function DeviceLinksPage({ onOpenActivity }: { onOpenActivity?: () => voi
           </div>
 
           {outgoingCode && (
-            <div style={{ marginTop: 10, padding: 10, background: "rgba(59, 130, 246, 0.1)", border: "1px solid rgba(59, 130, 246, 0.3)", borderRadius: 8, textAlign: "center" }}>
-              <div style={{ fontSize: 10.5, fontWeight: 600, color: "#93c5fd", textTransform: "uppercase" }}>
+            <div style={{ marginTop: 10, padding: 10, background: "color-mix(in srgb, var(--ui-accent-solid) 10%, transparent)", border: "1px solid color-mix(in srgb, var(--ui-accent-solid) 30%, transparent)", borderRadius: 8, textAlign: "center" }}>
+              <div style={{ fontSize: 10.5, fontWeight: 600, color: "var(--ui-info-text)", textTransform: "uppercase" }}>
                 10-Minute Pairing Key
               </div>
-              <div style={{ fontSize: 24, fontWeight: 800, letterSpacing: "0.2em", color: "#ffffff", margin: "4px 0" }}>
+              <div style={{ fontSize: 24, fontWeight: 800, letterSpacing: "0.2em", color: "var(--ui-text-primary)", margin: "4px 0" }}>
                 {outgoingCode}
               </div>
             </div>
@@ -230,7 +230,7 @@ export function DeviceLinksPage({ onOpenActivity }: { onOpenActivity?: () => voi
         </div>
 
         {pending.length === 0 ? (
-          <div style={{ padding: "16px 0", textAlign: "center", color: "rgba(255, 255, 255, 0.45)", fontSize: 12 }}>
+          <div style={{ padding: "16px 0", textAlign: "center", color: "var(--ui-text-tertiary)", fontSize: 12 }}>
             No incoming pairing requests at this moment.
           </div>
         ) : (
@@ -240,8 +240,8 @@ export function DeviceLinksPage({ onOpenActivity }: { onOpenActivity?: () => voi
                 key={request.request_id}
                 style={{
                   padding: 12,
-                  background: "rgba(0, 0, 0, 0.25)",
-                  border: "1px solid rgba(255, 255, 255, 0.08)",
+                  background: "var(--ui-surface-sunken)",
+                  border: "1px solid var(--ui-border-subtle)",
                   borderRadius: 10,
                   display: "flex",
                   justifyContent: "space-between",
@@ -249,7 +249,7 @@ export function DeviceLinksPage({ onOpenActivity }: { onOpenActivity?: () => voi
                 }}
               >
                 <div>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ui-text-primary)" }}>
                     💻 {request.device_name || "Another NEXUS Laptop"}
                   </div>
                   <div className="hx-fact-meta">Requests device pairing</div>
@@ -308,7 +308,7 @@ export function DeviceLinksPage({ onOpenActivity }: { onOpenActivity?: () => voi
         <div className="hx-switch-title">Linked Laptops ({links.length})</div>
 
         {links.length === 0 ? (
-          <div style={{ padding: "12px 0", textAlign: "center", color: "rgba(255, 255, 255, 0.45)", fontSize: 12 }}>
+          <div style={{ padding: "12px 0", textAlign: "center", color: "var(--ui-text-tertiary)", fontSize: 12 }}>
             No laptops paired yet.
           </div>
         ) : (
@@ -318,8 +318,8 @@ export function DeviceLinksPage({ onOpenActivity }: { onOpenActivity?: () => voi
                 key={link.link_id}
                 style={{
                   padding: "10px 14px",
-                  background: "rgba(0, 0, 0, 0.2)",
-                  border: "1px solid rgba(255, 255, 255, 0.06)",
+                  background: "var(--ui-surface-sunken)",
+                  border: "1px solid var(--ui-border-subtle)",
                   borderRadius: 10,
                   display: "flex",
                   justifyContent: "space-between",
@@ -329,7 +329,7 @@ export function DeviceLinksPage({ onOpenActivity }: { onOpenActivity?: () => voi
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <span style={{ fontSize: 20 }}>💻</span>
                   <div>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ui-text-primary)" }}>
                       {link.device_name || "Linked NEXUS Laptop"}
                     </div>
                     <div className="hx-fact-meta">

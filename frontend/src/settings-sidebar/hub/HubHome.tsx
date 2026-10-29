@@ -150,7 +150,7 @@ export function HubHome({ acc, insights: _insights, themeMode, onTheme: _onTheme
               {a.provider === "google" && acc.googleNeedsSignin && confirm !== key && (
                 <button
                   className="hx-btn hx-btn--tiny"
-                  style={{ marginRight: 8, background: "rgba(59, 130, 246, 0.15)", color: "var(--nx-accent-blue)", border: "1px solid var(--nx-accent-blue)", whiteSpace: "nowrap" }}
+                  style={{ marginRight: 8, background: "color-mix(in srgb, var(--ui-accent-solid) 15%, transparent)", color: "var(--nx-accent-blue)", border: "1px solid var(--nx-accent-blue)", whiteSpace: "nowrap" }}
                   disabled={acc.busy !== null}
                   onClick={(e) => {
                     e.stopPropagation();

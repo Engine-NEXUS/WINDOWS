@@ -537,7 +537,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
               {pending.map((p) => (
                 <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 8 }}>
                   <div>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>{p.key}</div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ui-text-primary)" }}>{p.key}</div>
                     <div className="hx-switch-sub">{p.value}</div>
                   </div>
                   <div style={{ display: "flex", gap: 6 }}>
@@ -551,7 +551,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
 
           {/* Facts List */}
           {filteredRows.length === 0 && (
-            <div className="hx-card" style={{ padding: 24, textAlign: "center", color: "rgba(255, 255, 255, 0.45)" }}>
+            <div className="hx-card" style={{ padding: 24, textAlign: "center", color: "var(--ui-text-tertiary)" }}>
               No facts match your query. NEXUS learns your habits and projects automatically as you speak.
             </div>
           )}
@@ -562,7 +562,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span className="hx-fact-key">{keyLabel(r)}</span>
                   {r.pinned && <span className="hx-pill hx-pill--on">Pinned</span>}
-                  <span className="hx-badge" style={{ background: "rgba(255, 255, 255, 0.08)" }}>{r.tier}</span>
+                  <span className="hx-badge" style={{ background: "var(--ui-surface-hover)" }}>{r.tier}</span>
                 </div>
                 {confirm === `${r.id}` ? (
                   <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -602,7 +602,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
             <div className="hx-section-title">Priority People & Contacts ({people.length})</div>
             <div className="hx-section-desc">Contacts whose messages trigger voice alerts and executive summaries.</div>
             {people.length === 0 ? (
-              <div className="hx-card" style={{ padding: 16, color: "rgba(255, 255, 255, 0.45)", fontSize: 12 }}>
+              <div className="hx-card" style={{ padding: 16, color: "var(--ui-text-tertiary)", fontSize: 12 }}>
                 No priority people detected yet. People are indexed automatically when you frequently collaborate with them.
               </div>
             ) : (
@@ -644,7 +644,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
             <div className="hx-section-title">Important Emails ({mail.length})</div>
             <div className="hx-section-desc">Critical notifications from GitHub, databases, and deadlines filed for 7 days.</div>
             {mail.length === 0 ? (
-              <div className="hx-card" style={{ padding: 16, color: "rgba(255, 255, 255, 0.45)", fontSize: 12 }}>
+              <div className="hx-card" style={{ padding: 16, color: "var(--ui-text-tertiary)", fontSize: 12 }}>
                 No important emails filed. Senders and short snippets are analyzed only when new mail arrives.
               </div>
             ) : (
@@ -653,7 +653,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
                   <div className="hx-card" key={m.key} style={{ padding: "10px 14px" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>{m.subject || "(no subject)"}</span>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--ui-text-primary)" }}>{m.subject || "(no subject)"}</span>
                         <span className="hx-pill hx-pill--on" style={{ fontSize: 9.5 }}>{categoryLabel(m.category)}</span>
                       </div>
                       <button
@@ -667,7 +667,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
                     <div className="hx-fact-meta" style={{ marginTop: 4 }}>
                       From: {m.sender} ({m.email}) • {ageLabel(now, Math.floor(m.ts_ms / 1000))}
                     </div>
-                    <div style={{ fontSize: 12, color: "rgba(255, 255, 255, 0.7)", marginTop: 4 }}>
+                    <div style={{ fontSize: 12, color: "var(--ui-text-secondary)", marginTop: 4 }}>
                       {m.snippet}
                     </div>
                   </div>
@@ -681,7 +681,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
             <div className="hx-section-title">Timetable Agenda Slots ({slots.length})</div>
             <div className="hx-section-desc">Recurring schedules NEXUS watches to proactively prepare workspaces.</div>
             {slots.length === 0 ? (
-              <div className="hx-card" style={{ padding: 16, color: "rgba(255, 255, 255, 0.45)", fontSize: 12 }}>
+              <div className="hx-card" style={{ padding: 16, color: "var(--ui-text-tertiary)", fontSize: 12 }}>
                 No agenda slots created. Say "remind me every day at 10 AM for standup" to create one.
               </div>
             ) : (
@@ -689,7 +689,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
                 {slots.map((s) => (
                   <div className="hx-card" key={s.id} style={{ padding: "10px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                     <div>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>{s.title}</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ui-text-primary)" }}>{s.title}</div>
                       <div className="hx-fact-meta" style={{ marginTop: 2 }}>
                         ⏰ {fmtSlotTime(s)} • {fmtDays(s.days)}
                       </div>
@@ -727,7 +727,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
               </button>
             </div>
             {routinesView.routines.length === 0 ? (
-              <div className="hx-card" style={{ padding: 16, color: "rgba(255, 255, 255, 0.45)", fontSize: 12, marginTop: 8 }}>
+              <div className="hx-card" style={{ padding: 16, color: "var(--ui-text-tertiary)", fontSize: 12, marginTop: 8 }}>
                 No custom voice macros saved yet.
               </div>
             ) : (
@@ -735,7 +735,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
                 {routinesView.routines.map((r) => (
                   <div className="hx-card" key={r.name} style={{ padding: "10px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                     <div>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>"{r.name}"</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ui-text-primary)" }}>"{r.name}"</div>
                       <div className="hx-fact-meta">{routineUse(r)} • {r.steps.join(" → ")}</div>
                     </div>
                     <button
@@ -759,7 +759,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
                 {corrections.map((c) => (
                   <div className="hx-card" key={c.heard} style={{ padding: "10px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                     <div>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>{describeCorrection(c)}</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ui-text-primary)" }}>{describeCorrection(c)}</div>
                       <div className="hx-fact-meta">Last seen {ageLabel(now, Math.floor(c.last_seen / 1000))}</div>
                     </div>
                     <button
@@ -781,7 +781,7 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
         <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
 
           {egress.length === 0 ? (
-            <div className="hx-card" style={{ padding: 24, textAlign: "center", color: "rgba(255, 255, 255, 0.45)" }}>
+            <div className="hx-card" style={{ padding: 24, textAlign: "center", color: "var(--ui-text-tertiary)" }}>
               No cloud transmissions in the last 7 days. Everything was resolved entirely on this machine.
             </div>
           ) : (
@@ -791,11 +791,11 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
                   <span className="hx-pill hx-pill--on" style={{ fontSize: 10 }}>{e.route}</span>
                   <span className="hx-fact-meta">{ageLabel(now, Math.floor(e.ts / 1000))}</span>
                 </div>
-                <div style={{ fontSize: 12.5, fontWeight: 600, color: "#ffffff" }}>
-                  Request: <span style={{ fontWeight: 400, color: "rgba(255, 255, 255, 0.85)" }}>{e.request}</span>
+                <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ui-text-primary)" }}>
+                  Request: <span style={{ fontWeight: 400, color: "var(--ui-text-primary)" }}>{e.request}</span>
                 </div>
                 {e.memory && (
-                  <div style={{ fontSize: 11, color: "rgba(255, 255, 255, 0.6)", background: "rgba(0, 0, 0, 0.2)", padding: "6px 8px", borderRadius: 6 }}>
+                  <div style={{ fontSize: 11, color: "var(--ui-text-secondary)", background: "var(--ui-surface-sunken)", padding: "6px 8px", borderRadius: 6 }}>
                     Attached Memory: {e.memory}
                   </div>
                 )}

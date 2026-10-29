@@ -344,20 +344,9 @@ body,
   min-width: 26px;
 }
 
-/* Light-theme slider tokens: system preference now, .hud--light hook
-   reserved for the pill-level luminance theme (plan 03, deferred). */
-@media (prefers-color-scheme: light) {
-  .hud {
-    --slider-track: rgba(20, 30, 50, 0.14);
-    --slider-range: linear-gradient(90deg, #1c7ab8, #1c7a45);
-    --slider-ring: rgba(20, 30, 50, 0.25);
-    --slider-tip-bg: rgba(255, 255, 255, 0.94);
-    --slider-tip-border: rgba(20, 30, 50, 0.16);
-    --slider-tip-text: #0f172a;
-  }
-}
-
-.hud--light {
+/* Light-theme slider tokens. They follow the app's theme setting (data-theme, set by sidebar/theme.ts like every other
+   window), not the OS preference: with the Hub on Dark and Windows on Light the sliders used to flip alone. */
+:root[data-theme="light"] .hud {
   --slider-track: rgba(20, 30, 50, 0.14);
   --slider-range: linear-gradient(90deg, #1c7ab8, #1c7a45);
   --slider-ring: rgba(20, 30, 50, 0.25);

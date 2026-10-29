@@ -1049,7 +1049,7 @@ function AccountsTab() {
                             height: 42,
                             borderRadius: "50%",
                             background: "var(--nx-accent-blue)",
-                            color: "white",
+                            color: "var(--ui-text-primary)",
                             display: "flex",
                             alignItems: "center",
                             justifyContent: "center",

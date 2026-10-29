@@ -23,7 +23,7 @@ html, body {
   overflow: hidden;
   background: transparent;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  color: rgba(255, 255, 255, 0.95);
+  color: var(--ui-text-primary);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -96,19 +96,19 @@ html, body {
   align-items: center;
   justify-content: space-between;
   padding-bottom: 8px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--ui-border-subtle);
 }
 
 .settings-title {
   font-size: 15px;
   font-weight: 600;
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--ui-text-primary);
   letter-spacing: 0.02em;
 }
 
 .settings-hint {
   font-size: 10px;
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--ui-text-tertiary);
 }
 
 /* ─── Merged Header Row: tabs left, dock right, full-width drag region ─── */
@@ -118,7 +118,7 @@ html, body {
   justify-content: space-between;
   gap: 16px;
   padding: 4px 0 8px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--ui-border-subtle);
   user-select: none;
   -webkit-user-select: none;
 }
@@ -140,7 +140,7 @@ html, body {
 .settings-tab {
   background: none;
   border: none;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--ui-text-tertiary);
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
@@ -151,13 +151,13 @@ html, body {
 }
 
 .settings-tab:hover {
-  color: rgba(255, 255, 255, 0.8);
-  background: rgba(255, 255, 255, 0.06);
+  color: var(--ui-text-primary);
+  background: var(--ui-surface-hover);
 }
 
 .settings-tab--active {
-  color: rgba(255, 255, 255, 0.95);
-  background: rgba(255, 255, 255, 0.12);
+  color: var(--ui-text-primary);
+  background: var(--ui-surface-raised);
 }
 
 /* ─── Scrollable content ─── */
@@ -189,7 +189,7 @@ html, body {
 .settings-section-title {
   font-size: 11px;
   font-weight: 600;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--ui-text-tertiary);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   padding-bottom: 4px;
@@ -207,13 +207,13 @@ html, body {
 
 .setting-label {
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--ui-text-primary);
   flex-shrink: 0;
 }
 
 .setting-desc {
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--ui-text-tertiary);
   margin-top: 2px;
 }
 
@@ -228,10 +228,10 @@ html, body {
 
 /* ─── Inputs ─── */
 .settings-input {
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--ui-surface-hover);
+  border: 1px solid var(--ui-border-subtle);
   border-radius: 8px;
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--ui-text-primary);
   font-size: 13px;
   padding: 6px 10px;
   width: 100%;
@@ -244,7 +244,7 @@ html, body {
 }
 
 .settings-input::placeholder {
-  color: rgba(255, 255, 255, 0.3);
+  color: var(--ui-text-tertiary);
 }
 
 /* ─── Toggle switch ─── */
@@ -252,7 +252,7 @@ html, body {
   position: relative;
   width: 40px;
   height: 22px;
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--ui-surface-raised);
   border-radius: 11px;
   cursor: pointer;
   transition: background 0.2s;
@@ -285,7 +285,7 @@ html, body {
   appearance: none;
   width: 180px;
   height: 4px;
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--ui-surface-raised);
   border-radius: 2px;
   outline: none;
   cursor: pointer;
@@ -299,7 +299,7 @@ html, body {
   border-radius: 50%;
   background: rgba(100, 200, 255, 0.9);
   cursor: pointer;
-  border: 2px solid rgba(255, 255, 255, 0.3);
+  border: 2px solid var(--ui-border-strong);
 }
 
 .settings-slider::-moz-range-thumb {
@@ -308,12 +308,12 @@ html, body {
   border-radius: 50%;
   background: rgba(100, 200, 255, 0.9);
   cursor: pointer;
-  border: 2px solid rgba(255, 255, 255, 0.3);
+  border: 2px solid var(--ui-border-strong);
 }
 
 .slider-value {
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--ui-text-secondary);
   min-width: 36px;
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -321,10 +321,10 @@ html, body {
 
 /* ─── Buttons ─── */
 .settings-btn {
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: var(--ui-surface-hover);
+  border: 1px solid var(--ui-border-subtle);
   border-radius: 8px;
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--ui-text-primary);
   font-size: 12px;
   font-weight: 500;
   padding: 6px 14px;
@@ -333,8 +333,8 @@ html, body {
 }
 
 .settings-btn:hover {
-  background: rgba(255, 255, 255, 0.15);
-  border-color: rgba(255, 255, 255, 0.25);
+  background: var(--ui-surface-raised);
+  border-color: var(--ui-border-strong);
 }
 
 .settings-btn--primary {
@@ -408,13 +408,13 @@ html, body {
 }
 
 .status-badge--connected {
-  background: rgba(80, 220, 120, 0.2);
-  color: rgba(120, 240, 160, 0.9);
+  background: var(--ui-success-soft);
+  color: var(--ui-success-text);
 }
 
 .status-badge--disconnected {
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.4);
+  background: var(--ui-surface-hover);
+  color: var(--ui-text-tertiary);
 }
 
 /* ─── Footer ─── */
@@ -447,8 +447,8 @@ html, body {
 .position-preview {
   width: 100%;
   height: 180px;
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--ui-surface-sunken);
+  border: 1px solid var(--ui-border-subtle);
   border-radius: 10px;
   position: relative;
   overflow: hidden;
@@ -482,7 +482,7 @@ html, body {
 }
 
 .transport-dot--cloud {
-  color: #7ee2a8;
+  color: var(--ui-success-text);
 }
 
 .transport-dot--local {
@@ -515,15 +515,15 @@ html, body {
   gap: 6px;
   padding: 12px;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: var(--ui-surface-card);
+  border: 1px solid var(--ui-border-subtle);
   cursor: pointer;
   transition: border-color 0.18s ease, background 0.18s ease, transform 0.12s ease;
 }
 
 .persona-card:hover {
-  background: rgba(255, 255, 255, 0.09);
-  border-color: rgba(255, 255, 255, 0.22);
+  background: var(--ui-surface-hover);
+  border-color: var(--ui-border-strong);
 }
 
 .persona-card--active {
@@ -555,18 +555,18 @@ html, body {
   font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.04em;
-  color: #ffffff;
+  color: var(--ui-text-primary);
 }
 
 .persona-accent {
   font-size: 10px;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--ui-text-tertiary);
 }
 
 .persona-desc {
   font-size: 11px;
   line-height: 1.45;
-  color: rgba(255, 255, 255, 0.65);
+  color: var(--ui-text-secondary);
   min-height: 32px;
 }
 
@@ -579,7 +579,7 @@ html, body {
 }
 
 .persona-sync--ready {
-  color: #7ee2a8;
+  color: var(--ui-success-text);
   background: rgba(126, 226, 168, 0.12);
   border: 1px solid rgba(126, 226, 168, 0.35);
 }
@@ -606,9 +606,9 @@ html, body {
   margin-top: 2px;
   padding: 6px 10px;
   border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  background: rgba(255, 255, 255, 0.07);
-  color: #ffffff;
+  border: 1px solid var(--ui-border-subtle);
+  background: var(--ui-surface-hover);
+  color: var(--ui-text-primary);
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
@@ -616,7 +616,7 @@ html, body {
 }
 
 .persona-play-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--ui-surface-raised);
 }
 
 .persona-play-btn:disabled {
@@ -645,7 +645,7 @@ html, body {
 }
 
 .voice-empty {
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--ui-text-tertiary);
   font-size: 12px;
   text-align: center;
   padding: 16px;
@@ -662,7 +662,7 @@ html, body {
 }
 
 .voice-row:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--ui-surface-hover);
 }
 
 .voice-row--selected {
@@ -673,7 +673,7 @@ html, body {
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.25);
+  border: 2px solid var(--ui-border-strong);
   flex-shrink: 0;
   transition: all 0.15s;
 }
@@ -695,7 +695,7 @@ html, body {
 .voice-name {
   font-size: 13px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--ui-text-primary);
 }
 
 .voice-meta {
@@ -726,8 +726,8 @@ html, body {
   padding: 1px 6px;
   border-radius: 4px;
   font-weight: 500;
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.5);
+  background: var(--ui-surface-hover);
+  color: var(--ui-text-tertiary);
 }
 
 .voice-provider--piper {
@@ -736,10 +736,10 @@ html, body {
 }
 
 .voice-play-btn {
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--ui-surface-hover);
+  border: 1px solid var(--ui-border-subtle);
   border-radius: 6px;
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--ui-text-primary);
   font-size: 12px;
   width: 28px;
   height: 28px;
@@ -752,8 +752,8 @@ html, body {
 }
 
 .voice-play-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.18);
-  border-color: rgba(255, 255, 255, 0.25);
+  background: var(--ui-surface-raised);
+  border-color: var(--ui-border-strong);
 }
 
 .voice-play-btn:disabled {
@@ -763,8 +763,8 @@ html, body {
 
 /* ─── Auth card ─── */
 .auth-card {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--ui-surface-card);
+  border: 1px solid var(--ui-border-subtle);
   border-radius: 12px;
   padding: 12px 14px;
   display: flex;
@@ -781,7 +781,7 @@ html, body {
 .auth-card-title {
   font-size: 13px;
   font-weight: 600;
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--ui-text-primary);
 }
 
 .auth-card-actions {
@@ -800,7 +800,7 @@ html, body {
   border-radius: 10px;
   background: rgba(15, 23, 42, 0.9);
   border: 1px solid rgba(126, 226, 168, 0.35);
-  color: #7ee2a8;
+  color: var(--ui-success-text);
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
@@ -983,47 +983,47 @@ html, body {
 :root[data-theme="light"] .settings-container {
   background-color: #f8f9fa;
   border-color: rgba(0, 0, 0, 0.1);
-  color: #0f172a;
+  color: var(--ui-text-primary);
 }
 
 :root[data-theme="light"] .settings-title {
-  color: #0f172a;
+  color: var(--ui-text-primary);
 }
 
 :root[data-theme="light"] .settings-hint {
-  color: #64748b;
+  color: var(--ui-text-tertiary);
 }
 
 :root[data-theme="light"] .settings-tab {
-  color: #64748b;
+  color: var(--ui-text-tertiary);
 }
 
 :root[data-theme="light"] .settings-tab:hover {
-  color: #0f172a;
+  color: var(--ui-text-primary);
   background: rgba(0, 0, 0, 0.05);
 }
 
 :root[data-theme="light"] .settings-tab--active {
-  color: #0f172a;
+  color: var(--ui-text-primary);
   background: rgba(0, 0, 0, 0.08);
 }
 
 :root[data-theme="light"] .settings-section-title {
-  color: #0f172a;
+  color: var(--ui-text-primary);
 }
 
 :root[data-theme="light"] .setting-label {
-  color: #0f172a;
+  color: var(--ui-text-primary);
 }
 
 :root[data-theme="light"] .setting-desc {
-  color: #475569;
+  color: var(--ui-text-secondary);
 }
 
 :root[data-theme="light"] .settings-input {
   background: #ffffff;
   border: 1px solid rgba(0, 0, 0, 0.12);
-  color: #0f172a;
+  color: var(--ui-text-primary);
 }
 
 :root[data-theme="light"] .settings-input::placeholder {
@@ -1049,20 +1049,20 @@ html, body {
 :root[data-theme="light"] .settings-btn {
   background: #ffffff;
   border: 1px solid rgba(0, 0, 0, 0.12);
-  color: #0f172a;
+  color: var(--ui-text-primary);
 }
 
 :root[data-theme="light"] .settings-btn--glass {
   background: #ffffff;
   border-color: rgba(0, 0, 0, 0.1);
-  color: #0f172a;
+  color: var(--ui-text-primary);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
 :root[data-theme="light"] .settings-btn--glass:hover:not(:disabled) {
   background: #f8fafc;
   border-color: rgba(0, 0, 0, 0.18);
-  color: #0f172a;
+  color: var(--ui-text-primary);
 }
 
 :root[data-theme="light"] .settings-btn--active {
@@ -1089,21 +1089,21 @@ html, body {
 }
 
 :root[data-theme="light"] .persona-name {
-  color: #0f172a;
+  color: var(--ui-text-primary);
 }
 
 :root[data-theme="light"] .persona-accent {
-  color: #64748b;
+  color: var(--ui-text-tertiary);
 }
 
 :root[data-theme="light"] .persona-desc {
-  color: #475569;
+  color: var(--ui-text-secondary);
 }
 
 :root[data-theme="light"] .persona-play-btn {
   background: #f1f5f9;
   border-color: rgba(0, 0, 0, 0.1);
-  color: #0f172a;
+  color: var(--ui-text-primary);
 }
 
 :root[data-theme="light"] .persona-play-btn:hover:not(:disabled) {
@@ -1111,18 +1111,18 @@ html, body {
 }
 
 :root[data-theme="light"] .voice-name {
-  color: #0f172a;
+  color: var(--ui-text-primary);
 }
 
 :root[data-theme="light"] .voice-provider {
   background: #f1f5f9;
-  color: #64748b;
+  color: var(--ui-text-tertiary);
 }
 
 :root[data-theme="light"] .voice-play-btn {
   background: #f1f5f9;
   border-color: rgba(0, 0, 0, 0.1);
-  color: #0f172a;
+  color: var(--ui-text-primary);
 }
 
 :root[data-theme="light"] .voice-row:hover {
@@ -1137,11 +1137,11 @@ html, body {
   background: #ffffff;
   border: 1px solid rgba(0, 0, 0, 0.08);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
-  color: #0f172a;
+  color: var(--ui-text-primary);
 }
 
 :root[data-theme="light"] .auth-note {
-  color: #475569;
+  color: var(--ui-text-secondary);
 }
 
 :root[data-theme="light"] .setting-badge {

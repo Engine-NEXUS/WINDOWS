@@ -108,8 +108,8 @@ export function AgentWatchSection() {
                 gap: 8,
                 padding: "6px 10px",
                 borderRadius: 6,
-                background: "rgba(255,255,255,0.04)",
-                border: "1px solid rgba(255,255,255,0.08)",
+                background: "var(--ui-surface-card)",
+                border: "1px solid var(--ui-border-subtle)",
               }}
             >
               <span style={{ fontSize: 13 }}>

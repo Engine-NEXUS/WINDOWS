@@ -520,7 +520,7 @@ export function SetupApp() {
                       <div style={{
                         width: "28px",
                         height: "28px",
-                        border: "3px solid rgba(59,130,246,0.3)",
+                        border: "3px solid color-mix(in srgb, var(--ui-accent-solid) 30%, transparent)",
                         borderTopColor: "rgba(59,130,246,0.8)",
                         borderRadius: "50%",
                         animation: "spin 0.8s linear infinite",
@@ -633,8 +633,8 @@ export function SetupApp() {
                   marginTop: "var(--nx-space-4)",
                   padding: "12px 16px",
                   borderRadius: "8px",
-                  background: "rgba(59,130,246,0.08)",
-                  border: "1px solid rgba(59,130,246,0.2)",
+                  background: "color-mix(in srgb, var(--ui-accent-solid) 8%, transparent)",
+                  border: "1px solid color-mix(in srgb, var(--ui-accent-solid) 20%, transparent)",
                   fontSize: "var(--nx-text-xs)",
                   color: "var(--nx-text-secondary)",
                 }}>
@@ -854,7 +854,7 @@ export function SetupApp() {
                       </div>
                     )}
                     {connecting === "google" && (
-                      <div className="installer-list-item-spinner" style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.2)", borderTopColor: "#3b82f6", borderRadius: "50%", animation: "nx-spin 0.8s linear infinite" }} />
+                      <div className="installer-list-item-spinner" style={{ width: 16, height: 16, border: "2px solid var(--ui-border-strong)", borderTopColor: "#3b82f6", borderRadius: "50%", animation: "nx-spin 0.8s linear infinite" }} />
                     )}
                   </div>
 
@@ -888,7 +888,7 @@ export function SetupApp() {
                       </div>
                     )}
                     {connecting === "github" && (
-                      <div className="installer-list-item-spinner" style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.2)", borderTopColor: "#3b82f6", borderRadius: "50%", animation: "nx-spin 0.8s linear infinite" }} />
+                      <div className="installer-list-item-spinner" style={{ width: 16, height: 16, border: "2px solid var(--ui-border-strong)", borderTopColor: "#3b82f6", borderRadius: "50%", animation: "nx-spin 0.8s linear infinite" }} />
                     )}
                   </div>
                 </div>
