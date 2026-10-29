@@ -64,8 +64,9 @@ describe("SpatialView dock button layout and column container", () => {
     // Dock buttons are inside the header row
     expect(html).toContain('title="Dock Left"');
     expect(html).toContain('title="Dock Right"');
-    expect(html).toContain("◧");
-    expect(html).toContain("◨");
+    // The glyph characters were replaced by SVG icons that follow the text colour (kit/DockButtons.tsx).
+    expect(html).toContain('class="dock-icon"');
+    expect(html).not.toContain("◧");
   });
 
   it("renders empty state wrapped in .sidebar-view-col with header as first child", () => {

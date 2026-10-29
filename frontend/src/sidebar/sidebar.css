@@ -170,6 +170,8 @@ html, body, #root {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+  min-height: 44px;
+  box-sizing: border-box;
   padding: 12px 14px 4px 14px;
   margin: -16px -18px 0 -18px;
   user-select: none;
@@ -191,7 +193,7 @@ html, body, #root {
 .sidebar-dock-controls {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   pointer-events: auto;
 }
 

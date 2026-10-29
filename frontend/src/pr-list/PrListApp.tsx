@@ -6,6 +6,7 @@ import { GitHubActivityRadarGraph } from "./GitHubActivityRadarGraph";
 import { GitHubSignInGate } from "./GitHubSignInGate";
 import { GitHubReposView } from "./GitHubReposView";
 import { GitHubStarredView } from "./GitHubStarredView";
+import { DockButtons } from "../sidebar/kit/DockButtons";
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -441,15 +442,7 @@ export function PrListApp({ onDock = () => {} }: { onDock?: (d: string) => void 
         </div>
 
         <div className="gh-header-actions">
-          {/* Dock Controls */}
-          <div className="sidebar-dock-controls">
-            <button type="button" className="sidebar-dock-btn" onClick={() => onDock("left")} title="Dock Left">
-              ◧
-            </button>
-            <button type="button" className="sidebar-dock-btn" onClick={() => onDock("right")} title="Dock Right">
-              ◨
-            </button>
-          </div>
+          <DockButtons onDock={onDock} />
         </div>
       </header>
 

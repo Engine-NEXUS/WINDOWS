@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useSidebar, type SpatialData, type SpatialItemCard } from "./sidebarStore";
 import { Lens } from "./Lens";
-import { AppBar, Card, Chip, IconButton, LogoTile } from "./kit";
+import { AppBar, Card, Chip, DockIcon, IconButton, LogoTile } from "./kit";
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -75,14 +75,14 @@ export function SpatialView({
                 label="Dock Left"
                 onClick={() => onDock("left")}
               >
-                ◧
+                <DockIcon side="left" />
               </IconButton>
               <IconButton
                 className="sidebar-dock-btn"
                 label="Dock Right"
                 onClick={() => onDock("right")}
               >
-                ◨
+                <DockIcon side="right" />
               </IconButton>
             </>
           }
@@ -110,14 +110,14 @@ export function SpatialView({
               label="Dock Left"
               onClick={() => onDock("left")}
             >
-              ◧
+              <DockIcon side="left" />
             </IconButton>
             <IconButton
               className="sidebar-dock-btn"
               label="Dock Right"
               onClick={() => onDock("right")}
             >
-              ◨
+              <DockIcon side="right" />
             </IconButton>
           </>
         }

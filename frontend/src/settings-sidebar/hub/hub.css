@@ -116,33 +116,11 @@
 .hx-header-dock {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   margin-left: auto;
   z-index: 1;
 }
-.hx-header-dock button {
-  width: 28px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--hx-border);
-  border-radius: 8px;
-  background: var(--hx-card);
-  color: var(--hx-text);
-  font-size: 13px;
-  cursor: pointer;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
-  transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease, color 0.15s ease;
-}
-.hx-header-dock button:hover {
-  background: var(--hx-card-2);
-  border-color: var(--hx-rim);
-  color: var(--hx-text);
-}
-.hx-header-dock button:active {
-  transform: scale(0.92);
-}
+/* The dock buttons inside use the shared .sidebar-dock-btn style (sidebar/unified.css). */
 
 /* ── Scroll + page ── */
 .hx-scroll {
@@ -303,6 +281,7 @@
   padding: 9px 0 7px;
 }
 .hx-link {
+  min-height: 24px;
   background: none;
   border: 0;
   color: var(--hx-accent);

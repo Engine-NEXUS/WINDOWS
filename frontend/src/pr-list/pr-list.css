@@ -1083,6 +1083,7 @@
 
 .gh-pat-toggle-btn {
   margin-top: 14px;
+  min-height: 24px;
   background: none;
   border: none;
   color: var(--gh-signin-terms-color);

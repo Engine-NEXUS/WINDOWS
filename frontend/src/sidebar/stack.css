@@ -136,6 +136,8 @@
 .stack-hero-copy-link {
   background: transparent;
   border: none;
+  /* 24 px tall hit area (WCAG 2.5.8) without changing how the text sits */
+  min-height: 24px;
   padding: 0;
   color: var(--hub-accent);
   font-size: 12px;
@@ -434,6 +436,7 @@
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
+  min-height: 24px;
   padding: 0;
   align-self: flex-start;
 }
@@ -502,7 +505,8 @@
   background-color: var(--hub-card);
   border: 1px solid var(--hub-border);
   border-radius: 9999px;
-  padding: 2px 8px;
+  min-height: 24px;
+  padding: 2px 10px;
   font-size: 11px;
   color: var(--hub-text);
   cursor: pointer;

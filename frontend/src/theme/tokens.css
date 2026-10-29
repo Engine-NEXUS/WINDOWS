@@ -182,6 +182,23 @@
   --nx-z-toast:   1000;
 }
 
+/* Keyboard focus. Many stylesheets set `outline: none` on buttons and controls, which left keyboard users with no
+   indicator. This ring wins over those rules (hence !important) but only for keyboard focus, so a mouse click shows
+   nothing. 2 px, 3:1 against every surface (checked by scripts/check-theme-contrast.mjs). Text inputs keep their own
+   border-colour focus style. */
+button:focus-visible,
+[role="button"]:focus-visible,
+[role="tab"]:focus-visible,
+[role="switch"]:focus-visible,
+[role="radio"]:focus-visible,
+[role="checkbox"]:focus-visible,
+a[href]:focus-visible,
+summary:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--ui-focus-ring) !important;
+  outline-offset: 2px !important;
+}
+
 /* Reduced motion: disable all animations */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

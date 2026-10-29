@@ -17,6 +17,7 @@ import {
   type OAuthStatus,
 } from "../setup/oauth";
 import { useAssistant } from "../store/assistant";
+import { DockButtons, DockIcon } from "../sidebar/kit/DockButtons";
 import { applyThemePreference, normalizePreference, resolveThemeMode, type ThemePreference } from "../sidebar/theme";
 import "./hub/hub.css";
 import { HubHome, type HubPage } from "./hub/HubHome";
@@ -452,8 +453,7 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
         </div>
         <div className="hx-title" data-tauri-drag-region>{PAGE_TITLES[page]}</div>
         <div className="hx-header-dock" data-tauri-drag-region>
-          <button type="button" onClick={() => onDock("left")} title="Dock Left">◧</button>
-          <button type="button" onClick={() => onDock("right")} title="Dock Right">◨</button>
+          <DockButtons onDock={onDock} />
         </div>
       </header>
 
@@ -784,7 +784,7 @@ function DisplayTab({ settings, update }: {
               invoke("set_sidebar_dock", { dock: "left" }).catch(() => {});
             }}
           >
-            ◧ Dock Left
+            <DockIcon side="left" /> Dock Left
           </button>
           <button
             className="settings-btn settings-btn--glass"
@@ -793,7 +793,7 @@ function DisplayTab({ settings, update }: {
               invoke("set_sidebar_dock", { dock: "right" }).catch(() => {});
             }}
           >
-            ◨ Dock Right
+            <DockIcon side="right" /> Dock Right
           </button>
         </div>
         <button
