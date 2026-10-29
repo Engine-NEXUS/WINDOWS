@@ -1,5 +1,7 @@
 # NEXUS — Changelog
 
+- 2026-10-29: [UI plan Phase 4 - stage layout and overlays](178-ui-phase-4-stage-layout-and-overlays.md) — stage chips could not read their colours (stage never loaded the tokens): fixed; one layout module so the hand chip stacks above the caption and task chips hang under the spinner (no-collision test on 6 screen sizes); pebble orb visible in Light; live caption on a solid pill; stage window fitted to the primary monitor on show. All 16 local CI checks pass; not run on a scaled display or in the live app.
+
 - 2026-10-29: [UI plan Phase 3c - Hub, Settings, Setup and HUD on the theme tokens](177-ui-phase-3c-hub-settings-setup-and-hud.md) — Hub palette is the shared tokens; ~390 colours tokenised; measured contrast pass over every Hub page and theme: 0 failures in 1,088 text elements (was 21 in Light); HUD sliders follow the app theme. 761 frontend tests pass; checked in the dev browser, not the live app.
 
 - 2026-10-29: [UI plan Phase 3b - GitHub dashboard and Architect on the one theme switch](176-ui-phase-3b-github-dashboard-and-architect.md) — dashboard follows `data-theme` (own class and store sync removed), failing muted text/accent fixed, Architect text tokens shared; contrast gate 168 pairs, colour baseline 1,679. 761 frontend tests pass; not run in the live app.
