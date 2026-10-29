@@ -1,5 +1,7 @@
 # NEXUS — Changelog
 
+- 2026-10-29: [UI plan Phase 3c - Hub, Settings, Setup and HUD on the theme tokens](177-ui-phase-3c-hub-settings-setup-and-hud.md) — Hub palette is the shared tokens; ~390 colours tokenised; measured contrast pass over every Hub page and theme: 0 failures in 1,088 text elements (was 21 in Light); HUD sliders follow the app theme. 761 frontend tests pass; checked in the dev browser, not the live app.
+
 - 2026-10-29: [UI plan Phase 3b - GitHub dashboard and Architect on the one theme switch](176-ui-phase-3b-github-dashboard-and-architect.md) — dashboard follows `data-theme` (own class and store sync removed), failing muted text/accent fixed, Architect text tokens shared; contrast gate 168 pairs, colour baseline 1,679. 761 frontend tests pass; not run in the live app.
 
 - 2026-10-29: [UI plan Phase 3a - CodeRabbit, Assistant view and stage chips on theme tokens](175-ui-phase-3a-coderabbit-assistant-and-stage-chips.md) — CodeRabbit panel and Assistant view follow Light/Dark (were fixed dark / white-on-white); stage chips documented as solid dark with `--stage-*` tokens; contrast gate 144 pairs; new hard-coded colour ratchet in CI. 761 frontend tests pass; checked in the dev browser, not the live app.
