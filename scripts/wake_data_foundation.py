@@ -163,11 +163,16 @@ def validate_audio_manifest(require_data):
     return errors, counts
 
 
-def validate(require_data):
+def validate(require_data, clean_checkout=False):
     errors = validate_model_manifest()
-    audio_errors, counts = validate_audio_manifest(require_data)
+    if clean_checkout:
+        # What the CI runner sees: wake_word_data/ is git-ignored, so only the model fingerprints are checked.
+        audio_errors, counts = [], Counter()
+        print("Audio manifest: not read (--clean-checkout: the data is local-only and not in the repository)")
+    else:
+        audio_errors, counts = validate_audio_manifest(require_data)
+        print(f"Audio manifest: {AUDIO_MANIFEST_PATH}")
     errors.extend(audio_errors)
-    print(f"Audio manifest: {AUDIO_MANIFEST_PATH}")
     print(f"Audio counts: {dict(sorted(counts.items()))}")
     if errors:
         for error in errors:
@@ -183,11 +188,16 @@ def main():
     subparsers.add_parser("fingerprint-models")
     validate_parser = subparsers.add_parser("validate")
     validate_parser.add_argument("--require-data", action="store_true")
+    validate_parser.add_argument(
+        "--clean-checkout",
+        action="store_true",
+        help="validate as CI does, without reading the git-ignored local audio manifest",
+    )
     args = parser.parse_args()
     if args.command == "fingerprint-models":
         write_model_manifest()
         return 0
-    return validate(args.require_data)
+    return validate(args.require_data, args.clean_checkout)
 
 
 if __name__ == "__main__":
