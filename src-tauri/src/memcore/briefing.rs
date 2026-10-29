@@ -231,7 +231,10 @@ pub fn scrub_mail(items: Vec<MailItem>, names: &SelfNames) -> Vec<MailItem> {
     items
         .into_iter()
         .map(|mut m| {
-            if let Some(short) = mailwording::short_ci_wording(&m.subject) {
+            // Only mail the inbox triage filed as GitHub (decided from the sender's domain) gets the short CI line;
+            // a watched email from anyone else with a CI-looking subject keeps its sender and deadline.
+            let github = m.category.as_deref() == Some("github");
+            if let Some(short) = mailwording::short_ci_wording(&m.subject).filter(|_| github) {
                 m.sender.clear();
                 m.subject = short;
                 m.deadline = None;
@@ -1150,6 +1153,12 @@ mod session_greeting_tests {
         assert!(lines[1].starts_with("an email about “Assignment 3”"), "{lines:?}");
         assert!(lines[2].contains("Prof. Rao"), "someone else is still named: {lines:?}");
         assert!(lines.iter().all(|l| !l.contains("Chitkul") && !l.contains("Lakshya")), "{lines:?}");
+        // A CI-looking subject from a non-GitHub sender is not shortened and keeps its sender and deadline.
+        let spoof = scrub_mail(
+            vec![MailItem { sender: "Prof. Rao".into(), subject: "Run failed: CI - course/project".into(), deadline: Some("Friday".into()), category: None }],
+            &names,
+        );
+        assert_eq!((spoof[0].sender.as_str(), spoof[0].subject.as_str(), spoof[0].deadline.as_deref()), ("Prof. Rao", "Run failed: CI - course/project", Some("Friday")));
         // Nothing to hide: an empty name set keeps a plain sender.
         let kept = scrub_mail(
             vec![MailItem { sender: "Prof. Rao".into(), subject: "Exam".into(), deadline: None, category: None }],

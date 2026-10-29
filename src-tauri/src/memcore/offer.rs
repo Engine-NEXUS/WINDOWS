@@ -54,6 +54,8 @@ pub enum Offer {
     HookSetup { agent: String },
     /// "When it finishes clean, shall I commit to a new branch and open a draft pull request?" Nothing touches git until yes.
     PlanFollowUp,
+    /// "You have 7 of 10 free CodeRabbit reviews left. Use one on PR 34?" Nothing is spent until yes.
+    CodeRabbitReview { repo: String, pr: u32 },
 }
 
 impl Offer {
@@ -61,7 +63,7 @@ impl Offer {
     pub fn reply_window(&self) -> Duration {
         match self {
             Offer::Power { .. } | Offer::ClearTimetable | Offer::FileConfirm | Offer::HookSetup { .. } | Offer::PlanFollowUp => REPLY_WINDOW_HIGH,
-            Offer::AddEvent { .. } | Offer::AddSlots { .. } => REPLY_WINDOW_MEDIUM,
+            Offer::AddEvent { .. } | Offer::AddSlots { .. } | Offer::CodeRabbitReview { .. } => REPLY_WINDOW_MEDIUM,
             Offer::Start { .. } | Offer::Choose { .. } | Offer::ReopenSession | Offer::OpenApp { .. } => REPLY_WINDOW_LOW,
         }
     }

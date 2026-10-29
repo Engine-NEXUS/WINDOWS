@@ -851,7 +851,10 @@ pub fn stt_filter_stats() -> (u64, u64) {
 /// sentence ("It's very nice to know that it's not a person. It's a person. It's a person."): the
 /// Whisper hallucination that is not an exact k-block loop because the first sentence differs.
 /// Needs 3+ sentences and a 3+ word repeated sentence, so ordinary speech and emphatic repeats pass.
-fn repeats_a_sentence_at_the_end(text: &str) -> bool {
+///
+/// Returns the text with the duplicated closing sentence removed when that applies. The caller keeps this only
+/// when it is itself a real command ("What is on my calendar? Please read it now. Please read it now.").
+fn without_repeated_ending(text: &str) -> Option<String> {
     let sentences: Vec<String> = text
         .split(|c: char| matches!(c, '.' | '!' | '?'))
         .map(|s| {
@@ -864,7 +867,14 @@ fn repeats_a_sentence_at_the_end(text: &str) -> bool {
         .filter(|s| !s.is_empty())
         .collect();
     let n = sentences.len();
-    n >= 3 && sentences[n - 1] == sentences[n - 2] && sentences[n - 1].split_whitespace().count() >= 3
+    if !(n >= 3 && sentences[n - 1] == sentences[n - 2] && sentences[n - 1].split_whitespace().count() >= 3) {
+        return None;
+    }
+    // Cut at the end of the second-to-last sentence (the last terminator-delimited chunk is the duplicate).
+    let trimmed = text.trim_end();
+    let body = trimmed.trim_end_matches(|c: char| matches!(c, '.' | '!' | '?'));
+    let cut = body.rfind(|c: char| matches!(c, '.' | '!' | '?'))?;
+    Some(trimmed[..=cut].trim().to_string())
 }
 
 /// True if the word list is k≥2 repeats of one identical block (block ≥2
@@ -1063,7 +1073,17 @@ fn evaluate_transcript(text: &str) -> Result<String, u8> {
     // Blocks are ≥2 words: single-word repeats ("stop stop stop stop")
     // pass through so emphatic real commands still work.
     let words: Vec<&str> = lower.split_whitespace().collect();
-    if is_repetition_loop(&words) || repeats_a_sentence_at_the_end(&lower) {
+    if is_repetition_loop(&words) {
+        tracing::info!("stt: filtered repetition loop hallucination: '{}'", text);
+        return Err(R_REPEAT);
+    }
+    if let Some(kept) = without_repeated_ending(&normalized) {
+        // A duplicated closing sentence is a hallucination tell, but a genuine request before it must survive:
+        // keep the text without the duplicate only when that remainder is a command the parser acts on.
+        if kept.split(|c: char| matches!(c, '.' | '!' | '?')).map(str::trim).any(|sentence| !sentence.is_empty() && is_known_command(sentence)) {
+            tracing::info!("stt: dropped a repeated closing sentence, kept '{}'", kept);
+            return Ok(kept);
+        }
         tracing::info!("stt: filtered repetition loop hallucination: '{}'", text);
         return Err(R_REPEAT);
     }
@@ -1386,6 +1406,20 @@ mod tests {
         assert_eq!(evaluate_transcript("Thank you for watching"), Err(R_PHRASE));
         assert_eq!(evaluate_transcript("from the"), Err(R_FRAGMENT));
         assert_eq!(evaluate_transcript("Open breath. Open breath."), Err(R_REPEAT));
+        // A genuine request followed by a doubled closing sentence keeps the request.
+        assert_eq!(
+            evaluate_transcript("Open brave. Please do it now. Please do it now."),
+            Ok("Open brave. Please do it now.".to_string())
+        );
+        assert_eq!(
+            evaluate_transcript("What is on my calendar? Please read it now. Please read it now."),
+            Ok("What is on my calendar? Please read it now.".to_string())
+        );
+        assert_eq!(
+            evaluate_transcript("It's very nice to know that it's not a person. It's a person. It's a person."),
+            Err(R_REPEAT),
+            "a hallucination whose remainder is no command is still blocked"
+        );
         assert_eq!(evaluate_transcript("Tentang Otor. Post Immortal."), Err(R_DICT));
         assert_eq!(evaluate_transcript("x"), Err(R_SHORT));
         assert!(evaluate_transcript("open brave").is_ok());

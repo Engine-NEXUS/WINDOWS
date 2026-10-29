@@ -50,7 +50,15 @@ pub fn seed_name(dir: &Path, name: &str) -> bool {
 /// The owner's name as NEXUS knows it (first name preferred when `first`).
 pub fn known_name(dir: &Path, first: bool) -> Option<String> {
     let full = crate::memory::core_value(dir, "name").or_else(|| crate::memory::core_value(dir, KEY_NAME))?;
-    Some(if first { crate::memory::core_value(dir, KEY_FIRST).unwrap_or_else(|| first_name(&full)) } else { full })
+    if !first {
+        return Some(full);
+    }
+    // The stored first name belongs to the SEEDED full name only; a name the owner gave later gets its own first word.
+    let seeded_full = crate::memory::core_value(dir, KEY_NAME);
+    Some(match crate::memory::core_value(dir, KEY_FIRST) {
+        Some(f) if seeded_full.as_deref() == Some(full.as_str()) => f,
+        _ => first_name(&full),
+    })
 }
 
 /// Pure: is this a "what is my name / who am I" question? Whole-sentence match so chat that merely
@@ -103,6 +111,11 @@ mod tests {
         assert_eq!(known_name(&d, true).as_deref(), Some("Asha"));
         assert!(!seed_name(&d, "Someone Else"), "an existing name is kept");
         assert_eq!(known_name(&d, false).as_deref(), Some("Asha Rao"));
+
+        // A name the owner gives later overrides the seed for the first name too.
+        assert!(crate::memory::remember(&d, "name", "Lakshya Chitkul"));
+        assert_eq!(known_name(&d, false).as_deref(), Some("Lakshya Chitkul"));
+        assert_eq!(known_name(&d, true).as_deref(), Some("Lakshya"), "not the seeded Asha");
 
         let d2 = temp();
         assert!(crate::memory::remember(&d2, "name", "Lakshya"));

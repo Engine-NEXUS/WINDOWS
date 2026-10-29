@@ -47,6 +47,14 @@ pub enum ParsedIntent {
     /// "open coderabbit" / "show coderabbit" / "coderabbit"
     #[serde(rename = "open_coderabbit_hub")]
     OpenCodeRabbitHub,
+    /// CodeRabbit's review of the pull request that is open: "give me the coderabbit review", "use coderabbit to review
+    /// this", "coderabbit this PR". Asks before it spends one of the free reviews.
+    #[serde(rename = "coderabbit_review_this")]
+    CodeRabbitReviewThis,
+    /// An analysis of the open pull request / failing build by the owner's own API key (Gemini, Groq, Cerebras):
+    /// "have gemini look at this PR", "analyse this error with ai". Not CodeRabbit.
+    #[serde(rename = "ai_review_this")]
+    AiReviewThis,
     /// Open the native GitHub Dashboard / feed window.
     /// "open github dashboard" / "open github feed" / "show pr list" / "open github interface"
     #[serde(rename = "open_github_dashboard")]
@@ -392,6 +400,8 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::OpenArchitect => "open_architect",
         ParsedIntent::OpenSettings => "open_settings",
         ParsedIntent::OpenCodeRabbitHub => "open_coderabbit_hub",
+        ParsedIntent::CodeRabbitReviewThis => "coderabbit_review_this",
+        ParsedIntent::AiReviewThis => "ai_review_this",
         ParsedIntent::OpenGitHubDashboard { .. } => "open_github_dashboard",
         ParsedIntent::Search { .. } => "search",
         ParsedIntent::AnalyseRepo { .. } => "analyse_repo",
@@ -675,7 +685,14 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
         .replace("code-rabbit", "coderabbit");
     let cr_clean = cr_norm.trim();
 
+    if crate::coderabbit_phrases::is_ai_review_request(cr_clean) {
+        return Some(ParseResult { intent: ParsedIntent::AiReviewThis, confidence: 1.0, source: "deterministic".to_string() });
+    }
+
     if cr_clean.contains("coderabbit") {
+        if crate::coderabbit_phrases::is_coderabbit_review_request(cr_clean) {
+            return Some(ParseResult { intent: ParsedIntent::CodeRabbitReviewThis, confidence: 1.0, source: "deterministic".to_string() });
+        }
         // Check for specific PR number: e.g. "show coderabbit review for pr 24", "coderabbit pr 24", "check coderabbit 24"
         let pr_num = cr_clean
             .split(|c: char| !c.is_ascii_digit())
@@ -5735,6 +5752,11 @@ pub(crate) fn is_stray_statement(transcript: &str) -> bool {
         "what" | "whats" | "how" | "why" | "when" | "where" | "who" | "which" | "can" | "could" | "would"
             | "will" | "is" | "are" | "do" | "does" | "did" | "tell" | "show" | "open" | "nexus" | "please"
             | "play" | "search" | "close" | "stop" | "cancel" | "no" | "not"
+            // Direct requests that are not parser commands still go on to normal handling.
+            | "explain" | "describe" | "summarize" | "summarise" | "compare" | "give" | "find" | "list"
+            | "read" | "check" | "set" | "send" | "call" | "remind" | "turn" | "take" | "make" | "run"
+            | "start" | "launch" | "switch" | "let" | "help" | "calculate" | "write" | "create" | "add"
+            | "get" | "look" | "translate" | "define" | "repeat" | "say" | "ask" | "analyse" | "analyze"
     )
 }
 
@@ -7988,7 +8010,7 @@ mod tests {
     #[test]
     fn stray_statements_are_told_apart_from_questions_and_commands() {
         assert!(is_stray_statement("It's very nice to know that it's not a person"));
-        for t in ["what is the capital of france", "open chrome and go to youtube", "yes", "do it", "tell me about rust please"] {
+        for t in ["what is the capital of france", "open chrome and go to youtube", "yes", "do it", "tell me about rust please", "explain the difference between these options", "describe what you just did please"] {
             assert!(!is_stray_statement(t), "{t}");
         }
     }
