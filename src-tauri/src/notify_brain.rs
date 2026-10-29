@@ -148,6 +148,24 @@ impl Book {
         self.entities.get(id)
     }
 
+    /// Moves an entity to a new (full-identity) key keeping its whole state, so a key migration neither replays
+    /// an old failure as new nor forgets one. Returns false (and changes nothing) when `old` is unknown or
+    /// `new` is already taken: an existing record is never overwritten.
+    #[cfg(test)] // N2 uses it for the full-key migration; test-only until then (dead-code ratchet)
+    pub fn rekey(&mut self, old: &str, new: &str) -> bool {
+        if old == new || self.entities.contains_key(new) {
+            return false;
+        }
+        match self.entities.remove(old) {
+            Some(mut e) => {
+                e.id = new.to_string();
+                self.entities.insert(new.to_string(), e);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn prune(&mut self, now_ms: u64) {
         let cutoff = now_ms.saturating_sub(RETENTION_MS);
         self.entities.retain(|_, e| e.last_seen_ms >= cutoff);
@@ -420,6 +438,49 @@ pub fn say<R: Runtime>(app: &AppHandle<R>, service: &str, line: Line) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn failing_entity(id: &str, run: &str) -> Entity {
+        Entity {
+            id: id.into(),
+            failing: true,
+            since_ms: 5,
+            fail_count: 3,
+            last_ref: run.into(),
+            spoken_failure: true,
+            last_spoken_ms: 9,
+            last_seen_ms: 10,
+        }
+    }
+
+    #[test]
+    fn rekey_keeps_the_whole_state_and_leaves_no_legacy_copy() {
+        let mut book = Book::from_records(vec![failing_entity("github:zync:pr", "r7")]);
+        assert!(book.rekey("github:zync:pr", "v1:github:acct1:github.com/o/zync:pr"));
+        assert!(book.get("github:zync:pr").is_none());
+        let moved = book.get("v1:github:acct1:github.com/o/zync:pr").unwrap();
+        assert_eq!(moved.id, "v1:github:acct1:github.com/o/zync:pr");
+        assert_eq!((moved.failing, moved.fail_count, moved.last_ref.as_str(), moved.spoken_failure, moved.last_seen_ms), (true, 3, "r7", true, 10));
+    }
+
+    #[test]
+    fn rekey_never_overwrites_an_existing_record_or_invents_one() {
+        let mut book = Book::from_records(vec![failing_entity("a", "r1"), failing_entity("b", "r2")]);
+        assert!(!book.rekey("a", "b"), "destination already taken");
+        assert_eq!(book.get("b").unwrap().last_ref, "r2");
+        assert!(book.get("a").is_some(), "source untouched on refusal");
+        assert!(!book.rekey("missing", "c"));
+        assert!(book.get("c").is_none());
+        assert!(!book.rekey("a", "a"));
+    }
+
+    #[test]
+    fn a_rekeyed_failure_does_not_replay_as_a_new_alert() {
+        // Same run observed again after the migration (as the next poll would) stays silent.
+        let mut book = Book::from_records(vec![failing_entity("github:zync:pr", "r7")]);
+        book.rekey("github:zync:pr", "github:zync:pr");
+        let f = Fact { service: "github", project: "zync".into(), kind: Kind::Pr, obs: Obs::Failed, run_ref: "r7".into() };
+        assert_eq!(book.observe(&f, 20, false), Decision::Silent);
+    }
 
     #[test]
     fn test_entity_id_derivation() {
