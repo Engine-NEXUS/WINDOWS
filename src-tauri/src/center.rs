@@ -721,29 +721,32 @@ pub const ALL_SUB_CENTERS: &[CenterId] = &[
 /// Visual transitions the Main Center may direct.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiDirective {
-    /// Top-right loading window show/hide.
-    #[allow(dead_code)]
+    /// Top-right loading window: show for the active request, or hide unconditionally.
     Loading(bool),
+    /// A turn's own end of the loading window. Skipped when another request owns the pipeline by now, so a late
+    /// hide from an older turn cannot take a newer turn's spinner.
+    LoadingEnd(String),
     /// Ghost session enter/exit (orb waves + flag).
     Session(bool),
 }
 
-/// Pure predicate behind the Loading guard — matrix-tested below.
-#[allow(dead_code)]
+/// Pure predicate behind the Loading guard - matrix-tested below.
 pub fn loading_should_show(has_active_request: bool, ghost_session: bool) -> bool {
     has_active_request && !ghost_session
 }
 
-/// Single choke point for visual transitions. New code MUST use this;
-/// legacy `show_loading`/`hide_loading` callers are covered because the
-/// guard also lives in `show_loading` itself.
+/// Single choke point for visual transitions. Every loading show/hide in the orchestrator goes through here, so the
+/// guards below hold for every subsystem instead of being copied (or forgotten) in each branch.
 pub fn direct_ui<R: tauri::Runtime>(app: &tauri::AppHandle<R>, d: UiDirective) {
     tracing::info!("main-center: ui-directive {:?}", d);
     match d {
         UiDirective::Loading(true) => {
-            if !crate::orchestrator::has_active_request() {
+            if !loading_should_show(
+                crate::orchestrator::has_active_request(),
+                crate::ghost::session_active(),
+            ) {
                 tracing::warn!(
-                    "main-center: Loading(true) ignored — no active request (orphan spinner)"
+                    "main-center: Loading(true) ignored - no active request or a ghost session owns the visual"
                 );
                 return;
             }
@@ -751,6 +754,9 @@ pub fn direct_ui<R: tauri::Runtime>(app: &tauri::AppHandle<R>, d: UiDirective) {
         }
         UiDirective::Loading(false) => {
             crate::orchestrator::hide_loading(app);
+        }
+        UiDirective::LoadingEnd(request_id) => {
+            crate::orchestrator::hide_loading_for(app, &request_id);
         }
         UiDirective::Session(active) => {
             crate::ghost::emit_session(crate::ghost::ghost_wry::g_wry_ref(app), active);
