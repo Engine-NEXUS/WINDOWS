@@ -16,7 +16,7 @@
 /* Windows High Contrast: stage chips and cards keep a visible edge using system colours only. */
 @media (forced-colors: active) {
   .live-caption-pill,
-  .nx-task-chip,
+  .nx-task-chip {
     border: 1px solid CanvasText;
     background: Canvas;
     color: CanvasText;
