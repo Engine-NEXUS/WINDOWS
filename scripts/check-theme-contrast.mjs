@@ -14,7 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const FILES = ["frontend/src/theme/tokens.css", "frontend/src/sidebar/unified.css"].map((f) => join(ROOT, f));
+const FILES = ["frontend/src/theme/tokens.css", "frontend/src/sidebar/unified.css", "frontend/src/pr-list/pr-list.css"].map((f) => join(ROOT, f));
 
 /** Custom-property maps per theme: dark = `:root`/dark blocks, light = dark overlaid by the light blocks. */
 export function loadThemes(cssTexts) {
@@ -24,7 +24,7 @@ export function loadThemes(cssTexts) {
     const text = css.replace(/\/\*[\s\S]*?\*\//g, "");
     for (const m of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
       const selector = m[1].trim();
-      const target = /data-theme\s*=\s*["']light["']/.test(selector) ? lightOnly : /:root|data-theme\s*=\s*["']dark["']/.test(selector) ? dark : null;
+      const target = /data-theme\s*=\s*["']light["']/.test(selector) ? lightOnly : /:root|data-theme\s*=\s*["']dark["']|^\.gh-dashboard-shell$/.test(selector) ? dark : null;
       if (!target) continue;
       for (const d of m[2].matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) target.set(d[1], d[2].trim());
     }
@@ -110,6 +110,13 @@ export const PAIRS = [
   // Stage overlay chips and cards: solid dark in both themes by rule, so each pair is measured in both.
   ...["--stage-text", "--stage-text-muted", "--stage-accent", "--stage-attention", "--stage-ok"].map((fg) => [fg, "--stage-surface", TEXT, "stage chip text"]),
   ["--stage-text", "--stage-surface-live", TEXT, "text on the live hand chip"],
+  // GitHub dashboard palette (pr-list/pr-list.css): GitHub-style colours, scoped to the dashboard shell.
+  ...["--gh-bg", "--gh-surface", "--gh-surface-subtle"].flatMap((s) => [
+    ["--gh-text-primary", s, TEXT, "dashboard text"],
+    ["--gh-text-secondary", s, TEXT, "dashboard secondary text"],
+    ["--gh-text-muted", s, TEXT, "dashboard muted text"],
+    ["--gh-accent", s, TEXT, "dashboard accent as text"],
+  ]),
   // Command Hub palette (sidebar/unified.css), still the live one until the views migrate.
   ...["--hub-bg", "--hub-card"].flatMap((s) => [
     ["--hub-text", s, TEXT, "hub text"],

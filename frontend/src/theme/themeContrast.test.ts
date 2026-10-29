@@ -19,7 +19,7 @@ describe("contrast maths", () => {
 });
 
 describe("the real tokens", () => {
-  const themes = loadThemes([read("frontend/src/theme/tokens.css"), read("frontend/src/sidebar/unified.css")]);
+  const themes = loadThemes([read("frontend/src/theme/tokens.css"), read("frontend/src/sidebar/unified.css"), read("frontend/src/pr-list/pr-list.css")]);
 
   it("define every token the gate measures, in both themes", () => {
     for (const map of [themes.dark, themes.light]) {

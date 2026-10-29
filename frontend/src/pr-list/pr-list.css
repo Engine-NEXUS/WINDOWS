@@ -5,7 +5,7 @@
    ═══════════════════════════════════════════════════════════════ */
 
 /* ── Light Theme (Default White Canvas) ── */
-.gh-dashboard-shell.theme--light {
+[data-theme="light"] .gh-dashboard-shell {
   --gh-bg: #f6f8fa;
   --gh-surface: #ffffff;
   --gh-surface-subtle: #f1f3f5;
@@ -13,7 +13,7 @@
   --gh-border-subtle: #eaeef2;
   --gh-text-primary: #1f2328;
   --gh-text-secondary: #656d76;
-  --gh-text-muted: #8c959f;
+  --gh-text-muted: #59636e;
   --gh-accent: #0969da;
   --gh-card-shadow: 0 1px 3px rgba(31, 35, 40, 0.08);
   --gh-header-bg: #ffffff;
@@ -29,7 +29,7 @@
 }
 
 /* ── Dark Theme (GitHub Dark Dimmed) ── */
-.gh-dashboard-shell.theme--dark {
+.gh-dashboard-shell {
   --gh-bg: #0d1117;
   --gh-surface: #161b22;
   --gh-surface-subtle: #21262d;
@@ -37,8 +37,8 @@
   --gh-border-subtle: #21262d;
   --gh-text-primary: #e6edf3;
   --gh-text-secondary: #8b949e;
-  --gh-text-muted: #6e7681;
-  --gh-accent: #2f81f7;
+  --gh-text-muted: #8e96a0;
+  --gh-accent: #4493f8;
   --gh-card-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
   --gh-header-bg: #161b22;
   --gh-badge-bg: rgba(56, 139, 253, 0.15);
@@ -431,7 +431,7 @@
   opacity: 0.9;
 }
 
-.theme--dark .gh-radar-axis-line {
+:root:not([data-theme="light"]) .gh-radar-axis-line {
   stroke: #3fb950;
 }
 
@@ -442,7 +442,7 @@
   stroke-linejoin: round;
 }
 
-.theme--dark .gh-radar-polygon {
+:root:not([data-theme="light"]) .gh-radar-polygon {
   fill: rgba(63, 185, 80, 0.42);
   stroke: #3fb950;
 }
@@ -453,7 +453,7 @@
   stroke-width: 2px;
 }
 
-.theme--dark .gh-radar-dot {
+:root:not([data-theme="light"]) .gh-radar-dot {
   fill: #ffffff;
   stroke: #3fb950;
 }
@@ -932,7 +932,7 @@
   background: var(--gh-signin-bg);
 }
 
-.theme--light.gh-shell--logged-out {
+[data-theme="light"] .gh-shell--logged-out {
   --gh-signin-bg: #ffffff;
   --gh-signin-badge-bg: #000000;
   --gh-signin-badge-color: #ffffff;
@@ -944,7 +944,7 @@
   --gh-signin-link-color: #0969da;
 }
 
-.theme--dark.gh-shell--logged-out {
+:root:not([data-theme="light"]) .gh-shell--logged-out {
   --gh-signin-bg: #0d1117;
   --gh-signin-badge-bg: #ffffff;
   --gh-signin-badge-color: #000000;
@@ -1256,7 +1256,7 @@
   box-shadow: 0 0 0 2px rgba(9, 105, 218, 0.18);
 }
 
-.theme--dark .gh-search-input:focus {
+:root:not([data-theme="light"]) .gh-search-input:focus {
   box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.22);
 }
 
@@ -1392,14 +1392,14 @@
   border: 1px solid rgba(255, 255, 255, 0.16) !important;
 }
 
-.theme--light .gh-role-badge,
-.theme--light .gh-repo-vis-badge,
-.theme--light .gh-role--owner,
-.theme--light .gh-role--org,
-.theme--light .gh-role--contributor,
-.theme--light .gh-vis--public,
-.theme--light .gh-vis--private,
-.theme--light .gh-vis--fork {
+[data-theme="light"] .gh-role-badge,
+[data-theme="light"] .gh-repo-vis-badge,
+[data-theme="light"] .gh-role--owner,
+[data-theme="light"] .gh-role--org,
+[data-theme="light"] .gh-role--contributor,
+[data-theme="light"] .gh-vis--public,
+[data-theme="light"] .gh-vis--private,
+[data-theme="light"] .gh-vis--fork {
   background: rgba(0, 0, 0, 0.04) !important;
   color: #24292f !important;
   border: 1px solid rgba(0, 0, 0, 0.12) !important;
