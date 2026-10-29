@@ -1,5 +1,7 @@
 # NEXUS — Changelog
 
+- 2026-10-29: [UI plan Phase 2 - dock buttons and chrome](174-ui-phase-2-dock-buttons-and-chrome.md) — one shared dock control with SVG icons and accessible names, visible in light and dark (was invisible); global keyboard focus ring; thin themed scrollbars; 24 px minimum hit targets. 761 frontend tests pass; checked in the dev browser, not the live app.
+
 - 2026-10-29: [UI plan Phase 1 - token foundation and theme switching](173-ui-phase-1-tokens-and-theme-switching.md) — semantic `--ui-*` tokens, real System theme that follows Windows, theme set before first paint in every window, contrast fixed at the source, new CI contrast gate (78 pairs). 757 frontend tests pass; not run in the live app.
 
 - 2026-10-29: [Voice flow audit, speech continuity and one owner for the loading state](172-voice-flow-loading-state-and-speech-continuity.md) — review findings fixed; failed cloud sentence finishes in the local twin voice, background speech queues behind answers, repeated stops idempotent; loading routed through the main center, orb echo removed, orb stays in the thinking pose after an ack, duplicate result-style acks removed, background-task chip for CodeRabbit/AI reviews. Rust 2813 + frontend 751 pass; not rebuilt or run live.
