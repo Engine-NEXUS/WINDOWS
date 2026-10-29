@@ -2393,6 +2393,7 @@ pub fn list_tts_voices() -> Result<Vec<TtsVoiceInfo>, String> {
     Ok(voices)
 }
 
+#[cfg(test)]
 fn parse_settings_content(content: &str) -> NexusSettings {
     let mut settings: NexusSettings = serde_json::from_str(content).unwrap_or_default();
     settings.speaker_verification = voice_profile::voice_lock_from_settings(content);

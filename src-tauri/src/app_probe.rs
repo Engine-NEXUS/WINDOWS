@@ -1167,7 +1167,7 @@ mod tests {
             let _ = symlink_file(&target, &link);
         }
 
-        let facts = collect_facts(&exe_path).unwrap();
+        let _facts = collect_facts(&exe_path).unwrap();
         // Symlinks should not be followed, so link.txt should not appear
         // (though on Windows symlink creation may fail without admin)
     }

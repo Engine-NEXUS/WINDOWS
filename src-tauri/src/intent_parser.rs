@@ -7846,7 +7846,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_plain_pr_command_parses_to_list_prs() {
         let result = parse_deterministic("analyse the pr in zync");
         assert!(result.is_some());

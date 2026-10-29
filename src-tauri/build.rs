@@ -8,9 +8,6 @@ fn main() {
     // unexpected_cfgs lint doesn't fire on desktop builds.
     println!("cargo::rustc-check-cfg=cfg(mobile)");
 
-    #[cfg(feature = "mock-wake")]
-    println!("cargo:warning=NEXUS built with mock-wake: Porcupine native lib disabled");
-
     tauri_build::build();
 
     // Re-run when native assets or capabilities change.
