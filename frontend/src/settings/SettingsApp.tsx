@@ -4,7 +4,7 @@ import { useVoiceLockState, VoiceLockStatus } from "./VoiceLockStatus";
 import { applyNativeLockToDraft, clearSubmittedFields, type VoiceLockState } from "./voiceLockState";
 
 import { stopTts, type VoicePersona, ICONIC_PERSONAS } from "../audio/ttsPlayer";
-import { initThemeSync, applyThemeMode, resolveThemeMode } from "../sidebar/theme";
+import { initThemeSync, applyThemeMode, normalizePreference } from "../sidebar/theme";
 import { McpServersPanel } from "../settings-sidebar/McpServersPanel";
 import { ApiKeyIcon } from "../settings-sidebar/ApiKeyIcons";
 
@@ -48,7 +48,7 @@ interface Settings {
   selectedVoice?: string;
   offlineVoiceModel?: string;
   orbPosition?: "top" | "bottom";
-  themeMode?: "light" | "dark";
+  themeMode?: "light" | "dark" | "system";
   defaultMusicPlayer?: "spotify" | "apple_music";
 }
 
@@ -138,7 +138,7 @@ export function SettingsApp() {
           return reconciled;
         });
         if (s.themeMode) {
-          applyThemeMode(resolveThemeMode(s.themeMode), false);
+          applyThemeMode(normalizePreference(s.themeMode), false);
         }
       }
     }).catch(() => {

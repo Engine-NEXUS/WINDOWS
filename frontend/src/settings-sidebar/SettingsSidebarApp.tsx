@@ -17,6 +17,7 @@ import {
   type OAuthStatus,
 } from "../setup/oauth";
 import { useAssistant } from "../store/assistant";
+import { applyThemePreference, normalizePreference, resolveThemeMode, type ThemePreference } from "../sidebar/theme";
 import "./hub/hub.css";
 import { HubHome, type HubPage } from "./hub/HubHome";
 import { ApiKeysPage } from "./hub/ApiKeysPage";
@@ -421,11 +422,13 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
 
   const acc = useAccounts(settings.serverUrl, settings.userId);
   const insights = useInsights(insightsKey);
-  const themeMode: "light" | "dark" = settings.themeMode === "light" ? "light" : "dark";
+  const themePreference = normalizePreference(settings.themeMode);
+  // What is on screen right now: "system" resolves against Windows.
+  const themeMode: "light" | "dark" = resolveThemeMode(settings.themeMode);
 
-  const handleTheme = (m: "light" | "dark") => {
+  const handleTheme = (m: ThemePreference) => {
     update("themeMode", m);
-    void import("../sidebar/theme").then(({ applyThemeMode }) => applyThemeMode(m)).catch(() => {});
+    applyThemePreference(m);
     // Persist immediately: the Command Hub home has no Save button. Patch only the theme: re-saving the whole
     // (possibly stale) form here used to revert anything another window or IPC had changed.
     invoke("settings_patch", { patch: { themeMode: m } }).catch(() => {});
@@ -467,7 +470,7 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
           {page === "device-links" && <DeviceLinksPage onOpenActivity={() => setPage("activity")} />}
           {page === "activity" && <ActivityManagerPage />}
           {page === "connections" && <McpServersPanel />}
-          {page === "appearance" && <AppearancePage themeMode={themeMode} onTheme={handleTheme} />}
+          {page === "appearance" && <AppearancePage themeMode={themePreference} onTheme={handleTheme} />}
           {isLegacyPage && (
             <div className="hx-legacy">
               {page === "display" && <DisplayTab settings={settings} update={update} />}

@@ -14,7 +14,7 @@
   --hub-card-2: #202029;
   --hub-text: #ffffff;
   --hub-text-dim: rgba(255, 255, 255, 0.70);
-  --hub-text-faint: rgba(255, 255, 255, 0.40);
+  --hub-text-faint: rgba(255, 255, 255, 0.50);
   --hub-accent: #0a84ff;
   --hub-border: rgba(255, 255, 255, 0.12);
   --hub-danger: #ff453a;
@@ -26,10 +26,10 @@
   --hub-card-2: #e8e8ed;
   --hub-text: #111827;
   --hub-text-dim: rgba(0, 0, 0, 0.65);
-  --hub-text-faint: rgba(0, 0, 0, 0.40);
-  --hub-accent: #007aff;
+  --hub-text-faint: rgba(0, 0, 0, 0.55);
+  --hub-accent: #0062cc;
   --hub-border: rgba(0, 0, 0, 0.08);
-  --hub-danger: #ff3b30;
+  --hub-danger: #d70015;
 }
 
 *, *::before, *::after {

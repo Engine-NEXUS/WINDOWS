@@ -1,6 +1,17 @@
 /* ═══════════════════════════════════════════════════════════════
-   NEXUS Design Tokens — Pitch Black (#000000) & Pure White (#ffffff)
-   Strictly opaque themes with 10px radii, 1px borders, zero transparency.
+   NEXUS Design Tokens - solid dark and light themes.
+   Strictly opaque surfaces (dark base #0a0a0c, light base #f8f9fa), 10px radii, 1px borders.
+
+   Two layers, one file:
+   1. Legacy names (--nx-*): the values every existing view already uses.
+   2. Semantic roles (--ui-*): the names new and migrated CSS uses. They point at the legacy
+      values (no visual change) and add the roles that did not exist: focus ring, strong border,
+      accent fill/text/on-accent, and status text that passes contrast on its surface.
+   Every text/surface pair below is checked by scripts/check-theme-contrast.mjs (WCAG 2.2 AA:
+   4.5:1 for text, 3:1 for UI components and focus rings), which CI runs.
+
+   The theme is set by `data-theme` on <html> (public/theme-boot.js before first paint, then
+   src/sidebar/theme.ts). `color-scheme` follows it so scrollbars and form controls match.
    ═══════════════════════════════════════════════════════════════ */
 
 :root {
@@ -16,7 +27,7 @@
 
   --nx-text-primary:   #ffffff;
   --nx-text-secondary: rgba(255, 255, 255, 0.72);
-  --nx-text-tertiary:  rgba(255, 255, 255, 0.45);
+  --nx-text-tertiary:  rgba(255, 255, 255, 0.52);
   --nx-text-inverse:   #000000;
 
   --nx-border:           rgba(255, 255, 255, 0.12);
@@ -39,6 +50,30 @@
   --nx-success-bg: rgba(16, 185, 129, 0.12);
   --nx-warning:    #f59e0b;
   --nx-warning-bg: rgba(245, 158, 11, 0.12);
+
+  /* ── Semantic roles (dark) ─────────────────────────────────── */
+  color-scheme: dark;
+  --ui-surface-app:    var(--nx-bg);
+  --ui-surface-card:   var(--nx-bg-card);
+  --ui-surface-raised: var(--nx-bg-elevated);
+  --ui-surface-hover:  var(--nx-bg-hover);
+  --ui-text-primary:   var(--nx-text-primary);
+  --ui-text-secondary: var(--nx-text-secondary);
+  --ui-text-tertiary:  var(--nx-text-tertiary);
+  --ui-text-inverse:   var(--nx-text-inverse);
+  --ui-border-subtle:  var(--nx-border);
+  --ui-border-strong:  rgba(255, 255, 255, 0.40);
+  --ui-focus-ring:     #8ab4ff;
+  --ui-accent-solid:   #0a6cf0;
+  --ui-accent-text:    #6cb0ff;
+  --ui-on-accent:      #ffffff;
+  --ui-danger-text:    #ff7b72;
+  --ui-danger-solid:   #d92d20;
+  --ui-danger-soft:    var(--nx-error-bg);
+  --ui-warning-text:   #fbbf24;
+  --ui-warning-soft:   var(--nx-warning-bg);
+  --ui-success-text:   #34d399;
+  --ui-success-soft:   var(--nx-success-bg);
 }
 
 :root[data-theme="light"] {
@@ -54,7 +89,7 @@
 
   --nx-text-primary:   #111827;
   --nx-text-secondary: rgba(0, 0, 0, 0.68);
-  --nx-text-tertiary:  rgba(0, 0, 0, 0.45);
+  --nx-text-tertiary:  rgba(0, 0, 0, 0.56);
   --nx-text-inverse:   #ffffff;
 
   --nx-border:           rgba(0, 0, 0, 0.10);
@@ -71,10 +106,22 @@
   --nx-speaking:   #16a34a;
   --nx-error:      #dc2626;
   --nx-error-bg:   rgba(220, 38, 38, 0.08);
-  --nx-success:    #059669;
-  --nx-success-bg: rgba(5, 150, 105, 0.08);
-  --nx-warning:    #d97706;
-  --nx-warning-bg: rgba(217, 119, 6, 0.08);
+  --nx-success:    #047857;
+  --nx-success-bg: rgba(4, 120, 87, 0.08);
+  --nx-warning:    #b45309;
+  --nx-warning-bg: rgba(180, 83, 9, 0.08);
+
+  /* ── Semantic roles (light) ────────────────────────────────── */
+  color-scheme: light;
+  --ui-border-strong:  rgba(0, 0, 0, 0.52);
+  --ui-focus-ring:     #1d4ed8;
+  --ui-accent-solid:   #0062cc;
+  --ui-accent-text:    #0062cc;
+  --ui-on-accent:      #ffffff;
+  --ui-danger-text:    #b42318;
+  --ui-danger-solid:   #d92d20;
+  --ui-warning-text:   #b45309;
+  --ui-success-text:   #047857;
 }
 
 /* Theme-independent tokens (shared by dark and light) */

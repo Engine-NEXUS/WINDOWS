@@ -42,6 +42,10 @@ jobs:
       - name: Repo hygiene gate (no tracked secrets, databases, logs, key files)
         run: node ../scripts/check-repo-hygiene.mjs
 
+      # Every text/surface pair of the design tokens, dark and light, against WCAG 2.2 AA.
+      - name: Theme contrast gate
+        run: node ../scripts/check-theme-contrast.mjs
+
       # Commands defined/registered/invoked and events emitted/listened must agree;
       # the one-sided leftovers are frozen in scripts/baselines/ and may only shrink.
       - name: IPC + event contract gate
