@@ -67,7 +67,7 @@
 
 .orb-capsule:hover {
   border-color: rgba(255, 255, 255, 0.26);
-  box-shadow: 0 20px 54px rgba(0, 0, 0, 1), 0 0 16px rgba(242, 184, 89, 0.25);
+  box-shadow: 0 20px 54px rgba(0, 0, 0, 1);
 }
 
 /* ─── Feature 106: Pebble Wakeup Design (Organic Contour) ─── */
@@ -77,8 +77,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #000000 !important;
-  background-color: #000000 !important;
+  background: var(--orb-surface) !important;
+  background-color: var(--orb-surface) !important;
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
   border: 1px solid rgba(255, 255, 255, 0.18);

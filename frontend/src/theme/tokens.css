@@ -164,8 +164,10 @@
   --stage-accent:        #8ab4ff;
   --stage-attention:     #ff7a4d;
   --stage-ok:            #5fd38a;
-  --stage-shadow:        0 6px 20px rgba(0, 0, 0, 0.45);
-  --stage-shadow-lg:     0 10px 34px rgba(0, 0, 0, 0.5);
+  --stage-shadow:        0 6px 20px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.14);
+  /* The orb pouch: black in Dark, near-white in Light, like the classic capsule (the particles turn to black ink in Light). */
+  --orb-surface:         #000000;
+  --stage-shadow-lg:     0 10px 34px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.14);
 
   /* ── Typography ─────────────────────────────────────────────── */
   --nx-font: -apple-system, "Segoe UI", "Inter", Roboto, sans-serif;
@@ -247,4 +249,12 @@ select:focus-visible {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* The orb pouch follows the theme; chips and cards on the stage do not (see --stage-* above). */
+:root[data-theme="light"] {
+  --orb-surface: #fafafa;
+}
+.orb-pebble-fill {
+  fill: var(--orb-surface);
 }

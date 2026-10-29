@@ -108,11 +108,16 @@ export function chipPlacement(
   chipW: number,
   chipH: number,
   taskbarBottom: number = TASKBAR_FALLBACK,
+  /** Top edge of the response caption (CSS px) when it shares this edge: the chip then stacks ABOVE it. */
+  captionTop?: number,
 ): { left: number; top: number } {
   const left = Math.max(0, (viewport.w - chipW) / 2);
   if (dock === "bottom") return { left, top: EDGE_GAP };
   const inset = Math.max(0, taskbarBottom) + EDGE_GAP;
-  return { left, top: Math.max(0, viewport.h - chipH - inset) };
+  let top = viewport.h - chipH - inset;
+  // With a visible taskbar the bottom-edge slot is the caption's row: sit above the caption instead of on it.
+  if (captionTop !== undefined) top = Math.min(top, captionTop - chipH - EDGE_GAP);
+  return { left, top: Math.max(0, top) };
 }
 
 /** CSS px the taskbar covers at the bottom edge of the screen (0 if it is elsewhere or auto-hidden). */

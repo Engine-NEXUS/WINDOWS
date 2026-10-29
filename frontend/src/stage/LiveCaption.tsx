@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { captionSlot } from "./layoutSlots";
 
 interface OrbRect {
   x: number;
@@ -84,9 +85,8 @@ export function LiveCaption() {
 
     // Same user-tuned slot as ResponseCaption (caption-tuner 2026-10-09).
     if (isTop) {
-      const centerX = window.innerWidth * 0.515;
-      const y = window.innerHeight * 0.895;
-      el.style.transform = `translate(${centerX - 260}px, ${y}px)`;
+      const slot = captionSlot({ w: window.innerWidth, h: window.innerHeight });
+      el.style.transform = `translate(${slot.x}px, ${slot.y}px)`;
     } else {
       const centerX = typeof window !== "undefined" ? window.innerWidth / 2 : rect.x / dpr + rect.w / dpr / 2;
       const bottomY = (rect.y + rect.h) / dpr;
@@ -108,7 +108,7 @@ export function LiveCaption() {
         applyPosition(el);
       }}
     >
-      {text}
+      <span className="live-caption-pill">{text}</span>
     </div>
   );
 }

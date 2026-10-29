@@ -250,7 +250,7 @@ function PebbleScoopFrame({
         </defs>
 
         {/* Pure pitch-black container pouch */}
-        <path ref={fillPathRef} fill="#000000" />
+        <path ref={fillPathRef} className="orb-pebble-fill" />
 
         {/* Stretching Thread boundary with Specular Rim */}
         <path ref={rimPathRef} fill="none" stroke="url(#pebbleRimGrad)" strokeWidth={1.3} />

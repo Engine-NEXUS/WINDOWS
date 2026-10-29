@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { initCaptionListener, onCaptionLineUpdate, CaptionLineEvent } from "../audio/captionScheduler";
 import { onSpeechStageLine, setSpeechCaptionReady, speechStageActive } from "../audio/speechStage";
+import { captionSlot } from "./layoutSlots";
 
 interface OrbRect {
   x: number;
@@ -70,8 +71,9 @@ export function ResponseCaption() {
     const isTop = topY < (typeof window !== "undefined" ? window.innerHeight / 2 : 540);
 
     if (isTop) {
-      const centerX = window.innerWidth * 0.515;
-      const y = window.innerHeight * 0.895;
+      const slot = captionSlot({ w: window.innerWidth, h: window.innerHeight });
+      const centerX = slot.x + slot.w / 2;
+      const y = slot.y;
       el.style.transform = `translate(${centerX}px, ${y}px) translateX(-50%)`;
     } else {
       // Bottom-dock fallback (untuned): keep the legacy above-orb slot
