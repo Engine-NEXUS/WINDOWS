@@ -22,6 +22,12 @@ import { useAssistant } from "../store/assistant";
 import {
   __testPendingSpeechCloseFor,
   __testSetCurrentRequestId,
+  __testSetLatestTurn,
+  __testSetSpeechAudible,
+  __testSpeechAudible,
+  hideIsStale,
+  isUserTurnRequest,
+  noteAckTurnStarted,
   __testSetPendingSpeechCloseFor,
   __testSetStuckTicks,
   __testStuckTicks,
@@ -417,5 +423,83 @@ describe("hideOrbAfterSpeech (Main Center UI-director, feature 75 P-B)", () => {
     // One quiet tick only — still speaking, nothing forced yet.
     expect(useAssistant.getState().state).toBe("speaking");
     expect(getCurrentRequestId()).toBe("req-play");
+  });
+});
+
+describe("loading-state step 2: per-turn guards", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    invokeMock.mockReset().mockResolvedValue(undefined);
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    __testSetLatestTurn(null);
+    __testSetStuckTicks(0);
+  });
+
+  it("a new turn's ack clears the audible flag the previous turn left set", () => {
+    __testSetSpeechAudible(true);
+    noteAckTurnStarted();
+    expect(__testSpeechAudible()).toBe(false);
+  });
+
+  it("a hide armed for an older turn is stale once a newer user turn is current", () => {
+    expect(hideIsStale("a1", "b2")).toBe(true);
+    expect(hideIsStale("a1", "a1")).toBe(false);
+    expect(hideIsStale(null, "b2")).toBe(false);
+    expect(hideIsStale("a1", null)).toBe(false);
+  });
+
+  it("boot and sentinel speech is not a user turn", () => {
+    expect(isUserTurnRequest("adf342d98b46")).toBe(true);
+    expect(isUserTurnRequest("sentinel_nb_github:zync:pr_9")).toBe(false);
+    expect(isUserTurnRequest("boot_briefing")).toBe(false);
+  });
+
+  it("a chain for an older turn does not hide the orb of the newer one", async () => {
+    useAssistant.setState({ state: "idle", visible: true, captionActive: false });
+    __testSetLatestTurn("b2");
+    hideOrbAfterSpeech(600, "a1");
+    await vi.advanceTimersByTimeAsync(700);
+    expect(useAssistant.getState().visible).toBe(true);
+  });
+
+  it("the same turn's chain still hides the orb once speech is done", async () => {
+    useAssistant.setState({ state: "idle", visible: true, captionActive: false });
+    __testSetLatestTurn("a1");
+    hideOrbAfterSpeech(600, "a1");
+    await vi.advanceTimersByTimeAsync(700);
+    expect(useAssistant.getState().visible).toBe(false);
+  });
+
+  it("two live chains no longer share one stuck-speaking counter", async () => {
+    // Each chain needs ten quiet ticks of its own; two chains used to reach the limit together in about 5 s.
+    useAssistant.setState({ state: "speaking", visible: true });
+    __testSetCurrentRequestId("req-two");
+    __testSetLatestTurn("req-two");
+    hideOrbAfterSpeech(1000, "req-two");
+    hideOrbAfterSpeech(1000, "req-two");
+    await vi.advanceTimersByTimeAsync(6500);
+    expect(useAssistant.getState().state).toBe("speaking");
+    expect(invokeMock).not.toHaveBeenCalledWith("orchestrator_done", expect.anything());
+    await vi.runAllTimersAsync();
+    expect(invokeMock).toHaveBeenCalledWith("orchestrator_done", { requestId: "req-two" });
+  });
+});
+
+describe("loading-state step 4: the orb after an acknowledgement", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    invokeMock.mockReset().mockResolvedValue(undefined);
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    __testSetLatestTurn(null);
+    __testSetStuckTicks(0);
+  });
+
+  it("an ack that has ended while the spinner is up leaves the orb visible in the thinking pose", async () => {
+    useAssistant.setState({ state: "speaking", visible: true, loadingVisible: true, captionActive: false, ghostActive: false });
+    hideOrbAfterSpeech(600);
+    await vi.runAllTimersAsync();
+    expect(useAssistant.getState().visible).toBe(true);
+    expect(useAssistant.getState().state).toBe("thinking");
+    expect(invokeMock).not.toHaveBeenCalledWith("orchestrator_done", expect.anything());
   });
 });

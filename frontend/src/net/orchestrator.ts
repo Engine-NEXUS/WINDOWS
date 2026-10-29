@@ -21,6 +21,7 @@ import { classifyConfirmReply, isConfirmExpired } from "./confirmReply";
 import { useAssistant } from "../store/assistant";
 import { speak, stopTts } from "../audio/ttsPlayer";
 import { speechKindForResult } from "../audio/speechArbiter";
+import { decideAfterSpeech } from "./orbVisibility";
 import { useSidebar } from "../sidebar/sidebarStore";
 import { clearLongRunningInFlight, isLocalAckGiven } from "./wsBridge";
 import { DeferredAck } from "./ackDefer";
@@ -68,6 +69,37 @@ let orbSilentHideTimer: ReturnType<typeof setTimeout> | null = null;
  *  is emitted before synthesis even begins). */
 let speechBecameAudible = false;
 
+/** A new turn's acknowledgement is about to be scheduled: audio from an EARLIER turn must not count as this
+ *  turn's. The flag used to stay true for the rest of the session, so after the first spoken line the 4 s
+ *  silent-hide observer and the ack-deadline guard (which both read it) never acted again. */
+export function noteAckTurnStarted(): void {
+  speechBecameAudible = false;
+}
+
+/** The newest request id the event stream has mentioned. A hide chain armed for an older turn checks it. */
+let latestTurnRequestId: string | null = null;
+
+/** Test hooks for the per-turn audible flag and the newest-turn tracker. */
+export function __testSpeechAudible(): boolean {
+  return speechBecameAudible;
+}
+export function __testSetSpeechAudible(v: boolean): void {
+  speechBecameAudible = v;
+}
+export function __testSetLatestTurn(id: string | null): void {
+  latestTurnRequestId = id;
+}
+
+/** Background speech (boot hello, briefing, alerts) is not a user turn and must not make a user turn's chains stale. */
+export function isUserTurnRequest(id: string): boolean {
+  return !id.startsWith("sentinel_") && !id.startsWith("boot_");
+}
+
+/** Has a newer turn started since a hide was armed for `scope`? Pure over its inputs. */
+export function hideIsStale(scope: string | null, latest: string | null): boolean {
+  return scope !== null && latest !== null && scope !== latest;
+}
+
 function armAckDeadlineGuard(requestId: string | undefined, sourceCenter: string | undefined): void {
   if (!isTauri()) return; // dev browser / tests: inert
   ackGuardRequestId = requestId ?? null;
@@ -95,18 +127,19 @@ function armAckDeadlineGuard(requestId: string | undefined, sourceCenter: string
 /** Belt-and-braces for the orb: if loading is on but NO audio ever became
  *  audible (guard fallback lost the race too), hide the orb — the spinner
  *  carries the turn visually. The result/error events re-show the orb. */
-function armOrbSilentHideObserver(): void {
+function armOrbSilentHideObserver(scope: string | null = latestTurnRequestId): void {
   if (!isTauri()) return;
   if (orbSilentHideTimer) clearTimeout(orbSilentHideTimer);
   orbSilentHideTimer = setTimeout(() => {
     orbSilentHideTimer = null;
     const s = useAssistant.getState();
     if (s.ghostActive) return;
+    if (hideIsStale(scope, latestTurnRequestId)) return;
     if (s.ttsActive || speechBecameAudible) return;
     console.warn(
       "[NEXUS] loading: orb visible with no audio after 4s — hiding (loading indicator carries the turn)"
     );
-    s.setVisible(false);
+    hideOrbLogged("silent-hide observer", scope);
   }, ORB_SILENT_HIDE_MS);
 }
 
@@ -428,68 +461,126 @@ export function closeTurnOnSpeechEnd(requestId: string): boolean {
  * the zoom doesn't park on a dead orb until the 60s failsafe. Visuals
  * thus follow audio truth, never just the state flag.
  */
-let stuckSpeakingTicks = 0;
 const STUCK_SPEAKING_LIMIT = 10;
-let captionHoldTicks = 0;
 const CAPTION_HOLD_LIMIT = 43; // ~15 s at the 350 ms re-arm
 
-/** Test hooks for the stuck-speaking watchdog. */
-export function __testStuckTicks(): number {
-  return stuckSpeakingTicks;
-}
-export function __testSetStuckTicks(n: number): void {
-  stuckSpeakingTicks = n;
+/** One hide chain's own counters. They were module-wide, so two live chains (the ack's and the loading event's)
+ *  shared one counter and reached the 10 s limit in about 5 s. */
+interface HideChain {
+  stuckTicks: number;
+  captionTicks: number;
+  /** The turn this chain was armed for; a newer turn makes the chain stale. */
+  scope: string | null;
 }
 
-export function hideOrbAfterSpeech(firstDelayMs: number): void {
+/** Test hooks: seed the next chain's stuck ticks, read the last chain's. */
+let nextChainSeed = 0;
+let lastChainStuck = 0;
+export function __testStuckTicks(): number {
+  return lastChainStuck;
+}
+export function __testSetStuckTicks(n: number): void {
+  nextChainSeed = n;
+  lastChainStuck = n;
+}
+
+function setStuck(chain: HideChain, n: number): void {
+  chain.stuckTicks = n;
+  lastChainStuck = n;
+}
+
+/** The single place the orchestrator hides the orb, so the log names who did it and for which turn. */
+function hideOrbLogged(source: string, scope: string | null): void {
+  console.log(
+    `[ORB] hide by ${source} (turn=${scope ?? "none"}, newest=${latestTurnRequestId ?? "none"}, state=${useAssistant.getState().state}, loading=${useAssistant.getState().loadingVisible})`,
+  );
+  useAssistant.getState().setVisible(false);
+}
+
+export function hideOrbAfterSpeech(firstDelayMs: number, scopeOrChain?: string | null | HideChain): void {
+  const chain: HideChain =
+    scopeOrChain && typeof scopeOrChain === "object"
+      ? scopeOrChain
+      : { stuckTicks: nextChainSeed, captionTicks: 0, scope: scopeOrChain ?? latestTurnRequestId };
+  nextChainSeed = 0;
   setTimeout(() => {
     const s = useAssistant.getState();
     if (s.ghostActive) {
-      stuckSpeakingTicks = 0;
+      setStuck(chain, 0);
       return;
     }
+    if (hideIsStale(chain.scope, latestTurnRequestId)) {
+      console.log(`[ORB] hide chain for turn ${chain.scope} ended: turn ${latestTurnRequestId} is newer`);
+      return;
+    }
+    const decide = (audioPlaying: boolean) =>
+      decideAfterSpeech({
+        ghostActive: s.ghostActive,
+        state: s.state,
+        loadingVisible: s.loadingVisible,
+        audioPlaying,
+        captionActive: s.captionActive,
+        awaitingInput: s.awaitingInput,
+        pendingGithubCommand: Boolean(s.pendingGithubCommand),
+      });
+    const apply = (decision: ReturnType<typeof decide>) => {
+      switch (decision) {
+        case "keep":
+          setStuck(chain, 0);
+          return;
+        case "wait":
+          setStuck(chain, 0);
+          if (useAssistant.getState().state === "speaking") {
+            hideOrbAfterSpeech(1000, chain);
+            return;
+          }
+          // A caption still on screen: cap the wait (15 s = ~43 re-arms at 350 ms).
+          chain.captionTicks += 1;
+          if (chain.captionTicks <= CAPTION_HOLD_LIMIT) {
+            console.log("[ORB] hideOrbAfterSpeech: caption is still active on screen, holding orb visible for sync");
+            hideOrbAfterSpeech(350, chain);
+            return;
+          }
+          console.warn("[ORB] hideOrbAfterSpeech: caption hold limit reached, hiding anyway");
+          hideOrbLogged("hideOrbAfterSpeech (caption hold limit)", chain.scope);
+          return;
+        case "settle_thinking":
+          // The acknowledgement is over but the turn's work is not: show the thinking pose, not a silent
+          // "speaking" one, and keep the orb (see orbVisibility.ts). The result re-opens the speaking pose.
+          setStuck(chain, 0);
+          console.log(`[ORB] ack finished while loading is up (turn=${chain.scope ?? "none"}): back to thinking, orb stays`);
+          useAssistant.getState().setState("thinking");
+          return;
+        case "stuck_tick":
+          setStuck(chain, chain.stuckTicks + 1);
+          if (chain.stuckTicks >= STUCK_SPEAKING_LIMIT) {
+            setStuck(chain, 0);
+            console.warn("[NEXUS] stuck-speaking watchdog: silent 10s, forcing turn close");
+            finishSpokenResult(getCurrentRequestId() ?? "");
+            return;
+          }
+          hideOrbAfterSpeech(1000, chain);
+          return;
+        case "hide":
+          setStuck(chain, 0);
+          hideOrbLogged("hideOrbAfterSpeech (speech and caption finished)", chain.scope);
+          return;
+      }
+    };
     if (s.state === "speaking") {
       void import("../audio/ttsPlayer").then(({ isRustTtsPlaying }) => {
+        // State may have moved on during the import hop.
         if (useAssistant.getState().state !== "speaking") {
-          stuckSpeakingTicks = 0;
+          setStuck(chain, 0);
           return;
         }
-        if (isRustTtsPlaying()) {
-          stuckSpeakingTicks = 0;
-          hideOrbAfterSpeech(1000);
-          return;
-        }
-        stuckSpeakingTicks += 1;
-        if (stuckSpeakingTicks >= STUCK_SPEAKING_LIMIT) {
-          stuckSpeakingTicks = 0;
-          console.warn(
-            "[NEXUS] stuck-speaking watchdog: silent 10s, forcing turn close"
-          );
-          finishSpokenResult(getCurrentRequestId() ?? "");
-          return;
-        }
-        hideOrbAfterSpeech(1000);
+        apply(decide(isRustTtsPlaying()));
       }).catch(() => {
-        hideOrbAfterSpeech(1000);
+        hideOrbAfterSpeech(1000, chain);
       });
       return;
     }
-    stuckSpeakingTicks = 0;
-    if (s.state !== "idle") return;
-    if (s.captionActive) {
-      // Cap the wait: a caption that never reports finished must not hold
-      // the orb forever (15 s = ~43 re-arms at 350 ms).
-      captionHoldTicks += 1;
-      if (captionHoldTicks <= CAPTION_HOLD_LIMIT) {
-        console.log("[ORB] hideOrbAfterSpeech: caption is still active on screen, holding orb visible for sync");
-        hideOrbAfterSpeech(350);
-        return;
-      }
-      console.warn("[ORB] hideOrbAfterSpeech: caption hold limit reached, hiding anyway");
-    }
-    captionHoldTicks = 0;
-    console.log("[ORB] hideOrbAfterSpeech: speech and caption finished, setting visible=false");
-    s.setVisible(false);
+    apply(decide(false));
   }, firstDelayMs);
 }
 
@@ -513,6 +604,8 @@ export async function initOrchestratorListener(): Promise<void> {
   await listen<OrchestratorEvent>("orchestrator:event", async (event) => {
     const ev = event.payload;
     const store = useAssistant.getState();
+    const evRequest = (ev as { request_id?: string }).request_id;
+    if (evRequest && isUserTurnRequest(evRequest)) latestTurnRequestId = evRequest;
 
     // Serialized (not raw object): CDP forwards console args without
     // remote-object resolution, so raw objects arrive as useless "Object".
@@ -542,10 +635,10 @@ export async function initOrchestratorListener(): Promise<void> {
             // This keeps the orb visible while "On it sir" is playing,
             // then transitions to the loading indicator once it's ready.
             // State-aware (never mid-speech, never mid-ghost).
-            hideOrbAfterSpeech(600);
+            hideOrbAfterSpeech(600, ev.request_id ?? null);
             // Belt-and-braces: if the ack audio never becomes audible, the
             // orb must not park on screen — the spinner carries the turn.
-            armOrbSilentHideObserver();
+            armOrbSilentHideObserver(ev.request_id ?? null);
           } else if (!ev.visible) {
             // The loading window closed — no stale guard may fire later.
             clearAckDeadlineGuards();
@@ -555,6 +648,8 @@ export async function initOrchestratorListener(): Promise<void> {
       }
 
       case "ack": {
+        // A new turn's ack: earlier audio must not count as this turn's.
+        noteAckTurnStarted();
         // Speak the acknowledgement ("On it sir")
         // Skip if we've already given a local ack (ackLongRunningQuery in
         // recorder.ts) to avoid double-speak ("On it sir" said twice).
@@ -562,7 +657,7 @@ export async function initOrchestratorListener(): Promise<void> {
           console.log("[NEXUS] orchestrator ack suppressed — local ack already given");
           // Still hide the orb after TTS finishes (if not in ghost mode) — the
           // loading indicator will take over. State-aware, never mid-speech.
-          hideOrbAfterSpeech(1500);
+          hideOrbAfterSpeech(1500, ev.request_id ?? null);
           break;
         }
         if (ev.text) {
@@ -578,7 +673,7 @@ export async function initOrchestratorListener(): Promise<void> {
             void speak(ackText, undefined, { requestId: ackReq, sourceCenter: ackCenter, kind: "ack" });
             // Hide the orb after TTS actually finishes (if not in ghost
             // mode) — the zoom plays fully instead of sliding down mid-speech.
-            hideOrbAfterSpeech(1500);
+            hideOrbAfterSpeech(1500, ackReq ?? null);
           });
         }
         break;
