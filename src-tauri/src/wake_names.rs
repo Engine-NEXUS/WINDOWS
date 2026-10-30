@@ -72,6 +72,39 @@ fn name_forms() -> Vec<String> {
     v
 }
 
+/// True when the transcript is nothing but the assistant's name (optionally with a greeting, repeated, with
+/// punctuation): "Nexus.", "hey nexus", "nexus nexus", "ok next us". While a turn is already open this is just
+/// the user calling the name, not a command and not a question about the product, so it must be ignored.
+/// "nexus open chrome" and "what is nexus" are NOT name-only.
+pub fn is_name_only(text: &str) -> bool {
+    let words: Vec<String> = text
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|x| !x.is_empty())
+        .map(String::from)
+        .collect();
+    if words.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    let mut names = 0;
+    while i < words.len() {
+        let w = words[i].as_str();
+        if GREETINGS.contains(&w) {
+            i += 1;
+        } else if i + 1 < words.len() && NEAR_PAIRS.iter().any(|(a, b)| words[i] == *a && words[i + 1] == *b) {
+            names += 1;
+            i += 2;
+        } else if EXACT.contains(&w) || NEAR_WORDS.contains(&w) {
+            names += 1;
+            i += 1;
+        } else {
+            return false;
+        }
+    }
+    names > 0
+}
+
 /// Prefixes `strip_wake_prefix` removes: "<greeting> <name>" and bare "<name>",
 /// longest first so "hey nexus" is tried before "nexus". Built once.
 pub fn wake_prefixes() -> &'static [String] {
@@ -129,6 +162,15 @@ mod tests {
         // No form is both exact and near.
         for e in EXACT {
             assert!(!NEAR_WORDS.contains(e));
+        }
+    }
+    #[test]
+    fn test_is_name_only() {
+        for yes in ["Nexus.", "nexus", "Hey Nexus!", "ok nexus", "nexus nexus", "hey, next us", "Lexus?", "okay nixus."] {
+            assert!(is_name_only(yes), "{yes}");
+        }
+        for no in ["", "   ", "nexus open chrome", "what is nexus", "hey nexus stop", "next", "hello", "texas", "open nexus", "nexus is great"] {
+            assert!(!is_name_only(no), "{no}");
         }
     }
 }

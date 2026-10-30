@@ -217,6 +217,13 @@ pub struct PlaceItem {
     pub open_now: Option<bool>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlaceDetail {
+    pub item: PlaceItem,
+    pub weekday_hours: Vec<String>,
+    pub summary: Option<String>,
+}
+
 // ─── Photos Models ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

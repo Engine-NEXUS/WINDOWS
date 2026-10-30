@@ -76,6 +76,8 @@ export type Intent =
   | { action: "mail_mute" }
   | { action: "directions"; destination: string; origin?: string | null; mode: string }
   | { action: "places_search"; query: string; near?: string | null }
+  | { action: "place_info"; query: string; ask: string }
+  | { action: "analyse_this_email" }
   | { action: "whatsapp_read"; name?: string | null }
   | { action: "people_flag"; name: string; kind: string; on: boolean }
   | { action: "people_list" }

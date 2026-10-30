@@ -4115,7 +4115,14 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     .await;
 
                     let stt_failed = transcript.is_err();
-                    let raw_text = transcript.unwrap_or_default();
+                    let mut raw_text = transcript.unwrap_or_default();
+                    // The user only said the assistant's name while a turn was already open: ignore it (no reply,
+                    // no "what is Nexus" answer). It reaches the frontend as a silent miss, which re-opens the mic.
+                    let name_only = !raw_text.is_empty() && crate::wake_names::is_name_only(&raw_text);
+                    if name_only {
+                        tracing::info!("stt-capture: transcript '{}' is only the assistant's name — ignored", raw_text);
+                        raw_text.clear();
+                    }
                     // Start/abort share this barrier. Once a packet has passed
                     // this check, neither can invalidate it halfway through
                     // provenance registration and native event emission.
@@ -4168,7 +4175,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                         }
                     }
                     stats.stt_path = crate::stt::last_stt_path_str();
-                    stats.filter = crate::stt::last_filter_str();
+                    stats.filter = if name_only { "name_only" } else { crate::stt::last_filter_str() };
                     crate::stt_diagnostics::save_capture(&app_for_stt, session, &samples, &raw_text, &stats);
                     // Unlike a routing/action success, this only proves the
                     // native event emit completed. A missing frontend still

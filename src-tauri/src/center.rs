@@ -543,6 +543,8 @@ pub fn center_id_for(intent: &ParsedIntent) -> CenterId {
         ParsedIntent::WatchScreenEmail
         | ParsedIntent::Directions { .. }
         | ParsedIntent::PlacesSearch { .. }
+        | ParsedIntent::PlaceInfo { .. }
+        | ParsedIntent::AnalyseThisEmail
         | ParsedIntent::ScanInternshipEmails => CenterId::Google,
 
         ParsedIntent::MemoryAudit

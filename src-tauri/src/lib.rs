@@ -168,6 +168,7 @@ pub(crate) mod watch_runner;
 pub(crate) mod agent_tracker;
 pub(crate) mod agent_outcomes;
 pub(crate) mod howto;
+pub(crate) mod email_brief;
 pub(crate) mod power_close;
 pub(crate) mod window_tile;
 pub(crate) mod latency;
