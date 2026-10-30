@@ -14,7 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const FILES = ["frontend/src/theme/tokens.css", "frontend/src/sidebar/unified.css", "frontend/src/pr-list/pr-list.css"].map((f) => join(ROOT, f));
+const FILES = ["frontend/src/theme/tokens.css", "frontend/src/sidebar/unified.css", "frontend/src/pr-list/pr-list.css", "frontend/src/architect/architect.css"].map((f) => join(ROOT, f));
 
 /** Custom-property maps per theme: dark = `:root`/dark blocks, light = dark overlaid by the light blocks. */
 export function loadThemes(cssTexts) {
@@ -116,6 +116,13 @@ export const PAIRS = [
     ["--gh-text-secondary", s, TEXT, "dashboard secondary text"],
     ["--gh-text-muted", s, TEXT, "dashboard muted text"],
     ["--gh-accent", s, TEXT, "dashboard accent as text"],
+  ]),
+  // Architecture Mapper palette (architect/architect.css).
+  ...["--apple-surface-base", "--apple-surface-sidebar", "--apple-surface-muted", "--apple-surface-raised"].flatMap((s) => [
+    ["--apple-text-primary", s, TEXT, "mapper text"],
+    ["--apple-text-secondary", s, TEXT, "mapper secondary text"],
+    ["--apple-text-tertiary", s, TEXT, "mapper tertiary text"],
+    ["--apple-text-accent", s, TEXT, "mapper accent as text"],
   ]),
   // Command Hub palette (sidebar/unified.css), still the live one until the views migrate.
   ...["--hub-bg", "--hub-card"].flatMap((s) => [
