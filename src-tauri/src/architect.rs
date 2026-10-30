@@ -675,6 +675,64 @@ pub async fn open_architect_window<R: Runtime>(
     Ok(())
 }
 
+/// Label of the dedicated Architecture map window.
+const MAP_WINDOW: &str = "architect-map";
+
+/// Split "owner/repo" (exactly one slash, both parts plain) into its parts. Pure.
+pub(crate) fn split_full_name(full: &str) -> Option<(String, String)> {
+    let (o, r) = full.trim().split_once('/')?;
+    let ok = |p: &str| !p.is_empty() && p.len() <= 100 && p.chars().next().map_or(false, |c| c.is_ascii_alphanumeric()) && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if ok(o) && ok(r) && !r.contains('/') { Some((o.to_string(), r.to_string())) } else { None }
+}
+
+/// Open the Architecture map in its OWN window to the left of the response sidebar and start the analysis for
+/// `owner/repo` there. Returns at once (the map fills in as the analysis arrives). The unified sidebar window is
+/// not touched, so the repo overview can appear in it at the same time.
+pub async fn open_architect_map_window<R: Runtime>(app: AppHandle<R>, owner: String, repo: String) -> Result<(), String> {
+    let existed = app.get_webview_window("architect-map").is_some();
+    // Store the pending repo BEFORE the window exists: React asks for it on mount.
+    {
+        let mut pending = PENDING_ARCHITECT_REPO.lock();
+        *pending = Some(PendingArchitect {
+            owner: Some(owner.clone()),
+            repo: Some(repo.clone()),
+            backdrop: None,
+            phase1_data: None,
+        });
+    }
+    let win = crate::dyn_windows::get_or_create_window(&app, crate::dyn_windows::WindowConfig::architect_map())?;
+    if let Ok(Some(monitor)) = win.current_monitor().or_else(|_| win.primary_monitor()) {
+        let (p, s) = (monitor.position(), monitor.size());
+        let work = crate::work_area::PRect { x: p.x, y: p.y, w: s.width as i32, h: s.height as i32 };
+        let rect = crate::work_area::sidebar_rect("architect-beside", None, work, monitor.scale_factor());
+        let _ = win.set_size(tauri::PhysicalSize::new(rect.w as u32, rect.h as u32));
+        let _ = win.set_position(tauri::PhysicalPosition::new(rect.x, rect.y));
+    }
+    win.show().map_err(|e| format!("architect map show: {e}"))?;
+    #[cfg(target_os = "windows")]
+    crate::dwm_corners::round_corners(&win);
+    let payload = serde_json::json!({ "owner": owner, "repo": repo });
+    if existed {
+        let _ = app.emit_to(MAP_WINDOW, "architect:set-repo", payload.clone());
+    } else {
+        // A fresh page may not have registered its listener yet: the pending slot covers the early case,
+        // this delayed emit covers the narrow race around it.
+        let app2 = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            let _ = app2.emit_to(MAP_WINDOW, "architect:set-repo", payload);
+        });
+    }
+    tracing::info!("architect-map: open ({owner}/{repo}, existed={existed})");
+    Ok(())
+}
+
+/// IPC: close the Architecture map window (Escape inside it).
+#[tauri::command]
+pub async fn close_architect_map<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    crate::dyn_windows::destroy_window(&app, "architect-map")
+}
+
 /// IPC: Auto-detect GitHub repo from active browser, run Phase 1 analysis
 /// in the background, and ONLY show the architect window when the map is ready.
 ///
@@ -2799,6 +2857,16 @@ fn build_spoken_summary(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn split_full_name_accepts_only_plain_owner_repo() {
+        assert_eq!(split_full_name("Engine-NEXUS/WINDOWS"), Some(("Engine-NEXUS".into(), "WINDOWS".into())));
+        assert_eq!(split_full_name(" a/b.c_d "), Some(("a".into(), "b.c_d".into())));
+        for bad in ["", "repo", "a/", "/b", "a/b/c", "a b/c", "../etc", "a/b;rm", "owner/re po"] {
+            assert_eq!(split_full_name(bad), None, "{bad}");
+        }
+    }
+
     use super::*;
 
     #[test]

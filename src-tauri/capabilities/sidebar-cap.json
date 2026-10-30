@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "sidebar-cap",
   "description": "Capabilities for the unified NEXUS sidebar window (Assistant / Command Hub / Architect / PR List views) — event listening, TTS read-aloud, drag region, and dock IPC.",
-  "windows": ["sidebar"],
+  "windows": ["sidebar", "architect-map"],
   "permissions": [
     "core:default",
     "core:event:allow-emit",

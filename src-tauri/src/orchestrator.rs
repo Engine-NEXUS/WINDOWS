@@ -2172,8 +2172,36 @@ pub async fn process_transcript<R: Runtime>(
         Subsystem::WorkerBackend => {
             // feature 161 repo resolution
             let mut worker_transcript = transcript.clone();
+            // "analyse this repo" / "analyse this PR": the user pointed instead of naming. Read the open page; if it is a
+            // repository (or pull request) analyse that one, otherwise understand whatever is on screen.
+            if let ParsedIntent::AnalyseRepo { owner: None, repo } = &intent {
+                let deictic_repo = is_deictic_repo_word(repo);
+                let deictic_pr = is_deictic_pr_word(repo);
+                if deictic_repo || deictic_pr {
+                    let url = tokio::task::spawn_blocking(crate::browser_url::get_active_browser_url).await.ok().flatten();
+                    if deictic_pr {
+                        if let Some((o, r, n)) = url.as_deref().and_then(github_pr_from_url) {
+                            worker_transcript = format!("analyse pr {n} in {o}/{r}");
+                        } else {
+                            clear_active_request(&request_id);
+                            return run_screen_analysis(app, format!("analyse what is on my screen: {transcript}")).await;
+                        }
+                    } else {
+                        let found = tokio::task::spawn_blocking(crate::architect::get_active_repo_url).await.ok().flatten();
+                        match found {
+                            Some(id) => worker_transcript = format!("analyse {}/{}", id.owner, id.repo),
+                            None => {
+                                clear_active_request(&request_id);
+                                return run_screen_analysis(app, format!("analyse what is on my screen: {transcript}")).await;
+                            }
+                        }
+                    }
+                }
+            }
             let target_repo = match &intent {
-                ParsedIntent::AnalyseRepo { owner: None, repo } if !repo.trim().is_empty() => {
+                ParsedIntent::AnalyseRepo { owner: None, repo }
+                    if !repo.trim().is_empty() && !is_deictic_repo_word(repo) && !is_deictic_pr_word(repo) =>
+                {
                     Some((repo.clone(), true))
                 }
                 ParsedIntent::AnalysePr { owner: None, repo, .. }
@@ -2239,6 +2267,25 @@ pub async fn process_transcript<R: Runtime>(
                 }
             }
             // end feature 161 repo resolution
+            // "Analyse this repo": the Architecture map opens in its own window beside the overview sidebar and
+            // starts at once; the Worker analysis fills the sidebar when it arrives.
+            if let ParsedIntent::AnalyseRepo { owner, repo } = &intent {
+                let pair = if is_deictic_pr_word(repo) { None } else { match owner.as_deref().filter(|o| !o.trim().is_empty()) {
+                    Some(o) => crate::architect::split_full_name(&format!("{}/{}", o.trim(), repo.trim())),
+                    None => worker_transcript
+                        .split_whitespace()
+                        .rev()
+                        .find_map(|w| crate::architect::split_full_name(w.trim_matches(|c: char| matches!(c, '.' | ',' | '?' | '!')))),
+                } };
+                if let Some((o, r)) = pair {
+                    let app_for_map = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = crate::architect::open_architect_map_window(app_for_map, o, r).await {
+                            tracing::warn!("analyse repo: architect map window failed: {e}");
+                        }
+                    });
+                }
+            }
             // Long-running — emit ack, then show loading indicator after TTS.
             // Repeat-back: the ack names the action (P1), so the user hears
             // WHAT was understood instead of a bare "on it sir".
@@ -5829,6 +5876,33 @@ async fn run_places_search<R: Runtime>(
         return say_and_finish(&app, request_id, "I couldn't open the map window, sir.".into());
     }
     say_and_finish(&app, request_id, places_line(&query, near.as_deref().or(anchor.as_deref()), &places))
+}
+
+/// The repo word the parser produced when the user pointed instead of naming ("analyse this repo" -> "this").
+pub(crate) fn is_deictic_repo_word(repo: &str) -> bool {
+    matches!(
+        repo.trim().to_lowercase().as_str(),
+        "this" | "that" | "it" | "here" | "current" | "the current" | "this one" | "that one" | "open" | "the open"
+            | "this repo" | "this repository" | "this project" | "the repo" | "the repository"
+    )
+}
+
+/// "this pr" / "this pull request" (the parser keeps the noun for PRs).
+pub(crate) fn is_deictic_pr_word(repo: &str) -> bool {
+    matches!(repo.trim().to_lowercase().as_str(), "this pr" | "this pull request" | "that pr" | "the pr" | "the pull request" | "this pull" )
+}
+
+/// owner, repo and PR number from an open GitHub pull-request URL. Pure.
+pub(crate) fn github_pr_from_url(url: &str) -> Option<(String, String, u64)> {
+    let rest = url.split("github.com/").nth(1)?;
+    let mut parts = rest.split(['/', '?', '#']);
+    let (owner, repo, kind, num) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    if kind != "pull" {
+        return None;
+    }
+    let full = crate::architect::split_full_name(&format!("{owner}/{repo}"))?;
+    let n: u64 = num.parse().ok().filter(|n| *n > 0)?;
+    Some((full.0, full.1, n))
 }
 
 /// Today's line from Google's seven weekday lines (Monday first), without the day name:
@@ -11169,6 +11243,22 @@ mod tests {
             directions_line("Central Park", Some("28 minutes via FDR Drive")),
             "Finding route to Central Park. About 28 minutes via FDR Drive, sir."
         );
+    }
+
+    #[test]
+    fn deictic_repo_and_pr_words_and_urls() {
+        for w in ["this", "That", " it ", "this repo", "the current"] {
+            assert!(is_deictic_repo_word(w), "{w}");
+        }
+        for w in ["servx", "zync", "owner/repo", "this-repo-name", "itsy"] {
+            assert!(!is_deictic_repo_word(w), "{w}");
+        }
+        assert!(is_deictic_pr_word("this pr") && is_deictic_pr_word("This Pull Request") && !is_deictic_pr_word("this"));
+        assert_eq!(github_pr_from_url("https://github.com/Engine-NEXUS/WINDOWS/pull/38/files"), Some(("Engine-NEXUS".into(), "WINDOWS".into(), 38)));
+        assert_eq!(github_pr_from_url("https://github.com/a/b/pull/7?diff=split"), Some(("a".into(), "b".into(), 7)));
+        for bad in ["https://github.com/a/b", "https://github.com/a/b/issues/7", "https://github.com/a/b/pull/x", "https://example.com/a/b/pull/7", "https://github.com/a/b/pull/0"] {
+            assert_eq!(github_pr_from_url(bad), None, "{bad}");
+        }
     }
 
     #[test]

@@ -1327,6 +1327,7 @@ pub fn run() {
             architect::analyze_repo_fast,
             architect::enrich_phase1,
             architect::cancel_architect_analysis,
+            architect::close_architect_map,
             architect::query_impact,
             // Agent-completion watcher (Claude Code, Gemini CLI, Codex, Aider, Hermes, opencode)
             agent_watch::agent_watch_unavailable_reason,

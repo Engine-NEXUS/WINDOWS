@@ -954,6 +954,10 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
     // --- Screen Analysis & Visual Research ---
     // "nexus analyse the screen", "analyse the screen", "explain what is on my screen"
     // Must precede parse_analyse_command so "analyse the screen" is not treated as a repo.
+    // --- "Analyse this" with no name: whatever is on screen (not a repo called "this"). ---
+    if let Some(result) = parse_analyse_deictic_command(&text) {
+        return Some(result);
+    }
     if let Some(result) = parse_screen_analysis_command(&text) {
         return Some(result);
     }
@@ -3021,6 +3025,90 @@ fn parse_analyse_this_email_command(text: &str) -> Option<ParseResult> {
         intent: ParsedIntent::AnalyseThisEmail,
         confidence: 0.95,
         source: "deterministic-analyse-email".to_string(),
+    })
+}
+
+/// "Analyse this", "explain this", "what is this", "describe this image", "summarise this page": the user points
+/// at whatever is on screen without naming it (a picture, a person's page, a YouTube video, a website, a chart,
+/// code, a document...). It goes to the screen-understanding path, which reads the foreground window and its
+/// context. It must NOT be taken for a repository name. Dedicated nouns keep their own routes: "this repo" and
+/// "this PR" are resolved from the open browser page by the orchestrator, "this email" has its own parser.
+fn parse_analyse_deictic_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase().replace(['\u{2019}', '\u{2018}'], "'");
+    let t = t.trim_end_matches(['.', ',', '!', '?']).trim().to_string();
+    let mut s = t.as_str();
+    for lead in ["please ", "nexus, ", "nexus ", "hey ", "ok ", "okay ", "can you ", "could you ", "would you ", "i want you to ", "i need you to "] {
+        if let Some(r) = s.strip_prefix(lead) {
+            s = r;
+        }
+    }
+    if s.split_whitespace().count() > 12 {
+        return None;
+    }
+    const VERBS: &[&str] = &[
+        "analyse ", "analyze ", "explain ", "describe ", "summarise ", "summarize ", "review ", "break down ",
+        "go through ", "look at ", "check out ", "tell me about ", "tell me what is ", "tell me what's ",
+        "what do you think of ", "what do you think about ",
+    ];
+    // "what is this" forms are only taken with "this" (never "it"/"that": those answer the previous reply).
+    const WHAT_FORMS: &[&str] = &["what is ", "what's ", "what is this about", "what's this about"];
+    let (rest, strict_this) = if let Some(v) = VERBS.iter().find(|v| s.starts_with(**v)) {
+        (&s[v.len()..], false)
+    } else if let Some(v) = WHAT_FORMS.iter().find(|v| s.starts_with(**v)) {
+        (&s[v.len()..], true)
+    } else {
+        return None;
+    };
+    let rest = rest.trim();
+    // Optional trailing "for me", "please", "that i'm looking at", "on my screen"...
+    let mut core = rest;
+    for suffix in [
+        " for me", " please", " on my screen", " on the screen", " on screen", " that i'm looking at", " i'm looking at",
+        " that i am looking at", " i am looking at", " that i can see", " that i see", " that is open", " in front of me",
+    ] {
+        if let Some(p) = core.strip_suffix(suffix) {
+            core = p.trim();
+        }
+    }
+    let core = core.strip_suffix(" about").unwrap_or(core).trim();
+    const PRONOUNS: &[&str] = &["this", "that", "it", "this one", "that one", "these", "those", "this thing", "that thing"];
+    const OBJECTS: &[&str] = &[
+        "image", "picture", "photo", "photograph", "screenshot", "page", "webpage", "web page", "site", "website",
+        "video", "clip", "article", "post", "tweet", "profile", "person", "document", "doc", "pdf", "chart", "graph",
+        "diagram", "code", "file", "tab", "window", "app", "slide", "slides", "table", "form", "message", "thread",
+        "song", "product", "listing", "recipe", "map", "design", "ui", "page here",
+    ];
+    // Words that mean a different, dedicated route.
+    const DEDICATED: &[&str] = &[
+        "repo", "repository", "repositories", "project", "codebase", "pr", "pull", "email", "mail", "e-mail", "branch",
+        "commit", "issue",
+    ];
+    let words: Vec<&str> = core.split_whitespace().collect();
+    if words.is_empty() || words.iter().any(|w| DEDICATED.contains(w)) {
+        return None;
+    }
+    let is_pronoun = PRONOUNS.contains(&core);
+    // "this/that <anything up to four words>" is the user pointing ("this youtube video", "this linkedin profile");
+    // "the/my/current <known object>" needs a known object so ordinary chat is not taken.
+    let is_this_object = words.len() >= 2
+        && ((matches!(words[0], "this" | "that" | "these" | "those") && words.len() <= 5)
+            || (matches!(words[0], "the" | "my" | "current" | "open") && OBJECTS.contains(&words[1..].join(" ").as_str())));
+    let ok = if strict_this {
+        core == "this" || core == "this one" || core == "this thing" || (is_this_object && words[0] == "this")
+    } else {
+        is_pronoun || is_this_object
+    };
+    if !ok {
+        return None;
+    }
+    Some(ParseResult {
+        intent: ParsedIntent::NluResult {
+            intent: "screen_analysis".to_string(),
+            slots: serde_json::json!({ "prompt": format!("analyse what is on my screen: {}", text.trim()) }),
+            confidence: 1.0,
+        },
+        confidence: 1.0,
+        source: "deterministic-screen-analysis".to_string(),
     })
 }
 
@@ -10693,6 +10781,34 @@ mod tests {
         ] {
             let got = format!("{:?}", parse_deterministic(p).map(|r| r.intent));
             assert!(!got.contains("AnalyseThisEmail"), "'{p}' wrongly parsed as {got}");
+        }
+    }
+
+    #[test]
+    fn test_analyse_deictic_goes_to_the_screen_not_to_a_repo() {
+        let label = |p: &str| match parse_deterministic(p).map(|r| r.intent) {
+            Some(ParsedIntent::NluResult { intent, .. }) => format!("nlu:{intent}"),
+            Some(other) => format!("{:?}", other),
+            None => "none".to_string(),
+        };
+        for p in [
+            "analyse this", "analyze that", "analyse it", "explain this", "describe this image", "analyse this video",
+            "summarise this page", "what is this", "what's this", "review this", "look at this", "tell me about this",
+            "analyse this website", "analyse this person", "break down this chart", "can you analyse this please",
+            "nexus analyse this", "analyse this for me", "describe this picture on my screen", "what is this about",
+            "explain this code", "analyze this youtube video",
+        ] {
+            // "this website/app/page/site" already has a dedicated whole-window review route (ReviewForeground).
+            let got = label(p);
+            assert!(got == "nlu:screen_analysis" || got == "ReviewForeground", "'{p}' -> {got}");
+        }
+        // Named or dedicated targets keep their routes; chat is untouched.
+        assert!(label("analyse servx").starts_with("AnalyseRepo"), "{}", label("analyse servx"));
+        assert!(label("analyse this repo").starts_with("AnalyseRepo"), "{}", label("analyse this repo"));
+        assert!(label("analyze this repository").starts_with("AnalyseRepo"));
+        assert!(label("analyse this email").starts_with("AnalyseThisEmail"), "{}", label("analyse this email"));
+        for p in ["what is it", "what is that", "what is the weather", "explain quantum computing", "describe your day", "what's the time", "review the budget"] {
+            assert_ne!(label(p), "nlu:screen_analysis", "'{p}' wrongly sent to the screen");
         }
     }
 

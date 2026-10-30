@@ -1014,6 +1014,15 @@ pub fn sidebar_geometry(
             let h = (monitor_h - 40.0).min(1040.0).max(400.0);
             if dock == Some("center") { center_xy(400.0, h) } else { dock_x(400.0, h) }
         }
+        // The Architect map as its own window, directly LEFT of the right-docked response sidebar (520 px wide).
+        // 10 px from the left edge, 10 px gap to the sidebar, at most 960 wide.
+        "architect-beside" => {
+            let h = (monitor_h - 40.0).min(1040.0).max(400.0);
+            let sidebar_x = (monitor_w - 520.0 - 10.0).max(0.0);
+            let w = (sidebar_x - 20.0).min(960.0).max(320.0);
+            let x = (sidebar_x - 10.0 - w).max(0.0);
+            (x, 20.0, w, h)
+        }
         // "assistant" | fallback → default right dock, full height.
         _ => {
             let h = (monitor_h - 40.0).min(1040.0).max(400.0);
@@ -3954,6 +3963,18 @@ pub fn import_settings<R: Runtime>(app: AppHandle<R>, json_str: String) -> Resul
 #[cfg(test)]
 mod sidebar_geometry_tests {
     use super::sidebar_geometry;
+
+    #[test]
+    fn architect_beside_sits_left_of_the_sidebar_without_overlap() {
+        for (mw, mh) in [(1366.0, 728.0), (1280.0, 720.0), (1536.0, 824.0), (1920.0, 1040.0), (2560.0, 1400.0), (1000.0, 700.0)] {
+            let (sx, _, sw, _) = sidebar_geometry("assistant", None, mw, mh);
+            let (x, y, w, h) = sidebar_geometry("architect-beside", None, mw, mh);
+            assert!(x >= 0.0 && y >= 0.0 && w >= 320.0 && h >= 400.0, "{mw}x{mh}: {x},{y},{w},{h}");
+            assert!(x + w <= sx - 10.0 + 0.001 || sx - 10.0 < 320.0, "{mw}x{mh}: map right edge {} vs sidebar left {}", x + w, sx);
+            assert!(sx + sw <= mw + 0.001, "{mw}x{mh}: sidebar stays on screen");
+            assert!(w <= 960.0);
+        }
+    }
 
     #[test]
     fn only_the_assistant_and_coderabbit_views_are_replaceable_by_an_alert() {
