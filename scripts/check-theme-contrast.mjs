@@ -14,7 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const FILES = ["frontend/src/theme/tokens.css", "frontend/src/sidebar/unified.css", "frontend/src/pr-list/pr-list.css", "frontend/src/architect/architect.css"].map((f) => join(ROOT, f));
+const FILES = ["frontend/src/theme/tokens.css", "frontend/src/sidebar/unified.css", "frontend/src/pr-list/pr-list.css", "frontend/src/architect/architect.css", "frontend/src/sidebar/sidebar.css", "frontend/src/companion-hud/companion-hud.css"].map((f) => join(ROOT, f));
 
 /** Custom-property maps per theme: dark = `:root`/dark blocks, light = dark overlaid by the light blocks. */
 export function loadThemes(cssTexts) {
@@ -124,6 +124,10 @@ export const PAIRS = [
     ["--apple-text-tertiary", s, TEXT, "mapper tertiary text"],
     ["--apple-text-accent", s, TEXT, "mapper accent as text"],
   ]),
+  // Calibration HUD (companion-hud/companion-hud.css).
+  ["--hud-text", "--hud-bg", TEXT, "hud text"],
+  ["--hud-dim", "--hud-bg", TEXT, "hud secondary text"],
+  ["--hud-accent", "--hud-bg", UI, "hud accent (non-text)"],
   // Command Hub palette (sidebar/unified.css), still the live one until the views migrate.
   ...["--hub-bg", "--hub-card"].flatMap((s) => [
     ["--hub-text", s, TEXT, "hub text"],
