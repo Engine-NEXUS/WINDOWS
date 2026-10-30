@@ -1781,6 +1781,10 @@ pub struct NexusSettings {
     /// choose with `stt_eval --capture-offset-ms`. Clamped to ±400.
     #[serde(default)]
     pub wake_seed_offset_ms: i32,
+    /// When Voice Lock already confirmed the owner's voice on a wake candidate, skip the cloud speech check:
+    /// the local wake model plus the local voice match decide. Default on; turn off to check every wake in the cloud.
+    #[serde(default = "default_true")]
+    pub wake_owner_fast_path: bool,
     /// Wake-word front-end chain: "legacy" (the original runtime chain, default)
     /// or "aligned" (identical to the chain the classifier was trained with).
     /// Compare with `wake_eval --dsp` on your recordings before switching.
@@ -2271,6 +2275,7 @@ impl Default for NexusSettings {
             stt_confidence_gate: false,
             stt_command_hints: false,
             wake_seed_offset_ms: 0,
+            wake_owner_fast_path: true,
             wake_dsp_profile: default_wake_dsp_profile(),
             ghost_step_timeout_ms: 15000,
             ghost_turn_gap_ms: 1000,
@@ -3286,6 +3291,16 @@ pub fn read_wake_verify_high<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> f3
         .and_then(|j| j.get("wakeVerifyHigh").and_then(|v| v.as_f64()))
         .map(|v| v as f32)
         .unwrap_or(crate::wakeword_oww::DEFAULT_VERIFY_HIGH)
+}
+
+/// Read `wakeOwnerFastPath` (true when unset).
+pub fn read_wake_owner_fast_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return true; };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("wakeOwnerFastPath").and_then(|v| v.as_bool()))
+        .unwrap_or(true)
 }
 
 /// Read `wakeSeedOffsetMs` (0 when unset or invalid).

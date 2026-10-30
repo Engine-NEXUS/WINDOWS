@@ -1998,7 +1998,7 @@ static VERIFY_RING: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::V
 const VERIFY_RING_CAP: usize = 40000;
 /// Max time to wait for STT verification before failing open.
 #[cfg(not(feature = "mock-wake"))]
-const VERIFY_TIMEOUT_SECS: u64 = 10;
+const VERIFY_TIMEOUT_SECS: u64 = 3;
 /// A stage-1 acoustic candidate: ring audio + the trigger probability.
 /// The probability powers the two-key gate (near-matches require prob ≥ 0.6).
 #[cfg(not(feature = "mock-wake"))]
@@ -4214,17 +4214,19 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         // cannot turn a wake candidate into an owner command.
         // A stage-2-verified candidate already passed this check when it was
         // first seen — never repeat it.
+        let mut owner_sim: Option<f32> = None;
         if !verified && crate::commands::read_speaker_verification(&app) {
             match verify_speaker_at_fire(&app, &candidate.audio) {
-                Some(false) | None => {
+                Some((false, _)) | None => {
                     tracing::info!(
                         "wake-word: REJECTED by speaker verification (prob {:.3})",
                         candidate.prob
                     );
                     continue;
                 }
-                Some(true) => {
+                Some((true, sim)) => {
                     tracing::debug!("wake-word: ACCEPTED by speaker verification");
+                    owner_sim = Some(sim);
                 }
             }
         }
@@ -4250,7 +4252,9 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                 read_verify_mode(&app),
                 crate::commands::read_wake_verify_high(&app),
                 candidate.prob,
-            ) {
+            ) || (crate::commands::read_wake_owner_fast_path(&app)
+                && owner_fast_path(owner_sim, candidate.prob))
+            {
                 // Instant fire ONLY for real stage-1 detections. A prob-0.0
                 // candidate (v4 barge-in "exact-only verify") has ZERO neural
                 // evidence — firing it here sent phantom "confidence 0.0%"
@@ -4263,6 +4267,12 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     "wake-word: instant neural trigger (confidence: {:.1}%, prob: {:.3})",
                     candidate.prob * 100.0,
                     candidate.prob
+                );
+                tracing::info!(
+                    "[WAKE] path={} prob={:.3} owner_sim={}",
+                    if owner_fast_path(owner_sim, candidate.prob) { "owner-fast" } else { "model-only" },
+                    candidate.prob,
+                    owner_sim.map(|v| format!("{v:.3}")).unwrap_or_else(|| "n/a".into())
                 );
                 if let Ok(dir) = app.path().app_data_dir() {
                     crate::diary::log_event(
@@ -4493,7 +4503,7 @@ pub(crate) fn verify_turn_audio<R: Runtime>(
 /// (~1.28s) to fill the feature buffer, then mean-pools for a robust
 /// speaker embedding.
 #[cfg(not(feature = "mock-wake"))]
-fn verify_speaker_at_fire<R: Runtime>(app: &AppHandle<R>, audio: &[f32]) -> Option<bool> {
+fn verify_speaker_at_fire<R: Runtime>(app: &AppHandle<R>, audio: &[f32]) -> Option<(bool, f32)> {
     fn init_check<R: Runtime>(app: &AppHandle<R>) -> Option<SpeakerCheck> {
         let res_dir = app.path().resource_dir().ok()?;
         let data_dir = app.path().app_data_dir().ok()?;
@@ -4523,7 +4533,7 @@ fn verify_speaker_at_fire<R: Runtime>(app: &AppHandle<R>, audio: &[f32]) -> Opti
         "speaker-verify: similarity={:.3} verified={}",
         sim, verified
     );
-    Some(verified)
+    Some((verified, sim))
 }
 
 /// Cooldown between candidate fires (consecutive frames of one utterance
@@ -4662,6 +4672,15 @@ fn should_instant_fire(mode: VerifyMode, high: f32, prob: f32) -> bool {
         VerifyMode::Always => false,
         VerifyMode::Tiered => prob >= clamp_verify_high(high),
     }
+}
+
+/// Owner-voice fast path: the local wake model found "Nexus" (stage-1 evidence) AND Voice Lock matched the
+/// enrolled owner's voice strongly, so the cloud speech check adds only delay and mishearing risk.
+/// `owner_sim` is `None` when Voice Lock is off or not enrolled, so this never fires without a voice match.
+pub const OWNER_FAST_PATH_SIM: f32 = 0.90;
+pub const OWNER_FAST_PATH_PROB: f32 = 0.70;
+fn owner_fast_path(owner_sim: Option<f32>, prob: f32) -> bool {
+    matches!(owner_sim, Some(sim) if sim.is_finite() && sim >= OWNER_FAST_PATH_SIM) && prob >= OWNER_FAST_PATH_PROB
 }
 
 /// Extra TTS-interrupt phrases beyond `ghost::STOP_PHRASES` (whole-utterance matches only).
@@ -6459,6 +6478,19 @@ mod tests {
         assert!(!super::should_instant_fire(VerifyMode::Tiered, 0.10, 0.79));
         assert!(!super::should_instant_fire(VerifyMode::Tiered, 5.0, 0.99), "clamped down to 0.9999");
         assert!(super::should_instant_fire(VerifyMode::Tiered, f32::NAN, 0.98), "NaN -> default 0.97");
+    }
+
+    /// Owner-voice fast path: needs a strong voice match AND real stage-1 evidence; never without Voice Lock.
+    #[test]
+    fn test_owner_fast_path_needs_voice_match_and_evidence() {
+        use super::owner_fast_path as f;
+        assert!(f(Some(0.986), 0.78), "the 28 Oct log case: owner 0.986, prob 0.78");
+        assert!(f(Some(0.90), 0.70), "exactly at both floors");
+        assert!(!f(None, 0.99), "Voice Lock off / not enrolled: never skip the check");
+        assert!(!f(Some(0.89), 0.99), "weak voice match");
+        assert!(!f(Some(0.99), 0.69), "weak wake evidence");
+        assert!(!f(Some(0.99), 0.0), "prob-0.0 barge-in candidates never take the fast path");
+        assert!(!f(Some(f32::NAN), 0.9), "NaN similarity");
     }
 
     /// E4: the new wakeVerifyMode setting overrides the legacy boolean; nothing else changes behaviour.
