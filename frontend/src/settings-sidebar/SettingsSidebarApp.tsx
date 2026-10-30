@@ -494,33 +494,11 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
   );
 }
 
-const COLOR_PRESETS = [
-  { name: "Golden Amber (Default)", hex: "#f2b859" },
-  { name: "Electric Cyan", hex: "#00e5ff" },
-  { name: "Neon Emerald", hex: "#10b981" },
-  { name: "Crimson Ruby", hex: "#ef4444" },
-  { name: "Royal Azure", hex: "#3b82f6" },
-  { name: "Amethyst Violet", hex: "#a855f7" },
-  { name: "Silver Pearl", hex: "#e2e8f0" },
-];
-
 // ─── Display Tab (Phase 2 — orb position + size) ──────────────────────
 function DisplayTab({ settings, update }: {
   settings: Settings;
   update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
 }) {
-  const currentColor = settings.orbColor || "#f2b859";
-
-  const onColorSelect = (hex: string) => {
-    update("orbColor", hex);
-    try {
-      localStorage.setItem("nexus:orb_color", hex);
-    } catch {}
-    import("@tauri-apps/api/event").then(({ emit }) => {
-      emit("orb:color", { color: hex }).catch(() => {});
-    }).catch(() => {});
-  };
-
   const currentPos = settings.orbPosition || "top";
   const currentCapsuleStyle = settings.orbCapsuleStyle || "pebble";
   const currentWakeupMode = settings.orbWakeupMode ?? 1;
@@ -563,84 +541,6 @@ function DisplayTab({ settings, update }: {
 
   return (
     <>
-      <div className="settings-section">
-        <div className="settings-section-title">Orb Aura</div>
-        <div className="setting-desc" style={{ marginBottom: 10 }}>
-          Accent color for active and idle states.
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 8, marginBottom: 12 }}>
-          {COLOR_PRESETS.map((p) => {
-            const isSelected = currentColor.toLowerCase() === p.hex.toLowerCase();
-            return (
-              <button
-                key={p.hex}
-                type="button"
-                className={`settings-btn ${isSelected ? "settings-btn--primary" : "settings-btn--glass"}`}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  padding: "8px 10px",
-                  borderRadius: 8,
-                  border: isSelected ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
-                  background: isSelected ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
-                  cursor: "pointer",
-                  color: "var(--ui-text-primary)",
-                  fontSize: 12,
-                  fontWeight: isSelected ? 600 : 400,
-                  transition: "all 0.15s ease",
-                }}
-                onClick={() => onColorSelect(p.hex)}
-                title={p.name}
-              >
-                <span
-                  style={{
-                    width: 14,
-                    height: 14,
-                    borderRadius: "50%",
-                    background: p.hex,
-                    boxShadow: `0 0 8px ${p.hex}99`,
-                    flexShrink: 0,
-                    display: "inline-block",
-                  }}
-                />
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {p.name.split(" ")[0]}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-        <div className="setting-row" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div>
-            <div className="setting-label">Hex Color</div>
-            <div className="setting-desc">Custom hex code</div>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="color"
-              value={currentColor}
-              onChange={(e) => onColorSelect(e.target.value)}
-              style={{
-                width: 32,
-                height: 32,
-                borderRadius: 6,
-                border: "1px solid var(--ui-border-strong)",
-                cursor: "pointer",
-                background: "transparent",
-              }}
-            />
-            <input
-              type="text"
-              className="settings-input"
-              style={{ width: 85, textAlign: "center", fontFamily: "monospace" }}
-              value={currentColor}
-              onChange={(e) => onColorSelect(e.target.value)}
-            />
-          </div>
-        </div>
-      </div>
-
       <div className="settings-section">
         <div className="settings-section-title">Screen Anchor</div>
         <div className="setting-desc" style={{ marginBottom: 12 }}>
