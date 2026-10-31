@@ -4,8 +4,8 @@ import { panelResizeDelta } from "./dockKeys";
 
 describe("maps panel source guard", () => {
   it("accepts only Google's embed endpoint", () => {
-    expect(isEmbedSrc("https://www.google.com/maps/embed/v1/place?key=K&q=Charminar")).toBe(true);
-    for (const bad of [null, undefined, 5, "", "https://evil.example/maps/embed/v1/place", "http://www.google.com/maps/embed/v1/place", "https://www.google.com/maps/search/?q=x", "https://www.google.com/maps/embed/v1/place?q=a b", "javascript:alert(1)"]) {
+    expect(isEmbedSrc("https://www.google.com/maps?q=Charminar&output=embed")).toBe(true);
+    for (const bad of [null, undefined, 5, "", "https://evil.example/maps?q=x&output=embed", "http://www.google.com/maps?q=x&output=embed", "https://www.google.com/maps/search/?q=x", "https://www.google.com/maps?q=a b&output=embed", "javascript:alert(1)"]) {
       expect(isEmbedSrc(bad as unknown), String(bad)).toBe(false);
     }
   });

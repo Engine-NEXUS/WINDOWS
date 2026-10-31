@@ -6,7 +6,7 @@ function isTauri(): boolean {
 
 /** Only Google's Maps Embed endpoint may be framed here; anything else (a stale or forged payload) is ignored. */
 export function isEmbedSrc(url: unknown): url is string {
-  return typeof url === "string" && url.startsWith("https://www.google.com/maps/embed/v1/") && !/\s/.test(url);
+  return typeof url === "string" && url.startsWith("https://www.google.com/maps?") && url.endsWith("&output=embed") && !/\s/.test(url);
 }
 
 /**

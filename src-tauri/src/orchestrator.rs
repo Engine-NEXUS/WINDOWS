@@ -6066,7 +6066,13 @@ async fn run_place_info<R: Runtime>(app: AppHandle<R>, query: String, ask: Strin
         Some(d) => format!("{} {}", d.item.name, d.item.address),
         None => query.clone(),
     };
-    if let Err(e) = crate::maps_panel::show_map(&app, crate::maps_panel::MapsTarget::Place(search_text.clone())).await {
+    if let Err(e) = crate::maps_panel::show_map(
+        &app,
+        // "Where is X" opens straight on the route to it (from the saved home when there is one); no navigation starts.
+        crate::maps_panel::MapsTarget::Directions { origin: saved_place(&app, "home"), destination: search_text.clone(), mode: crate::google::types::TravelMode::Driving },
+    )
+    .await
+    {
         tracing::warn!("place info: could not open Maps window: {e}");
         return say_and_finish(&app, request_id, "I couldn't open the map window, sir.".into());
     }

@@ -1,12 +1,10 @@
-//! Maps inside our own window. Google does not allow its normal Maps site in an iframe, so the old Maps window was an
-//! ordinary web window (title bar, resizable, centred). Google's Maps Embed API is made for iframes (free, key needed,
-//! "Maps Embed API" enabled on the key). `show_map` opens a plain frameless NEXUS panel (`maps-panel`, the pinned
-//! `?pin=maps` view) that frames it, placed by `panel_layout` beside the other panels. If there is no key, the API is not
-//! enabled for it, the setting `mapsEmbed` is off, or the request has no origin for a route, it falls back to the old
-//! window, so a map always opens.
+//! Maps inside our own window, with no API key. Google does not allow its normal Maps site in an iframe, but the
+//! "Share -> Embed a map" page (`/maps?...&output=embed`, which redirects to `/maps/embed?pb=...`) is served framable
+//! and needs no key. `show_map` opens a plain frameless NEXUS panel (`maps-panel`, the pinned `?pin=maps` view) that
+//! frames it, placed by `panel_layout` beside the other panels. If the setting `mapsEmbed` is off or the embed cannot
+//! show the target, the real Maps site opens as the page of a plain panel (`maps-web`) instead, so a map always opens.
 
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
@@ -33,31 +31,23 @@ fn enc(s: &str) -> String {
         .collect()
 }
 
-fn mode_word(m: TravelMode) -> &'static str {
-    match m {
-        TravelMode::Walking => "walking",
-        TravelMode::Bicycling => "bicycling",
-        TravelMode::Transit => "transit",
-        _ => "driving",
-    }
-}
-
-/// The Embed API URL for a target, or `None` when the embed cannot show it (a route with no origin, an empty query). Pure.
-pub fn embed_url(key: &str, target: &MapsTarget) -> Option<String> {
-    let key = key.trim();
-    if key.is_empty() || key.contains(['&', '"', '\'', '<', '>', ' ']) {
-        return None;
-    }
-    let base = "https://www.google.com/maps/embed/v1";
+/// The keyless embed URL for a target ("Share -> Embed a map": Google serves it framable and needs no API key), or
+/// `None` when it cannot show the target (empty query / destination). A route with no origin shows the destination;
+/// the user starts directions from the map itself. Pure.
+pub fn embed_url(target: &MapsTarget) -> Option<String> {
+    let base = "https://www.google.com/maps";
     match target {
-        MapsTarget::Place(q) if !q.trim().is_empty() => Some(format!("{base}/place?key={key}&q={}", enc(q.trim()))),
-        MapsTarget::Search(q) if !q.trim().is_empty() => Some(format!("{base}/search?key={key}&q={}", enc(q.trim()))),
-        MapsTarget::Directions { origin: Some(o), destination, mode } if !o.trim().is_empty() && !destination.trim().is_empty() => Some(format!(
-            "{base}/directions?key={key}&origin={}&destination={}&mode={}",
-            enc(o.trim()),
-            enc(destination.trim()),
-            mode_word(*mode)
-        )),
+        MapsTarget::Place(q) | MapsTarget::Search(q) if !q.trim().is_empty() => Some(format!("{base}?q={}&output=embed", enc(q.trim()))),
+        MapsTarget::Directions { origin, destination, mode } if !destination.trim().is_empty() => {
+            let flag = match mode {
+                TravelMode::Walking => "w",
+                TravelMode::Bicycling => "b",
+                TravelMode::Transit => "r",
+                _ => "d",
+            };
+            let from = origin.as_deref().map(str::trim).filter(|o| !o.is_empty()).map(|o| format!("saddr={}&", enc(o))).unwrap_or_default();
+            Some(format!("{base}?{from}daddr={}&dirflg={flag}&output=embed", enc(destination.trim())))
+        }
         _ => None,
     }
 }
@@ -69,64 +59,6 @@ pub fn legacy_url(target: &MapsTarget) -> String {
         MapsTarget::Place(q) | MapsTarget::Search(q) => MapsService::build_place_search_url(q),
         MapsTarget::Directions { origin, destination, mode } => MapsService::build_directions_url(origin.as_deref(), destination, *mode),
     }
-}
-
-/// True when the Embed API answered with one of its own error pages instead of a map. Pure.
-pub fn embed_error_in(body: &str) -> bool {
-    [
-        "ApiNotActivatedMapError",
-        "InvalidKeyMapError",
-        "MissingKeyMapError",
-        "ExpiredKeyMapError",
-        "RefererNotAllowedMapError",
-        "ApiTargetBlockedMapError",
-        "BillingNotEnabledMapError",
-        "ApiKeyNotFoundMapError",
-    ]
-    .iter()
-    .any(|m| body.contains(m))
-}
-
-/// Cached answer to "does the Embed API work with this key": (when checked, ok).
-static PREFLIGHT: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
-
-async fn embed_works(key: &str) -> bool {
-    if let Some((at, ok)) = *PREFLIGHT.lock().unwrap() {
-        if at.elapsed() < Duration::from_secs(600) {
-            return ok;
-        }
-    }
-    let ok = match embed_url(key, &MapsTarget::Place("Google".into())) {
-        None => {
-            tracing::warn!("maps: no usable Google Maps key for the embedded map - using the Maps window");
-            false
-        }
-        Some(url) => {
-            let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(12)).build().unwrap_or_default();
-            match client.get(&url).header("Referer", "http://tauri.localhost/").send().await {
-                Ok(r) if r.status().is_success() => {
-                    let body = r.text().await.unwrap_or_default();
-                    let bad = embed_error_in(&body);
-                    if bad {
-                        tracing::warn!("maps: the Embed API answered with an error page - using the Maps window");
-                    }
-                    !bad
-                }
-                Ok(r) => {
-                    let status = r.status();
-                    let body: String = r.text().await.unwrap_or_default().chars().take(140).collect();
-                    tracing::warn!("maps: Embed API refused the key (HTTP {status}): {body} - enable \"Maps Embed API\" for this key in Google Cloud Console; using the Maps window meanwhile");
-                    false
-                }
-                Err(e) => {
-                    tracing::warn!("maps: Embed API check failed ({e}) - using the Maps window");
-                    false
-                }
-            }
-        }
-    };
-    *PREFLIGHT.lock().unwrap() = Some((Instant::now(), ok));
-    ok
 }
 
 /// What the panel shows once it has mounted (the window can finish loading after the event was sent).
@@ -164,29 +96,23 @@ fn embed_enabled<R: Runtime>(app: &AppHandle<R>) -> bool {
         .unwrap_or(true)
 }
 
-/// Show a map: in the NEXUS panel when the embed works, otherwise in the old window. Returns which one was used.
+/// Show a map in the NEXUS panel (keyless embed). If the embed is switched off (`mapsEmbed`) or cannot show the target,
+/// the real Maps site opens as the page of a plain panel instead. Returns which one was used.
 pub async fn show_map<R: Runtime>(app: &AppHandle<R>, target: MapsTarget) -> Result<&'static str, String> {
-    // The embed key is the Google Maps key the user already saved (the same Google Cloud project).
-    let key = [crate::commands::read_api_key(app, "google_maps"), crate::commands::read_api_key(app, "google_places")]
-        .into_iter()
-        .find(|k| !k.trim().is_empty())
-        .unwrap_or_default();
     if embed_enabled(app) {
-        if let Some(src) = embed_url(&key, &target) {
-            if embed_works(&key).await {
-                crate::panel_layout::note_opened(crate::panel_layout::Panel::Maps);
-                *PENDING.lock().unwrap() = Some(src.clone());
-                let existed = app.get_webview_window(crate::panel_layout::Panel::Maps.label()).is_some();
-                let win = crate::dyn_windows::get_or_create_window(app, crate::dyn_windows::WindowConfig::maps_panel())?;
-                crate::panel_layout::apply(app);
-                win.show().map_err(|e| format!("maps panel show: {e}"))?;
-                #[cfg(target_os = "windows")]
-                crate::dwm_corners::round_corners(&win);
-                if existed {
-                    let _ = app.emit_to(crate::panel_layout::Panel::Maps.label(), "maps:show", src);
-                }
-                return Ok("panel");
+        if let Some(src) = embed_url(&target) {
+            crate::panel_layout::note_opened(crate::panel_layout::Panel::Maps);
+            *PENDING.lock().unwrap() = Some(src.clone());
+            let existed = app.get_webview_window(crate::panel_layout::Panel::Maps.label()).is_some();
+            let win = crate::dyn_windows::get_or_create_window(app, crate::dyn_windows::WindowConfig::maps_panel())?;
+            crate::panel_layout::apply(app);
+            win.show().map_err(|e| format!("maps panel show: {e}"))?;
+            #[cfg(target_os = "windows")]
+            crate::dwm_corners::round_corners(&win);
+            if existed {
+                let _ = app.emit_to(crate::panel_layout::Panel::Maps.label(), "maps:show", src);
             }
+            return Ok("panel");
         }
     }
     // No key needed: the normal Google Maps site as the page of our own plain panel.
@@ -221,41 +147,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embed_urls_per_target() {
-        let k = "AIzaKEY123";
-        assert_eq!(
-            embed_url(k, &MapsTarget::Place("Charminar, Hyderabad".into())).as_deref(),
-            Some("https://www.google.com/maps/embed/v1/place?key=AIzaKEY123&q=Charminar%2C+Hyderabad")
-        );
-        assert!(embed_url(k, &MapsTarget::Search("pharmacy near me".into())).unwrap().contains("/search?key=AIzaKEY123&q=pharmacy+near+me"));
+    fn embed_urls_per_target_need_no_key() {
+        assert_eq!(embed_url(&MapsTarget::Place("Charminar, Hyderabad".into())).as_deref(), Some("https://www.google.com/maps?q=Charminar%2C+Hyderabad&output=embed"));
+        assert!(embed_url(&MapsTarget::Search("pharmacy near me".into())).unwrap().contains("q=pharmacy+near+me"));
         let route = MapsTarget::Directions { origin: Some("Home".into()), destination: "T-Hub".into(), mode: TravelMode::Walking };
-        let u = embed_url(k, &route).unwrap();
-        assert!(u.contains("/directions?") && u.contains("origin=Home") && u.contains("destination=T-Hub") && u.ends_with("&mode=walking"), "{u}");
+        assert_eq!(embed_url(&route).as_deref(), Some("https://www.google.com/maps?saddr=Home&daddr=T-Hub&dirflg=w&output=embed"));
+        let no_origin = MapsTarget::Directions { origin: None, destination: "T-Hub".into(), mode: TravelMode::Driving };
+        assert_eq!(embed_url(&no_origin).as_deref(), Some("https://www.google.com/maps?daddr=T-Hub&dirflg=d&output=embed"));
     }
 
     #[test]
-    fn no_embed_for_routes_without_origin_empty_queries_or_bad_keys() {
-        let k = "AIzaKEY123";
-        assert!(embed_url(k, &MapsTarget::Directions { origin: None, destination: "x".into(), mode: TravelMode::Driving }).is_none());
-        assert!(embed_url(k, &MapsTarget::Place("  ".into())).is_none());
-        assert!(embed_url("", &MapsTarget::Place("x".into())).is_none());
-        // A key that could break out of the URL is refused, never concatenated.
-        assert!(embed_url("a&b=c", &MapsTarget::Place("x".into())).is_none());
-        assert!(embed_url("a\"b", &MapsTarget::Place("x".into())).is_none());
+    fn no_embed_for_empty_targets() {
+        assert!(embed_url(&MapsTarget::Place("  ".into())).is_none());
+        assert!(embed_url(&MapsTarget::Directions { origin: None, destination: " ".into(), mode: TravelMode::Driving }).is_none());
     }
 
     #[test]
     fn query_text_is_encoded_not_injected() {
-        let u = embed_url("K", &MapsTarget::Place("a&key=EVIL#<script>".into())).unwrap();
-        assert_eq!(u.matches("key=").count(), 1, "{u}");
+        let u = embed_url(&MapsTarget::Place("a&output=EVIL#<script>".into())).unwrap();
+        assert_eq!(u.matches("output=").count(), 1, "{u}");
         assert!(!u.contains('<') && !u.contains('#'), "{u}");
-    }
-
-    #[test]
-    fn embed_error_pages_are_recognised() {
-        assert!(embed_error_in("... ApiNotActivatedMapError ..."));
-        assert!(embed_error_in("InvalidKeyMapError"));
-        assert!(!embed_error_in("<html>a normal map page</html>"));
     }
 
     #[test]
