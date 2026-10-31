@@ -189,8 +189,31 @@ pub async fn show_map<R: Runtime>(app: &AppHandle<R>, target: MapsTarget) -> Res
             }
         }
     }
-    crate::commands::open_maps_url(app, &legacy_url(&target))?;
-    Ok("window")
+    // No key needed: the normal Google Maps site as the page of our own plain panel.
+    match show_web_panel(app, &legacy_url(&target)) {
+        Ok(()) => Ok("web-panel"),
+        Err(e) => {
+            tracing::warn!("maps: web panel failed ({e}) - using the Maps window");
+            crate::commands::open_maps_url(app, &legacy_url(&target))?;
+            Ok("window")
+        }
+    }
+}
+
+fn web_panel_closed<R: Runtime>(app: &AppHandle<R>) {
+    crate::panel_layout::note_closed(crate::panel_layout::Panel::MapsWeb);
+    crate::panel_layout::apply(app);
+}
+
+fn show_web_panel<R: Runtime>(app: &AppHandle<R>, url: &str) -> Result<(), String> {
+    use crate::panel_layout::Panel;
+    let win = crate::dyn_windows::open_external_panel(app, Panel::MapsWeb.label(), url, "NEXUS Map", (Panel::MapsWeb.widths().0, 950.0), web_panel_closed::<R>)?;
+    crate::panel_layout::note_opened(Panel::MapsWeb);
+    crate::panel_layout::apply(app);
+    win.show().map_err(|e| format!("maps web panel show: {e}"))?;
+    #[cfg(target_os = "windows")]
+    crate::dwm_corners::round_corners(&win);
+    Ok(())
 }
 
 #[cfg(test)]

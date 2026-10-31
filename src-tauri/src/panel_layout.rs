@@ -22,6 +22,8 @@ pub const TOP: f64 = 20.0;
 pub enum Panel {
     Architect,
     Maps,
+    /// Real Google Maps (the normal site, no API key) as the top-level page of a plain panel.
+    MapsWeb,
 }
 
 impl Panel {
@@ -29,12 +31,14 @@ impl Panel {
         match self {
             Panel::Architect => "architect-map",
             Panel::Maps => "maps-panel",
+            Panel::MapsWeb => "maps-web",
         }
     }
     pub fn from_label(label: &str) -> Option<Panel> {
         match label {
             "architect-map" => Some(Panel::Architect),
             "maps-panel" => Some(Panel::Maps),
+            "maps-web" => Some(Panel::MapsWeb),
             _ => None,
         }
     }
@@ -42,7 +46,7 @@ impl Panel {
     pub fn widths(self) -> (f64, f64, f64) {
         match self {
             Panel::Architect => (960.0, 480.0, 1400.0),
-            Panel::Maps => (720.0, 420.0, 1200.0),
+            Panel::Maps | Panel::MapsWeb => (720.0, 420.0, 1200.0),
         }
     }
 }
@@ -240,7 +244,7 @@ mod tests {
 
     #[test]
     fn labels_round_trip() {
-        for p in [Panel::Architect, Panel::Maps] {
+        for p in [Panel::Architect, Panel::Maps, Panel::MapsWeb] {
             assert_eq!(Panel::from_label(p.label()), Some(p));
         }
         assert_eq!(Panel::from_label("sidebar"), None);
