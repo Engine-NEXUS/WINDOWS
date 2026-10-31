@@ -3121,6 +3121,15 @@ pub fn start_stt_capture() {
 /// itself; everything else is an explicit user turn). Phase 8 directed-speech gate reads this.
 #[cfg(not(feature = "mock-wake"))]
 pub fn start_stt_capture_with_origin(origin: crate::directed::Origin) {
+    start_stt_capture_inner(origin, None);
+}
+
+/// The one place a capture is opened. `seed` = audio that arrived after the wake detection point
+/// (samples, ring position at the time it was cut). It goes through the SAME lifecycle bookkeeping as an
+/// unseeded start: without it the endpoint finds no lifecycle and drops the buffer ("missing lifecycle"),
+/// which is how every neural wake used to lose the command that followed it.
+#[cfg(not(feature = "mock-wake"))]
+fn start_stt_capture_inner(origin: crate::directed::Origin, seed: Option<(Vec<f32>, u64)>) {
     use crate::capture_audit::Outcome;
     let mut audit = crate::capture_audit::begin(match origin {
         crate::directed::Origin::Direct => "direct", _ => "hot_mic",
@@ -3168,6 +3177,9 @@ pub fn start_stt_capture_with_origin(origin: crate::directed::Origin) {
     {
         let mut buf = STT_CAPTURE_BUFFER.lock();
         buf.clear();
+        if let Some((samples, _)) = &seed {
+            buf.extend_from_slice(samples);
+        }
         // NOTE: No prefix-pad from VERIFY_RING here.
         // The VERIFY_RING contains the wake word audio ("NEXUS") and ~2s
         // of audio context. Seeding that into the command capture poisons
@@ -3194,8 +3206,23 @@ pub fn start_stt_capture_with_origin(origin: crate::directed::Origin) {
     }
     SMART_TURN_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     SMART_TURN_LAST_REQ.store(0, std::sync::atomic::Ordering::Relaxed);
+    let seeded = seed.as_ref().map(|(samples, upto)| {
+        for chunk in samples.chunks(engine::OWW_CHUNK_SIZE) {
+            let sum_sq: f32 = chunk.iter().map(|s| s * s).sum();
+            capture_vad_update((sum_sq / chunk.len() as f32).sqrt());
+            STT_TOTAL_CHUNKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        SEED_UPTO.store(*upto, std::sync::atomic::Ordering::SeqCst);
+        samples.len()
+    });
     STT_CAPTURING.store(true, std::sync::atomic::Ordering::Release);
-    tracing::info!("stt-capture: started (session={session}, cpal-side capture, no baton pass)");
+    match seeded {
+        Some(n) => tracing::info!(
+            "stt-capture: started (session={session}, seeded {n} samples = {}ms after the detection point)",
+            n / 16
+        ),
+        None => tracing::info!("stt-capture: started (session={session}, cpal-side capture, no baton pass)"),
+    }
 }
 
 /// Mock builds have no audio path.
@@ -3239,6 +3266,9 @@ pub fn start_stt_capture_seeded(offset_ms: i32, ring_end: u64) {
         start_stt_capture();
         return;
     }
+    // Hold the ring lock until the capture is armed: the audio callback pushes into the ring under this lock,
+    // so no chunk can fall between the seed and the first live chunk. (The callback never holds the ring
+    // lock while waiting for the capture lock, so this order cannot deadlock.)
     let ring = VERIFY_RING.lock();
     let total_now = RING_TOTAL.load(Ordering::SeqCst);
     let offset = offset_ms.clamp(-400, 400) as i64 * 16;
@@ -3246,33 +3276,8 @@ pub fn start_stt_capture_seeded(offset_ms: i32, ring_end: u64) {
         Some((start, count)) => ring.iter().skip(start).take(count).copied().collect(),
         None => Vec::new(),
     };
-
-    {
-        let mut buf = STT_CAPTURE_BUFFER.lock();
-        buf.clear();
-        buf.extend_from_slice(&seed);
-    }
-    CAPTURE_FLOOR_BITS.store(NOISE_FLOOR_BITS.load(Ordering::Relaxed), Ordering::Relaxed);
-    STT_SPEECH_DETECTED.store(false, Ordering::Relaxed);
-    STT_SILENCE_CHUNKS.store(0, Ordering::Relaxed);
-    STT_TOTAL_CHUNKS.store(0, Ordering::Relaxed);
-    STT_VOICED_CHUNKS.store(0, Ordering::Relaxed);
-    STT_PAUSE_COUNT.store(0, Ordering::Relaxed);
-    for chunk in seed.chunks(engine::OWW_CHUNK_SIZE) {
-        let sum_sq: f32 = chunk.iter().map(|s| s * s).sum();
-        capture_vad_update((sum_sq / chunk.len() as f32).sqrt());
-        STT_TOTAL_CHUNKS.fetch_add(1, Ordering::Relaxed);
-    }
-    SEED_UPTO.store(total_now, Ordering::SeqCst);
-    STT_CAPTURING.store(true, Ordering::Relaxed);
+    start_stt_capture_inner(crate::directed::Origin::Direct, Some((seed, total_now)));
     drop(ring);
-
-    tracing::info!(
-        "stt-capture: started (seeded {} samples = {}ms after the detection point, offset {}ms)",
-        seed.len(),
-        seed.len() / 16,
-        offset_ms
-    );
 }
 
 /// Slow minimum-tracking estimate of the room's noise floor (RMS per 80 ms
@@ -5412,6 +5417,25 @@ mod tests {
 
     use super::level_from_rms;
     use super::VerifyMode;
+
+    /// Wiring pin: a seeded (wake) capture must open through the same lifecycle bookkeeping as every other
+    /// capture. The seeded variant used to arm the buffer by hand and skip it, so at the endpoint the lifecycle
+    /// was missing and the whole command was dropped ("missing lifecycle at endpoint", 2026-10-31).
+    #[test]
+    fn seeded_wake_capture_opens_through_the_lifecycle() {
+        let src = include_str!("wakeword_oww.rs");
+        let a = src.find("pub fn start_stt_capture_seeded(offset_ms: i32, ring_end: u64) {").expect("seeded fn");
+        let body = &src[a..src[a..].find("
+}
+").map(|i| a + i).expect("end of fn")];
+        assert!(body.contains("start_stt_capture_inner("), "seeded start must go through start_stt_capture_inner");
+        assert!(!body.contains("STT_CAPTURING.store"), "seeded start must not arm the capture by hand");
+        let o = src.find("pub fn start_stt_capture_with_origin(").expect("origin fn");
+        let ob = &src[o..src[o..].find("
+}
+").map(|i| o + i).unwrap()];
+        assert!(ob.contains("start_stt_capture_inner(origin, None)"));
+    }
 
     #[test]
     #[cfg(not(feature = "mock-wake"))]
