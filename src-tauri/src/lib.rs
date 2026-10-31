@@ -172,6 +172,7 @@ pub(crate) mod email_brief;
 pub(crate) mod repo_hint;
 pub(crate) mod panel_layout;
 pub(crate) mod maps_panel;
+pub(crate) mod location;
 pub(crate) mod power_close;
 pub(crate) mod window_tile;
 pub(crate) mod latency;

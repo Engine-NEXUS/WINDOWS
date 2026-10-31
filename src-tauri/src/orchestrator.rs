@@ -5758,6 +5758,11 @@ async fn run_directions<R: Runtime>(
         Ok(r) => r,
         Err(line) => return say_and_finish(&app, request_id, line),
     };
+    let here = if origin.as_deref().is_none_or(|o| o.trim().is_empty()) { crate::location::current().await } else { None };
+    let origin = match origin.filter(|o| !o.trim().is_empty()) {
+        Some(o) => Some(o),
+        None => here.map(|f| f.as_point()),
+    };
     if let Err(e) = crate::maps_panel::show_map(
         &app,
         crate::maps_panel::MapsTarget::Directions { origin: origin.clone(), destination: destination.clone(), mode: travel },
@@ -5785,7 +5790,11 @@ async fn run_directions<R: Runtime>(
         }
         _ => None,
     };
-    say_and_finish(&app, request_id, directions_line(&destination, eta.as_deref()))
+    let mut line = directions_line(&destination, eta.as_deref());
+    if here.as_ref().is_some_and(crate::location::should_tell_about_exact_location) {
+        line.push_str(" For an exact starting point, turn on location in Windows settings, sir.");
+    }
+    say_and_finish(&app, request_id, line)
 }
 
 /// Which saved place a spoken word means: "home" / "work" (None = a real address).
@@ -6066,10 +6075,11 @@ async fn run_place_info<R: Runtime>(app: AppHandle<R>, query: String, ask: Strin
         Some(d) => format!("{} {}", d.item.name, d.item.address),
         None => query.clone(),
     };
+    let here = crate::location::current().await;
     if let Err(e) = crate::maps_panel::show_map(
         &app,
-        // "Where is X" opens straight on the route to it (from the saved home when there is one); no navigation starts.
-        crate::maps_panel::MapsTarget::Directions { origin: saved_place(&app, "home"), destination: search_text.clone(), mode: crate::google::types::TravelMode::Driving },
+        // "Where is X" opens straight on the route to it from where the user is now; no navigation starts.
+        crate::maps_panel::MapsTarget::Directions { origin: here.map(|f| f.as_point()), destination: search_text.clone(), mode: crate::google::types::TravelMode::Driving },
     )
     .await
     {
@@ -6081,7 +6091,11 @@ async fn run_place_info<R: Runtime>(app: AppHandle<R>, query: String, ask: Strin
         chrono::Local::now().weekday().num_days_from_monday() as usize
     };
     let hours = detail.as_ref().and_then(|d| hours_today(&d.weekday_hours, weekday));
-    say_and_finish(&app, request_id, place_info_line(&query, &ask, detail.as_ref(), hours.as_deref()))
+    let mut line = place_info_line(&query, &ask, detail.as_ref(), hours.as_deref());
+    if here.as_ref().is_some_and(crate::location::should_tell_about_exact_location) {
+        line.push_str(" For an exact starting point, turn on location in Windows settings, sir.");
+    }
+    say_and_finish(&app, request_id, line)
 }
 
 /// "Analyse this email": freeze the foreground window, refuse sensitive ones, read the screenshot with the

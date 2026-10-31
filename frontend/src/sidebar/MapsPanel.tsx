@@ -15,7 +15,9 @@ export function isEmbedSrc(url: unknown): url is string {
  * race path is `get_pending_maps` on mount. Placement, order and size are owned by `panel_layout` in Rust.
  */
 export function MapsPanel() {
-  const [src, setSrc] = useState<string | null>(null);
+  const [shown, setShown] = useState<{ src: string; n: number } | null>(null);
+  // Every request reloads the map, even for the same place (the user may have panned away from it).
+  const setSrc = (src: string) => setShown((p) => ({ src, n: (p?.n ?? 0) + 1 }));
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -37,11 +39,12 @@ export function MapsPanel() {
   return (
     <div className="maps-panel">
       <div className="sidebar-drag-strip" data-tauri-drag-region />
-      {src ? (
+      {shown ? (
         <iframe
           className="maps-frame"
           title="Map"
-          src={src}
+          key={shown.n}
+          src={shown.src}
           allowFullScreen
           referrerPolicy="strict-origin-when-cross-origin"
         />

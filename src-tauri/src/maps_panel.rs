@@ -5,6 +5,7 @@
 //! show the target, the real Maps site opens as the page of a plain panel (`maps-web`) instead, so a map always opens.
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
@@ -69,6 +70,54 @@ pub fn get_pending_maps() -> Option<String> {
     PENDING.lock().unwrap().clone()
 }
 
+/// Key presses inside Google's embedded frame never reach our page (a cross-origin frame owns the keyboard), so Escape
+/// is watched natively: while a map panel is open AND focused, an Escape press closes it. Only this panel is affected;
+/// Escape is not taken from other windows.
+#[cfg(target_os = "windows")]
+fn escape_down() -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetAsyncKeyState(vk: i32) -> i16;
+    }
+    // SAFETY: plain user32 query with a constant virtual-key code.
+    unsafe { (GetAsyncKeyState(0x1B) as u16 & 0x8000) != 0 }
+}
+
+static WATCHING: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+
+pub fn watch_escape<R: Runtime>(app: &AppHandle<R>, panel: crate::panel_layout::Panel) {
+    #[cfg(target_os = "windows")]
+    {
+        let label = panel.label();
+        {
+            let mut w = WATCHING.lock().unwrap();
+            if w.contains(&label) {
+                return;
+            }
+            w.push(label);
+        }
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let mut was_down = escape_down(); // an Escape already held when the panel opened is not a close request
+            loop {
+                std::thread::sleep(Duration::from_millis(40));
+                let Some(win) = app.get_webview_window(label) else { break };
+                let down = escape_down();
+                if down && !was_down && win.is_focused().unwrap_or(false) {
+                    crate::panel_layout::note_closed(panel);
+                    let _ = crate::dyn_windows::destroy_window(&app, label);
+                    crate::panel_layout::apply(&app);
+                    break;
+                }
+                was_down = down;
+            }
+            WATCHING.lock().unwrap().retain(|l| *l != label);
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (app, panel);
+}
+
 /// IPC: close the Maps panel (Escape inside it).
 #[tauri::command]
 pub async fn close_maps_panel<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
@@ -109,6 +158,7 @@ pub async fn show_map<R: Runtime>(app: &AppHandle<R>, target: MapsTarget) -> Res
             win.show().map_err(|e| format!("maps panel show: {e}"))?;
             #[cfg(target_os = "windows")]
             crate::dwm_corners::round_corners(&win);
+            watch_escape(app, crate::panel_layout::Panel::Maps);
             if existed {
                 let _ = app.emit_to(crate::panel_layout::Panel::Maps.label(), "maps:show", src);
             }
@@ -139,6 +189,7 @@ fn show_web_panel<R: Runtime>(app: &AppHandle<R>, url: &str) -> Result<(), Strin
     win.show().map_err(|e| format!("maps web panel show: {e}"))?;
     #[cfg(target_os = "windows")]
     crate::dwm_corners::round_corners(&win);
+    watch_escape(app, Panel::MapsWeb);
     Ok(())
 }
 
