@@ -97,12 +97,31 @@ async fn embed_works(key: &str) -> bool {
         }
     }
     let ok = match embed_url(key, &MapsTarget::Place("Google".into())) {
-        None => false,
+        None => {
+            tracing::warn!("maps: no usable Google Maps key for the embedded map - using the Maps window");
+            false
+        }
         Some(url) => {
-            let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(3)).timeout(Duration::from_secs(5)).build().unwrap_or_default();
+            let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(12)).build().unwrap_or_default();
             match client.get(&url).header("Referer", "http://tauri.localhost/").send().await {
-                Ok(r) if r.status().is_success() => !embed_error_in(&r.text().await.unwrap_or_default()),
-                _ => false,
+                Ok(r) if r.status().is_success() => {
+                    let body = r.text().await.unwrap_or_default();
+                    let bad = embed_error_in(&body);
+                    if bad {
+                        tracing::warn!("maps: the Embed API answered with an error page - using the Maps window");
+                    }
+                    !bad
+                }
+                Ok(r) => {
+                    let status = r.status();
+                    let body: String = r.text().await.unwrap_or_default().chars().take(140).collect();
+                    tracing::warn!("maps: Embed API refused the key (HTTP {status}): {body} - enable \"Maps Embed API\" for this key in Google Cloud Console; using the Maps window meanwhile");
+                    false
+                }
+                Err(e) => {
+                    tracing::warn!("maps: Embed API check failed ({e}) - using the Maps window");
+                    false
+                }
             }
         }
     };
