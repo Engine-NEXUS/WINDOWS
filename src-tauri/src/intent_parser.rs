@@ -1633,6 +1633,22 @@ fn parse_analyse_command(text: &str) -> Option<ParseResult> {
 
     let analyse_text = analyse_text.trim();
 
+    // "analyse this repo" / "analyse the repository": the user points at the open repository without naming it.
+    // The orchestrator reads the open page and, if no repository is open, falls back to understanding the screen.
+    // "report" is the speech engine's usual mishearing of "repo" ("analyse this report" in the 2026-10-31 log).
+    let pointed = analyse_text.trim_end_matches(['.', ',', '!', '?']).trim();
+    if matches!(
+        pointed,
+        "this repo" | "the repo" | "this repository" | "the repository" | "the current repo" | "the open repo"
+            | "this report" | "the report" | "this project repo" | "my repo" | "this git repo"
+    ) {
+        return Some(ParseResult {
+            intent: ParsedIntent::AnalyseRepo { owner: None, repo: "this".to_string() },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
+
     // Pattern 1: "PR <num> [in|of|for|from] <repo>" or "pull request <num> ..."
     // e.g. "PR 23 servx", "PR 23 in servx", "pull request 23 servx"
     if let Some(result) = parse_pr_analyse(analyse_text) {
@@ -3081,7 +3097,7 @@ fn parse_analyse_deictic_command(text: &str) -> Option<ParseResult> {
     // Words that mean a different, dedicated route.
     const DEDICATED: &[&str] = &[
         "repo", "repository", "repositories", "project", "codebase", "pr", "pull", "email", "mail", "e-mail", "branch",
-        "commit", "issue",
+        "commit", "issue", "report",
     ];
     let words: Vec<&str> = core.split_whitespace().collect();
     if words.is_empty() || words.iter().any(|w| DEDICATED.contains(w)) {
@@ -10801,6 +10817,10 @@ mod tests {
             // "this website/app/page/site" already has a dedicated whole-window review route (ReviewForeground).
             let got = label(p);
             assert!(got == "nlu:screen_analysis" || got == "ReviewForeground", "'{p}' -> {got}");
+        }
+        // Pointing at the open repository ("this report" is how the speech engine often hears "this repo").
+        for p in ["analyse this repo", "analyze the repo", "analyse this repository", "analyse this report", "analyze the report."] {
+            assert!(label(p).starts_with("AnalyseRepo { owner: None, repo: \"this\" }"), "'{p}' -> {}", label(p));
         }
         // Named or dedicated targets keep their routes; chat is untouched.
         assert!(label("analyse servx").starts_with("AnalyseRepo"), "{}", label("analyse servx"));

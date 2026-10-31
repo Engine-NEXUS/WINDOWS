@@ -21,7 +21,6 @@ import {
   AppBar,
   LogoTile,
   IconButton,
-  DockIcon,
   Card,
   Chip,
   DropdownChip,
@@ -87,7 +86,7 @@ function downloadMarkdown(markdown: string, host: string) {
 }
 
 export function StackView({
-  onDock = () => {},
+  onDock: _onDock = () => {},
   payload,
   progress,
   focus,
@@ -250,16 +249,6 @@ export function StackView({
           logo={<LogoTile name="Nexus" size={36} rounded="lg" />}
           title="Tech Stack"
           subtitle="Web Reverse Engineer"
-          actions={
-            <>
-              <IconButton className="sidebar-dock-btn" label="Dock Left" onClick={() => onDock("left")}>
-                <DockIcon side="left" />
-              </IconButton>
-              <IconButton className="sidebar-dock-btn" label="Dock Right" onClick={() => onDock("right")}>
-                <DockIcon side="right" />
-              </IconButton>
-            </>
-          }
         />
         <div className="stack-empty-content">
           <div className="stack-empty-icon">🌐</div>
@@ -304,12 +293,6 @@ export function StackView({
               disabled={!stackData.markdown}
             >
               {copied ? "✓" : "📋"}
-            </IconButton>
-            <IconButton className="sidebar-dock-btn" label="Dock Left" onClick={() => onDock("left")}>
-              <DockIcon side="left" />
-            </IconButton>
-            <IconButton className="sidebar-dock-btn" label="Dock Right" onClick={() => onDock("right")}>
-              <DockIcon side="right" />
             </IconButton>
           </>
         }

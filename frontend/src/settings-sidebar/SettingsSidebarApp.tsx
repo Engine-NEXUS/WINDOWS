@@ -17,7 +17,7 @@ import {
   type OAuthStatus,
 } from "../setup/oauth";
 import { useAssistant } from "../store/assistant";
-import { DockButtons, DockIcon } from "../sidebar/kit/DockButtons";
+import { DockIcon } from "../sidebar/kit/DockButtons";
 import { applyThemePreference, normalizePreference, resolveThemeMode, type ThemePreference } from "../sidebar/theme";
 import "./hub/hub.css";
 import { HubHome, type HubPage } from "./hub/HubHome";
@@ -310,7 +310,7 @@ class SubpageErrorBoundary extends Component<SubpageErrorBoundaryProps, SubpageE
   }
 }
 
-export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string) => void }) {
+export function SettingsSidebarApp({ onDock: _onDock = () => {} }: { onDock?: (d: string) => void }) {
   const dirtyFields = useRef<Set<keyof Settings>>(new Set());
   const [page, setPage] = useState<HubPage>("home");
   const [insightsKey, setInsightsKey] = useState(0);
@@ -452,9 +452,6 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
           )}
         </div>
         <div className="hx-title" data-tauri-drag-region>{PAGE_TITLES[page]}</div>
-        <div className="hx-header-dock" data-tauri-drag-region>
-          <DockButtons onDock={onDock} />
-        </div>
       </header>
 
       {toast && <div className="hx-toast">{toast}</div>}

@@ -1,7 +1,6 @@
 import { useEffect, useState, useCallback, Component, type ReactNode } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { DockButtons } from "../sidebar/kit/DockButtons";
 import { useArchitect, type Phase1Data, type Phase2Data, type ArchitectProgress } from "./architectStore";
 import { ArchitectureMap } from "./ArchitectureMap";
 
@@ -24,8 +23,18 @@ class MapErrorBoundary extends Component<{ children: ReactNode }, { hasError: bo
   }
 }
 
-export function ArchitectApp({ onDock = () => {} }: { onDock?: (d: string) => void }) {
+export function ArchitectApp({ onDock: _onDock = () => {} }: { onDock?: (d: string) => void }) {
   const loading = useArchitect((s) => s.loading);
+  // An empty map must not spin forever: after a few seconds with nothing to do, say what to type or say.
+  const [gaveUp, setGaveUp] = useState(false);
+  useEffect(() => {
+    if (loading) {
+      setGaveUp(false);
+      return;
+    }
+    const id = window.setTimeout(() => setGaveUp(true), 8000);
+    return () => window.clearTimeout(id);
+  }, [loading]);
   const deepScanning = useArchitect((s) => s.deepScanning);
   const progressMessage = useArchitect((s) => s.progressMessage);
   const phase1Data = useArchitect((s) => s.phase1Data);
@@ -250,11 +259,8 @@ export function ArchitectApp({ onDock = () => {} }: { onDock?: (d: string) => vo
 
   return (
     <div className="architect-app">
-      {/* ── Header row: drag region + dock controls (Left/Right) ────── */}
-      <header className="sidebar-header-row" data-tauri-drag-region>
-        <div className="sidebar-header-spacer" data-tauri-drag-region />
-        <DockButtons onDock={onDock} />
-      </header>
+      {/* Plain window: an invisible strip drags it; Left / Right arrow keys dock it. */}
+      <div className="sidebar-drag-strip" data-tauri-drag-region />
 
       {/* ── Top Navigation Bar ─────────────────────────────────────── */}
       <header className="architect-header">
@@ -353,9 +359,13 @@ export function ArchitectApp({ onDock = () => {} }: { onDock?: (d: string) => vo
         ) : (
           <div className="architect-hero-empty">
             <div className="architect-hero-card">
-              <div className="architect-hero-loading-spinner" />
+              {(loading || !gaveUp) && <div className="architect-hero-loading-spinner" />}
               <p className="architect-hero-subtitle">
-                {loading ? "Analyzing repository..." : "Waiting for repository..."}
+                {loading
+                  ? "Analyzing repository..."
+                  : gaveUp
+                    ? "No repository yet. Type owner/repo above, or say: Nexus, analyse this repo."
+                    : "Waiting for repository..."}
               </p>
             </div>
           </div>

@@ -84,6 +84,17 @@ impl WindowConfig {
         }
     }
 
+    /// Google Maps inside a NEXUS panel (`?pin=maps`): frameless, glass, placed by `panel_layout`.
+    pub fn maps_panel() -> Self {
+        Self {
+            label: "maps-panel", title: "NEXUS Map", url: "sidebar.html?pin=maps",
+            width: 720., height: 950., min_width: None, min_height: None,
+            resizable: false, decorations: false, transparent: true,
+            always_on_top: true, skip_taskbar: true, shadow: false,
+            focus: false, center: false, hidden_title: true,
+        }
+    }
+
     /// Stage shell — fullscreen transparent overlay, always-on (single-
     /// stage migration). Hosts the voice orb, the loading indicator, the
     /// ghost ring, and stage notices/annotations. WS_EX_TOOLWINDOW so
@@ -207,7 +218,7 @@ pub fn get_or_create_window<R: Runtime>(
         // (sidebar_backdrop.rs -> `sidebar:backdrop` -> `.sidebar-card::after`).
         let is_glass_window = matches!(
             config.label,
-            "sidebar" | "architect-map" | "calibrate-toolbar" | "settings" | "setup" | "orb-studio"
+            "sidebar" | "architect-map" | "maps-panel" | "calibrate-toolbar" | "settings" | "setup" | "orb-studio"
         );
         if is_glass_window {
             crate::dwm_corners::round_corners(&win);

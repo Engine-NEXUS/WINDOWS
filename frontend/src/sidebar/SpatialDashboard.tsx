@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useSidebar, type SpatialData, type SpatialItemCard } from "./sidebarStore";
 import { Lens } from "./Lens";
-import { AppBar, Card, Chip, DockIcon, IconButton, LogoTile } from "./kit";
+import { Card, Chip, LogoTile } from "./kit";
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -63,30 +63,7 @@ export function SpatialView({
   if (!spatialData) {
     return (
       <div className="sidebar-view-col">
-        <AppBar
-          className="sidebar-header-row"
-          logo={<LogoTile name="Nexus" size={36} rounded="lg" />}
-          title="Screen Analysis"
-          subtitle="Spatial screen analysis"
-          actions={
-            <>
-              <IconButton
-                className="sidebar-dock-btn"
-                label="Dock Left"
-                onClick={() => onDock("left")}
-              >
-                <DockIcon side="left" />
-              </IconButton>
-              <IconButton
-                className="sidebar-dock-btn"
-                label="Dock Right"
-                onClick={() => onDock("right")}
-              >
-                <DockIcon side="right" />
-              </IconButton>
-            </>
-          }
-        />
+        <div className="sidebar-drag-strip" data-tauri-drag-region />
         <div className="spatial-dashboard spatial-dashboard--empty">
           No spatial analysis yet, sir. Say "Analyse the screen".
         </div>
@@ -94,34 +71,9 @@ export function SpatialView({
     );
   }
 
-  const itemCount = spatialData.items?.length ?? 0;
-
   return (
     <div className="sidebar-view-col">
-      <AppBar
-        className="sidebar-header-row"
-        logo={<LogoTile name={spatialData.title || "Screen"} size={36} rounded="lg" />}
-        title={spatialData.title}
-        subtitle={`Screen analysis · ${itemCount} items`}
-        actions={
-          <>
-            <IconButton
-              className="sidebar-dock-btn"
-              label="Dock Left"
-              onClick={() => onDock("left")}
-            >
-              <DockIcon side="left" />
-            </IconButton>
-            <IconButton
-              className="sidebar-dock-btn"
-              label="Dock Right"
-              onClick={() => onDock("right")}
-            >
-              <DockIcon side="right" />
-            </IconButton>
-          </>
-        }
-      />
+      <div className="sidebar-drag-strip" data-tauri-drag-region />
       <SpatialDashboard data={spatialData} onDock={onDock} />
     </div>
   );

@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import type { SpatialData } from "./sidebarStore";
 import type { AnnotElement, AnnotTool } from "../stage/annotationTypes";
 import { toAnnotJson, toMermaid, toPlantUml } from "./diagramSerializer";
-import { DockButtons } from "./kit/DockButtons";
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -35,7 +34,7 @@ type DiagramTab = "mermaid" | "plantuml" | "json";
  *   warm-window  → sidebar:show_annotation → stage:annotation_begin
  * Canvas ops stay frontend-local; commit serializes here.
  */
-export function AnnotateView({ onDock = () => {} }: { onDock?: (d: string) => void }) {
+export function AnnotateView({ onDock: _onDock = () => {} }: { onDock?: (d: string) => void }) {
   const [tool, setTool] = useState<AnnotTool>("select");
   const [color, setColor] = useState(COLORS[0]);
   const [count, setCount] = useState(0);
@@ -119,10 +118,7 @@ export function AnnotateView({ onDock = () => {} }: { onDock?: (d: string) => vo
 
   return (
     <div className="annotate-palette">
-      <header className="sidebar-header-row" data-tauri-drag-region>
-        <div className="sidebar-header-spacer" data-tauri-drag-region />
-        <DockButtons onDock={onDock} />
-      </header>
+      <div className="sidebar-drag-strip" data-tauri-drag-region />
 
       <div className="annotate-title">Annotate Screen {count > 0 && <span className="annotate-count">{count}</span>}</div>
 

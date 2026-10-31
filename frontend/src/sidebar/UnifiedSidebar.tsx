@@ -8,6 +8,8 @@ import { PrListApp } from "../pr-list/PrListApp";
 import { SpatialView } from "./SpatialDashboard";
 import { AnnotateView } from "./AnnotatePalette";
 import { StackView } from "./StackView";
+import { useArrowDock, usePanelResize } from "./dockKeys";
+import { MapsPanel } from "./MapsPanel";
 import "./unified.css";
 
 /**
@@ -22,9 +24,9 @@ import "./unified.css";
  * stores survive across mounts; display:none keeps remount flicker at
  * zero and makes switches feel instant).
  */
-export type SidebarView = "assistant" | "settings" | "architect" | "pr-list" | "spatial" | "annotate" | "stack";
+export type SidebarView = "assistant" | "settings" | "architect" | "pr-list" | "spatial" | "annotate" | "stack" | "maps";
 
-const VIEWS: SidebarView[] = ["assistant", "settings", "architect", "pr-list", "spatial", "annotate", "stack"];
+const VIEWS: SidebarView[] = ["assistant", "settings", "architect", "pr-list", "spatial", "annotate", "stack", "maps"];
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -105,7 +107,10 @@ export function UnifiedSidebar() {
         e.stopPropagation();
         if (pinned) {
           // A pinned window closes only itself; it must not stop speech or hide the response sidebar.
-          if (isTauri()) invoke("close_architect_map").catch(() => {});
+          if (isTauri()) {
+            if (pinned === "maps") invoke("close_maps_panel").catch(() => {});
+            else invoke("close_architect_map").catch(() => {});
+          }
           return;
         }
         void import("../audio/ttsPlayer").then(({ stopTts }) => stopTts()).catch(() => {});
@@ -125,13 +130,18 @@ export function UnifiedSidebar() {
     invoke("set_sidebar_dock", { dock: d }).catch(() => {});
   };
 
+  // No dock buttons anywhere: Left / Right arrow keys move the window (the Assistant view has its own handler
+  // because its default dock depends on what it shows).
+  usePanelResize(pinned === "maps" ? "maps-panel" : pinned === "architect" ? "architect-map" : null);
+  useArrowDock("right", dock as (d: "left" | "center" | "right") => void, view !== "assistant" && !pinned);
+
   return (
     <div className="unified-shell">
       {/* ── View host: keep-mounted views, display toggled ──────────── */}
       <div className="unified-view-host">
         {mounted.has("assistant") && (
           <div className="unified-view" style={{ display: view === "assistant" ? "flex" : "none" }}>
-            <SidebarApp onDock={dock} />
+            <SidebarApp onDock={dock} active={view === "assistant"} />
           </div>
         )}
         {mounted.has("settings") && (
@@ -157,6 +167,11 @@ export function UnifiedSidebar() {
         {mounted.has("annotate") && (
           <div className="unified-view" style={{ display: view === "annotate" ? "flex" : "none" }}>
             <AnnotateView onDock={dock} />
+          </div>
+        )}
+        {mounted.has("maps") && (
+          <div className="unified-view" style={{ display: view === "maps" ? "flex" : "none" }}>
+            <MapsPanel />
           </div>
         )}
         {mounted.has("stack") && (
