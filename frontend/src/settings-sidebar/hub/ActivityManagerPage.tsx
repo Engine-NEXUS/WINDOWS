@@ -276,7 +276,12 @@ export function ActivityManagerPage() {
         <>
           <div className="am-periods" role="group" aria-label="Activity period">
             {(["today", "week", "month"] as Period[]).map((value) => (
-              <button key={value} className={period === value ? "am-active" : ""} onClick={() => setPeriod(value)}>
+              <button
+                key={value}
+                className={period === value ? "am-active" : ""}
+                onClick={() => setPeriod(value)}
+                aria-pressed={period === value}
+              >
                 {value === "today" ? "Today" : value === "week" ? "7 days" : "30 days"}
               </button>
             ))}

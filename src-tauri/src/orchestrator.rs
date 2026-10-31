@@ -709,6 +709,8 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         | ParsedIntent::CalendarAdd { .. }
         | ParsedIntent::Directions { .. }
         | ParsedIntent::PlacesSearch { .. }
+        | ParsedIntent::PlaceInfo { .. }
+        | ParsedIntent::AnalyseThisEmail
         | ParsedIntent::WhatsappRead { .. }
         | ParsedIntent::PeopleFlag { .. }
         | ParsedIntent::PeopleList
@@ -1461,6 +1463,12 @@ pub async fn process_transcript<R: Runtime>(
             ParsedIntent::PlacesSearch { query, near } => {
                 return run_places_search(app, query.clone(), near.clone()).await;
             }
+            ParsedIntent::PlaceInfo { query, ask } => {
+                return run_place_info(app, query.clone(), ask.clone()).await;
+            }
+            ParsedIntent::AnalyseThisEmail => {
+                return run_analyse_this_email(app).await;
+            }
             ParsedIntent::WhatsappRead { name } => {
                 return run_whatsapp_read(app, name.clone()).await;
             }
@@ -1777,6 +1785,12 @@ pub async fn process_transcript<R: Runtime>(
             }
             ParsedIntent::PlacesSearch { query, near } => {
                 return run_places_search(app, query.clone(), near.clone()).await;
+            }
+            ParsedIntent::PlaceInfo { query, ask } => {
+                return run_place_info(app, query.clone(), ask.clone()).await;
+            }
+            ParsedIntent::AnalyseThisEmail => {
+                return run_analyse_this_email(app).await;
             }
             ParsedIntent::WhatsappRead { name } => {
                 return run_whatsapp_read(app, name.clone()).await;
@@ -2158,8 +2172,36 @@ pub async fn process_transcript<R: Runtime>(
         Subsystem::WorkerBackend => {
             // feature 161 repo resolution
             let mut worker_transcript = transcript.clone();
+            // "analyse this repo" / "analyse this PR": the user pointed instead of naming. Read the open page; if it is a
+            // repository (or pull request) analyse that one, otherwise understand whatever is on screen.
+            if let ParsedIntent::AnalyseRepo { owner: None, repo } = &intent {
+                let deictic_repo = is_deictic_repo_word(repo);
+                let deictic_pr = is_deictic_pr_word(repo);
+                if deictic_repo || deictic_pr {
+                    let url = tokio::task::spawn_blocking(crate::browser_url::get_active_browser_url).await.ok().flatten();
+                    if deictic_pr {
+                        if let Some((o, r, n)) = url.as_deref().and_then(github_pr_from_url) {
+                            worker_transcript = format!("analyse pr {n} in {o}/{r}");
+                        } else {
+                            clear_active_request(&request_id);
+                            return run_screen_analysis(app, format!("analyse what is on my screen: {transcript}")).await;
+                        }
+                    } else {
+                        let found = tokio::task::spawn_blocking(crate::architect::get_active_repo_url).await.ok().flatten();
+                        match found {
+                            Some(id) => worker_transcript = format!("analyse {}/{}", id.owner, id.repo),
+                            None => {
+                                clear_active_request(&request_id);
+                                return run_screen_analysis(app, format!("analyse what is on my screen: {transcript}")).await;
+                            }
+                        }
+                    }
+                }
+            }
             let target_repo = match &intent {
-                ParsedIntent::AnalyseRepo { owner: None, repo } if !repo.trim().is_empty() => {
+                ParsedIntent::AnalyseRepo { owner: None, repo }
+                    if !repo.trim().is_empty() && !is_deictic_repo_word(repo) && !is_deictic_pr_word(repo) =>
+                {
                     Some((repo.clone(), true))
                 }
                 ParsedIntent::AnalysePr { owner: None, repo, .. }
@@ -2225,6 +2267,25 @@ pub async fn process_transcript<R: Runtime>(
                 }
             }
             // end feature 161 repo resolution
+            // "Analyse this repo": the Architecture map opens in its own window beside the overview sidebar and
+            // starts at once; the Worker analysis fills the sidebar when it arrives.
+            if let ParsedIntent::AnalyseRepo { owner, repo } = &intent {
+                let pair = if is_deictic_pr_word(repo) { None } else { match owner.as_deref().filter(|o| !o.trim().is_empty()) {
+                    Some(o) => crate::architect::split_full_name(&format!("{}/{}", o.trim(), repo.trim())),
+                    None => worker_transcript
+                        .split_whitespace()
+                        .rev()
+                        .find_map(|w| crate::architect::split_full_name(w.trim_matches(|c: char| matches!(c, '.' | ',' | '?' | '!')))),
+                } };
+                if let Some((o, r)) = pair {
+                    let app_for_map = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = crate::architect::open_architect_map_window(app_for_map, o, r).await {
+                            tracing::warn!("analyse repo: architect map window failed: {e}");
+                        }
+                    });
+                }
+            }
             // Long-running — emit ack, then show loading indicator after TTS.
             // Repeat-back: the ack names the action (P1), so the user hears
             // WHAT was understood instead of a bare "on it sir".
@@ -5815,6 +5876,201 @@ async fn run_places_search<R: Runtime>(
         return say_and_finish(&app, request_id, "I couldn't open the map window, sir.".into());
     }
     say_and_finish(&app, request_id, places_line(&query, near.as_deref().or(anchor.as_deref()), &places))
+}
+
+/// The repo word the parser produced when the user pointed instead of naming ("analyse this repo" -> "this").
+pub(crate) fn is_deictic_repo_word(repo: &str) -> bool {
+    matches!(
+        repo.trim().to_lowercase().as_str(),
+        "this" | "that" | "it" | "here" | "current" | "the current" | "this one" | "that one" | "open" | "the open"
+            | "this repo" | "this repository" | "this project" | "the repo" | "the repository"
+    )
+}
+
+/// "this pr" / "this pull request" (the parser keeps the noun for PRs).
+pub(crate) fn is_deictic_pr_word(repo: &str) -> bool {
+    matches!(repo.trim().to_lowercase().as_str(), "this pr" | "this pull request" | "that pr" | "the pr" | "the pull request" | "this pull" )
+}
+
+/// owner, repo and PR number from an open GitHub pull-request URL. Pure.
+pub(crate) fn github_pr_from_url(url: &str) -> Option<(String, String, u64)> {
+    let rest = url.split("github.com/").nth(1)?;
+    let mut parts = rest.split(['/', '?', '#']);
+    let (owner, repo, kind, num) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    if kind != "pull" {
+        return None;
+    }
+    let full = crate::architect::split_full_name(&format!("{owner}/{repo}"))?;
+    let n: u64 = num.parse().ok().filter(|n| *n > 0)?;
+    Some((full.0, full.1, n))
+}
+
+/// Today's line from Google's seven weekday lines (Monday first), without the day name:
+/// "Tuesday: 9:00 AM - 5:30 PM" -> "9:00 AM - 5:30 PM". `weekday` is 0 for Monday.
+pub(crate) fn hours_today(weekday_hours: &[String], weekday: usize) -> Option<String> {
+    let line = weekday_hours.get(weekday)?;
+    let (_, hours) = line.split_once(':')?;
+    let hours = hours.trim();
+    if hours.is_empty() { None } else { Some(hours.to_string()) }
+}
+
+/// The one spoken line for a named place. Pure.
+pub(crate) fn place_info_line(query: &str, ask: &str, detail: Option<&crate::google::types::PlaceDetail>, hours: Option<&str>) -> String {
+    let Some(d) = detail else {
+        return format!("Showing {query} on the map, sir.");
+    };
+    let city = d.item.address.split(',').rev().nth(2).or_else(|| d.item.address.split(',').next()).unwrap_or("").trim();
+    let at = if city.is_empty() { String::new() } else { format!(" in {city}") };
+    match ask {
+        "where" => format!("{} is{at}. I've opened it on the map.", d.item.name),
+        _ => {
+            let open = match d.item.open_now {
+                Some(true) => "It is open now",
+                Some(false) => "It is closed right now",
+                None => "",
+            };
+            match (hours, open.is_empty()) {
+                (Some(h), false) => format!("{}{at}: {open}. Today {h}.", d.item.name),
+                (Some(h), true) => format!("{}{at}: today {h}.", d.item.name),
+                (None, false) => format!("{}{at}: {open}.", d.item.name),
+                (None, true) => format!("{} is{at}. I couldn't find its opening hours, sir.", d.item.name),
+            }
+        }
+    }
+}
+
+fn place_info_card(d: &crate::google::types::PlaceDetail) -> String {
+    let mut md = format!("## {}\n\n", d.item.name);
+    if !d.item.address.is_empty() {
+        md.push_str(&format!("**Address:** {}\n\n", d.item.address));
+    }
+    if let Some(r) = d.item.rating {
+        md.push_str(&format!("**Rating:** {r:.1} / 5\n\n"));
+    }
+    if let Some(sum) = &d.summary {
+        md.push_str(&format!("{sum}\n\n"));
+    }
+    if !d.weekday_hours.is_empty() {
+        md.push_str("**Opening hours**\n\n");
+        for l in &d.weekday_hours {
+            md.push_str(&format!("- {l}\n"));
+        }
+    }
+    md
+}
+
+/// "Where / when is the Charminar", "is the museum open": one Places lookup, the map on that place, one spoken
+/// line, the details in the sidebar. Without a Places key it still opens Maps on the spoken name.
+async fn run_place_info<R: Runtime>(app: AppHandle<R>, query: String, ask: String) -> Result<ProcessResult, String> {
+    use crate::google::maps::MapsService;
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let key = crate::commands::read_api_key(&app, "google_places");
+    let mut detail = None;
+    if !key.is_empty() {
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .timeout(std::time::Duration::from_secs(4))
+            .build()
+            .unwrap_or_default();
+        match MapsService::place_detail(&client, &key, &query).await {
+            Ok(d) => detail = d,
+            Err(e) => tracing::debug!("place info: {e}"),
+        }
+    }
+    let search_text = match &detail {
+        Some(d) => format!("{} {}", d.item.name, d.item.address),
+        None => query.clone(),
+    };
+    if let Err(e) = crate::commands::open_maps_url(&app, &MapsService::build_place_search_url(&search_text)) {
+        tracing::warn!("place info: could not open Maps window: {e}");
+        return say_and_finish(&app, request_id, "I couldn't open the map window, sir.".into());
+    }
+    let weekday = {
+        use chrono::Datelike;
+        chrono::Local::now().weekday().num_days_from_monday() as usize
+    };
+    let hours = detail.as_ref().and_then(|d| hours_today(&d.weekday_hours, weekday));
+    if let Some(d) = &detail {
+        let (a, q, md) = (app.clone(), query.clone(), place_info_card(d));
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = crate::commands::show_sidebar_with_content(a, q, md).await {
+                tracing::warn!("place info: sidebar failed: {e}");
+            }
+        });
+    }
+    say_and_finish(&app, request_id, place_info_line(&query, &ask, detail.as_ref(), hours.as_deref()))
+}
+
+/// "Analyse this email": freeze the foreground window, refuse sensitive ones, read the screenshot with the
+/// vision model, validate the answer in code (`email_brief`), then show the card, open a map only if the
+/// email names a venue, and speak one line.
+async fn run_analyse_this_email<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    #[cfg(not(target_os = "windows"))]
+    {
+        return say_and_finish(&app, request_id, "Reading the open email is not verified on this platform yet, sir.".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let key = crate::commands::read_api_key(&app, "gemini");
+        if key.is_empty() {
+            return say_and_finish(&app, request_id, "I need a Gemini key to read the email, sir. You can add one in the Command Hub.".into());
+        }
+        let (sw, sh) = crate::screen::primary_monitor_size().ok_or("Could not identify the primary monitor")?;
+        let target = crate::screen_context::collect_target(sw, sh).await;
+        if let Some(reason) = crate::screen_context::capture_block_reason(&target) {
+            return say_and_finish(&app, request_id, reason.into());
+        }
+        let Ok(dir) = app.path().app_data_dir() else {
+            return say_and_finish(&app, request_id, "I couldn't read the email, sir.".into());
+        };
+        if crate::vision::exhausted(&dir, "gemini") {
+            return say_and_finish(&app, request_id, "My vision allowance for today is used up, sir.".into());
+        }
+        speak_line(&app, "Reading this email, sir.".into(), &request_id);
+        if !crate::screen_context::foreground_still_matches(&target, sw, sh).await {
+            return say_and_finish(&app, request_id, "The window changed. Please try again.".into());
+        }
+        let r = target.region;
+        let Some(frame) = crate::vision::capture_region_jpeg_base64(r.x, r.y, r.w, r.h, 1600) else {
+            return say_and_finish(&app, request_id, "I could not capture the email, sir.".into());
+        };
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
+        let models = crate::vision::tour_model_ladder(None);
+        let call = crate::vision::gemini_json_with_image(
+            crate::email_brief::build_prompt(), &frame, &key, &client, 2048, &models, crate::email_brief::parse_brief,
+        );
+        let brief = match tokio::time::timeout(std::time::Duration::from_secs(45), call).await {
+            Err(_) => return say_and_finish(&app, request_id, "Reading the email took too long, sir.".into()),
+            Ok(crate::vision::JsonStep::Found(b)) => {
+                crate::vision::record_use(&dir, "gemini");
+                b
+            }
+            Ok(crate::vision::JsonStep::Quota) => {
+                crate::vision::mark_exhausted(&dir, "gemini");
+                return say_and_finish(&app, request_id, "My vision allowance for today is used up, sir.".into());
+            }
+            Ok(crate::vision::JsonStep::Miss) => {
+                return say_and_finish(&app, request_id, "I couldn't read an email on this screen, sir.".into());
+            }
+        };
+        let mut opened_map = false;
+        if let Some(q) = crate::email_brief::map_query(&brief) {
+            let url = crate::google::maps::MapsService::build_place_search_url(&q);
+            opened_map = crate::commands::open_maps_url(&app, &url).is_ok();
+        }
+        let (a, title, md) = (app.clone(), brief.title.clone(), crate::email_brief::card_markdown(&brief));
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = crate::commands::show_sidebar_with_content(a, title, md).await {
+                tracing::warn!("analyse email: sidebar failed: {e}");
+            }
+        });
+        say_and_finish(&app, request_id, crate::email_brief::spoken_line(&brief, opened_map))
+    }
 }
 
 // ─── WhatsApp priority people (P6) ────────────────────────────────────
@@ -10987,6 +11243,47 @@ mod tests {
             directions_line("Central Park", Some("28 minutes via FDR Drive")),
             "Finding route to Central Park. About 28 minutes via FDR Drive, sir."
         );
+    }
+
+    #[test]
+    fn deictic_repo_and_pr_words_and_urls() {
+        for w in ["this", "That", " it ", "this repo", "the current"] {
+            assert!(is_deictic_repo_word(w), "{w}");
+        }
+        for w in ["servx", "zync", "owner/repo", "this-repo-name", "itsy"] {
+            assert!(!is_deictic_repo_word(w), "{w}");
+        }
+        assert!(is_deictic_pr_word("this pr") && is_deictic_pr_word("This Pull Request") && !is_deictic_pr_word("this"));
+        assert_eq!(github_pr_from_url("https://github.com/Engine-NEXUS/WINDOWS/pull/38/files"), Some(("Engine-NEXUS".into(), "WINDOWS".into(), 38)));
+        assert_eq!(github_pr_from_url("https://github.com/a/b/pull/7?diff=split"), Some(("a".into(), "b".into(), 7)));
+        for bad in ["https://github.com/a/b", "https://github.com/a/b/issues/7", "https://github.com/a/b/pull/x", "https://example.com/a/b/pull/7", "https://github.com/a/b/pull/0"] {
+            assert_eq!(github_pr_from_url(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn place_info_lines_and_hours() {
+        use crate::google::types::{PlaceDetail, PlaceItem};
+        let hours: Vec<String> = ["Monday: Closed", "Tuesday: 9:00 AM \u{2013} 5:30 PM"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(hours_today(&hours, 1).as_deref(), Some("9:00 AM \u{2013} 5:30 PM"));
+        assert_eq!(hours_today(&hours, 0).as_deref(), Some("Closed"));
+        assert_eq!(hours_today(&hours, 6), None);
+        assert_eq!(hours_today(&[], 0), None);
+        let d = PlaceDetail {
+            item: PlaceItem { name: "Charminar".into(), address: "Char Kaman, Ghansi Bazaar, Hyderabad, Telangana 500002, India".into(), rating: Some(4.5), open_now: Some(true) },
+            weekday_hours: hours,
+            summary: None,
+        };
+        let when = place_info_line("charminar", "when", Some(&d), Some("9:00 AM \u{2013} 5:30 PM"));
+        assert!(when.contains("open now") && when.contains("9:00 AM"), "{when}");
+        let where_ = place_info_line("charminar", "where", Some(&d), None);
+        assert!(where_.starts_with("Charminar"), "{where_}");
+        assert!(!where_.contains(" ."), "{where_}");
+        assert_eq!(place_info_line("zzz", "when", None, None), "Showing zzz on the map, sir.");
+        let none = PlaceDetail { item: PlaceItem { name: "X".into(), address: String::new(), rating: None, open_now: None }, weekday_hours: vec![], summary: None };
+        assert!(place_info_line("x", "hours", Some(&none), None).contains("couldn't find its opening hours"));
+        let card = place_info_card(&d);
+        assert!(card.contains("## Charminar") && card.contains("Monday: Closed") && card.contains("4.5"));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, Component, type ReactNode } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { DockButtons } from "../sidebar/kit/DockButtons";
 import { useArchitect, type Phase1Data, type Phase2Data, type ArchitectProgress } from "./architectStore";
 import { ArchitectureMap } from "./ArchitectureMap";
 
@@ -252,14 +253,7 @@ export function ArchitectApp({ onDock = () => {} }: { onDock?: (d: string) => vo
       {/* ── Header row: drag region + dock controls (Left/Right) ────── */}
       <header className="sidebar-header-row" data-tauri-drag-region>
         <div className="sidebar-header-spacer" data-tauri-drag-region />
-        <div className="sidebar-dock-controls">
-          <button type="button" className="sidebar-dock-btn" onClick={() => onDock("left")} title="Dock Left">
-            ◧
-          </button>
-          <button type="button" className="sidebar-dock-btn" onClick={() => onDock("right")} title="Dock Right">
-            ◨
-          </button>
-        </div>
+        <DockButtons onDock={onDock} />
       </header>
 
       {/* ── Top Navigation Bar ─────────────────────────────────────── */}
@@ -338,7 +332,13 @@ export function ArchitectApp({ onDock = () => {} }: { onDock?: (d: string) => vo
       {errorMsg && (
         <div className="architect-error-banner">
           ⚠️ {errorMsg}
-          <button type="button" className="architect-error-close" onClick={() => setErrorMsg(null)}>
+          <button
+            type="button"
+            className="architect-error-close"
+            onClick={() => setErrorMsg(null)}
+            title="Close error"
+            aria-label="Close error"
+          >
             ✕
           </button>
         </div>

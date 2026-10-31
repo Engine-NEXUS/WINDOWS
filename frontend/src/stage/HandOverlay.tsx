@@ -3,6 +3,7 @@ import "./hand-overlay.css";
 import type { HudState } from "../hand/payload";
 import { useAssistant } from "../store/assistant";
 import { chipPlacement, gestureLabel, overlayModel, taskbarBottomPx } from "./handOverlayModel";
+import { captionSlot } from "./layoutSlots";
 
 /**
  * Hand mode on the stage: ONE short status chip centred on the edge opposite the orb, a virtual cursor ring
@@ -41,6 +42,7 @@ export function HandOverlay() {
         box.width,
         box.height || 28,
         taskbarBottomPx(window.screen as unknown as { height: number; availHeight: number; availTop?: number }),
+        captionSlot({ w: window.innerWidth, h: window.innerHeight }).y,
       );
       chip.style.left = `${p.left}px`;
       chip.style.top = `${p.top}px`;

@@ -14,7 +14,7 @@
   --hub-card-2: #202029;
   --hub-text: #ffffff;
   --hub-text-dim: rgba(255, 255, 255, 0.70);
-  --hub-text-faint: rgba(255, 255, 255, 0.40);
+  --hub-text-faint: rgba(255, 255, 255, 0.50);
   --hub-accent: #0a84ff;
   --hub-border: rgba(255, 255, 255, 0.12);
   --hub-danger: #ff453a;
@@ -26,23 +26,37 @@
   --hub-card-2: #e8e8ed;
   --hub-text: #111827;
   --hub-text-dim: rgba(0, 0, 0, 0.65);
-  --hub-text-faint: rgba(0, 0, 0, 0.40);
-  --hub-accent: #007aff;
+  --hub-text-faint: rgba(0, 0, 0, 0.55);
+  --hub-accent: #0062cc;
   --hub-border: rgba(0, 0, 0, 0.08);
-  --hub-danger: #ff3b30;
+  --hub-danger: #d70015;
 }
 
-*, *::before, *::after {
-  scrollbar-width: none !important;
-  -ms-overflow-style: none !important;
+/* Thin, themed scrollbars. They were hidden everywhere, which left no sign that a list scrolls. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ui-border-strong) transparent;
 }
 
-*::-webkit-scrollbar,
-*::-webkit-scrollbar-thumb,
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
 *::-webkit-scrollbar-track {
-  display: none !important;
-  width: 0 !important;
-  height: 0 !important;
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--ui-border-strong);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--ui-text-tertiary);
+  background-clip: content-box;
 }
 
 .unified-shell {
@@ -101,28 +115,38 @@
   max-height: 100vh;
 }
 
-/* ── Shared dock buttons (embedded in each view's header row) ────── */
+/* ── Shared dock buttons (embedded in each view's header row) ──────
+   ONE style for every dock control (kit/DockButtons.tsx and the kit IconButton variants). It used to be white on
+   transparent, which is 1.05:1 on a light header; it now reads from the theme tokens in both themes, is 32 px
+   (WCAG 2.5.8 asks 24 px, Windows suggests larger), and shows a focus ring for the keyboard. */
 .sidebar-dock-btn {
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
+  flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 9px;
-  background: transparent;
-  color: #ffffff;
+  padding: 0;
+  border: 1px solid var(--ui-border-subtle);
+  border-radius: var(--nx-radius, 10px);
+  background: var(--ui-surface-card);
+  color: var(--ui-text-primary);
   font-size: 13px;
   cursor: pointer;
   box-shadow: none;
-  transition: background 0.18s ease, transform 0.12s ease, border-color 0.18s ease;
+  transition: background 0.15s ease, transform 0.12s ease, border-color 0.15s ease;
 }
 
 .sidebar-dock-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.25);
+  background: var(--ui-surface-hover);
+  border-color: var(--ui-border-strong);
 }
 
 .sidebar-dock-btn:active {
   transform: scale(0.94);
 }
+
+.sidebar-dock-btn .dock-icon {
+  display: block;
+}
+

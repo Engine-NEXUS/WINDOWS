@@ -93,7 +93,7 @@ body.is-browser-dev.is-popup .nx-settings {
   max-width: 1100px;
   padding: 8px 16px;
   background: var(--nx-bg-card);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--ui-border-subtle);
   border-radius: 12px;
   gap: 12px;
   flex-wrap: wrap;
@@ -119,16 +119,16 @@ body.is-browser-dev.is-popup .nx-settings {
   align-items: center;
   gap: 10px;
   font-size: 13px;
-  color: #ffffff;
+  color: var(--ui-text-primary);
 }
 
 .nx-dev-dim-badge {
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.6);
-  background: rgba(255, 255, 255, 0.08);
+  color: var(--ui-text-secondary);
+  background: var(--ui-surface-hover);
   padding: 2px 8px;
   border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--ui-border-subtle);
 }
 
 .nx-dev-controls {
@@ -141,8 +141,8 @@ body.is-browser-dev.is-popup .nx-settings {
 .nx-dev-button-group {
   display: inline-flex;
   align-items: center;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--ui-surface-hover);
+  border: 1px solid var(--ui-border-subtle);
   border-radius: 8px;
   padding: 2px;
   gap: 2px;
@@ -151,7 +151,7 @@ body.is-browser-dev.is-popup .nx-settings {
 .nx-dev-pill-btn {
   background: transparent;
   border: none;
-  color: rgba(255, 255, 255, 0.75);
+  color: var(--ui-text-secondary);
   font-size: 11.5px;
   font-weight: 500;
   padding: 5px 10px;
@@ -162,20 +162,20 @@ body.is-browser-dev.is-popup .nx-settings {
 }
 
 .nx-dev-pill-btn:hover {
-  color: #ffffff;
-  background: rgba(255, 255, 255, 0.1);
+  color: var(--ui-text-primary);
+  background: var(--ui-surface-hover);
 }
 
 .nx-dev-pill-btn.is-active {
-  background: #3b82f6;
-  color: #ffffff;
+  background: var(--ui-accent-solid);
+  color: var(--ui-on-accent);
   font-weight: 600;
-  box-shadow: 0 1px 4px rgba(59, 130, 246, 0.4);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--ui-accent-solid) 40%, transparent);
 }
 
 .nx-dev-popup-action {
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: var(--ui-surface-hover);
+  border: 1px solid var(--ui-border-subtle);
 }
 
 .nx-dev-window-frame {
@@ -235,7 +235,7 @@ body.is-browser-dev.is-popup .nx-settings {
   z-index: 1000;
   user-select: none;
   border-bottom: 1px solid var(--nx-border);
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--ui-surface-card);
 }
 
 /* ── Sidebar (tabs) ──────────────────────────────────────────── */
@@ -643,8 +643,8 @@ body.is-browser-dev.is-popup .nx-settings {
 
 .nx-persona-card--active {
   border-color: var(--nx-accent-blue);
-  background: rgba(59, 130, 246, 0.08);
-  box-shadow: 0 0 0 1px var(--nx-accent-blue), 0 4px 16px rgba(59, 130, 246, 0.15);
+  background: color-mix(in srgb, var(--ui-accent-solid) 8%, transparent);
+  box-shadow: 0 0 0 1px var(--nx-accent-blue), 0 4px 16px color-mix(in srgb, var(--ui-accent-solid) 15%, transparent);
 }
 
 .nx-persona-card-top {
@@ -704,8 +704,8 @@ body.is-browser-dev.is-popup .nx-settings {
 
 .nx-persona-sync--ready {
   color: #10b981;
-  background: rgba(16, 185, 129, 0.12);
-  border: 1px solid rgba(16, 185, 129, 0.35);
+  background: color-mix(in srgb, var(--ui-success-solid) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ui-success-solid) 35%, transparent);
 }
 
 .nx-persona-sync--pending {
@@ -716,8 +716,8 @@ body.is-browser-dev.is-popup .nx-settings {
 
 .nx-persona-sync--busy {
   color: #3b82f6;
-  background: rgba(59, 130, 246, 0.12);
-  border: 1px solid rgba(59, 130, 246, 0.40);
+  background: color-mix(in srgb, var(--ui-accent-solid) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ui-accent-solid) 40%, transparent);
   animation: nx-sync-pulse 1.2s ease-in-out infinite;
 }
 
@@ -774,9 +774,9 @@ body.is-browser-dev.is-popup .nx-settings {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #ffffff;
+  background: var(--ui-surface-hover);
+  border: 1px solid var(--ui-border-subtle);
+  color: var(--ui-text-primary);
   border-radius: 9999px;
   padding: 6px 14px;
   font-size: 12.5px;
@@ -787,8 +787,8 @@ body.is-browser-dev.is-popup .nx-settings {
   user-select: none;
 }
 .nx-animated-theme-toggler:hover {
-  background: rgba(255, 255, 255, 0.14);
-  border-color: rgba(255, 255, 255, 0.24);
+  background: var(--ui-surface-raised);
+  border-color: var(--ui-border-strong);
   transform: translateY(-1px);
 }
 :root[data-theme="light"] .nx-animated-theme-toggler {
@@ -832,20 +832,20 @@ body.is-browser-dev.is-popup .nx-settings {
 
   /* Pitch Black Mode default */
   background: #141418;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--ui-border-subtle);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
 
 .nx-option-card:hover:not(.is-disabled) {
   background: #1c1c24;
-  border-color: rgba(255, 255, 255, 0.2);
+  border-color: var(--ui-border-strong);
   transform: translateY(-1px);
 }
 
 .nx-option-card.is-selected {
-  background: rgba(59, 130, 246, 0.08);
-  border-color: #3b82f6;
-  box-shadow: 0 0 16px rgba(59, 130, 246, 0.18), inset 0 0 0 1px #3b82f6;
+  background: color-mix(in srgb, var(--ui-accent-solid) 8%, transparent);
+  border-color: var(--ui-accent-solid);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--ui-accent-solid) 18%, transparent), inset 0 0 0 1px var(--ui-accent-solid);
 }
 
 .nx-option-card.is-disabled {
@@ -883,28 +883,28 @@ body.is-browser-dev.is-popup .nx-settings {
   justify-content: center;
   flex-shrink: 0;
   font-size: 18px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--ui-surface-hover);
+  border: 1px solid var(--ui-border-subtle);
   color: #f1f5f9;
   transition: all 0.18s ease;
 }
 
 .nx-option-card.is-selected .nx-option-icon {
-  background: rgba(59, 130, 246, 0.15);
-  border-color: rgba(59, 130, 246, 0.35);
-  color: #60a5fa;
+  background: color-mix(in srgb, var(--ui-accent-solid) 15%, transparent);
+  border-color: color-mix(in srgb, var(--ui-accent-solid) 35%, transparent);
+  color: var(--ui-info-text);
 }
 
 :root[data-theme="light"] .nx-option-icon {
   background: #f1f5f9;
   border: 1px solid rgba(0, 0, 0, 0.06);
-  color: #1e293b;
+  color: var(--ui-text-primary);
 }
 
 :root[data-theme="light"] .nx-option-card.is-selected .nx-option-icon {
   background: rgba(37, 99, 235, 0.1);
   border-color: rgba(37, 99, 235, 0.25);
-  color: #2563eb;
+  color: var(--ui-info-text);
 }
 
 /* Center Meta (Title & Microcopy) */
@@ -931,7 +931,7 @@ body.is-browser-dev.is-popup .nx-settings {
 }
 
 :root[data-theme="light"] .nx-option-title {
-  color: #0f172a;
+  color: var(--ui-text-primary);
 }
 
 .nx-option-badge {
@@ -941,14 +941,14 @@ body.is-browser-dev.is-popup .nx-settings {
   letter-spacing: 0.04em;
   padding: 1px 6px;
   border-radius: 4px;
-  background: rgba(59, 130, 246, 0.16);
-  color: #60a5fa;
-  border: 1px solid rgba(59, 130, 246, 0.3);
+  background: color-mix(in srgb, var(--ui-accent-solid) 16%, transparent);
+  color: var(--ui-info-text);
+  border: 1px solid color-mix(in srgb, var(--ui-accent-solid) 30%, transparent);
 }
 
 :root[data-theme="light"] .nx-option-badge {
   background: rgba(37, 99, 235, 0.1);
-  color: #2563eb;
+  color: var(--ui-info-text);
   border-color: rgba(37, 99, 235, 0.2);
 }
 
@@ -956,7 +956,7 @@ body.is-browser-dev.is-popup .nx-settings {
   font-size: 11.5px;
   line-height: 1.4;
   margin-top: 2px;
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--ui-text-tertiary);
   white-space: normal;
 }
 
@@ -977,15 +977,15 @@ body.is-browser-dev.is-popup .nx-settings {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  border: 1.5px solid rgba(255, 255, 255, 0.22);
+  border: 1.5px solid var(--ui-border-strong);
   background: transparent;
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .nx-option-card.is-selected .nx-option-check {
-  background: #3b82f6;
-  border-color: #3b82f6;
-  box-shadow: 0 0 10px rgba(59, 130, 246, 0.5);
+  background: var(--ui-accent-solid);
+  border-color: var(--ui-accent-solid);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--ui-accent-solid) 50%, transparent);
 }
 
 :root[data-theme="light"] .nx-option-check {
@@ -1001,7 +1001,7 @@ body.is-browser-dev.is-popup .nx-settings {
 .nx-option-check-glyph {
   font-size: 12px;
   font-weight: 800;
-  color: #ffffff;
+  color: var(--ui-text-primary);
   line-height: 1;
 }
 
@@ -1010,7 +1010,7 @@ body.is-browser-dev.is-popup .nx-settings {
   width: 44px;
   height: 24px;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.16);
+  background: var(--ui-surface-raised);
   position: relative;
   flex-shrink: 0;
   transition: background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease;
@@ -1030,8 +1030,8 @@ body.is-browser-dev.is-popup .nx-settings {
 }
 
 .nx-option-switch.is-on {
-  background: #3b82f6;
-  box-shadow: 0 0 12px rgba(59, 130, 246, 0.4);
+  background: var(--ui-accent-solid);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--ui-accent-solid) 40%, transparent);
 }
 
 .nx-option-switch.is-on .nx-option-switch-thumb {

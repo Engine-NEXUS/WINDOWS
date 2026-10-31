@@ -1998,7 +1998,7 @@ static VERIFY_RING: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::V
 const VERIFY_RING_CAP: usize = 40000;
 /// Max time to wait for STT verification before failing open.
 #[cfg(not(feature = "mock-wake"))]
-const VERIFY_TIMEOUT_SECS: u64 = 10;
+const VERIFY_TIMEOUT_SECS: u64 = 3;
 /// A stage-1 acoustic candidate: ring audio + the trigger probability.
 /// The probability powers the two-key gate (near-matches require prob ≥ 0.6).
 #[cfg(not(feature = "mock-wake"))]
@@ -3121,6 +3121,15 @@ pub fn start_stt_capture() {
 /// itself; everything else is an explicit user turn). Phase 8 directed-speech gate reads this.
 #[cfg(not(feature = "mock-wake"))]
 pub fn start_stt_capture_with_origin(origin: crate::directed::Origin) {
+    start_stt_capture_inner(origin, None);
+}
+
+/// The one place a capture is opened. `seed` = audio that arrived after the wake detection point
+/// (samples, ring position at the time it was cut). It goes through the SAME lifecycle bookkeeping as an
+/// unseeded start: without it the endpoint finds no lifecycle and drops the buffer ("missing lifecycle"),
+/// which is how every neural wake used to lose the command that followed it.
+#[cfg(not(feature = "mock-wake"))]
+fn start_stt_capture_inner(origin: crate::directed::Origin, seed: Option<(Vec<f32>, u64)>) {
     use crate::capture_audit::Outcome;
     let mut audit = crate::capture_audit::begin(match origin {
         crate::directed::Origin::Direct => "direct", _ => "hot_mic",
@@ -3168,6 +3177,9 @@ pub fn start_stt_capture_with_origin(origin: crate::directed::Origin) {
     {
         let mut buf = STT_CAPTURE_BUFFER.lock();
         buf.clear();
+        if let Some((samples, _)) = &seed {
+            buf.extend_from_slice(samples);
+        }
         // NOTE: No prefix-pad from VERIFY_RING here.
         // The VERIFY_RING contains the wake word audio ("NEXUS") and ~2s
         // of audio context. Seeding that into the command capture poisons
@@ -3194,8 +3206,23 @@ pub fn start_stt_capture_with_origin(origin: crate::directed::Origin) {
     }
     SMART_TURN_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     SMART_TURN_LAST_REQ.store(0, std::sync::atomic::Ordering::Relaxed);
+    let seeded = seed.as_ref().map(|(samples, upto)| {
+        for chunk in samples.chunks(engine::OWW_CHUNK_SIZE) {
+            let sum_sq: f32 = chunk.iter().map(|s| s * s).sum();
+            capture_vad_update((sum_sq / chunk.len() as f32).sqrt());
+            STT_TOTAL_CHUNKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        SEED_UPTO.store(*upto, std::sync::atomic::Ordering::SeqCst);
+        samples.len()
+    });
     STT_CAPTURING.store(true, std::sync::atomic::Ordering::Release);
-    tracing::info!("stt-capture: started (session={session}, cpal-side capture, no baton pass)");
+    match seeded {
+        Some(n) => tracing::info!(
+            "stt-capture: started (session={session}, seeded {n} samples = {}ms after the detection point)",
+            n / 16
+        ),
+        None => tracing::info!("stt-capture: started (session={session}, cpal-side capture, no baton pass)"),
+    }
 }
 
 /// Mock builds have no audio path.
@@ -3239,6 +3266,9 @@ pub fn start_stt_capture_seeded(offset_ms: i32, ring_end: u64) {
         start_stt_capture();
         return;
     }
+    // Hold the ring lock until the capture is armed: the audio callback pushes into the ring under this lock,
+    // so no chunk can fall between the seed and the first live chunk. (The callback never holds the ring
+    // lock while waiting for the capture lock, so this order cannot deadlock.)
     let ring = VERIFY_RING.lock();
     let total_now = RING_TOTAL.load(Ordering::SeqCst);
     let offset = offset_ms.clamp(-400, 400) as i64 * 16;
@@ -3246,33 +3276,8 @@ pub fn start_stt_capture_seeded(offset_ms: i32, ring_end: u64) {
         Some((start, count)) => ring.iter().skip(start).take(count).copied().collect(),
         None => Vec::new(),
     };
-
-    {
-        let mut buf = STT_CAPTURE_BUFFER.lock();
-        buf.clear();
-        buf.extend_from_slice(&seed);
-    }
-    CAPTURE_FLOOR_BITS.store(NOISE_FLOOR_BITS.load(Ordering::Relaxed), Ordering::Relaxed);
-    STT_SPEECH_DETECTED.store(false, Ordering::Relaxed);
-    STT_SILENCE_CHUNKS.store(0, Ordering::Relaxed);
-    STT_TOTAL_CHUNKS.store(0, Ordering::Relaxed);
-    STT_VOICED_CHUNKS.store(0, Ordering::Relaxed);
-    STT_PAUSE_COUNT.store(0, Ordering::Relaxed);
-    for chunk in seed.chunks(engine::OWW_CHUNK_SIZE) {
-        let sum_sq: f32 = chunk.iter().map(|s| s * s).sum();
-        capture_vad_update((sum_sq / chunk.len() as f32).sqrt());
-        STT_TOTAL_CHUNKS.fetch_add(1, Ordering::Relaxed);
-    }
-    SEED_UPTO.store(total_now, Ordering::SeqCst);
-    STT_CAPTURING.store(true, Ordering::Relaxed);
+    start_stt_capture_inner(crate::directed::Origin::Direct, Some((seed, total_now)));
     drop(ring);
-
-    tracing::info!(
-        "stt-capture: started (seeded {} samples = {}ms after the detection point, offset {}ms)",
-        seed.len(),
-        seed.len() / 16,
-        offset_ms
-    );
 }
 
 /// Slow minimum-tracking estimate of the room's noise floor (RMS per 80 ms
@@ -4115,7 +4120,14 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     .await;
 
                     let stt_failed = transcript.is_err();
-                    let raw_text = transcript.unwrap_or_default();
+                    let mut raw_text = transcript.unwrap_or_default();
+                    // The user only said the assistant's name while a turn was already open: ignore it (no reply,
+                    // no "what is Nexus" answer). It reaches the frontend as a silent miss, which re-opens the mic.
+                    let name_only = !raw_text.is_empty() && crate::wake_names::is_name_only(&raw_text);
+                    if name_only {
+                        tracing::info!("stt-capture: transcript '{}' is only the assistant's name — ignored", raw_text);
+                        raw_text.clear();
+                    }
                     // Start/abort share this barrier. Once a packet has passed
                     // this check, neither can invalidate it halfway through
                     // provenance registration and native event emission.
@@ -4168,7 +4180,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                         }
                     }
                     stats.stt_path = crate::stt::last_stt_path_str();
-                    stats.filter = crate::stt::last_filter_str();
+                    stats.filter = if name_only { "name_only" } else { crate::stt::last_filter_str() };
                     crate::stt_diagnostics::save_capture(&app_for_stt, session, &samples, &raw_text, &stats);
                     // Unlike a routing/action success, this only proves the
                     // native event emit completed. A missing frontend still
@@ -4214,17 +4226,19 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         // cannot turn a wake candidate into an owner command.
         // A stage-2-verified candidate already passed this check when it was
         // first seen — never repeat it.
+        let mut owner_sim: Option<f32> = None;
         if !verified && crate::commands::read_speaker_verification(&app) {
             match verify_speaker_at_fire(&app, &candidate.audio) {
-                Some(false) | None => {
+                Some((false, _)) | None => {
                     tracing::info!(
                         "wake-word: REJECTED by speaker verification (prob {:.3})",
                         candidate.prob
                     );
                     continue;
                 }
-                Some(true) => {
+                Some((true, sim)) => {
                     tracing::debug!("wake-word: ACCEPTED by speaker verification");
+                    owner_sim = Some(sim);
                 }
             }
         }
@@ -4250,7 +4264,9 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                 read_verify_mode(&app),
                 crate::commands::read_wake_verify_high(&app),
                 candidate.prob,
-            ) {
+            ) || (crate::commands::read_wake_owner_fast_path(&app)
+                && owner_fast_path(owner_sim, candidate.prob))
+            {
                 // Instant fire ONLY for real stage-1 detections. A prob-0.0
                 // candidate (v4 barge-in "exact-only verify") has ZERO neural
                 // evidence — firing it here sent phantom "confidence 0.0%"
@@ -4263,6 +4279,12 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     "wake-word: instant neural trigger (confidence: {:.1}%, prob: {:.3})",
                     candidate.prob * 100.0,
                     candidate.prob
+                );
+                tracing::info!(
+                    "[WAKE] path={} prob={:.3} owner_sim={}",
+                    if owner_fast_path(owner_sim, candidate.prob) { "owner-fast" } else { "model-only" },
+                    candidate.prob,
+                    owner_sim.map(|v| format!("{v:.3}")).unwrap_or_else(|| "n/a".into())
                 );
                 if let Ok(dir) = app.path().app_data_dir() {
                     crate::diary::log_event(
@@ -4493,7 +4515,7 @@ pub(crate) fn verify_turn_audio<R: Runtime>(
 /// (~1.28s) to fill the feature buffer, then mean-pools for a robust
 /// speaker embedding.
 #[cfg(not(feature = "mock-wake"))]
-fn verify_speaker_at_fire<R: Runtime>(app: &AppHandle<R>, audio: &[f32]) -> Option<bool> {
+fn verify_speaker_at_fire<R: Runtime>(app: &AppHandle<R>, audio: &[f32]) -> Option<(bool, f32)> {
     fn init_check<R: Runtime>(app: &AppHandle<R>) -> Option<SpeakerCheck> {
         let res_dir = app.path().resource_dir().ok()?;
         let data_dir = app.path().app_data_dir().ok()?;
@@ -4523,7 +4545,7 @@ fn verify_speaker_at_fire<R: Runtime>(app: &AppHandle<R>, audio: &[f32]) -> Opti
         "speaker-verify: similarity={:.3} verified={}",
         sim, verified
     );
-    Some(verified)
+    Some((verified, sim))
 }
 
 /// Cooldown between candidate fires (consecutive frames of one utterance
@@ -4662,6 +4684,15 @@ fn should_instant_fire(mode: VerifyMode, high: f32, prob: f32) -> bool {
         VerifyMode::Always => false,
         VerifyMode::Tiered => prob >= clamp_verify_high(high),
     }
+}
+
+/// Owner-voice fast path: the local wake model found "Nexus" (stage-1 evidence) AND Voice Lock matched the
+/// enrolled owner's voice strongly, so the cloud speech check adds only delay and mishearing risk.
+/// `owner_sim` is `None` when Voice Lock is off or not enrolled, so this never fires without a voice match.
+pub const OWNER_FAST_PATH_SIM: f32 = 0.90;
+pub const OWNER_FAST_PATH_PROB: f32 = 0.70;
+fn owner_fast_path(owner_sim: Option<f32>, prob: f32) -> bool {
+    matches!(owner_sim, Some(sim) if sim.is_finite() && sim >= OWNER_FAST_PATH_SIM) && prob >= OWNER_FAST_PATH_PROB
 }
 
 /// Extra TTS-interrupt phrases beyond `ghost::STOP_PHRASES` (whole-utterance matches only).
@@ -5386,6 +5417,25 @@ mod tests {
 
     use super::level_from_rms;
     use super::VerifyMode;
+
+    /// Wiring pin: a seeded (wake) capture must open through the same lifecycle bookkeeping as every other
+    /// capture. The seeded variant used to arm the buffer by hand and skip it, so at the endpoint the lifecycle
+    /// was missing and the whole command was dropped ("missing lifecycle at endpoint", 2026-10-31).
+    #[test]
+    fn seeded_wake_capture_opens_through_the_lifecycle() {
+        let src = include_str!("wakeword_oww.rs");
+        let a = src.find("pub fn start_stt_capture_seeded(offset_ms: i32, ring_end: u64) {").expect("seeded fn");
+        let body = &src[a..src[a..].find("
+}
+").map(|i| a + i).expect("end of fn")];
+        assert!(body.contains("start_stt_capture_inner("), "seeded start must go through start_stt_capture_inner");
+        assert!(!body.contains("STT_CAPTURING.store"), "seeded start must not arm the capture by hand");
+        let o = src.find("pub fn start_stt_capture_with_origin(").expect("origin fn");
+        let ob = &src[o..src[o..].find("
+}
+").map(|i| o + i).unwrap()];
+        assert!(ob.contains("start_stt_capture_inner(origin, None)"));
+    }
 
     #[test]
     #[cfg(not(feature = "mock-wake"))]
@@ -6459,6 +6509,19 @@ mod tests {
         assert!(!super::should_instant_fire(VerifyMode::Tiered, 0.10, 0.79));
         assert!(!super::should_instant_fire(VerifyMode::Tiered, 5.0, 0.99), "clamped down to 0.9999");
         assert!(super::should_instant_fire(VerifyMode::Tiered, f32::NAN, 0.98), "NaN -> default 0.97");
+    }
+
+    /// Owner-voice fast path: needs a strong voice match AND real stage-1 evidence; never without Voice Lock.
+    #[test]
+    fn test_owner_fast_path_needs_voice_match_and_evidence() {
+        use super::owner_fast_path as f;
+        assert!(f(Some(0.986), 0.78), "the 28 Oct log case: owner 0.986, prob 0.78");
+        assert!(f(Some(0.90), 0.70), "exactly at both floors");
+        assert!(!f(None, 0.99), "Voice Lock off / not enrolled: never skip the check");
+        assert!(!f(Some(0.89), 0.99), "weak voice match");
+        assert!(!f(Some(0.99), 0.69), "weak wake evidence");
+        assert!(!f(Some(0.99), 0.0), "prob-0.0 barge-in candidates never take the fast path");
+        assert!(!f(Some(f32::NAN), 0.9), "NaN similarity");
     }
 
     /// E4: the new wakeVerifyMode setting overrides the legacy boolean; nothing else changes behaviour.

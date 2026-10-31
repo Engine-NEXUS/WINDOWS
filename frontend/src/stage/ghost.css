@@ -2,6 +2,10 @@
    active. Pure indicator: pointer-events none, excluded from hitboxes
    explicitly (the stage ignores the cursor everywhere by default). */
 
+/* The stage window did not load the shared tokens, so the --stage-* and --orb-surface values its chips, cards and
+   pebble use were undefined there. Imported here so every stage element reads the same file as the other windows. */
+@import "../theme/tokens.css";
+
 #ghost-ring {
   position: fixed;
   width: 38px;
@@ -172,7 +176,8 @@
   padding: 0 9px;
   border: none;
   border-radius: 13px;
-  background: linear-gradient(135deg, #5a9eff, #259ed6);
+  /* white text needs 4.5:1: the old #5a9eff to #259ed6 gradient was 2.7 to 3.0:1 */
+  background: linear-gradient(135deg, #2f6fd6, #1d6fb8);
   color: #ffffff;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
   font-size: 11.5px;
@@ -480,6 +485,18 @@
    one is listening-only, the other speaking-only). No per-word animation:
    the whole line replaces wholesale on each partial (Moonshine's own
    semantics), so an animate-in-per-word would fight itself every update. */
+/* The user's own words sit on the same solid pill as the reply (white text on a light wallpaper was about 1.2:1),
+   distinguished by a dimmer pill and a lighter border, not by having no background. */
+.live-caption-pill {
+  display: inline-block;
+  background: var(--stage-surface);
+  color: var(--stage-text);
+  border: 1px solid var(--stage-border-strong);
+  border-radius: 10px;
+  padding: 2px 24px;
+  text-shadow: none;
+}
+
 .live-caption {
   opacity: 0.82;
   font-size: 16.5px; /* match user-tuned reply caption size (caption-tuner 2026-10-09) */
@@ -505,8 +522,8 @@
 }
 
 .loading-indicator-lottie {
-  width: 60px;
-  height: 60px;
+  width: 100%; /* fills the wrapper, so the size setting scales the spinner too */
+  height: 100%;
 }
 
 .loading-indicator-pulse {
@@ -533,4 +550,25 @@
   font-weight: 600;
   white-space: nowrap;
   pointer-events: none;
+}
+
+/* Reduced motion on the stage: no looping pulses, drops, sweeps or travelling dots; state changes still show, instantly. */
+@media (prefers-reduced-motion: reduce) {
+  #ghost-ring,
+  .spatial-box,
+  .spatial-pin,
+  .response-caption-word,
+  .loading-indicator,
+  .hand-ripple,
+  .tour-ring,
+  .tour-dot,
+  .ann-pin-shape {
+    animation: none !important;
+  }
+  .response-caption,
+  .caption-black-capsule,
+  .mercury-pill,
+  .orb-slider {
+    transition-duration: 0.01ms !important;
+  }
 }

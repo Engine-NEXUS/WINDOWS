@@ -21,6 +21,7 @@ import {
   AppBar,
   LogoTile,
   IconButton,
+  DockIcon,
   Card,
   Chip,
   DropdownChip,
@@ -251,11 +252,11 @@ export function StackView({
           subtitle="Web Reverse Engineer"
           actions={
             <>
-              <IconButton label="Dock Left" onClick={() => onDock("left")}>
-                ◧
+              <IconButton className="sidebar-dock-btn" label="Dock Left" onClick={() => onDock("left")}>
+                <DockIcon side="left" />
               </IconButton>
-              <IconButton label="Dock Right" onClick={() => onDock("right")}>
-                ◨
+              <IconButton className="sidebar-dock-btn" label="Dock Right" onClick={() => onDock("right")}>
+                <DockIcon side="right" />
               </IconButton>
             </>
           }
@@ -304,11 +305,11 @@ export function StackView({
             >
               {copied ? "✓" : "📋"}
             </IconButton>
-            <IconButton label="Dock Left" onClick={() => onDock("left")}>
-              ◧
+            <IconButton className="sidebar-dock-btn" label="Dock Left" onClick={() => onDock("left")}>
+              <DockIcon side="left" />
             </IconButton>
-            <IconButton label="Dock Right" onClick={() => onDock("right")}>
-              ◨
+            <IconButton className="sidebar-dock-btn" label="Dock Right" onClick={() => onDock("right")}>
+              <DockIcon side="right" />
             </IconButton>
           </>
         }

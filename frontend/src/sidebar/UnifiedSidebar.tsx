@@ -30,8 +30,16 @@ function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
 }
 
+/** `?pin=architect` makes this window a dedicated Architect window: it never follows `sidebar:set_view`. */
+export function pinnedView(search: string = typeof window !== "undefined" ? window.location.search : ""): SidebarView | null {
+  const p = new URLSearchParams(search).get("pin") as SidebarView | null;
+  return p && VIEWS.includes(p) ? p : null;
+}
+
 export function UnifiedSidebar() {
+  const pinned = pinnedView();
   const [view, setView] = useState<SidebarView>(() => {
+    if (pinned) return pinned;
     if (!isTauri()) {
       const p = new URLSearchParams(window.location.search).get("view") as SidebarView;
       if (p && VIEWS.includes(p)) return p;
@@ -40,6 +48,7 @@ export function UnifiedSidebar() {
     return "assistant";
   });
   const [mounted, setMounted] = useState<Set<SidebarView>>(() => {
+    if (pinned) return new Set<SidebarView>([pinned]);
     if (!isTauri()) {
       const p = new URLSearchParams(window.location.search).get("view") as SidebarView;
       if (p && VIEWS.includes(p)) return new Set<SidebarView>([p]);
@@ -52,7 +61,7 @@ export function UnifiedSidebar() {
   // FRESH-WINDOW RACE: that event can fire before this component mounts —
   // so we also fetch the persisted pending view on mount and land there.
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isTauri() || pinned) return;
     const un = listen<{ view: string }>("sidebar:set_view", (event) => {
       const v = event.payload.view as SidebarView;
       if (VIEWS.includes(v)) {
@@ -66,7 +75,7 @@ export function UnifiedSidebar() {
   }, []);
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isTauri() || pinned) return;
     invoke<string | null>("get_pending_sidebar_view")
       .then((v) => {
         if (v) {
@@ -94,6 +103,11 @@ export function UnifiedSidebar() {
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
+        if (pinned) {
+          // A pinned window closes only itself; it must not stop speech or hide the response sidebar.
+          if (isTauri()) invoke("close_architect_map").catch(() => {});
+          return;
+        }
         void import("../audio/ttsPlayer").then(({ stopTts }) => stopTts()).catch(() => {});
         if (isTauri()) {
           invoke("hide_sidebar").catch(() => {});
@@ -107,7 +121,7 @@ export function UnifiedSidebar() {
 
   // Exported for view components to call
   const dock = (d: string) => {
-    if (!isTauri()) return;
+    if (!isTauri() || pinned) return; // a pinned window must not move the response sidebar
     invoke("set_sidebar_dock", { dock: d }).catch(() => {});
   };
 

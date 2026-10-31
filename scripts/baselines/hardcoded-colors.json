@@ -1,0 +1,22 @@
+{
+  "frontend/src/architect/architect.css": 132,
+  "frontend/src/companion-hud/companion-hud.css": 73,
+  "frontend/src/hand/hand.css": 16,
+  "frontend/src/pr-list/pr-list.css": 166,
+  "frontend/src/settings-sidebar/hub/activity-manager.css": 9,
+  "frontend/src/settings-sidebar/hub/hub.css": 184,
+  "frontend/src/settings-sidebar/mcpServers.css": 48,
+  "frontend/src/settings-sidebar/settings-sidebar.css": 111,
+  "frontend/src/settings/settings.css": 55,
+  "frontend/src/setup/setup.css": 36,
+  "frontend/src/sidebar/kit/kit.css": 42,
+  "frontend/src/sidebar/lens.css": 14,
+  "frontend/src/sidebar/sidebar.css": 141,
+  "frontend/src/sidebar/stack.css": 14,
+  "frontend/src/sidebar/unified.css": 18,
+  "frontend/src/stage/ghost.css": 69,
+  "frontend/src/stage/hand-overlay.css": 8,
+  "frontend/src/stage/tour.css": 95,
+  "frontend/src/styles.css": 43,
+  "frontend/src/theme/liquid-glass.css": 18
+}

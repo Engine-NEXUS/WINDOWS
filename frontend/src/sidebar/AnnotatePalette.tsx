@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { SpatialData } from "./sidebarStore";
 import type { AnnotElement, AnnotTool } from "../stage/annotationTypes";
 import { toAnnotJson, toMermaid, toPlantUml } from "./diagramSerializer";
+import { DockButtons } from "./kit/DockButtons";
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -120,14 +121,7 @@ export function AnnotateView({ onDock = () => {} }: { onDock?: (d: string) => vo
     <div className="annotate-palette">
       <header className="sidebar-header-row" data-tauri-drag-region>
         <div className="sidebar-header-spacer" data-tauri-drag-region />
-        <div className="sidebar-dock-controls">
-          <button type="button" className="sidebar-dock-btn" onClick={() => onDock("left")} title="Dock Left">
-            ◧
-          </button>
-          <button type="button" className="sidebar-dock-btn" onClick={() => onDock("right")} title="Dock Right">
-            ◨
-          </button>
-        </div>
+        <DockButtons onDock={onDock} />
       </header>
 
       <div className="annotate-title">Annotate Screen {count > 0 && <span className="annotate-count">{count}</span>}</div>
@@ -138,6 +132,7 @@ export function AnnotateView({ onDock = () => {} }: { onDock?: (d: string) => vo
             key={t.id}
             type="button"
             title={t.hint}
+            aria-label={t.hint}
             className={`annotate-tool ${tool === t.id ? "annotate-tool--active" : ""}`}
             onClick={() => pickTool(t.id)}
           >
@@ -152,6 +147,7 @@ export function AnnotateView({ onDock = () => {} }: { onDock?: (d: string) => vo
             key={c}
             type="button"
             title={c}
+            aria-label={`Color ${c}`}
             className={`annotate-swatch ${color === c ? "annotate-swatch--active" : ""}`}
             style={{ background: c }}
             onClick={() => pickColor(c)}

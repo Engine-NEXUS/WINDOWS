@@ -1,0 +1,25 @@
+/* Visually hidden pattern (WCAG 2.2 accessible live regions / screen-reader-only elements).
+   1px clipped box, zero visual impact, zero colours. */
+.sr-only,
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Windows High Contrast: stage chips and cards keep a visible edge using system colours only. */
+@media (forced-colors: active) {
+  .live-caption-pill,
+  .nx-task-chip {
+    border: 1px solid CanvasText;
+    background: Canvas;
+    color: CanvasText;
+    forced-color-adjust: none;
+  }
+}

@@ -250,7 +250,7 @@ function PebbleScoopFrame({
         </defs>
 
         {/* Pure pitch-black container pouch */}
-        <path ref={fillPathRef} fill="#000000" />
+        <path ref={fillPathRef} className="orb-pebble-fill" />
 
         {/* Stretching Thread boundary with Specular Rim */}
         <path ref={rimPathRef} fill="none" stroke="url(#pebbleRimGrad)" strokeWidth={1.3} />
@@ -330,7 +330,7 @@ export function OrbFrame() {
   const state = useAssistant((s) => s.state);
   const ghostActive = useAssistant((s) => s.ghostActive);
   const orbPosition = useAssistant((s) => s.orbPosition || "top");
-  const capsuleStyle = useAssistant((s) => s.orbCapsuleStyle || "classic");
+  const capsuleStyle = useAssistant((s) => s.orbCapsuleStyle || "pebble");
   const wakeupMode = useAssistant((s) => s.orbWakeupMode || 1);
 
   const [rect, setRect] = useState<OrbRect | null>(null);

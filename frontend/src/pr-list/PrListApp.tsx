@@ -1,11 +1,12 @@
 import { useEffect, useMemo } from "react";
 import { usePrList, PrSummary, GitHubFeedItem, GitHubDashboardData } from "./prListStore";
-import { getThemeMode, THEME_EVENT, THEME_STORAGE_KEY, ThemeMode } from "../sidebar/theme";
+import { applyThemeMode } from "../sidebar/theme";
 import { GitHubContributionGraph } from "./GitHubContributionGraph";
 import { GitHubActivityRadarGraph } from "./GitHubActivityRadarGraph";
 import { GitHubSignInGate } from "./GitHubSignInGate";
 import { GitHubReposView } from "./GitHubReposView";
 import { GitHubStarredView } from "./GitHubStarredView";
+import { DockButtons } from "../sidebar/kit/DockButtons";
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -48,7 +49,6 @@ export function PrListApp({ onDock = () => {} }: { onDock?: (d: string) => void 
     loading,
     actionInProgress,
     subpage,
-    theme,
     isAuthenticated,
     isAuthenticating,
     authChecked,
@@ -184,7 +184,7 @@ export function PrListApp({ onDock = () => {} }: { onDock?: (d: string) => void 
       const subpageParam = (params.get("subpage") || "feed") as any;
       const requestedTheme = params.get("theme");
       if (requestedTheme === "dark" || requestedTheme === "light") {
-        usePrList.getState().setTheme(requestedTheme);
+        applyThemeMode(requestedTheme, false);
       }
       usePrList.getState().showPrList("", subpageParam, []);
       return;
@@ -282,32 +282,7 @@ export function PrListApp({ onDock = () => {} }: { onDock?: (d: string) => void 
     }
   };
 
-  // Synchronize theme with global Settings window theme (read-only from Settings)
-  useEffect(() => {
-    usePrList.getState().setTheme(getThemeMode());
-
-    const handleThemeChange = (e: Event) => {
-      const customEvent = e as CustomEvent<ThemeMode>;
-      if (customEvent.detail === "light" || customEvent.detail === "dark") {
-        usePrList.getState().setTheme(customEvent.detail);
-      } else {
-        usePrList.getState().setTheme(getThemeMode());
-      }
-    };
-
-    window.addEventListener(THEME_EVENT, handleThemeChange);
-    const storageHandler = (e: StorageEvent) => {
-      if (e.key === THEME_STORAGE_KEY) {
-        usePrList.getState().setTheme(getThemeMode());
-      }
-    };
-    window.addEventListener("storage", storageHandler);
-
-    return () => {
-      window.removeEventListener(THEME_EVENT, handleThemeChange);
-      window.removeEventListener("storage", storageHandler);
-    };
-  }, []);
+  // The theme is not tracked here: the stylesheet follows `data-theme` on <html>, which sidebar/theme.ts keeps current.
 
   // Listen for sidebar:backdrop events
   useEffect(() => {
@@ -428,7 +403,7 @@ export function PrListApp({ onDock = () => {} }: { onDock?: (d: string) => void 
   if (!visible) return null;
 
   return (
-    <div className={`gh-dashboard-shell theme--${theme} ${authChecked && !isAuthenticated ? "gh-shell--logged-out" : ""}`}>
+    <div className={`gh-dashboard-shell ${authChecked && !isAuthenticated ? "gh-shell--logged-out" : ""}`}>
       {/* ── Top Header Bar ── */}
       <header className={`gh-header-row ${authChecked && !isAuthenticated ? "gh-header--signin" : ""}`} data-tauri-drag-region>
         <div className="gh-brand-cluster" data-tauri-drag-region>
@@ -441,15 +416,7 @@ export function PrListApp({ onDock = () => {} }: { onDock?: (d: string) => void 
         </div>
 
         <div className="gh-header-actions">
-          {/* Dock Controls */}
-          <div className="sidebar-dock-controls">
-            <button type="button" className="sidebar-dock-btn" onClick={() => onDock("left")} title="Dock Left">
-              ◧
-            </button>
-            <button type="button" className="sidebar-dock-btn" onClick={() => onDock("right")} title="Dock Right">
-              ◨
-            </button>
-          </div>
+          <DockButtons onDock={onDock} />
         </div>
       </header>
 

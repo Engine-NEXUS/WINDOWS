@@ -1,6 +1,7 @@
 export * from "./LogoTile";
 export * from "./AppBar";
 export * from "./IconButton";
+export * from "./DockButtons";
 export * from "./Card";
 export * from "./Chip";
 export * from "./Donut";

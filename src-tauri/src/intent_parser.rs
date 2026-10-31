@@ -260,6 +260,11 @@ pub enum ParsedIntent {
     /// "Nearest pharmacy" - Places API lookup + Maps search window.
     #[serde(rename = "places_search")]
     PlacesSearch { query: String, near: Option<String> },
+    /// "Where is the Charminar" / "when is the Charminar" / "is the museum open": one named place.
+    /// `ask` is "where" | "hours" | "when".
+    PlaceInfo { query: String, ask: String },
+    /// "Analyse this email": read the email open on screen into a sidebar card (+ a map if it names a venue).
+    AnalyseThisEmail,
     /// "What's on my calendar today/tomorrow".
     #[serde(rename = "calendar_agenda")]
     CalendarAgenda { day: String },
@@ -452,6 +457,8 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::MailMute => "mail_mute",
         ParsedIntent::Directions { .. } => "directions",
         ParsedIntent::PlacesSearch { .. } => "places_search",
+        ParsedIntent::PlaceInfo { .. } => "place_info",
+        ParsedIntent::AnalyseThisEmail => "analyse_this_email",
         ParsedIntent::WhatsappRead { .. } => "whatsapp_read",
         ParsedIntent::PeopleFlag { .. } => "people_flag",
         ParsedIntent::PeopleList => "people_list",
@@ -866,6 +873,10 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
     if let Some(result) = parse_places_command(&text) {
         return Some(result);
     }
+    // --- One named place ("where is the Charminar", "when is the Charminar", "is the museum open") ---
+    if let Some(result) = parse_place_info_command(&text) {
+        return Some(result);
+    }
     // --- WhatsApp priority people (P6): "read that message", "make Asha a
     // VIP", "who are my priority people". Narrow phrases only. ---
     if let Some(result) = parse_whatsapp_people_command(&text) {
@@ -928,6 +939,11 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
         return Some(result);
     }
 
+    // --- "Analyse this email" (open email on screen). Must precede parse_screen_analysis_command. ---
+    if let Some(result) = parse_analyse_this_email_command(&text) {
+        return Some(result);
+    }
+
     // --- Reverse engineer this website / app (Feature 152) ---
     // "nexus reverse engineer this website", "what is this site built with".
     // Must precede parse_screen_analysis_command so a stack question is not a screen tour.
@@ -938,6 +954,10 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
     // --- Screen Analysis & Visual Research ---
     // "nexus analyse the screen", "analyse the screen", "explain what is on my screen"
     // Must precede parse_analyse_command so "analyse the screen" is not treated as a repo.
+    // --- "Analyse this" with no name: whatever is on screen (not a repo called "this"). ---
+    if let Some(result) = parse_analyse_deictic_command(&text) {
+        return Some(result);
+    }
     if let Some(result) = parse_screen_analysis_command(&text) {
         return Some(result);
     }
@@ -2889,6 +2909,206 @@ fn parse_directions_command(text: &str) -> Option<ParseResult> {
         intent: ParsedIntent::Directions { destination: dest, origin, mode: mode.unwrap_or("driving").to_string() },
         confidence: 1.0,
         source: "deterministic-directions".to_string(),
+    })
+}
+
+/// Words that mean the thing asked about is not a place (a UI control, a person, an object, an idea).
+const PLACE_INFO_NOT_PLACES: &[&str] = &[
+    "my", "your", "our", "his", "her", "their", "it", "that", "this", "there", "here", "everyone", "everything",
+    "anything", "someone", "somebody", "who", "what", "which", "file", "files", "folder", "document", "documents",
+    "app", "apps", "tab", "tabs", "window", "windows", "button", "icon", "menu", "setting", "settings", "option",
+    "options", "bar", "search", "key", "keys", "keyboard", "mouse", "cursor", "mic", "microphone", "camera",
+    "screen", "sidebar", "orb", "volume", "wifi", "bluetooth", "battery", "charger", "phone", "laptop", "remote",
+    "wallet", "email", "emails", "message", "messages", "pr", "repo", "repository", "branch", "commit", "error",
+    "bug", "code", "line", "function", "variable", "problem", "issue", "point", "answer", "love", "money", "time",
+    "truth", "hope", "mind", "thing", "way", "rest", "nexus", "mom", "dad", "mummy", "daddy", "ghost", "dictation",
+    "nearest", "closest", "nearby", "near",
+];
+
+/// Extra words that make "when is X" an event or a deadline, not a place.
+const PLACE_INFO_EVENT_WORDS: &[&str] = &[
+    "meeting", "deadline", "exam", "exams", "test", "class", "lecture", "interview", "holiday", "birthday", "party",
+    "wedding", "event", "game", "match", "hackathon", "submission", "due", "sale", "release", "launch", "festival",
+    "diwali", "christmas", "eid", "holi", "new", "next", "today", "tomorrow", "now", "appointment", "call", "reminder",
+    "standup", "demo", "presentation", "result", "results", "assignment", "quiz", "semester", "session", "show", "movie",
+];
+
+/// "Where is the Charminar", "when is the Charminar", "when does the museum close", "is the zoo open",
+/// "show me the Taj Mahal on the map". Needs a short, place-like noun phrase; anything that smells like a
+/// control, a person, an event or an idea is left to the other parsers.
+fn parse_place_info_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase();
+    let t = t.trim_end_matches(['.', ',', '!', '?']).trim().to_string();
+    let mut s = t.as_str();
+    for lead in ["please ", "nexus, ", "nexus ", "can you ", "could you ", "tell me ", "do you know ", "show me ", "i want to know "] {
+        if let Some(r) = s.strip_prefix(lead) {
+            s = r;
+        }
+    }
+    let on_map = s.ends_with(" on the map") || s.ends_with(" on maps") || s.ends_with(" on google maps");
+    let (rest, mut ask): (&str, &str) = if let Some(r) = s.strip_prefix("where is ").or_else(|| s.strip_prefix("where's ")) {
+        (r, "where")
+    } else if let Some(r) = s.strip_prefix("when is ").or_else(|| s.strip_prefix("when's ")) {
+        (r, "when")
+    } else if let Some(r) = s.strip_prefix("when does ").or_else(|| s.strip_prefix("what time does ")) {
+        (r, "hours")
+    } else if let Some(r) = s.strip_prefix("what time is ") {
+        (r, "hours")
+    } else if let Some(r) = s.strip_prefix("is ").filter(|r| r.ends_with(" open") || r.ends_with(" open now") || r.ends_with(" closed")) {
+        (r, "hours")
+    } else if on_map {
+        (s, "where")
+    } else {
+        return None;
+    };
+    let mut place = rest.to_string();
+    for suffix in [
+        " on the map", " on maps", " on google maps", " located at", " located", " open now", " open", " closed", " close",
+        " closing", " opening", " exactly", " please",
+    ] {
+        if let Some(p) = place.strip_suffix(suffix) {
+            if matches!(suffix.trim(), "open" | "open now" | "close" | "closed" | "closing" | "opening") {
+                ask = "hours";
+            }
+            place = p.trim().to_string();
+        }
+    }
+    let place = place.trim_start_matches("the ").trim_start_matches("a ").trim().to_string();
+    let words: Vec<&str> = place.split_whitespace().collect();
+    if words.is_empty() || words.len() > 5 || place.chars().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if words.iter().any(|w| PLACE_INFO_NOT_PLACES.contains(w)) {
+        return None;
+    }
+    if ask == "when" && words.iter().any(|w| PLACE_INFO_EVENT_WORDS.contains(w)) {
+        return None;
+    }
+    Some(ParseResult {
+        intent: ParsedIntent::PlaceInfo { query: place, ask: ask.to_string() },
+        confidence: 0.9,
+        source: "deterministic-place-info".to_string(),
+    })
+}
+
+/// "Analyse this email", "summarise this mail", "what is this email about": read the email that is open on
+/// screen. Needs an explicit "this/the open/current email" so "analyse the email I got about the internship"
+/// (ScanInternshipEmails) and "watch this email" (WatchScreenEmail) keep their own parsers.
+fn parse_analyse_this_email_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase();
+    let t = t.trim_end_matches(['.', ',', '!', '?']).trim().to_string();
+    let mut s = t.as_str();
+    for lead in ["please ", "nexus, ", "nexus ", "hey ", "can you ", "could you ", "go ahead and "] {
+        if let Some(r) = s.strip_prefix(lead) {
+            s = r;
+        }
+    }
+    const TARGETS: &[&str] = &[
+        "this email", "this mail", "this e-mail", "the open email", "the open mail", "the current email",
+        "the email on screen", "the email on my screen", "the email i have open", "the email i'm reading",
+    ];
+    const VERBS: &[&str] = &[
+        "analyse ", "analyze ", "summarise ", "summarize ", "explain ", "break down ", "go through ", "read ",
+        "check ", "tell me about ", "what is ", "what's ", "what does ", "give me the details of ", "give me details of ",
+    ];
+    const BLOCK: &[&str] = &["reply", "send", "delete", "forward", "draft", "write", "watch", "track", "update me", "archive", "mark"];
+    if s.split_whitespace().count() > 16 || !VERBS.iter().any(|v| s.starts_with(v)) {
+        return None;
+    }
+    if !TARGETS.iter().any(|x| s.contains(x)) {
+        return None;
+    }
+    if s.split_whitespace().any(|w| BLOCK.contains(&w)) {
+        return None;
+    }
+    Some(ParseResult {
+        intent: ParsedIntent::AnalyseThisEmail,
+        confidence: 0.95,
+        source: "deterministic-analyse-email".to_string(),
+    })
+}
+
+/// "Analyse this", "explain this", "what is this", "describe this image", "summarise this page": the user points
+/// at whatever is on screen without naming it (a picture, a person's page, a YouTube video, a website, a chart,
+/// code, a document...). It goes to the screen-understanding path, which reads the foreground window and its
+/// context. It must NOT be taken for a repository name. Dedicated nouns keep their own routes: "this repo" and
+/// "this PR" are resolved from the open browser page by the orchestrator, "this email" has its own parser.
+fn parse_analyse_deictic_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase().replace(['\u{2019}', '\u{2018}'], "'");
+    let t = t.trim_end_matches(['.', ',', '!', '?']).trim().to_string();
+    let mut s = t.as_str();
+    for lead in ["please ", "nexus, ", "nexus ", "hey ", "ok ", "okay ", "can you ", "could you ", "would you ", "i want you to ", "i need you to "] {
+        if let Some(r) = s.strip_prefix(lead) {
+            s = r;
+        }
+    }
+    if s.split_whitespace().count() > 12 {
+        return None;
+    }
+    const VERBS: &[&str] = &[
+        "analyse ", "analyze ", "explain ", "describe ", "summarise ", "summarize ", "review ", "break down ",
+        "go through ", "look at ", "check out ", "tell me about ", "tell me what is ", "tell me what's ",
+        "what do you think of ", "what do you think about ",
+    ];
+    // "what is this" forms are only taken with "this" (never "it"/"that": those answer the previous reply).
+    const WHAT_FORMS: &[&str] = &["what is ", "what's ", "what is this about", "what's this about"];
+    let (rest, strict_this) = if let Some(v) = VERBS.iter().find(|v| s.starts_with(**v)) {
+        (&s[v.len()..], false)
+    } else if let Some(v) = WHAT_FORMS.iter().find(|v| s.starts_with(**v)) {
+        (&s[v.len()..], true)
+    } else {
+        return None;
+    };
+    let rest = rest.trim();
+    // Optional trailing "for me", "please", "that i'm looking at", "on my screen"...
+    let mut core = rest;
+    for suffix in [
+        " for me", " please", " on my screen", " on the screen", " on screen", " that i'm looking at", " i'm looking at",
+        " that i am looking at", " i am looking at", " that i can see", " that i see", " that is open", " in front of me",
+    ] {
+        if let Some(p) = core.strip_suffix(suffix) {
+            core = p.trim();
+        }
+    }
+    let core = core.strip_suffix(" about").unwrap_or(core).trim();
+    const PRONOUNS: &[&str] = &["this", "that", "it", "this one", "that one", "these", "those", "this thing", "that thing"];
+    const OBJECTS: &[&str] = &[
+        "image", "picture", "photo", "photograph", "screenshot", "page", "webpage", "web page", "site", "website",
+        "video", "clip", "article", "post", "tweet", "profile", "person", "document", "doc", "pdf", "chart", "graph",
+        "diagram", "code", "file", "tab", "window", "app", "slide", "slides", "table", "form", "message", "thread",
+        "song", "product", "listing", "recipe", "map", "design", "ui", "page here",
+    ];
+    // Words that mean a different, dedicated route.
+    const DEDICATED: &[&str] = &[
+        "repo", "repository", "repositories", "project", "codebase", "pr", "pull", "email", "mail", "e-mail", "branch",
+        "commit", "issue",
+    ];
+    let words: Vec<&str> = core.split_whitespace().collect();
+    if words.is_empty() || words.iter().any(|w| DEDICATED.contains(w)) {
+        return None;
+    }
+    let is_pronoun = PRONOUNS.contains(&core);
+    // "this/that <anything up to four words>" is the user pointing ("this youtube video", "this linkedin profile");
+    // "the/my/current <known object>" needs a known object so ordinary chat is not taken.
+    let is_this_object = words.len() >= 2
+        && ((matches!(words[0], "this" | "that" | "these" | "those") && words.len() <= 5)
+            || (matches!(words[0], "the" | "my" | "current" | "open") && OBJECTS.contains(&words[1..].join(" ").as_str())));
+    let ok = if strict_this {
+        core == "this" || core == "this one" || core == "this thing" || (is_this_object && words[0] == "this")
+    } else {
+        is_pronoun || is_this_object
+    };
+    if !ok {
+        return None;
+    }
+    Some(ParseResult {
+        intent: ParsedIntent::NluResult {
+            intent: "screen_analysis".to_string(),
+            slots: serde_json::json!({ "prompt": format!("analyse what is on my screen: {}", text.trim()) }),
+            confidence: 1.0,
+        },
+        confidence: 1.0,
+        source: "deterministic-screen-analysis".to_string(),
     })
 }
 
@@ -10542,6 +10762,82 @@ mod tests {
             let got = dbg(p);
             assert!(!got.contains("Directions"), "'{p}' wrongly parsed as {got}");
         }
+    }
+
+    #[test]
+    fn test_analyse_this_email_phrases() {
+        for p in [
+            "analyse this email", "Nexus, analyze this email.", "summarize this mail", "what is this email about",
+            "what does this email say", "explain the open email", "break down this email and give me the directions",
+            "go through the email on screen", "can you read this email",
+        ] {
+            let got = format!("{:?}", parse_deterministic(p).map(|r| r.intent));
+            assert!(got.contains("AnalyseThisEmail"), "'{p}' parsed as {got}");
+        }
+        for p in [
+            "analyse the email i have received in my college email about an internship", "watch this email",
+            "reply to this email", "delete this email", "send this email to mom", "analyse this screen",
+            "analyse this repo", "update me whenever there is any update on this email", "check my college email about internship",
+        ] {
+            let got = format!("{:?}", parse_deterministic(p).map(|r| r.intent));
+            assert!(!got.contains("AnalyseThisEmail"), "'{p}' wrongly parsed as {got}");
+        }
+    }
+
+    #[test]
+    fn test_analyse_deictic_goes_to_the_screen_not_to_a_repo() {
+        let label = |p: &str| match parse_deterministic(p).map(|r| r.intent) {
+            Some(ParsedIntent::NluResult { intent, .. }) => format!("nlu:{intent}"),
+            Some(other) => format!("{:?}", other),
+            None => "none".to_string(),
+        };
+        for p in [
+            "analyse this", "analyze that", "analyse it", "explain this", "describe this image", "analyse this video",
+            "summarise this page", "what is this", "what's this", "review this", "look at this", "tell me about this",
+            "analyse this website", "analyse this person", "break down this chart", "can you analyse this please",
+            "nexus analyse this", "analyse this for me", "describe this picture on my screen", "what is this about",
+            "explain this code", "analyze this youtube video",
+        ] {
+            // "this website/app/page/site" already has a dedicated whole-window review route (ReviewForeground).
+            let got = label(p);
+            assert!(got == "nlu:screen_analysis" || got == "ReviewForeground", "'{p}' -> {got}");
+        }
+        // Named or dedicated targets keep their routes; chat is untouched.
+        assert!(label("analyse servx").starts_with("AnalyseRepo"), "{}", label("analyse servx"));
+        assert!(label("analyse this repo").starts_with("AnalyseRepo"), "{}", label("analyse this repo"));
+        assert!(label("analyze this repository").starts_with("AnalyseRepo"));
+        assert!(label("analyse this email").starts_with("AnalyseThisEmail"), "{}", label("analyse this email"));
+        for p in ["what is it", "what is that", "what is the weather", "explain quantum computing", "describe your day", "what's the time", "review the budget"] {
+            assert_ne!(label(p), "nlu:screen_analysis", "'{p}' wrongly sent to the screen");
+        }
+    }
+
+    #[test]
+    fn test_place_info_phrases() {
+        let q = |p: &str| match parse_deterministic(p).map(|r| r.intent) {
+            Some(ParsedIntent::PlaceInfo { query, ask }) => Some((query, ask)),
+            _ => None,
+        };
+        let got = |a: &str, b: &str| Some((a.to_string(), b.to_string()));
+        assert_eq!(q("where is the charminar"), got("charminar", "where"));
+        assert_eq!(q("when is the charminar?"), got("charminar", "when"));
+        assert_eq!(q("nexus, where's the taj mahal located"), got("taj mahal", "where"));
+        assert_eq!(q("when does the museum close"), got("museum", "hours"));
+        assert_eq!(q("what time does the national zoo open"), got("national zoo", "hours"));
+        assert_eq!(q("is the red fort open"), got("red fort", "hours"));
+        assert_eq!(q("show me golconda fort on the map"), got("golconda fort", "where"));
+        // Misfire guards: controls, people, objects, events, ideas, other parsers' phrases.
+        for p in [
+            "where is my phone", "where is the search bar", "where is mom", "when is the meeting", "when is the deadline",
+            "when is my exam", "when is the hackathon", "where is the settings button", "where is the problem",
+            "where is it", "where is everyone", "when is tomorrow", "where is the nearest pharmacy",
+            "is it open", "where is the file i saved", "when is the next one", "where is room 204",
+        ] {
+            assert_eq!(q(p), None, "'{p}' wrongly parsed as place info");
+        }
+        // The other place parsers keep their phrases.
+        assert!(format!("{:?}", parse_deterministic("where is the closest petrol station?").map(|r| r.intent)).contains("PlacesSearch"));
+        assert!(format!("{:?}", parse_deterministic("directions to work").map(|r| r.intent)).contains("Directions"));
     }
 
     #[test]

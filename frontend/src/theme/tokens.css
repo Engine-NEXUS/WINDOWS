@@ -1,6 +1,17 @@
 /* ═══════════════════════════════════════════════════════════════
-   NEXUS Design Tokens — Pitch Black (#000000) & Pure White (#ffffff)
-   Strictly opaque themes with 10px radii, 1px borders, zero transparency.
+   NEXUS Design Tokens - solid dark and light themes.
+   Strictly opaque surfaces (dark base #0a0a0c, light base #f8f9fa), 10px radii, 1px borders.
+
+   Two layers, one file:
+   1. Legacy names (--nx-*): the values every existing view already uses.
+   2. Semantic roles (--ui-*): the names new and migrated CSS uses. They point at the legacy
+      values (no visual change) and add the roles that did not exist: focus ring, strong border,
+      accent fill/text/on-accent, and status text that passes contrast on its surface.
+   Every text/surface pair below is checked by scripts/check-theme-contrast.mjs (WCAG 2.2 AA:
+   4.5:1 for text, 3:1 for UI components and focus rings), which CI runs.
+
+   The theme is set by `data-theme` on <html> (public/theme-boot.js before first paint, then
+   src/sidebar/theme.ts). `color-scheme` follows it so scrollbars and form controls match.
    ═══════════════════════════════════════════════════════════════ */
 
 :root {
@@ -16,7 +27,7 @@
 
   --nx-text-primary:   #ffffff;
   --nx-text-secondary: rgba(255, 255, 255, 0.72);
-  --nx-text-tertiary:  rgba(255, 255, 255, 0.45);
+  --nx-text-tertiary:  rgba(255, 255, 255, 0.52);
   --nx-text-inverse:   #000000;
 
   --nx-border:           rgba(255, 255, 255, 0.12);
@@ -39,6 +50,43 @@
   --nx-success-bg: rgba(16, 185, 129, 0.12);
   --nx-warning:    #f59e0b;
   --nx-warning-bg: rgba(245, 158, 11, 0.12);
+
+  /* ── Semantic roles (dark) ─────────────────────────────────── */
+  color-scheme: dark;
+  --ui-surface-app:    var(--nx-bg);
+  --ui-surface-card:   var(--nx-bg-card);
+  --ui-surface-raised: var(--nx-bg-elevated);
+  --ui-surface-hover:  var(--nx-bg-hover);
+  --ui-text-primary:   var(--nx-text-primary);
+  --ui-text-secondary: var(--nx-text-secondary);
+  --ui-text-tertiary:  var(--nx-text-tertiary);
+  --ui-text-inverse:   var(--nx-text-inverse);
+  --ui-border-subtle:  var(--nx-border);
+  --ui-border-strong:  rgba(255, 255, 255, 0.40);
+  --ui-focus-ring:     #8ab4ff;
+  --ui-accent-solid:   #0a6cf0;
+  --ui-accent-text:    #6cb0ff;
+  --ui-on-accent:      #ffffff;
+  --ui-danger-text:    #ff7b72;
+  --ui-danger-solid:   #d92d20;
+  --ui-danger-soft:    var(--nx-error-bg);
+  --ui-warning-text:   #fbbf24;
+  --ui-warning-soft:   var(--nx-warning-bg);
+  --ui-success-text:   #34d399;
+  --ui-success-soft:   var(--nx-success-bg);
+  --ui-surface-sunken: #0f0f13;
+  --ui-success-solid:  #30d158;
+  --ui-on-success:     #04210f;
+  /* Attention (CodeRabbit orange), info (blue) and the review-severity scale, as text on every surface */
+  --ui-attention-text: #ff8a5c;
+  --ui-attention-solid: #c2410c;
+  --ui-info-text:      #8ab4ff;
+  --ui-sev-critical:   #ff7b72;
+  --ui-sev-major:      #ffb454;
+  --ui-sev-minor:      #e5d36b;
+  --ui-sev-trivial:    #8ab4ff;
+  --ui-sev-info:       #b6b6b6;
+  --ui-sev-unknown:    #9a9a9a;
 }
 
 :root[data-theme="light"] {
@@ -54,7 +102,7 @@
 
   --nx-text-primary:   #111827;
   --nx-text-secondary: rgba(0, 0, 0, 0.68);
-  --nx-text-tertiary:  rgba(0, 0, 0, 0.45);
+  --nx-text-tertiary:  rgba(0, 0, 0, 0.56);
   --nx-text-inverse:   #ffffff;
 
   --nx-border:           rgba(0, 0, 0, 0.10);
@@ -71,14 +119,56 @@
   --nx-speaking:   #16a34a;
   --nx-error:      #dc2626;
   --nx-error-bg:   rgba(220, 38, 38, 0.08);
-  --nx-success:    #059669;
-  --nx-success-bg: rgba(5, 150, 105, 0.08);
-  --nx-warning:    #d97706;
-  --nx-warning-bg: rgba(217, 119, 6, 0.08);
+  --nx-success:    #047857;
+  --nx-success-bg: rgba(4, 120, 87, 0.08);
+  --nx-warning:    #b45309;
+  --nx-warning-bg: rgba(180, 83, 9, 0.08);
+
+  /* ── Semantic roles (light) ────────────────────────────────── */
+  color-scheme: light;
+  --ui-border-strong:  rgba(0, 0, 0, 0.52);
+  --ui-focus-ring:     #1d4ed8;
+  --ui-accent-solid:   #0062cc;
+  --ui-accent-text:    #0062cc;
+  --ui-on-accent:      #ffffff;
+  --ui-danger-text:    #b42318;
+  --ui-danger-solid:   #d92d20;
+  --ui-warning-text:   #92400e;
+  --ui-success-text:   #065f46;
+  --ui-surface-sunken: #eef0f3;
+  --ui-success-solid:  #047857;
+  --ui-on-success:     #ffffff;
+  --ui-attention-text: #b3400f;
+  --ui-attention-solid: #c2410c;
+  --ui-info-text:      #1d4ed8;
+  --ui-sev-critical:   #b42318;
+  --ui-sev-major:      #b45309;
+  --ui-sev-minor:      #8a6a00;
+  --ui-sev-trivial:    #1d4ed8;
+  --ui-sev-info:       #52525b;
+  --ui-sev-unknown:    #5f6672;
 }
 
 /* Theme-independent tokens (shared by dark and light) */
 :root {
+  /* ── Stage overlay colours ─────────────────────────────────────
+     The stage is the always-on layer drawn over whatever the owner is doing (chips, cards, the notification
+     growing into the sidebar). RULE: every chip and card on the stage stays SOLID DARK in both themes, because it
+     has to read on any wallpaper or window behind it. The sidebar, Hub and settings windows follow the theme. */
+  --stage-surface:       #151515;
+  --stage-surface-live:  #a01e1e;
+  --stage-text:          #f1f1f1;
+  --stage-text-muted:    #9aa0aa;
+  --stage-border:        #2b2b30;
+  --stage-border-strong: #3a3a42;
+  --stage-accent:        #8ab4ff;
+  --stage-attention:     #ff7a4d;
+  --stage-ok:            #5fd38a;
+  --stage-shadow:        0 6px 20px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.14);
+  /* The orb pouch: black in Dark, near-white in Light, like the classic capsule (the particles turn to black ink in Light). */
+  --orb-surface:         #000000;
+  --stage-shadow-lg:     0 10px 34px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.14);
+
   /* ── Typography ─────────────────────────────────────────────── */
   --nx-font: -apple-system, "Segoe UI", "Inter", Roboto, sans-serif;
   --nx-font-mono: "SF Mono", "Cascadia Code", Consolas, monospace;
@@ -135,6 +225,23 @@
   --nx-z-toast:   1000;
 }
 
+/* Keyboard focus. Many stylesheets set `outline: none` on buttons and controls, which left keyboard users with no
+   indicator. This ring wins over those rules (hence !important) but only for keyboard focus, so a mouse click shows
+   nothing. 2 px, 3:1 against every surface (checked by scripts/check-theme-contrast.mjs). Text inputs keep their own
+   border-colour focus style. */
+button:focus-visible,
+[role="button"]:focus-visible,
+[role="tab"]:focus-visible,
+[role="switch"]:focus-visible,
+[role="radio"]:focus-visible,
+[role="checkbox"]:focus-visible,
+a[href]:focus-visible,
+summary:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--ui-focus-ring) !important;
+  outline-offset: 2px !important;
+}
+
 /* Reduced motion: disable all animations */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
@@ -142,4 +249,12 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* The orb pouch follows the theme; chips and cards on the stage do not (see --stage-* above). */
+:root[data-theme="light"] {
+  --orb-surface: #fafafa;
+}
+.orb-pebble-fill {
+  fill: var(--orb-surface);
 }

@@ -600,11 +600,6 @@ export function initOrbRuntime(): void {
 
     try {
       const { listen } = await import("@tauri-apps/api/event");
-      await listen<{ color: string }>("orb:color", (e) => {
-        if (e.payload?.color) {
-          useAssistant.getState().setOrbColor(e.payload.color);
-        }
-      });
       await listen<{ style?: string; mode?: number; genesis?: number } | string>("orb:capsule_style", (e) => {
         const payload = e.payload;
         if (typeof payload === "string") {

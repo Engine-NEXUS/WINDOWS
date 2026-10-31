@@ -50,10 +50,10 @@
   border-radius: 14px;
   font: 600 13px/1.2 "Segoe UI", system-ui, sans-serif;
   letter-spacing: 0.02em;
-  color: #fff;
-  background: rgba(14, 18, 26, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: var(--stage-text);
+  background: var(--stage-surface);
+  border: 1px solid var(--stage-border-strong);
   white-space: nowrap;
 }
 .hand-chip--preview.on { border-color: rgba(255, 196, 64, 0.9); }
-.hand-chip--live.on { background: rgba(160, 30, 30, 0.95); border-color: rgba(255, 120, 120, 0.9); }
+.hand-chip--live.on { background: var(--stage-surface-live); border-color: var(--stage-attention); }

@@ -3,7 +3,7 @@
 .am-head { margin: 3px 0 16px; }
 .am-head h2 { margin: 3px 0 0; font-size: 24px; line-height: 1.15; letter-spacing: -.04em; overflow-wrap: anywhere; }
 .am-eyebrow { color: var(--hx-dim); font-size: 10px; font-weight: 700; letter-spacing: .14em; }
-.am-text-button { border: 0; background: transparent; color: #74a9ff; cursor: pointer; font: inherit; font-size: 12px; padding: 6px 0; }
+.am-text-button { border: 0; background: transparent; color: var(--ui-accent-text); cursor: pointer; font: inherit; font-size: 12px; padding: 6px 0; }
 .am-periods { display: flex; gap: 5px; background: var(--hx-card-2); border-radius: 15px; padding: 4px; margin: 0 0 18px; }
 .am-periods button { flex: 1; color: var(--hx-dim); background: transparent; border: 0; border-radius: 12px; padding: 9px 6px; cursor: pointer; font: inherit; font-size: 12px; }
 .am-periods .am-active { color: var(--hx-text); background: var(--hx-card); box-shadow: 0 1px 7px #0002; font-weight: 700; }

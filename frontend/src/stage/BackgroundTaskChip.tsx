@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./background-task.css";
 import { elapsedLabel, parseTasks, visibleTasks, type BackgroundTask } from "./backgroundTaskModel";
+import { taskStackSlot, type Rect } from "./layoutSlots";
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -14,15 +15,27 @@ function isTauri(): boolean {
 export function BackgroundTaskChip() {
   const [tasks, setTasks] = useState<BackgroundTask[]>([]);
   const [now, setNow] = useState(Date.now());
+  // The spinner's rect (CSS px): the chips hang under it, wherever the owner placed it and at whatever size.
+  const [spinner, setSpinner] = useState<Rect | null>(null);
+  const stackRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!isTauri()) return;
     let off: (() => void) | undefined;
+    let offRect: (() => void) | undefined;
     let live = true;
     void (async () => {
       const { invoke } = await import("@tauri-apps/api/core");
       const { listen } = await import("@tauri-apps/api/event");
       off = await listen<unknown>("task:update", (e) => live && setTasks(parseTasks(e.payload)));
+      const toCss = (r: Rect): Rect => {
+        const d = window.devicePixelRatio || 1;
+        return { x: r.x / d, y: r.y / d, w: r.w / d, h: r.h / d };
+      };
+      offRect = await listen<Rect>("stage:loading_rect", (e) => live && e.payload && setSpinner(toCss(e.payload)));
+      invoke<Rect | null>("get_pending_loading_rect")
+        .then((r) => live && r && setSpinner(toCss(r)))
+        .catch(() => {});
       // A task that started before this stage mounted.
       invoke("background_tasks_list")
         .then((l) => live && setTasks(parseTasks(l)))
@@ -31,8 +44,18 @@ export function BackgroundTaskChip() {
     return () => {
       live = false;
       off?.();
+      offRect?.();
     };
   }, []);
+
+  // Placement is applied through the CSSOM (the stage CSP drops React inline styles); the CSS default is the fallback.
+  useEffect(() => {
+    const el = stackRef.current;
+    if (!el) return;
+    const slot = taskStackSlot(spinner, { w: window.innerWidth, h: window.innerHeight });
+    el.style.top = `${slot.top}px`;
+    el.style.right = `${slot.right}px`;
+  }, [spinner, tasks.length]);
 
   useEffect(() => {
     if (tasks.length === 0) return;
@@ -43,7 +66,7 @@ export function BackgroundTaskChip() {
   if (tasks.length === 0) return null;
   const { shown, extra } = visibleTasks(tasks);
   return (
-    <div className="nx-task-stack" role="status" aria-live="polite">
+    <div className="nx-task-stack" role="status" aria-live="polite" ref={stackRef}>
       {shown.map((t) => (
         <div key={t.id} className="nx-task-chip">
           <span className="nx-task-spinner" aria-hidden="true" />

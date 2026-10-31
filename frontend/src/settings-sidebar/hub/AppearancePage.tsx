@@ -1,13 +1,14 @@
 import { useState, useEffect, useRef } from "react";
 import { performThemeTransition, type TransitionVariant } from "../../theme/animated-theme-toggler";
-import { type ThemeMode } from "../../sidebar/theme";
+import { effectiveTheme, systemPrefersDark, type ThemePreference } from "../../sidebar/theme";
 
 interface AppearancePageProps {
-  themeMode: "light" | "dark";
-  onTheme: (m: "light" | "dark") => void;
+  /** The saved choice, including "system" (follow Windows). */
+  themeMode: ThemePreference;
+  onTheme: (m: ThemePreference) => void;
 }
 
-type ThemeChoice = "light" | "dark" | "system";
+type ThemeChoice = ThemePreference;
 
 export interface ColorPreset {
   id: string;
@@ -132,12 +133,10 @@ export function AppearancePage({ themeMode, onTheme }: AppearancePageProps) {
 
   const colorInputRef = useRef<HTMLInputElement>(null);
 
-  // Sync state if external theme changes
+  // Sync state if the saved choice changes elsewhere (another window, settings reload).
   useEffect(() => {
-    if (selectedTheme !== "system") {
-      setSelectedTheme(themeMode);
-    }
-  }, [themeMode, selectedTheme]);
+    setSelectedTheme(themeMode);
+  }, [themeMode]);
 
   // Apply window border styles on mount & whenever color/thickness/opacity changes
   useEffect(() => {
@@ -146,14 +145,8 @@ export function AppearancePage({ themeMode, onTheme }: AppearancePageProps) {
 
   const handleSelectTheme = (choice: ThemeChoice, e: React.MouseEvent<HTMLDivElement>) => {
     setSelectedTheme(choice);
-    let targetMode: ThemeMode;
-
-    if (choice === "system") {
-      const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-      targetMode = prefersDark ? "dark" : "light";
-    } else {
-      targetMode = choice;
-    }
+    // The animation needs a concrete destination; the saved choice stays "system" so it keeps following Windows.
+    const targetMode = effectiveTheme(choice, systemPrefersDark());
 
     if (typeof (document as any).startViewTransition === "function") {
       performThemeTransition({
@@ -161,10 +154,10 @@ export function AppearancePage({ themeMode, onTheme }: AppearancePageProps) {
         variant,
         duration: 450,
         origin: e,
-        onThemeChange: onTheme,
+        onThemeChange: () => onTheme(choice),
       });
     } else {
-      onTheme(targetMode);
+      onTheme(choice);
     }
   };
 
@@ -321,6 +314,7 @@ export function AppearancePage({ themeMode, onTheme }: AppearancePageProps) {
                 type="button"
                 className={`hx-anim-card ${isSelected ? "is-selected" : ""}`}
                 onClick={() => handleSelectVariant(a.id)}
+                aria-pressed={isSelected}
               >
                 <span className="hx-anim-icon">{a.icon}</span>
                 <span className="hx-anim-name">{a.name}</span>
@@ -353,6 +347,7 @@ export function AppearancePage({ themeMode, onTheme }: AppearancePageProps) {
                     onClick={() => handleSelectColor(c.hex)}
                     title={c.name}
                     aria-label={c.name}
+                    aria-pressed={isSelected}
                   >
                     {c.id === "default" ? (
                       <span className="hx-swatch-default-icon">⊘</span>
@@ -377,6 +372,7 @@ export function AppearancePage({ themeMode, onTheme }: AppearancePageProps) {
                 onClick={() => colorInputRef.current?.click()}
                 title="Custom color"
                 aria-label="Pick custom color"
+                aria-pressed={selectedColor.startsWith("#") && !BORDER_COLORS.some((c) => c.hex.toLowerCase() === selectedColor.toLowerCase())}
               >
                 {selectedColor.startsWith("#") && !BORDER_COLORS.some((c) => c.hex.toLowerCase() === selectedColor.toLowerCase()) ? (
                   <span className="hx-swatch-circle" style={{ background: selectedColor }} />

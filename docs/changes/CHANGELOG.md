@@ -1,5 +1,17 @@
 # NEXUS — Changelog
 
+- 2026-10-29: [UI plan Phase 4 - stage layout and overlays](178-ui-phase-4-stage-layout-and-overlays.md) — stage chips could not read their colours (stage never loaded the tokens): fixed; one layout module so the hand chip stacks above the caption and task chips hang under the spinner (no-collision test on 6 screen sizes); pebble orb visible in Light; live caption on a solid pill; stage window fitted to the primary monitor on show. All 16 local CI checks pass; not run on a scaled display or in the live app.
+
+- 2026-10-29: [UI plan Phase 3c - Hub, Settings, Setup and HUD on the theme tokens](177-ui-phase-3c-hub-settings-setup-and-hud.md) — Hub palette is the shared tokens; ~390 colours tokenised; measured contrast pass over every Hub page and theme: 0 failures in 1,088 text elements (was 21 in Light); HUD sliders follow the app theme. 761 frontend tests pass; checked in the dev browser, not the live app.
+
+- 2026-10-29: [UI plan Phase 3b - GitHub dashboard and Architect on the one theme switch](176-ui-phase-3b-github-dashboard-and-architect.md) — dashboard follows `data-theme` (own class and store sync removed), failing muted text/accent fixed, Architect text tokens shared; contrast gate 168 pairs, colour baseline 1,679. 761 frontend tests pass; not run in the live app.
+
+- 2026-10-29: [UI plan Phase 3a - CodeRabbit, Assistant view and stage chips on theme tokens](175-ui-phase-3a-coderabbit-assistant-and-stage-chips.md) — CodeRabbit panel and Assistant view follow Light/Dark (were fixed dark / white-on-white); stage chips documented as solid dark with `--stage-*` tokens; contrast gate 144 pairs; new hard-coded colour ratchet in CI. 761 frontend tests pass; checked in the dev browser, not the live app.
+
+- 2026-10-29: [UI plan Phase 2 - dock buttons and chrome](174-ui-phase-2-dock-buttons-and-chrome.md) — one shared dock control with SVG icons and accessible names, visible in light and dark (was invisible); global keyboard focus ring; thin themed scrollbars; 24 px minimum hit targets. 761 frontend tests pass; checked in the dev browser, not the live app.
+
+- 2026-10-29: [UI plan Phase 1 - token foundation and theme switching](173-ui-phase-1-tokens-and-theme-switching.md) — semantic `--ui-*` tokens, real System theme that follows Windows, theme set before first paint in every window, contrast fixed at the source, new CI contrast gate (78 pairs). 757 frontend tests pass; not run in the live app.
+
 - 2026-10-29: [Voice flow audit, speech continuity and one owner for the loading state](172-voice-flow-loading-state-and-speech-continuity.md) — review findings fixed; failed cloud sentence finishes in the local twin voice, background speech queues behind answers, repeated stops idempotent; loading routed through the main center, orb echo removed, orb stays in the thinking pose after an ack, duplicate result-style acks removed, background-task chip for CodeRabbit/AI reviews. Rust 2813 + frontend 751 pass; not rebuilt or run live.
 
 - 2026-10-28: [Notification-to-sidebar research](../research/notification-to-sidebar/README.md), [phased implementation plan](../features/notification-to-sidebar-implementation-plan.md), and [coding prompt](../features/notification-to-sidebar-implementation-prompt.md) — documentation-only proposal for compact top alerts opening exact sidebar context; native/custom UI boundaries, platform limits, tests and owner-only runtime/build constraints recorded. No implementation, live test or queue promotion.

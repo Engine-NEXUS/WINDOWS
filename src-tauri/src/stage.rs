@@ -143,10 +143,44 @@ fn ensure_stage<R: Runtime>(app: &AppHandle<R>) -> Result<tauri::WebviewWindow<R
 /// must create+show the stage BEFORE `mic_permissions::init` looks it up
 /// by label — an `async_runtime::spawn`'d call wouldn't have run yet by
 /// that point in the same synchronous setup closure.
+/// The physical rectangle the stage should cover: the primary monitor's own. `None` for a monitor that reports no size.
+/// Pure, so the 100/125/150 % and 1366x768 / 2560x1440 cases are unit-tested.
+pub fn stage_target_rect(monitor_pos: (i32, i32), monitor_size: (u32, u32)) -> Option<(i32, i32, u32, u32)> {
+    if monitor_size.0 == 0 || monitor_size.1 == 0 {
+        return None;
+    }
+    Some((monitor_pos.0, monitor_pos.1, monitor_size.0, monitor_size.1))
+}
+
+/// The stage window is created at a fixed 1920x1080 LOGICAL size (`WindowConfig::stage`), which only matches a 1080p screen at
+/// 100 %. At 125 % or 150 %, or on another resolution, it was too big or too small, and the captions (placed as a fraction of
+/// the stage height) could land off the visible screen. Fit it to the primary monitor on every show.
+fn fit_to_primary_monitor<R: Runtime>(win: &tauri::WebviewWindow<R>) {
+    let Ok(Some(monitor)) = win.primary_monitor() else {
+        tracing::warn!("stage: no primary monitor reported; keeping the configured size");
+        return;
+    };
+    let pos = monitor.position();
+    let size = monitor.size();
+    let Some((x, y, w, h)) = stage_target_rect((pos.x, pos.y), (size.width, size.height)) else {
+        tracing::warn!("stage: primary monitor reported an empty size; keeping the configured size");
+        return;
+    };
+    let moved = win.set_position(tauri::PhysicalPosition::new(x, y));
+    let sized = win.set_size(tauri::PhysicalSize::new(w, h));
+    tracing::info!(
+        "stage: fitted to the primary monitor {w}x{h} at ({x},{y}), scale {} (position ok={}, size ok={})",
+        monitor.scale_factor(),
+        moved.is_ok(),
+        sized.is_ok()
+    );
+}
+
 pub fn stage_show_sync<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     DISABLED.store(false, std::sync::atomic::Ordering::Relaxed);
     FAILS.store(0, std::sync::atomic::Ordering::Relaxed);
     let win = ensure_stage(app)?;
+    fit_to_primary_monitor(&win);
     win.show().map_err(|e| format!("stage show: {e}"))?;
     // Re-assert on every show: a recreated window resets to the default
     // (cursor-intercepting) state — the fullscreen overlay must be
@@ -636,5 +670,29 @@ mod tests {
     fn test_hitbox_empty_never_inside() {
         let boxes: Vec<StageRect> = vec![];
         assert!(!boxes.iter().any(|r| r.contains(960, 540)));
+    }
+}
+
+#[cfg(test)]
+mod stage_fit_tests {
+    use super::stage_target_rect;
+
+    #[test]
+    fn the_stage_covers_the_primary_monitor_at_every_common_size() {
+        // Physical pixels as the monitor reports them: scaling does not change the physical rectangle.
+        for size in [(1366, 768), (1920, 1080), (2560, 1440), (3840, 2160)] {
+            assert_eq!(stage_target_rect((0, 0), size), Some((0, 0, size.0, size.1)));
+        }
+    }
+
+    #[test]
+    fn a_primary_monitor_that_is_not_at_the_origin_keeps_its_position() {
+        assert_eq!(stage_target_rect((-1920, 0), (1920, 1080)), Some((-1920, 0, 1920, 1080)));
+    }
+
+    #[test]
+    fn a_monitor_with_no_size_is_ignored() {
+        assert_eq!(stage_target_rect((0, 0), (0, 1080)), None);
+        assert_eq!(stage_target_rect((0, 0), (1920, 0)), None);
     }
 }

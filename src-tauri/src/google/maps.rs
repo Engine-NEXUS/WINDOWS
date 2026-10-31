@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use super::types::{CommuteDelay, GoogleError, PlaceItem, RouteSummary, TravelMode};
+use super::types::{CommuteDelay, GoogleError, PlaceDetail, PlaceItem, RouteSummary, TravelMode};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
@@ -311,6 +311,58 @@ impl MapsService {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// One place with today's opening hours, for "when is the Charminar" / "is the museum open".
+    /// `weekday_hours` holds Google's seven lines in Monday-first order ("Monday: 9:00 AM - 5:30 PM").
+    pub fn parse_place_detail_json(json: &Value) -> Option<PlaceDetail> {
+        let p = json.get("places")?.as_array()?.first()?;
+        let name = p.pointer("/displayName/text").and_then(|v| v.as_str())?.trim().to_string();
+        if name.is_empty() {
+            return None;
+        }
+        let hours = p
+            .pointer("/regularOpeningHours/weekdayDescriptions")
+            .or_else(|| p.pointer("/currentOpeningHours/weekdayDescriptions"))
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        Some(PlaceDetail {
+            item: PlaceItem {
+                name,
+                address: p.get("formattedAddress").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                rating: p.get("rating").and_then(|v| v.as_f64()).map(|f| f as f32),
+                open_now: p.pointer("/currentOpeningHours/openNow").and_then(|v| v.as_bool()),
+            },
+            weekday_hours: hours,
+            summary: p.pointer("/editorialSummary/text").and_then(|v| v.as_str()).map(str::to_string),
+        })
+    }
+
+    /// Top Places API (New) match with hours. Key in a header only.
+    pub async fn place_detail(
+        client: &reqwest::Client,
+        api_key: &str,
+        text_query: &str,
+    ) -> Result<Option<PlaceDetail>, GoogleError> {
+        let resp = client
+            .post("https://places.googleapis.com/v1/places:searchText")
+            .header("X-Goog-Api-Key", api_key)
+            .header(
+                "X-Goog-FieldMask",
+                "places.displayName,places.formattedAddress,places.rating,places.currentOpeningHours.openNow,places.regularOpeningHours.weekdayDescriptions,places.editorialSummary",
+            )
+            .json(&serde_json::json!({ "textQuery": text_query, "maxResultCount": 1, "languageCode": "en" }))
+            .send()
+            .await
+            .map_err(|e| GoogleError::NetworkError(e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Self::map_response_error(status.as_u16(), &body));
+        }
+        let json: Value = resp.json().await.map_err(|e| GoogleError::SerializationError(e.to_string()))?;
+        Ok(Self::parse_place_detail_json(&json))
     }
 
     /// Call Places API (New) text search. Key in a header only.

@@ -150,7 +150,7 @@ export function ActionsPage() {
         <div className="hx-switch-title">Workspace Roots</div>
 
         {/* Standard User Folders Switch */}
-        <div className="hx-switch-card" style={{ marginTop: 10, background: "rgba(0, 0, 0, 0.2)" }}>
+        <div className="hx-switch-card" style={{ marginTop: 10, background: "var(--ui-surface-sunken)" }}>
           <div className="hx-switch-meta">
             <div className="hx-switch-title">Default User Folders</div>
             <div className="hx-switch-sub">Allow access to Downloads, Desktop, and Documents.</div>
@@ -187,7 +187,7 @@ export function ActionsPage() {
             </div>
           ))}
           {view.roots.length === 0 && (
-            <div style={{ padding: 12, textAlign: "center", color: "rgba(255, 255, 255, 0.45)", fontSize: 12 }}>
+            <div style={{ padding: 12, textAlign: "center", color: "var(--ui-text-tertiary)", fontSize: 12 }}>
               No folder roots configured. Voice file commands will be refused until a boundary is added.
             </div>
           )}
@@ -256,7 +256,7 @@ export function ActionsPage() {
         </div>
 
         {trash.length === 0 ? (
-          <div style={{ padding: "16px 0", textAlign: "center", color: "rgba(255, 255, 255, 0.45)", fontSize: 12 }}>
+          <div style={{ padding: "16px 0", textAlign: "center", color: "var(--ui-text-tertiary)", fontSize: 12 }}>
             Quarantine vault is empty. No files have been deleted by voice recently.
           </div>
         ) : (
@@ -266,8 +266,8 @@ export function ActionsPage() {
                 key={t.id}
                 style={{
                   padding: "10px 12px",
-                  background: "rgba(0, 0, 0, 0.25)",
-                  border: "1px solid rgba(255, 255, 255, 0.06)",
+                  background: "var(--ui-surface-sunken)",
+                  border: "1px solid var(--ui-border-subtle)",
                   borderRadius: 8,
                   display: "flex",
                   justifyContent: "space-between",
@@ -275,7 +275,7 @@ export function ActionsPage() {
                 }}
               >
                 <div>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>{trashLabel(t)}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ui-text-primary)" }}>{trashLabel(t)}</div>
                   <div className="hx-fact-meta">
                     Quarantine remaining: {purgeInDays(t, now, p.quarantine_days)} days
                   </div>
@@ -307,7 +307,7 @@ export function ActionsPage() {
                   justifyContent: "space-between",
                   alignItems: "center",
                   padding: "8px 12px",
-                  background: "rgba(0, 0, 0, 0.2)",
+                  background: "var(--ui-surface-sunken)",
                   borderRadius: 8,
                 }}
               >
@@ -317,16 +317,16 @@ export function ActionsPage() {
                     style={{
                       background:
                         r.effect === "allow"
-                          ? "rgba(16, 185, 129, 0.15)"
+                          ? "var(--ui-success-soft)"
                           : r.effect === "ask"
-                            ? "rgba(242, 184, 89, 0.15)"
-                            : "rgba(239, 68, 68, 0.15)",
-                      color: r.effect === "allow" ? "#34d399" : r.effect === "ask" ? "#f2b859" : "#ff5a52",
+                            ? "var(--ui-warning-soft)"
+                            : "var(--ui-danger-soft)",
+                      color: r.effect === "allow" ? "var(--ui-success-text)" : r.effect === "ask" ? "var(--ui-warning-text)" : "var(--ui-danger-text)",
                     }}
                   >
                     {r.effect.toUpperCase()}
                   </span>
-                  <span style={{ fontSize: 12.5, color: "#fff" }}>{ruleLabel(r)}</span>
+                  <span style={{ fontSize: 12.5, color: "var(--ui-text-primary)" }}>{ruleLabel(r)}</span>
                 </div>
                 <button
                   className="hx-btn hx-btn--tiny hx-btn--danger-ghost"
@@ -390,7 +390,7 @@ export function ActionsPage() {
         <div className="hx-switch-title">Recent Activity ({audit.length})</div>
 
         {audit.length === 0 ? (
-          <div style={{ padding: "16px 0", textAlign: "center", color: "rgba(255, 255, 255, 0.45)", fontSize: 12 }}>
+          <div style={{ padding: "16px 0", textAlign: "center", color: "var(--ui-text-tertiary)", fontSize: 12 }}>
             No recent file operations recorded.
           </div>
         ) : (
@@ -400,7 +400,7 @@ export function ActionsPage() {
                 key={`${a.ts}${i}`}
                 style={{
                   padding: "8px 10px",
-                  background: "rgba(0, 0, 0, 0.2)",
+                  background: "var(--ui-surface-sunken)",
                   borderRadius: 6,
                   display: "flex",
                   justifyContent: "space-between",
@@ -409,8 +409,8 @@ export function ActionsPage() {
                 }}
               >
                 <div>
-                  <span style={{ color: "#fff", fontWeight: 500 }}>{auditSummary(a)}</span>
-                  {a.origin === "derived" && <span style={{ color: "rgba(255, 255, 255, 0.4)", marginLeft: 6 }}>(text trigger)</span>}
+                  <span style={{ color: "var(--ui-text-primary)", fontWeight: 500 }}>{auditSummary(a)}</span>
+                  {a.origin === "derived" && <span style={{ color: "var(--ui-text-tertiary)", marginLeft: 6 }}>(text trigger)</span>}
                 </div>
                 <span className="hx-fact-meta">{fmtWhen(a.ts)}</span>
               </div>

@@ -17,6 +17,8 @@ import {
   type OAuthStatus,
 } from "../setup/oauth";
 import { useAssistant } from "../store/assistant";
+import { DockButtons, DockIcon } from "../sidebar/kit/DockButtons";
+import { applyThemePreference, normalizePreference, resolveThemeMode, type ThemePreference } from "../sidebar/theme";
 import "./hub/hub.css";
 import { HubHome, type HubPage } from "./hub/HubHome";
 import { ApiKeysPage } from "./hub/ApiKeysPage";
@@ -421,11 +423,13 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
 
   const acc = useAccounts(settings.serverUrl, settings.userId);
   const insights = useInsights(insightsKey);
-  const themeMode: "light" | "dark" = settings.themeMode === "light" ? "light" : "dark";
+  const themePreference = normalizePreference(settings.themeMode);
+  // What is on screen right now: "system" resolves against Windows.
+  const themeMode: "light" | "dark" = resolveThemeMode(settings.themeMode);
 
-  const handleTheme = (m: "light" | "dark") => {
+  const handleTheme = (m: ThemePreference) => {
     update("themeMode", m);
-    void import("../sidebar/theme").then(({ applyThemeMode }) => applyThemeMode(m)).catch(() => {});
+    applyThemePreference(m);
     // Persist immediately: the Command Hub home has no Save button. Patch only the theme: re-saving the whole
     // (possibly stale) form here used to revert anything another window or IPC had changed.
     invoke("settings_patch", { patch: { themeMode: m } }).catch(() => {});
@@ -449,8 +453,7 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
         </div>
         <div className="hx-title" data-tauri-drag-region>{PAGE_TITLES[page]}</div>
         <div className="hx-header-dock" data-tauri-drag-region>
-          <button type="button" onClick={() => onDock("left")} title="Dock Left">◧</button>
-          <button type="button" onClick={() => onDock("right")} title="Dock Right">◨</button>
+          <DockButtons onDock={onDock} />
         </div>
       </header>
 
@@ -467,7 +470,7 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
           {page === "device-links" && <DeviceLinksPage onOpenActivity={() => setPage("activity")} />}
           {page === "activity" && <ActivityManagerPage />}
           {page === "connections" && <McpServersPanel />}
-          {page === "appearance" && <AppearancePage themeMode={themeMode} onTheme={handleTheme} />}
+          {page === "appearance" && <AppearancePage themeMode={themePreference} onTheme={handleTheme} />}
           {isLegacyPage && (
             <div className="hx-legacy">
               {page === "display" && <DisplayTab settings={settings} update={update} />}
@@ -491,35 +494,13 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
   );
 }
 
-const COLOR_PRESETS = [
-  { name: "Golden Amber (Default)", hex: "#f2b859" },
-  { name: "Electric Cyan", hex: "#00e5ff" },
-  { name: "Neon Emerald", hex: "#10b981" },
-  { name: "Crimson Ruby", hex: "#ef4444" },
-  { name: "Royal Azure", hex: "#3b82f6" },
-  { name: "Amethyst Violet", hex: "#a855f7" },
-  { name: "Silver Pearl", hex: "#e2e8f0" },
-];
-
 // ─── Display Tab (Phase 2 — orb position + size) ──────────────────────
 function DisplayTab({ settings, update }: {
   settings: Settings;
   update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
 }) {
-  const currentColor = settings.orbColor || "#f2b859";
-
-  const onColorSelect = (hex: string) => {
-    update("orbColor", hex);
-    try {
-      localStorage.setItem("nexus:orb_color", hex);
-    } catch {}
-    import("@tauri-apps/api/event").then(({ emit }) => {
-      emit("orb:color", { color: hex }).catch(() => {});
-    }).catch(() => {});
-  };
-
   const currentPos = settings.orbPosition || "top";
-  const currentCapsuleStyle = settings.orbCapsuleStyle || "classic";
+  const currentCapsuleStyle = settings.orbCapsuleStyle || "pebble";
   const currentWakeupMode = settings.orbWakeupMode ?? 1;
   const currentInteriorGenesis = settings.orbInteriorGenesis ?? 2;
 
@@ -560,84 +541,6 @@ function DisplayTab({ settings, update }: {
 
   return (
     <>
-      <div className="settings-section">
-        <div className="settings-section-title">Orb Aura</div>
-        <div className="setting-desc" style={{ marginBottom: 10 }}>
-          Accent color for active and idle states.
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 8, marginBottom: 12 }}>
-          {COLOR_PRESETS.map((p) => {
-            const isSelected = currentColor.toLowerCase() === p.hex.toLowerCase();
-            return (
-              <button
-                key={p.hex}
-                type="button"
-                className={`settings-btn ${isSelected ? "settings-btn--primary" : "settings-btn--glass"}`}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  padding: "8px 10px",
-                  borderRadius: 8,
-                  border: isSelected ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
-                  background: isSelected ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
-                  cursor: "pointer",
-                  color: "#fff",
-                  fontSize: 12,
-                  fontWeight: isSelected ? 600 : 400,
-                  transition: "all 0.15s ease",
-                }}
-                onClick={() => onColorSelect(p.hex)}
-                title={p.name}
-              >
-                <span
-                  style={{
-                    width: 14,
-                    height: 14,
-                    borderRadius: "50%",
-                    background: p.hex,
-                    boxShadow: `0 0 8px ${p.hex}99`,
-                    flexShrink: 0,
-                    display: "inline-block",
-                  }}
-                />
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {p.name.split(" ")[0]}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-        <div className="setting-row" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div>
-            <div className="setting-label">Hex Color</div>
-            <div className="setting-desc">Custom hex code</div>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="color"
-              value={currentColor}
-              onChange={(e) => onColorSelect(e.target.value)}
-              style={{
-                width: 32,
-                height: 32,
-                borderRadius: 6,
-                border: "1px solid rgba(255,255,255,0.2)",
-                cursor: "pointer",
-                background: "transparent",
-              }}
-            />
-            <input
-              type="text"
-              className="settings-input"
-              style={{ width: 85, textAlign: "center", fontFamily: "monospace" }}
-              value={currentColor}
-              onChange={(e) => onColorSelect(e.target.value)}
-            />
-          </div>
-        </div>
-      </div>
-
       <div className="settings-section">
         <div className="settings-section-title">Screen Anchor</div>
         <div className="setting-desc" style={{ marginBottom: 12 }}>
@@ -781,7 +684,7 @@ function DisplayTab({ settings, update }: {
               invoke("set_sidebar_dock", { dock: "left" }).catch(() => {});
             }}
           >
-            ◧ Dock Left
+            <DockIcon side="left" /> Dock Left
           </button>
           <button
             className="settings-btn settings-btn--glass"
@@ -790,7 +693,7 @@ function DisplayTab({ settings, update }: {
               invoke("set_sidebar_dock", { dock: "right" }).catch(() => {});
             }}
           >
-            ◨ Dock Right
+            <DockIcon side="right" /> Dock Right
           </button>
         </div>
         <button
@@ -816,7 +719,7 @@ function DisplayTab({ settings, update }: {
             width: "100%",
             padding: "10px 14px",
             borderRadius: 10,
-            color: "#ffffff",
+            color: "var(--ui-text-primary)",
             fontWeight: 600,
             fontSize: 13,
             cursor: "pointer",
@@ -1586,7 +1489,7 @@ function AuthTab({ settings, update }: {
           )}
           {showCustomCreds && (
             <div className="auth-card" style={{ marginTop: 8, padding: 12 }}>
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.7)", marginBottom: 8 }}>
+              <div style={{ fontSize: 11, color: "var(--ui-text-secondary)", marginBottom: 8 }}>
                 Google Cloud Desktop OAuth credentials:
               </div>
               <input
