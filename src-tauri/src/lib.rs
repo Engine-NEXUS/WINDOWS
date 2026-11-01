@@ -169,6 +169,7 @@ pub(crate) mod agent_tracker;
 pub(crate) mod agent_outcomes;
 pub(crate) mod agent_attention;
 pub(crate) mod repo_review;
+pub(crate) mod pr_screen;
 pub(crate) mod howto;
 pub(crate) mod email_brief;
 pub(crate) mod repo_hint;

@@ -393,6 +393,17 @@ pub fn extract_github_repo_from_url(url: &str) -> Option<RepoIdentity> {
     None
 }
 
+/// The titles that can tell what the user is looking at: the foreground window and the last non-NEXUS one.
+pub(crate) fn foreground_titles() -> Vec<String> {
+    let mut v = Vec::new();
+    for t in [get_foreground_window_title(), get_cached_foreground_title()].into_iter().flatten() {
+        if !v.contains(&t) {
+            v.push(t);
+        }
+    }
+    v
+}
+
 /// Get the foreground window title (cross-platform).
 fn get_foreground_window_title() -> Option<String> {
     #[cfg(target_os = "windows")]

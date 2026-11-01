@@ -2174,6 +2174,10 @@ pub async fn process_transcript<R: Runtime>(
             let mut worker_transcript = transcript.clone();
             // A sentence to put before the result when the repo on screen was corrected to the user's real one.
             let mut repo_notice: Option<String> = None;
+            // What was really analysed, for the spoken line ("PR #70 in owner/repo", "the latest PR in owner/repo").
+            let mut spoken_target: Option<String> = None;
+            // The screen already settled the target: do not rewrite names in the sentence again below.
+            let mut screen_resolved = false;
             // "analyse this repo" / "analyse this PR": the user pointed instead of naming. Read the open page; if it is a
             // repository (or pull request) analyse that one, otherwise understand whatever is on screen.
             if let ParsedIntent::AnalyseRepo { owner: None, repo } = &intent {
@@ -2182,11 +2186,20 @@ pub async fn process_transcript<R: Runtime>(
                 if deictic_repo || deictic_pr {
                     let url = tokio::task::spawn_blocking(crate::browser_url::get_active_browser_url).await.ok().flatten();
                     if deictic_pr {
-                        if let Some((o, r, n)) = url.as_deref().and_then(github_pr_from_url) {
-                            worker_transcript = format!("analyse pr {n} in {o}/{r}");
-                        } else {
-                            clear_active_request(&request_id);
-                            return run_screen_analysis(app, format!("analyse what is on my screen: {transcript}")).await;
+                        // "analyse this PR": the screen is the first source; if it names no pull request, ask which one.
+                        match resolve_pr_target(&app, url.as_deref(), None, pr_phrase_wants_latest(repo)).await {
+                            PrTarget::Go { transcript: t, spoken, notice } => {
+                                worker_transcript = t;
+                                spoken_target = Some(spoken);
+                                repo_notice = notice;
+                                screen_resolved = true;
+                            }
+                            PrTarget::Ask(text) => {
+                                emit(&app, &OrchestratorEvent::Result { text, request_id: request_id.clone(), analysis: None, dialog_state: None });
+                                emit(&app, &OrchestratorEvent::Done { request_id: request_id.clone() });
+                                clear_active_request(&request_id);
+                                return Ok(ProcessResult { request_id, subsystem, handled_locally: true });
+                            }
                         }
                     } else {
                         let found = tokio::task::spawn_blocking(crate::architect::get_active_repo_url).await.ok().flatten();
@@ -2244,7 +2257,29 @@ pub async fn process_transcript<R: Runtime>(
                     }
                 }
             }
+            // "analyse the latest PR in <repo>" / "analyse this PR in <repo>": a pull request of THAT repo on the screen wins,
+            // otherwise the repository's latest one. (An author in the sentence keeps the plain latest-by-author reading.)
+            if let ParsedIntent::AnalyseLatestPr { owner, repo, author: None } = &intent {
+                if !screen_resolved && !repo.trim().is_empty() {
+                    let query = match owner.as_deref().filter(|o| !o.trim().is_empty()) {
+                        Some(o) => format!("{o}/{repo}"),
+                        None => repo.clone(),
+                    };
+                    if let crate::github_repo_index::Resolution::One(e) = crate::github_repo_index::resolve_name(&query).await {
+                        let url = tokio::task::spawn_blocking(crate::browser_url::get_active_browser_url).await.ok().flatten();
+                        if let PrTarget::Go { transcript: t, spoken, notice } =
+                            resolve_pr_target(&app, url.as_deref(), Some((e.owner.clone(), e.name.clone())), true).await
+                        {
+                            worker_transcript = t;
+                            spoken_target = Some(spoken);
+                            repo_notice = notice;
+                            screen_resolved = true;
+                        }
+                    }
+                }
+            }
             let target_repo = match &intent {
+                _ if screen_resolved => None,
                 ParsedIntent::AnalyseRepo { owner: None, repo }
                     if !repo.trim().is_empty() && !is_deictic_repo_word(repo) && !is_deictic_pr_word(repo) =>
                 {
@@ -2451,6 +2486,10 @@ pub async fn process_transcript<R: Runtime>(
 
                     let (spoken_text, show_sidebar) = if is_analysis_intent || has_structured_analysis || is_long_markdown || howto_sidebar {
                         let spoken = match &intent {
+                            _ if spoken_target.is_some() => {
+                                let lead = repo_notice.as_ref().map(|n| format!("{n} ")).unwrap_or_default();
+                                format!("{lead}Here is the analysis for {}, sir.", spoken_target.as_deref().unwrap_or_default())
+                            }
                             ParsedIntent::AnalysePr { pr_number, repo, .. } => {
                                 format!("Here is the analysis for PR #{} in {}, sir.", pr_number, repo)
                             }
@@ -5975,7 +6014,110 @@ pub(crate) fn is_deictic_repo_word(repo: &str) -> bool {
 
 /// "this pr" / "this pull request" (the parser keeps the noun for PRs).
 pub(crate) fn is_deictic_pr_word(repo: &str) -> bool {
-    matches!(repo.trim().to_lowercase().as_str(), "this pr" | "this pull request" | "that pr" | "the pr" | "the pull request" | "this pull" )
+    matches!(
+        repo.trim().to_lowercase().as_str(),
+        "this pr" | "this pull request" | "that pr" | "the pr" | "the pull request" | "this pull" | "pr" | "my pr" | "open pr"
+            | "latest pr" | "the latest pr" | "latest pull request" | "the latest pull request" | "newest pr" | "last pr"
+    )
+}
+
+/// "latest pr" / "the latest pull request": the user asked for the latest one rather than pointed at one.
+pub(crate) fn pr_phrase_wants_latest(repo: &str) -> bool {
+    repo.split_whitespace().any(|w| matches!(w, "latest" | "newest" | "last" | "recent"))
+}
+
+/// What "analyse this PR" resolved to.
+pub(crate) enum PrTarget {
+    /// Run `transcript` (e.g. "analyse pr 70 in owner/repo"); `spoken` names it aloud; `notice` is said first.
+    Go { transcript: String, spoken: String, notice: Option<String> },
+    /// Say this and wait for the user.
+    Ask(String),
+}
+
+/// Everything the screen shows about pull requests, most reliable first: a github.com page, the title of the window
+/// (Gmail subject, GitHub app), and, only when no PR number was found yet, a vision read of the window.
+async fn gather_screen_prs<R: Runtime>(app: &AppHandle<R>, url: Option<&str>) -> Vec<(crate::pr_screen::Seen, bool)> {
+    let mut out: Vec<(crate::pr_screen::Seen, bool)> = Vec::new();
+    let add = |s: crate::pr_screen::Seen, from_page: bool, out: &mut Vec<(crate::pr_screen::Seen, bool)>| {
+        if !out.iter().any(|(o, _)| *o == s) {
+            out.push((s, from_page));
+        }
+    };
+    if let Some(s) = url.and_then(crate::pr_screen::from_url) {
+        add(s, true, &mut out);
+    }
+    let titles = tokio::task::spawn_blocking(|| crate::architect::foreground_titles()).await.unwrap_or_default();
+    for t in titles {
+        if let Some(s) = crate::pr_screen::from_text(&t) {
+            add(s, false, &mut out);
+        }
+    }
+    if !out.iter().any(|(s, _)| s.number.is_some()) {
+        #[cfg(target_os = "windows")]
+        {
+            let seen = read_screen_json(app, crate::pr_screen::build_prompt(), 400, |t| Some(crate::pr_screen::parse_prs(t)))
+                .await
+                .unwrap_or_default();
+            for s in seen {
+                add(s, false, &mut out);
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = app;
+    }
+    out
+}
+
+/// Which pull request does the user mean? The screen first; a named repository narrows it; otherwise ask.
+/// Every repository seen is checked against the user's GitHub (a real github.com page may be anyone's public repo), and a
+/// PR number that GitHub says does not exist is dropped.
+async fn resolve_pr_target<R: Runtime>(
+    app: &AppHandle<R>,
+    url: Option<&str>,
+    mentioned: Option<(String, String)>,
+    want_latest: bool,
+) -> PrTarget {
+    use crate::pr_screen::{decide, Decision, Resolved};
+    let seen = gather_screen_prs(app, url).await;
+    let entries = crate::github_repo_index::entries_for_check().await;
+    let mut resolved: Vec<Resolved> = Vec::new();
+    for (s, from_page) in seen {
+        let (owner, repo) = match &s.owner {
+            Some(o) => {
+                let verdict = crate::github_repo_index::verify_repo_identity(&entries, o, &s.repo);
+                println!("[ANALYSE-PR] screen says {o}/{} #{:?} (page: {from_page}) -> {verdict:?}", s.repo, s.number);
+                match pointed_decision(from_page, o, &s.repo, verdict) {
+                    Pointed::Use { owner, repo, .. } => (owner, repo),
+                    Pointed::Stop(_) => continue,
+                }
+            }
+            None => match crate::github_repo_index::resolve_in(&entries, &s.repo) {
+                crate::github_repo_index::Resolution::One(e) => (e.owner, e.name),
+                _ => continue,
+            },
+        };
+        if let Some(n) = s.number {
+            if crate::repo_review::pr_exists(&owner, &repo, n).await == Some(false) {
+                println!("[ANALYSE-PR] {owner}/{repo} #{n} does not exist on GitHub: ignored");
+                continue;
+            }
+        }
+        resolved.push(Resolved { owner, repo, number: s.number });
+    }
+    let mentioned_ref = mentioned.as_ref().map(|(o, r)| (o.as_str(), r.as_str()));
+    match decide(&resolved, mentioned_ref, want_latest) {
+        Decision::Analyse { owner, repo, number } => PrTarget::Go {
+            transcript: format!("analyse pr {number} in {owner}/{repo}"),
+            spoken: format!("PR #{number} in {owner}/{repo}"),
+            notice: None,
+        },
+        Decision::Latest { owner, repo, notice } => PrTarget::Go {
+            transcript: format!("analyse the latest pr in {owner}/{repo}"),
+            spoken: format!("the latest PR in {owner}/{repo}"),
+            notice,
+        },
+        Decision::Ask(text) => PrTarget::Ask(text),
+    }
 }
 
 /// owner, repo and PR number from an open GitHub pull-request URL. Pure.

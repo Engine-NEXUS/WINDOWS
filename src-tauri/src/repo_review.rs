@@ -207,6 +207,24 @@ pub async fn fetch(owner: &str, repo: &str) -> Result<Facts, String> {
     Ok(facts)
 }
 
+/// Does GitHub have this pull request? `None` = could not tell (offline, no login, rate limit): keep it.
+pub async fn pr_exists(owner: &str, repo: &str, number: u64) -> Option<bool> {
+    let token = crate::github_data::resolve_token(None, None).await.ok();
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(8)).build().ok()?;
+    let mut req = client
+        .get(format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}"))
+        .header("User-Agent", "nexus-assistant")
+        .header("Accept", "application/vnd.github+json");
+    if let Some(t) = &token {
+        req = req.bearer_auth(t);
+    }
+    match req.send().await.ok()?.status().as_u16() {
+        200 => Some(true),
+        404 => Some(false),
+        _ => None,
+    }
+}
+
 /// The review as markdown, or the plain reason it could not be written. Never a guess.
 pub async fn grounded_review<R: tauri::Runtime>(app: &tauri::AppHandle<R>, owner: &str, repo: &str) -> Result<String, String> {
     let facts = fetch(owner, repo).await.map_err(|e| format!("I couldn't read {owner}/{repo} from GitHub, sir: {e}."))?;

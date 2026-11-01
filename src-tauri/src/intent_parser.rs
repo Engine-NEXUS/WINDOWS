@@ -685,6 +685,11 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
         });
     }
 
+    // --- "analyse this PR" / "analyse the latest PR in zync": a PR pointed at, no number ---
+    if let Some(result) = parse_analyse_pr_pointer(&text) {
+        return Some(result);
+    }
+
     // --- CodeRabbit Review shortcut commands ---
     let cr_norm = text
         .replace("code rabbit", "coderabbit")
@@ -3072,6 +3077,111 @@ fn parse_analyse_this_email_command(text: &str) -> Option<ParseResult> {
 /// code, a document...). It goes to the screen-understanding path, which reads the foreground window and its
 /// context. It must NOT be taken for a repository name. Dedicated nouns keep their own routes: "this repo" and
 /// "this PR" are resolved from the open browser page by the orchestrator, "this email" has its own parser.
+/// "analyse this pr" / "review the latest pull request" / "analyse the pr in zync": pointing at a pull request WITHOUT a
+/// number. No repo named -> `AnalyseRepo { repo: "this pr" | "latest pr" }` (the screen decides which one); a repo named
+/// -> `AnalyseLatestPr` (the screen is checked for a PR of that repo first, else its latest one). A number, an author
+/// ("by prem") or any other word keeps the older parsers. Pure.
+fn parse_analyse_pr_pointer(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase().replace(['\u{2019}', '\u{2018}'], "'");
+    let t = t.trim_end_matches(['.', ',', '!', '?']).trim().to_string();
+    let mut s = t.as_str();
+    for lead in ["please ", "nexus, ", "nexus ", "hey ", "ok ", "okay "] {
+        if let Some(r) = s.strip_prefix(lead) {
+            s = r;
+        }
+    }
+    let s = strip_lead_ins(s);
+    const VERBS: &[&str] = &[
+        "analyse ", "analyze ", "review ", "explain ", "summarise ", "summarize ", "describe ", "check ", "look at ",
+        "go through ", "break down ", "tell me about ",
+    ];
+    const WHAT: &[&str] = &["what is ", "what's "];
+    let (rest, strict_this) = if let Some(v) = VERBS.iter().find(|v| s.starts_with(**v)) {
+        (&s[v.len()..], false)
+    } else if let Some(v) = WHAT.iter().find(|v| s.starts_with(**v)) {
+        (&s[v.len()..], true)
+    } else {
+        return None;
+    };
+    let mut core = rest.trim();
+    'strip: loop {
+        for suffix in [
+            " for me", " please", " on my screen", " on the screen", " on screen", " here", " that i'm looking at",
+            " i'm looking at", " that i am looking at", " that i can see", " about", " is about",
+        ] {
+            if let Some(p) = core.strip_suffix(suffix) {
+                core = p.trim();
+                continue 'strip;
+            }
+        }
+        break;
+    }
+    // a specific PR (number) or an author keeps the older parsers
+    if core.contains(|c: char| c.is_ascii_digit() || c == '#') || core.contains(" by ") {
+        return None;
+    }
+    // "<head> [in|of|for|from <repo>]"
+    let mut head = core;
+    let mut repo_part: Option<&str> = None;
+    for prep in [" in ", " of ", " for ", " from "] {
+        if let Some(i) = core.find(prep) {
+            head = core[..i].trim();
+            repo_part = Some(core[i + prep.len()..].trim());
+            break;
+        }
+    }
+    const ALLOWED: &[&str] = &["the", "this", "that", "my", "current", "latest", "newest", "last", "recent", "open", "a", "one"];
+    let mut words: Vec<&str> = head.split_whitespace().collect();
+    match words.as_slice() {
+        [.., "pull", "request"] => {
+            words.truncate(words.len() - 2);
+        }
+        [.., "pr"] => {
+            words.truncate(words.len() - 1);
+        }
+        _ => return None,
+    }
+    if words.iter().any(|w| !ALLOWED.contains(w)) || (strict_this && !words.contains(&"this")) {
+        return None;
+    }
+    let latest = words.iter().any(|w| matches!(*w, "latest" | "newest" | "last" | "recent"));
+    // "analyse the pr in zync" (plain "the", a repo named) stays the older list-the-PRs reading; only a pointing or
+    // "latest" word makes it "the one on screen, else the latest of that repo"
+    if repo_part.is_some() && !words.iter().any(|w| matches!(*w, "this" | "that" | "my" | "current" | "latest" | "newest" | "last" | "recent")) {
+        return None;
+    }
+    let repo_part = repo_part
+        .map(|r| r.trim_end_matches(" repository").trim_end_matches(" repo").trim_end_matches(" project").trim())
+        .filter(|r| !r.is_empty() && !matches!(*r, "this" | "here" | "this repo" | "this repository" | "the repo" | "the repository"));
+    match repo_part {
+        None => Some(ParseResult {
+            intent: ParsedIntent::AnalyseRepo { owner: None, repo: if latest { "latest pr" } else { "this pr" }.to_string() },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        }),
+        Some(rp) => {
+            if let Some((owner, repo)) = parse_owner_repo(rp) {
+                return Some(ParseResult {
+                    intent: ParsedIntent::AnalyseLatestPr { owner: Some(owner), repo, author: None },
+                    confidence: 1.0,
+                    source: "deterministic".to_string(),
+                });
+            }
+            let repo = clean_repo_name(rp);
+            if repo.is_empty() {
+                return None;
+            }
+            let lower = repo.to_lowercase();
+            let repo = if KNOWN_REPOS.contains(&lower.as_str()) { repo } else { fuzzy_match_repo_name(&lower).unwrap_or(repo) };
+            Some(ParseResult {
+                intent: ParsedIntent::AnalyseLatestPr { owner: None, repo, author: None },
+                confidence: 0.95,
+                source: "deterministic".to_string(),
+            })
+        }
+    }
+}
+
 fn parse_analyse_deictic_command(text: &str) -> Option<ParseResult> {
     let t = text.trim().to_lowercase().replace(['\u{2019}', '\u{2018}'], "'");
     let t = t.trim_end_matches(['.', ',', '!', '?']).trim().to_string();
@@ -10826,6 +10936,39 @@ mod tests {
             let got = format!("{:?}", parse_deterministic(p).map(|r| r.intent));
             assert!(!got.contains("AnalyseThisEmail"), "'{p}' wrongly parsed as {got}");
         }
+    }
+
+    #[test]
+    fn analyse_this_pr_points_at_the_screen_and_a_named_repo_means_latest_pr_there() {
+        let label = |t: &str| format!("{:?}", parse_deterministic(t).map(|r| r.intent));
+        // no repo named: the screen decides
+        for p in [
+            "analyse this pr", "analyze this pull request", "analyse the pr", "analyse that pr", "analyse my pr", "analyze the open pr",
+            "let us analyze this pr", "can you analyse this pr for me", "analyse this pr please", "review this pr", "explain this pr",
+            "what is this pr about", "analyse the pr on the screen", "check this pull request",
+        ] {
+            assert!(label(p).contains("AnalyseRepo { owner: None, repo: \"this pr\" }"), "'{p}' -> {}", label(p));
+        }
+        for p in ["analyse the latest pr", "analyze the latest pull request", "review the newest pr"] {
+            assert!(label(p).contains("AnalyseRepo { owner: None, repo: \"latest pr\" }"), "'{p}' -> {}", label(p));
+        }
+        // repo named: screen first, else the latest PR of that repo
+        for (p, repo) in [
+            ("analyse the latest pr in servx", "servx"),
+            ("analyse this pr in zync", "zync"),
+            ("review the latest pull request of zync", "zync"),
+        ] {
+            let l = label(p);
+            assert!(l.contains("AnalyseLatestPr") && l.contains(&format!("repo: \"{repo}\"")), "'{p}' -> {l}");
+        }
+        assert!(label("analyse the latest pr of Leddger-AI/LedgerAI").contains("AnalyseLatestPr { owner: Some(\"leddger-ai\"), repo: \"ledgerai\""), "{}", label("analyse the latest pr of Leddger-AI/LedgerAI"));
+        // plain "the pr" with a repo keeps the older list reading; a number, an author and listing are untouched too
+        assert!(label("analyse the pr in zync").contains("ListPrs"), "{}", label("analyse the pr in zync"));
+        assert!(label("analyse pr 70 in zync").contains("AnalysePr"));
+        assert!(label("analyse the pr by prem in servx").contains("author: Some(\"prem\")"));
+        assert!(!label("list pull requests").contains("this pr"));
+        assert!(label("show me the prs").contains("OpenGitHubDashboard") || label("show me the prs").contains("ListPrs"));
+        assert!(label("what is this pr about the weather").contains("None") || !label("what is this pr about the weather").contains("this pr\" }"));
     }
 
     #[test]

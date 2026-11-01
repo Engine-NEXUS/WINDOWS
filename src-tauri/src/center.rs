@@ -255,7 +255,7 @@ pub fn command_evidence(
             // "Analyse this repo": the user points at what is on screen. That is the whole request, not a guess at a
             // repository name, so a clear deterministic parse is Strong (2026-11-01: it was rated Medium, an unenrolled
             // voice was then asked "Which repository should I use?" and the screen was never read).
-            if strength >= 3 && crate::orchestrator::is_deictic_repo_word(repo) {
+            if strength >= 3 && (crate::orchestrator::is_deictic_repo_word(repo) || crate::orchestrator::is_deictic_pr_word(repo)) {
                 CommandEvidence::Strong
             } else if matches!(
                 crate::github_repo_index::peek(repo),
