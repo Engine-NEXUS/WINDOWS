@@ -650,6 +650,19 @@ pub fn can_route(transcript: &str) -> bool {
         }
     }
 
+    // "analyse owner/repo": a repository named in full is read from GitHub, never described from its name by a chat model
+    // (2026-11-01: a rewritten "analyse Leddger-AI/LedgerAI" matched none of the phrases above and was answered from the name alone).
+    if (lower.contains("analyse ") || lower.contains("analyze ") || lower.contains("review ")) && lower.split_whitespace().any(|w| {
+        let w = w.trim_matches(|c: char| matches!(c, '.' | ',' | '?' | '!'));
+        match w.split_once('/') {
+            Some((a, b)) => a.chars().any(|c| c.is_alphanumeric()) && b.chars().any(|c| c.is_alphanumeric()),
+            None => false,
+        }
+    }) {
+        tracing::debug!("9router: routing to Worker (owner/repo analysis)");
+        return false;
+    }
+
     // Everything else can try 9Router first.
     true
 }
@@ -665,6 +678,14 @@ mod tests {
         assert!(can_route("what is the capital of france"));
         assert!(can_route("how tall is the eiffel tower"));
         assert!(can_route("tell me a joke"));
+    }
+
+    #[test]
+    fn a_repository_named_in_full_is_never_answered_by_the_chat_model() {
+        assert!(!can_route("analyse Leddger-AI/LedgerAI"));
+        assert!(!can_route("Analyze acme/zync."));
+        assert!(can_route("what is 10/5"), "a plain fraction is still a general question");
+        assert!(can_route("tell me about tcp/ip"));
     }
 
     #[test]

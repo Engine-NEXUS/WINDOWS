@@ -2172,6 +2172,8 @@ pub async fn process_transcript<R: Runtime>(
         Subsystem::WorkerBackend => {
             // feature 161 repo resolution
             let mut worker_transcript = transcript.clone();
+            // A sentence to put before the result when the repo on screen was corrected to the user's real one.
+            let mut repo_notice: Option<String> = None;
             // "analyse this repo" / "analyse this PR": the user pointed instead of naming. Read the open page; if it is a
             // repository (or pull request) analyse that one, otherwise understand whatever is on screen.
             if let ParsedIntent::AnalyseRepo { owner: None, repo } = &intent {
@@ -2189,7 +2191,26 @@ pub async fn process_transcript<R: Runtime>(
                     } else {
                         let found = tokio::task::spawn_blocking(crate::architect::get_active_repo_url).await.ok().flatten();
                         match found {
-                            Some(id) => worker_transcript = format!("analyse {}/{}", id.owner, id.repo),
+                            Some(id) => {
+                                // What the address bar or window title shows is not proof: check it against the repositories of
+                                // the signed-in GitHub account (live list, else the cached one) before anything is analysed.
+                                let from_page = url.as_deref().and_then(crate::architect::extract_github_repo_from_url).is_some();
+                                let entries = crate::github_repo_index::entries_for_check().await;
+                                let verdict = crate::github_repo_index::verify_repo_identity(&entries, &id.owner, &id.repo);
+                                println!("[ANALYSE-REPO] screen says {}/{} (page url: {from_page}) -> {verdict:?}", id.owner, id.repo);
+                                match pointed_decision(from_page, &id.owner, &id.repo, verdict) {
+                                    Pointed::Use { owner, repo, notice } => {
+                                        worker_transcript = format!("analyse {owner}/{repo}");
+                                        repo_notice = notice;
+                                    }
+                                    Pointed::Stop(text) => {
+                                        emit(&app, &OrchestratorEvent::Result { text, request_id: request_id.clone(), analysis: None, dialog_state: None });
+                                        emit(&app, &OrchestratorEvent::Done { request_id: request_id.clone() });
+                                        clear_active_request(&request_id);
+                                        return Ok(ProcessResult { request_id, subsystem, handled_locally: true });
+                                    }
+                                }
+                            }
                             None => {
                                 // No repository page is open: the repository may only be NAMED on screen (an email, a
                                 // notification). Read the names off the screen and find them in the user's GitHub.
@@ -2338,17 +2359,41 @@ pub async fn process_transcript<R: Runtime>(
                 "[SUB-PROC] SubCenter Knowledge routing to 9Router / Cloudflare Worker (request_id={})",
                 request_id
             );
-            let result = dispatch_to_worker(
-                app.clone(),
-                worker_transcript.clone(),
-                dialog_context,
-                request_id.clone(),
-                cancel_flag.clone(),
-                &turn,
-                crate::intent_parser::intent_to_label(&intent),
-                false,
-            )
-            .await;
+            // "Analyse <repo>": read the repository first and write the review from what was read (never from the name).
+            // If it cannot be read here (no GitHub login on this device), the Worker is tried; if that fails too, the
+            // user hears the real reason instead of a description made up from the name.
+            let grounded = match (&intent, analysed_repo_label(&worker_transcript).and_then(|l| crate::architect::split_full_name(&l))) {
+                (ParsedIntent::AnalyseRepo { .. }, Some((o, r))) => Some(crate::repo_review::grounded_review(&app, &o, &r).await),
+                _ => None,
+            };
+            let result = match grounded {
+                Some(Ok(text)) => Ok((text, None, None)),
+                other => {
+                    let why = match other {
+                        Some(Err(why)) => {
+                            println!("[ANALYSE-REPO] could not read the repository locally: {why}");
+                            Some(why)
+                        }
+                        _ => None,
+                    };
+                    let via_worker = dispatch_to_worker(
+                        app.clone(),
+                        worker_transcript.clone(),
+                        dialog_context,
+                        request_id.clone(),
+                        cancel_flag.clone(),
+                        &turn,
+                        crate::intent_parser::intent_to_label(&intent),
+                        false,
+                    )
+                    .await;
+                    match (via_worker, why) {
+                        (Ok(r), _) => Ok(r),
+                        (Err(_), Some(why)) => Err(why),
+                        (Err(e), None) => Err(e),
+                    }
+                }
+            };
 
             match &result {
                 Ok((t, _, _)) => {
@@ -2410,7 +2455,9 @@ pub async fn process_transcript<R: Runtime>(
                                 format!("Here is the analysis for PR #{} in {}, sir.", pr_number, repo)
                             }
                             ParsedIntent::AnalyseRepo { repo, .. } => {
-                                format!("Here is the analysis for {}, sir.", repo)
+                                let label = analysed_repo_label(&worker_transcript).unwrap_or_else(|| repo.clone());
+                                let lead = repo_notice.as_ref().map(|n| format!("{n} ")).unwrap_or_default();
+                                format!("{lead}Here is the analysis for {label}, sir.")
                             }
                             ParsedIntent::AnalyseLatestPr { repo, .. } => {
                                 format!("Here is the analysis for the latest PR in {}, sir.", repo)
@@ -3289,7 +3336,7 @@ counsel: bool,
     // ─── 9Router fast path ──────────────────────────────────────────────
     // Try local → free cloud providers first. This bypasses the Worker
     // entirely for general questions, cutting latency from ~2s to ~242ms.
-    if crate::router::can_route(&transcript) {
+    if crate::router::can_route(&transcript) && !is_repo_analysis_label(intent_label) {
         let keys = crate::router::read_provider_keys(&app);
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
@@ -5945,6 +5992,43 @@ pub(crate) fn github_pr_from_url(url: &str) -> Option<(String, String, u64)> {
 }
 
 /// What repository names found on screen resolve to in the user's own GitHub.
+/// What to do with the repository the screen points at.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Pointed {
+    /// Analyse `owner/repo`; `notice` is said first when the name was corrected.
+    Use { owner: String, repo: String, notice: Option<String> },
+    /// Say this and stop (a question, or "that is not in your GitHub").
+    Stop(String),
+}
+
+/// Pure: the decision for a name read from the address bar or the window title. A real github.com page is the user
+/// looking at that repository (public ones that are not theirs are fine); a name from anywhere else (an email subject,
+/// a notification) must be in the user's GitHub or nothing is analysed.
+pub(crate) fn pointed_decision(from_page: bool, owner: &str, repo: &str, id: crate::github_repo_index::Identity) -> Pointed {
+    use crate::github_repo_index::{identity_notice, Identity};
+    let written = format!("{owner}/{repo}");
+    match &id {
+        Identity::Verified(e) => Pointed::Use { owner: e.owner.clone(), repo: e.name.clone(), notice: None },
+        Identity::Corrected(e) => Pointed::Use { owner: e.owner.clone(), repo: e.name.clone(), notice: identity_notice(&written, &id) },
+        Identity::Ambiguous(_) => Pointed::Stop(identity_notice(&written, &id).unwrap_or_default()),
+        Identity::NotFound | Identity::Unverifiable if from_page => {
+            Pointed::Use { owner: owner.to_string(), repo: repo.to_string(), notice: None }
+        }
+        Identity::NotFound | Identity::Unverifiable => Pointed::Stop(identity_notice(&written, &id).unwrap_or_default()),
+    }
+}
+
+/// "analyse Leddger-AI/LedgerAI" -> "Leddger-AI/LedgerAI" (the repository that was really analysed, for the spoken line).
+pub(crate) fn analysed_repo_label(worker_transcript: &str) -> Option<String> {
+    let w = worker_transcript.trim().strip_prefix("analyse ")?.trim();
+    (w.contains('/') && !w.contains(' ')).then(|| w.to_string())
+}
+
+/// The intents whose answer must come from reading the repository, never from the general chat model.
+pub(crate) fn is_repo_analysis_label(label: &str) -> bool {
+    matches!(label, "analyse_repo" | "analyse_pr" | "analyse_latest_pr" | "check_branch")
+}
+
 pub(crate) enum ScreenRepo {
     One(String, String),
     /// The bare name matched repositories under several owners.
@@ -5955,10 +6039,17 @@ pub(crate) enum ScreenRepo {
 /// First name that resolves wins. `owner/repo` is taken as written; a bare name is looked up in the user's repos and
 /// every organisation they belong to (the connected GitHub login), so a name in an email needs no link.
 pub(crate) async fn resolve_screen_repos(names: &[String]) -> ScreenRepo {
+    use crate::github_repo_index::Identity;
     use crate::repo_hint::Candidate;
+    let entries = crate::github_repo_index::entries_for_check().await;
     for n in names {
         match crate::repo_hint::classify(n) {
-            Some(Candidate::Full(o, r)) => return ScreenRepo::One(o, r),
+            // A full name read off the screen is only used when the user's GitHub has it (or a clear correction of it).
+            Some(Candidate::Full(o, r)) => match crate::github_repo_index::verify_repo_identity(&entries, &o, &r) {
+                Identity::Verified(e) | Identity::Corrected(e) => return ScreenRepo::One(e.owner, e.name),
+                Identity::Ambiguous(v) => return ScreenRepo::Many(r, v.iter().take(3).map(|e| e.owner.clone()).collect()),
+                Identity::NotFound | Identity::Unverifiable => {}
+            },
             Some(Candidate::Bare(b)) => match crate::github_repo_index::resolve_name(&b).await {
                 crate::github_repo_index::Resolution::One(e) => return ScreenRepo::One(e.owner, e.name),
                 crate::github_repo_index::Resolution::Many(v) => {
@@ -11364,6 +11455,48 @@ mod tests {
             directions_line("Central Park", Some("28 minutes via FDR Drive")),
             "Finding route to Central Park. About 28 minutes via FDR Drive, sir."
         );
+    }
+
+    #[test]
+    fn a_title_name_must_be_in_the_users_github_but_a_real_repo_page_may_be_anyones() {
+        use crate::github_repo_index::{Identity, RepoEntry};
+        let mine = RepoEntry { full_name: "Leddger-AI/LedgerAI".into(), owner: "Leddger-AI".into(), name: "LedgerAI".into(), owner_type: "Organization".into(), open_issues: 0 };
+        // verified: used, nothing to say
+        assert_eq!(
+            pointed_decision(false, "Leddger-AI", "LedgerAI", Identity::Verified(mine.clone())),
+            Pointed::Use { owner: "Leddger-AI".into(), repo: "LedgerAI".into(), notice: None }
+        );
+        // corrected: used, and it says so
+        match pointed_decision(false, "Leddger-AI", "LedgerA1", Identity::Corrected(mine.clone())) {
+            Pointed::Use { repo, notice, .. } => {
+                assert_eq!(repo, "LedgerAI");
+                assert!(notice.unwrap().contains("your GitHub has Leddger-AI/LedgerAI"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // an email subject naming something that is not theirs: nothing is analysed
+        for id in [Identity::NotFound, Identity::Unverifiable] {
+            assert!(matches!(pointed_decision(false, "Acme", "thing", id), Pointed::Stop(t) if t.contains("won't guess")));
+        }
+        // a real github.com page of someone else's public repo is still analysable
+        assert_eq!(
+            pointed_decision(true, "facebook", "react", Identity::NotFound),
+            Pointed::Use { owner: "facebook".into(), repo: "react".into(), notice: None }
+        );
+        // several fit: a question, in both cases
+        assert!(matches!(pointed_decision(true, "x", "y", Identity::Ambiguous(vec![mine.clone(), mine])), Pointed::Stop(t) if t.ends_with("Which one?")));
+    }
+
+    #[test]
+    fn repo_analysis_never_goes_to_the_general_chat_model() {
+        for l in ["analyse_repo", "analyse_pr", "analyse_latest_pr", "check_branch"] {
+            assert!(is_repo_analysis_label(l), "{l}");
+        }
+        for l in ["unknown", "open_app", "search"] {
+            assert!(!is_repo_analysis_label(l), "{l}");
+        }
+        assert_eq!(analysed_repo_label("analyse Leddger-AI/LedgerAI").as_deref(), Some("Leddger-AI/LedgerAI"));
+        assert_eq!(analysed_repo_label("analyse this repository"), None);
     }
 
     #[test]

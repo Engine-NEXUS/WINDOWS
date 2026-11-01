@@ -168,6 +168,7 @@ pub(crate) mod watch_runner;
 pub(crate) mod agent_tracker;
 pub(crate) mod agent_outcomes;
 pub(crate) mod agent_attention;
+pub(crate) mod repo_review;
 pub(crate) mod howto;
 pub(crate) mod email_brief;
 pub(crate) mod repo_hint;

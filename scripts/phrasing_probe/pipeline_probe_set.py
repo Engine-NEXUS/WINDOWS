@@ -2,7 +2,8 @@ import json, sys
 # (expected_label, [phrasings]) -- phrasings a person actually says: canonical, casual, polite, partial, STT mishearings
 S = {
  "analyse_repo": ["analyse this repo", "analyze the repository", "can you analyze zync for me", "give me an analysis of the servx repo", "review my repo zync", "tell me about this repository",
-                  "what does this repo do", "break down the repo for me", "analyzing repository from my github for me", "do an analysis of nexus windows repo", "i want you to analyse zync", "take a look at this repo and analyse it"],
+                  "what does this repo do", "break down the repo for me", "analyzing repository from my github for me", "do an analysis of nexus windows repo", "i want you to analyse zync", "take a look at this repo and analyse it",
+                  "analyze this repository", "let us analyze this repository", "okay analyse this rap up", "can you please analyse this repo"],
  "analyse_pr": ["analyse pr 254 in zync", "analyze pull request 12 in servx", "look at pr number 34", "review pull request 7 of zync", "what is in pr 254", "check pr 254 for me",
                 "analyse pr 254 in zink", "analyse pull request two fifty four in sir vex"],
  "analyse_latest_pr": ["analyse the latest pr", "analyze the newest pull request in zync", "review the last pr", "look at the most recent pull request", "check the latest pr in servx"],
