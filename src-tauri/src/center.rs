@@ -252,7 +252,12 @@ pub fn command_evidence(
             }
         }
         ParsedIntent::AnalyseRepo { repo, .. } => {
-            if matches!(
+            // "Analyse this repo": the user points at what is on screen. That is the whole request, not a guess at a
+            // repository name, so a clear deterministic parse is Strong (2026-11-01: it was rated Medium, an unenrolled
+            // voice was then asked "Which repository should I use?" and the screen was never read).
+            if strength >= 3 && crate::orchestrator::is_deictic_repo_word(repo) {
+                CommandEvidence::Strong
+            } else if matches!(
                 crate::github_repo_index::peek(repo),
                 Some(crate::github_repo_index::Resolution::One(_))
             ) {
@@ -1229,6 +1234,18 @@ mod director_tests {
             ),
             ActionDisposition::Allow
         );
+    }
+
+    #[test]
+    fn analyse_this_repo_is_strong_evidence_and_runs_for_an_unenrolled_voice() {
+        let intent = ParsedIntent::AnalyseRepo { owner: None, repo: "this".to_string() };
+        for t in ["analyse this repo", "let us analyze this repository", "analyze the report"] {
+            assert_eq!(command_evidence(&intent, t, "deterministic"), CommandEvidence::Strong, "{t}");
+            assert_eq!(action_disposition(&intent, t, "deterministic", TurnOwnership::Unenrolled, false), ActionDisposition::Allow, "{t}");
+        }
+        // A guessed repository name is still only a guess.
+        let guess = ParsedIntent::AnalyseRepo { owner: None, repo: "some random words".to_string() };
+        assert_ne!(command_evidence(&guess, "analyse some random words", "deterministic"), CommandEvidence::Strong);
     }
 
     #[test]
