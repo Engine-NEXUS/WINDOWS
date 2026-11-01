@@ -686,6 +686,14 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
             *g = agg.outcomes.clone();
         }
         let finished_now = announcer.step(now_ms, &snapshots);
+        // while the user is away every finish is also kept for the moment they are back
+        if !finished_now.is_empty() && user_idle_ms().map_or(false, |i| i >= crate::agent_attention::AWAY_MS) {
+            if let Ok(dir) = app.path().app_data_dir() {
+                for o in &finished_now {
+                    crate::agent_attention::remember(&dir, &o.label, &crate::agent_tracker::outcome_line(o));
+                }
+            }
+        }
         // "... and commit and raise a PR": per finished agent, only after the user said yes, once per plan
         if stored.plan.followup && stored.followup_ok {
             for o in &finished_now {
@@ -700,7 +708,7 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
             awake = None;
         } else {
             if awake.is_none() {
-                awake = crate::keep_awake::acquire_lease();
+                awake = crate::keep_awake::acquire_pinned(crate::keep_awake::MAX_WATCH_HOLD);
             }
             crate::keep_awake::heartbeat();
         }

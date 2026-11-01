@@ -167,6 +167,7 @@ pub(crate) mod session_observer;
 pub(crate) mod watch_runner;
 pub(crate) mod agent_tracker;
 pub(crate) mod agent_outcomes;
+pub(crate) mod agent_attention;
 pub(crate) mod howto;
 pub(crate) mod email_brief;
 pub(crate) mod repo_hint;
@@ -853,6 +854,7 @@ pub fn run() {
             proactive_policy::start_ticker(app.handle().clone()); // releases deferred alerts at breakpoints
             memcore::resume::start_recorder(app.handle().clone()); // 30 s foreground-window resume points
             memcore::briefing::start_boot_briefing(app.handle().clone()); // once-a-day spoken "where you left off"
+            agent_attention::start(app.handle().clone()); // "Codex needs your input, sir" + what happened while you were away
             memcore::routines::start_suggester(app.handle().clone()); // offers a routine when it notices a repeated sequence
             memcore::curator::start_curator(app.handle().clone()); // daily idle upkeep: retire unused routines, keep used profile facts
             memcore::review::start_reviewer(app.handle().clone()); // optional, default off: suggests profile facts for approval

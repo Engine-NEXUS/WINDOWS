@@ -399,7 +399,7 @@ pub async fn start_watch<R: tauri::Runtime>(
         .to_string();
 
     mark_activity();
-    let lease = crate::keep_awake::acquire_lease();
+    let lease = crate::keep_awake::acquire_pinned(crate::keep_awake::MAX_WATCH_HOLD);
     ACTIVE_WATCHES.lock().unwrap().push((id.clone(), lease));
 
     let poll_id = id.clone();
@@ -496,7 +496,7 @@ pub async fn start_desktop_or_ide_watch<R: tauri::Runtime>(
             .unwrap_or(0)
     );
 
-    let lease = crate::keep_awake::acquire_lease();
+    let lease = crate::keep_awake::acquire_pinned(crate::keep_awake::MAX_WATCH_HOLD);
     ACTIVE_WATCHES.lock().unwrap().push((id.clone(), lease));
 
     let watch_id = id.clone();
