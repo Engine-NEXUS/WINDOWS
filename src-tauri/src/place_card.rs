@@ -184,7 +184,7 @@ pub fn parse_wiki_image(body: &str, lat: f64, lon: f64) -> Option<String> {
         return None;
     }
     let url = v.get("thumbnail")?.get("source")?.as_str()?;
-    url.starts_with("https://upload.wikimedia.org/").then(|| url.to_string())
+    (url.starts_with("https://upload.wikimedia.org/") || url.starts_with("https://thumb.wikimedia.org/")).then(|| url.to_string())
 }
 
 /// A keyless satellite image around the point (Esri World Imagery export). Pure.
@@ -285,7 +285,7 @@ async fn google_route(c: &reqwest::Client, key: &str, from: (f64, f64), to: (f64
         .await
         .ok()?;
     if !r.status().is_success() {
-        tracing::debug!("place card: routes {mode} HTTP {}", r.status());
+        tracing::info!("place card: Google Routes {mode} refused (HTTP {}); falling back to the open route service", r.status());
         return None;
     }
     parse_routes(&r.text().await.ok()?)
@@ -339,8 +339,9 @@ async fn fetch_image(c: &reqwest::Client, url: &str, authed_key: Option<&str>) -
 async fn photo_for(c: &reqwest::Client, key: &str, f: &Found, query: &str) -> Option<Photo> {
     if let (false, Some((name, credit))) = (key.is_empty(), f.photo.as_ref()) {
         let url = format!("https://places.googleapis.com/v1/{name}/media?maxWidthPx=630");
-        if let Some(uri) = fetch_image(c, &url, Some(key)).await {
-            return Some(Photo { data_uri: uri, kind: "photo", credit: credit.clone().map(|c| format!("Photo: {c} / Google")) });
+        match fetch_image(c, &url, Some(key)).await {
+            Some(uri) => return Some(Photo { data_uri: uri, kind: "photo", credit: credit.clone().map(|c| format!("Photo: {c} / Google")) }),
+            None => tracing::info!("place card: the Google photo could not be fetched; trying Wikipedia"),
         }
     }
     let title = query.split(',').next().unwrap_or(query).trim().replace(' ', "_");
@@ -356,6 +357,7 @@ async fn photo_for(c: &reqwest::Client, key: &str, f: &Found, query: &str) -> Op
             }
         }
     }
+    tracing::info!("place card: no photo found for {:?}; showing a map image", f.name);
     let uri = fetch_image(c, &map_image_url(f.lat, f.lon), None).await?;
     Some(Photo { data_uri: uri, kind: "map", credit: Some("Imagery: Esri".into()) })
 }
@@ -503,6 +505,8 @@ mod tests {
     fn wikipedia_image_is_used_only_for_the_same_place() {
         let body = |lat: f64| format!(r#"{{"type":"standard","coordinates":{{"lat":{lat},"lon":78.4747}},"thumbnail":{{"source":"https://upload.wikimedia.org/a/b.jpg"}}}}"#);
         assert!(parse_wiki_image(&body(17.3616), 17.3616, 78.4747).is_some());
+        let thumb = r#"{"type":"standard","coordinates":{"lat":17.3616,"lon":78.4747},"thumbnail":{"source":"https://thumb.wikimedia.org/wikipedia/commons/thumb/7/71/C.jpg/330px-C.jpg"}}"#;
+        assert!(parse_wiki_image(thumb, 17.3616, 78.4747).is_some(), "Wikipedia serves thumbnails from thumb.wikimedia.org");
         assert!(parse_wiki_image(&body(18.5), 17.3616, 78.4747).is_none(), "a different place with the same name");
         assert!(parse_wiki_image(r#"{"type":"disambiguation"}"#, 1.0, 1.0).is_none());
         let no_coords = r#"{"thumbnail":{"source":"https://upload.wikimedia.org/a/b.jpg"}}"#;
