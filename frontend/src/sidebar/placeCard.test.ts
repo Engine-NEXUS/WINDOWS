@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatKm, formatMinutes, formatRupees, isPlaceCard, safeImageSrc } from "./placeCardModel";
+import { categoryIcon, formatKm, formatMinutes, formatRupees, isPlaceCard, safeImageSrc, siteHost } from "./placeCardModel";
 import { pinnedView } from "./UnifiedSidebar";
 
 describe("place card model", () => {
@@ -22,5 +22,18 @@ describe("place card model", () => {
   });
   it("is a pinned view", () => {
     expect(pinnedView("?pin=place")).toBe("place");
+  });
+  it("picks a category icon from the place type", () => {
+    expect(categoryIcon("Restaurant")).toBe("utensils");
+    expect(categoryIcon("Shopping mall")).toBe("bag");
+    expect(categoryIcon("Monument")).toBe("landmark");
+    expect(categoryIcon("Hospital")).toBe("hospital");
+    expect(categoryIcon("Pharmacy")).toBe("pill");
+    expect(categoryIcon("Something odd")).toBe("place");
+    expect(categoryIcon(null)).toBe("place");
+  });
+  it("shows a website as its host only for http(s)", () => {
+    expect(siteHost("https://www.paradisefood.com/menu")).toBe("paradisefood.com");
+    for (const bad of ["javascript:alert(1)", "file:///c:/x", "not a url", "", null, undefined]) expect(siteHost(bad as string | null | undefined)).toBeNull();
   });
 });

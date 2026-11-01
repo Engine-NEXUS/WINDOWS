@@ -53,6 +53,9 @@ pub struct PlaceCard {
     pub phone: Option<String>,
     pub rating: Option<f32>,
     pub summary: Option<String>,
+    pub website: Option<String>,
+    /// Opening hours for the whole week, as Google words them ("Monday: 9:00 AM - 5:30 PM").
+    pub weekday_hours: Vec<String>,
     pub fares: Vec<Fare>,
 }
 
@@ -69,6 +72,7 @@ pub struct Found {
     pub weekday_hours: Vec<String>,
     pub phone: Option<String>,
     pub summary: Option<String>,
+    pub website: Option<String>,
     /// Google photo resource name and the author credit, when there is one.
     pub photo: Option<(String, Option<String>)>,
 }
@@ -132,7 +136,8 @@ pub fn parse_nominatim(body: &str) -> Option<Found> {
     let display = p.get("display_name").and_then(|d| d.as_str()).unwrap_or("").to_string();
     let name = p.get("name").and_then(|n| n.as_str()).filter(|n| !n.is_empty()).map(str::to_string).or_else(|| display.split(',').next().map(|s| s.trim().to_string()))?;
     let category = p.get("type").and_then(|t| t.as_str()).filter(|t| !matches!(*t, "yes" | "")).map(pretty_kind);
-    Some(Found { name, category, address: (!display.is_empty()).then_some(display), lat, lon, ..Found::default() })
+    let website = p.get("extratags").and_then(|e| e.get("website")).and_then(|w| w.as_str()).map(str::to_string);
+    Some(Found { name, category, address: (!display.is_empty()).then_some(display), lat, lon, website, ..Found::default() })
 }
 
 /// Google Places (New) text-search answer -> the first place. Pure.
@@ -167,6 +172,7 @@ pub fn parse_google_place(body: &str) -> Option<Found> {
             .unwrap_or_default(),
         phone: p.get("nationalPhoneNumber").and_then(|a| a.as_str()).map(str::to_string),
         summary: text("editorialSummary"),
+        website: p.get("websiteUri").and_then(|a| a.as_str()).map(str::to_string),
         photo,
     })
 }
@@ -184,7 +190,138 @@ pub fn parse_wiki_image(body: &str, lat: f64, lon: f64) -> Option<String> {
         return None;
     }
     let url = v.get("thumbnail")?.get("source")?.as_str()?;
-    (url.starts_with("https://upload.wikimedia.org/") || url.starts_with("https://thumb.wikimedia.org/")).then(|| url.to_string())
+    if !(url.starts_with("https://upload.wikimedia.org/") || url.starts_with("https://thumb.wikimedia.org/")) {
+        return None;
+    }
+    Some(wider_thumb(url))
+}
+
+/// Wikimedia thumbnail URLs carry their width ("/330px-"); ask for 640 so the image is sharp at the card width. Pure.
+pub fn wider_thumb(url: &str) -> String {
+    let Some(i) = url.find("px-") else { return url.to_string() };
+    let start = url[..i].rfind('/').map(|p| p + 1).unwrap_or(0);
+    if url[start..i].chars().all(|c| c.is_ascii_digit()) && i > start {
+        format!("{}640{}", &url[..start], &url[i..])
+    } else {
+        url.to_string()
+    }
+}
+
+/// Place types that are worth a Wikimedia Commons coordinate search (a shop next to a monument must not get the
+/// monument's photo). Pure.
+pub fn is_landmark_category(category: Option<&str>) -> bool {
+    let Some(c) = category else { return false };
+    let c = c.to_lowercase();
+    ["monument", "attraction", "tourist", "temple", "mosque", "church", "fort", "palace", "museum", "memorial", "castle", "landmark", "heritage", "historic", "worship", "park", "lake", "station"]
+        .iter()
+        .any(|k| c.contains(k))
+}
+
+/// Commons files near a point, with a 640 px thumbnail and licence data, in one request. Pure URL.
+pub fn commons_url(lat: f64, lon: f64) -> String {
+    format!(
+        "https://commons.wikimedia.org/w/api.php?action=query&generator=geosearch&ggscoord={lat:.6}%7C{lon:.6}&ggsradius=250&ggslimit=8&ggsnamespace=6&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=640&format=json"
+    )
+}
+
+fn strip_tags(s: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for ch in s.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.trim().to_string()
+}
+
+/// The best Commons file from a geosearch answer: a jpeg/png with a thumbnail, nearest first. Returns (thumbnail url,
+/// credit text). Pure.
+pub fn parse_commons(body: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let pages = v.get("query")?.get("pages")?.as_object()?;
+    let mut items: Vec<(i64, String, String)> = Vec::new();
+    for p in pages.values() {
+        let info = p.get("imageinfo").and_then(|i| i.get(0))?;
+        let mime = info.get("mime").and_then(|m| m.as_str()).unwrap_or("");
+        if mime != "image/jpeg" && mime != "image/png" {
+            continue;
+        }
+        let url = info.get("thumburl").and_then(|u| u.as_str())?;
+        if !url.starts_with("https://upload.wikimedia.org/") {
+            continue;
+        }
+        let meta = info.get("extmetadata");
+        let field = |k: &str| meta.and_then(|m| m.get(k)).and_then(|f| f.get("value")).and_then(|v| v.as_str()).map(strip_tags).filter(|s| !s.is_empty());
+        let credit = match (field("Artist"), field("LicenseShortName")) {
+            (Some(a), Some(l)) => format!("Photo: {a} / {l} / Wikimedia Commons"),
+            (None, Some(l)) => format!("Photo: {l} / Wikimedia Commons"),
+            _ => "Photo: Wikimedia Commons".to_string(),
+        };
+        items.push((p.get("index").and_then(|i| i.as_i64()).unwrap_or(99), url.to_string(), credit));
+    }
+    items.sort_by_key(|i| i.0);
+    items.into_iter().next().map(|(_, u, c)| (u, c))
+}
+
+/// The page's preview image (`og:image`, else `twitter:image`) as an absolute https URL. Pure.
+pub fn parse_og_image(html: &str, base: &str) -> Option<String> {
+    let lower = html.to_lowercase();
+    for key in ["og:image", "twitter:image"] {
+        let mut from = 0;
+        while let Some(i) = lower[from..].find("<meta") {
+            let start = from + i;
+            let end = lower[start..].find('>').map(|e| start + e)?;
+            let tag = &html[start..end];
+            let tl = &lower[start..end];
+            from = end;
+            if !(tl.contains(&format!("property=\"{key}\"")) || tl.contains(&format!("name=\"{key}\"")) || tl.contains(&format!("property='{key}'")) || tl.contains(&format!("name='{key}'"))) {
+                continue;
+            }
+            let ci = tl.find("content=")?;
+            let rest = &tag[ci + 8..];
+            let q = rest.chars().next()?;
+            if q != '"' && q != '\'' {
+                continue;
+            }
+            let val = &rest[1..];
+            let val = &val[..val.find(q)?];
+            let abs = tauri::Url::parse(base).ok()?.join(val.trim()).ok()?;
+            if abs.scheme() == "https" {
+                return Some(abs.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Does robots.txt allow `path` for everyone (`User-agent: *`)? Longest matching rule wins, Allow beats Disallow on a
+/// tie. An unreadable or empty file allows. Pure.
+pub fn robots_allows(robots: &str, path: &str) -> bool {
+    let mut applies = false;
+    let mut best: Option<(usize, bool)> = None;
+    for line in robots.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        let Some((k, v)) = line.split_once(':') else { continue };
+        let (k, v) = (k.trim().to_lowercase(), v.trim());
+        match k.as_str() {
+            "user-agent" => applies = v == "*",
+            "allow" | "disallow" if applies && !v.is_empty() => {
+                if path.starts_with(v) {
+                    let rule = (v.len(), k == "allow");
+                    best = Some(match best {
+                        Some(b) if b.0 > rule.0 || (b.0 == rule.0 && b.1) => b,
+                        _ => rule,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    best.map(|b| b.1).unwrap_or(true)
 }
 
 /// A keyless satellite image around the point (Esri World Imagery export). Pure.
@@ -237,7 +374,7 @@ async fn google_lookup(c: &reqwest::Client, key: &str, query: &str, here: Option
         .header("X-Goog-Api-Key", key)
         .header(
             "X-Goog-FieldMask",
-            "places.displayName,places.formattedAddress,places.location,places.rating,places.currentOpeningHours.openNow,places.regularOpeningHours.weekdayDescriptions,places.nationalPhoneNumber,places.primaryTypeDisplayName,places.editorialSummary,places.photos",
+            "places.displayName,places.formattedAddress,places.location,places.rating,places.currentOpeningHours.openNow,places.regularOpeningHours.weekdayDescriptions,places.nationalPhoneNumber,places.primaryTypeDisplayName,places.editorialSummary,places.websiteUri,places.photos",
         )
         .json(&body)
         .send()
@@ -251,7 +388,7 @@ async fn google_lookup(c: &reqwest::Client, key: &str, query: &str, here: Option
 }
 
 async fn nominatim_lookup(c: &reqwest::Client, query: &str) -> Option<Found> {
-    let url = format!("https://nominatim.openstreetmap.org/search?q={}&format=jsonv2&limit=1&accept-language=en", enc(query));
+    let url = format!("https://nominatim.openstreetmap.org/search?q={}&format=jsonv2&limit=1&accept-language=en&extratags=1", enc(query));
     let r = c.get(url).send().await.ok()?;
     if !r.status().is_success() {
         return None;
@@ -336,12 +473,41 @@ async fn fetch_image(c: &reqwest::Client, url: &str, authed_key: Option<&str>) -
     Some(format!("data:{};base64,{}", mime.split(';').next().unwrap_or("image/jpeg"), base64::engine::general_purpose::STANDARD.encode(&bytes)))
 }
 
+async fn website_image(c: &reqwest::Client, site: &str) -> Option<(String, String)> {
+    let u = tauri::Url::parse(site).ok()?;
+    if u.scheme() != "https" && u.scheme() != "http" {
+        return None;
+    }
+    let host = u.host_str()?.to_string();
+    // robots.txt first: a site that says no is not fetched.
+    let robots_url = format!("https://{host}/robots.txt");
+    if let Ok(r) = c.get(robots_url).send().await {
+        if r.status().is_success() {
+            let txt = r.text().await.unwrap_or_default();
+            if !robots_allows(&txt, if u.path().is_empty() { "/" } else { u.path() }) {
+                tracing::info!("place card: {host} disallows fetching the page, skipping its preview image");
+                return None;
+            }
+        }
+    }
+    let page = c.get(u.as_str()).send().await.ok()?;
+    if !page.status().is_success() {
+        return None;
+    }
+    let final_url = page.url().to_string();
+    let html = page.text().await.ok()?;
+    let head: String = html.chars().take(200_000).collect();
+    let img = parse_og_image(&head, &final_url)?;
+    let uri = fetch_image(c, &img, None).await?;
+    Some((uri, format!("Image from {host}")))
+}
+
 async fn photo_for(c: &reqwest::Client, key: &str, f: &Found, query: &str) -> Option<Photo> {
     if let (false, Some((name, credit))) = (key.is_empty(), f.photo.as_ref()) {
-        let url = format!("https://places.googleapis.com/v1/{name}/media?maxWidthPx=630");
+        let url = format!("https://places.googleapis.com/v1/{name}/media?maxWidthPx=800");
         match fetch_image(c, &url, Some(key)).await {
             Some(uri) => return Some(Photo { data_uri: uri, kind: "photo", credit: credit.clone().map(|c| format!("Photo: {c} / Google")) }),
-            None => tracing::info!("place card: the Google photo could not be fetched; trying Wikipedia"),
+            None => tracing::info!("place card: the Google photo could not be fetched; trying other sources"),
         }
     }
     let title = query.split(',').next().unwrap_or(query).trim().replace(' ', "_");
@@ -355,6 +521,20 @@ async fn photo_for(c: &reqwest::Client, key: &str, f: &Found, query: &str) -> Op
                     }
                 }
             }
+        }
+    }
+    if is_landmark_category(f.category.as_deref()) {
+        if let Ok(r) = c.get(commons_url(f.lat, f.lon)).send().await {
+            if let Some((img, credit)) = r.text().await.ok().as_deref().and_then(parse_commons) {
+                if let Some(uri) = fetch_image(c, &img, None).await {
+                    return Some(Photo { data_uri: uri, kind: "photo", credit: Some(credit) });
+                }
+            }
+        }
+    }
+    if let Some(site) = f.website.as_deref() {
+        if let Some((uri, credit)) = website_image(c, site).await {
+            return Some(Photo { data_uri: uri, kind: "photo", credit: Some(credit) });
         }
     }
     tracing::info!("place card: no photo found for {:?}; showing a map image", f.name);
@@ -390,6 +570,8 @@ pub async fn build<R: Runtime>(app: &AppHandle<R>, query: &str, here: Option<Fix
     let tariff = app.path().app_data_dir().map(|d| crate::fares::load_tariff(&d)).unwrap_or_default();
     Some(PlaceCard {
         hours_today: crate::orchestrator::hours_today(&found.weekday_hours, weekday),
+        weekday_hours: found.weekday_hours.clone(),
+        website: found.website.clone(),
         fares: route.as_ref().map(|r| crate::fares::estimate(&tariff, r.km, night)).unwrap_or_default(),
         distance_km: route.as_ref().map(|r| (r.km * 10.0).round() / 10.0),
         car_min: route.as_ref().map(|r| r.car_min),
@@ -440,6 +622,11 @@ pub fn place_card_open(kind: String) -> Result<(), String> {
             card.lon,
             enc(&card.name)
         ),
+        // The place's own website, only when it is a plain http(s) address.
+        "site" => match card.website.as_deref().and_then(|w| tauri::Url::parse(w).ok()) {
+            Some(u) if u.scheme() == "https" || u.scheme() == "http" => u.to_string(),
+            _ => return Err("no website".into()),
+        },
         _ => return Err("unknown link".into()),
     };
     open::that(url).map_err(|e| e.to_string())
@@ -527,5 +714,51 @@ mod tests {
         assert!(spoken_extra(&c).contains("23 kilometres") && spoken_extra(&c).contains("48 minutes"));
         c.car_min = None;
         assert!(spoken_extra(&c).is_empty());
+    }
+
+    #[test]
+    fn wikimedia_thumbnails_are_widened() {
+        assert_eq!(wider_thumb("https://thumb.wikimedia.org/wikipedia/commons/thumb/7/71/C.jpg/330px-C.jpg?utm=1"), "https://thumb.wikimedia.org/wikipedia/commons/thumb/7/71/C.jpg/640px-C.jpg?utm=1");
+        assert_eq!(wider_thumb("https://upload.wikimedia.org/a/b.jpg"), "https://upload.wikimedia.org/a/b.jpg");
+    }
+
+    #[test]
+    fn only_landmarks_get_the_coordinate_photo_search() {
+        for c in ["Monument", "Tourist attraction", "Hindu temple", "Fort"] {
+            assert!(is_landmark_category(Some(c)), "{c}");
+        }
+        for c in ["Restaurant", "Shopping mall", "Pharmacy"] {
+            assert!(!is_landmark_category(Some(c)), "{c}");
+        }
+        assert!(!is_landmark_category(None));
+    }
+
+    #[test]
+    fn commons_answer_gives_nearest_jpeg_with_credit() {
+        let body = r#"{"query":{"pages":{"1":{"index":2,"imageinfo":[{"mime":"image/jpeg","thumburl":"https://upload.wikimedia.org/x/b.jpg","extmetadata":{"Artist":{"value":"<a href=\"x\">Asha</a>"},"LicenseShortName":{"value":"CC BY-SA 4.0"}}}]},"2":{"index":1,"imageinfo":[{"mime":"image/svg+xml","thumburl":"https://upload.wikimedia.org/x/a.png"}]},"3":{"index":3,"imageinfo":[{"mime":"image/jpeg","thumburl":"https://evil.example/c.jpg"}]}}}}"#;
+        let (u, c) = parse_commons(body).unwrap();
+        assert_eq!(u, "https://upload.wikimedia.org/x/b.jpg");
+        assert_eq!(c, "Photo: Asha / CC BY-SA 4.0 / Wikimedia Commons");
+        assert!(parse_commons("{}").is_none());
+    }
+
+    #[test]
+    fn og_image_is_read_resolved_and_must_be_https() {
+        let html = r#"<html><head><meta charset="utf-8"><meta property="og:image" content="/img/hero.jpg"><title>x</title></head>"#;
+        assert_eq!(parse_og_image(html, "https://shop.example/menu").as_deref(), Some("https://shop.example/img/hero.jpg"));
+        let tw = r#"<meta name='twitter:image' content='https://cdn.example/a.png'>"#;
+        assert_eq!(parse_og_image(tw, "https://shop.example/").as_deref(), Some("https://cdn.example/a.png"));
+        assert!(parse_og_image(r#"<meta property="og:image" content="http://insecure.example/a.jpg">"#, "https://s.example/").is_none());
+        assert!(parse_og_image("<html></html>", "https://s.example/").is_none());
+    }
+
+    #[test]
+    fn robots_rules_are_honoured() {
+        let r = "User-agent: Googlebot\nDisallow: /\n\nUser-agent: *\nDisallow: /private\nAllow: /private/public\n";
+        assert!(robots_allows(r, "/"));
+        assert!(!robots_allows(r, "/private/x"));
+        assert!(robots_allows(r, "/private/public/y"));
+        assert!(robots_allows("", "/anything"));
+        assert!(!robots_allows("User-agent: *\nDisallow: /", "/menu"));
     }
 }

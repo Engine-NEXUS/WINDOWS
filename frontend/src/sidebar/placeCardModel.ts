@@ -12,8 +12,10 @@ export interface PlaceCardData {
   travelApprox?: boolean;
   photo?: { dataUri: string; kind: "photo" | "map"; credit?: string | null } | null;
   hoursToday?: string | null;
+  weekdayHours?: string[];
   openNow?: boolean | null;
   phone?: string | null;
+  website?: string | null;
   rating?: number | null;
   summary?: string | null;
   fares?: { kind: string; label: string; low: number; high: number }[];
@@ -44,4 +46,33 @@ export function formatMinutes(min: number): string {
 
 export function formatRupees(low: number, high: number): string {
   return low === high ? `₹${low}` : `₹${low}–${high}`;
+}
+
+/** Which icon a place type gets in the category pill. Keyword match on the type text; unknown types get a neutral mark. */
+export function categoryIcon(category: string | null | undefined): string {
+  const c = (category ?? "").toLowerCase();
+  const rules: [string[], string][] = [
+    [["restaurant", "cafe", "coffee", "food", "bakery", "biryani", "dhaba", "bar"], "utensils"],
+    [["mall", "shopping", "supermarket", "market"], "bag"],
+    [["shop", "store", "boutique", "salon", "retail"], "store"],
+    [["hospital", "clinic", "doctor", "medical"], "hospital"],
+    [["pharmacy", "chemist", "drug"], "pill"],
+    [["fuel", "petrol", "gas station"], "fuel"],
+    [["school", "college", "university", "academy"], "school"],
+    [["hotel", "lodging", "resort", "hostel"], "hotel"],
+    [["monument", "attraction", "tourist", "temple", "mosque", "church", "fort", "palace", "museum", "memorial", "castle", "landmark", "heritage", "historic", "worship"], "landmark"],
+  ];
+  for (const [keys, icon] of rules) if (keys.some((k) => c.includes(k))) return icon;
+  return "place";
+}
+
+/** Host name of a website for display ("www." removed). */
+export function siteHost(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" || u.protocol === "http:" ? u.host.replace(/^www\./, "") : null;
+  } catch {
+    return null;
+  }
 }
