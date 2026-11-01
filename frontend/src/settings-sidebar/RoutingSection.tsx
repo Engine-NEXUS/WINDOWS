@@ -69,15 +69,15 @@ export function RoutingSection({ settings, update }: Props) {
         ))}
       </div>
 
-      <div className="setting-row" style={{ marginTop: 12 }}>
+      <div className="setting-row" style={{ marginTop: 12, flexDirection: "column", alignItems: "stretch", gap: 6 }}>
         <label htmlFor="routing-url">Server address</label>
         <input id="routing-url" type="url" inputMode="url" placeholder="https://route.example.com" value={settings.routingServerUrl ?? ""} onChange={(e) => update("routingServerUrl", e.target.value)} style={{ width: "100%" }} />
         <div className="setting-desc">https, or http only for a server on this computer or your home network. Remember to Save.</div>
       </div>
-      <div className="setting-row">
+      <div className="setting-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
         <label htmlFor="routing-token">Server token</label>
         <div style={{ display: "flex", gap: 8 }}>
-          <input id="routing-token" type="password" autoComplete="off" placeholder="paste the token, then Save token" value={token} onChange={(e) => setToken(e.target.value)} style={{ flex: 1, minWidth: 0 }} />
+          <input id="routing-token" type="password" autoComplete="off" placeholder="paste the token" value={token} onChange={(e) => setToken(e.target.value)} style={{ flex: 1, minWidth: 0 }} />
           <button type="button" className="settings-btn" disabled={busy || !token.trim()} onClick={saveToken}>
             Save token
           </button>
