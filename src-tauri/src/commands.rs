@@ -1804,6 +1804,13 @@ pub struct NexusSettings {
     /// Show maps inside a NEXUS panel (Google's embed). Off = always use the old Maps window.
     #[serde(default = "default_true")]
     pub maps_embed: bool,
+    /// Where the place card gets distance and travel time: "auto" (your routing server if one is set, else your Google
+    /// key, else the open service), "server", "google" or "open".
+    #[serde(default = "default_routing_mode")]
+    pub routing_mode: String,
+    /// Address of your own routing server (see server/routing). Empty = none.
+    #[serde(default)]
+    pub routing_server_url: String,
     /// Wake-word front-end chain: "legacy" (the original runtime chain, default)
     /// or "aligned" (identical to the chain the classifier was trained with).
     /// Compare with `wake_eval --dsp` on your recordings before switching.
@@ -2296,6 +2303,8 @@ impl Default for NexusSettings {
             wake_seed_offset_ms: 0,
             wake_owner_fast_path: false,
             maps_embed: true,
+            routing_mode: default_routing_mode(),
+            routing_server_url: String::new(),
             wake_dsp_profile: default_wake_dsp_profile(),
             ghost_step_timeout_ms: 15000,
             ghost_turn_gap_ms: 1000,
@@ -3311,6 +3320,23 @@ pub fn read_wake_verify_high<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> f3
         .and_then(|j| j.get("wakeVerifyHigh").and_then(|v| v.as_f64()))
         .map(|v| v as f32)
         .unwrap_or(crate::wakeword_oww::DEFAULT_VERIFY_HIGH)
+}
+
+fn default_routing_mode() -> String {
+    "auto".to_string()
+}
+
+/// `(routingMode, routingServerUrl)` from settings.json, with the defaults when unset. The server token is a key in
+/// the vault (`routing_server`), never in this file.
+pub fn read_routing_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> (String, String) {
+    let j = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .and_then(|d| std::fs::read_to_string(d.join("settings.json")).ok())
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
+    let get = |k: &str| j.as_ref().and_then(|j| j.get(k)).and_then(|v| v.as_str()).map(|s| s.trim().to_string());
+    (get("routingMode").filter(|m| matches!(m.as_str(), "auto" | "server" | "google" | "open")).unwrap_or_else(default_routing_mode), get("routingServerUrl").unwrap_or_default())
 }
 
 /// Read `wakeOwnerFastPath` (false when unset: the cloud speech check stays on).

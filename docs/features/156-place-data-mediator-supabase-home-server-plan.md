@@ -73,3 +73,9 @@ Each layer does one job: Cloudflare keeps strangers out and absorbs load, Supaba
 2. Who gets access first, and how invites are issued.
 3. OK to store only licensed/open image links (no Google content)?
 4. OK to fetch website preview images with robots.txt respected?
+
+## Built (2026-11-01): routing server option
+- `server/routing/`: Valhalla + adapter (`app.py`, tests, docker-compose, README). Not run against real Valhalla (no Docker on the dev machine).
+- Place card routing order is a setting, `routingMode`: auto (server, then your Google key, then the free open service), server, google, open.
+- Command Hub, Connections: "Distance and travel time" section (mode, server address, token in the keychain, Test server).
+- Supabase, the invite flow and the image index (the rest of this plan) are still to do.

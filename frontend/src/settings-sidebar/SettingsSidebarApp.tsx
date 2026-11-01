@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, Component, type ErrorInfo } from "react";
 import { HandModeSection } from "./HandModeSection";
 import { AgentWatchSection } from "./AgentWatchSection";
+import { RoutingSection } from "./RoutingSection";
 import { invoke } from "@tauri-apps/api/core";
 import { useVoiceLockState, VoiceLockStatus, VerifiedSaveStatus } from "../settings/VoiceLockStatus";
 import { applyNativeLockToDraft, clearSubmittedFields, type VoiceLockState } from "../settings/voiceLockState";
@@ -130,6 +131,8 @@ interface Settings {
   ghostTurnGapMs?: number;
   ghostEngagementSecs?: number;
   directedGate?: boolean;
+  routingMode?: string;
+  routingServerUrl?: string;
   handMode?: boolean;
   handMousePreview?: boolean;
   handShowCamera?: boolean;
@@ -221,6 +224,8 @@ const DEFAULT_SETTINGS: Settings = {
   ghostTurnGapMs: 1000,
   ghostEngagementSecs: 0,
   directedGate: true,
+  routingMode: "auto",
+  routingServerUrl: "",
   handMode: true,
   handMousePreview: false,
   handShowCamera: false,
@@ -466,7 +471,7 @@ export function SettingsSidebarApp({ onDock: _onDock = () => {} }: { onDock?: (d
           {page === "actions" && <ActionsPage />}
           {page === "device-links" && <DeviceLinksPage onOpenActivity={() => setPage("activity")} />}
           {page === "activity" && <ActivityManagerPage />}
-          {page === "connections" && <McpServersPanel />}
+          {page === "connections" && <><McpServersPanel /><RoutingSection settings={settings} update={update as (k: "routingMode" | "routingServerUrl", v: string) => void} /></>}
           {page === "appearance" && <AppearancePage themeMode={themePreference} onTheme={handleTheme} />}
           {isLegacyPage && (
             <div className="hx-legacy">

@@ -402,7 +402,7 @@ async fn nominatim_lookup(c: &reqwest::Client, query: &str) -> Option<Found> {
     parse_nominatim(&r.text().await.ok()?)
 }
 
-struct Route {
+pub struct Route {
     km: f64,
     car_min: u32,
     bike_min: u32,
@@ -434,17 +434,69 @@ async fn google_route(c: &reqwest::Client, key: &str, from: (f64, f64), to: (f64
     parse_routes(&r.text().await.ok()?)
 }
 
-async fn route(c: &reqwest::Client, key: &str, from: (f64, f64), to: (f64, f64)) -> Route {
-    if !key.is_empty() {
-        let (drive, bike) = tokio::join!(google_route(c, key, from, to, "DRIVE"), google_route(c, key, from, to, "TWO_WHEELER"));
-        if let Some((km, car)) = drive {
-            let (bike_min, bike_approx) = match bike {
-                Some((_, m)) => (m, false),
-                None => (bike_from_car(car), true),
-            };
-            return Route { km, car_min: car, bike_min, bike_approx, travel_approx: false };
-        }
+/// `https://host`, or `http://` only for this computer or a private network address (a server at home, no tunnel).
+/// Returns the URL without a trailing slash. Pure.
+pub fn server_url_ok(url: &str) -> Option<String> {
+    let u = tauri::Url::parse(url.trim()).ok()?;
+    let host = u.host_str()?.to_string();
+    let private = host == "localhost"
+        || host.starts_with("127.")
+        || host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || host
+            .strip_prefix("172.")
+            .and_then(|r| r.split('.').next())
+            .and_then(|n| n.parse::<u8>().ok())
+            .is_some_and(|n| (16..=31).contains(&n));
+    match u.scheme() {
+        "https" => {}
+        "http" if private => {}
+        _ => return None,
     }
+    Some(u.as_str().trim_end_matches('/').to_string())
+}
+
+/// Your routing server's answer -> Route. Pure.
+pub fn parse_server_route(body: &str) -> Option<Route> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let km = v.get("km")?.as_f64()?;
+    let car = v.get("carMin")?.as_f64()?;
+    if !(km > 0.0 && km < 4000.0 && car > 0.0) {
+        return None;
+    }
+    let car_min = car.round().max(1.0) as u32;
+    let (bike_min, bike_approx) = match (v.get("bikeMin").and_then(|b| b.as_f64()), v.get("bikeMeasured").and_then(|m| m.as_bool())) {
+        (Some(b), Some(true)) if b > 0.0 => (b.round().max(1.0) as u32, false),
+        (Some(b), _) if b > 0.0 => (b.round().max(1.0) as u32, true),
+        _ => (bike_from_car(car_min), true),
+    };
+    Some(Route { km, car_min, bike_min, bike_approx, travel_approx: !v.get("traffic").and_then(|t| t.as_bool()).unwrap_or(false) })
+}
+
+async fn server_route(c: &reqwest::Client, base: &str, token: &str, from: (f64, f64), to: (f64, f64)) -> Option<Route> {
+    let mut req = c.get(format!("{base}/route")).query(&[("fromLat", from.0), ("fromLon", from.1), ("toLat", to.0), ("toLon", to.1)]);
+    if !token.is_empty() {
+        req = req.bearer_auth(token);
+    }
+    let r = req.send().await.ok()?;
+    if !r.status().is_success() {
+        tracing::info!("place card: your routing server answered HTTP {}; using the next source", r.status());
+        return None;
+    }
+    parse_server_route(&r.text().await.ok()?)
+}
+
+async fn google_full_route(c: &reqwest::Client, key: &str, from: (f64, f64), to: (f64, f64)) -> Option<Route> {
+    let (drive, bike) = tokio::join!(google_route(c, key, from, to, "DRIVE"), google_route(c, key, from, to, "TWO_WHEELER"));
+    let (km, car) = drive?;
+    let (bike_min, bike_approx) = match bike {
+        Some((_, m)) => (m, false),
+        None => (bike_from_car(car), true),
+    };
+    Some(Route { km, car_min: car, bike_min, bike_approx, travel_approx: false })
+}
+
+async fn open_route(c: &reqwest::Client, from: (f64, f64), to: (f64, f64)) -> Route {
     let url = format!("https://router.project-osrm.org/route/v1/driving/{:.6},{:.6};{:.6},{:.6}?overview=false", from.1, from.0, to.1, to.0);
     if let Ok(r) = c.get(url).send().await {
         if r.status().is_success() {
@@ -456,6 +508,38 @@ async fn route(c: &reqwest::Client, key: &str, from: (f64, f64), to: (f64, f64))
     let km = haversine_km(from, to) * 1.3;
     let car = secs_to_min(km / 25.0 * 3600.0);
     Route { km, car_min: car, bike_min: bike_from_car(car), bike_approx: true, travel_approx: true }
+}
+
+/// Which sources to try, in order, for a routing mode. Pure.
+pub fn route_order(mode: &str, have_server: bool, have_google: bool) -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = match mode {
+        "server" => vec!["server"],
+        "google" => vec!["google"],
+        "open" => vec![],
+        _ => vec!["server", "google"],
+    };
+    v.retain(|s| (*s == "server" && have_server) || (*s == "google" && have_google));
+    v
+}
+
+pub struct RoutingCfg {
+    pub mode: String,
+    pub server: Option<(String, String)>,
+    pub google_key: String,
+}
+
+async fn route(c: &reqwest::Client, cfg: &RoutingCfg, from: (f64, f64), to: (f64, f64)) -> Route {
+    for source in route_order(&cfg.mode, cfg.server.is_some(), !cfg.google_key.is_empty()) {
+        let got = match (source, &cfg.server) {
+            ("server", Some((url, token))) => server_route(c, url, token, from, to).await,
+            ("google", _) => google_full_route(c, &cfg.google_key, from, to).await,
+            _ => None,
+        };
+        if let Some(r) = got {
+            return r;
+        }
+    }
+    open_route(c, from, to).await
 }
 
 async fn fetch_image(c: &reqwest::Client, url: &str, authed_key: Option<&str>) -> Option<String> {
@@ -561,10 +645,16 @@ pub async fn build<R: Runtime>(app: &AppHandle<R>, query: &str, here: Option<Fix
         Some(f) => f,
         None => nominatim_lookup(&c, query).await?,
     };
+    let (mode, server_url) = crate::commands::read_routing_settings(app);
+    let cfg = RoutingCfg {
+        mode,
+        server: server_url_ok(&server_url).map(|u| (u, crate::commands::read_api_key(app, "routing_server"))),
+        google_key: key.clone(),
+    };
     let (route, photo) = tokio::join!(
         async {
             match here {
-                Some(h) => Some(route(&c, &key, (h.lat, h.lon), (found.lat, found.lon)).await),
+                Some(h) => Some(route(&c, &cfg, (h.lat, h.lon), (found.lat, found.lon)).await),
                 None => None,
             }
         },
@@ -641,6 +731,23 @@ pub fn place_card_open(kind: String) -> Result<(), String> {
         _ => return Err("unknown link".into()),
     };
     open::that(url).map_err(|e| e.to_string())
+}
+
+/// IPC: check the routing server from the Command Hub. Returns one plain sentence for the user.
+#[tauri::command]
+pub async fn routing_server_test<R: Runtime>(app: AppHandle<R>, url: Option<String>) -> Result<String, String> {
+    // The address typed in the Hub is tested as it stands, before it has been saved.
+    let url = url.unwrap_or_else(|| crate::commands::read_routing_settings(&app).1);
+    let Some(base) = server_url_ok(&url) else {
+        return Err("Enter your server address first (https://..., or http:// only for a server on this computer or your home network).".into());
+    };
+    let token = crate::commands::read_api_key(&app, "routing_server");
+    let c = client();
+    // A short real route (Charminar to Golconda) proves the server, the token and the map data together.
+    match server_route(&c, &base, &token, (17.3616, 78.4747), (17.3833, 78.4011)).await {
+        Some(r) => Ok(format!("Working: {:.1} km, {} min by car, {} min by bike{}.", r.km, r.car_min, r.bike_min, if r.bike_approx { " (estimated)" } else { "" })),
+        None => Err("The server did not give a route. Check the address, the token, and that the map data covers this area.".into()),
+    }
 }
 
 /// Show the card in its own panel beside the map.
@@ -776,5 +883,38 @@ mod tests {
         assert!(robots_allows(r, "/private/public/y"));
         assert!(robots_allows("", "/anything"));
         assert!(!robots_allows("User-agent: *\nDisallow: /", "/menu"));
+    }
+
+    #[test]
+    fn server_urls_must_be_https_or_private_http() {
+        assert_eq!(server_url_ok("https://route.example.com/").as_deref(), Some("https://route.example.com"));
+        assert_eq!(server_url_ok("http://192.168.1.20:8080").as_deref(), Some("http://192.168.1.20:8080"));
+        assert_eq!(server_url_ok("http://localhost:8080/").as_deref(), Some("http://localhost:8080"));
+        assert!(server_url_ok("http://route.example.com").is_none(), "plain http over the internet leaks the token");
+        assert!(server_url_ok("http://172.40.0.1").is_none() && server_url_ok("ftp://x.example").is_none() && server_url_ok("nonsense").is_none());
+    }
+
+    #[test]
+    fn server_answer_parses_and_marks_estimates() {
+        let r = parse_server_route(r#"{"km":22.6,"carMin":47.6,"bikeMin":41,"bikeMeasured":true}"#).unwrap();
+        assert_eq!((r.car_min, r.bike_min, r.bike_approx, r.travel_approx), (48, 41, false, true));
+        let r = parse_server_route(r#"{"km":5,"carMin":20}"#).unwrap();
+        assert_eq!((r.bike_min, r.bike_approx), (17, true));
+        let r = parse_server_route(r#"{"km":5,"carMin":20,"traffic":true}"#).unwrap();
+        assert!(!r.travel_approx);
+        for bad in ["{}", "nope", r#"{"km":0,"carMin":5}"#, r#"{"km":9999,"carMin":5}"#] {
+            assert!(parse_server_route(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn routing_order_follows_the_mode() {
+        assert_eq!(route_order("auto", true, true), vec!["server", "google"]);
+        assert_eq!(route_order("auto", false, true), vec!["google"]);
+        assert_eq!(route_order("auto", false, false), Vec::<&str>::new());
+        assert_eq!(route_order("server", true, true), vec!["server"]);
+        assert_eq!(route_order("google", true, true), vec!["google"]);
+        assert!(route_order("open", true, true).is_empty());
+        assert!(route_order("server", false, true).is_empty(), "a server mode with no server falls to the open service");
     }
 }

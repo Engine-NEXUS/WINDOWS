@@ -43,6 +43,7 @@ pub const KEY_SERVICES: &[(&str, &str, &str)] = &[
     ("google_maps", "Google Maps & Routes", "routesApiKey"),
     ("google_places", "Google Places", "placesApiKey"),
     ("logo_dev", "Logo.dev", "logoDevPublishableKey"),
+    ("routing_server", "NEXUS routing server token", "routingServerToken"),
 ];
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

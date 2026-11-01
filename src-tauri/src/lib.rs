@@ -1340,6 +1340,7 @@ pub fn run() {
             place_card::get_pending_place,
             place_card::close_place_card,
             place_card::place_card_open,
+            place_card::routing_server_test,
             architect::query_impact,
             // Agent-completion watcher (Claude Code, Gemini CLI, Codex, Aider, Hermes, opencode)
             agent_watch::agent_watch_unavailable_reason,
