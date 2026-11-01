@@ -177,9 +177,9 @@ pub fn parse_google_place(body: &str) -> Option<Found> {
     })
 }
 
-/// Wikipedia summary -> (image url, credit) only when the page is plainly the same place (its coordinates are within
+/// Wikipedia summary -> (widened thumbnail url, original thumbnail url) only when the page is plainly the same place (its coordinates are within
 /// 1.5 km of ours). Without that check a name like "Paradise" would show the wrong page. Pure.
-pub fn parse_wiki_image(body: &str, lat: f64, lon: f64) -> Option<String> {
+pub fn parse_wiki_image(body: &str, lat: f64, lon: f64) -> Option<(String, String)> {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
     if v.get("type").and_then(|t| t.as_str()) == Some("disambiguation") {
         return None;
@@ -193,15 +193,15 @@ pub fn parse_wiki_image(body: &str, lat: f64, lon: f64) -> Option<String> {
     if !(url.starts_with("https://upload.wikimedia.org/") || url.starts_with("https://thumb.wikimedia.org/")) {
         return None;
     }
-    Some(wider_thumb(url))
+    Some((wider_thumb(url), url.to_string()))
 }
 
-/// Wikimedia thumbnail URLs carry their width ("/330px-"); ask for 640 so the image is sharp at the card width. Pure.
+/// Wikimedia thumbnail URLs carry their width ("/330px-"); ask for 500 (one of the widths Wikimedia serves) so the image is sharp at the card width. Pure.
 pub fn wider_thumb(url: &str) -> String {
     let Some(i) = url.find("px-") else { return url.to_string() };
     let start = url[..i].rfind('/').map(|p| p + 1).unwrap_or(0);
     if url[start..i].chars().all(|c| c.is_ascii_digit()) && i > start {
-        format!("{}640{}", &url[..start], &url[i..])
+        format!("{}500{}", &url[..start], &url[i..])
     } else {
         url.to_string()
     }
@@ -220,7 +220,7 @@ pub fn is_landmark_category(category: Option<&str>) -> bool {
 /// Commons files near a point, with a 640 px thumbnail and licence data, in one request. Pure URL.
 pub fn commons_url(lat: f64, lon: f64) -> String {
     format!(
-        "https://commons.wikimedia.org/w/api.php?action=query&generator=geosearch&ggscoord={lat:.6}%7C{lon:.6}&ggsradius=250&ggslimit=8&ggsnamespace=6&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=640&format=json"
+        "https://commons.wikimedia.org/w/api.php?action=query&generator=geosearch&ggscoord={lat:.6}%7C{lon:.6}&ggsradius=250&ggslimit=8&ggsnamespace=6&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=500&format=json"
     )
 }
 
@@ -238,16 +238,22 @@ fn strip_tags(s: &str) -> String {
     out.trim().to_string()
 }
 
-/// The best Commons file from a geosearch answer: a jpeg/png with a thumbnail, nearest first. Returns (thumbnail url,
+/// The best Commons file from a geosearch answer: a jpeg/png with a thumbnail whose file name contains a word of the
+/// place's name (a photo of the temple next door is not a photo of the monument), nearest first. Returns (thumbnail url,
 /// credit text). Pure.
-pub fn parse_commons(body: &str) -> Option<(String, String)> {
+pub fn parse_commons(body: &str, place_name: &str) -> Option<(String, String)> {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
     let pages = v.get("query")?.get("pages")?.as_object()?;
+    let words: Vec<String> = place_name.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 4).map(str::to_string).collect();
     let mut items: Vec<(i64, String, String)> = Vec::new();
     for p in pages.values() {
         let info = p.get("imageinfo").and_then(|i| i.get(0))?;
         let mime = info.get("mime").and_then(|m| m.as_str()).unwrap_or("");
         if mime != "image/jpeg" && mime != "image/png" {
+            continue;
+        }
+        let title = p.get("title").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
+        if !words.iter().any(|w| title.contains(w.as_str())) {
             continue;
         }
         let url = info.get("thumburl").and_then(|u| u.as_str())?;
@@ -515,17 +521,22 @@ async fn photo_for(c: &reqwest::Client, key: &str, f: &Found, query: &str) -> Op
         let url = format!("https://en.wikipedia.org/api/rest_v1/page/summary/{}", enc(&title));
         if let Ok(r) = c.get(url).send().await {
             if r.status().is_success() {
-                if let Some(img) = r.text().await.ok().as_deref().and_then(|b| parse_wiki_image(b, f.lat, f.lon)) {
-                    if let Some(uri) = fetch_image(c, &img, None).await {
+                if let Some((wide, original)) = r.text().await.ok().as_deref().and_then(|b| parse_wiki_image(b, f.lat, f.lon)) {
+                    let got = match fetch_image(c, &wide, None).await {
+                        Some(u) => Some(u),
+                        None => fetch_image(c, &original, None).await,
+                    };
+                    if let Some(uri) = got {
                         return Some(Photo { data_uri: uri, kind: "photo", credit: Some("Photo: Wikipedia".into()) });
                     }
+                    tracing::info!("place card: the Wikipedia image for {:?} could not be fetched", f.name);
                 }
             }
         }
     }
     if is_landmark_category(f.category.as_deref()) {
         if let Ok(r) = c.get(commons_url(f.lat, f.lon)).send().await {
-            if let Some((img, credit)) = r.text().await.ok().as_deref().and_then(parse_commons) {
+            if let Some((img, credit)) = r.text().await.ok().as_deref().and_then(|b| parse_commons(b, &f.name)) {
                 if let Some(uri) = fetch_image(c, &img, None).await {
                     return Some(Photo { data_uri: uri, kind: "photo", credit: Some(credit) });
                 }
@@ -718,7 +729,7 @@ mod tests {
 
     #[test]
     fn wikimedia_thumbnails_are_widened() {
-        assert_eq!(wider_thumb("https://thumb.wikimedia.org/wikipedia/commons/thumb/7/71/C.jpg/330px-C.jpg?utm=1"), "https://thumb.wikimedia.org/wikipedia/commons/thumb/7/71/C.jpg/640px-C.jpg?utm=1");
+        assert_eq!(wider_thumb("https://thumb.wikimedia.org/wikipedia/commons/thumb/7/71/C.jpg/330px-C.jpg?utm=1"), "https://thumb.wikimedia.org/wikipedia/commons/thumb/7/71/C.jpg/500px-C.jpg?utm=1");
         assert_eq!(wider_thumb("https://upload.wikimedia.org/a/b.jpg"), "https://upload.wikimedia.org/a/b.jpg");
     }
 
@@ -734,12 +745,17 @@ mod tests {
     }
 
     #[test]
-    fn commons_answer_gives_nearest_jpeg_with_credit() {
-        let body = r#"{"query":{"pages":{"1":{"index":2,"imageinfo":[{"mime":"image/jpeg","thumburl":"https://upload.wikimedia.org/x/b.jpg","extmetadata":{"Artist":{"value":"<a href=\"x\">Asha</a>"},"LicenseShortName":{"value":"CC BY-SA 4.0"}}}]},"2":{"index":1,"imageinfo":[{"mime":"image/svg+xml","thumburl":"https://upload.wikimedia.org/x/a.png"}]},"3":{"index":3,"imageinfo":[{"mime":"image/jpeg","thumburl":"https://evil.example/c.jpg"}]}}}}"#;
-        let (u, c) = parse_commons(body).unwrap();
-        assert_eq!(u, "https://upload.wikimedia.org/x/b.jpg");
+    fn commons_answer_gives_nearest_matching_jpeg_with_credit() {
+        let body = r#"{"query":{"pages":{
+            "1":{"index":2,"title":"File:Charminar night view.jpg","imageinfo":[{"mime":"image/jpeg","thumburl":"https://upload.wikimedia.org/x/b.jpg","extmetadata":{"Artist":{"value":"<a href=\"x\">Asha</a>"},"LicenseShortName":{"value":"CC BY-SA 4.0"}}}]},
+            "2":{"index":1,"title":"File:Bhagyalaxmi devi.jpg","imageinfo":[{"mime":"image/jpeg","thumburl":"https://upload.wikimedia.org/x/idol.jpg"}]},
+            "3":{"index":3,"title":"File:Charminar plan.svg","imageinfo":[{"mime":"image/svg+xml","thumburl":"https://upload.wikimedia.org/x/a.png"}]},
+            "4":{"index":4,"title":"File:Charminar x.jpg","imageinfo":[{"mime":"image/jpeg","thumburl":"https://evil.example/c.jpg"}]}}}}"#;
+        let (u, c) = parse_commons(body, "Charminar").unwrap();
+        assert_eq!(u, "https://upload.wikimedia.org/x/b.jpg", "the nearer file does not name the place, so it is skipped");
         assert_eq!(c, "Photo: Asha / CC BY-SA 4.0 / Wikimedia Commons");
-        assert!(parse_commons("{}").is_none());
+        assert!(parse_commons(body, "Golconda Fort").is_none(), "no file names this place");
+        assert!(parse_commons("{}", "Charminar").is_none());
     }
 
     #[test]
