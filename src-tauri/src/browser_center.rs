@@ -18,7 +18,6 @@ use crate::intent_parser::ParsedIntent;
 use serde_json::Value;
 
 use std::path::PathBuf;
-use std::process::Command;
 
 /// Actions this center owns. Mirrors the Browser arms of `center_for`.
 #[allow(dead_code)]
@@ -77,7 +76,7 @@ pub fn read_page_markdown(url: &str) -> Result<String, String> {
         "Crawler bridge script not found at server/crawler/engine.py".to_string()
     })?;
 
-    let output = Command::new("python")
+    let output = crate::no_window::command("python")
         .arg(&script_path)
         .arg("read-page")
         .arg(url)

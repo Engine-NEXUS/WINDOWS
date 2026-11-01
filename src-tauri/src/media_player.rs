@@ -7,8 +7,9 @@
 //!   deep links (`spotify:`, `applemusic:`), and native process activation.
 //! - Linux: MPRIS D-Bus interface via `crate::mpris`.
 
-use std::process::Command;
 
+#[cfg(not(target_os = "windows"))]
+use std::process::Command;
 /// Canonical music player identifiers.
 pub const PLAYER_SPOTIFY: &str = "spotify";
 pub const PLAYER_APPLE_MUSIC: &str = "apple_music";
@@ -322,7 +323,7 @@ fn execute_windows_action(
 #[cfg(target_os = "windows")]
 fn protocol_registered(player: &str) -> bool {
     let key = if player == PLAYER_APPLE_MUSIC { r"HKCR\applemusic" } else { r"HKCR\spotify" };
-    Command::new("reg")
+    crate::no_window::command("reg")
         .args(["query", key])
         .output()
         .map(|o| o.status.success())
@@ -333,7 +334,7 @@ fn protocol_registered(player: &str) -> bool {
 /// in it can be read as a second command.
 #[cfg(target_os = "windows")]
 fn open_address(address: &str) -> Result<(), String> {
-    Command::new("explorer.exe")
+    crate::no_window::command("explorer.exe")
         .arg(address)
         .spawn()
         .map(|_| ())

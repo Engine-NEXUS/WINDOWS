@@ -6325,7 +6325,7 @@ async fn run_instagram_action(action: &'static str, target: String) -> Result<()
         if !script.exists() {
             return Err("the Instagram helper script isn't installed".to_string());
         }
-        let out = std::process::Command::new("python")
+        let out = crate::no_window::command("python")
             .args([script.to_string_lossy().as_ref(), action, "--user", &target])
             .output()
             .map_err(|e| format!("I couldn't run Python ({e})"))?;
@@ -7499,7 +7499,7 @@ async fn run_analyse_chat_docs<R: Runtime>(
 
     let out = tokio::task::spawn_blocking(move || {
         let script = crate::memcore::leases::resolve_script_path("scripts/doc_analyzer.py");
-        std::process::Command::new("python")
+        crate::no_window::command("python")
             .args([script.to_string_lossy().as_ref(), &file_to_analyze.to_string_lossy()])
             .output()
     })

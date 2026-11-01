@@ -153,7 +153,7 @@ pub fn dispatch_to_agent(
             if BYPASS_FLAGS.contains(&exe) || BYPASS_FLAGS.contains(&flag) {
                 return Err(format!("I won't start {} with its safety checks switched off", agent.display_name()));
             }
-            let mut cmd = std::process::Command::new(exe);
+            let mut cmd = crate::no_window::command(exe);
             cmd.arg(flag).arg(safe_prompt(prompt));
             if let Some(dir) = project_dir {
                 cmd.current_dir(dir);

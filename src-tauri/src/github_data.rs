@@ -196,7 +196,7 @@ pub async fn resolve_token(server_url: Option<&str>, user_id: Option<&str>) -> R
     }
     #[cfg(not(target_os = "windows"))]
     {
-        if let Ok(output) = std::process::Command::new("gh").args(["auth", "token"]).output() {
+        if let Ok(output) = crate::no_window::command("gh").args(["auth", "token"]).output() {
             if output.status.success() {
                 let tok = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !tok.is_empty() && (tok.starts_with("gh") || tok.starts_with("github_pat_")) {

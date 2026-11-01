@@ -377,7 +377,7 @@ fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus
             }
             #[cfg(not(target_os = "windows"))]
             {
-                std::process::Command::new("gh")
+                crate::no_window::command("gh")
                     .args(["auth", "token"])
                     .output()
                     .map(|o| o.status.success())

@@ -99,7 +99,7 @@ pub fn execute_unblock(lease: &ActionLease) -> bool {
                 tracing::warn!("leases: instagram helper script missing at {}", script.display());
                 return false;
             }
-            let out = std::process::Command::new("python")
+            let out = crate::no_window::command("python")
                 .args([script.to_string_lossy().as_ref(), "unblock", "--user", &lease.target_name])
                 .output();
             match out {

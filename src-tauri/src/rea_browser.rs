@@ -60,6 +60,8 @@ fn result_value(json: &Value) -> &Value {
 
 async fn rea_command(script: &Path, args: &[&str]) -> Result<Value, String> {
     let mut cmd = Command::new("node");
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     cmd.arg(script).args(args).arg("--format").arg("json");
     cmd.kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(18), cmd.output())
@@ -131,6 +133,8 @@ pub async fn observe(url: &reqwest::Url, full_inspection: bool, cancelled: &Arc<
     let profile = raw_temp_root.join(format!("nexus-review-{}", crate::network::uuid_v4()));
     if std::fs::create_dir(&profile).is_err() { return unavailable("Could not create an isolated browser profile".into()) }
     let mut cmd = Command::new(chrome);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     cmd.arg("--headless=new")
         .arg("--no-first-run")
         .arg("--no-default-browser-check")

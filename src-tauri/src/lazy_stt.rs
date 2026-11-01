@@ -10,7 +10,7 @@
 //! This saves ~340 MB of RAM at idle (the vast majority of the time).
 
 use std::io::BufRead;
-use std::process::{Child, Command};
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -127,7 +127,7 @@ fn stt_child_env() -> Vec<(String, String)> {
 pub fn find_python() -> Option<String> {
     // 1. Try PATH-based commands â€” verify each actually works
     for cmd in &["python", "python3", "py"] {
-        if let Ok(output) = std::process::Command::new(cmd).arg("--version").output() {
+        if let Ok(output) = crate::no_window::command(cmd).arg("--version").output() {
             if output.status.success() {
                 return Some(cmd.to_string());
             }
@@ -176,7 +176,7 @@ pub fn find_python() -> Option<String> {
 
         for path in candidates {
             if path.exists() {
-                if let Ok(output) = std::process::Command::new(&path).arg("--version").output() {
+                if let Ok(output) = crate::no_window::command(&path).arg("--version").output() {
                     if output.status.success() {
                         tracing::info!("lazy_stt: found Python at {}", path.display());
                         return Some(path.to_string_lossy().to_string());
@@ -237,7 +237,7 @@ pub fn ensure_stt_running() {
         }
     };
 
-    let child = Command::new(&python_cmd)
+    let child = crate::no_window::command(&python_cmd)
         .arg(&script)
         .envs(stt_child_env())
         .stdout(std::process::Stdio::null())

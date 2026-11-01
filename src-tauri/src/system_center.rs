@@ -7,7 +7,6 @@
 use crate::center::{ConfirmKind, SubCenter, Validity};
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::process::Command;
 
 /// Actions owned by SystemCenter.
 #[allow(dead_code)]
@@ -129,7 +128,7 @@ pub fn inspect_window_via_bridge(title: Option<&str>) -> Result<Value, String> {
         "UFO UI Automation bridge script not found at server/ufo/uia_engine.py".to_string()
     })?;
 
-    let mut cmd = Command::new("python");
+    let mut cmd = crate::no_window::command("python");
     cmd.arg(&script_path).arg("inspect");
 
     if let Some(t) = title {

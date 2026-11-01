@@ -259,7 +259,7 @@ fn close_app(target: &str) -> Result<CommandResult, String> {
     {
         // Polite close: posts WM_CLOSE to the app's windows, so unsaved work gets its
         // "save changes?" prompt. (It used to be `/F`, which loses that work.)
-        let output = Command::new("taskkill").args(["/IM", &exe_name]).output();
+        let output = crate::no_window::command("taskkill").args(["/IM", &exe_name]).output();
         match output {
             Ok(o) if o.status.success() => {
                 tracing::info!("closed app '{}' ({})", app_name, exe_name);
@@ -714,7 +714,7 @@ fn take_screenshot() -> Result<CommandResult, String> {
 fn lock_screen() -> Result<CommandResult, String> {
     #[cfg(target_os = "windows")]
     {
-        let _ = Command::new("rundll32.exe")
+        let _ = crate::no_window::command("rundll32.exe")
             .args(["user32.dll,LockWorkStation"])
             .spawn();
     }
