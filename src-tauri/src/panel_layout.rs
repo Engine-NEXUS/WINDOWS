@@ -24,6 +24,8 @@ pub enum Panel {
     Maps,
     /// Real Google Maps (the normal site, no API key) as the top-level page of a plain panel.
     MapsWeb,
+    /// The place card (distance, times, address, photo, fares) beside the map.
+    PlaceCard,
 }
 
 impl Panel {
@@ -32,6 +34,7 @@ impl Panel {
             Panel::Architect => "architect-map",
             Panel::Maps => "maps-panel",
             Panel::MapsWeb => "maps-web",
+            Panel::PlaceCard => "place-card",
         }
     }
     pub fn from_label(label: &str) -> Option<Panel> {
@@ -39,6 +42,7 @@ impl Panel {
             "architect-map" => Some(Panel::Architect),
             "maps-panel" => Some(Panel::Maps),
             "maps-web" => Some(Panel::MapsWeb),
+            "place-card" => Some(Panel::PlaceCard),
             _ => None,
         }
     }
@@ -47,6 +51,8 @@ impl Panel {
         match self {
             Panel::Architect => (960.0, 480.0, 1400.0),
             Panel::Maps | Panel::MapsWeb => (720.0, 420.0, 1200.0),
+            // Fixed narrow column; the height follows the screen.
+            Panel::PlaceCard => (315.0, 315.0, 315.0),
         }
     }
 }
@@ -244,7 +250,7 @@ mod tests {
 
     #[test]
     fn labels_round_trip() {
-        for p in [Panel::Architect, Panel::Maps, Panel::MapsWeb] {
+        for p in [Panel::Architect, Panel::Maps, Panel::MapsWeb, Panel::PlaceCard] {
             assert_eq!(Panel::from_label(p.label()), Some(p));
         }
         assert_eq!(Panel::from_label("sidebar"), None);

@@ -6091,7 +6091,17 @@ async fn run_place_info<R: Runtime>(app: AppHandle<R>, query: String, ask: Strin
         chrono::Local::now().weekday().num_days_from_monday() as usize
     };
     let hours = detail.as_ref().and_then(|d| hours_today(&d.weekday_hours, weekday));
+    // The place card beside the map: distance, car and bike time, address, photo, fare estimates.
+    let card = crate::place_card::build(&app, &query, here).await;
+    if let Some(card) = &card {
+        if let Err(e) = crate::place_card::show_card(&app, card.clone()) {
+            tracing::warn!("place card: could not show it: {e}");
+        }
+    }
     let mut line = place_info_line(&query, &ask, detail.as_ref(), hours.as_deref());
+    if let Some(card) = &card {
+        line.push_str(&crate::place_card::spoken_extra(card));
+    }
     if here.as_ref().is_some_and(crate::location::should_tell_about_exact_location) {
         line.push_str(" For an exact starting point, turn on location in Windows settings, sir.");
     }

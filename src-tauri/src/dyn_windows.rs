@@ -95,6 +95,17 @@ impl WindowConfig {
         }
     }
 
+    /// The place card: a 315 px column (`?pin=place`), frameless glass, placed by `panel_layout`.
+    pub fn place_card() -> Self {
+        Self {
+            label: "place-card", title: "NEXUS Place", url: "sidebar.html?pin=place",
+            width: 315., height: 950., min_width: None, min_height: None,
+            resizable: false, decorations: false, transparent: true,
+            always_on_top: true, skip_taskbar: true, shadow: false,
+            focus: false, center: false, hidden_title: true,
+        }
+    }
+
     /// Stage shell — fullscreen transparent overlay, always-on (single-
     /// stage migration). Hosts the voice orb, the loading indicator, the
     /// ghost ring, and stage notices/annotations. WS_EX_TOOLWINDOW so
@@ -218,7 +229,7 @@ pub fn get_or_create_window<R: Runtime>(
         // (sidebar_backdrop.rs -> `sidebar:backdrop` -> `.sidebar-card::after`).
         let is_glass_window = matches!(
             config.label,
-            "sidebar" | "architect-map" | "maps-panel" | "calibrate-toolbar" | "settings" | "setup" | "orb-studio"
+            "sidebar" | "architect-map" | "maps-panel" | "place-card" | "calibrate-toolbar" | "settings" | "setup" | "orb-studio"
         );
         if is_glass_window {
             crate::dwm_corners::round_corners(&win);

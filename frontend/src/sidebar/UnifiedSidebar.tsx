@@ -10,6 +10,7 @@ import { AnnotateView } from "./AnnotatePalette";
 import { StackView } from "./StackView";
 import { useArrowDock, usePanelResize } from "./dockKeys";
 import { MapsPanel } from "./MapsPanel";
+import { PlaceCard } from "./PlaceCard";
 import "./unified.css";
 
 /**
@@ -24,9 +25,9 @@ import "./unified.css";
  * stores survive across mounts; display:none keeps remount flicker at
  * zero and makes switches feel instant).
  */
-export type SidebarView = "assistant" | "settings" | "architect" | "pr-list" | "spatial" | "annotate" | "stack" | "maps";
+export type SidebarView = "assistant" | "settings" | "architect" | "pr-list" | "spatial" | "annotate" | "stack" | "maps" | "place";
 
-const VIEWS: SidebarView[] = ["assistant", "settings", "architect", "pr-list", "spatial", "annotate", "stack", "maps"];
+const VIEWS: SidebarView[] = ["assistant", "settings", "architect", "pr-list", "spatial", "annotate", "stack", "maps", "place"];
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -109,6 +110,7 @@ export function UnifiedSidebar() {
           // A pinned window closes only itself; it must not stop speech or hide the response sidebar.
           if (isTauri()) {
             if (pinned === "maps") invoke("close_maps_panel").catch(() => {});
+            else if (pinned === "place") invoke("close_place_card").catch(() => {});
             else invoke("close_architect_map").catch(() => {});
           }
           return;
@@ -172,6 +174,11 @@ export function UnifiedSidebar() {
         {mounted.has("maps") && (
           <div className="unified-view" style={{ display: view === "maps" ? "flex" : "none" }}>
             <MapsPanel />
+          </div>
+        )}
+        {mounted.has("place") && (
+          <div className="unified-view" style={{ display: view === "place" ? "flex" : "none" }}>
+            <PlaceCard />
           </div>
         )}
         {mounted.has("stack") && (
