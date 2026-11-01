@@ -10,3 +10,10 @@ Owner request: with Gmail or the GitHub app open, "analyse this pr" must read th
 
 ## Verify
 Rust lib 2931 pass (new: 1 parser test, 9 pr_screen tests). NOT run live: the Gmail / GitHub app title case, the vision fallback, the GitHub 404 check, the spoken question. Needs a rebuild.
+
+## Update 2026-11-02 - list instead of guess; PR numbers
+Owner rules: screen first; if it cannot tell which repo and PR, show ALL open PRs in the sidebar; if it knows the repo, list that repo's PRs; if only a PR number is given and several repos have it, ask which repo.
+- `pr_screen::decide` now returns Analyse / Latest / List. List = the open PRs go into the PR sidebar (that repo's, or every repo's) and the question is spoken ("Which pull request in zync do you mean, sir? The open pull requests are in the sidebar."). Latest only when the user NAMED the repo and the screen shows none of its PRs (case 2), or asked for "the latest" with one repo on screen. A repo seen on screen without a PR number is listed, no longer auto-"latest".
+- `pr_screen::decide_number` + `orchestrator::resolve_pr_number`: "analyse PR 70" -> `AnalysePr { repo: "this" }`; a screen repo that really has PR 70 first, else the one repository of yours that has it (FindPr search), else the PRs are listed in the sidebar and it asks which repository ("Pull request 70 is open in zync and servx, sir. Which repository?"). The older "analyse pr 34" -> FindPr test was updated; "find/where is pr 34" is unchanged.
+- "Analyse the pr in zync" (plain "the", repo named) still lists that repo's open PRs and now says "Which one, sir?".
+Verify: Rust lib 2931 pass. NOT run live (needs a rebuild): the sidebar fill on ask, the GitHub session lookup, the 404 check.

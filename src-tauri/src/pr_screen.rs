@@ -33,10 +33,11 @@ impl Resolved {
 pub enum Decision {
     /// Analyse this exact pull request.
     Analyse { owner: String, repo: String, number: u64 },
-    /// Analyse the latest pull request of this repository; `notice` is said first when that was a fallback.
-    Latest { owner: String, repo: String, notice: Option<String> },
-    /// Say this and wait for the user.
-    Ask(String),
+    /// Analyse the latest pull request of this repository (the user named it and the screen shows none of it, or asked
+    /// for "the latest" and the screen shows exactly one repository).
+    Latest { owner: String, repo: String },
+    /// Not sure which: put the open pull requests in the sidebar (this repository's, or `None` = all the user's) and ask.
+    List { repo: Option<(String, String)>, text: String },
 }
 
 // ─── text -> what it shows ───────────────────────────────────────────
@@ -182,47 +183,75 @@ fn repos_of<'a>(found: &'a [&'a Resolved]) -> Vec<(&'a str, &'a str)> {
     out
 }
 
-/// Pure. `mentioned` = the repository the user named (already matched to a real one), if any. `want_latest` = they said
-/// "latest" without a repo.
+fn list_one(owner: &str, repo: &str) -> Decision {
+    Decision::List {
+        repo: Some((owner.to_string(), repo.to_string())),
+        text: format!("Which pull request in {repo} do you mean, sir?"),
+    }
+}
+
+fn list_all() -> Decision {
+    Decision::List { repo: None, text: "I can't tell which pull request you mean, sir. Which one?".to_string() }
+}
+
+/// Pure. The screen is read first. `mentioned` = the repository the user named (already matched to a real one), if any.
+/// `want_latest` = they said "latest" without a repo.
+///   * a pull request of the named repository on the screen -> that one; else the named repository's latest (case 2);
+///   * no repo named: exactly one pull request on the screen -> that one;
+///     one repository only -> its open pull requests are listed (or its latest, when "latest" was asked);
+///     anything else, or nothing -> all the user's open pull requests are listed.
 pub fn decide(found: &[Resolved], mentioned: Option<(&str, &str)>, want_latest: bool) -> Decision {
     let found = distinct(found);
-    // The user named a repository: a pull request of THAT repository on the screen wins, otherwise its latest one.
     if let Some((mo, mr)) = mentioned {
-        let on_screen = found.iter().find(|r| r.same_repo(mo, mr) && r.number.is_some());
-        return match on_screen {
+        return match found.iter().find(|r| r.same_repo(mo, mr) && r.number.is_some()) {
             Some(r) => Decision::Analyse { owner: r.owner.clone(), repo: r.repo.clone(), number: r.number.unwrap_or(0) },
-            None => Decision::Latest { owner: mo.to_string(), repo: mr.to_string(), notice: None },
+            None => Decision::Latest { owner: mo.to_string(), repo: mr.to_string() },
         };
     }
     let numbered: Vec<&&Resolved> = found.iter().filter(|r| r.number.is_some()).collect();
     let repos = repos_of(&found);
     if want_latest {
-        // "the latest PR": the repository on the screen decides which repository
         if let [(o, r)] = repos.as_slice() {
-            return Decision::Latest { owner: o.to_string(), repo: r.to_string(), notice: None };
+            return Decision::Latest { owner: o.to_string(), repo: r.to_string() };
         }
     } else if let [one] = numbered.as_slice() {
         return Decision::Analyse { owner: one.owner.clone(), repo: one.repo.clone(), number: one.number.unwrap_or(0) };
     }
-    if numbered.len() > 1 && !want_latest {
-        let list: Vec<String> = numbered.iter().take(4).map(|r| format!("number {} in {}", r.number.unwrap_or(0), r.repo)).collect();
-        return Decision::Ask(format!("I can see more than one pull request, sir: {}. Which one?", list.join(", and ")));
-    }
     match repos.as_slice() {
-        [(o, r)] => Decision::Latest {
-            owner: o.to_string(),
-            repo: r.to_string(),
-            notice: Some(format!("I can't see a specific pull request on the screen, so I'm taking the latest one in {r}, sir.")),
-        },
-        [] => Decision::Ask(
-            "I can't see a pull request on your screen, sir. Which one do you mean? Tell me the repository, and the number if you have it."
-                .to_string(),
-        ),
-        many => {
-            let names: Vec<&str> = many.iter().take(3).map(|(_, r)| *r).collect();
-            Decision::Ask(format!("I can see more than one repository, sir: {}. Which pull request do you mean?", names.join(" and ")))
-        }
+        [(o, r)] => list_one(o, r),
+        _ => list_all(),
     }
+}
+
+/// What a PR NUMBER (no repository) means. `on_screen` = repositories shown on the screen that really have this PR;
+/// `elsewhere` = every repository of the user's with this PR open.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NumberDecision {
+    Analyse { owner: String, repo: String },
+    /// The same number is open in several repositories: ask which (the sidebar lists them).
+    AskRepo(String),
+    NotFound(String),
+}
+
+pub fn decide_number(number: u64, on_screen: &[(String, String)], elsewhere: &[(String, String)]) -> NumberDecision {
+    let pick = |v: &[(String, String)]| -> Option<NumberDecision> {
+        match v {
+            [(o, r)] => Some(NumberDecision::Analyse { owner: o.clone(), repo: r.clone() }),
+            _ => None,
+        }
+    };
+    // the screen first: one repository shown there has it
+    if let Some(d) = pick(on_screen) {
+        return d;
+    }
+    if let Some(d) = pick(elsewhere) {
+        return d;
+    }
+    if elsewhere.is_empty() {
+        return NumberDecision::NotFound(format!("There is no open pull request {number} in your repositories, sir."));
+    }
+    let names: Vec<&str> = elsewhere.iter().take(4).map(|(_, r)| r.as_str()).collect();
+    NumberDecision::AskRepo(format!("Pull request {number} is open in {}, sir. Which repository?", names.join(" and ")))
 }
 
 #[cfg(test)]
@@ -246,12 +275,9 @@ mod tests {
         assert_eq!(n("Fix login by prem · Pull Request #345 · acme/zync · GitHub"), Some(345));
         assert_eq!(n("acme/zync#9 Add retries"), Some(9));
         assert_eq!(n("GitHub Desktop - acme/zync - PR 21"), Some(21));
-        // a repo without a number is still a sighting (a repo page or a list of PRs)
         assert_eq!(from_text("acme/zync: Pull requests"), Some(Seen { owner: Some("acme".into()), repo: "zync".into(), number: None }));
-        // nothing about a repository or pull request
         assert_eq!(from_text("Inbox (3) - someone@gmail.com - Gmail"), None);
         assert_eq!(from_text("improve 12 things you can do"), None);
-        // "pr" inside a word is not a pull request
         assert_eq!(from_text("acme/zync improve 12 things").and_then(|s| s.number), None);
     }
 
@@ -276,45 +302,59 @@ mod tests {
     fn this_pr_with_one_pr_on_screen_analyses_it() {
         let d = decide(&[res("Leddger-AI", "LedgerAI", Some(70))], None, false);
         assert_eq!(d, Decision::Analyse { owner: "Leddger-AI".into(), repo: "LedgerAI".into(), number: 70 });
-    }
-
-    #[test]
-    fn a_named_repo_prefers_its_pr_on_screen_then_its_latest() {
-        let screen = [res("acme", "zync", Some(5)), res("acme", "other", Some(9))];
-        // case 1: the screen shows a PR of the named repo
-        assert_eq!(decide(&screen, Some(("acme", "zync")), false), Decision::Analyse { owner: "acme".into(), repo: "zync".into(), number: 5 });
-        // case 2: nothing of that repo on screen -> its latest PR (the other repo's PR is not used)
-        assert_eq!(decide(&screen, Some(("acme", "servx")), false), Decision::Latest { owner: "acme".into(), repo: "servx".into(), notice: None });
-        assert_eq!(decide(&[], Some(("acme", "zync")), false), Decision::Latest { owner: "acme".into(), repo: "zync".into(), notice: None });
-        // only the repo (no number) on screen is not "a PR of that repo": latest
-        assert!(matches!(decide(&[res("acme", "zync", None)], Some(("acme", "zync")), false), Decision::Latest { .. }));
-    }
-
-    #[test]
-    fn several_pull_requests_are_a_question_and_so_is_an_empty_screen() {
-        let two = [res("a", "zync", Some(1)), res("a", "servx", Some(2))];
-        let Decision::Ask(q) = decide(&two, None, false) else { panic!() };
-        assert!(q.contains("number 1 in zync") && q.contains("number 2 in servx") && q.ends_with("Which one?"), "{q}");
-        let Decision::Ask(q) = decide(&[], None, false) else { panic!() };
-        assert!(q.contains("can't see a pull request") && q.contains("Which one"), "{q}");
         // the same PR seen twice (URL and title) is one
         let twice = [res("a", "zync", Some(1)), res("A", "ZYNC", Some(1))];
         assert!(matches!(decide(&twice, None, false), Decision::Analyse { number: 1, .. }));
     }
 
     #[test]
-    fn a_repo_without_a_pr_number_gives_its_latest_and_says_why() {
-        let Decision::Latest { repo, notice, .. } = decide(&[res("a", "zync", None)], None, false) else { panic!() };
-        assert_eq!(repo, "zync");
-        assert!(notice.unwrap().contains("taking the latest one in zync"));
-        // two repos and no PR: ask
-        assert!(matches!(decide(&[res("a", "zync", None), res("a", "servx", None)], None, false), Decision::Ask(_)));
+    fn a_named_repo_prefers_its_pr_on_screen_then_its_latest() {
+        let screen = [res("acme", "zync", Some(5)), res("acme", "other", Some(9))];
+        assert_eq!(decide(&screen, Some(("acme", "zync")), false), Decision::Analyse { owner: "acme".into(), repo: "zync".into(), number: 5 });
+        // case 2: nothing of that repo on screen -> its latest PR (the other repo's PR is not used)
+        assert_eq!(decide(&screen, Some(("acme", "servx")), false), Decision::Latest { owner: "acme".into(), repo: "servx".into() });
+        assert_eq!(decide(&[], Some(("acme", "zync")), false), Decision::Latest { owner: "acme".into(), repo: "zync".into() });
+        assert!(matches!(decide(&[res("acme", "zync", None)], Some(("acme", "zync")), false), Decision::Latest { .. }));
+    }
+
+    #[test]
+    fn not_knowing_which_lists_the_prs_of_the_known_repo_or_all_of_them() {
+        // several PRs in different repos on screen, two repos with no PR number, or nothing: all open PRs
+        let two = [res("a", "zync", Some(1)), res("a", "servx", Some(2))];
+        assert!(matches!(decide(&two, None, false), Decision::List { repo: None, .. }));
+        assert!(matches!(decide(&[], None, false), Decision::List { repo: None, .. }));
+        assert!(matches!(decide(&[res("a", "zync", None), res("a", "servx", None)], None, false), Decision::List { repo: None, .. }));
+        // one repo known (no PR number): that repo's open PRs, and the question names it
+        let Decision::List { repo, text } = decide(&[res("a", "zync", None)], None, false) else { panic!() };
+        assert_eq!(repo, Some(("a".into(), "zync".into())));
+        assert!(text.contains("pull request in zync"), "{text}");
+        // several PRs in the SAME repo: that repo's list
+        let same = [res("a", "zync", Some(1)), res("a", "zync", Some(2))];
+        assert!(matches!(decide(&same, None, false), Decision::List { repo: Some(_), .. }));
     }
 
     #[test]
     fn the_latest_pr_uses_the_repo_on_screen() {
-        let d = decide(&[res("a", "zync", Some(3))], None, true);
-        assert_eq!(d, Decision::Latest { owner: "a".into(), repo: "zync".into(), notice: None });
-        assert!(matches!(decide(&[], None, true), Decision::Ask(_)));
+        assert_eq!(decide(&[res("a", "zync", Some(3))], None, true), Decision::Latest { owner: "a".into(), repo: "zync".into() });
+        assert!(matches!(decide(&[], None, true), Decision::List { repo: None, .. }));
+    }
+
+    fn pair(o: &str, r: &str) -> (String, String) {
+        (o.to_string(), r.to_string())
+    }
+
+    #[test]
+    fn a_pr_number_alone_uses_the_screen_then_a_unique_match_else_asks_which_repo() {
+        // the screen's repo has it
+        assert_eq!(decide_number(70, &[pair("a", "zync")], &[pair("a", "zync"), pair("a", "servx")]), NumberDecision::Analyse { owner: "a".into(), repo: "zync".into() });
+        // nothing on screen, one repo has it
+        assert_eq!(decide_number(70, &[], &[pair("a", "servx")]), NumberDecision::Analyse { owner: "a".into(), repo: "servx".into() });
+        // the same number in two repos and the screen does not settle it: ask which repo
+        let NumberDecision::AskRepo(q) = decide_number(70, &[], &[pair("a", "zync"), pair("a", "servx")]) else { panic!() };
+        assert!(q.contains("zync and servx") && q.ends_with("Which repository?"), "{q}");
+        // two on screen have it: still ask
+        assert!(matches!(decide_number(70, &[pair("a", "zync"), pair("a", "servx")], &[pair("a", "zync"), pair("a", "servx")]), NumberDecision::AskRepo(_)));
+        // nobody has it
+        assert!(matches!(decide_number(70, &[], &[]), NumberDecision::NotFound(t) if t.contains("no open pull request 70")));
     }
 }

@@ -3116,6 +3116,20 @@ fn parse_analyse_pr_pointer(text: &str) -> Option<ParseResult> {
         }
         break;
     }
+    // "analyse PR 70" (a number, no repository): the screen, then the user's repositories decide which repo
+    if !strict_this {
+        if let Some(caps) = regex_captures(core, r"^(?:(?:the|this|that)\s+)?(?:pr|pull request)\s*#?\s*(\d{1,6})$") {
+            if let Ok(n) = caps[1].parse::<u32>() {
+                if n > 0 {
+                    return Some(ParseResult {
+                        intent: ParsedIntent::AnalysePr { owner: None, repo: "this".to_string(), pr_number: n },
+                        confidence: 1.0,
+                        source: "deterministic".to_string(),
+                    });
+                }
+            }
+        }
+    }
     // a specific PR (number) or an author keeps the older parsers
     if core.contains(|c: char| c.is_ascii_digit() || c == '#') || core.contains(" by ") {
         return None;
@@ -7784,15 +7798,12 @@ mod tests {
             "analyse the pr 34",
             "analyse pull request 34",
         ] {
+            // 2026-11-02: "analyse PR 34" with no repository is no longer a bare search: the screen is read first, then the
+            // user's repositories (the same number in several asks which repo and lists them)
             let res = parse_deterministic(phrase).unwrap_or_else(|| panic!("failed to parse {phrase:?}"));
             assert!(
-                matches!(
-                    res.intent,
-                    ParsedIntent::GitHubCommand {
-                        command: crate::github_cmd::GitHubCommand::FindPr { pr_number: 34 }
-                    }
-                ),
-                "expected FindPr for {phrase:?}, got {:?}",
+                matches!(&res.intent, ParsedIntent::AnalysePr { owner: None, repo, pr_number: 34 } if repo == "this"),
+                "expected AnalysePr for {phrase:?}, got {:?}",
                 res.intent
             );
         }

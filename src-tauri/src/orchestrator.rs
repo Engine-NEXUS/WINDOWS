@@ -2194,7 +2194,8 @@ pub async fn process_transcript<R: Runtime>(
                                 repo_notice = notice;
                                 screen_resolved = true;
                             }
-                            PrTarget::Ask(text) => {
+                            other @ (PrTarget::Ask { .. } | PrTarget::Say(_)) => {
+                                let text = pr_target_text(&app, other).await;
                                 emit(&app, &OrchestratorEvent::Result { text, request_id: request_id.clone(), analysis: None, dialog_state: None });
                                 emit(&app, &OrchestratorEvent::Done { request_id: request_id.clone() });
                                 clear_active_request(&request_id);
@@ -2257,6 +2258,27 @@ pub async fn process_transcript<R: Runtime>(
                     }
                 }
             }
+            // "analyse PR 70" (no repository): the screen, then the one repository that has it, else ask which repository.
+            if let ParsedIntent::AnalysePr { owner: None, repo, pr_number } = &intent {
+                if is_deictic_repo_word(repo) {
+                    let url = tokio::task::spawn_blocking(crate::browser_url::get_active_browser_url).await.ok().flatten();
+                    match resolve_pr_number(&app, url.as_deref(), u64::from(*pr_number)).await {
+                        PrTarget::Go { transcript: t, spoken, notice } => {
+                            worker_transcript = t;
+                            spoken_target = Some(spoken);
+                            repo_notice = notice;
+                            screen_resolved = true;
+                        }
+                        other => {
+                            let text = pr_target_text(&app, other).await;
+                            emit(&app, &OrchestratorEvent::Result { text, request_id: request_id.clone(), analysis: None, dialog_state: None });
+                            emit(&app, &OrchestratorEvent::Done { request_id: request_id.clone() });
+                            clear_active_request(&request_id);
+                            return Ok(ProcessResult { request_id, subsystem, handled_locally: true });
+                        }
+                    }
+                }
+            }
             // "analyse the latest PR in <repo>" / "analyse this PR in <repo>": a pull request of THAT repo on the screen wins,
             // otherwise the repository's latest one. (An author in the sentence keeps the plain latest-by-author reading.)
             if let ParsedIntent::AnalyseLatestPr { owner, repo, author: None } = &intent {
@@ -2287,7 +2309,7 @@ pub async fn process_transcript<R: Runtime>(
                 }
                 ParsedIntent::AnalysePr { owner: None, repo, .. }
                 | ParsedIntent::AnalyseLatestPr { owner: None, repo, .. }
-                    if !repo.trim().is_empty() =>
+                    if !repo.trim().is_empty() && !is_deictic_repo_word(repo) =>
                 {
                     Some((repo.clone(), false))
                 }
@@ -2865,6 +2887,13 @@ pub async fn process_transcript<R: Runtime>(
                             if count == 1 { "" } else { "s" },
                             repo
                         )
+                    };
+                    // "analyse the pr in zync" names no pull request: the list is the question
+                    let t = transcript.to_lowercase();
+                    let ack_text = if (t.contains("analy") || t.contains("review")) && !repo.starts_with("PR #") && count > 0 {
+                        format!("Which one, sir? {ack_text}")
+                    } else {
+                        ack_text
                     };
                     emit(
                         &app,
@@ -6030,8 +6059,45 @@ pub(crate) fn pr_phrase_wants_latest(repo: &str) -> bool {
 pub(crate) enum PrTarget {
     /// Run `transcript` (e.g. "analyse pr 70 in owner/repo"); `spoken` names it aloud; `notice` is said first.
     Go { transcript: String, spoken: String, notice: Option<String> },
-    /// Say this and wait for the user.
-    Ask(String),
+    /// Say this and wait for the user; `list_repo` is the repository whose open PRs go into the sidebar ("" = every repository).
+    Ask { text: String, list_repo: String },
+    /// Say this and stop (the sidebar, if any, is already showing).
+    Say(String),
+}
+
+/// The sentence for a PrTarget that is not a go. An Ask also fills the PR sidebar with the open pull requests.
+async fn pr_target_text<R: Runtime>(app: &AppHandle<R>, t: PrTarget) -> String {
+    match t {
+        PrTarget::Ask { text, list_repo } => {
+            if show_open_prs_in_sidebar(app, &list_repo).await {
+                format!("{text} The open pull requests are in the sidebar.")
+            } else {
+                text
+            }
+        }
+        PrTarget::Say(text) => text,
+        PrTarget::Go { spoken, .. } => spoken,
+    }
+}
+
+/// Put the user's open pull requests ("" = every repository) into the PR sidebar, where each has its own Analyse button.
+/// `false` when they could not be fetched (no GitHub session, an error, none open): the caller then only asks aloud.
+async fn show_open_prs_in_sidebar<R: Runtime>(app: &AppHandle<R>, repo: &str) -> bool {
+    let Some((worker_url, user_id, _)) = network::get_session_info() else { return false };
+    let cmd = crate::github_cmd::GitHubCommand::ListPrs { repo: repo.to_string(), state: "open".to_string() };
+    match crate::github_cmd::execute_command(&worker_url, &user_id, &cmd, false).await {
+        crate::github_cmd::GitHubResult::PrList { repo, state, prs } if !prs.is_empty() => {
+            crate::commands::set_pending_pr_list(serde_json::json!({ "type": "pr_list", "repo": repo, "state": state, "prs": prs }));
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = crate::commands::show_pr_list_sidebar(app).await {
+                    tracing::error!("orchestrator: failed to show PR list sidebar: {e}");
+                }
+            });
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Everything the screen shows about pull requests, most reliable first: a github.com page, the title of the window
@@ -6068,16 +6134,11 @@ async fn gather_screen_prs<R: Runtime>(app: &AppHandle<R>, url: Option<&str>) ->
     out
 }
 
-/// Which pull request does the user mean? The screen first; a named repository narrows it; otherwise ask.
-/// Every repository seen is checked against the user's GitHub (a real github.com page may be anyone's public repo), and a
-/// PR number that GitHub says does not exist is dropped.
-async fn resolve_pr_target<R: Runtime>(
-    app: &AppHandle<R>,
-    url: Option<&str>,
-    mentioned: Option<(String, String)>,
-    want_latest: bool,
-) -> PrTarget {
-    use crate::pr_screen::{decide, Decision, Resolved};
+/// What the screen shows, matched to real repositories: every repository seen is checked against the user's GitHub (a
+/// real github.com page may be anyone's public repo), and, when `check_numbers`, a PR number that GitHub reports as 404
+/// is dropped.
+async fn resolve_screen<R: Runtime>(app: &AppHandle<R>, url: Option<&str>, check_numbers: bool) -> Vec<crate::pr_screen::Resolved> {
+    use crate::pr_screen::Resolved;
     let seen = gather_screen_prs(app, url).await;
     let entries = crate::github_repo_index::entries_for_check().await;
     let mut resolved: Vec<Resolved> = Vec::new();
@@ -6096,14 +6157,29 @@ async fn resolve_pr_target<R: Runtime>(
                 _ => continue,
             },
         };
-        if let Some(n) = s.number {
-            if crate::repo_review::pr_exists(&owner, &repo, n).await == Some(false) {
-                println!("[ANALYSE-PR] {owner}/{repo} #{n} does not exist on GitHub: ignored");
-                continue;
+        if check_numbers {
+            if let Some(n) = s.number {
+                if crate::repo_review::pr_exists(&owner, &repo, n).await == Some(false) {
+                    println!("[ANALYSE-PR] {owner}/{repo} #{n} does not exist on GitHub: ignored");
+                    continue;
+                }
             }
         }
         resolved.push(Resolved { owner, repo, number: s.number });
     }
+    resolved
+}
+
+/// Which pull request does the user mean? The screen first; a named repository narrows it (its PR on screen, else its
+/// latest one); when it cannot be told, the open pull requests are listed in the sidebar and the user is asked.
+async fn resolve_pr_target<R: Runtime>(
+    app: &AppHandle<R>,
+    url: Option<&str>,
+    mentioned: Option<(String, String)>,
+    want_latest: bool,
+) -> PrTarget {
+    use crate::pr_screen::{decide, Decision};
+    let resolved = resolve_screen(app, url, true).await;
     let mentioned_ref = mentioned.as_ref().map(|(o, r)| (o.as_str(), r.as_str()));
     match decide(&resolved, mentioned_ref, want_latest) {
         Decision::Analyse { owner, repo, number } => PrTarget::Go {
@@ -6111,12 +6187,60 @@ async fn resolve_pr_target<R: Runtime>(
             spoken: format!("PR #{number} in {owner}/{repo}"),
             notice: None,
         },
-        Decision::Latest { owner, repo, notice } => PrTarget::Go {
+        Decision::Latest { owner, repo } => PrTarget::Go {
             transcript: format!("analyse the latest pr in {owner}/{repo}"),
             spoken: format!("the latest PR in {owner}/{repo}"),
-            notice,
+            notice: None,
         },
-        Decision::Ask(text) => PrTarget::Ask(text),
+        Decision::List { repo, text } => PrTarget::Ask { text, list_repo: repo.map(|(o, r)| format!("{o}/{r}")).unwrap_or_default() },
+    }
+}
+
+/// "analyse PR 70" (no repository): a repository on the screen that has PR 70 first, else the one repository of the
+/// user's that has it, else (the same number in several repositories) the sidebar lists them and the user is asked.
+async fn resolve_pr_number<R: Runtime>(app: &AppHandle<R>, url: Option<&str>, number: u64) -> PrTarget {
+    use crate::pr_screen::{decide_number, NumberDecision};
+    let on_screen_repos = resolve_screen(app, url, false).await;
+    let mut on_screen: Vec<(String, String)> = Vec::new();
+    for r in &on_screen_repos {
+        if !on_screen.iter().any(|(o, n)| o.eq_ignore_ascii_case(&r.owner) && n.eq_ignore_ascii_case(&r.repo))
+            && crate::repo_review::pr_exists(&r.owner, &r.repo, number).await == Some(true)
+        {
+            on_screen.push((r.owner.clone(), r.repo.clone()));
+        }
+    }
+    let go = |o: &str, r: &str| PrTarget::Go {
+        transcript: format!("analyse pr {number} in {o}/{r}"),
+        spoken: format!("PR #{number} in {o}/{r}"),
+        notice: None,
+    };
+    if let [(o, r)] = on_screen.as_slice() {
+        return go(o, r);
+    }
+    let Some((worker_url, user_id, _)) = network::get_session_info() else {
+        return PrTarget::Say(format!("I can't search your repositories right now, sir. Which repository is pull request {number} in?"));
+    };
+    let cmd = crate::github_cmd::GitHubCommand::FindPr { pr_number: number };
+    match crate::github_cmd::execute_command(&worker_url, &user_id, &cmd, false).await {
+        crate::github_cmd::GitHubResult::PrList { repo, state, prs } => {
+            let elsewhere: Vec<(String, String)> = prs.iter().filter_map(|p| crate::architect::split_full_name(&p.repo)).collect();
+            match decide_number(number, &on_screen, &elsewhere) {
+                NumberDecision::Analyse { owner, repo } => go(&owner, &repo),
+                NumberDecision::AskRepo(text) => {
+                    crate::commands::set_pending_pr_list(serde_json::json!({ "type": "pr_list", "repo": repo, "state": state, "prs": prs }));
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = crate::commands::show_pr_list_sidebar(app).await {
+                            tracing::error!("orchestrator: failed to show PR list sidebar: {e}");
+                        }
+                    });
+                    PrTarget::Say(format!("{text} They are in the sidebar."))
+                }
+                NumberDecision::NotFound(text) => PrTarget::Say(text),
+            }
+        }
+        crate::github_cmd::GitHubResult::Text { text } => PrTarget::Say(text),
+        _ => PrTarget::Say(format!("I couldn't search for pull request {number} just now, sir. Which repository is it in?")),
     }
 }
 
