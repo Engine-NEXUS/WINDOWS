@@ -1612,7 +1612,28 @@ fn simple_phonetic(word: &str) -> String {
 /// - "analyse PR 23 owner/repo"
 /// - "deep analysis PR 24 in servx" / "deep analyse PR 24 in servx"
 /// - "analysis PR 24 in servx" (noun form)
+/// Conversational lead-ins that do not change the request: "let us analyze this repo", "can you please analyse ...",
+/// "okay let's ...". Several may be stacked. Input is already lower-case. Pure.
+fn strip_lead_ins(text: &str) -> &str {
+    const LEADS: &[&str] = &[
+        "let us ", "let's ", "let\u{2019}s ", "lets ", "please ", "can you ", "could you ", "would you ", "will you ", "can we ",
+        "could we ", "go ahead and ", "i want you to ", "i need you to ", "i'd like you to ", "i would like you to ", "now ",
+        "okay ", "ok ", "hey ", "so ", "just ",
+    ];
+    let mut s = text.trim_start();
+    'again: loop {
+        for l in LEADS {
+            if let Some(r) = s.strip_prefix(l) {
+                s = r.trim_start();
+                continue 'again;
+            }
+        }
+        return s;
+    }
+}
+
 fn parse_analyse_command(text: &str) -> Option<ParseResult> {
+    let text = strip_lead_ins(text);
     // Must start with "analyse", "analyze", "analysis", "deep analyse",
     // "deep analyze", or "deep analysis"
     let analyse_text = if text.starts_with("analyse ") {
@@ -1641,6 +1662,8 @@ fn parse_analyse_command(text: &str) -> Option<ParseResult> {
         pointed,
         "this repo" | "the repo" | "this repository" | "the repository" | "the current repo" | "the open repo"
             | "this report" | "the report" | "this project repo" | "my repo" | "this git repo"
+            // The speech engine also hears "this repo" as "this rap up" / "this wrap up" (2026-11-01 log).
+            | "this rap up" | "this wrap up" | "this repo up" | "the rap up" | "the wrap up"
     ) {
         return Some(ParseResult {
             intent: ParsedIntent::AnalyseRepo { owner: None, repo: "this".to_string() },
@@ -3058,6 +3081,7 @@ fn parse_analyse_deictic_command(text: &str) -> Option<ParseResult> {
             s = r;
         }
     }
+    let s = strip_lead_ins(s);
     if s.split_whitespace().count() > 12 {
         return None;
     }
@@ -3099,6 +3123,10 @@ fn parse_analyse_deictic_command(text: &str) -> Option<ParseResult> {
         "repo", "repository", "repositories", "project", "codebase", "pr", "pull", "email", "mail", "e-mail", "branch",
         "commit", "issue", "report",
     ];
+    // "this rap up" is the speech engine's "this repo": the repository route takes it.
+    if matches!(core, "this rap up" | "this wrap up" | "this repo up" | "the rap up" | "the wrap up") {
+        return None;
+    }
     let words: Vec<&str> = core.split_whitespace().collect();
     if words.is_empty() || words.iter().any(|w| DEDICATED.contains(w)) {
         return None;
@@ -10822,6 +10850,16 @@ mod tests {
         for p in ["analyse this repo", "analyze the repo", "analyse this repository", "analyse this report", "analyze the report."] {
             assert!(label(p).starts_with("AnalyseRepo { owner: None, repo: \"this\" }"), "'{p}' -> {}", label(p));
         }
+        // Conversational lead-ins and the "rap up" mishearing (2026-11-01 log: "Let us analyze this repository." went to chat).
+        for p in [
+            "let us analyze this repository.", "let's analyze this repo", "Let\u{2019}s analyze this repo", "can you please analyse this repo",
+            "okay let's analyze this rap up.", "could you analyze the repository for me", "go ahead and analyze this repo",
+        ] {
+            let t = p.to_lowercase();
+            let t = t.trim_end_matches(" for me").to_string();
+            assert!(label(&t).starts_with("AnalyseRepo { owner: None, repo: \"this\" }"), "'{p}' -> {}", label(&t));
+        }
+        assert_eq!(label("let's analyze this youtube video"), "nlu:screen_analysis");
         // Named or dedicated targets keep their routes; chat is untouched.
         assert!(label("analyse servx").starts_with("AnalyseRepo"), "{}", label("analyse servx"));
         assert!(label("analyse this repo").starts_with("AnalyseRepo"), "{}", label("analyse this repo"));
