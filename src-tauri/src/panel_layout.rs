@@ -129,6 +129,23 @@ pub fn resize(p: Panel, delta: f64) -> f64 {
     new
 }
 
+/// The free span (left, right) in logical px beside the response sidebar, and whether panels hug its right end.
+/// `sidebar` is `(x, width)` of the visible sidebar, or `None`. A sidebar on the right half leaves the span to its left;
+/// one on the left half leaves the span to its right. Pure.
+pub fn free_span(width: f64, sidebar: Option<(f64, f64)>) -> ((f64, f64), bool) {
+    let mut span = (MARGIN, width - MARGIN);
+    let mut align_right = true;
+    if let Some((sx, sw)) = sidebar {
+        if sx + sw / 2.0 >= width / 2.0 {
+            span.1 = (sx - GAP).max(span.0 + 1.0);
+        } else {
+            span.0 = (sx + sw + GAP).min(span.1 - 1.0);
+            align_right = false;
+        }
+    }
+    (span, align_right)
+}
+
 /// Place every open panel. Safe to call any time; ignores panels whose window does not exist.
 pub fn apply<R: Runtime>(app: &AppHandle<R>) {
     let order: Vec<Panel> = ORDER.lock().unwrap().iter().copied().filter(|p| app.get_webview_window(p.label()).is_some()).collect();
@@ -144,20 +161,13 @@ pub fn apply<R: Runtime>(app: &AppHandle<R>) {
     let h_log = ((work.h as f64 / scale) - 2.0 * TOP).min(1040.0).max(400.0);
 
     // The response sidebar keeps its own place; the panels use the free span on its inner side.
-    let mut span = (MARGIN, w_log - MARGIN);
-    let mut align_right = true;
+    let mut sidebar = None;
     if let Some(sb) = app.get_webview_window("sidebar").filter(|w| w.is_visible().unwrap_or(false)) {
         if let (Ok(pos), Ok(size)) = (sb.outer_position(), sb.outer_size()) {
-            let sx = (pos.x - work.x) as f64 / scale;
-            let sw = size.width as f64 / scale;
-            if sx + sw / 2.0 >= w_log / 2.0 {
-                span.1 = (sx - GAP).max(span.0 + 1.0);
-            } else {
-                span.0 = (sx + sw + GAP).min(span.1 - 1.0);
-                align_right = false;
-            }
+            sidebar = Some(((pos.x - work.x) as f64 / scale, size.width as f64 / scale));
         }
     }
+    let (span, align_right) = free_span(w_log, sidebar);
     let specs: Vec<(f64, f64)> = order.iter().map(|p| (width_for(*p), p.widths().1)).collect();
     // Panels sit left-to-right in open order; the oldest is furthest from the sidebar.
     let placed = if align_right { arrange(span, &specs, true, GAP) } else {
@@ -254,5 +264,21 @@ mod tests {
             assert_eq!(Panel::from_label(p.label()), Some(p));
         }
         assert_eq!(Panel::from_label("sidebar"), None);
+    }
+
+    #[test]
+    fn panels_sit_beside_the_sidebar_never_under_it() {
+        // 1920 wide, a 520 px sidebar docked right (x = 1390): panels get the span to its left.
+        let (span, right) = free_span(1920.0, Some((1390.0, 520.0)));
+        assert!(right && span.1 <= 1390.0 - GAP + 0.001 && span.0 == MARGIN, "{span:?}");
+        let placed = arrange(span, &[(960.0, 480.0), (720.0, 420.0)], right, GAP);
+        for (x, w) in &placed {
+            assert!(x + w <= 1390.0, "a panel reaches under the sidebar: {placed:?}");
+        }
+        // Sidebar docked left: the span is to its right and panels start after it.
+        let (span, right) = free_span(1920.0, Some((10.0, 520.0)));
+        assert!(!right && span.0 >= 530.0 && span.1 == 1920.0 - MARGIN, "{span:?}");
+        // No sidebar: the whole width.
+        assert_eq!(free_span(1920.0, None), ((MARGIN, 1920.0 - MARGIN), true));
     }
 }
