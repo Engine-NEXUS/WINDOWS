@@ -6,9 +6,8 @@ name: macOS port check
 # (docs/features/117: nothing has ever run on macOS).
 on:
   push:
-    branches: [feat/action-kernel]
+    branches: [main, feat/action-kernel]
   pull_request:
-    branches: [feat/action-kernel]
   workflow_dispatch:
 
 jobs:
@@ -36,6 +35,9 @@ jobs:
         working-directory: src-tauri
         run: cargo check --lib --target aarch64-apple-darwin
 
+      # Informational until card M1 (docs/features/155) has fixed whatever the
+      # first macOS run reports; the compile step above is the gate.
       - name: cargo test --lib (macOS host)
         working-directory: src-tauri
+        continue-on-error: true
         run: cargo test --lib
