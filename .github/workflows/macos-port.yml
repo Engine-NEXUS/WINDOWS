@@ -6,9 +6,13 @@ name: macOS port check
 # (docs/features/117: nothing has ever run on macOS).
 on:
   push:
-    branches: [main, feat/action-kernel]
+    branches: [main, feat/action-kernel, 'claude/**']
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: macos-port-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   compile:
@@ -28,6 +32,10 @@ jobs:
       - name: npm install (frontend)
         run: npm --prefix frontend install
 
+      # tauri::generate_context! needs frontendDist to exist at compile time.
+      - name: Build frontend
+        run: npm --prefix frontend run build
+
       # The port gate: typecheck-only for the Apple-Silicon target, catching
       # any unresolved-Windows-symbol regressions the static classifier
       # reports as zero.
@@ -40,4 +48,4 @@ jobs:
       - name: cargo test --lib (macOS host)
         working-directory: src-tauri
         continue-on-error: true
-        run: cargo test --lib
+        run: cargo test --lib -- --test-threads=1
