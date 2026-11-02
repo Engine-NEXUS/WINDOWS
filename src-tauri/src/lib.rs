@@ -170,6 +170,7 @@ pub(crate) mod agent_outcomes;
 pub(crate) mod agent_attention;
 pub(crate) mod repo_review;
 pub(crate) mod pr_screen;
+pub(crate) mod early_hello;
 pub(crate) mod howto;
 pub(crate) mod email_brief;
 pub(crate) mod repo_hint;
@@ -387,6 +388,8 @@ fn init_logging() {
 pub fn run() {
     crate::boot::mark("main");
     init_logging();
+    // The greeting at logon: waits for the desktop, then plays a cached clip while the rest of the app is still starting.
+    early_hello::start_if_logon();
 
     // ─── WebView2 stale profile cleanup ───────────────────────────────
     //
@@ -704,6 +707,7 @@ pub fn run() {
             }
 
             // Tray menu.
+            crate::boot::mark("setup_before_tray");
             tray::setup(app.handle())?;
             crate::boot::mark("setup_tray_done");
 

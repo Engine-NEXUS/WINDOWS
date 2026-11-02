@@ -2015,6 +2015,10 @@ pub struct NexusSettings {
     /// to reopen them after a restart. Must live in this struct (save_settings rewrites the file).
     #[serde(default = "default_memcore")]
     pub memcore_session: bool,
+    /// Play the cached greeting as soon as the desktop is shown at logon, before the app has finished starting.
+    /// Must live in this struct (save_settings rewrites the file). Read early from settings.json by `early_hello`.
+    #[serde(default = "default_early_hello")]
+    pub early_hello: bool,
     /// Check the connections NEXUS relies on at startup and mention problems in the greeting.
     #[serde(default = "default_memcore")]
     pub memcore_health: bool,
@@ -2038,6 +2042,10 @@ fn default_watch_power() -> String {
 }
 
 fn default_memcore() -> bool {
+    true
+}
+
+fn default_early_hello() -> bool {
     true
 }
 
@@ -2366,6 +2374,7 @@ impl Default for NexusSettings {
             memcore_whatsapp_speak: false,
             memcore_leave_by: default_memcore(),
             memcore_session: default_memcore(),
+            early_hello: default_early_hello(),
             memcore_health: default_memcore(),
             power_commands: default_memcore(),
             default_music_player: default_music_player(),

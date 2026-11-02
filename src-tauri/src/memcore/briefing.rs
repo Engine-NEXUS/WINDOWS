@@ -542,6 +542,15 @@ async fn wait_until_quiet(max_secs: u64) {
 /// Speak the plain time-of-day hello unless one was spoken recently. `tag` names the trigger in the log
 /// and in the alert id. Returns whether a hello was submitted.
 fn submit_hello<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std::path::Path, tag: &str) -> bool {
+    // The early hello (played when the desktop appeared) already greeted: never a second one.
+    if crate::early_hello::owns_the_hello() {
+        if crate::early_hello::played_this_run() {
+            let now_ts = chrono::Utc::now().timestamp();
+            super::with_store(dir, |s| s.meta_set("last_hello_ts", &now_ts.to_string()));
+        }
+        println!("[BOOT] no hello ({tag}): the early hello owns it");
+        return true;
+    }
     use chrono::Timelike;
     let now_ts = chrono::Utc::now().timestamp();
     let last_hello = super::with_store(dir, |s| s.meta_get("last_hello_ts").and_then(|v| v.parse::<i64>().ok())).flatten();
