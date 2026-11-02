@@ -8106,7 +8106,7 @@ async fn restore_session<R: Runtime>(app: &AppHandle<R>) -> String {
     if failed.is_empty() {
         session::clear_pending(&dir);
     }
-    format!("{} Done, sir.", restore::report(&opened, &failed, &plan.already_open, plan.skipped))
+    restore::restore_report_short(&opened, &failed, &plan.already_open)
 }
 
 /// "Reopen my session" (without waiting for the greeting question).

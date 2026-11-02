@@ -2501,6 +2501,7 @@ pub fn get_settings<R: Runtime>(
             }
         }
     }
+    normalize_orb_fields(&mut settings);
     Ok(settings)
 }
 
@@ -2565,6 +2566,7 @@ fn save_settings_with_voice_intent<R: Runtime>(
         settings.server_url = crate::network::normalize_worker_url(&settings.server_url)?;
     }
     normalize_voice_fields(&mut settings);
+    normalize_orb_fields(&mut settings);
     if !settings.edge_tts_voice.is_empty() {
         settings.tts_voice = settings.edge_tts_voice.clone();
         if settings.tts_provider.is_empty() || settings.tts_provider == "kokoro" {
@@ -2653,6 +2655,14 @@ pub fn normalize_voice_fields(s: &mut NexusSettings) {
     }
 }
 
+/// The voice orb is always fixed at the top (top-center, 200px); only its design can be chosen.
+pub fn normalize_orb_fields(s: &mut NexusSettings) {
+    s.orb_position = "top".to_string();
+    s.orb_horizontal_pct = 0.5;
+    s.orb_vertical_pct = 0.0;
+    s.orb_size = 200;
+}
+
 /// Merge `patch` (camelCase keys) into the current settings and validate the result as a whole.
 pub fn apply_settings_patch(
     current: &NexusSettings,
@@ -2738,6 +2748,22 @@ mod settings_voice_tests {
         assert_eq!(s.selected_voice, "nexus");
         assert_eq!(s.tts_voice, "en-IN-NeerjaNeural");
         assert_eq!(s.edge_tts_voice, "en-IN-NeerjaNeural");
+    }
+
+    #[test]
+    fn normalize_orb_fields_forces_fixed_top_center_and_size() {
+        let mut s = NexusSettings::default();
+        s.orb_position = "bottom".to_string();
+        s.orb_horizontal_pct = 0.85;
+        s.orb_vertical_pct = 0.95;
+        s.orb_size = 360;
+
+        normalize_orb_fields(&mut s);
+
+        assert_eq!(s.orb_position, "top");
+        assert_eq!(s.orb_horizontal_pct, 0.5);
+        assert_eq!(s.orb_vertical_pct, 0.0);
+        assert_eq!(s.orb_size, 200);
     }
 
     #[test]

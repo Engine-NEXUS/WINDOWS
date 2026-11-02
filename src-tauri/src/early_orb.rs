@@ -1,22 +1,29 @@
 //! A small native orb + caption shown while the early hello is spoken (doc 158, slice 2).
 //!
 //! The real orb lives in the `stage` WebView, which does not exist until 5-25 s after logon. So while the cached
-//! greeting plays, this draws the same idea natively: the black capsule at the top (or bottom) of the screen with a white
-//! particle sphere that breathes with the voice, and below it the black caption pill that reveals the words as they are
-//! spoken. It is a lightweight stand-in: drawn in software into a layered window (per-pixel alpha, click-through, never
-//! takes focus), shown for the length of the clip plus a short linger, then it fades away and the window is destroyed.
+//! greeting plays, this draws the same idea natively: the black capsule at the top of the screen with a white
+//! particle sphere that breathes with the voice, and at the stage slot (screen x=51.5%, top=89.5%) the black caption
+//! pill that reveals the words as they are spoken. It uses two layered windows (per-pixel alpha, click-through, never
+//! takes focus), shown for the length of the clip plus a short linger, then they fade away and the windows are destroyed.
 //!
 //! Everything about the picture is pure and tested (geometry, fades, the revealed words, the sphere, the compositing);
-//! only the window and the text rasteriser are Windows glue at the bottom.
+//! only the windows and the text rasteriser are Windows glue at the bottom.
 
-/// Logical (96-dpi) sizes. The capsule size comes from the user's orb settings (`orbScoopWidth` / `orbScoopHeight`).
+/// Logical (96-dpi) sizes. Fixed capsule sizes for top docking:
+/// 301x105 for pebble scoop, 200x200 for classic.
 pub const DEFAULT_CAPSULE_W: f32 = 301.0;
 pub const DEFAULT_CAPSULE_H: f32 = 105.0;
-const GAP: f32 = 12.0;
-const CAPTION_MAX_W: f32 = 520.0;
-const CAPTION_H: f32 = 44.0;
-const PILL_CORNER: f32 = 10.0;
-const SPHERE_RADIUS: f32 = 34.0;
+pub const CLASSIC_CAPSULE_W: f32 = 200.0;
+pub const CLASSIC_CAPSULE_H: f32 = 200.0;
+
+/// Stage slot constants matching frontend/src/stage/layoutSlots.ts and ghost.css.
+pub const CAPTION_CENTER_X: f32 = 0.515;
+pub const CAPTION_TOP: f32 = 0.895;
+pub const CAPTION_PILL_MAX_W: f32 = 620.0;
+pub const CAPTION_PILL_MIN_H: f32 = 30.0;
+pub const SHADOW_MARGIN: f32 = 24.0;
+pub const PILL_CORNER: f32 = 10.0;
+pub const SPHERE_RADIUS: f32 = 34.0;
 const DOTS: usize = 640;
 
 const FADE_IN_MS: u64 = 160;
@@ -24,7 +31,7 @@ const ORB_LINGER_MS: u64 = 900;
 const CAPTION_LINGER_MS: u64 = 1_500;
 const FADE_OUT_MS: u64 = 320;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -32,21 +39,46 @@ pub struct Rect {
     pub h: i32,
 }
 
-/// Where the overlay window goes: it spans the capsule and the caption, anchored to the top (or bottom) edge of the work
-/// area, placed horizontally by the user's `orbHorizontalPct`. Returns (window, capsule inside the window).
-pub fn layout(work: Rect, scale: f32, top: bool, x_pct: f32, capsule_w: f32, capsule_h: f32) -> (Rect, Rect) {
+/// The capsule dimensions (logical px) for each style.
+pub fn capsule_size(style: Style) -> (f32, f32) {
+    match style {
+        Style::Pebble => (DEFAULT_CAPSULE_W, DEFAULT_CAPSULE_H),
+        Style::Classic => (CLASSIC_CAPSULE_W, CLASSIC_CAPSULE_H),
+    }
+}
+
+/// Where the capsule window goes: docked at the top centre of the primary monitor (y = 0), sized exactly to the capsule.
+/// Returns (window rect, capsule rect inside the window). Pure.
+pub fn layout(screen_w: i32, scale: f32, capsule_w: f32, capsule_h: f32) -> (Rect, Rect) {
     let cap_w = (capsule_w * scale).round() as i32;
     let cap_h = (capsule_h * scale).round() as i32;
-    let win_w = ((CAPTION_MAX_W.max(capsule_w)) * scale).round() as i32;
-    let win_h = cap_h + ((GAP + CAPTION_H) * scale).round() as i32;
-    let pct = x_pct.clamp(0.0, 1.0);
-    let x = work.x + ((work.w - win_w).max(0) as f32 * pct).round() as i32;
-    let y = if top { work.y } else { work.y + work.h - win_h };
-    let win = Rect { x, y, w: win_w, h: win_h };
-    // inside the window: the capsule hugs the screen edge, the caption sits on the other side of it
-    let cx = (win_w - cap_w) / 2;
-    let cy = if top { 0 } else { win_h - cap_h };
-    (win, Rect { x: cx, y: cy, w: cap_w, h: cap_h })
+    let x = (screen_w - cap_w) / 2;
+    let y = 0;
+    (Rect { x, y, w: cap_w, h: cap_h }, Rect { x: 0, y: 0, w: cap_w, h: cap_h })
+}
+
+/// Where the caption window goes: centred horizontally at screen_w * 0.515, with the pill's top edge
+/// at screen_h * 0.895, padded by SHADOW_MARGIN * scale for soft drop shadows. Pure.
+pub fn caption_slot(screen_w: i32, screen_h: i32, scale: f32) -> Rect {
+    let win_w = ((CAPTION_PILL_MAX_W + 2.0 * SHADOW_MARGIN) * scale).round() as i32;
+    let win_h = ((CAPTION_PILL_MIN_H + 2.0 * SHADOW_MARGIN) * scale).round() as i32;
+    let center_x = screen_w as f32 * CAPTION_CENTER_X;
+    let win_x = (center_x - win_w as f32 / 2.0).round() as i32;
+    let pill_top = screen_h as f32 * CAPTION_TOP;
+    let win_y = (pill_top - SHADOW_MARGIN * scale).round() as i32;
+    Rect { x: win_x, y: win_y, w: win_w, h: win_h }
+}
+
+/// The pill rectangle inside the caption window for measured text dimensions.
+/// Centred horizontally in the window, top at SHADOW_MARGIN * scale. Pure.
+pub fn pill_in_window(win_w: i32, text_w: i32, text_h: i32, scale: f32) -> Rect {
+    let max_w = (CAPTION_PILL_MAX_W * scale).round() as i32;
+    let w = ((text_w as f32 + 48.0 * scale + 2.0).round() as i32).min(max_w);
+    let min_h = (CAPTION_PILL_MIN_H * scale).round() as i32;
+    let h = min_h.max((text_h as f32 + 4.0 * scale + 2.0).round() as i32);
+    let x = (win_w - w) / 2;
+    let y = (SHADOW_MARGIN * scale).round() as i32;
+    Rect { x, y, w, h }
 }
 
 /// The fades: (orb opacity, caption opacity, finished) for `t_ms` since the audio started and a clip of `clip_ms`.
@@ -135,7 +167,7 @@ fn sdf(px: f32, py: f32, r: Rect, r_top: f32, r_bottom: f32) -> f32 {
     (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - rad
 }
 
-/// A solid black rounded shape with a faint 1 px white border (the capsule and the caption pill look alike).
+/// A solid black rounded shape with an optional faint white border ring (the capsule and caption pill look alike).
 pub fn fill_black_shape(buf: &mut [u32], width: i32, r: Rect, r_top: f32, r_bottom: f32, alpha: f32, border_alpha: f32) {
     if alpha <= 0.0 {
         return;
@@ -151,9 +183,11 @@ pub fn fill_black_shape(buf: &mut [u32], width: i32, r: Rect, r_top: f32, r_bott
             let idx = (y * width + x) as usize;
             over(buf, idx, cov * alpha, 0.0, 0.0, 0.0);
             // the border: the outermost pixel ring, as a white film
-            let ring = (1.0 - (-d - 0.5).abs().min(1.0)) * border_alpha * alpha * cov;
-            if ring > 0.0 {
-                over(buf, idx, ring, ring, ring, ring);
+            if border_alpha > 0.0 {
+                let ring = (1.0 - (-d - 0.5).abs().min(1.0)) * border_alpha * alpha * cov;
+                if ring > 0.0 {
+                    over(buf, idx, ring, ring, ring, ring);
+                }
             }
         }
     }
@@ -208,12 +242,12 @@ pub fn composite_mask(buf: &mut [u32], width: i32, mask: &[u8], mw: i32, mh: i32
     }
 }
 
-/// The background shape the user chose in the Command Hub (`orbCapsuleStyle`).
+/// The background shape chosen for the orb (`orbCapsuleStyle`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Style {
-    /// The fluid bezel scoop: a catenary bowl hanging from the screen edge (the default).
+    /// The fluid bezel scoop: a catenary bowl hanging from the top screen edge (default).
     Pebble,
-    /// The plain black capsule: a square box with the two outer corners rounded by 10 px.
+    /// The plain black capsule: a 200x200 square box with the bottom two corners rounded by 10 px.
     Classic,
 }
 
@@ -228,10 +262,6 @@ pub struct Show {
     pub env: Vec<f32>,
     pub env_frame_ms: u64,
     pub clip_ms: u64,
-    pub top: bool,
-    pub x_pct: f32,
-    pub capsule_w: f32,
-    pub capsule_h: f32,
 }
 
 /// The depth of the pebble bowl (px from the screen edge) at every pixel column 0..w. The real orb draws two cubic
@@ -271,8 +301,8 @@ pub fn bowl_profile(w: f32, h: f32, wing: f32) -> Vec<f32> {
         .collect()
 }
 
-/// The pebble: a black bowl hanging from the screen edge (top) or rising from it (bottom), with a faint rim line.
-pub fn fill_pebble(buf: &mut [u32], width: i32, r: Rect, profile: &[f32], top: bool, alpha: f32, rim_alpha: f32) {
+/// The pebble: a black bowl hanging from the top screen edge, with a faint rim line. Pure.
+pub fn fill_pebble(buf: &mut [u32], width: i32, r: Rect, profile: &[f32], alpha: f32, rim_alpha: f32) {
     if alpha <= 0.0 {
         return;
     }
@@ -282,7 +312,7 @@ pub fn fill_pebble(buf: &mut [u32], width: i32, r: Rect, profile: &[f32], top: b
             let u = (x - r.x) as usize;
             let Some(&depth) = profile.get(u) else { continue };
             let slope = (profile.get(u + 1).copied().unwrap_or(depth) - profile.get(u.saturating_sub(1)).copied().unwrap_or(depth)) / 2.0;
-            let y_rel = if top { (y - r.y) as f32 + 0.5 } else { (r.y + r.h - y) as f32 - 0.5 };
+            let y_rel = (y - r.y) as f32 + 0.5;
             let d = (depth - y_rel) / (1.0 + slope * slope).sqrt(); // > 0 inside the bowl
             let cov = (0.5 + d).clamp(0.0, 1.0);
             if cov > 0.0 {
@@ -297,9 +327,8 @@ pub fn fill_pebble(buf: &mut [u32], width: i32, r: Rect, profile: &[f32], top: b
     }
 }
 
-/// Draw one frame of everything except the caption text. Returns the caption pill's centre-top anchor so the glue can
-/// rasterise the revealed text there. Pure.
-pub fn render_frame(buf: &mut [u32], width: i32, capsule: Rect, scale: f32, top: bool, t_ms: u64, s: &Show, points: &[[f32; 3]]) -> (f32, f32) {
+/// Draw one frame of the capsule window: the capsule background and the white particle sphere. Pure.
+pub fn render_frame(buf: &mut [u32], width: i32, capsule: Rect, scale: f32, t_ms: u64, s: &Show, points: &[[f32; 3]]) {
     for p in buf.iter_mut() {
         *p = 0;
     }
@@ -310,29 +339,73 @@ pub fn render_frame(buf: &mut [u32], width: i32, capsule: Rect, scale: f32, top:
         Style::Pebble => {
             let wing = (120.0 * scale).min(capsule.w as f32 * 0.25);
             let profile = bowl_profile(capsule.w as f32, capsule.h as f32, wing);
-            fill_pebble(buf, width, capsule, &profile, top, orb_a, s.rim_alpha);
+            fill_pebble(buf, width, capsule, &profile, orb_a, s.rim_alpha);
             // the sphere nestles in the pocket, a little above the lowest point
             let off = capsule.h as f32 * 0.04;
-            (if top { mid_y - off } else { mid_y + off }, SPHERE_RADIUS * scale)
+            (mid_y - off, SPHERE_RADIUS * scale)
         }
         Style::Classic => {
-            // the plain capsule: the screen-side corners are square, the other two are rounded by 10 px
+            // the plain capsule: the top screen-side corners are square, the bottom two are rounded by 10 px
             let corner = PILL_CORNER * scale;
-            let (r_top, r_bottom) = if top { (0.0, corner) } else { (corner, 0.0) };
-            fill_black_shape(buf, width, capsule, r_top, r_bottom, orb_a, 0.16);
+            fill_black_shape(buf, width, capsule, 0.0, corner, orb_a, 0.16);
             (mid_y, capsule.w as f32 * 0.30)
         }
     };
     draw_orb(buf, width, cx, cy, radius, t_ms as f32 / 1000.0, amp, orb_a, points);
-    let pill_y = if top { (capsule.y + capsule.h) as f32 + GAP * scale } else { capsule.y as f32 - GAP * scale };
-    (cx, pill_y)
 }
 
-/// The pill rectangle for a measured text, centred on `cx`, hanging below (top) or rising above (bottom) `anchor_y`.
-pub fn pill_rect(cx: f32, anchor_y: f32, text_w: i32, text_h: i32, scale: f32, top: bool) -> Rect {
-    let (pad_x, pad_y) = ((18.0 * scale).round() as i32, (8.0 * scale).round() as i32);
-    let (w, h) = (text_w + 2 * pad_x, text_h + 2 * pad_y);
-    Rect { x: (cx - w as f32 / 2.0).round() as i32, y: if top { anchor_y.round() as i32 } else { anchor_y.round() as i32 - h }, w, h }
+/// Draw the caption pill with soft black shadows and composited text into the caption window buffer. Pure.
+pub fn render_caption(
+    buf: &mut [u32],
+    width: i32,
+    pill: Rect,
+    scale: f32,
+    alpha: f32,
+    mask: &[u8],
+    mw: i32,
+    mh: i32,
+    tw: i32,
+    th: i32,
+) {
+    for p in buf.iter_mut() {
+        *p = 0;
+    }
+    if alpha <= 0.0 {
+        return;
+    }
+    let corner = pill_corner(scale);
+    // The pill shadow: draw 3 slightly larger translucent black rounded rects behind the pill
+    // expanded by 22, 14 and 6 logical px with alpha 0.07, 0.14 and 0.25 scaled by the caption alpha.
+    for (exp_logical, a_mult) in [(22.0, 0.07), (14.0, 0.14), (6.0, 0.25)] {
+        let exp = (exp_logical * scale).round() as i32;
+        let r = Rect {
+            x: pill.x - exp,
+            y: pill.y - exp,
+            w: pill.w + 2 * exp,
+            h: pill.h + 2 * exp,
+        };
+        let rad = corner + exp as f32;
+        fill_black_shape(buf, width, r, rad, rad, alpha * a_mult, 0.0);
+    }
+
+    // The solid black pill with 1 px white border (16% opacity)
+    fill_black_shape(buf, width, pill, corner, corner, alpha, 0.16);
+
+    // Composite the text inside the pill, centered horizontally and vertically
+    if !mask.is_empty() && tw > 0 && th > 0 {
+        let (cw, ch) = (tw.min(mw).max(0), th.min(mh).max(0));
+        let mut cropped = Vec::with_capacity((cw * ch) as usize);
+        for y in 0..ch {
+            let start = (y * mw) as usize;
+            let end = start + cw as usize;
+            if end <= mask.len() {
+                cropped.extend_from_slice(&mask[start..end]);
+            }
+        }
+        let text_x = pill.x + (pill.w - cw) / 2;
+        let text_y = pill.y + (pill.h - ch) / 2;
+        composite_mask(buf, width, &cropped, cw, ch, text_x, text_y, alpha);
+    }
 }
 
 pub fn pill_corner(scale: f32) -> f32 {
@@ -344,16 +417,16 @@ pub fn dot_count() -> usize {
 }
 
 pub fn caption_max_width(scale: f32) -> i32 {
-    ((CAPTION_MAX_W - 36.0) * scale).round() as i32
+    (CAPTION_PILL_MAX_W * scale).round() as i32
 }
 
 pub fn caption_height(scale: f32) -> i32 {
-    ((CAPTION_H - 16.0) * scale).round() as i32
+    (44.0 * scale).round() as i32
 }
 
-// ─── the window (Windows only) ───────────────────────────────────────
+// ─── the windows (Windows only) ──────────────────────────────────────
 
-/// Show the overlay for the length of the clip. Returns at once; the window lives on its own thread. Best effort: any
+/// Show the overlay for the length of the clip. Returns at once; the windows live on their own thread. Best effort: any
 /// failure is logged and the greeting is simply heard without a picture.
 #[cfg(target_os = "windows")]
 pub fn show(s: Show) {
@@ -386,14 +459,6 @@ mod win {
     struct Size {
         cx: i32,
         cy: i32,
-    }
-    #[repr(C)]
-    #[derive(Default, Clone, Copy)]
-    struct RectRaw {
-        left: i32,
-        top: i32,
-        right: i32,
-        bottom: i32,
     }
     #[repr(C)]
     struct Msg {
@@ -442,7 +507,20 @@ mod win {
     #[link(name = "user32")]
     extern "system" {
         fn RegisterClassW(class: *const WndClassW) -> u16;
-        fn CreateWindowExW(ex: u32, class: *const u16, title: *const u16, style: u32, x: i32, y: i32, w: i32, h: i32, parent: Hwnd, menu: isize, inst: isize, param: *const c_void) -> Hwnd;
+        fn CreateWindowExW(
+            ex: u32,
+            class: *const u16,
+            title: *const u16,
+            style: u32,
+            x: i32,
+            y: i32,
+            w: i32,
+            h: i32,
+            parent: Hwnd,
+            menu: isize,
+            inst: isize,
+            param: *const c_void,
+        ) -> Hwnd;
         fn DefWindowProcW(h: Hwnd, m: u32, w: usize, l: isize) -> isize;
         fn ShowWindow(h: Hwnd, cmd: i32) -> i32;
         fn SetTimer(h: Hwnd, id: usize, ms: u32, f: *const c_void) -> usize;
@@ -451,9 +529,18 @@ mod win {
         fn DispatchMessageW(m: *const Msg) -> isize;
         fn PostQuitMessage(code: i32);
         fn DestroyWindow(h: Hwnd) -> i32;
-        fn UpdateLayeredWindow(h: Hwnd, dst: isize, pos: *const Point, size: *const Size, src: isize, src_pos: *const Point, key: u32, blend: *const BlendFunction, flags: u32) -> i32;
+        fn UpdateLayeredWindow(
+            h: Hwnd,
+            dst: isize,
+            pos: *const Point,
+            size: *const Size,
+            src: isize,
+            src_pos: *const Point,
+            key: u32,
+            blend: *const BlendFunction,
+            flags: u32,
+        ) -> i32;
         fn GetSystemMetrics(i: i32) -> i32;
-        fn SystemParametersInfoW(action: u32, p1: u32, p2: *mut c_void, flags: u32) -> i32;
         fn SetThreadDpiAwarenessContext(ctx: isize) -> isize;
         fn GetDpiForSystem() -> u32;
     }
@@ -464,7 +551,22 @@ mod win {
         fn SelectObject(dc: isize, obj: isize) -> isize;
         fn DeleteObject(obj: isize) -> i32;
         fn DeleteDC(dc: isize) -> i32;
-        fn CreateFontW(h: i32, w: i32, esc: i32, orient: i32, weight: i32, italic: u32, underline: u32, strike: u32, charset: u32, out: u32, clip: u32, quality: u32, pitch: u32, face: *const u16) -> isize;
+        fn CreateFontW(
+            h: i32,
+            w: i32,
+            esc: i32,
+            orient: i32,
+            weight: i32,
+            italic: u32,
+            underline: u32,
+            strike: u32,
+            charset: u32,
+            out: u32,
+            clip: u32,
+            quality: u32,
+            pitch: u32,
+            face: *const u16,
+        ) -> isize;
         fn SetTextColor(dc: isize, color: u32) -> u32;
         fn SetBkMode(dc: isize, mode: i32) -> i32;
         fn TextOutW(dc: isize, x: i32, y: i32, s: *const u16, n: i32) -> i32;
@@ -536,14 +638,18 @@ mod win {
 
     struct State {
         show: Show,
-        window: Rect,
-        capsule: Rect,
+        capsule_win: Rect,
+        caption_win: Rect,
+        capsule_rect: Rect,
         scale: f32,
         started: std::time::Instant,
-        canvas: Dib,
+        capsule_canvas: Dib,
+        caption_canvas: Dib,
         text: Dib,
         font: isize,
         points: Vec<[f32; 3]>,
+        hwnd_capsule: Hwnd,
+        hwnd_caption: Hwnd,
     }
 
     thread_local! {
@@ -554,7 +660,7 @@ mod win {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// Rasterise `text` into the mask bitmap with GDI and return (coverage mask, width, height, measured width).
+    /// Rasterise `text` into the mask bitmap with GDI and return (coverage mask, width, height, measured width, measured height).
     fn text_mask(st: &mut State, text: &str) -> (Vec<u8>, i32, i32, i32, i32) {
         let w16: Vec<u16> = text.encode_utf16().collect();
         // SAFETY: GDI calls on the DC and font owned by `st`; the string outlives the calls.
@@ -574,43 +680,51 @@ mod win {
         }
     }
 
-    /// Draw the whole picture for `t_ms` into the canvas. `true` when the show is over.
+    /// Draw both windows for `t_ms` into their canvases. `true` when the show is over.
     fn compose(st: &mut State, t_ms: u64) -> bool {
         let (_, cap_a, done) = alphas(t_ms, st.show.clip_ms);
-        let width = st.window.w;
-        let (cx, anchor) = {
-            let (show, capsule, scale, top) = (st.show.clone(), st.capsule, st.scale, st.show.top);
+
+        // 1. Render capsule window (capsule + sphere)
+        {
+            let show = st.show.clone();
+            let capsule_rect = st.capsule_rect;
+            let scale = st.scale;
             let points = std::mem::take(&mut st.points);
-            let r = render_frame(st.canvas.pixels(), width, capsule, scale, top, t_ms, &show, &points);
+            render_frame(st.capsule_canvas.pixels(), st.capsule_win.w, capsule_rect, scale, t_ms, &show, &points);
             st.points = points;
-            r
-        };
+        }
+
+        // 2. Render caption window (pill + shadows + text)
         let shown = visible_prefix(&st.show.words, &st.show.text, t_ms);
         if cap_a > 0.0 && !shown.is_empty() {
             let (mask, mw, mh, tw, th) = text_mask(st, &shown);
-            let pill = pill_rect(cx, anchor, tw, th, st.scale, st.show.top);
-            fill_black_shape(st.canvas.pixels(), width, pill, pill_corner(st.scale), pill_corner(st.scale), cap_a, 0.16);
-            let (pad_x, pad_y) = ((18.0 * st.scale).round() as i32, (8.0 * st.scale).round() as i32);
-            // the mask bitmap is wider than the text: cut out exactly the text rectangle (the mask has its own row width)
-            let (cw, ch) = (tw.min(mw).max(0), th.min(mh).max(0));
-            let mut cropped = Vec::with_capacity((cw * ch) as usize);
-            for y in 0..ch {
-                cropped.extend_from_slice(&mask[(y * mw) as usize..(y * mw + cw) as usize]);
+            let pill = pill_in_window(st.caption_win.w, tw, th, st.scale);
+            render_caption(st.caption_canvas.pixels(), st.caption_win.w, pill, st.scale, cap_a, &mask, mw, mh, tw, th);
+        } else {
+            for p in st.caption_canvas.pixels().iter_mut() {
+                *p = 0;
             }
-            composite_mask(st.canvas.pixels(), width, &cropped, cw, ch, pill.x + pad_x, pill.y + pad_y, cap_a);
         }
+
         done
     }
 
-    fn draw(st: &mut State, hwnd: Hwnd) -> bool {
+    fn draw(st: &mut State) -> bool {
         let done = compose(st, st.started.elapsed().as_millis() as u64);
-        // SAFETY: the canvas DC holds a 32-bit premultiplied bitmap the size of the window.
+        // SAFETY: both canvas DCs hold 32-bit premultiplied bitmaps matching their window sizes.
         unsafe {
-            let pos = Point { x: st.window.x, y: st.window.y };
-            let size = Size { cx: st.window.w, cy: st.window.h };
             let src = Point::default();
             let blend = BlendFunction { op: 0, flags: 0, alpha: 255, format: 1 };
-            UpdateLayeredWindow(hwnd, 0, &pos, &size, st.canvas.dc, &src, 0, &blend, 2);
+
+            // Update capsule window
+            let pos_cap = Point { x: st.capsule_win.x, y: st.capsule_win.y };
+            let size_cap = Size { cx: st.capsule_win.w, cy: st.capsule_win.h };
+            UpdateLayeredWindow(st.hwnd_capsule, 0, &pos_cap, &size_cap, st.capsule_canvas.dc, &src, 0, &blend, 2);
+
+            // Update caption window
+            let pos_txt = Point { x: st.caption_win.x, y: st.caption_win.y };
+            let size_txt = Size { cx: st.caption_win.w, cy: st.caption_win.h };
+            UpdateLayeredWindow(st.hwnd_caption, 0, &pos_txt, &size_txt, st.caption_canvas.dc, &src, 0, &blend, 2);
         }
         done
     }
@@ -618,47 +732,76 @@ mod win {
     unsafe extern "system" fn proc_(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) -> isize {
         match msg {
             WM_TIMER => {
-                let done = STATE.with(|s| s.borrow_mut().as_mut().map(|st| draw(st, hwnd)).unwrap_or(true));
+                let (done, h_cap, h_txt) = STATE.with(|s| {
+                    let mut b = s.borrow_mut();
+                    if let Some(st) = b.as_mut() {
+                        let done = draw(st);
+                        (done, st.hwnd_capsule, st.hwnd_caption)
+                    } else {
+                        (true, 0, 0)
+                    }
+                });
                 if done {
-                    DestroyWindow(hwnd);
+                    if h_cap != 0 {
+                        DestroyWindow(h_cap);
+                    }
+                    if h_txt != 0 {
+                        DestroyWindow(h_txt);
+                    }
                 }
                 0
             }
             WM_DESTROY => {
-                PostQuitMessage(0);
+                let is_first = STATE.with(|s| s.borrow().as_ref().map_or(false, |st| st.hwnd_capsule == hwnd));
+                if is_first {
+                    PostQuitMessage(0);
+                }
                 0
             }
             _ => DefWindowProcW(hwnd, msg, wp, lp),
         }
     }
 
-    /// Everything except the window: the layout, the bitmaps, the font and the sphere.
+    /// Everything except the windows: layout, bitmaps, font and particle sphere.
     unsafe fn build_state(s: Show) -> Result<State, String> {
         // draw in real pixels whatever the DPI of the process is this early in startup
         SetThreadDpiAwarenessContext(-4);
         let scale = GetDpiForSystem().max(96) as f32 / 96.0;
-        let mut raw = RectRaw::default();
-        let work = if SystemParametersInfoW(0x0030, 0, &mut raw as *mut RectRaw as *mut c_void, 0) != 0 {
-            Rect { x: raw.left, y: raw.top, w: raw.right - raw.left, h: raw.bottom - raw.top }
-        } else {
-            Rect { x: 0, y: 0, w: GetSystemMetrics(0), h: GetSystemMetrics(1) }
-        };
-        let (window, capsule) = layout(work, scale, s.top, s.x_pct, s.capsule_w, s.capsule_h);
-        let canvas = Dib::new(window.w, window.h).ok_or("no canvas")?;
+        let screen_w = GetSystemMetrics(0);
+        let screen_h = GetSystemMetrics(1);
+        let (cap_w, cap_h) = capsule_size(s.style);
+        let (capsule_win, capsule_rect) = layout(screen_w, scale, cap_w, cap_h);
+        let caption_win = caption_slot(screen_w, screen_h, scale);
+
+        let capsule_canvas = Dib::new(capsule_win.w, capsule_win.h).ok_or("no capsule canvas")?;
+        let caption_canvas = Dib::new(caption_win.w, caption_win.h).ok_or("no caption canvas")?;
         let text = Dib::new(caption_max_width(scale), caption_height(scale)).ok_or("no text bitmap")?;
         let face = wide("Segoe UI");
-        let font = CreateFontW(-((18.0 * scale).round() as i32), 0, 0, 0, 500, 0, 0, 0, 1, 0, 0, 4, 0, face.as_ptr());
+        let font = CreateFontW(-((16.5 * scale).round() as i32), 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 4, 0, face.as_ptr());
         if font == 0 {
             return Err("no font".into());
         }
-        Ok(State { show: s, window, capsule, scale, started: std::time::Instant::now(), canvas, text, font, points: sphere_points(dot_count()) })
+        Ok(State {
+            show: s,
+            capsule_win,
+            caption_win,
+            capsule_rect,
+            scale,
+            started: std::time::Instant::now(),
+            capsule_canvas,
+            caption_canvas,
+            text,
+            font,
+            points: sphere_points(dot_count()),
+            hwnd_capsule: 0,
+            hwnd_caption: 0,
+        })
     }
 
     pub fn run(s: Show) -> Result<(), String> {
-        // SAFETY: plain user32/gdi32 setup on this thread; every handle is released before returning.
+        // SAFETY: user32/gdi32 setup for two layered windows on this thread; all handles released before returning.
         unsafe {
-            let state = build_state(s)?;
-            let window = state.window;
+            let mut state = build_state(s)?;
             let class = wide("NexusEarlyOrb");
             let inst = GetModuleHandleW(std::ptr::null());
             let wc = WndClassW {
@@ -674,21 +817,63 @@ mod win {
                 class_name: class.as_ptr(),
             };
             RegisterClassW(&wc); // 0 when it already exists, which is fine
+
             // layered | topmost | toolwindow (no taskbar button) | noactivate | transparent (clicks pass through)
             let ex = 0x0008_0000 | 0x0000_0008 | 0x0000_0080 | 0x0800_0000 | 0x0000_0020;
-            let hwnd = CreateWindowExW(ex, class.as_ptr(), class.as_ptr(), 0x8000_0000, window.x, window.y, window.w, window.h, 0, 0, inst, std::ptr::null());
-            if hwnd == 0 {
+            let hwnd_capsule = CreateWindowExW(
+                ex,
+                class.as_ptr(),
+                class.as_ptr(),
+                0x8000_0000,
+                state.capsule_win.x,
+                state.capsule_win.y,
+                state.capsule_win.w,
+                state.capsule_win.h,
+                0,
+                0,
+                inst,
+                std::ptr::null(),
+            );
+            if hwnd_capsule == 0 {
                 DeleteObject(state.font);
-                return Err("CreateWindowExW failed".into());
+                return Err("CreateWindowExW capsule failed".into());
             }
+
+            let hwnd_caption = CreateWindowExW(
+                ex,
+                class.as_ptr(),
+                class.as_ptr(),
+                0x8000_0000,
+                state.caption_win.x,
+                state.caption_win.y,
+                state.caption_win.w,
+                state.caption_win.h,
+                0,
+                0,
+                inst,
+                std::ptr::null(),
+            );
+            if hwnd_caption == 0 {
+                DestroyWindow(hwnd_capsule);
+                DeleteObject(state.font);
+                return Err("CreateWindowExW caption failed".into());
+            }
+
+            state.hwnd_capsule = hwnd_capsule;
+            state.hwnd_caption = hwnd_caption;
+
             STATE.with(|st| *st.borrow_mut() = Some(State { started: std::time::Instant::now(), ..state }));
-            ShowWindow(hwnd, 4); // SW_SHOWNOACTIVATE
-            SetTimer(hwnd, TIMER_ID, 16, std::ptr::null());
+
+            ShowWindow(hwnd_capsule, 4); // SW_SHOWNOACTIVATE
+            ShowWindow(hwnd_caption, 4); // SW_SHOWNOACTIVATE
+            SetTimer(hwnd_capsule, TIMER_ID, 16, std::ptr::null());
+
             let mut msg = std::mem::zeroed::<Msg>();
             while GetMessageW(&mut msg, 0, 0, 0) > 0 {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
+
             STATE.with(|st| {
                 if let Some(state) = st.borrow_mut().take() {
                     DeleteObject(state.font);
@@ -698,16 +883,17 @@ mod win {
         Ok(())
     }
 
-    /// Test helper: the composed canvas at `t_ms` as (premultiplied BGRA pixels, width, height), no window involved.
+    /// Test helper: the composed canvases at `t_ms` as ((capsule pixels, w, h), (caption pixels, w, h)).
     #[cfg(test)]
-    pub fn preview(s: Show, t_ms: u64) -> Option<(Vec<u32>, i32, i32)> {
+    pub fn preview(s: Show, t_ms: u64) -> Option<((Vec<u32>, i32, i32), (Vec<u32>, i32, i32))> {
         // SAFETY: as `run`; the state is dropped (font deleted) before returning.
         unsafe {
             let mut st = build_state(s).ok()?;
             compose(&mut st, t_ms);
-            let out = (st.canvas.pixels().to_vec(), st.window.w, st.window.h);
+            let cap = (st.capsule_canvas.pixels().to_vec(), st.capsule_win.w, st.capsule_win.h);
+            let txt = (st.caption_canvas.pixels().to_vec(), st.caption_win.w, st.caption_win.h);
             DeleteObject(st.font);
-            Some(out)
+            Some((cap, txt))
         }
     }
 }
@@ -715,8 +901,6 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const WORK: Rect = Rect { x: 0, y: 0, w: 1920, h: 1040 };
 
     fn show_for(clip_ms: u64) -> Show {
         Show {
@@ -727,28 +911,84 @@ mod tests {
             env: vec![0.2, 0.9, 0.5],
             env_frame_ms: 20,
             clip_ms,
-            top: true,
-            x_pct: 0.5,
-            capsule_w: DEFAULT_CAPSULE_W,
-            capsule_h: DEFAULT_CAPSULE_H,
         }
     }
 
     #[test]
-    fn the_window_hugs_the_top_or_bottom_edge_and_follows_the_horizontal_setting() {
-        let (win, cap) = layout(WORK, 1.0, true, 0.5, 301.0, 105.0);
-        assert_eq!((win.y, cap.y), (0, 0), "top: flush with the screen edge");
-        assert_eq!(win.w, 520);
-        assert_eq!(win.x, (1920 - 520) / 2);
-        assert_eq!(cap.x, (520 - 301) / 2, "the capsule is centred in the window");
-        assert_eq!(win.h, 105 + 12 + 44);
-        let (win_b, cap_b) = layout(WORK, 1.0, false, 0.5, 301.0, 105.0);
-        assert_eq!(win_b.y + win_b.h, 1040, "bottom: on the bottom of the work area");
-        assert_eq!(cap_b.y, win_b.h - 105, "the capsule is at the screen side, the caption above it");
-        let (left, _) = layout(WORK, 1.0, true, 0.0, 301.0, 105.0);
-        assert_eq!(left.x, 0);
-        let (hi, _) = layout(WORK, 1.5, true, 0.5, 301.0, 105.0);
-        assert_eq!(hi.w, 780, "scaled by the display scale");
+    fn caption_slot_and_pill_geometry() {
+        // At scale 1.0 on a 1920x1080 screen:
+        // window width = (620 + 2*24) * 1.0 = 668, height = (30 + 2*24) * 1.0 = 78
+        // center_x = 1920 * 0.515 = 988.8 -> win_x = (988.8 - 334.0) = 655
+        // pill top = 1080 * 0.895 = 966.6 -> win_y = (966.6 - 24.0) = 943
+        let slot = caption_slot(1920, 1080, 1.0);
+        assert_eq!(slot.w, 668);
+        assert_eq!(slot.h, 78);
+        assert_eq!(slot.x, 655);
+        assert_eq!(slot.y, 943);
+
+        // At scale 1.5 on a 1920x1080 screen:
+        // win_w = (668 * 1.5) = 1002, win_h = (78 * 1.5) = 117
+        // win_x = (988.8 - 501.0) = 488, win_y = (966.6 - 36.0) = 931
+        let slot_hi = caption_slot(1920, 1080, 1.5);
+        assert_eq!(slot_hi.w, 1002);
+        assert_eq!(slot_hi.h, 117);
+        assert_eq!(slot_hi.x, 488);
+        assert_eq!(slot_hi.y, 931);
+
+        // pill_in_window inside slot:
+        // measured text 200x24:
+        // pill width = 200 + 48 + 2 = 250
+        // height = max(30, 24 + 4 + 2) = 30
+        // x centered = (668 - 250) / 2 = 209
+        // top = 24
+        let pill = pill_in_window(slot.w, 200, 24, 1.0);
+        assert_eq!(pill, Rect { x: 209, y: 24, w: 250, h: 30 });
+
+        // Taller text exceeds 30px min-height:
+        // measured text 200x40 -> height = max(30, 40 + 4 + 2) = 46
+        let tall_pill = pill_in_window(slot.w, 200, 40, 1.0);
+        assert_eq!(tall_pill.h, 46);
+
+        // Max width clamp at 620:
+        let wide_pill = pill_in_window(slot.w, 600, 24, 1.0);
+        assert_eq!(wide_pill.w, 620);
+    }
+
+    #[test]
+    fn drift_check_caption_slot_constants_match_frontend() {
+        let ts_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../frontend/src/stage/layoutSlots.ts");
+        let ts = std::fs::read_to_string(ts_path).expect("read layoutSlots.ts");
+        let line = ts.lines().find(|l| l.contains("export const CAPTION =")).expect("CAPTION line in layoutSlots.ts");
+
+        let cx_str = line.split("centerX:").nth(1).unwrap().split(',').next().unwrap().trim();
+        let cx: f32 = cx_str.parse().expect("parse centerX");
+        assert_eq!(cx, CAPTION_CENTER_X);
+
+        let top_str = line.split("top:").nth(1).unwrap().split(',').next().unwrap().trim();
+        let top: f32 = top_str.parse().expect("parse top");
+        assert_eq!(top, CAPTION_TOP);
+
+        let css_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../frontend/src/stage/ghost.css");
+        let css = std::fs::read_to_string(css_path).expect("read ghost.css");
+        let capsule_pos = css.find(".caption-black-capsule").expect(".caption-black-capsule in ghost.css");
+        let after_capsule = &css[capsule_pos..];
+        let max_w_line = after_capsule.lines().take(20).find(|l| l.contains("max-width:")).expect("max-width in caption-black-capsule");
+        assert!(max_w_line.contains("620px"), "ghost.css max-width should be 620px, got: {max_w_line}");
+        assert_eq!(CAPTION_PILL_MAX_W, 620.0);
+    }
+
+    #[test]
+    fn the_capsule_window_is_docked_at_top_centre() {
+        let (win, cap) = layout(1920, 1.0, 301.0, 105.0);
+        assert_eq!((win.y, cap.y), (0, 0), "top: flush with the screen edge y=0");
+        assert_eq!(win.w, 301);
+        assert_eq!(win.h, 105);
+        assert_eq!(win.x, (1920 - 301) / 2, "centred horizontally");
+        assert_eq!(cap, Rect { x: 0, y: 0, w: 301, h: 105 });
+
+        let (hi, _) = layout(1920, 1.5, 301.0, 105.0);
+        assert_eq!(hi.w, (301.0 * 1.5f32).round() as i32, "scaled by the display scale");
+        assert_eq!(hi.h, (105.0 * 1.5f32).round() as i32);
     }
 
     #[test]
@@ -811,39 +1051,37 @@ mod tests {
 
     #[test]
     fn each_style_draws_its_own_background() {
-        let (win, cap) = layout(WORK, 1.0, true, 0.5, 301.0, 105.0);
+        let (win, cap) = layout(1920, 1.0, 301.0, 105.0);
         let pts = sphere_points(dot_count());
         let alpha = |buf: &Vec<u32>, x: i32, y: i32| buf[(y * win.w + x) as usize] >> 24;
-        // pebble: the bowl's upper corner area (just inside the capsule rect, near the top-left) is empty sky beside the wing
+
+        // pebble: the bowl's upper corner area (near top-left) is empty sky beside the wing
         let mut pebble = vec![0u32; (win.w * win.h) as usize];
-        render_frame(&mut pebble, win.w, cap, 1.0, true, 800, &show_for(2_000), &pts);
+        render_frame(&mut pebble, win.w, cap, 1.0, 800, &show_for(2_000), &pts);
         assert_eq!(alpha(&pebble, cap.x + 20, cap.y + 40), 0, "below the wing, outside the bowl");
         assert!(alpha(&pebble, cap.x + cap.w / 2, cap.y + 90) > 200, "inside the bowl at the middle");
-        assert!(alpha(&pebble, cap.x + cap.w / 2, cap.y + cap.h + 4) == 0, "nothing under the lowest point");
-        // classic: a solid box, so the same corner area IS black; the bottom corners are rounded by 10 px
-        let mut classic = vec![0u32; (win.w * win.h) as usize];
+
+        // classic: a solid 200x200 box, so the same corner area IS black; the bottom corners are rounded by 10 px
         let mut s = show_for(2_000);
         s.style = Style::Classic;
-        let (_, cap_c) = layout(WORK, 1.0, true, 0.5, 200.0, 200.0);
-        let (win_c, _) = layout(WORK, 1.0, true, 0.5, 200.0, 200.0);
+        let (win_c, cap_c) = layout(1920, 1.0, 200.0, 200.0);
         let mut classic_buf = vec![0u32; (win_c.w * win_c.h) as usize];
-        render_frame(&mut classic_buf, win_c.w, cap_c, 1.0, true, 800, &s, &pts);
+        render_frame(&mut classic_buf, win_c.w, cap_c, 1.0, 800, &s, &pts);
         let ca = |x: i32, y: i32| classic_buf[(y * win_c.w + x) as usize] >> 24;
         assert_eq!(ca(cap_c.x + 20, cap_c.y + 40), 255, "classic is a solid box");
         assert_eq!(ca(cap_c.x, cap_c.y + cap_c.h - 1), 0, "the outer bottom corner is rounded");
         assert!(ca(cap_c.x + 14, cap_c.y + cap_c.h - 1) > 200, "but the box reaches the bottom edge");
-        assert!(ca(cap_c.x, cap_c.y) > 200, "the screen-side corners are square");
-        let _ = &mut classic;
+        assert!(ca(cap_c.x, cap_c.y) > 200, "the screen-side top corners are square");
     }
 
     #[test]
     fn a_frame_has_a_black_capsule_a_white_sphere_and_transparent_corners() {
-        let (win, cap) = layout(WORK, 1.0, true, 0.5, 301.0, 105.0);
+        let (win, cap) = layout(1920, 1.0, 200.0, 200.0);
         let mut buf = vec![0u32; (win.w * win.h) as usize];
         let mut s = show_for(2_000);
         s.style = Style::Classic;
         let pts = sphere_points(dot_count());
-        render_frame(&mut buf, win.w, cap, 1.0, true, 800, &s, &pts);
+        render_frame(&mut buf, win.w, cap, 1.0, 800, &s, &pts);
         let px = |x: i32, y: i32| buf[(y * win.w + x) as usize];
         let alpha = |v: u32| v >> 24;
         // inside the capsule, away from the sphere: opaque black
@@ -853,8 +1091,6 @@ mod tests {
         assert_eq!(alpha(px(cap.x, cap.y + cap.h - 1)), 0);
         // the top corners are square (the capsule hugs the screen edge)
         assert!(alpha(px(cap.x, cap.y)) > 200);
-        // outside the capsule, in the caption area: nothing yet (the glue draws the pill)
-        assert_eq!(alpha(px(2, win.h - 3)), 0);
         // the sphere: some bright pixel near the centre
         let (cx, cy) = (cap.x + cap.w / 2, cap.y + cap.h / 2);
         let bright = (-30..30).flat_map(|dy| (-30..30).map(move |dx| (dx, dy))).filter(|(dx, dy)| px(cx + dx, cy + dy) & 255 > 200).count();
@@ -863,9 +1099,9 @@ mod tests {
 
     #[test]
     fn nothing_is_drawn_while_invisible_and_text_composites_where_asked() {
-        let (win, cap) = layout(WORK, 1.0, true, 0.5, 301.0, 105.0);
+        let (win, cap) = layout(1920, 1.0, 301.0, 105.0);
         let mut buf = vec![0u32; (win.w * win.h) as usize];
-        render_frame(&mut buf, win.w, cap, 1.0, true, 0, &show_for(2_000), &sphere_points(50));
+        render_frame(&mut buf, win.w, cap, 1.0, 0, &show_for(2_000), &sphere_points(50));
         assert!(buf.iter().all(|p| p >> 24 == 0), "alpha is zero at t=0");
         let mask = vec![255u8; 4 * 3];
         composite_mask(&mut buf, win.w, &mask, 4, 3, 10, 20, 1.0);
@@ -878,15 +1114,35 @@ mod tests {
     }
 
     #[test]
-    fn the_caption_pill_hangs_below_at_the_top_and_rises_above_at_the_bottom() {
-        let top = pill_rect(260.0, 117.0, 200, 24, 1.0, true);
-        assert_eq!((top.y, top.w, top.h), (117, 236, 40));
-        assert_eq!(top.x, 260 - 118);
-        let bottom = pill_rect(260.0, 40.0, 200, 24, 1.0, false);
-        assert_eq!(bottom.y + bottom.h, 40);
+    fn render_caption_draws_pill_with_three_shadows_and_border() {
+        let slot = caption_slot(1920, 1080, 1.0);
+        let pill = pill_in_window(slot.w, 200, 24, 1.0);
+        let mut buf = vec![0u32; (slot.w * slot.h) as usize];
+
+        // 1. Invisible when alpha = 0
+        render_caption(&mut buf, slot.w, pill, 1.0, 0.0, &[], 0, 0, 0, 0);
+        assert!(buf.iter().all(|&p| p == 0));
+
+        // 2. Visible with alpha = 1.0:
+        render_caption(&mut buf, slot.w, pill, 1.0, 1.0, &[], 0, 0, 0, 0);
+        let px = |x: i32, y: i32| buf[(y * slot.w + x) as usize];
+        let alpha = |v: u32| v >> 24;
+
+        // Inside pill center: solid black (alpha=255, RGB=0)
+        let center_p = px(pill.x + pill.w / 2, pill.y + pill.h / 2);
+        assert_eq!(alpha(center_p), 255);
+        assert_eq!(center_p & 0x00FF_FFFF, 0);
+
+        // Outside pill, within shadow expansion (e.g. 10 px outside left edge):
+        // has shadow alpha > 0, RGB = 0 (black shadow)
+        let shadow_p = px(pill.x - 10, pill.y + pill.h / 2);
+        assert!(alpha(shadow_p) > 0, "shadow should be visible outside pill");
+        assert_eq!(shadow_p & 0x00FF_FFFF, 0, "shadow is pure black");
+
+        // Far outside (past 24px shadow margin): alpha is 0
+        assert_eq!(alpha(px(1, 1)), 0);
     }
 
-    /// Run by hand on a signed-in desktop: shows the overlay for about 5 s (screenshot it while it runs).
     #[cfg(target_os = "windows")]
     #[test]
     #[ignore = "shows a window on the real desktop"]
@@ -895,7 +1151,6 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5_500));
     }
 
-    /// Run by hand: writes frames of the overlay (on a grey desktop) as BMP files for a look.
     #[cfg(target_os = "windows")]
     #[test]
     #[ignore = "writes preview images"]
@@ -903,43 +1158,41 @@ mod tests {
         let dir = std::env::var("NEXUS_PREVIEW_DIR").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
         let mut classic = show_for(2_000);
         classic.style = Style::Classic;
-        classic.capsule_w = 200.0;
-        classic.capsule_h = 200.0;
-        let mut bottom = show_for(2_000);
-        bottom.top = false;
         for (name, t, show) in [
             ("a_start", 120u64, show_for(2_000)),
             ("b_mid", 700, show_for(2_000)),
             ("c_end", 1_800, show_for(2_000)),
             ("d_fade", 3_000, show_for(2_000)),
             ("e_classic", 1_800, classic),
-            ("f_pebble_bottom", 1_800, bottom),
         ] {
-            let (px, w, h) = win::preview(show, t).expect("preview");
-            // composite premultiplied pixels over a grey desktop and write a 24-bit bottom-up BMP
-            let row = ((w * 3 + 3) / 4 * 4) as usize;
-            let mut bmp = vec![0u8; 54 + row * h as usize];
-            bmp[0..2].copy_from_slice(b"BM");
-            bmp[2..6].copy_from_slice(&((54 + row * h as usize) as u32).to_le_bytes());
-            bmp[10..14].copy_from_slice(&54u32.to_le_bytes());
-            bmp[14..18].copy_from_slice(&40u32.to_le_bytes());
-            bmp[18..22].copy_from_slice(&w.to_le_bytes());
-            bmp[22..26].copy_from_slice(&h.to_le_bytes());
-            bmp[26..28].copy_from_slice(&1u16.to_le_bytes());
-            bmp[28..30].copy_from_slice(&24u16.to_le_bytes());
-            for y in 0..h {
-                for x in 0..w {
-                    let p = px[(y * w + x) as usize];
-                    let a = (p >> 24) as f32 / 255.0;
-                    let bg = 110.0;
-                    let ch = |v: u32| ((v & 255) as f32 + bg * (1.0 - a)).clamp(0.0, 255.0) as u8;
-                    let o = 54 + (h - 1 - y) as usize * row + x as usize * 3;
-                    bmp[o] = ch(p);
-                    bmp[o + 1] = ch(p >> 8);
-                    bmp[o + 2] = ch(p >> 16);
+            let ((cap_px, cap_w, cap_h), (txt_px, txt_w, txt_h)) = win::preview(show, t).expect("preview");
+            let write_bmp = |filename: &str, px: &[u32], w: i32, h: i32| {
+                let row = ((w * 3 + 3) / 4 * 4) as usize;
+                let mut bmp = vec![0u8; 54 + row * h as usize];
+                bmp[0..2].copy_from_slice(b"BM");
+                bmp[2..6].copy_from_slice(&((54 + row * h as usize) as u32).to_le_bytes());
+                bmp[10..14].copy_from_slice(&54u32.to_le_bytes());
+                bmp[14..18].copy_from_slice(&40u32.to_le_bytes());
+                bmp[18..22].copy_from_slice(&w.to_le_bytes());
+                bmp[22..26].copy_from_slice(&h.to_le_bytes());
+                bmp[26..28].copy_from_slice(&1u16.to_le_bytes());
+                bmp[28..30].copy_from_slice(&24u16.to_le_bytes());
+                for y in 0..h {
+                    for x in 0..w {
+                        let p = px[(y * w + x) as usize];
+                        let a = (p >> 24) as f32 / 255.0;
+                        let bg = 110.0;
+                        let ch = |v: u32| ((v & 255) as f32 + bg * (1.0 - a)).clamp(0.0, 255.0) as u8;
+                        let o = 54 + (h - 1 - y) as usize * row + x as usize * 3;
+                        bmp[o] = ch(p);
+                        bmp[o + 1] = ch(p >> 8);
+                        bmp[o + 2] = ch(p >> 16);
+                    }
                 }
-            }
-            std::fs::write(std::path::Path::new(&dir).join(format!("early_orb_{name}.bmp")), bmp).unwrap();
+                std::fs::write(std::path::Path::new(&dir).join(filename), bmp).unwrap();
+            };
+            write_bmp(&format!("early_orb_{name}_capsule.bmp"), &cap_px, cap_w, cap_h);
+            write_bmp(&format!("early_orb_{name}_caption.bmp"), &txt_px, txt_w, txt_h);
         }
     }
 }

@@ -103,30 +103,26 @@ pub fn describe(items: &[Item]) -> String {
     super::session::names_phrase(names, folders)
 }
 
-/// "Reopened VS Code on ULTRON, Brave and 2 folders. Notepad was already open." Pure.
-pub fn report(opened: &[String], failed: &[String], already_open: &[String], skipped: usize) -> String {
-    let mut out = String::new();
-    if opened.is_empty() {
-        out.push_str("I couldn't reopen anything");
-        if !already_open.is_empty() {
-            out.push_str(", sir.");
-        } else {
-            out.push('.');
-        }
-    } else {
-        out.push_str(&format!("Reopened {}.", join_names(opened)));
-    }
+/// Short spoken result for `restore_session` (no list of apps): "Done, sir. I opened 5 apps." with "1 was / 2 were already
+/// open" only when something was already open; when something did not start, only those names are said:
+/// "I opened 4 apps, but I couldn't start Brave." Pure.
+pub fn restore_report_short(opened: &[String], failed: &[String], already_open: &[String]) -> String {
+    let (n, m) = (opened.len(), already_open.len());
+    let apps = if n == 1 { "app" } else { "apps" };
     if !failed.is_empty() {
-        out.push_str(&format!(" {} would not start.", join_names(failed)));
+        return if n > 0 {
+            format!("I opened {n} {apps}, but I couldn't start {}.", join_names(failed))
+        } else {
+            format!("I couldn't start {}.", join_names(failed))
+        };
     }
-    if !already_open.is_empty() {
-        let verb = if already_open.len() == 1 { "was" } else { "were" };
-        out.push_str(&format!(" {} {verb} already open.", join_names(already_open)));
+    if m == 0 {
+        format!("Done, sir. I opened {n} {apps}.")
+    } else if m == 1 {
+        format!("Done, sir. I opened {n} {apps}. 1 was already open.")
+    } else {
+        format!("Done, sir. I opened {n} {apps}. {m} were already open.")
     }
-    if skipped > 0 {
-        out.push_str(&format!(" I left {skipped} out."));
-    }
-    out.trim().to_string()
 }
 
 fn join_names(items: &[String]) -> String {
@@ -180,14 +176,31 @@ fn launch(item: &Item) -> Result<(), String> {
     }
 }
 
-/// Open items in `plan`, using `launcher` to spawn each item. Returns (opened, failed) labels.
+pub const RETRY_PAUSE_MS: u64 = 1500;
+
+/// Open items in `plan`, using `launcher` to spawn each item.
+/// Retries each failed item ONCE after the whole pass (with a 1.5 s pause between the pass and retry if stagger_ms > 0).
+/// Returns (opened, failed) labels.
 pub async fn run_with<F>(items: Vec<Item>, stagger_ms: u64, launcher: F) -> (Vec<String>, Vec<String>)
+where
+    F: Fn(&Item) -> Result<(), String> + Send + Sync + 'static,
+{
+    run_with_pause(items, stagger_ms, if stagger_ms > 0 { RETRY_PAUSE_MS } else { 0 }, launcher).await
+}
+
+/// Open items in `plan` with an explicit pause before retry.
+pub async fn run_with_pause<F>(
+    items: Vec<Item>,
+    stagger_ms: u64,
+    retry_pause_ms: u64,
+    launcher: F,
+) -> (Vec<String>, Vec<String>)
 where
     F: Fn(&Item) -> Result<(), String> + Send + Sync + 'static,
 {
     let launcher = Arc::new(launcher);
     let mut opened = vec![];
-    let mut failed = vec![];
+    let mut failed_items: Vec<Item> = vec![];
     for it in items {
         let label = it.label();
         let it2 = it.clone();
@@ -199,14 +212,41 @@ where
             }
             other => {
                 println!("[SESSION] could not reopen {label}: {other:?}");
-                failed.push(label);
+                failed_items.push(it);
             }
         }
         if stagger_ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(stagger_ms)).await;
         }
     }
-    (opened, failed)
+
+    if !failed_items.is_empty() {
+        if retry_pause_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(retry_pause_ms)).await;
+        }
+        let mut still_failed = vec![];
+        for it in failed_items {
+            let label = it.label();
+            let it2 = it.clone();
+            let l = launcher.clone();
+            match tauri::async_runtime::spawn_blocking(move || l(&it2)).await {
+                Ok(Ok(())) => {
+                    println!("[SESSION] reopened on retry: {label}");
+                    opened.push(label);
+                }
+                other => {
+                    println!("[SESSION] retry failed for {label}: {other:?}");
+                    still_failed.push(label);
+                }
+            }
+            if stagger_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(stagger_ms)).await;
+            }
+        }
+        (opened, still_failed)
+    } else {
+        (opened, vec![])
+    }
 }
 
 /// Open everything in `plan`, one item every 400 ms. Returns (opened, failed) labels.
@@ -277,16 +317,6 @@ mod tests {
     }
 
     #[test]
-    fn report_wording() {
-        assert_eq!(
-            report(&["VS Code".into(), "Brave".into()], &[], &["Notepad".into()], 0),
-            "Reopened VS Code and Brave. Notepad was already open."
-        );
-        assert_eq!(report(&[], &[], &["Brave".into(), "Code".into()], 0), "I couldn't reopen anything, sir. Brave and Code were already open.");
-        assert_eq!(report(&["A".into()], &["B".into()], &[], 2), "Reopened A. B would not start. I left 2 out.");
-    }
-
-    #[test]
     fn test_restore_plan_ordering_is_stable_browsers_then_apps_then_folders() {
         let mut b1 = app("brave.exe", "Brave");
         b1.browser = true;
@@ -334,8 +364,6 @@ mod tests {
         assert_eq!(p.items.len(), 0);
         assert_eq!(p.skipped, 1);
 
-        let rep = report(&[], &[], &[], p.skipped);
-        assert_eq!(rep, "I couldn't reopen anything. I left 1 out.");
     }
 
     #[test]
@@ -369,8 +397,6 @@ mod tests {
         assert_eq!(opened, vec!["App1".to_string()]);
         assert_eq!(failed, vec!["FailApp".to_string()]);
 
-        let rep = report(&opened, &failed, &[], 0);
-        assert_eq!(rep, "Reopened App1. FailApp would not start.");
     }
 
     #[test]
@@ -403,8 +429,36 @@ mod tests {
         let p = plan(&snap(vec![w], &[]), &running(&[]), &|_| true);
         assert_eq!(p.items, vec![Item::Packaged { label: "WhatsApp".into() }]);
 
-        // In report, if it fails to start it is reported cleanly
-        let rep = report(&[], &["WhatsApp".into()], &[], 0);
-        assert_eq!(rep, "I couldn't reopen anything. WhatsApp would not start.");
+    }
+
+    #[test]
+    fn test_restore_report_short() {
+        assert_eq!(restore_report_short(&["VS Code".into()], &[], &[]), "Done, sir. I opened 1 app.");
+        assert_eq!(restore_report_short(&["VS Code".into(), "Brave".into()], &[], &[]), "Done, sir. I opened 2 apps.");
+        assert_eq!(restore_report_short(&["VS Code".into(), "Brave".into()], &[], &["Notepad".into()]), "Done, sir. I opened 2 apps. 1 was already open.");
+        assert_eq!(restore_report_short(&["Code".into()], &[], &["A".into(), "B".into()]), "Done, sir. I opened 1 app. 2 were already open.");
+        assert_eq!(restore_report_short(&[], &["Brave".into()], &[]), "I couldn't start Brave.");
+        assert_eq!(restore_report_short(&[], &["Brave".into(), "Spotify".into()], &[]), "I couldn't start Brave and Spotify.");
+        assert_eq!(restore_report_short(&["Code".into()], &["Brave".into()], &[]), "I opened 1 app, but I couldn't start Brave.");
+    }
+
+    #[tokio::test]
+    async fn test_run_retries_failed_app_once_and_succeeds() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let attempts = Arc::new(AtomicU32::new(0));
+        let attempts_clone = attempts.clone();
+        let items = vec![Item::Exe { path: r"C:\retry_app.exe".into(), args: vec![], label: "RetryApp".into() }];
+        let fake_launcher = move |_it: &Item| {
+            let prev = attempts_clone.fetch_add(1, Ordering::SeqCst);
+            if prev == 0 {
+                Err("First attempt failed".to_string())
+            } else {
+                Ok(())
+            }
+        };
+        let (opened, failed) = run_with(items, 0, fake_launcher).await;
+        assert_eq!(opened, vec!["RetryApp".to_string()]);
+        assert!(failed.is_empty());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 }

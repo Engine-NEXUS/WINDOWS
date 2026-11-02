@@ -178,18 +178,21 @@ fn words(text: &str) -> Vec<String> {
 /// such as "chrome", "weather", "music") makes the sentence an ordinary command, not an answer.
 const ANSWER_VOCAB: &[&str] = &[
     // yes
-    "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "proceed", "confirm", "confirmed", "affirmative",
-    "go", "ahead", "do", "it", "for", "let's", "lets", "start", "begin", "add", "save", "them", "those", "reopen",
-    "everything", "all",
+    "yes", "yeah", "yaa", "yaah", "ya", "yea", "yep", "yup", "haan", "han",
+    "sure", "ok", "okay", "okey", "proceed", "confirm", "confirmed", "affirmative",
+    "go", "ahead", "do", "it", "for", "let's", "lets", "start", "begin", "add", "save",
+    "them", "those", "reopen", "everything", "all",
+    "carry", "continue", "resume",
     // more ways to say yes ("absolutely", "sounds good", "by all means", "that would be great", "make it so")
     "absolutely", "definitely", "certainly", "of", "course", "sounds", "good", "alright", "correct", "agreed", "thing",
-    "would", "be", "great", "by", "means", "make", "so", "why", "on", "right", "that's", "thats", "i", "do", "fine",
+    "would", "be", "great", "by", "means", "make", "so", "why", "on", "right", "that's", "thats", "i", "fine",
     // no
-    "no", "nope", "nah", "skip", "cancel", "stop", "don't", "dont", "never", "mind", "not", "today", "leave",
+    "no", "nope", "nah", "nahi", "skip", "cancel", "stop", "don't", "dont", "never", "mind", "nevermind",
+    "not", "today", "leave", "need", "it's", "its", "i'm", "im", "rehne", "mat", "karo", "stay", "closed",
     // later
     "later", "remind", "me", "snooze", "few", "minutes", "minute", "in", "a", "bit", "now",
     // polite filler
-    "please", "sir", "thanks", "thank", "you", "then", "the", "that", "this", "with", "kindly", "and",
+    "nexus", "please", "sir", "thanks", "thank", "you", "then", "the", "that", "this", "with", "kindly", "and",
 ];
 
 /// Strict short-reply classifier. Order matters: "not now" must not read as
@@ -198,6 +201,9 @@ pub fn classify(text: &str) -> Reply {
     let mut w = words(text);
     if w.first().map(|x| x == "nexus").unwrap_or(false) {
         w.remove(0);
+    }
+    if w.last().map(|x| x == "nexus").unwrap_or(false) {
+        w.pop();
     }
     if w.is_empty() || w.len() > MAX_REPLY_WORDS {
         return Reply::Other;
@@ -218,20 +224,33 @@ pub fn classify(text: &str) -> Reply {
         return Reply::Later;
     }
     // Any negation wins over a yes word: "absolutely not", "not sure", "of course not", "definitely not".
-    if has_word(&["no", "nope", "nah", "skip", "cancel", "stop", "not", "never"])
+    if has_word(&[
+        "no", "nope", "nah", "nahi", "skip", "cancel", "stop", "not", "never", "nevermind", "dont", "mat",
+    ])
         || w.iter().any(|x| x.ends_with("n't"))
         || has("don't")
         || has("do not")
         || has("never mind")
         || has("not today")
         || has("leave it")
+        || has("leave them")
+        || has("no need")
+        || has("it's fine")
+        || has("its fine")
+        || has("i'm good")
+        || has("im good")
+        || has("rehne do")
+        || has("mat karo")
+        || has("stay closed")
     {
         return Reply::No;
     }
     if has_word(&[
-        "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "proceed", "confirm", "confirmed", "affirmative",
+        "yes", "yeah", "yaa", "yaah", "ya", "yea", "yep", "yup", "haan", "han",
+        "sure", "ok", "okay", "okey", "proceed", "confirm", "confirmed", "affirmative",
         "absolutely", "definitely", "certainly", "alright", "agreed", "correct",
     ])
+        || has("sure thing")
         || has("go ahead")
         || has("go on")
         || has("of course")
@@ -251,11 +270,14 @@ pub fn classify(text: &str) -> Reply {
         || has("let's go")
         || has("let's start")
         || has("start it")
+        || has("carry on")
+        || has("all right")
+        || has("fine do it")
         || has("add them")
         || has("add it")
         || has("save them")
         || has("save it")
-        || (w.len() <= 3 && has_word(&["start", "begin", "please"]))
+        || (w.len() <= 4 && has_word(&["start", "begin", "continue", "resume", "please"]))
     {
         return Reply::Yes;
     }
@@ -313,32 +335,53 @@ fn classify_power(kind: &str, text: &str) -> Reply {
 /// the action itself ("reopen them", "open them all", "open everything"). Only such short action phrases count; any
 /// word outside the small vocabulary (a "no", a "don't", a different request) leaves it to the generic classifier.
 fn classify_reopen(text: &str) -> Reply {
+    // Words that make sense ONLY as an answer to "shall I reopen your apps?". They are not in the generic vocabulary, so
+    // "open them" can never approve a pending shutdown, merge or message.
     const VOCAB: &[&str] = &[
-        "reopen", "open", "them", "it", "all", "everything", "apps", "app", "the", "other", "of", "please", "those",
-        "my", "windows", "and",
+        "reopen", "open", "them", "it", "all", "everything", "apps", "app", "the", "other", "of", "those", "my", "windows", "and",
+        "restore", "bring", "back", "pick", "up", "stay", "closed",
     ];
-    let mut w = words(text);
-    if w.first().map(|x| x == "nexus").unwrap_or(false) {
-        w.remove(0);
-    }
-    if w.is_empty() || w.len() > MAX_REPLY_WORDS || !w.iter().all(|x| VOCAB.contains(&x.as_str())) {
+    // Yes-flavoured filler that may surround the request ("yes, open them", "ok bring them back sir").
+    const FILLER: &[&str] = &[
+        "yes", "yeah", "yaa", "yaah", "ya", "yea", "yep", "yup", "haan", "han", "ok", "okay", "okey", "sure", "please", "sir", "thanks",
+        "thank", "you", "nexus", "just", "kindly", "then",
+    ];
+    const NEGATION: &[&str] = &["no", "nope", "nah", "nahi", "not", "never", "dont", "don't", "skip", "cancel", "stop", "mat"];
+    let w = words(text);
+    if w.is_empty() || w.len() > MAX_REPLY_WORDS {
         return Reply::Other;
     }
-    let has_action = w.iter().any(|x| x == "reopen" || x == "open");
-    let has_object = w.iter().any(|x| matches!(x.as_str(), "them" | "it" | "all" | "everything" | "apps" | "app" | "those" | "windows"));
-    if has_action && has_object { Reply::Yes } else { Reply::Other }
+    if !w.iter().all(|x| VOCAB.contains(&x.as_str()) || FILLER.contains(&x.as_str()) || NEGATION.contains(&x.as_str())) {
+        return Reply::Other;
+    }
+    // any negation wins ("no don't open them", "stay closed")
+    if w.iter().any(|x| NEGATION.contains(&x.as_str())) || w.join(" ").contains("stay closed") {
+        return Reply::No;
+    }
+    let core: Vec<&String> = w.iter().filter(|x| !FILLER.contains(&x.as_str())).collect();
+    let has_action = core.iter().any(|x| matches!(x.as_str(), "reopen" | "open" | "restore" | "bring" | "pick"));
+    let has_object = core.iter().any(|x| matches!(x.as_str(), "them" | "it" | "all" | "everything" | "apps" | "app" | "those" | "windows" | "up" | "back"));
+    let bare_restore = core.iter().any(|x| x.as_str() == "restore");
+    if has_action && (has_object || bare_restore) { Reply::Yes } else { Reply::Other }
 }
 
 /// Classify an answer to the question that is waiting. Power questions also accept the action itself.
+/// ReopenSession offer accepts restore actions and treats Reply::Later as Reply::No.
 pub fn classify_for(offer: &Offer, text: &str) -> Reply {
     let base = classify(text);
-    if base != Reply::Other {
-        return base;
-    }
-    match offer {
-        Offer::Power { kind } => classify_power(kind, text),
-        Offer::ReopenSession => classify_reopen(text),
-        _ => Reply::Other,
+    let reply = if base != Reply::Other {
+        base
+    } else {
+        match offer {
+            Offer::Power { kind } => classify_power(kind, text),
+            Offer::ReopenSession => classify_reopen(text),
+            _ => Reply::Other,
+        }
+    };
+    if matches!(offer, Offer::ReopenSession) && reply == Reply::Later {
+        Reply::No
+    } else {
+        reply
     }
 }
 
@@ -552,6 +595,70 @@ mod tests {
         assert_eq!(take(), Some(Offer::ReopenSession));
         assert!(peek().is_none());
         assert!(!is_armed());
+    }
+
+    #[test]
+    fn test_reopen_session_and_generic_answer_tables() {
+        let off = Offer::ReopenSession;
+
+        let yes_phrases = [
+            "yes", "yeah", "yaa", "yaah", "ya", "yea", "yep", "yup", "haan", "han",
+            "sure", "sure thing", "ok", "okay", "okey", "do it", "go ahead", "go for it",
+            "please do", "yes please", "open them", "open them all", "open all", "open everything",
+            "start", "start it", "pick it up", "carry on", "continue", "resume", "restore",
+            "restore them", "bring them back", "why not", "absolutely", "definitely", "of course",
+            "sounds good", "that would be great", "alright", "all right", "fine do it",
+        ];
+
+        for phrase in yes_phrases {
+            assert_eq!(classify_for(&off, phrase), Reply::Yes, "yes phrase for ReopenSession: {phrase}");
+            // Optional variants with polite words
+            assert_eq!(classify_for(&off, &format!("nexus {phrase}")), Reply::Yes, "nexus {phrase}");
+            assert_eq!(classify_for(&off, &format!("{phrase} sir")), Reply::Yes, "{phrase} sir");
+            assert_eq!(classify_for(&off, &format!("{phrase} please")), Reply::Yes, "{phrase} please");
+            assert_eq!(classify_for(&off, &format!("{phrase} thanks")), Reply::Yes, "{phrase} thanks");
+
+            // The generic classifier recognises the generic ones; the reopen-only ones are NOT answers to other questions
+            let reopen_only = ["open them", "open them all", "open all", "open everything", "pick it up", "restore", "restore them", "bring them back"];
+            if reopen_only.contains(&phrase) {
+                assert_eq!(classify(phrase), Reply::Other, "reopen-only phrase must not be a generic yes: {phrase}");
+                assert_ne!(classify_for(&Offer::Power { kind: "shutdown".into() }, phrase), Reply::Yes, "must not approve a shutdown: {phrase}");
+            } else {
+                assert_eq!(classify(phrase), Reply::Yes, "generic yes: {phrase}");
+            }
+        }
+
+        let no_phrases = [
+            "no", "nope", "nah", "nahi", "no thanks", "no thank you", "no need", "no need sir",
+            "don't", "dont", "do not", "it's fine", "its fine", "leave it", "leave them",
+            "skip", "not today", "not now", "later", "never mind", "nevermind",
+            "i'm good", "im good", "rehne do", "mat karo", "stay closed",
+        ];
+
+        for phrase in no_phrases {
+            // For ReopenSession, classify_for treats every NO and Later as Reply::No
+            assert_eq!(classify_for(&off, phrase), Reply::No, "no phrase for ReopenSession: {phrase}");
+
+            // In generic classify:
+            if phrase == "not now" || phrase == "later" {
+                assert_eq!(classify(phrase), Reply::Later, "generic later: {phrase}");
+            } else {
+                assert_eq!(classify(phrase), Reply::No, "generic no: {phrase}");
+            }
+        }
+
+        // A negation anywhere still beats a yes word
+        // ("open" is not a generic answer word, so only the reopen question understands this one)
+        assert_eq!(classify_for(&off, "no don't open them"), Reply::No);
+        assert_eq!(classify("absolutely not"), Reply::No);
+        assert_eq!(classify_for(&off, "absolutely not"), Reply::No);
+        assert_eq!(classify_for(&off, "definitely not"), Reply::No);
+
+        // Sentences that are really commands must stay Reply::Other
+        for other in ["okay open chrome", "yes what is the weather", "open the weather"] {
+            assert_eq!(classify(other), Reply::Other, "must stay other (classify): {other}");
+            assert_eq!(classify_for(&off, other), Reply::Other, "must stay other (classify_for): {other}");
+        }
     }
 
     #[test]

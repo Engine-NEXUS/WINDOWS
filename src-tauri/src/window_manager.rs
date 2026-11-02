@@ -72,37 +72,11 @@ pub struct RectPayload {
 }
 
 /// Read orb position + size from settings.json.
-/// Falls back to defaults (center-bottom, 200px) if the file is missing,
-/// can't be parsed, or doesn't contain the orb fields.
-pub fn read_orb_settings<R: Runtime>(app: &AppHandle<R>) -> (f64, f64, u32) {
-    let dir = match app.path().app_data_dir() {
-        Ok(d) => d,
-        Err(_) => return (0.5, 0.0, 200),
-    };
-    let path = dir.join("settings.json");
-    if !path.exists() {
-        return (0.5, 0.0, 200);
-    }
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return (0.5, 0.0, 200),
-    };
-    let json: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return (0.5, 0.0, 200),
-    };
-    let pos = json.get("orbPosition").and_then(|v| v.as_str()).unwrap_or("top");
-    let (h, v): (f64, f64) = if pos == "bottom" {
-        (0.5, 1.0)
-    } else {
-        (0.5, 0.0)
-    };
-    let size = json.get("orbSize").and_then(|v| v.as_u64()).unwrap_or(200) as u32;
-    // Clamp to safe ranges (orb/waves box 180–400 — ensures room for particle sphere).
-    let h = h.max(0.0).min(1.0);
-    let v = v.max(0.0).min(1.0);
-    let size = size.max(180).min(400);
-    (h, v, size)
+/// The orb is always fixed at top-center (0.5, 0.0, 200px); any saved
+/// `orbPosition`, `orbHorizontalPct`, `orbVerticalPct` and `orbSize`
+/// are ignored.
+pub fn read_orb_settings<R: Runtime>(_app: &AppHandle<R>) -> (f64, f64, u32) {
+    (0.5, 0.0, 200)
 }
 
 /// Loose settings reader used by both the orb and the waves/loading paths:
@@ -211,7 +185,7 @@ pub fn monitor_info<R: Runtime>(app: &AppHandle<R>) -> (i32, i32, f64) {
 }
 
 /// Compute a physical-px rect for arbitrary (h, v, size) — shared by
-/// `orb_rect`, the calibration preview, and `set_orb_position`'s
+/// `orb_rect` and the calibration preview's
 /// live-preview path.
 pub fn rect_for<R: Runtime>(app: &AppHandle<R>, h_pct: f64, v_pct: f64, size: u32) -> RectPayload {
     let (sw, sh, scale) = monitor_info(app);
@@ -307,31 +281,6 @@ pub fn set_orb_interactive<R: Runtime>(app: AppHandle<R>, interactive: bool) -> 
     } else {
         crate::stage::set_hitbox_source("orb", Vec::new());
     }
-    Ok(())
-}
-
-/// IPC: live calibration preview rect for arbitrary (h, v, size) — used
-/// by the settings sidebar sliders for real-time preview. Does NOT save
-/// to settings.json; the frontend calls `save_settings` separately.
-/// Bypasses the calibration-session skip in `emit_orb_rect` by design:
-/// this command IS an explicit "show this exact rect now" request.
-#[tauri::command]
-pub fn set_orb_position<R: Runtime>(
-    app: AppHandle<R>,
-    horizontal_pct: f64,
-    vertical_pct: f64,
-    size: u32,
-) -> Result<(), String> {
-    let h = horizontal_pct.max(0.0).min(1.0);
-    let v = vertical_pct.max(0.0).min(1.0);
-    let s = size.max(100).min(400);
-    let rect = rect_for(&app, h, v, s);
-    *LAST_ORB_RECT.lock() = Some(rect);
-    crate::commands::emit_logged(&app, "stage:orb_rect", rect);
-    let pos_tag = if v > 0.5 { "bottom" } else { "top" };
-    crate::commands::emit_logged(&app, "stage:orb_position", pos_tag);
-    set_orb_hitbox_interactive(&app, rect);
-    tracing::debug!("set_orb_position: emitted rect {:?} [h={h}, v={v}, pos={pos_tag}]", rect);
     Ok(())
 }
 

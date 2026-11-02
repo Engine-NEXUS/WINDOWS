@@ -1189,7 +1189,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             window_manager::set_orb_interactive,
-            window_manager::set_orb_position,
             window_manager::get_pending_orb_rect,
             window_manager::get_pending_orb_position,
             window_manager::get_pending_loading_rect,

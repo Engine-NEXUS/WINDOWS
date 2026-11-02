@@ -115,7 +115,7 @@ pub struct Briefing {
     pub card_md: String,
     /// Open items (mail deadlines + unfinished requests).
     pub items: usize,
-    /// The spoken text ends with "Shall I reopen them?" - the caller must register the offer.
+    /// The spoken text ends with a restore question - the caller must register the offer.
     pub offers_restore: bool,
 }
 
@@ -151,6 +151,91 @@ pub fn ago_phrase(now: i64, ts: i64) -> String {
         }
         86_400..=172_799 => "yesterday".into(),
         _ => format!("{} days ago", d / 86_400),
+    }
+}
+
+/// Rotate between 5 deterministic question variations for reopening the previous session.
+pub fn reopen_question(day: &str, variant: u64) -> String {
+    match variant % 5 {
+        0 => format!("Do you want me to open all the apps you closed {day}?"),
+        1 => "Do you want me to start where you left off?".to_string(),
+        2 => format!("Shall I open everything you had open {day}?"),
+        3 => "Want me to pick up where you left off?".to_string(),
+        _ => format!("Should I bring back the apps from {day}?"),
+    }
+}
+
+/// Short relative day phrase for the restore question:
+/// "yesterday" for the previous local calendar day,
+/// "last night" for 18:00 to 04:59 when now is before noon and gap < 18h,
+/// "earlier today" for the same local calendar day,
+/// or "on {Weekday}" for 2 to 6 days ago.
+pub fn day_phrase(now: i64, left_at: i64) -> String {
+    day_phrase_tz(now, left_at, &chrono::Local)
+}
+
+/// Timezone-aware day phrase calculation.
+pub fn day_phrase_tz<Tz: chrono::TimeZone>(now: i64, left_at: i64, tz: &Tz) -> String {
+    use chrono::{Datelike, Timelike};
+    let now_dt = match chrono::DateTime::from_timestamp(now, 0) {
+        Some(dt) => dt.with_timezone(tz),
+        None => return ago_phrase(now, left_at),
+    };
+    let left_dt = match chrono::DateTime::from_timestamp(left_at, 0) {
+        Some(dt) => dt.with_timezone(tz),
+        None => return ago_phrase(now, left_at),
+    };
+    let gap_secs = (now - left_at).max(0);
+    day_phrase_parts(
+        now_dt.date_naive(),
+        now_dt.hour(),
+        left_dt.date_naive(),
+        left_dt.hour(),
+        left_dt.weekday(),
+        gap_secs,
+    )
+}
+
+/// Offset-free day phrase calculation using local calendar dates and hours.
+pub fn day_phrase_parts(
+    now_date: chrono::NaiveDate,
+    now_hour: u32,
+    left_date: chrono::NaiveDate,
+    left_hour: u32,
+    left_weekday: chrono::Weekday,
+    gap_secs: i64,
+) -> String {
+    let day_diff = (now_date - left_date).num_days();
+    let is_before_noon = now_hour < 12;
+    let gap_under_18h = gap_secs >= 0 && gap_secs < 18 * 3600;
+
+    // "last night" (left between 18:00 and 04:59 the previous evening/night,
+    // takes priority over "yesterday" only when now is before noon and the gap is under 18 h).
+    // It also covers the early-morning night hours (00:00-04:59) before noon.
+    if ((day_diff == 1 && left_hour >= 18) || (day_diff == 0 && left_hour < 5))
+        && is_before_noon
+        && gap_under_18h
+    {
+        return "last night".to_string();
+    }
+
+    match day_diff {
+        0 => "earlier today".to_string(),
+        1 => "yesterday".to_string(),
+        2..=6 => {
+            let weekday_name = match left_weekday {
+                chrono::Weekday::Mon => "Monday",
+                chrono::Weekday::Tue => "Tuesday",
+                chrono::Weekday::Wed => "Wednesday",
+                chrono::Weekday::Thu => "Thursday",
+                chrono::Weekday::Fri => "Friday",
+                chrono::Weekday::Sat => "Saturday",
+                chrono::Weekday::Sun => "Sunday",
+            };
+            format!("on {weekday_name}")
+        }
+        _ if day_diff > 6 => format!("{day_diff} days ago"),
+        _ => "earlier today".to_string(),
     }
 }
 
@@ -309,21 +394,14 @@ pub fn build(input: &Input) -> Option<Briefing> {
             spoken.push_str(" This is where we left off.");
         }
     }
-    if let Some(s) = &input.session {
-        // The whole previous session is more useful than the single last window.
-        // Active voice, no repeated greeting (the time-of-day greeting above
-        // already signals "you're back" — "Welcome back." was redundant).
-        spoken.push_str(&format!(
-            " You left {} open {}.",
-            s.summary,
-            ago_phrase(input.now, s.left_at)
-        ));
-    } else if let Some(r) = latest {
-        spoken.push_str(&format!(
-            " You were {}, {}.",
-            describe(&r.sample),
-            ago_phrase(input.now, r.last_seen)
-        ));
+    if input.session.is_none() {
+        if let Some(r) = latest {
+            spoken.push_str(&format!(
+                " You were {}, {}.",
+                describe(&r.sample),
+                ago_phrase(input.now, r.last_seen)
+            ));
+        }
     }
     if let Some(first) = input.events.first() {
         let n = input.events.len();
@@ -349,8 +427,15 @@ pub fn build(input: &Input) -> Option<Briefing> {
         spoken.push_str(h);
     }
     // The question comes last so the answer window opens right after it.
-    if input.session.is_some() {
-        spoken.push_str(if input.overnight.is_some() { " Do you want me to open the other apps you were using too?" } else { " Shall I reopen them?" });
+    if let Some(s) = &input.session {
+        spoken.push(' ');
+        if input.overnight.is_some() {
+            spoken.push_str("Do you want me to open the other apps you were using too?");
+        } else {
+            let day = day_phrase(input.now, s.left_at);
+            let variant = (input.now.max(0) as u64) / 86_400;
+            spoken.push_str(&reopen_question(&day, variant));
+        }
     }
 
     // ── card (full) ──
@@ -772,11 +857,13 @@ mod tests {
         i.session = Some(SessionOffer { summary: "VS Code on ULTRON and Brave".into(), left_at: i.now - 30_000 });
         let b = build(&i).unwrap();
         assert!(b.offers_restore);
-        assert!(b.spoken.contains("This is where we left off. You left VS Code on ULTRON and Brave open"), "{}", b.spoken);
+        assert!(b.spoken.contains("This is where we left off."), "{}", b.spoken);
+        assert!(!b.spoken.contains("VS Code on ULTRON"), "the apps are not read out: {}", b.spoken);
         assert!(b.spoken.ends_with("Do you want me to open the other apps you were using too?"), "{}", b.spoken);
-        // without news the old question is unchanged
+        // without news the short reopen question is asked (one of the rotating wordings)
         i.overnight = None;
-        assert!(build(&i).unwrap().spoken.ends_with("Shall I reopen them?"));
+        let plain = build(&i).unwrap().spoken;
+        assert!(plain.ends_with('?') && !plain.contains("VS Code on ULTRON"), "{plain}");
     }
 
     #[test]
@@ -839,14 +926,10 @@ mod tests {
             );
         }
 
-        // Without an overnight record the old question is used
+        // Without an overnight record the short reopen question is used (one of the rotating wordings)
         i.overnight = None;
         let b_without = build(&i).expect("briefing without overnight must build");
-        assert!(
-            b_without.spoken.ends_with("Shall I reopen them?"),
-            "{}",
-            b_without.spoken
-        );
+        assert!(b_without.spoken.ends_with('?') && !b_without.spoken.contains("other apps you were using too"), "{}", b_without.spoken);
     }
 
     #[test]
@@ -1119,11 +1202,72 @@ mod session_greeting_tests {
         i.session = Some(SessionOffer { summary: "VS Code on ULTRON, Brave and 2 folders".into(), left_at: i.now - 79_200 });
         let b = build(&i).unwrap();
         assert!(b.offers_restore);
-        assert!(b.spoken.starts_with("Welcome back, sir. You left VS Code on ULTRON, Brave and 2 folders open"), "{}", b.spoken);
-        assert_eq!(b.spoken.matches("Welcome back").count(), 1, "only the greeting says it, the session line does not repeat it: {}", b.spoken);
+        assert!(!b.spoken.contains("VS Code on ULTRON, Brave and 2 folders"), "spoken text must NOT contain the summary: {}", b.spoken);
         assert!(!b.spoken.contains("You were in"), "the one-window line is redundant: {}", b.spoken);
-        assert!(b.spoken.ends_with("Shall I reopen them?"), "{}", b.spoken);
+        assert_eq!(b.spoken.matches("Welcome back").count(), 1, "only the greeting says it: {}", b.spoken);
+        assert!(b.spoken.ends_with('?'), "must end with a question mark: {}", b.spoken);
+        let valid_questions = [
+            "Do you want me to open all the apps you closed",
+            "Do you want me to start where you left off?",
+            "Shall I open everything you had open",
+            "Want me to pick up where you left off?",
+            "Should I bring back the apps from",
+        ];
+        assert!(valid_questions.iter().any(|q| b.spoken.contains(q)), "must contain one of the 5 questions: {}", b.spoken);
         assert!(b.card_md.contains("### Open when you left"), "{}", b.card_md);
+        assert!(b.card_md.contains("VS Code on ULTRON, Brave and 2 folders"), "card still lists the apps: {}", b.card_md);
+    }
+
+    #[test]
+    fn variants_rotate_with_now() {
+        let mut i = base();
+        i.session = Some(SessionOffer { summary: "Brave".into(), left_at: 1_000_000 });
+        let mut seen = std::collections::HashSet::new();
+        for day in 0..5 {
+            i.now = 1_000_000 + day * 86_400;
+            let b = build(&i).unwrap();
+            let last_sentence = b.spoken.rsplit(". ").next().unwrap_or(&b.spoken);
+            seen.insert(last_sentence.to_string());
+        }
+        assert_eq!(seen.len(), 5, "all 5 variants should rotate across consecutive days: {seen:?}");
+    }
+
+    #[test]
+    fn day_phrase_cases() {
+        use chrono::NaiveDate;
+        let today = NaiveDate::from_ymd_opt(2026, 11, 2).unwrap(); // Monday
+        let yesterday = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(); // Sunday
+        let friday = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap(); // Friday (3 days before Monday)
+
+        // Same day (e.g. afternoon today, left morning today)
+        let s_same = day_phrase_parts(today, 15, today, 10, chrono::Weekday::Mon, 5 * 3600);
+        assert_eq!(s_same, "earlier today");
+
+        // Previous day (e.g. afternoon today, left afternoon yesterday)
+        let s_prev = day_phrase_parts(today, 15, yesterday, 14, chrono::Weekday::Sun, 25 * 3600);
+        assert_eq!(s_prev, "yesterday");
+
+        // Last night (e.g. morning today at 08:00, left 22:00 last night; gap 10h < 18h)
+        let s_night = day_phrase_parts(today, 8, yesterday, 22, chrono::Weekday::Sun, 10 * 3600);
+        assert_eq!(s_night, "last night");
+
+        // 3 days ago (e.g. Monday to Friday)
+        let s_3days = day_phrase_parts(today, 15, friday, 15, chrono::Weekday::Fri, 3 * 86_400);
+        assert_eq!(s_3days, "on Friday");
+    }
+
+    #[test]
+    fn card_still_lists_apps_even_when_spoken_does_not() {
+        let mut i = base();
+        i.session = Some(SessionOffer {
+            summary: "VS Code on ULTRON, Brave and 2 folders".into(),
+            left_at: i.now - 3600,
+        });
+        let b = build(&i).unwrap();
+        assert!(!b.spoken.contains("VS Code on ULTRON"));
+        assert!(!b.spoken.contains("Brave"));
+        assert!(b.card_md.contains("### Open when you left"));
+        assert!(b.card_md.contains("VS Code on ULTRON, Brave and 2 folders"));
     }
 
     #[test]
@@ -1141,7 +1285,8 @@ mod session_greeting_tests {
 
         i.session = Some(SessionOffer { summary: "Brave".into(), left_at: i.now - 3600 });
         let b2 = build(&i).unwrap();
-        let q = b2.spoken.find("Shall I reopen them?").unwrap();
+        assert!(b2.spoken.ends_with('?'), "{}", b2.spoken);
+        let q = b2.spoken.rfind('?').unwrap();
         assert!(b2.spoken.find("Heads up").unwrap() < q, "{}", b2.spoken);
     }
 
