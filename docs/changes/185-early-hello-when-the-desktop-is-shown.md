@@ -24,3 +24,6 @@ Owner: the early orb showed one fixed shape; it must follow the capsule style ch
 - **pebble** (default): the fluid bezel scoop, the same two cubic Beziers the real orb draws at rest ((0,0) (wing,0) (cx-0.26w,h) (cx,h), mirrored), hanging from the top edge or rising from the bottom, with the faint rim line (`orbBaseRimOpacity`), size from `orbScoopWidth/Height`;
 - **classic**: the plain black square capsule of `orbSize` with the two outer corners rounded by 10 px and a 1 px border.
 Position follows `orbPosition` and `orbHorizontalPct`. Verified as images rendered from the real code (pebble top, pebble bottom, classic); not yet seen at a real logon. Not mirrored: the pebble's wake-up stretch animation and the wing glow (default 0).
+
+## Update 2026-11-02 (c): "Welcome back" after 18:00
+The logon test said "Good evening" at night. New rule (plan in docs/features/158, revision c): morning 05:00-11:59, afternoon 12:00-17:59, "Welcome back, sir" / "Good to have you back, sir" from 18:00 to 04:59. `early_hello::Period` is Morning/Afternoon/Night, `SCRIPT_VERSION` 2 (an old script with an "evening" key is replaced), `briefing::greeting` follows the same bands (its evening started at 17:00), and both new lines are in `tts::CACHED_PHRASES`. Tests updated/added; Rust lib suite 2951 pass. Not run live: needs a rebuild and one normal start so the clips are cached.

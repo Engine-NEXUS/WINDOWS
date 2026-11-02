@@ -16,16 +16,15 @@ use std::path::Path;
 pub enum Period {
     Morning,
     Afternoon,
-    Evening,
+    /// From 18:00 it is night: "Welcome back", never "Good evening" ("Good night" is the farewell).
     Night,
 }
 
-/// 05:00-11:59 morning, 12:00-17:59 afternoon, 18:00-21:59 evening, otherwise (22:00-04:59) night.
+/// 05:00-11:59 morning, 12:00-17:59 afternoon, 18:00-04:59 night.
 pub fn period_for_hour(hour: u32) -> Period {
     match hour {
         5..=11 => Period::Morning,
         12..=17 => Period::Afternoon,
-        18..=21 => Period::Evening,
         _ => Period::Night,
     }
 }
@@ -35,7 +34,6 @@ impl Period {
         match self {
             Period::Morning => "morning",
             Period::Afternoon => "afternoon",
-            Period::Evening => "evening",
             Period::Night => "night",
         }
     }
@@ -50,7 +48,7 @@ pub fn due(last_played: Option<i64>, now: i64) -> bool {
 }
 
 pub const SCRIPT_FILE: &str = "hello_script.json";
-pub const SCRIPT_VERSION: u32 = 1;
+pub const SCRIPT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Script {
@@ -65,13 +63,12 @@ pub struct Script {
     pub last_played: Option<i64>,
 }
 
-/// The lines whose clips every install already has (the boot hello renders them).
+/// The lines (their clips are rendered once by the voice cache warm-up, `tts::CACHED_PHRASES`).
 pub fn default_script(voice: &str) -> Script {
     let mut lines = BTreeMap::new();
     lines.insert("morning".to_string(), vec!["Good morning, sir".to_string()]);
     lines.insert("afternoon".to_string(), vec!["Good afternoon, sir".to_string()]);
-    lines.insert("evening".to_string(), vec!["Good evening, sir".to_string()]);
-    lines.insert("night".to_string(), vec!["Good evening, sir".to_string()]);
+    lines.insert("night".to_string(), vec!["Welcome back, sir".to_string(), "Good to have you back, sir".to_string()]);
     Script { version: SCRIPT_VERSION, voice: voice.to_string(), lines, last_index: BTreeMap::new(), last_played: None }
 }
 
@@ -403,21 +400,47 @@ mod tests {
     }
 
     #[test]
-    fn the_four_parts_of_the_day() {
+    fn the_three_parts_of_the_day_and_night_starts_at_six() {
         for (h, p) in [
             (4, Period::Night),
             (5, Period::Morning),
             (11, Period::Morning),
             (12, Period::Afternoon),
             (17, Period::Afternoon),
-            (18, Period::Evening),
-            (21, Period::Evening),
-            (22, Period::Night),
+            (18, Period::Night),
+            (19, Period::Night),
+            (21, Period::Night),
+            (23, Period::Night),
             (0, Period::Night),
         ] {
             assert_eq!(period_for_hour(h), p, "hour {h}");
         }
-        assert_eq!(Period::Evening.key(), "evening");
+        assert_eq!(Period::Night.key(), "night");
+    }
+
+    #[test]
+    fn after_six_it_says_welcome_back_never_good_evening_and_the_variants_alternate() {
+        let mut s = default_script("v");
+        for p in [Period::Morning, Period::Afternoon, Period::Night] {
+            let lines = &s.lines[p.key()];
+            assert!(lines.iter().all(|l| !l.to_lowercase().contains("evening") && !l.to_lowercase().contains("good night")), "{lines:?}");
+        }
+        assert_eq!(s.lines["night"], vec!["Welcome back, sir".to_string(), "Good to have you back, sir".to_string()]);
+        let (first, i0) = pick(&s, Period::Night).unwrap();
+        assert_eq!(first, "Welcome back, sir");
+        after_play(&mut s, Period::Night, i0, 1);
+        assert_eq!(pick(&s, Period::Night).unwrap().0, "Good to have you back, sir", "not the same line twice in a row");
+    }
+
+    #[test]
+    fn an_older_script_with_an_evening_key_is_replaced_by_the_new_lines() {
+        let dir = tmp("v1");
+        let mut old = default_script("v");
+        old.version = 1;
+        old.lines.insert("evening".into(), vec!["Good evening, sir".into()]);
+        save_script(&dir, &old);
+        assert_eq!(load_script(&dir, "v"), default_script("v"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

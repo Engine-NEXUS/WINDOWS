@@ -44,7 +44,8 @@ pub fn without_greeting(spoken: &str, hour: u32, name: Option<&str>, friend: boo
     spoken.strip_prefix(g.as_str()).unwrap_or(spoken).trim_start().to_string()
 }
 
-/// The three hellos (user decision): morning 05:00-11:59, afternoon 12:00-16:59, evening otherwise.
+/// The three hellos (user decision): morning 05:00-11:59, afternoon 12:00-17:59, and from 18:00 "Welcome back"
+/// (it is night then; "Good evening" at 7 or 8 pm was wrong, and "Good night" is the farewell).
 pub fn hello_line(hour: u32, name: Option<&str>, friend: bool) -> String {
     greeting(hour, name, friend)
 }
@@ -156,8 +157,8 @@ pub fn ago_phrase(now: i64, ts: i64) -> String {
 fn greeting(hour: u32, name: Option<&str>, friend: bool) -> String {
     let base = match hour {
         5..=11 => "Good morning",
-        12..=16 => "Good afternoon",
-        _ => "Good evening",
+        12..=17 => "Good afternoon",
+        _ => "Welcome back",
     };
     format!("{base}{}.", crate::persona::greet_address(name, friend))
 }
@@ -897,15 +898,15 @@ mod tests {
     }
 
     #[test]
-    fn friend_mode_uses_the_first_name_and_late_hours_say_good_evening() {
+    fn friend_mode_uses_the_first_name_and_late_hours_say_welcome_back() {
         let mut i = input();
         i.friend = true;
         i.hour = 2;
         i.mail = vec![MailItem { sender: "GitHub".into(), subject: "Run failed".into(), deadline: None, category: None }];
         let b = build(&i).unwrap();
-        assert!(b.spoken.starts_with("Good evening, Lakshya."), "{}", b.spoken);
+        assert!(b.spoken.starts_with("Welcome back, Lakshya."), "{}", b.spoken);
         i.name = None;
-        assert!(build(&i).unwrap().spoken.starts_with("Good evening."));
+        assert!(build(&i).unwrap().spoken.starts_with("Welcome back."));
     }
 
     #[test]
@@ -1000,8 +1001,8 @@ mod tests {
     fn exactly_three_hellos_by_local_hour() {
         for (h, want) in [
             (5, "Good morning, sir."), (11, "Good morning, sir."),
-            (12, "Good afternoon, sir."), (16, "Good afternoon, sir."),
-            (17, "Good evening, sir."), (23, "Good evening, sir."), (0, "Good evening, sir."), (4, "Good evening, sir."),
+            (12, "Good afternoon, sir."), (17, "Good afternoon, sir."),
+            (18, "Welcome back, sir."), (23, "Welcome back, sir."), (0, "Welcome back, sir."), (4, "Welcome back, sir."),
         ] {
             assert_eq!(hello_line(h, Some("Lakshya"), false), want, "hour {h}");
         }
@@ -1118,8 +1119,8 @@ mod session_greeting_tests {
         i.session = Some(SessionOffer { summary: "VS Code on ULTRON, Brave and 2 folders".into(), left_at: i.now - 79_200 });
         let b = build(&i).unwrap();
         assert!(b.offers_restore);
-        assert!(b.spoken.starts_with("Good evening, sir. You left VS Code on ULTRON, Brave and 2 folders open"), "{}", b.spoken);
-        assert!(!b.spoken.contains("Welcome back"), "the time-of-day greeting already covers this: {}", b.spoken);
+        assert!(b.spoken.starts_with("Welcome back, sir. You left VS Code on ULTRON, Brave and 2 folders open"), "{}", b.spoken);
+        assert_eq!(b.spoken.matches("Welcome back").count(), 1, "only the greeting says it, the session line does not repeat it: {}", b.spoken);
         assert!(!b.spoken.contains("You were in"), "the one-window line is redundant: {}", b.spoken);
         assert!(b.spoken.ends_with("Shall I reopen them?"), "{}", b.spoken);
         assert!(b.card_md.contains("### Open when you left"), "{}", b.card_md);
