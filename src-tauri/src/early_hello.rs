@@ -90,11 +90,20 @@ pub fn after_play(script: &mut Script, period: Period, idx: usize, now: i64) {
 /// Read the script. Anything unusable gives the default; a script of the same version keeps `last_played` even when the
 /// voice changed (a voice change must not cause an extra hello).
 pub fn load_script(dir: &Path, voice: &str) -> Script {
-    let Some(read) = std::fs::read(dir.join(SCRIPT_FILE)).ok().and_then(|b| serde_json::from_slice::<Script>(&b).ok()) else {
-        return default_script(voice);
+    let bytes = std::fs::read(dir.join(SCRIPT_FILE)).ok();
+    let Some(read) = bytes.as_deref().and_then(|b| serde_json::from_slice::<Script>(b).ok()) else {
+        // an older script has a different shape: keep only its `last_played` (a format change must not drop the 2 h guard)
+        let mut fresh = default_script(voice);
+        fresh.last_played = bytes
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+            .and_then(|v| v.get("last_played").and_then(|x| x.as_i64()));
+        return fresh;
     };
     if read.version != SCRIPT_VERSION {
-        return default_script(voice);
+        let mut fresh = default_script(voice);
+        fresh.last_played = read.last_played;
+        return fresh;
     }
     if read.voice != voice || read.lines.is_empty() {
         let mut fresh = default_script(voice);
@@ -282,11 +291,16 @@ fn desktop_shown() -> bool {
 pub fn start_if_logon() {
     let Some(dir) = crate::app_dirs::nexus_data_dir() else { return };
     let cfg = read_settings(&dir);
-    if !should_start(std::env::args().any(|a| a == "--background"), cfg.enabled) {
+    let is_background = std::env::args().any(|a| a == "--background");
+    if !should_start(is_background, cfg.enabled) {
+        if is_background {
+            gave_up("the earlyHello setting is off");
+        }
         return;
     }
     let mut script = load_script(&dir, &cfg.voice);
     if !due(script.last_played, now_secs()) {
+        gave_up("a hello was already played less than 2 hours ago");
         return;
     }
     STATE.store(PENDING, Ordering::SeqCst);
@@ -299,11 +313,32 @@ pub fn start_if_logon() {
     }
 }
 
-/// The clip for the part of the day, from the on-disk voice cache.
+/// A line that is always cached (the stock `Hello, sir`), used when the clip for the part of the day is not on disk yet
+/// (first logon after an update that added a line, or a freshly chosen voice). A plain hello beats silence.
+const FALLBACK_LINE: &str = "Hello, sir";
+
+/// The clip to play: the picked line, else another variant of the same part of the day, else the stock hello.
 fn clip_for(dir: &Path, cfg: &EarlySettings, script: &Script, period: Period) -> Option<(String, usize, crate::tts_cache_disk::Loaded)> {
+    let cache = crate::tts_cache_disk::dir_for(dir);
     let (text, idx) = pick(script, period)?;
-    let clip = crate::tts_cache_disk::load(&crate::tts_cache_disk::dir_for(dir), &cfg.voice, &text)?;
-    Some((text, idx, clip))
+    let mut candidates: Vec<String> = vec![text];
+    candidates.extend(script.lines.get(period.key()).into_iter().flatten().cloned());
+    candidates.push(FALLBACK_LINE.to_string());
+    for (n, line) in candidates.iter().enumerate() {
+        if let Some(clip) = crate::tts_cache_disk::load(&cache, &cfg.voice, line) {
+            if n > 0 {
+                println!("[EARLY-HELLO] the clip for '{}' is not cached yet: playing '{line}' instead", candidates[0]);
+            }
+            return Some((line.clone(), idx, clip));
+        }
+    }
+    None
+}
+
+/// Every way the early hello can end without speaking leaves a marker in the boot timeline and a log line.
+fn gave_up(reason: &str) {
+    println!("[EARLY-HELLO] not played: {reason}");
+    crate::boot::mark_with("early_hello_gave_up", reason);
 }
 
 /// While waiting for the desktop: open the audio device (it can be late at logon) so that the sound can start the moment
@@ -320,13 +355,13 @@ fn run(dir: &Path, cfg: &EarlySettings, script: &mut Script) -> bool {
     // Everything slow is done BEFORE the desktop appears: read the clip, open the audio device.
     let mut clip = clip_for(dir, cfg, script, period);
     if clip.is_none() {
-        println!("[EARLY-HELLO] no cached clip for the {} hello in voice {}: leaving the hello to the app", period.key(), cfg.voice);
+        gave_up(&format!("no cached clip at all for the {} hello in voice {}", period.key(), cfg.voice));
         return false;
     }
     let mut audio: Option<(rodio::OutputStream, rodio::OutputStreamHandle)> = None;
     while !desktop_shown() {
         if started.elapsed().as_secs() >= DESKTOP_WAIT_SECS {
-            println!("[EARLY-HELLO] the desktop never appeared within {DESKTOP_WAIT_SECS}s: leaving the hello to the app");
+            gave_up(&format!("the desktop never appeared within {DESKTOP_WAIT_SECS}s"));
             return false;
         }
         if audio.is_none() {
@@ -345,19 +380,25 @@ fn run(dir: &Path, cfg: &EarlySettings, script: &mut Script) -> bool {
         period = now_period;
         clip = clip_for(dir, cfg, script, period);
     }
-    let Some((text, idx, clip)) = clip else { return false };
+    let Some((text, idx, clip)) = clip else {
+        gave_up("no clip for the part of the day after the wait");
+        return false;
+    };
     // The audio device can still be late: keep trying for a few more seconds.
     let (stream, handle) = loop {
         if let Some(pair) = audio.take().or_else(open_audio) {
             break pair;
         }
         if started.elapsed().as_secs() >= DESKTOP_WAIT_SECS + AUDIO_WAIT_SECS {
-            println!("[EARLY-HELLO] no audio device");
+            gave_up("no audio device");
             return false;
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
     };
-    let Ok(sink) = rodio::Sink::try_new(&handle) else { return false };
+    let Ok(sink) = rodio::Sink::try_new(&handle) else {
+        gave_up("could not open an audio sink");
+        return false;
+    };
     // Same rule as every spoken line: the system volume is set to the speech volume while NEXUS talks and restored after.
     let volume_lease = if cfg.volume_pct > 0 { crate::volume::acquire_volume_lease(cfg.volume_pct as f32 / 100.0) } else { None };
     // From here the normal boot hello must stay silent, whatever happens next.
@@ -379,6 +420,7 @@ fn run(dir: &Path, cfg: &EarlySettings, script: &mut Script) -> bool {
     });
     crate::boot::mark("early_hello_audio");
     println!("[EARLY-HELLO] '{text}' ({}) volume {}% {} ms after the thread started", cfg.voice, cfg.volume_pct, started.elapsed().as_millis());
+    crate::boot::mark_with("early_hello_playing", &text);
     sink.append(rodio::buffer::SamplesBuffer::new(1, clip.sample_rate, clip.samples));
     after_play(script, period, idx, now_secs());
     save_script(dir, script);
@@ -439,7 +481,9 @@ mod tests {
         old.version = 1;
         old.lines.insert("evening".into(), vec!["Good evening, sir".into()]);
         save_script(&dir, &old);
-        assert_eq!(load_script(&dir, "v"), default_script("v"));
+        let got = load_script(&dir, "v");
+        assert_eq!(got.lines, default_script("v").lines, "the old lines are replaced by the new ones");
+        assert!(!got.lines.contains_key("evening"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -482,12 +526,14 @@ mod tests {
         // corrupt file
         std::fs::write(dir.join(SCRIPT_FILE), b"not json").unwrap();
         assert_eq!(load_script(&dir, "v"), default_script("v"));
-        // a different version
+        // a different version: the lines are replaced, `last_played` is kept
         let mut old = default_script("v");
         old.version = 99;
         old.last_played = Some(5);
         save_script(&dir, &old);
-        assert_eq!(load_script(&dir, "v"), default_script("v"));
+        let reloaded = load_script(&dir, "v");
+        assert_eq!(reloaded.lines, default_script("v").lines);
+        assert_eq!(reloaded.last_played, Some(5));
         // missing file
         let empty = tmp("script_missing");
         assert_eq!(load_script(&empty, "v"), default_script("v"));
@@ -508,6 +554,29 @@ mod tests {
         for (bg, on) in [(false, false), (false, true), (true, false), (true, true)] {
             assert_eq!(should_start(bg, on), bg && on);
         }
+    }
+
+    #[test]
+    fn a_missing_clip_falls_back_to_the_same_period_then_to_the_stock_hello_and_never_to_silence() {
+        let dir = tmp("clips");
+        let cache = crate::tts_cache_disk::dir_for(&dir);
+        let cfg = parse_settings(&serde_json::json!({"edgeTtsVoice": "v"}));
+        let script = default_script("v");
+        let save = |text: &str| {
+            crate::tts_cache_disk::save(&cache, "v", text, crate::tts_cache_disk::Origin::Edge, &[0.1; 800], 16_000, 50, &[]).unwrap();
+        };
+        // nothing cached: nothing to play
+        assert!(clip_for(&dir, &cfg, &script, Period::Night).is_none());
+        // only the stock hello is cached: it is used
+        save(FALLBACK_LINE);
+        assert_eq!(clip_for(&dir, &cfg, &script, Period::Night).unwrap().0, FALLBACK_LINE);
+        // the other night variant is cached: preferred over the stock hello
+        save("Good to have you back, sir");
+        assert_eq!(clip_for(&dir, &cfg, &script, Period::Night).unwrap().0, "Good to have you back, sir");
+        // the picked line is cached: it wins
+        save("Welcome back, sir");
+        assert_eq!(clip_for(&dir, &cfg, &script, Period::Night).unwrap().0, "Welcome back, sir");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

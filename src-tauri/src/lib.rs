@@ -363,6 +363,24 @@ fn no_stdout() -> bool {
     h == 0 || h == -1
 }
 
+/// Point this process's standard output and error at the log file (Windows, no console).
+#[cfg(target_os = "windows")]
+fn redirect_std_to(file: &std::fs::File) {
+    use std::os::windows::io::IntoRawHandle;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetStdHandle(id: u32, handle: isize) -> i32;
+    }
+    for id in [0xFFFF_FFF5u32 /* STD_OUTPUT_HANDLE */, 0xFFFF_FFF4u32 /* STD_ERROR_HANDLE */] {
+        if let Ok(dup) = file.try_clone() {
+            // SAFETY: the duplicated handle is leaked on purpose: it must stay valid for the life of the process.
+            unsafe {
+                SetStdHandle(id, dup.into_raw_handle() as isize);
+            }
+        }
+    }
+}
+
 /// Logs go to the console/redirect when there is one (`nexus start`, development) and to
 /// `%APPDATA%/com.nexus.assistant/logs/nexus.log` otherwise, so a logon start with no console can still be diagnosed.
 fn init_logging() {
@@ -376,6 +394,9 @@ fn init_logging() {
                 let _ = std::fs::rename(&file, dir.join("nexus.old.log"));
             }
             if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+                // `println!` lines ([EARLY-HELLO], [BOOT], [WATCH-POWER] ...) go to the same file: with no console they
+                // were lost, which hid why the early hello stayed silent at a real logon (2026-11-02).
+                redirect_std_to(&f);
                 tracing_subscriber::fmt().with_env_filter(filter).with_target(false).with_ansi(false).with_writer(std::sync::Mutex::new(f)).init();
                 std::panic::set_hook(Box::new(|info| tracing::error!("panic: {info}")));
                 return;
