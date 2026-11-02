@@ -163,3 +163,50 @@ Run on an Apple-Silicon MacBook, a fresh user account, after a signed build:
 
 Record each result in `docs/testing/` with macOS version and chip. Until that table exists, treat macOS as
 "experimental, compiles in CI".
+
+## 7. Where to test: free and cheap Mac options (researched 2026-11-02)
+
+Source quality: runner specs, the TCC issue, Codemagic/Xcode Cloud allowances and the cloud-Mac price list come from web
+search results and one fetched GitHub issue. Several vendor/docs hosts (docs.github.com, macincloud.com, aws.amazon.com)
+were unreachable from the cloud session, so **prices and free-tier terms below must be re-checked on the vendor page before
+spending money**. Nothing here was run on a Mac.
+
+| Option | Cost | What it can test | What it cannot |
+|---|---|---|---|
+| **GitHub Actions macOS runners** (`macos-14/15/26`, Apple-silicon M1, 3 cores, 7 GB; Intel labels exist) | This repo is public; standard hosted runners are free for public repos per GitHub's billing policy (not re-confirmed this session) | Compile (`cargo check/build --target aarch64-apple-darwin`), `cargo test --lib`, frontend build, unsigned `.app`/`.dmg` artifact, headless smoke tests, screenshots | No microphone/camera/speaker hardware, no interactive desktop, no nested virtualization |
+| Same, with TCC edits | Free | Screen Recording permission can be pre-granted by inserting into `TCC.db` on the macOS 13/14 images (runner-images issue 9529). Mic, camera, Accessibility were **not** confirmed | Newer images (15/26) unconfirmed |
+| Codemagic | Reported 500 free macOS (M2) minutes/month, 1 build at a time | Same as above; redundant while GitHub is free | Built for mobile apps |
+| Xcode Cloud | About 25 compute hours/month with an Apple Developer Program membership | Xcode projects only | Poor fit for Tauri/Rust |
+| Cirrus CI | Reported shut down in 2026 (from a competitor's blog, unconfirmed) | Do not plan on it | |
+| MacinCloud pay-as-you-go | About $1/hour, prepaid credit (page is old, re-check) | Real GUI session over remote desktop: permission prompts, hotkeys, tray, stage click-through, window look | Cloud Macs usually have no mic/camera |
+| Scaleway Mac mini M2 | About 0.17 EUR/hour but **24 hour minimum** (about 4 EUR a lease) | Same, plus SSH and a full day to iterate | Same |
+| AWS EC2 Mac | About $0.88-1.23/host-hour, **24 hour minimum** (about $21+) | Same | Most expensive |
+| MacStadium | From about $109/month | Long-running test box | Not hourly |
+| A physical MacBook (own, borrowed, refurbished) | Free if borrowed | Everything, including microphone, wake word, camera/Hand Mode, Retina, sleep/wake, AirPods | |
+
+Do not use Hackintosh, OSX-KVM or Docker-OSX: Apple's licence allows macOS virtualisation only on Apple hardware, and audio/GPU
+would be unrepresentative anyway.
+
+### What each tier can prove
+
+* **GitHub runner (free):** it compiles, unit tests pass, the bundle builds. Cards M1-M5 and the pure-logic parts of M3/M4/M9
+  (coordinate conversion, key maps, tiling maths) belong here.
+* **Rented GUI Mac (about 5-25 EUR):** the app starts, the call hotkey works and does not open Spotlight, stage buttons are
+  clickable, tray and settings windows look right, AppleScript calls get their permission prompt, Ghost grounding (M6) finds
+  controls in Finder/Safari.
+* **Physical Mac only:** microphone and wake word, camera and Hand Mode, signing and notarisation, AirPods/Bluetooth, lid and
+  sleep behaviour, battery behaviour.
+
+### Plan
+
+1. **P0, free, now:** get the existing `macos-port` job to run on this branch (it needs a pull request or a push to `main`;
+   the file was edited in section 5) and fix whatever it reports. A cloud agent can read the job logs and iterate
+   push -> CI -> fix with no Mac at all. That is the free "Mac" for the compile half.
+2. **P1, free:** cards M2-M5 (hotkey, stage cursor position, Cmd shortcut seed, entitlements), each with Linux unit tests plus the
+   macOS compile check.
+3. **P2, free:** add a CI step that builds an unsigned `.app`/`.dmg` artifact and a headless smoke test (needs a small
+   `--smoke` startup flag that exits after the stage window and wake engine initialise).
+4. **P3, about 5-25 EUR:** one 24 hour Scaleway lease (or MacinCloud prepaid hours) for a single GUI pass over the section 6
+   checklist items that do not need a microphone or camera. Do M6-M10 first so the session is not wasted on known gaps.
+5. **P4:** a physical MacBook for the audio/camera/signing items. Signing and notarisation need an Apple Developer Program
+   membership (paid annual fee, confirm current price).
