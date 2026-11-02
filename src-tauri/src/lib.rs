@@ -171,6 +171,7 @@ pub(crate) mod agent_attention;
 pub(crate) mod repo_review;
 pub(crate) mod pr_screen;
 pub(crate) mod early_hello;
+pub(crate) mod early_orb;
 pub(crate) mod howto;
 pub(crate) mod email_brief;
 pub(crate) mod repo_hint;

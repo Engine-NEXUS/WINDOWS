@@ -162,13 +162,37 @@ fn now_secs() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
-/// Settings read straight from settings.json (the app's own settings are not loaded yet this early).
-fn read_settings(dir: &Path) -> (bool, String) {
+/// The settings the early hello needs, read straight from settings.json (the app's own settings are not loaded yet).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EarlySettings {
+    pub enabled: bool,
+    pub voice: String,
+    /// The speech volume the app sets while it talks (percent). 0 = leave the system volume alone.
+    pub volume_pct: u8,
+    pub orb_top: bool,
+    pub orb_x_pct: f32,
+    pub capsule_w: f32,
+    pub capsule_h: f32,
+}
+
+/// Pure: the settings out of the parsed settings.json (`Null` = defaults).
+pub fn parse_settings(v: &serde_json::Value) -> EarlySettings {
+    let num = |k: &str| v.get(k).and_then(|x| x.as_f64());
+    EarlySettings {
+        enabled: v.get("earlyHello").and_then(|x| x.as_bool()).unwrap_or(true),
+        voice: v.get("edgeTtsVoice").and_then(|x| x.as_str()).unwrap_or("en-US-AvaNeural").to_string(),
+        volume_pct: num("ttsVolume").map_or(75, |n| n.clamp(0.0, 100.0) as u8),
+        orb_top: v.get("orbPosition").and_then(|x| x.as_str()).map_or(true, |p| !p.eq_ignore_ascii_case("bottom")),
+        orb_x_pct: num("orbHorizontalPct").map_or(0.5, |n| n.clamp(0.0, 1.0) as f32),
+        capsule_w: num("orbScoopWidth").filter(|n| *n >= 120.0).map_or(crate::early_orb::DEFAULT_CAPSULE_W, |n| n.min(700.0) as f32),
+        capsule_h: num("orbScoopHeight").filter(|n| *n >= 60.0).map_or(crate::early_orb::DEFAULT_CAPSULE_H, |n| n.min(300.0) as f32),
+    }
+}
+
+fn read_settings(dir: &Path) -> EarlySettings {
     let v: serde_json::Value =
         std::fs::read(dir.join("settings.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(serde_json::Value::Null);
-    let enabled = v.get("earlyHello").and_then(|x| x.as_bool()).unwrap_or(true);
-    let voice = v.get("edgeTtsVoice").and_then(|x| x.as_str()).unwrap_or("en-US-AvaNeural").to_string();
-    (enabled, voice)
+    parse_settings(&v)
 }
 
 #[cfg(target_os = "windows")]
@@ -243,17 +267,17 @@ fn desktop_shown() -> bool {
 /// Start the thread when this is the logon launch. Cheap and never blocks `run()`.
 pub fn start_if_logon() {
     let Some(dir) = crate::app_dirs::nexus_data_dir() else { return };
-    let (enabled, voice) = read_settings(&dir);
-    if !should_start(std::env::args().any(|a| a == "--background"), enabled) {
+    let cfg = read_settings(&dir);
+    if !should_start(std::env::args().any(|a| a == "--background"), cfg.enabled) {
         return;
     }
-    let mut script = load_script(&dir, &voice);
+    let mut script = load_script(&dir, &cfg.voice);
     if !due(script.last_played, now_secs()) {
         return;
     }
     STATE.store(PENDING, Ordering::SeqCst);
     let spawned = std::thread::Builder::new().name("early-hello".into()).spawn(move || {
-        let played = run(&dir, &voice, &mut script);
+        let played = run(&dir, &cfg, &mut script);
         STATE.store(if played { PLAYED } else { GAVE_UP }, Ordering::SeqCst);
     });
     if spawned.is_err() {
@@ -261,49 +285,89 @@ pub fn start_if_logon() {
     }
 }
 
+/// The clip for the part of the day, from the on-disk voice cache.
+fn clip_for(dir: &Path, cfg: &EarlySettings, script: &Script, period: Period) -> Option<(String, usize, crate::tts_cache_disk::Loaded)> {
+    let (text, idx) = pick(script, period)?;
+    let clip = crate::tts_cache_disk::load(&crate::tts_cache_disk::dir_for(dir), &cfg.voice, &text)?;
+    Some((text, idx, clip))
+}
+
+/// While waiting for the desktop: open the audio device (it can be late at logon) so that the sound can start the moment
+/// the desktop appears, instead of paying the device start-up then (measured 2026-11-02: 3.7 s from desktop to sound).
+fn open_audio() -> Option<(rodio::OutputStream, rodio::OutputStreamHandle)> {
+    rodio::OutputStream::try_default().ok()
+}
+
 /// Wait for the desktop, then play. `true` when the greeting was spoken.
-fn run(dir: &Path, voice: &str, script: &mut Script) -> bool {
+fn run(dir: &Path, cfg: &EarlySettings, script: &mut Script) -> bool {
     use chrono::Timelike;
     let started = std::time::Instant::now();
+    let mut period = period_for_hour(chrono::Local::now().hour());
+    // Everything slow is done BEFORE the desktop appears: read the clip, open the audio device.
+    let mut clip = clip_for(dir, cfg, script, period);
+    if clip.is_none() {
+        println!("[EARLY-HELLO] no cached clip for the {} hello in voice {}: leaving the hello to the app", period.key(), cfg.voice);
+        return false;
+    }
+    let mut audio: Option<(rodio::OutputStream, rodio::OutputStreamHandle)> = None;
     while !desktop_shown() {
         if started.elapsed().as_secs() >= DESKTOP_WAIT_SECS {
             println!("[EARLY-HELLO] the desktop never appeared within {DESKTOP_WAIT_SECS}s: leaving the hello to the app");
             return false;
         }
+        if audio.is_none() {
+            audio = open_audio();
+            if audio.is_some() {
+                crate::boot::mark("early_hello_audio_ready");
+            }
+        }
         std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
     }
     crate::boot::mark("early_hello_desktop_shown");
     std::thread::sleep(std::time::Duration::from_millis(SETTLE_MS));
-    let period = period_for_hour(chrono::Local::now().hour());
-    let Some((text, idx)) = pick(script, period) else { return false };
-    let cache = crate::tts_cache_disk::dir_for(dir);
-    let Some(clip) = crate::tts_cache_disk::load(&cache, voice, &text) else {
-        println!("[EARLY-HELLO] no cached clip for '{text}' in voice {voice}: leaving the hello to the app");
-        return false;
-    };
-    // The audio device can be late at logon: keep trying for a few seconds.
+    // The part of the day can have changed while waiting.
+    let now_period = period_for_hour(chrono::Local::now().hour());
+    if now_period != period {
+        period = now_period;
+        clip = clip_for(dir, cfg, script, period);
+    }
+    let Some((text, idx, clip)) = clip else { return false };
+    // The audio device can still be late: keep trying for a few more seconds.
     let (stream, handle) = loop {
-        match rodio::OutputStream::try_default() {
-            Ok(pair) => break pair,
-            Err(e) => {
-                if started.elapsed().as_secs() >= DESKTOP_WAIT_SECS + AUDIO_WAIT_SECS {
-                    println!("[EARLY-HELLO] no audio device: {e}");
-                    return false;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(250));
-            }
+        if let Some(pair) = audio.take().or_else(open_audio) {
+            break pair;
         }
+        if started.elapsed().as_secs() >= DESKTOP_WAIT_SECS + AUDIO_WAIT_SECS {
+            println!("[EARLY-HELLO] no audio device");
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
     };
     let Ok(sink) = rodio::Sink::try_new(&handle) else { return false };
-    sink.set_volume(0.85);
+    // Same rule as every spoken line: the system volume is set to the speech volume while NEXUS talks and restored after.
+    let volume_lease = if cfg.volume_pct > 0 { crate::volume::acquire_volume_lease(cfg.volume_pct as f32 / 100.0) } else { None };
     // From here the normal boot hello must stay silent, whatever happens next.
     STATE.store(PLAYED, Ordering::SeqCst);
+    // The orb and the caption, drawn natively because the app's own window does not exist yet.
+    let env = crate::tts::compute_envelope(&clip.samples, clip.sample_rate, 20);
+    crate::early_orb::show(crate::early_orb::Show {
+        text: text.clone(),
+        words: clip.words.clone(),
+        env,
+        env_frame_ms: 20,
+        clip_ms: clip.total_ms,
+        top: cfg.orb_top,
+        x_pct: cfg.orb_x_pct,
+        capsule_w: cfg.capsule_w,
+        capsule_h: cfg.capsule_h,
+    });
     crate::boot::mark("early_hello_audio");
-    println!("[EARLY-HELLO] '{text}' ({voice}) {} ms after the thread started", started.elapsed().as_millis());
+    println!("[EARLY-HELLO] '{text}' ({}) volume {}% {} ms after the thread started", cfg.voice, cfg.volume_pct, started.elapsed().as_millis());
     sink.append(rodio::buffer::SamplesBuffer::new(1, clip.sample_rate, clip.samples));
     after_play(script, period, idx, now_secs());
     save_script(dir, script);
     sink.sleep_until_end();
+    drop(volume_lease); // restores the user's own volume (after the short grace the volume module keeps)
     drop(stream);
     true
 }
@@ -402,6 +466,26 @@ mod tests {
         for (bg, on) in [(false, false), (false, true), (true, false), (true, true)] {
             assert_eq!(should_start(bg, on), bg && on);
         }
+    }
+
+    #[test]
+    fn the_settings_come_from_settings_json_with_safe_defaults() {
+        let d = parse_settings(&serde_json::Value::Null);
+        assert_eq!((d.enabled, d.voice.as_str(), d.volume_pct, d.orb_top), (true, "en-US-AvaNeural", 75, true));
+        assert_eq!((d.orb_x_pct, d.capsule_w, d.capsule_h), (0.5, 301.0, 105.0));
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"earlyHello":false,"edgeTtsVoice":"en-GB-RyanNeural","ttsVolume":70,"orbPosition":"bottom","orbHorizontalPct":0.25,"orbScoopWidth":320,"orbScoopHeight":110}"#,
+        )
+        .unwrap();
+        let s = parse_settings(&v);
+        assert_eq!((s.enabled, s.voice.as_str(), s.volume_pct, s.orb_top), (false, "en-GB-RyanNeural", 70, false));
+        assert_eq!((s.orb_x_pct, s.capsule_w, s.capsule_h), (0.25, 320.0, 110.0));
+        // nonsense is clamped, not trusted
+        let bad: serde_json::Value = serde_json::from_str(r#"{"ttsVolume":900,"orbHorizontalPct":7,"orbScoopWidth":3,"orbScoopHeight":99999}"#).unwrap();
+        let b = parse_settings(&bad);
+        assert_eq!((b.volume_pct, b.orb_x_pct, b.capsule_w, b.capsule_h), (100, 1.0, 301.0, 300.0));
+        // a speech volume of 0 means "leave the system volume alone"
+        assert_eq!(parse_settings(&serde_json::json!({"ttsVolume": 0})).volume_pct, 0);
     }
 
     #[test]
