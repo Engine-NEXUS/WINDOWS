@@ -159,3 +159,38 @@ drive the GUI does not exist; see doc 155 section 7). Phase 5 needs a real MacBo
 3. Approve the strangler seam (`platform/`) and the two new gates (R4, R5).
 4. Whether a one-off rented Mac (about 5-25 EUR) is acceptable for the Phase 3 GUI pass, and whether a physical MacBook can
    be borrowed for Phase 5.
+
+## 7. First real macOS compile result (2026-11-02, run 41466573865, `macos-14`, Apple silicon)
+
+The whole dependency tree (cpal/CoreAudio, ort, tract, rusqlite, webrtc-vad, tauri, enigo, keyring, window-vibrancy) compiled
+on macOS in about 3 minutes. NEXUS itself failed with **8 errors, 5 distinct causes**:
+
+| # | Where | Cause | Class |
+|---|---|---|---|
+| 1 | `live/mod.rs:474` | calls `commands::mouse::ghost_click`, which exists only on Windows | missing macOS path (card M7) |
+| 2 | `hand/mod.rs:330` | calls `browser_url::foreground_process_name`, Windows-only | missing macOS path |
+| 3 | `vision.rs:498` | calls `mouse::resolve_element`, Windows-only | missing macOS path (M6/M7) |
+| 4 | `screen_capture_mac.rs:37-38` (3 errors) | `i32::try_from(f64)` does not exist | plain bug in earlier macOS code |
+| 5 | `screen_capture_mac.rs:69` | missing `use image::GenericImageView` | plain bug |
+| 6 | `shortcuts/exec.rs:235` | `enigo::Key::Raw` does not exist in enigo 0.5 | wrong API assumption; needs the 0.5 raw-key API |
+
+So the compile gap is small and mostly "a Windows-only function is called from shared code with no macOS stand-in", which is
+exactly what the `platform/` seam fixes. Card M1 is a handful of edits, not a rewrite. (Fixes not started; plan only.)
+
+## 8. Phase 5 with no money: what free testing can and cannot cover
+
+| Phase 5 item | Free coverage | How | Limit |
+|---|---|---|---|
+| Wake-word model and DSP on Apple silicon | **Full** | `wake_eval` / `voice_eval` replay harness on the macOS runner, compare scores with Windows | proves inference parity, not the microphone |
+| CoreAudio capture path | **Partial, experiment** | install the BlackHole virtual audio device on the runner (HAL plug-in, `sudo`, restart `coreaudiod`) and play WAVs into it; the app captures through cpal | unproven on hosted runners; microphone permission (TCC) on newer images unconfirmed |
+| Hand Mode logic | **Partial** | replay recorded landmark traces (`handTrace`) through the pure engine | no camera, no WKWebView `getUserMedia` |
+| Camera / Hand Mode in a real window | None | needs hardware | |
+| Signing | **Partial** | ad-hoc `codesign --sign -` in CI; check entitlements and hardened-runtime flags are embedded | not trusted by Gatekeeper on other machines |
+| Notarisation | None free | needs a paid Apple Developer Program membership; fee waivers exist only for nonprofits, accredited schools and governments (not individuals) | |
+| Permission prompts (mic, camera, screen, accessibility) | None | need a GUI session | |
+| Sleep/wake, lid, AirPods, battery | None | hardware | |
+
+Free hardware routes: MacStadium's free open-source program (remote Mac mini; the project must be genuinely free/open source, not
+commercially funded, 3+ months old, waitlist possible; **this repo has no LICENSE file in its root**, so eligibility is
+unclear); borrowing a Mac for about an hour (a short checklist makes one hour enough). Free "trial" cloud Macs: one directory lists
+MyRemoteMac with a 24 hour no-card trial (unverified); MacinCloud's trial is reportedly $0.99, not free.
