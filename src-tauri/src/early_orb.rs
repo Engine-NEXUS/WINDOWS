@@ -15,7 +15,6 @@ pub const DEFAULT_CAPSULE_H: f32 = 105.0;
 const GAP: f32 = 12.0;
 const CAPTION_MAX_W: f32 = 520.0;
 const CAPTION_H: f32 = 44.0;
-const CAPSULE_CORNER: f32 = 36.0;
 const PILL_CORNER: f32 = 10.0;
 const SPHERE_RADIUS: f32 = 34.0;
 const DOTS: usize = 640;
@@ -209,9 +208,21 @@ pub fn composite_mask(buf: &mut [u32], width: i32, mask: &[u8], mw: i32, mh: i32
     }
 }
 
+/// The background shape the user chose in the Command Hub (`orbCapsuleStyle`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Style {
+    /// The fluid bezel scoop: a catenary bowl hanging from the screen edge (the default).
+    Pebble,
+    /// The plain black capsule: a square box with the two outer corners rounded by 10 px.
+    Classic,
+}
+
 /// Everything the overlay needs to know about the clip being spoken.
 #[derive(Debug, Clone)]
 pub struct Show {
+    pub style: Style,
+    /// The faint rim line of the pebble (`orbBaseRimOpacity` / 100).
+    pub rim_alpha: f32,
     pub text: String,
     pub words: Vec<(String, u64, u64)>,
     pub env: Vec<f32>,
@@ -223,6 +234,69 @@ pub struct Show {
     pub capsule_h: f32,
 }
 
+/// The depth of the pebble bowl (px from the screen edge) at every pixel column 0..w. The real orb draws two cubic
+/// Beziers from the top corners to the lowest point in the middle: (0,0) (wing,0) (cx-0.26w,h) (cx,h), mirrored.
+pub fn bowl_profile(w: f32, h: f32, wing: f32) -> Vec<f32> {
+    let cx = w / 2.0;
+    let (p0, p1, p2, p3) = ((0.0f32, 0.0f32), (wing, 0.0f32), (cx - 0.26 * w, h), (cx, h));
+    // sample the left curve and read it back by x (x is monotonic along it)
+    let n = 600;
+    let pts: Vec<(f32, f32)> = (0..=n)
+        .map(|i| {
+            let t = i as f32 / n as f32;
+            let u = 1.0 - t;
+            let bx = u * u * u * p0.0 + 3.0 * u * u * t * p1.0 + 3.0 * u * t * t * p2.0 + t * t * t * p3.0;
+            let by = u * u * u * p0.1 + 3.0 * u * u * t * p1.1 + 3.0 * u * t * t * p2.1 + t * t * t * p3.1;
+            (bx, by)
+        })
+        .collect();
+    let depth_at = |x: f32| -> f32 {
+        let x = x.clamp(0.0, cx);
+        let i = pts.partition_point(|p| p.0 < x).min(n);
+        if i == 0 {
+            return pts[0].1;
+        }
+        let ((x0, y0), (x1, y1)) = (pts[i - 1], pts[i]);
+        if (x1 - x0).abs() < 1e-6 {
+            y1
+        } else {
+            y0 + (y1 - y0) * ((x - x0) / (x1 - x0)).clamp(0.0, 1.0)
+        }
+    };
+    (0..w.ceil() as usize)
+        .map(|i| {
+            let x = i as f32 + 0.5;
+            depth_at(if x <= cx { x } else { w - x })
+        })
+        .collect()
+}
+
+/// The pebble: a black bowl hanging from the screen edge (top) or rising from it (bottom), with a faint rim line.
+pub fn fill_pebble(buf: &mut [u32], width: i32, r: Rect, profile: &[f32], top: bool, alpha: f32, rim_alpha: f32) {
+    if alpha <= 0.0 {
+        return;
+    }
+    let height = buf.len() as i32 / width.max(1);
+    for y in r.y.max(0)..(r.y + r.h).min(height) {
+        for x in r.x.max(0)..(r.x + r.w).min(width) {
+            let u = (x - r.x) as usize;
+            let Some(&depth) = profile.get(u) else { continue };
+            let slope = (profile.get(u + 1).copied().unwrap_or(depth) - profile.get(u.saturating_sub(1)).copied().unwrap_or(depth)) / 2.0;
+            let y_rel = if top { (y - r.y) as f32 + 0.5 } else { (r.y + r.h - y) as f32 - 0.5 };
+            let d = (depth - y_rel) / (1.0 + slope * slope).sqrt(); // > 0 inside the bowl
+            let cov = (0.5 + d).clamp(0.0, 1.0);
+            if cov > 0.0 {
+                let idx = (y * width + x) as usize;
+                over(buf, idx, cov * alpha, 0.0, 0.0, 0.0);
+                let ring = (1.0 - (d.abs() / 1.2).min(1.0)) * rim_alpha * alpha;
+                if ring > 0.0 && d.abs() < 1.2 {
+                    over(buf, idx, ring, ring, ring, ring);
+                }
+            }
+        }
+    }
+}
+
 /// Draw one frame of everything except the caption text. Returns the caption pill's centre-top anchor so the glue can
 /// rasterise the revealed text there. Pure.
 pub fn render_frame(buf: &mut [u32], width: i32, capsule: Rect, scale: f32, top: bool, t_ms: u64, s: &Show, points: &[[f32; 3]]) -> (f32, f32) {
@@ -230,12 +304,26 @@ pub fn render_frame(buf: &mut [u32], width: i32, capsule: Rect, scale: f32, top:
         *p = 0;
     }
     let (orb_a, _, _) = alphas(t_ms, s.clip_ms);
-    // the capsule hugs the screen edge: its screen-side corners are square
-    let (r_top, r_bottom) = if top { (0.0, CAPSULE_CORNER * scale) } else { (CAPSULE_CORNER * scale, 0.0) };
-    fill_black_shape(buf, width, capsule, r_top, r_bottom, orb_a, 0.16);
     let amp = envelope_at(&s.env, s.env_frame_ms, t_ms);
-    let (cx, cy) = (capsule.x as f32 + capsule.w as f32 / 2.0, capsule.y as f32 + capsule.h as f32 / 2.0);
-    draw_orb(buf, width, cx, cy, SPHERE_RADIUS * scale, t_ms as f32 / 1000.0, amp, orb_a, points);
+    let (cx, mid_y) = (capsule.x as f32 + capsule.w as f32 / 2.0, capsule.y as f32 + capsule.h as f32 / 2.0);
+    let (cy, radius) = match s.style {
+        Style::Pebble => {
+            let wing = (120.0 * scale).min(capsule.w as f32 * 0.25);
+            let profile = bowl_profile(capsule.w as f32, capsule.h as f32, wing);
+            fill_pebble(buf, width, capsule, &profile, top, orb_a, s.rim_alpha);
+            // the sphere nestles in the pocket, a little above the lowest point
+            let off = capsule.h as f32 * 0.04;
+            (if top { mid_y - off } else { mid_y + off }, SPHERE_RADIUS * scale)
+        }
+        Style::Classic => {
+            // the plain capsule: the screen-side corners are square, the other two are rounded by 10 px
+            let corner = PILL_CORNER * scale;
+            let (r_top, r_bottom) = if top { (0.0, corner) } else { (corner, 0.0) };
+            fill_black_shape(buf, width, capsule, r_top, r_bottom, orb_a, 0.16);
+            (mid_y, capsule.w as f32 * 0.30)
+        }
+    };
+    draw_orb(buf, width, cx, cy, radius, t_ms as f32 / 1000.0, amp, orb_a, points);
     let pill_y = if top { (capsule.y + capsule.h) as f32 + GAP * scale } else { capsule.y as f32 - GAP * scale };
     (cx, pill_y)
 }
@@ -632,6 +720,8 @@ mod tests {
 
     fn show_for(clip_ms: u64) -> Show {
         Show {
+            style: Style::Pebble,
+            rim_alpha: 0.25,
             text: "Good evening, sir".into(),
             words: vec![("Good".into(), 0, 300), ("evening,".into(), 300, 600), ("sir".into(), 900, 400)],
             env: vec![0.2, 0.9, 0.5],
@@ -710,10 +800,48 @@ mod tests {
     }
 
     #[test]
+    fn the_pebble_is_a_bowl_deepest_in_the_middle_and_flush_with_the_edge_at_the_corners() {
+        let prof = bowl_profile(301.0, 105.0, 75.25);
+        assert_eq!(prof.len(), 301);
+        assert!(prof[0] < 3.0 && prof[300] < 3.0, "the tips touch the screen edge: {} {}", prof[0], prof[300]);
+        assert!((prof[150] - 105.0).abs() < 1.0, "deepest in the middle: {}", prof[150]);
+        assert!((prof[60] - prof[240]).abs() < 0.5, "symmetric");
+        assert!(prof[100] > prof[60] && prof[150] >= prof[100], "it deepens towards the middle");
+    }
+
+    #[test]
+    fn each_style_draws_its_own_background() {
+        let (win, cap) = layout(WORK, 1.0, true, 0.5, 301.0, 105.0);
+        let pts = sphere_points(dot_count());
+        let alpha = |buf: &Vec<u32>, x: i32, y: i32| buf[(y * win.w + x) as usize] >> 24;
+        // pebble: the bowl's upper corner area (just inside the capsule rect, near the top-left) is empty sky beside the wing
+        let mut pebble = vec![0u32; (win.w * win.h) as usize];
+        render_frame(&mut pebble, win.w, cap, 1.0, true, 800, &show_for(2_000), &pts);
+        assert_eq!(alpha(&pebble, cap.x + 20, cap.y + 40), 0, "below the wing, outside the bowl");
+        assert!(alpha(&pebble, cap.x + cap.w / 2, cap.y + 90) > 200, "inside the bowl at the middle");
+        assert!(alpha(&pebble, cap.x + cap.w / 2, cap.y + cap.h + 4) == 0, "nothing under the lowest point");
+        // classic: a solid box, so the same corner area IS black; the bottom corners are rounded by 10 px
+        let mut classic = vec![0u32; (win.w * win.h) as usize];
+        let mut s = show_for(2_000);
+        s.style = Style::Classic;
+        let (_, cap_c) = layout(WORK, 1.0, true, 0.5, 200.0, 200.0);
+        let (win_c, _) = layout(WORK, 1.0, true, 0.5, 200.0, 200.0);
+        let mut classic_buf = vec![0u32; (win_c.w * win_c.h) as usize];
+        render_frame(&mut classic_buf, win_c.w, cap_c, 1.0, true, 800, &s, &pts);
+        let ca = |x: i32, y: i32| classic_buf[(y * win_c.w + x) as usize] >> 24;
+        assert_eq!(ca(cap_c.x + 20, cap_c.y + 40), 255, "classic is a solid box");
+        assert_eq!(ca(cap_c.x, cap_c.y + cap_c.h - 1), 0, "the outer bottom corner is rounded");
+        assert!(ca(cap_c.x + 14, cap_c.y + cap_c.h - 1) > 200, "but the box reaches the bottom edge");
+        assert!(ca(cap_c.x, cap_c.y) > 200, "the screen-side corners are square");
+        let _ = &mut classic;
+    }
+
+    #[test]
     fn a_frame_has_a_black_capsule_a_white_sphere_and_transparent_corners() {
         let (win, cap) = layout(WORK, 1.0, true, 0.5, 301.0, 105.0);
         let mut buf = vec![0u32; (win.w * win.h) as usize];
-        let s = show_for(2_000);
+        let mut s = show_for(2_000);
+        s.style = Style::Classic;
         let pts = sphere_points(dot_count());
         render_frame(&mut buf, win.w, cap, 1.0, true, 800, &s, &pts);
         let px = |x: i32, y: i32| buf[(y * win.w + x) as usize];
@@ -773,8 +901,21 @@ mod tests {
     #[ignore = "writes preview images"]
     fn write_preview_images() {
         let dir = std::env::var("NEXUS_PREVIEW_DIR").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
-        for (name, t) in [("a_start", 120u64), ("b_mid", 700), ("c_end", 1_800), ("d_fade", 3_000)] {
-            let (px, w, h) = win::preview(show_for(2_000), t).expect("preview");
+        let mut classic = show_for(2_000);
+        classic.style = Style::Classic;
+        classic.capsule_w = 200.0;
+        classic.capsule_h = 200.0;
+        let mut bottom = show_for(2_000);
+        bottom.top = false;
+        for (name, t, show) in [
+            ("a_start", 120u64, show_for(2_000)),
+            ("b_mid", 700, show_for(2_000)),
+            ("c_end", 1_800, show_for(2_000)),
+            ("d_fade", 3_000, show_for(2_000)),
+            ("e_classic", 1_800, classic),
+            ("f_pebble_bottom", 1_800, bottom),
+        ] {
+            let (px, w, h) = win::preview(show, t).expect("preview");
             // composite premultiplied pixels over a grey desktop and write a 24-bit bottom-up BMP
             let row = ((w * 3 + 3) / 4 * 4) as usize;
             let mut bmp = vec![0u8; 54 + row * h as usize];

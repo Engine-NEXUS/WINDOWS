@@ -18,3 +18,9 @@ Owner report: it said "Good evening" but no orb, no caption, and the volume was 
 - **Delay**: the clip is read and the audio device is opened WHILE waiting for the desktop (new mark `early_hello_audio_ready`), so the sound starts ~250 ms after the desktop appears instead of 3.7 s (expected; to be confirmed by the next timeline).
 - Settings read early by `parse_settings` (tested, clamps nonsense). Rust lib suite passes.
 - Still open: the 18.7 s `tray::setup` wait, the early question + microphone buffer, welcome-back after 18:00, unlock/lid triggers, the real WebGL orb taking over from the stand-in.
+
+## Update 2026-11-02 (b): the background shape follows the Command Hub choice
+Owner: the early orb showed one fixed shape; it must follow the capsule style chosen in the Command Hub. `early_orb` now takes `Style` from `orbCapsuleStyle`:
+- **pebble** (default): the fluid bezel scoop, the same two cubic Beziers the real orb draws at rest ((0,0) (wing,0) (cx-0.26w,h) (cx,h), mirrored), hanging from the top edge or rising from the bottom, with the faint rim line (`orbBaseRimOpacity`), size from `orbScoopWidth/Height`;
+- **classic**: the plain black square capsule of `orbSize` with the two outer corners rounded by 10 px and a 1 px border.
+Position follows `orbPosition` and `orbHorizontalPct`. Verified as images rendered from the real code (pebble top, pebble bottom, classic); not yet seen at a real logon. Not mirrored: the pebble's wake-up stretch animation and the wing glow (default 0).

@@ -171,6 +171,10 @@ pub struct EarlySettings {
     pub volume_pct: u8,
     pub orb_top: bool,
     pub orb_x_pct: f32,
+    /// The capsule style chosen in the Command Hub (`orbCapsuleStyle`): "pebble" (default) or "classic".
+    pub classic: bool,
+    /// The pebble's faint rim line (`orbBaseRimOpacity` / 100).
+    pub rim_alpha: f32,
     pub capsule_w: f32,
     pub capsule_h: f32,
 }
@@ -178,14 +182,27 @@ pub struct EarlySettings {
 /// Pure: the settings out of the parsed settings.json (`Null` = defaults).
 pub fn parse_settings(v: &serde_json::Value) -> EarlySettings {
     let num = |k: &str| v.get(k).and_then(|x| x.as_f64());
+    let classic = v.get("orbCapsuleStyle").and_then(|x| x.as_str()).map_or(false, |s| s.eq_ignore_ascii_case("classic"));
+    let size = num("orbSize").filter(|n| *n >= 80.0).map_or(200.0, |n| n.min(400.0) as f32);
     EarlySettings {
         enabled: v.get("earlyHello").and_then(|x| x.as_bool()).unwrap_or(true),
         voice: v.get("edgeTtsVoice").and_then(|x| x.as_str()).unwrap_or("en-US-AvaNeural").to_string(),
         volume_pct: num("ttsVolume").map_or(75, |n| n.clamp(0.0, 100.0) as u8),
         orb_top: v.get("orbPosition").and_then(|x| x.as_str()).map_or(true, |p| !p.eq_ignore_ascii_case("bottom")),
         orb_x_pct: num("orbHorizontalPct").map_or(0.5, |n| n.clamp(0.0, 1.0) as f32),
-        capsule_w: num("orbScoopWidth").filter(|n| *n >= 120.0).map_or(crate::early_orb::DEFAULT_CAPSULE_W, |n| n.min(700.0) as f32),
-        capsule_h: num("orbScoopHeight").filter(|n| *n >= 60.0).map_or(crate::early_orb::DEFAULT_CAPSULE_H, |n| n.min(300.0) as f32),
+        classic,
+        rim_alpha: num("orbBaseRimOpacity").map_or(0.25, |n| (n / 100.0).clamp(0.0, 1.0) as f32),
+        // the classic capsule is a square of `orbSize` (the real orb window); the pebble uses the scoop size
+        capsule_w: if classic {
+            size
+        } else {
+            num("orbScoopWidth").filter(|n| *n >= 120.0).map_or(crate::early_orb::DEFAULT_CAPSULE_W, |n| n.min(700.0) as f32)
+        },
+        capsule_h: if classic {
+            size
+        } else {
+            num("orbScoopHeight").filter(|n| *n >= 60.0).map_or(crate::early_orb::DEFAULT_CAPSULE_H, |n| n.min(300.0) as f32)
+        },
     }
 }
 
@@ -351,6 +368,8 @@ fn run(dir: &Path, cfg: &EarlySettings, script: &mut Script) -> bool {
     // The orb and the caption, drawn natively because the app's own window does not exist yet.
     let env = crate::tts::compute_envelope(&clip.samples, clip.sample_rate, 20);
     crate::early_orb::show(crate::early_orb::Show {
+        style: if cfg.classic { crate::early_orb::Style::Classic } else { crate::early_orb::Style::Pebble },
+        rim_alpha: cfg.rim_alpha,
         text: text.clone(),
         words: clip.words.clone(),
         env,
@@ -472,7 +491,7 @@ mod tests {
     fn the_settings_come_from_settings_json_with_safe_defaults() {
         let d = parse_settings(&serde_json::Value::Null);
         assert_eq!((d.enabled, d.voice.as_str(), d.volume_pct, d.orb_top), (true, "en-US-AvaNeural", 75, true));
-        assert_eq!((d.orb_x_pct, d.capsule_w, d.capsule_h), (0.5, 301.0, 105.0));
+        assert_eq!((d.orb_x_pct, d.capsule_w, d.capsule_h, d.classic, d.rim_alpha), (0.5, 301.0, 105.0, false, 0.25));
         let v: serde_json::Value = serde_json::from_str(
             r#"{"earlyHello":false,"edgeTtsVoice":"en-GB-RyanNeural","ttsVolume":70,"orbPosition":"bottom","orbHorizontalPct":0.25,"orbScoopWidth":320,"orbScoopHeight":110}"#,
         )
@@ -480,6 +499,11 @@ mod tests {
         let s = parse_settings(&v);
         assert_eq!((s.enabled, s.voice.as_str(), s.volume_pct, s.orb_top), (false, "en-GB-RyanNeural", 70, false));
         assert_eq!((s.orb_x_pct, s.capsule_w, s.capsule_h), (0.25, 320.0, 110.0));
+        // the classic style: a square capsule the size of the orb, no scoop size
+        let c = parse_settings(&serde_json::json!({"orbCapsuleStyle": "classic", "orbSize": 180, "orbScoopWidth": 320}));
+        assert_eq!((c.classic, c.capsule_w, c.capsule_h), (true, 180.0, 180.0));
+        assert_eq!(parse_settings(&serde_json::json!({"orbCapsuleStyle": "classic"})).capsule_w, 200.0);
+        assert_eq!(parse_settings(&serde_json::json!({"orbBaseRimOpacity": 40})).rim_alpha, 0.4);
         // nonsense is clamped, not trusted
         let bad: serde_json::Value = serde_json::from_str(r#"{"ttsVolume":900,"orbHorizontalPct":7,"orbScoopWidth":3,"orbScoopHeight":99999}"#).unwrap();
         let b = parse_settings(&bad);
