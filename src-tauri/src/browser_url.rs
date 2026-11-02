@@ -494,6 +494,13 @@ pub(crate) fn foreground_window_title() -> Option<String> {
     None
 }
 
+/// macOS: the NSWorkspace read lands with the macOS port (doc 155, cards M6/M7). `None` means "unknown", and every
+/// safety caller must treat unknown as "refuse" (see `hand::guard_now`).
+#[cfg(target_os = "macos")]
+pub(crate) fn foreground_process_name() -> Option<String> {
+    None
+}
+
 /// Foreground process executable name, lower-case (e.g. `brave.exe`).
 #[cfg(target_os = "windows")]
 pub(crate) fn foreground_process_name() -> Option<String> {

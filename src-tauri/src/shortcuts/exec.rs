@@ -126,7 +126,7 @@ pub fn send_events(events: &[KeyEvent]) -> Result<(), String> {
     }
 }
 
-/// One chord on macOS = the same down/up sequence sent through enigo's `Key::Raw`,
+/// One chord on macOS = the same down/up sequence sent through enigo's `Keyboard::raw`,
 /// which posts CGEvents with the platform's virtual key codes (Accessibility
 /// permission required; without it the OS silently drops the keys, so callers'
 /// verification steps still catch a failed press).
@@ -223,7 +223,7 @@ fn vk_to_mac(vk: u16) -> Option<u16> {
 
 #[cfg(target_os = "macos")]
 pub fn send_events(events: &[KeyEvent]) -> Result<(), String> {
-    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+    use enigo::{Direction, Enigo, Keyboard, Settings};
     if events.is_empty() {
         return Ok(());
     }
@@ -232,7 +232,8 @@ pub fn send_events(events: &[KeyEvent]) -> Result<(), String> {
         let code = vk_to_mac(ev.vk)
             .ok_or_else(|| format!("virtual key 0x{:02X} has no macOS mapping yet", ev.vk))?;
         let dir = if ev.up { Direction::Release } else { Direction::Press };
-        e.key(Key::Raw(code), dir).map_err(|err| err.to_string())?;
+        // enigo 0.5 removed `Key::Raw`; `Keyboard::raw` posts the CGKeyCode and tracks modifier flags itself.
+        e.raw(code, dir).map_err(|err| err.to_string())?;
     }
     Ok(())
 }
