@@ -1992,6 +1992,12 @@ pub struct NexusSettings {
     /// Failure toasts ask Windows to show them even while Do Not Disturb is on (Windows asks the owner once).
     #[serde(default = "default_memcore")]
     pub notify_urgent: bool,
+    /// Show the five-second NEXUS toast window for alerts (default on); the Windows toast is then the fallback only.
+    #[serde(default = "default_memcore")]
+    pub notify_toast: bool,
+    /// What the toast may show of private content: "normal", "private" (sender and subject only, default) or "hidden".
+    #[serde(default = "default_notify_privacy")]
+    pub notify_privacy: String,
     /// Start a FREE CodeRabbit review automatically when an alert opens (default OFF: NEXUS asks first and shows the count).
     #[serde(default)]
     pub coderabbit_auto_review: bool,
@@ -2047,6 +2053,10 @@ fn default_memcore() -> bool {
 
 fn default_early_hello() -> bool {
     true
+}
+
+fn default_notify_privacy() -> String {
+    "private".to_string()
 }
 
 fn default_persona_mode() -> String {
@@ -2368,6 +2378,8 @@ impl Default for NexusSettings {
             coderabbit_auto_open: default_memcore(),
             notify_native: true,
             notify_urgent: true,
+            notify_toast: true,
+            notify_privacy: default_notify_privacy(),
             coderabbit_auto_review: false,
             memcore_mail_plain: false,
             memcore_whatsapp: false,

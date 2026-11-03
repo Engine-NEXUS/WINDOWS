@@ -69,6 +69,7 @@ export default defineConfig({
         // caption-showcase / pebble-showcase / caption-tuner are design playgrounds: the Vite dev
         // server still serves them on demand, but they are not shipped in the release bundle.
         githubDashboard: resolve(__dirname, "github-dashboard.html"),
+        notifyToast: resolve(__dirname, "notify-toast.html"),
       },
     },
   },

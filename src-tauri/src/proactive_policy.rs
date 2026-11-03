@@ -457,7 +457,7 @@ pub fn presence_from(idle_secs: Option<u64>, locked: bool) -> bool {
     !locked && idle_secs.map_or(true, |s| s < AWAY_AFTER_SECS)
 }
 
-fn someone_is_here() -> bool {
+pub(crate) fn someone_is_here() -> bool {
     presence_from(crate::memcore::resume::user_idle_secs(), !crate::early_hello::not_locked_now())
 }
 

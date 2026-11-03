@@ -141,6 +141,13 @@ pub fn publish_github_extras<R: Runtime>(app: &AppHandle<R>, full_name: &str, fa
         .map(|d| crate::memcore::flag(&d, "notifyNative", true))
         .unwrap_or(true);
     let channel = channel_for(toast_on);
+    // Hybrid delivery: the NEXUS toast window while the user is present and the shell allows a banner; the native
+    // Windows toast otherwise (Focus Session, fullscreen, presentation, nobody at the PC, window failure).
+    let dir = tauri::Manager::path(app).app_data_dir().ok();
+    let custom_on = dir.as_ref().map(|d| crate::memcore::flag(d, "notifyToast", true)).unwrap_or(true);
+    let delivery = crate::notify_toast::decide(custom_on, toast_on, crate::proactive_policy::someone_is_here(), crate::notify_toast::shell_state());
+    let privacy = crate::notify_toast::Privacy::parse(&read_setting_str(dir.as_deref(), "notifyPrivacy").unwrap_or_default());
+    let channel = if delivery == crate::notify_toast::Delivery::History { Channel::HistoryOnly } else { channel };
     let outcome = {
         let mut h = lock();
         h.ledger.prune(now);
@@ -162,13 +169,35 @@ pub fn publish_github_extras<R: Runtime>(app: &AppHandle<R>, full_name: &str, fa
     if channel == Channel::HistoryOnly {
         return;
     }
+    if delivery == crate::notify_toast::Delivery::Custom {
+        let toast_ev = lock().ledger.get(&id).cloned();
+        if let Some(toast_ev) = toast_ev {
+            let app3 = app.clone();
+            let xml_fallback = (id.clone(), title.clone(), preview.clone(), status);
+            tauri::async_runtime::spawn(async move {
+                match crate::notify_toast::show(&app3, &toast_ev, privacy).await {
+                    Ok(()) => tracing::info!("[NOTIFY] NEXUS toast shown for {}", xml_fallback.0),
+                    Err(e) => {
+                        tracing::warn!("[NOTIFY] NEXUS toast failed ({e}); using the Windows toast");
+                        show_native(&app3, &xml_fallback.0, &xml_fallback.1, &xml_fallback.2, xml_fallback.3);
+                    }
+                }
+            });
+            return;
+        }
+    }
+    show_native(app, &id, &title, &preview, status);
+}
+
+/// The Windows notification-centre toast for an alert already recorded in the ledger.
+fn show_native<R: Runtime>(app: &AppHandle<R>, id: &str, title: &str, preview: &str, status: Status) {
     // Only failures ask to pass Do Not Disturb; a recovery is good news and can wait. `notifyUrgent` turns it off.
     let urgent_on = tauri::Manager::path(app)
         .app_data_dir()
         .map(|d| crate::memcore::flag(&d, "notifyUrgent", true))
         .unwrap_or(true);
     let urgent = wants_urgent(status, urgent_on);
-    let Some(xml) = toast_xml(&id, &title, &preview, urgent) else {
+    let Some(xml) = toast_xml(id, title, preview, urgent) else {
         return;
     };
     let app2 = app.clone();
@@ -182,6 +211,12 @@ pub fn publish_github_extras<R: Runtime>(app: &AppHandle<R>, full_name: &str, fa
         Ok(()) => tracing::info!("[NOTIFY] toast shown for {id}"),
         Err(e) => tracing::warn!("[NOTIFY] toast failed (alert kept in history): {e}"),
     }
+}
+
+/// A string setting from settings.json (None when unreadable or absent).
+fn read_setting_str(dir: Option<&std::path::Path>, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(dir?.join("settings.json")).ok()?;
+    serde_json::from_str::<Value>(&text).ok()?.get(key)?.as_str().map(String::from)
 }
 
 /// Only a failure asks Windows to pass Do Not Disturb, and only while the owner has not switched `notifyUrgent` off.
@@ -221,6 +256,39 @@ pub async fn activate<R: Runtime>(app: AppHandle<R>, event_id: String) {
     if let Err(e) = open_event(app, event_id).await {
         tracing::warn!("[NOTIFY] could not open the alert: {e}");
     }
+}
+
+/// Pure: only https pages and the WhatsApp send link may be handed to the OS; nothing else a ladder could hold.
+pub fn scheme_allowed(url: &str) -> bool {
+    let ok_chars = !url.is_empty() && url.len() <= 600 && !url.chars().any(|c| c.is_control() || c.is_whitespace());
+    ok_chars
+        && (url.starts_with("https://")
+            || url
+                .strip_prefix("whatsapp://send?phone=")
+                .is_some_and(|d| (6..=15).contains(&d.len()) && d.chars().all(|c| c.is_ascii_digit())))
+}
+
+fn run_action(a: &crate::notify_links::OpenAction) -> bool {
+    use crate::notify_links::OpenAction;
+    match a {
+        OpenAction::Url(u) if scheme_allowed(u) => open::that(u).is_ok(),
+        OpenAction::FocusAgent { cwd } => std::path::Path::new(cwd).is_dir() && open::that(cwd).is_ok(),
+        _ => false,
+    }
+}
+
+/// A toast click: open the real item (the first entry of the alert's ladder that works); if none can be opened, show
+/// the alert's detail in the sidebar instead. The id is resolved in the ledger; no URL ever comes from the page.
+pub async fn open_external<R: Runtime>(app: &AppHandle<R>, event_id: &str) -> Result<(), String> {
+    let ladder = lock().ledger.get(event_id).map(crate::notify_open::event_ladder);
+    let Some(ladder) = ladder else {
+        return Err("this alert is no longer available".into());
+    };
+    if ladder.iter().any(run_action) {
+        return Ok(());
+    }
+    activate(app.clone(), event_id.to_string()).await;
+    Ok(())
 }
 
 /// The most recent alert's id (for `nexus notify open`).
@@ -345,6 +413,15 @@ pub fn notify_close_event(token: u64) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_https_pages_and_the_whatsapp_link_reach_the_os() {
+        assert!(scheme_allowed("https://github.com/o/r"));
+        assert!(scheme_allowed("whatsapp://send?phone=919876543210"));
+        for bad in ["http://x.example", "file:///C:/Windows/notepad.exe", "javascript:alert(1)", "whatsapp://send?phone=12", "whatsapp://send?phone=1234567a", "https://a b", "", "vscode://x"] {
+            assert!(!scheme_allowed(bad), "{bad}");
+        }
+    }
+
     #[test]
     fn a_failed_job_alert_opens_at_the_failing_step_and_keeps_pr_and_branch() {
         let extras = GithubExtras {

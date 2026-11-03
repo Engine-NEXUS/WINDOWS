@@ -35,6 +35,7 @@ pub(crate) mod background_tasks;
 pub(crate) mod notify_activation;
 pub(crate) mod notify_native;
 pub(crate) mod notify_open;
+pub(crate) mod notify_toast;
 pub(crate) mod notify_selftest;
 pub(crate) mod work_area;
 pub(crate) mod github_repo_index;
@@ -1223,6 +1224,9 @@ pub fn run() {
             coderabbit_review::coderabbit_set_context,
             notify_hub::notify_close_event,
             notify_hub::notify_event_ready,
+            notify_toast::get_pending_toast,
+            notify_toast::notify_toast_close,
+            notify_toast::notify_toast_click,
             mcp_client::mcp_connect_state,
             stage::stage_show,
             stage::stage_hide,

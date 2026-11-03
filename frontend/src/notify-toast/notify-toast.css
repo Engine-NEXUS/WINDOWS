@@ -1,0 +1,57 @@
+/* The five-second alert toast: solid, dark in both themes (it must read over any window), tokens only. */
+.nt-card {
+  position: relative;
+  box-sizing: border-box;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px 12px;
+  background: var(--stage-surface);
+  color: var(--stage-text);
+  border: 1px solid var(--stage-border);
+  border-left: 4px solid var(--stage-accent);
+  border-radius: 12px;
+  box-shadow: var(--stage-shadow-lg);
+  font: 400 14px/1.4 "Segoe UI", system-ui, sans-serif;
+  overflow: hidden;
+  animation: nt-in 160ms ease-out;
+}
+.nt-card--failed { border-left-color: var(--stage-attention); }
+.nt-card--recovered { border-left-color: var(--stage-ok); }
+.nt-head { display: flex; align-items: center; gap: 8px; }
+.nt-source { font-weight: 600; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--stage-text-muted); }
+.nt-status { font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--stage-border-strong); }
+.nt-status--failed { color: var(--stage-attention); border-color: var(--stage-attention); }
+.nt-status--recovered { color: var(--stage-ok); border-color: var(--stage-ok); }
+.nt-more { font-size: 12px; color: var(--stage-text-muted); }
+.nt-close {
+  margin-left: auto;
+  background: transparent;
+  color: var(--stage-text-muted);
+  border: 0;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.nt-close:hover { color: var(--stage-text); }
+.nt-body { flex: 1; min-height: 0; margin-top: 10px; cursor: pointer; overflow: hidden; }
+.nt-title { font-weight: 600; font-size: 17px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.nt-preview { margin-top: 6px; color: var(--stage-text-muted); display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.nt-foot { display: flex; justify-content: flex-end; margin-top: 8px; }
+.nt-action {
+  background: var(--stage-accent);
+  color: var(--stage-surface);
+  border: 0;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font: 600 13px "Segoe UI", system-ui, sans-serif;
+  cursor: pointer;
+}
+.nt-action:focus-visible, .nt-close:focus-visible { outline: 2px solid var(--stage-text); outline-offset: 2px; }
+.nt-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--stage-border); }
+.nt-bar-fill { height: 100%; background: var(--stage-accent); transition: width 100ms linear; }
+@keyframes nt-in { from { transform: translateY(-8px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .nt-card { animation: none; } .nt-bar-fill { transition: none; } }
+@media (forced-colors: active) { .nt-card { border: 2px solid CanvasText; } .nt-action { border: 1px solid ButtonText; } }
