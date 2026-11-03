@@ -2015,6 +2015,10 @@ pub struct NexusSettings {
     /// to reopen them after a restart. Must live in this struct (save_settings rewrites the file).
     #[serde(default = "default_memcore")]
     pub memcore_session: bool,
+    /// Play the cached greeting as soon as the desktop is shown at logon, before the app has finished starting.
+    /// Must live in this struct (save_settings rewrites the file). Read early from settings.json by `early_hello`.
+    #[serde(default = "default_early_hello")]
+    pub early_hello: bool,
     /// Check the connections NEXUS relies on at startup and mention problems in the greeting.
     #[serde(default = "default_memcore")]
     pub memcore_health: bool,
@@ -2038,6 +2042,10 @@ fn default_watch_power() -> String {
 }
 
 fn default_memcore() -> bool {
+    true
+}
+
+fn default_early_hello() -> bool {
     true
 }
 
@@ -2366,6 +2374,7 @@ impl Default for NexusSettings {
             memcore_whatsapp_speak: false,
             memcore_leave_by: default_memcore(),
             memcore_session: default_memcore(),
+            early_hello: default_early_hello(),
             memcore_health: default_memcore(),
             power_commands: default_memcore(),
             default_music_player: default_music_player(),
@@ -2492,6 +2501,7 @@ pub fn get_settings<R: Runtime>(
             }
         }
     }
+    normalize_orb_fields(&mut settings);
     Ok(settings)
 }
 
@@ -2556,6 +2566,7 @@ fn save_settings_with_voice_intent<R: Runtime>(
         settings.server_url = crate::network::normalize_worker_url(&settings.server_url)?;
     }
     normalize_voice_fields(&mut settings);
+    normalize_orb_fields(&mut settings);
     if !settings.edge_tts_voice.is_empty() {
         settings.tts_voice = settings.edge_tts_voice.clone();
         if settings.tts_provider.is_empty() || settings.tts_provider == "kokoro" {
@@ -2644,6 +2655,14 @@ pub fn normalize_voice_fields(s: &mut NexusSettings) {
     }
 }
 
+/// The voice orb is always fixed at the top (top-center, 200px); only its design can be chosen.
+pub fn normalize_orb_fields(s: &mut NexusSettings) {
+    s.orb_position = "top".to_string();
+    s.orb_horizontal_pct = 0.5;
+    s.orb_vertical_pct = 0.0;
+    s.orb_size = 200;
+}
+
 /// Merge `patch` (camelCase keys) into the current settings and validate the result as a whole.
 pub fn apply_settings_patch(
     current: &NexusSettings,
@@ -2729,6 +2748,22 @@ mod settings_voice_tests {
         assert_eq!(s.selected_voice, "nexus");
         assert_eq!(s.tts_voice, "en-IN-NeerjaNeural");
         assert_eq!(s.edge_tts_voice, "en-IN-NeerjaNeural");
+    }
+
+    #[test]
+    fn normalize_orb_fields_forces_fixed_top_center_and_size() {
+        let mut s = NexusSettings::default();
+        s.orb_position = "bottom".to_string();
+        s.orb_horizontal_pct = 0.85;
+        s.orb_vertical_pct = 0.95;
+        s.orb_size = 360;
+
+        normalize_orb_fields(&mut s);
+
+        assert_eq!(s.orb_position, "top");
+        assert_eq!(s.orb_horizontal_pct, 0.5);
+        assert_eq!(s.orb_vertical_pct, 0.0);
+        assert_eq!(s.orb_size, 200);
     }
 
     #[test]

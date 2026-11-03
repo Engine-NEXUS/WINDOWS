@@ -50,6 +50,12 @@ pub enum Target {
     Loading = 2,
 }
 
+impl Default for Target {
+    fn default() -> Self {
+        Self::Waves
+    }
+}
+
 impl Target {
     fn from_str(s: &str) -> Option<Self> {
         match s {
@@ -294,12 +300,12 @@ pub async fn show_calibration_hud<R: Runtime>(app: AppHandle<R>) -> Result<(), S
         Draft::new(loading.0, loading.1, loading.2),
     ];
     *CALIBRATION.lock() = Some(CalibrationSession {
-        target: Target::Wakeup,
+        target: Target::Waves,
         initial,
         draft: initial,
     });
 
-    // Wakeup preview active immediately (orb window follows the draft).
+    // Waves preview active immediately (orb window follows the draft).
     apply_active(&app);
 
     // Companion pill HUD — top-center of the primary monitor.
@@ -318,7 +324,7 @@ pub async fn show_calibration_hud<R: Runtime>(app: AppHandle<R>) -> Result<(), S
     let _ = hud.set_ignore_cursor_events(false);
     let _ = hud.show();
     let _ = hud.set_focus();
-    tracing::info!("calibration: HUD shown (wakeup preview active)");
+    tracing::info!("calibration: HUD shown (waves preview active)");
     Ok(())
 }
 
@@ -642,6 +648,11 @@ mod tests {
         // Loading default ≈ today's top-right corner (center-anchored 0.95/0.05).
         let load = default_draft(Target::Loading);
         assert_eq!(load, Draft::new(0.95, 0.05, 80));
+    }
+
+    #[test]
+    fn test_default_target_is_waves() {
+        assert_eq!(Target::default(), Target::Waves);
     }
 
     #[test]

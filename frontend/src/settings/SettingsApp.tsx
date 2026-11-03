@@ -334,32 +334,6 @@ function GeneralTab({ settings, update }: { settings: Settings; update: <K exten
       </section>
 
       <section className="nx-section">
-        <div className="nx-section-title">Orb Screen Position</div>
-        <div className="nx-row">
-          <div className="nx-row-label">
-            <span className="nx-row-name">Screen Placement</span>
-            <span className="nx-row-hint">Position the black slider capsule at the top or bottom of the screen</span>
-          </div>
-          <div style={{ display: "flex", gap: "8px" }}>
-            <button
-              type="button"
-              className={`nx-btn ${settings.orbPosition !== "bottom" ? "nx-btn--primary" : ""}`}
-              onClick={() => update("orbPosition", "top")}
-            >
-              Top (Default)
-            </button>
-            <button
-              type="button"
-              className={`nx-btn ${settings.orbPosition === "bottom" ? "nx-btn--primary" : ""}`}
-              onClick={() => update("orbPosition", "bottom")}
-            >
-              Bottom
-            </button>
-          </div>
-        </div>
-      </section>
-
-      <section className="nx-section">
         <div className="nx-section-title">Theme & Appearance</div>
         <div className="nx-row">
           <div className="nx-row-label">

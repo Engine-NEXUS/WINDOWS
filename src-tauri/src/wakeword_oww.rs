@@ -2098,6 +2098,41 @@ pub fn fail_open_allowed(prob: f32) -> bool {
     prob >= VERIFY_FAIL_OPEN_PROB_FLOOR
 }
 
+/// A room full of speech (a TV, a film, a call) keeps triggering the stage-1 model, and the speech check normally rejects
+/// those candidates by their transcript. When it cannot answer (cloud STT unreachable, the 3 s timeout) the verifier used to
+/// fail open at prob >= 0.9 and wake the orb on dialogue: 2026-11-02, three false wakes in eight minutes at prob 0.919-0.978
+/// while a show was playing and Groq was failing. So after this many suppressed real candidates within the window the verifier
+/// never fails open (the hotkey still works, and a normal transcript still confirms a real "Nexus").
+pub const NOISY_ROOM_WINDOW_SECS: u64 = 180;
+pub const NOISY_ROOM_SUPPRESSIONS: usize = 2;
+
+/// Pure (unit-tested): seconds since each recent suppression -> is the room noisy?
+pub fn noisy_room(ages_secs: &[u64]) -> bool {
+    ages_secs.iter().filter(|a| **a <= NOISY_ROOM_WINDOW_SECS).count() >= NOISY_ROOM_SUPPRESSIONS
+}
+
+static SUPPRESSED_AT: std::sync::Mutex<Vec<std::time::Instant>> = std::sync::Mutex::new(Vec::new());
+
+/// Remember a candidate with real neural evidence that was suppressed (rejected transcript, or a failure that did not fire).
+fn note_suppressed(prob: f32) {
+    if prob < STAGE1_EVIDENCE_FLOOR {
+        return; // barge-in candidates carry no acoustic evidence
+    }
+    if let Ok(mut v) = SUPPRESSED_AT.lock() {
+        let now = std::time::Instant::now();
+        v.retain(|t| now.duration_since(*t).as_secs() <= NOISY_ROOM_WINDOW_SECS);
+        v.push(now);
+    }
+}
+
+fn room_is_noisy() -> bool {
+    let now = std::time::Instant::now();
+    SUPPRESSED_AT
+        .lock()
+        .map(|v| noisy_room(&v.iter().map(|t| now.duration_since(*t).as_secs()).collect::<Vec<_>>()))
+        .unwrap_or(false)
+}
+
 /// Stage-1 probability at/above which a clear soundalike of "nexus" is accepted
 /// ("Hello, Nico." was rejected at prob 0.98 and 0.93).
 pub const VERIFY_SOUNDALIKE_PROB_FLOOR: f32 = 0.9;
@@ -4734,14 +4769,16 @@ fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32, 
     // Verifier FAILURES (too short, STT error, timeout) fire only for a confident
     // stage-1 score; otherwise they suppress (see fail_open_allowed).
     let fail_open = |why: &str| {
-        if fail_open_allowed(prob) {
+        if fail_open_allowed(prob) && !room_is_noisy() {
             tracing::warn!("verify: {why} — firing (fail-open, stage-1 prob {:.3})", prob);
             fire();
         } else {
+            note_suppressed(prob);
             tracing::info!(
-                "verify: {why} — SUPPRESSED (stage-1 prob {:.3} < {:.2} fail-open floor)",
+                "verify: {why} — SUPPRESSED (stage-1 prob {:.3}; fail-open floor {:.2}{})",
                 prob,
-                VERIFY_FAIL_OPEN_PROB_FLOOR
+                VERIFY_FAIL_OPEN_PROB_FLOOR,
+                if room_is_noisy() { ", and the room is full of speech" } else { "" }
             );
         }
     };
@@ -4893,6 +4930,7 @@ fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32, 
                         }
                     }
                 }
+                note_suppressed(prob);
                 tracing::info!(
                     "verify: transcript '{}' rejected (stage-1 prob {:.3}) → wake SUPPRESSED",
                     text,
@@ -7111,6 +7149,11 @@ mod verify_policy_tests {
     #[test]
     fn verifier_failure_fires_only_for_confident_candidates() {
         // The cold-STT timeout used to fire the orb at prob 0.746 on "That's a poem".
+        assert!(!noisy_room(&[]));
+        assert!(!noisy_room(&[10]), "one suppression is not a noisy room");
+        assert!(noisy_room(&[10, 100]), "two within three minutes is");
+        assert!(!noisy_room(&[10, 400]), "an old suppression does not count");
+        assert!(noisy_room(&[5, 6, 7]));
         assert!(!fail_open_allowed(0.746));
         assert!(!fail_open_allowed(0.0)); // barge-in candidates carry no neural evidence
         assert!(!fail_open_allowed(0.89));

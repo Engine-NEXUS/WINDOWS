@@ -428,6 +428,9 @@ const CACHED_PHRASES: &[&str] = &[
     "Good afternoon, sir",
     "Good evening, sir",
     "Good night, sir",
+    // From 18:00 the hello is "Welcome back" (early_hello + briefing); rendered once per voice, then read from disk at logon.
+    "Welcome back, sir",
+    "Good to have you back, sir",
     "Shutting down, sir. See you soon",
 ];
 

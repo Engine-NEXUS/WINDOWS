@@ -1,0 +1,54 @@
+# 158 - Instant hello at logon and the reopen question (plan, nothing built)
+
+Request (2026-11-02): at wake-up say "Good afternoon, sir" at once while the app starts in the background; after 6 pm say "Welcome back, sir" and ask whether to reopen the apps from last time; a time-aware script with random variants per part of the day; yes/no answers; the session is remembered when the laptop is shut down (by an agent or by the user) and written into the script for the next wake-up.
+
+## Measured (boot_timeline.jsonl)
+| start | process start -> first sound |
+|---|---|
+| warm, from a terminal | 5.5 s |
+| logon 2026-11-01 | 26.6 s |
+`main()` is reached 86-135 ms after process start in every run, so a sound can start from inside `main()` long before the window, tray, memory store and wake engine exist.
+
+## What exists already
+- cached greeting clips per voice on disk (`tts_cache_disk`, "Good morning/afternoon/evening/night, sir"), played by `memcore::briefing::submit_hello` only after the stage is alive (the "no sound before the orb" rule), 2 h minimum gap, three periods (evening starts 17:00).
+- the previous session is captured every 60 s and at session end (`memcore::session`), reopened by `restore.rs`; "Shall I reopen them?" is asked in the once-a-day briefing and the yes is handled by `memcore::offer` + the strict yes/no classifier (`confirmReply.ts`, `offer::classify_reopen`).
+- the voice the user chose is the one the cached clips are rendered in; a voice swap already re-renders fixed lines.
+
+## Plan
+1. **Early hello (in-process, no second exe).** At the top of `run()` (before Tauri is built) a thread reads `hello_script.json`, picks the line for the local time, decodes the cached WAV and plays it with rodio (already a dependency). Retries for ~10 s if the audio device is not ready yet, gives up silently (the normal hello then plays later as today). The boot hello is skipped when the early one played (shared flag + a `last_played` stamp in the script, so the 2 h rule needs no memory store). New boot mark `early_hello_audio`. Expected first sound 1-3 s after logon instead of 26 s.
+2. **The script file** `<app data>/hello_script.json`, written atomically by NEXUS: voice id; per part of the day (morning 05-11:59, afternoon 12-17:59, evening 18-21:59, night 22-04:59) 2-3 variants {text, wav}; the last variant used (never the same twice in a row); `last_played`; and the `offer` block (summary like "VS Code on ULTRON and Brave", app count, left_at) or null. Rewritten when the voice changes, when the variants change, and whenever the session snapshot changes (so a power cut, lid close or an agent-triggered shutdown never loses it: nothing depends on an exit event). Clips are rendered in the user's voice through the existing cache path, offline fallback = the local voice.
+3. **Wording (random variant per part of day).** Before 18:00 only the greeting ("Good afternoon, sir."). From 18:00 (your rule) "Welcome back, sir." and then the question. Question asked only when the script's offer exists.
+4. **Two-stage question (recommended, honest about timing).** The helper cannot hear an answer (speech recognition needs the app). So the greeting plays at once; the question "Shall I open the apps you were using - VS Code on ULTRON and Brave?" is asked by the app the moment it is ready, with the answer window open right then. Asking it at second 1 and listening only from second 5-25 would lose the user's early "yes". Target: ready at 5-8 s after the startup work in doc 157.
+5. **Answers.** yes: yes, yeah, yaa, haan, ok, okay, do it, sure, go ahead, please, open them, yep. no: no, nope, don't, it's fine, leave it, not now, no need, nahi. Silence for 10 s = no (nothing is opened). Anything else = not an answer (the question is not repeated). Reuses `offer.rs` + `confirmReply.ts`; adds the Hindi/Hinglish words and the silence rule. If the user says no several days in a row the question is asked less (habits).
+6. **Time check.** Done by the early step from the local clock at play time (the script only stores the lines); the app re-checks when it asks the question, so a 17:59 greeting never becomes a "welcome back" question late.
+7. **Sleep/wake.** On resume the process is already running, so the same script is played instantly from the app (no startup), keeping today's wait-for-keyboard so it does not talk to an empty room.
+
+## Risks
+- Audio device not ready at logon (Bluetooth especially): retried, then skipped.
+- Sound with no orb or caption: this overrides the old rule, your decision.
+- Dev restarts: the 2 h gap and a `--background`-only trigger keep `nexus start` quiet.
+- A new voice has no clips yet: the early hello is skipped until they are rendered.
+- The answer cannot be heard before the app is ready (see 4).
+
+## Build order
+P0 early hello + script reader/writer + boot mark (measure first sound). P1 variants, 18:00 rule, voice-change re-render. P2 stage-2 question and the extended yes/no. P3 offer block from the session snapshots. P4 resume path and learning from repeated "no". Each phase is testable offline (script selection, variant rotation, time bands, answer classification are pure functions).
+
+## Revision 2026-11-02 after the three Opus research reports (docs/research/early-hello/01-03)
+- **Question timing changed**: ask the reopen question right after the greeting and record the answer (owner's point: people answer yes/no, and humans reply within ~0-200 ms, so the mic must already be recording). Design = burst-buffer / pre-roll, as Windows voice activation (250 ms pre-roll, >= 5 s buffer), Alexa (500 ms ring buffer) and Siri (tiny front stage, big stage later) do: stage 0 plays the clip, opens ONE cpal stream, keeps ~15 s in RAM (VAD marks the answer); the full app adopts the same stream, transcribes the clip (Groq, Moonshine fallback) and runs the strict yes/no classifier. No tiny trained yes/no model (no public data for haan/nahi/okay/yeah, false "yes" reopens apps). Add the on-screen Yes/No beside the spoken question. Audio stays in RAM, deleted after the decision.
+- **Trigger is not the problem** (measured 2026-11-01 logon): PIN accepted 14:40:57, nexus.exe running at +1.2 s. The 26 s are inside NEXUS: `stage` WebView2 window 7.7 s (while RunOnce ran the WebView2 installer), then a 13.5 s gap ending at `setup_tray_done` (inferred: `tray::setup` waits for the taskbar; add a boot mark before lib.rs:707 to prove), EcoQoS switched on at the first line. Fix = reorder: play the greeting first through native audio, then build tray/stage. Target: sound <= 4 s after the PIN. A tiny separate hello exe only if reordering Tauri setup is hard.
+- **Inside the running app**: greet on WTS_SESSION_UNLOCK / WTS_CONSOLE_CONNECT (WTSRegisterSessionNotification); GUID_SESSION_DISPLAY_STATUS, lid switch and user-presence only to warm the mic/voice; PBT_APMRESUMEAUTOMATIC for bookkeeping only (it also fires with nobody there). Replace the 10 s clock-jump resume check with these.
+- **Task**: keep At-logon; add SessionStateChange (unlock, console connect) triggers as crash re-launchers + RestartOnFailure; point at an installed exe copy, not target\release.
+- **Multi-user**: Local\ mutexes; release the mic on lock/disconnect; speak only when this session is the active unlocked console session. Unverified: mic/sound in a fast-user-switched (disconnected) session (needs a two-account test).
+- **Do not**: speech from a session-0 service, Credential Provider/Winlogon edits, speaking or listening before unlock, StartupDelayInMSec (does not affect tasks), the Power-Troubleshooter trigger, greeting on display-on alone.
+- **Licences**: Silero VAD page is contradictory (MIT vs CC BY-NC badge): check before use or use the existing VAD; openWakeWord pre-trained models are CC BY-NC-SA; Picovoice free plan is personal only.
+- **Biggest risk**: mic hand-off on the Intel Smart Sound laptop (a second capture stream starves the first). One stream only, wake engine adopts it, test on this laptop first. Fall back to "ask when ready" if the mic cannot open early (Bluetooth not connected).
+- **Order**: P-1 add boot marks (before tray::setup, before stage creation) and measure; P0 reorder + early greeting; P1 script file/variants/18:00; P2 early question + RAM buffer + hand-off + classifier extensions; P3 session offer in the script; P4 unlock/lid triggers.
+
+## Revision 2026-11-02 (b): "running while the lock screen is up" - what is and is not possible
+- Cold boot: no user session exists until the PIN is accepted, so NO per-user NEXUS code can run during PIN typing. A SYSTEM service could, but it cannot read the user's DPAPI/Credential Manager secrets (the sealed memory key is user-bound), session-0 isolation makes its audio unreliable, and speaking/listening before unlock is a privacy problem. So the lock-screen time can only be used for a SYSTEM "warm-up" task (optional, one UAC prompt): At startup, read nexus.exe, the WebView2 runtime DLLs, the ONNX models and tts_cache into the OS file cache, so the post-PIN start is not disk-bound. Value unmeasured (the 7.7 s stage window overlapped the WebView2 installer on RunOnce, not just disk).
+- After the PIN (+1.2 s nexus.exe is running): an EARLY STAGE thread started at the top of `run()` before Tauri is built: (1) a small native layered window that animates the orb (Win32/Direct2D, same capsule position as the real orb), (2) the greeting + question clip via rodio, (3) the single cpal stream into a RAM ring buffer. The slow parts run in parallel on the main thread, reordered: WebView2 environment creation first (async), tray moved off the critical path (the 13.5 s gap), EcoQoS only after boot. When the `stage` window is alive the native orb cross-fades into the real one.
+- Lock/unlock, lid open, fast user switch: the process is already resident (it survives lock), so the same early path fires from WTS_SESSION_UNLOCK in under ~0.3 s. Only a cold boot needs the early stage.
+- Targets (to be measured with boot marks `early_orb_shown`, `early_audio_started`): native orb <= 1.5 s and sound <= 2.5 s after the PIN (today 27 s); full app ready 6-10 s.
+
+## Revision 2026-11-02 (c): the time bands changed
+Owner: from 6 pm it is night, so "Good evening" at 7 or 8 pm is wrong and "Good night" is a farewell. Bands now: 05:00-11:59 "Good morning, sir", 12:00-17:59 "Good afternoon, sir", 18:00-04:59 "Welcome back, sir" or "Good to have you back, sir" (alternating, never the same twice in a row). Used by both the logon hello (`early_hello.rs`, script version 2) and the normal boot/resume hello (`memcore/briefing.rs::greeting`, whose evening used to start at 17:00). The two new lines are in `tts::CACHED_PHRASES`, rendered once per voice (start NEXUS normally once after updating so the logon hello finds them on disk; until then it stays quiet and the normal hello speaks). "Good night, sir" stays only as the shutdown farewell.

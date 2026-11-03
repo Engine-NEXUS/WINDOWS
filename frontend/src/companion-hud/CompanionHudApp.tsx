@@ -18,33 +18,31 @@ import { GlassFilter } from "./GlassFilter";
 import { Slider } from "./Slider";
 import "./companion-hud.css";
 
-type Target = "wakeup" | "waves" | "loading";
+type Target = "waves" | "loading";
 
 interface StatePayload {
   active: boolean;
-  target: Target;
+  target: string;
   h: number;
   v: number;
   size: number;
-  dirty?: { wakeup: boolean; waves: boolean; loading: boolean };
+  dirty?: { wakeup?: boolean; waves: boolean; loading: boolean };
 }
 
 interface Drafts {
-  wakeup: TargetRect;
+  wakeup?: TargetRect;
   waves: TargetRect;
   loading: TargetRect;
 }
 
 const TARGETS: { id: Target; label: string }[] = [
-  { id: "wakeup", label: "Wakeup" },
   { id: "waves", label: "Waves" },
   { id: "loading", label: "Loading" },
 ];
 
 export function CompanionHudApp() {
-  const [target, setTarget] = useState<Target>("wakeup");
+  const [target, setTarget] = useState<Target>("waves");
   const [dirty, setDirty] = useState<Record<Target, boolean>>({
-    wakeup: false,
     waves: false,
     loading: false,
   });
@@ -56,8 +54,8 @@ export function CompanionHudApp() {
 
   function toSnapshot(d: Drafts | null): CalibrationSnapshot {
     return {
-      wakeup: d?.wakeup ?? { h: 0.5, v: 1.0, size: 200 },
-      waves: d?.waves ?? { h: 0.5, v: 1.0, size: 200 },
+      wakeup: d?.wakeup ?? { h: 0.5, v: 0.0, size: 200 },
+      waves: d?.waves ?? { h: 0.5, v: 0.0, size: 200 },
       loading: d?.loading ?? { h: 0.95, v: 0.05, size: 80 },
     };
   }
@@ -68,8 +66,15 @@ export function CompanionHudApp() {
     listen<StatePayload>("calibration:state", (ev) => {
       const p = ev.payload;
       if (!p || !p.active) return;
-      setTarget(p.target);
-      if (p.dirty) setDirty({ ...p.dirty });
+      if (p.target === "waves" || p.target === "loading") {
+        setTarget(p.target);
+      }
+      if (p.dirty) {
+        setDirty({
+          waves: !!p.dirty.waves,
+          loading: !!p.dirty.loading,
+        });
+      }
       const rect: TargetRect = { h: p.h, v: p.v, size: p.size };
       setDrafts((prev) => ({ ...toSnapshot(prev), [p.target]: rect }));
     }).then((u) => {
@@ -119,7 +124,9 @@ export function CompanionHudApp() {
       if (action.kind === "none") return;
       if (action.kind === "nudge") e.preventDefault();
       if (action.kind === "select") {
-        void invoke("calibration_set_target", { target: action.target }).catch(
+        const nextTarget: Target =
+          action.target === "loading" ? "loading" : "waves";
+        void invoke("calibration_set_target", { target: nextTarget }).catch(
           () => {}
         );
       } else if (action.kind === "nudge") {
@@ -206,9 +213,19 @@ export function CompanionHudApp() {
       {/* Row 1: Liquid Radio (3 options) + Waves Preview + Action Buttons */}
       <div className="hud-row hud-row--main">
         {/* Liquid Glass Radio Selector */}
-        <div className="liquid-radio-container" data-state={target}>
+        <div
+          className="liquid-radio-container"
+          data-state={target}
+          style={{ gridTemplateColumns: "repeat(2, 1fr)", width: "180px" }}
+        >
           <div className="liquid-radio-glass-layer" />
-          <div className="liquid-radio-pill" />
+          <div
+            className="liquid-radio-pill"
+            style={{
+              width: "calc(50% - 4px)",
+              transform: target === "waves" ? "translateX(0%)" : "translateX(100%)",
+            }}
+          />
           {TARGETS.map((t) => (
             <button
               key={t.id}

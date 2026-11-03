@@ -496,31 +496,14 @@ export function SettingsSidebarApp({ onDock: _onDock = () => {} }: { onDock?: (d
   );
 }
 
-// ─── Display Tab (Phase 2 — orb position + size) ──────────────────────
+// ─── Display Tab (Phase 2 — orb design) ───────────────────────────────
 function DisplayTab({ settings, update }: {
   settings: Settings;
   update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
 }) {
-  const currentPos = settings.orbPosition || "top";
   const currentCapsuleStyle = settings.orbCapsuleStyle || "pebble";
   const currentWakeupMode = settings.orbWakeupMode ?? 1;
   const currentInteriorGenesis = settings.orbInteriorGenesis ?? 2;
-
-  const onPositionSelect = (pos: "top" | "bottom") => {
-    update("orbPosition", pos);
-    try {
-      localStorage.setItem("nexus:orb_position", pos);
-    } catch {}
-    useAssistant.getState().setOrbPosition(pos);
-    import("@tauri-apps/api/core").then(({ invoke }) => {
-      const vPct = pos === "bottom" ? 1.0 : 0.0;
-      invoke("set_orb_position", {
-        horizontalPct: 0.5,
-        verticalPct: vPct,
-        size: settings.orbSize || 200,
-      }).catch(() => {});
-    }).catch(() => {});
-  };
 
   const onCapsuleStyleSelect = (style: "classic" | "pebble", mode?: number, genesis?: number) => {
     update("orbCapsuleStyle", style);
@@ -543,29 +526,6 @@ function DisplayTab({ settings, update }: {
 
   return (
     <>
-      <div className="settings-section">
-        <div className="settings-section-title">Screen Anchor</div>
-        <div className="setting-desc" style={{ marginBottom: 12 }}>
-          Desktop docking edge.
-        </div>
-        <div className="nx-options-grid">
-          <OptionCard
-            icon="⬒"
-            title="Top Anchor"
-            desc="Screen top bezel"
-            selected={currentPos === "top"}
-            onClick={() => onPositionSelect("top")}
-          />
-          <OptionCard
-            icon="⬓"
-            title="Bottom Anchor"
-            desc="Taskbar edge"
-            selected={currentPos === "bottom"}
-            onClick={() => onPositionSelect("bottom")}
-          />
-        </div>
-      </div>
-
       <div className="settings-section">
         <div className="settings-section-title">Capsule Geometry</div>
         <div className="setting-desc" style={{ marginBottom: 12 }}>
