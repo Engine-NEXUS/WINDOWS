@@ -26,6 +26,7 @@ pub(crate) mod proactive_policy;
 pub(crate) mod notify;
 pub(crate) mod notify_brain;
 pub(crate) mod notify_event;
+pub(crate) mod notify_links;
 pub(crate) mod notify_hub;
 pub(crate) mod coderabbit_review;
 pub(crate) mod coderabbit_phrases;

@@ -89,6 +89,7 @@ pub fn github_event(full_name: &str, fact: &Fact, line: &Line, now: u64) -> Opti
         delivery: Delivery::default(),
         read: ReadState::Unread,
         expires_at_ms: now + EVENT_TTL_MS,
+        hints: Default::default(),
     })
 }
 
@@ -225,6 +226,9 @@ fn target_rows(t: &Target) -> Vec<Value> {
         Target::Deployment { team, project, deployment_id, .. } => {
             vec![row("Project", format!("{team}/{project}")), row("Deployment", deployment_id.clone())]
         }
+        Target::WhatsApp { .. } => vec![row("Source", "WhatsApp chat".into())],
+        Target::Calendar { .. } => vec![row("Source", "Calendar event".into())],
+        Target::Agent { agent, project } => vec![row("Agent", agent.clone()), row("Project", project.clone())],
     }
 }
 

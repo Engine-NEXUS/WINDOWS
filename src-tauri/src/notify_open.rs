@@ -63,6 +63,7 @@ fn message_for(e: &EventError) -> &'static str {
 
 /// Provider page for a typed target. GitHub only: Gmail needs the signed-in mailbox index and deployments need the
 /// provider's dashboard path, neither of which is known safely here, so they get none rather than a guess.
+#[cfg(test)] // superseded by `event_url` (typed target + hints); kept as the target-only reference for the tests
 pub fn provider_url(t: &Target) -> Option<String> {
     match t {
         Target::GitHub { host, owner, repo, pr, run_id, .. } if host == "github.com" => {
@@ -78,6 +79,16 @@ pub fn provider_url(t: &Target) -> Option<String> {
     }
 }
 
+/// Every way to open this alert, best first (typed target + validated hints; see `notify_links`).
+pub fn event_ladder(ev: &NotifyEvent) -> Vec<crate::notify_links::OpenAction> {
+    crate::notify_links::open_ladder(ev.provider, &ev.target, &ev.hints)
+}
+
+/// The best page URL for this alert, if its ladder has one.
+pub fn event_url(ev: &NotifyEvent) -> Option<String> {
+    event_ladder(ev).into_iter().find_map(|a| if let crate::notify_links::OpenAction::Url(u) = a { Some(u) } else { None })
+}
+
 fn detail(token: u64, ev: &NotifyEvent) -> EventDetail {
     EventDetail {
         token,
@@ -91,7 +102,7 @@ fn detail(token: u64, ev: &NotifyEvent) -> EventDetail {
         original_source_ref: ev.original_source_ref.clone(),
         source_ref: ev.source_ref.clone(),
         occurrences: ev.occurrences,
-        provider_url: provider_url(&ev.target),
+        provider_url: event_url(ev),
     }
 }
 
@@ -252,6 +263,7 @@ mod tests {
             delivery: Delivery::default(),
             read: ReadState::Unread,
             expires_at_ms: 1_000,
+            hints: Default::default(),
         }
     }
 
