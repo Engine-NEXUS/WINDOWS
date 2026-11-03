@@ -82,7 +82,7 @@ fn is_brain_responsive() -> bool {
 fn find_python() -> Option<String> {
     // 1. Try PATH-based commands
     for cmd in &["python", "python3", "py"] {
-        if let Ok(output) = std::process::Command::new(cmd).arg("--version").output() {
+        if let Ok(output) = crate::no_window::command(cmd).arg("--version").output() {
             if output.status.success() {
                 return Some(cmd.to_string());
             }

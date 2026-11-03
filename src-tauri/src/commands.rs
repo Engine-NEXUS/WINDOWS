@@ -1192,6 +1192,9 @@ pub(crate) fn finish_sidebar<R: Runtime>(
     dock: Option<&str>,
 ) -> Result<(), String> {
     win.show().map_err(|e| format!("sidebar show: {e}"))?;
+    // Panels beside it (Architecture map, Maps, place card) were arranged around where the sidebar WAS: move them out of
+    // its way now that it is placed and visible, so they sit side by side instead of underneath it.
+    crate::panel_layout::apply(app);
     let _ = win.set_focus();
     #[cfg(target_os = "windows")]
     {
@@ -1302,6 +1305,7 @@ pub fn hide_sidebar<R: Runtime>(
 ) -> Result<(), String> {
     // Destroy the unified sidebar window to free its ~250 MB WebView2 tree.
     let _ = crate::dyn_windows::destroy_window(&app, "sidebar");
+    crate::panel_layout::apply(&app);
     Ok(())
 }
 
@@ -1326,6 +1330,7 @@ pub fn hide_pr_list_sidebar<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
     let _ = crate::dyn_windows::destroy_window(&app, "sidebar");
+    crate::panel_layout::apply(&app);
     Ok(())
 }
 
@@ -1352,6 +1357,7 @@ pub fn hide_settings_sidebar<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
     let _ = crate::dyn_windows::destroy_window(&app, "sidebar");
+    crate::panel_layout::apply(&app);
     Ok(())
 }
 

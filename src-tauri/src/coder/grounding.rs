@@ -238,11 +238,11 @@ pub fn launch_localhost(project: &ProjectContext) -> Result<String, String> {
     // `npm`, `pnpm`, `yarn` and `npx` are .cmd shims on Windows, which a bare
     // CreateProcess of "npm" cannot find: go through the shell there.
     #[cfg(windows)]
-    let child = std::process::Command::new("cmd").args(["/C", cmd]).current_dir(dir).spawn();
+    let child = crate::no_window::command("cmd").args(["/C", cmd]).current_dir(dir).spawn();
     #[cfg(not(windows))]
     let child = {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
-        std::process::Command::new(parts[0]).args(&parts[1..]).current_dir(dir).spawn()
+        crate::no_window::command(parts[0]).args(&parts[1..]).current_dir(dir).spawn()
     };
 
     match child {

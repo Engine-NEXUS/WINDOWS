@@ -120,6 +120,79 @@ pub fn resolve_in(entries: &[RepoEntry], query: &str) -> Resolution {
     Resolution::None
 }
 
+/// Is `owner/repo` (read off a page, a window title or an email) really one of the user's repositories?
+#[derive(Clone, Debug, PartialEq)]
+pub enum Identity {
+    /// Exactly this owner/repo is in the user's GitHub.
+    Verified(RepoEntry),
+    /// Not as written, but one repository of the user's is clearly what was meant (a misspelled owner or name).
+    Corrected(RepoEntry),
+    /// Several of the user's repositories fit; the user has to say which.
+    Ambiguous(Vec<RepoEntry>),
+    /// Nothing in the user's GitHub looks like it.
+    NotFound,
+    /// There is no repository list to check against (no token, no cache): the name cannot be vouched for.
+    Unverifiable,
+}
+
+fn owner_close(a: &str, b: &str) -> bool {
+    let (a, b) = (clean_token(a), clean_token(b));
+    !a.is_empty() && (a == b || (a.len() >= 4 && crate::intent_parser::levenshtein(&a, &b) <= 2))
+}
+
+/// Pure: check a name taken from the screen against the user's repositories.
+pub fn verify_repo_identity(entries: &[RepoEntry], owner: &str, repo: &str) -> Identity {
+    if entries.is_empty() {
+        return Identity::Unverifiable;
+    }
+    let (owner, repo) = (owner.trim(), repo.trim());
+    if let Some(e) = entries.iter().find(|e| e.owner.eq_ignore_ascii_case(owner) && e.name.eq_ignore_ascii_case(repo)) {
+        return Identity::Verified(e.clone());
+    }
+    match resolve_in(entries, repo) {
+        Resolution::One(e) => Identity::Corrected(e),
+        Resolution::Many(v) => {
+            // the owner written on screen settles which of several same-named repositories was meant
+            let by_owner: Vec<RepoEntry> = v.iter().filter(|e| owner_close(&e.owner, owner)).cloned().collect();
+            match by_owner.as_slice() {
+                [one] => Identity::Corrected(one.clone()),
+                [] => Identity::Ambiguous(v),
+                _ => Identity::Ambiguous(by_owner),
+            }
+        }
+        Resolution::None => Identity::NotFound,
+    }
+}
+
+/// The spoken sentence for an identity that is not a plain match; `None` when the repo can simply be used.
+pub fn identity_notice(written: &str, id: &Identity) -> Option<String> {
+    match id {
+        Identity::Verified(_) => None,
+        Identity::Corrected(e) => Some(format!("The screen says {written}; your GitHub has {}, so I'm using that, sir.", e.full_name)),
+        Identity::Ambiguous(v) => {
+            let owners: Vec<&str> = v.iter().take(3).map(|e| e.owner.as_str()).collect();
+            Some(format!("I found {written} under {}, sir. Which one?", owners.join(" and ")))
+        }
+        Identity::NotFound => Some(format!("I see {written} on the screen, sir, but it isn't in your GitHub, so I won't guess about it.")),
+        Identity::Unverifiable => {
+            Some(format!("I see {written} on the screen, sir, but I can't check it against your GitHub right now, so I won't guess about it."))
+        }
+    }
+}
+
+/// The user's repositories for a check: the live list, else the cached one. Empty = cannot verify.
+pub async fn entries_for_check() -> Vec<RepoEntry> {
+    let live = entries().await;
+    if !live.is_empty() {
+        return live;
+    }
+    // `entries` already reads the disk cache through `peek`; asking again keeps the intent explicit and cheap.
+    match peek("") {
+        Some(_) => entries().await,
+        None => Vec::new(),
+    }
+}
+
 /// Deduplicate matches by `full_name`, rank them, and return `One` or `Many`.
 fn rank_and_resolve(matches: Vec<RepoEntry>) -> Resolution {
     let mut deduped: Vec<RepoEntry> = Vec::new();
@@ -713,5 +786,71 @@ mod tests {
         assert_eq!(e.len(), 5);
         assert_eq!(e[0].full_name, "chitkul/zync");
         clear_cache_for_test();
+    }
+
+    fn entry(owner: &str, name: &str) -> RepoEntry {
+        RepoEntry { full_name: format!("{owner}/{name}"), owner: owner.into(), name: name.into(), owner_type: "Organization".into(), open_issues: 0 }
+    }
+
+    fn mine() -> Vec<RepoEntry> {
+        vec![
+            entry("Leddger-AI", "LedgerAI"),
+            entry("Leddger-AI", "MAIN-Server"),
+            entry("Servx-lab", "ServX"),
+            entry("Servx-lab", "Servx-Backend"),
+            entry("ChitkulLakshya", "COGNI"),
+            entry("ChitkulLakshya", "Portfolio"),
+            entry("Other-Org", "Portfolio"),
+        ]
+    }
+
+    #[test]
+    fn a_name_that_is_in_the_users_github_is_verified() {
+        match verify_repo_identity(&mine(), "leddger-ai", "ledgerai") {
+            Identity::Verified(e) => assert_eq!(e.full_name, "Leddger-AI/LedgerAI"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_misspelled_name_is_corrected_to_the_real_one_and_said_aloud() {
+        let id = verify_repo_identity(&mine(), "Leddger-AI", "LedgerA1");
+        let Identity::Corrected(e) = &id else { panic!("{id:?}") };
+        assert_eq!(e.full_name, "Leddger-AI/LedgerAI");
+        let said = identity_notice("Leddger-AI/LedgerA1", &id).unwrap();
+        assert!(said.contains("your GitHub has Leddger-AI/LedgerAI"), "{said}");
+    }
+
+    #[test]
+    fn the_owner_on_screen_settles_which_same_named_repo_was_meant() {
+        let id = verify_repo_identity(&mine(), "ChitkulLakshya", "portfolio-site");
+        // not an exact repo of that owner and not close to a name: nothing to guess
+        assert_eq!(id, Identity::NotFound);
+        let id = verify_repo_identity(&mine(), "Other-Org", "Portfolio");
+        assert!(matches!(id, Identity::Verified(ref e) if e.full_name == "Other-Org/Portfolio"), "{id:?}");
+        let id = verify_repo_identity(&mine(), "chitkul-lakshya", "Portfolio");
+        assert!(matches!(id, Identity::Corrected(ref e) if e.owner == "ChitkulLakshya"), "{id:?}");
+    }
+
+    #[test]
+    fn two_equally_good_matches_are_a_question_not_a_guess() {
+        let id = verify_repo_identity(&mine(), "Nobody", "Portfolio");
+        let Identity::Ambiguous(v) = &id else { panic!("{id:?}") };
+        assert_eq!(v.len(), 2);
+        assert!(identity_notice("Nobody/Portfolio", &id).unwrap().ends_with("Which one?"));
+    }
+
+    #[test]
+    fn a_name_that_is_not_in_the_users_github_is_refused_not_guessed() {
+        let id = verify_repo_identity(&mine(), "Acme", "totally-unrelated-thing");
+        assert_eq!(id, Identity::NotFound);
+        assert!(identity_notice("Acme/totally-unrelated-thing", &id).unwrap().contains("isn't in your GitHub"));
+    }
+
+    #[test]
+    fn with_no_repository_list_nothing_can_be_vouched_for() {
+        let id = verify_repo_identity(&[], "Leddger-AI", "LedgerAI");
+        assert_eq!(id, Identity::Unverifiable);
+        assert!(identity_notice("Leddger-AI/LedgerAI", &id).unwrap().contains("can't check it"));
     }
 }

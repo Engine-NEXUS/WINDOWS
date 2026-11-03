@@ -167,12 +167,16 @@ pub(crate) mod session_observer;
 pub(crate) mod watch_runner;
 pub(crate) mod agent_tracker;
 pub(crate) mod agent_outcomes;
+pub(crate) mod agent_attention;
+pub(crate) mod repo_review;
+pub(crate) mod pr_screen;
 pub(crate) mod howto;
 pub(crate) mod email_brief;
 pub(crate) mod repo_hint;
 pub(crate) mod panel_layout;
 pub(crate) mod maps_panel;
 pub(crate) mod location;
+pub(crate) mod no_window;
 pub(crate) mod fares;
 pub(crate) mod place_card;
 pub(crate) mod power_close;
@@ -345,13 +349,44 @@ fn reset_webview2_profile(webview_dir: &std::path::Path) {
     }
 }
 
+/// True when this process has no usable standard output (a release build started at logon has no console).
+#[cfg(target_os = "windows")]
+fn no_stdout() -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(n: u32) -> isize;
+    }
+    // SAFETY: plain kernel32 query; STD_OUTPUT_HANDLE is (DWORD)-11.
+    let h = unsafe { GetStdHandle(0xFFFF_FFF5) };
+    h == 0 || h == -1
+}
+
+/// Logs go to the console/redirect when there is one (`nexus start`, development) and to
+/// `%APPDATA%/com.nexus.assistant/logs/nexus.log` otherwise, so a logon start with no console can still be diagnosed.
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,nexus=debug"));
+    #[cfg(target_os = "windows")]
+    if no_stdout() {
+        if let Some(dir) = std::env::var_os("APPDATA").map(|a| std::path::PathBuf::from(a).join("com.nexus.assistant").join("logs")) {
+            let _ = std::fs::create_dir_all(&dir);
+            let file = dir.join("nexus.log");
+            if std::fs::metadata(&file).map(|m| m.len() > 5_000_000).unwrap_or(false) {
+                let _ = std::fs::rename(&file, dir.join("nexus.old.log"));
+            }
+            if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+                tracing_subscriber::fmt().with_env_filter(filter).with_target(false).with_ansi(false).with_writer(std::sync::Mutex::new(f)).init();
+                std::panic::set_hook(Box::new(|info| tracing::error!("panic: {info}")));
+                return;
+            }
+        }
+    }
+    tracing_subscriber::fmt().with_env_filter(filter).with_target(false).init();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     crate::boot::mark("main");
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,nexus=debug")))
-        .with_target(false)
-        .init();
+    init_logging();
 
     // ─── WebView2 stale profile cleanup ───────────────────────────────
     //
@@ -490,7 +525,14 @@ pub fn run() {
 
         // Immediate 5-layer preflight system audit — prints health matrix to stdout
         let audit_dir = app.path().app_data_dir().ok();
-        diagnostics::run_full_system_audit(audit_dir.as_deref());
+        {
+            // It only prints and probes tools; it must not hold up the first hello (it ran on the main thread).
+            let dir = audit_dir.clone();
+            let _ = std::thread::Builder::new().name("boot-audit".into()).spawn(move || {
+                diagnostics::run_full_system_audit(dir.as_deref());
+            });
+        }
+        crate::boot::mark("setup_audit_started");
 
         // If a previous run died while NEXUS held the system volume at the TTS level, put the
         // user's original volume back before anything speaks.
@@ -587,6 +629,9 @@ pub fn run() {
                   // Task registration shells out to PowerShell (~2 s measured at boot): off the setup
                   // path, so the first word is not delayed by it (docs/features/123, cause E).
                   let _ = std::thread::Builder::new().name("autostart-task".into()).spawn(move || {
+                    // Not at the logon peak: the task already exists from the last run, and this PowerShell
+                    // call (about 2 s of CPU) competes with startup. It only has to happen once per session.
+                    std::thread::sleep(std::time::Duration::from_secs(120));
                     // Always remove old HKCU\Run entry (from the previous autostart plugin)
                     // to avoid double-launching.
                     let _ = std::process::Command::new("reg")
@@ -660,6 +705,7 @@ pub fn run() {
 
             // Tray menu.
             tray::setup(app.handle())?;
+            crate::boot::mark("setup_tray_done");
 
             // ─── Meeting / privacy mode state ──────────────────────────
             let meeting_state = std::sync::Arc::new(meeting_detect::MeetingState::new());
@@ -759,6 +805,7 @@ pub fn run() {
             // WebView2 permission handler — auto-approves mic/camera for our
             // own app origins so the permission dialog never re-appears.
             mic_permissions::init(app);
+            crate::boot::mark("setup_permissions_done");
 
             // Compute + cache the orb's bottom-center rect (just above the
             // taskbar/dock) so the stage frontend's pending-pull fallback
@@ -791,6 +838,7 @@ pub fn run() {
                 memcore::session::start_recorder(app_data.clone());
                 action_kernel::startup(&app_data); // age purge of the trash, audit prune, folder aliases
                 memcore::session::install_session_end_hook(app_data.clone());
+                crate::boot::mark("setup_memory_done");
                 agent_specs::ensure_example(&app_data);
                 let improve_dir = app_data.clone();
                 std::thread::spawn(move || {
@@ -808,6 +856,7 @@ pub fn run() {
             proactive_policy::start_ticker(app.handle().clone()); // releases deferred alerts at breakpoints
             memcore::resume::start_recorder(app.handle().clone()); // 30 s foreground-window resume points
             memcore::briefing::start_boot_briefing(app.handle().clone()); // once-a-day spoken "where you left off"
+            agent_attention::start(app.handle().clone()); // "Codex needs your input, sir" + what happened while you were away
             memcore::routines::start_suggester(app.handle().clone()); // offers a routine when it notices a repeated sequence
             memcore::curator::start_curator(app.handle().clone()); // daily idle upkeep: retire unused routines, keep used profile facts
             memcore::review::start_reviewer(app.handle().clone()); // optional, default off: suggests profile facts for approval
@@ -881,6 +930,7 @@ pub fn run() {
             // starts lazily only when an ambiguous command is encountered.
             // This saves ~100 MB idle RAM.
 
+            crate::boot::mark("setup_before_hotkey");
             // Global hotkey → wake event (not available on Linux).
             #[cfg(not(target_os = "linux"))]
             hotkey::init(app.handle())?;
@@ -1108,6 +1158,7 @@ pub fn run() {
                 diagnostics::log_diagnostics(&worker_url, &user_id, diag_data_dir.as_deref());
             });
 
+            crate::boot::mark("setup_end");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

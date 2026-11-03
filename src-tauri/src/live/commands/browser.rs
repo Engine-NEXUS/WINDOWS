@@ -73,7 +73,7 @@ pub fn search(query: &str) -> Result<(), String> {
             crate::browser_url::foreground_process_path(),
         ) {
             if crate::browser_url::is_browser_process(&name)
-                && std::process::Command::new(&path).arg(&url).spawn().is_ok()
+                && crate::no_window::command(&path).arg(&url).spawn().is_ok()
             {
                 return Ok(());
             }

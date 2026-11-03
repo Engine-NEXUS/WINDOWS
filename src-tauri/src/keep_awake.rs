@@ -19,12 +19,15 @@
 //! every tick while any lease is held — a free Win32 call either way, correct under both
 //! interpretations.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const WATCHDOG_MS: u64 = 10_000;
 const WATCHDOG_POLL_MS: u64 = 500;
+/// The longest a watch on a coding agent may hold the machine awake (a forgotten watch must not do it forever).
+pub const MAX_WATCH_HOLD: Duration = Duration::from_secs(8 * 3600);
 
 fn now_millis() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
@@ -49,9 +52,22 @@ impl KeepAwakeBackend for SystemBackend {
 
 #[derive(Default)]
 struct State {
-    /// Live leases across both reasons (speaking + working).
-    count: usize,
+    /// Short leases (a spoken line, a request): these need a heartbeat, or the watchdog drops them.
+    loose: usize,
+    /// Bumped whenever every loose lease is dropped at once (watchdog, force clear), so a LATE drop of one of the
+    /// dropped leases cannot release a newer, live one.
+    loose_epoch: u64,
+    /// Long holds (watching a coding agent for hours): id -> deadline in ms. No heartbeat needed; they end when their
+    /// owner drops them or at the deadline, whichever comes first.
+    pins: BTreeMap<u64, u64>,
+    next_pin: u64,
     watchdog_running: bool,
+}
+
+impl State {
+    fn count(&self) -> usize {
+        self.loose + self.pins.len()
+    }
 }
 
 pub struct Controller {
@@ -62,9 +78,15 @@ pub struct Controller {
     watchdog_poll: Duration,
 }
 
+enum Kind {
+    Loose(u64),
+    Pin(u64),
+}
+
 /// RAII lease: clears its slot when dropped.
 pub struct KeepAwakeLease {
     ctrl: Arc<Controller>,
+    kind: Kind,
     active: bool,
 }
 
@@ -72,7 +94,7 @@ impl Drop for KeepAwakeLease {
     fn drop(&mut self) {
         if self.active {
             self.active = false;
-            self.ctrl.release();
+            self.ctrl.release(&self.kind);
         }
     }
 }
@@ -99,31 +121,69 @@ impl Controller {
     pub fn acquire(self: &Arc<Self>) -> Option<KeepAwakeLease> {
         let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
         self.heartbeat();
-        if st.count == 0 {
+        if !self.assert_if_first(&st) {
+            return None;
+        }
+        st.loose += 1;
+        tracing::debug!("[KEEPAWAKE] acquire count={}", st.count());
+        let epoch = st.loose_epoch;
+        self.ensure_watchdog(&mut st);
+        drop(st);
+        Some(KeepAwakeLease { ctrl: Arc::clone(self), kind: Kind::Loose(epoch), active: true })
+    }
+
+    /// A long hold that needs no heartbeat: a watch on a coding agent can sit inside a slow cloud check for longer
+    /// than the watchdog allows, and must not lose the screen because of that. It ends when dropped or after `max`.
+    pub fn acquire_pinned(self: &Arc<Self>, max: Duration) -> Option<KeepAwakeLease> {
+        let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.assert_if_first(&st) {
+            return None;
+        }
+        let id = st.next_pin;
+        st.next_pin += 1;
+        st.pins.insert(id, now_millis().saturating_add(max.as_millis() as u64));
+        tracing::debug!("[KEEPAWAKE] pinned count={}", st.count());
+        self.ensure_watchdog(&mut st);
+        drop(st);
+        Some(KeepAwakeLease { ctrl: Arc::clone(self), kind: Kind::Pin(id), active: true })
+    }
+
+    fn assert_if_first(&self, st: &State) -> bool {
+        if st.count() == 0 {
             if let Err(e) = self.backend.assert() {
                 tracing::warn!("keep_awake: failed to assert ({e}); not holding a lease");
-                return None;
+                return false;
             }
             tracing::info!("[KEEPAWAKE] asserted");
         }
-        st.count += 1;
-        tracing::debug!("[KEEPAWAKE] acquire count={}", st.count);
+        true
+    }
+
+    fn ensure_watchdog(self: &Arc<Self>, st: &mut State) {
         if !st.watchdog_running {
             st.watchdog_running = true;
             let me = Arc::clone(self);
             std::thread::spawn(move || me.watchdog_loop());
         }
-        drop(st);
-        Some(KeepAwakeLease { ctrl: Arc::clone(self), active: true })
     }
 
-    fn release(self: &Arc<Self>) {
+    fn release(self: &Arc<Self>, kind: &Kind) {
         let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = st.count;
-        st.count = st.count.saturating_sub(1);
-        tracing::debug!("[KEEPAWAKE] release count={}", st.count);
-        if prev > 0 && st.count == 0 {
-            // Cleared instantly, no grace period — unlike volume, a flicker here has no
+        let released = match kind {
+            // a lease from before the last "drop everything" no longer counts for anything
+            Kind::Loose(epoch) => {
+                if *epoch == st.loose_epoch && st.loose > 0 {
+                    st.loose -= 1;
+                    true
+                } else {
+                    false
+                }
+            }
+            Kind::Pin(id) => st.pins.remove(id).is_some(),
+        };
+        tracing::debug!("[KEEPAWAKE] release count={}", st.count());
+        if released && st.count() == 0 {
+            // Cleared instantly, no grace period: unlike volume, a flicker here has no
             // audible defect, and the user explicitly wants this instant.
             if let Err(e) = self.backend.clear() {
                 tracing::warn!("keep_awake: failed to clear: {e}");
@@ -136,8 +196,10 @@ impl Controller {
     /// Immediate clear regardless of refcount (explicit stop, app exit).
     pub fn force_clear(&self) {
         let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
-        if st.count > 0 {
-            st.count = 0;
+        st.loose_epoch += 1;
+        if st.count() > 0 {
+            st.loose = 0;
+            st.pins.clear();
             let _ = self.backend.clear();
             tracing::info!("[KEEPAWAKE] force-cleared");
         }
@@ -147,15 +209,26 @@ impl Controller {
         loop {
             std::thread::sleep(self.watchdog_poll);
             let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
-            if st.count == 0 {
-                st.watchdog_running = false;
-                return;
+            let now = now_millis();
+            let before = st.pins.len();
+            st.pins.retain(|_, deadline| *deadline > now);
+            let expired = before - st.pins.len();
+            if expired > 0 {
+                tracing::warn!("[KEEPAWAKE] {expired} pinned hold(s) reached their time limit and were released");
             }
-            let silent = now_millis().saturating_sub(self.last_beat.load(Ordering::Relaxed));
-            if silent as u128 > self.watchdog.as_millis() {
-                tracing::warn!("[KEEPAWAKE] watchdog: no heartbeat for {silent} ms, force-clearing");
-                st.count = 0;
-                let _ = self.backend.clear();
+            let silent = now.saturating_sub(self.last_beat.load(Ordering::Relaxed));
+            let mut dropped_loose = false;
+            if st.loose > 0 && silent as u128 > self.watchdog.as_millis() {
+                tracing::warn!("[KEEPAWAKE] watchdog: no heartbeat for {silent} ms, dropping {} short lease(s)", st.loose);
+                st.loose = 0;
+                st.loose_epoch += 1;
+                dropped_loose = true;
+            }
+            if st.count() == 0 {
+                // released normally (already cleared), or everything that was left was dropped just now
+                if expired > 0 || dropped_loose {
+                    let _ = self.backend.clear();
+                }
                 st.watchdog_running = false;
                 return;
             }
@@ -168,7 +241,7 @@ impl Controller {
 
     #[cfg(test)]
     fn snapshot(&self) -> usize {
-        self.st.lock().unwrap().count
+        self.st.lock().unwrap().count()
     }
 }
 
@@ -185,6 +258,11 @@ fn ctrl() -> &'static Arc<Controller> {
 /// Acquire an RAII lease (e.g. held for the duration of one spoken utterance).
 pub fn acquire_lease() -> Option<KeepAwakeLease> {
     ctrl().acquire()
+}
+
+/// A long hold for watching a coding agent: needs no heartbeat, ends when dropped or after `max`.
+pub fn acquire_pinned(max: Duration) -> Option<KeepAwakeLease> {
+    ctrl().acquire_pinned(max)
 }
 
 /// Playback/work loops call this periodically so a long-running lease is never force-cleared.
@@ -507,6 +585,52 @@ mod tests {
         let c = Controller::new(Arc::new(FailingBackend));
         assert!(c.acquire().is_none(), "acquire must fail if backend assert fails");
         assert_eq!(c.snapshot(), 0);
+    }
+
+    #[test]
+    fn a_pinned_hold_survives_silence_far_longer_than_the_watchdog() {
+        let (fake, c) = rig();
+        let pin = c.acquire_pinned(Duration::from_secs(60)).unwrap();
+        sleep(1_000); // 2.5x the 400 ms watchdog, no heartbeat at all
+        assert!(*fake.live.lock().unwrap(), "a watch that waits on a slow check lost the screen");
+        drop(pin);
+        assert!(!*fake.live.lock().unwrap());
+    }
+
+    #[test]
+    fn a_pinned_hold_ends_at_its_time_limit() {
+        let (fake, c) = rig();
+        let pin = c.acquire_pinned(Duration::from_millis(150)).unwrap();
+        std::mem::forget(pin);
+        sleep(600);
+        assert!(!*fake.live.lock().unwrap(), "a forgotten pin held the screen forever");
+        assert_eq!(c.snapshot(), 0);
+    }
+
+    #[test]
+    fn a_silent_loose_lease_is_dropped_but_a_pinned_one_stays() {
+        let (fake, c) = rig();
+        let pin = c.acquire_pinned(Duration::from_secs(60)).unwrap();
+        let loose = c.acquire().unwrap();
+        std::mem::forget(loose);
+        sleep(900);
+        assert!(*fake.live.lock().unwrap(), "the pinned hold must keep the screen on");
+        assert_eq!(c.snapshot(), 1, "only the pinned hold is left");
+        drop(pin);
+        assert!(!*fake.live.lock().unwrap());
+    }
+
+    #[test]
+    fn a_late_drop_of_a_dropped_lease_cannot_release_a_live_one() {
+        let (fake, c) = rig();
+        let old = c.acquire().unwrap();
+        c.force_clear();
+        let live = c.acquire().unwrap();
+        drop(old); // the stale drop: before the epoch guard this took the live lease's slot
+        assert!(*fake.live.lock().unwrap(), "a stale lease switched off a live hold");
+        assert_eq!(c.snapshot(), 1);
+        drop(live);
+        assert!(!*fake.live.lock().unwrap());
     }
 
     #[test]

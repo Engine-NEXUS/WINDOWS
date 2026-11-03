@@ -8,7 +8,6 @@ use crate::center::{ConfirmKind, SubCenter, Validity};
 use crate::diary;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Actions this center owns.
 #[allow(dead_code)]
@@ -131,7 +130,7 @@ pub fn execute_engine(action: &str, arg: &str, limit: Option<usize>) -> Result<V
     let script_path = resolve_youtube_engine_path()
         .ok_or_else(|| "YouTube engine not found at server/youtube/engine.py".to_string())?;
 
-    let mut cmd = Command::new("python");
+    let mut cmd = crate::no_window::command("python");
     cmd.arg(&script_path).arg(action).arg(arg);
 
     if let Some(l) = limit {

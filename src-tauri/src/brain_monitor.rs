@@ -362,7 +362,7 @@ async fn trigger_retrain() {
                 }
             });
 
-        std::process::Command::new("python")
+        crate::no_window::command("python")
             .arg(&script)
             .output()
     })

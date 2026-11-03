@@ -108,7 +108,7 @@ fn sidecar_dir() -> Option<std::path::PathBuf> {
 /// without Node. Reported honestly via `sidecar_unavailable_reason()`.
 fn find_node() -> Option<String> {
     for cmd in &["node", "node.exe"] {
-        if let Ok(output) = Command::new(cmd).arg("--version").output() {
+        if let Ok(output) = crate::no_window::command(cmd).arg("--version").output() {
             if output.status.success() {
                 return Some(cmd.to_string());
             }
@@ -227,7 +227,7 @@ fn ensure_sidecar_running() {
         return;
     };
 
-    let mut cmd = Command::new(&node_cmd);
+    let mut cmd = crate::no_window::command(&node_cmd);
     cmd.arg("server.cjs")
         .current_dir(&dir)
         .env("AGENT_WATCH_PORT", AGENT_WATCH_PORT.to_string())
@@ -399,7 +399,7 @@ pub async fn start_watch<R: tauri::Runtime>(
         .to_string();
 
     mark_activity();
-    let lease = crate::keep_awake::acquire_lease();
+    let lease = crate::keep_awake::acquire_pinned(crate::keep_awake::MAX_WATCH_HOLD);
     ACTIVE_WATCHES.lock().unwrap().push((id.clone(), lease));
 
     let poll_id = id.clone();
@@ -496,7 +496,7 @@ pub async fn start_desktop_or_ide_watch<R: tauri::Runtime>(
             .unwrap_or(0)
     );
 
-    let lease = crate::keep_awake::acquire_lease();
+    let lease = crate::keep_awake::acquire_pinned(crate::keep_awake::MAX_WATCH_HOLD);
     ACTIVE_WATCHES.lock().unwrap().push((id.clone(), lease));
 
     let watch_id = id.clone();

@@ -1118,6 +1118,7 @@ async fn play_audio(
     caption: CaptionTrack,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    crate::boot::first_audio();
     tokio::task::spawn_blocking(move || {
         match OutputStream::try_default() {
             Ok((_stream, handle)) => {
@@ -1510,6 +1511,7 @@ async fn play_audio_streamed(
     my_generation: usize,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    crate::boot::first_audio();
     tokio::task::spawn_blocking(move || {
         match OutputStream::try_default() {
             Ok((_stream, handle)) => match Sink::try_new(&handle) {

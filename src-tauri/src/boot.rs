@@ -18,6 +18,13 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Once;
 
+static FIRST_AUDIO: Once = Once::new();
+
+/// Mark the first moment any sound starts playing (the hello at logon), once per run.
+pub fn first_audio() {
+    FIRST_AUDIO.call_once(|| mark("first_audio"));
+}
+
 const TIMELINE_FILE: &str = "boot_timeline.jsonl";
 const TIMELINE_MAX_LINES: usize = 300;
 
