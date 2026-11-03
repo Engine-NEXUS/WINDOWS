@@ -701,13 +701,8 @@ pub async fn open_architect_map_window<R: Runtime>(app: AppHandle<R>, owner: Str
         });
     }
     let win = crate::dyn_windows::get_or_create_window(&app, crate::dyn_windows::WindowConfig::architect_map())?;
-    if let Ok(Some(monitor)) = win.current_monitor().or_else(|_| win.primary_monitor()) {
-        let (p, s) = (monitor.position(), monitor.size());
-        let work = crate::work_area::PRect { x: p.x, y: p.y, w: s.width as i32, h: s.height as i32 };
-        let rect = crate::work_area::sidebar_rect("architect-beside", None, work, monitor.scale_factor());
-        let _ = win.set_size(tauri::PhysicalSize::new(rect.w as u32, rect.h as u32));
-        let _ = win.set_position(tauri::PhysicalPosition::new(rect.x, rect.y));
-    }
+    crate::panel_layout::note_opened(crate::panel_layout::Panel::Architect);
+    crate::panel_layout::apply(&app);
     win.show().map_err(|e| format!("architect map show: {e}"))?;
     #[cfg(target_os = "windows")]
     crate::dwm_corners::round_corners(&win);
@@ -730,7 +725,10 @@ pub async fn open_architect_map_window<R: Runtime>(app: AppHandle<R>, owner: Str
 /// IPC: close the Architecture map window (Escape inside it).
 #[tauri::command]
 pub async fn close_architect_map<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    crate::dyn_windows::destroy_window(&app, "architect-map")
+    crate::panel_layout::note_closed(crate::panel_layout::Panel::Architect);
+    let r = crate::dyn_windows::destroy_window(&app, "architect-map");
+    crate::panel_layout::apply(&app);
+    r
 }
 
 /// IPC: Auto-detect GitHub repo from active browser, run Phase 1 analysis

@@ -1,5 +1,10 @@
 # NEXUS — Project Notes
 
+## Training data lives in D:\NEXUS-Training (2026-10-31)
+
+- The training folders (`wake_word_data`, `wake_camp`, `wake_test_recordings`, `nexus_real_samples`, `nexus_model`, `audioset*`, `mit_rirs`) were moved to `D:\NEXUS-Training\data\` (private repo Engine-NEXUS/NEXUS-Training; data is ignored there and never pushed). Directory junctions at the old paths keep every script working: do not delete a junction and never `git add` one. Training scripts stay in `scripts/` and `server/nlu/`. Record: `docs/changes/181-training-moved-to-nexus-training-repo.md`.
+
+
 ## Owner controls runtime and builds — edits only (2026-10-26)
 ## Voice Accuracy Phase E — Label Audit, Public Data, Synthetic Speakers, Tiered Speech Check (2026-10-21)
 

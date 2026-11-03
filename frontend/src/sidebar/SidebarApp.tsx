@@ -33,9 +33,11 @@ import { ZoomViewer } from "./ZoomViewer";
  */
 interface SidebarAppProps {
   onDock: (d: string) => void;
+  /** False while another view is on screen (this view stays mounted but hidden), so it does not answer arrow keys. */
+  active?: boolean;
 }
 
-export function SidebarApp({ onDock }: SidebarAppProps) {
+export function SidebarApp({ onDock, active = true }: SidebarAppProps) {
   const visible = useSidebar((s) => s.visible);
   const response = useSidebar((s) => s.response);
   const query = useSidebar((s) => s.query);
@@ -313,7 +315,7 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
   );
 
   // Left/Right arrows move the window (assistant and alert views sit right, the CodeRabbit list centred).
-  useArrowDock(isEventDetail ? "right" : isCodeRabbit ? "center" : "right", onDock);
+  useArrowDock(isEventDetail ? "right" : isCodeRabbit ? "center" : "right", onDock, active);
 
   return (
     <div id="sidebar-app" className={visible ? "sidebar--visible" : "sidebar--hidden"}>

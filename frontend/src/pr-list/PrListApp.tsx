@@ -6,7 +6,6 @@ import { GitHubActivityRadarGraph } from "./GitHubActivityRadarGraph";
 import { GitHubSignInGate } from "./GitHubSignInGate";
 import { GitHubReposView } from "./GitHubReposView";
 import { GitHubStarredView } from "./GitHubStarredView";
-import { DockButtons } from "../sidebar/kit/DockButtons";
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -35,7 +34,7 @@ function timeAgo(iso: string): string {
   return `${months}mo ago`;
 }
 
-export function PrListApp({ onDock = () => {} }: { onDock?: (d: string) => void }) {
+export function PrListApp({ onDock: _onDock = () => {} }: { onDock?: (d: string) => void }) {
   const {
     visible,
     prs,
@@ -413,10 +412,6 @@ export function PrListApp({ onDock = () => {} }: { onDock?: (d: string) => void 
           <div className="gh-title-block">
             <span className="gh-title-main">GitHub Dashboard</span>
           </div>
-        </div>
-
-        <div className="gh-header-actions">
-          <DockButtons onDock={onDock} />
         </div>
       </header>
 

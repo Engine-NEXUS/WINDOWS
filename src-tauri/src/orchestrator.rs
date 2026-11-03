@@ -2191,8 +2191,33 @@ pub async fn process_transcript<R: Runtime>(
                         match found {
                             Some(id) => worker_transcript = format!("analyse {}/{}", id.owner, id.repo),
                             None => {
-                                clear_active_request(&request_id);
-                                return run_screen_analysis(app, format!("analyse what is on my screen: {transcript}")).await;
+                                // No repository page is open: the repository may only be NAMED on screen (an email, a
+                                // notification). Read the names off the screen and find them in the user's GitHub.
+                                #[cfg(target_os = "windows")]
+                                let names: Vec<String> = read_screen_json(
+                                    &app,
+                                    crate::repo_hint::build_prompt(),
+                                    512,
+                                    |t| Some(crate::repo_hint::parse_names(t)),
+                                )
+                                .await
+                                .unwrap_or_default();
+                                #[cfg(not(target_os = "windows"))]
+                                let names: Vec<String> = Vec::new();
+                                match resolve_screen_repos(&names).await {
+                                    ScreenRepo::One(o, r) => worker_transcript = format!("analyse {o}/{r}"),
+                                    ScreenRepo::Many(name, owners) => {
+                                        let spoken_text = format!("I found {name} under {}, sir. Which one?", owners.join(" and "));
+                                        emit(&app, &OrchestratorEvent::Result { text: spoken_text, request_id: request_id.clone(), analysis: None, dialog_state: None });
+                                        emit(&app, &OrchestratorEvent::Done { request_id: request_id.clone() });
+                                        clear_active_request(&request_id);
+                                        return Ok(ProcessResult { request_id, subsystem, handled_locally: true });
+                                    }
+                                    ScreenRepo::None => {
+                                        clear_active_request(&request_id);
+                                        return run_screen_analysis(app, format!("analyse what is on my screen: {transcript}")).await;
+                                    }
+                                }
                             }
                         }
                     }
@@ -5733,7 +5758,17 @@ async fn run_directions<R: Runtime>(
         Ok(r) => r,
         Err(line) => return say_and_finish(&app, request_id, line),
     };
-    if let Err(e) = crate::commands::open_maps(&app, &destination, origin.as_deref(), travel) {
+    let here = if origin.as_deref().is_none_or(|o| o.trim().is_empty()) { crate::location::current().await } else { None };
+    let origin = match origin.filter(|o| !o.trim().is_empty()) {
+        Some(o) => Some(o),
+        None => here.map(|f| f.as_point()),
+    };
+    if let Err(e) = crate::maps_panel::show_map(
+        &app,
+        crate::maps_panel::MapsTarget::Directions { origin: origin.clone(), destination: destination.clone(), mode: travel },
+    )
+    .await
+    {
         tracing::warn!("directions: could not open Maps window: {e}");
         return say_and_finish(&app, request_id, "I couldn't open the map window, sir.".into());
     }
@@ -5755,7 +5790,11 @@ async fn run_directions<R: Runtime>(
         }
         _ => None,
     };
-    say_and_finish(&app, request_id, directions_line(&destination, eta.as_deref()))
+    let mut line = directions_line(&destination, eta.as_deref());
+    if here.as_ref().is_some_and(crate::location::should_tell_about_exact_location) {
+        line.push_str(" For an exact starting point, turn on location in Windows settings, sir.");
+    }
+    say_and_finish(&app, request_id, line)
 }
 
 /// Which saved place a spoken word means: "home" / "work" (None = a real address).
@@ -5870,8 +5909,7 @@ async fn run_places_search<R: Runtime>(
         (None, Some(a)) => format!("{query} near {a}"),
         (None, None) => query.clone(),
     };
-    let url = MapsService::build_place_search_url(&search_text);
-    if let Err(e) = crate::commands::open_maps_url(&app, &url) {
+    if let Err(e) = crate::maps_panel::show_map(&app, crate::maps_panel::MapsTarget::Search(search_text.clone())).await {
         tracing::warn!("places: could not open Maps window: {e}");
         return say_and_finish(&app, request_id, "I couldn't open the map window, sir.".into());
     }
@@ -5884,6 +5922,7 @@ pub(crate) fn is_deictic_repo_word(repo: &str) -> bool {
         repo.trim().to_lowercase().as_str(),
         "this" | "that" | "it" | "here" | "current" | "the current" | "this one" | "that one" | "open" | "the open"
             | "this repo" | "this repository" | "this project" | "the repo" | "the repository"
+            | "this report" | "the report"
     )
 }
 
@@ -5903,6 +5942,81 @@ pub(crate) fn github_pr_from_url(url: &str) -> Option<(String, String, u64)> {
     let full = crate::architect::split_full_name(&format!("{owner}/{repo}"))?;
     let n: u64 = num.parse().ok().filter(|n| *n > 0)?;
     Some((full.0, full.1, n))
+}
+
+/// What repository names found on screen resolve to in the user's own GitHub.
+pub(crate) enum ScreenRepo {
+    One(String, String),
+    /// The bare name matched repositories under several owners.
+    Many(String, Vec<String>),
+    None,
+}
+
+/// First name that resolves wins. `owner/repo` is taken as written; a bare name is looked up in the user's repos and
+/// every organisation they belong to (the connected GitHub login), so a name in an email needs no link.
+pub(crate) async fn resolve_screen_repos(names: &[String]) -> ScreenRepo {
+    use crate::repo_hint::Candidate;
+    for n in names {
+        match crate::repo_hint::classify(n) {
+            Some(Candidate::Full(o, r)) => return ScreenRepo::One(o, r),
+            Some(Candidate::Bare(b)) => match crate::github_repo_index::resolve_name(&b).await {
+                crate::github_repo_index::Resolution::One(e) => return ScreenRepo::One(e.owner, e.name),
+                crate::github_repo_index::Resolution::Many(v) => {
+                    return ScreenRepo::Many(b, v.iter().take(3).map(|e| e.owner.clone()).collect());
+                }
+                crate::github_repo_index::Resolution::None => {}
+            },
+            None => {}
+        }
+    }
+    ScreenRepo::None
+}
+
+/// Freeze the foreground window (sensitive ones refused), capture it and ask the vision model for JSON.
+/// `Err` carries a short spoken reason.
+#[cfg(target_os = "windows")]
+async fn read_screen_json<R: Runtime, T>(
+    app: &AppHandle<R>,
+    prompt: &str,
+    max_tokens: u32,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Result<T, String> {
+    let key = crate::commands::read_api_key(app, "gemini");
+    if key.is_empty() {
+        return Err("I need a Gemini key to read the screen, sir.".into());
+    }
+    let (sw, sh) = crate::screen::primary_monitor_size().ok_or("I couldn't identify the screen, sir.")?;
+    let target = crate::screen_context::collect_target(sw, sh).await;
+    if let Some(reason) = crate::screen_context::capture_block_reason(&target) {
+        return Err(reason.to_string());
+    }
+    let dir = app.path().app_data_dir().map_err(|_| "I couldn't read the screen, sir.".to_string())?;
+    if crate::vision::exhausted(&dir, "gemini") {
+        return Err("My vision allowance for today is used up, sir.".into());
+    }
+    let r = target.region;
+    let Some(frame) = crate::vision::capture_region_jpeg_base64(r.x, r.y, r.w, r.h, 1600) else {
+        return Err("I could not capture the window, sir.".into());
+    };
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
+    let models = crate::vision::tour_model_ladder(None);
+    let call = crate::vision::gemini_json_with_image(prompt, &frame, &key, &client, max_tokens, &models, parse);
+    match tokio::time::timeout(std::time::Duration::from_secs(45), call).await {
+        Err(_) => Err("Reading the screen took too long, sir.".into()),
+        Ok(crate::vision::JsonStep::Found(v)) => {
+            crate::vision::record_use(&dir, "gemini");
+            Ok(v)
+        }
+        Ok(crate::vision::JsonStep::Quota) => {
+            crate::vision::mark_exhausted(&dir, "gemini");
+            Err("My vision allowance for today is used up, sir.".into())
+        }
+        Ok(crate::vision::JsonStep::Miss) => Err("I couldn't read that, sir.".into()),
+    }
 }
 
 /// Today's line from Google's seven weekday lines (Monday first), without the day name:
@@ -5939,28 +6053,8 @@ pub(crate) fn place_info_line(query: &str, ask: &str, detail: Option<&crate::goo
     }
 }
 
-fn place_info_card(d: &crate::google::types::PlaceDetail) -> String {
-    let mut md = format!("## {}\n\n", d.item.name);
-    if !d.item.address.is_empty() {
-        md.push_str(&format!("**Address:** {}\n\n", d.item.address));
-    }
-    if let Some(r) = d.item.rating {
-        md.push_str(&format!("**Rating:** {r:.1} / 5\n\n"));
-    }
-    if let Some(sum) = &d.summary {
-        md.push_str(&format!("{sum}\n\n"));
-    }
-    if !d.weekday_hours.is_empty() {
-        md.push_str("**Opening hours**\n\n");
-        for l in &d.weekday_hours {
-            md.push_str(&format!("- {l}\n"));
-        }
-    }
-    md
-}
-
 /// "Where / when is the Charminar", "is the museum open": one Places lookup, the map on that place, one spoken
-/// line, the details in the sidebar. Without a Places key it still opens Maps on the spoken name.
+/// line. The map window is the only thing shown (no sidebar card). Without a Places key it still opens Maps on the spoken name.
 async fn run_place_info<R: Runtime>(app: AppHandle<R>, query: String, ask: String) -> Result<ProcessResult, String> {
     use crate::google::maps::MapsService;
     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
@@ -5981,7 +6075,14 @@ async fn run_place_info<R: Runtime>(app: AppHandle<R>, query: String, ask: Strin
         Some(d) => format!("{} {}", d.item.name, d.item.address),
         None => query.clone(),
     };
-    if let Err(e) = crate::commands::open_maps_url(&app, &MapsService::build_place_search_url(&search_text)) {
+    let here = crate::location::current().await;
+    if let Err(e) = crate::maps_panel::show_map(
+        &app,
+        // "Where is X" opens straight on the route to it from where the user is now; no navigation starts.
+        crate::maps_panel::MapsTarget::Directions { origin: here.map(|f| f.as_point()), destination: search_text.clone(), mode: crate::google::types::TravelMode::Driving },
+    )
+    .await
+    {
         tracing::warn!("place info: could not open Maps window: {e}");
         return say_and_finish(&app, request_id, "I couldn't open the map window, sir.".into());
     }
@@ -5990,15 +6091,21 @@ async fn run_place_info<R: Runtime>(app: AppHandle<R>, query: String, ask: Strin
         chrono::Local::now().weekday().num_days_from_monday() as usize
     };
     let hours = detail.as_ref().and_then(|d| hours_today(&d.weekday_hours, weekday));
-    if let Some(d) = &detail {
-        let (a, q, md) = (app.clone(), query.clone(), place_info_card(d));
-        tauri::async_runtime::spawn(async move {
-            if let Err(e) = crate::commands::show_sidebar_with_content(a, q, md).await {
-                tracing::warn!("place info: sidebar failed: {e}");
-            }
-        });
+    // The place card beside the map: distance, car and bike time, address, photo, fare estimates.
+    let card = crate::place_card::build(&app, &query, here).await;
+    if let Some(card) = &card {
+        if let Err(e) = crate::place_card::show_card(&app, card.clone()) {
+            tracing::warn!("place card: could not show it: {e}");
+        }
     }
-    say_and_finish(&app, request_id, place_info_line(&query, &ask, detail.as_ref(), hours.as_deref()))
+    let mut line = place_info_line(&query, &ask, detail.as_ref(), hours.as_deref());
+    if let Some(card) = &card {
+        line.push_str(&crate::place_card::spoken_extra(card));
+    }
+    if here.as_ref().is_some_and(crate::location::should_tell_about_exact_location) {
+        line.push_str(" For an exact starting point, turn on location in Windows settings, sir.");
+    }
+    say_and_finish(&app, request_id, line)
 }
 
 /// "Analyse this email": freeze the foreground window, refuse sensitive ones, read the screenshot with the
@@ -6060,16 +6167,28 @@ async fn run_analyse_this_email<R: Runtime>(app: AppHandle<R>) -> Result<Process
         };
         let mut opened_map = false;
         if let Some(q) = crate::email_brief::map_query(&brief) {
-            let url = crate::google::maps::MapsService::build_place_search_url(&q);
-            opened_map = crate::commands::open_maps_url(&app, &url).is_ok();
+            opened_map = crate::maps_panel::show_map(&app, crate::maps_panel::MapsTarget::Place(q)).await.is_ok();
         }
+        // The email may name a repository without a link: find it in the user's GitHub and open its map.
+        let repo_line = match resolve_screen_repos(&brief.repos).await {
+            ScreenRepo::One(o, r) => {
+                let (a, oo, rr) = (app.clone(), o.clone(), r.clone());
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = crate::architect::open_architect_map_window(a, oo, rr).await {
+                        tracing::warn!("analyse email: architect map failed: {e}");
+                    }
+                });
+                format!(" It names your repository {o}/{r}; I've opened its map.")
+            }
+            _ => String::new(),
+        };
         let (a, title, md) = (app.clone(), brief.title.clone(), crate::email_brief::card_markdown(&brief));
         tauri::async_runtime::spawn(async move {
             if let Err(e) = crate::commands::show_sidebar_with_content(a, title, md).await {
                 tracing::warn!("analyse email: sidebar failed: {e}");
             }
         });
-        say_and_finish(&app, request_id, crate::email_brief::spoken_line(&brief, opened_map))
+        say_and_finish(&app, request_id, format!("{}{}", crate::email_brief::spoken_line(&brief, opened_map), repo_line))
     }
 }
 
@@ -8063,11 +8182,13 @@ async fn run_screen_analysis<R: Runtime>(
                 // 4. Speak the high-level summary — the model's overview
                 //    (names public figures/celebrities when recognized),
                 //    falling back to the element count when empty (Feature 98 P4).
-                let spoken_line = if !payload.overview.trim().is_empty() {
-                    format!(
-                        "{}, sir.",
-                        payload.overview.trim().trim_end_matches('.')
-                    )
+                let overview = payload.overview.trim();
+                let spoken_line = if !overview.is_empty() {
+                    // Spoken: two sentences at most; the full breakdown stays in the sidebar.
+                    match crate::howto::spoken_summary(overview) {
+                        Some(short) => format!("{short} The full breakdown is in the sidebar, sir."),
+                        None => format!("{}, sir.", overview.trim_end_matches('.')),
+                    }
                 } else {
                     let n = payload.items.len();
                     format!(
@@ -11282,8 +11403,6 @@ mod tests {
         assert_eq!(place_info_line("zzz", "when", None, None), "Showing zzz on the map, sir.");
         let none = PlaceDetail { item: PlaceItem { name: "X".into(), address: String::new(), rating: None, open_now: None }, weekday_hours: vec![], summary: None };
         assert!(place_info_line("x", "hours", Some(&none), None).contains("couldn't find its opening hours"));
-        let card = place_info_card(&d);
-        assert!(card.contains("## Charminar") && card.contains("Monday: Closed") && card.contains("4.5"));
     }
 
     #[test]

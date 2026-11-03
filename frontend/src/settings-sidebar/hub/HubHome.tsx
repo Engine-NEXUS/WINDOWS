@@ -77,6 +77,24 @@ const ICONS = {
       <path d="M4 20V10M10 20V4M16 20v-7M22 20H2" />
     </Svg>
   ),
+  vault: (
+    <Svg>
+      <ellipse cx="12" cy="6" rx="7" ry="3" />
+      <path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" />
+    </Svg>
+  ),
+  shield: (
+    <Svg>
+      <path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z" />
+      <path d="M9 12l2 2 4-4" />
+    </Svg>
+  ),
+  clock: (
+    <Svg>
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 7v5l3 2" />
+    </Svg>
+  ),
 };
 
 function Avatar({ a, size }: { a: HubAccount; size: number }) {
@@ -201,10 +219,10 @@ export function HubHome({ acc, insights: _insights, themeMode, onTheme: _onTheme
 
       {/* ── Settings Navigation ── */}
       <Row icon={ICONS.key} title="API Keys & Models" sub="Groq, Gemini & Providers" onClick={() => onOpen("keys")} />
-      <Row icon={ICONS.chart} title="Memory Core" sub="Vault & Cloud Recall" onClick={() => onOpen("memory")} />
-      <Row icon={ICONS.chart} title="Actions & Permissions" sub="Safety & Boundaries" onClick={() => onOpen("actions")} />
+      <Row icon={ICONS.vault} title="Memory Core" sub="Vault & Cloud Recall" onClick={() => onOpen("memory")} />
+      <Row icon={ICONS.shield} title="Actions & Permissions" sub="Safety & Boundaries" onClick={() => onOpen("actions")} />
       <Row icon={ICONS.plug} title="Device Links" sub="Laptop Mesh" onClick={() => onOpen("device-links")} />
-      <Row icon={ICONS.chart} title="Activity Manager" sub="Daily and weekly app usage" onClick={() => onOpen("activity")} />
+      <Row icon={ICONS.clock} title="Activity Manager" sub="Daily and weekly app usage" onClick={() => onOpen("activity")} />
       <Row
         icon={ICONS.orb}
         title="Voice Orb 3D Studio"

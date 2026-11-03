@@ -22,6 +22,8 @@ pub struct EmailBrief {
     pub address: Option<String>,
     pub links: Vec<String>,
     pub actions: Vec<String>,
+    /// GitHub repositories the email names (`owner/repo` or a bare name), cleaned by `repo_hint`.
+    pub repos: Vec<String>,
 }
 
 pub fn build_prompt() -> &'static str {
@@ -29,7 +31,7 @@ pub fn build_prompt() -> &'static str {
 {\"is_email\": true, \"title\": \"short subject or event name\", \"summary\": \"two sentences, facts from the email only\", \
 \"sender\": \"name or null\", \"dates\": [\"dates and times mentioned, as written\"], \"deadline\": \"registration or submission deadline or null\", \
 \"venue\": \"name of the place the event happens, or null\", \"address\": \"street address or city of the venue as written, or null\", \
-\"links\": [\"https links shown on screen\"], \"actions\": [\"what the reader must do, short\"]}\n\
+\"links\": [\"https links shown on screen\"], \"actions\": [\"what the reader must do, short\"], \"repos\": [\"GitHub repository names or owner/repo mentioned, as written\"]}\n\
 Rules: use only what is visible; if something is not in the email use null or []; never guess a venue or address; \
 if the screenshot is not an email set is_email to false."
 }
@@ -86,6 +88,7 @@ pub fn parse_brief(text: &str) -> Option<EmailBrief> {
         address: opt(v.get("address"), MAX_PLACE),
         links: list(v.get("links"), 200, |l| l.starts_with("https://") && !l.contains(' ')),
         actions: list(v.get("actions"), 140, |_| true),
+        repos: crate::repo_hint::parse_names(&v.to_string()),
     })
 }
 
@@ -132,6 +135,13 @@ pub fn card_markdown(b: &EmailBrief) -> String {
         md.push_str("**What to do**\n\n");
         for a in &b.actions {
             md.push_str(&format!("- {a}\n"));
+        }
+        md.push('\n');
+    }
+    if !b.repos.is_empty() {
+        md.push_str("**Repositories**\n\n");
+        for r in &b.repos {
+            md.push_str(&format!("- {r}\n"));
         }
         md.push('\n');
     }

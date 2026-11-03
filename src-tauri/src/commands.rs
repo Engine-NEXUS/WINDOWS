@@ -1023,6 +1023,12 @@ pub fn sidebar_geometry(
             let x = (sidebar_x - 10.0 - w).max(0.0);
             (x, 20.0, w, h)
         }
+        // The annotation palette is a small tool strip, not a panel: a compact window so it does not cover the screen
+        // being annotated.
+        "annotate" => {
+            let h = 380.0_f64.min((monitor_h - 40.0).max(300.0));
+            dock_x(320.0, h)
+        }
         // "assistant" | fallback → default right dock, full height.
         _ => {
             let h = (monitor_h - 40.0).min(1040.0).max(400.0);
@@ -1795,6 +1801,16 @@ pub struct NexusSettings {
     /// the name passed that gate and woke NEXUS (2026-10-31 log), so the cloud speech check stays the default.
     #[serde(default)]
     pub wake_owner_fast_path: bool,
+    /// Show maps inside a NEXUS panel (Google's embed). Off = always use the old Maps window.
+    #[serde(default = "default_true")]
+    pub maps_embed: bool,
+    /// Where the place card gets distance and travel time: "auto" (your routing server if one is set, else your Google
+    /// key, else the open service), "server", "google" or "open".
+    #[serde(default = "default_routing_mode")]
+    pub routing_mode: String,
+    /// Address of your own routing server (see server/routing). Empty = none.
+    #[serde(default)]
+    pub routing_server_url: String,
     /// Wake-word front-end chain: "legacy" (the original runtime chain, default)
     /// or "aligned" (identical to the chain the classifier was trained with).
     /// Compare with `wake_eval --dsp` on your recordings before switching.
@@ -2286,6 +2302,9 @@ impl Default for NexusSettings {
             stt_command_hints: false,
             wake_seed_offset_ms: 0,
             wake_owner_fast_path: false,
+            maps_embed: true,
+            routing_mode: default_routing_mode(),
+            routing_server_url: String::new(),
             wake_dsp_profile: default_wake_dsp_profile(),
             ghost_step_timeout_ms: 15000,
             ghost_turn_gap_ms: 1000,
@@ -3303,6 +3322,23 @@ pub fn read_wake_verify_high<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> f3
         .unwrap_or(crate::wakeword_oww::DEFAULT_VERIFY_HIGH)
 }
 
+fn default_routing_mode() -> String {
+    "auto".to_string()
+}
+
+/// `(routingMode, routingServerUrl)` from settings.json, with the defaults when unset. The server token is a key in
+/// the vault (`routing_server`), never in this file.
+pub fn read_routing_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> (String, String) {
+    let j = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .and_then(|d| std::fs::read_to_string(d.join("settings.json")).ok())
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
+    let get = |k: &str| j.as_ref().and_then(|j| j.get(k)).and_then(|v| v.as_str()).map(|s| s.trim().to_string());
+    (get("routingMode").filter(|m| matches!(m.as_str(), "auto" | "server" | "google" | "open")).unwrap_or_else(default_routing_mode), get("routingServerUrl").unwrap_or_default())
+}
+
 /// Read `wakeOwnerFastPath` (false when unset: the cloud speech check stays on).
 pub fn read_wake_owner_fast_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let Ok(dir) = app.path().app_data_dir() else { return false; };
@@ -3964,6 +4000,14 @@ pub fn import_settings<R: Runtime>(app: AppHandle<R>, json_str: String) -> Resul
 #[cfg(test)]
 mod sidebar_geometry_tests {
     use super::sidebar_geometry;
+
+    #[test]
+    fn annotate_is_a_compact_window_on_screen() {
+        for (mw, mh) in [(1366.0, 728.0), (1920.0, 1040.0), (2560.0, 1400.0), (1000.0, 600.0)] {
+            let (x, y, w, h) = sidebar_geometry("annotate", None, mw, mh);
+            assert!(w <= 320.0 && h <= 380.0 && x >= 0.0 && y >= 0.0 && x + w <= mw + 0.001 && y + h <= mh + 0.001, "{mw}x{mh}: {x},{y},{w},{h}");
+        }
+    }
 
     #[test]
     fn architect_beside_sits_left_of_the_sidebar_without_overlap() {

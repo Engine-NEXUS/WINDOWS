@@ -107,34 +107,18 @@ describe("SpatialDashboard and SpatialCard Kit Restyle", () => {
     expect(inactiveHtml).not.toContain("spatial-card--active");
   });
 
-  it("dock buttons call onDock('left') and onDock('right') and live in the first child of .sidebar-view-col", () => {
-    const handleDock = vi.fn();
+  it("has no header row and no dock buttons; the drag strip is the first child of .sidebar-view-col", () => {
     let viewEl: any;
     function TestView() {
-      viewEl = SpatialView({ data: MOCK_DATA, onDock: handleDock });
+      viewEl = SpatialView({ data: MOCK_DATA, onDock: vi.fn() });
       return viewEl;
     }
     const html = renderToString(<TestView />);
 
-    // Assert that .sidebar-header-row is the FIRST child inside .sidebar-view-col
-    expect(html).toMatch(/<div class="sidebar-view-col">\s*<header class="[^"]*sidebar-header-row/);
-
-    // Verify first child of .sidebar-view-col is AppBar
-    const appBarChild = viewEl.props.children[0];
-    expect(appBarChild.props.className).toBe("sidebar-header-row");
-
-    const actions = appBarChild.props.actions;
-    const [leftBtn, rightBtn] = actions.props.children;
-
-    expect(leftBtn.props.label).toBe("Dock Left");
-    expect(leftBtn.props.className).toBe("sidebar-dock-btn");
-    leftBtn.props.onClick();
-    expect(handleDock).toHaveBeenCalledWith("left");
-
-    expect(rightBtn.props.label).toBe("Dock Right");
-    expect(rightBtn.props.className).toBe("sidebar-dock-btn");
-    rightBtn.props.onClick();
-    expect(handleDock).toHaveBeenCalledWith("right");
+    expect(html).toMatch(/<div class="sidebar-view-col">\s*<div class="sidebar-drag-strip"/);
+    expect(html).not.toContain("sidebar-header-row");
+    expect(html).not.toContain("Dock Left");
+    expect(viewEl.props.children[0].props.className).toBe("sidebar-drag-strip");
   });
 
   it("renders 380px phone column, hero card, item list card, and definition list", () => {

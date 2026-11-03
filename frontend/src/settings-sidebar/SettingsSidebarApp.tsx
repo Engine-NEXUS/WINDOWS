@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, Component, type ErrorInfo } from "react";
 import { HandModeSection } from "./HandModeSection";
 import { AgentWatchSection } from "./AgentWatchSection";
+import { RoutingSection } from "./RoutingSection";
 import { invoke } from "@tauri-apps/api/core";
 import { useVoiceLockState, VoiceLockStatus, VerifiedSaveStatus } from "../settings/VoiceLockStatus";
 import { applyNativeLockToDraft, clearSubmittedFields, type VoiceLockState } from "../settings/voiceLockState";
@@ -17,7 +18,7 @@ import {
   type OAuthStatus,
 } from "../setup/oauth";
 import { useAssistant } from "../store/assistant";
-import { DockButtons, DockIcon } from "../sidebar/kit/DockButtons";
+import { DockIcon } from "../sidebar/kit/DockButtons";
 import { applyThemePreference, normalizePreference, resolveThemeMode, type ThemePreference } from "../sidebar/theme";
 import "./hub/hub.css";
 import { HubHome, type HubPage } from "./hub/HubHome";
@@ -130,6 +131,8 @@ interface Settings {
   ghostTurnGapMs?: number;
   ghostEngagementSecs?: number;
   directedGate?: boolean;
+  routingMode?: string;
+  routingServerUrl?: string;
   handMode?: boolean;
   handMousePreview?: boolean;
   handShowCamera?: boolean;
@@ -221,6 +224,8 @@ const DEFAULT_SETTINGS: Settings = {
   ghostTurnGapMs: 1000,
   ghostEngagementSecs: 0,
   directedGate: true,
+  routingMode: "auto",
+  routingServerUrl: "",
   handMode: true,
   handMousePreview: false,
   handShowCamera: false,
@@ -310,7 +315,7 @@ class SubpageErrorBoundary extends Component<SubpageErrorBoundaryProps, SubpageE
   }
 }
 
-export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string) => void }) {
+export function SettingsSidebarApp({ onDock: _onDock = () => {} }: { onDock?: (d: string) => void }) {
   const dirtyFields = useRef<Set<keyof Settings>>(new Set());
   const [page, setPage] = useState<HubPage>("home");
   const [insightsKey, setInsightsKey] = useState(0);
@@ -452,9 +457,6 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
           )}
         </div>
         <div className="hx-title" data-tauri-drag-region>{PAGE_TITLES[page]}</div>
-        <div className="hx-header-dock" data-tauri-drag-region>
-          <DockButtons onDock={onDock} />
-        </div>
       </header>
 
       {toast && <div className="hx-toast">{toast}</div>}
@@ -469,7 +471,7 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
           {page === "actions" && <ActionsPage />}
           {page === "device-links" && <DeviceLinksPage onOpenActivity={() => setPage("activity")} />}
           {page === "activity" && <ActivityManagerPage />}
-          {page === "connections" && <McpServersPanel />}
+          {page === "connections" && <><McpServersPanel /><RoutingSection settings={settings} update={update as (k: "routingMode" | "routingServerUrl", v: string) => void} /></>}
           {page === "appearance" && <AppearancePage themeMode={themePreference} onTheme={handleTheme} />}
           {isLegacyPage && (
             <div className="hx-legacy">

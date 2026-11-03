@@ -84,6 +84,28 @@ impl WindowConfig {
         }
     }
 
+    /// Google Maps inside a NEXUS panel (`?pin=maps`): frameless, glass, placed by `panel_layout`.
+    pub fn maps_panel() -> Self {
+        Self {
+            label: "maps-panel", title: "NEXUS Map", url: "sidebar.html?pin=maps",
+            width: 720., height: 950., min_width: None, min_height: None,
+            resizable: false, decorations: false, transparent: true,
+            always_on_top: true, skip_taskbar: true, shadow: false,
+            focus: false, center: false, hidden_title: true,
+        }
+    }
+
+    /// The place card: a 315 px column (`?pin=place`), frameless glass, placed by `panel_layout`.
+    pub fn place_card() -> Self {
+        Self {
+            label: "place-card", title: "NEXUS Place", url: "sidebar.html?pin=place",
+            width: 315., height: 950., min_width: None, min_height: None,
+            resizable: false, decorations: false, transparent: true,
+            always_on_top: true, skip_taskbar: true, shadow: false,
+            focus: false, center: false, hidden_title: true,
+        }
+    }
+
     /// Stage shell — fullscreen transparent overlay, always-on (single-
     /// stage migration). Hosts the voice orb, the loading indicator, the
     /// ghost ring, and stage notices/annotations. WS_EX_TOOLWINDOW so
@@ -207,7 +229,7 @@ pub fn get_or_create_window<R: Runtime>(
         // (sidebar_backdrop.rs -> `sidebar:backdrop` -> `.sidebar-card::after`).
         let is_glass_window = matches!(
             config.label,
-            "sidebar" | "architect-map" | "calibrate-toolbar" | "settings" | "setup" | "orb-studio"
+            "sidebar" | "architect-map" | "maps-panel" | "place-card" | "calibrate-toolbar" | "settings" | "setup" | "orb-studio"
         );
         if is_glass_window {
             crate::dwm_corners::round_corners(&win);
@@ -316,4 +338,64 @@ pub fn open_external_window<R: Runtime>(
         .map_err(|e| format!("Failed to create {label} window: {e}"))?;
     let _ = win.set_focus();
     Ok(())
+}
+
+/// The address the injected close button / Escape key navigates to; `open_external_panel` intercepts it.
+const PANEL_CLOSE_URL: &str = "https://nexus.invalid/close";
+
+/// Like `open_external_window`, but a plain NEXUS panel: no title bar, no taskbar entry, placed by `panel_layout`
+/// (the caller does that). Needs no API key: the page is the normal site shown as a top-level document. The remote page
+/// gets no Tauri IPC (its label is in no capability file); a small close button and Escape are injected and handled by
+/// intercepting the navigation to `PANEL_CLOSE_URL`, then `on_close` runs.
+pub fn open_external_panel<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    label: &'static str,
+    url: &str,
+    title: &str,
+    size: (f64, f64),
+    on_close: fn(&tauri::AppHandle<R>),
+) -> Result<tauri::WebviewWindow<R>, String> {
+    let parsed: tauri::Url = url.parse().map_err(|e| format!("bad url: {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err("external panels must use https".into());
+    }
+    if let Some(win) = app.get_webview_window(label) {
+        let js = format!("window.location.replace({})", serde_json::to_string(url).map_err(|e| e.to_string())?);
+        win.eval(&js).map_err(|e| format!("navigate: {e}"))?;
+        return Ok(win);
+    }
+    let script = format!(
+        "(function(){{if(window.top!==window)return;var go=function(){{location.href='{PANEL_CLOSE_URL}';}};\
+         addEventListener('keydown',function(e){{if(e.key==='Escape')go();}},true);\
+         var add=function(){{if(document.getElementById('nexus-close')||!document.body)return;var b=document.createElement('button');\
+         b.id='nexus-close';b.textContent='\\u00d7';b.setAttribute('aria-label','Close map');\
+         b.style.cssText='position:fixed;top:10px;left:10px;z-index:2147483647;width:30px;height:30px;border-radius:15px;border:1px solid rgba(255,255,255,.4);background:rgba(20,20,22,.78);color:#fff;font:20px/26px system-ui,sans-serif;cursor:pointer;padding:0';\
+         b.onclick=go;document.body.appendChild(b);}};\
+         document.addEventListener('DOMContentLoaded',add);setInterval(add,1500);}})();"
+    );
+    let handle = app.clone();
+    let win = WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed))
+        .title(title)
+        .inner_size(size.0, size.1)
+        .resizable(false)
+        .decorations(false)
+        .skip_taskbar(true)
+        .always_on_top(true)
+        .focused(true)
+        .initialization_script(&script)
+        .on_navigation(move |u| {
+            if u.host_str() == Some("nexus.invalid") {
+                let h = handle.clone();
+                // Destroying a window from inside its own navigation callback can deadlock: do it off-thread.
+                std::thread::spawn(move || {
+                    let _ = destroy_window(&h, label);
+                    on_close(&h);
+                });
+                return false;
+            }
+            true
+        })
+        .build()
+        .map_err(|e| format!("Failed to create {label} window: {e}"))?;
+    Ok(win)
 }

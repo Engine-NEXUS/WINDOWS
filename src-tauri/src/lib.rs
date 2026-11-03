@@ -169,6 +169,12 @@ pub(crate) mod agent_tracker;
 pub(crate) mod agent_outcomes;
 pub(crate) mod howto;
 pub(crate) mod email_brief;
+pub(crate) mod repo_hint;
+pub(crate) mod panel_layout;
+pub(crate) mod maps_panel;
+pub(crate) mod location;
+pub(crate) mod fares;
+pub(crate) mod place_card;
 pub(crate) mod power_close;
 pub(crate) mod window_tile;
 pub(crate) mod latency;
@@ -1328,6 +1334,13 @@ pub fn run() {
             architect::enrich_phase1,
             architect::cancel_architect_analysis,
             architect::close_architect_map,
+            maps_panel::close_maps_panel,
+            maps_panel::get_pending_maps,
+            maps_panel::panel_resize,
+            place_card::get_pending_place,
+            place_card::close_place_card,
+            place_card::place_card_open,
+            place_card::routing_server_test,
             architect::query_impact,
             // Agent-completion watcher (Claude Code, Gemini CLI, Codex, Aider, Hermes, opencode)
             agent_watch::agent_watch_unavailable_reason,

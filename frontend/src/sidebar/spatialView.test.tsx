@@ -25,59 +25,39 @@ const MOCK_SPATIAL_DATA: SpatialData = {
   provider_used: "gemini-2.0-flash",
 };
 
-describe("SpatialView dock button layout and column container", () => {
+describe("SpatialView is a plain window: no heading, no dock buttons", () => {
   beforeEach(() => {
     useSidebar.setState({
       spatialData: null,
     });
   });
 
-  it("renders with data inside flex-row wrapper, sharing .sidebar-view-col with header as first child", () => {
-    const handleDock = (_dir: string) => {};
-
+  it("renders the dashboard in .sidebar-view-col behind an invisible drag strip, with no header row or dock buttons", () => {
     const html = renderToString(
       <div className="unified-view" style={{ display: "flex", flexDirection: "row" }}>
-        <SpatialView data={MOCK_SPATIAL_DATA} onDock={handleDock} />
+        <SpatialView data={MOCK_SPATIAL_DATA} onDock={() => {}} />
       </div>,
     );
 
-    // Verify parent flex row wrapper
     expect(html).toContain('class="unified-view"');
-
-    // Verify header and dashboard are wrapped together in .sidebar-view-col
-    expect(html).toContain('class="sidebar-view-col"');
-    expect(html).toContain("sidebar-header-row");
+    expect(html).toMatch(/<div class="sidebar-view-col">\s*<div class="sidebar-drag-strip"/);
     expect(html).toContain('class="spatial-dashboard"');
-
-    // Assert that .sidebar-header-row is the FIRST child inside .sidebar-view-col
-    expect(html).toMatch(/<div class="sidebar-view-col">\s*<header class="[^"]*sidebar-header-row/);
-
-    // Assert that the dashboard body is inside the same container following the header
-    const colIdx = html.indexOf('class="sidebar-view-col"');
-    const headerIdx = html.indexOf("sidebar-header-row");
-    const dashboardIdx = html.indexOf('class="spatial-dashboard"');
-
-    expect(colIdx).toBeGreaterThan(-1);
-    expect(headerIdx).toBeGreaterThan(colIdx);
-    expect(dashboardIdx).toBeGreaterThan(headerIdx);
-
-    // Dock buttons are inside the header row
-    expect(html).toContain('title="Dock Left"');
-    expect(html).toContain('title="Dock Right"');
-    // The glyph characters were replaced by SVG icons that follow the text colour (kit/DockButtons.tsx).
-    expect(html).toContain('class="dock-icon"');
-    expect(html).not.toContain("◧");
+    // The window is plain: no title bar and no dock buttons (arrow keys dock it).
+    expect(html).not.toContain("sidebar-header-row");
+    expect(html).not.toContain('title="Dock Left"');
+    expect(html).not.toContain('title="Dock Right"');
+    expect(html).not.toContain("dock-icon");
   });
 
-  it("renders empty state wrapped in .sidebar-view-col with header as first child", () => {
+  it("renders the empty state the same way", () => {
     const html = renderToString(
       <div className="unified-view" style={{ display: "flex", flexDirection: "row" }}>
         <SpatialView data={null} />
       </div>,
     );
 
-    expect(html).toContain('class="sidebar-view-col"');
-    expect(html).toMatch(/<div class="sidebar-view-col">\s*<header class="[^"]*sidebar-header-row/);
+    expect(html).toMatch(/<div class="sidebar-view-col">\s*<div class="sidebar-drag-strip"/);
+    expect(html).not.toContain("sidebar-header-row");
     expect(html).toContain('class="spatial-dashboard spatial-dashboard--empty"');
     expect(html).toContain("No spatial analysis yet, sir");
   });

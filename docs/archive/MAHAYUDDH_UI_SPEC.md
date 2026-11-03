@@ -1,9 +1,9 @@
-> **SUPERSEDED â€” archived 2026-10-17.** This document describes an earlier design or a point-in-time snapshot (n8n/Ollama "fat server", faster-whisper, Piper, Fernet-in-SQLite sidecar, PR-era status). It no longer matches the code. For current behaviour read the repository `README.md`, `docs/README.md` and `AGENTS.md`. Kept for history only.
+> **SUPERSEDED Ã¢â‚¬â€ archived 2026-10-17.** This document describes an earlier design or a point-in-time snapshot (n8n/Ollama "fat server", faster-whisper, Piper, Fernet-in-SQLite sidecar, PR-era status). It no longer matches the code. For current behaviour read the repository `README.md`, `docs/README.md` and `AGENTS.md`. Kept for history only.
 
 # Mahayuddh UI Design Guidelines (Apple Music Web UI Specification)
 
 > **Version:** 2.0.0  
-> **Aesthetic:** Apple Music Web (music.apple.com) — High-contrast pitch black surfaces (#000000), frosted glass fixed sidebar navigation, Category Bento Tiles with rich color gradients, "Top Picks" hero banners, and a persistent "Now Solving" active session bottom bar.  
+> **Aesthetic:** Apple Music Web (music.apple.com) â€” High-contrast pitch black surfaces (#000000), frosted glass fixed sidebar navigation, Category Bento Tiles with rich color gradients, "Top Picks" hero banners, and a persistent "Now Solving" active session bottom bar.  
 > **Target:** WCAG 2.2 AA Compliance  
 > **Status:** Active Target Specification  
 
@@ -15,26 +15,26 @@ The visual architecture is directly modeled after the **Apple Music Web App** la
 
 `
 +------------------------------------------------------------------------------------------+
-¦   Mahayuddh    ¦ ?? Search problems, tags, friends...              [All] [Squad Sheets] ¦
-¦                 +------------------------------------------------------------------------¦
-¦  ?? Search      ¦                                                                        ¦
-¦  ?? Arena       ¦  Top Picks for Squad (Hero Cards)                                      ¦
-¦  ?? Leaderboard ¦  +--------------+ +--------------+ +--------------+ +--------------+  ¦
-¦  ?? Suggestions ¦  ¦  Today POTD  ¦ ¦Streak Guardian¦ ¦Upcoming Contest¦ ¦ Top Suggestion ¦  ¦
-¦                 ¦  +--------------+ +--------------+ +--------------+ +--------------+  ¦
-¦  ROADMAPS       ¦                                                                        ¦
-¦  ?? NeetCode150 ¦  Browse DSA Topics (Category Bento Grid)                               ¦
-¦  ? Blind 75    ¦  +--------------+ +--------------+ +--------------+ +--------------+  ¦
-¦  ?? Striver SDE ¦  ¦  Arrays/Hash ¦ ¦  DP Patterns ¦ ¦ Graphs & BFS ¦ ¦ Binary Search¦  ¦
-¦                 ¦  +--------------+ +--------------+ +--------------+ +--------------+  ¦
-¦  CUSTOM LISTS   ¦                                                                        ¦
-¦  ?? Trees & BST ¦  Squad Activity Tracklist                                              ¦
-¦  ?? 3AM Lore ?? ¦  #1  Prem Sai   ?? 14d   1920 Rating   [E:40 M:85 H:15]   [Suggest]    ¦
-¦  ? New List    ¦  #2  Rahul K    ?? 8d    1810 Rating   [E:35 M:70 H:8]    [Suggest]    ¦
-¦                 ¦                                                                        ¦
-¦  ?? Prem Sai    ¦                                                                        ¦
-+------------------------------------------------------------------------------------------¦
-¦  [? ? ?] 00:24:15 ¦ ?? [Medium] 3Sum - Two Pointers (LeetCode #15) ¦ [Notes] [Push ??]  ¦
+Â¦   Mahayuddh    Â¦ ?? Search problems, tags, friends...              [All] [Squad Sheets] Â¦
+Â¦                 +------------------------------------------------------------------------Â¦
+Â¦  ?? Search      Â¦                                                                        Â¦
+Â¦  ?? Arena       Â¦  Top Picks for Squad (Hero Cards)                                      Â¦
+Â¦  ?? Leaderboard Â¦  +--------------+ +--------------+ +--------------+ +--------------+  Â¦
+Â¦  ?? Suggestions Â¦  Â¦  Today POTD  Â¦ Â¦Streak GuardianÂ¦ Â¦Upcoming ContestÂ¦ Â¦ Top Suggestion Â¦  Â¦
+Â¦                 Â¦  +--------------+ +--------------+ +--------------+ +--------------+  Â¦
+Â¦  ROADMAPS       Â¦                                                                        Â¦
+Â¦  ?? NeetCode150 Â¦  Browse DSA Topics (Category Bento Grid)                               Â¦
+Â¦  ? Blind 75    Â¦  +--------------+ +--------------+ +--------------+ +--------------+  Â¦
+Â¦  ?? Striver SDE Â¦  Â¦  Arrays/Hash Â¦ Â¦  DP Patterns Â¦ Â¦ Graphs & BFS Â¦ Â¦ Binary SearchÂ¦  Â¦
+Â¦                 Â¦  +--------------+ +--------------+ +--------------+ +--------------+  Â¦
+Â¦  CUSTOM LISTS   Â¦                                                                        Â¦
+Â¦  ?? Trees & BST Â¦  Squad Activity Tracklist                                              Â¦
+Â¦  ?? 3AM Lore ?? Â¦  #1  Prem Sai   ?? 14d   1920 Rating   [E:40 M:85 H:15]   [Suggest]    Â¦
+Â¦  ? New List    Â¦  #2  Rahul K    ?? 8d    1810 Rating   [E:35 M:70 H:8]    [Suggest]    Â¦
+Â¦                 Â¦                                                                        Â¦
+Â¦  ?? Prem Sai    Â¦                                                                        Â¦
++------------------------------------------------------------------------------------------Â¦
+Â¦  [? ? ?] 00:24:15 Â¦ ?? [Medium] 3Sum - Two Pointers (LeetCode #15) Â¦ [Notes] [Push ??]  Â¦
 +------------------------------------------------------------------------------------------+
 `
 
@@ -64,7 +64,7 @@ The visual architecture is directly modeled after the **Apple Music Web App** la
   * color.text.primary = #ffffff *(Main headings, card titles, high-contrast numbers)*
   * color.text.secondary = #8e8e93 *(Supporting metadata, problem slugs, timestamps)*
   * color.text.tertiary = #636366 *(Subtle icon fills, disabled hints)*
-  * color.text.accent = #fa586a *(Apple Music signature Rose/Crimson — active sidebar, streak fire, primary CTAs)*
+  * color.text.accent = #fa586a *(Apple Music signature Rose/Crimson â€” active sidebar, streak fire, primary CTAs)*
   * color.text.accentDark = #d60017 *(Deep crimson for high-contrast active backgrounds)*
 * **Difficulty Badges:**
   * color.difficulty.easy = #30d158 *(Apple Green)*
@@ -144,7 +144,7 @@ The visual architecture is directly modeled after the **Apple Music Web App** la
   * Bottom-left typography:
     * Category sub-label (ont.size.xs, uppercase, color.text.secondary, e.g. "PROBLEM OF THE DAY").
     * Main Card Title (ont.size.2xl, bold, color.text.primary, e.g. "LC #15: 3Sum").
-    * Status / Squad Progress (ont.size.xs, e.g. "3/5 Friends Solved • 45 mins avg").
+    * Status / Squad Progress (ont.size.xs, e.g. "3/5 Friends Solved â€¢ 45 mins avg").
 
 ### 4. Category Bento Grid (Referencing image.png)
 * **Layout:** 5-column responsive grid (grid-template-columns: repeat(auto-fill, minmax(210px, 1fr))), gap 16px.

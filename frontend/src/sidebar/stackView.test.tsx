@@ -19,8 +19,8 @@ describe("StackView component rendering (Phone Layout)", () => {
     const html = renderToString(<StackView />);
     expect(html).toContain("Say: Nexus, reverse engineer this website");
     expect(html).toContain("stack-view--empty");
-    expect(html).toContain('title="Dock Left"');
-    expect(html).toContain('title="Dock Right"');
+    expect(html).not.toContain("Dock Left");
+    expect(html).not.toContain("Dock Right");
     expect(html).toContain("Tech Stack");
     expect(html).toContain("Web Reverse Engineer");
   });
@@ -38,8 +38,8 @@ describe("StackView component rendering (Phone Layout)", () => {
     expect(html).toContain("Acme Cloud Platform");
     expect(html).toContain("acme.com · Tech stack");
     expect(html).toContain('title="Copy Report"');
-    expect(html).toContain('title="Dock Left"');
-    expect(html).toContain('title="Dock Right"');
+    expect(html).not.toContain("Dock Left");
+    expect(html).not.toContain("Dock Right");
 
     // 2. Hero Card
     expect(html).toContain("Acme is a modern Next.js 15 web application");
@@ -163,44 +163,14 @@ describe("StackView component rendering (Phone Layout)", () => {
     expect(collapsedHtml).not.toContain('class="stack-evidence-list"');
   });
 
-  it("calls onDock when dock buttons are clicked", () => {
-    const onDock = vi.fn();
+  it("has no dock buttons in either state (Left / Right arrow keys dock the window)", () => {
     const iconBtnSpy = vi.spyOn(Kit, "IconButton");
-
-    // Render empty state
-    renderToString(<StackView onDock={onDock} />);
-
-    // Find the calls for Dock Left and Dock Right
-    const emptyDockLeftCall = iconBtnSpy.mock.calls.find((call) => call[0]?.label === "Dock Left");
-    const emptyDockRightCall = iconBtnSpy.mock.calls.find((call) => call[0]?.label === "Dock Right");
-
-    expect(emptyDockLeftCall).toBeDefined();
-    expect(emptyDockRightCall).toBeDefined();
-
-    emptyDockLeftCall![0].onClick?.();
-    expect(onDock).toHaveBeenCalledWith("left");
-
-    emptyDockRightCall![0].onClick?.();
-    expect(onDock).toHaveBeenCalledWith("right");
-
-    // Render populated state
-    onDock.mockClear();
-    iconBtnSpy.mockClear();
-
-    renderToString(<StackView onDock={onDock} payload={SAMPLE_PAYLOAD} />);
-
-    const popDockLeftCall = iconBtnSpy.mock.calls.find((call) => call[0]?.label === "Dock Left");
-    const popDockRightCall = iconBtnSpy.mock.calls.find((call) => call[0]?.label === "Dock Right");
-
-    expect(popDockLeftCall).toBeDefined();
-    expect(popDockRightCall).toBeDefined();
-
-    popDockLeftCall![0].onClick?.();
-    expect(onDock).toHaveBeenCalledWith("left");
-
-    popDockRightCall![0].onClick?.();
-    expect(onDock).toHaveBeenCalledWith("right");
-
+    renderToString(<StackView />);
+    renderToString(<StackView payload={SAMPLE_PAYLOAD} />);
+    const labels = iconBtnSpy.mock.calls.map((c) => c[0]?.label);
+    expect(labels).not.toContain("Dock Left");
+    expect(labels).not.toContain("Dock Right");
+    expect(labels).toContain("Copy Report");
     iconBtnSpy.mockRestore();
   });
 

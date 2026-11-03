@@ -430,6 +430,10 @@ try {
           Write-Log "READY" "NEXUS Voice Engine Active — Listening for 'NEXUS'..." $C_RUST; $rustShown++
         } elseif ($msg -match "stream paused|stream resumed|baton") {
           Write-Log "BATON" $msg $C_CMD; $rustShown++
+        } elseif ($msg -match "^\[WAKE\]|verify: (STT confirmed|transcript .* rejected|STT timed out|verified candidate)|wake-word: REJECTED by speaker") {
+          # Every wake outcome in one place: which path fired, what the cloud check said, why a wake was refused.
+          $wakeColor = if ($msg -match "rejected|SUPPRESSED|timed out|REJECTED") { "DarkRed" } else { "Green" }
+          Write-Log "WAKE" $msg $wakeColor; $rustShown++
         } elseif ($msg -match "model probability") {
           # Only show probabilities above 0.3
           if ($msg -match "probability=0\.[3-9]|probability=1\.") {

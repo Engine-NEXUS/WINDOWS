@@ -1,0 +1,40 @@
+# NEXUS routing server: Valhalla (the map engine) + a tiny adapter NEXUS talks to.
+# Run on any always-on machine (a home server is fine):   ROUTING_TOKEN=<long random string> docker compose up -d
+# First start downloads the India map data and builds routing tiles: expect an hour or more and a few GB of disk.
+# NOTE: written without being able to run Docker here. Check the Valhalla image's README for the current variable names.
+services:
+  valhalla:
+    image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+    restart: unless-stopped
+    volumes:
+      - valhalla_tiles:/custom_files
+    environment:
+      tile_urls: https://download.geofabrik.de/asia/india-latest.osm.pbf
+      use_tiles_ignore_pbf: "True"
+      build_elevation: "False"
+      build_admins: "True"
+      build_time_zones: "False"
+      server_threads: "4"
+    expose:
+      - "8002"
+
+  adapter:
+    image: python:3.12-slim
+    restart: unless-stopped
+    working_dir: /srv
+    volumes:
+      - ./app.py:/srv/app.py:ro
+    command: ["python", "app.py"]
+    environment:
+      ROUTING_TOKEN: ${ROUTING_TOKEN:?set ROUTING_TOKEN}
+      VALHALLA_URL: http://valhalla:8002
+      HOST: 0.0.0.0
+      PORT: "8080"
+    depends_on:
+      - valhalla
+    ports:
+      # Local only. Reach it from outside through a Cloudflare Tunnel (no open router ports), or from your home network.
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  valhalla_tiles:
