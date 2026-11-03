@@ -510,6 +510,21 @@ fn inform_via_orb<R: Runtime>(app: &AppHandle<R>, text: &str) {
     let _ = app.emit("stage:notice", payload);
 }
 
+static RESUMED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// The machine just woke from sleep: the watchdog gives the renderer a short grace instead of calling it a blackout.
+pub fn note_resume() {
+    if let Ok(mut g) = RESUMED_AT.lock() {
+        *g = Some(std::time::Instant::now());
+    }
+}
+
+fn resumed_recently() -> bool {
+    RESUMED_AT.lock().ok().and_then(|g| *g).map_or(false, |t| t.elapsed().as_secs() < RESUME_GRACE_SECS)
+}
+
+const RESUME_GRACE_SECS: u64 = 40;
+
 /// Blackout watchdog: 2s cadence. Detect → shutdown → inform → auto-fix
 /// (see module docs). Gives up recreating after MAX_AUTO_FIXES but keeps
 /// watching so a manual `stage_show` still recovers.
@@ -534,6 +549,11 @@ pub fn spawn_stage_watchdog<R: Runtime>(app: AppHandle<R>) {
                 .map(|t| t.elapsed().as_secs() > HEARTBEAT_STALE_SECS)
                 .unwrap_or(true);
             if !window_gone && !stale {
+                continue;
+            }
+            // Just woke from sleep: the renderer was frozen, so its heartbeat is stale for a few seconds. That is not a blackout
+            // (measured 2026-11-03: a needless destroy + rebuild at every wake). Give it time to beat again.
+            if !window_gone && resumed_recently() {
                 continue;
             }
 

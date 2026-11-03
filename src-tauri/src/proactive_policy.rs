@@ -449,6 +449,18 @@ fn collect_signals<R: Runtime>(app: &AppHandle<R>) -> Signals {
     }
 }
 
+/// The user last touched the keyboard or mouse less than this long ago.
+const AWAY_AFTER_SECS: u64 = 20 * 60;
+
+/// Pure: is someone at the PC, given the OS idle time (None = unknown, benefit of the doubt) and the lock state?
+pub fn presence_from(idle_secs: Option<u64>, locked: bool) -> bool {
+    !locked && idle_secs.map_or(true, |s| s < AWAY_AFTER_SECS)
+}
+
+fn someone_is_here() -> bool {
+    presence_from(crate::memcore::resume::user_idle_secs(), !crate::early_hello::not_locked_now())
+}
+
 fn execute<R: Runtime>(app: &AppHandle<R>, actions: Vec<Action>) {
     for a in actions {
         match a {
@@ -457,6 +469,13 @@ fn execute<R: Runtime>(app: &AppHandle<R>, actions: Vec<Action>) {
                 let _ = app.emit("proactive:card", serde_json::json!({ "id": id, "reason": reason }));
             }
             Action::Speak { id, text, lead_in, override_meeting } => {
+                // Nobody at the PC (no keyboard or mouse for a long time, or the lock screen is up): an alert spoken now would
+                // be heard by no one, or hours later (a brief wake with nobody there spoke "sign in again" that way).
+                if !override_meeting && !someone_is_here() {
+                    tracing::info!("proactive: '{id}' not spoken (nobody is at the PC) — stays as a card");
+                    let _ = app.emit("proactive:card", serde_json::json!({ "id": id, "reason": "nobody at the PC" }));
+                    continue;
+                }
                 tracing::info!("proactive: speaking '{id}' (meeting override: {override_meeting})");
                 // heads-up ("access ritual"): nudge event, then a short beat, then the line
                 let _ = app.emit("proactive:nudge", serde_json::json!({ "id": id, "critical": lead_in.is_some() }));
