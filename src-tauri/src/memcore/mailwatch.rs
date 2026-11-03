@@ -391,31 +391,54 @@ pub async fn poll_account<R: Runtime>(app: &AppHandle<R>, dir: &std::path::Path,
 /// 7 days, so without this the inbox watcher would just stop, silently.
 fn note_auth_state<R: Runtime>(app: &AppHandle<R>, dir: &std::path::Path, account_key: &str, needs_signin: bool) {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let say = super::with_store(dir, |s| {
-        let was = s.meta_get("mail_needs_signin").map(|v| !v.is_empty()).unwrap_or(false);
-        if !needs_signin {
-            if was {
-                s.meta_set("mail_needs_signin", "");
-            }
-            return false;
+    let (say, accounts) = super::with_store(dir, |s| {
+        let current = s.meta_get("mail_needs_signin").unwrap_or_default();
+        let updated = update_signin_set(&current, account_key, needs_signin);
+        if updated != current {
+            s.meta_set("mail_needs_signin", &updated);
         }
-        s.meta_set("mail_needs_signin", account_key);
+        if !needs_signin {
+            return (false, updated);
+        }
         let told = s.meta_get("mail_signin_alert_day").as_deref() == Some(today.as_str());
         if !told {
             s.meta_set("mail_signin_alert_day", &today);
         }
-        !told
+        (!told, updated)
     })
-    .unwrap_or(false);
+    .unwrap_or((false, String::new()));
     if say {
         let addr = speak_address(app).map(|a| format!(", {a}")).unwrap_or_default();
         crate::proactive_policy::submit(
             app,
             "mail_signin".to_string(),
-            format!("Google needs you to sign in again{addr}, so I can keep watching your email. You can do it under Add Google Account in the Command Hub."),
+            signin_line(&accounts, &addr),
             AlertUrgency::Medium,
         );
     }
+}
+
+/// The accounts that need a sign-in as one comma-separated, sorted set. An account that polls fine is removed from the set
+/// and does NOT clear another account's entry (two accounts used to overwrite each other). Pure.
+pub fn update_signin_set(current: &str, account: &str, needs_signin: bool) -> String {
+    let mut set: Vec<String> = current.split(',').filter(|x| !x.is_empty()).map(String::from).collect();
+    set.retain(|x| x != account);
+    if needs_signin {
+        set.push(account.to_string());
+    }
+    set.sort();
+    set.join(",")
+}
+
+/// "Google needs you to sign in again for a@x.com, sir, ..." naming every account that needs it. Pure.
+pub fn signin_line(accounts: &str, address: &str) -> String {
+    let names: Vec<&str> = accounts.split(',').filter(|x| !x.is_empty() && *x != "default").collect();
+    let which = match names.len() {
+        0 => String::new(),
+        1 => format!(" for {}", names[0]),
+        _ => format!(" for {}", names.join(" and ")),
+    };
+    format!("Google needs you to sign in again{which}{address}, so I can keep watching your email. You can do it under Add Google Account in the Command Hub.")
 }
 
 /// Start the watcher. Idle (no work, no network) until a Google account with
@@ -867,5 +890,29 @@ mod tests {
                 Err(e) => println!("calendar: {e}"),
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod signin_tests {
+    use super::*;
+
+    #[test]
+    fn two_accounts_do_not_clear_each_other() {
+        let s = update_signin_set("", "a@x.com", true);
+        assert_eq!(s, "a@x.com");
+        // account b polls fine: a stays marked
+        assert_eq!(update_signin_set(&s, "b@x.com", false), "a@x.com");
+        let both = update_signin_set(&s, "b@x.com", true);
+        assert_eq!(both, "a@x.com,b@x.com");
+        assert_eq!(update_signin_set(&both, "a@x.com", false), "b@x.com");
+        assert_eq!(update_signin_set("b@x.com", "b@x.com", false), "");
+    }
+
+    #[test]
+    fn the_sign_in_line_names_the_account() {
+        assert!(signin_line("a@x.com", ", sir").contains("sign in again for a@x.com, sir"));
+        assert!(signin_line("a@x.com,b@x.com", "").contains("for a@x.com and b@x.com"));
+        assert!(!signin_line("default", "").contains(" for "));
     }
 }

@@ -325,6 +325,8 @@ pub struct Status {
     /// Google rejected the stored sign-in (typically the 7-day Testing-mode
     /// expiry): the inbox watcher is paused until the user signs in again.
     pub google_needs_signin: bool,
+    /// Which accounts need the sign-in (the Command Hub marks only those rows).
+    pub google_signin_accounts: Vec<String>,
     /// WhatsApp priority watcher is switched on (default off).
     pub whatsapp: bool,
     /// Message text may be spoken aloud (off: sidebar only).
@@ -385,6 +387,10 @@ pub fn status(app_data_dir: &Path) -> Status {
     let google_connected = !google_io::list_accounts(google_io::can_read_mail).is_empty();
     let google_needs_signin = with_store(app_data_dir, |s| s.meta_get("mail_needs_signin").map(|v| !v.is_empty()).unwrap_or(false))
         .unwrap_or(false);
+    let google_signin_accounts: Vec<String> = with_store(app_data_dir, |s| s.meta_get("mail_needs_signin"))
+        .flatten()
+        .map(|v| v.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
+        .unwrap_or_default();
     match with_store(app_data_dir, |s| {
         (
             s.is_encrypted(),
@@ -416,6 +422,7 @@ pub fn status(app_data_dir: &Path) -> Status {
             google_connected,
             mail_items,
             google_needs_signin,
+            google_signin_accounts: google_signin_accounts.clone(),
             whatsapp,
             whatsapp_speak,
             leave_by,
@@ -448,6 +455,7 @@ pub fn status(app_data_dir: &Path) -> Status {
             google_connected,
             mail_items: 0,
             google_needs_signin,
+            google_signin_accounts,
             whatsapp,
             whatsapp_speak,
             leave_by,
@@ -821,14 +829,14 @@ mod tests {
             row("fact", "employer", "Acme", "derived", now - 3 * 86_400),
             row("episode", "ep:1", "open chrome", "derived", now - 86_400),
         ];
-        let st = Status { enabled: true, encrypted: true, facts: 2, episodes: 1, egress_7d: 4, redact_names: false, activity: true, resume_points: 12, briefing: true, timetable: true, slots: 0, mail: true, mail_plain: true, github_watch: true, deploy_watch: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true, profile: true, account_seed: true, routines: true, review: false, pending: 0, curator_note: String::new() };
+        let st = Status { enabled: true, encrypted: true, facts: 2, episodes: 1, egress_7d: 4, redact_names: false, activity: true, resume_points: 12, briefing: true, timetable: true, slots: 0, mail: true, mail_plain: true, github_watch: true, deploy_watch: true, google_connected: false, mail_items: 0, google_needs_signin: false, google_signin_accounts: vec![], whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true, profile: true, account_seed: true, routines: true, review: false, pending: 0, curator_note: String::new() };
         let md = card_markdown(&rows, &st, now);
         assert!(md.contains("### You told me") && md.contains("**dog name**"), "{md}");
         assert!(md.contains("\\[x\\]\\(http") || md.contains("\\[x\\]("), "markdown must be escaped: {md}");
         assert!(md.contains("### I picked up") && md.contains("last used 3d ago"), "{md}");
         assert!(md.contains("Recent conversations (1)") && md.contains("yesterday"), "{md}");
         assert!(md.contains("encrypted: **yes**") && md.contains("**4** turns"), "{md}");
-        let empty = card_markdown(&[], &Status { enabled: true, encrypted: false, facts: 0, episodes: 0, egress_7d: 0, redact_names: false, activity: true, resume_points: 0, briefing: true, timetable: true, slots: 0, mail: true, mail_plain: true, github_watch: true, deploy_watch: true, google_connected: false, mail_items: 0, google_needs_signin: false, whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true, profile: true, account_seed: true, routines: true, review: false, pending: 0, curator_note: String::new() }, now);
+        let empty = card_markdown(&[], &Status { enabled: true, encrypted: false, facts: 0, episodes: 0, egress_7d: 0, redact_names: false, activity: true, resume_points: 0, briefing: true, timetable: true, slots: 0, mail: true, mail_plain: true, github_watch: true, deploy_watch: true, google_connected: false, mail_items: 0, google_needs_signin: false, google_signin_accounts: vec![], whatsapp: false, whatsapp_speak: false, leave_by: true, people: 0, session: true, health: true, profile: true, account_seed: true, routines: true, review: false, pending: 0, curator_note: String::new() }, now);
         assert!(empty.contains("Nothing yet"), "{empty}");
     }
 
