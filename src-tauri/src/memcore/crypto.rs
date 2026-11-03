@@ -113,8 +113,42 @@ fn store_keyring(key: &Key) -> bool {
 /// rather than encrypt with a key that could be lost.
 #[allow(dead_code)]
 pub fn load_or_create_key() -> Option<Key> {
-    if let Some(k) = read_keyring() {
-        return Some(k);
+    // A key is created ONLY when the store says there is no entry at all. Any other error (the key store busy or not yet
+    // ready at logon) is retried a few times and then reported as "no key": creating a new key over a real one makes the
+    // sealed memory unreadable for good.
+    for attempt in 0..8 {
+        match keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map(|e| e.get_password()) {
+            Ok(Ok(pw)) => {
+                if let Some(k) = from_hex(&pw) {
+                    return Some(k);
+                }
+                tracing::warn!("memcore: the stored data key is not valid; not replacing it");
+                return None;
+            }
+            Ok(Err(keyring::Error::NoEntry)) => break,
+            _ => {
+                if attempt == 7 {
+                    tracing::warn!("memcore: the OS key store could not be read; memory stays closed this run");
+                    return None;
+                }
+                // ~5 s in all: Credential Manager can be slow right after logon.
+                std::thread::sleep(std::time::Duration::from_millis(750));
+            }
+        }
+    }
+    // The store answered "no entry": the key is really gone (Credential Manager was cleared). A sealed file that exists can
+    // then never be opened; keep it aside (never deleted) so memory can start fresh instead of staying closed forever.
+    if let Some(dir) = crate::app_dirs::nexus_data_dir() {
+        let enc = crate::memory::resolve_memory_dir(&dir).join("memcore.enc");
+        if enc.exists() {
+            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let aside = enc.with_file_name(format!("memcore.enc.unreadable-{ts}"));
+            if std::fs::rename(&enc, &aside).is_err() {
+                tracing::warn!("memcore: no data key and the sealed memory could not be set aside; memory stays closed");
+                return None;
+            }
+            tracing::warn!("memcore: the data key is gone; the old sealed memory was kept as {}", aside.display());
+        }
     }
     let k = generate_key()?;
     if store_keyring(&k) {

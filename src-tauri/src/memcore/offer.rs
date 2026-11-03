@@ -62,9 +62,14 @@ impl Offer {
     /// How long this question stays answerable after it was spoken.
     pub fn reply_window(&self) -> Duration {
         match self {
-            Offer::Power { .. } | Offer::ClearTimetable | Offer::FileConfirm | Offer::HookSetup { .. } | Offer::PlanFollowUp => REPLY_WINDOW_HIGH,
+            Offer::Power { .. }
+            | Offer::ClearTimetable
+            | Offer::FileConfirm
+            | Offer::HookSetup { .. }
+            | Offer::PlanFollowUp
+            | Offer::ReopenSession => REPLY_WINDOW_HIGH,
             Offer::AddEvent { .. } | Offer::AddSlots { .. } | Offer::CodeRabbitReview { .. } => REPLY_WINDOW_MEDIUM,
-            Offer::Start { .. } | Offer::Choose { .. } | Offer::ReopenSession | Offer::OpenApp { .. } => REPLY_WINDOW_LOW,
+            Offer::Start { .. } | Offer::Choose { .. } | Offer::OpenApp { .. } => REPLY_WINDOW_LOW,
         }
     }
 }
@@ -109,6 +114,17 @@ pub fn arm() {
     if let Some(s) = lock().as_mut() {
         s.armed = true;
         s.expires = Instant::now() + s.offer.reply_window();
+    }
+}
+
+/// Like `arm`, but only when the waiting offer is the reopen question: a spoken reopen question must never arm (and so
+/// let a "yes" approve) some other question that happens to be waiting.
+pub fn arm_reopen() {
+    if let Some(s) = lock().as_mut() {
+        if matches!(s.offer, Offer::ReopenSession) {
+            s.armed = true;
+            s.expires = Instant::now() + s.offer.reply_window();
+        }
     }
 }
 
@@ -369,6 +385,14 @@ fn classify_reopen(text: &str) -> Reply {
 /// ReopenSession offer accepts restore actions and treats Reply::Later as Reply::No.
 pub fn classify_for(offer: &Offer, text: &str) -> Reply {
     let base = classify(text);
+    // A bare "resume" / "continue" / "start" / "please" is not an answer to "shall I bring back your apps?" (it is a
+    // music or dictation command): only a real yes word or a reopen phrase counts.
+    if matches!(offer, Offer::ReopenSession) && base == Reply::Yes {
+        let w = words(text);
+        if !w.is_empty() && w.iter().all(|x| matches!(x.as_str(), "resume" | "continue" | "start" | "begin" | "please")) {
+            return Reply::Other;
+        }
+    }
     let reply = if base != Reply::Other {
         base
     } else {
@@ -535,7 +559,7 @@ mod tests {
     fn the_answer_window_is_longer_the_cheaper_a_wrong_yes_is() {
         assert_eq!(Offer::Power { kind: "shutdown".into() }.reply_window(), REPLY_WINDOW_HIGH);
         assert_eq!(Offer::ClearTimetable.reply_window(), REPLY_WINDOW_HIGH);
-        assert_eq!(Offer::ReopenSession.reply_window(), REPLY_WINDOW_LOW);
+        assert_eq!(Offer::ReopenSession.reply_window(), REPLY_WINDOW_HIGH);
         assert_eq!(Offer::Start { title: "DSA".into(), activity: "dsa".into() }.reply_window(), REPLY_WINDOW_LOW);
         assert!(REPLY_WINDOW_HIGH < REPLY_WINDOW_MEDIUM && REPLY_WINDOW_MEDIUM < REPLY_WINDOW_LOW);
     }
@@ -579,6 +603,30 @@ mod tests {
     }
 
     #[test]
+    fn bare_resume_or_continue_is_not_a_reopen_answer_but_yes_is() {
+        let off = Offer::ReopenSession;
+        for t in ["resume", "continue", "start", "please", "begin"] {
+            assert_eq!(classify_for(&off, t), Reply::Other, "{t}");
+        }
+        assert_eq!(classify_for(&off, "yes"), Reply::Yes);
+        assert_eq!(classify_for(&off, "yes please"), Reply::Yes);
+    }
+
+    #[test]
+    fn the_reopen_question_never_arms_another_waiting_offer() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        set(Offer::Power { kind: "shutdown".into() }, false);
+        arm_reopen();
+        assert!(!is_armed(), "a power question must not be armed by the reopen question");
+        clear();
+        set(Offer::ReopenSession, false);
+        arm_reopen();
+        assert!(is_armed());
+        clear();
+    }
+
+    #[test]
     fn test_reopen_session_offer_clears_on_no_without_launching() {
         let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         clear();
@@ -605,7 +653,7 @@ mod tests {
             "yes", "yeah", "yaa", "yaah", "ya", "yea", "yep", "yup", "haan", "han",
             "sure", "sure thing", "ok", "okay", "okey", "do it", "go ahead", "go for it",
             "please do", "yes please", "open them", "open them all", "open all", "open everything",
-            "start", "start it", "pick it up", "carry on", "continue", "resume", "restore",
+            "start it", "pick it up", "carry on", "restore",
             "restore them", "bring them back", "why not", "absolutely", "definitely", "of course",
             "sounds good", "that would be great", "alright", "all right", "fine do it",
         ];

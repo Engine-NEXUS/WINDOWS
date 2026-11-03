@@ -118,6 +118,20 @@ const IGNORED_EXES: &[&str] = &[
     "pwsh.exe",
     "conhost.exe",
     "openconsole.exe",
+    // Interpreters and script hosts: relaunching them with their script path would run the script again.
+    "python.exe",
+    "pythonw.exe",
+    "py.exe",
+    "node.exe",
+    "java.exe",
+    "javaw.exe",
+    "dotnet.exe",
+    "wscript.exe",
+    "cscript.exe",
+    "mshta.exe",
+    "rundll32.exe",
+    "wsl.exe",
+    "bash.exe",
 ];
 
 const INSTALLER_HINTS: &[&str] = &["setup", "install", "uninstall", "update", "msiexec"];

@@ -39,8 +39,9 @@ impl Period {
     }
 }
 
-/// No second early hello within this many seconds (a restart while developing must stay quiet).
-pub const MIN_GAP_SECS: i64 = 2 * 3600;
+/// No second early hello within this many seconds. The early hello only runs for the logon launch (`--background`), so a
+/// restart of the laptop is greeted again; the gap only stops two launches in the same minute from both speaking.
+pub const MIN_GAP_SECS: i64 = 10 * 60;
 
 /// Is a hello due? Nothing played yet, or long enough ago, or the clock went backwards.
 pub fn due(last_played: Option<i64>, now: i64) -> bool {
@@ -154,13 +155,24 @@ pub fn played_this_run() -> bool {
     STATE.load(Ordering::SeqCst) == PLAYED
 }
 
+/// True from the start of the early-hello thread until it has completely finished (waiting for the desktop, playing,
+/// fading). Anything else that wants to speak waits for this so two voices never overlap.
+static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn busy() -> bool {
+    BUSY.load(Ordering::SeqCst)
+}
+
+
 // ─── Windows glue ────────────────────────────────────────────────────
 
 /// How long the thread waits for the desktop before giving up (the normal hello then speaks).
-const DESKTOP_WAIT_SECS: u64 = 90;
+const DESKTOP_WAIT_SECS: u64 = 300; // the user may take a while to type the PIN after a restart
 const POLL_MS: u64 = 100;
 /// A short settle after the desktop appears so the sound does not start on the very first frame of the shell.
-const SETTLE_MS: u64 = 250;
+const SETTLE_MS: u64 = 1200;
+/// Consecutive 100 ms polls the desktop must stay shown before the hello starts.
+const STABLE_POLLS: u32 = 10;
 /// How long to keep trying to open the audio device (it can be late at logon).
 const AUDIO_WAIT_SECS: u64 = 10;
 
@@ -254,6 +266,172 @@ mod win {
         class_visible("Shell_TrayWnd")
     }
 
+    #[repr(C)]
+    struct ProcessEntry {
+        size: u32,
+        usage: u32,
+        pid: u32,
+        heap: usize,
+        module: u32,
+        threads: u32,
+        parent: u32,
+        pri: i32,
+        flags: u32,
+        exe: [u16; 260],
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> *mut c_void;
+        fn Process32FirstW(snap: *mut c_void, e: *mut ProcessEntry) -> i32;
+        fn Process32NextW(snap: *mut c_void, e: *mut ProcessEntry) -> i32;
+        fn CloseHandle(h: *mut c_void) -> i32;
+        fn ProcessIdToSessionId(pid: u32, session: *mut u32) -> i32;
+        fn GetCurrentProcessId() -> u32;
+    }
+
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmGetWindowAttribute(hwnd: *mut c_void, attr: u32, value: *mut c_void, size: u32) -> i32;
+    }
+
+    /// `LogonUI.exe` draws the welcome animation and the lock screen. While one runs in OUR session the user is not
+    /// looking at the desktop yet, even though the taskbar window already exists and the input desktop says "Default"
+    /// (measured 2026-11-02: the desktop switch signal came 1.5 s before the sound, mid fade).
+    pub fn logon_ui_running_in_my_session() -> bool {
+        // SAFETY: plain kernel32 calls; the snapshot handle is closed, the entry is sized and owned here.
+        unsafe {
+            let mut mine = 0u32;
+            if ProcessIdToSessionId(GetCurrentProcessId(), &mut mine) == 0 {
+                return false;
+            }
+            let snap = CreateToolhelp32Snapshot(0x2, 0); // TH32CS_SNAPPROCESS
+            if snap.is_null() || snap as isize == -1 {
+                return false;
+            }
+            let mut e: ProcessEntry = std::mem::zeroed();
+            e.size = std::mem::size_of::<ProcessEntry>() as u32;
+            let mut found = false;
+            let mut ok = Process32FirstW(snap, &mut e);
+            while ok != 0 {
+                let len = e.exe.iter().position(|c| *c == 0).unwrap_or(e.exe.len());
+                if String::from_utf16_lossy(&e.exe[..len]).eq_ignore_ascii_case("LogonUI.exe") {
+                    let mut s = 0u32;
+                    if ProcessIdToSessionId(e.pid, &mut s) != 0 && s == mine {
+                        found = true;
+                        break;
+                    }
+                }
+                ok = Process32NextW(snap, &mut e);
+            }
+            CloseHandle(snap);
+            found
+        }
+    }
+
+    #[link(name = "wtsapi32")]
+    extern "system" {
+        fn WTSQuerySessionInformationW(server: *mut c_void, session: u32, class: i32, buf: *mut *mut u16, len: *mut u32) -> i32;
+        fn WTSFreeMemory(p: *mut c_void);
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetForegroundWindow() -> *mut c_void;
+        fn GetWindowThreadProcessId(hwnd: *mut c_void, pid: *mut u32) -> u32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn QueryFullProcessImageNameW(p: *mut c_void, flags: u32, name: *mut u16, len: *mut u32) -> i32;
+    }
+
+    /// Is this session locked? On Windows 11 the lock screen (LockApp) runs on the NORMAL desktop, so the input desktop
+    /// name and the taskbar cannot tell (measured 2026-11-03: after a restart Windows signs in and locks at once; the
+    /// hello spoke at 10:48:46 while the lock screen was up, the PIN came at 10:48:55). The session flag can.
+    pub fn session_locked() -> bool {
+        // SAFETY: WTSINFOEXW is read as plain u32/i32 fields at fixed offsets (level, session id, state, flags) from a
+        // buffer the API allocated and that is freed here; the length is checked first.
+        unsafe {
+            let mut buf: *mut u16 = std::ptr::null_mut();
+            let mut len = 0u32;
+            if WTSQuerySessionInformationW(std::ptr::null_mut(), 0xFFFF_FFFF, 25, &mut buf, &mut len) == 0 || buf.is_null() {
+                return false;
+            }
+            // Level @0, (union is 8-aligned) SessionId @8, SessionState @12, SessionFlags @16 (read on this machine
+            // 2026-11-03: unlocked desktop = 1 = WTS_SESSIONSTATE_UNLOCK).
+            let locked = if len >= 20 {
+                let flags = *(buf as *const i32).add(4);
+                flags == 0 // WTS_SESSIONSTATE_LOCK
+            } else {
+                false
+            };
+            WTSFreeMemory(buf as *mut c_void);
+            locked
+        }
+    }
+
+    /// The window in front belongs to the lock screen or the sign-in UI.
+    pub fn lock_screen_in_front() -> bool {
+        // SAFETY: plain user32/kernel32 calls; the process handle is closed, buffers are sized and owned here.
+        unsafe {
+            let h = GetForegroundWindow();
+            if h.is_null() {
+                return false;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(h, &mut pid);
+            if pid == 0 {
+                return false;
+            }
+            let p = OpenProcess(0x1000, 0, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+            if p.is_null() {
+                return false;
+            }
+            let mut name = [0u16; 520];
+            let mut n = name.len() as u32;
+            let ok = QueryFullProcessImageNameW(p, 0, name.as_mut_ptr(), &mut n);
+            CloseHandle(p);
+            if ok == 0 {
+                return false;
+            }
+            let path = String::from_utf16_lossy(&name[..n as usize]).to_ascii_lowercase();
+            path.ends_with("\\lockapp.exe") || path.ends_with("\\logonui.exe")
+        }
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateMutexW(attrs: *mut c_void, initial_owner: i32, name: *const u16) -> *mut c_void;
+        fn GetLastError() -> u32;
+    }
+
+    /// True for the first process of this logon that asks; a second launch (two triggers firing together) gets false and
+    /// must stay silent. The handle is kept for the life of the process on purpose.
+    pub fn first_instance() -> bool {
+        let name = wide("Local\\NexusEarlyHello");
+        // SAFETY: NUL-terminated name; the handle is intentionally never closed (it is the lock).
+        unsafe {
+            let h = CreateMutexW(std::ptr::null_mut(), 0, name.as_ptr());
+            !h.is_null() && GetLastError() != 183 // ERROR_ALREADY_EXISTS
+        }
+    }
+
+    /// DWM "cloaked" taskbar = hidden although `IsWindowVisible` says yes.
+    pub fn tray_cloaked() -> bool {
+        let c = wide("Shell_TrayWnd");
+        // SAFETY: NUL-terminated class name; out value is a local u32.
+        unsafe {
+            let h = FindWindowW(c.as_ptr(), std::ptr::null());
+            if h.is_null() {
+                return true;
+            }
+            let mut cloaked = 0u32;
+            DwmGetWindowAttribute(h, 14, &mut cloaked as *mut u32 as *mut c_void, 4) == 0 && cloaked != 0
+        }
+    }
+
     pub fn progman_visible() -> bool {
         class_visible("Progman")
     }
@@ -261,12 +439,30 @@ mod win {
 
 #[cfg(target_os = "windows")]
 fn desktop_shown() -> bool {
-    desktop_ready(win::input_desktop_is_default(), win::tray_visible(), win::progman_visible())
+    // Cheap checks first: the process snapshot of the LogonUI test runs only once everything else already says "shown".
+    !win::session_locked()
+        && !win::lock_screen_in_front()
+        && desktop_ready(win::input_desktop_is_default(), win::tray_visible(), win::progman_visible())
+        && !win::tray_cloaked()
+        && !win::logon_ui_running_in_my_session()
 }
 
 #[cfg(not(target_os = "windows"))]
 fn desktop_shown() -> bool {
     false
+}
+
+/// The lock screen is not up. Typing the PIN counts as input, so the normal hello (logon and resume from sleep) waits for
+/// this as well as for input. It is the weaker test: an odd shell or a remote session that never passes the full desktop
+/// test (used by the early hello) still gets its hello.
+#[cfg(target_os = "windows")]
+pub(crate) fn not_locked_now() -> bool {
+    !win::session_locked() && !win::lock_screen_in_front()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn not_locked_now() -> bool {
+    true
 }
 
 /// Start the thread when this is the logon launch. Cheap and never blocks `run()`.
@@ -282,16 +478,28 @@ pub fn start_if_logon() {
     }
     let mut script = load_script(&dir, &cfg.voice);
     if !due(script.last_played, now_secs()) {
-        gave_up("a hello was already played less than 2 hours ago");
+        gave_up("a hello was already played less than 10 minutes ago");
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    if !win::first_instance() {
+        gave_up("another NEXUS launch of this logon already owns the hello");
         return;
     }
     STATE.store(PENDING, Ordering::SeqCst);
+    BUSY.store(true, Ordering::SeqCst);
     let spawned = std::thread::Builder::new().name("early-hello".into()).spawn(move || {
-        let played = run(&dir, &cfg, &mut script);
+        // A panic must never leave the state PENDING (debug and test builds; the release profile aborts on panic).
+        let played = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&dir, &cfg, &mut script))).unwrap_or_else(|_| {
+            println!("[EARLY-HELLO] the thread panicked; the normal hello takes over");
+            false
+        });
         STATE.store(if played { PLAYED } else { GAVE_UP }, Ordering::SeqCst);
+        BUSY.store(false, Ordering::SeqCst);
     });
     if spawned.is_err() {
         STATE.store(GAVE_UP, Ordering::SeqCst);
+        BUSY.store(false, Ordering::SeqCst);
     }
 }
 
@@ -341,7 +549,18 @@ fn run(dir: &Path, cfg: &EarlySettings, script: &mut Script) -> bool {
         return false;
     }
     let mut audio: Option<(rodio::OutputStream, rodio::OutputStreamHandle)> = None;
-    while !desktop_shown() {
+    // The desktop must stay shown for STABLE_POLLS polls in a row (about 1 s): one lucky reading during the welcome
+    // fade is not enough.
+    let mut stable = 0u32;
+    loop {
+        if desktop_shown() {
+            stable += 1;
+            if stable >= STABLE_POLLS {
+                break;
+            }
+        } else {
+            stable = 0;
+        }
         if started.elapsed().as_secs() >= DESKTOP_WAIT_SECS {
             gave_up(&format!("the desktop never appeared within {DESKTOP_WAIT_SECS}s"));
             return false;
@@ -466,9 +685,9 @@ mod tests {
     }
 
     #[test]
-    fn a_hello_is_due_once_per_two_hours() {
+    fn a_hello_is_due_once_per_ten_minutes() {
         assert!(due(None, 1_000));
-        assert!(!due(Some(1_000), 1_000 + 3_600));
+        assert!(!due(Some(1_000), 1_000 + 120));
         assert!(due(Some(1_000), 1_000 + MIN_GAP_SECS));
         assert!(due(Some(5_000), 1_000), "the clock went backwards");
     }

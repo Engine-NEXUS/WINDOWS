@@ -121,7 +121,7 @@ pub fn visible_prefix(words: &[(String, u64, u64)], full: &str, t_ms: u64) -> St
             out.push(w.clone());
         } else {
             let shown = (((t_ms - start) as f32 / *dur as f32) * chars.len() as f32).ceil() as usize;
-            out.push(chars.iter().take(shown.clamp(1, chars.len())).collect());
+            out.push(chars.iter().take(shown.clamp(1, chars.len().max(1))).collect());
             break;
         }
     }
@@ -430,12 +430,23 @@ pub fn caption_height(scale: f32) -> i32 {
 /// failure is logged and the greeting is simply heard without a picture.
 #[cfg(target_os = "windows")]
 pub fn show(s: Show) {
+    FIRST_PAINT.store(false, std::sync::atomic::Ordering::SeqCst);
     let _ = std::thread::Builder::new().name("early-orb".into()).spawn(move || {
         if let Err(e) = win::run(s) {
             println!("[EARLY-ORB] not shown: {e}");
         }
     });
+    // The sound must never start without its picture: wait (bounded) until the first frame is really on the screen.
+    let t = std::time::Instant::now();
+    while !FIRST_PAINT.load(std::sync::atomic::Ordering::SeqCst) && t.elapsed().as_millis() < 1500 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    println!("[EARLY-ORB] first frame {} after {} ms", if FIRST_PAINT.load(std::sync::atomic::Ordering::SeqCst) { "painted" } else { "NOT painted" }, t.elapsed().as_millis());
 }
+
+/// Set by the window thread after the first successful `UpdateLayeredWindow`.
+#[cfg(target_os = "windows")]
+static FIRST_PAINT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(not(target_os = "windows"))]
 pub fn show(_s: Show) {}
@@ -719,7 +730,10 @@ mod win {
             // Update capsule window
             let pos_cap = Point { x: st.capsule_win.x, y: st.capsule_win.y };
             let size_cap = Size { cx: st.capsule_win.w, cy: st.capsule_win.h };
-            UpdateLayeredWindow(st.hwnd_capsule, 0, &pos_cap, &size_cap, st.capsule_canvas.dc, &src, 0, &blend, 2);
+            let ok = UpdateLayeredWindow(st.hwnd_capsule, 0, &pos_cap, &size_cap, st.capsule_canvas.dc, &src, 0, &blend, 2);
+            if ok != 0 {
+                FIRST_PAINT.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
 
             // Update caption window
             let pos_txt = Point { x: st.caption_win.x, y: st.caption_win.y };

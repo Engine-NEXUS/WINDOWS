@@ -8102,10 +8102,9 @@ async fn restore_session<R: Runtime>(app: &AppHandle<R>) -> String {
         return "Everything from your last session is already open, sir.".to_string();
     }
     let (opened, failed) = restore::run(plan.items.clone()).await;
-    // Anything that did not start can be retried; otherwise the offer is done.
-    if failed.is_empty() {
-        session::clear_pending(&dir);
-    }
+    // One attempt (with its own retry inside `run`) ends the offer. The apps that would not start are named aloud; keeping
+    // the offer would ask the same question at every logon for an app that can never start (an elevated one, error 740).
+    session::clear_pending(&dir);
     restore::restore_report_short(&opened, &failed, &plan.already_open)
 }
 
@@ -9277,7 +9276,9 @@ pub fn speak_line<R: Runtime>(app: &AppHandle<R>, text: String, request_id: &str
     }
     // A reminder that asks "Shall I start?" starts listening for the answer
     // only now that the question is being spoken.
-    if request_id.starts_with("sentinel_offer_") {
+    if request_id.starts_with("sentinel_offer_boot_session") {
+        crate::memcore::offer::arm_reopen();
+    } else if request_id.starts_with("sentinel_offer_") {
         crate::memcore::offer::arm();
     }
     // Record the on-device turn this line answers (proactive/boot speech is not a user turn).

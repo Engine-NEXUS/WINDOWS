@@ -303,9 +303,21 @@ impl Store {
         let mut from_plain = false;
         if enc.exists() {
             let blob = std::fs::read(&enc).map_err(|x| x.to_string())?;
-            let bytes = crypto::open(&key, &blob)
-                .ok_or_else(|| "cannot decrypt memory snapshot (wrong key or corrupt file)".to_string())?;
-            Self::load_bytes(&mut conn, bytes).map_err(e)?;
+            match crypto::open(&key, &blob) {
+                Some(bytes) => Self::load_bytes(&mut conn, bytes).map_err(e)?,
+                None => {
+                    // The key in Credential Manager no longer matches this file (measured 2026-11-02: every start failed, so
+                    // no session snapshot could be saved or read and the "reopen your apps" question never came).
+                    // The file is kept aside, never deleted or overwritten; memory starts fresh with the current key.
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let aside = dir.join(format!("{ENC_FILE}.unreadable-{ts}"));
+                    std::fs::rename(&enc, &aside).map_err(|x| format!("cannot decrypt memory snapshot and cannot set it aside: {x}"))?;
+                    tracing::warn!("memcore: memory snapshot could not be decrypted; kept as {} and started a fresh store", aside.display());
+                }
+            }
         } else if plain.exists() {
             let p = Connection::open(&plain).map_err(e)?;
             let _ = p.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;");
@@ -1720,16 +1732,22 @@ mod tests {
     }
 
     #[test]
-    fn wrong_key_is_refused_and_never_overwrites_the_snapshot() {
+    fn wrong_key_keeps_the_old_snapshot_aside_and_starts_fresh() {
         let d = tmp("enc_wrong");
         let key = crypto::generate_key().unwrap();
         Store::open(&d, Some(key)).unwrap()
             .observe(&obs("k", "v", Trust::UserSaid, true), 1)
             .unwrap();
         let before = std::fs::read(d.join(ENC_FILE)).unwrap();
-        assert!(Store::open(&d, Some(crypto::generate_key().unwrap())).is_err());
-        assert!(Store::open(&d, None).is_err(), "must not fork a plaintext db next to a sealed one");
-        assert_eq!(std::fs::read(d.join(ENC_FILE)).unwrap(), before);
+        let fresh = Store::open(&d, Some(crypto::generate_key().unwrap())).unwrap();
+        assert!(fresh.search(Tier::Fact, "k", 5, 20).is_empty(), "the unreadable data is not served");
+        let aside: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("memcore.enc.unreadable-"))
+            .collect();
+        assert_eq!(aside.len(), 1, "the old sealed file is kept, never deleted");
+        assert_eq!(std::fs::read(aside[0].path()).unwrap(), before);
     }
 
     #[test]

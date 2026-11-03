@@ -157,17 +157,32 @@ pub fn item_args(item: &Item) -> Vec<String> {
     }
 }
 
+/// Start an app so that it does not share NEXUS's console, log file or folder (stdout is redirected to nexus.log, which a
+/// child would otherwise keep open and write into).
+fn spawn_detached(cmd: &mut std::process::Command) -> Result<(), String> {
+    use std::process::Stdio;
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0000_0200); // CREATE_NEW_PROCESS_GROUP (console apps keep their window)
+    }
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
 /// Launch one item. Blocking but quick (spawn only).
 fn launch(item: &Item) -> Result<(), String> {
     match item {
-        Item::Exe { path, args, .. } => {
-            std::process::Command::new(path).args(args).spawn().map(|_| ()).map_err(|e| e.to_string())
+        Item::Exe { path, args, .. } => spawn_detached(std::process::Command::new(path).args(args)),
+        Item::Browser { path, .. } => {
+            let mut cmd = std::process::Command::new(path);
+            // Only Chromium-based browsers know this switch; Firefox restores its own session.
+            let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+            if !name.contains("firefox") {
+                cmd.arg("--restore-last-session");
+            }
+            spawn_detached(&mut cmd)
         }
-        Item::Browser { path, .. } => std::process::Command::new(path)
-            .arg("--restore-last-session")
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| e.to_string()),
         Item::Packaged { label } => {
             let entry = crate::app_registry::lookup(label).ok_or_else(|| format!("{label} not found"))?;
             crate::app_registry::launch(&entry)

@@ -619,7 +619,7 @@ async fn wait_until_quiet(max_secs: u64) {
     let start = std::time::Instant::now();
     // Give the policy + heads-up beat time to start the line before we look for its end.
     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-    while crate::orchestrator::has_active_request() && start.elapsed().as_secs() < max_secs {
+    while (crate::orchestrator::has_active_request() || crate::early_hello::busy()) && start.elapsed().as_secs() < max_secs {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -627,9 +627,16 @@ async fn wait_until_quiet(max_secs: u64) {
 
 /// Speak the plain time-of-day hello unless one was spoken recently. `tag` names the trigger in the log
 /// and in the alert id. Returns whether a hello was submitted.
-fn submit_hello<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std::path::Path, tag: &str) -> bool {
-    // The early hello (played when the desktop appeared) already greeted: never a second one.
-    if crate::early_hello::owns_the_hello() {
+async fn submit_hello<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std::path::Path, tag: &str) -> bool {
+    // Never over the early hello: wait (bounded) until it has either played completely or given up. When it gave up,
+    // this normal hello takes over, so nobody is left without a greeting.
+    let waited = std::time::Instant::now();
+    while crate::early_hello::busy() && waited.elapsed().as_secs() < 330 {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    // The early hello (played at this logon) already greeted: never a second one. Only the logon start is covered; a
+    // later resume from sleep greets again as usual.
+    if tag == "boot" && crate::early_hello::owns_the_hello() {
         if crate::early_hello::played_this_run() {
             let now_ts = chrono::Utc::now().timestamp();
             super::with_store(dir, |s| s.meta_set("last_hello_ts", &now_ts.to_string()));
@@ -682,7 +689,8 @@ pub fn on_resume<R: tauri::Runtime>(app: tauri::AppHandle<R>, away_secs: u64) {
             let idle = resume::user_idle_secs();
             let typed_recently = idle.map(|s| s < 10).unwrap_or(false);
             let changed = matches!((baseline, idle), (Some(b), Some(i)) if i < b);
-            if typed_recently || changed {
+            // Typing the PIN is input too: speak only once the real desktop is on screen, never on the lock screen.
+            if (typed_recently || changed) && crate::early_hello::not_locked_now() {
                 break;
             }
             if waited >= 180 {
@@ -691,7 +699,7 @@ pub fn on_resume<R: tauri::Runtime>(app: tauri::AppHandle<R>, away_secs: u64) {
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-        submit_hello(&app, &dir, "resume");
+        submit_hello(&app, &dir, "resume").await;
     });
 }
 
@@ -712,7 +720,7 @@ pub fn start_boot_briefing<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
         // Autostart runs at logon: do not talk to an empty room. Wait (up to
         // PRESENCE_WAIT_SECS) until there has been keyboard/mouse input lately.
         let mut presence_waited = 0u64;
-        while !user_present(resume::user_idle_secs()) {
+        while !(user_present(resume::user_idle_secs()) && crate::early_hello::not_locked_now()) {
             if presence_waited >= PRESENCE_WAIT_SECS {
                 println!("[BOOT] skip: gave up waiting for presence after {PRESENCE_WAIT_SECS}s");
                 return;
@@ -721,7 +729,7 @@ pub fn start_boot_briefing<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             presence_waited += PRESENCE_POLL_SECS;
         }
         // 1. The hello: every logon, short, cached, immediate.
-        let hello_spoken = submit_hello(&app, &dir, "boot");
+        let hello_spoken = submit_hello(&app, &dir, "boot").await;
 
         // 2. The details, once a day (and always when the agents left news before the last shutdown).
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -730,6 +738,9 @@ pub fn start_boot_briefing<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             .unwrap_or(true);
         if already && overnight.is_none() {
             println!("[BOOT] skip briefing: already briefed today ({today})");
+            // The reopen question does not depend on the daily briefing: every logon asks it when there is something
+            // from the last session to bring back (it was lost whenever the briefing had already run that day).
+            ask_reopen_only(&app, &dir, hello_spoken).await;
             return;
         }
         let snapshot = BOOT_SNAPSHOT.lock().ok().and_then(|g| g.clone()).unwrap_or_default();
@@ -795,6 +806,40 @@ pub fn start_boot_briefing<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
         };
         crate::proactive_policy::submit(&app, id.to_string(), spoken, crate::google::types::AlertUrgency::High);
     });
+}
+
+/// Only the short question "Do you want me to open all the apps you closed yesterday?", after the hello has finished.
+/// Nothing is said when there is nothing to reopen. The reply window arms once it has been spoken (`offer_` id).
+async fn ask_reopen_only<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std::path::Path, hello_spoken: bool) {
+    if !super::flag(dir, "memcoreSession", true) {
+        return;
+    }
+    let d = dir.to_path_buf();
+    let now = chrono::Utc::now().timestamp();
+    let offer = tokio::time::timeout(
+        std::time::Duration::from_secs(GATHER_CAP_SECS),
+        tauri::async_runtime::spawn_blocking(move || session_offer(&d, now)),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .flatten();
+    let Some(offer) = offer else {
+        println!("[BOOT] no reopen question: nothing from the last session to bring back");
+        return;
+    };
+    if hello_spoken {
+        wait_until_quiet(20).await;
+    }
+    // Never replace a question that is already waiting for its answer (a shutdown, a confirmation).
+    if super::offer::peek().is_some() {
+        println!("[BOOT] no reopen question: another question is waiting");
+        return;
+    }
+    let question = reopen_question(&day_phrase(now, offer.left_at), now as u64);
+    println!("[BOOT] reopen question: {question}");
+    super::offer::set(super::offer::Offer::ReopenSession, false);
+    crate::proactive_policy::submit(app, "offer_boot_session".to_string(), question, crate::google::types::AlertUrgency::High);
 }
 
 /// "Where did I leave off / show my briefing": built now from live data,
