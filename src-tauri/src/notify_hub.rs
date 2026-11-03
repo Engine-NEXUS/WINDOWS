@@ -56,10 +56,27 @@ fn now_ms() -> u64 {
 
 /// Pure: the ledger event for a GitHub observation of a UNIQUELY resolved `owner/repo`. None when the run id or
 /// the repository identity is not usable (no card is better than a card that opens the wrong thing).
+/// What the producer learned beyond the bare fact: the job / step to open, the PR number and the branch.
+#[derive(Debug, Clone, Default)]
+pub struct GithubExtras {
+    pub hints: crate::notify_links::OpenHints,
+    pub pr: Option<u64>,
+    pub branch: Option<String>,
+}
+
+#[cfg(test)]
 pub fn github_event(full_name: &str, fact: &Fact, line: &Line, now: u64) -> Option<NotifyEvent> {
+    github_event_with(full_name, fact, line, now, GithubExtras::default())
+}
+
+/// `github_event` with the extras. The PR number lives in the target; a hint that does not validate is dropped (the
+/// alert is still useful and still opens the run).
+pub fn github_event_with(full_name: &str, fact: &Fact, line: &Line, now: u64, extras: GithubExtras) -> Option<NotifyEvent> {
     let (owner, repo) = full_name.split_once('/')?;
     let run_id: u64 = fact.run_ref.parse().ok()?;
-    let target = Target::GitHub { host: "github.com".into(), owner: owner.into(), repo: repo.into(), pr: None, run_id: Some(run_id), sha: None };
+    let hints = if crate::notify_links::validate_hints(Provider::GitHub, &extras.hints).is_ok() { extras.hints } else { Default::default() };
+    let pr = extras.pr.filter(|n| *n > 0);
+    let target = Target::GitHub { host: "github.com".into(), owner: owner.into(), repo: repo.into(), pr, run_id: Some(run_id), sha: None };
     let kind = fact.kind.as_str();
     let key = entity_key(Provider::GitHub, GITHUB_ACCOUNT, &target, kind);
     let (status, severity) = match line {
@@ -80,7 +97,10 @@ pub fn github_event(full_name: &str, fact: &Fact, line: &Line, now: u64) -> Opti
         observed_at_ms: now,
         updated_at_ms: now,
         title: crate::notify_brain::render_for("github", line, None).trim_end_matches(['.', ',', ' ']).to_string(),
-        preview: format!("{full_name} · run {run_id}"),
+        preview: match extras.branch.as_deref().map(|b| crate::notify_event::sanitize_text(b, 60)).filter(|b| !b.is_empty()) {
+            Some(b) => format!("{full_name} · {b} · run {run_id}"),
+            None => format!("{full_name} · run {run_id}"),
+        },
         privacy: PrivacyClass::Public,
         target,
         source_ref: source_ref.clone(),
@@ -89,7 +109,7 @@ pub fn github_event(full_name: &str, fact: &Fact, line: &Line, now: u64) -> Opti
         delivery: Delivery::default(),
         read: ReadState::Unread,
         expires_at_ms: now + EVENT_TTL_MS,
-        hints: Default::default(),
+        hints,
     })
 }
 
@@ -101,15 +121,15 @@ fn status_str(s: Status) -> &'static str {
     }
 }
 
-/// Records the observation and, if it is news, shows the Windows notification-center toast.
-pub fn publish_github<R: Runtime>(app: &AppHandle<R>, full_name: &str, fact: &Fact, line: &Line) {
-    publish_github_with(app, full_name, fact, line, None);
-}
-
 /// `publish_github` with the self-test knob: a shorter lifetime for the alert.
 pub fn publish_github_with<R: Runtime>(app: &AppHandle<R>, full_name: &str, fact: &Fact, line: &Line, ttl_ms: Option<u64>) {
+    publish_github_extras(app, full_name, fact, line, ttl_ms, GithubExtras::default());
+}
+
+/// Publish a GitHub alert with the job / step / PR the watcher fetched, so a click opens the failing step.
+pub fn publish_github_extras<R: Runtime>(app: &AppHandle<R>, full_name: &str, fact: &Fact, line: &Line, ttl_ms: Option<u64>, extras: GithubExtras) {
     let now = now_ms();
-    let Some(mut ev) = github_event(full_name, fact, line, now) else {
+    let Some(mut ev) = github_event_with(full_name, fact, line, now, extras) else {
         return;
     };
     if let Some(ttl) = ttl_ms {
@@ -325,6 +345,39 @@ pub fn notify_close_event(token: u64) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_failed_job_alert_opens_at_the_failing_step_and_keeps_pr_and_branch() {
+        let extras = GithubExtras {
+            hints: crate::notify_links::OpenHints {
+                job_id: Some(22),
+                failed_step: Some(5),
+                html_url: Some("https://github.com/alice/zync/actions/runs/555/job/22".into()),
+                ..Default::default()
+            },
+            pr: Some(34),
+            branch: Some("feat/x".into()),
+        };
+        let line = Line::Failed { project: "zync".into(), kind: Kind::Build, count: 1 };
+        let ev = github_event_with("alice/zync", &fact("zync", Kind::Build, "555"), &line, 1_000, extras).expect("event");
+        assert!(matches!(&ev.target, Target::GitHub { pr: Some(34), run_id: Some(555), .. }));
+        assert!(ev.preview.contains("feat/x"));
+        let url = crate::notify_open::event_url(&ev).expect("url");
+        assert_eq!(url, "https://github.com/alice/zync/actions/runs/555/job/22#step:5:1");
+    }
+
+    #[test]
+    fn a_bad_hint_is_dropped_but_the_alert_still_opens_the_run() {
+        let extras = GithubExtras {
+            hints: crate::notify_links::OpenHints { html_url: Some("https://evil.example/x".into()), ..Default::default() },
+            pr: None,
+            branch: None,
+        };
+        let line = Line::Failed { project: "zync".into(), kind: Kind::Build, count: 1 };
+        let ev = github_event_with("alice/zync", &fact("zync", Kind::Build, "555"), &line, 1_000, extras).expect("event");
+        assert_eq!(ev.hints, Default::default());
+        assert_eq!(crate::notify_open::event_url(&ev).as_deref(), Some("https://github.com/alice/zync/actions/runs/555"));
+    }
+
     use super::*;
     use crate::notify_brain::{Kind, Obs};
 
