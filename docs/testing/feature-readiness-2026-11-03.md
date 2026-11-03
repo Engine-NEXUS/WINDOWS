@@ -224,3 +224,10 @@ Features 73–79 below were added from the last days' commits; 80–87 are plann
 8. **Do the W3 batch**: a spoken Spotify run, dictation into apps, a voice delete and undo, the WhatsApp flow (#33, #26, #27, #30, #25).
 9. **Measure the wake word**: ambient + held-out recordings, `nexus wake score`, a 30-minute TV test (#1, #7, #6). This is the main voice-quality gap.
 10. **Fix the release path**: NSIS, the stale start-menu shortcut, and one green GitHub CI run (#67, #63), so the proofs above are attributable to a shippable build. The Voice Lock work card (#8) continues in its own sessions and is the longest path.
+
+## Live results recorded after this report (owner, 2026-11-03)
+
+- **Early hello at logon (orb + caption + volume lease):** owner confirmed "great and perfect" on build 611e9b93; the 21:58 IST logon log shows the lock-screen gate, the orb painted before sound, the 75 % lease and the reopen question. Still level 3 until the sleep/wake and sign-out/in paths have a ledger line on the current build (e47e933b).
+- **Reopen question:** spoken and armed at the 21:58 logon; the reopen itself (answer, apps launched) is not yet proven live.
+- **Sleep/wake (build e47e933b):** resume-from-sleep barge-in and the overlay grace ran; the resume greeting needs >= 20 minutes away and has not been proven live.
+- **Google "sign in again" alert:** the 2026-11-03 20:58 alert was a false alarm (no network right after a dark wake); fixed in this change, not yet seen live.
