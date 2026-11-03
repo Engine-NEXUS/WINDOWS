@@ -99,8 +99,20 @@ pub async fn token_for(email: Option<&str>) -> Result<String, GoogleError> {
 
 async fn refresh_token(email: Option<&str>) -> Result<String, GoogleError> {
     match email {
-        Some(e) => crate::google::oauth::refresh_access_token_for(e).await.map_err(|_| GoogleError::AuthRequired),
+        Some(e) => crate::google::oauth::refresh_access_token_for(e).await.map_err(|m| classify_refresh_error(&m)),
         None => crate::google::auth::GoogleAuth::get_access_token().map_err(|_| GoogleError::AuthRequired),
+    }
+}
+
+/// Only a refusal from Google (or a missing refresh token) means "sign in again". A request that never got an answer
+/// (no network right after waking from sleep, a timeout, a server error) is a network problem and must not be reported
+/// as a lost sign-in (measured 2026-11-03: "No such host" after a wake became "Google needs you to sign in again"). Pure.
+pub fn classify_refresh_error(message: &str) -> GoogleError {
+    let m = message.to_lowercase();
+    if m.contains("no longer valid") || m.contains("sign in again") || m.contains("no refresh token") || m.contains("invalid_grant") {
+        GoogleError::AuthRequired
+    } else {
+        GoogleError::NetworkError(message.to_string())
     }
 }
 
@@ -219,5 +231,22 @@ mod tests {
     fn account_keys() {
         assert_eq!(Account { email: Some("a@b.com".into()) }.key(), "a@b.com");
         assert_eq!(Account { email: None }.key(), "default");
+    }
+}
+
+#[cfg(test)]
+mod refresh_error_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_refusal_from_google_means_sign_in_again() {
+        assert_eq!(classify_refresh_error("Google token for a@x.com is no longer valid. Please sign in again."), GoogleError::AuthRequired);
+        assert_eq!(classify_refresh_error("No refresh token stored for a@x.com"), GoogleError::AuthRequired);
+        // right after a wake there is no network: that is NOT a lost sign-in
+        assert!(matches!(
+            classify_refresh_error("Token refresh request failed: error sending request: No such host is known. (os error 11001)"),
+            GoogleError::NetworkError(_)
+        ));
+        assert!(matches!(classify_refresh_error("Token refresh failed for a@x.com: HTTP 503"), GoogleError::NetworkError(_)));
     }
 }

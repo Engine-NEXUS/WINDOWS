@@ -1122,6 +1122,8 @@ async fn play_audio(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     crate::boot::first_audio();
+    // A lease taken before synthesis may have been ended (sleep, barge-in): re-assert the speech volume now.
+    let _playback_volume = crate::volume::ensure_live_lease(read_tts_volume(&app));
     tokio::task::spawn_blocking(move || {
         match OutputStream::try_default() {
             Ok((_stream, handle)) => {
@@ -1515,6 +1517,7 @@ async fn play_audio_streamed(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     crate::boot::first_audio();
+    let _playback_volume = crate::volume::ensure_live_lease(read_tts_volume(&app));
     tokio::task::spawn_blocking(move || {
         match OutputStream::try_default() {
             Ok((_stream, handle)) => match Sink::try_new(&handle) {

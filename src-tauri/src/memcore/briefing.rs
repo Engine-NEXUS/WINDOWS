@@ -670,11 +670,14 @@ pub const RESUME_HELLO_MIN_AWAY_SECS: u64 = 20 * 60;
 
 /// The machine just woke from sleep after `away_secs`. After a real absence, greet once the user is
 /// back at the keyboard (they have typed their password / PIN). No personal content: just the hello.
+    static RESUME_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub fn on_resume<R: tauri::Runtime>(app: tauri::AppHandle<R>, away_secs: u64) {
     use tauri::Manager;
     if away_secs < RESUME_HELLO_MIN_AWAY_SECS {
         return;
     }
+    // A newer wake replaces an older waiting task (a brief wake with nobody there used to leave its task alive for hours).
+    let my_gen = RESUME_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn(async move {
         let Ok(dir) = app.path().app_data_dir() else { return };
         if !super::enabled(&dir) || !super::flag(&dir, "memcoreBriefing", true) {
@@ -686,6 +689,9 @@ pub fn on_resume<R: tauri::Runtime>(app: tauri::AppHandle<R>, away_secs: u64) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             waited += 2;
+            if RESUME_GEN.load(std::sync::atomic::Ordering::SeqCst) != my_gen {
+                return;
+            }
             let idle = resume::user_idle_secs();
             let typed_recently = idle.map(|s| s < 10).unwrap_or(false);
             let changed = matches!((baseline, idle), (Some(b), Some(i)) if i < b);

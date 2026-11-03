@@ -157,6 +157,13 @@ impl Controller {
         }
     }
 
+    /// A lease is live when this epoch still owns the volume. After a force/defer restore (the watchdog after a sleep,
+    /// a barge-in) a lease the caller still holds is stale and no longer protects its playback.
+    pub fn lease_is_live(&self) -> bool {
+        let st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+        st.count > 0 && st.baseline.is_some()
+    }
+
     pub fn heartbeat(&self) {
         self.last_beat.store(now_millis(), Ordering::Relaxed);
     }
@@ -332,6 +339,16 @@ pub fn init(app_data_dir: PathBuf) {
 /// Acquire an RAII lease for TTS volume (sets the system volume to `tts_volume`).
 pub fn acquire_volume_lease(tts_volume: f32) -> Option<TtsVolumeLease> {
     ctrl().acquire(tts_volume)
+}
+
+/// Called where audio really starts. A lease taken earlier (before synthesis, which can take hours across a sleep) may
+/// have been ended by the watchdog; then the speech gets a fresh one so it never plays at the user's own volume.
+/// `None` when the volume setting is 0, or when a live lease already covers this playback.
+pub fn ensure_live_lease(tts_volume_pct: u8) -> Option<TtsVolumeLease> {
+    if tts_volume_pct == 0 || ctrl().lease_is_live() {
+        return None;
+    }
+    ctrl().acquire(tts_volume_pct as f32 / 100.0)
 }
 
 /// Playback loops call this (about once a second is plenty) so long speech is never force-restored.
@@ -881,5 +898,39 @@ mod tests {
         if let Ok(v) = vol {
             assert!(v >= 0.0 && v <= 1.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod live_lease_tests {
+    use super::*;
+
+    struct Fake(Mutex<f32>);
+    impl VolumeBackend for Fake {
+        fn get(&self) -> Result<f32, String> {
+            Ok(*self.0.lock().unwrap())
+        }
+        fn set(&self, l: f32) -> Result<(), String> {
+            *self.0.lock().unwrap() = l;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_lease_ended_by_the_watchdog_is_not_live_and_a_new_one_covers_the_playback() {
+        let fake = Arc::new(Fake(Mutex::new(0.22)));
+        let c = Controller::with_timing(fake.clone(), Duration::from_millis(50), Duration::from_secs(60), Duration::from_secs(60));
+        assert!(!c.lease_is_live(), "no lease yet");
+        let stale = c.acquire(0.75).expect("lease");
+        assert!(c.lease_is_live());
+        c.force_restore(); // the watchdog after a long sleep
+        assert!(!c.lease_is_live(), "the old lease no longer protects playback");
+        assert!((*fake.0.lock().unwrap() - 0.22).abs() < 1e-6, "volume went back to the user's own");
+        let fresh = c.acquire(0.75).expect("fresh lease at playback");
+        assert!(c.lease_is_live());
+        assert!((*fake.0.lock().unwrap() - 0.75).abs() < 1e-6);
+        drop(stale);
+        assert!(c.lease_is_live(), "dropping the stale lease must not end the fresh one");
+        drop(fresh);
     }
 }
