@@ -22,7 +22,9 @@ use crate::notify_open::{Accept, Opened, Opener};
 
 /// Opaque local binding of the single connected GitHub sign-in (the vault holds one GitHub token).
 const GITHUB_ACCOUNT: &str = "gh-primary";
+const DEPLOY_ACCOUNT: &str = "deploys";
 const EVENT_TTL_MS: u64 = 7 * 24 * 3600 * 1000;
+pub use crate::memcore::deploy_watch::DeployExtras;
 /// GitHub alerts are shown in the CodeRabbit interface, docked right (the toast appears bottom-right).
 pub const DETAIL_VIEW: &str = "coderabbit";
 pub const DETAIL_DOCK: &str = "right";
@@ -203,6 +205,107 @@ pub fn publish_github_extras<R: Runtime>(app: &AppHandle<R>, full_name: &str, fa
         return;
     };
     publish_event(app, ev, ttl_ms);
+}
+
+/// Pure: the ledger event for a deployment observation (Vercel, Render, Netlify, Supabase).
+/// Returns None when any target id is unusable or the service is unknown.
+pub fn deploy_event(
+    service: &str,
+    display_project: &str,
+    fact: &Fact,
+    line: &Line,
+    now: u64,
+    extras: DeployExtras,
+) -> Option<NotifyEvent> {
+    let provider = match service.to_ascii_lowercase().as_str() {
+        "vercel" => Provider::Vercel,
+        "render" => Provider::Render,
+        "netlify" => Provider::Netlify,
+        "supabase" => Provider::Supabase,
+        _ => return None,
+    };
+    let target = Target::Deployment {
+        provider,
+        team: extras.team,
+        project: extras.slug,
+        deployment_id: extras.deployment_id.clone(),
+        revision: None,
+    };
+    if crate::notify_event::validate_target(&target).is_err() {
+        return None;
+    }
+    let hints = if let Some(url) = extras.url.filter(|u| crate::notify_links::provider_page_ok(provider, u)) {
+        crate::notify_links::OpenHints {
+            html_url: Some(url),
+            ..Default::default()
+        }
+    } else {
+        crate::notify_links::OpenHints::default()
+    };
+    let key = entity_key(provider, DEPLOY_ACCOUNT, &target, "deploy");
+    let (status, severity) = match line {
+        Line::Fixed { .. } => (Status::Recovered, Severity::Low),
+        Line::Failed { .. } | Line::StillFailing { .. } => (Status::Failed, Severity::Medium),
+    };
+    let source_ref = if !extras.deployment_id.is_empty() {
+        extras.deployment_id
+    } else {
+        fact.run_ref.clone()
+    };
+    if source_ref.is_empty()
+        || source_ref.len() > 100
+        || !source_ref.chars().all(|c| c.is_ascii_alphanumeric() || "._-:".contains(c))
+    {
+        return None;
+    }
+    let short_id: String = source_ref.chars().take(12).collect();
+    let preview = if !short_id.is_empty() {
+        format!("{display_project} · {short_id}")
+    } else {
+        display_project.to_string()
+    };
+    let raw_title = crate::notify_brain::render_for(service, line, None);
+    let title = raw_title.trim_end_matches(['.', ',', ' ']).to_string();
+    Some(NotifyEvent {
+        schema_version: SCHEMA_VERSION,
+        event_id: event_id(&key, &source_ref, status),
+        entity_key: key,
+        provider,
+        account_id: DEPLOY_ACCOUNT.into(),
+        kind: "deploy".into(),
+        status,
+        severity,
+        occurred_at_ms: now,
+        observed_at_ms: now,
+        updated_at_ms: now,
+        title: crate::notify_event::sanitize_text(&title, 120),
+        preview: crate::notify_event::sanitize_text(&preview, 240),
+        privacy: PrivacyClass::Public,
+        target,
+        source_ref: source_ref.clone(),
+        original_source_ref: source_ref,
+        occurrences: 1,
+        delivery: Delivery::default(),
+        read: ReadState::Unread,
+        expires_at_ms: now + EVENT_TTL_MS,
+        hints,
+    })
+}
+
+/// Publish a deployment alert: Windows/NEXUS notification toast with typed target to open the exact deploy page.
+pub fn publish_deploy<R: Runtime>(
+    app: &AppHandle<R>,
+    service: &str,
+    display_project: &str,
+    fact: &Fact,
+    line: &Line,
+    extras: DeployExtras,
+) {
+    let now = now_ms();
+    let Some(ev) = deploy_event(service, display_project, fact, line, now, extras) else {
+        return;
+    };
+    publish_event(app, ev, None);
 }
 
 /// Record any source's alert in the ledger and deliver it: the NEXUS toast, the Windows toast, or history only.
@@ -661,5 +764,150 @@ mod tests {
         let gone = op.begin("ev_missing", &mut led, 5, &|_, _| true, None, false);
         let v = detail_json(&gone, None, None);
         assert!(v["unavailable"].is_string() && v.get("title").is_none());
+    }
+
+    #[test]
+    fn deploy_event_open_urls_and_fallback_for_all_services() {
+        let now = 1_000_000u64;
+        let fail_line = Line::Failed { project: "zync".into(), kind: Kind::Deploy, count: 1 };
+        let fixed_line = Line::Fixed { project: "zync".into(), kind: Kind::Deploy };
+
+        // 1. Vercel
+        let fact_vercel = Fact { service: "vercel", project: "zync".into(), kind: Kind::Deploy, obs: Obs::Failed, run_ref: "dpl_1".into() };
+        // Failure with inspectorUrl
+        let extras_v1 = DeployExtras {
+            team: "acme".into(),
+            slug: "zync".into(),
+            deployment_id: "dpl_1".into(),
+            url: Some("https://vercel.com/acme/zync/dpl_1".into()),
+        };
+        let ev_v1 = deploy_event("vercel", "zync", &fact_vercel, &fail_line, now, extras_v1).expect("vercel failure event");
+        assert_eq!(ev_v1.status, Status::Failed);
+        assert_eq!(crate::notify_open::event_url(&ev_v1).as_deref(), Some("https://vercel.com/acme/zync/dpl_1"));
+
+        // Recovery without inspectorUrl (uses fallback)
+        let fact_vercel_rec = Fact { service: "vercel", project: "zync".into(), kind: Kind::Deploy, obs: Obs::Fixed, run_ref: "dpl_2".into() };
+        let extras_v2 = DeployExtras {
+            team: "acme".into(),
+            slug: "zync".into(),
+            deployment_id: "dpl_2".into(),
+            url: None,
+        };
+        let ev_v2 = deploy_event("vercel", "zync", &fact_vercel_rec, &fixed_line, now, extras_v2).expect("vercel recovery event");
+        assert_eq!(ev_v2.status, Status::Recovered);
+        assert_eq!(crate::notify_open::event_url(&ev_v2).as_deref(), Some("https://vercel.com/acme/zync/dpl_2"));
+
+        // Evil inspectorUrl on another host is dropped and fallback is used
+        let extras_v_evil = DeployExtras {
+            team: "acme".into(),
+            slug: "zync".into(),
+            deployment_id: "dpl_3".into(),
+            url: Some("https://evil.com/phish".into()),
+        };
+        let ev_v_evil = deploy_event("vercel", "zync", &fact_vercel, &fail_line, now, extras_v_evil).expect("vercel evil url event");
+        assert_eq!(ev_v_evil.hints.html_url, None);
+        assert_eq!(crate::notify_open::event_url(&ev_v_evil).as_deref(), Some("https://vercel.com/acme/zync/dpl_3"));
+
+        // Unusable id returns None
+        let extras_v_bad = DeployExtras {
+            team: "acme".into(),
+            slug: "zync".into(),
+            deployment_id: "bad id with spaces".into(),
+            url: None,
+        };
+        assert!(deploy_event("vercel", "zync", &fact_vercel, &fail_line, now, extras_v_bad).is_none());
+
+        // 2. Render
+        let fact_render = Fact { service: "render", project: "zync".into(), kind: Kind::Deploy, obs: Obs::Failed, run_ref: "dep-101".into() };
+        let extras_r1 = DeployExtras {
+            team: "default".into(),
+            slug: "srv-c123456".into(),
+            deployment_id: "dep-101".into(),
+            url: None,
+        };
+        let ev_r1 = deploy_event("render", "zync", &fact_render, &fail_line, now, extras_r1).expect("render failure event");
+        assert_eq!(ev_r1.status, Status::Failed);
+        assert_eq!(crate::notify_open::event_url(&ev_r1).as_deref(), Some("https://dashboard.render.com/web/srv-c123456/deploys/dep-101"));
+
+        let fact_render_rec = Fact { service: "render", project: "zync".into(), kind: Kind::Deploy, obs: Obs::Fixed, run_ref: "dep-102".into() };
+        let extras_r2 = DeployExtras {
+            team: "default".into(),
+            slug: "srv-c123456".into(),
+            deployment_id: "dep-102".into(),
+            url: None,
+        };
+        let ev_r2 = deploy_event("render", "zync", &fact_render_rec, &fixed_line, now, extras_r2).expect("render recovery event");
+        assert_eq!(ev_r2.status, Status::Recovered);
+        assert_eq!(crate::notify_open::event_url(&ev_r2).as_deref(), Some("https://dashboard.render.com/web/srv-c123456/deploys/dep-102"));
+
+        let extras_r_bad = DeployExtras {
+            team: "default".into(),
+            slug: "srv-c123456".into(),
+            deployment_id: "bad/id".into(),
+            url: None,
+        };
+        assert!(deploy_event("render", "zync", &fact_render, &fail_line, now, extras_r_bad).is_none());
+
+        // 3. Netlify
+        let fact_netlify = Fact { service: "netlify", project: "zync".into(), kind: Kind::Deploy, obs: Obs::Failed, run_ref: "net-201".into() };
+        let extras_n1 = DeployExtras {
+            team: "default".into(),
+            slug: "my-site".into(),
+            deployment_id: "net-201".into(),
+            url: None,
+        };
+        let ev_n1 = deploy_event("netlify", "zync", &fact_netlify, &fail_line, now, extras_n1).expect("netlify failure event");
+        assert_eq!(ev_n1.status, Status::Failed);
+        assert_eq!(crate::notify_open::event_url(&ev_n1).as_deref(), Some("https://app.netlify.com/projects/my-site/deploys/net-201"));
+
+        let fact_netlify_rec = Fact { service: "netlify", project: "zync".into(), kind: Kind::Deploy, obs: Obs::Fixed, run_ref: "net-202".into() };
+        let extras_n2 = DeployExtras {
+            team: "default".into(),
+            slug: "my-site".into(),
+            deployment_id: "net-202".into(),
+            url: None,
+        };
+        let ev_n2 = deploy_event("netlify", "zync", &fact_netlify_rec, &fixed_line, now, extras_n2).expect("netlify recovery event");
+        assert_eq!(ev_n2.status, Status::Recovered);
+        assert_eq!(crate::notify_open::event_url(&ev_n2).as_deref(), Some("https://app.netlify.com/projects/my-site/deploys/net-202"));
+
+        let extras_n_bad = DeployExtras {
+            team: "default".into(),
+            slug: "bad site with space".into(),
+            deployment_id: "net-201".into(),
+            url: None,
+        };
+        assert!(deploy_event("netlify", "zync", &fact_netlify, &fail_line, now, extras_n_bad).is_none());
+
+        // 4. Supabase
+        let fact_supabase = Fact { service: "supabase", project: "zync".into(), kind: Kind::Deploy, obs: Obs::Failed, run_ref: "INIT_FAILED".into() };
+        let extras_s1 = DeployExtras {
+            team: "default".into(),
+            slug: "abcdefghijkl".into(),
+            deployment_id: "INIT_FAILED".into(),
+            url: None,
+        };
+        let ev_s1 = deploy_event("supabase", "zync", &fact_supabase, &fail_line, now, extras_s1).expect("supabase failure event");
+        assert_eq!(ev_s1.status, Status::Failed);
+        assert_eq!(crate::notify_open::event_url(&ev_s1).as_deref(), Some("https://supabase.com/dashboard/project/abcdefghijkl"));
+
+        let fact_supabase_rec = Fact { service: "supabase", project: "zync".into(), kind: Kind::Deploy, obs: Obs::Fixed, run_ref: "ACTIVE_HEALTHY".into() };
+        let extras_s2 = DeployExtras {
+            team: "default".into(),
+            slug: "abcdefghijkl".into(),
+            deployment_id: "ACTIVE_HEALTHY".into(),
+            url: None,
+        };
+        let ev_s2 = deploy_event("supabase", "zync", &fact_supabase_rec, &fixed_line, now, extras_s2).expect("supabase recovery event");
+        assert_eq!(ev_s2.status, Status::Recovered);
+        assert_eq!(crate::notify_open::event_url(&ev_s2).as_deref(), Some("https://supabase.com/dashboard/project/abcdefghijkl"));
+
+        let extras_s_bad = DeployExtras {
+            team: "default".into(),
+            slug: "".into(),
+            deployment_id: "ACTIVE_HEALTHY".into(),
+            url: None,
+        };
+        assert!(deploy_event("supabase", "zync", &fact_supabase, &fail_line, now, extras_s_bad).is_none());
     }
 }

@@ -16,12 +16,23 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use crate::notify_brain::{Fact, Kind, Obs};
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DeployExtras {
+    pub team: String,
+    pub slug: String,
+    pub deployment_id: String,
+    pub url: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeployRun {
     pub project: String,
     pub id: String,
     pub obs: Option<Obs>,
     pub at_ms: i64,
+    pub team: String,
+    pub slug: String,
+    pub url: Option<String>,
 }
 
 fn parse_ts_ms(val: &serde_json::Value) -> Option<i64> {
@@ -111,11 +122,34 @@ pub fn parse_vercel(json: &str) -> Vec<DeployRun> {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let obs = obs_of_vercel(state);
+        let url = item.get("inspectorUrl").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let team = item
+            .get("team")
+            .or_else(|| item.get("teamSlug"))
+            .or_else(|| item.get("team_slug"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                url.as_deref().and_then(|u| {
+                    let rest = u.strip_prefix("https://")?.strip_prefix("vercel.com/")?;
+                    let t = rest.split('/').next()?;
+                    if !t.is_empty() {
+                        Some(t.to_string())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .or_else(|| item.get("teamId").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .unwrap_or_else(|| "me".to_string());
         out.push(DeployRun {
             project: project.to_string(),
             id: id.to_string(),
             obs,
             at_ms,
+            team,
+            slug: project.to_string(),
+            url,
         });
     }
     out
@@ -204,11 +238,33 @@ pub fn parse_render(project: &str, json: &str) -> Vec<DeployRun> {
         };
         let status = deploy.get("status").and_then(|v| v.as_str()).unwrap_or("");
         let obs = obs_of_render(status);
+        let slug = deploy
+            .get("serviceId")
+            .or_else(|| deploy.get("service_id"))
+            .or_else(|| item.get("serviceId"))
+            .or_else(|| item.get("service_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| if project.starts_with("srv-") { project } else { "" })
+            .to_string();
+        let team = deploy
+            .get("team")
+            .or_else(|| item.get("team"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("default")
+            .to_string();
+        let url = deploy
+            .get("url")
+            .or_else(|| item.get("url"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         out.push(DeployRun {
             project: proj,
             id: id.to_string(),
             obs,
             at_ms,
+            team,
+            slug,
+            url,
         });
     }
     out
@@ -275,11 +331,26 @@ pub fn parse_supabase(json: &str, now_ms: i64) -> Vec<DeployRun> {
             if name.is_empty() {
                 return None;
             }
+            let ref_id = p
+                .get("id")
+                .or_else(|| p.get("ref"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let team = p
+                .get("organization_id")
+                .or_else(|| p.get("team"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("default")
+                .to_string();
             Some(DeployRun {
                 project: name.to_string(),
                 id: status.to_ascii_uppercase(),
                 obs: obs_of_supabase(status),
                 at_ms: now_ms,
+                team,
+                slug: ref_id,
+                url: None,
             })
         })
         .collect()
@@ -324,17 +395,37 @@ pub fn parse_netlify(project: &str, json: &str) -> Vec<DeployRun> {
         };
         let state = item.get("state").and_then(|v| v.as_str()).unwrap_or("");
         let obs = obs_of_netlify(state);
+        let slug = item
+            .get("site_name")
+            .or_else(|| item.get("name"))
+            .or_else(|| item.get("slug"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(if !project.is_empty() { project } else { "" })
+            .to_string();
+        let team = item
+            .get("account_slug")
+            .or_else(|| item.get("team"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("default")
+            .to_string();
+        let url = item
+            .get("admin_url")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         out.push(DeployRun {
             project: proj,
             id: id.to_string(),
             obs,
             at_ms,
+            team,
+            slug,
+            url,
         });
     }
     out
 }
 
-pub fn facts_for(service: &'static str, runs: &[DeployRun], now_ms: i64) -> Vec<Fact> {
+pub fn facts_for(service: &'static str, runs: &[DeployRun], now_ms: i64) -> Vec<(Fact, DeployExtras)> {
     const MAX_AGE_MS: i64 = 7 * 24 * 3600 * 1000;
     let mut projects: Vec<String> = runs.iter().map(|r| r.project.clone()).collect();
     projects.sort();
@@ -350,13 +441,20 @@ pub fn facts_for(service: &'static str, runs: &[DeployRun], now_ms: i64) -> Vec<
             .max_by(|a, b| a.at_ms.cmp(&b.at_ms).then_with(|| a.id.cmp(&b.id)));
 
         if let Some((run, obs)) = candidate.and_then(|r| r.obs.map(|o| (r, o))) {
-            facts.push(Fact {
+            let fact = Fact {
                 service,
                 project: project.clone(),
                 kind: Kind::Deploy,
                 obs,
                 run_ref: run.id.clone(),
-            });
+            };
+            let extras = DeployExtras {
+                team: run.team.clone(),
+                slug: run.slug.clone(),
+                deployment_id: run.id.clone(),
+                url: run.url.clone(),
+            };
+            facts.push((fact, extras));
         }
     }
     facts
@@ -403,7 +501,7 @@ pub async fn poll_service(
     token: &str,
     state: &mut WatchState,
     now_ms: i64,
-) -> Result<Vec<(Fact, bool)>, PollError> {
+) -> Result<Vec<(Fact, bool, DeployExtras)>, PollError> {
     let base = base.trim_end_matches('/');
     let mut all_runs = Vec::new();
 
@@ -438,12 +536,12 @@ pub async fn poll_service(
                 team_ids = parse_teams_vercel(&text);
             }
 
-            let mut endpoints = vec![format!("{base}/v6/deployments?limit=20&target=production")];
+            let mut endpoints = vec![("me".to_string(), format!("{base}/v6/deployments?limit=20&target=production"))];
             for tid in team_ids {
-                endpoints.push(format!("{base}/v6/deployments?limit=20&target=production&teamId={tid}"));
+                endpoints.push((tid.clone(), format!("{base}/v6/deployments?limit=20&target=production&teamId={tid}")));
             }
 
-            for url in endpoints {
+            for (team_slug, url) in endpoints {
                 let req = client
                     .get(&url)
                     .header("User-Agent", "nexus-assistant")
@@ -472,7 +570,13 @@ pub async fn poll_service(
                     return Err(PollError::Other(format!("vercel deployments returned {st}")));
                 }
                 let text = resp.text().await.map_err(|e| PollError::Other(e.to_string()))?;
-                all_runs.extend(parse_vercel(&text));
+                let mut runs = parse_vercel(&text);
+                for r in &mut runs {
+                    if r.team == "me" && team_slug != "me" {
+                        r.team = team_slug.clone();
+                    }
+                }
+                all_runs.extend(runs);
             }
         }
         "render" => {
@@ -530,7 +634,13 @@ pub async fn poll_service(
                     return Err(PollError::Other(format!("render deploys for {service_name} returned {st}")));
                 }
                 let text = resp.text().await.map_err(|e| PollError::Other(e.to_string()))?;
-                all_runs.extend(parse_render(&service_name, &text));
+                let mut runs = parse_render(&service_name, &text);
+                for r in &mut runs {
+                    if r.slug.is_empty() {
+                        r.slug = service_id.clone();
+                    }
+                }
+                all_runs.extend(runs);
             }
         }
         "netlify" => {
@@ -588,7 +698,13 @@ pub async fn poll_service(
                     return Err(PollError::Other(format!("netlify deploys for {site_name} returned {st}")));
                 }
                 let text = resp.text().await.map_err(|e| PollError::Other(e.to_string()))?;
-                all_runs.extend(parse_netlify(&site_name, &text));
+                let mut runs = parse_netlify(&site_name, &text);
+                for r in &mut runs {
+                    if r.slug.is_empty() {
+                        r.slug = site_name.clone();
+                    }
+                }
+                all_runs.extend(runs);
             }
         }
         "supabase" => {
@@ -628,13 +744,13 @@ pub async fn poll_service(
     };
     let facts = facts_for(static_service, &all_runs, now_ms);
     let mut out = Vec::with_capacity(facts.len());
-    for fact in facts {
+    for (fact, extras) in facts {
         let key = format!("{}:{}", service, fact.project.to_lowercase());
         let is_first = !state.seen.contains(&key);
         if is_first {
             state.seen.insert(key);
         }
-        out.push((fact, is_first));
+        out.push((fact, is_first, extras));
     }
 
     Ok(out)
@@ -754,11 +870,12 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
                         failures.insert(service.to_string(), 0);
                         noted_auth.insert(service.to_string(), false);
                         note_auth_state(&app, &dir, service, false);
-                        for (fact, baseline) in items {
+                        for (fact, baseline, extras) in items {
                             if let crate::notify_brain::Decision::Say(line) =
                                 crate::notify_brain::observe_fact(&app, &fact, baseline)
                             {
-                                crate::notify_brain::say(&app, service, line);
+                                crate::notify_brain::say(&app, service, line.clone());
+                                crate::notify_hub::publish_deploy(&app, service, &fact.project, &fact, &line, extras);
                             }
                         }
                         let delay = next_delay_secs(0, false, state.rate_limit_remaining);
@@ -1037,27 +1154,39 @@ mod tests {
                 id: "d1".into(),
                 obs: Some(Obs::Failed),
                 at_ms: now - 3600 * 1000,
+                team: "me".into(),
+                slug: "zync".into(),
+                url: None,
             },
             DeployRun {
                 project: "zync".into(),
                 id: "d2".into(),
                 obs: None, // newest deploy cancelled: must not hide older terminal d1
                 at_ms: now - 1800 * 1000,
+                team: "me".into(),
+                slug: "zync".into(),
+                url: None,
             },
             DeployRun {
                 project: "nexus".into(),
                 id: "n1".into(),
                 obs: None, // running deploy: never counts
                 at_ms: now - 600 * 1000,
+                team: "me".into(),
+                slug: "nexus".into(),
+                url: None,
             },
         ];
 
         let facts = facts_for("vercel", &runs, now);
         assert_eq!(facts.len(), 1, "nexus running deploy must yield no facts");
-        assert_eq!(facts[0].service, "vercel");
-        assert_eq!(facts[0].project, "zync");
-        assert_eq!(facts[0].obs, Obs::Failed);
-        assert_eq!(facts[0].run_ref, "d1");
+        assert_eq!(facts[0].0.service, "vercel");
+        assert_eq!(facts[0].0.project, "zync");
+        assert_eq!(facts[0].0.obs, Obs::Failed);
+        assert_eq!(facts[0].0.run_ref, "d1");
+        assert_eq!(facts[0].1.team, "me");
+        assert_eq!(facts[0].1.slug, "zync");
+        assert_eq!(facts[0].1.deployment_id, "d1");
     }
 
     #[test]
@@ -1069,6 +1198,9 @@ mod tests {
             id: "d_old".into(),
             obs: Some(Obs::Fixed),
             at_ms: now - eight_days_ms,
+            team: "default".into(),
+            slug: "srv-zync".into(),
+            url: None,
         }];
 
         let facts = facts_for("render", &runs, now);
@@ -1085,30 +1217,39 @@ mod tests {
                 id: "dep_1".into(),
                 obs: Some(Obs::Failed),
                 at_ms: ts,
+                team: "default".into(),
+                slug: "zync".into(),
+                url: None,
             },
             DeployRun {
                 project: "zync".into(),
                 id: "dep_2".into(),
                 obs: Some(Obs::Fixed),
                 at_ms: ts, // same timestamp: tie break by id dep_2
+                team: "default".into(),
+                slug: "zync".into(),
+                url: None,
             },
             DeployRun {
                 project: "app".into(),
                 id: "app_1".into(),
                 obs: Some(Obs::Fixed),
                 at_ms: ts,
+                team: "default".into(),
+                slug: "app".into(),
+                url: None,
             },
         ];
 
         let facts = facts_for("netlify", &runs, now);
         assert_eq!(facts.len(), 2);
         // Sorted by project: app, then zync
-        assert_eq!(facts[0].project, "app");
-        assert_eq!(facts[0].run_ref, "app_1");
+        assert_eq!(facts[0].0.project, "app");
+        assert_eq!(facts[0].0.run_ref, "app_1");
 
-        assert_eq!(facts[1].project, "zync");
-        assert_eq!(facts[1].run_ref, "dep_2");
-        assert_eq!(facts[1].obs, Obs::Fixed);
+        assert_eq!(facts[1].0.project, "zync");
+        assert_eq!(facts[1].0.run_ref, "dep_2");
+        assert_eq!(facts[1].0.obs, Obs::Fixed);
     }
 
     #[test]
@@ -1380,5 +1521,107 @@ mod tests {
         assert_eq!(facts[0].0.run_ref, "n_ok");
 
         stop.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn test_parsers_fill_new_fields_from_realistic_fixtures() {
+        // Vercel with inspectorUrl, without inspectorUrl, and with untrusted host
+        let vercel_json = r#"{
+            "deployments": [
+                {
+                    "uid": "dpl_good",
+                    "name": "web-app",
+                    "state": "READY",
+                    "target": "production",
+                    "created": 1729850000000,
+                    "inspectorUrl": "https://vercel.com/acme/web-app/dpl_good"
+                },
+                {
+                    "uid": "dpl_no_url",
+                    "name": "docs",
+                    "state": "READY",
+                    "target": "production",
+                    "created": 1729851000000
+                },
+                {
+                    "uid": "dpl_evil",
+                    "name": "api",
+                    "state": "ERROR",
+                    "target": "production",
+                    "created": 1729852000000,
+                    "inspectorUrl": "https://evil.com/phish"
+                }
+            ]
+        }"#;
+        let v_runs = parse_vercel(vercel_json);
+        assert_eq!(v_runs.len(), 3);
+        assert_eq!(v_runs[0].team, "acme");
+        assert_eq!(v_runs[0].slug, "web-app");
+        assert_eq!(v_runs[0].id, "dpl_good");
+        assert_eq!(v_runs[0].url.as_deref(), Some("https://vercel.com/acme/web-app/dpl_good"));
+
+        assert_eq!(v_runs[1].team, "me");
+        assert_eq!(v_runs[1].slug, "docs");
+        assert_eq!(v_runs[1].id, "dpl_no_url");
+        assert_eq!(v_runs[1].url, None);
+
+        // Evil inspectorUrl is kept in the run by the parser
+        assert_eq!(v_runs[2].id, "dpl_evil");
+        assert_eq!(v_runs[2].url.as_deref(), Some("https://evil.com/phish"));
+
+        // Render with serviceId in deploy
+        let render_json = r#"[
+            {
+                "deploy": {
+                    "id": "dep-render-1",
+                    "serviceId": "srv-c123456",
+                    "status": "live",
+                    "createdAt": "2026-10-25T12:00:00Z"
+                }
+            }
+        ]"#;
+        let r_runs = parse_render("web-service", render_json);
+        assert_eq!(r_runs.len(), 1);
+        assert_eq!(r_runs[0].project, "web-service");
+        assert_eq!(r_runs[0].slug, "srv-c123456");
+        assert_eq!(r_runs[0].id, "dep-render-1");
+        assert_eq!(r_runs[0].team, "default");
+        assert_eq!(r_runs[0].url, None);
+
+        // Netlify with site_name and admin_url
+        let netlify_json = r#"[
+            {
+                "id": "dep-net-1",
+                "site_name": "my-site",
+                "account_slug": "team-netlify",
+                "state": "ready",
+                "context": "production",
+                "created_at": "2026-10-25T10:00:00Z",
+                "admin_url": "https://app.netlify.com/sites/my-site/deploys/dep-net-1"
+            }
+        ]"#;
+        let n_runs = parse_netlify("my-site", netlify_json);
+        assert_eq!(n_runs.len(), 1);
+        assert_eq!(n_runs[0].slug, "my-site");
+        assert_eq!(n_runs[0].id, "dep-net-1");
+        assert_eq!(n_runs[0].team, "team-netlify");
+        assert_eq!(n_runs[0].url.as_deref(), Some("https://app.netlify.com/sites/my-site/deploys/dep-net-1"));
+
+        // Supabase with id ref
+        let supabase_json = r#"[
+            {
+                "id": "ref-sb-123",
+                "name": "my-database",
+                "organization_id": "org-sb",
+                "status": "ACTIVE_HEALTHY"
+            }
+        ]"#;
+        let s_runs = parse_supabase(supabase_json, 1000);
+        assert_eq!(s_runs.len(), 1);
+        assert_eq!(s_runs[0].project, "my-database");
+        assert_eq!(s_runs[0].slug, "ref-sb-123");
+        assert_eq!(s_runs[0].id, "ACTIVE_HEALTHY");
+        assert_eq!(s_runs[0].team, "org-sb");
+        assert_eq!(s_runs[0].url, None);
     }
 }

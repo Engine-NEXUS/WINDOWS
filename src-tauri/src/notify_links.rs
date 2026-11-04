@@ -222,8 +222,13 @@ pub fn open_ladder(provider: Provider, target: &Target, h: &OpenHints) -> Vec<Op
             }
             match p {
                 Provider::Vercel => {
-                    url(&mut v, format!("https://vercel.com/{team}/{project}/{deployment_id}"));
-                    url(&mut v, format!("https://vercel.com/{team}/{project}"));
+                    // A team slug is needed for a project page. "me" (personal account) and "team_..." (an id, not a slug)
+                    // would give a page that does not exist, so those fall back to the dashboard.
+                    if team != "me" && !team.starts_with("team_") {
+                        url(&mut v, format!("https://vercel.com/{team}/{project}/{deployment_id}"));
+                        url(&mut v, format!("https://vercel.com/{team}/{project}"));
+                    }
+                    url(&mut v, "https://vercel.com/dashboard".to_string());
                 }
                 Provider::Render => {
                     // `project` holds the service id (srv-...); the deploy path is unverified, the service page is not.
@@ -365,7 +370,8 @@ mod tests {
         let h = OpenHints { html_url: Some("https://vercel.com/team/zync/AbC123".into()), ..Default::default() };
         let u = urls(&open_ladder(Provider::Vercel, &vercel, &h));
         assert_eq!(u[0], "https://vercel.com/team/zync/AbC123");
-        assert_eq!(u.last().unwrap(), "https://vercel.com/team/zync");
+        assert_eq!(u[u.len() - 2], "https://vercel.com/team/zync");
+        assert_eq!(u.last().unwrap(), "https://vercel.com/dashboard");
         let render = Target::Deployment { provider: Provider::Render, team: "me".into(), project: "srv-abc".into(), deployment_id: "dep-1".into(), revision: None };
         let u = urls(&open_ladder(Provider::Render, &render, &OpenHints::default()));
         assert_eq!(u[0], "https://dashboard.render.com/web/srv-abc/deploys/dep-1");
@@ -376,6 +382,15 @@ mod tests {
         assert_eq!(u[1], "https://app.netlify.com/projects/my-site");
         let sb = Target::Deployment { provider: Provider::Supabase, team: "me".into(), project: "abcdefgh".into(), deployment_id: "x".into(), revision: None };
         assert_eq!(urls(&open_ladder(Provider::Supabase, &sb, &OpenHints::default())), vec!["https://supabase.com/dashboard/project/abcdefgh".to_string()]);
+    }
+
+    #[test]
+    fn vercel_without_a_team_slug_falls_back_to_the_dashboard_not_a_guessed_page() {
+        for team in ["me", "team_AbC123"] {
+            let t = Target::Deployment { provider: Provider::Vercel, team: team.into(), project: "zync".into(), deployment_id: "dpl_1".into(), revision: None };
+            let u = urls(&open_ladder(Provider::Vercel, &t, &OpenHints::default()));
+            assert_eq!(u, vec!["https://vercel.com/dashboard".to_string()], "{team}");
+        }
     }
 
     #[test]
