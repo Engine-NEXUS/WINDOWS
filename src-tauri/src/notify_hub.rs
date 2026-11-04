@@ -308,6 +308,136 @@ pub fn publish_deploy<R: Runtime>(
     publish_event(app, ev, None);
 }
 
+/// What the producer knows about a calendar reminder.
+#[derive(Debug, Clone, Default)]
+pub struct CalendarAlertData<'a> {
+    pub id: &'a str,
+    /// Start time (epoch seconds): a moved event reminds again, so it must be a different alert.
+    pub start_epoch: i64,
+    pub summary: &'a str,
+    pub location: Option<&'a str>,
+    pub html_link: Option<&'a str>,
+    pub meet_url: Option<&'a str>,
+}
+
+impl<'a> From<&'a crate::memcore::leavewatch::LeaveEvent> for CalendarAlertData<'a> {
+    fn from(ev: &'a crate::memcore::leavewatch::LeaveEvent) -> Self {
+        Self {
+            id: &ev.id,
+            start_epoch: ev.start_epoch,
+            summary: &ev.summary,
+            location: Some(&ev.location),
+            html_link: ev.html_link.as_deref(),
+            meet_url: ev.meet_url.as_deref(),
+        }
+    }
+}
+
+impl From<crate::google::types::AlertUrgency> for Severity {
+    fn from(u: crate::google::types::AlertUrgency) -> Self {
+        match u {
+            crate::google::types::AlertUrgency::Low => Severity::Low,
+            crate::google::types::AlertUrgency::Medium => Severity::Medium,
+            crate::google::types::AlertUrgency::High => Severity::High,
+            crate::google::types::AlertUrgency::Critical => Severity::Critical,
+        }
+    }
+}
+
+/// Pure: the ledger event for a calendar reminder.
+/// Provider::Calendar, Target::Calendar { event_id }, kind "event", status Info, title = summary (sanitized, <=120),
+/// preview = the reminder text trimmed (<=240), hints.html_url only if `provider_page_ok(Provider::Calendar, url)`,
+/// hints.meet_url only if valid per `validate_hints`; invalid hints are dropped (never fail the event).
+/// account_id: the Google account email when the loop has it (`acct.email`), else "calendar".
+/// Returns None when the event_id is unusable (fails validate_target).
+pub fn calendar_event(
+    account: &str,
+    ev: &CalendarAlertData<'_>,
+    text: &str,
+    severity: Severity,
+    now: u64,
+) -> Option<NotifyEvent> {
+    let _ = ev.location;
+    let target = Target::Calendar { event_id: ev.id.to_string() };
+    if crate::notify_event::validate_target(&target).is_err() {
+        return None;
+    }
+    let account_id = if account.trim().is_empty() { "calendar" } else { account.trim() };
+    let key = entity_key(Provider::Calendar, account_id, &target, "event");
+    let status = Status::Info;
+    let source_ref = format!("{}-{}", ev.id, ev.start_epoch);
+    let raw_title = crate::notify_event::sanitize_text(ev.summary, 120);
+    let title = if raw_title.is_empty() { "(No title)".to_string() } else { raw_title };
+    let preview = crate::notify_event::sanitize_text(text.trim(), 240);
+
+    let html_url = ev
+        .html_link
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .filter(|u| crate::notify_links::provider_page_ok(Provider::Calendar, u))
+        .map(String::from);
+
+    let meet_url = ev
+        .meet_url
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .filter(|u| {
+            let test_hints = crate::notify_links::OpenHints {
+                meet_url: Some(u.to_string()),
+                ..Default::default()
+            };
+            crate::notify_links::validate_hints(Provider::Calendar, &test_hints).is_ok()
+        })
+        .map(String::from);
+
+    let hints = crate::notify_links::OpenHints {
+        html_url,
+        meet_url,
+        ..Default::default()
+    };
+
+    Some(NotifyEvent {
+        schema_version: SCHEMA_VERSION,
+        event_id: event_id(&key, &source_ref, status),
+        entity_key: key,
+        provider: Provider::Calendar,
+        account_id: account_id.to_string(),
+        kind: "event".into(),
+        status,
+        severity,
+        occurred_at_ms: now,
+        observed_at_ms: now,
+        updated_at_ms: now,
+        title,
+        preview,
+        privacy: PrivacyClass::Public,
+        target,
+        source_ref: source_ref.clone(),
+        original_source_ref: source_ref,
+        occurrences: 1,
+        delivery: Delivery::default(),
+        read: ReadState::Unread,
+        expires_at_ms: now + EVENT_TTL_MS,
+        hints,
+    })
+}
+
+/// Publish a calendar leave-by reminder: show it on the toast, click opens the event page / Meet link.
+pub fn publish_calendar<R: Runtime>(
+    app: &AppHandle<R>,
+    account: &str,
+    ev: &crate::memcore::leavewatch::LeaveEvent,
+    text: &str,
+    urgency: crate::google::types::AlertUrgency,
+) {
+    let now = now_ms();
+    let data = CalendarAlertData::from(ev);
+    let Some(event) = calendar_event(account, &data, text, urgency.into(), now) else {
+        return;
+    };
+    publish_event(app, event, None);
+}
+
 /// Record any source's alert in the ledger and deliver it: the NEXUS toast, the Windows toast, or history only.
 pub fn publish_event<R: Runtime>(app: &AppHandle<R>, mut ev: NotifyEvent, ttl_ms: Option<u64>) {
     let now = now_ms();
@@ -592,6 +722,15 @@ pub fn notify_close_event(token: u64) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_moved_event_is_a_new_alert_with_the_same_entity() {
+        let mk = |start: i64| CalendarAlertData { id: "cal_ev_1", summary: "Dentist", location: None, html_link: None, meet_url: None, start_epoch: start };
+        let a = calendar_event("me@gmail.com", &mk(1_000), "Leave now.", Severity::High, 1).unwrap();
+        let b = calendar_event("me@gmail.com", &mk(2_000), "Leave now.", Severity::High, 1).unwrap();
+        assert_eq!(a.entity_key, b.entity_key);
+        assert_ne!(a.event_id, b.event_id, "moved event must not be swallowed as a duplicate");
+    }
+
     fn mail(subject: &str, from: &str) -> crate::memcore::mailtriage::MailMeta {
         crate::memcore::mailtriage::MailMeta {
             id: "18c2e".into(),
@@ -909,5 +1048,121 @@ mod tests {
             url: None,
         };
         assert!(deploy_event("supabase", "zync", &fact_supabase, &fail_line, now, extras_s_bad).is_none());
+    }
+
+    #[test]
+    fn calendar_event_urls_fallbacks_and_validation() {
+        let now = 1_000_000u64;
+
+        // 1. calendar_event -> notify_open::event_url(&ev) equals the event page when html_link is a google calendar URL
+        let valid_data = CalendarAlertData {
+            start_epoch: 1_700_000_000,
+            id: "cal_ev_123",
+            summary: "Doctor Appointment",
+            location: Some("123 Health Ave"),
+            html_link: Some("https://calendar.google.com/calendar/event?eid=abc123xyz"),
+            meet_url: Some("https://meet.google.com/abc-defg-hij"),
+        };
+        let ev = calendar_event("calendar", &valid_data, "Time to leave for Doctor Appointment.", Severity::High, now)
+            .expect("valid calendar event");
+        assert_eq!(ev.provider, Provider::Calendar);
+        assert_eq!(ev.status, Status::Info);
+        assert_eq!(ev.severity, Severity::High);
+        assert_eq!(ev.title, "Doctor Appointment");
+        assert_eq!(ev.preview, "Time to leave for Doctor Appointment.");
+        assert_eq!(ev.hints.html_url.as_deref(), Some("https://calendar.google.com/calendar/event?eid=abc123xyz"));
+        assert_eq!(ev.hints.meet_url.as_deref(), Some("https://meet.google.com/abc-defg-hij"));
+        assert_eq!(
+            crate::notify_open::event_url(&ev).as_deref(),
+            Some("https://calendar.google.com/calendar/event?eid=abc123xyz")
+        );
+
+        // 2. A link on another host is dropped (falls back to https://calendar.google.com/calendar/)
+        let evil_url_data = CalendarAlertData {
+            start_epoch: 1_700_000_000,
+            id: "cal_ev_456",
+            summary: "Team Sync",
+            location: Some("Office"),
+            html_link: Some("https://evil.com/phish"),
+            meet_url: None,
+        };
+        let ev_evil = calendar_event("calendar", &evil_url_data, "Leave soon.", Severity::Medium, now)
+            .expect("evil url event");
+        assert_eq!(ev_evil.hints.html_url, None);
+        assert_eq!(
+            crate::notify_open::event_url(&ev_evil).as_deref(),
+            Some("https://calendar.google.com/calendar/")
+        );
+
+        // 3. An unusable event id gives None
+        let bad_id_data = CalendarAlertData {
+            start_epoch: 1_700_000_000,
+            id: "invalid event id with spaces!",
+            summary: "Invalid",
+            location: None,
+            html_link: None,
+            meet_url: None,
+        };
+        assert!(calendar_event("calendar", &bad_id_data, "Leave now.", Severity::Low, now).is_none());
+
+        let empty_id_data = CalendarAlertData {
+            start_epoch: 1_700_000_000,
+            id: "",
+            summary: "Empty",
+            location: None,
+            html_link: None,
+            meet_url: None,
+        };
+        assert!(calendar_event("calendar", &empty_id_data, "Leave now.", Severity::Low, now).is_none());
+
+        // 4. Meet link is kept only for meet.google.com
+        let good_meet_data = CalendarAlertData {
+            start_epoch: 1_700_000_000,
+            id: "cal_ev_789",
+            summary: "Virtual Check-in",
+            location: None,
+            html_link: None,
+            meet_url: Some("https://meet.google.com/xyz-uvwx-rst"),
+        };
+        let ev_meet = calendar_event("calendar", &good_meet_data, "Call starting.", Severity::Medium, now)
+            .expect("good meet event");
+        assert_eq!(ev_meet.hints.meet_url.as_deref(), Some("https://meet.google.com/xyz-uvwx-rst"));
+        // Since html_link is None, event_url opens the Meet link!
+        assert_eq!(
+            crate::notify_open::event_url(&ev_meet).as_deref(),
+            Some("https://meet.google.com/xyz-uvwx-rst")
+        );
+
+        let bad_meet_data = CalendarAlertData {
+            start_epoch: 1_700_000_000,
+            id: "cal_ev_890",
+            summary: "Zoom Call",
+            location: None,
+            html_link: None,
+            meet_url: Some("https://zoom.us/j/123456789"),
+        };
+        let ev_bad_meet = calendar_event("calendar", &bad_meet_data, "Call starting.", Severity::Medium, now)
+            .expect("bad meet event");
+        assert_eq!(ev_bad_meet.hints.meet_url, None);
+        // Both html_link and meet_url are None, so event_url falls back to calendar base URL
+        assert_eq!(
+            crate::notify_open::event_url(&ev_bad_meet).as_deref(),
+            Some("https://calendar.google.com/calendar/")
+        );
+
+        // 5. Account id handling: email used when non-empty, otherwise "calendar"
+        let acct_data = CalendarAlertData {
+            start_epoch: 1_700_000_000,
+            id: "cal_ev_999",
+            summary: "Personal sync",
+            location: None,
+            html_link: None,
+            meet_url: None,
+        };
+        let ev_acct = calendar_event("user@gmail.com", &acct_data, "Leave now.", Severity::Low, now).unwrap();
+        assert_eq!(ev_acct.account_id, "user@gmail.com");
+
+        let ev_default = calendar_event("", &acct_data, "Leave now.", Severity::Low, now).unwrap();
+        assert_eq!(ev_default.account_id, "calendar");
     }
 }

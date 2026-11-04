@@ -500,6 +500,8 @@ mod tests {
             end_iso: end.into(),
             location: None,
             status: "confirmed".into(),
+            html_link: None,
+            meet_url: None,
         }
     }
 
