@@ -511,6 +511,7 @@ mod tests {
             snippet: snippet.into(),
             labels: vec!["INBOX".into()],
             date_ms: 1_700_000_000_000,
+            rfc822_id: String::new(),
         }
     }
 

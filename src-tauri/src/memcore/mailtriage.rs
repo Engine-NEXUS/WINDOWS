@@ -29,6 +29,8 @@ pub struct MailMeta {
     pub snippet: String,
     pub labels: Vec<String>,
     pub date_ms: i64,
+    /// RFC 822 `Message-ID` header (an id-independent way to find this mail in Gmail); empty when absent.
+    pub rfc822_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +132,7 @@ pub fn parse_message_meta(v: &Value) -> Option<MailMeta> {
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default(),
         date_ms: v.get("internalDate").and_then(|d| d.as_str()).and_then(|d| d.parse().ok()).unwrap_or(0),
+        rfc822_id: header(v, "Message-ID"),
     })
 }
 
@@ -527,11 +530,20 @@ mod tests {
             snippet: snippet.into(),
             labels: labels.iter().map(|s| s.to_string()).collect(),
             date_ms: 1_700_000_000_000,
+            rfc822_id: String::new(),
         }
     }
 
     fn cls(from: &str, subject: &str, snippet: &str, labels: &[&str]) -> Option<(Category, AlertUrgency)> {
         classify(&mail(from, subject, snippet, labels), &[]).map(|t| (t.category, t.urgency))
+    }
+
+    #[test]
+    fn the_message_id_header_is_read_for_the_gmail_link() {
+        let v: Value = serde_json::json!({"id":"m1","threadId":"t1","payload":{"headers":[{"name":"From","value":"A <a@x.com>"},{"name":"Subject","value":"Hi"},{"name":"Message-ID","value":"<CAF+abc@mail.gmail.com>"}]}});
+        assert_eq!(parse_message_meta(&v).unwrap().rfc822_id, "<CAF+abc@mail.gmail.com>");
+        let none: Value = serde_json::json!({"id":"m1","payload":{"headers":[]}});
+        assert_eq!(parse_message_meta(&none).unwrap().rfc822_id, "");
     }
 
     #[test]

@@ -56,6 +56,76 @@ fn now_ms() -> u64 {
 
 /// Pure: the ledger event for a GitHub observation of a UNIQUELY resolved `owner/repo`. None when the run id or
 /// the repository identity is not usable (no card is better than a card that opens the wrong thing).
+/// Mail that must never show its words on a toast: codes, resets and bank messages. Pure; lowercase match on subject
+/// and sender.
+pub fn looks_security(subject: &str, from: &str) -> bool {
+    let s = format!("{} {}", subject.to_lowercase(), from.to_lowercase());
+    [
+        "verification code", "one-time", "one time password", "otp", "password reset", "reset your password",
+        "security code", "sign-in code", "login code", "your code", "2-step", "two-step", "bank", "upi",
+        "transaction alert", "debited", "credited", "account statement",
+    ]
+    .iter()
+    .any(|k| s.contains(k))
+}
+
+/// Pure: the ledger event for one important mail of `account`. Sender is the title and the subject the preview; the
+/// body and snippet are never stored. Security mail is reduced to "Security message". None when ids are unusable.
+pub fn gmail_event(account: &str, m: &crate::memcore::mailtriage::MailMeta, severity: Severity, now: u64) -> Option<NotifyEvent> {
+    if m.id.is_empty() || m.thread_id.is_empty() || account.is_empty() {
+        return None;
+    }
+    let target = Target::Gmail { thread_id: m.thread_id.clone(), message_id: Some(m.id.clone()) };
+    let key = entity_key(Provider::Gmail, account, &target, "mail");
+    let (title, preview) = if looks_security(&m.subject, &m.from_email) {
+        ("Security message".to_string(), String::new())
+    } else {
+        let who = if m.from_name.trim().is_empty() { m.from_email.clone() } else { m.from_name.clone() };
+        (crate::notify_event::sanitize_text(&who, 120), crate::notify_event::sanitize_text(&m.subject, 240))
+    };
+    let hints = crate::notify_links::OpenHints {
+        gmail_account: Some(account.to_string()),
+        rfc822_id: (!m.rfc822_id.is_empty()).then(|| m.rfc822_id.clone()),
+        ..Default::default()
+    };
+    let hints = if crate::notify_links::validate_hints(Provider::Gmail, &hints).is_ok() {
+        hints
+    } else {
+        crate::notify_links::OpenHints { gmail_account: hints.gmail_account.filter(|a| crate::notify_links::validate_hints(Provider::Gmail, &crate::notify_links::OpenHints { gmail_account: Some(a.clone()), ..Default::default() }).is_ok()), ..Default::default() }
+    };
+    Some(NotifyEvent {
+        schema_version: SCHEMA_VERSION,
+        event_id: event_id(&key, &m.id, Status::Info),
+        entity_key: key,
+        provider: Provider::Gmail,
+        account_id: account.to_string(),
+        kind: "mail".into(),
+        status: Status::Info,
+        severity,
+        occurred_at_ms: now,
+        observed_at_ms: now,
+        updated_at_ms: now,
+        title,
+        preview,
+        privacy: PrivacyClass::Public,
+        target,
+        source_ref: m.id.clone(),
+        original_source_ref: m.id.clone(),
+        occurrences: 1,
+        delivery: Delivery::default(),
+        read: ReadState::Unread,
+        expires_at_ms: now + EVENT_TTL_MS,
+        hints,
+    })
+}
+
+/// An important mail arrived for `account`: show it as a toast (sender + subject only), click opens that message.
+pub fn publish_gmail<R: Runtime>(app: &AppHandle<R>, account: &str, m: &crate::memcore::mailtriage::MailMeta, severity: Severity) {
+    if let Some(ev) = gmail_event(account, m, severity, now_ms()) {
+        publish_event(app, ev, None);
+    }
+}
+
 /// What the producer learned beyond the bare fact: the job / step to open, the PR number and the branch.
 #[derive(Debug, Clone, Default)]
 pub struct GithubExtras {
@@ -129,9 +199,15 @@ pub fn publish_github_with<R: Runtime>(app: &AppHandle<R>, full_name: &str, fact
 /// Publish a GitHub alert with the job / step / PR the watcher fetched, so a click opens the failing step.
 pub fn publish_github_extras<R: Runtime>(app: &AppHandle<R>, full_name: &str, fact: &Fact, line: &Line, ttl_ms: Option<u64>, extras: GithubExtras) {
     let now = now_ms();
-    let Some(mut ev) = github_event_with(full_name, fact, line, now, extras) else {
+    let Some(ev) = github_event_with(full_name, fact, line, now, extras) else {
         return;
     };
+    publish_event(app, ev, ttl_ms);
+}
+
+/// Record any source's alert in the ledger and deliver it: the NEXUS toast, the Windows toast, or history only.
+pub fn publish_event<R: Runtime>(app: &AppHandle<R>, mut ev: NotifyEvent, ttl_ms: Option<u64>) {
+    let now = now_ms();
     if let Some(ttl) = ttl_ms {
         ev.expires_at_ms = now + ttl;
     }
@@ -413,6 +489,53 @@ pub fn notify_close_event(token: u64) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    fn mail(subject: &str, from: &str) -> crate::memcore::mailtriage::MailMeta {
+        crate::memcore::mailtriage::MailMeta {
+            id: "18c2e".into(),
+            thread_id: "18c2f".into(),
+            from_name: from.into(),
+            from_email: "x@y.com".into(),
+            subject: subject.into(),
+            snippet: "secret snippet text".into(),
+            labels: vec![],
+            date_ms: 0,
+            rfc822_id: "<CAF+abc@mail.gmail.com>".into(),
+        }
+    }
+
+    #[test]
+    fn a_mail_event_holds_sender_and_subject_never_the_snippet_and_opens_that_message() {
+        let ev = gmail_event("me@gmail.com", &mail("Interview on Monday", "Asha R"), Severity::High, 1_000).expect("event");
+        assert_eq!((ev.title.as_str(), ev.preview.as_str()), ("Asha R", "Interview on Monday"));
+        assert!(!ev.title.contains("secret") && !ev.preview.contains("secret"));
+        let url = crate::notify_open::event_url(&ev).expect("url");
+        assert!(url.starts_with("https://mail.google.com/mail/?authuser=me%40gmail.com#search/rfc822msgid%3A"), "{url}");
+        assert!(matches!(&ev.target, Target::Gmail { thread_id, message_id: Some(m) } if thread_id == "18c2f" && m == "18c2e"));
+    }
+
+    #[test]
+    fn codes_and_bank_mail_are_reduced_to_a_security_message() {
+        for subj in ["Your verification code is 123456", "Password reset requested", "Transaction alert: debited INR 500", "OTP for login"] {
+            let ev = gmail_event("me@gmail.com", &mail(subj, "Someone"), Severity::High, 1_000).expect("event");
+            assert_eq!((ev.title.as_str(), ev.preview.as_str()), ("Security message", ""), "{subj}");
+        }
+        assert!(!looks_security("Lunch tomorrow?", "friend@x.com"));
+    }
+
+    #[test]
+    fn a_mail_without_ids_or_an_account_gives_no_event() {
+        let mut m = mail("Hi", "A");
+        m.thread_id.clear();
+        assert!(gmail_event("me@gmail.com", &m, Severity::Low, 1).is_none());
+        assert!(gmail_event("", &mail("Hi", "A"), Severity::Low, 1).is_none());
+    }
+
+    #[test]
+    fn the_account_email_is_kept_as_the_open_hint() {
+        let ev = gmail_event("me@gmail.com", &mail("Hi", "A"), Severity::Low, 1).expect("event");
+        assert_eq!(ev.hints.gmail_account.as_deref(), Some("me@gmail.com"));
+    }
+
     #[test]
     fn only_https_pages_and_the_whatsapp_link_reach_the_os() {
         assert!(scheme_allowed("https://github.com/o/r"));

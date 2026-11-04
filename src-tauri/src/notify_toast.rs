@@ -108,10 +108,6 @@ fn label(p: Provider) -> &'static str {
     }
 }
 
-fn private_content(p: Provider) -> bool {
-    matches!(p, Provider::Gmail | Provider::WhatsApp)
-}
-
 fn status_word(s: Status) -> &'static str {
     match s {
         Status::Failed => "failed",
@@ -143,7 +139,7 @@ fn action_label(ev: &NotifyEvent) -> &'static str {
 pub fn visible_text(mode: Privacy, ev: &NotifyEvent) -> (String, String) {
     match mode {
         Privacy::Normal => (ev.title.clone(), ev.preview.clone()),
-        Privacy::Private if private_content(ev.provider) => (ev.title.clone(), String::new()),
+        // Private = sender and subject (mail) or contact (chat): that is all an event stores, snippets are never kept.
         Privacy::Private => (ev.title.clone(), ev.preview.clone()),
         Privacy::Hidden => (format!("{} alert", label(ev.provider)), String::new()),
     }
@@ -227,12 +223,18 @@ fn close<R: Runtime>(app: &AppHandle<R>) {
 /// Show `ev` as the toast. Returns Err when the window could not be made (the caller then falls back to native).
 pub async fn show<R: Runtime>(app: &AppHandle<R>, ev: &NotifyEvent, mode: Privacy) -> Result<(), String> {
     let seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-    let data = payload(ev, mode, duration_ms(), seq);
-    *pending() = Some(data.clone());
 
     let monitor = app.primary_monitor().map_err(|e| e.to_string())?.ok_or("no monitor")?;
     let wa = monitor.work_area();
     let work = PRect { x: wa.position.x, y: wa.position.y, w: wa.size.width as i32, h: wa.size.height as i32 };
+    // In a meeting or a call the toast shows only the source: a mail subject on a shared screen is not ours to show.
+    let mode = if app.try_state::<std::sync::Arc<crate::meeting_detect::MeetingState>>().is_some_and(|m| m.should_suppress_tts()) {
+        Privacy::Hidden
+    } else {
+        mode
+    };
+    let data = payload(ev, mode, duration_ms(), seq);
+    *pending() = Some(data.clone());
     let sidebar_open = app.get_webview_window("sidebar").map(|w| w.is_visible().unwrap_or(false)).unwrap_or(false);
     let rect = toast_rect(work, monitor.scale_factor(), sidebar_open);
 
@@ -383,7 +385,7 @@ mod tests {
     #[test]
     fn privacy_cuts_private_content_first() {
         let mail = ev(Provider::Gmail, Status::Info);
-        assert_eq!(visible_text(Privacy::Private, &mail).1, "", "no snippet by default");
+        assert_eq!(visible_text(Privacy::Private, &mail).1, "alice/zync · main · run 5", "sender and subject are what a mail event holds");
         assert_eq!(visible_text(Privacy::Private, &mail).0, "Build failed in zync");
         assert_eq!(visible_text(Privacy::Normal, &mail).1, "alice/zync · main · run 5");
         assert_eq!(visible_text(Privacy::Hidden, &mail), ("Mail alert".to_string(), String::new()));
