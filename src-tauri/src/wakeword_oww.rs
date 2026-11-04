@@ -1526,7 +1526,7 @@ pub(crate) mod engine {
             // Bit-exact-zero streak: quiet rooms produce nonzero floor noise,
             // so exact 0.0 means driver-level silence (dropout/mute), not quiet.
             // This is the Meet-parity discriminator (content vs terminal).
-            if rms == 0.0 {
+            if super::is_digital_silence(rms) {
                 super::EXACT_ZERO_CBS.fetch_add(1, Ordering::Relaxed);
             } else {
                 super::EXACT_ZERO_CBS.store(0, Ordering::Relaxed);
@@ -2559,6 +2559,13 @@ pub fn classify_stream_health(
         return StreamHealth::Suspect;
     }
     StreamHealth::Quiet
+}
+
+/// Digital silence: far below any real room (a live mic idles around 5e-5 here, measured 2026-11-04) so only a dead or
+/// muted driver produces it. Not `== 0.0`: the Intel SST driver sprinkles values like 1e-9 into a dead stream, which reset
+/// the streak and kept the recovery from ever firing (the wake word stayed deaf for 500+ s).
+pub fn is_digital_silence(rms: f32) -> bool {
+    rms < 1.0e-6
 }
 
 /// Consecutive bit-exact-zero callbacks (rms == 0.0f32 exactly).
@@ -7133,6 +7140,15 @@ mod verify_policy_tests {
         // Bare "next us" stays rejected (news/TV), at any probability.
         assert!(!verify_transcript_accept("next us", 0.99));
         assert!(!verify_transcript_accept("what is next us", 0.99));
+    }
+
+    #[test]
+    fn a_dead_mic_with_dither_still_counts_as_digital_silence_but_a_live_idle_room_does_not() {
+        assert!(is_digital_silence(0.0));
+        assert!(is_digital_silence(1.0e-9), "dither on a dead stream");
+        assert!(!is_digital_silence(4.6e-5), "measured idle floor of the working mic");
+        assert!(!is_digital_silence(7.0e-5));
+        assert!(!is_digital_silence(0.2));
     }
 
     #[test]
