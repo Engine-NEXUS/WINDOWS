@@ -26,15 +26,26 @@ const HARD_CAP_MS: u64 = 60_000;
 
 // ─── pure: placement ──────────────────────────────────────────────────
 
-/// Top-right rectangle (physical px) of the toast inside `work`: the assistant sidebar's width and half its height,
+/// Toast width in logical px (the owner picked this size on 2026-11-04: a compact notification, not a panel).
+pub const TOAST_WIDTH: f64 = 320.0;
+/// Tallest the toast may be (logical px).
+pub const TOAST_MAX_HEIGHT: f64 = 352.0;
+
+/// Logical height that fits `rows` detail lines: header, a two-line headline, the rows and the action row. Pure.
+pub fn toast_height(rows: usize) -> f64 {
+    (148.0 + 20.0 * rows.min(4) as f64).min(TOAST_MAX_HEIGHT)
+}
+
+/// Top-right rectangle (physical px) of the toast inside `work`: `TOAST_WIDTH` wide and `height_logical` tall,
 /// `MARGIN` from the edges, and left of the sidebar when that is open on the right. Always inside `work`.
-pub fn toast_rect(work: PRect, scale: f64, sidebar_open: bool) -> PRect {
+pub fn toast_rect(work: PRect, scale: f64, sidebar_open: bool, height_logical: f64) -> PRect {
     let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
-    let (_, _, lw, lh) = crate::commands::sidebar_geometry("assistant", None, work.w as f64 / scale, work.h as f64 / scale);
-    let w = ((lw * scale).round() as i32).clamp(1, work.w.max(1));
-    let h = (((lh / 2.0) * scale).round() as i32).clamp(1, work.h.max(1));
+    let w = ((TOAST_WIDTH * scale).round() as i32).clamp(1, work.w.max(1));
+    let h = ((height_logical.clamp(60.0, TOAST_MAX_HEIGHT) * scale).round() as i32).clamp(1, work.h.max(1));
     let margin = (MARGIN * scale).round() as i32;
-    let shift = if sidebar_open { w + margin } else { 0 };
+    // The open sidebar (right dock) is wider than the toast: step left of ITS edge, not just of our own width.
+    let sidebar_w = crate::commands::sidebar_geometry("assistant", None, work.w as f64 / scale, work.h as f64 / scale).2;
+    let shift = if sidebar_open { (sidebar_w * scale).round() as i32 + margin } else { 0 };
     let x = (work.x + work.w - w - margin - shift).clamp(work.x, work.x + (work.w - w).max(0));
     let y = (work.y + margin).clamp(work.y, work.y + (work.h - h).max(0));
     PRect { x, y, w, h }
@@ -145,10 +156,81 @@ pub fn visible_text(mode: Privacy, ev: &NotifyEvent) -> (String, String) {
     }
 }
 
+/// Pure: the big line and up to four label/value rows shown under it, per source. Built from the event's typed fields and
+/// its (already sanitized) title and preview; nothing here can carry a URL.
+pub fn headline_and_rows(ev: &NotifyEvent, mode: Privacy) -> (String, Vec<(String, String)>) {
+    use crate::notify_event::Target;
+    let (title, preview) = visible_text(mode, ev);
+    if mode == Privacy::Hidden {
+        return (title, Vec::new());
+    }
+    let clip = |s: &str| -> String { s.chars().take(80).collect() };
+    let mut rows: Vec<(String, String)> = Vec::new();
+    let mut add = |l: &str, v: &str| {
+        if !v.trim().is_empty() && rows.len() < 4 {
+            rows.push((l.to_string(), clip(v.trim())));
+        }
+    };
+    let parts: Vec<&str> = preview.split(" · ").collect();
+    let headline = match &ev.target {
+        Target::GitHub { owner, repo, pr, run_id, .. } => {
+            add("Repo", &format!("{owner}/{repo}"));
+            if parts.len() >= 3 {
+                add("Branch", parts[1]);
+            }
+            if let Some(n) = pr {
+                add("PR", &format!("#{n}"));
+            } else if let Some(r) = run_id {
+                add("Run", &format!("#{r}"));
+            }
+            if let Some(s) = ev.hints.failed_step {
+                add("Failed step", &format!("step {s}"));
+            }
+            title
+        }
+        Target::Repo { owner, repo, .. } => {
+            add("Repo", &format!("{owner}/{repo}"));
+            title
+        }
+        Target::Gmail { .. } => {
+            if preview.is_empty() {
+                title
+            } else {
+                add("From", &title);
+                preview
+            }
+        }
+        Target::Deployment { .. } => {
+            add("Project", parts.first().copied().unwrap_or(""));
+            if parts.len() >= 2 {
+                add("Deploy", parts[1]);
+            }
+            title
+        }
+        Target::Calendar { .. } => {
+            add("Reminder", &preview);
+            title
+        }
+        Target::WhatsApp { .. } => {
+            add("Chat", "new message");
+            title
+        }
+        Target::Agent { .. } => {
+            add("Folder", &preview);
+            title
+        }
+    };
+    (headline, rows)
+}
+
 /// Pure: the display payload sent to the toast page. Carries the opaque event id, never a URL.
 pub fn payload(ev: &NotifyEvent, mode: Privacy, duration_ms: u64, seq: u64) -> Value {
     let (title, preview) = visible_text(mode, ev);
+    let (headline, rows) = headline_and_rows(ev, mode);
+    let rows: Vec<Value> = rows.into_iter().map(|(l, v)| json!({ "label": l, "value": v })).collect();
     json!({
+        "headline": headline,
+        "rows": rows,
         "seq": seq,
         "eventId": ev.event_id,
         "provider": label(ev.provider),
@@ -274,11 +356,16 @@ pub async fn notify_toast_close<R: Runtime>(app: AppHandle<R>) -> Result<(), Str
     Ok(())
 }
 
-/// The user clicked the toast (or its button): open the real item, then close.
+/// The user clicked the toast (or its button): open the sidebar detail first, then close.
 #[tauri::command]
 pub async fn notify_toast_click<R: Runtime>(app: AppHandle<R>, event_id: String) -> Result<(), String> {
     close(&app);
-    crate::notify_hub::open_external(&app, &event_id).await
+    if crate::notify_hub::has_event(&event_id) {
+        crate::notify_hub::activate(app, event_id).await;
+        Ok(())
+    } else {
+        crate::notify_hub::open_external(&app, &event_id, false).await
+    }
 }
 
 fn close<R: Runtime>(app: &AppHandle<R>) {
@@ -286,13 +373,31 @@ fn close<R: Runtime>(app: &AppHandle<R>) {
     let _ = crate::dyn_windows::destroy_window(app, LABEL);
 }
 
+/// Where the toast goes now (physical px): the primary monitor's work area, left of the sidebar when it is open.
+fn placement<R: Runtime>(app: &AppHandle<R>, height_logical: f64) -> Result<PRect, String> {
+    let monitor = app.primary_monitor().map_err(|e| e.to_string())?.ok_or("no monitor")?;
+    let wa = monitor.work_area();
+    let work = PRect { x: wa.position.x, y: wa.position.y, w: wa.size.width as i32, h: wa.size.height as i32 };
+    let sidebar_open = app.get_webview_window("sidebar").map(|w| w.is_visible().unwrap_or(false)).unwrap_or(false);
+    Ok(toast_rect(work, monitor.scale_factor(), sidebar_open, height_logical))
+}
+
+/// The page measured its content: fit the window to it exactly (the first size is only an estimate by row count).
+#[tauri::command]
+pub async fn notify_toast_fit<R: Runtime>(app: AppHandle<R>, height: f64) -> Result<(), String> {
+    if !height.is_finite() {
+        return Err("bad height".into());
+    }
+    let rect = placement(&app, height)?;
+    let win = app.get_webview_window(LABEL).ok_or("no toast window")?;
+    win.set_size(tauri::PhysicalSize::new(rect.w as u32, rect.h as u32)).map_err(|e| e.to_string())?;
+    win.set_position(tauri::PhysicalPosition::new(rect.x, rect.y)).map_err(|e| e.to_string())
+}
+
 /// Show `ev` as the toast. Returns Err when the window could not be made (the caller then falls back to native).
 pub async fn show<R: Runtime>(app: &AppHandle<R>, ev: &NotifyEvent, mode: Privacy) -> Result<(), String> {
     let seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
 
-    let monitor = app.primary_monitor().map_err(|e| e.to_string())?.ok_or("no monitor")?;
-    let wa = monitor.work_area();
-    let work = PRect { x: wa.position.x, y: wa.position.y, w: wa.size.width as i32, h: wa.size.height as i32 };
     // In a meeting or a call the toast shows only the source: a mail subject on a shared screen is not ours to show.
     let mode = if app.try_state::<std::sync::Arc<crate::meeting_detect::MeetingState>>().is_some_and(|m| m.should_suppress_tts()) {
         Privacy::Hidden
@@ -301,8 +406,8 @@ pub async fn show<R: Runtime>(app: &AppHandle<R>, ev: &NotifyEvent, mode: Privac
     };
     let data = payload(ev, mode, duration_ms(), seq);
     *pending() = Some(data.clone());
-    let sidebar_open = app.get_webview_window("sidebar").map(|w| w.is_visible().unwrap_or(false)).unwrap_or(false);
-    let rect = toast_rect(work, monitor.scale_factor(), sidebar_open);
+    let rows = data.get("rows").and_then(|r| r.as_array()).map_or(0, |r| r.len());
+    let rect = placement(app, toast_height(rows))?;
 
     let warm = app.get_webview_window(LABEL).is_some();
     let win = crate::dyn_windows::get_or_create_window(app, crate::dyn_windows::WindowConfig::notify_toast())?;
@@ -401,12 +506,12 @@ mod tests {
     }
 
     #[test]
-    fn the_toast_sits_top_right_in_the_work_area_at_sidebar_width_and_half_height() {
+    fn the_toast_is_a_compact_320_wide_card_top_right_in_the_work_area() {
         let work = PRect { x: 0, y: 0, w: 1920, h: 1040 }; // taskbar at the bottom
-        let r = toast_rect(work, 1.0, false);
-        let (_, _, sw, sh) = crate::commands::sidebar_geometry("assistant", None, 1920.0, 1040.0);
-        assert_eq!(r.w, sw.round() as i32);
-        assert_eq!(r.h, (sh / 2.0).round() as i32);
+        let r = toast_rect(work, 1.0, false, toast_height(3));
+        assert_eq!(r.w, 320);
+        assert_eq!(r.h, 208);
+        assert!(toast_height(0) < toast_height(4) && toast_height(99) <= TOAST_MAX_HEIGHT);
         assert_eq!(r.x, 1920 - r.w - 16);
         assert_eq!(r.y, 16);
     }
@@ -414,12 +519,13 @@ mod tests {
     #[test]
     fn it_slides_left_of_an_open_sidebar_and_stays_inside_the_work_area() {
         let work = PRect { x: 0, y: 0, w: 1920, h: 1040 };
-        let open = toast_rect(work, 1.0, true);
-        let closed = toast_rect(work, 1.0, false);
-        assert_eq!(open.x, closed.x - closed.w - 16);
+        let open = toast_rect(work, 1.0, true, 180.0);
+        let closed = toast_rect(work, 1.0, false, 180.0);
+        let (_, _, sidebar_w, _) = crate::commands::sidebar_geometry("assistant", None, 1920.0, 1040.0);
+        assert_eq!(open.x, closed.x - sidebar_w.round() as i32 - 16, "left of the sidebar's edge, not just of the toast");
         // a tiny display never pushes it off-screen
         let small = PRect { x: 100, y: 50, w: 400, h: 300 };
-        let r = toast_rect(small, 1.0, true);
+        let r = toast_rect(small, 1.0, true, 180.0);
         assert!(r.x >= small.x && r.y >= small.y && r.x + r.w <= small.x + small.w && r.y + r.h <= small.y + small.h, "{r:?}");
     }
 
@@ -427,11 +533,11 @@ mod tests {
     fn placement_follows_the_monitor_origin_and_scale() {
         // a monitor left of the primary (negative origin) at 150 %
         let work = PRect { x: -2560, y: 0, w: 2560, h: 1400 };
-        let r = toast_rect(work, 1.5, false);
+        let r = toast_rect(work, 1.5, false, 180.0);
         assert!(r.x >= -2560 && r.x + r.w <= 0, "{r:?}");
         assert_eq!(r.x, -2560 + 2560 - r.w - 24);
         assert_eq!(r.y, 24);
-        assert_eq!(toast_rect(work, 0.0, false), toast_rect(work, 1.0, false), "bad scale falls back to 1");
+        assert_eq!(toast_rect(work, 0.0, false, 180.0), toast_rect(work, 1.0, false, 180.0), "bad scale falls back to 1");
     }
 
     #[test]
@@ -477,6 +583,38 @@ mod tests {
         assert_eq!(visible_text(Privacy::Private, &ci).1, "alice/zync · main · run 5", "repo and branch are not private");
         assert_eq!(Privacy::parse("Normal"), Privacy::Normal);
         assert_eq!(Privacy::parse("nonsense"), Privacy::Private);
+    }
+
+    #[test]
+    fn each_source_gets_a_headline_and_neat_detail_rows() {
+        use crate::notify_event::Target;
+        let mut ci = ev(Provider::GitHub, Status::Failed);
+        ci.target = Target::GitHub { host: "github.com".into(), owner: "alice".into(), repo: "zync".into(), pr: None, run_id: Some(5), sha: None };
+        ci.hints.failed_step = Some(3);
+        let (h, rows) = headline_and_rows(&ci, Privacy::Private);
+        assert_eq!(h, "Build failed in zync");
+        let labels: Vec<&str> = rows.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, ["Repo", "Branch", "Run", "Failed step"]);
+        assert_eq!(rows[1].1, "main");
+        assert_eq!(rows[3].1, "step 3");
+
+        let mut mail = ev(Provider::Gmail, Status::Info);
+        mail.target = Target::Gmail { thread_id: "t".into(), message_id: None };
+        mail.title = "Asha R".into();
+        mail.preview = "Interview on Monday".into();
+        let (h, rows) = headline_and_rows(&mail, Privacy::Private);
+        assert_eq!((h.as_str(), rows.len(), rows[0].1.as_str()), ("Interview on Monday", 1, "Asha R"), "subject is the headline, sender a row");
+        mail.preview = String::new();
+        assert_eq!(headline_and_rows(&mail, Privacy::Private).0, "Asha R", "a security message has no subject");
+
+        let mut dep = ev(Provider::Vercel, Status::Failed);
+        dep.target = Target::Deployment { provider: Provider::Vercel, team: "t".into(), project: "zync".into(), deployment_id: "dpl_1".into(), revision: None };
+        dep.preview = "zync · dpl_1".into();
+        let (_, rows) = headline_and_rows(&dep, Privacy::Private);
+        assert_eq!(rows, vec![("Project".to_string(), "zync".to_string()), ("Deploy".to_string(), "dpl_1".to_string())]);
+
+        let (h, rows) = headline_and_rows(&mail, Privacy::Hidden);
+        assert_eq!((h.as_str(), rows.len()), ("Mail alert", 0), "hidden mode shows only the source");
     }
 
     #[test]

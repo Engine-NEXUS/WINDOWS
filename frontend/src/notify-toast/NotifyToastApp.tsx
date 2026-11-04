@@ -1,17 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { TICK_MS, asPayload, moreLabel, progress, remainingAfter, statusLabel, type ToastPayload } from "./notifyToastModel";
-import "./notify-toast.css";
+import { TICK_MS, asPayload, isFading, remainingAfter, type ToastPayload } from "./notifyToastModel";
+import { NotifyToastView } from "./NotifyToastView";
 
-/** The five-second heads-up. Rust shows this window without activating it, sizes it and places it top-right; the page
- *  runs the timer (paused on hover / keyboard focus), and a click sends only the opaque event id back: Rust builds the
- *  link from the typed target. */
+/** The five-second heads-up. Rust shows this window without activating it, sizes it to the content and places it
+ *  top-right; the page runs the timer (paused on hover / keyboard focus), and a click sends only the opaque event id
+ *  back: Rust opens the sidebar detail (and from there the real item). */
 export function NotifyToastApp() {
   const [p, setP] = useState<ToastPayload | null>(null);
   const [left, setLeft] = useState(0);
   const paused = useRef(false);
   const closing = useRef(false);
+  const cardRef = useRef<HTMLDivElement>(null);
 
   const show = useCallback((raw: unknown) => {
     const next = asPayload(raw);
@@ -41,6 +42,12 @@ export function NotifyToastApp() {
     invoke("notify_toast_click", { eventId: p.eventId }).catch(() => {});
   }, [p]);
 
+  // Tell Rust how tall the content really is so the window fits it exactly (its first size is an estimate).
+  useLayoutEffect(() => {
+    const h = cardRef.current?.offsetHeight;
+    if (p && h) invoke("notify_toast_fit", { height: h }).catch(() => {});
+  }, [p]);
+
   useEffect(() => {
     if (!p) return;
     const id = window.setInterval(() => setLeft((l) => remainingAfter(l, TICK_MS, paused.current)), TICK_MS);
@@ -60,38 +67,14 @@ export function NotifyToastApp() {
   }, [close]);
 
   if (!p) return null;
-  const more = moreLabel(p.count);
   return (
-    <div
-      className={`nt-card nt-card--${p.status}`}
-      role="status"
-      aria-live="polite"
-      aria-label={`${p.provider}: ${p.title}`}
-      onMouseEnter={() => (paused.current = true)}
-      onMouseLeave={() => (paused.current = false)}
-      onFocus={() => (paused.current = true)}
-      onBlur={() => (paused.current = false)}
-    >
-      <div className="nt-head">
-        <span className="nt-source">{p.provider}</span>
-        <span className={`nt-status nt-status--${p.status}`}>{statusLabel(p.status)}</span>
-        {more && <span className="nt-more">{more}</span>}
-        <button className="nt-close" aria-label="Dismiss" onClick={close}>
-          ×
-        </button>
-      </div>
-      <div className="nt-body" onClick={open}>
-        <div className="nt-title">{p.title}</div>
-        {p.preview && <div className="nt-preview">{p.preview}</div>}
-      </div>
-      <div className="nt-foot">
-        <button className="nt-action" onClick={open}>
-          {p.action}
-        </button>
-      </div>
-      <div className="nt-bar" aria-hidden="true">
-        <div className="nt-bar-fill" style={{ width: `${progress(left, p.durationMs) * 100}%` }} />
-      </div>
-    </div>
+    <NotifyToastView
+      ref={cardRef}
+      payload={p}
+      fading={isFading(left)}
+      onOpen={open}
+      onClose={close}
+      onPause={(v) => (paused.current = v)}
+    />
   );
 }

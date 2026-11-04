@@ -1,57 +1,105 @@
-/* The five-second alert toast: solid, dark in both themes (it must read over any window), tokens only. */
+/* The alert toast: a compact, solid dark card (readable over any window in both themes), tokens only.
+   320 px wide; the window is sized to the content by Rust, the card fills it. No timers or bars on screen. */
 .nt-card {
   position: relative;
   box-sizing: border-box;
   width: 100vw;
-  height: 100vh;
+  height: auto; /* natural height: the page reports it and Rust fits the window to it */
   display: flex;
   flex-direction: column;
-  padding: 14px 16px 12px;
+  gap: 8px;
+  padding: 12px 14px 12px 16px;
   background: var(--stage-surface);
   color: var(--stage-text);
   border: 1px solid var(--stage-border);
-  border-left: 4px solid var(--stage-accent);
-  border-radius: 12px;
+  border-radius: 14px;
   box-shadow: var(--stage-shadow-lg);
-  font: 400 14px/1.4 "Segoe UI", system-ui, sans-serif;
+  font: 400 13px/1.35 "Segoe UI", system-ui, sans-serif;
   overflow: hidden;
-  animation: nt-in 160ms ease-out;
+  animation: nt-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition: opacity 280ms ease;
+  --nt-tone: var(--stage-accent);
 }
-.nt-card--failed { border-left-color: var(--stage-attention); }
-.nt-card--recovered { border-left-color: var(--stage-ok); }
-.nt-head { display: flex; align-items: center; gap: 8px; }
-.nt-source { font-weight: 600; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--stage-text-muted); }
-.nt-status { font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--stage-border-strong); }
-.nt-status--failed { color: var(--stage-attention); border-color: var(--stage-attention); }
-.nt-status--recovered { color: var(--stage-ok); border-color: var(--stage-ok); }
-.nt-more { font-size: 12px; color: var(--stage-text-muted); }
+/* the left edge carries the tone as a short rounded bar, not a full-height stripe */
+.nt-card::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 14px;
+  bottom: 14px;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--nt-tone);
+}
+.nt-card--failed { --nt-tone: var(--stage-attention); }
+.nt-card--recovered { --nt-tone: var(--stage-ok); }
+.nt-card--out { opacity: 0; }
+
+.nt-head { display: flex; align-items: center; gap: 7px; min-height: 22px; }
+.nt-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--nt-tone); flex: none; }
+.nt-source { font-weight: 600; font-size: 12px; color: var(--stage-text-muted); letter-spacing: 0.02em; }
+.nt-status {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 7px;
+  line-height: 18px;
+  border-radius: 999px;
+  color: var(--nt-tone);
+  border: 1px solid var(--nt-tone);
+}
+.nt-more { font-size: 11px; color: var(--stage-text-muted); }
 .nt-close {
   margin-left: auto;
   background: transparent;
   color: var(--stage-text-muted);
   border: 0;
-  font-size: 20px;
+  border-radius: 6px;
+  font-size: 18px;
   line-height: 1;
+  width: 22px;
+  height: 22px;
   cursor: pointer;
-  padding: 0 4px;
+  padding: 0;
 }
-.nt-close:hover { color: var(--stage-text); }
-.nt-body { flex: 1; min-height: 0; margin-top: 10px; cursor: pointer; overflow: hidden; }
-.nt-title { font-weight: 600; font-size: 17px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.nt-preview { margin-top: 6px; color: var(--stage-text-muted); display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
-.nt-foot { display: flex; justify-content: flex-end; margin-top: 8px; }
+.nt-close:hover { color: var(--stage-text); background: var(--stage-border); }
+
+.nt-body {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: pointer;
+  overflow: hidden;
+}
+.nt-headline {
+  font-weight: 600;
+  font-size: 15px;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.nt-rows { display: flex; flex-direction: column; gap: 2px; }
+.nt-row { display: grid; grid-template-columns: 74px 1fr; gap: 8px; align-items: baseline; }
+.nt-label { color: var(--stage-text-muted); font-size: 12px; }
+.nt-value { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.nt-foot { display: flex; align-items: center; }
 .nt-action {
-  background: var(--stage-accent);
+  background: var(--nt-tone);
   color: var(--stage-surface);
   border: 0;
   border-radius: 8px;
-  padding: 6px 14px;
-  font: 600 13px "Segoe UI", system-ui, sans-serif;
+  padding: 0 12px;
+  height: 28px;
+  font: 600 12.5px "Segoe UI", system-ui, sans-serif;
   cursor: pointer;
 }
-.nt-action:focus-visible, .nt-close:focus-visible { outline: 2px solid var(--stage-text); outline-offset: 2px; }
-.nt-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--stage-border); }
-.nt-bar-fill { height: 100%; background: var(--stage-accent); transition: width 100ms linear; }
-@keyframes nt-in { from { transform: translateY(-8px); opacity: 0; } to { transform: none; opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .nt-card { animation: none; } .nt-bar-fill { transition: none; } }
+.nt-action:hover { filter: brightness(1.08); }
+.nt-action:focus-visible, .nt-close:focus-visible, .nt-body:focus-visible { outline: 2px solid var(--stage-text); outline-offset: 2px; border-radius: 8px; }
+
+@keyframes nt-in { from { transform: translateY(-6px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .nt-card { animation: none; transition: none; } }
 @media (forced-colors: active) { .nt-card { border: 2px solid CanvasText; } .nt-action { border: 1px solid ButtonText; } }

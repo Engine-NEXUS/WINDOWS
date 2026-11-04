@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { asPayload, moreLabel, progress, remainingAfter, statusLabel } from "./notifyToastModel";
+import { FADE_MS, asPayload, isFading, moreLabel, remainingAfter, statusLabel } from "./notifyToastModel";
 
 describe("notify toast model", () => {
   it("counts down and pauses while hovered", () => {
@@ -8,10 +8,11 @@ describe("notify toast model", () => {
     expect(remainingAfter(50, 100, false)).toBe(0);
     expect(remainingAfter(50, -5, false)).toBe(50);
   });
-  it("reports the share of time left", () => {
-    expect(progress(2500, 5000)).toBe(0.5);
-    expect(progress(9000, 5000)).toBe(1);
-    expect(progress(10, 0)).toBe(0);
+  it("fades only in the last stretch", () => {
+    expect(isFading(5000)).toBe(false);
+    expect(isFading(FADE_MS)).toBe(true);
+    expect(isFading(1)).toBe(true);
+    expect(isFading(0)).toBe(false);
   });
   it("labels status and grouped repeats", () => {
     expect(statusLabel("failed")).toBe("Failed");
@@ -24,6 +25,26 @@ describe("notify toast model", () => {
     expect(asPayload(null)).toBeNull();
     expect(asPayload({ title: "x" })).toBeNull();
     const p = asPayload({ eventId: "ev_1", status: "weird", durationMs: 99999999, count: 0 });
-    expect(p).toMatchObject({ eventId: "ev_1", status: "info", durationMs: 300000, count: 1, provider: "NEXUS", action: "Open" });
+    expect(p).toMatchObject({ eventId: "ev_1", status: "info", durationMs: 300000, count: 1, provider: "NEXUS", action: "Open", rows: [] });
+  });
+  it("reads the headline and keeps at most four clean rows", () => {
+    const p = asPayload({
+      eventId: "ev_1",
+      headline: "Build failed in zync",
+      rows: [
+        { label: "Repo", value: "a/b" },
+        { label: "Branch", value: "main" },
+        { label: "Empty", value: "  " },
+        { label: 5, value: "x" },
+        { label: "Run", value: "#9" },
+        { label: "Step", value: "step 3" },
+        { label: "Extra", value: "dropped" },
+      ],
+    });
+    expect(p?.headline).toBe("Build failed in zync");
+    expect(p?.rows.map((r) => r.label)).toEqual(["Repo", "Branch", "Run", "Step"]);
+  });
+  it("falls back to the old title field for the headline", () => {
+    expect(asPayload({ eventId: "ev_1", title: "Old title" })?.headline).toBe("Old title");
   });
 });

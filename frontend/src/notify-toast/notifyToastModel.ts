@@ -1,3 +1,9 @@
+/** One label/value line under the headline (built in Rust: notify_toast::headline_and_rows). */
+export interface ToastRow {
+  label: string;
+  value: string;
+}
+
 /** Display payload of one alert (built in Rust: notify_toast::payload). It never carries a URL. */
 export interface ToastPayload {
   seq: number;
@@ -5,14 +11,17 @@ export interface ToastPayload {
   provider: string;
   status: "failed" | "recovered" | "info";
   kind: string;
-  title: string;
-  preview: string;
+  /** The big line (the subject for mail, the sentence for a failed build). */
+  headline: string;
+  rows: ToastRow[];
   count: number;
   action: string;
   durationMs: number;
 }
 
 export const TICK_MS = 100;
+/** The card fades out during this last stretch of its time. */
+export const FADE_MS = 300;
 
 /** Pure countdown: time left after dt ms, paused while the pointer or keyboard focus is on the toast. */
 export function remainingAfter(remaining: number, dt: number, paused: boolean): number {
@@ -20,10 +29,9 @@ export function remainingAfter(remaining: number, dt: number, paused: boolean): 
   return Math.max(0, remaining - Math.max(0, dt));
 }
 
-/** Share of the time still left, 0..1 (the thin progress line). */
-export function progress(remaining: number, total: number): number {
-  if (!(total > 0)) return 0;
-  return Math.min(1, Math.max(0, remaining / total));
+/** True while the card should be fading out. */
+export function isFading(remaining: number): boolean {
+  return remaining > 0 && remaining <= FADE_MS;
 }
 
 export function statusLabel(s: ToastPayload["status"]): string {
@@ -42,6 +50,20 @@ export function moreLabel(count: number): string {
   return count > 1 ? `+${count - 1} more` : "";
 }
 
+function asRows(v: unknown): ToastRow[] {
+  if (!Array.isArray(v)) return [];
+  const out: ToastRow[] = [];
+  for (const r of v) {
+    if (!r || typeof r !== "object") continue;
+    const o = r as Record<string, unknown>;
+    if (typeof o.label === "string" && typeof o.value === "string" && o.value.trim()) {
+      out.push({ label: o.label.slice(0, 20), value: o.value.slice(0, 120) });
+    }
+    if (out.length >= 4) break;
+  }
+  return out;
+}
+
 /** Narrow unknown event data to a payload, or null (the page never trusts what it did not shape). */
 export function asPayload(v: unknown): ToastPayload | null {
   if (!v || typeof v !== "object") return null;
@@ -57,8 +79,8 @@ export function asPayload(v: unknown): ToastPayload | null {
     provider: str("provider") || "NEXUS",
     status,
     kind: str("kind"),
-    title: str("title"),
-    preview: str("preview"),
+    headline: str("headline") || str("title"),
+    rows: asRows(o.rows),
     count: Math.max(1, num("count", 1)),
     action: str("action") || "Open",
     durationMs: Math.min(300_000, Math.max(1_000, num("durationMs", 5_000))),
