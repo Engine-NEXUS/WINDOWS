@@ -9,6 +9,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::notify_brain::{Fact, Line};
@@ -438,6 +439,233 @@ pub fn publish_calendar<R: Runtime>(
     publish_event(app, event, None);
 }
 
+/// Pure: the ledger event for a WhatsApp chat alert.
+/// Provider::WhatsApp, Target::WhatsApp { chat: first 24 hex of sha256(jid) }, kind "chat", status Info,
+/// account_id "whatsapp", title = contact name (sanitized, <=120; if empty "WhatsApp"), preview = EMPTY STRING ALWAYS,
+/// hints.phone_digits = digits before '@' of the jid ONLY when the jid ends with "@s.whatsapp.net" and has 6..=15 digits.
+/// Returns None when jid is empty or chat id is invalid.
+pub fn whatsapp_event(
+    alert_name: &str,
+    jid: &str,
+    last_ts: Option<i64>,
+    severity: Severity,
+    now: u64,
+) -> Option<NotifyEvent> {
+    let jid_trimmed = jid.trim();
+    if jid_trimmed.is_empty() {
+        return None;
+    }
+    let mut h = Sha256::new();
+    h.update(jid_trimmed.as_bytes());
+    let full_hex: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let chat = full_hex[..24].to_string();
+    let target = Target::WhatsApp { chat };
+    if crate::notify_event::validate_target(&target).is_err() {
+        return None;
+    }
+    let key = entity_key(Provider::WhatsApp, "whatsapp", &target, "chat");
+    let status = Status::Info;
+    let ts = last_ts.unwrap_or(now as i64).max(0);
+    let source_ref = format!("{}-{}", &full_hex[..12], ts);
+
+    let raw_title = crate::notify_event::sanitize_text(alert_name, 120);
+    let title = if raw_title.is_empty() { "WhatsApp".to_string() } else { raw_title };
+    let preview = String::new();
+
+    let phone_digits = if let Some(local) = jid_trimmed.strip_suffix("@s.whatsapp.net") {
+        if (6..=15).contains(&local.len()) && local.chars().all(|c| c.is_ascii_digit()) {
+            Some(local.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let hints = crate::notify_links::OpenHints {
+        phone_digits,
+        ..Default::default()
+    };
+
+    Some(NotifyEvent {
+        schema_version: SCHEMA_VERSION,
+        event_id: event_id(&key, &source_ref, status),
+        entity_key: key,
+        provider: Provider::WhatsApp,
+        account_id: "whatsapp".into(),
+        kind: "chat".into(),
+        status,
+        severity,
+        occurred_at_ms: now,
+        observed_at_ms: now,
+        updated_at_ms: now,
+        title,
+        preview,
+        privacy: PrivacyClass::Public,
+        target,
+        source_ref: source_ref.clone(),
+        original_source_ref: source_ref,
+        occurrences: 1,
+        delivery: Delivery::default(),
+        read: ReadState::Unread,
+        expires_at_ms: now + EVENT_TTL_MS,
+        hints,
+    })
+}
+
+/// Publish a WhatsApp alert: show it on the toast, click opens the chat link.
+pub fn publish_whatsapp<R: Runtime>(
+    app: &AppHandle<R>,
+    alert_name: &str,
+    jid: &str,
+    last_ts: Option<i64>,
+    severity: Severity,
+) {
+    let now = now_ms();
+    if let Some(ev) = whatsapp_event(alert_name, jid, last_ts, severity, now) {
+        publish_event(app, ev, None);
+    }
+}
+
+/// Sanitize folder name for `Target::Agent` project field: `[A-Za-z0-9._-]`, no `..`, never empty, <=60 chars.
+pub fn sanitize_project_name(cwd: Option<&str>) -> String {
+    let raw = match cwd {
+        Some(s) => {
+            let trimmed = s.trim_end_matches(['/', '\\']);
+            let seg = trimmed.rsplit(['/', '\\']).next().unwrap_or("").trim();
+            if seg.is_empty() {
+                "session"
+            } else {
+                seg
+            }
+        }
+        None => "session",
+    };
+    let mut out = String::new();
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+            out.push(c);
+        } else {
+            out.push('-');
+        }
+    }
+    while out.contains("..") {
+        out = out.replace("..", "-");
+    }
+    let truncated: String = out.chars().take(60).collect();
+    let trimmed = truncated.trim_matches('.');
+    if trimmed.is_empty() {
+        "session".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn sanitize_agent_name(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+            out.push(c);
+        } else {
+            out.push('-');
+        }
+    }
+    while out.contains("..") {
+        out = out.replace("..", "-");
+    }
+    let truncated: String = out.chars().take(60).collect();
+    let trimmed = truncated.trim_matches('.');
+    if trimmed.is_empty() {
+        "agent".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Pure: the ledger event for a coding agent alert ("needs your input" or "finished").
+/// Provider::Agent, Target::Agent { agent, project }, kind "needs_input" or "finished",
+/// status Info, severity Medium (needs_input) / Low (finished), account_id "local",
+/// title = "<label> needs your input" or "<label> finished", preview = project folder name only,
+/// source_ref = "<at_ms>", hints.agent_cwd only if validate_hints accepts it.
+pub fn agent_event(
+    agent_name: &str,
+    agent_label: &str,
+    cwd: Option<&str>,
+    needs_input: bool,
+    at_ms: u64,
+    now: u64,
+) -> Option<NotifyEvent> {
+    let project = sanitize_project_name(cwd);
+    let agent = sanitize_agent_name(agent_name);
+    let target = Target::Agent { agent, project: project.clone() };
+    if crate::notify_event::validate_target(&target).is_err() {
+        return None;
+    }
+    let kind = if needs_input { "needs_input" } else { "finished" };
+    let severity = if needs_input { Severity::Medium } else { Severity::Low };
+    let status = Status::Info;
+    let key = entity_key(Provider::Agent, "local", &target, kind);
+    let source_ref = format!("{at_ms}");
+
+    let raw_title = if needs_input {
+        format!("{agent_label} needs your input")
+    } else {
+        format!("{agent_label} finished")
+    };
+    let title = crate::notify_event::sanitize_text(&raw_title, 120);
+    let preview = project;
+
+    let test_hints = crate::notify_links::OpenHints {
+        agent_cwd: cwd.filter(|c| !c.is_empty()).map(str::to_string),
+        ..Default::default()
+    };
+    let hints = if crate::notify_links::validate_hints(Provider::Agent, &test_hints).is_ok() {
+        test_hints
+    } else {
+        crate::notify_links::OpenHints::default()
+    };
+
+    Some(NotifyEvent {
+        schema_version: SCHEMA_VERSION,
+        event_id: event_id(&key, &source_ref, status),
+        entity_key: key,
+        provider: Provider::Agent,
+        account_id: "local".into(),
+        kind: kind.into(),
+        status,
+        severity,
+        occurred_at_ms: now,
+        observed_at_ms: now,
+        updated_at_ms: now,
+        title,
+        preview,
+        privacy: PrivacyClass::Public,
+        target,
+        source_ref: source_ref.clone(),
+        original_source_ref: source_ref,
+        occurrences: 1,
+        delivery: Delivery::default(),
+        read: ReadState::Unread,
+        expires_at_ms: now + EVENT_TTL_MS,
+        hints,
+    })
+}
+
+/// Publish a coding agent alert: show it on the toast, click focuses the agent window or opens the folder.
+pub fn publish_agent<R: Runtime>(
+    app: &AppHandle<R>,
+    agent_name: &str,
+    agent_label: &str,
+    cwd: Option<&str>,
+    needs_input: bool,
+    at_ms: u64,
+) {
+    let now = now_ms();
+    if let Some(ev) = agent_event(agent_name, agent_label, cwd, needs_input, at_ms, now) {
+        publish_event(app, ev, None);
+    }
+}
+
 /// Record any source's alert in the ledger and deliver it: the NEXUS toast, the Windows toast, or history only.
 pub fn publish_event<R: Runtime>(app: &AppHandle<R>, mut ev: NotifyEvent, ttl_ms: Option<u64>) {
     let now = now_ms();
@@ -577,11 +805,36 @@ pub fn scheme_allowed(url: &str) -> bool {
                 .is_some_and(|d| (6..=15).contains(&d.len()) && d.chars().all(|c| c.is_ascii_digit())))
 }
 
-fn run_action(a: &crate::notify_links::OpenAction) -> bool {
+fn folder_name_from_cwd(cwd: &str) -> Option<&str> {
+    let trimmed = cwd.trim_end_matches(['/', '\\']);
+    let seg = trimmed.rsplit(['/', '\\']).next()?.trim();
+    if seg.is_empty() {
+        None
+    } else {
+        Some(seg)
+    }
+}
+
+fn focus_agent(cwd: &str) -> bool {
+    // A very short folder name ("src", "app") would match unrelated window titles, so it is never used to pick a window.
+    if let Some(folder) = folder_name_from_cwd(cwd).filter(|f| f.chars().count() >= 4) {
+        if crate::live::commands::window::wait_and_focus_app(folder, 600) {
+            return true;
+        }
+    }
+    std::path::Path::new(cwd).is_dir() && open::that(cwd).is_ok()
+}
+
+async fn run_action(a: &crate::notify_links::OpenAction) -> bool {
     use crate::notify_links::OpenAction;
     match a {
         OpenAction::Url(u) if scheme_allowed(u) => open::that(u).is_ok(),
-        OpenAction::FocusAgent { cwd } => std::path::Path::new(cwd).is_dir() && open::that(cwd).is_ok(),
+        OpenAction::FocusAgent { cwd } => {
+            let cwd_owned = cwd.clone();
+            tauri::async_runtime::spawn_blocking(move || focus_agent(&cwd_owned))
+                .await
+                .unwrap_or(false)
+        }
         _ => false,
     }
 }
@@ -593,8 +846,10 @@ pub async fn open_external<R: Runtime>(app: &AppHandle<R>, event_id: &str) -> Re
     let Some(ladder) = ladder else {
         return Err("this alert is no longer available".into());
     };
-    if ladder.iter().any(run_action) {
-        return Ok(());
+    for a in &ladder {
+        if run_action(a).await {
+            return Ok(());
+        }
     }
     activate(app.clone(), event_id.to_string()).await;
     Ok(())
@@ -1164,5 +1419,155 @@ mod tests {
 
         let ev_default = calendar_event("", &acct_data, "Leave now.", Severity::Low, now).unwrap();
         assert_eq!(ev_default.account_id, "calendar");
+    }
+
+    #[test]
+    fn whatsapp_event_normal_jid_ladder_preview_title_and_hash() {
+        let now = 1_700_000_000u64;
+        let jid = "919876543210@s.whatsapp.net";
+        let ev = whatsapp_event("Alice Smith", jid, Some(100), Severity::Medium, now).expect("whatsapp event");
+
+        // normal jid gives phone digits and a ladder of whatsapp://send?phone=... then https://wa.me/...
+        assert_eq!(ev.hints.phone_digits.as_deref(), Some("919876543210"));
+        let ladder = crate::notify_links::open_ladder(ev.provider, &ev.target, &ev.hints);
+        assert_eq!(
+            ladder,
+            vec![
+                crate::notify_links::OpenAction::Url("whatsapp://send?phone=919876543210".into()),
+                crate::notify_links::OpenAction::Url("https://wa.me/919876543210".into()),
+            ]
+        );
+
+        // preview is always empty and the title never contains message text
+        assert_eq!(ev.preview, "");
+        assert_eq!(ev.title, "Alice Smith");
+
+        // empty contact name falls back to "WhatsApp"
+        let ev_anon = whatsapp_event("", jid, Some(100), Severity::Medium, now).expect("anon event");
+        assert_eq!(ev_anon.title, "WhatsApp");
+        assert_eq!(ev_anon.preview, "");
+
+        // chat id is a 24-hex hash (no '@')
+        let chat = match &ev.target {
+            Target::WhatsApp { chat } => chat.clone(),
+            _ => panic!("expected Target::WhatsApp"),
+        };
+        assert_eq!(chat.len(), 24);
+        assert!(!chat.contains('@'));
+        assert!(chat.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // ledger validation passes
+        assert!(crate::notify_event::validate_target(&ev.target).is_ok());
+
+        // two alerts with different timestamps have different event ids but the same entity key
+        let ev2 = whatsapp_event("Alice Smith", jid, Some(200), Severity::Medium, now).expect("second event");
+        assert_eq!(ev.entity_key, ev2.entity_key);
+        assert_ne!(ev.event_id, ev2.event_id);
+    }
+
+    #[test]
+    fn whatsapp_event_lid_and_group_jids_give_empty_ladder_no_panic() {
+        let now = 1_700_000_000u64;
+
+        // @lid jid
+        let ev_lid = whatsapp_event("Secret Contact", "12345678901234@lid", None, Severity::Low, now)
+            .expect("lid event");
+        assert_eq!(ev_lid.hints.phone_digits, None);
+        assert_eq!(ev_lid.preview, "");
+        assert!(crate::notify_links::open_ladder(ev_lid.provider, &ev_lid.target, &ev_lid.hints).is_empty());
+
+        // @g.us group jid
+        let ev_group = whatsapp_event("Project Group", "123456789-987654@g.us", None, Severity::High, now)
+            .expect("group event");
+        assert_eq!(ev_group.hints.phone_digits, None);
+        assert_eq!(ev_group.preview, "");
+        assert!(crate::notify_links::open_ladder(ev_group.provider, &ev_group.target, &ev_group.hints).is_empty());
+
+        // invalid empty jid gives None
+        assert!(whatsapp_event("Alice", "", None, Severity::Low, now).is_none());
+        assert!(whatsapp_event("Alice", "   ", None, Severity::Low, now).is_none());
+    }
+
+    #[test]
+    fn agent_event_needs_input_vs_finished_titles_kind_and_severity() {
+        let now = 1_000_000u64;
+        let ev_needs = agent_event("claude", "Claude Code", Some("/home/user/nexus"), true, 500, now).expect("needs_input");
+        assert_eq!(ev_needs.title, "Claude Code needs your input");
+        assert_eq!(ev_needs.kind, "needs_input");
+        assert_eq!(ev_needs.severity, Severity::Medium);
+        assert_eq!(ev_needs.status, Status::Info);
+        assert_eq!(ev_needs.account_id, "local");
+        assert_eq!(ev_needs.preview, "nexus");
+
+        let ev_fin = agent_event("codex", "Codex", Some("/home/user/nexus"), false, 600, now).expect("finished");
+        assert_eq!(ev_fin.title, "Codex finished");
+        assert_eq!(ev_fin.kind, "finished");
+        assert_eq!(ev_fin.severity, Severity::Low);
+        assert_eq!(ev_fin.status, Status::Info);
+        assert_eq!(ev_fin.account_id, "local");
+        assert_eq!(ev_fin.preview, "nexus");
+    }
+
+    #[test]
+    fn agent_event_project_sanitization_and_cwd_hints() {
+        let now = 1_000_000u64;
+
+        // Spaces
+        let ev_space = agent_event("claude", "Claude Code", Some("/home/user/my cool project"), true, 1, now).unwrap();
+        assert_eq!(ev_space.preview, "my-cool-project");
+        assert!(matches!(&ev_space.target, Target::Agent { project, .. } if project == "my-cool-project"));
+
+        // Unicode
+        let ev_unicode = agent_event("claude", "Claude Code", Some("/projects/proj🦀ect"), true, 2, now).unwrap();
+        assert_eq!(ev_unicode.preview, "proj-ect");
+        assert!(matches!(&ev_unicode.target, Target::Agent { project, .. } if project == "proj-ect"));
+
+        // Drive letters
+        let ev_drive = agent_event("claude", "Claude Code", Some("C:\\"), true, 3, now).unwrap();
+        assert_eq!(ev_drive.preview, "C-");
+        assert!(matches!(&ev_drive.target, Target::Agent { project, .. } if project == "C-"));
+
+        // Trailing slash
+        let ev_slash = agent_event("claude", "Claude Code", Some("D:/ULTRON/"), true, 4, now).unwrap();
+        assert_eq!(ev_slash.preview, "ULTRON");
+        assert!(matches!(&ev_slash.target, Target::Agent { project, .. } if project == "ULTRON"));
+
+        // Empty cwd -> "session"
+        let ev_empty = agent_event("claude", "Claude Code", Some(""), true, 5, now).unwrap();
+        assert_eq!(ev_empty.preview, "session");
+        assert!(matches!(&ev_empty.target, Target::Agent { project, .. } if project == "session"));
+
+        let ev_none = agent_event("claude", "Claude Code", None, true, 6, now).unwrap();
+        assert_eq!(ev_none.preview, "session");
+        assert!(matches!(&ev_none.target, Target::Agent { project, .. } if project == "session"));
+
+        // source_ref differs per prompt
+        let ev_p1 = agent_event("claude", "Claude Code", Some("/path/proj"), true, 100, now).unwrap();
+        let ev_p2 = agent_event("claude", "Claude Code", Some("/path/proj"), true, 200, now).unwrap();
+        assert_eq!(ev_p1.source_ref, "100");
+        assert_eq!(ev_p2.source_ref, "200");
+        assert_ne!(ev_p1.event_id, ev_p2.event_id);
+
+        // Invalid cwd with control characters is dropped from hints but event still builds
+        let ev_bad_cwd = agent_event("claude", "Claude Code", Some("/bad/path\x07\x08"), true, 300, now).unwrap();
+        assert_eq!(ev_bad_cwd.hints.agent_cwd, None);
+        let ladder_bad = crate::notify_links::open_ladder(ev_bad_cwd.provider, &ev_bad_cwd.target, &ev_bad_cwd.hints);
+        assert!(ladder_bad.is_empty(), "ladder is empty when hints have no valid cwd");
+
+        // Valid cwd gives FocusAgent ladder
+        let ev_valid_cwd = agent_event("claude", "Claude Code", Some("/valid/path"), true, 400, now).unwrap();
+        assert_eq!(ev_valid_cwd.hints.agent_cwd.as_deref(), Some("/valid/path"));
+        let ladder_valid = crate::notify_links::open_ladder(ev_valid_cwd.provider, &ev_valid_cwd.target, &ev_valid_cwd.hints);
+        assert_eq!(ladder_valid, vec![crate::notify_links::OpenAction::FocusAgent { cwd: "/valid/path".into() }]);
+    }
+
+    #[test]
+    fn folder_name_from_cwd_extracts_basename() {
+        assert_eq!(folder_name_from_cwd("D:\\ULTRON"), Some("ULTRON"));
+        assert_eq!(folder_name_from_cwd("D:/ULTRON/"), Some("ULTRON"));
+        assert_eq!(folder_name_from_cwd("/home/user/project"), Some("project"));
+        assert_eq!(folder_name_from_cwd("/home/user/project/"), Some("project"));
+        assert_eq!(folder_name_from_cwd(""), None);
+        assert_eq!(folder_name_from_cwd("   "), None);
     }
 }
