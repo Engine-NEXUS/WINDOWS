@@ -839,20 +839,47 @@ async fn run_action(a: &crate::notify_links::OpenAction) -> bool {
     }
 }
 
-/// A toast click: open the real item (the first entry of the alert's ladder that works); if none can be opened, show
-/// the alert's detail in the sidebar instead. The id is resolved in the ledger; no URL ever comes from the page.
-pub async fn open_external<R: Runtime>(app: &AppHandle<R>, event_id: &str) -> Result<(), String> {
+/// Is `event_id` currently recorded in the ledger?
+pub fn has_event(event_id: &str) -> bool {
+    lock().ledger.get(event_id).is_some()
+}
+
+/// Pure: is this action allowed to be opened by the OS.
+pub fn action_allowed(a: &crate::notify_links::OpenAction) -> bool {
+    use crate::notify_links::OpenAction;
+    match a {
+        OpenAction::Url(u) => scheme_allowed(u),
+        OpenAction::FocusAgent { cwd } => !cwd.trim().is_empty(),
+    }
+}
+
+/// Pure: which ladder entry to run, or an error when none can be opened.
+pub fn first_openable_action<'a>(ladder: &'a [crate::notify_links::OpenAction]) -> Result<&'a crate::notify_links::OpenAction, &'static str> {
+    ladder.iter().find(|a| action_allowed(a)).ok_or("This alert has no page to open.")
+}
+
+/// Open the real item (the first entry of the alert's ladder that works).
+/// If `fallback_to_activate` is true (e.g. toast fallback), show the alert's detail in the sidebar.
+/// If `fallback_to_activate` is false (e.g. "Open in app" button in the sidebar), return Err("This alert has no page to open.").
+pub async fn open_external<R: Runtime>(app: &AppHandle<R>, event_id: &str, fallback_to_activate: bool) -> Result<(), String> {
     let ladder = lock().ledger.get(event_id).map(crate::notify_open::event_ladder);
     let Some(ladder) = ladder else {
         return Err("this alert is no longer available".into());
     };
+    if !fallback_to_activate && first_openable_action(&ladder).is_err() {
+        return Err("This alert has no page to open.".into());
+    }
     for a in &ladder {
         if run_action(a).await {
             return Ok(());
         }
     }
-    activate(app.clone(), event_id.to_string()).await;
-    Ok(())
+    if fallback_to_activate {
+        activate(app.clone(), event_id.to_string()).await;
+        Ok(())
+    } else {
+        Err("This alert has no page to open.".into())
+    }
 }
 
 /// The most recent alert's id (for `nexus notify open`).
@@ -904,12 +931,15 @@ pub fn detail_json(opened: &Opened, restore_view: Option<&str>, pr_hint: Option<
             "occurrences": d.occurrences,
             "providerUrl": d.provider_url,
             "restoreView": restore_view,
+            "canOpen": d.can_open,
+            "openLabel": d.open_label,
         }),
         Opened::Unavailable(u) => json!({
             "mode": "event_detail",
             "token": u.token,
             "unavailable": u.message,
             "restoreView": restore_view,
+            "canOpen": false,
         }),
     }
 }
@@ -973,6 +1003,13 @@ pub fn notify_event_ready<R: Runtime>(app: AppHandle<R>, token: u64) -> bool {
 #[tauri::command]
 pub fn notify_close_event(token: u64) -> Option<String> {
     lock().opener.close(token)
+}
+
+/// IPC: open the real external item for `event_id` using the link ladder.
+/// Returns an error if no page/action can be opened, without looping back to activate.
+#[tauri::command]
+pub async fn notify_open_external<R: Runtime>(app: AppHandle<R>, event_id: String) -> Result<(), String> {
+    open_external(&app, &event_id, false).await
 }
 
 #[cfg(test)]
@@ -1569,5 +1606,58 @@ mod tests {
         assert_eq!(folder_name_from_cwd("/home/user/project/"), Some("project"));
         assert_eq!(folder_name_from_cwd(""), None);
         assert_eq!(folder_name_from_cwd("   "), None);
+    }
+
+    #[test]
+    fn detail_json_contains_event_id_and_can_open_flag() {
+        let extras = GithubExtras { hints: crate::notify_links::OpenHints::default(), pr: None, branch: None };
+        let line = Line::Failed { project: "zync".into(), kind: Kind::Build, count: 1 };
+        let gh_ev = github_event_with("alice/zync", &fact("zync", Kind::Build, "555"), &line, 1_000, extras).unwrap();
+        let gh_detail = crate::notify_open::detail(1, &gh_ev);
+        let gh_json = detail_json(&crate::notify_open::Opened::Detail(Box::new(gh_detail)), None, None);
+        assert_eq!(gh_json["eventId"], gh_ev.event_id);
+        assert_eq!(gh_json["canOpen"], true);
+
+        // WhatsApp event without phone digits gives an empty ladder and canOpen false.
+        let wa_ev = whatsapp_event("Support", "group@g.us", None, Severity::Low, 1_000).unwrap();
+        assert!(wa_ev.hints.phone_digits.is_none());
+        assert!(crate::notify_open::event_ladder(&wa_ev).is_empty());
+        let wa_detail = crate::notify_open::detail(2, &wa_ev);
+        let wa_json = detail_json(&crate::notify_open::Opened::Detail(Box::new(wa_detail)), None, None);
+        assert_eq!(wa_json["eventId"], wa_ev.event_id);
+        assert_eq!(wa_json["canOpen"], false);
+    }
+
+    #[test]
+    fn notify_open_external_pure_helper_logic() {
+        use crate::notify_links::OpenAction;
+
+        // Empty ladder returns error
+        assert_eq!(first_openable_action(&[]), Err("This alert has no page to open."));
+
+        // Blocked schemes return error
+        let blocked = vec![
+            OpenAction::Url("javascript:alert(1)".into()),
+            OpenAction::Url("http://insecure.example.com".into()),
+            OpenAction::Url("file:///C:/secret.txt".into()),
+        ];
+        assert_eq!(first_openable_action(&blocked), Err("This alert has no page to open."));
+
+        // Valid url is picked first
+        let valid_url = OpenAction::Url("https://github.com/alice/zync/actions/runs/555".into());
+        let ladder = vec![
+            OpenAction::Url("javascript:void(0)".into()),
+            valid_url.clone(),
+            OpenAction::Url("https://github.com/alice/zync".into()),
+        ];
+        assert_eq!(first_openable_action(&ladder), Ok(&valid_url));
+
+        // FocusAgent with valid cwd is picked
+        let agent = OpenAction::FocusAgent { cwd: "D:/ULTRON".into() };
+        assert_eq!(first_openable_action(&[agent.clone()]), Ok(&agent));
+
+        // FocusAgent with empty cwd returns error
+        let empty_agent = OpenAction::FocusAgent { cwd: "   ".into() };
+        assert_eq!(first_openable_action(&[empty_agent]), Err("This alert has no page to open."));
     }
 }

@@ -26,6 +26,10 @@ pub struct EventDetail {
     pub occurrences: u32,
     /// Allowlisted provider page derived from the typed target (never from notification text).
     pub provider_url: Option<String>,
+    /// Whether any entry in this alert's ladder can be opened.
+    pub can_open: bool,
+    /// Optional label for the "Open in app" button.
+    pub open_label: Option<String>,
 }
 
 /// Read-only error view shown instead of any guessed content.
@@ -89,7 +93,15 @@ pub fn event_url(ev: &NotifyEvent) -> Option<String> {
     event_ladder(ev).into_iter().find_map(|a| if let crate::notify_links::OpenAction::Url(u) = a { Some(u) } else { None })
 }
 
-fn detail(token: u64, ev: &NotifyEvent) -> EventDetail {
+/// The button text label for an event: GitHub keeps its existing provider link text.
+pub fn open_label(ev: &NotifyEvent) -> Option<String> {
+    match ev.provider {
+        Provider::GitHub => Some("Open on GitHub".into()),
+        _ => None,
+    }
+}
+
+pub(crate) fn detail(token: u64, ev: &NotifyEvent) -> EventDetail {
     EventDetail {
         token,
         event_id: ev.event_id.clone(),
@@ -103,6 +115,8 @@ fn detail(token: u64, ev: &NotifyEvent) -> EventDetail {
         source_ref: ev.source_ref.clone(),
         occurrences: ev.occurrences,
         provider_url: event_url(ev),
+        can_open: !event_ladder(ev).is_empty(),
+        open_label: open_label(ev),
     }
 }
 
