@@ -171,6 +171,72 @@ fn pending() -> std::sync::MutexGuard<'static, Option<Value>> {
     PENDING.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Windows reports "busy" (2) whenever a full-screen window exists, and NEXUS's own stage overlay is one (measured
+/// 2026-11-04: state 2 with NEXUS running, 5 with it stopped), so the custom toast would never show. "Busy" counts only
+/// when the window in FRONT is really full screen. Pure.
+pub fn resolve_busy(raw: i32, foreground_fullscreen: bool) -> i32 {
+    if raw == 2 && !foreground_fullscreen {
+        5
+    } else {
+        raw
+    }
+}
+
+/// Is the foreground window a real full-screen window (a video, a game, F11)? It covers its whole monitor, has no
+/// caption and is not maximised (a maximised window also overhangs the monitor by its border). Pure core + Win32 glue.
+pub fn is_fullscreen_rect(win: (i32, i32, i32, i32), monitor: (i32, i32, i32, i32), has_caption: bool, maximized: bool) -> bool {
+    let covers = win.0 <= monitor.0 && win.1 <= monitor.1 && win.2 >= monitor.2 && win.3 >= monitor.3;
+    covers && !has_caption && !maximized
+}
+
+#[cfg(target_os = "windows")]
+fn foreground_fullscreen() -> bool {
+    #[repr(C)]
+    struct Rect {
+        l: i32,
+        t: i32,
+        r: i32,
+        b: i32,
+    }
+    #[repr(C)]
+    struct MonitorInfo {
+        size: u32,
+        monitor: Rect,
+        work: Rect,
+        flags: u32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetForegroundWindow() -> *mut std::ffi::c_void;
+        fn GetWindowRect(hwnd: isize, r: *mut Rect) -> i32;
+        fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
+        fn IsZoomed(hwnd: isize) -> i32;
+        fn MonitorFromWindow(hwnd: isize, flags: u32) -> isize;
+        fn GetMonitorInfoW(monitor: isize, info: *mut MonitorInfo) -> i32;
+    }
+    const GWL_STYLE: i32 = -16;
+    const WS_CAPTION: isize = 0x00C0_0000;
+    const MONITOR_DEFAULTTONEAREST: u32 = 2;
+    // SAFETY: plain user32 calls with valid out pointers; the handle is only read.
+    unsafe {
+        let fg = GetForegroundWindow() as isize;
+        if fg == 0 {
+            return false;
+        }
+        let mut r = Rect { l: 0, t: 0, r: 0, b: 0 };
+        if GetWindowRect(fg, &mut r) == 0 {
+            return false;
+        }
+        let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MonitorInfo { size: std::mem::size_of::<MonitorInfo>() as u32, monitor: Rect { l: 0, t: 0, r: 0, b: 0 }, work: Rect { l: 0, t: 0, r: 0, b: 0 }, flags: 0 };
+        if mon == 0 || GetMonitorInfoW(mon, &mut mi) == 0 {
+            return false;
+        }
+        let has_caption = GetWindowLongPtrW(fg, GWL_STYLE) & WS_CAPTION == WS_CAPTION;
+        is_fullscreen_rect((r.l, r.t, r.r, r.b), (mi.monitor.l, mi.monitor.t, mi.monitor.r, mi.monitor.b), has_caption, IsZoomed(fg) != 0)
+    }
+}
+
 /// The shell's view of whether a banner is welcome (Windows only; None elsewhere or on failure).
 pub fn shell_state() -> Option<i32> {
     #[cfg(target_os = "windows")]
@@ -182,7 +248,7 @@ pub fn shell_state() -> Option<i32> {
         let mut s = 0i32;
         // SAFETY: plain shell32 call with a valid out pointer.
         let hr = unsafe { SHQueryUserNotificationState(&mut s) };
-        (hr >= 0).then_some(s)
+        (hr >= 0).then(|| resolve_busy(s, foreground_fullscreen()))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -366,6 +432,24 @@ mod tests {
         assert_eq!(r.x, -2560 + 2560 - r.w - 24);
         assert_eq!(r.y, 24);
         assert_eq!(toast_rect(work, 0.0, false), toast_rect(work, 1.0, false), "bad scale falls back to 1");
+    }
+
+    #[test]
+    fn our_own_fullscreen_stage_does_not_count_as_a_busy_shell() {
+        assert_eq!(resolve_busy(2, false), 5, "busy only because of a full-screen overlay (NEXUS itself)");
+        assert_eq!(resolve_busy(2, true), 2, "a real full-screen window in front still blocks");
+        for s in [1, 3, 4, 5, 6, 7] {
+            assert_eq!(resolve_busy(s, false), s);
+        }
+    }
+
+    #[test]
+    fn a_maximised_window_is_not_full_screen_but_a_bare_one_that_covers_the_monitor_is() {
+        let mon = (0, 0, 1920, 1080);
+        assert!(!is_fullscreen_rect((-8, -8, 1928, 1088), mon, true, true), "maximised: overhangs by its border");
+        assert!(!is_fullscreen_rect((100, 100, 900, 700), mon, true, false));
+        assert!(is_fullscreen_rect((0, 0, 1920, 1080), mon, false, false), "F11 video");
+        assert!(!is_fullscreen_rect((0, 0, 1920, 1080), mon, true, false), "has a title bar");
     }
 
     #[test]
