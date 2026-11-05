@@ -826,7 +826,7 @@ fn browser_key(keys: &str, label: &str) -> Result<CommandResult, String> {
     // of a detached PowerShell SendKeys that never checked the window and reported success regardless.
     // Unknown apps (e.g. a browser not in the seed) keep the old behaviour below; known apps without that
     // shortcut, protected windows and a window change are refused with a spoken reason.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     if crate::shortcuts::enabled() {
         use crate::shortcuts::{Action, Spoken};
         let action = match keys {
