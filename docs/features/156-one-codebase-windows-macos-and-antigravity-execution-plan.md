@@ -194,3 +194,30 @@ Free hardware routes: MacStadium's free open-source program (remote Mac mini; th
 commercially funded, 3+ months old, waitlist possible; **this repo has no LICENSE file in its root**, so eligibility is
 unclear); borrowing a Mac for about an hour (a short checklist makes one hour enough). Free "trial" cloud Macs: one directory lists
 MyRemoteMac with a 24 hour no-card trial (unverified); MacinCloud's trial is reportedly $0.99, not free.
+
+## 9. Phase 2 results (2026-11-05) — what was built, and what was actually proven
+
+Everything here is in the one codebase; each macOS path is behind `cfg(target_os = "macos")` (or `cfg!`) so the Windows build is
+unchanged. "Proven" below means a green CI job on a real runner; nothing has run on a person's Mac.
+
+| Card | Built | Proof so far |
+|---|---|---|
+| M1 compile | 8 compile errors fixed (`76ec071`), safety fix for voice "close X" (`ae364bc`, `ed1ab93`) | macOS `cargo check` + 2846 tests green; Windows green |
+| M2 hotkeys | per-OS tables with roles; Mac = Control+Space (call), Control+Shift+S, Control+Alt+X; Windows strings identical | chords parsed with the real `global-hotkey` library in a test; green |
+| M3 overlay clicks | stage cursor = Tauri cursor − window origin on non-Windows (pure `window_relative`) | pure tests green; **not** clicked on a real Mac |
+| M4 shortcut map | `shortcuts/seed_macos.json` (Cmd chords, bundle-id keys, terminals never inherit the global table, Safari has no number-row tab switch); `active_seed()` is exactly the Windows map off macOS; Mac `WinEnv::foreground()`; `press_shortcut` maps NEXUS's own `ctrl` chords to Cmd on a Mac; tab switching and browser keys now use the shortcut brain on macOS | seed tests run on every OS (mutation: Cmd→Ctrl caught); macOS-only test that every seed chord translates to a Mac key code; CI result for the latest commit is recorded in `AGENTS.md` |
+| (foreground) | `macos_foreground.rs`: front app from `lsappinfo list`, window title from one System Events call; parsers written against output captured on a real `macos-14` runner | parsers + real-runner tests; permission prompt on a user's Mac untested |
+| (safety) | password-manager bundle ids (1Password, Keychain Access, Passwords) refused for keystrokes | unit tests |
+| M12 Python | `mac_interpreters.rs`: PATH (skipping Apple's `/usr/bin/python3` stub), Homebrew, pyenv, python.org; the stub only when `xcode-select -p` succeeds | pure tests + a runner test that a Python is found and runs |
+
+Facts learned from the real runner (macOS 14.8.9): `lsappinfo info` prints nothing in CI but `lsappinfo list` records carry `(in front)`,
+`bundleID` and `pid`; a System Events call returns app, bundle, pid and title in about 0.12 s; a window-less app raises -1719 (wrapped
+in `try`); the polite-quit script works against a real TextEdit.
+
+Test-reliability lesson: real-time `sleep` margins flaked twice on the loaded macOS runner (a 250 ms sleep overshot a 400 ms timeout).
+Prefer moving the clock (`Instant::now() - d`) over waiting.
+
+Not done / next: M5 notarisation notes, M6 Accessibility (AXUIElement) grounding, M8 Vision OCR, M7 launcher + mouse, M9 tiling,
+M10 glass, M11 Focus Mode, M13 `nexus start` on macOS, M14 CoreML. Still open: unit tests that launch real apps on a developer Mac;
+the Antigravity/OpenCode review (`docs/testing/antigravity-cross-check-macos-compile-fixes.md`, not run: neither tool exists in the cloud
+session) and it does not yet cover the Phase 2 changes.
