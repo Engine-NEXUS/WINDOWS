@@ -150,6 +150,8 @@ pub(crate) mod screen_capture_mac;
 // Frontmost app on macOS (lsappinfo + System Events). Pure parsers are compiled in tests on every OS.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) mod macos_foreground;
+#[cfg(any(target_os = "macos", test))]
+pub(crate) mod mac_interpreters;
 
 pub mod screen;
 pub mod shortcuts;
