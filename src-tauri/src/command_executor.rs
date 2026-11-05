@@ -229,6 +229,11 @@ fn is_protected_process(stem: &str, display: &str, macos: bool) -> bool {
 /// The AppleScript for a polite quit. The app name arrives as `argv`, never spliced into the script text, so a
 /// spoken or registry name cannot inject AppleScript. It checks the app is running first (telling a closed app to
 /// quit would launch it), and `quit` lets the app ask to save, like the Windows `taskkill` without `/F`.
+///
+/// Compiled on macOS (where `close_app` uses it) and in tests on every OS (so the injection and guard tests run on
+/// Windows and Linux CI). It is NOT compiled into a Windows release build, where the dead-code ratchet would
+/// rightly flag an unused item.
+#[cfg(any(target_os = "macos", test))]
 const MACOS_QUIT_SCRIPT: &[&str] = &[
     "on run argv",
     "set appName to item 1 of argv",
@@ -242,6 +247,7 @@ const MACOS_QUIT_SCRIPT: &[&str] = &[
 ];
 
 /// `osascript` arguments for a polite quit of `name`, or None when the name is not a plausible app name.
+#[cfg(any(target_os = "macos", test))]
 fn macos_quit_args(name: &str) -> Option<Vec<String>> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 80 || name.chars().any(|c| c.is_control()) {
