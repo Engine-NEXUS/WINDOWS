@@ -7,7 +7,10 @@ name: macOS port check
 on:
   push:
     branches: [main, feat/action-kernel, 'claude/**']
+    # a probe-only or docs-only push must not cancel and restart the 35-minute build
+    paths-ignore: ['.github/workflows/macos-probe.yml', 'docs/**']
   pull_request:
+    paths-ignore: ['.github/workflows/macos-probe.yml', 'docs/**']
   workflow_dispatch:
 
 concurrency:
