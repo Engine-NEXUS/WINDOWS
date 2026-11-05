@@ -43,9 +43,24 @@ jobs:
         working-directory: src-tauri
         run: cargo check --lib --target aarch64-apple-darwin
 
-      # Informational until card M1 (docs/features/155) has fixed whatever the
-      # first macOS run reports; the compile step above is the gate.
+      # Failures here fail the job. (This step used to be `continue-on-error`, which reported "success" while 7 tests
+      # were failing; the first real run was only noticed by reading the log.)
       - name: cargo test --lib (macOS host)
         working-directory: src-tauri
-        continue-on-error: true
-        run: cargo test --lib -- --test-threads=1
+        run: |
+          set -o pipefail
+          cargo test --lib -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/mac-test.log"
+
+      # Always runs, so a failing or non-compiling test run still leaves a readable summary on the run page.
+      - name: Test summary
+        if: always()
+        run: |
+          LOG="$RUNNER_TEMP/mac-test.log"
+          {
+            echo "### macOS unit tests"
+            grep -E "^test result:" "$LOG" || echo "no test result line (did the tests compile?)"
+            echo ""
+            echo "Failing tests:"
+            grep -E "^test .* \.\.\. FAILED$" "$LOG" | sed 's/^test \(.*\) \.\.\. FAILED$/- \1/' || echo "- none"
+          } >> "$GITHUB_STEP_SUMMARY"
+          grep -E "^test .* \.\.\. FAILED$" "$LOG" | sed 's/^test \(.*\) \.\.\. FAILED$/::error title=macOS test failed::\1/' || true
