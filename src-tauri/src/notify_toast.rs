@@ -103,6 +103,53 @@ pub fn delivery_reason(
     }
 }
 
+/// Pure: is this provider muted? Muted providers drop the toast, but failures from GitHub or deploy
+/// services are never muted silently.
+pub fn is_muted(provider: Provider, status: Status, muted: &[String]) -> bool {
+    let id = match provider {
+        Provider::GitHub => "github",
+        Provider::Gmail => "mail",
+        Provider::Vercel => "vercel",
+        Provider::Render => "render",
+        Provider::Netlify => "netlify",
+        Provider::Supabase => "supabase",
+        Provider::WhatsApp => "whatsapp",
+        Provider::Calendar => "calendar",
+        Provider::Agent => "agent",
+    };
+    let is_in_muted = muted.iter().any(|m| {
+        let m = m.trim().to_ascii_lowercase();
+        m == id || (id == "mail" && m == "gmail") || (id == "gmail" && m == "mail")
+    });
+    if !is_in_muted {
+        return false;
+    }
+    let is_failure_exception = status == Status::Failed
+        && matches!(
+            provider,
+            Provider::GitHub | Provider::Vercel | Provider::Render | Provider::Netlify | Provider::Supabase
+        );
+    !is_failure_exception
+}
+
+/// Pure: channel decision considering muted providers and failure exceptions.
+pub fn decide_delivery(
+    custom_on: bool,
+    native_on: bool,
+    present: bool,
+    shell_state: Option<i32>,
+    provider: Provider,
+    status: Status,
+    muted_providers: &[String],
+) -> (Delivery, &'static str) {
+    if is_muted(provider, status, muted_providers) {
+        return (Delivery::History, "muted");
+    }
+    let d = decide(custom_on, native_on, present, shell_state);
+    let r = delivery_reason(custom_on, native_on, present, shell_state);
+    (d, r)
+}
+
 // ─── pure: what the toast shows ───────────────────────────────────────
 
 /// How much of an alert's text the toast shows. Content that may be private (mail, chat) is cut first.
@@ -126,7 +173,7 @@ impl Privacy {
     }
 }
 
-fn label(p: Provider) -> &'static str {
+pub fn label(p: Provider) -> &'static str {
     match p {
         Provider::GitHub => "GitHub",
         Provider::Gmail => "Mail",
@@ -178,7 +225,7 @@ pub fn icon_id(ev: &NotifyEvent) -> String {
     }
 }
 
-fn status_word(s: Status) -> &'static str {
+pub fn status_word(s: Status) -> &'static str {
     match s {
         Status::Failed => "failed",
         Status::Recovered => "recovered",

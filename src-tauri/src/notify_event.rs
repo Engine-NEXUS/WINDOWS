@@ -490,7 +490,6 @@ impl Ledger {
         }
     }
 
-    #[cfg(test)] // the card (and its dismiss button) is gone; the toast is dismissed in the Action Center
     pub fn dismiss(&mut self, id: &str) -> bool {
         match self.index(id).map(|i| &mut self.entries[i]) {
             Some(e) if e.read != ReadState::Dismissed => {
@@ -499,6 +498,14 @@ impl Ledger {
             }
             _ => false,
         }
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub fn entries(&self) -> &[NotifyEvent] {
+        &self.entries
     }
 
     /// OR-s delivery flags in; a flag never goes back to false.

@@ -245,6 +245,24 @@ pub enum ParsedIntent {
     /// "That's not important" — mute the sender of the last alert.
     #[serde(rename = "mail_mute")]
     MailMute,
+    /// "Open the last alert" / "show me the last notification".
+    #[serde(rename = "alert_open_last")]
+    AlertOpenLast,
+    /// "What did I miss" / "read my alerts" — spoken summary of recent alerts.
+    #[serde(rename = "alert_read")]
+    AlertRead,
+    /// "Dismiss the alert" / "clear my alerts" (`all` = true for all/clear).
+    #[serde(rename = "alert_dismiss")]
+    AlertDismiss {
+        #[serde(default)]
+        all: bool,
+    },
+    /// "Mute this source" / "mute alerts from github" (`provider` = None means latest alert's source).
+    #[serde(rename = "alert_mute_source")]
+    AlertMuteSource {
+        #[serde(default)]
+        provider: Option<String>,
+    },
     /// "Read that message" / "read Asha's message" - WhatsApp, read-only.
     #[serde(rename = "whatsapp_read")]
     WhatsappRead { name: Option<String> },
@@ -455,6 +473,10 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::StudyPref { .. } => "study_pref",
         ParsedIntent::MailDigest => "mail_digest",
         ParsedIntent::MailMute => "mail_mute",
+        ParsedIntent::AlertOpenLast => "alert_open_last",
+        ParsedIntent::AlertRead => "alert_read",
+        ParsedIntent::AlertDismiss { .. } => "alert_dismiss",
+        ParsedIntent::AlertMuteSource { .. } => "alert_mute_source",
         ParsedIntent::Directions { .. } => "directions",
         ParsedIntent::PlacesSearch { .. } => "places_search",
         ParsedIntent::PlaceInfo { .. } => "place_info",
@@ -868,6 +890,10 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
     // --- Inbox + calendar (P5): "any important emails", "that's not
     // important", "what's on my calendar", "add X to my calendar …". ---
     if let Some(result) = parse_mail_calendar_command(&text) {
+        return Some(result);
+    }
+    // --- AlertCenter voice commands: open, read, dismiss, mute ---
+    if let Some(result) = parse_alert_command(&text) {
         return Some(result);
     }
     // --- Directions ("directions to X", "how do I get to X") ---
@@ -3544,6 +3570,74 @@ fn parse_mail_calendar_command(text: &str) -> Option<ParseResult> {
         let day = if has("tomorrow") { "tomorrow" } else { "today" };
         return mk(ParsedIntent::CalendarAgenda { day: day.to_string() });
     }
+    None
+}
+
+/// AlertCenter voice control (open, read, dismiss, mute). Whole-sentence matching only.
+fn parse_alert_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase();
+    let t = t.trim_end_matches(['.', ',', '!', '?']).trim();
+    let mk = |intent: ParsedIntent| {
+        Some(ParseResult {
+            intent,
+            confidence: 1.0,
+            source: "deterministic-alert".to_string(),
+        })
+    };
+
+    if matches!(
+        t,
+        "open the last alert"
+            | "open last alert"
+            | "show the last alert"
+            | "open the last notification"
+            | "show me the last notification"
+    ) {
+        return mk(ParsedIntent::AlertOpenLast);
+    }
+
+    if matches!(
+        t,
+        "what did i miss"
+            | "read my alerts"
+            | "read my notifications"
+            | "any new alerts"
+            | "what are my alerts"
+            | "what alerts do i have"
+    ) {
+        return mk(ParsedIntent::AlertRead);
+    }
+
+    if matches!(t, "dismiss the alert" | "dismiss that alert") {
+        return mk(ParsedIntent::AlertDismiss { all: false });
+    }
+
+    if matches!(
+        t,
+        "dismiss all alerts" | "clear my alerts" | "clear my notifications"
+    ) {
+        return mk(ParsedIntent::AlertDismiss { all: true });
+    }
+
+    if matches!(
+        t,
+        "mute this source" | "mute that source" | "mute alerts from this source"
+    ) {
+        return mk(ParsedIntent::AlertMuteSource { provider: None });
+    }
+
+    if let Some(rest) = t.strip_prefix("mute alerts from ") {
+        let p = rest.trim();
+        if matches!(
+            p,
+            "github" | "vercel" | "render" | "netlify" | "supabase" | "whatsapp" | "mail" | "calendar"
+        ) {
+            return mk(ParsedIntent::AlertMuteSource {
+                provider: Some(p.to_string()),
+            });
+        }
+    }
+
     None
 }
 
@@ -11050,6 +11144,50 @@ mod tests {
         // The other place parsers keep their phrases.
         assert!(format!("{:?}", parse_deterministic("where is the closest petrol station?").map(|r| r.intent)).contains("PlacesSearch"));
         assert!(format!("{:?}", parse_deterministic("directions to work").map(|r| r.intent)).contains("Directions"));
+    }
+
+    #[test]
+    fn test_alert_command_phrases() {
+        let p = |text: &str| parse_deterministic(text).map(|r| r.intent);
+
+        // Open
+        assert!(matches!(p("open the last alert"), Some(ParsedIntent::AlertOpenLast)));
+        assert!(matches!(p("open last alert"), Some(ParsedIntent::AlertOpenLast)));
+        assert!(matches!(p("show the last alert"), Some(ParsedIntent::AlertOpenLast)));
+        assert!(matches!(p("open the last notification"), Some(ParsedIntent::AlertOpenLast)));
+        assert!(matches!(p("show me the last notification"), Some(ParsedIntent::AlertOpenLast)));
+        assert!(matches!(p("hey nexus open the last alert"), Some(ParsedIntent::AlertOpenLast)));
+
+        // Read
+        assert!(matches!(p("what did i miss"), Some(ParsedIntent::AlertRead)));
+        assert!(matches!(p("read my alerts"), Some(ParsedIntent::AlertRead)));
+        assert!(matches!(p("read my notifications"), Some(ParsedIntent::AlertRead)));
+        assert!(matches!(p("any new alerts"), Some(ParsedIntent::AlertRead)));
+        assert!(matches!(p("what are my alerts"), Some(ParsedIntent::AlertRead)));
+        assert!(matches!(p("what alerts do i have"), Some(ParsedIntent::AlertRead)));
+
+        // Dismiss
+        assert!(matches!(p("dismiss the alert"), Some(ParsedIntent::AlertDismiss { all: false })));
+        assert!(matches!(p("dismiss that alert"), Some(ParsedIntent::AlertDismiss { all: false })));
+        assert!(matches!(p("dismiss all alerts"), Some(ParsedIntent::AlertDismiss { all: true })));
+        assert!(matches!(p("clear my alerts"), Some(ParsedIntent::AlertDismiss { all: true })));
+        assert!(matches!(p("clear my notifications"), Some(ParsedIntent::AlertDismiss { all: true })));
+
+        // Mute
+        assert!(matches!(p("mute this source"), Some(ParsedIntent::AlertMuteSource { provider: None })));
+        assert!(matches!(p("mute that source"), Some(ParsedIntent::AlertMuteSource { provider: None })));
+        assert!(matches!(p("mute alerts from this source"), Some(ParsedIntent::AlertMuteSource { provider: None })));
+        assert!(matches!(p("mute alerts from github"), Some(ParsedIntent::AlertMuteSource { provider: Some(ref s) }) if s == "github"));
+        assert!(matches!(p("mute alerts from vercel"), Some(ParsedIntent::AlertMuteSource { provider: Some(ref s) }) if s == "vercel"));
+        assert!(matches!(p("mute alerts from mail"), Some(ParsedIntent::AlertMuteSource { provider: Some(ref s) }) if s == "mail"));
+        assert!(matches!(p("mute alerts from calendar"), Some(ParsedIntent::AlertMuteSource { provider: Some(ref s) }) if s == "calendar"));
+
+        // Negatives: must NOT match alert commands
+        assert!(!matches!(p("open the last file"), Some(ParsedIntent::AlertOpenLast)));
+        assert!(!matches!(p("what did i miss in class"), Some(ParsedIntent::AlertRead)));
+        assert!(!matches!(p("dismiss the meeting"), Some(ParsedIntent::AlertDismiss { .. })));
+        assert!(!matches!(p("mute the television"), Some(ParsedIntent::AlertMuteSource { .. })));
+        assert!(!matches!(p("clear my browser history"), Some(ParsedIntent::AlertDismiss { .. })));
     }
 
     #[test]

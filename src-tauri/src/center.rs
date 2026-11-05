@@ -9,6 +9,7 @@ use serde_json::Value;
 pub enum CenterId {
     App, Browser, System, Media, YouTube, Message, Commerce, GitHub,
     Architect, Ghost, Hand, Google, Memory, File, Dictation, Greeting, Knowledge,
+    Alert,
 }
 
 impl CenterId {
@@ -22,7 +23,7 @@ impl CenterId {
             Self::Hand => "HandCenter", Self::Google => "GoogleCenter",
             Self::Memory => "MemoryCenter", Self::File => "FileCenter",
             Self::Dictation => "DictationCenter", Self::Greeting => "GreetingCenter",
-            Self::Knowledge => "KnowledgeCenter",
+            Self::Knowledge => "KnowledgeCenter", Self::Alert => "AlertCenter",
         }
     }
 }
@@ -219,6 +220,8 @@ pub fn is_side_effect(intent: &ParsedIntent) -> bool {
         | ParsedIntent::Unknown { .. } | ParsedIntent::MemoryAudit
         | ParsedIntent::Briefing | ParsedIntent::TimetableShow
         | ParsedIntent::MailDigest | ParsedIntent::WhatsappRead { .. }
+        | ParsedIntent::AlertOpenLast | ParsedIntent::AlertRead
+        | ParsedIntent::AlertDismiss { .. } | ParsedIntent::AlertMuteSource { .. }
         | ParsedIntent::PeopleList | ParsedIntent::CalendarAgenda { .. }
         | ParsedIntent::ReviewForeground
         | ParsedIntent::ListBlockedContacts | ParsedIntent::ShareConcern { .. } => false,
@@ -581,6 +584,11 @@ pub fn center_id_for(intent: &ParsedIntent) -> CenterId {
         | ParsedIntent::PersonaButler
         | ParsedIntent::ShareConcern { .. } => CenterId::Greeting,
 
+        ParsedIntent::AlertOpenLast
+        | ParsedIntent::AlertRead
+        | ParsedIntent::AlertDismiss { .. }
+        | ParsedIntent::AlertMuteSource { .. } => CenterId::Alert,
+
         ParsedIntent::NluResult { intent: name, .. } => {
             if name.starts_with("youtube_") {
                 CenterId::YouTube
@@ -694,18 +702,50 @@ pub fn validate(intent: &ParsedIntent, transcript: &str, has_dialog_context: boo
                 Validity::Ok
             }
         }
+        ParsedIntent::AlertOpenLast
+        | ParsedIntent::AlertRead
+        | ParsedIntent::AlertDismiss { .. }
+        | ParsedIntent::AlertMuteSource { .. } => AlertCenter::new().validate("alert", &Value::Null),
         _ => Validity::Ok,
     }
 }
 
-/// All 17 action sub-centers in the NEXUS Command Center architecture.
+pub struct AlertCenter;
+
+impl AlertCenter {
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for AlertCenter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SubCenter for AlertCenter {
+    fn name(&self) -> &'static str {
+        "AlertCenter"
+    }
+
+    fn validate(&self, _action: &str, _slots: &Value) -> Validity {
+        Validity::Ok
+    }
+
+    fn confirm_kind(&self, _action: &str, _slots: &Value) -> ConfirmKind {
+        ConfirmKind::None
+    }
+}
+
+/// All 18 action sub-centers in the NEXUS Command Center architecture.
 #[allow(dead_code)]
 pub const ALL_SUB_CENTERS: &[CenterId] = &[
     CenterId::App, CenterId::Browser, CenterId::System, CenterId::Media,
     CenterId::YouTube, CenterId::Message, CenterId::Commerce, CenterId::GitHub,
     CenterId::Architect, CenterId::Ghost, CenterId::Hand, CenterId::Google,
     CenterId::Memory, CenterId::File, CenterId::Dictation, CenterId::Greeting,
-    CenterId::Knowledge,
+    CenterId::Knowledge, CenterId::Alert,
 ];
 
 // ─── Unit Tests ──────────────────────────────────────────────────────────────
@@ -965,6 +1005,7 @@ mod tests {
             ("GreetingCenter", ParsedIntent::Greeting { reply: "x".into() }),
             ("KnowledgeCenter", ParsedIntent::Search { query: "x".into() }),
             ("KnowledgeCenter", ParsedIntent::Unknown { raw: "x".into() }),
+            ("AlertCenter", ParsedIntent::AlertRead),
         ];
         for (expected, intent) in samples {
             let got = center_id_for(intent).as_str();

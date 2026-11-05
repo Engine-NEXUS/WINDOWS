@@ -703,8 +703,16 @@ pub fn publish_event<R: Runtime>(app: &AppHandle<R>, mut ev: NotifyEvent, ttl_ms
         set_app_data_dir(d.clone());
     }
     let custom_on = dir.as_ref().map(|d| crate::memcore::flag(d, "notifyToast", true)).unwrap_or(true);
-    let delivery = crate::notify_toast::decide(custom_on, toast_on, crate::proactive_policy::someone_is_here(), crate::notify_toast::shell_state());
-    let reason = crate::notify_toast::delivery_reason(custom_on, toast_on, crate::proactive_policy::someone_is_here(), crate::notify_toast::shell_state());
+    let muted = read_muted_providers(dir.as_deref());
+    let (delivery, reason) = crate::notify_toast::decide_delivery(
+        custom_on,
+        toast_on,
+        crate::proactive_policy::someone_is_here(),
+        crate::notify_toast::shell_state(),
+        ev.provider,
+        ev.status,
+        &muted,
+    );
     tracing::info!("[NOTIFY] delivery={delivery:?} reason={reason}");
     let privacy = crate::notify_toast::Privacy::parse(&read_setting_str(dir.as_deref(), "notifyPrivacy").unwrap_or_default());
     let channel = if delivery == crate::notify_toast::Delivery::History { Channel::HistoryOnly } else { channel };
@@ -1088,6 +1096,169 @@ pub fn notify_close_event(token: u64) -> Option<String> {
 #[tauri::command]
 pub async fn notify_open_external<R: Runtime>(app: AppHandle<R>, event_id: String) -> Result<(), String> {
     open_external(&app, &event_id, false).await
+}
+
+pub fn provider_id(p: Provider) -> &'static str {
+    match p {
+        Provider::GitHub => "github",
+        Provider::Gmail => "mail",
+        Provider::Vercel => "vercel",
+        Provider::Render => "render",
+        Provider::Netlify => "netlify",
+        Provider::Supabase => "supabase",
+        Provider::WhatsApp => "whatsapp",
+        Provider::Calendar => "calendar",
+        Provider::Agent => "agent",
+    }
+}
+
+pub fn parse_muted_providers(json: &str) -> Vec<String> {
+    let Ok(val) = serde_json::from_str::<Value>(json) else { return Vec::new(); };
+    let arr = val.get("notifyMuted").and_then(|v| v.as_array()).or_else(|| val.as_array());
+    let Some(arr) = arr else { return Vec::new(); };
+    arr.iter().filter_map(|v| v.as_str().map(|s| s.trim().to_ascii_lowercase())).collect()
+}
+
+pub fn read_muted_providers(dir: Option<&std::path::Path>) -> Vec<String> {
+    let text = dir.and_then(|d| std::fs::read_to_string(d.join("settings.json")).ok());
+    text.map(|t| parse_muted_providers(&t)).unwrap_or_default()
+}
+
+pub fn mute_provider(dir: &std::path::Path, provider: &str) -> Result<bool, String> {
+    let provider = provider.trim().to_ascii_lowercase();
+    if provider.is_empty() {
+        return Ok(false);
+    }
+    let path = dir.join("settings.json");
+    let mut val = if let Ok(text) = std::fs::read_to_string(&path) {
+        serde_json::from_str::<Value>(&text).unwrap_or_else(|_| json!({}))
+    } else {
+        json!({})
+    };
+    let mut list = val
+        .get("notifyMuted")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_ascii_lowercase())).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if !list.contains(&provider) {
+        list.push(provider);
+        val["notifyMuted"] = json!(list);
+        let text = serde_json::to_string_pretty(&val).map_err(|e| e.to_string())?;
+        std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    }
+    Ok(true)
+}
+
+pub fn latest_event() -> Option<NotifyEvent> {
+    let h = lock();
+    let id = h.ledger.latest_id()?;
+    h.ledger.get(id).cloned()
+}
+
+pub fn clear_store_events_best_effort() {
+    if let Some(dir) = get_app_data_dir() {
+        if let Err(e) = crate::memcore::with_store(&dir, |s| s.clear_notify_events()).unwrap_or(Ok(0)) {
+            tracing::warn!("[NOTIFY] failed to clear stored events: {e}");
+        }
+    }
+}
+
+pub fn clear_alerts() {
+    lock().ledger.clear();
+    clear_store_events_best_effort();
+}
+
+pub fn dismiss_latest() -> bool {
+    let mut h = lock();
+    if let Some(id) = h.ledger.latest_id().map(str::to_string) {
+        let ok = h.ledger.dismiss(&id);
+        if ok {
+            if let Some(ev) = h.ledger.get(&id).cloned() {
+                drop(h);
+                save_event_best_effort(&ev);
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn mark_seen_events(ids: &[String]) {
+    let affected: Vec<NotifyEvent> = {
+        let mut h = lock();
+        let mut list = Vec::new();
+        for id in ids {
+            if h.ledger.mark_seen(id) {
+                if let Some(ev) = h.ledger.get(id).cloned() {
+                    list.push(ev);
+                }
+            }
+        }
+        list
+    };
+    for ev in affected {
+        save_event_best_effort(&ev);
+    }
+}
+
+pub fn list_ledger_events() -> Vec<NotifyEvent> {
+    let mut items: Vec<NotifyEvent> = lock().ledger.entries().to_vec();
+    items.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+    items
+}
+
+pub fn list_events_with_privacy(privacy: crate::notify_toast::Privacy) -> Vec<Value> {
+    let mut items = list_ledger_events();
+    items.truncate(50);
+    items
+        .into_iter()
+        .map(|ev| {
+            let (title, preview) = crate::notify_toast::visible_text(privacy, &ev);
+            json!({
+                "eventId": ev.event_id,
+                "provider": crate::notify_toast::label(ev.provider),
+                "icon": crate::notify_toast::icon_id(&ev),
+                "status": match ev.status {
+                    Status::Failed => "failed",
+                    Status::Recovered => "recovered",
+                    Status::Info => "info",
+                },
+                "title": title,
+                "preview": preview,
+                "updatedAtMs": ev.updated_at_ms,
+                "read": ev.read != ReadState::Unread,
+                "spoken": ev.delivery.spoken,
+                "count": ev.occurrences,
+            })
+        })
+        .collect()
+}
+
+/// IPC: list recent alerts for the Command Hub.
+/// Newest first, max 50, from the in-memory ledger. Respects notifyPrivacy mode.
+#[tauri::command]
+pub fn notify_list_events() -> Vec<serde_json::Value> {
+    let dir = get_app_data_dir();
+    let privacy = crate::notify_toast::Privacy::parse(
+        &read_setting_str(dir.as_deref(), "notifyPrivacy").unwrap_or_default(),
+    );
+    list_events_with_privacy(privacy)
+}
+
+/// IPC: activate an alert from the Command Hub list.
+#[tauri::command]
+pub async fn notify_alert_open<R: Runtime>(app: AppHandle<R>, event_id: String) -> Result<(), String> {
+    if !has_event(&event_id) {
+        return Err("alert not found in ledger".into());
+    }
+    activate(app, event_id).await;
+    Ok(())
+}
+
+/// IPC: dismiss/clear all alerts from ledger and persistent store.
+#[tauri::command]
+pub fn notify_alerts_clear() {
+    clear_alerts();
 }
 
 #[cfg(test)]
@@ -1737,5 +1908,135 @@ mod tests {
         // FocusAgent with empty cwd returns error
         let empty_agent = OpenAction::FocusAgent { cwd: "   ".into() };
         assert_eq!(first_openable_action(&[empty_agent]), Err("This alert has no page to open."));
+    }
+
+    fn make_test_event(i: u64, now: u64) -> NotifyEvent {
+        let line = Line::Failed { project: format!("proj_{i}"), kind: Kind::Build, count: 1 };
+        let extras = GithubExtras {
+            hints: Default::default(),
+            pr: Some(i),
+            branch: Some("main".into()),
+        };
+        github_event_with(&format!("owner/repo_{i}"), &fact(&format!("proj_{i}"), Kind::Build, &format!("{i}")), &line, now, extras).unwrap()
+    }
+
+    static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_list_ordering_and_cap_50() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        clear_alerts();
+        for i in 1..=55 {
+            let ev = make_test_event(i, 10_000 + i * 10);
+            record_test_event(ev);
+        }
+        let list = list_events_with_privacy(crate::notify_toast::Privacy::Normal);
+        assert_eq!(list.len(), 50, "must cap at 50 events");
+        for w in list.windows(2) {
+            let t1 = w[0]["updatedAtMs"].as_u64().unwrap();
+            let t2 = w[1]["updatedAtMs"].as_u64().unwrap();
+            assert!(t1 >= t2, "expected newest first: {t1} >= {t2}");
+        }
+        let first = &list[0];
+        assert!(first.get("eventId").is_some());
+        assert_eq!(first["provider"], "GitHub");
+        assert_eq!(first["status"], "failed");
+        assert!(first.get("title").is_some());
+        assert!(first.get("preview").is_some());
+        assert!(first.get("icon").is_some());
+        assert_eq!(first["read"], false);
+        assert_eq!(first["spoken"], false);
+        assert_eq!(first["count"], 1);
+        clear_alerts();
+    }
+
+    #[test]
+    fn test_privacy_hidden_masks() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        clear_alerts();
+        let ev = make_test_event(1, 1_000);
+        record_test_event(ev);
+
+        let normal = list_events_with_privacy(crate::notify_toast::Privacy::Normal);
+        assert_eq!(normal.len(), 1);
+        assert_ne!(normal[0]["title"], "GitHub alert");
+        assert_ne!(normal[0]["preview"], "");
+
+        let hidden = list_events_with_privacy(crate::notify_toast::Privacy::Hidden);
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0]["title"], "GitHub alert");
+        assert_eq!(hidden[0]["preview"], "");
+        clear_alerts();
+    }
+
+    #[test]
+    fn test_clear_empties_both_ledger_and_store() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        clear_alerts();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let temp_path = temp.path().to_path_buf();
+        set_app_data_dir(temp_path.clone());
+
+        let ev = make_test_event(42, 5_000);
+        let id = ev.event_id.clone();
+        record_test_event(ev.clone());
+        save_event_best_effort(&ev);
+
+        assert!(has_event(&id));
+        let stored_before = crate::memcore::with_store(&temp_path, |s| s.load_notify_events(0)).unwrap_or_default();
+        assert!(!stored_before.is_empty(), "store should have the saved event");
+
+        notify_alerts_clear();
+
+        assert!(!has_event(&id), "ledger must be empty after clear");
+        assert!(lock().ledger.entries().is_empty());
+
+        let stored_after = crate::memcore::with_store(&temp_path, |s| s.load_notify_events(0)).unwrap_or_default();
+        assert!(stored_after.is_empty(), "store must be empty after clear");
+    }
+
+    #[test]
+    fn test_mute_list_parsing() {
+        assert_eq!(
+            parse_muted_providers(r#"{"notifyMuted": ["GitHub", "Vercel", "MAIL"]}"#),
+            vec!["github", "vercel", "mail"]
+        );
+        assert_eq!(
+            parse_muted_providers(r#"["whatsapp", "supabase"]"#),
+            vec!["whatsapp", "supabase"]
+        );
+        assert_eq!(parse_muted_providers(r#"{}"#), Vec::<String>::new());
+        assert_eq!(parse_muted_providers("not json"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_publish_decision_with_muted_provider_and_failure_exception() {
+        use crate::notify_toast::{decide_delivery, Delivery};
+
+        let muted = vec!["github".to_string(), "vercel".to_string(), "whatsapp".to_string()];
+
+        let (d, r) = decide_delivery(true, true, true, None, Provider::WhatsApp, Status::Info, &muted);
+        assert_eq!(d, Delivery::History);
+        assert_eq!(r, "muted");
+
+        let (d, r) = decide_delivery(true, true, true, None, Provider::GitHub, Status::Recovered, &muted);
+        assert_eq!(d, Delivery::History);
+        assert_eq!(r, "muted");
+
+        let (d, r) = decide_delivery(true, true, true, None, Provider::GitHub, Status::Failed, &muted);
+        assert_eq!(d, Delivery::Custom);
+        assert_eq!(r, "ok");
+
+        let (d, r) = decide_delivery(true, true, true, None, Provider::Vercel, Status::Failed, &muted);
+        assert_eq!(d, Delivery::Custom);
+        assert_eq!(r, "ok");
+
+        let (d, r) = decide_delivery(true, true, true, None, Provider::Vercel, Status::Recovered, &muted);
+        assert_eq!(d, Delivery::History);
+        assert_eq!(r, "muted");
+
+        let (d, r) = decide_delivery(true, true, true, None, Provider::Gmail, Status::Info, &muted);
+        assert_eq!(d, Delivery::Custom);
+        assert_eq!(r, "ok");
     }
 }

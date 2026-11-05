@@ -1300,6 +1300,12 @@ impl Store {
         out
     }
 
+    pub fn clear_notify_events(&self) -> rusqlite::Result<usize> {
+        let n = self.conn.execute("DELETE FROM notify_events", [])?;
+        self.flush();
+        Ok(n)
+    }
+
     /// Retention + decay. Pinned facts are never decayed. Returns rows removed.
     pub fn prune(&self, now: i64) -> usize {
         let removed = self.prune_inner(now);
