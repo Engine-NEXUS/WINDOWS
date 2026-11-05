@@ -1,4 +1,4 @@
-# Antigravity cross-check brief — macOS compile fixes (commit 76ec071)
+# Antigravity / OpenCode cross-check brief — macOS compile fixes and close-safety fix (commits 76ec071 .. ed1ab93)
 
 Purpose: an independent review of the 8-error macOS compile fix, by a different tool than the one that wrote it.
 Status: **NOT RUN.** `agy` is not installed in the cloud session that wrote the fix, so no Antigravity review has happened.
@@ -18,8 +18,9 @@ If `agy` hangs with `--sandbox` on Windows (a reported issue), run without it.
 
 ## Prompt (give this to the reviewer)
 
-You are reviewing commit `76ec071` against its parent. It changes only these files under `src-tauri/src/`:
-`shortcuts/exec.rs`, `screen_capture_mac.rs`, `live/mod.rs`, `vision.rs`, `browser_url.rs`, `hand/mod.rs`.
+You are reviewing the commits `76ec071`, `ae364bc` and `ed1ab93` (`git diff 76ec071~1 ed1ab93 -- src-tauri .github`). They change only these files:
+`shortcuts/exec.rs`, `screen_capture_mac.rs`, `live/mod.rs`, `vision.rs`, `browser_url.rs`, `hand/mod.rs`, `command_executor.rs`,
+`action_kernel/paths.rs`, `agent_hooks.rs`, `keep_awake.rs`, `live/state.rs`, `site_probe.rs` (all under `src-tauri/src/`) and `.github/workflows/macos-port.yml`.
 Do NOT edit anything. Report findings only. For each finding give: file:line, severity (blocker / should-fix / note),
 what is wrong, and the evidence you checked. If you cannot verify something, say so instead of guessing.
 
@@ -46,9 +47,34 @@ Check, in this order:
    errors exist, so list any Windows-only symbol still referenced from shared (non-cfg) code. Search for calls into modules or
    functions that are `#[cfg(target_os = "windows")]` and that are reachable on macOS.
 
+8. **Close-safety fix (`command_executor.rs`).** Voice "close X" used `pkill -x` on macOS and its protected list held only Windows
+   names. Review `PROTECTED_PROCESSES_MACOS`, `is_protected_process`, `MACOS_QUIT_SCRIPT`, `macos_quit_args` and `close_app`:
+   - Is the app name ever spliced into AppleScript text, or only passed as `argv`? Can any spoken or registry name reach the script?
+   - Is `loginwindow`, `Finder`, `Dock`, `WindowServer`, `SystemUIServer` refused through every path to `close_app` (including other
+     callers of `plan_close`, and names that arrive via the registry display name rather than an exe stem)?
+   - With `macos == false` is `is_protected_process` exactly the old `PROTECTED_PROCESSES.contains(stem)` check?
+   - AppleScript: is `tell application appName to quit` with a variable valid, and is the `System Events` running-check right?
+     (A `cfg(macos)` test already compiles the script with `osacompile` in CI; runtime behaviour and Automation-permission
+     prompts are NOT tested anywhere.)
+   - `#[cfg(any(target_os = "macos", test))]` on the two helpers: any build configuration where they are used but missing?
+9. **Test-only changes.** `paths.rs`, `agent_hooks.rs`, `keep_awake.rs`, `live/state.rs`, `site_probe.rs`: confirm each edit only
+   changes test code, and that none weakens what the test proves (the timing tests widened their margins; check the assertions
+   still distinguish pass from fail).
+10. **CI (`macos-port.yml`).** The test step is no longer `continue-on-error`. Confirm a failing test fails the job and that the
+    summary step always runs.
+
 Output a table of findings, then a one-line verdict: SAFE TO MERGE / CHANGES NEEDED.
 
 ## What the cloud session already verified (so the reviewer can concentrate on the rest)
 
 * `screen_capture_mac.rs` functions compile and their unit tests pass in a scratch crate on Linux against `image 0.25.10`.
-* The real macOS result comes from the `macOS port check` GitHub Actions job; Windows and Linux jobs run on the same push.
+* The close-safety helpers and their tests were extracted into an isolated crate and run on Linux; 7 mutations (drop `loginwindow`,
+  leak the macOS list into Windows, put the name inside the script, drop or misplace the running check, allow control characters)
+  are all caught by the tests.
+* **CI result on `ed1ab93`:** macOS `cargo check` passed; macOS `cargo test --lib` = 2846 passed, 0 failed, 22 ignored (was 2835
+  passed, 7 failed); Windows compile checks, dead-code ratchet, unit tests and installer build passed; frontend/Worker/Python
+  checks passed.
+* Not verified anywhere: AppleScript behaviour at runtime on a real Mac, macOS permission prompts, anything needing a microphone,
+  camera, or a person at the screen.
+* Known open issue (not part of these commits): some unit tests launch real apps (Safari, Google Chrome, System Events were found
+  running at the end of the macOS CI job). On a developer Mac `cargo test` would open real browsers.
