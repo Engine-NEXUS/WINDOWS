@@ -10,6 +10,7 @@ import { useAssistant } from "../store/assistant";
 import {
   __testMissStreak,
   __testSetMissStreak,
+  followUpTurnAction,
   hideOrbIfIdle,
   isAdministratorControlText,
   nextMissAction,
@@ -129,5 +130,24 @@ describe("nextMissAction (approach E retry-with-escalation)", () => {
     expect(__testMissStreak()).toBe(1);
     expect(nextMissAction(__testMissStreak())).toBe("relisten");
     __testSetMissStreak(0);
+  });
+});
+
+describe("followUpTurnAction (pure decision helper)", () => {
+  it("returns none when follow-up window is closed", () => {
+    expect(followUpTurnAction({ isFollowUpOpen: false, hasTranscript: false })).toBe("none");
+    expect(followUpTurnAction({ isFollowUpOpen: false, hasTranscript: true, gateAccepted: true })).toBe("none");
+  });
+
+  it("returns quiet_close_silence when follow-up window is open with empty transcript", () => {
+    expect(followUpTurnAction({ isFollowUpOpen: true, hasTranscript: false })).toBe("quiet_close_silence");
+  });
+
+  it("returns quiet_close_rejected when follow-up window transcript is rejected by gate", () => {
+    expect(followUpTurnAction({ isFollowUpOpen: true, hasTranscript: true, gateAccepted: false })).toBe("quiet_close_rejected");
+  });
+
+  it("returns accept when follow-up window transcript is accepted by gate", () => {
+    expect(followUpTurnAction({ isFollowUpOpen: true, hasTranscript: true, gateAccepted: true })).toBe("accept");
   });
 });

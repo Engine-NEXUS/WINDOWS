@@ -8,10 +8,12 @@ vi.mock("../sidebar/sidebarStore", () => ({
   useSidebar: { getState: () => ({ showConflict: vi.fn() }) },
 }));
 
-// wsBridge touches `window` at import time — stub the two fns we need.
+// wsBridge touches `window` at import time — stub the fns we need.
 vi.mock("./wsBridge", () => ({
   clearLongRunningInFlight: vi.fn(),
   isLocalAckGiven: () => false,
+  isLongRunningInFlight: () => false,
+  isBargedIn: () => false,
 }));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
@@ -52,12 +54,16 @@ describe("finishSpokenResult (result → done → idle handshake)", () => {
     expect(getCurrentRequestId()).toBeNull();
     // Brief visible beat first (mirrors the `done` handler)…
     expect(useAssistant.getState().visible).toBe(true);
-    // …then idle after 550ms.
-    await vi.advanceTimersByTimeAsync(550);
+    // …not yet idle at 149ms
+    await vi.advanceTimersByTimeAsync(149);
+    expect(useAssistant.getState().state).toBe("speaking");
+    // …then idle after 150ms (non-ghost beat).
+    await vi.advanceTimersByTimeAsync(1);
     expect(useAssistant.getState().state).toBe("idle");
     expect(invokeMock).toHaveBeenCalledWith("orchestrator_done", {
       requestId: "req-1",
     });
+    await vi.advanceTimersByTimeAsync(0);
   });
 
   it("stale onEnd (barge-in moved on) touches nothing", async () => {
@@ -143,7 +149,7 @@ describe("closeTurnOnSpeechEnd (no turn parks in speaking forever)", () => {
 
   it("closes a normal-mode error/conflict turn at speech end", async () => {
     expect(closeTurnOnSpeechEnd("req-err")).toBe(true);
-    await vi.advanceTimersByTimeAsync(550);
+    await vi.advanceTimersByTimeAsync(150);
     expect(useAssistant.getState().state).toBe("idle");
     expect(invokeMock).toHaveBeenCalledWith("orchestrator_done", {
       requestId: "req-err",

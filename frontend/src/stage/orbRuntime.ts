@@ -34,31 +34,37 @@ let lastFollowupListenOrigin: string | null = null;
  *  enough: the Rust cpal capture must be started explicitly, or the orb
  *  shows "listening" while Rust captures nothing (live bug, doc 44 —
  *  the confirm window already did this; the shared path didn't). */
-export function triggerFollowupListen(hotMic = false): void {
+export function triggerFollowupListen(hotMic = false, noSpeechMs?: number): void {
   // Duplicate-listen guard (R3): independent re-arm paths can land together;
   // the second would restart a live capture and run the wake handler twice.
   const origin = hotMic ? "hot_mic" : "direct";
+  const dedupeOrigin = noSpeechMs !== undefined ? "followup_window" : origin;
   const nowMs = Date.now();
-  if (isDuplicateListen(nowMs, lastFollowupListenAt, lastFollowupListenOrigin, origin)) {
+  if (isDuplicateListen(nowMs, lastFollowupListenAt, lastFollowupListenOrigin, dedupeOrigin)) {
     console.log(
-      `[NEXUS] followup listen skipped: duplicate ${origin} re-arm (+${nowMs - lastFollowupListenAt}ms)`,
+      `[NEXUS] followup listen skipped: duplicate ${dedupeOrigin} re-arm (+${nowMs - lastFollowupListenAt}ms)`,
     );
     return;
   }
   lastFollowupListenAt = nowMs;
-  lastFollowupListenOrigin = origin;
+  lastFollowupListenOrigin = dedupeOrigin;
   autoReopenFromFollowup = true;
   const w = window as any;
   if (w.__NEXUS_WAKE__) {
     // P2 double-wake audit: followup relistens also funnel through the
     // wake handler — tag the source so doubles are attributable.
-    (w.__NEXUS_WAKE_SOURCE as string | undefined) = hotMic ? "followup-hotmic" : "followup";
+    (w.__NEXUS_WAKE_SOURCE as string | undefined) = noSpeechMs !== undefined
+      ? "followup-window"
+      : hotMic ? "followup-hotmic" : "followup";
     w.__NEXUS_WAKE__();
   }
   import("@tauri-apps/api/core")
     // origin: "hot_mic" = the ghost hot-mic loop re-opened the mic by itself, so the Phase 8
     // directed-speech gate applies to what it hears; every other caller is an explicit turn.
-    .then(({ invoke }) => invoke("start_stt_capture", { origin: hotMic ? "hot_mic" : "direct" }))
+    .then(({ invoke }) => invoke("start_stt_capture", {
+      origin: hotMic ? "hot_mic" : "direct",
+      ...(noSpeechMs !== undefined ? { noSpeechMs } : {}),
+    }))
     .catch((e) => {
       console.warn("[NEXUS] followup listen: Rust capture not started:", e);
     });
@@ -114,6 +120,7 @@ async function startListening() {
   // Second Ctrl+Space press while listening = cancel the call.
   if (s.state === "listening") {
     console.log("[NEXUS] second press while listening → aborting capture");
+    void import("../net/followUp").then((m) => m.markFollowUpClosed()).catch(() => {});
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const res = await invoke<{ had_speech: boolean; elapsed_ms: number }>(
@@ -139,6 +146,9 @@ async function startListening() {
   const wasSpeaking = s.state === "speaking";
   const isAutoReopen = autoReopenFromFollowup;
   autoReopenFromFollowup = false; // consume the flag
+  if (!isAutoReopen) {
+    void import("../net/followUp").then((m) => m.markFollowUpClosed()).catch(() => {});
+  }
   const { isLongRunningInFlight } = await import("../net/wsBridge");
   const longRunningActive = isLongRunningInFlight();
   if (wasSpeaking || s.state === "thinking") {
@@ -160,7 +170,7 @@ async function startListening() {
       await abortCapture().catch((e) => console.warn("[NEXUS] barge-in abortCapture failed:", e));
     }
     if (wasSpeaking && !isAutoReopen) {
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 100));
     }
   } else {
     clearBargedIn();

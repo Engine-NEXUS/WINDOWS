@@ -1392,6 +1392,7 @@ pub fn run() {
             stt_stream::stt_stream_push_chunk,
             stt_stream::stt_stream_stop,
             tts::speak_text,
+            commands::follow_up_window_secs,
             tts::speak_cached,
             speech_sync::speech_stage_register,
             speech_sync::speech_stage_ack,

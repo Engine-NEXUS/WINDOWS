@@ -657,6 +657,21 @@ export function nextMissAction(misses: number): "relisten" | "nag" {
   return misses <= 1 ? "relisten" : "nag";
 }
 
+export type FollowUpAction = "none" | "quiet_close_silence" | "quiet_close_rejected" | "accept";
+
+/** Pure decision helper for follow-up window transcript / directed gate outcomes. */
+export function followUpTurnAction(opts: {
+  isFollowUpOpen: boolean;
+  hasTranscript: boolean;
+  gateAccepted?: boolean;
+}): FollowUpAction {
+  if (!opts.isFollowUpOpen) return "none";
+  if (!opts.hasTranscript) return "quiet_close_silence";
+  if (opts.gateAccepted === false) return "quiet_close_rejected";
+  if (opts.gateAccepted === true) return "accept";
+  return "none";
+}
+
 /** Test hook: read/reset the streak without touching turn flow. */
 export function __testMissStreak(): number {
   return missStreak;
@@ -728,6 +743,15 @@ export async function processTranscript(
     return;
   }
   if (!transcript) {
+    const { isFollowUpOpen, markFollowUpClosed } = await import("../net/followUp");
+    if (isFollowUpOpen()) {
+      markFollowUpClosed();
+      console.log("[TURN] followup closed reason=silence");
+      hideOrbIfIdle();
+      // turn-end:keep-raw follow-up window silent close
+      useAssistant.getState().reset();
+      return;
+    }
     // Ghost hot-mic: silence during an open ghost session must NOT nag.
     // Ghost turns re-listen quietly, up to GHOST_SILENT_CAP consecutive
     // empties, then park with ONE nag.
@@ -790,16 +814,26 @@ export async function processTranscript(
     return;
   }
 
-  // Phase 8 — directed-speech gate. Only in a live ghost session (open mic): speech that is not
-  // addressed to NEXUS (TV, side talk, our own TTS echo, STT hallucination loops) must not reach the
-  // command pipeline or the cloud LLM. Explicit turns (wake / hotkey / confirm window) are always
-  // accepted by the Rust side; the gate fails open if it is unavailable.
-  if (useAssistant.getState().ghostActive) {
+  // Phase 8 — directed-speech gate. Only in a live ghost session (open mic) or follow-up window:
+  // speech that is not addressed to NEXUS (TV, side talk, our own TTS echo, STT hallucination loops)
+  // must not reach the command pipeline or the cloud LLM. Explicit turns (wake / hotkey / confirm window)
+  // are always accepted by the Rust side; the gate fails open if it is unavailable.
+  const { isFollowUpOpen, markFollowUpClosed } = await import("../net/followUp");
+  const followUpActive = isFollowUpOpen();
+  if (useAssistant.getState().ghostActive || followUpActive) {
     const { askDirectedGate, gateAction } = await import("../net/directedGate");
     const { recordIgnoredTurn, resetIgnoredTurns, markGhostParked, GHOST_IGNORED_CAP } =
       await import("../net/ghostHotMic");
     const verdict = await askDirectedGate(applyLearnedCorrections(correctSttTranscript(transcript)));
     if (!verdict.accept) {
+      if (followUpActive) {
+        markFollowUpClosed();
+        console.log("[TURN] followup closed reason=rejected");
+        hideOrbIfIdle();
+        // turn-end:keep-raw follow-up window rejected by directed gate
+        useAssistant.getState().reset();
+        return;
+      }
       // Ignored speech (TV, side talk, echo) has its OWN streak, windowed in time:
       // it used to share the silent-capture counter, so three sentences from the TV
       // parked the mic with no word and the next real command went nowhere.
@@ -831,6 +865,10 @@ export async function processTranscript(
           });
       }
       return;
+    }
+    if (followUpActive) {
+      markFollowUpClosed();
+      console.log("[TURN] followup closed reason=accepted");
     }
   }
 
@@ -928,7 +966,7 @@ export async function processTranscript(
   // Special case: open architecture mapper window directly
   if (intent.action === "open_architect") {
     await waitForTtsIdle();
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await new Promise((resolve) => setTimeout(resolve, 400));
     if (!useAssistant.getState().ghostActive) {
       hideOrbIfIdle();
       useAssistant.getState().setLoadingVisible(true);
@@ -946,7 +984,7 @@ export async function processTranscript(
         useAssistant.getState().addAssistantMessage("No repository found, sir. Open a repo in your browser or GitHub Desktop.");
         void speak("No repository found sir. Open a repo in your browser or GitHub Desktop.");
         await waitForTtsIdle();
-        await new Promise((resolve) => setTimeout(resolve, 800));
+        await new Promise((resolve) => setTimeout(resolve, 300));
         if (!useAssistant.getState().ghostActive) {
           hideOrbIfIdle();
         }
@@ -966,7 +1004,7 @@ export async function processTranscript(
   // Special case: open settings sidebar (command center)
   if (intent.action === "open_settings") {
     await waitForTtsIdle();
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     hideOrbIfIdle();
     try {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -987,7 +1025,7 @@ export async function processTranscript(
     useAssistant.getState().addAssistantMessage(prompt);
     void speak(prompt.replace(/,/g, ""));
     await waitForTtsIdle();
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     hideOrbIfIdle();
     setTimeout(() => { void endTurn(); }, 550);
     return;
@@ -1000,7 +1038,7 @@ export async function processTranscript(
     useAssistant.getState().addAssistantMessage(reply);
     void speak(reply.replace(/,/g, ""));
     await waitForTtsIdle();
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     hideOrbIfIdle();
     setTimeout(() => { void endTurn(); }, 550);
     return;
@@ -1031,7 +1069,7 @@ export async function processTranscript(
         void speak("Couldn't do that sir.");
       }
       await waitForTtsIdle();
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      await new Promise((resolve) => setTimeout(resolve, 300));
       hideOrbIfIdle();
       setTimeout(() => { void endTurn(); }, 550);
     }
@@ -1059,7 +1097,7 @@ export async function processTranscript(
       void speak("Couldn't do that sir.");
     }
     await waitForTtsIdle();
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     hideOrbIfIdle();
     setTimeout(() => { void endTurn(); }, 550);
     return;
@@ -1255,7 +1293,7 @@ export async function finishCapture(): Promise<void> {
     // but our TTS is played via Rust (edge-tts → rodio), so we also add
     // a fixed delay matching the "On it sir" audio duration (~1.2s).
     await waitForTtsIdle();
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await new Promise((resolve) => setTimeout(resolve, 400));
 
     if (!useAssistant.getState().ghostActive) {
       hideOrbIfIdle();
@@ -1279,7 +1317,7 @@ export async function finishCapture(): Promise<void> {
         useAssistant.getState().addAssistantMessage("No repository found, sir. Open a repo in your browser or GitHub Desktop.");
         void speak("No repository found sir. Open a repo in your browser or GitHub Desktop.");
         await waitForTtsIdle();
-        await new Promise((resolve) => setTimeout(resolve, 800));
+        await new Promise((resolve) => setTimeout(resolve, 300));
         if (!useAssistant.getState().ghostActive) {
           hideOrbIfIdle();
         }
@@ -1304,7 +1342,7 @@ export async function finishCapture(): Promise<void> {
   // Special case: open settings sidebar (command center)
   if (intent.action === "open_settings") {
     await waitForTtsIdle();
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     hideOrbIfIdle();
     try {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -1326,7 +1364,7 @@ export async function finishCapture(): Promise<void> {
     useAssistant.getState().addAssistantMessage(prompt);
     void speak(prompt.replace(/,/g, ""));
     await waitForTtsIdle();
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     hideOrbIfIdle();
     setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
@@ -1345,7 +1383,7 @@ export async function finishCapture(): Promise<void> {
     void speak(reply.replace(/,/g, ""));
 
     await waitForTtsIdle();
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     hideOrbIfIdle();
     setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
@@ -1372,7 +1410,7 @@ export async function finishCapture(): Promise<void> {
     }
 
     await waitForTtsIdle();
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     hideOrbIfIdle();
     setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
@@ -1627,7 +1665,7 @@ async function _finishCaptureFromVadInner(
     // but our TTS is played via Rust (edge-tts → rodio), so we also add
     // a fixed delay matching the "On it sir" audio duration (~1.2s).
     await waitForTtsIdle();
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await new Promise((resolve) => setTimeout(resolve, 400));
 
     if (!useAssistant.getState().ghostActive) {
       hideOrbIfIdle();
@@ -1651,7 +1689,7 @@ async function _finishCaptureFromVadInner(
         useAssistant.getState().addAssistantMessage("No repository found, sir. Open a repo in your browser or GitHub Desktop.");
         void speak("No repository found sir. Open a repo in your browser or GitHub Desktop.");
         await waitForTtsIdle();
-        await new Promise((resolve) => setTimeout(resolve, 800));
+        await new Promise((resolve) => setTimeout(resolve, 300));
         if (!useAssistant.getState().ghostActive) {
           hideOrbIfIdle();
         }
@@ -1682,7 +1720,7 @@ async function _finishCaptureFromVadInner(
     useAssistant.getState().addAssistantMessage(prompt);
     void speak(prompt.replace(/,/g, ""));
     await waitForTtsIdle();
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     hideOrbIfIdle();
     setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
@@ -1701,7 +1739,7 @@ async function _finishCaptureFromVadInner(
     void speak(reply.replace(/,/g, ""));
 
     await waitForTtsIdle();
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     hideOrbIfIdle();
     setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
@@ -1728,7 +1766,7 @@ async function _finishCaptureFromVadInner(
     }
 
     await waitForTtsIdle();
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     hideOrbIfIdle();
     setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;

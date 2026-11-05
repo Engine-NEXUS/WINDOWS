@@ -2981,8 +2981,16 @@ pub(crate) fn clear_held_turn() {
     STT_NO_SPEECH_LIMIT_OVERRIDE.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
+#[cfg(not(feature = "mock-wake"))]
+pub(crate) fn set_no_speech_limit_override(chunks: u32) {
+    STT_NO_SPEECH_LIMIT_OVERRIDE.store(chunks, std::sync::atomic::Ordering::SeqCst);
+}
+
 #[cfg(feature = "mock-wake")]
 pub(crate) fn clear_held_turn() {}
+
+#[cfg(feature = "mock-wake")]
+pub(crate) fn set_no_speech_limit_override(_chunks: u32) {}
 
 /// Capture session generation. Incremented by each accepted start and abort so the
 /// STT receiver thread can drop buffers that were already in flight when a

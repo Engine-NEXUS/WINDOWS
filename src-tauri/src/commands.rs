@@ -2041,6 +2041,9 @@ pub struct NexusSettings {
     /// Continuation window in seconds (5..=120, default 25).
     #[serde(default = "default_continuation_window_secs")]
     pub continuation_window_secs: u64,
+    /// Follow-up listening window in seconds after NEXUS speaks (0 = off, clamp 0..=20, default 6).
+    #[serde(default = "default_follow_up_window_secs")]
+    pub follow_up_window_secs: u32,
     /// Extra unknown settings preserved across saves so frontend/plugins never get wiped.
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
@@ -2058,6 +2061,12 @@ fn default_turn_hold_ms() -> u32 {
 
 fn default_continuation_window_secs() -> u64 {
     25
+}
+
+pub const DEFAULT_FOLLOW_UP_WINDOW_SECS: u32 = 6;
+
+fn default_follow_up_window_secs() -> u32 {
+    DEFAULT_FOLLOW_UP_WINDOW_SECS
 }
 
 fn default_watch_power() -> String {
@@ -2409,6 +2418,7 @@ impl Default for NexusSettings {
             power_commands: default_memcore(),
             default_music_player: default_music_player(),
             continuation_window_secs: default_continuation_window_secs(),
+            follow_up_window_secs: DEFAULT_FOLLOW_UP_WINDOW_SECS,
             extra: std::collections::HashMap::new(),
         }
     }
@@ -3338,7 +3348,7 @@ pub fn mic_self_test() -> Result<crate::wakeword_oww::MicSelfTestReport, String>
 /// no getUserMedia, no baton pass. This fixes the Intel SST driver issue
 /// where getUserMedia returns silence but cpal is still working.
 #[tauri::command]
-pub fn start_stt_capture(origin: Option<String>) -> Result<(), String> {
+pub fn start_stt_capture(origin: Option<String>, no_speech_ms: Option<u32>) -> Result<(), String> {
     // `origin: "hot_mic"` = the ghost hot-mic loop re-opened the mic (Phase 8 gate applies);
     // anything else (confirm window, clarification, follow-up question) is an explicit turn.
     let origin = crate::directed::Origin::parse(origin.as_deref().unwrap_or("direct"));
@@ -3347,6 +3357,12 @@ pub fn start_stt_capture(origin: Option<String>) -> Result<(), String> {
 }
 
 /// Abort an in-flight Rust-side STT capture (hotkey second-press cancel).
+    if let Some(ms) = no_speech_ms {
+        if ms > 0 {
+            let chunks = (ms / 80).max(10);
+            crate::wakeword_oww::set_no_speech_limit_override(chunks);
+        }
+    }
 /// Returns whether voice was already underway + capture length so the
 /// frontend can decide: hide the orb (no speech) vs let the turn finish.
 #[tauri::command]
@@ -3548,6 +3564,40 @@ pub fn read_ghost_turn_gap_ms<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u
 /// Defaults to FALSE. Set `"speakerVerification": true` to enable.
 pub fn read_speaker_verification<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let dir = app.path().app_data_dir();
+/// Read the continuationWindowSecs setting (clamped 5..=120, default 25).
+pub fn read_continuation_window_secs<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u64 {
+    let dir = app.path().app_data_dir();
+    let Ok(dir) = dir else { return 25; };
+    let path = dir.join("settings.json");
+    let Ok(content) = std::fs::read_to_string(&path) else { return 25; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return 25; };
+    json.get("continuationWindowSecs")
+        .or_else(|| json.get("continuation_window_secs"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v.clamp(5, 120))
+        .unwrap_or(25)
+}
+
+/// Read the followUpWindowSecs setting (0 = off, clamp 0..=20, default 6).
+pub fn read_follow_up_window_secs<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u32 {
+    let dir = app.path().app_data_dir();
+    let Ok(dir) = dir else { return DEFAULT_FOLLOW_UP_WINDOW_SECS; };
+    let path = dir.join("settings.json");
+    let Ok(content) = std::fs::read_to_string(&path) else { return DEFAULT_FOLLOW_UP_WINDOW_SECS; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return DEFAULT_FOLLOW_UP_WINDOW_SECS; };
+    json.get("followUpWindowSecs")
+        .or_else(|| json.get("follow_up_window_secs"))
+        .and_then(|v| v.as_u64())
+        .map(|v| (v as u32).clamp(0, 20))
+        .unwrap_or(DEFAULT_FOLLOW_UP_WINDOW_SECS)
+}
+
+/// IPC: Follow-up listening window in seconds after NEXUS speaks (0 = off, clamp 0..=20, default 6).
+#[tauri::command]
+pub fn follow_up_window_secs<R: Runtime>(app: tauri::AppHandle<R>) -> u32 {
+    read_follow_up_window_secs(&app)
+}
+
 /// Read the continuationWindowSecs setting (clamped 5..=120, default 25).
 pub fn read_continuation_window_secs<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u64 {
     let dir = app.path().app_data_dir();
@@ -4372,6 +4422,26 @@ mod nexus_settings_tests {
         assert!(parsed.memcore_github_watch, "memcoreGithubWatch must default to true");
         let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
         assert_eq!(reserialized.get("memcoreGithubWatch"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn continuation_window_secs_defaults_to_25_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("continuationWindowSecs");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert_eq!(parsed.continuation_window_secs, 25);
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("continuationWindowSecs"), Some(&serde_json::json!(25)));
+    }
+
+    #[test]
+    fn follow_up_window_secs_defaults_to_6_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("followUpWindowSecs");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert_eq!(parsed.follow_up_window_secs, 6);
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("followUpWindowSecs"), Some(&serde_json::json!(6)));
     }
 
     #[test]

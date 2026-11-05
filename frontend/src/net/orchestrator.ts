@@ -23,7 +23,7 @@ import { speak, stopTts } from "../audio/ttsPlayer";
 import { speechKindForResult } from "../audio/speechArbiter";
 import { decideAfterSpeech } from "./orbVisibility";
 import { useSidebar } from "../sidebar/sidebarStore";
-import { clearLongRunningInFlight, isLocalAckGiven } from "./wsBridge";
+import { clearLongRunningInFlight, isLocalAckGiven, isLongRunningInFlight } from "./wsBridge";
 import { DeferredAck } from "./ackDefer";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -340,18 +340,18 @@ let offerListenTimer: ReturnType<typeof setTimeout> | null = null;
  * (`offer_pending` is only non-null once the question was actually spoken);
  * ghost sessions already reopen the mic themselves and meetings never get it.
  */
-export async function openPendingOfferWindow(): Promise<void> {
+export async function openPendingOfferWindow(): Promise<boolean> {
   const store = useAssistant.getState();
-  if (store.ghostActive) return;
+  if (store.ghostActive) return false;
   let windowMs: number | null | undefined;
   try {
     windowMs = await invoke<number | null>("offer_pending");
   } catch {
-    return;
+    return false;
   }
-  if (!windowMs) return;
+  if (!windowMs) return false;
   const meeting = await invoke<boolean>("meeting_active").catch(() => false);
-  if (meeting) return;
+  if (meeting) return false;
   store.setVisible(true);
   store.setState("listening");
   store.setAwaitingInput(true);
@@ -360,7 +360,7 @@ export async function openPendingOfferWindow(): Promise<void> {
   } catch (err) {
     console.warn("[NEXUS] orchestrator: offer capture failed:", err);
     store.setAwaitingInput(false);
-    return;
+    return false;
   }
   if (offerListenTimer) clearTimeout(offerListenTimer);
   offerListenTimer = setTimeout(() => {
@@ -376,6 +376,7 @@ export async function openPendingOfferWindow(): Promise<void> {
       setTimeout(() => useAssistant.getState().reset(), 550);
     })();
   }, windowMs);
+  return true;
 }
 
 /** Current request ID (for debugging / diagnostics). */
@@ -399,34 +400,59 @@ export function __testSetPendingSpeechCloseFor(id: string | null): void {
   pendingSpeechCloseFor = id;
 }
 
+export interface FinishSpokenResultOptions {
+  replyWasError?: boolean;
+  isLongRunning?: boolean;
+}
+
 /**
  * Complete a spoken result turn. Called when result TTS finishes (or fails).
  * Returns true when this turn was still current and the orb was reset;
  * false when a barge-in already moved on (stale onEnd must never touch the
  * new turn's state — the cancel flow owns that path).
  */
-export function finishSpokenResult(spokenFor: string): boolean {
+export function finishSpokenResult(spokenFor: string, opts?: FinishSpokenResultOptions): boolean {
   if (pendingSpeechCloseFor === spokenFor) pendingSpeechCloseFor = null;
   if (currentRequestId !== spokenFor) return false;
   currentRequestId = null;
+  const wasLongRunning = isLongRunningInFlight() || !!opts?.isLongRunning;
   clearLongRunningInFlight();
   clearConfirmListeningTimer();
   const store = useAssistant.getState();
   store.setLoadingVisible(false);
   store.setVisible(true); // brief beat, mirrors the `done` handler
+  const isGhost = store.ghostActive;
   // Phase 4 cadence: ghost turns reopen the mic at 250ms (the hot-mic
-  // loop owns the gap from here); normal turns keep the 550ms beat.
-  const beat = store.ghostActive ? 250 : 550;
+  // loop owns the gap from here); normal turns keep the 150ms beat.
+  const beat = isGhost ? 250 : 150;
   setTimeout(() => {
     if (currentRequestId === null) {
-      // Ghost hot-mic: reopen the mic if the session is still live
-      // BEFORE resetting (the relisten gate reads ghostActive; keep
-      // this order even though reset() preserves it today).
-      // No-op everywhere outside ghost mode.
-      void import("./ghostHotMic").then((m) => m.maybeGhostRelisten());
+      if (isGhost) {
+        // Ghost hot-mic: reopen the mic if the session is still live
+        // BEFORE resetting (the relisten gate reads ghostActive; keep
+        // this order even though reset() preserves it today).
+        void import("./ghostHotMic").then((m) => m.maybeGhostRelisten());
+      }
+      // turn-end:keep-raw spoken result turn ended after brief beat
       useAssistant.getState().reset();
-      // A spoken question ("Shall I start?") gets one short listening window.
-      void openPendingOfferWindow();
+      if (!isGhost) {
+        // A spoken question ("Shall I start?") gets one short listening window.
+        // If no offer was pending, open the follow-up window for normal mode.
+        void (async () => {
+          const offerOpened = await openPendingOfferWindow();
+          if (!offerOpened && !wasLongRunning && !opts?.replyWasError) {
+            const { isBargedIn } = await import("./wsBridge");
+            if (!isBargedIn()) {
+              const { openFollowUpWindow } = await import("./followUp");
+              await openFollowUpWindow({
+                offerWindowOpened: false,
+                replyWasError: false,
+                bargedIn: false,
+              });
+            }
+          }
+        })();
+      }
     }
   }, beat);
   void signalOrchestratorDone(spokenFor);
@@ -440,9 +466,9 @@ export function finishSpokenResult(spokenFor: string): boolean {
  * unit-tested; used by the result/error/conflict_report handlers so no
  * request can park the orb in `speaking` forever.
  */
-export function closeTurnOnSpeechEnd(requestId: string): boolean {
+export function closeTurnOnSpeechEnd(requestId: string, opts?: FinishSpokenResultOptions): boolean {
   if (useAssistant.getState().ghostActive) return false;
-  return finishSpokenResult(requestId);
+  return finishSpokenResult(requestId, opts);
 }
 
 /**
@@ -867,9 +893,9 @@ export async function initOrchestratorListener(): Promise<void> {
         // reset+relisten must stay the active closer for ghost turns.
         if (!store.ghostActive) pendingSpeechCloseFor = ev.request_id;
         void speak(errMsg, () => {
-          closeTurnOnSpeechEnd(ev.request_id);
+          closeTurnOnSpeechEnd(ev.request_id, { replyWasError: true });
         }, { requestId: ev.request_id, sourceCenter: ev.source_center, kind: "result" }).catch(() => {
-          closeTurnOnSpeechEnd(ev.request_id);
+          closeTurnOnSpeechEnd(ev.request_id, { replyWasError: true });
         });
         // After speaking the error, end the turn via the ghost-aware
         // path: a backend error mid-session must not deafen the loop.
@@ -935,9 +961,9 @@ export async function initOrchestratorListener(): Promise<void> {
         // Same ghost-mode exception as the error handler above.
         if (!store.ghostActive) pendingSpeechCloseFor = ev.request_id;
         void speak(spoken, () => {
-          closeTurnOnSpeechEnd(ev.request_id);
+          closeTurnOnSpeechEnd(ev.request_id, { replyWasError: true });
         }, { requestId: ev.request_id, sourceCenter: ev.source_center, kind: "result" }).catch(() => {
-          closeTurnOnSpeechEnd(ev.request_id);
+          closeTurnOnSpeechEnd(ev.request_id, { replyWasError: true });
         });
 
         console.log("[NEXUS] orchestrator: merge conflict", {
