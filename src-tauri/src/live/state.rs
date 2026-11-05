@@ -395,17 +395,28 @@ mod tests {
 
     #[test]
     fn test_context_transition_refreshes_expiry_clock() {
-        // 400 ms timeout with two 250 ms waits: each wait is under the timeout, the total (500 ms) is over it, so only a
-        // refreshed clock passes. (25/50 ms margins were flaky on a loaded macOS CI machine.)
-        let ctx = LiveContext::with_timeout(Duration::from_millis(400));
+        // No sleeping: a real-time wait is only as reliable as the machine's scheduler (a loaded macOS CI runner
+        // overslept a 250 ms wait past a 400 ms timeout). Instead the "last action" is moved into the past directly.
+        let ctx = LiveContext::with_timeout(Duration::from_secs(30));
         ctx.transition(LiveState::AppOpen { app: "whatsapp".into() });
-        std::thread::sleep(Duration::from_millis(250));
-        assert!(!ctx.is_expired(), "250ms < 400ms timeout");
 
-        // Transitioning refreshes last_action
+        let backdate = |secs: u64| {
+            let past = Instant::now().checked_sub(Duration::from_secs(secs));
+            *ctx.last_action.lock().unwrap() = past.expect("monotonic clock has run for at least a minute");
+        };
+
+        // Control: with no refresh, 40 s idle is past the 30 s timeout.
+        backdate(40);
+        assert!(ctx.is_expired(), "40s idle must be expired");
+
+        // 25 s idle is not expired yet; a transition then restarts the clock.
+        backdate(25);
+        assert!(!ctx.is_expired(), "25s < 30s timeout");
         ctx.transition(LiveState::ChatActive { app: "whatsapp".into(), contact: "dad".into() });
-        std::thread::sleep(Duration::from_millis(250));
-        // Total elapsed is 500ms, but since transition refreshed it, only 250ms since last action
+        assert!(
+            ctx.time_since_last_action() < Duration::from_secs(5),
+            "transition must refresh the action clock (was 25s)"
+        );
         assert!(!ctx.is_expired(), "action clock was refreshed by transition");
         assert_eq!(
             ctx.state(),
