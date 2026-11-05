@@ -2478,3 +2478,228 @@
 :root[data-theme="light"] .hx-slider-val {
   color: #334155 !important;
 }
+
+/* ── Alerts Page ── */
+.hx-alerts-switches {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.hx-alerts-privacy-card {
+  background: var(--hx-card);
+  border: 1px solid var(--hx-border);
+  border-radius: var(--hx-radius);
+  padding: 12px 14px;
+  margin-bottom: 16px;
+}
+
+.hx-alerts-privacy-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.hx-alerts-privacy-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ui-text-primary);
+}
+
+.hx-alerts-privacy-desc {
+  font-size: 12px;
+  color: var(--ui-text-secondary);
+  line-height: 1.4;
+  margin-top: 8px;
+}
+
+.hx-alerts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding: 0 2px;
+}
+
+.hx-alerts-count-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ui-text-primary);
+}
+
+.hx-confirm-msg {
+  font-size: 12px;
+  color: var(--ui-text-secondary);
+}
+
+.hx-alerts-group {
+  margin-bottom: 16px;
+}
+
+.hx-alerts-group-header {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ui-text-tertiary);
+  margin-bottom: 8px;
+  padding: 0 4px;
+}
+
+.hx-alerts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hx-alert-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--ui-surface-card);
+  border: 1px solid var(--ui-border-subtle);
+  border-radius: var(--hx-radius);
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  position: relative;
+}
+
+.hx-alert-row:hover {
+  background: var(--ui-surface-hover);
+  border-color: var(--ui-border-strong);
+}
+
+.hx-alert-row:focus-visible {
+  outline: 2px solid var(--ui-focus-ring);
+  outline-offset: 1px;
+}
+
+.hx-alert-row .nt-provider-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+}
+
+.hx-alert-row .nt-provider-logo .kit-logo-tile {
+  border-radius: 8px;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+}
+
+.hx-alert-unread-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ui-accent-solid);
+  flex-shrink: 0;
+}
+
+.hx-alert-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.hx-alert-row-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hx-alert-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ui-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.hx-alert-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ui-text-secondary);
+  background: var(--ui-surface-hover);
+  padding: 1px 5px;
+  border-radius: 999px;
+  border: 1px solid var(--ui-border-subtle);
+  flex-shrink: 0;
+}
+
+.hx-alert-status {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  line-height: 16px;
+  border: 1px solid currentColor;
+  flex-shrink: 0;
+}
+
+.hx-alert-status--failed {
+  color: var(--ui-danger-text);
+  background: var(--ui-danger-soft);
+}
+
+.hx-alert-status--recovered {
+  color: var(--ui-success-text);
+  background: var(--ui-success-soft);
+}
+
+.hx-alert-status--info {
+  color: var(--ui-info-text);
+  background: var(--ui-surface-hover);
+}
+
+.hx-alert-time {
+  font-size: 11px;
+  color: var(--ui-text-tertiary);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.hx-alert-preview {
+  font-size: 12px;
+  color: var(--ui-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+}
+
+.hx-alerts-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--ui-danger-soft);
+  border: 1px solid var(--ui-danger-text);
+  border-radius: var(--hx-radius);
+  color: var(--ui-danger-text);
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+
+.hx-alerts-error-msg {
+  flex: 1;
+  min-width: 0;
+  margin-right: 8px;
+}
