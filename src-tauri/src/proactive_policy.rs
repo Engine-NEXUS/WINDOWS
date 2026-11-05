@@ -457,6 +457,34 @@ pub fn presence_from(idle_secs: Option<u64>, locked: bool) -> bool {
     !locked && idle_secs.map_or(true, |s| s < AWAY_AFTER_SECS)
 }
 
+fn alert_links() -> &'static std::sync::Mutex<std::collections::VecDeque<(String, String)>> {
+    static LINKS: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<(String, String)>>> = std::sync::OnceLock::new();
+    LINKS.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::with_capacity(64)))
+}
+
+/// Link an alert id to a notify ledger event id (bounded to 64 items, oldest dropped).
+pub fn link_alert(alert_id: &str, event_id: &str) {
+    let Ok(mut links) = alert_links().lock() else { return };
+    if let Some(pos) = links.iter().position(|(a, _)| a == alert_id) {
+        links.remove(pos);
+    }
+    while links.len() >= 64 {
+        links.pop_front();
+    }
+    links.push_back((alert_id.to_string(), event_id.to_string()));
+}
+
+pub fn linked_event(alert_id: &str) -> Option<String> {
+    let links = alert_links().lock().ok()?;
+    links.iter().find(|(a, _)| a == alert_id).map(|(_, e)| e.clone())
+}
+
+pub fn on_spoken(alert_id: &str) {
+    if let Some(event_id) = linked_event(alert_id) {
+        crate::notify_hub::mark_spoken(&event_id);
+    }
+}
+
 pub(crate) fn someone_is_here() -> bool {
     presence_from(crate::memcore::resume::user_idle_secs(), !crate::early_hello::not_locked_now())
 }
@@ -506,6 +534,7 @@ fn execute<R: Runtime>(app: &AppHandle<R>, actions: Vec<Action>) {
                         crate::orchestrator::Subsystem::LocalCommand,
                     );
                     crate::orchestrator::speak_line(&app2, line, &req);
+                    on_spoken(&id);
                 });
             }
         }
@@ -957,5 +986,64 @@ mod tests {
         let post_actions = e.tick(post_focus_t, &unfocused, &CFG);
         assert_eq!(speaks(&post_actions), vec!["m1"]);
         assert_eq!(e.pending_len(), 0);
+    }
+
+    #[test]
+    fn alert_links_and_speaking_marks_spoken() {
+        use crate::notify_event::{entity_key, event_id, Delivery, PrivacyClass, Provider, ReadState, Severity, Status, Target, SCHEMA_VERSION};
+        let target = Target::Repo {
+            host: "github.com".into(),
+            owner: "o".into(),
+            repo: "r".into(),
+        };
+        let key = entity_key(Provider::GitHub, "gh-primary", &target, "build");
+        let id = event_id(&key, "1", Status::Failed);
+        let ev = crate::notify_event::NotifyEvent {
+            schema_version: SCHEMA_VERSION,
+            event_id: id.clone(),
+            entity_key: key,
+            provider: Provider::GitHub,
+            account_id: "gh-primary".into(),
+            kind: "build".into(),
+            status: Status::Failed,
+            severity: Severity::Medium,
+            occurred_at_ms: 1000,
+            observed_at_ms: 1000,
+            updated_at_ms: 1000,
+            title: "Build test".into(),
+            preview: "preview".into(),
+            privacy: PrivacyClass::Public,
+            target,
+            source_ref: "1".into(),
+            original_source_ref: "1".into(),
+            occurrences: 1,
+            delivery: Delivery::default(),
+            read: ReadState::Unread,
+            expires_at_ms: 50_000,
+            hints: Default::default(),
+        };
+        crate::notify_hub::record_test_event(ev);
+        assert!(!crate::notify_hub::is_spoken(&id));
+
+        // Link then simulate a Speak action marks spoken
+        link_alert("alert_test_1", &id);
+        on_spoken("alert_test_1");
+        assert!(crate::notify_hub::is_spoken(&id));
+
+        // An unlinked id does nothing
+        on_spoken("alert_unlinked_xyz");
+    }
+
+    #[test]
+    fn alert_links_map_is_bounded_to_64() {
+        for i in 0..100 {
+            link_alert(&format!("alt_{i}"), &format!("ev_{i}"));
+        }
+        // Oldest (0..36) must be dropped
+        assert_eq!(linked_event("alt_0"), None);
+        assert_eq!(linked_event("alt_35"), None);
+        // Newest must be retained
+        assert_eq!(linked_event("alt_99"), Some("ev_99".to_string()));
+        assert_eq!(linked_event("alt_36"), Some("ev_36".to_string()));
     }
 }

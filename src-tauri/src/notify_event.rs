@@ -150,7 +150,6 @@ pub enum EventError {
     NotFound,
     Expired,
     AccountDisconnected,
-    #[cfg(test)]
     Malformed,
 }
 
@@ -383,7 +382,6 @@ fn validate_event(ev: &NotifyEvent) -> Result<(), EventError> {
     Ok(())
 }
 
-#[cfg(test)] // persistence load path (N-later); tested, not yet used in production
 /// Strict JSON entry point (unknown fields, unknown target types and other schema versions are refused).
 pub fn parse_event(json: &str) -> Result<NotifyEvent, EventError> {
     let ev: NotifyEvent = serde_json::from_str(json).map_err(|_| EventError::Malformed)?;
@@ -543,6 +541,21 @@ impl Ledger {
 
     pub fn prune(&mut self, now_ms: u64) {
         self.entries.retain(|e| e.expires_at_ms > now_ms);
+    }
+
+    pub fn restore(&mut self, events: Vec<NotifyEvent>) {
+        for ev in events {
+            if let Some(i) = self.index(&ev.event_id) {
+                self.entries[i] = ev;
+            } else {
+                self.entries.push(ev);
+            }
+        }
+        while self.entries.len() > LEDGER_CAP {
+            if let Some(oldest) = self.entries.iter().enumerate().min_by_key(|(_, e)| e.updated_at_ms).map(|(i, _)| i) {
+                self.entries.remove(oldest);
+            }
+        }
     }
 }
 

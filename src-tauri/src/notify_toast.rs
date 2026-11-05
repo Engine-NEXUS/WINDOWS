@@ -82,6 +82,27 @@ pub fn decide(custom_on: bool, native_on: bool, present: bool, shell_state: Opti
     Delivery::Custom
 }
 
+/// Pure reason string for why a delivery channel was chosen.
+pub fn delivery_reason(
+    custom_on: bool,
+    native_on: bool,
+    present: bool,
+    shell_state: Option<i32>,
+) -> &'static str {
+    if !custom_on {
+        return if native_on { "native fallback" } else { "toast switched off" };
+    }
+    if !present {
+        return if native_on { "nobody at the PC" } else { "history only" };
+    }
+    match shell_state {
+        Some(1) => if native_on { "nobody at the PC" } else { "history only" },
+        Some(2 | 3 | 4) => if native_on { "fullscreen or presentation" } else { "history only" },
+        Some(6) => if native_on { "focus session" } else { "history only" },
+        _ => "ok",
+    }
+}
+
 // ─── pure: what the toast shows ───────────────────────────────────────
 
 /// How much of an alert's text the toast shows. Content that may be private (mail, chat) is cut first.
@@ -609,6 +630,23 @@ mod tests {
         assert_eq!(decide(false, true, true, Some(5)), Delivery::Native, "custom switched off");
         assert_eq!(decide(false, false, true, Some(5)), Delivery::History);
         assert_eq!(decide(true, true, true, Some(7)), Delivery::Custom, "a Store app in front is fine");
+    }
+
+    #[test]
+    fn delivery_reason_mirrors_decide_branches() {
+        assert_eq!(delivery_reason(true, true, true, None), "ok");
+        assert_eq!(delivery_reason(true, true, true, Some(5)), "ok");
+        assert_eq!(delivery_reason(false, true, true, None), "native fallback");
+        assert_eq!(delivery_reason(false, false, true, None), "toast switched off");
+        assert_eq!(delivery_reason(true, true, false, None), "nobody at the PC");
+        assert_eq!(delivery_reason(true, true, true, Some(1)), "nobody at the PC");
+        assert_eq!(delivery_reason(true, true, true, Some(2)), "fullscreen or presentation");
+        assert_eq!(delivery_reason(true, true, true, Some(3)), "fullscreen or presentation");
+        assert_eq!(delivery_reason(true, true, true, Some(4)), "fullscreen or presentation");
+        assert_eq!(delivery_reason(true, true, true, Some(6)), "focus session");
+        assert_eq!(delivery_reason(true, false, false, None), "history only");
+        assert_eq!(delivery_reason(true, false, true, Some(2)), "history only");
+        assert_eq!(delivery_reason(true, false, true, Some(6)), "history only");
     }
 
     #[test]

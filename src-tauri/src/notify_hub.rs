@@ -57,6 +57,28 @@ fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
+static APP_DATA_DIR: OnceLock<std::sync::RwLock<Option<std::path::PathBuf>>> = OnceLock::new();
+
+fn set_app_data_dir(path: std::path::PathBuf) {
+    let lock = APP_DATA_DIR.get_or_init(|| std::sync::RwLock::new(None));
+    if let Ok(mut g) = lock.write() {
+        *g = Some(path);
+    }
+}
+
+fn get_app_data_dir() -> Option<std::path::PathBuf> {
+    let lock = APP_DATA_DIR.get_or_init(|| std::sync::RwLock::new(None));
+    lock.read().ok().and_then(|g| g.clone())
+}
+
+fn save_event_best_effort(ev: &NotifyEvent) {
+    if let Some(dir) = get_app_data_dir() {
+        if let Err(e) = crate::memcore::with_store(&dir, |s| s.save_notify_event(ev)).unwrap_or(Ok(())) {
+            tracing::warn!("[NOTIFY] failed to persist event {}: {e}", ev.event_id);
+        }
+    }
+}
+
 /// Pure: the ledger event for a GitHub observation of a UNIQUELY resolved `owner/repo`. None when the run id or
 /// the repository identity is not usable (no card is better than a card that opens the wrong thing).
 /// Mail that must never show its words on a toast: codes, resets and bank messages. Pure; lowercase match on subject
@@ -123,10 +145,9 @@ pub fn gmail_event(account: &str, m: &crate::memcore::mailtriage::MailMeta, seve
 }
 
 /// An important mail arrived for `account`: show it as a toast (sender + subject only), click opens that message.
-pub fn publish_gmail<R: Runtime>(app: &AppHandle<R>, account: &str, m: &crate::memcore::mailtriage::MailMeta, severity: Severity) {
-    if let Some(ev) = gmail_event(account, m, severity, now_ms()) {
-        publish_event(app, ev, None);
-    }
+pub fn publish_gmail<R: Runtime>(app: &AppHandle<R>, account: &str, m: &crate::memcore::mailtriage::MailMeta, severity: Severity) -> Option<String> {
+    let ev = gmail_event(account, m, severity, now_ms())?;
+    publish_event(app, ev, None)
 }
 
 /// What the producer learned beyond the bare fact: the job / step to open, the PR number and the branch.
@@ -430,13 +451,11 @@ pub fn publish_calendar<R: Runtime>(
     ev: &crate::memcore::leavewatch::LeaveEvent,
     text: &str,
     urgency: crate::google::types::AlertUrgency,
-) {
+) -> Option<String> {
     let now = now_ms();
     let data = CalendarAlertData::from(ev);
-    let Some(event) = calendar_event(account, &data, text, urgency.into(), now) else {
-        return;
-    };
-    publish_event(app, event, None);
+    let event = calendar_event(account, &data, text, urgency.into(), now)?;
+    publish_event(app, event, None)
 }
 
 /// Pure: the ledger event for a WhatsApp chat alert.
@@ -520,11 +539,10 @@ pub fn publish_whatsapp<R: Runtime>(
     jid: &str,
     last_ts: Option<i64>,
     severity: Severity,
-) {
+) -> Option<String> {
     let now = now_ms();
-    if let Some(ev) = whatsapp_event(alert_name, jid, last_ts, severity, now) {
-        publish_event(app, ev, None);
-    }
+    let ev = whatsapp_event(alert_name, jid, last_ts, severity, now)?;
+    publish_event(app, ev, None)
 }
 
 /// Sanitize folder name for `Target::Agent` project field: `[A-Za-z0-9._-]`, no `..`, never empty, <=60 chars.
@@ -667,7 +685,7 @@ pub fn publish_agent<R: Runtime>(
 }
 
 /// Record any source's alert in the ledger and deliver it: the NEXUS toast, the Windows toast, or history only.
-pub fn publish_event<R: Runtime>(app: &AppHandle<R>, mut ev: NotifyEvent, ttl_ms: Option<u64>) {
+pub fn publish_event<R: Runtime>(app: &AppHandle<R>, mut ev: NotifyEvent, ttl_ms: Option<u64>) -> Option<String> {
     let now = now_ms();
     if let Some(ttl) = ttl_ms {
         ev.expires_at_ms = now + ttl;
@@ -681,30 +699,45 @@ pub fn publish_event<R: Runtime>(app: &AppHandle<R>, mut ev: NotifyEvent, ttl_ms
     // Hybrid delivery: the NEXUS toast window while the user is present and the shell allows a banner; the native
     // Windows toast otherwise (Focus Session, fullscreen, presentation, nobody at the PC, window failure).
     let dir = tauri::Manager::path(app).app_data_dir().ok();
+    if let Some(d) = dir.as_ref() {
+        set_app_data_dir(d.clone());
+    }
     let custom_on = dir.as_ref().map(|d| crate::memcore::flag(d, "notifyToast", true)).unwrap_or(true);
     let delivery = crate::notify_toast::decide(custom_on, toast_on, crate::proactive_policy::someone_is_here(), crate::notify_toast::shell_state());
+    let reason = crate::notify_toast::delivery_reason(custom_on, toast_on, crate::proactive_policy::someone_is_here(), crate::notify_toast::shell_state());
+    tracing::info!("[NOTIFY] delivery={delivery:?} reason={reason}");
     let privacy = crate::notify_toast::Privacy::parse(&read_setting_str(dir.as_deref(), "notifyPrivacy").unwrap_or_default());
     let channel = if delivery == crate::notify_toast::Delivery::History { Channel::HistoryOnly } else { channel };
-    let outcome = {
+    let (outcome, affected_event) = {
         let mut h = lock();
         h.ledger.prune(now);
         let out = h.ledger.record(ev);
         if let Ok(Recorded::Created(id) | Recorded::Recovered(id)) = &out {
             h.ledger.mark_delivered(id, false, channel == Channel::Toast, true);
         }
-        out
+        let affected = match &out {
+            Ok(Recorded::Created(id) | Recorded::Recovered(id) | Recorded::Grouped(id)) => {
+                h.ledger.get(id).cloned()
+            }
+            _ => None,
+        };
+        (out, affected)
     };
+    if let Some(ev_to_save) = &affected_event {
+        save_event_best_effort(ev_to_save);
+    }
     let (Recorded::Created(id) | Recorded::Recovered(id)) = (match outcome {
         Ok(o) => o,
         Err(e) => {
             tracing::warn!("[NOTIFY] event refused: {e:?}");
-            return;
+            return None;
         }
     }) else {
-        return;
+        return None;
     };
+    let event_id_ret = id.clone();
     if channel == Channel::HistoryOnly {
-        return;
+        return Some(event_id_ret);
     }
     if delivery == crate::notify_toast::Delivery::Custom {
         let toast_ev = lock().ledger.get(&id).cloned();
@@ -720,10 +753,39 @@ pub fn publish_event<R: Runtime>(app: &AppHandle<R>, mut ev: NotifyEvent, ttl_ms
                     }
                 }
             });
-            return;
+            return Some(event_id_ret);
         }
     }
     show_native(app, &id, &title, &preview, status);
+    Some(event_id_ret)
+}
+
+/// Sets delivery.spoken = true in the ledger and saves the event to the sealed store.
+pub fn mark_spoken(event_id: &str) {
+    let affected = {
+        let mut h = lock();
+        h.ledger.mark_delivered(event_id, true, false, false);
+        h.ledger.get(event_id).cloned()
+    };
+    if let Some(ev) = affected {
+        save_event_best_effort(&ev);
+    }
+}
+
+/// Restore saved events from the sealed store into the in-memory ledger at startup.
+pub fn restore_ledger<R: Runtime>(app: &AppHandle<R>) {
+    let Some(dir) = tauri::Manager::path(app).app_data_dir().ok() else {
+        return;
+    };
+    set_app_data_dir(dir.clone());
+    let now = now_ms();
+    let events = crate::memcore::with_store(&dir, |s| s.load_notify_events(now)).unwrap_or_default();
+    if !events.is_empty() {
+        let count = events.len();
+        let mut h = lock();
+        h.ledger.restore(events);
+        tracing::info!("[NOTIFY] restored {count} events into ledger");
+    }
 }
 
 /// The Windows notification-centre toast for an alert already recorded in the ledger.
@@ -842,6 +904,18 @@ async fn run_action(a: &crate::notify_links::OpenAction) -> bool {
 /// Is `event_id` currently recorded in the ledger?
 pub fn has_event(event_id: &str) -> bool {
     lock().ledger.get(event_id).is_some()
+}
+
+#[cfg(test)]
+pub fn is_spoken(event_id: &str) -> bool {
+    lock().ledger.get(event_id).map(|e| e.delivery.spoken).unwrap_or(false)
+}
+
+#[cfg(test)]
+pub fn record_test_event(ev: NotifyEvent) -> String {
+    let id = ev.event_id.clone();
+    let _ = lock().ledger.record(ev);
+    id
 }
 
 /// Pure: is this action allowed to be opened by the OS.
@@ -974,7 +1048,7 @@ pub async fn open_event<R: Runtime>(app: AppHandle<R>, event_id: String) -> Resu
     let pr_hint = resolve_pr_hint(&event_id).await;
     let _serial = open_gate().lock().await;
     let (current_view, pinned) = crate::commands::active_sidebar_view_for_notify(&app);
-    let (token, payload) = {
+    let (token, payload, affected_event) = {
         let mut guard = lock();
         let Hub { ledger, opener } = &mut *guard;
         let connected = |p: Provider, _: &str| match p {
@@ -982,8 +1056,12 @@ pub async fn open_event<R: Runtime>(app: AppHandle<R>, event_id: String) -> Resu
             _ => false,
         };
         let opened = opener.begin(&event_id, ledger, now_ms(), &connected, current_view.as_deref(), pinned);
-        (opened.token(), detail_json(&opened, opener.restore_view(), pr_hint))
+        let ev = ledger.get(&event_id).cloned();
+        (opened.token(), detail_json(&opened, opener.restore_view(), pr_hint), ev)
     };
+    if let Some(ev) = affected_event {
+        save_event_best_effort(&ev);
+    }
     crate::commands::show_event_detail(app, payload).await?;
     Ok(token)
 }

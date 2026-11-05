@@ -287,10 +287,16 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
                 fired.insert(k.clone());
                 mark_fired(&dir, &k);
                 tracing::info!("leavewatch: reminder {k}");
-                crate::proactive_policy::submit(&app, format!("leaveby_{}", r.key), r.text.clone(), r.urgency);
-                if let Some(ev) = events.iter().find(|e| event_key(e) == k || e.id == r.key.split(':').next().unwrap_or("")) {
+                let alert_id = format!("leaveby_{}", r.key);
+                let event_id = if let Some(ev) = events.iter().find(|e| event_key(e) == k || e.id == r.key.split(':').next().unwrap_or("")) {
                     let acct_email = acct.email.as_deref().unwrap_or("calendar");
-                    crate::notify_hub::publish_calendar(&app, acct_email, ev, &r.text, r.urgency);
+                    crate::notify_hub::publish_calendar(&app, acct_email, ev, &r.text, r.urgency)
+                } else {
+                    None
+                };
+                crate::proactive_policy::submit(&app, alert_id.clone(), r.text.clone(), r.urgency);
+                if let Some(ev_id) = event_id {
+                    crate::proactive_policy::link_alert(&alert_id, &ev_id);
                 }
             }
         }

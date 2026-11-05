@@ -699,17 +699,20 @@ fn fire<R: Runtime>(app: &AppHandle<R>, alerts: &[WaAlert]) {
     // restart. Now Medium repeats coalesce into one line per 5-minute window
     // (with a count-up after the lull) and High priority people still break
     // through.
-    let stamp = chrono::Utc::now().timestamp_millis();
-    let id = format!("wa_{}_{}", top.jid, stamp);
-    let key = format!("wa:{}", top.jid);
-    crate::proactive_policy::submit_event(app, id, text, urgency, Some(key));
     let severity = match top.urgency {
         AlertUrgency::Low => crate::notify_event::Severity::Low,
         AlertUrgency::Medium => crate::notify_event::Severity::Medium,
         AlertUrgency::High => crate::notify_event::Severity::High,
         AlertUrgency::Critical => crate::notify_event::Severity::Critical,
     };
-    crate::notify_hub::publish_whatsapp(app, &top.name, &top.jid, top.last_ts, severity);
+    let event_id = crate::notify_hub::publish_whatsapp(app, &top.name, &top.jid, top.last_ts, severity);
+    let stamp = chrono::Utc::now().timestamp_millis();
+    let id = format!("wa_{}_{}", top.jid, stamp);
+    let key = format!("wa:{}", top.jid);
+    crate::proactive_policy::submit_event(app, id.clone(), text, urgency, Some(key));
+    if let Some(ev_id) = event_id {
+        crate::proactive_policy::link_alert(&id, &ev_id);
+    }
 }
 
 pub fn start<R: Runtime>(app: AppHandle<R>) {

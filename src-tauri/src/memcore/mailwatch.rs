@@ -243,7 +243,14 @@ fn fire_alerts<R: Runtime>(app: &AppHandle<R>, items: &[(Triage, MailMeta)], acc
                         continue;
                     }
                     let text = mailtriage::alert_text(&t, &m, address_clone.as_deref());
-                    crate::proactive_policy::submit_event(&app_clone, format!("mail_{}", m.id), text, t.urgency, notify_key_for(&m));
+                    let alert_id = format!("mail_{}", m.id);
+                    let event_id = account_clone
+                        .as_deref()
+                        .and_then(|acct| crate::notify_hub::publish_gmail(&app_clone, acct, &m, severity_of(t.urgency)));
+                    crate::proactive_policy::submit_event(&app_clone, alert_id.clone(), text, t.urgency, notify_key_for(&m));
+                    if let Some(ev_id) = event_id {
+                        crate::proactive_policy::link_alert(&alert_id, &ev_id);
+                    }
                 }
                 return;
             }
@@ -268,10 +275,14 @@ fn fire_alerts<R: Runtime>(app: &AppHandle<R>, items: &[(Triage, MailMeta)], acc
             } else {
                 crate::memcore::mailwording::plain_alert_text(&app_clone, &dir, &t, &m, address_clone.as_deref()).await.0
             };
-            crate::proactive_policy::submit_event(&app_clone, format!("mail_{}", m.id), text, t.urgency, key);
+            let alert_id = format!("mail_{}", m.id);
             // The heads-up toast (sender + subject; a click opens this exact message in Gmail).
-            if let Some(acct) = account_clone.as_deref() {
-                crate::notify_hub::publish_gmail(&app_clone, acct, &m, severity_of(t.urgency));
+            let event_id = account_clone
+                .as_deref()
+                .and_then(|acct| crate::notify_hub::publish_gmail(&app_clone, acct, &m, severity_of(t.urgency)));
+            crate::proactive_policy::submit_event(&app_clone, alert_id.clone(), text, t.urgency, key);
+            if let Some(ev_id) = event_id {
+                crate::proactive_policy::link_alert(&alert_id, &ev_id);
             }
         }
     });

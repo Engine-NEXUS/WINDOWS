@@ -892,6 +892,7 @@ pub fn run() {
             memcore::routines::start_suggester(app.handle().clone()); // offers a routine when it notices a repeated sequence
             memcore::curator::start_curator(app.handle().clone()); // daily idle upkeep: retire unused routines, keep used profile facts
             memcore::review::start_reviewer(app.handle().clone()); // optional, default off: suggests profile facts for approval
+            notify_hub::restore_ledger(&app.handle().clone());
             memcore::scheduler::start(app.handle().clone()); // timetable slot reminders
             memcore::mailwatch::start(app.handle().clone()); // Gmail history.list watcher (idle until Google is connected)
             memcore::github_watch::start(app.handle().clone()); // GitHub Actions watcher (idle until GitHub token present)
