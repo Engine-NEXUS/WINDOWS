@@ -119,6 +119,44 @@ fn label(p: Provider) -> &'static str {
     }
 }
 
+/// Pure: the stable logo id the page maps to a bundled file (`/activity-logos/<id>.svg`). Agents use their own id so a
+/// Codex alert shows the Codex mark; an unknown agent gets "agent" and the page falls back to a monogram.
+pub fn icon_id(ev: &NotifyEvent) -> String {
+    use crate::notify_event::Target;
+    match ev.provider {
+        Provider::GitHub => "github".into(),
+        Provider::Gmail => "gmail".into(),
+        Provider::Vercel => "vercel".into(),
+        Provider::Render => "render".into(),
+        Provider::Netlify => "netlify".into(),
+        Provider::Supabase => "supabase".into(),
+        Provider::WhatsApp => "whatsapp".into(),
+        Provider::Calendar => "googlecalendar".into(),
+        Provider::Agent => {
+            let name = match &ev.target {
+                Target::Agent { agent, .. } => agent.to_ascii_lowercase(),
+                _ => String::new(),
+            };
+            for (needle, id) in [
+                ("claude", "claude"),
+                ("codex", "codex"),
+                ("antigravity", "antigravity"),
+                ("opencode", "opencode"),
+                ("cursor", "cursor"),
+                ("gemini", "gemini"),
+                ("copilot", "copilot"),
+                ("windsurf", "windsurf"),
+                ("aider", "aider"),
+            ] {
+                if name.contains(needle) {
+                    return id.into();
+                }
+            }
+            "agent".into()
+        }
+    }
+}
+
 fn status_word(s: Status) -> &'static str {
     match s {
         Status::Failed => "failed",
@@ -234,6 +272,7 @@ pub fn payload(ev: &NotifyEvent, mode: Privacy, duration_ms: u64, seq: u64) -> V
         "seq": seq,
         "eventId": ev.event_id,
         "provider": label(ev.provider),
+        "icon": icon_id(ev),
         "status": status_word(ev.status),
         "kind": ev.kind,
         "title": title,

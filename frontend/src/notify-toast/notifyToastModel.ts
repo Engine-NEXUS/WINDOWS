@@ -9,6 +9,7 @@ export interface ToastPayload {
   seq: number;
   eventId: string;
   provider: string;
+  icon: string;
   status: "failed" | "recovered" | "info";
   kind: string;
   /** The big line (the subject for mail, the sentence for a failed build). */
@@ -77,6 +78,7 @@ export function asPayload(v: unknown): ToastPayload | null {
     seq: num("seq", 0),
     eventId,
     provider: str("provider") || "NEXUS",
+    icon: str("icon"),
     status,
     kind: str("kind"),
     headline: str("headline") || str("title"),

@@ -25,7 +25,13 @@ describe("notify toast model", () => {
     expect(asPayload(null)).toBeNull();
     expect(asPayload({ title: "x" })).toBeNull();
     const p = asPayload({ eventId: "ev_1", status: "weird", durationMs: 99999999, count: 0 });
-    expect(p).toMatchObject({ eventId: "ev_1", status: "info", durationMs: 300000, count: 1, provider: "NEXUS", action: "Open", rows: [] });
+    expect(p).toMatchObject({ eventId: "ev_1", icon: "", status: "info", durationMs: 300000, count: 1, provider: "NEXUS", action: "Open", rows: [] });
+  });
+  it("preserves stable icon id or defaults to empty string", () => {
+    const withIcon = asPayload({ eventId: "ev_2", icon: "github" });
+    expect(withIcon?.icon).toBe("github");
+    const withoutIcon = asPayload({ eventId: "ev_3" });
+    expect(withoutIcon?.icon).toBe("");
   });
   it("reads the headline and keeps at most four clean rows", () => {
     const p = asPayload({
