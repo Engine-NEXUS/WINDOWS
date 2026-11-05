@@ -1728,6 +1728,12 @@ pub(crate) mod engine {
 
                     if should_stop {
                         super::STT_CAPTURING.store(false, Ordering::Relaxed);
+                        super::STT_NO_SPEECH_LIMIT_OVERRIDE.store(0, Ordering::Relaxed);
+                        if speech_detected {
+                            let now_ms = super::mono_ms_nonzero();
+                            let silence_ms = (silence as u64).saturating_mul(80);
+                            super::LAST_SPEECH_END_MS.store(now_ms.saturating_sub(silence_ms), Ordering::Relaxed);
+                        }
                         // Settle the UI meter: one final 0 so waves rest
                         // instead of freezing mid-speech.
                         if let Some(tx) = super::LEVEL_TX.get() {
@@ -2942,6 +2948,42 @@ static STT_CAPTURE_TX: OnceCell<std::sync::mpsc::Sender<(u64, TurnStats, Vec<f32
 static ACTIVE_CAPTURE_ATTEMPT: once_cell::sync::Lazy<parking_lot::Mutex<Option<(u64, crate::capture_audit::Attempt)>>> =
     once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
 
+#[cfg(not(feature = "mock-wake"))]
+struct HeldTurn {
+    final_payload: SttTranscript,
+    raw_admin: bool,
+    buffer: Vec<f32>,
+    diagnostic_samples: Vec<i16>,
+    stats: TurnStats,
+    session: u64,
+    extension_session: u64,
+    audit: crate::capture_audit::Attempt,
+    ends_at: u64,
+    speech_end_ms: u64,
+    stt_failed: bool,
+}
+
+#[cfg(not(feature = "mock-wake"))]
+static HELD_TURN: once_cell::sync::Lazy<parking_lot::Mutex<Option<HeldTurn>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
+
+#[cfg(not(feature = "mock-wake"))]
+static STT_NO_SPEECH_LIMIT_OVERRIDE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(not(feature = "mock-wake"))]
+static LAST_SPEECH_END_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(not(feature = "mock-wake"))]
+pub(crate) fn clear_held_turn() {
+    if let Some(mut held) = HELD_TURN.lock().take() {
+        held.audit.finish(crate::capture_audit::Outcome::Cancelled);
+    }
+    STT_NO_SPEECH_LIMIT_OVERRIDE.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(feature = "mock-wake")]
+pub(crate) fn clear_held_turn() {}
+
 /// Capture session generation. Incremented by each accepted start and abort so the
 /// STT receiver thread can drop buffers that were already in flight when a
 /// second Ctrl+Space press cancelled the turn (Gap 3: without this, the
@@ -3004,6 +3046,21 @@ const STT_MAX_CHUNKS: u32 = 125;
 /// speech" — only the 8s no-speech timeout can stop it.
 const STT_MIN_VOICED_CHUNKS: u32 = 3;
 
+#[cfg(not(feature = "mock-wake"))]
+fn effective_no_speech_limit() -> u32 {
+    let ov = STT_NO_SPEECH_LIMIT_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+    if ov > 0 {
+        ov
+    } else {
+        STT_NO_SPEECH_CHUNK_LIMIT
+    }
+}
+
+#[cfg(feature = "mock-wake")]
+fn effective_no_speech_limit() -> u32 {
+    STT_NO_SPEECH_CHUNK_LIMIT
+}
+
 /// Pure endpoint predicate (unit-tested): stop the capture when a CONFIRMED
 /// turn (enough voiced chunks) goes silent, on max duration, or on the
 /// no-speech timeout. `voiced < MIN` means no turn started — never cut.
@@ -3014,9 +3071,27 @@ fn should_stop_capture(
     silence_limit: u32,
     total: u32,
 ) -> bool {
+    should_stop_capture_with_limit(
+        speech_detected,
+        voiced,
+        silence,
+        silence_limit,
+        total,
+        effective_no_speech_limit(),
+    )
+}
+
+pub(crate) fn should_stop_capture_with_limit(
+    speech_detected: bool,
+    voiced: u32,
+    silence: u32,
+    silence_limit: u32,
+    total: u32,
+    no_speech_limit: u32,
+) -> bool {
     (speech_detected && voiced >= STT_MIN_VOICED_CHUNKS && silence >= silence_limit)
         || total >= STT_MAX_CHUNKS
-        || (!speech_detected && total >= STT_NO_SPEECH_CHUNK_LIMIT)
+        || (!speech_detected && total >= no_speech_limit)
 }
 
 /// Phantom-capture guard (unit-tested): true when a buffer holds too little
@@ -3112,11 +3187,29 @@ pub fn endpoint_reason(
     silence_limit: u32,
     total: u32,
 ) -> &'static str {
+    endpoint_reason_with_limit(
+        speech_detected,
+        voiced,
+        silence,
+        silence_limit,
+        total,
+        effective_no_speech_limit(),
+    )
+}
+
+pub(crate) fn endpoint_reason_with_limit(
+    speech_detected: bool,
+    voiced: u32,
+    silence: u32,
+    silence_limit: u32,
+    total: u32,
+    no_speech_limit: u32,
+) -> &'static str {
     if speech_detected && voiced >= STT_MIN_VOICED_CHUNKS && silence >= silence_limit {
         "silence_end"
     } else if total >= STT_MAX_CHUNKS {
         "max_duration"
-    } else if !speech_detected && total >= STT_NO_SPEECH_CHUNK_LIMIT {
+    } else if !speech_detected && total >= no_speech_limit {
         "no_speech"
     } else {
         "unknown"
@@ -3474,6 +3567,7 @@ pub fn abort_stt_capture() -> SttAbortResult {
     use std::sync::atomic::Ordering;
     let mut active_capture = ACTIVE_CAPTURE_ATTEMPT.lock();
     advance_capture_session(&CAPTURE_SESSION_ID);
+    clear_held_turn();
     crate::admin_privilege::invalidate_captured_turns();
     let was_capturing = STT_CAPTURING.swap(false, Ordering::SeqCst);
     let voiced = STT_VOICED_CHUNKS.load(Ordering::Relaxed);
@@ -4027,6 +4121,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     session,
                     CAPTURE_SESSION_ID.load(std::sync::atomic::Ordering::Relaxed),
                 ) {
+                    clear_held_turn();
                     tracing::info!(
                         "stt-capture: dropping stale-session buffer (taken={}, current={})",
                         session,
@@ -4038,6 +4133,65 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
                     continue;
                 }
+
+                let (buffer, extended) = {
+                    let mut held_guard = HELD_TURN.lock();
+                    if let Some(held) = held_guard.as_ref() {
+                        if held.extension_session == session {
+                            if let Some(held) = held_guard.take() {
+                                if stats.voiced_chunks >= STT_MIN_VOICED_CHUNKS {
+                                    let resumed_after_ms = mono_ms_nonzero().saturating_sub(held.speech_end_ms);
+                                    tracing::info!("[TURN] hold resumed +{}ms", resumed_after_ms);
+                                    let mut combined = held.buffer;
+                                    combined.extend(buffer);
+                                    audit.stage("held_resumed");
+                                    (combined, true)
+                                } else {
+                                    tracing::info!("[TURN] hold expired -> proceed");
+                                    tracing::debug!("held turn reached ends_at={}", held.ends_at);
+                                    if !held.final_payload.text.is_empty() {
+                                        if held.raw_admin {
+                                            crate::admin_privilege::register_captured_turn(held.session, &held.final_payload.text);
+                                        }
+                                        if let Ok(v) = serde_json::to_value(&held.final_payload) {
+                                            crate::stage::stash_transcript_if_not_ready(v);
+                                        }
+                                    }
+                                    crate::stt_diagnostics::save_capture(
+                                        &app_for_stt,
+                                        held.session,
+                                        &held.diagnostic_samples,
+                                        &held.final_payload.raw_text,
+                                        &held.stats,
+                                    );
+                                    let delivered = app_for_stt.emit("stt:transcript", &held.final_payload).is_ok();
+                                    let outcome = if !delivered {
+                                        Outcome::DeliveryFailed
+                                    } else if held.stt_failed {
+                                        Outcome::SttError
+                                    } else if held.stats.filter != "none" {
+                                        Outcome::Filtered
+                                    } else if held.final_payload.text.is_empty() {
+                                        Outcome::EmptyTranscript
+                                    } else {
+                                        Outcome::Delivered
+                                    };
+                                    let mut old_audit = held.audit;
+                                    old_audit.finish(outcome);
+                                    crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &held.stats);
+                                    audit.finish(Outcome::Superseded);
+                                    continue;
+                                }
+                            } else {
+                                (buffer, false)
+                            }
+                        } else {
+                            (buffer, false)
+                        }
+                    } else {
+                        (buffer, false)
+                    }
+                };
                 if buffer.is_empty() {
                     audit.finish(Outcome::EmptyBuffer);
                     tracing::warn!("stt-capture: empty buffer received");
@@ -4213,6 +4367,58 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                         intent_label,
                         pre_parsed,
                     };
+
+                    let hold_ms = crate::commands::read_turn_hold_ms(&app_for_stt);
+                    let ghost_active = crate::ghost::session_active();
+                    let origin = crate::directed::last_turn_origin();
+                    let verdict = crate::turn_complete::verdict(&final_payload.text);
+                    let speech_end_ms = LAST_SPEECH_END_MS.load(std::sync::atomic::Ordering::Relaxed);
+                    let now_ms = mono_ms_nonzero();
+                    let ms_since_speech_end = now_ms.saturating_sub(speech_end_ms);
+
+                    if crate::turn_complete::may_hold(
+                        hold_ms,
+                        ghost_active,
+                        origin,
+                        extended,
+                        verdict,
+                        ms_since_speech_end,
+                    ) {
+                        let wait_ms = (hold_ms as u64).saturating_sub(ms_since_speech_end);
+                        tracing::info!("[TURN] hold start text=\"{}\" wait_ms={}", final_payload.text, wait_ms);
+                        let remaining_chunks = crate::turn_complete::remaining_hold_chunks(hold_ms, ms_since_speech_end);
+                        STT_NO_SPEECH_LIMIT_OVERRIDE.store(remaining_chunks, std::sync::atomic::Ordering::SeqCst);
+
+                        *HELD_TURN.lock() = Some(HeldTurn {
+                            final_payload,
+                            raw_admin,
+                            buffer: buffer.clone(),
+                            diagnostic_samples: samples.clone(),
+                            stats: stats.clone(),
+                            session,
+                            extension_session: 0,
+                            audit,
+                            ends_at: now_ms + wait_ms,
+                            speech_end_ms,
+                            stt_failed,
+                        });
+
+                        crate::commands::emit_logged(
+                            &app_for_stt,
+                            "orchestrator:event",
+                            &crate::orchestrator::OrchestratorEvent::State {
+                                state: crate::orchestrator::OrchestratorState::Listening,
+                                request_id: String::new(),
+                            },
+                        );
+
+                        start_stt_capture_with_origin(crate::directed::Origin::Direct);
+                        let ext_session = CAPTURE_SESSION_ID.load(std::sync::atomic::Ordering::SeqCst);
+                        if let Some(held) = HELD_TURN.lock().as_mut() {
+                            held.extension_session = ext_session;
+                        }
+                        return;
+                    }
                     if !final_payload.text.is_empty() {
                         if raw_admin {
                             crate::admin_privilege::register_captured_turn(session, &final_payload.text);
@@ -4367,6 +4573,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
             continue;
         }
 
+        clear_held_turn();
         // ── Alexa-style barge-in: a wake that fires while TTS is
         // playing must cut speech FIRST (single choke point, same as
         // the hotkey branch) — otherwise the old reply talks over the
@@ -6686,6 +6893,18 @@ mod tests {
         // Non-stop inputs → unknown (never emitted, defensive only).
         assert_eq!(super::endpoint_reason(true, 5, 2, 5, 20), "unknown");
         assert_eq!(super::endpoint_reason(false, 0, 0, 5, 20), "unknown");
+    }
+
+    #[test]
+    fn test_should_stop_capture_with_no_speech_limit() {
+        // Normal default limit 100: at 50 chunks without speech, does not stop
+        assert!(!super::should_stop_capture_with_limit(false, 0, 0, 5, 50, 100));
+        assert!(super::should_stop_capture_with_limit(false, 0, 0, 5, 100, 100));
+
+        // Smart pause hold override limit (e.g. 25 chunks): stops at 25 without speech
+        assert!(!super::should_stop_capture_with_limit(false, 0, 0, 5, 24, 25));
+        assert!(super::should_stop_capture_with_limit(false, 0, 0, 5, 25, 25));
+        assert_eq!(super::endpoint_reason_with_limit(false, 0, 0, 5, 25, 25), "no_speech");
     }
 
     /// buffer_rms_stats: peak + mean energy of a capture buffer.

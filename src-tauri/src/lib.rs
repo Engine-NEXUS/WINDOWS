@@ -16,6 +16,8 @@ mod window_manager;
 // Smart Turn end-of-turn model — standalone prototype, not yet wired into capture.
 #[allow(dead_code)]
 pub(crate) mod turn_detect;
+pub(crate) mod turn_complete;
+pub(crate) mod turn_continue;
 // Silero VAD (Handy-derived) — used by the STT capture loop when "vadSilero" is on.
 pub(crate) mod vad;
 // Phase 8: directed-speech gate for open-mic (ghost hot-mic) turns

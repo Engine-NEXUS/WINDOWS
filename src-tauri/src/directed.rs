@@ -411,7 +411,8 @@ pub fn directed_gate<R: tauri::Runtime>(transcript: String, app: tauri::AppHandl
     let verdict = evaluate(&Input {
         transcript: &transcript,
         origin: last_turn_origin(),
-        parses_as_command: crate::intent_parser::parse_deterministic(&transcript).is_some(),
+        parses_as_command: crate::intent_parser::parse_deterministic(&transcript).is_some()
+            || crate::turn_continue::detect(&transcript) != crate::turn_continue::Continuation::None,
         spoken: &spoken,
         dictation_active: crate::orchestrator::is_dictation_active(),
         engaged: is_engaged(Instant::now()),
@@ -468,6 +469,23 @@ mod tests {
         assert!(c.accept && c.reason == "command");
         let d = evaluate(&Input { transcript: "so then we went to the market and bought apples", origin: Origin::HotMic, parses_as_command: false, spoken: &[], dictation_active: true, engaged: true, window_enabled: true });
         assert!(d.accept && d.reason == "dictation");
+    }
+
+    #[test]
+    fn continuation_phrases_accepted_as_command() {
+        let t = "complete this and run the tests";
+        let is_cmd = crate::intent_parser::parse_deterministic(t).is_some()
+            || crate::turn_continue::detect(t) != crate::turn_continue::Continuation::None;
+        let v = evaluate(&Input {
+            transcript: t,
+            origin: Origin::HotMic,
+            parses_as_command: is_cmd,
+            spoken: &[],
+            dictation_active: false,
+            engaged: true,
+            window_enabled: true,
+        });
+        assert!(v.accept && v.reason == "command");
     }
 
     #[test]
