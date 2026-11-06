@@ -317,15 +317,22 @@ describe("assert every public setter once", () => {
     expect(useAssistant.getState().captionActive).toBe(false);
   });
 
-  it("verifies setOrbThinkMode, setOrbSpeakMode, and setOrbListenMode", () => {
-    useAssistant.getState().setOrbThinkMode(8);
-    expect(useAssistant.getState().orbThinkMode).toBe(8);
+  it("setOrbSignals merges partial updates and keeps the same object when nothing changed", () => {
+    useAssistant.getState().setOrbSignals({ handActive: false, backgroundTasks: 0, tourFetching: false, dictationActive: false, agentWatching: false });
+    const before = useAssistant.getState().orbSignals;
+    useAssistant.getState().setOrbSignals({ handActive: false });
+    expect(useAssistant.getState().orbSignals).toBe(before);
 
-    useAssistant.getState().setOrbSpeakMode(4);
-    expect(useAssistant.getState().orbSpeakMode).toBe(4);
+    useAssistant.getState().setOrbSignals({ backgroundTasks: 2 });
+    expect(useAssistant.getState().orbSignals.backgroundTasks).toBe(2);
+    expect(useAssistant.getState().orbSignals.handActive).toBe(false);
+    useAssistant.getState().setOrbSignals({ backgroundTasks: 0 });
+  });
 
-    useAssistant.getState().setOrbListenMode(2);
-    expect(useAssistant.getState().orbListenMode).toBe(2);
+  it("setOrbDesigns stores the activity to design mapping", () => {
+    useAssistant.getState().setOrbDesigns({ ghost: "weaving" });
+    expect(useAssistant.getState().orbDesigns).toEqual({ ghost: "weaving" });
+    useAssistant.getState().setOrbDesigns({});
   });
 });
 

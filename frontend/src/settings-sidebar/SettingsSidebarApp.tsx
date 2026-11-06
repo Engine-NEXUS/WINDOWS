@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, Component, type ErrorInfo } from "react";
+import { OrbDesignsSection } from "./OrbDesignsSection";
 import { HandModeSection } from "./HandModeSection";
 import { AgentWatchSection } from "./AgentWatchSection";
 import { RoutingSection } from "./RoutingSection";
@@ -168,10 +169,8 @@ interface Settings {
   // Orb wakeup animation mode (1..5) & genesis mode (0..3)
   orbWakeupMode?: number;
   orbInteriorGenesis?: number;
-  // Orb morphology choices
-  orbThinkMode?: number;
-  orbSpeakMode?: number;
-  orbListenMode?: number;
+  // Activity -> orb design (empty = built-in mapping)
+  orbDesigns?: Record<string, string>;
   // TEMPORARY dev flag (remove before release): auto-open the calibrator
   // on boot for live cross-checks. Never part of the save flow.
   calibrationDevPersist?: boolean;
@@ -207,9 +206,6 @@ const DEFAULT_SETTINGS: Settings = {
   orbWakeupMode: 1,
   orbInteriorGenesis: 2,
   orbSize: 200,
-  orbThinkMode: 6,
-  orbSpeakMode: 2,
-  orbListenMode: 1,
   geminiApiKey: "",
   cerebrasApiKey: "",
   moonshineModel: "small_streaming",
@@ -681,34 +677,7 @@ function DisplayTab({ settings, update }: {
         </button>
       </div>
 
-      <div className="settings-section">
-        <div className="settings-section-title">3D Morphology Studio</div>
-        <div className="setting-desc" style={{ marginBottom: 10 }}>
-          Real-time particle dynamics.
-        </div>
-        <button
-          type="button"
-          className="settings-btn settings-btn--glass"
-          style={{
-            width: "100%",
-            padding: "10px 14px",
-            borderRadius: 10,
-            color: "var(--ui-text-primary)",
-            fontWeight: 600,
-            fontSize: 13,
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 8,
-          }}
-          onClick={() => {
-            invoke("open_orb_studio_window").catch(() => {});
-          }}
-        >
-          ✦ Open Orb Customization Studio ›
-        </button>
-      </div>
+      <OrbDesignsSection value={settings.orbDesigns} onSaved={(m) => update("orbDesigns", m)} />
     </>
   );
 }
@@ -900,33 +869,6 @@ function AudioTab({ settings, update, voiceLock }: {
               </button>
             </div>
           ))}
-        </div>
-      </div>
-
-      <div className="settings-section">
-        <div className="settings-section-title">Orb Visual Morphology</div>
-        <div className="setting-row" style={{ alignItems: "center" }}>
-          <div>
-            <div className="setting-label">Orb Animation</div>
-            <div className="setting-desc">3D WebGL particle morphologies</div>
-          </div>
-          <div className="setting-control">
-            <button
-              className="settings-btn settings-btn--glass"
-              style={{
-                background: "rgba(168, 85, 247, 0.15)",
-                borderColor: "rgba(168, 85, 247, 0.4)",
-                color: "#c084fc",
-                fontWeight: 600,
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "6px"
-              }}
-              onClick={() => invoke("open_orb_studio_window").catch(() => {})}
-            >
-              ✦ Customize Orb
-            </button>
-          </div>
         </div>
       </div>
 

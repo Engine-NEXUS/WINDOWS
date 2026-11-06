@@ -1,12 +1,19 @@
-import { useEffect, useState, useRef } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAssistant, AssistantState } from "../store/assistant";
 import { positionToPct, wheelResize, type CalibrationTarget } from "../calibration/geometry";
-import { VoiceOrb } from "./VoiceOrb";
+import { DottedOrb } from "./dotted/DottedOrb";
+import { parseInk } from "./dotted/paintInk";
+import { useReducedMotion } from "./dotted/theme";
+import type { OrbActivity } from "./orbActivity";
+import { initOrbSignals } from "./orbSignals";
+import { readOrbLevel, useOrbActivity } from "./useOrbActivity";
 import { useThemeMode } from "../sidebar/useThemeMode";
 
 /**
- * WebGL particle orb avatar — the sole visual in ALL modes (normal + ghost).
+ * Dotted orb avatar (thinking-orbs engine, see ./dotted) — the sole visual in ALL modes (normal + ghost).
+ * The design follows what NEXUS is doing (./orbActivity.ts: idle, listening, thinking, speaking, background
+ * tasks, analysing the screen, ghost, hand, dictation, agent watch, waiting). The WebGL particle orb that
+ * the notes below describe was retired in favour of it; those notes are kept as history.
  *
  * The Lottie era (wakeup.json choreography, waves bars, phase machine) is
  * RETIRED: the animation JSON files stay on disk unused (kept for future
@@ -260,6 +267,24 @@ export function easeScrubFrame(current: number, target: number, factor = 0.3): n
   return current + (target - current) * factor;
 }
 
+const DEFAULT_ORB_PX = 100;
+const MIN_ORB_PX = 48;
+
+/** Screen-reader label per activity. */
+const ORB_ARIA: Record<OrbActivity, string> = {
+  idle: "Ready",
+  listening: "Listening",
+  thinking: "Thinking",
+  speaking: "Speaking",
+  waiting: "Waiting for your answer",
+  analysing: "Analysing the screen",
+  ghost: "Ghost mode",
+  hand: "Hand mode",
+  dictation: "Typing for you",
+  agent: "Watching a coding agent",
+  background: "Working in the background",
+};
+
 export interface AvatarProps {
   /** One-shot: fires voice-orb.js's assemble() particle-burst entrance.
    *  OrbFrame triggers this on every visible false→true transition now
@@ -277,48 +302,15 @@ export interface AvatarProps {
 export function Avatar({ entered: enteredProp = false, dispersing = false, shown = true }: AvatarProps = {}) {
   const state = useAssistant((s) => s.state);
   const visible = useAssistant((s) => s.visible);
-  const ttsActive = useAssistant((s) => s.ttsActive);
-  const audioVolume = useAssistant((s) => s.audioVolume);
-  const micLevel = useAssistant((s) => s.micLevel);
   const awaitingInput = useAssistant((s) => s.awaitingInput);
   const ghostActive = useAssistant((s) => s.ghostActive);
   const calibrationTarget = useAssistant((s) => s.calibrationTarget);
   const calibrationSize = useAssistant((s) => s.calibrationSize);
   const calibrationPulse = useAssistant((s) => s.calibrationPulse);
   const orbColor = useAssistant((s) => s.orbColor);
-  const orbThinkMode = useAssistant((s) => s.orbThinkMode);
-  const orbSpeakMode = useAssistant((s) => s.orbSpeakMode);
-  const orbListenMode = useAssistant((s) => s.orbListenMode);
   const themeMode = useThemeMode();
-
-  // Battery-aware power scaling: on battery, scale particles 5000 -> 2500
-  // to halve vertex & fragment shader workloads and extend laptop runtime.
-  const [onBattery, setOnBattery] = useState(false);
-  useEffect(() => {
-    if (typeof navigator !== "undefined" && "getBattery" in navigator) {
-      (navigator as any)
-        .getBattery()
-        .then((b: any) => {
-          setOnBattery(!b.charging);
-          b.addEventListener("chargingchange", () => setOnBattery(!b.charging));
-        })
-        .catch(() => {});
-    }
-  }, []);
-
-  // GPU-contention power scaling: Hand Mode's pipeline detects sustained contention (another app
-  // competing for the same shared WebView2 GPU process — see `src-tauri/src/hand/mod.rs`) from
-  // real infer-time data and broadcasts it on the same `hand:state` event the hand window itself
-  // listens to. The orb reacts by giving back some of its own GPU draw cost, same mechanism as
-  // the battery cap just above, combined into one ceiling below.
-  const [gpuBusy, setGpuBusy] = useState(false);
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listen<{ gpu_busy?: boolean }>("hand:state", (e) => setGpuBusy(Boolean(e.payload.gpu_busy))).then((fn) => {
-      unlisten = fn;
-    });
-    return () => unlisten?.();
-  }, []);
+  const reducedMotion = useReducedMotion();
+  const ink = useMemo(() => parseInk(orbColor), [orbColor]);
 
   // Turn-gap pin (ghost always-on plan): in ghost mode an idle arriving
   // within 1.2s of the last active state (hot-mic relisten churn) holds the
@@ -345,6 +337,31 @@ export function Avatar({ entered: enteredProp = false, dispersing = false, shown
     const t = setTimeout(() => setDisplayState("idle"), 1200 - gap);
     return () => clearTimeout(t);
   }, [state, ghostActive]);
+
+  const { activity, design } = useOrbActivity(ghostActive ? displayState : state);
+  const activityRef = useRef(activity);
+  activityRef.current = activity;
+  const getLevel = useCallback(() => readOrbLevel(activityRef.current), []);
+
+  useEffect(() => {
+    initOrbSignals();
+  }, []);
+
+  // The orb fills its cradle: measure it (CSSOM-sized canvas, the stage CSP drops React inline styles).
+  const orbBoxRef = useRef<HTMLDivElement | null>(null);
+  const [orbSize, setOrbSize] = useState(DEFAULT_ORB_PX);
+  useEffect(() => {
+    const el = orbBoxRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const measure = () => {
+      const side = Math.min(el.clientWidth, el.clientHeight);
+      if (side >= MIN_ORB_PX) setOrbSize(Math.round(side));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // ─── Animation calibration (drag + wheel) ────────────────────────────
   // Single-stage migration (plan §1.5): the orb is a div inside the
@@ -456,23 +473,16 @@ export function Avatar({ entered: enteredProp = false, dispersing = false, shown
           whole window hittable with zero visual change. */}
       {calibrating && <div className="calibration-hitcatcher" aria-hidden />}
       {!wavesPreview && (
-        <div className="avatar-voice-orb-container">
-          <VoiceOrb
-            state={ghostDisplay ? displayState : state}
-            color={orbColor}
-            thinkMode={orbThinkMode}
-            speakMode={orbSpeakMode}
-            listenMode={orbListenMode}
-            theme={themeMode}
-            visible={isOrbVisible}
-            particles={Math.min(onBattery ? 2500 : 5000, gpuBusy ? 2000 : Infinity)}
-            entered={ghostActive || enteredProp}
-            dispersing={dispersing}
-            level={
-              displayState === "speaking"
-                ? (ttsActive ? Math.max(0.4, audioVolume) : 0)
-                : (ghostActive ? micLevel : audioVolume)
-            }
+        <div className="avatar-voice-orb-container" ref={orbBoxRef}>
+          <DottedOrb
+            design={design}
+            size={orbSize}
+            dark={themeMode !== "light"}
+            ink={ink}
+            getLevel={getLevel}
+            paused={!isOrbVisible}
+            reducedMotion={reducedMotion}
+            aria-label={ORB_ARIA[activity]}
           />
         </div>
       )}

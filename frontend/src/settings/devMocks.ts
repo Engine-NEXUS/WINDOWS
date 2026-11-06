@@ -497,10 +497,6 @@ export function initBrowserDevMocks() {
         console.log(`[Dev Mode] Dock set to: ${args.dock}`);
         return null;
       }
-      if (cmd === "open_orb_studio_window") {
-        console.log("[Dev Mode] Orb Studio opened");
-        return null;
-      }
       if (cmd === "set_orb_position" || cmd === "set_orb_capsule_style" || cmd === "preview_voice" || cmd === "preview_wake_sound" || cmd === "test_wake_orb") {
         return null;
       }

@@ -64,7 +64,6 @@ export default defineConfig({
         sidebar: resolve(__dirname, "sidebar.html"),
         stage: resolve(__dirname, "stage.html"),
         companionHud: resolve(__dirname, "companion-hud.html"),
-        orbStudio: resolve(__dirname, "orb-studio.html"),
         hand: resolve(__dirname, "hand.html"),
         // caption-showcase / pebble-showcase / caption-tuner are design playgrounds: the Vite dev
         // server still serves them on demand, but they are not shipped in the release bundle.
