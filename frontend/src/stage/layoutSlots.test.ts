@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { captionSlot, CAPTION, intersects, SLOT_GAP, taskStackSlot, type Rect } from "./layoutSlots";
+import { captionSlot, CAPTION, intersects, SLOT_GAP, speechPillSlot, taskStackSlot, type Rect } from "./layoutSlots";
 import { chipPlacement } from "./handOverlayModel";
 
 // Common screens as [physical width, physical height, scale]. The stage is that physical size divided by the scale.
@@ -80,5 +80,12 @@ describe("slots on common screens", () => {
     const c = captionSlot({ w: 1000, h: 1000 });
     expect(c.y).toBe(1000 * CAPTION.top);
     expect(c.x + c.w / 2).toBeCloseTo(1000 * CAPTION.centerX, 5);
+  });
+
+  it("speech pill slot shares the caption slot family without changing geometry", () => {
+    for (const [pw, ph, scale] of SCREENS) {
+      const vp = { w: Math.round(pw / scale), h: Math.round(ph / scale) };
+      expect(speechPillSlot(vp)).toEqual(captionSlot(vp));
+    }
   });
 });

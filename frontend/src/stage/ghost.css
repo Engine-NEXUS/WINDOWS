@@ -478,28 +478,67 @@
   transform: none;
 }
 
-/* Live caption (plan Phase 4) — the user's OWN words, growing while they
-   still talk. Shares .response-caption's position/font/shadow; a touch
-   dimmer than the assistant's reply so the two read as distinct even
-   though they occupy the same screen slot (never shown at the same time —
-   one is listening-only, the other speaking-only). No per-word animation:
-   the whole line replaces wholesale on each partial (Moonshine's own
-   semantics), so an animate-in-per-word would fight itself every update. */
-/* The user's own words sit on the same solid pill as the reply (white text on a light wallpaper was about 1.2:1),
-   distinguished by a dimmer pill and a lighter border, not by having no background. */
-.live-caption-pill {
-  display: inline-block;
-  background: var(--stage-surface);
-  color: var(--stage-text);
-  border: 1px solid var(--stage-border-strong);
-  border-radius: 10px;
-  padding: 2px 24px;
-  text-shadow: none;
+/* ─── Speech Pill (mic glyph + user's live partial / final transcript) ─── */
+.speech-pill-container {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: auto;
+  max-width: 680px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: transparent !important;
+  background-color: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: none !important;
+  border: none !important;
+  z-index: 10000;
 }
 
-.live-caption {
-  opacity: 0.82;
-  font-size: 16.5px; /* match user-tuned reply caption size (caption-tuner 2026-10-09) */
+.speech-pill {
+  background: var(--stage-surface);
+  border: 1px solid var(--stage-border-strong);
+  border-radius: 10px;
+  padding: 4px 18px;
+  max-width: 620px;
+  min-height: 30px;
+  box-shadow: var(--stage-shadow-lg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  pointer-events: none;
+  transition:
+    opacity 220ms ease,
+    transform 220ms ease;
+  will-change: opacity, transform;
+}
+
+.speech-pill-mic {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  color: var(--stage-accent);
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.speech-pill-text {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  font-size: 16.5px;
+  font-weight: 550;
+  letter-spacing: -0.2px;
+  line-height: 1.4;
+  color: var(--stage-text-white);
+  text-shadow: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-align: center;
+  display: block;
 }
 
 /* Loading indicator (plan §1.6) — the top-right Lottie spinner, retired
@@ -568,6 +607,7 @@
   .response-caption,
   .caption-black-capsule,
   .mercury-pill,
+  .speech-pill,
   .orb-slider {
     transition-duration: 0.01ms !important;
   }
