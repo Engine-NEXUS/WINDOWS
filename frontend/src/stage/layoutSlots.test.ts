@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { captionSlot, CAPTION, intersects, SLOT_GAP, speechPillSlot, taskStackSlot, type Rect } from "./layoutSlots";
+import {
+  actionReceiptSlot,
+  ACTION_RECEIPT,
+  captionSlot,
+  CAPTION,
+  intersects,
+  SLOT_GAP,
+  speechPillSlot,
+  taskStackSlot,
+  type Rect,
+} from "./layoutSlots";
 import { chipPlacement } from "./handOverlayModel";
 
 // Common screens as [physical width, physical height, scale]. The stage is that physical size divided by the scale.
@@ -53,7 +63,7 @@ describe("hand chip stays above the caption", () => {
 });
 
 describe("slots on common screens", () => {
-  it("the orb capsule, spinner, task stack and caption never intersect", () => {
+  it("the orb capsule, spinner, task stack, caption and action receipt never intersect", () => {
     for (const [pw, ph, scale] of SCREENS) {
       const vp = { w: Math.round(pw / scale), h: Math.round(ph / scale) };
       const orb: Rect = { x: (vp.w - 301) / 2, y: 0, w: 301, h: 105 }; // pebble, top dock
@@ -62,11 +72,13 @@ describe("slots on common screens", () => {
       const chipW = 320;
       const stackRect: Rect = { x: vp.w - stack.right - chipW, y: stack.top, w: chipW, h: 3 * 32 + 2 * 6 };
       const caption = captionSlot(vp);
+      const receipt = actionReceiptSlot(vp);
       const slots: [string, Rect][] = [
         ["orb", orb],
         ["spinner", spinner],
         ["tasks", stackRect],
         ["caption", caption],
+        ["receipt", receipt],
       ];
       for (let i = 0; i < slots.length; i++) {
         for (let j = i + 1; j < slots.length; j++) {
@@ -87,5 +99,22 @@ describe("slots on common screens", () => {
       const vp = { w: Math.round(pw / scale), h: Math.round(ph / scale) };
       expect(speechPillSlot(vp)).toEqual(captionSlot(vp));
     }
+  });
+
+  it("action receipt never intersects speech pill slot on common screens", () => {
+    for (const [pw, ph, scale] of SCREENS) {
+      const vp = { w: Math.round(pw / scale), h: Math.round(ph / scale) };
+      const receipt = actionReceiptSlot(vp);
+      const speech = speechPillSlot(vp);
+      expect(intersects(receipt, speech), `receipt / speech on ${pw}x${ph}@${scale}`).toBe(false);
+    }
+  });
+
+  it("action receipt keeps its tuned slot geometry", () => {
+    const r = actionReceiptSlot({ w: 1000, h: 1000 });
+    expect(r.y).toBe(ACTION_RECEIPT.top);
+    expect(r.w).toBe(ACTION_RECEIPT.width);
+    expect(r.h).toBe(ACTION_RECEIPT.minHeight);
+    expect(r.x + r.w / 2).toBeCloseTo(500, 1);
   });
 });

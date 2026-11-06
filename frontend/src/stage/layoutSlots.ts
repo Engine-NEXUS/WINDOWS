@@ -32,6 +32,19 @@ export function speechPillSlot(vp: Viewport): Rect {
   return captionSlot(vp);
 }
 
+/** Action receipt card: hangs under the top orb/island area, centered horizontally. */
+export const ACTION_RECEIPT = { width: 360, minHeight: 64, top: 118 } as const;
+
+export function actionReceiptSlot(vp: Viewport): Rect {
+  const w = ACTION_RECEIPT.width;
+  return {
+    x: Math.round(vp.w / 2 - w / 2),
+    y: ACTION_RECEIPT.top,
+    w,
+    h: ACTION_RECEIPT.minHeight,
+  };
+}
+
 /** Fallback when the spinner has not been placed yet: where the default spinner sits. */
 const TASK_STACK_FALLBACK = { top: 112, right: 24 };
 
