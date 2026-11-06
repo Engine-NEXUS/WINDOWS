@@ -26,6 +26,10 @@ pub struct EventDetail {
     pub occurrences: u32,
     /// Allowlisted provider page derived from the typed target (never from notification text).
     pub provider_url: Option<String>,
+    /// Whether any entry in this alert's ladder can be opened.
+    pub can_open: bool,
+    /// Optional label for the "Open in app" button.
+    pub open_label: Option<String>,
 }
 
 /// Read-only error view shown instead of any guessed content.
@@ -63,6 +67,7 @@ fn message_for(e: &EventError) -> &'static str {
 
 /// Provider page for a typed target. GitHub only: Gmail needs the signed-in mailbox index and deployments need the
 /// provider's dashboard path, neither of which is known safely here, so they get none rather than a guess.
+#[cfg(test)] // superseded by `event_url` (typed target + hints); kept as the target-only reference for the tests
 pub fn provider_url(t: &Target) -> Option<String> {
     match t {
         Target::GitHub { host, owner, repo, pr, run_id, .. } if host == "github.com" => {
@@ -78,7 +83,25 @@ pub fn provider_url(t: &Target) -> Option<String> {
     }
 }
 
-fn detail(token: u64, ev: &NotifyEvent) -> EventDetail {
+/// Every way to open this alert, best first (typed target + validated hints; see `notify_links`).
+pub fn event_ladder(ev: &NotifyEvent) -> Vec<crate::notify_links::OpenAction> {
+    crate::notify_links::open_ladder(ev.provider, &ev.target, &ev.hints)
+}
+
+/// The best page URL for this alert, if its ladder has one.
+pub fn event_url(ev: &NotifyEvent) -> Option<String> {
+    event_ladder(ev).into_iter().find_map(|a| if let crate::notify_links::OpenAction::Url(u) = a { Some(u) } else { None })
+}
+
+/// The button text label for an event: GitHub keeps its existing provider link text.
+pub fn open_label(ev: &NotifyEvent) -> Option<String> {
+    match ev.provider {
+        Provider::GitHub => Some("Open on GitHub".into()),
+        _ => None,
+    }
+}
+
+pub(crate) fn detail(token: u64, ev: &NotifyEvent) -> EventDetail {
     EventDetail {
         token,
         event_id: ev.event_id.clone(),
@@ -91,7 +114,9 @@ fn detail(token: u64, ev: &NotifyEvent) -> EventDetail {
         original_source_ref: ev.original_source_ref.clone(),
         source_ref: ev.source_ref.clone(),
         occurrences: ev.occurrences,
-        provider_url: provider_url(&ev.target),
+        provider_url: event_url(ev),
+        can_open: !event_ladder(ev).is_empty(),
+        open_label: open_label(ev),
     }
 }
 
@@ -252,6 +277,7 @@ mod tests {
             delivery: Delivery::default(),
             read: ReadState::Unread,
             expires_at_ms: 1_000,
+            hints: Default::default(),
         }
     }
 

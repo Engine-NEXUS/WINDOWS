@@ -30,7 +30,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;use tauri::{AppHandle, Emitter, Manager, Runtime};
 
@@ -158,6 +158,70 @@ pub enum OrchestratorEvent {
 /// When a new request arrives, the previous one is cancelled.
 static ACTIVE_REQUEST: once_cell::sync::Lazy<Arc<Mutex<Option<ActiveRequest>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
+
+/// Last accepted turn tracked for continuation ("complete this", "continue").
+#[derive(Debug, Clone)]
+pub(crate) struct LastTurn {
+    pub(crate) text: String,
+    pub(crate) request_id: String,
+    pub(crate) at: Instant,
+    pub(crate) executed: bool,
+}
+
+static LAST_TURN: Mutex<Option<LastTurn>> = Mutex::new(None);
+
+#[derive(Debug, Clone)]
+struct AwaitingContinuation {
+    prev_text: String,
+    at: Instant,
+}
+
+static AWAITING_CONTINUATION: Mutex<Option<AwaitingContinuation>> = Mutex::new(None);
+
+pub(crate) fn continuation_window_ok(at: Instant, now: Instant, window_secs: u64) -> bool {
+    now.saturating_duration_since(at) <= Duration::from_secs(window_secs)
+}
+
+pub(crate) fn set_last_turn(text: String, request_id: String) {
+    if let Ok(mut lock) = LAST_TURN.lock() {
+        *lock = Some(LastTurn {
+            text,
+            request_id,
+            at: Instant::now(),
+            executed: false,
+        });
+    }
+}
+
+pub(crate) fn mark_last_turn_executed(request_id: &str) {
+    if let Ok(mut lock) = LAST_TURN.lock() {
+        if let Some(ref mut turn) = *lock {
+            if turn.request_id == request_id {
+                turn.executed = true;
+            }
+        }
+    }
+}
+
+pub(crate) fn set_awaiting_continuation(prev_text: String) {
+    if let Ok(mut lock) = AWAITING_CONTINUATION.lock() {
+        *lock = Some(AwaitingContinuation {
+            prev_text,
+            at: Instant::now(),
+        });
+    }
+}
+
+pub(crate) fn take_awaiting_continuation() -> Option<String> {
+    if let Ok(mut lock) = AWAITING_CONTINUATION.lock() {
+        if let Some(awaiting) = lock.take() {
+            if awaiting.at.elapsed() <= Duration::from_secs(12) {
+                return Some(awaiting.prev_text);
+            }
+        }
+    }
+    None
+}
 
 /// Acknowledgement phrases — same as network.rs but owned by the orchestrator now.
 const ACK_PHRASES: &[&str] = &[
@@ -367,6 +431,17 @@ pub(crate) fn emit<R: Runtime>(app: &AppHandle<R>, event: &OrchestratorEvent) {
             object.insert("source_center".into(), source.into());
         }
     }
+    if matches!(event, OrchestratorEvent::Result { .. } | OrchestratorEvent::Done { .. }) {
+        if let Some(id) = payload.get("request_id").and_then(|v| v.as_str()) {
+            let is_side_effect = ACTIVE_REQUEST.try_lock().ok()
+                .and_then(|guard| guard.as_ref().filter(|active| active.id == id)
+                    .map(|active| matches!(active.subsystem, Subsystem::LocalCommand | Subsystem::Mcp | Subsystem::GitHub)))
+                .unwrap_or(false);
+            if is_side_effect {
+                mark_last_turn_executed(id);
+            }
+        }
+    }
     let _ = app.emit("orchestrator:event", payload);
     tracing::debug!("orchestrator: emitted {:?}", event);
 }
@@ -424,6 +499,14 @@ pub(crate) fn install_new_request_with_id(id: String, subsystem: Subsystem) -> A
         cancelled: cancel_flag.clone(),
         subsystem: subsystem.clone(),
     });
+
+    if let Ok(mut lock) = LAST_TURN.lock() {
+        if let Some(ref mut turn) = *lock {
+            if turn.request_id.is_empty() {
+                turn.request_id = id.clone();
+            }
+        }
+    }
 
     tracing::info!("orchestrator: new request {} -> {:?}", id, subsystem);
     cancel_flag
@@ -705,6 +788,10 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         | ParsedIntent::StudyPref { .. }
         | ParsedIntent::MailDigest
         | ParsedIntent::MailMute
+        | ParsedIntent::AlertOpenLast
+        | ParsedIntent::AlertRead
+        | ParsedIntent::AlertDismiss { .. }
+        | ParsedIntent::AlertMuteSource { .. }
         | ParsedIntent::CalendarAgenda { .. }
         | ParsedIntent::CalendarAdd { .. }
         | ParsedIntent::Directions { .. }
@@ -816,6 +903,13 @@ pub async fn process_transcript<R: Runtime>(
         return Err("empty transcript".into());
     }
 
+    let mut transcript = transcript;
+    if let Some(prev) = take_awaiting_continuation() {
+        let merged = crate::turn_continue::merge(&prev, &transcript);
+        tracing::info!("[TURN] continue merged=\"{}\"", merged);
+        transcript = merged;
+    }
+
     tracing::info!(
         "orchestrator: processing transcript: {:?}",
         transcript.chars().take(80).collect::<String>()
@@ -907,7 +1001,7 @@ pub async fn process_transcript<R: Runtime>(
     // routine's name. Saving and deleting answer on the spot; running rewrites the utterance into the
     // routine's steps joined by "then", so the normal compound path (and every confirmation gate in it)
     // executes it. Names and the waiting suggestion are in memory, so this costs no I/O on other turns.
-    let transcript = match app
+    let mut transcript = match app
         .path()
         .app_data_dir()
         .ok()
@@ -1028,6 +1122,43 @@ pub async fn process_transcript<R: Runtime>(
             DeviceQuestion::Screen => unreachable!(),
         };
         return say_and_finish(&app, request_id, reply);
+    }
+
+    // Continuation handling ("Nexus, complete this ...", "continue ...")
+    let stripped = crate::turn_continue::strip_wake_prefix(&transcript);
+    if let crate::turn_continue::Continuation::Append(rest) = crate::turn_continue::detect(stripped) {
+        let window_secs = crate::commands::read_continuation_window_secs(&app);
+        let last_opt = {
+            let lock = LAST_TURN.lock().ok();
+            lock.and_then(|g| g.clone())
+        };
+        let now = Instant::now();
+        if let Some(last) = last_opt.filter(|l| continuation_window_ok(l.at, now, window_secs)) {
+            let prev_age_ms = now.saturating_duration_since(last.at).as_millis() as u64;
+            if last.executed {
+                if rest.trim().is_empty() {
+                    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                    return say_and_finish(&app, request_id, "That one already ran, sir. What next?".into());
+                } else {
+                    let merged = crate::turn_continue::merge(&last.text, &rest);
+                    tracing::info!("[TURN] continue merged=\"{}\" prev_age_ms={} executed=true", merged, prev_age_ms);
+                    transcript = rest;
+                }
+            } else {
+                if rest.trim().is_empty() {
+                    set_awaiting_continuation(last.text.clone());
+                    return speak_prompt_and_hold(&app, "Go on, sir.".into(), "continuation".into()).await;
+                } else {
+                    request_barge_in("continue");
+                    let merged = crate::turn_continue::merge(&last.text, &rest);
+                    tracing::info!("[TURN] continue merged=\"{}\" prev_age_ms={} executed=false", merged, prev_age_ms);
+                    transcript = merged;
+                }
+            }
+        } else {
+            let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+            return say_and_finish(&app, request_id, "Nothing to continue, sir.".into());
+        }
     }
 
     // 1. Parse intent: deterministic (fast, <1ms) → brain (admin) → NLU → Unknown
@@ -1241,6 +1372,9 @@ pub async fn process_transcript<R: Runtime>(
         intent,
         center_name
     );
+
+    // Accepted for routing — record as last turn for potential continuation.
+    set_last_turn(transcript.clone(), String::new());
 
     // The same policy entry point also guards every compound step.
 
@@ -1456,6 +1590,18 @@ pub async fn process_transcript<R: Runtime>(
             }
             ParsedIntent::MailMute => {
                 return run_mail_mute(app).await;
+            }
+            ParsedIntent::AlertOpenLast => {
+                return run_alert_open_last(app).await;
+            }
+            ParsedIntent::AlertRead => {
+                return run_alert_read(app).await;
+            }
+            ParsedIntent::AlertDismiss { all } => {
+                return run_alert_dismiss(app, *all).await;
+            }
+            ParsedIntent::AlertMuteSource { provider } => {
+                return run_alert_mute_source(app, provider.as_deref()).await;
             }
             ParsedIntent::Directions { destination, origin, mode } => {
                 return run_directions(app, destination.clone(), origin.clone(), mode.clone()).await;
@@ -1779,6 +1925,18 @@ pub async fn process_transcript<R: Runtime>(
             }
             ParsedIntent::MailMute => {
                 return run_mail_mute(app).await;
+            }
+            ParsedIntent::AlertOpenLast => {
+                return run_alert_open_last(app).await;
+            }
+            ParsedIntent::AlertRead => {
+                return run_alert_read(app).await;
+            }
+            ParsedIntent::AlertDismiss { all } => {
+                return run_alert_dismiss(app, *all).await;
+            }
+            ParsedIntent::AlertMuteSource { provider } => {
+                return run_alert_mute_source(app, provider.as_deref()).await;
             }
             ParsedIntent::Directions { destination, origin, mode } => {
                 return run_directions(app, destination.clone(), origin.clone(), mode.clone()).await;
@@ -5845,6 +6003,97 @@ async fn run_mail_mute<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, S
         }
     };
     say_and_finish(&app, request_id, line)
+}
+
+/// Pure: build a short spoken summary of alerts (max 3 items: provider + title, no preview text).
+pub fn build_alert_summary(events: &[crate::notify_event::NotifyEvent], privacy: crate::notify_toast::Privacy) -> String {
+    if events.is_empty() {
+        return "No alerts, sir.".to_string();
+    }
+    let top: Vec<String> = events.iter().take(3).map(|e| {
+        let (title, _) = crate::notify_toast::visible_text(privacy, e);
+        let provider = crate::notify_toast::label(e.provider);
+        format!("{provider}: {title}")
+    }).collect();
+    let summary = top.join(". ");
+    let remaining = events.len().saturating_sub(3);
+    if remaining > 0 {
+        format!("{summary}, and {remaining} more, sir.")
+    } else {
+        format!("{summary}, sir.")
+    }
+}
+
+/// "Open the last alert" — activate the newest alert via the notify hub.
+async fn run_alert_open_last<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let event_id = crate::notify_hub::latest_event_id();
+    match event_id {
+        Some(id) => {
+            let app_clone = app.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::notify_hub::activate(app_clone, id).await;
+            });
+            say_and_finish(&app, request_id, "Opening it, sir.".into())
+        }
+        None => say_and_finish(&app, request_id, "No alerts, sir.".into()),
+    }
+}
+
+/// "Read my alerts" / "what did I miss" — speak short summary and mark read in ledger.
+async fn run_alert_read<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let dir = app.path().app_data_dir().ok();
+    let privacy = crate::notify_toast::Privacy::parse(
+        &dir.as_deref().and_then(|d| std::fs::read_to_string(d.join("settings.json")).ok())
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|j| j.get("notifyPrivacy").and_then(|v| v.as_str().map(String::from)))
+            .unwrap_or_default(),
+    );
+    let events = crate::notify_hub::list_ledger_events();
+    let line = build_alert_summary(&events, privacy);
+    let read_ids: Vec<String> = events.iter().take(3).map(|e| e.event_id.clone()).collect();
+    if !read_ids.is_empty() {
+        crate::notify_hub::mark_seen_events(&read_ids);
+    }
+    say_and_finish(&app, request_id, line)
+}
+
+/// "Dismiss the alert" / "clear my alerts".
+async fn run_alert_dismiss<R: Runtime>(app: AppHandle<R>, all: bool) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if all {
+        crate::notify_hub::clear_alerts();
+    } else {
+        crate::notify_hub::dismiss_latest();
+    }
+    say_and_finish(&app, request_id, "Done, sir.".into())
+}
+
+/// "Mute this source" / "mute alerts from github".
+async fn run_alert_mute_source<R: Runtime>(app: AppHandle<R>, provider: Option<&str>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let target_provider = match provider {
+        Some(p) => p.trim().to_lowercase(),
+        None => {
+            let latest = crate::notify_hub::latest_event();
+            match latest {
+                Some(ev) => crate::notify_hub::provider_id(ev.provider).to_string(),
+                None => {
+                    return say_and_finish(&app, request_id, "No alerts to mute, sir.".into());
+                }
+            }
+        }
+    };
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't save that, sir.".into());
+    };
+    let done = crate::notify_hub::mute_provider(&dir, &target_provider).unwrap_or(false);
+    if done {
+        say_and_finish(&app, request_id, format!("Muted {} alerts, sir.", target_provider))
+    } else {
+        say_and_finish(&app, request_id, "I couldn't save that, sir.".into())
+    }
 }
 
 // ─── Directions (Google Maps window) ──────────────────────────────────
@@ -11821,6 +12070,70 @@ mod tests {
             "Top result for pharmacy near 12 High St: Boots, 5 Mill Rd, open now. Also Lloyds."
         );
     }
+
+    #[test]
+    fn test_build_alert_summary() {
+        use crate::notify_event::{
+            entity_key, event_id, Delivery, NotifyEvent, PrivacyClass, Provider, ReadState, Severity, Status, Target, SCHEMA_VERSION,
+        };
+        use crate::notify_toast::Privacy;
+
+        assert_eq!(build_alert_summary(&[], Privacy::Normal), "No alerts, sir.");
+
+        let make_ev = |prov: Provider, title: &str| {
+            let target = match prov {
+                Provider::GitHub => Target::GitHub { host: "github.com".into(), owner: "o".into(), repo: "r".into(), pr: None, run_id: Some(1), sha: None },
+                _ => Target::Gmail { thread_id: "t1".into(), message_id: None },
+            };
+            let key = entity_key(prov, "acct", &target, "test");
+            NotifyEvent {
+                schema_version: SCHEMA_VERSION,
+                event_id: event_id(&key, &format!("src_{title}"), Status::Failed),
+                entity_key: key,
+                provider: prov,
+                account_id: "acct".into(),
+                kind: "test".into(),
+                status: Status::Failed,
+                severity: Severity::Low,
+                occurred_at_ms: 1000,
+                observed_at_ms: 1000,
+                updated_at_ms: 1000,
+                title: title.into(),
+                preview: "preview text".into(),
+                privacy: PrivacyClass::Public,
+                target,
+                source_ref: format!("src_{title}"),
+                original_source_ref: format!("src_{title}"),
+                occurrences: 1,
+                delivery: Delivery::default(),
+                read: ReadState::Unread,
+                expires_at_ms: 5000,
+                hints: Default::default(),
+            }
+        };
+
+        let ev1 = make_ev(Provider::GitHub, "Build failed");
+        assert_eq!(build_alert_summary(&[ev1.clone()], Privacy::Normal), "GitHub: Build failed, sir.");
+
+        let ev2 = make_ev(Provider::Gmail, "Interview on Monday");
+        let ev3 = make_ev(Provider::Vercel, "Deploy error");
+        assert_eq!(
+            build_alert_summary(&[ev1.clone(), ev2.clone(), ev3.clone()], Privacy::Normal),
+            "GitHub: Build failed. Mail: Interview on Monday. Vercel: Deploy error, sir."
+        );
+
+        let ev4 = make_ev(Provider::Netlify, "Site down");
+        let ev5 = make_ev(Provider::WhatsApp, "New message");
+        assert_eq!(
+            build_alert_summary(&[ev1.clone(), ev2.clone(), ev3.clone(), ev4, ev5], Privacy::Normal),
+            "GitHub: Build failed. Mail: Interview on Monday. Vercel: Deploy error, and 2 more, sir."
+        );
+
+        assert_eq!(
+            build_alert_summary(&[ev1, ev2], Privacy::Hidden),
+            "GitHub: GitHub alert. Mail: Mail alert, sir."
+        );
+    }
 }
 
 #[cfg(test)]
@@ -11840,5 +12153,54 @@ mod loading_hide_scope_tests {
     #[test]
     fn with_no_active_request_a_hide_is_harmless_and_applies() {
         assert!(loading_hide_applies(None, "a1"));
+    }
+}
+
+#[cfg(test)]
+mod continuation_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn test_continuation_window_predicate() {
+        let now = Instant::now();
+        let recent = now - Duration::from_secs(10);
+        let old = now - Duration::from_secs(30);
+
+        assert!(continuation_window_ok(recent, now, 25));
+        assert!(!continuation_window_ok(old, now, 25));
+        assert!(continuation_window_ok(now, now, 25));
+    }
+
+    #[test]
+    fn test_last_turn_execution_state() {
+        set_last_turn("open terminal".into(), "req_abc".into());
+        {
+            let lock = LAST_TURN.lock().unwrap();
+            let turn = lock.as_ref().unwrap();
+            assert_eq!(turn.text, "open terminal");
+            assert_eq!(turn.request_id, "req_abc");
+            assert!(!turn.executed);
+        }
+
+        mark_last_turn_executed("wrong_id");
+        {
+            let lock = LAST_TURN.lock().unwrap();
+            assert!(!lock.as_ref().unwrap().executed);
+        }
+
+        mark_last_turn_executed("req_abc");
+        {
+            let lock = LAST_TURN.lock().unwrap();
+            assert!(lock.as_ref().unwrap().executed);
+        }
+    }
+
+    #[test]
+    fn test_awaiting_continuation_roundtrip() {
+        set_awaiting_continuation("previous prompt".into());
+        let taken = take_awaiting_continuation();
+        assert_eq!(taken, Some("previous prompt".into()));
+        assert_eq!(take_awaiting_continuation(), None);
     }
 }

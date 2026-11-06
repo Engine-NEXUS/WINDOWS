@@ -26,6 +26,7 @@ import { ApiKeysPage } from "./hub/ApiKeysPage";
 import { MemoryPage } from "./hub/MemoryPage";
 import { WAKE_SOUNDS, clampWakeVolume, normalizeWakeSound } from "./wakeSounds";
 import { ActionsPage } from "./hub/ActionsPage";
+import { AlertsPage } from "./hub/AlertsPage";
 import { DeviceLinksPage } from "./hub/DeviceLinksPage";
 import { ActivityManagerPage } from "./hub/ActivityManagerPage";
 import { useAccounts, useInsights } from "./hub/useHubData";
@@ -109,6 +110,11 @@ interface Settings {
   memcoreSession?: boolean;
   memcoreHealth?: boolean;
   powerCommands?: boolean;
+  // Notification switches & privacy
+  notifyToast?: boolean;
+  notifyNative?: boolean;
+  notifyUrgent?: boolean;
+  notifyPrivacy?: "normal" | "private" | "hidden";
   // Command Hub theme (opaque "dark" default / "light"; no transparency)
   themeMode?: string;
   // Ghost vision provider order (auto = Groq → Gemini fallback)
@@ -245,6 +251,10 @@ const DEFAULT_SETTINGS: Settings = {
   loadingVerticalPct: 0.05,
   loadingSize: 80,
   orbColor: "#f2b859",
+  notifyToast: true,
+  notifyNative: true,
+  notifyUrgent: true,
+  notifyPrivacy: "private",
   calibrationDevPersist: false,
 };
 
@@ -253,6 +263,7 @@ const PAGE_TITLES: Record<HubPage, string> = {
   keys: "API Keys",
   memory: "Memory",
   actions: "Actions & Permissions",
+  alerts: "Alerts",
   "device-links": "Device Links",
   activity: "Activity Manager",
   audio: "Audio",
@@ -469,6 +480,7 @@ export function SettingsSidebarApp({ onDock: _onDock = () => {} }: { onDock?: (d
           {page === "keys" && <ApiKeysPage onChanged={() => setInsightsKey((k) => k + 1)} />}
           {page === "memory" && <MemoryPage onFlagChanged={(flag, on) => update(flag, on)} />}
           {page === "actions" && <ActionsPage />}
+          {page === "alerts" && <AlertsPage onSettingChanged={(k, v) => update(k as any, v as any)} />}
           {page === "device-links" && <DeviceLinksPage onOpenActivity={() => setPage("activity")} />}
           {page === "activity" && <ActivityManagerPage />}
           {page === "connections" && <><McpServersPanel /><RoutingSection settings={settings} update={update as (k: "routingMode" | "routingServerUrl", v: string) => void} /></>}

@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open as openExternal } from "@tauri-apps/plugin-shell";
 import { CodeRabbitReport } from "./CodeRabbitReport";
 import { ReviewControls } from "./ReviewControls";
 import type { Report } from "./reportModel";
@@ -24,6 +23,8 @@ export interface EventDetailData {
   /** Full `owner/repo` and PR number when the alert belongs to a pull request. */
   repo?: string | null;
   prNumber?: number | null;
+  canOpen?: boolean;
+  openLabel?: string;
 }
 
 const STATUS: Record<string, string> = { failed: "Failed", recovered: "Recovered", info: "Info" };
@@ -32,8 +33,27 @@ type Review = { state: "none" } | { state: "loading" } | { state: "error"; messa
 
 /** A GitHub alert shown in the CodeRabbit interface: the alert (what failed, which run) on top, then CodeRabbit's own
  *  review of the pull request below it. Builds with no pull request say so instead of showing anything else. */
-export const EventDetailView: React.FC<{ data: EventDetailData }> = ({ data }) => {
+export const EventDetailView: React.FC<{
+  data: EventDetailData;
+  initialError?: string;
+  onOpenInApp?: (fn: () => Promise<void>) => void;
+}> = ({ data, initialError, onOpenInApp }) => {
   const [review, setReview] = useState<Review>(data.repo && data.prNumber ? { state: "loading" } : { state: "none" });
+  const [openError, setOpenError] = useState<string | null>(initialError ?? null);
+
+  const openInApp = async () => {
+    if (!data.eventId) return;
+    setOpenError(null);
+    try {
+      await invoke("notify_open_external", { eventId: data.eventId });
+    } catch (err) {
+      setOpenError(String(err));
+    }
+  };
+
+  if (onOpenInApp) {
+    onOpenInApp(openInApp);
+  }
 
   // Closing the sidebar or switching away ends this opening transaction (a stale token is ignored in Rust).
   useEffect(() => {
@@ -116,9 +136,9 @@ export const EventDetailView: React.FC<{ data: EventDetailData }> = ({ data }) =
         )}
       </dl>
       <div className="crp-row">
-        {data.providerUrl && (
-          <button type="button" className="crp-link" onClick={() => openExternal(data.providerUrl as string).catch(() => {})}>
-            Open on GitHub
+        {data.canOpen && (
+          <button type="button" className="crp-link" onClick={openInApp}>
+            {data.openLabel ?? (data.providerUrl ? "Open on GitHub" : "Open in app")}
           </button>
         )}
         {data.restoreView && (
@@ -127,6 +147,7 @@ export const EventDetailView: React.FC<{ data: EventDetailData }> = ({ data }) =
           </button>
         )}
       </div>
+      {openError && <div className="crp-error">{openError}</div>}
 
       <div className="crp-section">CodeRabbit review</div>
       {data.repo && data.prNumber ? (

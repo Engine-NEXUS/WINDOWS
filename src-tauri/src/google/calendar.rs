@@ -40,6 +40,34 @@ impl CalendarService {
                 .unwrap_or_default()
                 .to_string();
 
+            let html_link = item
+                .get("htmlLink")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+
+            let meet_url = item
+                .get("hangoutLink")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    item.pointer("/conferenceData/entryPoints")
+                        .and_then(|v| v.as_array())
+                        .and_then(|entries| {
+                            entries.iter().find_map(|ep| {
+                                if ep.get("entryPointType").and_then(|v| v.as_str()) == Some("video") {
+                                    ep.get("uri")
+                                        .and_then(|v| v.as_str())
+                                        .filter(|s| !s.is_empty())
+                                        .map(|s| s.to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                });
+
             events.push(CalendarEvent {
                 id,
                 summary,
@@ -48,6 +76,8 @@ impl CalendarService {
                 end_iso,
                 location,
                 status,
+                html_link,
+                meet_url,
             });
         }
 
@@ -274,6 +304,8 @@ mod tests {
                 end_iso: "2026-09-30T11:00:00Z".into(),   // 1790766000
                 location: None,
                 status: "confirmed".into(),
+                html_link: None,
+                meet_url: None,
             },
             CalendarEvent {
                 id: "2".into(),
@@ -283,6 +315,8 @@ mod tests {
                 end_iso: "2026-09-30T13:00:00Z".into(),
                 location: None,
                 status: "cancelled".into(), // Should be ignored
+                html_link: None,
+                meet_url: None,
             },
         ];
 
@@ -311,6 +345,8 @@ mod tests {
                 end_iso: "2026-09-30T10:30:00Z".into(),
                 location: None,
                 status: "confirmed".into(),
+                html_link: None,
+                meet_url: None,
             },
             CalendarEvent {
                 id: "2".into(),
@@ -320,6 +356,8 @@ mod tests {
                 end_iso: "2026-09-30T12:00:00Z".into(),
                 location: None,
                 status: "confirmed".into(),
+                html_link: None,
+                meet_url: None,
             },
         ];
 
@@ -359,6 +397,8 @@ mod tests {
             end_iso: "2026-10-21".into(),
             location: None,
             status: "confirmed".into(),
+            html_link: None,
+            meet_url: None,
         }];
         // Proposed meeting at 2:00 PM - 3:00 PM UTC on the holiday date.
         let start = CalendarService::parse_iso_to_epoch("2026-10-20T14:00:00Z").unwrap();
@@ -378,6 +418,8 @@ mod tests {
                 end_iso: "2026-10-20T11:00:00Z".into(),   // 1792494000
                 location: None,
                 status: "confirmed".into(),
+                html_link: None,
+                meet_url: None,
             },
             CalendarEvent {
                 id: "cancelled".into(),
@@ -387,6 +429,8 @@ mod tests {
                 end_iso: "2026-10-20T11:00:00Z".into(),
                 location: None,
                 status: "cancelled".into(),
+                html_link: None,
+                meet_url: None,
             },
         ];
         let t10 = CalendarService::parse_iso_to_epoch("2026-10-20T10:00:00Z").unwrap();
@@ -436,5 +480,84 @@ mod tests {
         assert!(json_str.contains(r#"Review \"Q&A\" & Feedback"#));
         let roundtrip: serde_json::Value = serde_json::from_str(&json_str).expect("deserialize payload");
         assert_eq!(roundtrip["summary"], special_summary);
+    }
+
+    #[test]
+    fn test_parse_events_json_links_and_fallbacks() {
+        let raw = serde_json::json!({
+            "items": [
+                {
+                    "id": "event_with_hangout",
+                    "summary": "Meeting with Hangout",
+                    "start": { "dateTime": "2026-09-30T10:00:00Z" },
+                    "end": { "dateTime": "2026-09-30T10:30:00Z" },
+                    "htmlLink": "https://www.google.com/calendar/event?eid=abc123",
+                    "hangoutLink": "https://meet.google.com/aaa-bbbb-ccc",
+                    "conferenceData": {
+                        "entryPoints": [
+                            {
+                                "entryPointType": "video",
+                                "uri": "https://meet.google.com/fallback-should-not-be-used"
+                            }
+                        ]
+                    }
+                },
+                {
+                    "id": "event_with_conference_data_fallback",
+                    "summary": "Meeting with ConferenceData",
+                    "start": { "dateTime": "2026-09-30T11:00:00Z" },
+                    "end": { "dateTime": "2026-09-30T11:30:00Z" },
+                    "htmlLink": "https://calendar.google.com/calendar/r/eventedit/xyz",
+                    "conferenceData": {
+                        "entryPoints": [
+                            {
+                                "entryPointType": "phone",
+                                "uri": "tel:+123456789"
+                            },
+                            {
+                                "entryPointType": "video",
+                                "uri": "https://meet.google.com/ddd-eeee-fff"
+                            }
+                        ]
+                    }
+                },
+                {
+                    "id": "event_missing_links",
+                    "summary": "Offline Event",
+                    "start": { "dateTime": "2026-09-30T12:00:00Z" },
+                    "end": { "dateTime": "2026-09-30T12:30:00Z" }
+                }
+            ]
+        });
+
+        let events = CalendarService::parse_events_json(&raw).unwrap();
+        assert_eq!(events.len(), 3);
+
+        // 1. htmlLink and hangoutLink present: hangoutLink is preferred over conferenceData
+        assert_eq!(events[0].html_link.as_deref(), Some("https://www.google.com/calendar/event?eid=abc123"));
+        assert_eq!(events[0].meet_url.as_deref(), Some("https://meet.google.com/aaa-bbbb-ccc"));
+
+        // 2. conferenceData video entryPoint fallback
+        assert_eq!(events[1].html_link.as_deref(), Some("https://calendar.google.com/calendar/r/eventedit/xyz"));
+        assert_eq!(events[1].meet_url.as_deref(), Some("https://meet.google.com/ddd-eeee-fff"));
+
+        // 3. missing fields give None
+        assert_eq!(events[2].html_link, None);
+        assert_eq!(events[2].meet_url, None);
+    }
+
+    #[test]
+    fn test_calendar_event_serde_backwards_compatibility() {
+        let legacy_json = r#"{
+            "id": "legacy_ev",
+            "summary": "Old Event",
+            "start_iso": "2026-09-30T10:00:00Z",
+            "end_iso": "2026-09-30T11:00:00Z",
+            "status": "confirmed"
+        }"#;
+        let event: CalendarEvent = serde_json::from_str(legacy_json).expect("deserialize legacy CalendarEvent");
+        assert_eq!(event.id, "legacy_ev");
+        assert_eq!(event.html_link, None);
+        assert_eq!(event.meet_url, None);
     }
 }

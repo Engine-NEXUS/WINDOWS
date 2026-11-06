@@ -1795,6 +1795,10 @@ pub struct NexusSettings {
     /// that are not owner-verified. Off by default; A/B it with the scorecard.
     #[serde(default)]
     pub stt_command_hints: bool,
+    /// Smart pause hold: milliseconds to wait when a command ends on an unfinished connector.
+    /// Default 3000 ms. 0 = disabled. Clamped 0..=6000.
+    #[serde(default = "default_turn_hold_ms")]
+    pub turn_hold_ms: u32,
     /// Where the command capture starts, in ms relative to the end of the
     /// chunk that detected the wake word. 0 = right after the detection point
     /// (audio spoken while verifying/starting up is kept; the wake word is not).
@@ -1992,6 +1996,12 @@ pub struct NexusSettings {
     /// Failure toasts ask Windows to show them even while Do Not Disturb is on (Windows asks the owner once).
     #[serde(default = "default_memcore")]
     pub notify_urgent: bool,
+    /// Show the five-second NEXUS toast window for alerts (default on); the Windows toast is then the fallback only.
+    #[serde(default = "default_memcore")]
+    pub notify_toast: bool,
+    /// What the toast may show of private content: "normal", "private" (sender and subject only, default) or "hidden".
+    #[serde(default = "default_notify_privacy")]
+    pub notify_privacy: String,
     /// Start a FREE CodeRabbit review automatically when an alert opens (default OFF: NEXUS asks first and shows the count).
     #[serde(default)]
     pub coderabbit_auto_review: bool,
@@ -2028,6 +2038,16 @@ pub struct NexusSettings {
     /// Default music player: "spotify" (default) or "apple_music".
     #[serde(default = "default_music_player")]
     pub default_music_player: String,
+    /// Continuation window in seconds (5..=120, default 25).
+    #[serde(default = "default_continuation_window_secs")]
+    pub continuation_window_secs: u64,
+    /// Follow-up listening window in seconds after NEXUS speaks (0 = off, clamp 0..=20, default 6).
+    #[serde(default = "default_follow_up_window_secs")]
+    pub follow_up_window_secs: u32,
+    /// Barge-in without wake word while NEXUS is speaking: duck TTS and listen.
+    /// Default: true. When false, falls back to the legacy v4 wake-word barge path.
+    #[serde(default = "default_true")]
+    pub barge_in_no_wake: bool,
     /// Extra unknown settings preserved across saves so frontend/plugins never get wiped.
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
@@ -2035,6 +2055,22 @@ pub struct NexusSettings {
 
 fn default_music_player() -> String {
     "spotify".to_string()
+}
+
+pub const DEFAULT_TURN_HOLD_MS: u32 = 3000;
+
+fn default_turn_hold_ms() -> u32 {
+    DEFAULT_TURN_HOLD_MS
+}
+
+fn default_continuation_window_secs() -> u64 {
+    25
+}
+
+pub const DEFAULT_FOLLOW_UP_WINDOW_SECS: u32 = 6;
+
+fn default_follow_up_window_secs() -> u32 {
+    DEFAULT_FOLLOW_UP_WINDOW_SECS
 }
 
 fn default_watch_power() -> String {
@@ -2047,6 +2083,10 @@ fn default_memcore() -> bool {
 
 fn default_early_hello() -> bool {
     true
+}
+
+fn default_notify_privacy() -> String {
+    "private".to_string()
 }
 
 fn default_persona_mode() -> String {
@@ -2314,6 +2354,7 @@ impl Default for NexusSettings {
             ghost_depth_ack: true,
             stt_confidence_gate: false,
             stt_command_hints: false,
+            turn_hold_ms: DEFAULT_TURN_HOLD_MS,
             wake_seed_offset_ms: 0,
             wake_owner_fast_path: false,
             maps_embed: true,
@@ -2368,6 +2409,8 @@ impl Default for NexusSettings {
             coderabbit_auto_open: default_memcore(),
             notify_native: true,
             notify_urgent: true,
+            notify_toast: true,
+            notify_privacy: default_notify_privacy(),
             coderabbit_auto_review: false,
             memcore_mail_plain: false,
             memcore_whatsapp: false,
@@ -2378,6 +2421,9 @@ impl Default for NexusSettings {
             memcore_health: default_memcore(),
             power_commands: default_memcore(),
             default_music_player: default_music_player(),
+            continuation_window_secs: default_continuation_window_secs(),
+            follow_up_window_secs: DEFAULT_FOLLOW_UP_WINDOW_SECS,
+            barge_in_no_wake: true,
             extra: std::collections::HashMap::new(),
         }
     }
@@ -2578,6 +2624,7 @@ fn save_settings_with_voice_intent<R: Runtime>(
     // Sensitivity takes effect immediately (no restart).
     crate::wakeword_oww::apply_wake_sensitivity(&settings.wake_sensitivity);
     crate::wakeword_oww::apply_wake_dsp(&settings.wake_dsp_profile);
+    crate::wakeword_oww::BARGE_IN_NO_WAKE.store(settings.barge_in_no_wake, std::sync::atomic::Ordering::Relaxed);
 
     // Also save server config separately — but NEVER overwrite an existing
     // identity (user_id / device_id) with empty values. This prevents
@@ -3307,11 +3354,17 @@ pub fn mic_self_test() -> Result<crate::wakeword_oww::MicSelfTestReport, String>
 /// no getUserMedia, no baton pass. This fixes the Intel SST driver issue
 /// where getUserMedia returns silence but cpal is still working.
 #[tauri::command]
-pub fn start_stt_capture(origin: Option<String>) -> Result<(), String> {
+pub fn start_stt_capture(origin: Option<String>, no_speech_ms: Option<u32>) -> Result<(), String> {
     // `origin: "hot_mic"` = the ghost hot-mic loop re-opened the mic (Phase 8 gate applies);
     // anything else (confirm window, clarification, follow-up question) is an explicit turn.
     let origin = crate::directed::Origin::parse(origin.as_deref().unwrap_or("direct"));
     crate::wakeword_oww::start_stt_capture_with_origin(origin);
+    if let Some(ms) = no_speech_ms {
+        if ms > 0 {
+            let chunks = (ms / 80).max(10);
+            crate::wakeword_oww::set_no_speech_limit_override(chunks);
+        }
+    }
     Ok(())
 }
 
@@ -3411,6 +3464,35 @@ pub fn read_stt_command_hints<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> b
         .unwrap_or(false)
 }
 
+/// Read the `turnHoldMs` setting (default 3000, 0 = disabled, clamp 0..=6000).
+pub fn read_turn_hold_ms<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u32 {
+    let Ok(dir) = app.path().app_data_dir() else { return DEFAULT_TURN_HOLD_MS; };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| {
+            j.get("turnHoldMs")
+                .or_else(|| j.get("turn_hold_ms"))
+                .and_then(|v| v.as_u64())
+        })
+        .map(|v| (v as u32).min(6000))
+        .unwrap_or(DEFAULT_TURN_HOLD_MS)
+}
+
+/// Read the `bargeInNoWake` setting (default true).
+pub fn read_barge_in_no_wake<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return true; };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| {
+            j.get("bargeInNoWake")
+                .or_else(|| j.get("barge_in_no_wake"))
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(true)
+}
+
 /// Read the sttConfidenceGate flag (off unless the user turned it on).
 pub fn read_stt_confidence_gate<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let Ok(dir) = app.path().app_data_dir() else { return false; };
@@ -3496,6 +3578,40 @@ pub fn read_ghost_turn_gap_ms<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u
         .and_then(|v| v.as_u64())
         .filter(|v| *v <= 5000)
         .unwrap_or(1000)
+}
+
+/// Read the continuationWindowSecs setting (clamped 5..=120, default 25).
+pub fn read_continuation_window_secs<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u64 {
+    let dir = app.path().app_data_dir();
+    let Ok(dir) = dir else { return 25; };
+    let path = dir.join("settings.json");
+    let Ok(content) = std::fs::read_to_string(&path) else { return 25; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return 25; };
+    json.get("continuationWindowSecs")
+        .or_else(|| json.get("continuation_window_secs"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v.clamp(5, 120))
+        .unwrap_or(25)
+}
+
+/// Read the followUpWindowSecs setting (0 = off, clamp 0..=20, default 6).
+pub fn read_follow_up_window_secs<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u32 {
+    let dir = app.path().app_data_dir();
+    let Ok(dir) = dir else { return DEFAULT_FOLLOW_UP_WINDOW_SECS; };
+    let path = dir.join("settings.json");
+    let Ok(content) = std::fs::read_to_string(&path) else { return DEFAULT_FOLLOW_UP_WINDOW_SECS; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return DEFAULT_FOLLOW_UP_WINDOW_SECS; };
+    json.get("followUpWindowSecs")
+        .or_else(|| json.get("follow_up_window_secs"))
+        .and_then(|v| v.as_u64())
+        .map(|v| (v as u32).clamp(0, 20))
+        .unwrap_or(DEFAULT_FOLLOW_UP_WINDOW_SECS)
+}
+
+/// IPC: Follow-up listening window in seconds after NEXUS speaks (0 = off, clamp 0..=20, default 6).
+#[tauri::command]
+pub fn follow_up_window_secs<R: Runtime>(app: tauri::AppHandle<R>) -> u32 {
+    read_follow_up_window_secs(&app)
 }
 
 /// Read the speakerVerification flag from settings.json (wakeword_oww.rs).
@@ -4275,6 +4391,16 @@ mod nexus_settings_tests {
     }
 
     #[test]
+    fn turn_hold_ms_defaults_to_3000_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("turnHoldMs");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert_eq!(parsed.turn_hold_ms, 3000, "turnHoldMs must default to 3000");
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("turnHoldMs"), Some(&serde_json::json!(3000)));
+    }
+
+    #[test]
     fn hand_focus_mode_defaults_to_true_and_round_trips() {
         let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
         raw.as_object_mut().unwrap().remove("handFocusMode");
@@ -4312,6 +4438,43 @@ mod nexus_settings_tests {
         assert!(parsed.memcore_deploy_watch, "memcoreDeployWatch must default to true");
         let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
         assert_eq!(reserialized.get("memcoreDeployWatch"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn continuation_window_secs_defaults_to_25_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("continuationWindowSecs");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert_eq!(parsed.continuation_window_secs, 25);
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("continuationWindowSecs"), Some(&serde_json::json!(25)));
+    }
+
+    #[test]
+    fn follow_up_window_secs_defaults_to_6_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("followUpWindowSecs");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert_eq!(parsed.follow_up_window_secs, 6);
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("followUpWindowSecs"), Some(&serde_json::json!(6)));
+    }
+
+    #[test]
+    fn barge_in_no_wake_defaults_to_true_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("bargeInNoWake");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert!(parsed.barge_in_no_wake, "bargeInNoWake must default to true");
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("bargeInNoWake"), Some(&serde_json::json!(true)));
+
+        let mut raw_false = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw_false.as_object_mut().unwrap().insert("bargeInNoWake".to_string(), serde_json::json!(false));
+        let parsed_false: NexusSettings = serde_json::from_value(raw_false).expect("deserialization should succeed");
+        assert!(!parsed_false.barge_in_no_wake);
+        let reserialized_false = serde_json::to_value(&parsed_false).expect("serialization should succeed");
+        assert_eq!(reserialized_false.get("bargeInNoWake"), Some(&serde_json::json!(false)));
     }
 }
 

@@ -208,7 +208,7 @@ fn batch_key(items: &[(Triage, MailMeta)]) -> Option<String> {
 }
 
 /// One alert per email, or a single summary when several arrive together.
-fn fire_alerts<R: Runtime>(app: &AppHandle<R>, items: &[(Triage, MailMeta)]) {
+fn fire_alerts<R: Runtime>(app: &AppHandle<R>, items: &[(Triage, MailMeta)], account: Option<&str>) {
     if items.is_empty() {
         return;
     }
@@ -226,6 +226,7 @@ fn fire_alerts<R: Runtime>(app: &AppHandle<R>, items: &[(Triage, MailMeta)]) {
     let app_clone = app.clone();
     let items_clone = items.to_vec();
     let address_clone = address.clone();
+    let account_clone = account.map(str::to_string);
     tauri::async_runtime::spawn(async move {
         let dir = match app_clone.path().app_data_dir() {
             Ok(d) => d,
@@ -242,7 +243,14 @@ fn fire_alerts<R: Runtime>(app: &AppHandle<R>, items: &[(Triage, MailMeta)]) {
                         continue;
                     }
                     let text = mailtriage::alert_text(&t, &m, address_clone.as_deref());
-                    crate::proactive_policy::submit_event(&app_clone, format!("mail_{}", m.id), text, t.urgency, notify_key_for(&m));
+                    let alert_id = format!("mail_{}", m.id);
+                    let event_id = account_clone
+                        .as_deref()
+                        .and_then(|acct| crate::notify_hub::publish_gmail(&app_clone, acct, &m, severity_of(t.urgency)));
+                    crate::proactive_policy::submit_event(&app_clone, alert_id.clone(), text, t.urgency, notify_key_for(&m));
+                    if let Some(ev_id) = event_id {
+                        crate::proactive_policy::link_alert(&alert_id, &ev_id);
+                    }
                 }
                 return;
             }
@@ -267,7 +275,15 @@ fn fire_alerts<R: Runtime>(app: &AppHandle<R>, items: &[(Triage, MailMeta)]) {
             } else {
                 crate::memcore::mailwording::plain_alert_text(&app_clone, &dir, &t, &m, address_clone.as_deref()).await.0
             };
-            crate::proactive_policy::submit_event(&app_clone, format!("mail_{}", m.id), text, t.urgency, key);
+            let alert_id = format!("mail_{}", m.id);
+            // The heads-up toast (sender + subject; a click opens this exact message in Gmail).
+            let event_id = account_clone
+                .as_deref()
+                .and_then(|acct| crate::notify_hub::publish_gmail(&app_clone, acct, &m, severity_of(t.urgency)));
+            crate::proactive_policy::submit_event(&app_clone, alert_id.clone(), text, t.urgency, key);
+            if let Some(ev_id) = event_id {
+                crate::proactive_policy::link_alert(&alert_id, &ev_id);
+            }
         }
     });
 }
@@ -379,10 +395,21 @@ pub async fn poll_account<R: Runtime>(app: &AppHandle<R>, dir: &std::path::Path,
             let n = fresh.len();
             if n > 0 {
                 tracing::info!("mailwatch: {n} important new email(s) for {}", acct.key());
-                fire_alerts(app, &fresh);
+                fire_alerts(app, &fresh, acct.email.as_deref());
             }
             Ok(n)
         }
+    }
+}
+
+/// Alert urgency as the notification hub's severity. Pure.
+pub fn severity_of(u: AlertUrgency) -> crate::notify_event::Severity {
+    use crate::notify_event::Severity;
+    match u {
+        AlertUrgency::Low => Severity::Low,
+        AlertUrgency::Medium => Severity::Medium,
+        AlertUrgency::High => Severity::High,
+        AlertUrgency::Critical => Severity::Critical,
     }
 }
 
@@ -510,6 +537,7 @@ mod tests {
             snippet: String::new(),
             labels: labels.iter().map(|s| s.to_string()).collect(),
             date_ms: date,
+            rfc822_id: String::new(),
         }
     }
 

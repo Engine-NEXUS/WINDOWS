@@ -14,6 +14,7 @@ imply 218 separately identifiable foreground applications.
 | `@iconify-json/vscode-icons` 1.2.92, [VSCode Icons](https://github.com/vscode-icons/vscode-icons) | 5 | MIT; `LICENSE-vscode-icons.txt` |
 | [theSVG](https://thesvg.org), via `@thesvg/mcp-server` 0.8.4 | 62, including VLC | Per-icon source slug and license in `scripts/activity-icon-sources.json`; VLC is CC0-1.0 |
 | NEXUS local vector | 1 | `genericapp.svg` |
+| NEXUS alert sources | 2 | `googlecalendar.svg`, `aider.svg`; hand-drawn for NEXUS to identify the source |
 
 The curated theSVG import uses only entries marked CC0-1.0, MIT, or Apache-2.0.
 `scripts/activity-icon-sources.json` pins its package version, slug, variant,

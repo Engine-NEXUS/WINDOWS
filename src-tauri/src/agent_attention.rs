@@ -174,6 +174,25 @@ fn idle_ms() -> Option<u64> {
     crate::memcore::resume::user_idle_secs().map(|s| s * 1000)
 }
 
+/// Pure: whether the user is currently away from the PC based on idle duration.
+pub fn is_away(idle_ms: Option<u64>) -> bool {
+    idle_ms.map_or(false, |i| i >= AWAY_MS)
+}
+
+/// Pure: whether an agent alert toast should be published (only when user is present, so the away summary is not duplicated).
+pub fn should_publish_toast(away: bool) -> bool {
+    !away
+}
+
+/// How long a prompt stays unanswered before a present user gets the toast (someone typing into the agent answers sooner).
+const TOAST_AFTER_MS: u64 = 15_000;
+
+/// Pure: should the "needs your input" toast be published now? Only for a user who is present, once per prompt
+/// (`last` = the prompt time already toasted), and only after the prompt has waited `TOAST_AFTER_MS`.
+pub fn toast_due(since_ms: u64, now_ms: u64, away: bool, last: Option<u64>) -> bool {
+    should_publish_toast(away) && now_ms.saturating_sub(since_ms) >= TOAST_AFTER_MS && last != Some(since_ms)
+}
+
 /// Poll the agents' hooks; tell the user about a wait once, remember it for the return, and speak the log when the
 /// user is back. Cheap: nothing runs when no agent has ever reported a prompt.
 pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
@@ -183,10 +202,12 @@ pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
         let mut attention = Attention::default();
         let mut was_away = false;
         let mut stops: BTreeMap<&'static str, u64> = BTreeMap::new();
+        let mut toasted: BTreeMap<&'static str, u64> = BTreeMap::new();
         loop {
             tokio::time::sleep(POLL).await;
             let now = agent_hooks::now_ms();
             let idle = idle_ms();
+            let away = is_away(idle);
             let obs: Vec<WaitObs> = ALL_AGENTS
                 .iter()
                 .map(|a| WaitObs { name: a.name().to_string(), label: a.label().to_string(), waiting_since_ms: waiting_since(*a, started) })
@@ -194,20 +215,40 @@ pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             let Ok(dir) = app.path().app_data_dir() else { continue };
             for n in attention.step(now, idle, &obs) {
                 match n {
-                    Notice::New { label } => remember(&dir, &label, &needs_fragment(&label)),
+                    Notice::New { label } => {
+                        // (An away user is told on return; the toast below is for a user who is present.)
+                        remember(&dir, &label, &needs_fragment(&label));
+                    }
                     // the reminder keeps the same log line; it is spoken at the return like the first
                     Notice::Still { label, .. } => remember(&dir, &label, &needs_fragment(&label)),
                 }
             }
-            let away = idle.map_or(false, |i| i >= AWAY_MS);
+            // A user who is at the PC and has left a prompt unanswered for a while gets a heads-up toast, once per prompt
+            // (`Attention::step` above only tells users who are away, so it never reaches this case).
+            for o in &obs {
+                let Some(since) = o.waiting_since_ms else { continue };
+                if !toast_due(since, now, away, toasted.get(o.name.as_str()).copied()) {
+                    continue;
+                }
+                if let Some(agent) = ALL_AGENTS.iter().find(|a| a.name() == o.name) {
+                    toasted.insert(agent.name(), since);
+                    let cwd = agent_hooks::last_cwd(*agent);
+                    crate::notify_hub::publish_agent(&app, agent.name(), agent.label(), cwd.as_deref(), true, since);
+                }
+            }
             // a finish while nobody is here is remembered even when no plan is watching (a plan's own, richer line
             // replaces this one for the same agent a few seconds later)
             for a in ALL_AGENTS.iter() {
                 let Some(stop) = agent_hooks::last_event_ms(*a, agent_hooks::EventKind::Stop).filter(|t| *t > started) else { continue };
                 if stops.get(a.name()).map_or(true, |seen| stop > *seen) {
                     stops.insert(a.name(), stop);
-                    if away && agent_hooks::stop_is_latest(*a, started) {
-                        remember(&dir, a.label(), &format!("{} has finished", a.label()));
+                    if agent_hooks::stop_is_latest(*a, started) {
+                        if away {
+                            remember(&dir, a.label(), &format!("{} has finished", a.label()));
+                        } else if should_publish_toast(away) {
+                            let cwd = agent_hooks::last_cwd(*a);
+                            crate::notify_hub::publish_agent(&app, a.name(), a.label(), cwd.as_deref(), false, stop);
+                        }
                     }
                 }
             }
@@ -354,5 +395,29 @@ mod tests {
         assert!(said.starts_with("While you were away, sir: Codex needs your input."), "{said}");
         assert_eq!(take_summary(&dir), None, "told once");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_needs_input_toast_is_for_a_present_user_once_per_prompt_after_a_delay() {
+        assert!(!toast_due(1_000, 5_000, false, None), "too soon: the user may be answering");
+        assert!(toast_due(1_000, 16_000, false, None));
+        assert!(!toast_due(1_000, 16_000, false, Some(1_000)), "already toasted this prompt");
+        assert!(toast_due(1_000, 16_000, false, Some(500)), "a newer prompt toasts again");
+        assert!(!toast_due(1_000, 99_000, true, None), "an away user hears it on return instead");
+    }
+
+    #[test]
+    fn should_publish_toast_and_is_away_helpers() {
+        // User is away when idle_ms >= AWAY_MS (30_000)
+        assert!(!is_away(None));
+        assert!(!is_away(Some(0)));
+        assert!(!is_away(Some(10_000)));
+        assert!(!is_away(Some(29_999)));
+        assert!(is_away(Some(30_000)));
+        assert!(is_away(Some(60_000)));
+
+        // Toasts are published ONLY when user is present (!away)
+        assert!(should_publish_toast(false), "present user gets real-time toast");
+        assert!(!should_publish_toast(true), "away user toast is suppressed so return summary is not duplicated");
     }
 }

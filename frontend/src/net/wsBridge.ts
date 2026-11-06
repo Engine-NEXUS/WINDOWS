@@ -186,6 +186,11 @@ export function clearBargedIn(): void {
   bargedIn = false;
 }
 
+/** Check if the user barged in during the current turn. */
+export function isBargedIn(): boolean {
+  return bargedIn;
+}
+
 /** Called by recorder.ts when it gives a local "On it sir" ack via
  *  ackLongRunningQuery(). The wsBridge ack handler checks this flag. */
 export function setLocalAckGiven(): void {

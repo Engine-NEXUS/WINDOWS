@@ -25,6 +25,9 @@ pub enum Provider {
     Render,
     Netlify,
     Supabase,
+    WhatsApp,
+    Calendar,
+    Agent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -93,6 +96,19 @@ pub enum Target {
         owner: String,
         repo: String,
     },
+    /// A chat (opaque id; the number to open it lives in the validated hints).
+    WhatsApp {
+        chat: String,
+    },
+    /// A calendar event (opaque id; its page URL lives in the validated hints).
+    Calendar {
+        event_id: String,
+    },
+    /// A coding agent session: agent label and project folder name.
+    Agent {
+        agent: String,
+        project: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +138,9 @@ pub struct NotifyEvent {
     pub delivery: Delivery,
     pub read: ReadState,
     pub expires_at_ms: u64,
+    /// Validated extras for opening the exact item (job / step, Gmail account, vendor page URL...).
+    #[serde(default)]
+    pub hints: crate::notify_links::OpenHints,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,7 +150,6 @@ pub enum EventError {
     NotFound,
     Expired,
     AccountDisconnected,
-    #[cfg(test)]
     Malformed,
 }
 
@@ -204,7 +222,7 @@ pub fn validate_target(t: &Target) -> Result<(), EventError> {
             Ok(())
         }
         Target::Deployment { provider, team, project, deployment_id, revision } => {
-            if matches!(provider, Provider::GitHub | Provider::Gmail) {
+            if matches!(provider, Provider::GitHub | Provider::Gmail | Provider::WhatsApp | Provider::Calendar | Provider::Agent) {
                 return Err(bad("provider"));
             }
             if !name_ok(team) {
@@ -221,6 +239,27 @@ pub fn validate_target(t: &Target) -> Result<(), EventError> {
             }
             Ok(())
         }
+        Target::WhatsApp { chat } => {
+            if !id_ok(chat) {
+                return Err(bad("chat"));
+            }
+            Ok(())
+        }
+        Target::Calendar { event_id } => {
+            if !id_ok(event_id) {
+                return Err(bad("event_id"));
+            }
+            Ok(())
+        }
+        Target::Agent { agent, project } => {
+            if !name_ok(agent) {
+                return Err(bad("agent"));
+            }
+            if !name_ok(project) {
+                return Err(bad("project"));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -229,6 +268,9 @@ fn target_matches_provider(provider: Provider, t: &Target) -> bool {
     match (provider, t) {
         (Provider::GitHub, Target::GitHub { .. } | Target::Repo { .. }) => true,
         (Provider::Gmail, Target::Gmail { .. }) => true,
+        (Provider::WhatsApp, Target::WhatsApp { .. }) => true,
+        (Provider::Calendar, Target::Calendar { .. }) => true,
+        (Provider::Agent, Target::Agent { .. }) => true,
         (p, Target::Deployment { provider: tp, .. }) => p == *tp,
         _ => false,
     }
@@ -263,6 +305,9 @@ fn slug(p: Provider) -> &'static str {
         Provider::Render => "render",
         Provider::Netlify => "netlify",
         Provider::Supabase => "supabase",
+        Provider::WhatsApp => "whatsapp",
+        Provider::Calendar => "calendar",
+        Provider::Agent => "agent",
     }
 }
 
@@ -278,6 +323,9 @@ pub fn entity_key(provider: Provider, account_id: &str, t: &Target, kind: &str) 
         Target::Deployment { team, project, .. } => {
             format!("v1:{p}:{a}:{}/{}:{k}", team.to_lowercase(), project.to_lowercase())
         }
+        Target::WhatsApp { chat } => format!("v1:{p}:{a}:{}:{k}", chat.to_lowercase()),
+        Target::Calendar { event_id } => format!("v1:{p}:{a}:{}:{k}", event_id.to_lowercase()),
+        Target::Agent { agent, project } => format!("v1:{p}:{a}:{}/{}:{k}", agent.to_lowercase(), project.to_lowercase()),
     }
 }
 
@@ -300,6 +348,7 @@ fn validate_event(ev: &NotifyEvent) -> Result<(), EventError> {
         return Err(EventError::UnsupportedSchema(ev.schema_version));
     }
     validate_target(&ev.target)?;
+    crate::notify_links::validate_hints(ev.provider, &ev.hints).map_err(EventError::InvalidField)?;
     if !account_ok(&ev.account_id) {
         return Err(EventError::InvalidField("account_id"));
     }
@@ -333,7 +382,6 @@ fn validate_event(ev: &NotifyEvent) -> Result<(), EventError> {
     Ok(())
 }
 
-#[cfg(test)] // persistence load path (N-later); tested, not yet used in production
 /// Strict JSON entry point (unknown fields, unknown target types and other schema versions are refused).
 pub fn parse_event(json: &str) -> Result<NotifyEvent, EventError> {
     let ev: NotifyEvent = serde_json::from_str(json).map_err(|_| EventError::Malformed)?;
@@ -442,7 +490,6 @@ impl Ledger {
         }
     }
 
-    #[cfg(test)] // the card (and its dismiss button) is gone; the toast is dismissed in the Action Center
     pub fn dismiss(&mut self, id: &str) -> bool {
         match self.index(id).map(|i| &mut self.entries[i]) {
             Some(e) if e.read != ReadState::Dismissed => {
@@ -451,6 +498,14 @@ impl Ledger {
             }
             _ => false,
         }
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub fn entries(&self) -> &[NotifyEvent] {
+        &self.entries
     }
 
     /// OR-s delivery flags in; a flag never goes back to false.
@@ -494,6 +549,21 @@ impl Ledger {
     pub fn prune(&mut self, now_ms: u64) {
         self.entries.retain(|e| e.expires_at_ms > now_ms);
     }
+
+    pub fn restore(&mut self, events: Vec<NotifyEvent>) {
+        for ev in events {
+            if let Some(i) = self.index(&ev.event_id) {
+                self.entries[i] = ev;
+            } else {
+                self.entries.push(ev);
+            }
+        }
+        while self.entries.len() > LEDGER_CAP {
+            if let Some(oldest) = self.entries.iter().enumerate().min_by_key(|(_, e)| e.updated_at_ms).map(|(i, _)| i) {
+                self.entries.remove(oldest);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -528,6 +598,7 @@ mod tests {
             delivery: Delivery::default(),
             read: ReadState::Unread,
             expires_at_ms: 1_000_000,
+            hints: Default::default(),
         }
     }
 

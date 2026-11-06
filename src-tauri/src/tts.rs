@@ -30,6 +30,53 @@ pub fn init_disk_cache(app_data: &std::path::Path) {
     let _ = DISK_DIR.set(crate::tts_cache_disk::dir_for(app_data));
 }
 
+static DUCK_GAIN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1000);
+static DUCK_UNTIL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn duck(on: bool) {
+    if on {
+        DUCK_GAIN.store(250, Ordering::Relaxed);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        DUCK_UNTIL_MS.store(now_ms + 5000, Ordering::Relaxed);
+    } else {
+        DUCK_GAIN.store(1000, Ordering::Relaxed);
+        DUCK_UNTIL_MS.store(0, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn duck_gain(on: bool, now_ms: u64, until_ms: u64) -> f32 {
+    if !on {
+        1.0
+    } else if now_ms < until_ms {
+        0.25
+    } else {
+        1.0
+    }
+}
+
+pub(crate) fn is_ducked() -> bool {
+    let on = DUCK_GAIN.load(Ordering::Relaxed) < 1000;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let until_ms = DUCK_UNTIL_MS.load(Ordering::Relaxed);
+    duck_gain(on, now_ms, until_ms) < 1.0
+}
+
+pub(crate) fn apply_duck(sink: &rodio::Sink) {
+    let ducked = is_ducked();
+    let gain = if ducked { 0.25 } else { 1.0 };
+    if !ducked && DUCK_GAIN.load(Ordering::Relaxed) < 1000 {
+        DUCK_GAIN.store(1000, Ordering::Relaxed);
+        DUCK_UNTIL_MS.store(0, Ordering::Relaxed);
+    }
+    sink.set_volume(gain);
+}
+
 /// Speech calls in flight (speak_text / speak_cached). Background cache rendering waits for 0 so it
 /// never competes with a line the user is waiting for.
 static LIVE_SPEECH: AtomicUsize = AtomicUsize::new(0);
@@ -551,6 +598,7 @@ fn stop_has_work(current: usize, last_stop: usize) -> bool {
 /// IPC: Stop any currently-playing TTS audio and immediately restore system volume.
 #[tauri::command]
 pub fn stop_tts() -> Result<(), String> {
+    duck(false);
     {
         let mut last = LAST_STOP_GENERATION.lock().unwrap_or_else(|e| e.into_inner());
         if stop_has_work(TTS_GENERATION.load(Ordering::SeqCst), *last) {
@@ -593,6 +641,9 @@ pub async fn speak_text(
     crate::directed::note_spoken(&text); // echo rejection for open-mic turns (Phase 8)
     let _live = LiveSpeech::begin();
 
+    duck(false);
+    crate::wakeword::sync_barge_in_no_wake(&app);
+    crate::wakeword::reset_barge_gate();
     meeting.set_tts_playing(true);
     let my_generation = TTS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     crate::speech_sync::register_intent(my_generation as u64, request_id.clone(), source_center, kind);
@@ -958,6 +1009,9 @@ pub async fn speak_cached(
     crate::directed::note_spoken(&text);
     let _live = LiveSpeech::begin();
 
+    duck(false);
+    crate::wakeword::sync_barge_in_no_wake(&app);
+    crate::wakeword::reset_barge_gate();
     meeting.set_tts_playing(true);
     let my_generation = TTS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     crate::speech_sync::register_intent(my_generation as u64, request_id, source_center, kind);
@@ -1139,6 +1193,7 @@ async fn play_audio(
 
                         // Poll for stop request (barge-in)
                         while !sink.empty() {
+                            apply_duck(&sink);
                             crate::speech_sync::playing(my_generation as u64, sink.get_pos().as_millis() as u64);
                             crate::volume::heartbeat();
                             crate::keep_awake::heartbeat();
@@ -1544,6 +1599,7 @@ async fn play_audio_streamed(
                         let msg = match rx.recv_timeout(std::time::Duration::from_millis(20)) {
                             Ok(m) => m,
                             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                apply_duck(&sink);
                                 while queued_ms.len() > sink.len() {
                                     completed_ms += queued_ms.pop_front().unwrap_or(0);
                                 }
@@ -1587,6 +1643,7 @@ async fn play_audio_streamed(
                         }
                     }
                     while !sink.empty() {
+                        apply_duck(&sink);
                         while queued_ms.len() > sink.len() {
                             completed_ms += queued_ms.pop_front().unwrap_or(0);
                         }
@@ -1709,6 +1766,9 @@ where
     let emotions: Vec<crate::tts_edge::TtsEmotion> =
         lines.iter().map(|l| resolve_emotion(&app, l)).collect();
 
+    duck(false);
+    crate::wakeword::sync_barge_in_no_wake(&app);
+    crate::wakeword::reset_barge_gate();
     meeting.set_tts_playing(true);
     let my_generation = TTS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     crate::speech_sync::register_intent(my_generation as u64, None, Some("screen_tour".into()), Some(crate::speech_sync::SpeechKind::Narration));
@@ -1857,6 +1917,7 @@ where
                     }
                 }
             }
+            apply_duck(&sink);
             crate::volume::heartbeat();
             crate::keep_awake::heartbeat();
             for ev in tracker.update(appended, sink.len()) {
@@ -2121,6 +2182,15 @@ mod caption_tests {
         let env = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
         // 1000ms / 20ms per frame = 50 frames.
         assert_eq!(env.len(), 50);
+    }
+
+    #[test]
+    fn test_duck_gain() {
+        assert_eq!(duck_gain(false, 1000, 5000), 1.0);
+        assert_eq!(duck_gain(true, 1000, 5000), 0.25);
+        assert_eq!(duck_gain(true, 4999, 5000), 0.25);
+        assert_eq!(duck_gain(true, 5000, 5000), 1.0);
+        assert_eq!(duck_gain(true, 6000, 5000), 1.0);
     }
 }
 

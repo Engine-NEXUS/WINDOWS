@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invokeMock = vi.fn();
 
@@ -8,10 +8,19 @@ vi.mock("../sidebar/sidebarStore", () => ({
   useSidebar: { getState: () => ({ showConflict: vi.fn() }) },
 }));
 
-// wsBridge touches `window` at import time — stub the two fns we need.
+// wsBridge touches `window` at import time — stub the fns we need.
 vi.mock("./wsBridge", () => ({
   clearLongRunningInFlight: vi.fn(),
   isLocalAckGiven: () => false,
+  isLongRunningInFlight: () => false,
+  isBargedIn: () => false,
+}));
+// The follow-up window pulls in the whole stage runtime (slow dynamic imports that finish in the middle of a
+// later test); its own behaviour is covered in followUp.test.ts.
+vi.mock("./followUp", () => ({
+  openFollowUpWindow: vi.fn(async () => false),
+  isFollowUpOpen: () => false,
+  markFollowUpClosed: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
@@ -47,17 +56,30 @@ describe("finishSpokenResult (result → done → idle handshake)", () => {
     __testSetCurrentRequestId("req-1");
   });
 
+  // finishSpokenResult now continues asynchronously after its beat (offer / follow-up window lookups,
+  // dynamic imports). Let that chain finish before the next test resets the mocks, or its invoke calls
+  // land in a later test ("stale onEnd ... touches nothing") depending on timing.
+  afterEach(async () => {
+    await vi.advanceTimersByTimeAsync(3000);
+    vi.useRealTimers();
+    await new Promise((r) => setTimeout(r, 25));
+  });
+
   it("current turn resets the orb to idle and signals done", async () => {
     expect(finishSpokenResult("req-1")).toBe(true);
     expect(getCurrentRequestId()).toBeNull();
     // Brief visible beat first (mirrors the `done` handler)…
     expect(useAssistant.getState().visible).toBe(true);
-    // …then idle after 550ms.
-    await vi.advanceTimersByTimeAsync(550);
+    // …not yet idle at 149ms
+    await vi.advanceTimersByTimeAsync(149);
+    expect(useAssistant.getState().state).toBe("speaking");
+    // …then idle after 150ms (non-ghost beat).
+    await vi.advanceTimersByTimeAsync(1);
     expect(useAssistant.getState().state).toBe("idle");
     expect(invokeMock).toHaveBeenCalledWith("orchestrator_done", {
       requestId: "req-1",
     });
+    await vi.advanceTimersByTimeAsync(0);
   });
 
   it("stale onEnd (barge-in moved on) touches nothing", async () => {
@@ -143,7 +165,7 @@ describe("closeTurnOnSpeechEnd (no turn parks in speaking forever)", () => {
 
   it("closes a normal-mode error/conflict turn at speech end", async () => {
     expect(closeTurnOnSpeechEnd("req-err")).toBe(true);
-    await vi.advanceTimersByTimeAsync(550);
+    await vi.advanceTimersByTimeAsync(150);
     expect(useAssistant.getState().state).toBe("idle");
     expect(invokeMock).toHaveBeenCalledWith("orchestrator_done", {
       requestId: "req-err",

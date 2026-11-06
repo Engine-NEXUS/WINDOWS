@@ -103,7 +103,6 @@ ocr.rs: function capture_screen_text_only
 ocr.rs: function is_available
 orchestrator.rs: function build_worker_payload
 orchestrator.rs: variant Idle
-orchestrator.rs: variant Listening
 orchestrator.rs: variant Speaking
 pii_filter.rs: function count_hits
 pipeline_bench.rs: function fmt_ms

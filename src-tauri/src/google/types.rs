@@ -154,6 +154,10 @@ pub struct CalendarEvent {
     pub end_iso: String,
     pub location: Option<String>,
     pub status: String,
+    #[serde(default)]
+    pub html_link: Option<String>,
+    #[serde(default)]
+    pub meet_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

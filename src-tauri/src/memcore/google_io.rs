@@ -157,7 +157,7 @@ pub async fn gmail_history(c: &GoogleClient, start: &str, page: Option<&str>) ->
 
 pub async fn gmail_meta(c: &GoogleClient, id: &str) -> Result<MailMeta, GoogleError> {
     let url = format!(
-        "{}/messages/{}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date",
+        "{}/messages/{}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID",
         gmail_base(),
         mailtriage::pct_encode(id)
     );

@@ -496,7 +496,11 @@ impl Store {
                created_at INTEGER NOT NULL,
                status TEXT NOT NULL);
              CREATE INDEX IF NOT EXISTS idx_action_leases_due
-               ON action_leases(status, expires_at);",
+               ON action_leases(status, expires_at);
+             CREATE TABLE IF NOT EXISTS notify_events(
+               event_id TEXT PRIMARY KEY,
+               json TEXT NOT NULL,
+               updated_ms INTEGER NOT NULL);",
         )?;
         self.conn.execute(
             "INSERT OR IGNORE INTO meta(k, v) VALUES('schema_version', ?1)",
@@ -615,7 +619,7 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))
             .unwrap_or(0);
         let _ = self.conn.execute_batch(
-            "DELETE FROM records; DELETE FROM records_fts; DELETE FROM audit; DELETE FROM egress; DELETE FROM corrections; DELETE FROM command_log; DELETE FROM routines; DELETE FROM routine_offers; DELETE FROM pending; DELETE FROM review_rejected; DELETE FROM entity_state;
+            "DELETE FROM records; DELETE FROM records_fts; DELETE FROM audit; DELETE FROM egress; DELETE FROM corrections; DELETE FROM command_log; DELETE FROM routines; DELETE FROM routine_offers; DELETE FROM pending; DELETE FROM review_rejected; DELETE FROM entity_state; DELETE FROM notify_events;
              DELETE FROM meta WHERE k != 'schema_version';",
         );
         self.audit(now, "wipe", "", "", "", "", actor);
@@ -1262,6 +1266,46 @@ impl Store {
         rows.flatten().collect()
     }
 
+    pub fn save_notify_event(&self, ev: &crate::notify_event::NotifyEvent) -> rusqlite::Result<()> {
+        let json = match serde_json::to_string(ev) {
+            Ok(j) => j,
+            Err(e) => return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+        };
+        self.conn.execute(
+            "INSERT INTO notify_events(event_id, json, updated_ms) VALUES(?1, ?2, ?3)
+             ON CONFLICT(event_id) DO UPDATE SET json = excluded.json, updated_ms = excluded.updated_ms",
+            params![ev.event_id, json, ev.updated_at_ms as i64],
+        )?;
+        self.flush();
+        Ok(())
+    }
+
+    pub fn load_notify_events(&self, now_ms: u64) -> Vec<crate::notify_event::NotifyEvent> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT json FROM notify_events ORDER BY updated_ms ASC",
+        ) else {
+            return vec![];
+        };
+        let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else {
+            return vec![];
+        };
+        let mut out = Vec::new();
+        for json in rows.flatten() {
+            if let Ok(ev) = crate::notify_event::parse_event(&json) {
+                if ev.expires_at_ms > now_ms {
+                    out.push(ev);
+                }
+            }
+        }
+        out
+    }
+
+    pub fn clear_notify_events(&self) -> rusqlite::Result<usize> {
+        let n = self.conn.execute("DELETE FROM notify_events", [])?;
+        self.flush();
+        Ok(n)
+    }
+
     /// Retention + decay. Pinned facts are never decayed. Returns rows removed.
     pub fn prune(&self, now: i64) -> usize {
         let removed = self.prune_inner(now);
@@ -1270,10 +1314,19 @@ impl Store {
             .conn
             .execute("DELETE FROM egress WHERE ts < ?1", params![now - EGRESS_RETENTION_SECS])
             .unwrap_or(0);
-        if removed > 0 || aged > 0 || audit > 0 {
+        let now_ms = if now > 1_000_000_000_000 { now } else { now.saturating_mul(1000) };
+        let cutoff_30d = now_ms.saturating_sub(30 * 24 * 3600 * 1000);
+        let notify_pruned = self
+            .conn
+            .execute(
+                "DELETE FROM notify_events WHERE updated_ms < ?1 OR json_extract(json, '$.expires_at_ms') <= ?2",
+                params![cutoff_30d, now_ms],
+            )
+            .unwrap_or(0);
+        if removed > 0 || aged > 0 || audit > 0 || notify_pruned > 0 {
             self.flush();
         }
-        removed
+        removed + notify_pruned
     }
 
     /// The audit trail used to grow by a row per write, forever. Keep 30 days AND at most
@@ -1918,5 +1971,83 @@ mod tests {
         // Wipe also clears entity_state
         s.wipe("user", (now_ms / 1000) as i64);
         assert_eq!(s.entities_load().len(), 0);
+    }
+
+    fn test_notify_event(source_ref: &str, updated_ms: u64, expires_at_ms: u64) -> crate::notify_event::NotifyEvent {
+        use crate::notify_event::{entity_key, event_id, Delivery, PrivacyClass, Provider, ReadState, Severity, Status, Target, SCHEMA_VERSION};
+        let target = Target::Repo {
+            host: "github.com".into(),
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        let key = entity_key(Provider::GitHub, "gh-primary", &target, "build");
+        let id = event_id(&key, source_ref, Status::Failed);
+        crate::notify_event::NotifyEvent {
+            schema_version: SCHEMA_VERSION,
+            event_id: id,
+            entity_key: key,
+            provider: Provider::GitHub,
+            account_id: "gh-primary".into(),
+            kind: "build".into(),
+            status: Status::Failed,
+            severity: Severity::Medium,
+            occurred_at_ms: updated_ms,
+            observed_at_ms: updated_ms,
+            updated_at_ms: updated_ms,
+            title: "Test Build Failed".into(),
+            preview: "repo · run 1".into(),
+            privacy: PrivacyClass::Public,
+            target,
+            source_ref: source_ref.into(),
+            original_source_ref: source_ref.into(),
+            occurrences: 1,
+            delivery: Delivery::default(),
+            read: ReadState::Unread,
+            expires_at_ms,
+            hints: Default::default(),
+        }
+    }
+
+    #[test]
+    fn notify_events_save_load_round_trip_and_corrupt_skipped() {
+        let s = Store::open_in_memory().unwrap();
+        let ev1 = test_notify_event("1", 1000, 5000);
+        let ev2 = test_notify_event("2", 2000, 6000);
+        s.save_notify_event(&ev1).unwrap();
+        s.save_notify_event(&ev2).unwrap();
+
+        // Round trip
+        let loaded = s.load_notify_events(500);
+        assert_eq!(loaded, vec![ev1.clone(), ev2.clone()]);
+
+        // A corrupt row is skipped
+        s.conn.execute("INSERT INTO notify_events(event_id, json, updated_ms) VALUES('bad', 'not a valid json string', 3000)", []).unwrap();
+        let loaded = s.load_notify_events(500);
+        assert_eq!(loaded, vec![ev1, ev2]);
+    }
+
+    #[test]
+    fn notify_events_wipe_and_prune() {
+        let s = Store::open_in_memory().unwrap();
+        let now_ms = 1_700_000_000_000u64;
+        let old_ms = now_ms - 31 * 24 * 3600 * 1000;
+        let ev_expired = test_notify_event("exp", now_ms - 1000, now_ms - 500);
+        let ev_old = test_notify_event("old", old_ms, now_ms + 100_000);
+        let ev_live = test_notify_event("live", now_ms, now_ms + 100_000);
+
+        s.save_notify_event(&ev_expired).unwrap();
+        s.save_notify_event(&ev_old).unwrap();
+        s.save_notify_event(&ev_live).unwrap();
+
+        // Prune drops expired and older than 30 days
+        let removed = s.prune((now_ms / 1000) as i64);
+        assert_eq!(removed, 2);
+        let remaining = s.load_notify_events(now_ms);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].event_id, ev_live.event_id);
+
+        // Wipe clears the table
+        s.wipe("test", (now_ms / 1000) as i64);
+        assert_eq!(s.load_notify_events(0).len(), 0);
     }
 }

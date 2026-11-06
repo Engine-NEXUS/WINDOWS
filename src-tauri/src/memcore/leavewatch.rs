@@ -45,6 +45,8 @@ pub struct LeaveEvent {
     pub summary: String,
     pub location: String,
     pub start_epoch: i64,
+    pub html_link: Option<String>,
+    pub meet_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -91,6 +93,8 @@ pub fn candidate_events(events: &[CalendarEvent], now: i64, horizon_secs: i64) -
                 summary: e.summary.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(60).collect(),
                 location: loc.chars().take(160).collect(),
                 start_epoch: start,
+                html_link: e.html_link.clone(),
+                meet_url: e.meet_url.clone(),
             })
         })
         .collect()
@@ -283,7 +287,17 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
                 fired.insert(k.clone());
                 mark_fired(&dir, &k);
                 tracing::info!("leavewatch: reminder {k}");
-                crate::proactive_policy::submit(&app, format!("leaveby_{}", r.key), r.text, r.urgency);
+                let alert_id = format!("leaveby_{}", r.key);
+                let event_id = if let Some(ev) = events.iter().find(|e| event_key(e) == k || e.id == r.key.split(':').next().unwrap_or("")) {
+                    let acct_email = acct.email.as_deref().unwrap_or("calendar");
+                    crate::notify_hub::publish_calendar(&app, acct_email, ev, &r.text, r.urgency)
+                } else {
+                    None
+                };
+                crate::proactive_policy::submit(&app, alert_id.clone(), r.text.clone(), r.urgency);
+                if let Some(ev_id) = event_id {
+                    crate::proactive_policy::link_alert(&alert_id, &ev_id);
+                }
             }
         }
     });
@@ -305,11 +319,20 @@ mod tests {
             end_iso: start,
             location: loc.map(String::from),
             status: "confirmed".into(),
+            html_link: None,
+            meet_url: None,
         }
     }
 
     fn ev(start_offset: i64) -> LeaveEvent {
-        LeaveEvent { id: "e1".into(), summary: "Dentist".into(), location: "5 High St".into(), start_epoch: NOW + start_offset }
+        LeaveEvent {
+            id: "e1".into(),
+            summary: "Dentist".into(),
+            location: "5 High St".into(),
+            start_epoch: NOW + start_offset,
+            html_link: None,
+            meet_url: None,
+        }
     }
 
     #[test]
@@ -368,7 +391,14 @@ mod tests {
     }
 
     fn lev(id: &str, start_offset: i64) -> LeaveEvent {
-        LeaveEvent { id: id.into(), summary: id.into(), location: "5 High St".into(), start_epoch: NOW + start_offset }
+        LeaveEvent {
+            id: id.into(),
+            summary: id.into(),
+            location: "5 High St".into(),
+            start_epoch: NOW + start_offset,
+            html_link: None,
+            meet_url: None,
+        }
     }
 
     #[test]
@@ -457,5 +487,17 @@ mod tests {
         // 1 minute trip is spoken in the singular.
         let r = decide(&ev(7 * 60), 30, NOW + 60, None).unwrap();
         assert!(r.text.contains("about 1 minute from home"), "{}", r.text);
+    }
+
+    #[test]
+    fn candidate_events_carries_links() {
+        let mut event_with_links = cal("with_links", 3600, Some("5 High St"));
+        event_with_links.html_link = Some("https://calendar.google.com/calendar/r/eventedit/123".into());
+        event_with_links.meet_url = Some("https://meet.google.com/abc-defg-hij".into());
+
+        let candidates = candidate_events(&[event_with_links], NOW, HORIZON_SECS);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].html_link.as_deref(), Some("https://calendar.google.com/calendar/r/eventedit/123"));
+        assert_eq!(candidates[0].meet_url.as_deref(), Some("https://meet.google.com/abc-defg-hij"));
     }
 }

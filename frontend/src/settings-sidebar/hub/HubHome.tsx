@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { initialOf, type HubAccount, type UsageStats } from "./hubModel";
 
-export type HubPage = "home" | "keys" | "memory" | "actions" | "device-links" | "activity" | "audio" | "display" | "connections" | "advanced" | "appearance";
+export type HubPage = "home" | "keys" | "memory" | "actions" | "alerts" | "device-links" | "activity" | "audio" | "display" | "connections" | "advanced" | "appearance";
 
 interface AccountsApi {
   accounts: HubAccount[];
@@ -95,6 +95,12 @@ const ICONS = {
     <Svg>
       <circle cx="12" cy="12" r="8" />
       <path d="M12 7v5l3 2" />
+    </Svg>
+  ),
+  bell: (
+    <Svg>
+      <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9" />
+      <path d="M13.73 21a2 2 0 01-3.46 0" />
     </Svg>
   ),
 };
@@ -223,6 +229,7 @@ export function HubHome({ acc, insights: _insights, themeMode, onTheme: _onTheme
       <Row icon={ICONS.key} title="API Keys & Models" sub="Groq, Gemini & Providers" onClick={() => onOpen("keys")} />
       <Row icon={ICONS.vault} title="Memory Core" sub="Vault & Cloud Recall" onClick={() => onOpen("memory")} />
       <Row icon={ICONS.shield} title="Actions & Permissions" sub="Safety & Boundaries" onClick={() => onOpen("actions")} />
+      <Row icon={ICONS.bell} title="Alerts & History" sub="Notification Center & Controls" onClick={() => onOpen("alerts")} />
       <Row icon={ICONS.plug} title="Device Links" sub="Laptop Mesh" onClick={() => onOpen("device-links")} />
       <Row icon={ICONS.clock} title="Activity Manager" sub="Daily and weekly app usage" onClick={() => onOpen("activity")} />
       <Row

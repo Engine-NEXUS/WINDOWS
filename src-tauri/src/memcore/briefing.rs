@@ -1102,6 +1102,7 @@ mod tests {
                 snippet: String::new(),
                 labels: vec![],
                 date_ms: (now - age_h * 3600) * 1000,
+                rfc822_id: String::new(),
             };
             (Triage { category: cat, urgency: u, reason: "r".into() }, m)
         };

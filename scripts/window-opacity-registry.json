@@ -8,6 +8,9 @@
   "frontend/src/stage/notify-expand.css": [
     ".nx-expand"
   ],
+  "frontend/src/notify-toast/notify-toast.css": [
+    ".nt-card"
+  ],
   "frontend/src/sidebar/stack.css": [
     ".stack-view",
     ".stack-card",

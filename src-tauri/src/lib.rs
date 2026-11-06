@@ -16,6 +16,10 @@ mod window_manager;
 // Smart Turn end-of-turn model — standalone prototype, not yet wired into capture.
 #[allow(dead_code)]
 pub(crate) mod turn_detect;
+pub(crate) mod turn_complete;
+pub(crate) mod turn_continue;
+pub(crate) mod barge_gate;
+pub(crate) mod barge_classify;
 // Silero VAD (Handy-derived) — used by the STT capture loop when "vadSilero" is on.
 pub(crate) mod vad;
 // Phase 8: directed-speech gate for open-mic (ghost hot-mic) turns
@@ -26,6 +30,7 @@ pub(crate) mod proactive_policy;
 pub(crate) mod notify;
 pub(crate) mod notify_brain;
 pub(crate) mod notify_event;
+pub(crate) mod notify_links;
 pub(crate) mod notify_hub;
 pub(crate) mod coderabbit_review;
 pub(crate) mod coderabbit_phrases;
@@ -34,6 +39,7 @@ pub(crate) mod background_tasks;
 pub(crate) mod notify_activation;
 pub(crate) mod notify_native;
 pub(crate) mod notify_open;
+pub(crate) mod notify_toast;
 pub(crate) mod notify_selftest;
 pub(crate) mod work_area;
 pub(crate) mod github_repo_index;
@@ -890,6 +896,7 @@ pub fn run() {
             memcore::routines::start_suggester(app.handle().clone()); // offers a routine when it notices a repeated sequence
             memcore::curator::start_curator(app.handle().clone()); // daily idle upkeep: retire unused routines, keep used profile facts
             memcore::review::start_reviewer(app.handle().clone()); // optional, default off: suggests profile facts for approval
+            notify_hub::restore_ledger(&app.handle().clone());
             memcore::scheduler::start(app.handle().clone()); // timetable slot reminders
             memcore::mailwatch::start(app.handle().clone()); // Gmail history.list watcher (idle until Google is connected)
             memcore::github_watch::start(app.handle().clone()); // GitHub Actions watcher (idle until GitHub token present)
@@ -1222,10 +1229,18 @@ pub fn run() {
             coderabbit_review::coderabbit_set_context,
             notify_hub::notify_close_event,
             notify_hub::notify_event_ready,
+            notify_hub::notify_open_external,
+            notify_toast::get_pending_toast,
+            notify_toast::notify_toast_close,
+            notify_toast::notify_toast_fit,
+            notify_toast::notify_toast_click,
             mcp_client::mcp_connect_state,
             stage::stage_show,
             stage::stage_hide,
             stage::stage_heartbeat,
+            notify_hub::notify_list_events,
+            notify_hub::notify_alert_open,
+            notify_hub::notify_alerts_clear,
             stage::stage_take_pending_transcript,
             stage::stage_set_hitboxes,
             stage::stage_hide_kill,
@@ -1379,6 +1394,7 @@ pub fn run() {
             stt_stream::stt_stream_push_chunk,
             stt_stream::stt_stream_stop,
             tts::speak_text,
+            commands::follow_up_window_secs,
             tts::speak_cached,
             speech_sync::speech_stage_register,
             speech_sync::speech_stage_ack,

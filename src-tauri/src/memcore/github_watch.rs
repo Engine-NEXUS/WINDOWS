@@ -406,7 +406,12 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
                             if let crate::github_repo_index::Resolution::One(entry) =
                                 crate::github_repo_index::resolve_name(&fact.project).await
                             {
-                                crate::notify_hub::publish_github(&app, &entry.full_name, &fact, &line);
+                                let extras = if fact.obs == Obs::Failed {
+                                    fetch_extras(&client, &token, &entry.full_name, &fact.run_ref).await
+                                } else {
+                                    crate::notify_hub::GithubExtras::default()
+                                };
+                                crate::notify_hub::publish_github_extras(&app, &entry.full_name, &fact, &line, None, extras);
                             }
                             if fact.kind == Kind::Pr
                                 && fact.obs == Obs::Failed
@@ -448,6 +453,70 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
             }
         }
     });
+}
+
+/// The job page and first failed step of a run, from the jobs endpoint (`GET /repos/{o}/{r}/actions/runs/{id}/jobs`). Pure.
+pub fn job_hints(json: &str) -> crate::notify_links::OpenHints {
+    use crate::notify_links::{provider_page_ok, OpenHints};
+    use crate::notify_event::Provider;
+    let mut out = OpenHints::default();
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return out };
+    let failed = |c: Option<&str>| matches!(c, Some("failure" | "timed_out" | "startup_failure" | "cancelled"));
+    let Some(job) = v.get("jobs").and_then(|j| j.as_array()).and_then(|a| a.iter().find(|j| failed(j.get("conclusion").and_then(|c| c.as_str())))) else {
+        return out;
+    };
+    out.job_id = job.get("id").and_then(|x| x.as_u64()).filter(|n| *n > 0);
+    out.html_url = job.get("html_url").and_then(|x| x.as_str()).filter(|u| provider_page_ok(Provider::GitHub, u)).map(String::from);
+    out.failed_step = job
+        .get("steps")
+        .and_then(|s| s.as_array())
+        .and_then(|a| a.iter().find(|s| failed(s.get("conclusion").and_then(|c| c.as_str()))))
+        .and_then(|s| s.get("number").and_then(|n| n.as_u64()))
+        .filter(|n| *n > 0 && *n < 10_000)
+        .map(|n| n as u32);
+    out
+}
+
+/// The pull request number and branch of a run (`GET /repos/{o}/{r}/actions/runs/{id}`). Pure.
+pub fn run_pr_and_branch(json: &str) -> (Option<u64>, Option<String>) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return (None, None) };
+    let pr = v
+        .get("pull_requests")
+        .and_then(|p| p.as_array())
+        .and_then(|a| a.first())
+        .and_then(|p| p.get("number"))
+        .and_then(|n| n.as_u64())
+        .filter(|n| *n > 0);
+    let branch = v.get("head_branch").and_then(|b| b.as_str()).map(String::from);
+    (pr, branch)
+}
+
+async fn get_text(client: &reqwest::Client, token: &str, url: &str) -> Option<String> {
+    let resp = client
+        .get(url)
+        .header("User-Agent", "nexus-assistant")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .timeout(Duration::from_secs(8))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.text().await.ok()
+}
+
+/// Two small calls for a failure that is about to be announced: the run (PR, branch) and its jobs (job page, failed step).
+/// Any failure just leaves the extras empty; the alert still opens the run.
+async fn fetch_extras(client: &reqwest::Client, token: &str, full_name: &str, run_ref: &str) -> crate::notify_hub::GithubExtras {
+    let base = format!("https://api.github.com/repos/{full_name}/actions/runs/{run_ref}");
+    let jobs_url = format!("{base}/jobs");
+    let (run, jobs) = tokio::join!(get_text(client, token, &base), get_text(client, token, &jobs_url));
+    let (pr, branch) = run.as_deref().map(run_pr_and_branch).unwrap_or((None, None));
+    let hints = jobs.as_deref().map(job_hints).unwrap_or_default();
+    crate::notify_hub::GithubExtras { hints, pr, branch }
 }
 
 #[cfg(test)]
@@ -917,5 +986,42 @@ mod tests {
         assert_eq!(facts[0].0.project, "zync");
         assert!(facts[0].1, "first sight of the repo is a quiet baseline");
         stop.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    const JOBS: &str = r#"{"total_count":2,"jobs":[
+        {"id":11,"conclusion":"success","html_url":"https://github.com/o/r/actions/runs/7/job/11","steps":[{"number":1,"conclusion":"success"}]},
+        {"id":22,"conclusion":"failure","html_url":"https://github.com/o/r/actions/runs/7/job/22","steps":[
+            {"number":1,"name":"Set up job","conclusion":"success"},
+            {"number":2,"name":"Checkout","conclusion":"success"},
+            {"number":5,"name":"cargo test","conclusion":"failure"},
+            {"number":6,"name":"Post","conclusion":"skipped"}]}]}"#;
+
+    #[test]
+    fn the_first_failed_job_and_its_first_failed_step_are_found() {
+        let h = job_hints(JOBS);
+        assert_eq!(h.job_id, Some(22));
+        assert_eq!(h.failed_step, Some(5));
+        assert_eq!(h.html_url.as_deref(), Some("https://github.com/o/r/actions/runs/7/job/22"));
+    }
+
+    #[test]
+    fn a_job_url_on_another_host_or_garbage_gives_no_hints() {
+        let evil = JOBS.replace("https://github.com/o/r/actions/runs/7/job/22", "https://evil.example/x");
+        assert_eq!(job_hints(&evil).html_url, None);
+        assert_eq!(job_hints("not json"), crate::notify_links::OpenHints::default());
+        assert_eq!(job_hints(r#"{"jobs":[{"id":1,"conclusion":"success"}]}"#), crate::notify_links::OpenHints::default());
+    }
+
+    #[test]
+    fn the_run_gives_its_pull_request_and_branch() {
+        let run = r#"{"id":7,"head_branch":"feat/x","pull_requests":[{"number":34,"url":"u"}]}"#;
+        assert_eq!(run_pr_and_branch(run), (Some(34), Some("feat/x".to_string())));
+        assert_eq!(run_pr_and_branch(r#"{"head_branch":"main","pull_requests":[]}"#), (None, Some("main".to_string())));
+        assert_eq!(run_pr_and_branch("{}"), (None, None));
     }
 }

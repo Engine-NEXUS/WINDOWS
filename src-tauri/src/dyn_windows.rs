@@ -96,6 +96,18 @@ impl WindowConfig {
     }
 
     /// The place card: a 315 px column (`?pin=place`), frameless glass, placed by `panel_layout`.
+    /// The five-second alert toast (notify_toast.rs): frameless, transparent, topmost, never focused. Sized and
+    /// placed by Rust at show time.
+    pub fn notify_toast() -> Self {
+        Self {
+            label: "notify-toast", title: "NEXUS Alert", url: "notify-toast.html",
+            width: 520., height: 520., min_width: None, min_height: None,
+            resizable: false, decorations: false, transparent: true,
+            always_on_top: true, skip_taskbar: true, shadow: false,
+            focus: false, center: false, hidden_title: true,
+        }
+    }
+
     pub fn place_card() -> Self {
         Self {
             label: "place-card", title: "NEXUS Place", url: "sidebar.html?pin=place",
@@ -229,7 +241,7 @@ pub fn get_or_create_window<R: Runtime>(
         // (sidebar_backdrop.rs -> `sidebar:backdrop` -> `.sidebar-card::after`).
         let is_glass_window = matches!(
             config.label,
-            "sidebar" | "architect-map" | "maps-panel" | "place-card" | "calibrate-toolbar" | "settings" | "setup" | "orb-studio"
+            "sidebar" | "architect-map" | "maps-panel" | "place-card" | "notify-toast" | "calibrate-toolbar" | "settings" | "setup" | "orb-studio"
         );
         if is_glass_window {
             crate::dwm_corners::round_corners(&win);
