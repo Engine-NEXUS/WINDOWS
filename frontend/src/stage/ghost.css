@@ -575,21 +575,65 @@
   background: var(--stage-surface);
   border: 1px solid var(--stage-border-strong);
   border-radius: 10px;
-  padding: 8px 16px;
+  padding: 8px 14px;
   min-width: 240px;
   max-width: 420px;
   box-shadow: var(--stage-shadow-lg);
   display: flex;
-  flex-direction: column;
-  gap: 3px;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 10px;
   pointer-events: none;
   text-align: left;
+}
+
+.action-receipt-tile {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+}
+
+.action-receipt-tile .nt-provider-logo,
+.action-receipt-tile .kit-logo-tile {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  box-sizing: border-box;
+}
+
+.action-receipt-tile .kit-logo-tile {
+  border-radius: 7px;
+}
+
+.action-receipt-tile .kit-logo-tile--image {
+  background-color: var(--stage-surface);
+  border: 1px solid var(--stage-border);
+}
+
+.action-receipt-tile .kit-logo-tile--monogram {
+  background-color: var(--stage-border-strong);
+  border: 1px solid var(--stage-border);
+  color: var(--stage-text-white);
+  font-size: 13px;
+  line-height: 28px;
+}
+
+.action-receipt-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
 }
 
 .action-receipt-header {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .action-receipt-dot {

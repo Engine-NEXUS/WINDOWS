@@ -13,7 +13,20 @@ export function DevActionReceipt() {
   const [receipt, setReceipt] = useState<ActionReceiptType | null>(null);
   const [visible, setVisible] = useState(false);
 
-  const handleOpenApp = () => {
+  const handleYouTube = () => {
+    const state = model.onReceipt({
+      kind: "search",
+      headline: "Opened",
+      subject: "YouTube",
+      title: "lofi beats",
+      detail: "Search results. Nothing is playing yet.",
+      ok: true,
+    });
+    setReceipt(state.receipt);
+    setVisible(state.visible);
+  };
+
+  const handleNotepad = () => {
     const state = model.onReceipt({
       kind: "open_app",
       headline: "Opened",
@@ -26,13 +39,39 @@ export function DevActionReceipt() {
     setVisible(state.visible);
   };
 
-  const handleOpenSiteSearch = () => {
+  const handleVSCode = () => {
     const state = model.onReceipt({
-      kind: "search",
+      kind: "open_app",
       headline: "Opened",
-      subject: "youtube.com",
-      title: "lofi beats",
-      detail: "Search results. Nothing is playing yet.",
+      subject: "Visual Studio Code",
+      title: "src/stage/ActionReceipt.tsx",
+      detail: null,
+      ok: true,
+    });
+    setReceipt(state.receipt);
+    setVisible(state.visible);
+  };
+
+  const handleFooTool = () => {
+    const state = model.onReceipt({
+      kind: "open_app",
+      headline: "Launched",
+      subject: "Foo Tool",
+      title: null,
+      detail: "Unknown app monogram fallback",
+      ok: true,
+    });
+    setReceipt(state.receipt);
+    setVisible(state.visible);
+  };
+
+  const handleGithub = () => {
+    const state = model.onReceipt({
+      kind: "open_site",
+      headline: "Opened",
+      subject: "github.com",
+      title: "Engine-NEXUS / ULTRON",
+      detail: null,
       ok: true,
     });
     setReceipt(state.receipt);
@@ -72,11 +111,20 @@ export function DevActionReceipt() {
     <div>
       <h2>Action Receipt Preview (dev only)</h2>
       <div className="controls">
-        <button id="btn-open-app" onClick={handleOpenApp}>
-          open app ok
+        <button id="btn-youtube" onClick={handleYouTube}>
+          YouTube
         </button>
-        <button id="btn-open-site-search" onClick={handleOpenSiteSearch}>
-          open site + search
+        <button id="btn-notepad" onClick={handleNotepad}>
+          Notepad
+        </button>
+        <button id="btn-vscode" onClick={handleVSCode}>
+          Visual Studio Code
+        </button>
+        <button id="btn-foo-tool" onClick={handleFooTool}>
+          Foo Tool
+        </button>
+        <button id="btn-github" onClick={handleGithub}>
+          github.com
         </button>
         <button id="btn-fail" onClick={handleFail}>
           tried to open (fail)
