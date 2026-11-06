@@ -2150,7 +2150,7 @@ fn default_loading_size() -> u32 {
 }
 
 fn default_orb_color() -> String {
-    "#f2b859".to_string()
+    "#ffffff".to_string()
 }
 
 fn default_orb_position() -> String {
