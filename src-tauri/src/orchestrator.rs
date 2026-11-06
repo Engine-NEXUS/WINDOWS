@@ -9613,7 +9613,7 @@ async fn run_watch_screen_email<R: Runtime>(
     let app_data_dir = app
         .path()
         .app_data_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from(crate::app_dirs::APP_ID));
+        .unwrap_or_else(|_| std::path::PathBuf::from("com.nexus.assistant"));
 
     // Resolve matching connected Google account for this active email
     let connected_accounts = crate::auth_vault::get_google_accounts();

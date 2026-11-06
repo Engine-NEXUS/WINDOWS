@@ -3359,16 +3359,16 @@ pub fn start_stt_capture(origin: Option<String>, no_speech_ms: Option<u32>) -> R
     // anything else (confirm window, clarification, follow-up question) is an explicit turn.
     let origin = crate::directed::Origin::parse(origin.as_deref().unwrap_or("direct"));
     crate::wakeword_oww::start_stt_capture_with_origin(origin);
-    Ok(())
-}
-
-/// Abort an in-flight Rust-side STT capture (hotkey second-press cancel).
     if let Some(ms) = no_speech_ms {
         if ms > 0 {
             let chunks = (ms / 80).max(10);
             crate::wakeword_oww::set_no_speech_limit_override(chunks);
         }
     }
+    Ok(())
+}
+
+/// Abort an in-flight Rust-side STT capture (hotkey second-press cancel).
 /// Returns whether voice was already underway + capture length so the
 /// frontend can decide: hide the orb (no speech) vs let the turn finish.
 #[tauri::command]
@@ -3464,10 +3464,6 @@ pub fn read_stt_command_hints<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> b
         .unwrap_or(false)
 }
 
-/// Read the sttConfidenceGate flag (off unless the user turned it on).
-pub fn read_stt_confidence_gate<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
-    let Ok(dir) = app.path().app_data_dir() else { return false; };
-    std::fs::read_to_string(dir.join("settings.json"))
 /// Read the `turnHoldMs` setting (default 3000, 0 = disabled, clamp 0..=6000).
 pub fn read_turn_hold_ms<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u32 {
     let Ok(dir) = app.path().app_data_dir() else { return DEFAULT_TURN_HOLD_MS; };
@@ -3497,21 +3493,10 @@ pub fn read_barge_in_no_wake<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bo
         .unwrap_or(true)
 }
 
-/// Read the `turnHoldMs` setting (default 3000, 0 = disabled, clamp 0..=6000).
-pub fn read_turn_hold_ms<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u32 {
-    let Ok(dir) = app.path().app_data_dir() else { return DEFAULT_TURN_HOLD_MS; };
+/// Read the sttConfidenceGate flag (off unless the user turned it on).
+pub fn read_stt_confidence_gate<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return false; };
     std::fs::read_to_string(dir.join("settings.json"))
-        .ok()
-        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-        .and_then(|j| {
-            j.get("turnHoldMs")
-                .or_else(|| j.get("turn_hold_ms"))
-                .and_then(|v| v.as_u64())
-        })
-        .map(|v| (v as u32).min(6000))
-        .unwrap_or(DEFAULT_TURN_HOLD_MS)
-}
-
         .ok()
         .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
         .and_then(|j| j.get("sttConfidenceGate").and_then(|v| v.as_bool()))
@@ -3595,10 +3580,6 @@ pub fn read_ghost_turn_gap_ms<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u
         .unwrap_or(1000)
 }
 
-/// Read the speakerVerification flag from settings.json (wakeword_oww.rs).
-/// Defaults to FALSE. Set `"speakerVerification": true` to enable.
-pub fn read_speaker_verification<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
-    let dir = app.path().app_data_dir();
 /// Read the continuationWindowSecs setting (clamped 5..=120, default 25).
 pub fn read_continuation_window_secs<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u64 {
     let dir = app.path().app_data_dir();
@@ -3633,20 +3614,10 @@ pub fn follow_up_window_secs<R: Runtime>(app: tauri::AppHandle<R>) -> u32 {
     read_follow_up_window_secs(&app)
 }
 
-/// Read the continuationWindowSecs setting (clamped 5..=120, default 25).
-pub fn read_continuation_window_secs<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u64 {
+/// Read the speakerVerification flag from settings.json (wakeword_oww.rs).
+/// Defaults to FALSE. Set `"speakerVerification": true` to enable.
+pub fn read_speaker_verification<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let dir = app.path().app_data_dir();
-    let Ok(dir) = dir else { return 25; };
-    let path = dir.join("settings.json");
-    let Ok(content) = std::fs::read_to_string(&path) else { return 25; };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return 25; };
-    json.get("continuationWindowSecs")
-        .or_else(|| json.get("continuation_window_secs"))
-        .and_then(|v| v.as_u64())
-        .map(|v| v.clamp(5, 120))
-        .unwrap_or(25)
-}
-
     let Ok(dir) = dir else { return true; };
     let path = dir.join("settings.json");
     match path.try_exists() {
@@ -4420,10 +4391,6 @@ mod nexus_settings_tests {
     }
 
     #[test]
-    fn hand_focus_mode_defaults_to_true_and_round_trips() {
-        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
-        raw.as_object_mut().unwrap().remove("handFocusMode");
-    #[test]
     fn turn_hold_ms_defaults_to_3000_and_round_trips() {
         let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
         raw.as_object_mut().unwrap().remove("turnHoldMs");
@@ -4433,6 +4400,10 @@ mod nexus_settings_tests {
         assert_eq!(reserialized.get("turnHoldMs"), Some(&serde_json::json!(3000)));
     }
 
+    #[test]
+    fn hand_focus_mode_defaults_to_true_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("handFocusMode");
         let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
         assert!(parsed.hand_focus_mode, "handFocusMode must default to true");
         let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
@@ -4443,6 +4414,31 @@ mod nexus_settings_tests {
     fn hand_focus_lower_apps_defaults_to_true_and_round_trips() {
         let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
         raw.as_object_mut().unwrap().remove("handFocusLowerApps");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert!(parsed.hand_focus_lower_apps, "handFocusLowerApps must default to true");
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("handFocusLowerApps"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn memcore_github_watch_defaults_to_true_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("memcoreGithubWatch");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert!(parsed.memcore_github_watch, "memcoreGithubWatch must default to true");
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("memcoreGithubWatch"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn memcore_deploy_watch_defaults_to_true_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("memcoreDeployWatch");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert!(parsed.memcore_deploy_watch, "memcoreDeployWatch must default to true");
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("memcoreDeployWatch"), Some(&serde_json::json!(true)));
+    }
 
     #[test]
     fn continuation_window_secs_defaults_to_25_and_round_trips() {
@@ -4480,65 +4476,10 @@ mod nexus_settings_tests {
         let reserialized_false = serde_json::to_value(&parsed_false).expect("serialization should succeed");
         assert_eq!(reserialized_false.get("bargeInNoWake"), Some(&serde_json::json!(false)));
     }
-        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
-        assert!(parsed.hand_focus_lower_apps, "handFocusLowerApps must default to true");
-        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
-        assert_eq!(reserialized.get("handFocusLowerApps"), Some(&serde_json::json!(true)));
-    }
-
-    #[test]
-    fn memcore_github_watch_defaults_to_true_and_round_trips() {
-        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
-        raw.as_object_mut().unwrap().remove("memcoreGithubWatch");
-        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
-        assert!(parsed.memcore_github_watch, "memcoreGithubWatch must default to true");
-        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
-        assert_eq!(reserialized.get("memcoreGithubWatch"), Some(&serde_json::json!(true)));
-    }
-
-    #[test]
-    fn continuation_window_secs_defaults_to_25_and_round_trips() {
-        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
-        raw.as_object_mut().unwrap().remove("continuationWindowSecs");
-        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
-        assert_eq!(parsed.continuation_window_secs, 25);
-        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
-        assert_eq!(reserialized.get("continuationWindowSecs"), Some(&serde_json::json!(25)));
-    }
-
-    #[test]
-    fn follow_up_window_secs_defaults_to_6_and_round_trips() {
-        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
-        raw.as_object_mut().unwrap().remove("followUpWindowSecs");
-        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
-        assert_eq!(parsed.follow_up_window_secs, 6);
-        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
-        assert_eq!(reserialized.get("followUpWindowSecs"), Some(&serde_json::json!(6)));
-    }
-
-    #[test]
-    fn memcore_deploy_watch_defaults_to_true_and_round_trips() {
-        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
-        raw.as_object_mut().unwrap().remove("memcoreDeployWatch");
-        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
-        assert!(parsed.memcore_deploy_watch, "memcoreDeployWatch must default to true");
-        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
-        assert_eq!(reserialized.get("memcoreDeployWatch"), Some(&serde_json::json!(true)));
-    }
 }
 
 
 #[cfg(test)]
-
-    #[test]
-    fn continuation_window_secs_defaults_to_25_and_round_trips() {
-        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
-        raw.as_object_mut().unwrap().remove("continuationWindowSecs");
-        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
-        assert_eq!(parsed.continuation_window_secs, 25);
-        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
-        assert_eq!(reserialized.get("continuationWindowSecs"), Some(&serde_json::json!(25)));
-    }
 mod settings_robustness_tests {
     use super::*;
 
