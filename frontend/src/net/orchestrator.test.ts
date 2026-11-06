@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invokeMock = vi.fn();
 
@@ -14,6 +14,13 @@ vi.mock("./wsBridge", () => ({
   isLocalAckGiven: () => false,
   isLongRunningInFlight: () => false,
   isBargedIn: () => false,
+}));
+// The follow-up window pulls in the whole stage runtime (slow dynamic imports that finish in the middle of a
+// later test); its own behaviour is covered in followUp.test.ts.
+vi.mock("./followUp", () => ({
+  openFollowUpWindow: vi.fn(async () => false),
+  isFollowUpOpen: () => false,
+  markFollowUpClosed: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
@@ -47,6 +54,15 @@ describe("finishSpokenResult (result → done → idle handshake)", () => {
     vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
     useAssistant.setState({ state: "speaking", visible: true });
     __testSetCurrentRequestId("req-1");
+  });
+
+  // finishSpokenResult now continues asynchronously after its beat (offer / follow-up window lookups,
+  // dynamic imports). Let that chain finish before the next test resets the mocks, or its invoke calls
+  // land in a later test ("stale onEnd ... touches nothing") depending on timing.
+  afterEach(async () => {
+    await vi.advanceTimersByTimeAsync(3000);
+    vi.useRealTimers();
+    await new Promise((r) => setTimeout(r, 25));
   });
 
   it("current turn resets the orb to idle and signals done", async () => {
