@@ -246,7 +246,7 @@ const DEFAULT_SETTINGS: Settings = {
   loadingHorizontalPct: 0.95,
   loadingVerticalPct: 0.05,
   loadingSize: 80,
-  orbColor: "#f2b859",
+  orbColor: "#ffffff",
   notifyToast: true,
   notifyNative: true,
   notifyUrgent: true,

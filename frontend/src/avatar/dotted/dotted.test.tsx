@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DottedOrb } from "./DottedOrb";
-import { inkColor, parseInk, WHITE_INK, LEVEL_RADIUS_GAIN, paintDots } from "./paintInk";
+import { inkColor, inkFromSetting, parseInk, WHITE_INK, LEVEL_RADIUS_GAIN, paintDots } from "./paintInk";
 import { densityFor, frameFor, ORB_DESIGNS, resolveOrb } from "./resolveOrb";
 
 describe("inkColor", () => {
@@ -30,6 +30,19 @@ describe("parseInk", () => {
     expect(parseInk("")).toEqual(WHITE_INK);
     expect(parseInk(null)).toEqual(WHITE_INK);
     expect(parseInk("red")).toEqual(WHITE_INK);
+  });
+});
+
+describe("inkFromSetting", () => {
+  it("treats the legacy default amber as no choice (white), in any case and with spaces", () => {
+    expect(inkFromSetting("#f2b859")).toEqual(WHITE_INK);
+    expect(inkFromSetting(" #F2B859 ")).toEqual(WHITE_INK);
+  });
+  it("honours any other colour and falls back to white for junk or missing values", () => {
+    expect(inkFromSetting("#00ccff")).toEqual([0, 204, 255]);
+    expect(inkFromSetting("#ffffff")).toEqual(WHITE_INK);
+    expect(inkFromSetting(undefined)).toEqual(WHITE_INK);
+    expect(inkFromSetting("blue")).toEqual(WHITE_INK);
   });
 });
 

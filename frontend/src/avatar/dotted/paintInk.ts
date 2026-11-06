@@ -87,3 +87,13 @@ export function parseInk(hex: string | null | undefined): Ink {
   const n = parseInt(m[1], 16);
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
+
+/** The default `orbColor` every profile saved before the dotted orb. The old WebGL orb ignored the setting, so this
+ *  value means "never chose a colour", and NEXUS draws pure white (the standing directive) instead of amber. */
+export const LEGACY_DEFAULT_ORB_COLOR = "#f2b859";
+
+/** Ink for the saved `orbColor`: white unless the owner picked something other than the legacy default. */
+export function inkFromSetting(hex: string | null | undefined): Ink {
+  if ((hex ?? "").trim().toLowerCase() === LEGACY_DEFAULT_ORB_COLOR) return WHITE_INK;
+  return parseInk(hex);
+}

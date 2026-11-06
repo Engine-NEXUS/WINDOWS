@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAssistant, AssistantState } from "../store/assistant";
 import { positionToPct, wheelResize, type CalibrationTarget } from "../calibration/geometry";
 import { DottedOrb } from "./dotted/DottedOrb";
-import { parseInk } from "./dotted/paintInk";
+import { inkFromSetting } from "./dotted/paintInk";
 import { useReducedMotion } from "./dotted/theme";
 import type { OrbActivity } from "./orbActivity";
 import { initOrbSignals } from "./orbSignals";
@@ -310,7 +310,7 @@ export function Avatar({ entered: enteredProp = false, dispersing = false, shown
   const orbColor = useAssistant((s) => s.orbColor);
   const themeMode = useThemeMode();
   const reducedMotion = useReducedMotion();
-  const ink = useMemo(() => parseInk(orbColor), [orbColor]);
+  const ink = useMemo(() => inkFromSetting(orbColor), [orbColor]);
 
   // Turn-gap pin (ghost always-on plan): in ghost mode an idle arriving
   // within 1.2s of the last active state (hot-mic relisten churn) holds the

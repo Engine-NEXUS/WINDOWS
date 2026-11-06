@@ -36,7 +36,7 @@ export function initBrowserDevMocks() {
     offlineVoiceModel: "bm_george",
     orbPosition: "top",
     orbCapsuleStyle: "classic",
-    orbColor: "#f2b859",
+    orbColor: "#ffffff",
     themeMode: "dark",
     visionProvider: "auto",
     visionRace: "sequential",
