@@ -6,8 +6,8 @@ import {
   RECEIPT_AUTO_HIDE_MS,
   type ActionReceipt as ActionReceiptType,
 } from "./actionReceiptModel";
-import { receiptLogoId } from "./receiptLogo";
-import { ProviderLogo, tileColor } from "../notify-toast/ProviderLogo";
+import { receiptDisplayName, receiptLogoId } from "./receiptLogo";
+import { ProviderLogo } from "../notify-toast/ProviderLogo";
 
 interface OrbRect {
   x: number;
@@ -21,48 +21,31 @@ export interface ActionReceiptCardProps {
 }
 
 /**
- * Pure card view: logo tile (or monogram fallback), status dot, "<headline> - <subject>",
- * title (if any), detail (if any, muted).
+ * Pure card view: small header "<headline> • <subject>", then a large logo tile (or monogram
+ * fallback) beside a bold title, then a muted detail line. No status dot; a failed action tints the header.
  * Non-interactive: pointer-events: none.
  * Accessibility: role="status" aria-live="polite".
  */
 export function ActionReceiptCard({ receipt }: ActionReceiptCardProps) {
   const logoId = receiptLogoId(receipt.subject);
-  const tileRef = useRef<HTMLDivElement | null>(null);
-
-  // Apply tile background through CSSOM if brand color exists (CSP-safe, direct DOM mutation)
-  useEffect(() => {
-    if (tileRef.current && logoId) {
-      const bg = tileColor(logoId);
-      if (bg) {
-        tileRef.current.style.setProperty("--kit-tile-bg", bg);
-        tileRef.current.style.setProperty("--nt-logo-bg", bg);
-      }
-    }
-  }, [logoId]);
+  const bigTitle = receipt.title || receiptDisplayName(receipt.subject);
 
   return (
-    <div className="action-receipt" role="status" aria-live="polite">
-      <div className="action-receipt-tile" ref={tileRef} aria-hidden="true">
-        <ProviderLogo icon={logoId} provider={receipt.subject} />
-      </div>
-      <div className="action-receipt-body">
-        <div className="action-receipt-header">
-          <span
-            className={`action-receipt-dot ${receipt.ok ? "action-receipt-dot--ok" : "action-receipt-dot--fail"}`}
-            aria-hidden="true"
-          />
-          <span className="action-receipt-headline">
-            {formatReceiptHeadline(receipt)}
-          </span>
+    <div
+      className={`action-receipt${receipt.ok ? "" : " action-receipt--fail"}`}
+      role="status"
+      aria-live="polite"
+    >
+      <div className="action-receipt-header">{formatReceiptHeadline(receipt)}</div>
+      <div className="action-receipt-main">
+        <div className="action-receipt-tile" aria-hidden="true">
+          <ProviderLogo icon={logoId} provider={receipt.subject} />
         </div>
-        {receipt.title && (
-          <div className="action-receipt-title">{receipt.title}</div>
-        )}
-        {receipt.detail && (
-          <div className="action-receipt-detail">{receipt.detail}</div>
-        )}
+        <div className="action-receipt-title">{bigTitle}</div>
       </div>
+      {receipt.detail && (
+        <div className="action-receipt-detail">{receipt.detail}</div>
+      )}
     </div>
   );
 }

@@ -78,6 +78,19 @@ export function DevActionReceipt() {
     setVisible(state.visible);
   };
 
+  const handleGmail = () => {
+    const state = model.onReceipt({
+      kind: "open_site",
+      headline: "Opened",
+      subject: "mail.google.com",
+      title: null,
+      detail: "mail.google.com/mail/u/0/#inbox",
+      ok: true,
+    });
+    setReceipt(state.receipt);
+    setVisible(state.visible);
+  };
+
   const handleFail = () => {
     const state = model.onReceipt({
       kind: "open_app",
@@ -125,6 +138,9 @@ export function DevActionReceipt() {
         </button>
         <button id="btn-github" onClick={handleGithub}>
           github.com
+        </button>
+        <button id="btn-gmail" onClick={handleGmail}>
+          Gmail
         </button>
         <button id="btn-fail" onClick={handleFail}>
           tried to open (fail)

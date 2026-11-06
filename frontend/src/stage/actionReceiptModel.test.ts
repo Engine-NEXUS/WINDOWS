@@ -318,7 +318,7 @@ describe("ActionReceipt model - replacement table", () => {
       initial: handleReceipt(INITIAL_ACTION_RECEIPT_STATE, receiptA, t0),
       incoming: receiptB,
       arrivalMs: t0 + 3000,
-      expectedHeadline: "Opened - youtube.com",
+      expectedHeadline: "Opened • youtube.com",
       expectedTimestamp: t0 + 3000,
       testNowMs: t0 + 7000, // at t0 + 7000, receipt A would have expired, but receipt B is still active
       expectedVisibleAtTestNow: true,
@@ -328,7 +328,7 @@ describe("ActionReceipt model - replacement table", () => {
       initial: handleReceipt(INITIAL_ACTION_RECEIPT_STATE, receiptA, t0),
       incoming: { malformed: true },
       arrivalMs: t0 + 3000,
-      expectedHeadline: "Opened - Notepad",
+      expectedHeadline: "Opened • Notepad",
       expectedTimestamp: t0,
       testNowMs: t0 + 6500, // at t0 + 6500, original receipt A has expired
       expectedVisibleAtTestNow: false,

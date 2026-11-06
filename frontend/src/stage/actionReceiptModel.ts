@@ -108,7 +108,7 @@ export function normalizeReceiptPayload(raw: unknown): ActionReceipt | null {
 
 /** Format first line: "<headline> - <subject>" */
 export function formatReceiptHeadline(receipt: ActionReceipt): string {
-  return `${receipt.headline} - ${receipt.subject}`;
+  return `${receipt.headline} • ${receipt.subject}`;
 }
 
 /** Check if the 6 s dwell has elapsed */

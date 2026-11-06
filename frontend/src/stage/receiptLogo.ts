@@ -371,3 +371,38 @@ export function receiptLogoId(subject: string): string | null {
 
   return null;
 }
+
+const RECEIPT_DISPLAY_NAMES: Record<string, string> = {
+  gmail: "Gmail",
+  youtube: "YouTube",
+  vscode: "VS Code",
+  github: "GitHub",
+  whatsapp: "WhatsApp",
+  fileexplorer: "File Explorer",
+  googlecalendar: "Google Calendar",
+  googledrive: "Google Drive",
+  googlemeet: "Google Meet",
+  googlephotos: "Google Photos",
+  googlesheets: "Google Sheets",
+  linkedin: "LinkedIn",
+  chatgpt: "ChatGPT",
+  openai: "OpenAI",
+  powerpoint: "PowerPoint",
+  powershell: "PowerShell",
+  onedrive: "OneDrive",
+  onenote: "OneNote",
+  tiktok: "TikTok",
+  twitter: "X",
+};
+
+/**
+ * Friendly name for the card's big title when the payload has none: "mail.google.com" -> "Gmail",
+ * "youtube.com" -> "YouTube". Unknown subjects fall back to the subject itself.
+ */
+export function receiptDisplayName(subject: string): string {
+  const id = receiptLogoId(subject);
+  if (id) {
+    return RECEIPT_DISPLAY_NAMES[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
+  }
+  return (subject ?? "").trim();
+}

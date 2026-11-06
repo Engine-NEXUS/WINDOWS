@@ -11,7 +11,7 @@ describe("ActionReceipt component", () => {
 });
 
 describe("ActionReceiptCard rendering", () => {
-  it("renders success receipt with headline, subject, dot-ok, role status and aria-live polite", () => {
+  it("renders success receipt with header, big title from the app name, role status and no status dot", () => {
     const receipt: ActionReceiptType = {
       kind: "open_app",
       headline: "Opened",
@@ -23,16 +23,16 @@ describe("ActionReceiptCard rendering", () => {
     const html = renderToStaticMarkup(<ActionReceiptCard receipt={receipt} />);
     expect(html).toContain('role="status"');
     expect(html).toContain('aria-live="polite"');
-    expect(html).toContain("action-receipt-dot--ok");
-    expect(html).not.toContain("action-receipt-dot--fail");
-    expect(html).toContain("Opened - Notepad");
+    expect(html).not.toContain("action-receipt-dot");
+    expect(html).not.toContain("action-receipt--fail");
+    expect(html).toContain("Opened • Notepad");
+    expect(html).toContain('<div class="action-receipt-title">Notepad</div>');
     expect(html).toContain("/activity-logos/notepad.svg");
     expect(html).toContain('alt="Notepad"');
-    expect(html).not.toContain("action-receipt-title");
     expect(html).not.toContain("action-receipt-detail");
   });
 
-  it("renders failure receipt with dot-fail and detail", () => {
+  it("renders failure receipt with the fail tint (no dot) and detail", () => {
     const receipt: ActionReceiptType = {
       kind: "open_app",
       headline: "Tried to open",
@@ -42,13 +42,12 @@ describe("ActionReceiptCard rendering", () => {
       ok: false,
     };
     const html = renderToStaticMarkup(<ActionReceiptCard receipt={receipt} />);
-    expect(html).toContain("action-receipt-dot--fail");
-    expect(html).not.toContain("action-receipt-dot--ok");
-    expect(html).toContain("Tried to open - Notepad");
+    expect(html).toContain("action-receipt--fail");
+    expect(html).not.toContain("action-receipt-dot");
+    expect(html).toContain("Tried to open • Notepad");
     expect(html).toContain("/activity-logos/notepad.svg");
     expect(html).toContain("action-receipt-detail");
     expect(html).toContain("I could not confirm it came to the front.");
-    expect(html).not.toContain("action-receipt-title");
   });
 
   it("renders full search receipt with title and detail", () => {
@@ -61,8 +60,8 @@ describe("ActionReceiptCard rendering", () => {
       ok: true,
     };
     const html = renderToStaticMarkup(<ActionReceiptCard receipt={receipt} />);
-    expect(html).toContain("action-receipt-dot--ok");
-    expect(html).toContain("Opened - youtube.com");
+    expect(html).not.toContain("action-receipt-dot");
+    expect(html).toContain("Opened • youtube.com");
     expect(html).toContain("/activity-logos/youtube.svg");
     expect(html).toContain("action-receipt-title");
     expect(html).toContain("lofi beats");
@@ -82,7 +81,7 @@ describe("ActionReceiptCard rendering", () => {
     const html = renderToStaticMarkup(<ActionReceiptCard receipt={receipt} />);
     expect(html).toContain("/activity-logos/vscode.svg");
     expect(html).toContain('alt="Visual Studio Code"');
-    expect(html).toContain("Opened - Visual Studio Code");
+    expect(html).toContain("Opened • Visual Studio Code");
   });
 
   it("renders monogram fallback for unknown subject without broken image", () => {
@@ -99,6 +98,21 @@ describe("ActionReceiptCard rendering", () => {
     expect(html).toContain('data-mode="monogram"');
     expect(html).toContain('data-monogram="F"');
     expect(html).toContain("kit-logo-monogram");
-    expect(html).toContain("Opened - Foo Tool");
+    expect(html).toContain("Opened • Foo Tool");
+  });
+
+  it("uses the friendly app name as the big title for a site with no title (mail.google.com -> Gmail)", () => {
+    const receipt: ActionReceiptType = {
+      kind: "open_site",
+      headline: "Opened",
+      subject: "mail.google.com",
+      title: null,
+      detail: "mail.google.com/mail/u/0/#inbox",
+      ok: true,
+    };
+    const html = renderToStaticMarkup(<ActionReceiptCard receipt={receipt} />);
+    expect(html).toContain("Opened • mail.google.com");
+    expect(html).toContain('<div class="action-receipt-title">Gmail</div>');
+    expect(html).toContain("/activity-logos/gmail.svg");
   });
 });
