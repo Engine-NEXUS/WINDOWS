@@ -170,18 +170,6 @@ impl WindowConfig {
             focus: false, center: false, hidden_title: true,
         }
     }
-
-    /// Orb Customization Studio window — 800px wide (twice Settings width),
-    /// positioned to the left of the Settings sidebar.
-    pub fn orb_studio() -> Self {
-        Self {
-            label: "orb-studio", title: "NEXUS Orb Studio", url: "orb-studio.html",
-            width: 800., height: 980., min_width: Some(720.), min_height: Some(600.),
-            resizable: true, decorations: false, transparent: true,
-            always_on_top: true, skip_taskbar: false, shadow: true,
-            focus: true, center: false, hidden_title: true,
-        }
-    }
 }
 
 /// Get an existing window, or create it on-demand if it doesn't exist.
@@ -241,7 +229,7 @@ pub fn get_or_create_window<R: Runtime>(
         // (sidebar_backdrop.rs -> `sidebar:backdrop` -> `.sidebar-card::after`).
         let is_glass_window = matches!(
             config.label,
-            "sidebar" | "architect-map" | "maps-panel" | "place-card" | "notify-toast" | "calibrate-toolbar" | "settings" | "setup" | "orb-studio"
+            "sidebar" | "architect-map" | "maps-panel" | "place-card" | "notify-toast" | "calibrate-toolbar" | "settings" | "setup"
         );
         if is_glass_window {
             crate::dwm_corners::round_corners(&win);

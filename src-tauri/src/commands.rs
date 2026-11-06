@@ -1509,70 +1509,6 @@ pub fn close_settings_window<R: Runtime>(
     Ok(())
 }
 
-/// IPC: Open the Orb Studio customization window.
-/// Spawns directly to the left of the Settings sidebar without closing Settings.
-/// Width is 800px (twice Settings' 400px width).
-#[tauri::command]
-pub async fn open_orb_studio_window<R: Runtime>(
-    app: tauri::AppHandle<R>,
-) -> Result<(), String> {
-    let win = crate::dyn_windows::get_or_create_window(&app, crate::dyn_windows::WindowConfig::orb_studio())?;
-
-    // Position directly to the left of the settings window
-    if let Ok(monitors) = win.available_monitors() {
-        if let Some(primary) = monitors.first() {
-            let size = primary.size();
-            let scale = primary.scale_factor();
-            let mw = size.width as f64 / scale;
-            let mh = size.height as f64 / scale;
-
-            let h = (mh - 40.0).min(1040.0).max(400.0);
-            let studio_w = 800.0;
-            // Settings right dock x = mw - 400 - 10 = mw - 410.
-            // Studio sits 12px to the left of settings: x = mw - 410 - 800 - 12 = mw - 1222.
-            let studio_x = (mw - 1222.0).max(10.0);
-            let studio_y = 20.0;
-
-            let _ = win.set_size(tauri::LogicalSize::new(studio_w, h));
-            let _ = win.set_position(tauri::LogicalPosition::new(studio_x, studio_y));
-        }
-    }
-
-    win.show().map_err(|e| e.to_string())?;
-    win.set_focus().map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-/// IPC: Close/destroy the Orb Studio window.
-#[tauri::command]
-pub fn close_orb_studio_window<R: Runtime>(
-    app: tauri::AppHandle<R>,
-) -> Result<(), String> {
-    let _ = crate::dyn_windows::destroy_window(&app, "orb-studio");
-    Ok(())
-}
-
-/// IPC: Save custom orb morphology selection and broadcast to all windows immediately.
-#[tauri::command]
-pub fn set_orb_morphology<R: Runtime>(
-    app: tauri::AppHandle<R>,
-    think: u32,
-    speak: u32,
-    listen: u32,
-) -> Result<(), String> {
-    let mut settings = get_settings(app.clone())?;
-    settings.orb_think_mode = think;
-    settings.orb_speak_mode = speak;
-    settings.orb_listen_mode = listen;
-    save_settings(app.clone(), settings.clone())?;
-    let _ = app.emit("orb:morphology_changed", serde_json::json!({
-        "think": think,
-        "speak": speak,
-        "listen": listen,
-    }));
-    Ok(())
-}
-
 /// IPC: Save custom orb capsule style ("classic" | "pebble") and broadcast immediately.
 #[tauri::command]
 pub fn set_orb_capsule_style<R: Runtime>(
@@ -1700,18 +1636,10 @@ pub struct NexusSettings {
     /// Elastic spring stiffness factor * 100.
     #[serde(default = "default_orb_stiffness")]
     pub orb_stiffness: u32,
-    /// Orb thinking morphology mode (1..12).
-    /// Default: 6 (Trefoil Celtic Helix Cage).
-    #[serde(default = "default_orb_think_mode")]
-    pub orb_think_mode: u32,
-    /// Orb speaking morphology mode (1..6).
-    /// Default: 2 (64-strand Fibonacci Blossom).
-    #[serde(default = "default_orb_speak_mode")]
-    pub orb_speak_mode: u32,
-    /// Orb listening morphology mode (1..4).
-    /// Default: 1 (Acoustic Sand Cymatics & Inward Vortex).
-    #[serde(default = "default_orb_listen_mode")]
-    pub orb_listen_mode: u32,
+    /// Activity -> orb design (`idle`, `listening`, `thinking`, ... -> `breathing`, `working`, ...).
+    /// Empty = the built-in mapping. Unknown ids are ignored by the frontend.
+    #[serde(default)]
+    pub orb_designs: std::collections::HashMap<String, String>,
     /// Gemini API key for Google Gemini models.
     /// When empty, Gemini features are unavailable.
     #[serde(default)]
@@ -2265,18 +2193,6 @@ fn default_orb_stiffness() -> u32 {
     103
 }
 
-fn default_orb_think_mode() -> u32 {
-    6
-}
-
-fn default_orb_speak_mode() -> u32 {
-    2
-}
-
-fn default_orb_listen_mode() -> u32 {
-    1
-}
-
 /// `localSttOnly` when the setting is absent. ONE value for the struct default
 /// and every raw-JSON reader (they used to disagree: the Settings UI showed
 /// `true` while the runtime read `false`, so a user who only pasted a Groq key
@@ -2333,9 +2249,7 @@ impl Default for NexusSettings {
             orb_base_rim_opacity: default_orb_base_rim_opacity(),
             orb_wing_glow_spread: default_orb_wing_glow_spread(),
             orb_stiffness: default_orb_stiffness(),
-            orb_think_mode: default_orb_think_mode(),
-            orb_speak_mode: default_orb_speak_mode(),
-            orb_listen_mode: default_orb_listen_mode(),
+            orb_designs: std::collections::HashMap::new(),
             gemini_api_key: String::new(),
             cerebras_api_key: String::new(),
             deepgram_api_key: String::new(),
@@ -2676,11 +2590,6 @@ fn save_settings_with_voice_intent<R: Runtime>(
     std::fs::write(&config_path, serde_json::Value::Object(config).to_string())
         .map_err(|e| e.to_string())?;
     let _ = app.emit("settings:updated", &settings);
-    let _ = app.emit("orb:morphology_changed", serde_json::json!({
-        "think": settings.orb_think_mode,
-        "speak": settings.orb_speak_mode,
-        "listen": settings.orb_listen_mode,
-    }));
     let _ = app.emit("orb:capsule_style", serde_json::json!({
         "style": settings.orb_capsule_style,
         "mode": settings.orb_wakeup_mode,
@@ -4465,6 +4374,23 @@ mod nexus_settings_tests {
         let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
         raw.as_object_mut().unwrap().remove("bargeInNoWake");
         let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+    #[test]
+    fn orb_designs_defaults_empty_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("orbDesigns");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert!(parsed.orb_designs.is_empty(), "orbDesigns must default to the built-in mapping (empty)");
+
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut()
+            .unwrap()
+            .insert("orbDesigns".to_string(), serde_json::json!({"ghost": "weaving", "idle": "breathing"}));
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert_eq!(parsed.orb_designs.get("ghost").map(String::as_str), Some("weaving"));
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized["orbDesigns"]["idle"], serde_json::json!("breathing"));
+    }
+
         assert!(parsed.barge_in_no_wake, "bargeInNoWake must default to true");
         let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
         assert_eq!(reserialized.get("bargeInNoWake"), Some(&serde_json::json!(true)));
