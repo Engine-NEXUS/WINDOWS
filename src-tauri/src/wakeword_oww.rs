@@ -60,6 +60,12 @@ pub fn run<R: Runtime>(_app: AppHandle<R>) -> Result<(), String> {
 pub fn set_meeting_state(_state: std::sync::Arc<crate::meeting_detect::MeetingState>) {}
 
 #[cfg(feature = "mock-wake")]
+pub fn sync_barge_in_no_wake<R: Runtime>(_app: &AppHandle<R>) {}
+
+#[cfg(feature = "mock-wake")]
+pub fn reset_barge_gate() {}
+
+#[cfg(feature = "mock-wake")]
 pub(crate) fn clear_tts_playing() {}
 
 // `pub(crate)`: the offline evaluator (`voice_eval.rs`) drives the REAL engine.
@@ -1683,6 +1689,16 @@ pub(crate) mod engine {
                     // the endpoint.
                     if crate::wake_cue::window_active_now() {
                         super::capture_vad_apply(false, false);
+                    } else if super::barge_capture_over_tts() {
+                        // Barge capture while NEXUS still speaks (ducked): the VAD would call our own echo
+                        // speech forever. Only energy clearly above the expected echo counts as the owner.
+                        let duck_gain = if crate::tts::is_ducked() { 0.25 } else { 1.0 };
+                        let v = super::ECHO_GATE.lock().is_voice_chunk(
+                            rms,
+                            crate::speech_sync::reference_level_now(),
+                            duck_gain,
+                        );
+                        super::capture_vad_apply(v, v);
                     } else if let Some(p) = super::silero_chunk_prob(&chunk) {
                         let (cont_voice, start_voice) = super::chunk_voice_flags(rms, Some(p));
                         super::capture_vad_apply(cont_voice, start_voice);
@@ -1872,36 +1888,70 @@ pub(crate) mod engine {
                         })
                         .unwrap_or(false);
                     if tts_only {
-                        let sum_sq: f32 =
-                            chunk.iter().map(|s| s * s).sum();
-                        let chunk_rms =
-                            (sum_sq / chunk.len().max(1) as f32).sqrt();
-                        if chunk_rms > super::BARGE_RMS_FLOOR {
-                            super::BARGE_SUSTAINED_CHUNKS.fetch_add(1, Ordering::Relaxed);
+                        if !super::BARGE_IN_NO_WAKE.load(Ordering::Relaxed) {
+                            let sum_sq: f32 =
+                                chunk.iter().map(|s| s * s).sum();
+                            let chunk_rms =
+                                (sum_sq / chunk.len().max(1) as f32).sqrt();
+                            if chunk_rms > super::BARGE_RMS_FLOOR {
+                                super::BARGE_SUSTAINED_CHUNKS.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                super::BARGE_SUSTAINED_CHUNKS.store(0, Ordering::Relaxed);
+                            }
+                            let sustained =
+                                super::BARGE_SUSTAINED_CHUNKS.load(Ordering::Relaxed);
+                            if super::should_barge_attempt(tts_only, sustained)
+                                && !super::BARGE_ATTEMPTED.swap(true, Ordering::SeqCst)
+                            {
+                                tracing::info!(
+                                    "barge-in: sustained speech during TTS ({} chunks) — one exact-only verify",
+                                    sustained
+                                );
+                                let audio: Vec<f32> = super::VERIFY_RING
+                                    .lock()
+                                    .iter()
+                                    .copied()
+                                    .collect();
+                                let _ = wake_tx.send(super::WakeCandidate {
+                                    audio,
+                                    prob: 0.0,
+                                    verified: false,
+                                    // No wake word was heard: nothing to seed from.
+                                    ring_end: 0,
+                                });
+                            }
                         } else {
-                            super::BARGE_SUSTAINED_CHUNKS.store(0, Ordering::Relaxed);
-                        }
-                        let sustained =
-                            super::BARGE_SUSTAINED_CHUNKS.load(Ordering::Relaxed);
-                        if super::should_barge_attempt(tts_only, sustained)
-                            && !super::BARGE_ATTEMPTED.swap(true, Ordering::SeqCst)
-                        {
-                            tracing::info!(
-                                "barge-in: sustained speech during TTS ({} chunks) — one exact-only verify",
-                                sustained
-                            );
-                            let audio: Vec<f32> = super::VERIFY_RING
-                                .lock()
-                                .iter()
-                                .copied()
-                                .collect();
-                            let _ = wake_tx.send(super::WakeCandidate {
-                                audio,
-                                prob: 0.0,
-                                verified: false,
-                                // No wake word was heard: nothing to seed from.
-                                ring_end: 0,
-                            });
+                            let sum_sq: f32 =
+                                chunk.iter().map(|s| s * s).sum();
+                            let chunk_rms =
+                                (sum_sq / chunk.len().max(1) as f32).sqrt();
+                            let ref_level = crate::speech_sync::reference_level_now();
+                            let fired = super::ECHO_GATE.lock().update(chunk_rms, ref_level);
+                            if fired {
+                                let now_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64;
+                                let last = super::BARGE_LAST_ATTEMPT_MS.load(Ordering::Relaxed);
+                                if now_ms.saturating_sub(last) >= 1500 {
+                                    super::BARGE_LAST_ATTEMPT_MS.store(now_ms, Ordering::Relaxed);
+                                    let ratio = super::ECHO_GATE.lock().ratio_ema;
+                                    tracing::info!(
+                                        "[TURN] barge onset ref={} ratio={:.3}",
+                                        match ref_level {
+                                            Some(r) => format!("{:.3}", r),
+                                            None => "none".into(),
+                                        },
+                                        ratio
+                                    );
+                                    crate::tts::duck(true);
+                                    if let Some(tx) = super::BARGE_TX.get() {
+                                        let _ = tx.try_send(());
+                                    }
+                                    let ring_end = super::RING_TOTAL.load(Ordering::Relaxed);
+                                    super::start_stt_capture_barge(ring_end);
+                                }
+                            }
                         }
                     }
                     continue;
@@ -1911,6 +1961,7 @@ pub(crate) mod engine {
                 // re-arms exactly one attempt.
                 super::BARGE_SUSTAINED_CHUNKS.store(0, Ordering::Relaxed);
                 super::BARGE_ATTEMPTED.store(false, Ordering::Relaxed);
+                super::ECHO_GATE.lock().reset();
 
                 // Post-TTS Mute Gate: drop audio chunks for 2000ms after TTS
                 // finishes to allow room acoustics, DAC output buffers, and
@@ -2466,6 +2517,40 @@ static LAST_CALLBACK_FOR_RECOVERY: std::sync::atomic::AtomicU64 = std::sync::ato
 /// Tracks how many times the silence-recovery has restarted the stream.
 /// Used to rate-limit restarts and log the count for debugging.
 static RECOVERY_RESTART_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub static BARGE_IN_NO_WAKE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+#[cfg(not(feature = "mock-wake"))]
+static ECHO_GATE: parking_lot::Mutex<crate::barge_gate::EchoGate> =
+    parking_lot::Mutex::new(crate::barge_gate::EchoGate::new());
+#[cfg(not(feature = "mock-wake"))]
+static BARGE_LAST_ATTEMPT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static BARGE_TX: once_cell::sync::OnceCell<std::sync::mpsc::SyncSender<()>> =
+    once_cell::sync::OnceCell::new();
+
+#[cfg(not(feature = "mock-wake"))]
+pub fn sync_barge_in_no_wake<R: Runtime>(app: &AppHandle<R>) {
+    BARGE_IN_NO_WAKE.store(
+        crate::commands::read_barge_in_no_wake(app),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// True while a barge capture (speech over NEXUS) is open and NEXUS is still speaking.
+#[cfg(not(feature = "mock-wake"))]
+fn barge_capture_over_tts() -> bool {
+    crate::directed::current_capture_origin() == crate::directed::Origin::Barge
+        && MEETING_STATE
+            .get()
+            .map(|s| s.tts_playing.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(false)
+}
+
+#[cfg(not(feature = "mock-wake"))]
+pub fn reset_barge_gate() {
+    ECHO_GATE.lock().reset();
+}
 
 /// Barge-in attempt state (v4): sustained speech while TTS-muted may be the
 /// user interrupting. One exact-only verify per TTS session (cooldown via
@@ -3372,6 +3457,9 @@ fn start_stt_capture_inner(origin: crate::directed::Origin, seed: Option<(Vec<f3
 #[cfg(feature = "mock-wake")]
 pub fn start_stt_capture_seeded(_offset_ms: i32, _ring_end: u64) {}
 
+#[cfg(feature = "mock-wake")]
+pub fn start_stt_capture_barge(_ring_end: u64) {}
+
 /// Which slice of the verify ring a capture seed uses. Pure (unit-tested).
 ///
 /// `total_now`: samples ever pushed; `ring_len`: samples currently in the ring
@@ -3420,6 +3508,26 @@ pub fn start_stt_capture_seeded(offset_ms: i32, ring_end: u64) {
         None => Vec::new(),
     };
     start_stt_capture_inner(crate::directed::Origin::Direct, Some((seed, total_now)));
+    drop(ring);
+}
+
+/// Like [`start_stt_capture_seeded`], but begins 480 ms before `ring_end` (the onset window)
+/// and marks the capture with [`crate::directed::Origin::Barge`].
+#[cfg(not(feature = "mock-wake"))]
+pub fn start_stt_capture_barge(ring_end: u64) {
+    use std::sync::atomic::Ordering;
+    let ring = VERIFY_RING.lock();
+    let total_now = RING_TOTAL.load(Ordering::SeqCst);
+    let offset = -480 * 16;
+    let seed: Vec<f32> = match seed_slice(total_now, ring.len(), ring_end, offset) {
+        Some((start, count)) => ring.iter().skip(start).take(count).copied().collect(),
+        None => {
+            let count = (480 * 16).min(ring.len());
+            let start = ring.len().saturating_sub(count);
+            ring.iter().skip(start).take(count).copied().collect()
+        }
+    };
+    start_stt_capture_inner(crate::directed::Origin::Barge, Some((seed, total_now)));
     drop(ring);
 }
 
@@ -3727,6 +3835,7 @@ pub(crate) fn clear_tts_playing() {
 
 #[cfg(not(feature = "mock-wake"))]
 pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    sync_barge_in_no_wake(&app);
     crate::capture_audit::initialize();
     use tauri::{Emitter, Manager};
     use std::time::Instant;
@@ -4100,6 +4209,18 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         })
         .ok();
 
+    let (barge_tx, barge_rx) = std::sync::mpsc::sync_channel::<()>(4);
+    let _ = BARGE_TX.set(barge_tx);
+    let app_for_barge = app.clone();
+    std::thread::Builder::new()
+        .name("barge-duck-fwd".into())
+        .spawn(move || {
+            while let Ok(()) = barge_rx.recv() {
+                let _ = app_for_barge.emit("barge:duck", serde_json::json!({}));
+            }
+        })
+        .ok();
+
     // Spawn the STT receiver thread — it has access to the AppHandle and
     // handles transcription + event emission.
     let app_for_stt = app.clone();
@@ -4115,6 +4236,11 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     tracing::error!("stt-capture: failed to create persistent tokio runtime: {}", e);
                     return;
                 }
+            };
+
+            let barge_resume = |app: &AppHandle<R>| {
+                crate::tts::duck(false);
+                let _ = app.emit("barge:resume", serde_json::json!({}));
             };
 
             while let Ok((session, mut stats, buffer, mut audit)) = stt_rx.recv() {
@@ -4201,6 +4327,13 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     }
                 };
                 if buffer.is_empty() {
+                    if crate::directed::last_turn_origin() == crate::directed::Origin::Barge {
+                        audit.finish(Outcome::EmptyBuffer);
+                        stats.endpoint = "empty_buffer";
+                        crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
+                        barge_resume(&app_for_stt);
+                        continue;
+                    }
                     audit.finish(Outcome::EmptyBuffer);
                     tracing::warn!("stt-capture: empty buffer received");
                     crate::commands::emit_logged(&app_for_stt, "stt:transcript", "");
@@ -4215,6 +4348,18 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                 // brain, e.g. a phantom "Architect" window). "" flows into
                 // the normal retry prompt, never into an action.
                 if is_phantom_capture(&buffer) {
+                    if crate::directed::last_turn_origin() == crate::directed::Origin::Barge {
+                        audit.finish(Outcome::Phantom);
+                        stats.filter = "phantom";
+                        stats.stt_path = "skipped";
+                        let diagnostic_samples: Vec<i16> = buffer.iter()
+                            .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16).collect();
+                        crate::stt_diagnostics::save_capture(&app_for_stt, session, &diagnostic_samples, "", &stats);
+                        crate::stt_diagnostics::update_decision(&app_for_stt, session, "", "none", "phantom_drop");
+                        crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
+                        barge_resume(&app_for_stt);
+                        continue;
+                    }
                     audit.finish(Outcome::Phantom);
                     tracing::info!(
                         "stt-capture: phantom capture ({} samples, <{} voiced chunks) — skipping Groq",
@@ -4276,6 +4421,20 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     || (crate::commands::read_speaker_verification(&app_for_stt)
                         && ownership != crate::voice_profile::TurnOwnership::Verified)
                 {
+                    if crate::directed::last_turn_origin() == crate::directed::Origin::Barge {
+                        tracing::info!(
+                            "stt-capture: non-owner barge audio (score {:.3}) — ambient drop, no transcription",
+                            owner_score
+                        );
+                        stats.stt_path = "owner_hold";
+                        stats.filter = "non_owner";
+                        audit.finish(Outcome::OwnerHold);
+                        crate::stt_diagnostics::save_capture(&app_for_stt, session, &samples, "", &stats);
+                        crate::stt_diagnostics::update_decision(&app_for_stt, session, "", "none", "ambient_drop");
+                        crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
+                        barge_resume(&app_for_stt);
+                        continue;
+                    }
                     tracing::info!(
                         "stt-capture: non-owner audio (score {:.3}) — ambient drop, no transcription",
                         owner_score
@@ -4324,10 +4483,20 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     .await;
 
                     let stt_failed = transcript.is_err();
+                    if stt_failed && crate::directed::last_turn_origin() == crate::directed::Origin::Barge {
+                        stats.stt_path = "stt_error";
+                        stats.filter = "stt_error";
+                        audit.finish(Outcome::SttError);
+                        crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
+                        barge_resume(&app_for_stt);
+                        return;
+                    }
                     let mut raw_text = transcript.unwrap_or_default();
                     // The user only said the assistant's name while a turn was already open: ignore it (no reply,
                     // no "what is Nexus" answer). It reaches the frontend as a silent miss, which re-opens the mic.
-                    let name_only = !raw_text.is_empty() && crate::wake_names::is_name_only(&raw_text);
+                    let name_only = !raw_text.is_empty()
+                        && crate::directed::last_turn_origin() != crate::directed::Origin::Barge
+                        && crate::wake_names::is_name_only(&raw_text);
                     if name_only {
                         tracing::info!("stt-capture: transcript '{}' is only the assistant's name — ignored", raw_text);
                         raw_text.clear();
@@ -4352,6 +4521,37 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     let raw_admin = crate::admin_privilege::parse_command(&raw_text).is_some();
                     let normalized = crate::intent_parser::normalize_phonetic_mishearings(&raw_text);
                     let text = if raw_admin || normalized.is_empty() { raw_text.clone() } else { normalized };
+
+                    if crate::directed::last_turn_origin() == crate::directed::Origin::Barge {
+                        let action = crate::barge_classify::classify(&text, &crate::directed::recent_spoken_snapshot());
+                        tracing::info!("[TURN] barge classify=\"{}\" -> {:?}", text, action);
+                        match action {
+                            crate::barge_classify::BargeAction::Resume => {
+                                stats.filter = "barge_resume";
+                                stats.stt_path = crate::stt::last_stt_path_str();
+                                crate::stt_diagnostics::save_capture(&app_for_stt, session, &samples, &raw_text, &stats);
+                                audit.finish(Outcome::Filtered);
+                                crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
+                                barge_resume(&app_for_stt);
+                                return;
+                            }
+                            crate::barge_classify::BargeAction::StopOnly => {
+                                crate::orchestrator::request_barge_in("barge-stop");
+                                crate::tts::duck(false);
+                                let _ = app_for_stt.emit("tts:stop", ());
+                                stats.filter = "barge_stop";
+                                stats.stt_path = crate::stt::last_stt_path_str();
+                                crate::stt_diagnostics::save_capture(&app_for_stt, session, &samples, &raw_text, &stats);
+                                audit.finish(Outcome::Delivered);
+                                crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
+                                return;
+                            }
+                            crate::barge_classify::BargeAction::StopAndRoute => {
+                                crate::orchestrator::request_barge_in("barge");
+                                crate::tts::duck(false);
+                            }
+                        }
+                    }
                     // A waiting question owns a bare "yes" / "no": hand it to the orchestrator unparsed, or the
                     // greeting parser would answer it as chat and the question would never see it.
                     let parsed = if crate::intent_parser::answers_a_pending_offer(&text) {

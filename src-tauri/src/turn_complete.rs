@@ -364,6 +364,9 @@ mod tests {
         // Elapsed time >= turn_hold_ms: silence window already expired
         assert!(!may_hold(3000, false, Origin::Direct, false, Verdict::Incomplete, 3000));
         assert!(!may_hold(3000, false, Origin::Direct, false, Verdict::Incomplete, 3500));
+
+        // Barge origin: must not hold
+        assert!(!may_hold(3000, false, Origin::Barge, false, Verdict::Incomplete, 800));
     }
 
     #[test]

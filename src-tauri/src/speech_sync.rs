@@ -332,3 +332,64 @@ pub fn cancel_current() {
         }
     }
 }
+
+/// Pure helper: calculate envelope amplitude at `pos_ms` given track parameters.
+pub fn envelope_at(envelope: &[f32], frame_ms: u64, start_ms: u64, pos_ms: u64) -> Option<f32> {
+    if envelope.is_empty() || frame_ms == 0 || pos_ms < start_ms {
+        return None;
+    }
+    let offset_ms = pos_ms - start_ms;
+    let idx = (offset_ms / frame_ms) as usize;
+    envelope.get(idx).copied()
+}
+
+/// Peak-normalised TTS envelope level at current playback position, if playing.
+pub fn reference_level_now() -> Option<f32> {
+    if !enabled() {
+        return None;
+    }
+    let (lock, _) = &*STATE;
+    let state = lock.lock().unwrap();
+    let current = state.current.as_ref()?;
+    if current.phase != "playing" {
+        return None;
+    }
+    let pos_ms = current.position_ms;
+    for track in state.tracks.iter().rev() {
+        if let Some(level) = envelope_at(&track.envelope, track.frame_ms, track.envelope_start_ms, pos_ms) {
+            return Some(level);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_envelope_at() {
+        let env = vec![0.1, 0.4, 0.8, 0.5];
+        let frame_ms = 20;
+        let start_ms = 100;
+
+        assert_eq!(envelope_at(&env, frame_ms, start_ms, 100), Some(0.1));
+        assert_eq!(envelope_at(&env, frame_ms, start_ms, 115), Some(0.1));
+        assert_eq!(envelope_at(&env, frame_ms, start_ms, 120), Some(0.4));
+        assert_eq!(envelope_at(&env, frame_ms, start_ms, 140), Some(0.8));
+        assert_eq!(envelope_at(&env, frame_ms, start_ms, 160), Some(0.5));
+        assert_eq!(envelope_at(&env, frame_ms, start_ms, 179), Some(0.5));
+
+        // Before start
+        assert_eq!(envelope_at(&env, frame_ms, start_ms, 99), None);
+        assert_eq!(envelope_at(&env, frame_ms, start_ms, 0), None);
+
+        // Past end
+        assert_eq!(envelope_at(&env, frame_ms, start_ms, 180), None);
+        assert_eq!(envelope_at(&env, frame_ms, start_ms, 500), None);
+
+        // Empty envelope or zero frame_ms
+        assert_eq!(envelope_at(&[], frame_ms, start_ms, 100), None);
+        assert_eq!(envelope_at(&env, 0, start_ms, 100), None);
+    }
+}

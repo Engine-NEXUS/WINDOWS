@@ -18,6 +18,8 @@ mod window_manager;
 pub(crate) mod turn_detect;
 pub(crate) mod turn_complete;
 pub(crate) mod turn_continue;
+pub(crate) mod barge_gate;
+pub(crate) mod barge_classify;
 // Silero VAD (Handy-derived) — used by the STT capture loop when "vadSilero" is on.
 pub(crate) mod vad;
 // Phase 8: directed-speech gate for open-mic (ghost hot-mic) turns

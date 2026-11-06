@@ -261,7 +261,21 @@ async function setupOrbWakeListener() {
       // turn-end:keep-raw explicit user cancel (Ctrl+Space): the hot mic must not relisten
       s.reset();
     });
-    console.log("[NEXUS] orb:wake / orb:first_run_greeting / orb:cancel listeners registered");
+    // Speaking over NEXUS (no wake word): Rust ducks the voice and opens a capture. Show the
+    // listening form at once WITHOUT stopping speech or aborting anything; `barge:resume` puts the
+    // orb back to speaking when what was heard turned out to be echo or noise.
+    await listen("barge:duck", () => {
+      const s = useAssistant.getState();
+      console.log("[TURN] barge duck: orb -> listening (speech ducked, not stopped)");
+      s.setVisible(true);
+      s.setState("listening");
+    });
+    await listen("barge:resume", () => {
+      const s = useAssistant.getState();
+      console.log("[TURN] barge resume: not for NEXUS, continuing speech");
+      if (s.state === "listening") s.setState(isRustTtsPlaying() ? "speaking" : "idle");
+    });
+    console.log("[NEXUS] orb:wake / orb:first_run_greeting / orb:cancel / barge listeners registered");
   } catch (err) {
     console.warn("[NEXUS] Failed to register orb wake listeners:", err);
   }

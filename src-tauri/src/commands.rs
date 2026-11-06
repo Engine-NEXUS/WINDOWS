@@ -2044,6 +2044,10 @@ pub struct NexusSettings {
     /// Follow-up listening window in seconds after NEXUS speaks (0 = off, clamp 0..=20, default 6).
     #[serde(default = "default_follow_up_window_secs")]
     pub follow_up_window_secs: u32,
+    /// Barge-in without wake word while NEXUS is speaking: duck TTS and listen.
+    /// Default: true. When false, falls back to the legacy v4 wake-word barge path.
+    #[serde(default = "default_true")]
+    pub barge_in_no_wake: bool,
     /// Extra unknown settings preserved across saves so frontend/plugins never get wiped.
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
@@ -2419,6 +2423,7 @@ impl Default for NexusSettings {
             default_music_player: default_music_player(),
             continuation_window_secs: default_continuation_window_secs(),
             follow_up_window_secs: DEFAULT_FOLLOW_UP_WINDOW_SECS,
+            barge_in_no_wake: true,
             extra: std::collections::HashMap::new(),
         }
     }
@@ -2619,6 +2624,7 @@ fn save_settings_with_voice_intent<R: Runtime>(
     // Sensitivity takes effect immediately (no restart).
     crate::wakeword_oww::apply_wake_sensitivity(&settings.wake_sensitivity);
     crate::wakeword_oww::apply_wake_dsp(&settings.wake_dsp_profile);
+    crate::wakeword_oww::BARGE_IN_NO_WAKE.store(settings.barge_in_no_wake, std::sync::atomic::Ordering::Relaxed);
 
     // Also save server config separately — but NEVER overwrite an existing
     // identity (user_id / device_id) with empty values. This prevents
@@ -3462,6 +3468,35 @@ pub fn read_stt_command_hints<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> b
 pub fn read_stt_confidence_gate<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let Ok(dir) = app.path().app_data_dir() else { return false; };
     std::fs::read_to_string(dir.join("settings.json"))
+/// Read the `turnHoldMs` setting (default 3000, 0 = disabled, clamp 0..=6000).
+pub fn read_turn_hold_ms<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u32 {
+    let Ok(dir) = app.path().app_data_dir() else { return DEFAULT_TURN_HOLD_MS; };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| {
+            j.get("turnHoldMs")
+                .or_else(|| j.get("turn_hold_ms"))
+                .and_then(|v| v.as_u64())
+        })
+        .map(|v| (v as u32).min(6000))
+        .unwrap_or(DEFAULT_TURN_HOLD_MS)
+}
+
+/// Read the `bargeInNoWake` setting (default true).
+pub fn read_barge_in_no_wake<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return true; };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| {
+            j.get("bargeInNoWake")
+                .or_else(|| j.get("barge_in_no_wake"))
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(true)
+}
+
 /// Read the `turnHoldMs` setting (default 3000, 0 = disabled, clamp 0..=6000).
 pub fn read_turn_hold_ms<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u32 {
     let Ok(dir) = app.path().app_data_dir() else { return DEFAULT_TURN_HOLD_MS; };
@@ -4408,6 +4443,43 @@ mod nexus_settings_tests {
     fn hand_focus_lower_apps_defaults_to_true_and_round_trips() {
         let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
         raw.as_object_mut().unwrap().remove("handFocusLowerApps");
+
+    #[test]
+    fn continuation_window_secs_defaults_to_25_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("continuationWindowSecs");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert_eq!(parsed.continuation_window_secs, 25);
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("continuationWindowSecs"), Some(&serde_json::json!(25)));
+    }
+
+    #[test]
+    fn follow_up_window_secs_defaults_to_6_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("followUpWindowSecs");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert_eq!(parsed.follow_up_window_secs, 6);
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("followUpWindowSecs"), Some(&serde_json::json!(6)));
+    }
+
+    #[test]
+    fn barge_in_no_wake_defaults_to_true_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("bargeInNoWake");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert!(parsed.barge_in_no_wake, "bargeInNoWake must default to true");
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("bargeInNoWake"), Some(&serde_json::json!(true)));
+
+        let mut raw_false = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw_false.as_object_mut().unwrap().insert("bargeInNoWake".to_string(), serde_json::json!(false));
+        let parsed_false: NexusSettings = serde_json::from_value(raw_false).expect("deserialization should succeed");
+        assert!(!parsed_false.barge_in_no_wake);
+        let reserialized_false = serde_json::to_value(&parsed_false).expect("serialization should succeed");
+        assert_eq!(reserialized_false.get("bargeInNoWake"), Some(&serde_json::json!(false)));
+    }
         let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
         assert!(parsed.hand_focus_lower_apps, "handFocusLowerApps must default to true");
         let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
