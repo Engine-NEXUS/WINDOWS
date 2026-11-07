@@ -1984,6 +1984,9 @@ pub struct NexusSettings {
     /// a shorter absence gets the information quietly, with no welcome.
     #[serde(default = "default_agent_monitor_welcome_after_min")]
     pub agent_monitor_welcome_after_min: u32,
+    /// Find the coding agents installed on this laptop and connect them to NEXUS by itself (agent_autohook.rs).
+    #[serde(default = "default_memcore")]
+    pub agent_auto_hook: bool,
     /// Let a free cloud model read a redacted copy of recent cloud conversations and SUGGEST profile facts.
     /// Off by default; nothing is stored until the user approves it on the Memory page.
     #[serde(default)]
@@ -2426,6 +2429,7 @@ impl Default for NexusSettings {
             agent_monitor_hover: true,
             agent_monitor_display: default_agent_monitor_display(),
             agent_monitor_welcome_after_min: default_agent_monitor_welcome_after_min(),
+            agent_auto_hook: default_memcore(),
             wake_sound: true,
             wake_sound_style: default_wake_sound_style(),
             wake_sound_volume: default_wake_sound_volume(),
@@ -4450,7 +4454,7 @@ mod nexus_settings_tests {
     #[test]
     fn agent_monitor_settings_default_and_round_trip() {
         let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
-        for k in ["agentMonitor", "agentMonitorHover", "agentMonitorDisplay", "agentMonitorWelcomeAfterMin"] {
+        for k in ["agentMonitor", "agentMonitorHover", "agentMonitorDisplay", "agentMonitorWelcomeAfterMin", "agentAutoHook"] {
             raw.as_object_mut().unwrap().remove(k);
         }
         let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");

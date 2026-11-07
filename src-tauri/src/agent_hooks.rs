@@ -964,9 +964,47 @@ pub fn agents_present_in(home: &Path) -> Vec<Agent> {
         .collect()
 }
 
-/// `agents_present_in` for the real home folder.
+/// The command each agent's CLI is run with. A fresh install often has no settings folder yet, so the program on
+/// PATH is the earlier sign that the tool is there.
+fn cli_names(a: Agent) -> &'static [&'static str] {
+    match a {
+        Agent::Claude => &["claude"],
+        Agent::Codex => &["codex"],
+        Agent::Antigravity => &["agy"],
+        Agent::Gemini => &["gemini"],
+        Agent::Aider => &["aider"],
+        Agent::OpenCode => &["opencode"],
+        Agent::Kilo => &["kilo", "kilocode"],
+        Agent::Copilot => &["copilot"],
+        _ => &[],
+    }
+}
+
+/// Agents whose CLI is found in one of the `path_var` folders (`name`, `name.exe`, `.cmd`, `.bat`, `.ps1`). Pure.
+pub fn agents_on_path_in(path_var: &std::ffi::OsStr) -> Vec<Agent> {
+    let dirs: Vec<PathBuf> = std::env::split_paths(path_var).collect();
+    ALL_AGENTS
+        .iter()
+        .copied()
+        .filter(|a| {
+            cli_names(*a).iter().any(|n| {
+                dirs.iter().any(|d| ["", ".exe", ".cmd", ".bat", ".ps1"].iter().any(|ext| d.join(format!("{n}{ext}")).is_file()))
+            })
+        })
+        .collect()
+}
+
+/// Agents found by settings folder or by their CLI on PATH, in `ALL_AGENTS` order.
 pub fn agents_present() -> Vec<Agent> {
-    home().map(|h| agents_present_in(&h)).unwrap_or_default()
+    let mut found = home().map(|h| agents_present_in(&h)).unwrap_or_default();
+    if let Some(p) = std::env::var_os("PATH") {
+        for a in agents_on_path_in(&p) {
+            if !found.contains(&a) {
+                found.push(a);
+            }
+        }
+    }
+    ALL_AGENTS.iter().copied().filter(|a| found.contains(a)).collect()
 }
 
 /// The agents "hook up all agents" would touch: present ones that have a hook of their own to install (not Devin,

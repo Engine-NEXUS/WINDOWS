@@ -175,6 +175,7 @@ pub(crate) mod agent_tracker;
 pub(crate) mod agent_outcomes;
 pub(crate) mod agent_attention;
 // Agent Island: monitor (sessions, approvals, screen hold), the hover window, and the approval reply contract
+pub(crate) mod agent_autohook;
 pub(crate) mod agent_monitor;
 pub(crate) mod agent_island;
 pub(crate) mod agent_approval_reply;
@@ -897,6 +898,7 @@ pub fn run() {
             memcore::resume::start_recorder(app.handle().clone()); // 30 s foreground-window resume points
             memcore::briefing::start_boot_briefing(app.handle().clone()); // once-a-day spoken "where you left off"
             agent_attention::start(app.handle().clone()); // "Codex needs your input, sir" + what happened while you were away
+            agent_autohook::start(app.handle().clone()); // finds installed coding agents and connects them (setting agentAutoHook)
             agent_monitor::start(app.handle().clone()); // Agent Island: running agents, permission cards, screen on while they work
             memcore::routines::start_suggester(app.handle().clone()); // offers a routine when it notices a repeated sequence
             memcore::curator::start_curator(app.handle().clone()); // daily idle upkeep: retire unused routines, keep used profile facts

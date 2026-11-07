@@ -1,5 +1,9 @@
 # NEXUS — Project Notes
 
+## Agents connected automatically (2026-11-08)
+
+`agent_autohook.rs`: 25 s after start and every 30 min NEXUS looks for coding agents (settings folder or CLI on PATH: Claude Code, Codex, Antigravity `agy`, OpenCode, Gemini CLI, Aider, Kilo, Copilot, Windsurf, Cursor) and adds its own hook through the same `agent_hooks::install` as "hook up ..." (backup first, foreign hooks untouched), then says one line. Setting `agentAutoHook` (default on; Command Hub > Advanced > Agent Island) turns it off; it never removes existing hooks. Tests: `agent_autohook::tests` + `agents_on_path_in`. **Not run live:** a real fresh install; needs a rebuild.
+
 ## Logos via logoapi.sh (2026-11-08)
 
 21 logos now come from the logoapi.sh MCP, downloaded and bundled (`scripts/import-logoapi-icons.mjs`, provenance in `frontend/public/activity-logos/SOURCES.json`, gate `scripts/check-activity-icons.mjs`). logoapi mostly serves wide wordmarks, so only square marks are taken; the rest keep their files. Record: `docs/changes/187-logoapi-logos.md`. **Not run live:** rebuilt app screens.

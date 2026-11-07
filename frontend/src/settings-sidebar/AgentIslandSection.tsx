@@ -6,6 +6,7 @@ interface IslandSettings {
   agentMonitorHover: boolean;
   agentMonitorDisplay: "stay-awake" | "blank";
   agentMonitorWelcomeAfterMin: number;
+  agentAutoHook: boolean;
 }
 
 const DEFAULTS: IslandSettings = {
@@ -13,6 +14,7 @@ const DEFAULTS: IslandSettings = {
   agentMonitorHover: true,
   agentMonitorDisplay: "stay-awake",
   agentMonitorWelcomeAfterMin: 20,
+  agentAutoHook: true,
 };
 
 /** Command Hub card for the Agent Island: logos of running coding agents at the top of the screen, hover for
@@ -30,6 +32,7 @@ export function AgentIslandSection() {
           agentMonitorHover: r.agentMonitorHover ?? DEFAULTS.agentMonitorHover,
           agentMonitorDisplay: r.agentMonitorDisplay === "blank" ? "blank" : "stay-awake",
           agentMonitorWelcomeAfterMin: r.agentMonitorWelcomeAfterMin ?? DEFAULTS.agentMonitorWelcomeAfterMin,
+          agentAutoHook: r.agentAutoHook ?? DEFAULTS.agentAutoHook,
         }),
       )
       .catch(() => {});
@@ -50,6 +53,13 @@ export function AgentIslandSection() {
   return (
     <div className="settings-section">
       <div className="settings-section-title">Agent Island</div>
+      <label className="setting-row">
+        <div>
+          <div className="setting-label">Connect my coding agents automatically</div>
+          <div className="setting-desc">NEXUS looks for Claude Code, Codex, Antigravity, OpenCode, Gemini CLI and others on this laptop and connects them so it knows when they run and stop. A backup of each one's settings is made first.</div>
+        </div>
+        <input type="checkbox" checked={s.agentAutoHook} onChange={(e) => save("agentAutoHook", e.target.checked)} />
+      </label>
       <label className="setting-row">
         <div>
           <div className="setting-label">Show running agents</div>
