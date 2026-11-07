@@ -70,6 +70,7 @@ export default defineConfig({
         // server still serves them on demand, but they are not shipped in the release bundle.
         githubDashboard: resolve(__dirname, "github-dashboard.html"),
         notifyToast: resolve(__dirname, "notify-toast.html"),
+        agentIsland: resolve(__dirname, "agent-island.html"),
       },
     },
   },

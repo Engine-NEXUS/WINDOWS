@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, Component, type ErrorInfo } from "react";
 import { HandModeSection } from "./HandModeSection";
 import { AgentWatchSection } from "./AgentWatchSection";
+import { AgentIslandSection } from "./AgentIslandSection";
 import { RoutingSection } from "./RoutingSection";
 import { invoke } from "@tauri-apps/api/core";
 import { useVoiceLockState, VoiceLockStatus, VerifiedSaveStatus } from "../settings/VoiceLockStatus";
@@ -489,7 +490,7 @@ export function SettingsSidebarApp({ onDock: _onDock = () => {} }: { onDock?: (d
             <div className="hx-legacy">
               {page === "display" && <DisplayTab settings={settings} update={update} />}
               {page === "audio" && <AudioTab settings={settings} update={update} voiceLock={voiceLock} />}
-              {page === "advanced" && <><AgentWatchSection /><AdvancedSystemStatus /><AuthTab settings={settings} update={update} /></>}
+              {page === "advanced" && <><AgentIslandSection /><AgentWatchSection /><AdvancedSystemStatus /><AuthTab settings={settings} update={update} /></>}
             </div>
           )}
         </SubpageErrorBoundary>

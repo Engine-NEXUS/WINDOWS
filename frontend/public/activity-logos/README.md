@@ -1,6 +1,6 @@
 # Activity Manager icons
 
-The 90 SVGs here are bundled locally. Activity Manager makes no icon-service
+The 92 SVGs here are bundled locally. Activity Manager makes no icon-service
 request at runtime and needs no Logo.dev account or monthly request allowance.
 They cover the recognized desktop brands and common web apps found in the
 Windows Start menu inventory on 2026-10-21. `genericapp.svg` is a local NEXUS
@@ -13,6 +13,7 @@ imply 218 separately identifiable foreground applications.
 | `@iconify-json/logos` 1.2.17, [SVG Logos](https://github.com/gilbarbara/logos) | 22 | CC0-1.0 |
 | `@iconify-json/vscode-icons` 1.2.92, [VSCode Icons](https://github.com/vscode-icons/vscode-icons) | 5 | MIT; `LICENSE-vscode-icons.txt` |
 | [theSVG](https://thesvg.org), via `@thesvg/mcp-server` 0.8.4 | 62, including VLC | Per-icon source slug and license in `scripts/activity-icon-sources.json`; VLC is CC0-1.0 |
+| [Lobe Icons](https://github.com/lobehub/lobe-icons) `packages/static-svg/icons/devin.svg` and `kilocode.svg` (saved as `devin.svg`, `kilo.svg`; sizing attributes removed, no other change) | 2 | Repository licence MIT; the Devin (Cognition) and Kilo Code marks themselves are their owners' trademarks. Added 2026-11-07 for the Agent Island |
 | NEXUS local vector | 1 | `genericapp.svg` |
 | NEXUS alert sources | 2 | `googlecalendar.svg`, `aider.svg`; hand-drawn for NEXUS to identify the source |
 

@@ -157,15 +157,27 @@ pub fn remember(dir: &std::path::Path, label: &str, text: &str) {
     save(dir, &log);
 }
 
-/// The summary for the user who just came back; the log is emptied so it is told once.
-pub fn take_summary(dir: &std::path::Path) -> Option<String> {
-    let now = chrono::Utc::now().timestamp();
+/// The log for the user who just came back; it is emptied so it is told once.
+pub fn take_entries(dir: &std::path::Path) -> Vec<Entry> {
     let log = load(dir);
-    let said = summary(&log, now);
     if !log.is_empty() {
         save(dir, &[]);
     }
-    said
+    log
+}
+
+/// Whether a user who was away for `away_ms` gets a spoken welcome-back summary. A short absence is told quietly
+/// (a toast per agent, no speech, no greeting): `agentMonitorWelcomeAfterMin`, default 20 minutes.
+pub fn welcome_due(away_ms: u64, welcome_after_min: u32) -> bool {
+    away_ms >= u64::from(welcome_after_min) * 60_000
+}
+
+fn welcome_after_min(dir: &std::path::Path) -> u32 {
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("agentMonitorWelcomeAfterMin").and_then(|v| v.as_u64()))
+        .map_or(20, |m| m.min(24 * 60) as u32)
 }
 
 // ─── The loop ────────────────────────────────────────────────────────
@@ -201,6 +213,7 @@ pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
         let started = agent_hooks::now_ms();
         let mut attention = Attention::default();
         let mut was_away = false;
+        let mut away_since: Option<u64> = None;
         let mut stops: BTreeMap<&'static str, u64> = BTreeMap::new();
         let mut toasted: BTreeMap<&'static str, u64> = BTreeMap::new();
         loop {
@@ -252,16 +265,31 @@ pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                     }
                 }
             }
+            if away && !was_away {
+                away_since = Some(now);
+            }
             if was_away && !away {
-                // the user is back: say it once, after the hello if there is one
+                let away_ms = away_since.take().map_or(0, |t| now.saturating_sub(t));
+                // the user is back: tell it once, after the hello if there is one
                 tokio::time::sleep(Duration::from_secs(4)).await;
-                if let Some(line) = take_summary(&dir) {
-                    crate::proactive_policy::submit(
-                        &app,
-                        format!("agent_away_{}", chrono::Utc::now().timestamp()),
-                        line,
-                        crate::google::types::AlertUrgency::High,
-                    );
+                let entries = take_entries(&dir);
+                if welcome_due(away_ms, welcome_after_min(&dir)) {
+                    // away long enough for a welcome-back: the spoken summary
+                    if let Some(line) = summary(&entries, chrono::Utc::now().timestamp()) {
+                        crate::proactive_policy::submit(
+                            &app,
+                            format!("agent_away_{}", chrono::Utc::now().timestamp()),
+                            line,
+                            crate::google::types::AlertUrgency::High,
+                        );
+                    }
+                } else {
+                    // a short absence: no welcome and no speech, one quiet toast per agent
+                    for e in &entries {
+                        let Some(agent) = ALL_AGENTS.iter().find(|a| a.label() == e.label) else { continue };
+                        let needs = e.text.contains("needs your input") || e.text.contains("permission");
+                        crate::notify_hub::publish_agent(&app, agent.name(), agent.label(), agent_hooks::last_cwd(*agent).as_deref(), needs, now);
+                    }
                 }
             }
             was_away = away;
@@ -286,6 +314,16 @@ mod tests {
     }
 
     const T: u64 = 1_000_000;
+
+    #[test]
+    fn a_welcome_back_needs_a_long_enough_absence() {
+        let min = 60_000;
+        assert!(!welcome_due(19 * min + 59_000, 20), "under 20 minutes: no welcome");
+        assert!(welcome_due(20 * min, 20), "20 minutes: welcome");
+        assert!(welcome_due(3 * 60 * min, 20));
+        assert!(welcome_due(0, 0), "0 means always welcome");
+        assert!(!welcome_due(0, 20));
+    }
 
     #[test]
     fn an_unanswered_wait_is_told_once_when_the_user_is_away() {
@@ -391,9 +429,10 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         remember(&dir, "Claude Code", "Claude Code finished clean");
         remember(&dir, "Codex", &needs_fragment("Codex"));
-        let said = take_summary(&dir).expect("something to say");
+        let entries = take_entries(&dir);
+        let said = summary(&entries, chrono::Utc::now().timestamp()).expect("something to say");
         assert!(said.starts_with("While you were away, sir: Codex needs your input."), "{said}");
-        assert_eq!(take_summary(&dir), None, "told once");
+        assert!(take_entries(&dir).is_empty(), "told once");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

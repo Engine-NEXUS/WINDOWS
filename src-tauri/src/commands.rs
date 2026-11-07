@@ -1969,6 +1969,21 @@ pub struct NexusSettings {
     /// Anything else is read as "off". Changed by voice ("allow unattended shutdown").
     #[serde(default = "default_watch_power")]
     pub watch_power: String,
+    /// Agent Island: show running coding agents as logos at the top of the screen, with live tracking and Allow / Deny
+    /// cards (agent_monitor.rs). Also keeps the screen awake while an agent works.
+    #[serde(default = "default_memcore")]
+    pub agent_monitor: bool,
+    /// Hovering the island's pill opens the full island.
+    #[serde(default = "default_memcore")]
+    pub agent_monitor_hover: bool,
+    /// What happens to the screen once every agent is done: "stay-awake" (just release it; the OS sleep rules apply)
+    /// or "blank" (also turn the display off when you have been away and no meeting is on).
+    #[serde(default = "default_agent_monitor_display")]
+    pub agent_monitor_display: String,
+    /// A return after at least this many minutes away gets a spoken welcome-back summary of what the agents did;
+    /// a shorter absence gets the information quietly, with no welcome.
+    #[serde(default = "default_agent_monitor_welcome_after_min")]
+    pub agent_monitor_welcome_after_min: u32,
     /// Let a free cloud model read a redacted copy of recent cloud conversations and SUGGEST profile facts.
     /// Off by default; nothing is stored until the user approves it on the Memory page.
     #[serde(default)]
@@ -2075,6 +2090,14 @@ fn default_follow_up_window_secs() -> u32 {
 
 fn default_watch_power() -> String {
     "off".to_string()
+}
+
+fn default_agent_monitor_display() -> String {
+    "stay-awake".to_string()
+}
+
+fn default_agent_monitor_welcome_after_min() -> u32 {
+    20
 }
 
 fn default_memcore() -> bool {
@@ -2399,6 +2422,10 @@ impl Default for NexusSettings {
             memcore_routines: default_memcore(),
             memcore_review: false,
             watch_power: default_watch_power(),
+            agent_monitor: true,
+            agent_monitor_hover: true,
+            agent_monitor_display: default_agent_monitor_display(),
+            agent_monitor_welcome_after_min: default_agent_monitor_welcome_after_min(),
             wake_sound: true,
             wake_sound_style: default_wake_sound_style(),
             wake_sound_volume: default_wake_sound_volume(),
@@ -4418,6 +4445,28 @@ mod nexus_settings_tests {
         assert!(parsed.hand_focus_lower_apps, "handFocusLowerApps must default to true");
         let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
         assert_eq!(reserialized.get("handFocusLowerApps"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn agent_monitor_settings_default_and_round_trip() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        for k in ["agentMonitor", "agentMonitorHover", "agentMonitorDisplay", "agentMonitorWelcomeAfterMin"] {
+            raw.as_object_mut().unwrap().remove(k);
+        }
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert!(parsed.agent_monitor && parsed.agent_monitor_hover, "the island is on by default");
+        assert_eq!(parsed.agent_monitor_display, "stay-awake", "blanking the display is opt-in");
+        assert_eq!(parsed.agent_monitor_welcome_after_min, 20);
+        let back = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(back.get("agentMonitor"), Some(&serde_json::json!(true)));
+        assert_eq!(back.get("agentMonitorDisplay"), Some(&serde_json::json!("stay-awake")));
+        assert_eq!(back.get("agentMonitorWelcomeAfterMin"), Some(&serde_json::json!(20)));
+        // a patch from the Command Hub changes only its keys
+        let patch = serde_json::json!({ "agentMonitorDisplay": "blank", "agentMonitorWelcomeAfterMin": 5 });
+        let merged = super::apply_settings_patch(&parsed, patch.as_object().unwrap()).unwrap();
+        assert_eq!(merged.agent_monitor_display, "blank");
+        assert_eq!(merged.agent_monitor_welcome_after_min, 5);
+        assert!(merged.agent_monitor, "other settings are untouched");
     }
 
     #[test]

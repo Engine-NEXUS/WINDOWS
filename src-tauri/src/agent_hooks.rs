@@ -242,8 +242,13 @@ set AG=%~1\r\n\
 set EV=%~2\r\n\
 if \"%EV%\"==\"\" set EV=stop\r\n\
 if /i \"%AG%\"==\"aider\" goto aider\r\n\
+if /i \"%EV%\"==\"permission\" goto perm\r\n\
 curl.exe -s -m 3 -X POST \"http://127.0.0.1:@PORT@/agent-event?agent=%AG%&event=%EV%\" -H \"Authorization: Bearer @TOKEN@\" -H \"Content-Type: application/json\" --data-binary @- >nul 2>&1\r\n\
 goto out\r\n\
+:perm\r\n\
+rem a permission request is held open until the Agent Island answers; curl prints the reply the agent expects\r\n\
+curl.exe -s -m 112 -X POST \"http://127.0.0.1:@PORT@/agent-approval?agent=%AG%\" -H \"Authorization: Bearer @TOKEN@\" -H \"Content-Type: application/json\" --data-binary @-\r\n\
+exit /b 0\r\n\
 :aider\r\n\
 curl.exe -s -m 3 -X POST \"http://127.0.0.1:@PORT@/agent-event?agent=%AG%&event=%EV%\" -H \"Authorization: Bearer @TOKEN@\" --data-urlencode \"cwd=%CD%\" >nul 2>&1\r\n\
 :out\r\n\
@@ -260,6 +265,10 @@ const SCRIPT_TEMPLATE: &str = "#!/bin/sh\n\
 AG=\"$1\"\n\
 EV=\"${2:-stop}\"\n\
 URL=\"http://127.0.0.1:@PORT@/agent-event?agent=$AG&event=$EV\"\n\
+if [ \"$EV\" = \"permission\" ]; then\n\
+  curl -s -m 112 -X POST \"http://127.0.0.1:@PORT@/agent-approval?agent=$AG\" -H \"Authorization: Bearer @TOKEN@\" -H \"Content-Type: application/json\" --data-binary @-\n\
+  exit 0\n\
+fi\n\
 if [ \"$AG\" = \"aider\" ]; then\n\
   curl -s -m 3 -X POST \"$URL\" -H \"Authorization: Bearer @TOKEN@\" --data-urlencode \"cwd=$PWD\" >/dev/null 2>&1\n\
 else\n\
@@ -301,6 +310,10 @@ const CLAUDE_EVENTS: HookEvents = &[
     ("Stop", "stop", None),
     ("Notification", "notification", Some("permission_prompt|elicitation_dialog")),
     ("UserPromptSubmit", "start", None),
+    // The Agent Island (agent_monitor.rs): what the agent is doing, and permission requests held for Allow / Deny.
+    ("PreToolUse", "pretool", None),
+    ("SessionEnd", "end", None),
+    ("PermissionRequest", "permission", None),
 ];
 
 /// Gemini CLI: `AfterAgent` fires when the agent loop completes and carries `prompt_response`.
@@ -412,7 +425,11 @@ fn hooks_map_add(existing: &str, script: &Path, agent: &str, events: HookEvents,
         list.retain(|e| !entry_is_ours(e));
         let cmd = command_line(script, agent, kind)?;
         let mut entry = match shape {
-            Shape::Nested { timeout } => json!({ "hooks": [ { "type": "command", "command": cmd, "timeout": timeout } ] }),
+            // a permission request is held open for the user's click (agent_monitor::APPROVAL_WAIT = 108 s)
+            Shape::Nested { timeout } => {
+                let timeout = if *kind == "permission" { timeout.max(120) } else { timeout };
+                json!({ "hooks": [ { "type": "command", "command": cmd, "timeout": timeout } ] })
+            }
             Shape::Flat => json!({ "command": cmd }),
         };
         if let Some(m) = matcher {

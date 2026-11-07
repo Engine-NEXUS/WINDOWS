@@ -108,6 +108,18 @@ impl WindowConfig {
         }
     }
 
+    /// The Agent Island (agent_island.rs): a pill of agent logos at the top of the screen that expands on hover or a
+    /// permission request. Sized and placed by Rust, shown without focus.
+    pub fn agent_island() -> Self {
+        Self {
+            label: "agent-island", title: "NEXUS Agents", url: "agent-island.html",
+            width: 240., height: 40., min_width: None, min_height: None,
+            resizable: false, decorations: false, transparent: true,
+            always_on_top: true, skip_taskbar: true, shadow: false,
+            focus: false, center: false, hidden_title: true,
+        }
+    }
+
     pub fn place_card() -> Self {
         Self {
             label: "place-card", title: "NEXUS Place", url: "sidebar.html?pin=place",
@@ -241,7 +253,7 @@ pub fn get_or_create_window<R: Runtime>(
         // (sidebar_backdrop.rs -> `sidebar:backdrop` -> `.sidebar-card::after`).
         let is_glass_window = matches!(
             config.label,
-            "sidebar" | "architect-map" | "maps-panel" | "place-card" | "notify-toast" | "calibrate-toolbar" | "settings" | "setup" | "orb-studio"
+            "sidebar" | "architect-map" | "maps-panel" | "place-card" | "notify-toast" | "agent-island" | "calibrate-toolbar" | "settings" | "setup" | "orb-studio"
         );
         if is_glass_window {
             crate::dwm_corners::round_corners(&win);

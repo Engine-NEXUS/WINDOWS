@@ -174,6 +174,10 @@ pub(crate) mod watch_runner;
 pub(crate) mod agent_tracker;
 pub(crate) mod agent_outcomes;
 pub(crate) mod agent_attention;
+// Agent Island: monitor (sessions, approvals, screen hold), the hover window, and the approval reply contract
+pub(crate) mod agent_monitor;
+pub(crate) mod agent_island;
+pub(crate) mod agent_approval_reply;
 pub(crate) mod repo_review;
 pub(crate) mod pr_screen;
 pub(crate) mod early_hello;
@@ -893,6 +897,7 @@ pub fn run() {
             memcore::resume::start_recorder(app.handle().clone()); // 30 s foreground-window resume points
             memcore::briefing::start_boot_briefing(app.handle().clone()); // once-a-day spoken "where you left off"
             agent_attention::start(app.handle().clone()); // "Codex needs your input, sir" + what happened while you were away
+            agent_monitor::start(app.handle().clone()); // Agent Island: running agents, permission cards, screen on while they work
             memcore::routines::start_suggester(app.handle().clone()); // offers a routine when it notices a repeated sequence
             memcore::curator::start_curator(app.handle().clone()); // daily idle upkeep: retire unused routines, keep used profile facts
             memcore::review::start_reviewer(app.handle().clone()); // optional, default off: suggests profile facts for approval
@@ -1441,6 +1446,9 @@ pub fn run() {
             // Agent-completion watcher (Claude Code, Gemini CLI, Codex, Aider, Hermes, opencode)
             agent_watch::agent_watch_unavailable_reason,
             agent_watch::agent_watch_stop,
+            agent_monitor::agent_monitor_list,
+            agent_monitor::agent_approval_decide,
+            agent_island::agent_island_mode,
             agent_watch::agent_watch_list_watches,
             // Live mode commands
             live::live_type_text,
