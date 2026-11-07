@@ -42,6 +42,9 @@ jobs:
       - name: Repo hygiene gate (no tracked secrets, databases, logs, key files)
         run: node ../scripts/check-repo-hygiene.mjs
 
+      - name: Logo files gate
+        run: node ../scripts/check-activity-icons.mjs
+
       # Every text/surface pair of the design tokens, dark and light, against WCAG 2.2 AA.
       - name: Theme contrast gate
         run: node ../scripts/check-theme-contrast.mjs

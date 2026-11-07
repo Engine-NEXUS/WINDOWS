@@ -23,6 +23,9 @@ export const KNOWN_ICONS = new Set<string>([
   "copilot",
   "windsurf",
   "aider",
+  "kilo",
+  "devin",
+  "trae",
 ]);
 
 /** Returns the local asset path for a provider logo, or null for monogram fallback (empty, "agent", unknown). */

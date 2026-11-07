@@ -72,7 +72,7 @@ const LOOKS: Record<string, AgentLook> = {
   cursor: { src: "/activity-logos/cursor.svg", tile: LIGHT_TILE },
   aider: { src: "/activity-logos/aider.svg", tile: "#14b014" },
   copilot: { src: "/activity-logos/copilot.svg", tile: LIGHT_TILE },
-  windsurf: { src: "/activity-logos/windsurf.svg", tile: DARK_TILE },
+  windsurf: { src: "/activity-logos/windsurf.svg", tile: LIGHT_TILE },
   trae: { src: "/activity-logos/trae.svg", tile: DARK_TILE },
   kilo: { src: "/activity-logos/kilo.svg", tile: LIGHT_TILE },
   devin: { src: "/activity-logos/devin.svg", tile: LIGHT_TILE },

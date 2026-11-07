@@ -1,5 +1,9 @@
 # NEXUS — Project Notes
 
+## Logos via logoapi.sh (2026-11-08)
+
+21 logos now come from the logoapi.sh MCP, downloaded and bundled (`scripts/import-logoapi-icons.mjs`, provenance in `frontend/public/activity-logos/SOURCES.json`, gate `scripts/check-activity-icons.mjs`). logoapi mostly serves wide wordmarks, so only square marks are taken; the rest keep their files. Record: `docs/changes/187-logoapi-logos.md`. **Not run live:** rebuilt app screens.
+
 ## Agent Island (2026-11-07)
 
 Laptop feature, branch `feat/agent-island`: a pill of the running coding agents' logos at the top of the screen; hover opens live tracking; a permission request opens Allow / Deny by itself and folds back after the answer; a finished agent's logo leaves the row. The screen is held awake while any agent works, then released (optional display-off after you were away). Away/return rules: present = toast, away = silent away log, return after 20+ min = spoken welcome summary, shorter = quiet toasts only. New: `agent_monitor.rs`, `agent_island.rs`, `agent_approval_reply.rs` (ported from coucou's MIT relay, notice in THIRD_PARTY_NOTICES.md), `frontend/src/agent-island/`, settings `agentMonitor*`. Webhook now serves one thread per connection and `POST /agent-approval`. Claude Code hooks gain PreToolUse/SessionEnd/PermissionRequest (re-run "hook up claude"). **Not run live:** a real Claude Code permission round trip, hover/multi-monitor/DPI, display wake after blank. Record: `docs/changes/186-agent-island.md`.

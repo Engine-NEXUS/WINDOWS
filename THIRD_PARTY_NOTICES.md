@@ -49,6 +49,12 @@ OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CA
 WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+## logoapi.sh
+
+21 product logos in `frontend/public/activity-logos` were downloaded from https://logoapi.sh (embedding in an app is
+allowed by its terms; the whole catalog is not copied; takedown contact takedown@logoapi.sh). Per-file url, hash and
+date: `frontend/public/activity-logos/SOURCES.json`. The marks belong to their owners.
+
 ## Trademarks
 
 Logos are trademarks of their owners and are shown only to identify the alert source.

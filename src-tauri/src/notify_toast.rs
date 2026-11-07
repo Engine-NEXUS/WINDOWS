@@ -215,6 +215,9 @@ pub fn icon_id(ev: &NotifyEvent) -> String {
                 ("copilot", "copilot"),
                 ("windsurf", "windsurf"),
                 ("aider", "aider"),
+                ("kilo", "kilo"),
+                ("devin", "devin"),
+                ("trae", "trae"),
             ] {
                 if name.contains(needle) {
                     return id.into();
