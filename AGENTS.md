@@ -1,5 +1,9 @@
 # NEXUS — Project Notes
 
+## Multi-user wake-word research plan (2026-11-07)
+
+Owner confirmed many users and laptop microphones from the first milestone. Proposed pilot: 30 consenting participants and 15 laptops with disjoint training/calibration/acceptance people and devices; 4,500 fresh positives (2,250/750/1,500). These are research budgets, not proven accuracy or implemented collection tooling. Historical 120/137 owner recall and 44.04 raw neural detections/hour lack exact model/source/config binding; current live accuracy remains unestablished. Research and metadata audit: docs/research/voice-accuracy/03-current-evidence-and-training-plan-2026-11-06.md and docs/testing/runs/wake-evidence-audit-20261106.json. No audio upload, training, application build/runtime/settings operation, model promotion or score change. Raw training data remains private/ignored; owner controls builds/runtime.
+
 ## Training data lives in D:\NEXUS-Training (2026-10-31)
 
 - The training folders (`wake_word_data`, `wake_camp`, `wake_test_recordings`, `nexus_real_samples`, `nexus_model`, `audioset*`, `mit_rirs`) were moved to `D:\NEXUS-Training\data\` (private repo Engine-NEXUS/NEXUS-Training; data is ignored there and never pushed). Directory junctions at the old paths keep every script working: do not delete a junction and never `git add` one. Training scripts stay in `scripts/` and `server/nlu/`. Record: `docs/changes/181-training-moved-to-nexus-training-repo.md`.
