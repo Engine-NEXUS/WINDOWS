@@ -14,7 +14,8 @@
   background: var(--stage-surface);
   color: var(--stage-text);
   border: 1px solid var(--stage-border);
-  box-shadow: var(--stage-shadow-lg);
+  box-shadow: var(--stage-shadow);
+  transform-origin: 50% 0;
   font: 400 13px/1.35 "Segoe UI", system-ui, sans-serif;
   overflow: hidden;
   user-select: none;
@@ -22,7 +23,9 @@
   transition:
     width 320ms var(--ai-ease),
     height 320ms var(--ai-ease),
-    border-radius 320ms var(--ai-ease);
+    border-radius 320ms var(--ai-ease),
+    transform 160ms var(--ai-ease),
+    box-shadow 240ms var(--ai-ease);
   animation: ai-in 220ms var(--ai-ease);
 }
 
@@ -30,8 +33,15 @@
   border-radius: 14px;
 }
 
+/* the cursor is in the pill's hot zone (set by Rust): the pill lifts a little, so the hover is visible before it opens */
+.ai-island--hot {
+  transform: scale(1.1);
+  border-color: var(--stage-text-muted);
+}
+
 .ai-island--expanded {
   border-radius: 24px;
+  box-shadow: var(--stage-shadow-lg);
 }
 
 /* the two faces of the island: the pill fades out while the panel fades in a beat later */

@@ -1447,7 +1447,6 @@ pub fn run() {
             // Agent-completion watcher (Claude Code, Gemini CLI, Codex, Aider, Hermes, opencode)
             agent_watch::agent_watch_unavailable_reason,
             agent_watch::agent_watch_stop,
-            agent_monitor::agent_monitor_list,
             agent_monitor::agent_approval_decide,
             agent_island::agent_island_mode,
             agent_island::agent_island_snapshot,

@@ -32,7 +32,7 @@ import {
  *  The snapshot is already without the agents the user is looking at. */
 export function AgentIslandApp() {
   const [snap, setSnap] = useState<Snapshot>(EMPTY);
-  const [mode, setMode] = useState<ModePayload>({ mode: "hidden", byApproval: false, scale: SCALE_DEFAULT });
+  const [mode, setMode] = useState<ModePayload>({ mode: "hidden", byApproval: false, scale: SCALE_DEFAULT, hot: false });
   const [tab, setTab] = useState<Tab>("tracking");
   const [now, setNow] = useState(() => Date.now());
 
@@ -64,7 +64,7 @@ export function AgentIslandApp() {
   }, []);
 
   if (mode.mode === "hidden") return null;
-  return <Island snap={snap} mode={mode.mode} tab={tab} setTab={setTab} now={now} decide={decide} scale={mode.scale} />;
+  return <Island snap={snap} mode={mode.mode} tab={tab} setTab={setTab} now={now} decide={decide} scale={mode.scale} hot={mode.hot} />;
 }
 
 /** How long the panel stays mounted after the island folds, so its content fades out instead of vanishing. */
@@ -78,10 +78,12 @@ export function Island(p: {
   now: number;
   decide: (id: number, d: string) => void;
   scale?: number;
+  /** The cursor is in the hot zone of the pill (set by Rust). */
+  hot?: boolean;
   /** Mouse handlers for the dev preview (the real island is hovered through Rust). */
   host?: HTMLAttributes<HTMLDivElement>;
 }) {
-  const { snap, mode, tab, setTab, now, decide, scale = 1, host } = p;
+  const { snap, mode, tab, setTab, now, decide, scale = 1, hot = false, host } = p;
   const ref = useRef<HTMLDivElement | null>(null);
   const logos = pillLogos(snap).length;
   const [keepPanel, setKeepPanel] = useState(mode === "expanded");
@@ -106,7 +108,7 @@ export function Island(p: {
   }, [mode]);
 
   return (
-    <div className={`ai-island ai-island--${mode}`} ref={ref} {...host}>
+    <div className={`ai-island ai-island--${mode}${hot && mode === "collapsed" ? " ai-island--hot" : ""}`} ref={ref} {...host}>
       <div className="ai-layer ai-layer--pill" aria-hidden={mode === "expanded"}>
         <Pill snap={snap} />
       </div>

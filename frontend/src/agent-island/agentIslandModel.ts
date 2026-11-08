@@ -50,6 +50,8 @@ export interface ModePayload {
   byApproval: boolean;
   /** The size setting (0.75 - 1.5), so the page and the window never disagree. */
   scale: number;
+  /** The cursor is in the hot zone of the pill: the page lifts it so the hover is visible. */
+  hot: boolean;
 }
 
 export const SCALE_MIN = 0.75;
@@ -182,7 +184,7 @@ export function asSnapshot(raw: unknown): Snapshot {
 
 export function asMode(raw: unknown): ModePayload {
   const mode = isObj(raw) ? (["hidden", "collapsed", "expanded"] as const).find((m) => m === raw.mode) : undefined;
-  return { mode: mode ?? "hidden", byApproval: isObj(raw) && raw.byApproval === true, scale: clampScale(isObj(raw) ? raw.scale : SCALE_DEFAULT) };
+  return { mode: mode ?? "hidden", byApproval: isObj(raw) && raw.byApproval === true, scale: clampScale(isObj(raw) ? raw.scale : SCALE_DEFAULT), hot: isObj(raw) && raw.hot === true };
 }
 
 /** One logo per agent type: how many sessions it has and its most urgent state. */

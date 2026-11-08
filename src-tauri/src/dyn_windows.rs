@@ -254,9 +254,13 @@ pub fn get_or_create_window<R: Runtime>(
             if let Ok(hwnd) = win.hwnd() {
                 use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY};
                 use windows::Win32::Foundation::HWND;
-                // WDA_EXCLUDEFROMCAPTURE is 0x00000011 (17)
-                unsafe {
-                    let _ = SetWindowDisplayAffinity(HWND(hwnd.0 as _), WINDOW_DISPLAY_AFFINITY(17));
+                // WDA_EXCLUDEFROMCAPTURE is 0x00000011 (17). NEXUS_ISLAND_DEBUG=1 leaves the Agent Island capturable so a
+                // desktop screenshot (the island e2e script) can see what is really drawn.
+                let debug_island = config.label == "agent-island" && std::env::var_os("NEXUS_ISLAND_DEBUG").is_some();
+                if !debug_island {
+                    unsafe {
+                        let _ = SetWindowDisplayAffinity(HWND(hwnd.0 as _), WINDOW_DISPLAY_AFFINITY(17));
+                    }
                 }
             }
         } else {

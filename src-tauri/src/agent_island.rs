@@ -26,9 +26,10 @@ const PILL_MIN_W: f64 = 64.0;
 const PANEL_W: f64 = 760.0;
 const PANEL_H: f64 = 430.0;
 const TOP_GAP: f64 = 6.0;
-/// Cursor margin around the drawn island that still counts as "on the island", logical px.
-const MARGIN: f64 = 10.0;
-const HOVER_DWELL_MS: u64 = 120;
+/// Cursor margin around the drawn island that still counts as "on the island", logical px. Generous on purpose: the
+/// one-agent pill is only ~48 px wide at the smallest size, and the hover must be easy to hit.
+const MARGIN: f64 = 24.0;
+const HOVER_DWELL_MS: u64 = 180;
 const LEAVE_DWELL_MS: u64 = 450;
 /// A hidden island's window is destroyed after this long (a WebView2 costs RAM).
 const HIDE_DESTROY_MS: u64 = 120_000;
@@ -167,9 +168,11 @@ pub struct ModePayload {
     pub by_approval: bool,
     /// The size setting, so the page and the window never disagree.
     pub scale: f64,
+    /// The cursor is in the hot zone of the one-row pill (the page lifts it a little so the hover is visible).
+    pub hot: bool,
 }
 
-static CURRENT: Mutex<ModePayload> = Mutex::new(ModePayload { mode: Mode::Hidden, by_approval: false, scale: DEFAULT_SCALE });
+static CURRENT: Mutex<ModePayload> = Mutex::new(ModePayload { mode: Mode::Hidden, by_approval: false, scale: DEFAULT_SCALE, hot: false });
 
 /// The page reads this on mount (a cold window misses the first event).
 #[tauri::command]
@@ -213,6 +216,8 @@ pub struct Island {
     scale: f64,
     hidden_since: Option<u64>,
     ignoring: Option<bool>,
+    hot: bool,
+    was_inside: bool,
     /// The last snapshot summary, so the 33 ms hover tick can run without rebuilding the snapshot.
     last: Option<(bool, usize, usize)>,
 }
@@ -243,9 +248,18 @@ impl Island {
         let now = crate::agent_hooks::now_ms();
         let inside = self.shown != Mode::Hidden && cursor_inside(app, self.shown, logos, scale);
         let mode = self.sm.step(&In { now_ms: now, wanted, approvals, inside, hover });
-        let payload = ModePayload { mode, by_approval: self.sm.by_approval(), scale };
-        let changed = mode != self.shown || (scale - self.scale).abs() > f64::EPSILON || logos != self.logos;
+        let hot = inside && mode == Mode::Collapsed;
+        if inside != self.was_inside {
+            tracing::info!("agent island: cursor {} the island ({:?})", if inside { "entered" } else { "left" }, mode);
+            self.was_inside = inside;
+        }
+        if mode != self.shown {
+            tracing::info!("agent island: {:?} -> {:?} (cursor inside = {inside}, scale {scale})", self.shown, mode);
+        }
+        let payload = ModePayload { mode, by_approval: self.sm.by_approval(), scale, hot };
+        let changed = mode != self.shown || (scale - self.scale).abs() > f64::EPSILON || logos != self.logos || hot != self.hot;
         if changed {
+            self.hot = hot;
             *CURRENT.lock().unwrap_or_else(|e| e.into_inner()) = payload;
             match mode {
                 Mode::Hidden => {
@@ -280,7 +294,9 @@ impl Island {
             let want_ignore = !inside;
             if self.ignoring != Some(want_ignore) {
                 if let Some(w) = app.get_webview_window(LABEL) {
-                    let _ = w.set_ignore_cursor_events(want_ignore);
+                    if let Err(e) = set_click_through(&w, want_ignore) {
+                        tracing::warn!("agent island: click-through: {e}");
+                    }
                 }
                 self.ignoring = Some(want_ignore);
             }
@@ -305,6 +321,46 @@ fn place_and_show(app: &AppHandle, scale: f64, was_hidden: bool) -> Result<(), S
         crate::notify_toast::show_without_focus(&win, crate::work_area::PRect { x, y, w, h })?;
     }
     Ok(())
+}
+
+const WS_EX_TRANSPARENT: isize = 0x0000_0020;
+
+/// The extended window style with the click-through bit on or off, every other bit untouched.
+pub fn click_through_style(ex: isize, through: bool) -> isize {
+    if through {
+        ex | WS_EX_TRANSPARENT
+    } else {
+        ex & !WS_EX_TRANSPARENT
+    }
+}
+
+/// Click-through on or off by flipping ONLY WS_EX_TRANSPARENT on the window. Do NOT use `set_ignore_cursor_events` here:
+/// the island is shown with raw Win32 calls (`show_without_focus`, so it never takes focus), and tao, which does not
+/// know that, rebuilds the whole style from its own flags on that call: it hid the window the moment the cursor
+/// entered it (the pill vanished on hover) and dropped TOOLWINDOW / NOACTIVATE.
+#[cfg(target_os = "windows")]
+fn set_click_through(win: &tauri::WebviewWindow, through: bool) -> Result<(), String> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
+        fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
+    }
+    const GWL_EXSTYLE: i32 = -20;
+    let hwnd = win.hwnd().map_err(|e| e.to_string())?.0 as isize;
+    // SAFETY: plain user32 calls on the island's own window handle; only one style bit changes.
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let next = click_through_style(ex, through);
+        if next != ex {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_click_through(win: &tauri::WebviewWindow, through: bool) -> Result<(), String> {
+    win.set_ignore_cursor_events(through).map_err(|e| e.to_string())
 }
 
 #[cfg(target_os = "windows")]
@@ -453,5 +509,40 @@ mod tests {
         assert!(!near(pill, centre.0, 300.0, MARGIN));
         // within the margin
         assert!(near(pill, pill.0 - MARGIN + 1.0, centre.1, MARGIN));
+    }
+
+    #[test]
+    fn the_hot_zone_is_easy_to_hit_but_not_huge() {
+        // the smallest one-agent pill (75%): 48 x 30 logical px at x 261..309, y 0..30 in a 570-wide window
+        let (lw, lh) = size_for(Mode::Collapsed, 1, 0.75);
+        let rect = drawn_rect(0.0, 0.0, 570.0, Mode::Collapsed, 1, 0.75, 1.0);
+        assert_eq!((rect.2, rect.3), (lw, lh));
+        let cx = rect.0 + rect.2 / 2.0;
+        assert!(near(rect, cx, rect.1 + rect.3 + 20.0, MARGIN), "20 px below the pill still counts");
+        assert!(near(rect, rect.0 - 20.0, rect.1 + 10.0, MARGIN), "20 px to the side still counts");
+        assert!(!near(rect, cx, rect.1 + rect.3 + 60.0, MARGIN), "60 px below does not");
+        assert!(!near(rect, rect.0 - 80.0, rect.1 + 10.0, MARGIN), "80 px to the side does not");
+    }
+
+    #[test]
+    fn click_through_changes_only_its_own_bit() {
+        let ex: isize = 0x080C_01B8; // layered, tool window, no-activate, topmost ... as the live island has it
+        let through = click_through_style(ex, true);
+        assert_eq!(through & !WS_EX_TRANSPARENT, ex & !WS_EX_TRANSPARENT, "no other bit moves");
+        assert_ne!(through & WS_EX_TRANSPARENT, 0);
+        assert_eq!(click_through_style(through, false), ex & !WS_EX_TRANSPARENT);
+        assert_eq!(click_through_style(click_through_style(ex, true), true), through, "idempotent");
+    }
+
+    /// The island is shown with raw Win32 calls, so tao's `set_ignore_cursor_events` would hide it on hover (found by the
+    /// desktop e2e test: the window turned invisible the moment the cursor entered it). Keep it out of this file.
+    #[test]
+    fn the_island_never_uses_tao_set_ignore_cursor_events() {
+        let src = include_str!("agent_island.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap();
+        let calls: Vec<&str> = body.lines().filter(|l| !l.trim_start().starts_with("//") && l.contains(".set_ignore_cursor_events(")).collect();
+        // the only allowed call is the non-Windows fallback inside set_click_through
+        assert_eq!(calls.len(), 1, "unexpected calls: {calls:?}");
+        assert!(calls[0].contains("through"), "{calls:?}");
     }
 }

@@ -729,11 +729,6 @@ fn decision_is_plausible(d: &str) -> bool {
 
 // ─── Commands ────────────────────────────────────────────────────────
 
-#[tauri::command]
-pub fn agent_monitor_list() -> Snapshot {
-    snapshot_now()
-}
-
 /// The island's Allow / Deny / answer click. Returns false when the request is already gone.
 #[tauri::command]
 pub fn agent_approval_decide(id: u64, decision: String) -> bool {
