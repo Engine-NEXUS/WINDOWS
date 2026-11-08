@@ -1,17 +1,18 @@
 import { useEffect, useRef } from "react";
-import { MODE_FRAMES } from "./engine/registry";
+import type { OrbFrame } from "./engine/core";
+import { blendFrames, MORPH_MS } from "./morph";
 import { paintFrameInk, WHITE_INK, type Ink } from "./paintInk";
-import { resolveOrb, type OrbDesign, type ResolvedOrb } from "./resolveOrb";
+import { resolveOrb, type OrbDesign } from "./resolveOrb";
+import { smoothLevel, voiceClockStep, wobbleScale } from "./voiceClock";
 
-/** Cross-fade between two designs (the engine cannot morph between modes). */
-export const CROSSFADE_MS = 180;
 /** Voice level raises the clock by at most this much (1 = +100 %). */
 export const LEVEL_SPEED_GAIN = 0.9;
 /** Static frame time used for reduced motion and for a paused first paint. */
 export const STATIC_FRAME_T = 0.6;
 
 const LABELS: Record<OrbDesign, string> = {
-  breathing: "Idle",
+  circle: "Ready",
+  breathing: "Responding",
   listening: "Listening",
   working: "Working",
   searching: "Searching",
@@ -31,32 +32,37 @@ export interface DottedOrbProps {
   ink?: Ink;
   /** Speed multiplier on top of the design's tuned speed. */
   speed?: number;
+  /** Morph duration in ms (defaults to MORPH_MS; the preview slows it down to inspect it). */
+  morphMs?: number;
   /** Polled once per frame, 0..1 (mic or TTS envelope). Refs keep React out of the animation loop. */
   getLevel?: () => number;
+  /**
+   * Listening mode: the animation clock only advances while `getLevel` reports sound (the shape holds still in silence),
+   * runs faster the louder it is, and the wobble depth follows the level. The level is smoothed so it tracks the mic.
+   */
+  voiceDriven?: boolean;
   paused?: boolean;
   reducedMotion?: boolean;
   className?: string;
   "aria-label"?: string;
 }
 
-function drawDesign(
-  ctx: CanvasRenderingContext2D,
-  r: ResolvedOrb,
-  size: number,
-  t: number,
-  dark: boolean,
-  ink: Ink,
-  level: number,
-  alpha: number,
-): void {
-  paintFrameInk(ctx, MODE_FRAMES[r.mode](size, t * r.speed, r.opts), dark, ink, level, alpha);
+interface MorphState {
+  design: OrbDesign | null;
+  /** What was last drawn: the starting shape when the design changes (even mid-morph, so changes chain smoothly). */
+  last: OrbFrame | null;
+  from: OrbFrame | null;
+  since: number;
+  t: number;
+  /** Smoothed mic level (voice-driven mode). */
+  level: number;
 }
 
 /**
- * Canvas orb built on the vendored thinking-orbs engine. One rAF loop per orb: the clock accumulates
- * (so a speed change never jumps the phase), a design change cross-fades for CROSSFADE_MS, and nothing
- * runs while `paused` or when the tab is hidden. Canvas size is set through the CSSOM because the stage
- * CSP drops React inline styles.
+ * Canvas orb built on the vendored thinking-orbs engine. One rAF loop per orb: the clock accumulates (so a speed
+ * change never jumps the phase) and a design change MORPHS: every particle of the current shape travels to a particle
+ * of the new one over MORPH_MS (see morph.ts). Nothing runs while `paused` or when the tab is hidden. Canvas size is
+ * set through the CSSOM because the stage CSP drops React inline styles.
  */
 export function DottedOrb({
   design,
@@ -64,7 +70,9 @@ export function DottedOrb({
   dark = true,
   ink = WHITE_INK,
   speed = 1,
+  morphMs = MORPH_MS,
   getLevel,
+  voiceDriven = false,
   paused = false,
   reducedMotion = false,
   className,
@@ -75,13 +83,11 @@ export function DottedOrb({
   levelRef.current = getLevel;
   const speedRef = useRef(speed);
   speedRef.current = speed;
-  // Persist the fade state across effect re-runs (design changes re-run the effect).
-  const fadeRef = useRef<{ prev: ResolvedOrb | null; since: number; current: ResolvedOrb | null; t: number }>({
-    prev: null,
-    since: 0,
-    current: null,
-    t: 0,
-  });
+  const morphMsRef = useRef(morphMs);
+  morphMsRef.current = morphMs;
+  const stateRef = useRef<MorphState>({ design: null, last: null, from: null, since: 0, t: 0, level: 0 });
+  const voiceDrivenRef = useRef(voiceDriven);
+  voiceDrivenRef.current = voiceDriven;
 
   useEffect(() => {
     const canvas = ref.current;
@@ -94,31 +100,34 @@ export function DottedOrb({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const fade = fadeRef.current;
+    const st = stateRef.current;
     const next = resolveOrb(design, size);
-    if (fade.current && fade.current !== next) {
-      fade.prev = fade.current;
-      fade.since = performance.now();
+    if (st.design !== null && st.design !== design && st.last && !reducedMotion) {
+      st.from = st.last;
+      st.since = performance.now();
     }
-    fade.current = next;
+    if (reducedMotion) st.from = null;
+    st.design = design;
 
     const paint = (now: number) => {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, size, size);
-      const level = Math.min(1, Math.max(0, levelRef.current?.() ?? 0));
-      const k = fade.prev ? Math.min(1, (now - fade.since) / CROSSFADE_MS) : 1;
-      if (fade.prev && k < 1) {
-        drawDesign(ctx, fade.prev, size, fade.t, dark, ink, level, 1 - k);
-        drawDesign(ctx, next, size, fade.t, dark, ink, level, k);
-      } else {
-        fade.prev = null;
-        drawDesign(ctx, next, size, fade.t, dark, ink, level, 1);
+      const vd = voiceDrivenRef.current;
+      const level = vd ? st.level : Math.min(1, Math.max(0, levelRef.current?.() ?? 0));
+      const opts =
+        vd && typeof next.opts.wobMul === "number" ? { ...next.opts, wobMul: next.opts.wobMul * wobbleScale(st.level) } : next.opts;
+      let frame = next.frame(size, st.t * next.speed, opts);
+      if (st.from) {
+        const k = (now - st.since) / Math.max(1, morphMsRef.current);
+        if (k >= 1) st.from = null;
+        else frame = blendFrames(st.from, frame, k, size / 2, size / 2);
       }
+      st.last = frame;
+      paintFrameInk(ctx, frame, dark, ink, level);
     };
 
     if (reducedMotion) {
-      fade.prev = null;
-      fade.t = STATIC_FRAME_T;
+      st.t = STATIC_FRAME_T;
       paint(performance.now());
       return;
     }
@@ -130,8 +139,14 @@ export function DottedOrb({
       const now = performance.now();
       const dt = Math.min(0.1, (now - last) / 1000);
       last = now;
-      const level = Math.min(1, Math.max(0, levelRef.current?.() ?? 0));
-      fade.t += dt * speedRef.current * (1 + LEVEL_SPEED_GAIN * level);
+      const raw = Math.min(1, Math.max(0, levelRef.current?.() ?? 0));
+      if (voiceDrivenRef.current) {
+        st.level = smoothLevel(st.level, raw, dt);
+        st.t += voiceClockStep(dt * speedRef.current, st.level);
+      } else {
+        st.level = raw;
+        st.t += dt * speedRef.current * (1 + LEVEL_SPEED_GAIN * raw);
+      }
       paint(now);
       if (running) raf = requestAnimationFrame(loop);
     };

@@ -1670,17 +1670,11 @@ pub(crate) mod engine {
                     };
 
                     // ── UI level meter ───────────────────────────────
-                    // Feed speech-synced visuals (ghost waves). Every 2nd
-                    // 80ms chunk ≈ 6 Hz — smooth for bars, cheap for the
-                    // bridge. try_send never blocks the audio callback.
-                    {
-                        static LEVEL_DIVIDER: std::sync::atomic::AtomicU32 =
-                            std::sync::atomic::AtomicU32::new(0);
-                        if LEVEL_DIVIDER.fetch_add(1, Ordering::Relaxed) % 2 == 0 {
-                            if let Some(tx) = super::LEVEL_TX.get() {
-                                let _ = tx.try_send(super::level_from_rms(rms));
-                            }
-                        }
+                    // Feed speech-synced visuals (the listening orb, ghost waves). Every 80ms chunk
+                    // (≈12 Hz) so the orb follows the voice closely; the forwarder drops unchanged
+                    // values. try_send never blocks the audio callback.
+                    if let Some(tx) = super::LEVEL_TX.get() {
+                        let _ = tx.try_send(super::level_from_rms(rms));
                     }
 
                     // Neural VAD (vadSilero) when loaded, else the noise-floor-aware energy hysteresis
@@ -2812,7 +2806,7 @@ pub(crate) fn is_duplicate_capture_start(
 }
 
 /// UI level meter channel: the real-time audio callback `try_send`s one
-/// f32 per ~2 chunks (≈6 Hz) while capturing; a dedicated forwarder
+/// f32 per chunk (≈12 Hz) while capturing; a dedicated forwarder
 /// thread (spawned in `run()`, owns an AppHandle) drains-to-latest and
 /// emits `audio:level`. Bounded sync_channel(4): try_send never blocks
 /// the audio callback, and a full channel drops (the forwarder is behind
@@ -4620,6 +4614,10 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                             },
                         );
 
+                        // Release the delivery barrier BEFORE opening the next capture: starting a capture takes the same
+                        // non-reentrant lock, so holding it here froze this thread, then the hotkey thread (the UI
+                        // thread), then the whole app ("not responding"; 2026-11-07 and 2026-11-08 logs).
+                        drop(_delivery);
                         start_stt_capture_with_origin(crate::directed::Origin::Direct);
                         let ext_session = CAPTURE_SESSION_ID.load(std::sync::atomic::Ordering::SeqCst);
                         if let Some(held) = HELD_TURN.lock().as_mut() {
@@ -5895,6 +5893,23 @@ mod tests {
 }
 ").map(|i| o + i).unwrap()];
         assert!(ob.contains("start_stt_capture_inner(origin, None)"));
+    }
+
+    /// The delivery barrier and a capture start share one non-reentrant lock. The smart-pause hold path opens the
+    /// next capture from inside delivery; without releasing the barrier first it deadlocked, froze the hotkey
+    /// (UI) thread and made the whole app "not responding".
+    #[test]
+    fn hold_path_releases_the_delivery_barrier_before_starting_a_capture() {
+        let src = include_str!("wakeword_oww.rs");
+        let guard = src.find("let _delivery = ACTIVE_CAPTURE_ATTEMPT.lock();").expect("delivery guard");
+        let rel = src[guard..]
+            .find("start_stt_capture_with_origin(crate::directed::Origin::Direct);")
+            .expect("hold path starts a capture");
+        let between = &src[guard..guard + rel];
+        assert!(
+            between.contains("drop(_delivery);"),
+            "release the delivery barrier before starting the next capture (self-deadlock)"
+        );
     }
 
     #[test]
