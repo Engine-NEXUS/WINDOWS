@@ -78,9 +78,10 @@ describe("paintDots voice level", () => {
 });
 
 describe("resolveOrb / frames", () => {
-  it("covers all nine designs", () => {
-    expect(ORB_DESIGNS).toHaveLength(9);
-    expect(new Set(ORB_DESIGNS).size).toBe(9);
+  it("covers the nine upstream designs plus the plain circle", () => {
+    expect(ORB_DESIGNS).toHaveLength(10);
+    expect(new Set(ORB_DESIGNS).size).toBe(10);
+    expect(ORB_DESIGNS).toContain("circle");
   });
 
   it("every design yields marks at the capsule size, deterministically", () => {

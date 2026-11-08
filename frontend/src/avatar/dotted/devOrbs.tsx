@@ -6,6 +6,7 @@ import { DottedOrb } from "./DottedOrb";
 import { ORB_DESIGNS, type OrbDesign } from "./resolveOrb";
 
 const DESCRIPTIONS: Record<OrbDesign, string> = {
+  circle: "a plain, steady circle of dots (idle)",
   breathing: "a face-on ring slowly morphing",
   listening: "a waveform rolls through the rings",
   working: "particles on tilted orbits",
@@ -18,8 +19,8 @@ const DESCRIPTIONS: Record<OrbDesign, string> = {
 };
 
 const ACTIVITIES: { id: string; label: string; suggestion: OrbDesign }[] = [
-  { id: "idle", label: "Idle", suggestion: "breathing" },
-  { id: "listening", label: "Listening to you", suggestion: "listening" },
+  { id: "idle", label: "Idle", suggestion: "circle" },
+  { id: "listening", label: "Listening to you", suggestion: "breathing" },
   { id: "thinking", label: "Thinking", suggestion: "working" },
   { id: "speaking", label: "Speaking", suggestion: "composing" },
   { id: "background", label: "Doing tasks in the background", suggestion: "weaving" },
