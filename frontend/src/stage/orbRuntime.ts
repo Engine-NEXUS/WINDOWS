@@ -16,6 +16,7 @@ import { abortCapture, processTranscript } from "../audio/recorder";
 import { stopTts, isRustTtsPlaying } from "../audio/ttsPlayer";
 import { transcribeAudio } from "../audio/stt";
 import { useAssistant } from "../store/assistant";
+import { normalizeOrbDesigns } from "../avatar/orbActivity";
 import { setBargedIn, clearBargedIn, clearDialogContext } from "../net/wsBridge";
 import { isDuplicateListen } from "../net/listenDedupe";
 
@@ -592,9 +593,7 @@ export function initOrbRuntime(): void {
         orbCapsuleStyle?: "classic" | "pebble";
         orbWakeupMode?: number;
         orbInteriorGenesis?: number;
-        orbThinkMode?: number;
-        orbSpeakMode?: number;
-        orbListenMode?: number;
+        orbDesigns?: Record<string, string>;
       }>("get_settings");
       if (s?.orbColor) {
         useAssistant.getState().setOrbColor(s.orbColor);
@@ -611,14 +610,8 @@ export function initOrbRuntime(): void {
       if (s?.orbInteriorGenesis) {
         useAssistant.getState().setOrbInteriorGenesis(s.orbInteriorGenesis);
       }
-      if (s?.orbThinkMode) {
-        useAssistant.getState().setOrbThinkMode(s.orbThinkMode);
-      }
-      if (s?.orbSpeakMode) {
-        useAssistant.getState().setOrbSpeakMode(s.orbSpeakMode);
-      }
-      if (s?.orbListenMode) {
-        useAssistant.getState().setOrbListenMode(s.orbListenMode);
+      if (s?.orbDesigns) {
+        useAssistant.getState().setOrbDesigns(normalizeOrbDesigns(s.orbDesigns));
       }
     } catch (_) {}
 
@@ -644,10 +637,9 @@ export function initOrbRuntime(): void {
           useAssistant.getState().setOrbPosition(p);
         }
       });
-      await listen<{ think?: number; speak?: number; listen?: number }>("orb:morphology_changed", (e) => {
-        if (e.payload?.think) useAssistant.getState().setOrbThinkMode(e.payload.think);
-        if (e.payload?.speak) useAssistant.getState().setOrbSpeakMode(e.payload.speak);
-        if (e.payload?.listen) useAssistant.getState().setOrbListenMode(e.payload.listen);
+      // Every save broadcasts the whole settings object: pick the activity -> orb design map out of it.
+      await listen<{ orbDesigns?: unknown }>("settings:updated", (e) => {
+        useAssistant.getState().setOrbDesigns(normalizeOrbDesigns(e.payload?.orbDesigns));
       });
     } catch (_) {}
   })();

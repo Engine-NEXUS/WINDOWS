@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="color-scheme" content="dark light" />
+    <script src="/theme-boot.js"></script>
+    <title>Orb in capsule (dev only)</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 24px;
+        background: #4a5568;
+        color: #f1f1f1;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      button {
+        padding: 6px 12px;
+        border-radius: 6px;
+        border: 1px solid #3a3a42;
+        background: #1e1e24;
+        color: #fff;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      button.on {
+        background: #3a3a52;
+        border-color: #8ab4ff;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/avatar/dotted/devOrbCapsule.tsx"></script>
+  </body>
+</html>

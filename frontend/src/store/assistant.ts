@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { NO_SIGNALS, type OrbSignals } from "../avatar/orbActivity";
 import {
   LOADING_HIDDEN,
   LoadingSnapshot,
@@ -98,13 +99,12 @@ interface AssistantStore {
   /** True while speech captions are actively rendering/lingering on screen. */
   captionActive: boolean;
   setCaptionActive: (v: boolean) => void;
-  /** Orb 3D morphology modes: thinking (1..12), speaking (1..6), listening (1..6). */
-  orbThinkMode: number;
-  setOrbThinkMode: (m: number) => void;
-  orbSpeakMode: number;
-  setOrbSpeakMode: (m: number) => void;
-  orbListenMode: number;
-  setOrbListenMode: (m: number) => void;
+  /** Long-running activity signals the orb shows (tour, hand mode, dictation, agent watch, background tasks). */
+  orbSignals: OrbSignals;
+  setOrbSignals: (patch: Partial<OrbSignals>) => void;
+  /** Saved activity -> orb design mapping (sanitised; empty = defaults). Persisted as the `orbDesigns` setting. */
+  orbDesigns: Record<string, string>;
+  setOrbDesigns: (m: Record<string, string>) => void;
 }
 
 /** Single owner for the loading indicator (see loadingMachine.ts).
@@ -286,12 +286,15 @@ export const useAssistant = create<AssistantStore>((set) => ({
     console.log(`[ORB] setCaptionActive(${v}) (was:${st.captionActive})`);
     return { captionActive: v };
   }),
-  orbThinkMode: 6,
-  setOrbThinkMode: (m) => set({ orbThinkMode: m }),
-  orbSpeakMode: 2,
-  setOrbSpeakMode: (m) => set({ orbSpeakMode: m }),
-  orbListenMode: 1,
-  setOrbListenMode: (m) => set({ orbListenMode: m }),
+  orbSignals: NO_SIGNALS,
+  setOrbSignals: (patch) =>
+    set((st) => {
+      const next = { ...st.orbSignals, ...patch };
+      const same = (Object.keys(next) as (keyof OrbSignals)[]).every((k) => next[k] === st.orbSignals[k]);
+      return same ? st : { orbSignals: next };
+    }),
+  orbDesigns: {},
+  setOrbDesigns: (m) => set({ orbDesigns: m }),
 }));
 
 /**

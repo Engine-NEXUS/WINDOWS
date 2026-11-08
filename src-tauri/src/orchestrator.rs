@@ -266,6 +266,12 @@ pub fn set_dictation_active(active: bool) {
     DICTATION_ACTIVE.store(active, Ordering::SeqCst);
 }
 
+/// The orb reads this to show the typing design (the flag lives in a static and emits no event).
+#[tauri::command]
+pub fn dictation_active() -> bool {
+    is_dictation_active()
+}
+
 // ─── Counsel Mode (F1b) ─────────────────────────────────────────────
 // Armed by the ShareConcern opener ("i want to share something"): the
 // NEXT command turn runs through the counsel contract instead of normal

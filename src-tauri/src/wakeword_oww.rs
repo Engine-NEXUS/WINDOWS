@@ -1670,17 +1670,11 @@ pub(crate) mod engine {
                     };
 
                     // ── UI level meter ───────────────────────────────
-                    // Feed speech-synced visuals (ghost waves). Every 2nd
-                    // 80ms chunk ≈ 6 Hz — smooth for bars, cheap for the
-                    // bridge. try_send never blocks the audio callback.
-                    {
-                        static LEVEL_DIVIDER: std::sync::atomic::AtomicU32 =
-                            std::sync::atomic::AtomicU32::new(0);
-                        if LEVEL_DIVIDER.fetch_add(1, Ordering::Relaxed) % 2 == 0 {
-                            if let Some(tx) = super::LEVEL_TX.get() {
-                                let _ = tx.try_send(super::level_from_rms(rms));
-                            }
-                        }
+                    // Feed speech-synced visuals (the listening orb, ghost waves). Every 80ms chunk
+                    // (≈12 Hz) so the orb follows the voice closely; the forwarder drops unchanged
+                    // values. try_send never blocks the audio callback.
+                    if let Some(tx) = super::LEVEL_TX.get() {
+                        let _ = tx.try_send(super::level_from_rms(rms));
                     }
 
                     // Neural VAD (vadSilero) when loaded, else the noise-floor-aware energy hysteresis
@@ -2812,7 +2806,7 @@ pub(crate) fn is_duplicate_capture_start(
 }
 
 /// UI level meter channel: the real-time audio callback `try_send`s one
-/// f32 per ~2 chunks (≈6 Hz) while capturing; a dedicated forwarder
+/// f32 per chunk (≈12 Hz) while capturing; a dedicated forwarder
 /// thread (spawned in `run()`, owns an AppHandle) drains-to-latest and
 /// emits `audio:level`. Bounded sync_channel(4): try_send never blocks
 /// the audio callback, and a full channel drops (the forwarder is behind

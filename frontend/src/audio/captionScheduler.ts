@@ -125,7 +125,7 @@ export function clearCaptionSchedule(): void {
  * Current real TTS voice amplitude, 0..1, interpolated between the two
  * nearest envelope frames — or `null` when no envelope has arrived yet
  * (no utterance speaking, or this chunk's engine couldn't produce one).
- * Callers (VoiceOrb.tsx) fall back to the mic-proxy level on `null`.
+ * Callers (useOrbActivity.ts) fall back to the mic-proxy level on `null`.
  */
 export function getEnvelopeLevel(): number | null {
   if (anchorMs === null || !segments.length) return null;

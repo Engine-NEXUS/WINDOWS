@@ -27,6 +27,11 @@ export function captionSlot(vp: Viewport): Rect {
   return { x: vp.w * CAPTION.centerX - w / 2, y: vp.h * CAPTION.top, w, h: CAPTION.minHeight };
 }
 
+/** Speech pill: shares the caption slot family (LiveCaption / SpeechPill). */
+export function speechPillSlot(vp: Viewport): Rect {
+  return captionSlot(vp);
+}
+
 /** Fallback when the spinner has not been placed yet: where the default spinner sits. */
 const TASK_STACK_FALLBACK = { top: 112, right: 24 };
 

@@ -232,21 +232,7 @@ export function HubHome({ acc, insights: _insights, themeMode, onTheme: _onTheme
       <Row icon={ICONS.bell} title="Alerts & History" sub="Notification Center & Controls" onClick={() => onOpen("alerts")} />
       <Row icon={ICONS.plug} title="Device Links" sub="Laptop Mesh" onClick={() => onOpen("device-links")} />
       <Row icon={ICONS.clock} title="Activity Manager" sub="Daily and weekly app usage" onClick={() => onOpen("activity")} />
-      <Row
-        icon={ICONS.orb}
-        title="Voice Orb 3D Studio"
-        sub="3D Morphologies"
-        onClick={() => {
-          const isTauri = typeof (window as any).__TAURI_INTERNALS__ !== "undefined" && !(window as any).__TAURI_DEV_STANDALONE__;
-          if (isTauri) {
-            import("@tauri-apps/api/core").then(({ invoke }) => {
-              invoke("open_orb_studio_window").catch(() => {});
-            });
-          } else {
-            onOpen("display");
-          }
-        }}
-      />
+      <Row icon={ICONS.orb} title="Orb Designs" sub="What the orb shows" onClick={() => onOpen("display")} />
       <Row icon={ICONS.audio} title="Audio & Personas" sub="Voices & Earcons" onClick={() => onOpen("audio")} />
       <Row icon={ICONS.display} title="Display & Position" sub="Notch & Aura" onClick={() => onOpen("display")} />
       <Row icon={ICONS.plug} title="MCP Integrations" sub="Tools & Bridges" onClick={() => onOpen("connections")} />
