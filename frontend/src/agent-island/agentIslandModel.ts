@@ -48,6 +48,30 @@ export interface Snapshot {
 export interface ModePayload {
   mode: IslandMode;
   byApproval: boolean;
+  /** The size setting (0.75 - 1.5), so the page and the window never disagree. */
+  scale: number;
+}
+
+export const SCALE_MIN = 0.75;
+export const SCALE_MAX = 1.5;
+
+/** The size setting kept inside its limits; anything that is not a number is the default size. */
+export function clampScale(v: unknown): number {
+  const n = typeof v === "number" && Number.isFinite(v) ? v : 1;
+  return Math.min(SCALE_MAX, Math.max(SCALE_MIN, n));
+}
+
+/** Drawn size in CSS px at scale 1 (mirrors agent_island.rs `size_for`: LOGO_W 32, PILL_PAD 14, PILL_MIN_W 64, PILL_H 40,
+ *  PANEL 760 x 430). The page multiplies by the scale with CSS `zoom`; Rust sizes the OS window the same way. */
+export const PANEL = { w: 760, h: 430 } as const;
+export const PILL_H = 40;
+
+export function pillWidth(logos: number): number {
+  return Math.max(64, 28 + 32 * Math.min(8, Math.max(1, Math.round(logos) || 1)));
+}
+
+export function islandSize(mode: "collapsed" | "expanded", logos: number): { w: number; h: number } {
+  return mode === "expanded" ? { w: PANEL.w, h: PANEL.h } : { w: pillWidth(logos), h: PILL_H };
 }
 
 /** How an agent's logo is drawn on the island: the SVG and the tile it sits on. A mark is drawn in the vendor's own
@@ -157,7 +181,7 @@ export function asSnapshot(raw: unknown): Snapshot {
 
 export function asMode(raw: unknown): ModePayload {
   const mode = isObj(raw) ? (["hidden", "collapsed", "expanded"] as const).find((m) => m === raw.mode) : undefined;
-  return { mode: mode ?? "hidden", byApproval: isObj(raw) && raw.byApproval === true };
+  return { mode: mode ?? "hidden", byApproval: isObj(raw) && raw.byApproval === true, scale: clampScale(isObj(raw) ? raw.scale : 1) };
 }
 
 /** One logo per agent type: how many sessions it has and its most urgent state. */

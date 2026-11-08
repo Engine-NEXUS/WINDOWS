@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type HTMLAttributes } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { diffOf, fileName, type DiffLine } from "./diff";
@@ -12,6 +12,7 @@ import {
   defaultTab,
   elapsedLabel,
   focusSession,
+  islandSize,
   pillLogos,
   questionsOf,
   secondsLeft,
@@ -23,19 +24,21 @@ import {
   type Tab,
 } from "./agentIslandModel";
 
-/** The Agent Island. Rust owns the window (size, place, hover, auto-open for a permission request); this page only
- *  draws what it is told: a one-row pill of the running agents' logos, or the full island with a Tracking tab (the
- *  agent, its tool steps and a live diff of the file it is editing) and an Approvals tab. No mascot, no orb. */
+/** The Agent Island. Rust owns the window (a fixed, panel-sized, transparent window that ignores the mouse outside the
+ *  drawn island; the hover and auto-open for a permission request are decided there); this page only draws what it is
+ *  told. ONE element morphs between the one-row pill of the agents' logos and the full island (Tracking tab: the agent,
+ *  its tool steps and a live diff; Approvals tab), so a hover never resizes a window or swaps components: nothing jumps.
+ *  The snapshot is already without the agents the user is looking at. */
 export function AgentIslandApp() {
   const [snap, setSnap] = useState<Snapshot>(EMPTY);
-  const [mode, setMode] = useState<ModePayload>({ mode: "hidden", byApproval: false });
+  const [mode, setMode] = useState<ModePayload>({ mode: "hidden", byApproval: false, scale: 1 });
   const [tab, setTab] = useState<Tab>("tracking");
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
-    invoke<unknown>("agent_monitor_list").then((r) => setSnap(asSnapshot(r))).catch(() => {});
+    invoke<unknown>("agent_island_snapshot").then((r) => setSnap(asSnapshot(r))).catch(() => {});
     invoke<unknown>("agent_island_mode").then((r) => setMode(asMode(r))).catch(() => {});
-    const a = listen<unknown>("agent_monitor:update", (e) => setSnap(asSnapshot(e.payload)));
+    const a = listen<unknown>("agent_island:snapshot", (e) => setSnap(asSnapshot(e.payload)));
     const b = listen<unknown>("agent_island:mode", (e) => setMode(asMode(e.payload)));
     return () => {
       a.then((f) => f());
@@ -60,8 +63,57 @@ export function AgentIslandApp() {
   }, []);
 
   if (mode.mode === "hidden") return null;
-  if (mode.mode === "collapsed") return <Pill snap={snap} />;
-  return <Panel snap={snap} tab={tab} setTab={setTab} now={now} decide={decide} />;
+  return <Island snap={snap} mode={mode.mode} tab={tab} setTab={setTab} now={now} decide={decide} scale={mode.scale} />;
+}
+
+/** How long the panel stays mounted after the island folds, so its content fades out instead of vanishing. */
+const PANEL_LINGER_MS = 340;
+
+export function Island(p: {
+  snap: Snapshot;
+  mode: "collapsed" | "expanded";
+  tab: Tab;
+  setTab: (t: Tab) => void;
+  now: number;
+  decide: (id: number, d: string) => void;
+  scale?: number;
+  /** Mouse handlers for the dev preview (the real island is hovered through Rust). */
+  host?: HTMLAttributes<HTMLDivElement>;
+}) {
+  const { snap, mode, tab, setTab, now, decide, scale = 1, host } = p;
+  const ref = useRef<HTMLDivElement | null>(null);
+  const logos = pillLogos(snap).length;
+  const [keepPanel, setKeepPanel] = useState(mode === "expanded");
+
+  // sizes go in through CSS custom properties (the CSSOM is allowed under the window's CSP; the transition does the rest)
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const { w, h } = islandSize(mode, logos);
+    el.style.setProperty("--ai-w", `${w}px`);
+    el.style.setProperty("--ai-h", `${h}px`);
+    el.style.setProperty("--ai-scale", String(scale));
+  }, [mode, logos, scale]);
+
+  useEffect(() => {
+    if (mode === "expanded") {
+      setKeepPanel(true);
+      return;
+    }
+    const id = window.setTimeout(() => setKeepPanel(false), PANEL_LINGER_MS);
+    return () => window.clearTimeout(id);
+  }, [mode]);
+
+  return (
+    <div className={`ai-island ai-island--${mode}`} ref={ref} {...host}>
+      <div className="ai-layer ai-layer--pill" aria-hidden={mode === "expanded"}>
+        <Pill snap={snap} />
+      </div>
+      <div className="ai-layer ai-layer--panel" aria-hidden={mode === "collapsed"}>
+        {keepPanel && <Panel snap={snap} tab={tab} setTab={setTab} now={now} decide={decide} />}
+      </div>
+    </div>
+  );
 }
 
 export function Pill({ snap }: { snap: Snapshot }) {
