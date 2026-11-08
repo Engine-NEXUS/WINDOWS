@@ -4620,6 +4620,10 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                             },
                         );
 
+                        // Release the delivery barrier BEFORE opening the next capture: starting a capture takes the same
+                        // non-reentrant lock, so holding it here froze this thread, then the hotkey thread (the UI
+                        // thread), then the whole app ("not responding"; 2026-11-07 and 2026-11-08 logs).
+                        drop(_delivery);
                         start_stt_capture_with_origin(crate::directed::Origin::Direct);
                         let ext_session = CAPTURE_SESSION_ID.load(std::sync::atomic::Ordering::SeqCst);
                         if let Some(held) = HELD_TURN.lock().as_mut() {
