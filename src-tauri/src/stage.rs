@@ -534,6 +534,27 @@ fn is_resume_gap(gap_secs: u64) -> bool {
     gap_secs > TICK_RESUME_GAP_SECS
 }
 
+/// How long a rebuilt window gets to send its first heartbeat.
+const VERIFY_BEAT_SECS: u64 = 60;
+
+/// Recreate the stage, show it and wait for its first heartbeat. `None` = the window could not be built.
+async fn recreate_and_verify<R: Runtime>(app: &AppHandle<R>) -> Option<bool> {
+    let win = ensure_stage(app).map_err(|e| tracing::warn!("stage: auto-fix recreate failed: {e}")).ok()?;
+    win.show().ok()?;
+    VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
+    *SHOWN_AT.lock() = Some(std::time::Instant::now());
+    for _ in 0..(VERIFY_BEAT_SECS * 2) {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if disabled() {
+            return Some(false);
+        }
+        if LAST_BEAT.lock().map(|t| t.elapsed().as_secs() <= HEARTBEAT_STALE_SECS).unwrap_or(false) {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
 /// Blackout watchdog: 2s cadence. Detect → shutdown → inform → auto-fix
 /// (see module docs). Gives up recreating after MAX_AUTO_FIXES but keeps
 /// watching so a manual `stage_show` still recovers.
@@ -620,43 +641,19 @@ pub fn spawn_stage_watchdog<R: Runtime>(app: AppHandle<R>) {
                 // Kill-switch engaged mid-fix: stand down.
                 continue;
             }
-            match ensure_stage(&app) {
-                Ok(win) => {
-                    if win.show().is_err() {
-                        continue;
-                    }
-                    VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
-                    *SHOWN_AT.lock() = Some(std::time::Instant::now());
-                    // Wait up to 30s for a fresh heartbeat (proves the
-                    // renderer is alive, not just the window).
-                    let mut healthy = false;
-                    for _ in 0..60 {
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        let fresh = LAST_BEAT
-                            .lock()
-                            .map(|t| t.elapsed().as_secs() <= HEARTBEAT_STALE_SECS)
-                            .unwrap_or(false);
-                        if fresh {
-                            healthy = true;
-                            break;
-                        }
-                    }
-                    if healthy {
-                        if disabled() {
-                            // Kill-switch landed during verification: stay down.
-                            VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
-                            tracing::info!("stage: healthy beat but kill-switched — staying down");
-                        } else {
-                            FAILS.store(0, std::sync::atomic::Ordering::Relaxed);
-                            tracing::info!("stage: auto-fix verified healthy (heartbeat resumed)");
-                        }
-                    } else {
-                        tracing::warn!("stage: recreated window never beat — will retry");
-                    }
+            // Waits up to VERIFY_BEAT_SECS for a fresh heartbeat (proves the renderer is alive, not just the window).
+            match recreate_and_verify(&app).await {
+                Some(true) if disabled() => {
+                    // Kill-switch landed during verification: stay down.
+                    VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
+                    tracing::info!("stage: healthy beat but kill-switched — staying down");
                 }
-                Err(e) => {
-                    tracing::warn!("stage: auto-fix recreate failed: {e}");
+                Some(true) => {
+                    FAILS.store(0, std::sync::atomic::Ordering::Relaxed);
+                    tracing::info!("stage: auto-fix verified healthy (heartbeat resumed)");
                 }
+                Some(false) => tracing::warn!("stage: recreated window never beat — will retry"),
+                None => {}
             }
         }
     });
@@ -686,8 +683,9 @@ mod tests {
 
     #[test]
     fn resume_grace_covers_a_slow_renderer() {
-        // The failed recoveries needed more than 40 s; the grace must outlast them.
+        // The failed recoveries needed more than 40 s; the grace must outlast them and the first verify window.
         assert!(RESUME_GRACE_SECS >= 120);
+        assert!(VERIFY_BEAT_SECS >= 60, "a rebuilt window gets a full minute to beat");
     }
 
     #[test]
