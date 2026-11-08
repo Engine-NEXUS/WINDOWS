@@ -1,4 +1,5 @@
 import { useAssistant } from "../store/assistant";
+import { charSchedule } from "./typedCaption";
 
 // Response caption scheduler (plan Phase 3) — word-by-word reveal driven
 // by Rust's `tts:caption` event, anchored to performance.now() the moment
@@ -269,38 +270,23 @@ function scheduleChunk(track: CaptionTrack): void {
       }, startDelay)
     );
 
-    // Schedule incremental letter-by-letter reveal inside this active line
-    let accumulatedText = "";
-    for (let wi = 0; wi < line.words.length; wi++) {
-      const cw = line.words[wi];
-      const cleanWord = unescapeXml(cw.text);
-      if (wi > 0) {
-        accumulatedText += " ";
-      }
-      const wordPrefix = accumulatedText;
-      const charCount = cleanWord.length;
-      const wordDur = Math.max(80, cw.duration_ms);
-
-      for (let ci = 0; ci < charCount; ci++) {
-        const textSnapshot = wordPrefix + cleanWord.slice(0, ci + 1);
-        const charOffset = charCount > 1 ? (ci / charCount) * wordDur : 0;
-        const charDelay = Math.max(0, (cw.start_ms + charOffset) - (now - anchor));
-
-        timers.push(
-          setTimeout(() => {
-            if (activeLineSeq === lineSeq) {
-              notifyLine({
-                text: textSnapshot,
-                previousText: prevLineText,
-                phase: "active",
-                words: textSnapshot.trim().split(/\s+/).filter(Boolean),
-                activeWordIndex: wi,
-              }, false);
-            }
-          }, charDelay)
-        );
-      }
-      accumulatedText += cleanWord;
+    // Letter-by-letter reveal at a steady rate across the whole line (shared with the playback-driven stage).
+    for (const step of charSchedule(line.words)) {
+      const charDelay = Math.max(0, step.atMs - (now - anchor));
+      const snapshotWords = step.text.split(/\s+/).filter(Boolean);
+      timers.push(
+        setTimeout(() => {
+          if (activeLineSeq === lineSeq) {
+            notifyLine({
+              text: step.text,
+              previousText: prevLineText,
+              phase: "active",
+              words: snapshotWords,
+              activeWordIndex: Math.max(0, snapshotWords.length - 1),
+            }, false);
+          }
+        }, charDelay)
+      );
     }
 
     timers.push(

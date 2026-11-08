@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { typedText } from "./typedCaption";
 import { useAssistant } from "../store/assistant";
 import { CaptionLineEvent, CaptionTrack, partitionIntoLines, setPlaybackTimelineEnabled } from "./captionScheduler";
 
@@ -109,11 +110,6 @@ function rebuildLines() {
   ).sort((a, b) => a.start_ms - b.start_ms);
 }
 
-function decodeWord(text: string): string {
-  return text.replace(/&apos;/g, "'").replace(/&quot;/g, '"')
-    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
-}
-
 /** Pure caption projection from the measured playback cursor. */
 export function captionAtPosition(all: Line[], pos: number, finished = false): string {
   if (!all.length) return "";
@@ -128,16 +124,10 @@ export function captionAtPosition(all: Line[], pos: number, finished = false): s
   if (finished) selected = all.length - 1;
   if (selected < 0) return "";
   const line = all[selected];
-  if (line.estimated || finished) return line.text;
-  let text = "";
-  for (const word of line.words) {
-    if (word.start_ms > pos) break;
-    const clean = decodeWord(word.text);
-    const fraction = Math.min(1, Math.max(0, pos - word.start_ms) / Math.max(80, word.duration_ms));
-    const count = Math.max(1, Math.ceil(clean.length * fraction));
-    text += `${text ? " " : ""}${clean.slice(0, count)}`;
-  }
-  return text;
+  if (finished) return line.text;
+  // Letter by letter at a steady rate across the whole line (see typedCaption.ts). Estimated local-engine timing
+  // types too, over the line's own duration, instead of showing the clause at once.
+  return line.words.length ? typedText(line.words, pos) : line.text;
 }
 
 function cursor(): number {

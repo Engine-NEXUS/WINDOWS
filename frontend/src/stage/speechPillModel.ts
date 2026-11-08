@@ -173,3 +173,31 @@ export class SpeechPillModel {
     return this.getState();
   }
 }
+
+// ─── Letter-by-letter typing of the pill text ───────────────────────────────────────────────
+
+/** Typing speed (characters per second) for short texts. */
+export const TYPE_CPS = 55;
+/** A text never takes longer than this to finish typing, however long it is. */
+export const TYPE_MAX_MS = 1200;
+
+/**
+ * Characters typed (fractional) `elapsedMs` after typing started from `base` characters towards `total`.
+ * Short texts type at TYPE_CPS; long ones speed up so they still finish within TYPE_MAX_MS.
+ */
+export function typingProgress(base: number, total: number, elapsedMs: number, cps: number = TYPE_CPS, maxMs: number = TYPE_MAX_MS): number {
+  if (total <= 0) return 0;
+  const from = Math.min(Math.max(0, base), total);
+  const remaining = total - from;
+  if (remaining <= 0) return total;
+  const duration = Math.max(1, Math.min(maxMs, (remaining / cps) * 1000));
+  const p = Math.min(1, Math.max(0, elapsedMs / duration));
+  return from + remaining * p;
+}
+
+/** The visible slice for a fractional typed length: at least the first letter, never a trailing space. */
+export function typedSlice(text: string, typed: number): string {
+  if (!text) return "";
+  const n = Math.min(text.length, Math.max(1, Math.floor(typed)));
+  return text.slice(0, n).trimEnd();
+}
