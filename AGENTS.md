@@ -1,5 +1,21 @@
 # NEXUS — Project Notes
 
+## Agents connected automatically (2026-11-08)
+
+`agent_autohook.rs`: 25 s after start and every 30 min NEXUS looks for coding agents (settings folder or CLI on PATH: Claude Code, Codex, Antigravity `agy`, OpenCode, Gemini CLI, Aider, Kilo, Copilot, Windsurf, Cursor) and adds its own hook through the same `agent_hooks::install` as "hook up ..." (backup first, foreign hooks untouched), then says one line. Setting `agentAutoHook` (default on; Command Hub > Advanced > Agent Island) turns it off; it never removes existing hooks. Tests: `agent_autohook::tests` + `agents_on_path_in`. **Not run live:** a real fresh install; needs a rebuild.
+
+## Logos via logoapi.sh (2026-11-08)
+
+21 logos now come from the logoapi.sh MCP, downloaded and bundled (`scripts/import-logoapi-icons.mjs`, provenance in `frontend/public/activity-logos/SOURCES.json`, gate `scripts/check-activity-icons.mjs`). logoapi mostly serves wide wordmarks, so only square marks are taken; the rest keep their files. Record: `docs/changes/187-logoapi-logos.md`. **Not run live:** rebuilt app screens.
+
+## Agent Island (2026-11-07)
+
+Laptop feature, branch `feat/agent-island`: a pill of the running coding agents' logos at the top of the screen; hover opens live tracking; a permission request opens Allow / Deny by itself and folds back after the answer; a finished agent's logo leaves the row. The screen is held awake while any agent works, then released (optional display-off after you were away). Away/return rules: present = toast, away = silent away log, return after 20+ min = spoken welcome summary, shorter = quiet toasts only. New: `agent_monitor.rs`, `agent_island.rs`, `agent_approval_reply.rs` (ported from coucou's MIT relay, notice in THIRD_PARTY_NOTICES.md), `frontend/src/agent-island/`, settings `agentMonitor*`. Webhook now serves one thread per connection and `POST /agent-approval`. Claude Code hooks gain PreToolUse/SessionEnd/PermissionRequest (re-run "hook up claude"). **Not run live:** a real Claude Code permission round trip, hover/multi-monitor/DPI, display wake after blank. Record: `docs/changes/186-agent-island.md`.
+
+## Multi-user wake-word research plan (2026-11-07)
+
+Owner confirmed many users and laptop microphones from the first milestone. Proposed pilot: 30 consenting participants and 15 laptops with disjoint training/calibration/acceptance people and devices; 4,500 fresh positives (2,250/750/1,500). These are research budgets, not proven accuracy or implemented collection tooling. Historical 120/137 owner recall and 44.04 raw neural detections/hour lack exact model/source/config binding; current live accuracy remains unestablished. Research and metadata audit: docs/research/voice-accuracy/03-current-evidence-and-training-plan-2026-11-06.md and docs/testing/runs/wake-evidence-audit-20261106.json. No audio upload, training, application build/runtime/settings operation, model promotion or score change. Raw training data remains private/ignored; owner controls builds/runtime.
+
 ## Training data lives in D:\NEXUS-Training (2026-10-31)
 
 - The training folders (`wake_word_data`, `wake_camp`, `wake_test_recordings`, `nexus_real_samples`, `nexus_model`, `audioset*`, `mit_rirs`) were moved to `D:\NEXUS-Training\data\` (private repo Engine-NEXUS/NEXUS-Training; data is ignored there and never pushed). Directory junctions at the old paths keep every script working: do not delete a junction and never `git add` one. Training scripts stay in `scripts/` and `server/nlu/`. Record: `docs/changes/181-training-moved-to-nexus-training-repo.md`.

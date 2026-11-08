@@ -215,6 +215,9 @@ pub fn icon_id(ev: &NotifyEvent) -> String {
                 ("copilot", "copilot"),
                 ("windsurf", "windsurf"),
                 ("aider", "aider"),
+                ("kilo", "kilo"),
+                ("devin", "devin"),
+                ("trae", "trae"),
             ] {
                 if name.contains(needle) {
                     return id.into();
@@ -541,7 +544,7 @@ pub async fn show<R: Runtime>(app: &AppHandle<R>, ev: &NotifyEvent, mode: Privac
 /// Show the window topmost WITHOUT activating it. The foreground window is read before and after so the log proves
 /// whether focus moved (the on-device experiment of the plan, phase 0).
 #[cfg(target_os = "windows")]
-fn show_without_focus<R: Runtime>(win: &tauri::WebviewWindow<R>, rect: PRect) -> Result<(), String> {
+pub(crate) fn show_without_focus<R: Runtime>(win: &tauri::WebviewWindow<R>, rect: PRect) -> Result<(), String> {
     #[link(name = "user32")]
     extern "system" {
         fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
@@ -575,7 +578,7 @@ fn show_without_focus<R: Runtime>(win: &tauri::WebviewWindow<R>, rect: PRect) ->
 }
 
 #[cfg(not(target_os = "windows"))]
-fn show_without_focus<R: Runtime>(win: &tauri::WebviewWindow<R>, _rect: PRect) -> Result<(), String> {
+pub(crate) fn show_without_focus<R: Runtime>(win: &tauri::WebviewWindow<R>, _rect: PRect) -> Result<(), String> {
     win.show().map_err(|e| e.to_string())
 }
 

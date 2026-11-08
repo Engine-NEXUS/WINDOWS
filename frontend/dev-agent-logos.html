@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Agent logo sheet (dev only)</title>
+    <style>
+      body { margin: 0; padding: 24px; background: #151515; color: #f1f1f1; font-family: "Segoe UI", system-ui, sans-serif; }
+      h1 { font-size: 15px; font-weight: 600; margin: 0 0 16px; }
+      .row { display: grid; grid-template-columns: 130px 80px 36px 26px 26px; align-items: center; gap: 18px; margin-bottom: 14px; }
+      .row small { color: #9aa0aa; font-size: 11px; }
+      .ai-logo { display: flex; align-items: center; justify-content: center; flex: none; box-sizing: border-box; border: 1px solid #2b2b30; overflow: hidden; }
+      .ai-logo-img { width: 100%; height: 100%; padding: 14%; box-sizing: border-box; object-fit: contain; }
+      .big { width: 72px; height: 72px; border-radius: 20px; }
+      .mid { width: 36px; height: 36px; border-radius: 10px; }
+      .sm { width: 26px; height: 26px; border-radius: 7px; }
+    </style>
+  </head>
+  <body>
+    <h1>Agent logos as the island draws them (tile from agentLook)</h1>
+    <div id="sheet"></div>
+    <script type="module">
+      import { AGENTS_WITH_LOGOS, agentLook } from "/src/agent-island/agentIslandModel.ts";
+      const sheet = document.getElementById("sheet");
+      for (const a of AGENTS_WITH_LOGOS) {
+        const look = agentLook(a);
+        const tile = (cls) => `<div class="ai-logo ${cls}" style="background:${look.tile}"><img class="ai-logo-img" src="${look.src}" alt="${a}"/></div>`;
+        sheet.insertAdjacentHTML("beforeend", `<div class="row"><b>${a}</b><small>${look.tile}</small>${tile("big")}${tile("mid")}${tile("sm")}</div>`);
+      }
+    </script>
+  </body>
+</html>

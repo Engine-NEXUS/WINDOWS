@@ -1,5 +1,7 @@
 # NEXUS Documentation Index
 
+- [Wake-word evidence and multi-user laptop training plan](research/voice-accuracy/03-current-evidence-and-training-plan-2026-11-06.md) — historical measurements, commercial research and participant/device qualification.
+
 > NEXUS is a Windows-first voice desktop assistant: a Tauri v2 / Rust client with a React UI, a Cloudflare Worker backend, and on-demand local Python helpers (speech fallback, intent classifier).
 > **Where the truth lives:** [`../AGENTS.md`](../AGENTS.md) is the engineering log — newest entries first, each with *Verify* and *Not run live* lines. These docs add design, research and plans around it. Where a document disagrees with `AGENTS.md` or the code, trust those.
 

@@ -11,6 +11,10 @@
   "frontend/src/notify-toast/notify-toast.css": [
     ".nt-card"
   ],
+  "frontend/src/agent-island/agent-island.css": [
+    ".ai-pill",
+    ".ai-panel"
+  ],
   "frontend/src/sidebar/stack.css": [
     ".stack-view",
     ".stack-card",
