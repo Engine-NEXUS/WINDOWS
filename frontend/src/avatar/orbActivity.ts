@@ -31,10 +31,10 @@ export const ORB_ACTIVITIES: { id: OrbActivity; label: string }[] = [
   { id: "waiting", label: "Waiting for your answer" },
 ];
 
-/** The owner's mapping (dev-orbs.html, 2026-11-07). */
+/** The owner's mapping (dev-orbs.html, 2026-11-07; idle = plain circle, 2026-11-08; listening = the wobbling ring that only moves with the mic; speaking stays the composing sash). */
 export const DEFAULT_ORB_DESIGNS: Record<OrbActivity, OrbDesign> = {
-  idle: "breathing",
-  listening: "listening",
+  idle: "circle",
+  listening: "breathing",
   thinking: "working",
   speaking: "composing",
   background: "weaving",
