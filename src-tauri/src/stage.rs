@@ -528,14 +528,22 @@ fn resumed_recently() -> bool {
 const RESUME_GRACE_SECS: u64 = 120;
 /// The watchdog ticks every 2 s; a wall-clock gap this large between two ticks means the machine slept.
 const TICK_RESUME_GAP_SECS: u64 = 15;
+/// After the auto-fix budget is spent, try one quiet rebuild this often instead of staying hidden until restart.
+const GIVE_UP_RETRY_SECS: u64 = 60;
+/// How long a rebuilt window gets to send its first heartbeat.
+const VERIFY_BEAT_SECS: u64 = 60;
+
+static GAVE_UP_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 
 /// True when two watchdog ticks were far enough apart on the wall clock that the machine must have slept.
 fn is_resume_gap(gap_secs: u64) -> bool {
     gap_secs > TICK_RESUME_GAP_SECS
 }
 
-/// How long a rebuilt window gets to send its first heartbeat.
-const VERIFY_BEAT_SECS: u64 = 60;
+/// True when the slow background retry after a spent budget is due.
+fn give_up_retry_due(since_secs: u64) -> bool {
+    since_secs >= GIVE_UP_RETRY_SECS
+}
 
 /// Recreate the stage, show it and wait for its first heartbeat. `None` = the window could not be built.
 async fn recreate_and_verify<R: Runtime>(app: &AppHandle<R>) -> Option<bool> {
@@ -572,7 +580,34 @@ pub fn spawn_stage_watchdog<R: Runtime>(app: AppHandle<R>) {
             if is_resume_gap(tick_gap) {
                 note_resume();
             }
-            if !visible() || disabled() {
+            if disabled() {
+                continue;
+            }
+            if !visible() {
+                // The budget is spent: try one quiet rebuild every GIVE_UP_RETRY_SECS rather than staying dark until restart.
+                let due = GAVE_UP_AT
+                    .lock()
+                    .ok()
+                    .and_then(|g| *g)
+                    .map(|t| give_up_retry_due(t.elapsed().as_secs()))
+                    .unwrap_or(false);
+                if due && !resumed_recently() {
+                    if let Ok(mut g) = GAVE_UP_AT.lock() {
+                        *g = Some(std::time::Instant::now());
+                    }
+                    if recreate_and_verify(&app).await == Some(true) && !disabled() {
+                        FAILS.store(0, std::sync::atomic::Ordering::Relaxed);
+                        if let Ok(mut g) = GAVE_UP_AT.lock() {
+                            *g = None;
+                        }
+                        tracing::info!("stage: background retry restored the overlay");
+                    } else {
+                        VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
+                        let _ = crate::dyn_windows::destroy_window(&app, LABEL);
+                        note_window_destroyed();
+                        tracing::warn!("stage: background retry did not bring the overlay back — will try again");
+                    }
+                }
                 continue;
             }
             // Cold-boot grace: the renderer needs seconds to mount + beat.
@@ -624,7 +659,10 @@ pub fn spawn_stage_watchdog<R: Runtime>(app: AppHandle<R>) {
                         "Display overlay kept failing, sir. I switched visuals off until restart — voice still works."
                     },
                 );
-                tracing::error!("stage: auto-fix budget exhausted — staying hidden");
+                tracing::error!("stage: auto-fix budget exhausted — hidden, will retry quietly every {GIVE_UP_RETRY_SECS} s");
+                if let Ok(mut g) = GAVE_UP_AT.lock() {
+                    *g = Some(std::time::Instant::now());
+                }
                 continue;
             }
 
@@ -682,10 +720,17 @@ mod tests {
     }
 
     #[test]
+    fn the_quiet_retry_after_a_spent_budget_waits_a_minute() {
+        assert!(!give_up_retry_due(0));
+        assert!(!give_up_retry_due(GIVE_UP_RETRY_SECS - 1));
+        assert!(give_up_retry_due(GIVE_UP_RETRY_SECS));
+    }
+
+    #[test]
     fn resume_grace_covers_a_slow_renderer() {
         // The failed recoveries needed more than 40 s; the grace must outlast them and the first verify window.
         assert!(RESUME_GRACE_SECS >= 120);
-        assert!(VERIFY_BEAT_SECS >= 60, "a rebuilt window gets a full minute to beat");
+        assert!(VERIFY_BEAT_SECS >= 60);
     }
 
     #[test]
