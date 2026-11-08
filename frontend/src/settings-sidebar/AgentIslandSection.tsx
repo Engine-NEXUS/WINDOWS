@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { clampScale, SCALE_MAX, SCALE_MIN } from "../agent-island/agentIslandModel";
+import { clampScale, SCALE_DEFAULT, SCALE_MAX, SCALE_MIN } from "../agent-island/agentIslandModel";
 
 interface IslandSettings {
   agentMonitor: boolean;
@@ -19,7 +19,7 @@ const DEFAULTS: IslandSettings = {
   agentMonitorWelcomeAfterMin: 20,
   agentAutoHook: true,
   agentIslandHideWatched: true,
-  agentIslandScale: 1,
+  agentIslandScale: SCALE_DEFAULT,
 };
 
 /** Command Hub card for the Agent Island: logos of running coding agents at the top of the screen, hover for

@@ -34,13 +34,15 @@ const LEAVE_DWELL_MS: u64 = 450;
 const HIDE_DESTROY_MS: u64 = 120_000;
 pub const MIN_SCALE: f64 = 0.75;
 pub const MAX_SCALE: f64 = 1.5;
+/// The size the owner chose on the preview (the smallest the slider allows).
+pub const DEFAULT_SCALE: f64 = 0.75;
 
-/// The island size setting, kept inside its limits (a hand-edited or missing value falls back to 1.0).
+/// The island size setting, kept inside its limits (a hand-edited or missing value falls back to the default size).
 pub fn clamp_scale(s: f64) -> f64 {
     if s.is_finite() {
         s.clamp(MIN_SCALE, MAX_SCALE)
     } else {
-        1.0
+        DEFAULT_SCALE
     }
 }
 
@@ -167,7 +169,7 @@ pub struct ModePayload {
     pub scale: f64,
 }
 
-static CURRENT: Mutex<ModePayload> = Mutex::new(ModePayload { mode: Mode::Hidden, by_approval: false, scale: 1.0 });
+static CURRENT: Mutex<ModePayload> = Mutex::new(ModePayload { mode: Mode::Hidden, by_approval: false, scale: DEFAULT_SCALE });
 
 /// The page reads this on mount (a cold window misses the first event).
 #[tauri::command]
@@ -417,7 +419,7 @@ mod tests {
         assert_eq!(size_for(Mode::Expanded, 2, 0.75), (PANEL_W * 0.75, PANEL_H * 0.75));
         assert_eq!(clamp_scale(9.0), MAX_SCALE);
         assert_eq!(clamp_scale(0.1), MIN_SCALE);
-        assert_eq!(clamp_scale(f64::NAN), 1.0);
+        assert_eq!(clamp_scale(f64::NAN), DEFAULT_SCALE);
         assert_eq!(clamp_scale(1.2), 1.2);
         assert_eq!(size_for(Mode::Collapsed, 1, 99.0), size_for(Mode::Collapsed, 1, MAX_SCALE), "never beyond the limit");
     }

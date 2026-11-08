@@ -2039,7 +2039,7 @@ fn default_agent_monitor_welcome_after_min() -> u32 {
 }
 
 fn default_agent_island_scale() -> f64 {
-    1.0
+    crate::agent_island::DEFAULT_SCALE
 }
 
 fn default_memcore() -> bool {
@@ -4384,12 +4384,12 @@ mod nexus_settings_tests {
         assert_eq!(parsed.agent_monitor_display, "stay-awake", "blanking the display is opt-in");
         assert_eq!(parsed.agent_monitor_welcome_after_min, 20);
         assert!(parsed.agent_island_hide_watched, "agents you are looking at stay off the island by default");
-        assert_eq!(parsed.agent_island_scale, 1.0);
+        assert_eq!(parsed.agent_island_scale, 0.75);
         let back = serde_json::to_value(&parsed).unwrap();
         assert_eq!(back.get("agentMonitor"), Some(&serde_json::json!(true)));
         assert_eq!(back.get("agentMonitorDisplay"), Some(&serde_json::json!("stay-awake")));
         assert_eq!(back.get("agentMonitorWelcomeAfterMin"), Some(&serde_json::json!(20)));
-        assert_eq!(back.get("agentIslandScale"), Some(&serde_json::json!(1.0)));
+        assert_eq!(back.get("agentIslandScale"), Some(&serde_json::json!(0.75)));
         assert_eq!(back.get("agentIslandHideWatched"), Some(&serde_json::json!(true)));
         // a patch from the Command Hub changes only its keys
         let patch = serde_json::json!({ "agentMonitorDisplay": "blank", "agentMonitorWelcomeAfterMin": 5, "agentIslandScale": 1.25 });

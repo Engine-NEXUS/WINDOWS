@@ -7,7 +7,7 @@ import { createRoot } from "react-dom/client";
 import "../theme/tokens.css";
 import "./agent-island.css";
 import { Island } from "./AgentIslandApp";
-import { SCALE_MAX, SCALE_MIN, type AgentState, type ApprovalView, type SessionView, type Tab } from "./agentIslandModel";
+import { SCALE_DEFAULT, SCALE_MAX, SCALE_MIN, type AgentState, type ApprovalView, type SessionView, type Tab } from "./agentIslandModel";
 
 const HOVER_DWELL_MS = 120;
 const LEAVE_DWELL_MS = 450;
@@ -31,7 +31,7 @@ function Preview() {
   const [expanded, setExpanded] = useState(false);
   const [byApproval, setByApproval] = useState(false);
   const [tab, setTab] = useState<Tab>("tracking");
-  const [scale, setScale] = useState(1);
+  const [scale, setScale] = useState(SCALE_DEFAULT);
   const [watched, setWatched] = useState<Set<string>>(new Set());
   const [now, setNow] = useState(() => Date.now());
   const timer = useRef<number | null>(null);

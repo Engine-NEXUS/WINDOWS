@@ -15,6 +15,7 @@ import {
   islandSize,
   pillLogos,
   questionsOf,
+  SCALE_DEFAULT,
   secondsLeft,
   stateWord,
   type ApprovalView,
@@ -31,7 +32,7 @@ import {
  *  The snapshot is already without the agents the user is looking at. */
 export function AgentIslandApp() {
   const [snap, setSnap] = useState<Snapshot>(EMPTY);
-  const [mode, setMode] = useState<ModePayload>({ mode: "hidden", byApproval: false, scale: 1 });
+  const [mode, setMode] = useState<ModePayload>({ mode: "hidden", byApproval: false, scale: SCALE_DEFAULT });
   const [tab, setTab] = useState<Tab>("tracking");
   const [now, setNow] = useState(() => Date.now());
 
@@ -123,7 +124,6 @@ export function Pill({ snap }: { snap: Snapshot }) {
       {logos.map((l) => (
         <div key={l.agent} className={`ai-chip ai-chip--${l.state}`} title={`${l.label}: ${stateWord(l.state, null)}`}>
           <AgentLogo agent={l.agent} label={l.label} className="" />
-          <span className="ai-dot" aria-hidden="true" />
           {l.count > 1 && <span className="ai-count">{l.count}</span>}
         </div>
       ))}

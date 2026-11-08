@@ -54,10 +54,11 @@ export interface ModePayload {
 
 export const SCALE_MIN = 0.75;
 export const SCALE_MAX = 1.5;
+export const SCALE_DEFAULT = 0.75;
 
 /** The size setting kept inside its limits; anything that is not a number is the default size. */
 export function clampScale(v: unknown): number {
-  const n = typeof v === "number" && Number.isFinite(v) ? v : 1;
+  const n = typeof v === "number" && Number.isFinite(v) ? v : SCALE_DEFAULT;
   return Math.min(SCALE_MAX, Math.max(SCALE_MIN, n));
 }
 
@@ -181,7 +182,7 @@ export function asSnapshot(raw: unknown): Snapshot {
 
 export function asMode(raw: unknown): ModePayload {
   const mode = isObj(raw) ? (["hidden", "collapsed", "expanded"] as const).find((m) => m === raw.mode) : undefined;
-  return { mode: mode ?? "hidden", byApproval: isObj(raw) && raw.byApproval === true, scale: clampScale(isObj(raw) ? raw.scale : 1) };
+  return { mode: mode ?? "hidden", byApproval: isObj(raw) && raw.byApproval === true, scale: clampScale(isObj(raw) ? raw.scale : SCALE_DEFAULT) };
 }
 
 /** One logo per agent type: how many sessions it has and its most urgent state. */

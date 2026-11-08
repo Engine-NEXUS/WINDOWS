@@ -21,15 +21,15 @@ describe("size setting", () => {
     expect(clampScale(1.2)).toBe(1.2);
     expect(clampScale(9)).toBe(SCALE_MAX);
     expect(clampScale(0.1)).toBe(SCALE_MIN);
-    expect(clampScale("big")).toBe(1);
-    expect(clampScale(Number.NaN)).toBe(1);
-    expect(clampScale(undefined)).toBe(1);
+    expect(clampScale("big")).toBe(0.75);
+    expect(clampScale(Number.NaN)).toBe(0.75);
+    expect(clampScale(undefined)).toBe(0.75);
   });
 
   it("is read from the mode payload and clamped there too", () => {
     expect(asMode({ mode: "collapsed", byApproval: false, scale: 1.25 }).scale).toBe(1.25);
     expect(asMode({ mode: "collapsed", scale: 40 }).scale).toBe(SCALE_MAX);
-    expect(asMode({ mode: "expanded" }).scale).toBe(1);
-    expect(asMode(null).scale).toBe(1);
+    expect(asMode({ mode: "expanded" }).scale).toBe(0.75);
+    expect(asMode(null).scale).toBe(0.75);
   });
 });

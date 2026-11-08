@@ -44,8 +44,8 @@ describe("asSnapshot", () => {
 
 describe("asMode", () => {
   it("accepts the three modes and defaults to hidden", () => {
-    expect(asMode({ mode: "expanded", byApproval: true })).toEqual({ mode: "expanded", byApproval: true, scale: 1 });
-    expect(asMode({ mode: "collapsed" })).toEqual({ mode: "collapsed", byApproval: false, scale: 1 });
+    expect(asMode({ mode: "expanded", byApproval: true })).toEqual({ mode: "expanded", byApproval: true, scale: 0.75 });
+    expect(asMode({ mode: "collapsed" })).toEqual({ mode: "collapsed", byApproval: false, scale: 0.75 });
     expect(asMode({ mode: "weird" }).mode).toBe("hidden");
     expect(asMode(undefined).mode).toBe("hidden");
   });
