@@ -5901,6 +5901,23 @@ mod tests {
         assert!(ob.contains("start_stt_capture_inner(origin, None)"));
     }
 
+    /// The delivery barrier and a capture start share one non-reentrant lock. The smart-pause hold path opens the
+    /// next capture from inside delivery; without releasing the barrier first it deadlocked, froze the hotkey
+    /// (UI) thread and made the whole app "not responding".
+    #[test]
+    fn hold_path_releases_the_delivery_barrier_before_starting_a_capture() {
+        let src = include_str!("wakeword_oww.rs");
+        let guard = src.find("let _delivery = ACTIVE_CAPTURE_ATTEMPT.lock();").expect("delivery guard");
+        let rel = src[guard..]
+            .find("start_stt_capture_with_origin(crate::directed::Origin::Direct);")
+            .expect("hold path starts a capture");
+        let between = &src[guard..guard + rel];
+        assert!(
+            between.contains("drop(_delivery);"),
+            "release the delivery barrier before starting the next capture (self-deadlock)"
+        );
+    }
+
     #[test]
     #[cfg(not(feature = "mock-wake"))]
     fn enrollment_mic_baton_blocks_native_capture() {
