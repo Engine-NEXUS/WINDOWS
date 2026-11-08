@@ -168,7 +168,7 @@ async function startListening() {
       console.log("[NEXUS] barge-in/turn-transition: cancelling current turn");
       stopTts();
       stopVad();
-      await abortCapture(true).catch((e) => console.warn("[NEXUS] barge-in abortCapture failed:", e));
+      await abortCapture().catch((e) => console.warn("[NEXUS] barge-in abortCapture failed:", e));
     }
     if (wasSpeaking && !isAutoReopen) {
       await new Promise((r) => setTimeout(r, 100));
