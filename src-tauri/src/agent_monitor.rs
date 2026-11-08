@@ -760,7 +760,7 @@ struct Cfg {
 
 impl Default for Cfg {
     fn default() -> Self {
-        Cfg { enabled: true, hover: true, display: DisplayMode::StayAwake, hide_watched: true, scale: 1.0 }
+        Cfg { enabled: true, hover: true, display: DisplayMode::StayAwake, hide_watched: true, scale: crate::agent_island::DEFAULT_SCALE }
     }
 }
 
@@ -768,7 +768,7 @@ fn read_settings(dir: &std::path::Path) -> Cfg {
     let json = std::fs::read_to_string(dir.join("settings.json")).ok().and_then(|c| serde_json::from_str::<Value>(&c).ok());
     let flag = |k: &str, d: bool| json.as_ref().and_then(|j| j.get(k)).and_then(|v| v.as_bool()).unwrap_or(d);
     let display = json.as_ref().and_then(|j| j.get("agentMonitorDisplay")).and_then(|v| v.as_str()).map(DisplayMode::from_setting).unwrap_or(DisplayMode::StayAwake);
-    let scale = json.as_ref().and_then(|j| j.get("agentIslandScale")).and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let scale = json.as_ref().and_then(|j| j.get("agentIslandScale")).and_then(|v| v.as_f64()).unwrap_or(crate::agent_island::DEFAULT_SCALE);
     Cfg {
         enabled: flag("agentMonitor", true),
         hover: flag("agentMonitorHover", true),
