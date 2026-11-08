@@ -10,6 +10,9 @@ import {
   isFinalExpired,
   shouldShowPill,
   SpeechPillModel,
+  TYPE_MAX_MS,
+  typedSlice,
+  typingProgress,
   FINAL_LINGER_MS,
   INITIAL_SPEECH_PILL_STATE,
 } from "./speechPillModel";
@@ -241,5 +244,56 @@ describe("speechPillModel", () => {
       expect(model.isVisible(false)).toBe(true);
       expect(model.tick().visible).toBe(true);
     });
+  });
+});
+
+describe("letter-by-letter typing", () => {
+  it("typingProgress starts at the base, ends at the total and never goes backwards", () => {
+    expect(typingProgress(0, 20, 0)).toBe(0);
+    expect(typingProgress(0, 20, 100000)).toBe(20);
+    expect(typingProgress(5, 20, 0)).toBe(5);
+    expect(typingProgress(0, 0, 500)).toBe(0);
+    let prev = 0;
+    for (let t = 0; t <= 2000; t += 16) {
+      const v = typingProgress(0, 40, t);
+      expect(v).toBeGreaterThanOrEqual(prev);
+      prev = v;
+    }
+  });
+
+  it("short text types at about 55 characters a second", () => {
+    // 22 chars take 400 ms; at 200 ms half of them are out
+    expect(typingProgress(0, 22, 200)).toBeCloseTo(11, 5);
+    expect(typingProgress(0, 22, 400)).toBeCloseTo(22, 5);
+  });
+
+  it("a long text finishes within the maximum time", () => {
+    expect(typingProgress(0, 500, TYPE_MAX_MS)).toBe(500);
+    expect(typingProgress(0, 500, TYPE_MAX_MS / 2)).toBeCloseTo(250, 5);
+  });
+
+  it("an extended text continues from the base instead of restarting", () => {
+    expect(typingProgress(10, 30, 0)).toBe(10);
+    expect(typingProgress(10, 30, 100000)).toBe(30);
+    expect(typingProgress(40, 30, 0)).toBe(30); // target shorter than what was typed: show in full
+  });
+
+  it("typedSlice shows at least the first letter, no trailing space, and the whole text at the end", () => {
+    expect(typedSlice("hello world", 0)).toBe("h");
+    expect(typedSlice("hello world", 5.9)).toBe("hello");
+    expect(typedSlice("hello world", 6)).toBe("hello");
+    expect(typedSlice("hello world", 7)).toBe("hello w");
+    expect(typedSlice("hello world", 99)).toBe("hello world");
+    expect(typedSlice("", 3)).toBe("");
+  });
+
+  it("types one letter at a time at frame rate (no word bursts)", () => {
+    const text = "turn on the kitchen ceiling lights";
+    let prev = 0;
+    for (let t = 0; t <= 1200; t += 16) {
+      const visible = typedSlice(text, typingProgress(0, text.length, t)).replace(/\s/g, "").length;
+      expect(visible - prev).toBeLessThanOrEqual(2);
+      prev = visible;
+    }
   });
 });
