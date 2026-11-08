@@ -58,7 +58,10 @@ describe("mapping", () => {
     expect(designFor("ghost", { ghost: "not-a-design" })).toBe("connecting");
     expect(designFor("ghost", {})).toBe("connecting");
     expect(designFor("ghost", null)).toBe("connecting");
-    expect(designFor("idle", undefined)).toBe("breathing");
+    expect(designFor("idle", undefined)).toBe("circle");
+    expect(designFor("speaking", undefined)).toBe("composing");
+    expect(designFor("listening", undefined)).toBe("breathing");
+    expect(designFor("waiting", undefined)).toBe("breathing");
   });
 
   it("normalizeOrbDesigns keeps only known activities with known designs", () => {

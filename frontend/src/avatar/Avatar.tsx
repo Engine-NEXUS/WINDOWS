@@ -480,6 +480,7 @@ export function Avatar({ entered: enteredProp = false, dispersing = false, shown
             dark={themeMode !== "light"}
             ink={ink}
             getLevel={getLevel}
+            voiceDriven={activity === "listening"}
             paused={!isOrbVisible}
             reducedMotion={reducedMotion}
             aria-label={ORB_ARIA[activity]}
