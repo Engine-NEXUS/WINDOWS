@@ -523,16 +523,91 @@ fn resumed_recently() -> bool {
     RESUMED_AT.lock().ok().and_then(|g| *g).map_or(false, |t| t.elapsed().as_secs() < RESUME_GRACE_SECS)
 }
 
-const RESUME_GRACE_SECS: u64 = 40;
+/// After a wake from sleep the renderer can take far longer than 40 s to beat again (measured 2026-11-06 and
+/// 2026-11-07: the recreated window needed more than the old grace and the budget ran out), so wait longer.
+const RESUME_GRACE_SECS: u64 = 120;
+/// The watchdog ticks every 2 s; a wall-clock gap this large between two ticks means the machine slept.
+const TICK_RESUME_GAP_SECS: u64 = 15;
+/// After the auto-fix budget is spent, try one quiet rebuild this often instead of staying hidden until restart.
+const GIVE_UP_RETRY_SECS: u64 = 60;
+/// How long a rebuilt window gets to send its first heartbeat.
+const VERIFY_BEAT_SECS: u64 = 60;
+
+static GAVE_UP_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// True when two watchdog ticks were far enough apart on the wall clock that the machine must have slept.
+fn is_resume_gap(gap_secs: u64) -> bool {
+    gap_secs > TICK_RESUME_GAP_SECS
+}
+
+/// True when the slow background retry after a spent budget is due.
+fn give_up_retry_due(since_secs: u64) -> bool {
+    since_secs >= GIVE_UP_RETRY_SECS
+}
+
+/// Recreate the stage, show it and wait for its first heartbeat. `None` = the window could not be built.
+async fn recreate_and_verify<R: Runtime>(app: &AppHandle<R>) -> Option<bool> {
+    let win = ensure_stage(app).map_err(|e| tracing::warn!("stage: auto-fix recreate failed: {e}")).ok()?;
+    win.show().ok()?;
+    VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
+    *SHOWN_AT.lock() = Some(std::time::Instant::now());
+    for _ in 0..(VERIFY_BEAT_SECS * 2) {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if disabled() {
+            return Some(false);
+        }
+        if LAST_BEAT.lock().map(|t| t.elapsed().as_secs() <= HEARTBEAT_STALE_SECS).unwrap_or(false) {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
 
 /// Blackout watchdog: 2s cadence. Detect → shutdown → inform → auto-fix
 /// (see module docs). Gives up recreating after MAX_AUTO_FIXES but keeps
 /// watching so a manual `stage_show` still recovers.
 pub fn spawn_stage_watchdog<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
+        let mut last_tick = std::time::SystemTime::now();
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            if !visible() || disabled() {
+            // The sleep-wake thread only looks every 10 s, so on a wake this tick often runs first and would call the
+            // frozen renderer a blackout (2026-11-08: blackout logged 2 ms before "resumed from sleep"). Notice the
+            // jump here, on the same clock the watchdog uses.
+            let now_wall = std::time::SystemTime::now();
+            let tick_gap = now_wall.duration_since(last_tick).unwrap_or_default().as_secs();
+            last_tick = now_wall;
+            if is_resume_gap(tick_gap) {
+                note_resume();
+            }
+            if disabled() {
+                continue;
+            }
+            if !visible() {
+                // The budget is spent: try one quiet rebuild every GIVE_UP_RETRY_SECS rather than staying dark until restart.
+                let due = GAVE_UP_AT
+                    .lock()
+                    .ok()
+                    .and_then(|g| *g)
+                    .map(|t| give_up_retry_due(t.elapsed().as_secs()))
+                    .unwrap_or(false);
+                if due && !resumed_recently() {
+                    if let Ok(mut g) = GAVE_UP_AT.lock() {
+                        *g = Some(std::time::Instant::now());
+                    }
+                    if recreate_and_verify(&app).await == Some(true) && !disabled() {
+                        FAILS.store(0, std::sync::atomic::Ordering::Relaxed);
+                        if let Ok(mut g) = GAVE_UP_AT.lock() {
+                            *g = None;
+                        }
+                        tracing::info!("stage: background retry restored the overlay");
+                    } else {
+                        VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
+                        let _ = crate::dyn_windows::destroy_window(&app, LABEL);
+                        note_window_destroyed();
+                        tracing::warn!("stage: background retry did not bring the overlay back — will try again");
+                    }
+                }
                 continue;
             }
             // Cold-boot grace: the renderer needs seconds to mount + beat.
@@ -584,7 +659,10 @@ pub fn spawn_stage_watchdog<R: Runtime>(app: AppHandle<R>) {
                         "Display overlay kept failing, sir. I switched visuals off until restart — voice still works."
                     },
                 );
-                tracing::error!("stage: auto-fix budget exhausted — staying hidden");
+                tracing::error!("stage: auto-fix budget exhausted — hidden, will retry quietly every {GIVE_UP_RETRY_SECS} s");
+                if let Ok(mut g) = GAVE_UP_AT.lock() {
+                    *g = Some(std::time::Instant::now());
+                }
                 continue;
             }
 
@@ -601,43 +679,19 @@ pub fn spawn_stage_watchdog<R: Runtime>(app: AppHandle<R>) {
                 // Kill-switch engaged mid-fix: stand down.
                 continue;
             }
-            match ensure_stage(&app) {
-                Ok(win) => {
-                    if win.show().is_err() {
-                        continue;
-                    }
-                    VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
-                    *SHOWN_AT.lock() = Some(std::time::Instant::now());
-                    // Wait up to 30s for a fresh heartbeat (proves the
-                    // renderer is alive, not just the window).
-                    let mut healthy = false;
-                    for _ in 0..60 {
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        let fresh = LAST_BEAT
-                            .lock()
-                            .map(|t| t.elapsed().as_secs() <= HEARTBEAT_STALE_SECS)
-                            .unwrap_or(false);
-                        if fresh {
-                            healthy = true;
-                            break;
-                        }
-                    }
-                    if healthy {
-                        if disabled() {
-                            // Kill-switch landed during verification: stay down.
-                            VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
-                            tracing::info!("stage: healthy beat but kill-switched — staying down");
-                        } else {
-                            FAILS.store(0, std::sync::atomic::Ordering::Relaxed);
-                            tracing::info!("stage: auto-fix verified healthy (heartbeat resumed)");
-                        }
-                    } else {
-                        tracing::warn!("stage: recreated window never beat — will retry");
-                    }
+            // Waits up to VERIFY_BEAT_SECS for a fresh heartbeat (proves the renderer is alive, not just the window).
+            match recreate_and_verify(&app).await {
+                Some(true) if disabled() => {
+                    // Kill-switch landed during verification: stay down.
+                    VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
+                    tracing::info!("stage: healthy beat but kill-switched — staying down");
                 }
-                Err(e) => {
-                    tracing::warn!("stage: auto-fix recreate failed: {e}");
+                Some(true) => {
+                    FAILS.store(0, std::sync::atomic::Ordering::Relaxed);
+                    tracing::info!("stage: auto-fix verified healthy (heartbeat resumed)");
                 }
+                Some(false) => tracing::warn!("stage: recreated window never beat — will retry"),
+                None => {}
             }
         }
     });
@@ -655,6 +709,28 @@ mod tests {
         assert!(!r.contains(300, 100));
         assert!(!r.contains(99, 100));
         assert!(!r.contains(100, 200));
+    }
+
+    #[test]
+    fn a_wall_clock_jump_between_ticks_counts_as_a_resume() {
+        assert!(!is_resume_gap(2), "a normal 2 s tick");
+        assert!(!is_resume_gap(TICK_RESUME_GAP_SECS), "right at the limit is still normal");
+        assert!(is_resume_gap(TICK_RESUME_GAP_SECS + 1));
+        assert!(is_resume_gap(1533), "the 25 minute sleep from the 2026-11-08 log");
+    }
+
+    #[test]
+    fn the_quiet_retry_after_a_spent_budget_waits_a_minute() {
+        assert!(!give_up_retry_due(0));
+        assert!(!give_up_retry_due(GIVE_UP_RETRY_SECS - 1));
+        assert!(give_up_retry_due(GIVE_UP_RETRY_SECS));
+    }
+
+    #[test]
+    fn resume_grace_covers_a_slow_renderer() {
+        // The failed recoveries needed more than 40 s; the grace must outlast them and the first verify window.
+        assert!(RESUME_GRACE_SECS >= 120);
+        assert!(VERIFY_BEAT_SECS >= 60);
     }
 
     #[test]
