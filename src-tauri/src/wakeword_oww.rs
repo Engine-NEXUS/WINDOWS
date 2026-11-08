@@ -4620,6 +4620,10 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                             },
                         );
 
+                        // Release the delivery barrier BEFORE opening the next capture: starting a capture takes the same
+                        // non-reentrant lock, so holding it here froze this thread, then the hotkey thread (the UI
+                        // thread), then the whole app ("not responding"; 2026-11-07 and 2026-11-08 logs).
+                        drop(_delivery);
                         start_stt_capture_with_origin(crate::directed::Origin::Direct);
                         let ext_session = CAPTURE_SESSION_ID.load(std::sync::atomic::Ordering::SeqCst);
                         if let Some(held) = HELD_TURN.lock().as_mut() {
@@ -5895,6 +5899,23 @@ mod tests {
 }
 ").map(|i| o + i).unwrap()];
         assert!(ob.contains("start_stt_capture_inner(origin, None)"));
+    }
+
+    /// The delivery barrier and a capture start share one non-reentrant lock. The smart-pause hold path opens the
+    /// next capture from inside delivery; without releasing the barrier first it deadlocked, froze the hotkey
+    /// (UI) thread and made the whole app "not responding".
+    #[test]
+    fn hold_path_releases_the_delivery_barrier_before_starting_a_capture() {
+        let src = include_str!("wakeword_oww.rs");
+        let guard = src.find("let _delivery = ACTIVE_CAPTURE_ATTEMPT.lock();").expect("delivery guard");
+        let rel = src[guard..]
+            .find("start_stt_capture_with_origin(crate::directed::Origin::Direct);")
+            .expect("hold path starts a capture");
+        let between = &src[guard..guard + rel];
+        assert!(
+            between.contains("drop(_delivery);"),
+            "release the delivery barrier before starting the next capture (self-deadlock)"
+        );
     }
 
     #[test]
