@@ -32,8 +32,25 @@ describe("playback-driven caption projection", () => {
     expect(captionAtPosition(edge, 900)).toBe("Again");
   });
 
-  it("uses a clause for estimated local timing", () => {
-    expect(captionAtPosition([{ ...edge[0], estimated: true }], 0)).toBe("Hello world");
+  it("types estimated local timing letter by letter over the clause, not the whole clause at once", () => {
+    const est = [{ ...edge[0], estimated: true }];
+    expect(captionAtPosition(est, 0)).toBe("H");
+    expect(captionAtPosition(est, 250)).toBe("Hello");
+    expect(captionAtPosition(est, 500)).toBe("Hello world");
+  });
+
+  it("grows steadily across the clause: no word appears in one jump", () => {
+    const visible = (t: string) => t.replace(/\s/g, "").length;
+    let prev = visible(captionAtPosition(edge, 0));
+    let maxStep = 0;
+    for (let pos = 10; pos <= 500; pos += 10) {
+      const len = visible(captionAtPosition(edge, pos));
+      expect(len).toBeGreaterThanOrEqual(prev);
+      maxStep = Math.max(maxStep, len - prev);
+      prev = len;
+    }
+    expect(maxStep).toBeLessThanOrEqual(1);
+    expect(prev).toBe("Helloworld".length);
   });
 
   it("shows the final complete line at playback completion", () => {
