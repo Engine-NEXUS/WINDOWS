@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { clampScale, SCALE_MAX, SCALE_MIN } from "../agent-island/agentIslandModel";
 
 interface IslandSettings {
   agentMonitor: boolean;
@@ -7,6 +8,8 @@ interface IslandSettings {
   agentMonitorDisplay: "stay-awake" | "blank";
   agentMonitorWelcomeAfterMin: number;
   agentAutoHook: boolean;
+  agentIslandHideWatched: boolean;
+  agentIslandScale: number;
 }
 
 const DEFAULTS: IslandSettings = {
@@ -15,6 +18,8 @@ const DEFAULTS: IslandSettings = {
   agentMonitorDisplay: "stay-awake",
   agentMonitorWelcomeAfterMin: 20,
   agentAutoHook: true,
+  agentIslandHideWatched: true,
+  agentIslandScale: 1,
 };
 
 /** Command Hub card for the Agent Island: logos of running coding agents at the top of the screen, hover for
@@ -33,6 +38,8 @@ export function AgentIslandSection() {
           agentMonitorDisplay: r.agentMonitorDisplay === "blank" ? "blank" : "stay-awake",
           agentMonitorWelcomeAfterMin: r.agentMonitorWelcomeAfterMin ?? DEFAULTS.agentMonitorWelcomeAfterMin,
           agentAutoHook: r.agentAutoHook ?? DEFAULTS.agentAutoHook,
+          agentIslandHideWatched: r.agentIslandHideWatched ?? DEFAULTS.agentIslandHideWatched,
+          agentIslandScale: clampScale(r.agentIslandScale ?? DEFAULTS.agentIslandScale),
         }),
       )
       .catch(() => {});
@@ -67,6 +74,38 @@ export function AgentIslandSection() {
         </div>
         <input type="checkbox" checked={s.agentMonitor} onChange={(e) => save("agentMonitor", e.target.checked)} />
       </label>
+      <label className="setting-row">
+        <div>
+          <div className="setting-label">Only show agents I am not watching</div>
+          <div className="setting-desc">An agent whose window is in front of you, or visible next to another one in a split screen, stays off the island. A permission request always shows.</div>
+        </div>
+        <input type="checkbox" checked={s.agentIslandHideWatched} disabled={!s.agentMonitor} onChange={(e) => save("agentIslandHideWatched", e.target.checked)} />
+      </label>
+      <label className="setting-row">
+        <div>
+          <div className="setting-label">Island size · {Math.round(s.agentIslandScale * 100)}%</div>
+          <div className="setting-desc">Drag to resize the bar. It changes on your screen as you drag; "Show on my screen" displays it for ten seconds with two sample agents.</div>
+        </div>
+        <input
+          type="range"
+          min={SCALE_MIN}
+          max={SCALE_MAX}
+          step={0.05}
+          value={s.agentIslandScale}
+          disabled={!s.agentMonitor}
+          onChange={(e) => save("agentIslandScale", clampScale(Number(e.target.value)))}
+          aria-label="Island size"
+        />
+      </label>
+      <div className="setting-row">
+        <div>
+          <div className="setting-label">Preview</div>
+          <div className="setting-desc">Shows the island for ten seconds with two sample agents, at the size above.</div>
+        </div>
+        <button type="button" disabled={!s.agentMonitor} onClick={() => invoke("agent_island_preview").catch((e) => setErr(`Could not show the island: ${String(e)}`))}>
+          Show on my screen
+        </button>
+      </div>
       <label className="setting-row">
         <div>
           <div className="setting-label">Open on hover</div>

@@ -6,12 +6,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "../theme/tokens.css";
 import "./agent-island.css";
-import { Panel, Pill } from "./AgentIslandApp";
-import { pillLogos, type AgentState, type ApprovalView, type SessionView, type Tab } from "./agentIslandModel";
+import { Island } from "./AgentIslandApp";
+import { SCALE_MAX, SCALE_MIN, type AgentState, type ApprovalView, type SessionView, type Tab } from "./agentIslandModel";
 
 const HOVER_DWELL_MS = 120;
 const LEAVE_DWELL_MS = 450;
-const PANEL = { w: 760, h: 430 };
 const LABELS: Record<string, string> = { claude: "Claude Code", codex: "Codex", antigravity: "Antigravity", opencode: "OpenCode", gemini: "Gemini CLI", cursor: "Cursor" };
 
 const SRC_OLD = "import { Item } from './types'\n\nconst TVA = 0.196\n\nexport function total(items: Item[]) {\n  const sum = items.reduce((s, i) => s + i.price, 0)\n  return sum * (1 + TVA)\n}";
@@ -32,6 +31,8 @@ function Preview() {
   const [expanded, setExpanded] = useState(false);
   const [byApproval, setByApproval] = useState(false);
   const [tab, setTab] = useState<Tab>("tracking");
+  const [scale, setScale] = useState(1);
+  const [watched, setWatched] = useState<Set<string>>(new Set());
   const [now, setNow] = useState(() => Date.now());
   const timer = useRef<number | null>(null);
   const needLeave = useRef(false);
@@ -65,11 +66,12 @@ function Preview() {
     return () => window.clearInterval(id);
   }, []);
 
+  // what the real island draws: the agents you are looking at are left out (agent_watching.rs does this)
+  const shownSessions = useMemo(() => sessions.filter((s) => !watched.has(s.key)), [sessions, watched]);
   const snap = useMemo(
-    () => ({ running: sessions.filter((s) => s.state !== "done").length, atMs: now, sessions, approvals }),
-    [sessions, approvals, now],
+    () => ({ running: shownSessions.filter((s) => s.state !== "done").length, atMs: now, sessions: shownSessions, approvals }),
+    [shownSessions, approvals, now],
   );
-  const logos = pillLogos(snap);
 
   const clear = () => {
     if (timer.current) window.clearTimeout(timer.current);
@@ -167,9 +169,8 @@ function Preview() {
     });
   };
 
-  const mode = sessions.length === 0 && approvals.length === 0 ? "hidden" : expanded ? "expanded" : "collapsed";
-  const pillW = Math.max(64, 28 + 32 * Math.min(8, Math.max(1, logos.length)));
-  const frame = mode === "expanded" ? { width: PANEL.w, height: PANEL.h } : { width: pillW, height: 40 };
+  const mode = shownSessions.length === 0 && approvals.length === 0 ? "hidden" : expanded ? "expanded" : "collapsed";
+  const firstKey = sessions.find((x) => x.state !== "done")?.key ?? null;
 
   return (
     <>
@@ -177,8 +178,8 @@ function Preview() {
         Agent Island preview. Add an agent and hover the pill: the island shows the agent, its steps and the file it edits as a live diff. A permission request opens it by itself; answering folds it back. A finished agent's logo leaves the row.
       </div>
       {mode !== "hidden" && (
-        <div className="dev-frame" style={frame} onMouseEnter={onEnter} onMouseLeave={onLeave}>
-          {mode === "collapsed" ? <Pill snap={snap} /> : <Panel snap={snap} tab={tab} setTab={setTab} now={now} decide={decide} />}
+        <div className="dev-top">
+          <Island snap={snap} mode={mode} tab={tab} setTab={setTab} now={now} decide={decide} scale={scale} host={{ onMouseEnter: onEnter, onMouseLeave: onLeave }} />
         </div>
       )}
       <div className="dev-bar">
@@ -190,7 +191,17 @@ function Preview() {
         <button onClick={() => request(false)}>Permission request</button>
         <button onClick={() => request(true)}>Question</button>
         <button onClick={finish}>Finish one agent</button>
-        <button onClick={() => { setSessions([]); setApprovals([]); setExpanded(false); }}>Clear</button>
+        <button onClick={() => { setSessions([]); setApprovals([]); setExpanded(false); setWatched(new Set()); }}>Clear</button>
+        <button
+          disabled={!firstKey}
+          onClick={() => firstKey && setWatched((w) => { const n = new Set(w); if (n.has(firstKey)) n.delete(firstKey); else n.add(firstKey); return n; })}
+        >
+          {firstKey && watched.has(firstKey) ? "Stop watching the first agent" : "I am watching the first agent"}
+        </button>
+        <label className="dev-scale">
+          size {Math.round(scale * 100)}%
+          <input type="range" min={SCALE_MIN} max={SCALE_MAX} step={0.05} value={scale} onChange={(e) => setScale(Number(e.target.value))} />
+        </label>
         <span>mode: {mode}{byApproval ? " (by request)" : ""}</span>
       </div>
     </>
