@@ -523,15 +523,34 @@ fn resumed_recently() -> bool {
     RESUMED_AT.lock().ok().and_then(|g| *g).map_or(false, |t| t.elapsed().as_secs() < RESUME_GRACE_SECS)
 }
 
-const RESUME_GRACE_SECS: u64 = 40;
+/// After a wake from sleep the renderer can take far longer than 40 s to beat again (measured 2026-11-06 and
+/// 2026-11-07: the recreated window needed more than the old grace and the budget ran out), so wait longer.
+const RESUME_GRACE_SECS: u64 = 120;
+/// The watchdog ticks every 2 s; a wall-clock gap this large between two ticks means the machine slept.
+const TICK_RESUME_GAP_SECS: u64 = 15;
+
+/// True when two watchdog ticks were far enough apart on the wall clock that the machine must have slept.
+fn is_resume_gap(gap_secs: u64) -> bool {
+    gap_secs > TICK_RESUME_GAP_SECS
+}
 
 /// Blackout watchdog: 2s cadence. Detect → shutdown → inform → auto-fix
 /// (see module docs). Gives up recreating after MAX_AUTO_FIXES but keeps
 /// watching so a manual `stage_show` still recovers.
 pub fn spawn_stage_watchdog<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
+        let mut last_tick = std::time::SystemTime::now();
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            // The sleep-wake thread only looks every 10 s, so on a wake this tick often runs first and would call the
+            // frozen renderer a blackout (2026-11-08: blackout logged 2 ms before "resumed from sleep"). Notice the
+            // jump here, on the same clock the watchdog uses.
+            let now_wall = std::time::SystemTime::now();
+            let tick_gap = now_wall.duration_since(last_tick).unwrap_or_default().as_secs();
+            last_tick = now_wall;
+            if is_resume_gap(tick_gap) {
+                note_resume();
+            }
             if !visible() || disabled() {
                 continue;
             }
@@ -655,6 +674,20 @@ mod tests {
         assert!(!r.contains(300, 100));
         assert!(!r.contains(99, 100));
         assert!(!r.contains(100, 200));
+    }
+
+    #[test]
+    fn a_wall_clock_jump_between_ticks_counts_as_a_resume() {
+        assert!(!is_resume_gap(2), "a normal 2 s tick");
+        assert!(!is_resume_gap(TICK_RESUME_GAP_SECS), "right at the limit is still normal");
+        assert!(is_resume_gap(TICK_RESUME_GAP_SECS + 1));
+        assert!(is_resume_gap(1533), "the 25 minute sleep from the 2026-11-08 log");
+    }
+
+    #[test]
+    fn resume_grace_covers_a_slow_renderer() {
+        // The failed recoveries needed more than 40 s; the grace must outlast them.
+        assert!(RESUME_GRACE_SECS >= 120);
     }
 
     #[test]
