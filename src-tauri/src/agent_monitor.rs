@@ -885,7 +885,11 @@ pub fn start(app: tauri::AppHandle) {
                     })
                     .await
                     .unwrap_or_default();
-                    watched = debounce.step(now, &raw, &keys);
+                    let next = debounce.step(now, &raw, &keys);
+                    if next != watched {
+                        tracing::info!("agent island: watching {:?}; showing {:?}", next, keys.iter().filter(|k| !next.contains(*k)).collect::<Vec<_>>());
+                    }
+                    watched = next;
                 }
             } else {
                 watched.clear();

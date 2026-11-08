@@ -244,7 +244,12 @@ pub fn get_or_create_window<R: Runtime>(
             "sidebar" | "architect-map" | "maps-panel" | "place-card" | "notify-toast" | "agent-island" | "calibrate-toolbar" | "settings" | "setup"
         );
         if is_glass_window {
-            crate::dwm_corners::round_corners(&win);
+            if config.label == "agent-island" {
+                // the island draws its own rounded shape inside a larger transparent window: no OS corner or border
+                crate::dwm_corners::no_frame(&win);
+            } else {
+                crate::dwm_corners::round_corners(&win);
+            }
 
             if let Ok(hwnd) = win.hwnd() {
                 use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY};

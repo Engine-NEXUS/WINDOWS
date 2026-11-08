@@ -105,11 +105,51 @@ pub(crate) struct SessionRef {
     pub folder: Option<String>,
 }
 
+/// Does this process BE the agent? Its program name or its program path must carry the agent's word. A command line
+/// that merely mentions the word (a `grep codex`, a shell snapshot under `.claude`) is not the agent: matching on the
+/// whole command line sent every such process to whatever window hosted it and hid agents that were not in view.
+/// A script host (`node cli.js`) counts by the script path.
+pub(crate) fn is_agent_process(p: &ProcSnap, words: &[&str]) -> bool {
+    let first = p.cmd.trim_start().trim_start_matches('"');
+    let first = first.split(['"', ' ']).next().unwrap_or("");
+    let program = first.rsplit([std::path::MAIN_SEPARATOR, '/']).next().unwrap_or("");
+    let direct = |s: &str| words.iter().any(|w| s.contains(w));
+    if direct(&p.name) || direct(program) {
+        return true;
+    }
+    const HOSTS: [&str; 7] = ["node.exe", "node", "python.exe", "python", "bun.exe", "deno.exe", "pythonw.exe"];
+    if HOSTS.contains(&p.name.as_str()) {
+        // the first argument that is a script or package path
+        let cmd = p.cmd.trim_start();
+        let rest = if let Some(q) = cmd.strip_prefix('"') {
+            q.split_once('"').map_or("", |(_, r)| r)
+        } else if let Some(i) = cmd.find(".exe") {
+            &cmd[i + 4..]
+        } else {
+            cmd.split_once(' ').map_or("", |(_, r)| r)
+        };
+        let script = rest.split_whitespace().find(|a| !a.starts_with('-')).unwrap_or("").trim_matches('"');
+        return direct(script);
+    }
+    false
+}
+
+/// The roots of the processes that are the agent (a match whose parent is not also a match), never NEXUS itself.
+pub(crate) fn agent_roots(agent: &str, procs: &[ProcSnap], own_pid: u32) -> Vec<u32> {
+    let words = crate::session_observer::agent_words(agent);
+    if words.is_empty() {
+        return vec![];
+    }
+    let ours = crate::session_observer::descendants(&[own_pid], procs);
+    let matching: BTreeSet<u32> = procs.iter().filter(|p| !ours.contains(&p.pid) && is_agent_process(p, words)).map(|p| p.pid).collect();
+    procs.iter().filter(|p| matching.contains(&p.pid) && !matching.contains(&p.ppid)).map(|p| p.pid).collect()
+}
+
 /// The window that hosts a session: through the agent's processes (a terminal agent), else by the name of an IDE.
 /// The session's folder picks between several windows of one process (Windows Terminal hosts them all).
 pub(crate) fn session_window(s: &SessionRef, procs: &[ProcSnap], wins: &[TopWin], own_pid: u32) -> Option<isize> {
     let prefer: Vec<String> = s.folder.iter().cloned().collect();
-    for root in crate::session_observer::find_roots(Some(&s.agent), procs, None, own_pid) {
+    for root in agent_roots(&s.agent, procs, own_pid) {
         if let Some(h) = window_for_pid(root, procs, wins, &prefer) {
             return Some(h);
         }
@@ -404,5 +444,53 @@ mod tests {
         d.step(0, &a, &["a".to_string()]);
         assert!(d.step(10, &a, &[]).is_empty());
         assert!(d.state.is_empty());
+    }
+
+    #[test]
+    fn a_command_line_that_only_mentions_an_agent_is_not_that_agent() {
+        let words = crate::session_observer::agent_words("codex");
+        assert!(!is_agent_process(&proc(5, 1, "grep.exe", r"c:\git\grep.exe -e codex file"), words));
+        assert!(!is_agent_process(&proc(6, 1, "bash.exe", "bash.exe -c source ~/.claude/codex-snapshot.sh"), words));
+        assert!(is_agent_process(&proc(7, 1, "codex.exe", r"c:\tools\codex.exe --flag"), words));
+        assert!(is_agent_process(&proc(8, 1, "node.exe", r#""c:\program files\nodejs\node.exe" c:\npm\node_modules\@openai\codex\bin\codex.js exec"#), words));
+        assert!(!is_agent_process(&proc(9, 1, "node.exe", "node.exe server.js --name codex"), words));
+    }
+
+    #[test]
+    fn a_shell_that_mentions_an_agent_does_not_hide_that_agent_behind_the_window_that_runs_the_shell() {
+        // Claude Desktop (a window) runs a shell whose command line says "codex": codex is NOT in that window
+        let procs = vec![proc(100, 1, "claude.exe", "claude.exe"), proc(101, 100, "bash.exe", "bash.exe -c grep codex")];
+        let wins = vec![win(1, 100, "claude.exe", "Claude")];
+        let placed = vec![placed(1, 100, "claude.exe", "Claude", r(0, 0, 1920, 1080))];
+        let codex = sess("codex", "codex", None);
+        assert!(agent_roots("codex", &procs, 9999).is_empty());
+        assert_eq!(session_window(&codex, &procs, &wins, 9999), None);
+        assert!(watched_now(&[codex], &procs, &placed, &[SCREEN], Some(1), 9999).is_empty(), "shown, not hidden");
+    }
+
+    /// Developer probe: `cargo test --lib live_probe -- --ignored --nocapture` prints, for each agent, the window it
+    /// maps to and how much of it is visible right now. Move windows around and run it again.
+    #[test]
+    #[ignore]
+    fn live_probe() {
+        let (placed, screens, fg) = snapshot_windows();
+        let mut sampler = crate::session_observer::ProcSampler::new();
+        let procs = sampler.sample();
+        let wins: Vec<TopWin> = placed.iter().map(|p| p.win.clone()).collect();
+        println!("screens: {screens:?}  foreground: {fg:?}");
+        for (i, p) in placed.iter().enumerate() {
+            let above: Vec<Rect> = placed[..i].iter().filter(|q| !q.minimized).map(|q| q.rect).collect();
+            println!("  z{i:02} hwnd={} pid={} {} min={} rect={:?} vis={:.2} '{}'", p.win.hwnd, p.win.pid, p.win.exe, p.minimized, p.rect, visible_fraction(&p.rect, &above, &screens), p.win.title.chars().take(50).collect::<String>());
+        }
+        for agent in ["claude", "codex", "antigravity", "cursor", "opencode"] {
+            let s = SessionRef { key: agent.into(), agent: agent.into(), folder: None };
+            for r in agent_roots(agent, &procs, std::process::id()) {
+                let pr = procs.iter().find(|p| p.pid == r);
+                println!("    root {r}: {:?} cmd={}", pr.map(|p| p.name.clone()), pr.map(|p| p.cmd.chars().take(140).collect::<String>()).unwrap_or_default());
+            }
+            let w = session_window(&s, &procs, &wins, std::process::id());
+            let idx = w.and_then(|h| placed.iter().position(|p| p.win.hwnd == h));
+            println!("{agent}: window={w:?} z={idx:?} watched={}", idx.is_some_and(|i| window_watched(i, &placed, &screens, fg)));
+        }
     }
 }

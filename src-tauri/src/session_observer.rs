@@ -46,7 +46,7 @@ pub struct ProcSnap {
 // ─── Finding the agent ───────────────────────────────────────────────
 
 /// Words that identify an agent's processes (matched in the name or the command line).
-fn agent_words(agent: &str) -> &'static [&'static str] {
+pub(crate) fn agent_words(agent: &str) -> &'static [&'static str] {
     match agent {
         "claude" => &["claude"],
         "codex" => &["codex"],
