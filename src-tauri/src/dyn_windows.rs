@@ -113,7 +113,7 @@ impl WindowConfig {
     pub fn agent_island() -> Self {
         Self {
             label: "agent-island", title: "NEXUS Agents", url: "agent-island.html",
-            width: 240., height: 40., min_width: None, min_height: None,
+            width: 760., height: 430., min_width: None, min_height: None,
             resizable: false, decorations: false, transparent: true,
             always_on_top: true, skip_taskbar: true, shadow: false,
             focus: false, center: false, hidden_title: true,

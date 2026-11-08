@@ -178,6 +178,7 @@ pub(crate) mod agent_attention;
 pub(crate) mod agent_autohook;
 pub(crate) mod agent_monitor;
 pub(crate) mod agent_island;
+pub(crate) mod agent_watching;
 pub(crate) mod agent_approval_reply;
 pub(crate) mod repo_review;
 pub(crate) mod pr_screen;
@@ -1449,6 +1450,8 @@ pub fn run() {
             agent_monitor::agent_monitor_list,
             agent_monitor::agent_approval_decide,
             agent_island::agent_island_mode,
+            agent_island::agent_island_snapshot,
+            agent_island::agent_island_preview,
             agent_watch::agent_watch_list_watches,
             // Live mode commands
             live::live_type_text,

@@ -1915,6 +1915,13 @@ pub struct NexusSettings {
     /// Find the coding agents installed on this laptop and connect them to NEXUS by itself (agent_autohook.rs).
     #[serde(default = "default_memcore")]
     pub agent_auto_hook: bool,
+    /// Leave an agent off the island while its window is on screen and mostly visible, e.g. in front of you or in
+    /// a split screen (agent_watching.rs). A permission request is never left out.
+    #[serde(default = "default_true")]
+    pub agent_island_hide_watched: bool,
+    /// Size of the island, 0.75 to 1.5 (1.0 is the default). Clamped wherever it is read.
+    #[serde(default = "default_agent_island_scale")]
+    pub agent_island_scale: f64,
     /// Let a free cloud model read a redacted copy of recent cloud conversations and SUGGEST profile facts.
     /// Off by default; nothing is stored until the user approves it on the Memory page.
     #[serde(default)]
@@ -2029,6 +2036,10 @@ fn default_agent_monitor_display() -> String {
 
 fn default_agent_monitor_welcome_after_min() -> u32 {
     20
+}
+
+fn default_agent_island_scale() -> f64 {
+    1.0
 }
 
 fn default_memcore() -> bool {
@@ -2344,6 +2355,8 @@ impl Default for NexusSettings {
             agent_monitor_display: default_agent_monitor_display(),
             agent_monitor_welcome_after_min: default_agent_monitor_welcome_after_min(),
             agent_auto_hook: default_memcore(),
+            agent_island_hide_watched: true,
+            agent_island_scale: default_agent_island_scale(),
             wake_sound: true,
             wake_sound_style: default_wake_sound_style(),
             wake_sound_volume: default_wake_sound_volume(),
@@ -4363,22 +4376,27 @@ mod nexus_settings_tests {
     #[test]
     fn agent_monitor_settings_default_and_round_trip() {
         let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
-        for k in ["agentMonitor", "agentMonitorHover", "agentMonitorDisplay", "agentMonitorWelcomeAfterMin", "agentAutoHook"] {
+        for k in ["agentMonitor", "agentMonitorHover", "agentMonitorDisplay", "agentMonitorWelcomeAfterMin", "agentAutoHook", "agentIslandHideWatched", "agentIslandScale"] {
             raw.as_object_mut().unwrap().remove(k);
         }
         let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
         assert!(parsed.agent_monitor && parsed.agent_monitor_hover, "the island is on by default");
         assert_eq!(parsed.agent_monitor_display, "stay-awake", "blanking the display is opt-in");
         assert_eq!(parsed.agent_monitor_welcome_after_min, 20);
+        assert!(parsed.agent_island_hide_watched, "agents you are looking at stay off the island by default");
+        assert_eq!(parsed.agent_island_scale, 1.0);
         let back = serde_json::to_value(&parsed).unwrap();
         assert_eq!(back.get("agentMonitor"), Some(&serde_json::json!(true)));
         assert_eq!(back.get("agentMonitorDisplay"), Some(&serde_json::json!("stay-awake")));
         assert_eq!(back.get("agentMonitorWelcomeAfterMin"), Some(&serde_json::json!(20)));
+        assert_eq!(back.get("agentIslandScale"), Some(&serde_json::json!(1.0)));
+        assert_eq!(back.get("agentIslandHideWatched"), Some(&serde_json::json!(true)));
         // a patch from the Command Hub changes only its keys
-        let patch = serde_json::json!({ "agentMonitorDisplay": "blank", "agentMonitorWelcomeAfterMin": 5 });
+        let patch = serde_json::json!({ "agentMonitorDisplay": "blank", "agentMonitorWelcomeAfterMin": 5, "agentIslandScale": 1.25 });
         let merged = super::apply_settings_patch(&parsed, patch.as_object().unwrap()).unwrap();
         assert_eq!(merged.agent_monitor_display, "blank");
         assert_eq!(merged.agent_monitor_welcome_after_min, 5);
+        assert_eq!(merged.agent_island_scale, 1.25);
         assert!(merged.agent_monitor, "other settings are untouched");
     }
 

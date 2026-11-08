@@ -621,6 +621,11 @@ struct Slot {
 static MONITOR: Mutex<Monitor> = Mutex::new(Monitor::new());
 static WAITERS: Mutex<Vec<(u64, Arc<Slot>)>> = Mutex::new(Vec::new());
 static DIRTY: AtomicBool = AtomicBool::new(true);
+
+/// Ask the loop for an immediate rebuild of the snapshot (the island preview uses it).
+pub fn mark_dirty() {
+    DIRTY.store(true, Ordering::Relaxed);
+}
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
 
@@ -744,11 +749,60 @@ pub fn agent_approval_decide(id: u64, decision: String) -> bool {
 
 // ─── The loop ────────────────────────────────────────────────────────
 
-fn read_settings(dir: &std::path::Path) -> (bool, bool, DisplayMode) {
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Cfg {
+    enabled: bool,
+    hover: bool,
+    display: DisplayMode,
+    hide_watched: bool,
+    scale: f64,
+}
+
+impl Default for Cfg {
+    fn default() -> Self {
+        Cfg { enabled: true, hover: true, display: DisplayMode::StayAwake, hide_watched: true, scale: 1.0 }
+    }
+}
+
+fn read_settings(dir: &std::path::Path) -> Cfg {
     let json = std::fs::read_to_string(dir.join("settings.json")).ok().and_then(|c| serde_json::from_str::<Value>(&c).ok());
     let flag = |k: &str, d: bool| json.as_ref().and_then(|j| j.get(k)).and_then(|v| v.as_bool()).unwrap_or(d);
-    let mode = json.as_ref().and_then(|j| j.get("agentMonitorDisplay")).and_then(|v| v.as_str()).map(DisplayMode::from_setting).unwrap_or(DisplayMode::StayAwake);
-    (flag("agentMonitor", true), flag("agentMonitorHover", true), mode)
+    let display = json.as_ref().and_then(|j| j.get("agentMonitorDisplay")).and_then(|v| v.as_str()).map(DisplayMode::from_setting).unwrap_or(DisplayMode::StayAwake);
+    let scale = json.as_ref().and_then(|j| j.get("agentIslandScale")).and_then(|v| v.as_f64()).unwrap_or(1.0);
+    Cfg {
+        enabled: flag("agentMonitor", true),
+        hover: flag("agentMonitorHover", true),
+        display,
+        hide_watched: flag("agentIslandHideWatched", true),
+        scale: crate::agent_island::clamp_scale(scale),
+    }
+}
+
+/// The snapshot the island draws: sessions the user is watching are left out; permission requests never are.
+fn island_view(snap: &Snapshot, watched: &std::collections::BTreeSet<String>) -> Snapshot {
+    let sessions: Vec<SessionView> = snap.sessions.iter().filter(|s| !watched.contains(&s.key)).cloned().collect();
+    Snapshot { running: sessions.len(), at_ms: snap.at_ms, sessions, approvals: snap.approvals.clone() }
+}
+
+/// Two made-up agents for the "Show on my screen" preview.
+fn demo_snapshot(now: u64) -> Snapshot {
+    let s = |key: &str, agent: &str, label: &str, folder: &str, state: State, tool: Option<&str>| SessionView {
+        key: key.into(),
+        agent: agent.into(),
+        label: label.into(),
+        folder: Some(folder.into()),
+        state,
+        tool: tool.map(|t| t.into()),
+        steps: vec![],
+        edit: None,
+        started_ms: now.saturating_sub(95_000),
+        updated_ms: now,
+    };
+    let sessions = vec![
+        s("demo:claude", "claude", "Claude Code", "zync", State::Working, Some("Edit")),
+        s("demo:codex", "codex", "Codex", "nexus", State::Thinking, None),
+    ];
+    Snapshot { running: sessions.len(), at_ms: now, sessions, approvals: vec![] }
 }
 
 /// Take or drop the pinned screen-awake lease (it keeps the display and system on while it is held).
@@ -766,38 +820,94 @@ pub fn start(app: tauri::AppHandle) {
         let mut power = Power::default();
         let mut lease: Option<crate::keep_awake::KeepAwakeLease> = None;
         let mut island = crate::agent_island::Island::default();
-        let mut last_json = String::new();
-        let mut settings = (true, true, DisplayMode::StayAwake);
+        let mut last_island_json = String::new();
+        let mut cfg = Cfg::default();
         let mut settings_at = 0u64;
         let mut power_at = 0u64;
+        let mut full_at = 0u64;
+        let mut watch_at = 0u64;
+        let mut procs_at = 0u64;
+        let mut procs: Vec<crate::session_observer::ProcSnap> = vec![];
+        let sampler = Arc::new(Mutex::new(crate::session_observer::ProcSampler::new()));
+        let mut debounce = crate::agent_watching::Debounce::default();
+        let mut watched: std::collections::BTreeSet<String> = Default::default();
+        let own_pid = std::process::id();
         loop {
             let busy = DIRTY.load(Ordering::Relaxed) || lock_monitor().running() > 0 || island.visible();
-            tokio::time::sleep(Duration::from_millis(if busy { 150 } else { 1000 })).await;
+            // the hover test needs a fast tick while the island is up; everything else keeps the old cadence
+            let tick = if island.visible() { 33 } else if busy { 150 } else { 1000 };
+            tokio::time::sleep(Duration::from_millis(tick)).await;
             let now = crate::agent_hooks::now_ms();
             if now.saturating_sub(settings_at) > 2_000 {
                 if let Some(dir) = DIR.get() {
-                    settings = read_settings(dir);
+                    cfg = read_settings(dir);
                 }
                 settings_at = now;
-                ENABLED.store(settings.0, Ordering::Relaxed);
+                ENABLED.store(cfg.enabled, Ordering::Relaxed);
             }
-            let (enabled, hover, mode) = settings;
-            let snap = if enabled { snapshot_now() } else { Snapshot { running: 0, at_ms: now, sessions: vec![], approvals: vec![] } };
+            let full_every = if busy { 150 } else { 1000 };
+            if !DIRTY.load(Ordering::Relaxed) && now.saturating_sub(full_at) < full_every {
+                island.tick(&app, cfg.hover, cfg.scale);
+                continue;
+            }
+            full_at = now;
+            let preview = crate::agent_island::preview_active(now);
+            let snap = if preview {
+                demo_snapshot(now)
+            } else if cfg.enabled {
+                snapshot_now()
+            } else {
+                Snapshot { running: 0, at_ms: now, sessions: vec![], approvals: vec![] }
+            };
             DIRTY.store(false, Ordering::Relaxed);
-            let json = serde_json::to_string(&snap).unwrap_or_default();
-            if json != last_json {
-                let _ = app.emit("agent_monitor:update", &snap);
-                last_json = json;
+
+            // which agents the user is already looking at (windows twice a second, processes every 3 s)
+            if cfg.hide_watched && !preview && !snap.sessions.is_empty() {
+                if now.saturating_sub(procs_at) >= 3_000 {
+                    procs_at = now;
+                    let sampler = sampler.clone();
+                    if let Ok(p) = tauri::async_runtime::spawn_blocking(move || sampler.lock().map(|mut g| g.sample()).unwrap_or_default()).await {
+                        procs = p;
+                    }
+                }
+                if now.saturating_sub(watch_at) >= 500 {
+                    watch_at = now;
+                    let refs: Vec<crate::agent_watching::SessionRef> = snap
+                        .sessions
+                        .iter()
+                        .map(|s| crate::agent_watching::SessionRef { key: s.key.clone(), agent: s.agent.clone(), folder: s.folder.clone() })
+                        .collect();
+                    let keys: Vec<String> = refs.iter().map(|r| r.key.clone()).collect();
+                    let procs_now = procs.clone();
+                    let raw = tauri::async_runtime::spawn_blocking(move || {
+                        let (placed, screens, fg) = crate::agent_watching::snapshot_windows();
+                        crate::agent_watching::watched_now(&refs, &procs_now, &placed, &screens, fg, own_pid)
+                    })
+                    .await
+                    .unwrap_or_default();
+                    watched = debounce.step(now, &raw, &keys);
+                }
+            } else {
+                watched.clear();
+                debounce = crate::agent_watching::Debounce::default();
             }
-            island.update(&app, &snap, hover);
+            let view = island_view(&snap, &watched);
+            let island_json = serde_json::to_string(&view).unwrap_or_default();
+            if island_json != last_island_json {
+                crate::agent_island::set_shown(&view);
+                let _ = app.emit_to(crate::agent_island::LABEL, "agent_island:snapshot", &view);
+                last_island_json = island_json;
+            }
+            island.update(&app, &view, cfg.hover, cfg.scale);
             if now.saturating_sub(power_at) >= 1_000 {
                 power_at = now;
                 let idle = crate::memcore::resume::user_idle_secs();
                 let meeting = app
                     .try_state::<Arc<crate::meeting_detect::MeetingState>>()
                     .is_some_and(|m| m.should_suppress_tts());
+                // the power rules look at every running agent, watched or not
                 let obs = PowerObs { now_ms: now, running: snap.running, idle_secs: idle, meeting };
-                for act in power.step(&obs, mode, |i, m| crate::window_tile::may_blank_display(i, m).is_ok()) {
+                for act in power.step(&obs, cfg.display, |i, m| crate::window_tile::may_blank_display(i, m).is_ok()) {
                     match act {
                         PowerAct::Hold => set_hold(&mut lease, true),
                         PowerAct::Release => set_hold(&mut lease, false),
@@ -1004,6 +1114,34 @@ mod tests {
         let Kind::PreTool(t) = parse("agent=claude&event=pretool", &body).unwrap().kind else { panic!() };
         let edit = t.edit.unwrap();
         assert!(edit.too_large && edit.pairs.is_empty());
+    }
+
+    #[test]
+    fn the_island_view_drops_watched_sessions_but_never_a_permission_request() {
+        let mut snap = demo_snapshot(1_000);
+        snap.approvals.push(ApprovalView {
+            id: 7,
+            agent: "claude".into(),
+            label: "Claude Code".into(),
+            tool: "Bash".into(),
+            summary: "rm -rf build".into(),
+            question: None,
+            requested_ms: 1_000,
+            deadline_ms: 100_000,
+        });
+        let watched: std::collections::BTreeSet<String> = ["demo:claude".to_string()].into();
+        let view = island_view(&snap, &watched);
+        assert_eq!(view.sessions.len(), 1, "the agent being watched is left out");
+        assert_eq!(view.sessions[0].key, "demo:codex");
+        assert_eq!(view.running, 1);
+        assert_eq!(view.approvals.len(), 1, "a request for a watched agent still shows");
+        // watching everything leaves only the request
+        let all: std::collections::BTreeSet<String> = ["demo:claude".to_string(), "demo:codex".to_string()].into();
+        let view = island_view(&snap, &all);
+        assert!(view.sessions.is_empty());
+        assert_eq!(view.approvals.len(), 1);
+        // the power rules still see every running agent
+        assert_eq!(snap.running, 2);
     }
 
     #[test]

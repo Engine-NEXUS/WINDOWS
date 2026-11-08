@@ -1,13 +1,15 @@
 //! The Agent Island window: a small always-on-top pill at the top of the screen that shows the logos of the agents
-//! that are running; hovering it (or a permission request) expands it into the full island.
+//! that are running and that you are not already looking at; hovering it (or a permission request) expands it into
+//! the full island.
 //!
-//! The window is its own small OS window, shown without taking focus (notify_toast::show_without_focus) and resized
-//! between the pill and the panel, so the rest of the screen is never covered or click-blocked. Placement and the
-//! cursor-over-window test follow Louis-CFM/coucou's `island.rs` (MIT, see THIRD_PARTY_NOTICES.md); the state machine
-//! is NEXUS's own.
+//! The OS window is created ONCE at the (scaled) panel size and never resized on hover; the page morphs one element
+//! between the pill and the panel (CSS transition), so nothing jumps. Outside the drawn island the window ignores the
+//! mouse (set_ignore_cursor_events), so the rest of the screen is never click-blocked: Rust polls the cursor and
+//! turns clicks on only while it is over the island. Placement and the cursor-over test follow Louis-CFM/coucou's
+//! `island.rs` (MIT, see THIRD_PARTY_NOTICES.md); the state machine is NEXUS's own.
 //!
 //! Rules (pure `Sm`, tested):
-//!   * nothing running -> hidden;
+//!   * nothing to show -> hidden;
 //!   * a permission request -> expanded at once, and after the answer back to the one-row pill;
 //!   * hover on the pill for a moment -> expanded; leaving it for a moment -> pill.
 
@@ -24,12 +26,23 @@ const PILL_MIN_W: f64 = 64.0;
 const PANEL_W: f64 = 760.0;
 const PANEL_H: f64 = 430.0;
 const TOP_GAP: f64 = 6.0;
-/// Cursor margin around the window that still counts as "on the island", logical px.
+/// Cursor margin around the drawn island that still counts as "on the island", logical px.
 const MARGIN: f64 = 10.0;
 const HOVER_DWELL_MS: u64 = 120;
 const LEAVE_DWELL_MS: u64 = 450;
 /// A hidden island's window is destroyed after this long (a WebView2 costs RAM).
 const HIDE_DESTROY_MS: u64 = 120_000;
+pub const MIN_SCALE: f64 = 0.75;
+pub const MAX_SCALE: f64 = 1.5;
+
+/// The island size setting, kept inside its limits (a hand-edited or missing value falls back to 1.0).
+pub fn clamp_scale(s: f64) -> f64 {
+    if s.is_finite() {
+        s.clamp(MIN_SCALE, MAX_SCALE)
+    } else {
+        1.0
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -45,7 +58,7 @@ pub struct In {
     /// Any session or request to show.
     pub wanted: bool,
     pub approvals: usize,
-    /// The cursor is over the island window.
+    /// The cursor is over the island.
     pub inside: bool,
     pub hover: bool,
 }
@@ -118,22 +131,43 @@ impl Sm {
     }
 }
 
-/// Logical window size for a mode and a number of distinct agent logos.
-pub fn size_for(mode: Mode, logos: usize) -> (f64, f64) {
+/// Logical size of what is DRAWN for a mode, a number of distinct agent logos and the size setting.
+pub fn size_for(mode: Mode, logos: usize, scale: f64) -> (f64, f64) {
+    let s = clamp_scale(scale);
     match mode {
-        Mode::Expanded => (PANEL_W, PANEL_H),
-        _ => ((PILL_PAD * 2.0 + LOGO_W * logos.clamp(1, 8) as f64).max(PILL_MIN_W), PILL_H),
+        Mode::Expanded => (PANEL_W * s, PANEL_H * s),
+        _ => ((PILL_PAD * 2.0 + LOGO_W * logos.clamp(1, 8) as f64).max(PILL_MIN_W) * s, PILL_H * s),
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// Logical size of the OS window: always the panel, so a hover never resizes it.
+pub fn window_size(scale: f64) -> (f64, f64) {
+    size_for(Mode::Expanded, 0, scale)
+}
+
+/// The drawn island's rectangle inside the window, in the same units as the inputs: horizontally centred, at the top.
+pub fn drawn_rect(win_x: f64, win_y: f64, win_w: f64, mode: Mode, logos: usize, scale: f64, dpi: f64) -> (f64, f64, f64, f64) {
+    let (lw, lh) = size_for(mode, logos, scale);
+    let (w, h) = (lw * dpi, lh * dpi);
+    (win_x + (win_w - w) / 2.0, win_y, w, h)
+}
+
+/// Is a point within `margin` of a rectangle (x, y, w, h)?
+pub fn near(rect: (f64, f64, f64, f64), px: f64, py: f64, margin: f64) -> bool {
+    let (x, y, w, h) = rect;
+    px >= x - margin && px < x + w + margin && py >= y - margin && py < y + h + margin
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModePayload {
     pub mode: Mode,
     pub by_approval: bool,
+    /// The size setting, so the page and the window never disagree.
+    pub scale: f64,
 }
 
-static CURRENT: Mutex<ModePayload> = Mutex::new(ModePayload { mode: Mode::Hidden, by_approval: false });
+static CURRENT: Mutex<ModePayload> = Mutex::new(ModePayload { mode: Mode::Hidden, by_approval: false, scale: 1.0 });
 
 /// The page reads this on mount (a cold window misses the first event).
 #[tauri::command]
@@ -141,12 +175,44 @@ pub fn agent_island_mode() -> ModePayload {
     *CURRENT.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// What the island page draws: the running agents the user is not already looking at (permission requests are never
+/// left out). The page reads this on mount; later changes arrive as `agent_island:snapshot`.
+static SHOWN: Mutex<Option<Snapshot>> = Mutex::new(None);
+
+pub fn set_shown(snap: &Snapshot) {
+    *SHOWN.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap.clone());
+}
+
+#[tauri::command]
+pub fn agent_island_snapshot() -> Snapshot {
+    SHOWN.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(|| crate::agent_monitor::snapshot_now())
+}
+
+static PREVIEW_UNTIL: Mutex<u64> = Mutex::new(0);
+const PREVIEW_MS: u64 = 10_000;
+
+/// "Show on my screen": the island with two demo agents for ten seconds, at the current size setting, so the size
+/// can be judged without a running agent.
+#[tauri::command]
+pub fn agent_island_preview() {
+    *PREVIEW_UNTIL.lock().unwrap_or_else(|e| e.into_inner()) = crate::agent_hooks::now_ms() + PREVIEW_MS;
+    crate::agent_monitor::mark_dirty();
+}
+
+pub fn preview_active(now_ms: u64) -> bool {
+    now_ms < *PREVIEW_UNTIL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[derive(Default)]
 pub struct Island {
     sm: Sm,
     shown: Mode,
     logos: usize,
+    scale: f64,
     hidden_since: Option<u64>,
+    ignoring: Option<bool>,
+    /// The last snapshot summary, so the 33 ms hover tick can run without rebuilding the snapshot.
+    last: Option<(bool, usize, usize)>,
 }
 
 fn distinct_agents(snap: &Snapshot) -> usize {
@@ -161,52 +227,75 @@ impl Island {
         self.shown != Mode::Hidden
     }
 
-    pub fn update(&mut self, app: &AppHandle, snap: &Snapshot, hover: bool) {
-        let now = crate::agent_hooks::now_ms();
+    /// A new snapshot (already without the agents the user is watching).
+    pub fn update(&mut self, app: &AppHandle, snap: &Snapshot, hover: bool, scale: f64) {
         let wanted = !snap.sessions.is_empty() || !snap.approvals.is_empty();
-        let logos = distinct_agents(snap);
-        let inside = self.shown != Mode::Hidden && cursor_inside(app);
-        let mode = self.sm.step(&In { now_ms: now, wanted, approvals: snap.approvals.len(), inside, hover });
-        let payload = ModePayload { mode, by_approval: self.sm.by_approval() };
-        if mode == self.shown && (logos == self.logos || mode != Mode::Collapsed) {
-            if mode == Mode::Hidden {
-                let since = *self.hidden_since.get_or_insert(now);
-                if now.saturating_sub(since) >= HIDE_DESTROY_MS && app.get_webview_window(LABEL).is_some() {
-                    let _ = crate::dyn_windows::destroy_window(app, LABEL);
+        self.last = Some((wanted, snap.approvals.len(), distinct_agents(snap)));
+        self.tick(app, hover, scale);
+    }
+
+    /// The cheap part that must run often: the cursor, the hover state machine, the window's click-through state.
+    pub fn tick(&mut self, app: &AppHandle, hover: bool, scale: f64) {
+        let Some((wanted, approvals, logos)) = self.last else { return };
+        let scale = clamp_scale(scale);
+        let now = crate::agent_hooks::now_ms();
+        let inside = self.shown != Mode::Hidden && cursor_inside(app, self.shown, logos, scale);
+        let mode = self.sm.step(&In { now_ms: now, wanted, approvals, inside, hover });
+        let payload = ModePayload { mode, by_approval: self.sm.by_approval(), scale };
+        let changed = mode != self.shown || (scale - self.scale).abs() > f64::EPSILON || logos != self.logos;
+        if changed {
+            *CURRENT.lock().unwrap_or_else(|e| e.into_inner()) = payload;
+            match mode {
+                Mode::Hidden => {
+                    if let Some(w) = app.get_webview_window(LABEL) {
+                        let _ = w.hide();
+                    }
+                    self.hidden_since = Some(now);
+                    self.ignoring = None;
+                }
+                Mode::Collapsed | Mode::Expanded => {
+                    self.hidden_since = None;
+                    let place = self.shown == Mode::Hidden || (scale - self.scale).abs() > f64::EPSILON;
+                    if place {
+                        if let Err(e) = place_and_show(app, scale, self.shown == Mode::Hidden) {
+                            tracing::warn!("agent island: {e}");
+                        }
+                    }
                 }
             }
-            return;
+            self.shown = mode;
+            self.logos = logos;
+            self.scale = scale;
+            let _ = app.emit_to(LABEL, "agent_island:mode", payload);
+        } else if mode == Mode::Hidden {
+            let since = *self.hidden_since.get_or_insert(now);
+            if now.saturating_sub(since) >= HIDE_DESTROY_MS && app.get_webview_window(LABEL).is_some() {
+                let _ = crate::dyn_windows::destroy_window(app, LABEL);
+            }
         }
-        *CURRENT.lock().unwrap_or_else(|e| e.into_inner()) = payload;
-        self.logos = logos;
-        match mode {
-            Mode::Hidden => {
+        // clicks pass through everywhere except over the drawn island
+        if self.shown != Mode::Hidden {
+            let want_ignore = !inside;
+            if self.ignoring != Some(want_ignore) {
                 if let Some(w) = app.get_webview_window(LABEL) {
-                    let _ = w.hide();
+                    let _ = w.set_ignore_cursor_events(want_ignore);
                 }
-                self.hidden_since = Some(now);
-            }
-            Mode::Collapsed | Mode::Expanded => {
-                self.hidden_since = None;
-                if let Err(e) = place_and_show(app, mode, logos, self.shown == Mode::Hidden) {
-                    tracing::warn!("agent island: {e}");
-                }
+                self.ignoring = Some(want_ignore);
             }
         }
-        self.shown = mode;
-        let _ = app.emit_to(LABEL, "agent_island:mode", payload);
     }
 }
 
-fn place_and_show(app: &AppHandle, mode: Mode, logos: usize, was_hidden: bool) -> Result<(), String> {
+/// Create (if needed), size, place and show the window: panel-sized, centred at the top of the primary monitor.
+fn place_and_show(app: &AppHandle, scale: f64, was_hidden: bool) -> Result<(), String> {
     let monitor = app.primary_monitor().map_err(|e| e.to_string())?.ok_or("no monitor")?;
-    let scale = monitor.scale_factor();
-    let (lw, lh) = size_for(mode, logos);
-    let (w, h) = ((lw * scale).round() as i32, (lh * scale).round() as i32);
+    let dpi = monitor.scale_factor();
+    let (lw, lh) = window_size(scale);
+    let (w, h) = ((lw * dpi).round() as i32, (lh * dpi).round() as i32);
     let mp = monitor.position();
     let ms = monitor.size();
     let x = mp.x + (ms.width as i32 - w) / 2;
-    let y = mp.y + (TOP_GAP * scale).round() as i32;
+    let y = mp.y + (TOP_GAP * dpi).round() as i32;
     let win = crate::dyn_windows::get_or_create_window(app, crate::dyn_windows::WindowConfig::agent_island())?;
     let _ = win.set_size(tauri::PhysicalSize::new(w as u32, h as u32));
     let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
@@ -217,23 +306,23 @@ fn place_and_show(app: &AppHandle, mode: Mode, logos: usize, was_hidden: bool) -
 }
 
 #[cfg(target_os = "windows")]
-fn cursor_inside(app: &AppHandle) -> bool {
+fn cursor_inside(app: &AppHandle, mode: Mode, logos: usize, scale: f64) -> bool {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
     let Some(win) = app.get_webview_window(LABEL) else { return false };
     let (Ok(p), Ok(s)) = (win.outer_position(), win.outer_size()) else { return false };
-    let scale = win.scale_factor().unwrap_or(1.0);
+    let dpi = win.scale_factor().unwrap_or(1.0);
     let mut pt = POINT::default();
     // SAFETY: `pt` is a valid POINT; GetCursorPos only writes it.
     if !unsafe { GetCursorPos(&mut pt) }.as_bool() {
         return false;
     }
-    let m = (MARGIN * scale) as i32;
-    pt.x >= p.x - m && pt.x < p.x + s.width as i32 + m && pt.y >= p.y - m && pt.y < p.y + s.height as i32 + m
+    let rect = drawn_rect(p.x as f64, p.y as f64, s.width as f64, mode, logos, scale, dpi);
+    near(rect, pt.x as f64, pt.y as f64, MARGIN * dpi)
 }
 
 #[cfg(not(target_os = "windows"))]
-fn cursor_inside(_app: &AppHandle) -> bool {
+fn cursor_inside(_app: &AppHandle, _mode: Mode, _logos: usize, _scale: f64) -> bool {
     false
 }
 
@@ -312,11 +401,55 @@ mod tests {
 
     #[test]
     fn sizes_grow_with_the_logos_and_the_panel_is_fixed() {
-        assert_eq!(size_for(Mode::Expanded, 3), (PANEL_W, PANEL_H));
-        let one = size_for(Mode::Collapsed, 1).0;
-        let three = size_for(Mode::Collapsed, 3).0;
+        assert_eq!(size_for(Mode::Expanded, 3, 1.0), (PANEL_W, PANEL_H));
+        let one = size_for(Mode::Collapsed, 1, 1.0).0;
+        let three = size_for(Mode::Collapsed, 3, 1.0).0;
         assert!(three > one);
-        assert_eq!(size_for(Mode::Collapsed, 0), size_for(Mode::Collapsed, 1));
-        assert_eq!(size_for(Mode::Collapsed, 50), size_for(Mode::Collapsed, 8), "capped");
+        assert_eq!(size_for(Mode::Collapsed, 0, 1.0), size_for(Mode::Collapsed, 1, 1.0));
+        assert_eq!(size_for(Mode::Collapsed, 50, 1.0), size_for(Mode::Collapsed, 8, 1.0), "capped");
+    }
+
+    #[test]
+    fn the_size_setting_scales_everything_and_stays_in_range() {
+        let (w1, h1) = size_for(Mode::Collapsed, 2, 1.0);
+        let (w2, h2) = size_for(Mode::Collapsed, 2, 1.5);
+        assert!((w2 / w1 - 1.5).abs() < 1e-9 && (h2 / h1 - 1.5).abs() < 1e-9);
+        assert_eq!(size_for(Mode::Expanded, 2, 0.75), (PANEL_W * 0.75, PANEL_H * 0.75));
+        assert_eq!(clamp_scale(9.0), MAX_SCALE);
+        assert_eq!(clamp_scale(0.1), MIN_SCALE);
+        assert_eq!(clamp_scale(f64::NAN), 1.0);
+        assert_eq!(clamp_scale(1.2), 1.2);
+        assert_eq!(size_for(Mode::Collapsed, 1, 99.0), size_for(Mode::Collapsed, 1, MAX_SCALE), "never beyond the limit");
+    }
+
+    #[test]
+    fn the_window_never_changes_size_between_pill_and_panel() {
+        assert_eq!(window_size(1.0), size_for(Mode::Expanded, 0, 1.0));
+        assert_eq!(window_size(1.0), window_size(1.0));
+        assert!(window_size(1.25).0 > window_size(1.0).0);
+    }
+
+    #[test]
+    fn the_drawn_pill_is_centred_at_the_top_of_the_window() {
+        // a 760-wide window at x=580, y=6 (scale 1, dpi 1); a one-logo pill is 64 wide
+        let (x, y, w, h) = drawn_rect(580.0, 6.0, 760.0, Mode::Collapsed, 1, 1.0, 1.0);
+        assert_eq!((w, h), (64.0, 40.0));
+        assert_eq!(x, 580.0 + (760.0 - 64.0) / 2.0);
+        assert_eq!(y, 6.0);
+        let (px, _, pw, ph) = drawn_rect(580.0, 6.0, 760.0, Mode::Expanded, 1, 1.0, 1.0);
+        assert_eq!((px, pw, ph), (580.0, 760.0, 430.0), "the panel fills the window");
+    }
+
+    #[test]
+    fn only_the_drawn_island_takes_the_mouse_not_the_empty_window() {
+        let pill = drawn_rect(580.0, 6.0, 760.0, Mode::Collapsed, 1, 1.0, 1.0);
+        let centre = (580.0 + 380.0, 6.0 + 20.0);
+        assert!(near(pill, centre.0, centre.1, MARGIN));
+        // far left of the pill but still inside the (transparent) window: must click through
+        assert!(!near(pill, 600.0, 26.0, MARGIN));
+        // far below the pill but inside the window
+        assert!(!near(pill, centre.0, 300.0, MARGIN));
+        // within the margin
+        assert!(near(pill, pill.0 - MARGIN + 1.0, centre.1, MARGIN));
     }
 }
