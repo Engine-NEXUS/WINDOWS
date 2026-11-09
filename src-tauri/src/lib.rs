@@ -1449,6 +1449,7 @@ pub fn run() {
             agent_watch::agent_watch_stop,
             agent_monitor::agent_approval_decide,
             agent_island::agent_island_mode,
+            agent_island::agent_island_set_obstacle,
             agent_island::agent_island_snapshot,
             agent_island::agent_island_preview,
             agent_watch::agent_watch_list_watches,

@@ -666,6 +666,12 @@
   user-select: text;
 }
 
+/* a plan is read in full before it is approved: taller, normal text */
+.ai-summary--plan {
+  max-height: 250px;
+  font: 400 12.5px/1.5 system-ui, "Segoe UI", sans-serif;
+}
+
 .ai-actions {
   display: flex;
   gap: 8px;

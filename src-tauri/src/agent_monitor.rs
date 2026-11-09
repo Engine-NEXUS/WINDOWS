@@ -22,6 +22,8 @@ pub const STALE_MS: u64 = 15 * 60_000;
 /// How long a permission request waits for a click before the agent is left to ask in its own terminal.
 pub const APPROVAL_WAIT: Duration = Duration::from_secs(108);
 const MAX_SUMMARY_CHARS: usize = 600;
+/// A plan is read in full before it is approved.
+const MAX_PLAN_CHARS: usize = 12_000;
 const MAX_APPROVALS: usize = 8;
 const MAX_SESSIONS: usize = 24;
 /// The tool steps kept per session (the island shows a short timeline, not a log).
@@ -409,6 +411,17 @@ impl Monitor {
         true
     }
 
+    /// Ids of the pending requests of `session_key` that an event proves were answered in the agent itself: every one when the
+    /// session starts a new turn, stops or ends; only the one for the same tool when that tool reports it finished.
+    pub fn answered_elsewhere(&self, session_key: &str, kind: &Kind, finished_tool: Option<&str>) -> Vec<u64> {
+        let mine = self.approvals.iter().filter(|a| a.session_key == session_key);
+        match kind {
+            Kind::Prompt | Kind::Stop | Kind::End => mine.map(|a| a.id).collect(),
+            Kind::PostTool => mine.filter(|a| finished_tool.map(|t| t == a.tool).unwrap_or(true)).map(|a| a.id).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn prune(&mut self, now: u64) {
         let pending: Vec<String> = self.approvals.iter().map(|a| a.session_key.clone()).collect();
         self.sessions.retain(|s| match s.ended_ms {
@@ -518,18 +531,61 @@ pub struct Snapshot {
 /// One line saying what the tool wants to do. Secrets are masked and the text is cut: this is shown on screen
 /// (possibly shared) and never stored.
 pub fn summarize(tool: &str, input: Option<&Value>) -> String {
-    let pick = |k: &str| input.and_then(|i| i.get(k)).and_then(|v| v.as_str()).map(String::from);
-    let raw = match tool {
-        "Bash" | "PowerShell" => pick("command"),
-        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "Read" => pick("file_path"),
-        "WebFetch" => pick("url"),
-        "WebSearch" => pick("query"),
-        _ => None,
+    let text = |k: &str| input.and_then(|i| i.get(k)).and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()).map(String::from);
+    let (raw, cap) = match tool {
+        "Bash" | "PowerShell" => (text("command"), MAX_SUMMARY_CHARS),
+        // the plan the agent wants approved, exactly as it wrote it (markdown), from its first line
+        "ExitPlanMode" => (text("plan"), MAX_PLAN_CHARS),
+        "Edit" => (
+            text("file_path").map(|p| match (text("old_string"), text("new_string")) {
+                (Some(o), Some(n)) => format!("{p}
+{}", diff_text(&o, &n)),
+                _ => p,
+            }),
+            MAX_SUMMARY_CHARS,
+        ),
+        "Write" => (
+            text("file_path").map(|p| match text("content") {
+                Some(c) => format!("{p}
+{}", c.lines().take(40).map(|l| format!("+ {l}")).collect::<Vec<_>>().join("
+")),
+                None => p,
+            }),
+            MAX_SUMMARY_CHARS,
+        ),
+        "MultiEdit" | "NotebookEdit" | "Read" => (text("file_path"), MAX_SUMMARY_CHARS),
+        "WebFetch" => (text("url"), MAX_SUMMARY_CHARS),
+        "WebSearch" => (text("query"), MAX_SUMMARY_CHARS),
+        "Task" | "Agent" => (text("prompt").or_else(|| text("description")), MAX_SUMMARY_CHARS * 2),
+        _ => (None, MAX_SUMMARY_CHARS),
+    };
+    let raw = raw.or_else(|| input.map(readable_fields)).unwrap_or_default();
+    // mask secrets over the whole text (not only its tail: a plan must keep its beginning)
+    let masked = crate::pii_filter::sanitize(&raw);
+    masked.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).take(cap).collect()
+}
+
+/// `- old` / `+ new` lines of an edit (the whole of both texts, the caller caps the length).
+fn diff_text(old: &str, new: &str) -> String {
+    old.lines().map(|l| format!("- {l}")).chain(new.lines().map(|l| format!("+ {l}"))).collect::<Vec<_>>().join("
+")
+}
+
+/// Any other tool: `key: value` lines instead of a JSON blob.
+fn readable_fields(input: &Value) -> String {
+    match input {
+        Value::Object(m) => m
+            .iter()
+            .map(|(k, v)| match v {
+                Value::String(s) => format!("{k}: {s}"),
+                other => format!("{k}: {other}"),
+            })
+            .collect::<Vec<_>>()
+            .join("
+"),
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
     }
-    .or_else(|| input.map(|i| i.to_string()))
-    .unwrap_or_default();
-    let masked = crate::session_verdict::prepare_tail(&raw);
-    masked.chars().filter(|c| !c.is_control() || *c == '\n').take(MAX_SUMMARY_CHARS).collect()
 }
 
 // ─── Power: keep the screen on while an agent works ──────────────────
@@ -640,8 +696,33 @@ fn lock_waiters() -> std::sync::MutexGuard<'static, Vec<(u64, Arc<Slot>)>> {
 /// Called by the webhook for every agent event.
 pub fn ingest(query: &str, body: &str) {
     if let Some(ev) = parse(query, body) {
-        lock_monitor().apply(&ev, crate::agent_hooks::now_ms());
+        let tool = serde_json::from_str::<Value>(body).ok().and_then(|v| v.get("tool_name").and_then(|t| t.as_str()).map(|t| clean_token(t, 40)));
+        let key = format!("{}:{}", ev.agent.name(), ev.session_id);
+        let answered = {
+            let mut m = lock_monitor();
+            let ids = m.answered_elsewhere(&key, &ev.kind, tool.as_deref());
+            m.apply(&ev, crate::agent_hooks::now_ms());
+            ids
+        };
+        // the user answered in the agent's own window: take the card off the bar and let the waiting hook go (it prints nothing)
+        for id in answered {
+            release_waiter(id);
+        }
         DIRTY.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The sentinel decision of a request that was answered somewhere else. Never accepted from the island's buttons.
+const ANSWERED_ELSEWHERE: &str = "__answered_elsewhere__";
+
+fn release_waiter(id: u64) {
+    let slot = lock_waiters().iter().find(|(i, _)| *i == id).map(|(_, s)| s.clone());
+    if let Some(slot) = slot {
+        let mut d = slot.decision.lock().unwrap_or_else(|e| e.into_inner());
+        if d.is_none() {
+            *d = Some(ANSWERED_ELSEWHERE.to_string());
+        }
+        slot.cv.notify_all();
     }
 }
 
@@ -683,6 +764,9 @@ pub fn request_approval(req: ApprovalRequest, timeout: Duration) -> Option<Strin
     lock_waiters().retain(|(i, _)| *i != id);
     lock_monitor().remove_approval(id, crate::agent_hooks::now_ms());
     DIRTY.store(true, Ordering::Relaxed);
+    if decision.as_deref() == Some(ANSWERED_ELSEWHERE) {
+        return None;
+    }
     if decision.is_none() {
         note_unanswered(req.agent.label());
     }
@@ -1256,5 +1340,66 @@ mod tests {
         assert_eq!(DisplayMode::from_setting("Blank"), DisplayMode::Blank);
         assert_eq!(DisplayMode::from_setting("stay-awake"), DisplayMode::StayAwake);
         assert_eq!(DisplayMode::from_setting(""), DisplayMode::StayAwake);
+    }
+
+    #[test]
+    fn a_plan_is_shown_as_the_text_the_agent_wrote_not_as_json() {
+        let plan = "## Plan
+1. Fix the bug
+2. Add a test";
+        let out = summarize("ExitPlanMode", Some(&json!({ "plan": plan })));
+        assert_eq!(out, plan);
+        assert!(!out.contains('{') && !out.contains("\\n"));
+        let long = format!("# Plan
+{}", "step
+".repeat(2_000));
+        let cut = summarize("ExitPlanMode", Some(&json!({ "plan": long })));
+        assert!(cut.starts_with("# Plan") && cut.chars().count() <= MAX_PLAN_CHARS && cut.chars().count() > MAX_SUMMARY_CHARS);
+    }
+
+    #[test]
+    fn an_edit_shows_the_change_and_an_unknown_tool_shows_readable_lines() {
+        let e = summarize("Edit", Some(&json!({"file_path":"a.rs","old_string":"let x = 1;","new_string":"let x = 2;"})));
+        assert_eq!(e, "a.rs
+- let x = 1;
++ let x = 2;");
+        let u = summarize("mcp__thing", Some(&json!({"name":"x","count":3})));
+        assert!(u.contains("name: x") && u.contains("count: 3") && !u.contains('{'), "{u}");
+    }
+
+    #[test]
+    fn a_request_answered_in_the_agent_is_cleared_by_what_the_agent_does_next() {
+        let mut m = Monitor::new();
+        m.apply(&ev(Agent::Claude, "s1", Kind::Prompt), T);
+        let id = m.add_approval(Agent::Claude, "s1", None, "Bash".into(), "ls".into(), None, T + 1, APPROVAL_WAIT).unwrap();
+        let key = "claude:s1";
+        assert!(m.answered_elsewhere(key, &Kind::PostTool, Some("Read")).is_empty(), "another tool finishing proves nothing");
+        assert!(m.answered_elsewhere("claude:other", &Kind::PostTool, Some("Bash")).is_empty(), "another session neither");
+        assert!(m.answered_elsewhere(key, &Kind::Notify, None).is_empty());
+        assert_eq!(m.answered_elsewhere(key, &Kind::PostTool, Some("Bash")), vec![id]);
+        assert_eq!(m.answered_elsewhere(key, &Kind::Stop, None), vec![id]);
+        assert_eq!(m.answered_elsewhere(key, &Kind::Prompt, None), vec![id]);
+    }
+
+    #[test]
+    fn answering_in_the_agent_releases_the_waiting_hook_and_the_bar_forgets_it() {
+        let q = |event: &str| format!("agent=claude&event={event}");
+        let body = r#"{"session_id":"elsewhere1","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+        let waiting = std::thread::spawn(move || {
+            request_approval(ApprovalRequest { agent: Agent::Claude, session_id: "elsewhere1".into(), cwd: None, tool: "Bash".into(), summary: "ls".into(), question: None }, Duration::from_secs(20))
+        });
+        for _ in 0..200 {
+            if lock_monitor().approvals_len() > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(lock_monitor().approvals_len() >= 1, "the request appeared on the bar");
+        let t0 = std::time::Instant::now();
+        ingest(&q("posttool"), body);
+        let decision = waiting.join().unwrap();
+        assert_eq!(decision, None, "the hook prints nothing: the agent already has its answer");
+        assert!(t0.elapsed() < Duration::from_secs(3), "released at once, not after the timeout");
+        assert!(!lock_monitor().approvals.iter().any(|a| a.session_key == "claude:elsewhere1"));
     }
 }

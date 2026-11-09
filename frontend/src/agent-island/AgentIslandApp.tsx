@@ -335,12 +335,12 @@ function ApprovalCard({ a, now, decide }: { a: ApprovalView; now: number; decide
       <div className="ai-card-head">
         <AgentLogo agent={a.agent} label={a.label} className="ai-logo--small" />
         <span className="ai-name">{a.label}</span>
-        <span className="ai-tool">{questions.length > 0 ? "Question" : a.tool || "Tool"}</span>
+        <span className="ai-tool">{questions.length > 0 ? "Question" : a.tool === "ExitPlanMode" ? "Plan" : a.tool || "Tool"}</span>
         <span className="ai-left" title="After this the agent asks in its own terminal">{left}s</span>
       </div>
       {questions.length === 0 ? (
         <>
-          <pre className="ai-summary">{a.summary || "(no details)"}</pre>
+          <pre className={a.tool === "ExitPlanMode" ? "ai-summary ai-summary--plan" : "ai-summary"}>{a.summary || "(no details)"}</pre>
           <div className="ai-actions">
             <button className="ai-btn ai-btn--allow" onClick={() => decide(a.id, "allow")}>
               Allow

@@ -193,6 +193,38 @@ pub fn agent_island_snapshot() -> Snapshot {
     SHOWN.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(|| crate::agent_monitor::snapshot_now())
 }
 
+/// How far down the wake orb's capsule reaches from the top of the screen, logical px (0 = no orb at the top). The stage
+/// reports it; the island sits below it and slides when it changes.
+static OBSTACLE: Mutex<f64> = Mutex::new(0.0);
+
+#[tauri::command]
+pub fn agent_island_set_obstacle(bottom: f64) {
+    *OBSTACLE.lock().unwrap_or_else(|e| e.into_inner()) = clamp_obstacle(bottom);
+}
+
+fn obstacle() -> f64 {
+    *OBSTACLE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A sane obstacle: finite, not negative, at most a quarter of a tall screen.
+pub fn clamp_obstacle(v: f64) -> f64 {
+    if v.is_finite() {
+        v.clamp(0.0, 300.0)
+    } else {
+        0.0
+    }
+}
+
+/// One animation step of the slide: ease toward the target, snap when close.
+pub fn slide_step(cur: f64, target: f64) -> f64 {
+    let d = target - cur;
+    if d.abs() < 0.75 {
+        target
+    } else {
+        cur + d * 0.28
+    }
+}
+
 static PREVIEW_UNTIL: Mutex<u64> = Mutex::new(0);
 const PREVIEW_MS: u64 = 10_000;
 
@@ -220,6 +252,8 @@ pub struct Island {
     was_inside: bool,
     /// The last snapshot summary, so the 33 ms hover tick can run without rebuilding the snapshot.
     last: Option<(bool, usize, usize)>,
+    /// Current slide below the wake orb, logical px.
+    y_off: f64,
 }
 
 fn distinct_agents(snap: &Snapshot) -> usize {
@@ -289,6 +323,18 @@ impl Island {
                 let _ = crate::dyn_windows::destroy_window(app, LABEL);
             }
         }
+        // keep clear of the wake orb: slide down while its capsule is at the top, back up when it leaves
+        if self.shown != Mode::Hidden {
+            let target = obstacle();
+            if (self.y_off - target).abs() > f64::EPSILON {
+                self.y_off = slide_step(self.y_off, target);
+                if let Some(w) = app.get_webview_window(LABEL) {
+                    move_to_offset(app, &w, self.y_off);
+                }
+            }
+        } else {
+            self.y_off = obstacle();
+        }
         // clicks pass through everywhere except over the drawn island
         if self.shown != Mode::Hidden {
             let want_ignore = !inside;
@@ -313,7 +359,7 @@ fn place_and_show(app: &AppHandle, scale: f64, was_hidden: bool) -> Result<(), S
     let mp = monitor.position();
     let ms = monitor.size();
     let x = mp.x + (ms.width as i32 - w) / 2;
-    let y = mp.y + (TOP_GAP * dpi).round() as i32;
+    let y = mp.y + ((TOP_GAP + obstacle()) * dpi).round() as i32;
     let win = crate::dyn_windows::get_or_create_window(app, crate::dyn_windows::WindowConfig::agent_island())?;
     let _ = win.set_size(tauri::PhysicalSize::new(w as u32, h as u32));
     let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
@@ -321,6 +367,17 @@ fn place_and_show(app: &AppHandle, scale: f64, was_hidden: bool) -> Result<(), S
         crate::notify_toast::show_without_focus(&win, crate::work_area::PRect { x, y, w, h })?;
     }
     Ok(())
+}
+
+/// Move the island window to `TOP_GAP + off` below the top of the primary monitor, keeping its x.
+fn move_to_offset(app: &AppHandle, win: &tauri::WebviewWindow, off: f64) {
+    let Ok(Some(monitor)) = app.primary_monitor() else { return };
+    let dpi = monitor.scale_factor();
+    let Ok(p) = win.outer_position() else { return };
+    let y = monitor.position().y + ((TOP_GAP + off) * dpi).round() as i32;
+    if p.y != y {
+        let _ = win.set_position(tauri::PhysicalPosition::new(p.x, y));
+    }
 }
 
 const WS_EX_TRANSPARENT: isize = 0x0000_0020;
@@ -544,5 +601,28 @@ mod tests {
         // the only allowed call is the non-Windows fallback inside set_click_through
         assert_eq!(calls.len(), 1, "unexpected calls: {calls:?}");
         assert!(calls[0].contains("through"), "{calls:?}");
+    }
+
+    #[test]
+    fn the_island_slides_down_below_the_orb_and_settles_there() {
+        assert_eq!(clamp_obstacle(f64::NAN), 0.0);
+        assert_eq!(clamp_obstacle(-5.0), 0.0);
+        assert_eq!(clamp_obstacle(9_000.0), 300.0);
+        assert_eq!(clamp_obstacle(110.0), 110.0);
+        let mut y = 0.0;
+        let mut steps = 0;
+        while y != 110.0 {
+            let next = slide_step(y, 110.0);
+            assert!(next > y && next <= 110.0, "moves toward the target, never past it");
+            y = next;
+            steps += 1;
+            assert!(steps < 60, "it settles");
+        }
+        let mut y = 110.0;
+        while y != 0.0 {
+            y = slide_step(y, 0.0);
+            steps += 1;
+            assert!(steps < 120);
+        }
     }
 }

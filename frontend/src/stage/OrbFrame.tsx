@@ -753,6 +753,13 @@ export function OrbFrame() {
     el.style.pointerEvents = shown ? "auto" : "none";
   };
   const frameRef = useRef<HTMLDivElement | null>(null);
+  // The agent island sits below the wake orb: tell it how far down the capsule reaches (0 when it is hidden or at the bottom).
+  useEffect(() => {
+    const pebble = capsuleStyle === "pebble";
+    const bottomCss = !rect ? 0 : pebble ? 105 : rect.y / (window.devicePixelRatio || 1) + rect.h / (window.devicePixelRatio || 1);
+    const reach = isShown && orbPosition === "top" ? Math.round(bottomCss + 4) : 0;
+    void tauriInvoke("agent_island_set_obstacle", { bottom: reach }).catch(() => {});
+  }, [rect, isShown, orbPosition, capsuleStyle]);
   useEffect(() => {
     console.log(`[ORB-FRAME] state: isShown=${isShown} pos=${orbPosition} (assistantVisible=${assistantVisible}, ghost=${ghostActive}, stageOverride=${stageOverride})`);
     applyRect(frameRef.current, rect, isShown, orbPosition);
