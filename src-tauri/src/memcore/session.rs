@@ -427,7 +427,13 @@ pub fn rehearsal() -> bool {
 }
 
 fn rehearsal_flag(value: Option<&str>) -> bool {
-    matches!(value.map(str::trim), Some("1") | Some("true"))
+    matches!(value.map(str::trim), Some("1") | Some("true") | Some("briefing"))
+}
+
+/// `NEXUS_BOOT_REHEARSAL=briefing`: also run the daily briefing path although today's briefing was already spoken (without
+/// recording that it was).
+pub fn rehearsal_briefing() -> bool {
+    std::env::var("NEXUS_BOOT_REHEARSAL").map(|v| v.trim() == "briefing").unwrap_or(false)
 }
 
 /// The synthetic session of the rehearsal: Calculator, last seen 90 minutes before `now`.
@@ -1291,6 +1297,7 @@ mod live_probe {
         assert!(!rehearsal_flag(Some("yes please")));
         assert!(rehearsal_flag(Some("1")));
         assert!(rehearsal_flag(Some(" true ")));
+        assert!(rehearsal_flag(Some("briefing")), "the briefing rehearsal is a rehearsal too");
         // the synthetic session is one harmless app, recent enough to be offered, and ends a session
         let now = 1_800_000_000;
         let s = rehearsal_snapshot(now);

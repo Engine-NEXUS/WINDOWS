@@ -750,7 +750,7 @@ pub fn start_boot_briefing<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             .unwrap_or(true);
         // The reopen question does not depend on the daily briefing: every logon asks it when there is something from the last
         // session to bring back (it was lost whenever the briefing had already run that day).
-        let want_briefing = !(already && overnight.is_none());
+        let want_briefing = !(already && overnight.is_none()) || super::session::rehearsal_briefing();
         let snapshot = BOOT_SNAPSHOT.lock().ok().and_then(|g| g.clone()).unwrap_or_default();
 
         // 1. The hello: every logon, short, cached, immediate. While it plays (the early hello can take seconds to start and to
@@ -787,9 +787,11 @@ pub fn start_boot_briefing<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             println!("[BOOT] skip briefing: nothing to say (no resume/mail/events/session/health)");
             return;
         };
-        super::with_store(&dir, |s| s.meta_set("last_briefing_day", &today));
-        if pb.overnight {
-            crate::agent_outcomes::mark_told(&dir);
+        if !super::session::rehearsal() {
+            super::with_store(&dir, |s| s.meta_set("last_briefing_day", &today));
+            if pb.overnight {
+                crate::agent_outcomes::mark_told(&dir);
+            }
         }
         println!(
             "[BOOT] briefing: session_offer={} health_spoken={} open_items={} (voice ready: {})",
