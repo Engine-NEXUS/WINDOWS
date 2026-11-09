@@ -130,8 +130,11 @@ pub struct Config {
     pub arm_step_ms: u64,
     /// Holding the open palm still this long while armed disarms (the arm gesture itself only ever arms).
     pub palm_hold_ms: u64,
-    /// How far (as a share of the camera image) the palm may drift and still count as "held still".
+    /// How far (as a share of the camera image) the palm may drift and still count as "held still" (a hand held up for
+    /// the camera drifts a few centimetres).
     pub palm_still_radius: f64,
+    /// A pose other than the palm for no longer than this does not restart the hold (the pose flickers on a 15 fps camera).
+    pub palm_gap_ms: u64,
     /// No hand at all for this long while disarmed ends hand mode (the camera must not stay on forever).
     pub idle_exit_ms: u64,
     /// Tab / window gestures (3 fingers). Off in tests unless asked for; the glue turns it on from settings.
@@ -163,8 +166,9 @@ impl Config {
             lost_disarm_ms: 5000,
             arm_debounce_ms: 80,
             arm_step_ms: 3000,
-            palm_hold_ms: 2000,
+            palm_hold_ms: 1500,
             palm_still_radius: 0.02,
+            palm_gap_ms: 200,
             idle_exit_ms: 600_000,
             gestures: false,
             gestures_desktop: false,
@@ -191,6 +195,8 @@ pub struct Snapshot {
     pub cursor: (i32, i32),
     /// 0..=3: how far through palm-fist-palm-fist the user is.
     pub arm_stage: u8,
+    /// How far the held palm that switches the pointer off has got, 0..1.
+    pub palm_hold: f64,
 }
 
 fn pose_name(p: Option<Pose>) -> &'static str {
@@ -295,6 +301,10 @@ pub struct Engine {
     arm: ArmDetector,
     /// Where and since when the open palm has been held still (the disarm gesture).
     palm_still: Option<(u64, (f64, f64))>,
+    /// Since when the pose has not been a palm while a hold was running (flicker tolerance).
+    palm_gap_since: Option<u64>,
+    /// How far the hold has got, 0..1 (shown so the user knows to keep holding).
+    palm_progress: f64,
     /// After arming (which ends on a palm) the palm must leave once before holding it can disarm.
     palm_ready: bool,
     fx: OneEuro,
@@ -345,6 +355,8 @@ impl Engine {
             tracker: PoseTracker::default(),
             arm: ArmDetector::default(),
             palm_still: None,
+            palm_gap_since: None,
+            palm_progress: 0.0,
             palm_ready: false,
             last_palm: None,
             last_t: None,
@@ -426,6 +438,8 @@ impl Engine {
         self.last_palm = None;
         self.scroll_anchor = None;
         self.palm_still = None;
+        self.palm_gap_since = None;
+        self.palm_progress = 0.0;
         self.palm_ready = false;
         self.prev_filtered = None;
         self.vel = (0.0, 0.0);
@@ -486,6 +500,7 @@ impl Engine {
             },
             cursor: (px - m.x.round() as i32, py - m.y.round() as i32),
             arm_stage: self.arm.stage,
+            palm_hold: self.palm_progress,
         }
     }
 
@@ -505,6 +520,8 @@ impl Engine {
                 // picture and showing it again is one of the ways to "show the palm again"
                 self.tracker.reset();
                 self.palm_still = None;
+                self.palm_gap_since = None;
+                self.palm_progress = 0.0;
                 self.prev_filtered = None;
                 self.vel = (0.0, 0.0);
                 self.last_pose = None;
@@ -535,18 +552,29 @@ impl Engine {
         }
         if self.armed {
             // The open palm held still for `palm_hold_ms` disarms, but only after the palm has left once since arming.
+            // A flicker to another pose for under `palm_gap_ms` does not restart the hold.
             let (cx, cy) = pose::palm_center(h);
             if p != Pose::Palm {
                 self.palm_ready = true;
-                self.palm_still = None;
+                let g = *self.palm_gap_since.get_or_insert(t_ms);
+                if t_ms.saturating_sub(g) > self.cfg.palm_gap_ms {
+                    self.palm_still = None;
+                    self.palm_progress = 0.0;
+                }
             } else if self.palm_ready {
+                self.palm_gap_since = None;
                 match self.palm_still {
                     Some((since, (ax, ay))) if (cx - ax).hypot(cy - ay) <= self.cfg.palm_still_radius => {
-                        if t_ms.saturating_sub(since) >= self.cfg.palm_hold_ms {
+                        let held = t_ms.saturating_sub(since);
+                        self.palm_progress = (held as f64 / self.cfg.palm_hold_ms as f64).min(1.0);
+                        if held >= self.cfg.palm_hold_ms {
                             out.extend(self.set_armed(false, "palm-hold"));
                         }
                     }
-                    _ => self.palm_still = Some((t_ms, (cx, cy))),
+                    _ => {
+                        self.palm_still = Some((t_ms, (cx, cy)));
+                        self.palm_progress = 0.0;
+                    }
                 }
             }
         }
@@ -903,9 +931,9 @@ mod tests {
         // start again and test the exact rule
         let mut r = Rig::new();
         r.arm();
-        r.hold(&palm(), 1200);
-        assert!(r.e.is_armed(), "1.2 s is not long enough");
         r.hold(&palm(), 1000);
+        assert!(r.e.is_armed(), "1 s is not long enough");
+        r.hold(&palm(), 700);
         assert!(!r.e.is_armed());
         assert!(r.actions.contains(&Action::ArmChanged { armed: false, reason: "palm-hold" }));
     }
@@ -929,6 +957,40 @@ mod tests {
             r.frame(Some(&shifted(&palm(), dx, 0.0)));
         }
         assert!(r.e.is_armed(), "pointing with an open hand must not disarm");
+    }
+
+    #[test]
+    fn one_flickering_frame_does_not_restart_the_hold_but_a_longer_break_does() {
+        let mut r = Rig::new();
+        r.arm();
+        r.hold(&palm(), 700);
+        r.frame(Some(&fist())); // the pose flickers for one frame
+        r.hold(&palm(), 900);
+        assert!(!r.e.is_armed(), "700 + flicker + 900 ms of palm is over 1.5 s: disarmed");
+        assert!(r.actions.contains(&Action::ArmChanged { armed: false, reason: "palm-hold" }));
+        let mut r = Rig::new();
+        r.arm();
+        r.hold(&palm(), 1000);
+        r.hold(&fist(), 400); // a real break of more than 200 ms
+        r.hold(&palm(), 1000);
+        assert!(r.e.is_armed(), "the hold started over after a real break");
+    }
+
+    #[test]
+    fn a_hand_drifting_a_few_centimetres_still_counts_as_held_and_progress_is_reported() {
+        let mut r = Rig::new();
+        r.arm();
+        r.hold(&fist(), 100);
+        for i in 0..25 {
+            let dx = if i % 2 == 0 { 0.0 } else { 0.012 }; // 1.2 % of the image, inside the 2 % radius
+            r.frame(Some(&shifted(&palm(), dx, 0.0)));
+        }
+        let p = r.snap.clone().unwrap().palm_hold;
+        assert!(p > 0.3 && p <= 1.0, "progress {p}");
+        for _ in 0..40 {
+            r.frame(Some(&palm()));
+        }
+        assert!(!r.e.is_armed());
     }
 
     #[test]

@@ -110,6 +110,8 @@ export interface HudState {
   scrolling: boolean;
   cursor: [number, number];
   arm_stage: number;
+  /** How far the held palm that switches the pointer off has got, 0..1. */
+  palm_hold?: number;
   live: boolean;
   /** Size of the monitor the cursor is on; `cursor` is inside it. */
   screen: [number, number];

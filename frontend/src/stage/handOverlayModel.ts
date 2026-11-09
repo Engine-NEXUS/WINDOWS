@@ -51,6 +51,7 @@ export function chipText(s: HudState): string {
   if (s.armed && s.gesture === "tabs") return `HAND · 3 fingers: flick for tabs${suffix}`;
   if (s.armed && s.gesture === "windows") return `HAND · windows: flick, drop the hand to pick${suffix}`;
   if (s.armed && s.gesture === "desktops") return `HAND · 4 fingers: flick for desktops${suffix}`;
+  if (s.armed && (s.palm_hold ?? 0) > 0.25) return `HAND · hold the palm to stop${suffix}`;
   if (s.armed) {
     if (!s.live) return `HAND · PREVIEW${suffix}`;
     return s.tracking ? `HAND · ON${suffix}` : `HAND · ON · show your hand${suffix}`;
