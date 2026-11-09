@@ -12,6 +12,8 @@ export const STATIC_FRAME_T = 0.6;
 
 const LABELS: Record<OrbDesign, string> = {
   circle: "Ready",
+  triangle: "Hand pointer on",
+  square: "Hand pointer off",
   breathing: "Responding",
   listening: "Listening",
   working: "Working",

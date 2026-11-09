@@ -78,9 +78,9 @@ describe("paintDots voice level", () => {
 });
 
 describe("resolveOrb / frames", () => {
-  it("covers the nine upstream designs plus the plain circle", () => {
-    expect(ORB_DESIGNS).toHaveLength(10);
-    expect(new Set(ORB_DESIGNS).size).toBe(10);
+  it("covers the nine upstream designs plus the circle, triangle and square", () => {
+    expect(ORB_DESIGNS).toHaveLength(12);
+    expect(new Set(ORB_DESIGNS).size).toBe(12);
     expect(ORB_DESIGNS).toContain("circle");
   });
 

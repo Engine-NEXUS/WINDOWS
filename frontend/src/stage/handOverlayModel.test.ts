@@ -11,8 +11,8 @@ const vp = { w: 1280, h: 720 };
 
 describe("chipText (short, one line)", () => {
   it("guides the arming gesture with progress", () => {
-    expect(chipText(base)).toBe("HAND · palm, fist, palm, fist  1/3");
-    expect(chipText({ ...base, arm_stage: 0 })).toBe("HAND · palm, fist, palm, fist");
+    expect(chipText(base)).toBe("HAND · show your palm 3 times  1/3");
+    expect(chipText({ ...base, arm_stage: 0 })).toBe("HAND · show your palm 3 times");
   });
   it("asks for a hand when none is seen", () => {
     expect(chipText({ ...base, tracking: false })).toBe("HAND · show your hand");
@@ -73,8 +73,8 @@ describe("gestures on the chip", () => {
     expect(overlayModel({ ...armed, last_action: "next_tab" }, vp, true).ripple).toBe(false);
     expect(overlayModel({ ...armed, last_action: "click" }, vp, true).ripple).toBe(true);
   });
-  it("tells how to leave after a fist-hold disarm", () => {
-    expect(chipText({ ...base, note: "disarmed (fist-hold)" })).toContain("exit");
+  it("tells how to start again after a held palm switched the pointer off", () => {
+    expect(chipText({ ...base, note: "disarmed (palm-hold)" })).toContain("palm 3 times");
   });
 });
 

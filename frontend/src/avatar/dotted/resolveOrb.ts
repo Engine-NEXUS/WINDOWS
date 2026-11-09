@@ -5,15 +5,17 @@
 import { MODE_FRAMES } from "./engine/registry";
 import { BASE_PROFILES, scaleCounts, scaleRadii, type ModeOpts } from "./engine/profiles";
 import type { ModeFrame } from "./engine/types";
-import { frameCircle } from "./nexusModes";
+import { frameCircle, frameSquare, frameTriangle } from "./nexusModes";
 import { PRESETS, STATE_TO_MODE } from "./presets";
 import type { OrbState } from "./types";
 
-/** The nine upstream designs plus NEXUS's own plain `circle` (idle). */
-export type OrbDesign = OrbState | "circle";
+/** The nine upstream designs plus NEXUS's own `circle` (idle) and the hand-mode `triangle` and `square`. */
+export type OrbDesign = OrbState | "circle" | "triangle" | "square";
 
 export const ORB_DESIGNS: readonly OrbDesign[] = [
   "circle",
+  "triangle",
+  "square",
   "breathing",
   "listening",
   "working",
@@ -47,8 +49,9 @@ export function resolveOrb(design: OrbDesign, size: number): ResolvedOrb {
   const hit = cache.get(key);
   if (hit) return hit;
 
-  if (design === "circle") {
-    const own: ResolvedOrb = { design, frame: frameCircle, speed: 1, opts: {} };
+  if (design === "circle" || design === "triangle" || design === "square") {
+    const frame = design === "circle" ? frameCircle : design === "triangle" ? frameTriangle : frameSquare;
+    const own: ResolvedOrb = { design, frame, speed: 1, opts: {} };
     cache.set(key, own);
     return own;
   }

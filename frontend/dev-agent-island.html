@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="color-scheme" content="dark light" />
+    <script src="/theme-boot.js"></script>
+    <title>Agent Island preview (dev only)</title>
+    <style>
+      html, body { margin: 0; height: 100%; }
+      body {
+        background: linear-gradient(135deg, #1f2937 0%, #3b4a63 45%, #6b5b7b 100%);
+        font-family: "Segoe UI", system-ui, sans-serif;
+        color: #e5e7eb;
+      }
+      /* the real island sits in a fixed, transparent, panel-sized window and morphs inside it; here that window is this strip */
+      .dev-top { position: fixed; left: 0; right: 0; top: 6px; }
+      .dev-scale { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+      .dev-bar {
+        position: fixed; left: 16px; bottom: 16px; right: 16px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+        padding: 12px; border-radius: 12px; background: rgba(0,0,0,0.45);
+      }
+      .dev-bar button { padding: 7px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.25); background: rgba(255,255,255,0.08); color: #fff; cursor: pointer; font: 600 12px "Segoe UI", sans-serif; }
+      .dev-bar button:hover { background: rgba(255,255,255,0.18); }
+      .dev-bar span { font-size: 12px; opacity: 0.8; margin-left: auto; }
+      .dev-note { position: fixed; left: 16px; top: 16px; font-size: 12px; opacity: 0.7; max-width: 300px; line-height: 1.5; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/agent-island/dev.tsx"></script>
+  </body>
+</html>

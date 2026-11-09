@@ -13,6 +13,8 @@ export type OrbActivity =
   | "analysing"
   | "ghost"
   | "hand"
+  | "handArmed"
+  | "handPaused"
   | "dictation"
   | "agent"
   | "background";
@@ -25,7 +27,9 @@ export const ORB_ACTIVITIES: { id: OrbActivity; label: string }[] = [
   { id: "background", label: "Doing tasks in the background" },
   { id: "analysing", label: "Analysing the screen" },
   { id: "ghost", label: "Ghost mode" },
-  { id: "hand", label: "Hand mode" },
+  { id: "hand", label: "Hand mode, waiting for 3 palms" },
+  { id: "handArmed", label: "Hand mode, pointer on" },
+  { id: "handPaused", label: "Hand mode, pointer off (palm held)" },
   { id: "dictation", label: "Dictation / typing for you" },
   { id: "agent", label: "Watching a coding agent" },
   { id: "waiting", label: "Waiting for your answer" },
@@ -40,7 +44,9 @@ export const DEFAULT_ORB_DESIGNS: Record<OrbActivity, OrbDesign> = {
   background: "weaving",
   analysing: "searching",
   ghost: "connecting",
-  hand: "shaping",
+  hand: "circle",
+  handArmed: "triangle",
+  handPaused: "square",
   dictation: "shaping",
   agent: "solving",
   waiting: "breathing",
@@ -51,6 +57,10 @@ export interface OrbSignals {
   /** Screen tour is capturing + running vision. */
   tourFetching: boolean;
   handActive: boolean;
+  /** Hand mode with the pointer on (after three palms). */
+  handArmed: boolean;
+  /** Hand mode with the pointer switched off by a held palm (until three palms switch it on again). */
+  handPaused: boolean;
   dictationActive: boolean;
   agentWatching: boolean;
   backgroundTasks: number;
@@ -59,6 +69,8 @@ export interface OrbSignals {
 export const NO_SIGNALS: OrbSignals = {
   tourFetching: false,
   handActive: false,
+  handArmed: false,
+  handPaused: false,
   dictationActive: false,
   agentWatching: false,
   backgroundTasks: 0,
@@ -84,7 +96,7 @@ export function deriveOrbActivity(i: OrbActivityInputs): OrbActivity {
   if (i.state === "thinking") return "thinking";
   if (i.state === "listening") return "listening";
   if (i.ghostActive) return "ghost";
-  if (i.handActive) return "hand";
+  if (i.handActive) return i.handArmed ? "handArmed" : i.handPaused ? "handPaused" : "hand";
   if (i.dictationActive) return "dictation";
   if (i.agentWatching) return "agent";
   if (i.backgroundTasks > 0) return "background";

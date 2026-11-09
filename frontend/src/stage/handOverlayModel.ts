@@ -46,18 +46,19 @@ export function chipText(s: HudState): string {
   const dim2 = !s.covered ? dim : "";
   const suffix = covered + busy + dim2;
   if (!s.tracking && !s.armed && s.note && s.note.startsWith("starting")) return "HAND · starting…";
-  if (s.note && s.note.startsWith("disarmed (fist-hold")) return `HAND · off · keep the fist to exit${suffix}`;
-  if (s.note && s.note.startsWith("disarmed")) return `HAND · off · palm, fist, palm, fist to start${suffix}`;
+  if (s.note && s.note.startsWith("disarmed (palm-hold")) return `HAND · off · show your palm 3 times to start${suffix}`;
+  if (s.note && s.note.startsWith("disarmed")) return `HAND · off · show your palm 3 times to start${suffix}`;
   if (s.armed && s.gesture === "tabs") return `HAND · 3 fingers: flick for tabs${suffix}`;
   if (s.armed && s.gesture === "windows") return `HAND · windows: flick, drop the hand to pick${suffix}`;
   if (s.armed && s.gesture === "desktops") return `HAND · 4 fingers: flick for desktops${suffix}`;
+  if (s.armed && (s.palm_hold ?? 0) > 0.25) return `HAND · hold the palm to stop${suffix}`;
   if (s.armed) {
     if (!s.live) return `HAND · PREVIEW${suffix}`;
     return s.tracking ? `HAND · ON${suffix}` : `HAND · ON · show your hand${suffix}`;
   }
   if (!s.tracking) return `HAND · show your hand${suffix}`;
   const n = Math.min(s.arm_stage, 3);
-  return `HAND · palm, fist, palm, fist${n > 0 ? `  ${n}/3` : ""}${suffix}`;
+  return `HAND · show your palm 3 times${n > 0 ? `  ${n}/3` : ""}${suffix}`;
 }
 
 export function overlayModel(

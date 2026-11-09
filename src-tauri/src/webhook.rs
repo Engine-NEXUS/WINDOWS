@@ -17,6 +17,12 @@ pub const WEBHOOK_PORT: u16 = 39220;
 const MAX_BODY: usize = 8192;
 /// A Stop hook posts the agent's final message, which can be long. Only `/agent-event` may send this much.
 const MAX_AGENT_BODY: usize = 64 * 1024;
+/// A permission request carries the whole tool input (a Write's file text can be long). Over the cap the request is
+/// refused and the agent simply asks in its own terminal.
+const MAX_APPROVAL_BODY: usize = 256 * 1024;
+/// At most this many connections are served at once: a permission request is held open for up to 108 s, and a runaway
+/// local sender must not be able to spawn threads without end.
+const MAX_CONNECTIONS: usize = 32;
 const TOKEN_SERVICE: &str = "webhook";
 
 /// Get-or-create the webhook bearer token (keychain-stored).
@@ -71,6 +77,8 @@ fn body_limit(head: &str) -> usize {
     let path = target.split('?').next().unwrap_or("");
     if path == "/agent-event" {
         MAX_AGENT_BODY
+    } else if path == "/agent-approval" {
+        MAX_APPROVAL_BODY
     } else {
         MAX_BODY
     }
@@ -191,10 +199,29 @@ fn handle_conn(
         respond(&mut stream, 200, r#"{"ok":true,"service":"nexus-webhook"}"#);
         return None;
     }
+    if req.path == "/agent-approval" {
+        // A permission request: held open until the island's Allow / Deny, or until the wait runs out. The reply body
+        // is exactly the line the agent expects on stdout (empty = print nothing = the agent asks in its terminal).
+        if !(req.method == "POST" && bearer_ok(&req.auth, agent_token)) {
+            respond(&mut stream, 401, r#"{"error":"unauthorized"}"#);
+            return None;
+        }
+        let line = crate::agent_monitor::handle_approval(&req.query, &req.body);
+        respond(&mut stream, 200, &line);
+        return None;
+    }
     if req.path == "/agent-event" {
         // An agent's Stop hook says "claude stopped". Its own token (never the /trigger one), a body of two
         // words, and nothing that can run a command: see agent_hooks.
         let ok = req.method == "POST" && bearer_ok(&req.auth, agent_token);
+        if ok {
+            // the agent monitor (island, screen hold) sees every event, including the ones only it uses
+            crate::agent_monitor::ingest(&req.query, &req.body);
+            if crate::agent_monitor::is_monitor_only(&req.query) {
+                respond(&mut stream, 200, r#"{"ok":true}"#);
+                return None;
+            }
+        }
         let (code, reply, event) = crate::agent_hooks::route_event(ok, &req.query, &req.body);
         if let Some(mut ev) = event {
             // Antigravity and Aider name a file the final text is read from (path-checked, size-capped)
@@ -255,6 +282,7 @@ pub fn spawn_listener<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             let token = webhook_token();
             let agent_token = crate::agent_hooks::agent_event_token();
             tracing::info!("webhook: listening on 127.0.0.1:{} (localhost only)", WEBHOOK_PORT);
+            let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let peer_local = stream
@@ -264,24 +292,39 @@ pub fn spawn_listener<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                 if !peer_local {
                     continue;
                 }
-                if let Some(transcript) = handle_conn(stream, &token, &agent_token) {
-                    tracing::info!(
-                        "webhook: trigger {:?}...",
-                        transcript.chars().take(60).collect::<String>()
-                    );
-                    if let Ok(dir) = app.path().app_data_dir() {
-                        crate::diary::log_event(&dir, "webhook", &transcript);
+                // One thread per connection: a held-open permission request must not stall every other hook.
+                if active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_CONNECTIONS {
+                    active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    drop(stream);
+                    continue;
+                }
+                let (app, token, agent_token, done) = (app.clone(), token.clone(), agent_token.clone(), active.clone());
+                let spawned = std::thread::Builder::new().name("webhook-conn".into()).spawn(move || {
+                    if let Some(transcript) = handle_conn(stream, &token, &agent_token) {
+                        tracing::info!(
+                            "webhook: trigger {:?}...",
+                            transcript.chars().take(60).collect::<String>()
+                        );
+                        if let Ok(dir) = app.path().app_data_dir() {
+                            crate::diary::log_event(&dir, "webhook", &transcript);
+                        }
+                        let app_c = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let _ = crate::orchestrator::process_transcript(
+                                app_c,
+                                transcript,
+                                None,
+                                None,
+                            )
+                            .await;
+                        });
                     }
-                    let app_c = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let _ = crate::orchestrator::process_transcript(
-                            app_c,
-                            transcript,
-                            None,
-                            None,
-                        )
-                        .await;
-                    });
+                    done.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                });
+                if spawned.is_err() {
+                    // the closure never ran: undo the count here
+                    active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    tracing::warn!("webhook: could not start a connection thread");
                 }
             }
         })

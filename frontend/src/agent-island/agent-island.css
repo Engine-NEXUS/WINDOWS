@@ -1,0 +1,764 @@
+/* The Agent Island: a solid, flat strip of agent logos that opens into a tracking / approvals panel.
+   Tokens only (no hard-coded colours); the window is transparent, these two surfaces are solid. */
+/* ONE element is the island: it morphs between the pill and the panel (width / height / radius transition) inside a
+   fixed, transparent window, so a hover never resizes the OS window. The size comes from --ai-w / --ai-h (set by the
+   page); --ai-scale is the user's size setting, applied with zoom. */
+.ai-island {
+  --ai-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  position: relative;
+  box-sizing: border-box;
+  width: var(--ai-w, 64px);
+  height: var(--ai-h, 40px);
+  margin: 0 auto;
+  zoom: var(--ai-scale, 1);
+  background: var(--stage-surface);
+  color: var(--stage-text);
+  border: 1px solid var(--stage-border);
+  box-shadow: var(--stage-shadow);
+  transform-origin: 50% 0;
+  font: 400 13px/1.35 "Segoe UI", system-ui, sans-serif;
+  overflow: hidden;
+  user-select: none;
+  will-change: width, height;
+  transition:
+    width 320ms var(--ai-ease),
+    height 320ms var(--ai-ease),
+    border-radius 320ms var(--ai-ease),
+    transform 160ms var(--ai-ease),
+    box-shadow 240ms var(--ai-ease);
+  animation: ai-in 220ms var(--ai-ease);
+}
+
+.ai-island--collapsed {
+  border-radius: 14px;
+}
+
+/* the cursor is in the pill's hot zone (set by Rust): the pill lifts a little, so the hover is visible before it opens */
+.ai-island--hot {
+  transform: scale(1.1);
+  border-color: var(--stage-text-muted);
+}
+
+.ai-island--expanded {
+  border-radius: 24px;
+  box-shadow: var(--stage-shadow-lg);
+}
+
+/* the two faces of the island: the pill fades out while the panel fades in a beat later */
+.ai-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  transition:
+    opacity 180ms ease,
+    transform 320ms var(--ai-ease),
+    visibility 0s linear 320ms;
+}
+
+.ai-layer--pill {
+  bottom: 0;
+  opacity: 1;
+}
+
+.ai-island--expanded .ai-layer--pill {
+  opacity: 0;
+  pointer-events: none;
+  transition-delay: 0s, 0s, 0s;
+}
+
+.ai-layer--panel {
+  /* a fixed-size page centred in the island: it is revealed as the island grows, never reflowed */
+  left: 50%;
+  right: auto;
+  width: 760px;
+  height: 430px;
+  margin-left: -380px;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-6px);
+}
+
+.ai-island--expanded .ai-layer--panel {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: none;
+  transition-delay: 90ms, 60ms, 0s;
+}
+
+/* ─── The one-row pill ─── */
+.ai-pill {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  height: 100%;
+  padding: 0 8px;
+  box-sizing: border-box;
+}
+
+.ai-chip {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  width: 26px;
+  height: 26px;
+}
+
+/* A logo tile: brand colour (inline) behind the mark. */
+.ai-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  box-sizing: border-box;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--stage-border);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.ai-logo-img {
+  width: 100%;
+  height: 100%;
+  padding: 14%;
+  box-sizing: border-box;
+  object-fit: contain;
+}
+
+.ai-logo-mono {
+  color: var(--stage-surface);
+  font: 800 12px/1 "Segoe UI", system-ui, sans-serif;
+}
+
+.ai-logo--small {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+}
+
+.ai-logo--hero {
+  width: 72px;
+  height: 72px;
+  border-radius: 20px;
+}
+
+.ai-count {
+  position: absolute;
+  left: -3px;
+  top: -4px;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 3px;
+  box-sizing: border-box;
+  border-radius: 7px;
+  background: var(--stage-text);
+  color: var(--stage-surface);
+  font: 700 9px/13px "Segoe UI", system-ui, sans-serif;
+  text-align: center;
+}
+
+/* ─── The panel ─── */
+.ai-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+}
+
+.ai-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px 4px;
+}
+
+.ai-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.ai-tab {
+  position: relative;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 30px;
+  border: 0;
+  border-radius: 15px;
+  background: none;
+  color: var(--stage-text-muted);
+  cursor: pointer;
+}
+
+.ai-tab[aria-selected="true"] {
+  background: var(--stage-border);
+  color: var(--stage-text);
+}
+
+.ai-badge {
+  position: absolute;
+  right: -2px;
+  top: -3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  background: var(--stage-attention);
+  color: var(--stage-surface);
+  font: 700 10px/15px "Segoe UI", system-ui, sans-serif;
+  text-align: center;
+}
+
+.ai-title {
+  margin-left: auto;
+  color: var(--stage-text-muted);
+  font-size: 12px;
+}
+
+.ai-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 14px 14px;
+}
+
+/* Natural scrolling with no scrollbars: wheel, trackpad and touch still scroll; nothing draws a bar, and a scroll
+   at the end of a list does not drag the page behind it. */
+.ai-body,
+.ai-lines,
+.ai-summary,
+.ai-steps {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  overscroll-behavior: contain;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+}
+
+.ai-body::-webkit-scrollbar,
+.ai-lines::-webkit-scrollbar,
+.ai-summary::-webkit-scrollbar,
+.ai-steps::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.ai-empty {
+  margin: 36px 0;
+  text-align: center;
+  color: var(--stage-text-muted);
+}
+
+/* ─── Tracking: left rail + code pane ─── */
+.ai-body:has(.ai-track) {
+  overflow: hidden;
+  display: flex;
+}
+
+.ai-track {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: 14px;
+}
+
+.ai-rail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 4px 2px 0 6px;
+}
+
+.ai-switch {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.ai-switch-btn {
+  appearance: none;
+  padding: 2px;
+  border: 2px solid transparent;
+  border-radius: 9px;
+  background: none;
+  cursor: pointer;
+  opacity: 0.55;
+}
+
+.ai-switch-btn[aria-selected="true"] {
+  border-color: var(--stage-accent);
+  opacity: 1;
+}
+
+.ai-hero {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  margin-bottom: 12px;
+}
+
+.ai-bubble {
+  position: absolute;
+  left: -6px;
+  top: -6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 24px;
+  height: 24px;
+  box-sizing: border-box;
+  border: 2px solid var(--stage-surface);
+  border-radius: 12px;
+  background: var(--stage-accent);
+  color: var(--stage-surface);
+  font: 800 12px/1 "Segoe UI", system-ui, sans-serif;
+}
+
+.ai-bubble i {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--stage-surface);
+  animation: ai-blink 1.2s ease-in-out infinite;
+}
+
+.ai-bubble i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.ai-bubble i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+.ai-bubble--waiting {
+  background: var(--stage-attention);
+}
+
+.ai-bubble--done {
+  background: var(--stage-ok);
+}
+
+.ai-who-name {
+  font-size: 17px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-who-agent,
+.ai-who-time {
+  color: var(--stage-text-muted);
+  font-size: 13px;
+}
+
+.ai-who-time {
+  font: 400 11.5px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+.ai-steps {
+  flex: 1;
+  min-height: 0;
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  overflow-y: auto;
+}
+
+.ai-step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--stage-text-muted);
+  font-size: 14px;
+}
+
+.ai-step--running {
+  color: var(--stage-text);
+  font-weight: 600;
+}
+
+.ai-step--idle {
+  font-size: 13px;
+}
+
+.ai-step-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  width: 16px;
+}
+
+.ai-step--done .ai-step-icon {
+  color: var(--stage-ok);
+}
+
+.ai-step-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--stage-text-muted);
+  font: 400 11px/1.3 ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+.ai-spin {
+  width: 13px;
+  height: 13px;
+  box-sizing: border-box;
+  border: 2px solid var(--stage-border-strong);
+  border-top-color: var(--stage-text);
+  border-radius: 50%;
+  animation: ai-turn 0.8s linear infinite;
+}
+
+.ai-spin--small {
+  width: 12px;
+  height: 12px;
+  border-color: var(--stage-surface);
+  border-top-color: transparent;
+}
+
+/* ─── The code pane ─── */
+.ai-code {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-radius: 16px;
+  background: var(--stage-code-bg);
+  overflow: hidden;
+}
+
+.ai-code--empty {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 6px;
+  padding: 20px;
+}
+
+.ai-code-note {
+  padding: 12px 14px;
+  font: 600 13px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.ai-code-sub {
+  color: var(--stage-text-muted);
+  font-size: 12px;
+}
+
+.ai-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px 6px;
+}
+
+.ai-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 5px 10px;
+  border-radius: 9px;
+  background: var(--stage-surface);
+  font: 600 13px/1 ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+.ai-lang {
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: var(--stage-accent);
+  color: var(--stage-code-bg);
+  font: 800 9px/1 "Segoe UI", system-ui, sans-serif;
+}
+
+.ai-file-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--stage-border-strong);
+}
+
+.ai-file-dot--live {
+  background: var(--stage-attention);
+}
+
+.ai-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: right;
+  color: var(--stage-text-muted);
+  font: 400 12px/1 ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+.ai-lines {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 0 10px;
+  user-select: text;
+  font: 400 13px/1.7 ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+.ai-line {
+  display: flex;
+  min-width: max-content;
+  border-left: 3px solid transparent;
+  white-space: pre;
+}
+
+.ai-line--added {
+  background: var(--stage-diff-add-bg);
+  border-left-color: var(--stage-diff-add-bar);
+}
+
+.ai-line--removed {
+  background: var(--stage-diff-del-bg);
+  border-left-color: var(--stage-diff-del-bar);
+}
+
+.ai-line--removed .ai-text {
+  text-decoration: line-through;
+  opacity: 0.75;
+}
+
+.ai-num {
+  flex: none;
+  width: 34px;
+  padding-right: 8px;
+  box-sizing: border-box;
+  text-align: right;
+  color: var(--stage-linenum);
+}
+
+.ai-line--added .ai-num {
+  color: var(--stage-diff-add-bar);
+}
+
+.ai-line--removed .ai-num {
+  color: var(--stage-diff-del-bar);
+}
+
+.ai-sign {
+  flex: none;
+  width: 16px;
+  color: var(--stage-text-muted);
+}
+
+.ai-gap {
+  padding: 1px 0 1px 52px;
+  color: var(--stage-linenum);
+  line-height: 1;
+}
+
+.ai-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  background: var(--stage-text);
+  animation: ai-blink 1s steps(2, start) infinite;
+}
+
+.syn-kw {
+  color: var(--stage-syn-kw);
+}
+
+.syn-str {
+  color: var(--stage-syn-str);
+}
+
+.syn-num {
+  color: var(--stage-syn-num);
+}
+
+.syn-fn {
+  color: var(--stage-syn-fn);
+}
+
+.syn-type {
+  color: var(--stage-syn-type);
+}
+
+.syn-com {
+  color: var(--stage-syn-com);
+  font-style: italic;
+}
+
+/* ─── Approval cards ─── */
+.ai-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--stage-attention);
+  border-radius: 14px;
+}
+
+.ai-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-name {
+  font-weight: 600;
+}
+
+.ai-tool,
+.ai-left {
+  color: var(--stage-text-muted);
+  font: 400 11.5px/1.3 ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+.ai-tool {
+  padding: 1px 7px;
+  border: 1px solid var(--stage-border-strong);
+  border-radius: 6px;
+}
+
+.ai-left {
+  margin-left: auto;
+}
+
+.ai-summary {
+  margin: 0;
+  max-height: 140px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--stage-code-bg);
+  font: 400 12px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+/* a plan is read in full before it is approved: taller, normal text */
+.ai-summary--plan {
+  max-height: 250px;
+  font: 400 12.5px/1.5 system-ui, "Segoe UI", sans-serif;
+}
+
+.ai-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.ai-btn {
+  appearance: none;
+  flex: 1;
+  padding: 9px 12px;
+  border: 1px solid var(--stage-border-strong);
+  border-radius: 10px;
+  background: var(--stage-surface);
+  color: var(--stage-text);
+  font: 600 12.5px/1 "Segoe UI", system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.ai-btn--allow {
+  background: var(--stage-accent);
+  border-color: var(--stage-accent);
+  color: var(--stage-surface);
+}
+
+.ai-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.ai-q {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ai-q legend {
+  padding: 0;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+
+.ai-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+@keyframes ai-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes ai-turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes ai-blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-island,
+  .ai-layer {
+    transition-duration: 1ms;
+    transition-delay: 0s;
+    transform: none;
+  }
+
+  .ai-island,
+  .ai-pill,
+  .ai-panel,
+  .ai-spin,
+  .ai-caret,
+  .ai-bubble i {
+    animation: none;
+  }
+}

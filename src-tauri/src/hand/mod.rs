@@ -37,6 +37,8 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
 static LIVE: AtomicBool = AtomicBool::new(false);
+/// The pointer was last switched off by a held palm (the orb shows a square until three palms switch it on again).
+static PALM_PAUSED: AtomicBool = AtomicBool::new(false);
 /// Last position WE moved the cursor to (packed x:y), and when. A real cursor far from it = the user's own mouse.
 static LAST_SET: AtomicI64 = AtomicI64::new(i64::MIN);
 static LAST_SET_MS: AtomicU64 = AtomicU64::new(0);
@@ -689,6 +691,7 @@ fn apply<R: Runtime>(app: &AppHandle<R>, s: &mut Session, actions: Vec<Action>) 
     for a in actions {
         match a {
             Action::ArmChanged { armed, reason } => {
+                PALM_PAUSED.store(!armed && reason == "palm-hold", Ordering::Relaxed);
                 if armed {
                     // Forget where an earlier session put the cursor, or the first check would read
                     // the user's own mouse position as a takeover.
@@ -793,7 +796,27 @@ fn hud<R: Runtime>(app: &AppHandle<R>, s: &Session, snap: Snapshot) {
         gpu_busy: s.gpu_busy,
         covered: s.covered,
     };
+    let armed = st.snap.armed;
     let _ = app.emit("hand:state", st);
+    orb_state(app, armed);
+}
+
+/// What the wake orb shows for hand mode, on an event of its own (the orb's page must not share `hand:state` with the
+/// overlay: in testing a page's listener for it was sometimes never called). Sent when it changes and at least every 1.5 s.
+static ORB_LAST: Mutex<Option<(bool, bool, Instant)>> = Mutex::new(None);
+
+fn orb_state<R: Runtime>(app: &AppHandle<R>, armed: bool) {
+    let paused = !armed && PALM_PAUSED.load(Ordering::Relaxed);
+    let mut g = ORB_LAST.lock();
+    let due = match *g {
+        Some((a, p, at)) => a != armed || p != paused || at.elapsed() >= Duration::from_millis(1500),
+        None => true,
+    };
+    if due {
+        *g = Some((armed, paused, Instant::now()));
+        drop(g);
+        let _ = app.emit("hand:orb", serde_json::json!({ "active": true, "armed": armed, "palm_paused": paused }));
+    }
 }
 
 /// Stop clicks reaching the OS right now: used by Esc, the mouse-takeover check and exits.
@@ -1204,6 +1227,8 @@ pub fn stop<R: Runtime>(app: &AppHandle<R>, reason: &str) {
     }
     let _ = s.out.send(Out::Stop);
     STARTED_BY_GHOST.store(false, Ordering::Relaxed);
+    PALM_PAUSED.store(false, Ordering::Relaxed);
+    *ORB_LAST.lock() = None;
     let epoch = FOCUS_EPOCH.swap(0, Ordering::SeqCst);
     if epoch != 0 {
         crate::focus_mode::release(epoch);
@@ -1264,11 +1289,19 @@ pub async fn hand_stop<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 pub struct HandStatus {
     active: bool,
     live: bool,
+    /// The pointer is on (three palms were shown).
+    armed: bool,
+    /// The pointer was switched off by a held palm.
+    palm_paused: bool,
 }
 
 #[tauri::command]
 pub fn hand_status() -> HandStatus {
-    HandStatus { active: active(), live: LIVE.load(Ordering::Relaxed) }
+    let (active, armed) = {
+        let g = SESSION.lock();
+        (g.is_some(), g.as_ref().is_some_and(|s| s.engine.is_armed()))
+    };
+    HandStatus { active, live: LIVE.load(Ordering::Relaxed), armed, palm_paused: active && PALM_PAUSED.load(Ordering::Relaxed) }
 }
 
 /// Watches for: the window dying, no frames arriving, and the user's own mouse taking over.

@@ -685,11 +685,16 @@ pub fn on_resume<R: tauri::Runtime>(app: tauri::AppHandle<R>, away_secs: u64) {
     if away_secs < RESUME_HELLO_MIN_AWAY_SECS {
         return;
     }
+    RESUME_HELLO_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
     // A newer wake replaces an older waiting task (a brief wake with nobody there used to leave its task alive for hours).
     let my_gen = RESUME_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn(async move {
-        let Ok(dir) = app.path().app_data_dir() else { return };
+        let Ok(dir) = app.path().app_data_dir() else {
+            RESUME_HELLO_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+            return;
+        };
         if !super::enabled(&dir) || !super::flag(&dir, "memcoreBriefing", true) {
+            RESUME_HELLO_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
             return;
         }
         // Silent while the lock screen is up: wait (bounded) for input, which only the owner can give.
@@ -699,7 +704,7 @@ pub fn on_resume<R: tauri::Runtime>(app: tauri::AppHandle<R>, away_secs: u64) {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             waited += 2;
             if RESUME_GEN.load(std::sync::atomic::Ordering::SeqCst) != my_gen {
-                return;
+                return; // a newer wake owns the flag now
             }
             let idle = resume::user_idle_secs();
             let typed_recently = idle.map(|s| s < 10).unwrap_or(false);
@@ -710,12 +715,21 @@ pub fn on_resume<R: tauri::Runtime>(app: tauri::AppHandle<R>, away_secs: u64) {
             }
             if waited >= 180 {
                 println!("[BOOT] resume hello skipped: nobody came back within 3 min");
+                RESUME_HELLO_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
                 return;
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         submit_hello(&app, &dir, "resume").await;
+        RESUME_HELLO_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
     });
+}
+
+/// The welcome-back hello of a resume from sleep has not been spoken yet (it waits for the user to come back).
+static RESUME_HELLO_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn resume_hello_pending() -> bool {
+    RESUME_HELLO_PENDING.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// The spoken hello at logon / app start, then the once-a-day briefing. The hello is the cached
