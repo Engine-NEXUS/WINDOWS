@@ -7,7 +7,7 @@
 //! * A click lands where the cursor was `rewind_ms` BEFORE the pinch closed, then the cursor stays
 //!   locked until release: the pinch itself can no longer pull the click off target.
 //! * Quick pinch = click, held pinch = drag, thumb+middle = right click, two fingers up = scroll.
-//! * The pointer only acts while ARMED. Arming toggles with palm -> fist -> palm -> fist (twice).
+//! * The pointer only acts while ARMED. Showing the open palm three times arms it; holding the palm still disarms it.
 //! * Losing the hand releases any held button; staying lost disarms.
 
 use super::filter::{OneEuro, OneEuroParams};
@@ -125,13 +125,16 @@ pub struct Config {
     pub lost_disarm_ms: u64,
     /// A pose counts once it has been seen this long AND on at least two frames in a row.
     pub arm_debounce_ms: u64,
-    /// Each step of palm-fist-palm-fist must follow the previous one within this long (a slow camera
-    /// makes the whole gesture slow; a total-time window punished exactly that).
+    /// Each palm of the three that arm must follow the previous one within this long (a slow camera makes the
+    /// whole gesture slow; a total-time window punished exactly that).
     pub arm_step_ms: u64,
-    /// Holding a fist this long while armed disarms (the arm gesture itself only ever arms).
-    pub fist_disarm_ms: u64,
-    /// After a fist-hold disarm, keeping the fist closed this much longer ends hand mode (a way out without voice).
-    pub fist_exit_ms: u64,
+    /// Holding the open palm still this long while armed disarms (the arm gesture itself only ever arms).
+    pub palm_hold_ms: u64,
+    /// How far (as a share of the camera image) the palm may drift and still count as "held still" (a hand held up for
+    /// the camera drifts a few centimetres).
+    pub palm_still_radius: f64,
+    /// A pose other than the palm for no longer than this does not restart the hold (the pose flickers on a 15 fps camera).
+    pub palm_gap_ms: u64,
     /// No hand at all for this long while disarmed ends hand mode (the camera must not stay on forever).
     pub idle_exit_ms: u64,
     /// Tab / window gestures (3 fingers). Off in tests unless asked for; the glue turns it on from settings.
@@ -163,8 +166,9 @@ impl Config {
             lost_disarm_ms: 5000,
             arm_debounce_ms: 80,
             arm_step_ms: 3000,
-            fist_disarm_ms: 1200,
-            fist_exit_ms: 2000,
+            palm_hold_ms: 1500,
+            palm_still_radius: 0.02,
+            palm_gap_ms: 200,
             idle_exit_ms: 600_000,
             gestures: false,
             gestures_desktop: false,
@@ -191,6 +195,8 @@ pub struct Snapshot {
     pub cursor: (i32, i32),
     /// 0..=3: how far through palm-fist-palm-fist the user is.
     pub arm_stage: u8,
+    /// How far the held palm that switches the pointer off has got, 0..1.
+    pub palm_hold: f64,
 }
 
 fn pose_name(p: Option<Pose>) -> &'static str {
@@ -234,6 +240,7 @@ impl PoseTracker {
     }
 }
 
+/// Counts the palms shown: each stable change INTO an open palm (after the hand was something else, or gone) is one.
 #[derive(Debug, Default)]
 struct ArmDetector {
     stage: u8,
@@ -245,30 +252,18 @@ impl ArmDetector {
         *self = Self::default();
     }
 
-    /// A new stable pose `cp` at `t`; true when palm-fist-palm-fist has just completed.
+    /// A new stable pose `cp` at `t`; true when the third palm has just been shown.
     fn on_stable(&mut self, t: u64, cp: Pose, step_ms: u64) -> bool {
         if self.stage > 0 && t.saturating_sub(self.last_step) > step_ms {
             self.stage = 0;
         }
-        match (self.stage, cp) {
-            (0, Pose::Palm) | (1, Pose::Palm) => {
-                self.stage = 1;
-                self.last_step = t;
-            }
-            (1, Pose::Fist) => {
-                self.stage = 2;
-                self.last_step = t;
-            }
-            (2, Pose::Palm) => {
-                self.stage = 3;
-                self.last_step = t;
-            }
-            (3, Pose::Fist) => {
+        if cp == Pose::Palm {
+            self.stage += 1;
+            self.last_step = t;
+            if self.stage >= 3 {
                 self.stage = 0;
                 return true;
             }
-            (_, Pose::Other) | (_, Pose::Peace) => {}
-            _ => self.stage = 0,
         }
         false
     }
@@ -304,11 +299,14 @@ pub struct Engine {
     armed: bool,
     tracker: PoseTracker,
     arm: ArmDetector,
-    fist_since: Option<u64>,
-    /// Set when a fist-hold just disarmed the pointer: the fist kept closed from here on exits the mode.
-    exit_fist_since: Option<u64>,
-    /// After arming (which ends on a fist) the hand must open once before a fist can disarm.
-    fist_ready: bool,
+    /// Where and since when the open palm has been held still (the disarm gesture).
+    palm_still: Option<(u64, (f64, f64))>,
+    /// Since when the pose has not been a palm while a hold was running (flicker tolerance).
+    palm_gap_since: Option<u64>,
+    /// How far the hold has got, 0..1 (shown so the user knows to keep holding).
+    palm_progress: f64,
+    /// After arming (which ends on a palm) the palm must leave once before holding it can disarm.
+    palm_ready: bool,
     fx: OneEuro,
     fy: OneEuro,
     cursor: (f64, f64),
@@ -356,9 +354,10 @@ impl Engine {
             armed: false,
             tracker: PoseTracker::default(),
             arm: ArmDetector::default(),
-            fist_since: None,
-            exit_fist_since: None,
-            fist_ready: false,
+            palm_still: None,
+            palm_gap_since: None,
+            palm_progress: 0.0,
+            palm_ready: false,
             last_palm: None,
             last_t: None,
             history: VecDeque::new(),
@@ -438,8 +437,10 @@ impl Engine {
         self.armed = armed;
         self.last_palm = None;
         self.scroll_anchor = None;
-        self.fist_since = None;
-        self.fist_ready = false;
+        self.palm_still = None;
+        self.palm_gap_since = None;
+        self.palm_progress = 0.0;
+        self.palm_ready = false;
         self.prev_filtered = None;
         self.vel = (0.0, 0.0);
         self.arm.reset();
@@ -499,6 +500,7 @@ impl Engine {
             },
             cursor: (px - m.x.round() as i32, py - m.y.round() as i32),
             arm_stage: self.arm.stage,
+            palm_hold: self.palm_progress,
         }
     }
 
@@ -514,9 +516,12 @@ impl Engine {
                 self.fx.reset();
                 self.fy.reset();
                 self.last_palm = None;
-                self.arm.reset();
+                // the palms already shown stay counted (they expire by `arm_step_ms`): taking the hand out of the
+                // picture and showing it again is one of the ways to "show the palm again"
                 self.tracker.reset();
-                self.fist_since = None;
+                self.palm_still = None;
+                self.palm_gap_since = None;
+                self.palm_progress = 0.0;
                 self.prev_filtered = None;
                 self.vel = (0.0, 0.0);
                 self.last_pose = None;
@@ -546,15 +551,30 @@ impl Engine {
             }
         }
         if self.armed {
-            // A fist held for `fist_disarm_ms` disarms, but only after the hand has opened once since arming.
-            if p != Pose::Fist {
-                self.fist_ready = true;
-                self.fist_since = None;
-            } else if self.fist_ready {
-                let since = *self.fist_since.get_or_insert(t_ms);
-                if t_ms.saturating_sub(since) >= self.cfg.fist_disarm_ms {
-                    out.extend(self.set_armed(false, "fist-hold"));
-                    self.exit_fist_since = Some(t_ms);
+            // The open palm held still for `palm_hold_ms` disarms, but only after the palm has left once since arming.
+            // A flicker to another pose for under `palm_gap_ms` does not restart the hold.
+            let (cx, cy) = pose::palm_center(h);
+            if p != Pose::Palm {
+                self.palm_ready = true;
+                let g = *self.palm_gap_since.get_or_insert(t_ms);
+                if t_ms.saturating_sub(g) > self.cfg.palm_gap_ms {
+                    self.palm_still = None;
+                    self.palm_progress = 0.0;
+                }
+            } else if self.palm_ready {
+                self.palm_gap_since = None;
+                match self.palm_still {
+                    Some((since, (ax, ay))) if (cx - ax).hypot(cy - ay) <= self.cfg.palm_still_radius => {
+                        let held = t_ms.saturating_sub(since);
+                        self.palm_progress = (held as f64 / self.cfg.palm_hold_ms as f64).min(1.0);
+                        if held >= self.cfg.palm_hold_ms {
+                            out.extend(self.set_armed(false, "palm-hold"));
+                        }
+                    }
+                    _ => {
+                        self.palm_still = Some((t_ms, (cx, cy)));
+                        self.palm_progress = 0.0;
+                    }
                 }
             }
         }
@@ -566,17 +586,6 @@ impl Engine {
         let (fx, fy) = (self.fx.filter(px, t_s), self.fy.filter(py, t_s));
 
         if !self.armed {
-            // A fist kept closed after a fist-hold disarm leaves hand mode altogether.
-            match self.exit_fist_since {
-                Some(s0) if p == Pose::Fist => {
-                    if t_ms.saturating_sub(s0) >= self.cfg.fist_exit_ms {
-                        self.exit_fist_since = None;
-                        out.push(Action::ExitMode { reason: "fist" });
-                    }
-                }
-                Some(_) => self.exit_fist_since = None,
-                None => {}
-            }
             self.last_palm = Some((fx, fy));
             return (out, self.snapshot(true));
         }
@@ -846,7 +855,7 @@ mod tests {
             }
         }
         fn arm(&mut self) {
-            for _ in 0..2 {
+            for _ in 0..3 {
                 self.hold(&palm(), 300);
                 self.hold(&fist(), 300);
             }
@@ -863,41 +872,125 @@ mod tests {
     }
 
     #[test]
-    fn palm_fist_palm_fist_arms_and_repeating_it_does_not_disarm() {
+    fn three_palms_arm_two_do_not_and_repeating_it_does_not_disarm() {
         let mut r = Rig::new();
         assert!(!r.e.is_armed());
         for _ in 0..2 {
             r.hold(&palm(), 300);
             r.hold(&fist(), 300);
         }
+        assert!(!r.e.is_armed(), "two palms are not enough");
+        assert_eq!(r.snap.clone().unwrap().arm_stage, 2, "the counter shows the palms seen so far");
+        r.hold(&palm(), 300);
         assert!(r.e.is_armed());
         assert!(r.actions.contains(&Action::ArmChanged { armed: true, reason: "gesture" }));
-        // "More than twice" used to flip it off again. It must stay armed.
+        // showing three more palms while armed must not flip it
         for _ in 0..3 {
-            r.hold(&palm(), 300);
             r.hold(&fist(), 300);
+            r.hold(&palm(), 300);
         }
         assert!(r.e.is_armed());
     }
 
     #[test]
-    fn a_held_fist_disarms_but_not_straight_after_arming() {
+    fn one_open_hand_held_does_not_count_as_three_palms() {
         let mut r = Rig::new();
-        for _ in 0..2 {
+        r.hold(&palm(), 8000);
+        assert!(!r.e.is_armed(), "a resting open hand is one palm, not three");
+    }
+
+    #[test]
+    fn palms_too_far_apart_do_not_add_up_and_a_hand_leaving_the_picture_counts_as_leaving() {
+        let mut r = Rig::new();
+        r.hold(&palm(), 300);
+        r.gone(5000); // longer than the step window
+        r.hold(&palm(), 300);
+        r.gone(5000);
+        r.hold(&palm(), 300);
+        assert!(!r.e.is_armed(), "each pair is more than 3 s apart");
+        // quickly in and out of the picture three times does arm
+        let mut r = Rig::new();
+        for _ in 0..3 {
+            r.hold(&palm(), 300);
+            r.gone(700);
+        }
+        assert!(r.e.is_armed(), "{:?}", r.actions);
+    }
+
+    #[test]
+    fn a_held_palm_disarms_but_not_straight_after_arming() {
+        let mut r = Rig::new();
+        for _ in 0..3 {
             r.hold(&palm(), 300);
             r.hold(&fist(), 300);
         }
         assert!(r.e.is_armed());
-        // The arm gesture ended on a fist: keeping it closed for 2 s must NOT disarm.
-        r.hold(&fist(), 2000);
-        assert!(r.e.is_armed(), "fist right after arming is the end of the gesture, not a disarm");
-        // Open the hand once, then hold a fist: disarms with its own reason.
-        r.hold(&palm(), 300);
-        r.hold(&fist(), 1000);
+        // the third palm armed it and a fist followed: holding the palm now needs the palm to leave first, then hold
+        r.hold(&palm(), 2500);
+        assert!(!r.e.is_armed() || r.actions.contains(&Action::ArmChanged { armed: false, reason: "palm-hold" }));
+        // start again and test the exact rule
+        let mut r = Rig::new();
+        r.arm();
+        r.hold(&palm(), 1000);
         assert!(r.e.is_armed(), "1 s is not long enough");
-        r.hold(&fist(), 400);
+        r.hold(&palm(), 700);
         assert!(!r.e.is_armed());
-        assert!(r.actions.contains(&Action::ArmChanged { armed: false, reason: "fist-hold" }));
+        assert!(r.actions.contains(&Action::ArmChanged { armed: false, reason: "palm-hold" }));
+    }
+
+    #[test]
+    fn a_palm_that_moves_does_not_disarm_and_the_arming_palm_itself_never_does() {
+        let mut r = Rig::new();
+        // arm with the third palm still showing: holding that very palm must not disarm it
+        r.hold(&palm(), 300);
+        r.hold(&fist(), 300);
+        r.hold(&palm(), 300);
+        r.hold(&fist(), 300);
+        r.hold(&palm(), 300);
+        assert!(r.e.is_armed());
+        r.hold(&palm(), 4000);
+        assert!(r.e.is_armed(), "the palm that armed it has not left yet");
+        // after it left once, a palm that keeps moving (pointing) never counts as held still
+        r.hold(&fist(), 300);
+        for i in 0..90 {
+            let dx = if i % 2 == 0 { 0.0 } else { 0.1 };
+            r.frame(Some(&shifted(&palm(), dx, 0.0)));
+        }
+        assert!(r.e.is_armed(), "pointing with an open hand must not disarm");
+    }
+
+    #[test]
+    fn one_flickering_frame_does_not_restart_the_hold_but_a_longer_break_does() {
+        let mut r = Rig::new();
+        r.arm();
+        r.hold(&palm(), 700);
+        r.frame(Some(&fist())); // the pose flickers for one frame
+        r.hold(&palm(), 900);
+        assert!(!r.e.is_armed(), "700 + flicker + 900 ms of palm is over 1.5 s: disarmed");
+        assert!(r.actions.contains(&Action::ArmChanged { armed: false, reason: "palm-hold" }));
+        let mut r = Rig::new();
+        r.arm();
+        r.hold(&palm(), 1000);
+        r.hold(&fist(), 400); // a real break of more than 200 ms
+        r.hold(&palm(), 1000);
+        assert!(r.e.is_armed(), "the hold started over after a real break");
+    }
+
+    #[test]
+    fn a_hand_drifting_a_few_centimetres_still_counts_as_held_and_progress_is_reported() {
+        let mut r = Rig::new();
+        r.arm();
+        r.hold(&fist(), 100);
+        for i in 0..25 {
+            let dx = if i % 2 == 0 { 0.0 } else { 0.012 }; // 1.2 % of the image, inside the 2 % radius
+            r.frame(Some(&shifted(&palm(), dx, 0.0)));
+        }
+        let p = r.snap.clone().unwrap().palm_hold;
+        assert!(p > 0.3 && p <= 1.0, "progress {p}");
+        for _ in 0..40 {
+            r.frame(Some(&palm()));
+        }
+        assert!(!r.e.is_armed());
     }
 
     #[test]
@@ -928,7 +1021,7 @@ mod tests {
             frames(&mut r, &palm(), 2);
             frames(&mut r, &fist(), 2);
         }
-        frames(&mut r, &palm(), 1);
+        frames(&mut r, &palm(), 2);
         assert!(r.e.is_armed(), "slow cameras must still arm: {:?}", r.actions);
     }
 
@@ -1004,9 +1097,9 @@ mod tests {
     fn a_slow_gesture_arms_when_every_step_is_prompt() {
         // Field test 2: at 5 fps the four poses took 8+ s in total, which a 6 s total window rejected.
         let mut r = Rig::new();
-        for _ in 0..2 {
-            r.hold(&palm(), 2500);
-            r.hold(&fist(), 2500);
+        for _ in 0..3 {
+            r.hold(&palm(), 1300);
+            r.hold(&fist(), 1300);
         }
         assert!(r.e.is_armed(), "each step within 3 s must arm no matter how long the whole gesture took");
     }
@@ -1403,29 +1496,6 @@ mod tests {
         r.hold(&hand([false, false, false, false], false), 100); // the whole hand closes: not a click
         r.hold(&fist(), 200);
         assert!(r.clicks().is_empty(), "{:?}", r.actions);
-    }
-
-    #[test]
-    fn keeping_the_fist_closed_after_a_fist_hold_disarm_leaves_hand_mode() {
-        let mut r = Rig::new();
-        r.arm();
-        r.hold(&palm(), 300);
-        r.hold(&fist(), 1500);
-        assert!(!r.e.is_armed());
-        assert!(!r.actions.iter().any(|a| matches!(a, Action::ExitMode { .. })), "not yet");
-        r.hold(&fist(), 2200);
-        assert!(r.actions.contains(&Action::ExitMode { reason: "fist" }), "{:?}", r.actions);
-    }
-
-    #[test]
-    fn opening_the_hand_after_a_fist_hold_disarm_cancels_the_exit() {
-        let mut r = Rig::new();
-        r.arm();
-        r.hold(&palm(), 300);
-        r.hold(&fist(), 1500);
-        r.hold(&palm(), 300);
-        r.hold(&fist(), 4000);
-        assert!(!r.actions.iter().any(|a| matches!(a, Action::ExitMode { .. })), "{:?}", r.actions);
     }
 
     #[test]

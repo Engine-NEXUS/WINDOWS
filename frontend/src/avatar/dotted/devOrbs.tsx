@@ -7,6 +7,8 @@ import { ORB_DESIGNS, type OrbDesign } from "./resolveOrb";
 
 const DESCRIPTIONS: Record<OrbDesign, string> = {
   circle: "a plain, steady circle of dots (idle)",
+  triangle: "a steady triangle of dots (hand pointer on)",
+  square: "a steady square of dots (hand pointer off)",
   breathing: "a face-on ring slowly morphing",
   listening: "a waveform rolls through the rings",
   working: "particles on tilted orbits",

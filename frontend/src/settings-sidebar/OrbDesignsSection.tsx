@@ -6,6 +6,8 @@ import { DEFAULT_ORB_DESIGNS, designFor, normalizeOrbDesigns, ORB_ACTIVITIES } f
 
 const DESIGN_LABELS: Record<OrbDesign, string> = {
   circle: "Plain circle",
+  triangle: "Triangle",
+  square: "Square",
   breathing: "Breathing ring",
   listening: "Listening waves",
   working: "Working orbits",
