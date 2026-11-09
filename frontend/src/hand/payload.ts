@@ -110,6 +110,8 @@ export interface HudState {
   scrolling: boolean;
   cursor: [number, number];
   arm_stage: number;
+  /** How far the held palm that switches the pointer off has got, 0..1. */
+  palm_hold?: number;
   live: boolean;
   /** Size of the monitor the cursor is on; `cursor` is inside it. */
   screen: [number, number];
@@ -134,7 +136,7 @@ export function statusLine(s: HudState): string {
   if (!s.armed) {
     return s.note && s.note.startsWith("disarmed")
       ? s.note
-      : `palm → fist → palm → fist to arm (${s.arm_stage}/3)`;
+      : `show your palm 3 times to start (${s.arm_stage}/3)`;
   }
   const mode = s.live ? "LIVE" : "PREVIEW (not clicking)";
   const what = s.dragging ? "dragging" : s.scrolling ? "scrolling" : s.pressed ? "pinched" : s.pose;

@@ -52,6 +52,47 @@ function isTauri(): boolean {
 
 let started = false;
 
+/** How often the hand-mode state is asked for as a backup to the events. */
+export const HAND_POLL_MS = 3000;
+
+/** The hand-mode orb signals from the `hand_status` command, or null for an answer that is not a status. */
+export function handSignalsFromStatus(r: unknown): { handActive: boolean; handArmed: boolean; handPaused: boolean } | null {
+  if (!r || typeof r !== "object") return null;
+  const o = r as { active?: unknown; armed?: unknown; palm_paused?: unknown };
+  if (typeof o.active !== "boolean") return null;
+  const active = o.active;
+  return { handActive: active, handArmed: active && o.armed === true, handPaused: active && o.armed !== true && o.palm_paused === true };
+}
+
+/** After hand mode ends the orb first goes back to the circle and stays that long, then leaves the screen. */
+export const HAND_EXIT_MS = 1700;
+
+export interface HandSignals {
+  handActive: boolean;
+  handArmed: boolean;
+  handPaused: boolean;
+}
+
+const HAND_OFF: HandSignals = { handActive: false, handArmed: false, handPaused: false };
+const HAND_CIRCLE: HandSignals = { handActive: true, handArmed: false, handPaused: false };
+
+/**
+ * Hand-mode orb signals for a new status (from the `hand:orb` event, the status poll or `hand:stopped`).
+ * Ending hand mode (it was on, it is now off) first shows the circle for HAND_EXIT_MS, then nothing: the orb morphs back to
+ * the circle and only then leaves. `endingUntil` is the time that circle stops (0 = not ending).
+ */
+export function settleHand(
+  prevActive: boolean,
+  status: HandSignals,
+  now: number,
+  endingUntil: number,
+): { signals: HandSignals; endingUntil: number } {
+  if (status.handActive) return { signals: status, endingUntil: 0 };
+  if (endingUntil > 0 && now < endingUntil) return { signals: HAND_CIRCLE, endingUntil };
+  if (endingUntil === 0 && prevActive) return { signals: HAND_CIRCLE, endingUntil: now + HAND_EXIT_MS };
+  return { signals: HAND_OFF, endingUntil: 0 };
+}
+
 export function initOrbSignals(): void {
   if (started || !isTauri()) return;
   started = true;
@@ -69,15 +110,51 @@ export function initOrbSignals(): void {
     }
 
     let handTimer: ReturnType<typeof setTimeout> | null = null;
-    await listen<unknown>("hand:state", () => {
-      set({ handActive: true });
+    let exitTimer: ReturnType<typeof setTimeout> | null = null;
+    let endingUntil = 0;
+    let handOn = false;
+    let lastHandEvent = 0;
+    const applyHand = (status: HandSignals) => {
+      const r = settleHand(handOn, status, Date.now(), endingUntil);
+      endingUntil = r.endingUntil;
+      handOn = r.signals.handActive;
+      set(r.signals);
+      if (exitTimer) clearTimeout(exitTimer);
+      exitTimer = null;
+      if (endingUntil > 0) {
+        // leave the screen when the circle has been shown
+        exitTimer = setTimeout(() => applyHand(HAND_OFF), Math.max(50, endingUntil - Date.now() + 20));
+      }
+    };
+    // `hand:orb` is the orb's own event (the overlay listens to `hand:state`; two listeners for one event name in one page
+    // were not reliable). It arrives when hand mode's state changes and at least every 1.5 s while it runs.
+    await listen<unknown>("hand:orb", (e) => {
+      const next = handSignalsFromStatus(e.payload);
+      if (!next) return;
+      lastHandEvent = Date.now();
+      applyHand(next);
       if (handTimer) clearTimeout(handTimer);
-      handTimer = setTimeout(() => set({ handActive: false }), HAND_STALE_MS);
+      handTimer = setTimeout(() => applyHand(HAND_OFF), HAND_STALE_MS);
     });
+    console.log("[ORB] hand signals listening");
+    // The events can be missed (a page that started before the app was ready lost its first listeners in testing), so
+    // the same facts are also asked for every few seconds: hand mode on, pointer armed, pointer switched off by a palm.
+    const askHand = () =>
+      Date.now() - lastHandEvent < HAND_STALE_MS
+        ? Promise.resolve()
+        : invoke("hand_status")
+            .then((r) => {
+              const next = handSignalsFromStatus(r);
+              if (next) applyHand(next);
+            })
+            .catch(() => {});
+    void askHand();
+    setInterval(askHand, HAND_POLL_MS);
     await listen<unknown>("hand:stopped", () => {
       if (handTimer) clearTimeout(handTimer);
       handTimer = null;
-      set({ handActive: false });
+      lastHandEvent = 0;
+      applyHand(HAND_OFF);
     });
 
     await listen<unknown>("task:update", (e) => set({ backgroundTasks: parseTasks(e.payload).length }));

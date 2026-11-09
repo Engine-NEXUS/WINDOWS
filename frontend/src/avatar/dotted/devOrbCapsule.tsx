@@ -18,6 +18,8 @@ const PRESETS: Record<OrbActivity, Preset> = {
   analysing: { state: "thinking", signals: { tourFetching: true } },
   ghost: { state: "idle", ghostActive: true },
   hand: { state: "idle", signals: { handActive: true } },
+  handArmed: { state: "idle", signals: { handActive: true, handArmed: true } },
+  handPaused: { state: "idle", signals: { handActive: true, handPaused: true } },
   dictation: { state: "idle", signals: { dictationActive: true } },
   agent: { state: "idle", signals: { agentWatching: true } },
   background: { state: "idle", signals: { backgroundTasks: 2 } },
