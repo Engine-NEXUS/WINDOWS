@@ -38,6 +38,7 @@ add("frontend", "Frontend tests", "frontend", "npm test");
 add("frontend", "Turn-end choke-point gate", "frontend", "node ../scripts/check-turn-ends.mjs");
 add("frontend", "Hygiene gate self-test", "frontend", "node ../scripts/check-repo-hygiene.mjs --selftest");
 add("frontend", "Hygiene gate", "frontend", "node ../scripts/check-repo-hygiene.mjs");
+add("frontend", "Logo files gate", "frontend", "node ../scripts/check-activity-icons.mjs");
 add("frontend", "Theme contrast gate", "frontend", "node ../scripts/check-theme-contrast.mjs");
 add("frontend", "Hard-coded colour ratchet", "frontend", "node ../scripts/check-hardcoded-colors.mjs");
 add("frontend", "IPC + event contract gate", "frontend", "node ../scripts/check-ipc-contract.mjs");

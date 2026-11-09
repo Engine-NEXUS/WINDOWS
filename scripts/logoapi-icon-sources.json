@@ -1,0 +1,418 @@
+{
+  "_comment": "Product-own domains only. 'expect' is checked against the brand name logoapi reports ('=' prefix = exact). A parent-company domain would return the wrong mark, so none are listed here.",
+  "mcp": "https://logoapi.sh/mcp",
+  "icons": {
+    "amazon": {
+      "domain": "amazon.com",
+      "expect": [
+        "amazon"
+      ]
+    },
+    "antigravity": {
+      "domain": "antigravity.google",
+      "expect": [
+        "antigravity"
+      ]
+    },
+    "anydesk": {
+      "domain": "anydesk.com",
+      "expect": [
+        "anydesk"
+      ]
+    },
+    "balena": {
+      "domain": "balena.io",
+      "expect": [
+        "balena"
+      ]
+    },
+    "blender": {
+      "domain": "blender.org",
+      "expect": [
+        "blender"
+      ]
+    },
+    "brave": {
+      "domain": "brave.com",
+      "expect": [
+        "brave"
+      ]
+    },
+    "canva": {
+      "domain": "canva.com",
+      "expect": [
+        "canva"
+      ]
+    },
+    "claude": {
+      "domain": "claude.ai",
+      "expect": [
+        "claude"
+      ]
+    },
+    "coderabbit": {
+      "domain": "coderabbit.ai",
+      "expect": [
+        "coderabbit"
+      ]
+    },
+    "copilot": {
+      "domain": "copilot.github.com",
+      "expect": [
+        "copilot"
+      ]
+    },
+    "cursor": {
+      "domain": "cursor.com",
+      "expect": [
+        "cursor"
+      ]
+    },
+    "deepnote": {
+      "domain": "deepnote.com",
+      "expect": [
+        "deepnote"
+      ]
+    },
+    "devin": {
+      "domain": "devin.ai",
+      "expect": [
+        "devin"
+      ]
+    },
+    "discord": {
+      "domain": "discord.com",
+      "expect": [
+        "discord"
+      ]
+    },
+    "dribbble": {
+      "domain": "dribbble.com",
+      "expect": [
+        "dribbble"
+      ]
+    },
+    "figma": {
+      "domain": "figma.com",
+      "expect": [
+        "figma"
+      ]
+    },
+    "firebase": {
+      "domain": "firebase.google.com",
+      "expect": [
+        "firebase"
+      ]
+    },
+    "firefox": {
+      "domain": "firefox.com",
+      "expect": [
+        "firefox"
+      ]
+    },
+    "gemini": {
+      "domain": "gemini.google.com",
+      "expect": [
+        "gemini"
+      ]
+    },
+    "github": {
+      "domain": "github.com",
+      "expect": [
+        "github"
+      ]
+    },
+    "gitlab": {
+      "domain": "gitlab.com",
+      "expect": [
+        "gitlab"
+      ]
+    },
+    "gmail": {
+      "domain": "gmail.com",
+      "expect": [
+        "gmail"
+      ]
+    },
+    "google": {
+      "domain": "google.com",
+      "expect": [
+        "=google"
+      ]
+    },
+    "googlecloud": {
+      "domain": "cloud.google.com",
+      "expect": [
+        "google cloud"
+      ]
+    },
+    "googlecolab": {
+      "domain": "colab.research.google.com",
+      "expect": [
+        "colab"
+      ]
+    },
+    "googledrive": {
+      "domain": "drive.google.com",
+      "expect": [
+        "drive"
+      ]
+    },
+    "googlephotos": {
+      "domain": "photos.google.com",
+      "expect": [
+        "photos"
+      ]
+    },
+    "instagram": {
+      "domain": "instagram.com",
+      "expect": [
+        "instagram"
+      ]
+    },
+    "jules": {
+      "domain": "jules.google",
+      "expect": [
+        "jules"
+      ]
+    },
+    "linkedin": {
+      "domain": "linkedin.com",
+      "expect": [
+        "linkedin"
+      ]
+    },
+    "lovable": {
+      "domain": "lovable.dev",
+      "expect": [
+        "lovable"
+      ]
+    },
+    "mongodb": {
+      "domain": "mongodb.com",
+      "expect": [
+        "mongodb"
+      ]
+    },
+    "netflix": {
+      "domain": "netflix.com",
+      "expect": [
+        "netflix"
+      ]
+    },
+    "netlify": {
+      "domain": "netlify.com",
+      "expect": [
+        "netlify"
+      ]
+    },
+    "nodejs": {
+      "domain": "nodejs.org",
+      "expect": [
+        "node"
+      ]
+    },
+    "notion": {
+      "domain": "notion.so",
+      "expect": [
+        "notion"
+      ]
+    },
+    "openai": {
+      "domain": "openai.com",
+      "expect": [
+        "openai"
+      ]
+    },
+    "opencode": {
+      "domain": "opencode.ai",
+      "expect": [
+        "opencode"
+      ]
+    },
+    "perplexity": {
+      "domain": "perplexity.ai",
+      "expect": [
+        "perplexity"
+      ]
+    },
+    "reddit": {
+      "domain": "reddit.com",
+      "expect": [
+        "reddit"
+      ]
+    },
+    "render": {
+      "domain": "render.com",
+      "expect": [
+        "render"
+      ]
+    },
+    "rockstar": {
+      "domain": "rockstargames.com",
+      "expect": [
+        "rockstar"
+      ]
+    },
+    "samsung": {
+      "domain": "samsung.com",
+      "expect": [
+        "samsung"
+      ]
+    },
+    "signal": {
+      "domain": "signal.org",
+      "expect": [
+        "signal"
+      ]
+    },
+    "skype": {
+      "domain": "skype.com",
+      "expect": [
+        "skype"
+      ]
+    },
+    "slack": {
+      "domain": "slack.com",
+      "expect": [
+        "slack"
+      ]
+    },
+    "spotify": {
+      "domain": "spotify.com",
+      "expect": [
+        "spotify"
+      ]
+    },
+    "stripe": {
+      "domain": "stripe.com",
+      "expect": [
+        "stripe"
+      ]
+    },
+    "supabase": {
+      "domain": "supabase.com",
+      "expect": [
+        "supabase"
+      ]
+    },
+    "swiggy": {
+      "domain": "swiggy.com",
+      "expect": [
+        "swiggy"
+      ]
+    },
+    "tailscale": {
+      "domain": "tailscale.com",
+      "expect": [
+        "tailscale"
+      ]
+    },
+    "telegram": {
+      "domain": "telegram.org",
+      "expect": [
+        "telegram"
+      ]
+    },
+    "tiktok": {
+      "domain": "tiktok.com",
+      "expect": [
+        "tiktok"
+      ]
+    },
+    "trae": {
+      "domain": "trae.ai",
+      "expect": [
+        "trae"
+      ]
+    },
+    "twitter": {
+      "domain": "x.com",
+      "expect": [
+        "=x",
+        "twitter"
+      ]
+    },
+    "vercel": {
+      "domain": "vercel.com",
+      "expect": [
+        "vercel"
+      ]
+    },
+    "visualstudio": {
+      "domain": "visualstudio.microsoft.com",
+      "expect": [
+        "visual studio"
+      ]
+    },
+    "vscode": {
+      "domain": "code.visualstudio.com",
+      "expect": [
+        "visual studio code",
+        "vs code"
+      ]
+    },
+    "whatsapp": {
+      "domain": "whatsapp.com",
+      "expect": [
+        "whatsapp"
+      ]
+    },
+    "windsurf": {
+      "domain": "windsurf.com",
+      "expect": [
+        "windsurf"
+      ]
+    },
+    "youtube": {
+      "domain": "youtube.com",
+      "expect": [
+        "youtube"
+      ]
+    },
+    "zoom": {
+      "domain": "zoom.us",
+      "expect": [
+        "zoom"
+      ]
+    }
+  },
+  "keep": {
+    "chatgpt": "logoapi only has the generic OpenAI mark for openai.com; ChatGPT keeps its own file",
+    "codex": "logoapi only has the generic OpenAI mark; Codex keeps its own file",
+    "chrome": "chrome.google.com returns the Chrome Web Store mark, not Chrome",
+    "androidstudio": "android.com returns the Android mark, not Android Studio",
+    "edge": "microsoft.com returns the generic Microsoft logo",
+    "excel": "microsoft.com returns the generic Microsoft logo",
+    "fileexplorer": "microsoft.com returns the generic Microsoft logo",
+    "microsofttodo": "microsoft.com returns the generic Microsoft logo",
+    "notepad": "microsoft.com returns the generic Microsoft logo",
+    "onedrive": "microsoft.com returns the generic Microsoft logo",
+    "onenote": "microsoft.com returns the generic Microsoft logo",
+    "powerpoint": "microsoft.com returns the generic Microsoft logo",
+    "powershell": "microsoft.com returns the generic Microsoft logo",
+    "powertoys": "microsoft.com returns the generic Microsoft logo",
+    "teams": "microsoft.com returns the generic Microsoft logo",
+    "terminal": "microsoft.com returns the generic Microsoft logo",
+    "word": "microsoft.com returns the generic Microsoft logo",
+    "aider": "not in logoapi",
+    "blackmagic": "not in logoapi",
+    "clipchamp": "not in logoapi",
+    "cmake": "not in logoapi",
+    "davinci": "not in logoapi",
+    "googlecalendar": "not in logoapi",
+    "lottiefiles": "not in logoapi",
+    "outlook": "not in logoapi",
+    "postman": "not in logoapi",
+    "qbittorrent": "not in logoapi",
+    "rainmeter": "not in logoapi",
+    "vlc": "not in logoapi",
+    "xbox": "not in logoapi",
+    "zed": "not in logoapi",
+    "googlemeet": "logoapi's Meet mark is a plain yellow camera, not the current Meet logo - checked by eye, existing file kept",
+    "kilo": "logoapi's Kilo mark is solid black and vanishes on dark tiles; identical shape to the existing file",
+    "googlesheets": "logoapi's mark has a different aspect than the existing file; existing kept",
+    "steam": "logoapi SVG contains external references - rejected by the safety check"
+  },
+  "_wordmark_note": "logoapi serves full logos; ids whose logo is a wide wordmark lockup (aspect outside 0.7-1.43) are skipped by the importer and keep their existing square mark (about 40 ids: claude, cursor, github, discord, figma, ...)."
+}

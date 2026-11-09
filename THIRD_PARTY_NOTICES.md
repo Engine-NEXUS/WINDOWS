@@ -19,9 +19,12 @@ were added together with the code they cover.
 | (removed) Piper TTS / `piper-rs` / bundled `espeak-ng-data` | — | — | GPL-3 | Removed 2026-10-05 (change 81) |
 | Memory v2 design (always-on bounded user profile with a hard size cap, add/patch/remove memory edits, approval-gated write review, background review of conversations treated as data, skills-like procedures idea) | `src-tauri/src/memcore/{profile,review,curator,routines,corrections}.rs` | design influence: Hermes Agent by Nous Research (`NousResearch/hermes-agent`, official docs on persistent memory and the memory/skills review); idle consolidation idea from Letta (`letta-ai/letta`, "sleep-time" agents) | MIT (Hermes Agent, per its repository); Apache-2.0 (Letta) | **No source code copied** - re-implemented in Rust on our encrypted store; the review prompt and all text are written independently. Hermes copyright line **not yet verified from source** - confirm before distribution, and keep this row if any prompt wording is ever copied |
 | Dotted thought-orb engine (9 animated orb designs: geometry modes, presets, theme hook) | `frontend/src/avatar/dotted/` (engine copied; `paintInk.ts`, `resolveOrb.ts`, `DottedOrb.tsx` are NEXUS code) | `Jakubantalik/thinking-orbs` (`src/engine/*`, `src/presets.ts`, `src/types.ts`, `src/theme.ts`), checked 2026-11-07 | MIT - Copyright (c) 2026 Jakub Antalik (full text in `frontend/src/avatar/dotted/LICENSE-thinking-orbs.txt`) | Copied unmodified except one unused-parameter rename in `engine/core.ts`. Not an npm dependency. Keep this row and the licence file with the code |
+| Agent Island: permission-reply contract (nothing is allowed without a human click; per-agent stdout shapes; AskUserQuestion answers), approval timing (800 ms ack, 108 s decision, silence falls back to the agent's terminal), island window placement and cursor test | `src-tauri/src/agent_approval_reply.rs` and `frontend/src/agent-island/diff.ts` (ported, tests included; the line-diff engine is from `windows/src/core/diff.ts`), `agent_island.rs` and `agent_monitor.rs` (design and timings) | `Louis-CFM/coucou` `windows/hook/src/reply.rs`, `windows/src/core/diff.ts`, `windows/src-tauri/src/island.rs`, `pipe.rs` | MIT - Copyright (c) 2026 Louis Raillé | Code ported under the MIT notice below. **Not copied:** the names "Coucou"/"Mochi", the character, icons, sounds, `docs/media/` and `design/` (reserved by its `LICENSE-ASSETS.md`). Transport is NEXUS's own token-authenticated webhook, not coucou's named pipe |
 | Test fixture `sapi_open_whatsapp_16k.wav` | `src-tauri/tests/fixtures/` | generated locally with Windows SAPI | n/a | Synthetic speech, test-only |
 
-## MIT licence text (Handy, Silero)
+## MIT licence text (Handy, Silero, coucou)
+
+Coucou: Copyright (c) 2026 Louis Raillé. Same MIT terms as below; the copyright line above applies to the parts ported from `Louis-CFM/coucou`.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 documentation files (the "Software"), to deal in the Software without restriction, including without limitation the
@@ -46,6 +49,12 @@ INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIM
 OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
 WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+## logoapi.sh
+
+21 product logos in `frontend/public/activity-logos` were downloaded from https://logoapi.sh (embedding in an app is
+allowed by its terms; the whole catalog is not copied; takedown contact takedown@logoapi.sh). Per-file url, hash and
+date: `frontend/public/activity-logos/SOURCES.json`. The marks belong to their owners.
 
 ## Trademarks
 
