@@ -458,7 +458,9 @@ export function Avatar({ entered: enteredProp = false, dispersing = false, shown
   const wavesPreview = calibrationTarget === "waves";
   // Ghost always-on display: the WebGL orb replaces the waves bars.
   const ghostDisplay = shouldShowGhostParticles(visible, ghostActive);
-  const isOrbVisible = Boolean(enteredProp || dispersing || (shown && (visible || ghostActive)));
+  // Hand mode keeps the orb on the display, so it must keep animating too.
+  const handOn = useAssistant((s) => s.orbSignals.handActive);
+  const isOrbVisible = Boolean(enteredProp || dispersing || (shown && (visible || ghostActive || handOn)));
   // Target-switch pulse (plan 04 §4): toggling suffix restarts the CSS
   // animation, so identical rects still read as switched.
   const pulseClass = calibrating ? ` calib-pulse-${calibrationPulse % 2}` : "";

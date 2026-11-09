@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { frameCircle, frameSquare, frameTriangle, polygonPoint } from "./dotted/nexusModes";
-import { handSignalsFor } from "./orbSignals";
+import { handSignalsFromStatus } from "./orbSignals";
 import { designFor } from "./orbActivity";
 import { resolveOrb } from "./dotted/resolveOrb";
 
@@ -47,18 +47,16 @@ describe("hand-mode shapes", () => {
   });
 });
 
-describe("hand:state to orb signals", () => {
-  it("armed means the triangle", () => {
-    expect(handSignalsFor({ armed: true }, false)).toEqual({ handActive: true, handArmed: true, handPaused: false });
+describe("hand:orb and hand_status to orb signals", () => {
+  it("maps active, armed and palm-paused", () => {
+    expect(handSignalsFromStatus({ active: false, live: false, armed: false, palm_paused: false })).toEqual({ handActive: false, handArmed: false, handPaused: false });
+    expect(handSignalsFromStatus({ active: true, armed: false, palm_paused: false })).toEqual({ handActive: true, handArmed: false, handPaused: false });
+    expect(handSignalsFromStatus({ active: true, armed: true, palm_paused: true })).toEqual({ handActive: true, handArmed: true, handPaused: false });
+    expect(handSignalsFromStatus({ active: true, armed: false, palm_paused: true })).toEqual({ handActive: true, handArmed: false, handPaused: true });
   });
-  it("a held palm makes the square, which stays until the pointer is armed again", () => {
-    const paused = handSignalsFor({ armed: false, note: "disarmed (palm-hold)" }, false);
-    expect(paused).toEqual({ handActive: true, handArmed: false, handPaused: true });
-    expect(handSignalsFor({ armed: false, note: "" }, paused.handPaused).handPaused).toBe(true);
-    expect(handSignalsFor({ armed: true }, true).handPaused).toBe(false);
-  });
-  it("other ways of switching off, and a fresh start, show the circle", () => {
-    expect(handSignalsFor({ armed: false, note: "disarmed (hand-lost)" }, false).handPaused).toBe(false);
-    expect(handSignalsFor(null, false)).toEqual({ handActive: true, handArmed: false, handPaused: false });
+  it("a stale palm-paused flag without hand mode shows nothing, and junk is ignored", () => {
+    expect(handSignalsFromStatus({ active: false, armed: false, palm_paused: true })?.handPaused).toBe(false);
+    expect(handSignalsFromStatus(null)).toBeNull();
+    expect(handSignalsFromStatus({ nothing: 1 })).toBeNull();
   });
 });

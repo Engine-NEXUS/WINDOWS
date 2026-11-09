@@ -52,14 +52,16 @@ function isTauri(): boolean {
 
 let started = false;
 
-/** What a `hand:state` payload says about the hand-mode orb: on, pointer armed, pointer switched off by a held palm. */
-export function handSignalsFor(payload: unknown, wasPaused: boolean): { handActive: true; handArmed: boolean; handPaused: boolean } {
-  const p = (payload && typeof payload === "object" ? payload : {}) as { armed?: unknown; note?: unknown };
-  const armed = p.armed === true;
-  const note = typeof p.note === "string" ? p.note : "";
-  // a held palm switches the pointer off: the square stays until three palms switch it on again
-  const paused = armed ? false : note.startsWith("disarmed (palm-hold") ? true : wasPaused;
-  return { handActive: true, handArmed: armed, handPaused: paused };
+/** How often the hand-mode state is asked for as a backup to the events. */
+export const HAND_POLL_MS = 3000;
+
+/** The hand-mode orb signals from the `hand_status` command, or null for an answer that is not a status. */
+export function handSignalsFromStatus(r: unknown): { handActive: boolean; handArmed: boolean; handPaused: boolean } | null {
+  if (!r || typeof r !== "object") return null;
+  const o = r as { active?: unknown; armed?: unknown; palm_paused?: unknown };
+  if (typeof o.active !== "boolean") return null;
+  const active = o.active;
+  return { handActive: active, handArmed: active && o.armed === true, handPaused: active && o.armed !== true && o.palm_paused === true };
 }
 
 export function initOrbSignals(): void {
@@ -79,18 +81,34 @@ export function initOrbSignals(): void {
     }
 
     let handTimer: ReturnType<typeof setTimeout> | null = null;
-    let handPaused = false;
-    await listen<unknown>("hand:state", (e) => {
-      const next = handSignalsFor(e.payload, handPaused);
-      handPaused = next.handPaused;
+    // `hand:orb` is the orb's own event (the overlay listens to `hand:state`; two listeners for one event name in one page
+    // were not reliable). It arrives when hand mode's state changes and at least every 1.5 s while it runs.
+    let lastHandEvent = 0;
+    await listen<unknown>("hand:orb", (e) => {
+      const next = handSignalsFromStatus(e.payload);
+      if (!next) return;
+      lastHandEvent = Date.now();
       set(next);
       if (handTimer) clearTimeout(handTimer);
       handTimer = setTimeout(() => set({ handActive: false, handArmed: false, handPaused: false }), HAND_STALE_MS);
     });
+    console.log("[ORB] hand signals listening");
+    // The events can be missed (a page that started before the app was ready lost its first listeners in testing), so
+    // the same facts are also asked for every few seconds: hand mode on, pointer armed, pointer switched off by a palm.
+    const askHand = () =>
+      Date.now() - lastHandEvent < HAND_STALE_MS
+        ? Promise.resolve()
+        : invoke("hand_status")
+        .then((r) => {
+          const next = handSignalsFromStatus(r);
+          if (next) set(next);
+        })
+        .catch(() => {});
+    void askHand();
+    setInterval(askHand, HAND_POLL_MS);
     await listen<unknown>("hand:stopped", () => {
       if (handTimer) clearTimeout(handTimer);
       handTimer = null;
-      handPaused = false;
       set({ handActive: false, handArmed: false, handPaused: false });
     });
 
