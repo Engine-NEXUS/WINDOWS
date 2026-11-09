@@ -202,6 +202,8 @@ const ANSWER_VOCAB: &[&str] = &[
     // more ways to say yes ("absolutely", "sounds good", "by all means", "that would be great", "make it so")
     "absolutely", "definitely", "certainly", "of", "course", "sounds", "good", "alright", "correct", "agreed", "thing",
     "would", "be", "great", "by", "means", "make", "so", "why", "on", "right", "that's", "thats", "i", "fine",
+    // Hinglish yes ("kar do", "chalo"), and hedges ("maybe later", "not really")
+    "kar", "chalo", "chal", "maybe", "really",
     // no
     "no", "nope", "nah", "nahi", "skip", "cancel", "stop", "don't", "dont", "never", "mind", "nevermind",
     "not", "today", "leave", "need", "it's", "its", "i'm", "im", "rehne", "mat", "karo", "stay", "closed",
@@ -282,6 +284,8 @@ pub fn classify(text: &str) -> Reply {
         || has("thats right")
         || has("i do")
         || has("do it")
+        || has("kar do")
+        || has_word(&["chalo"])
         || has("go for it")
         || has("let's go")
         || has("let's start")
@@ -355,7 +359,7 @@ fn classify_reopen(text: &str) -> Reply {
     // "open them" can never approve a pending shutdown, merge or message.
     const VOCAB: &[&str] = &[
         "reopen", "open", "them", "it", "all", "everything", "apps", "app", "the", "other", "of", "those", "my", "windows", "and",
-        "restore", "bring", "back", "pick", "up", "stay", "closed",
+        "restore", "bring", "back", "pick", "up", "stay", "closed", "where", "i", "left", "off",
     ];
     // Yes-flavoured filler that may surround the request ("yes, open them", "ok bring them back sir").
     const FILLER: &[&str] = &[
@@ -721,5 +725,51 @@ mod tests {
         // Second take returns None; a second "yes" finds nothing waiting
         assert_eq!(take(), None);
         assert!(peek().is_none());
+    }
+
+    /// The ways a person answers "Shall I bring back your last session?" (corpus: the owner's examples, polite and short forms,
+    /// Hinglish, the action itself). Anything that is a different request must stay `Other`.
+    #[test]
+    fn the_reopen_question_understands_a_wide_range_of_answers() {
+        let off = Offer::ReopenSession;
+        let yes = [
+            "yes", "yes sir", "yes please", "yeah", "yep", "yup", "ya", "yea", "sure", "sure thing", "ok", "okay", "ok sir", "okay sir",
+            "do it", "do it sir", "please do it", "go ahead", "go ahead sir", "go for it", "let's do it", "lets do it", "alright", "all right",
+            "absolutely", "definitely", "certainly", "of course", "sounds good", "make it so", "why not", "fine do it", "carry on",
+            "haan", "haan karo", "han", "yes do it", "yes go ahead", "yeah sure", "yeah okay", "Nexus yes", "yes Nexus", "affirmative",
+            "reopen them", "open them", "open them all", "open everything", "bring them back", "bring everything back", "restore them",
+            "yes reopen them", "yes open them", "ok open them", "pick up where I left off", "reopen everything", "open all of them",
+            "that would be great", "kar do", "chalo", "haan kar do",
+        ];
+        let mut bad: Vec<String> = Vec::new();
+        for t in yes {
+            if classify_for(&off, t) != Reply::Yes {
+                bad.push(format!("yes: {t} -> {:?}", classify_for(&off, t)));
+            }
+        }
+        let no = [
+            "no", "no sir", "no thanks", "no thank you", "nope", "nah", "not now", "not today", "later", "maybe later", "skip", "skip it",
+            "cancel", "never mind", "nevermind", "don't", "don't do it", "do not", "no don't open them", "stay closed", "leave them", "leave it",
+            "leave it closed", "no need", "i'm good", "it's fine", "not really", "absolutely not", "of course not", "definitely not",
+            "nahi", "nahi karo", "rehne do", "mat karo", "no leave it", "not right now",
+        ];
+        for t in no {
+            if !matches!(classify_for(&off, t), Reply::No | Reply::Later) {
+                bad.push(format!("no: {t} -> {:?}", classify_for(&off, t)));
+            }
+        }
+        // other requests and chatter are not answers (they must reach the normal command path)
+        let other = [
+            "open chrome", "what time is it", "play some music", "stop the music", "good night", "open youtube and play lofi", "send a message to mom",
+            "how is the weather", "resume", "continue", "start", "begin", "tell me a joke", "what's on my calendar",
+        ];
+        for t in other {
+            if classify_for(&off, t) != Reply::Other {
+                bad.push(format!("other: {t} -> {:?}", classify_for(&off, t)));
+            }
+        }
+        assert!(bad.is_empty(), "misread answers:
+{}", bad.join("
+"));
     }
 }

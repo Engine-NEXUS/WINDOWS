@@ -5568,7 +5568,10 @@ where
 
 /// Speak `text` for a finished local turn.
 fn say_and_finish<R: Runtime>(app: &AppHandle<R>, request_id: String, text: String) -> Result<ProcessResult, String> {
-    speak_line(app, text, &request_id);
+    // An empty line means "already said" (an acknowledgement went out first): nothing more is spoken, the turn still ends.
+    if !text.trim().is_empty() {
+        speak_line(app, text, &request_id);
+    }
     clear_active_request(&request_id);
     Ok(local_result(request_id, Subsystem::LocalCommand))
 }
@@ -5876,15 +5879,38 @@ async fn run_offer_reply<R: Runtime>(
         }
         (Offer::AddEvent { .. }, Reply::Later) => "Very well, sir. Ask me again whenever you're ready.".to_string(),
         (Offer::AddEvent { .. }, _) => "Understood, sir. I won't add it.".to_string(),
-        (Offer::ReopenSession, Reply::Yes) => restore_session(&app).await,
-        (Offer::ReopenSession, Reply::Later) => {
-            "Very well, sir. I'll keep that list; say reopen my session whenever you want it.".to_string()
+        (Offer::ReopenSession, Reply::Yes) => {
+            // The acknowledgement is said at once (a cached voice line, different every time) and the apps start
+            // together while it plays; only a problem is said afterwards.
+            let t0 = std::time::Instant::now();
+            if let Some(d) = &dir {
+                let ack = crate::memcore::phrase_bank::next(d, crate::memcore::phrase_bank::Bank::AckYes, None);
+                speak_line(&app, ack, &request_id);
+                println!("[BOOT] yes -> acknowledgement handed to speech after {} ms", t0.elapsed().as_millis());
+            }
+            let line = restore_session(&app, dir.is_some()).await;
+            if !line.is_empty() {
+                // let the acknowledgement finish, then the problem
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                let wait = std::time::Instant::now();
+                while crate::tts::speech_active() && wait.elapsed().as_secs() < 4 {
+                    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                }
+            }
+            line
         }
+        (Offer::ReopenSession, Reply::Later) => match &dir {
+            Some(d) => crate::memcore::phrase_bank::next(d, crate::memcore::phrase_bank::Bank::AckLater, None),
+            None => "Very well, sir. I'll keep that list; say reopen my session whenever you want it.".to_string(),
+        },
         (Offer::ReopenSession, _) => {
             if let Some(d) = &dir {
                 crate::memcore::session::clear_pending(d);
             }
-            "Understood, sir. I won't reopen anything.".to_string()
+            match &dir {
+                Some(d) => crate::memcore::phrase_bank::next(d, crate::memcore::phrase_bank::Bank::AckNo, None),
+                None => "Understood, sir. I won't reopen anything.".to_string(),
+            }
         }
         (Offer::Power { kind }, Reply::Yes) => match crate::power_cmd::PowerKind::from_str(&kind) {
             Some(k) => {
@@ -8342,8 +8368,9 @@ fn capitalise(s: &str) -> String {
 }
 
 /// Reopen the apps, folders and browser from the last session (after a spoken yes).
-async fn restore_session<R: Runtime>(app: &AppHandle<R>) -> String {
-    use crate::memcore::{restore, session};
+/// `acknowledged`: the caller already said an acknowledgement ("On it, sir."), so a success needs no further line (empty).
+async fn restore_session<R: Runtime>(app: &AppHandle<R>, acknowledged: bool) -> String {
+    use crate::memcore::{phrase_bank, restore, session};
     let Ok(dir) = app.path().app_data_dir() else {
         return "I couldn't open my memory, sir.".to_string();
     };
@@ -8356,17 +8383,20 @@ async fn restore_session<R: Runtime>(app: &AppHandle<R>) -> String {
         session::clear_pending(&dir);
         return "Everything from your last session is already open, sir.".to_string();
     }
+    let started = std::time::Instant::now();
     let (opened, failed) = restore::run(plan.items.clone()).await;
+    println!("[BOOT] session reopened: {} started, {} failed in {} ms", opened.len(), failed.len(), started.elapsed().as_millis());
     // One attempt (with its own retry inside `run`) ends the offer. The apps that would not start are named aloud; keeping
     // the offer would ask the same question at every logon for an app that can never start (an elevated one, error 740).
     session::clear_pending(&dir);
-    restore::restore_report_short(&opened, &failed, &plan.already_open)
+    let done = if acknowledged { String::new() } else { phrase_bank::next(&dir, phrase_bank::Bank::Done, None) };
+    restore::restore_report_short(&opened, &failed, &plan.already_open, &done)
 }
 
 /// "Reopen my session" (without waiting for the greeting question).
 async fn run_reopen_session<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-    let line = restore_session(&app).await;
+    let line = restore_session(&app, false).await;
     say_and_finish(&app, request_id, line)
 }
 

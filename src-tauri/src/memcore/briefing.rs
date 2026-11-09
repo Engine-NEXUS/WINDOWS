@@ -617,12 +617,12 @@ async fn wait_until_ready() -> u64 {
 /// Wait (bounded) until the line just handed to the speech policy has been spoken and is over.
 async fn wait_until_quiet(max_secs: u64) {
     let start = std::time::Instant::now();
-    // Give the policy + heads-up beat time to start the line before we look for its end.
-    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    // Give the policy time to start the line before we look for its end (the scripted logon lines have no heads-up beat).
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
     while (crate::orchestrator::has_active_request() || crate::early_hello::busy()) && start.elapsed().as_secs() < max_secs {
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
     }
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
 }
 
 /// Speak the plain time-of-day hello unless one was spoken recently. `tag` names the trigger in the log
@@ -632,7 +632,7 @@ async fn submit_hello<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std::p
     // this normal hello takes over, so nobody is left without a greeting.
     let waited = std::time::Instant::now();
     while crate::early_hello::busy() && waited.elapsed().as_secs() < 330 {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     }
     // The early hello (played at this logon) already greeted: never a second one. Only the logon start is covered; a
     // later resume from sleep greets again as usual.
@@ -734,8 +734,12 @@ pub fn start_boot_briefing<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             tokio::time::sleep(std::time::Duration::from_secs(PRESENCE_POLL_SECS)).await;
             presence_waited += PRESENCE_POLL_SECS;
         }
-        // 1. The hello: every logon, short, cached, immediate.
-        let hello_spoken = submit_hello(&app, &dir, "boot").await;
+        // 1. The hello: every logon, short, cached, immediate. While it plays (the early hello can take seconds to start and
+        //    to finish) the reopen question is prepared in parallel: what is left of the last session, the wording, and its
+        //    voice line rendered into the cache, so it can start the moment the hello ends.
+        let hello_started = std::time::Instant::now();
+        let (hello_spoken, prepared) = tokio::join!(submit_hello(&app, &dir, "boot"), prepare_reopen(&app, &dir));
+        let hello_over = std::time::Instant::now();
 
         // 2. The details, once a day (and always when the agents left news before the last shutdown).
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -746,7 +750,7 @@ pub fn start_boot_briefing<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             println!("[BOOT] skip briefing: already briefed today ({today})");
             // The reopen question does not depend on the daily briefing: every logon asks it when there is something
             // from the last session to bring back (it was lost whenever the briefing had already run that day).
-            ask_reopen_only(&app, &dir, hello_spoken).await;
+            ask_reopen_only(&app, &dir, hello_spoken, prepared, hello_over, hello_started).await;
             return;
         }
         let snapshot = BOOT_SNAPSHOT.lock().ok().and_then(|g| g.clone()).unwrap_or_default();
@@ -814,12 +818,19 @@ pub fn start_boot_briefing<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     });
 }
 
-/// Only the short question "Do you want me to open all the apps you closed yesterday?", after the hello has finished.
-/// Nothing is said when there is nothing to reopen. The reply window arms once it has been spoken (`offer_` id).
-async fn ask_reopen_only<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std::path::Path, hello_spoken: bool) {
+/// The reopen question, worked out while the hello plays: what is left of the last session, the wording (different every
+/// time, see `phrase_bank`) and its audio rendered into the voice cache.
+pub struct PreparedReopen {
+    pub question: String,
+    /// The voice line is in the cache: it plays with nothing to synthesise.
+    pub audio_ready: bool,
+}
+
+async fn prepare_reopen<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std::path::Path) -> Option<PreparedReopen> {
     if !super::flag(dir, "memcoreSession", true) {
-        return;
+        return None;
     }
+    let started = std::time::Instant::now();
     let d = dir.to_path_buf();
     let now = chrono::Utc::now().timestamp();
     let offer = tokio::time::timeout(
@@ -829,12 +840,33 @@ async fn ask_reopen_only<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std
     .await
     .ok()
     .and_then(|r| r.ok())
-    .flatten();
-    let Some(offer) = offer else {
+    .flatten()?;
+    let day = day_phrase(now, offer.left_at);
+    let d2 = dir.to_path_buf();
+    let question = tauri::async_runtime::spawn_blocking(move || super::phrase_bank::reopen_question(&d2, &day)).await.ok()?;
+    let audio_ready = crate::tts::prepare_line(app, &question).await;
+    println!("[BOOT] reopen question prepared in {} ms (voice line ready: {audio_ready}): {question}", started.elapsed().as_millis());
+    Some(PreparedReopen { question, audio_ready })
+}
+
+/// Only the short question after the hello has finished. Nothing is said when there is nothing to reopen. The reply window arms
+/// once it has been spoken (`offer_` id). Prepared while the hello played, so it follows the hello without a gap.
+async fn ask_reopen_only<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    dir: &std::path::Path,
+    hello_spoken: bool,
+    prepared: Option<PreparedReopen>,
+    hello_over: std::time::Instant,
+    hello_started: std::time::Instant,
+) {
+    let _ = hello_started;
+    let Some(prepared) = prepared else {
         println!("[BOOT] no reopen question: nothing from the last session to bring back");
         return;
     };
-    if hello_spoken {
+    // The early hello (native player) is already over when `submit_hello` returned; a hello spoken through the speech policy
+    // is only handed over, so its end is waited for.
+    if hello_spoken && !crate::early_hello::played_this_run() {
         wait_until_quiet(20).await;
     }
     // Never replace a question that is already waiting for its answer (a shutdown, a confirmation).
@@ -842,10 +874,11 @@ async fn ask_reopen_only<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std
         println!("[BOOT] no reopen question: another question is waiting");
         return;
     }
-    let question = reopen_question(&day_phrase(now, offer.left_at), now as u64);
-    println!("[BOOT] reopen question: {question}");
+    let _ = dir;
+    println!("[BOOT] reopen question: {}", prepared.question);
     super::offer::set(super::offer::Offer::ReopenSession, false);
-    crate::proactive_policy::submit(app, "offer_boot_session".to_string(), question, crate::google::types::AlertUrgency::High);
+    println!("[BOOT] reopen question handed to speech {} ms after the hello ended", hello_over.elapsed().as_millis());
+    crate::proactive_policy::submit(app, "offer_boot_session".to_string(), prepared.question, crate::google::types::AlertUrgency::High);
 }
 
 /// "Where did I leave off / show my briefing": built now from live data,

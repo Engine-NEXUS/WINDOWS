@@ -1,12 +1,12 @@
 //! A small native orb + caption shown while the early hello is spoken (doc 158, slice 2).
 //!
 //! The real orb lives in the `stage` WebView, which does not exist until 5-25 s after logon. So while the cached
-//! greeting plays, this draws the same idea natively: the black capsule at the top of the screen with a white
-//! particle sphere that breathes with the voice, and at the stage slot (screen x=51.5%, top=89.5%) the black caption
-//! pill that reveals the words as they are spoken. It uses two layered windows (per-pixel alpha, click-through, never
+//! greeting plays, this draws the same picture natively: the black capsule at the top of the screen with the NEW dotted
+//! orb (the idle circle morphing into the speaking design, baked from the real engine by `scripts/bake-early-orb.mjs`),
+//! and at the stage slot (screen x=51.5%, top=89.5%) the black caption pill that types the words as they are spoken. It uses two layered windows (per-pixel alpha, click-through, never
 //! takes focus), shown for the length of the clip plus a short linger, then they fade away and the windows are destroyed.
 //!
-//! Everything about the picture is pure and tested (geometry, fades, the revealed words, the sphere, the compositing);
+//! Everything about the picture is pure and tested (geometry, fades, the typed words, the baked orb, the compositing);
 //! only the windows and the text rasteriser are Windows glue at the bottom.
 
 /// Logical (96-dpi) sizes. Fixed capsule sizes for top docking:
@@ -23,8 +23,6 @@ pub const CAPTION_PILL_MAX_W: f32 = 620.0;
 pub const CAPTION_PILL_MIN_H: f32 = 30.0;
 pub const SHADOW_MARGIN: f32 = 24.0;
 pub const PILL_CORNER: f32 = 10.0;
-pub const SPHERE_RADIUS: f32 = 34.0;
-const DOTS: usize = 640;
 
 const FADE_IN_MS: u64 = 160;
 const ORB_LINGER_MS: u64 = 900;
@@ -105,45 +103,116 @@ pub fn envelope_at(env: &[f32], frame_ms: u64, t_ms: u64) -> f32 {
     env.get((t_ms / frame_ms) as usize).copied().unwrap_or(0.0).clamp(0.0, 1.0)
 }
 
-/// The words spoken so far, a word being revealed letter by letter across its duration. `words` = (text, start ms, ms).
-/// With no word timings the whole line is shown.
+/// The caption typed so far at `t_ms`: ONE steady typing rate across the whole line (first word start to last word end),
+/// 1 character as soon as the line starts and all of it when it ends. Same maths as `typedText` in
+/// `frontend/src/audio/typedCaption.ts`, which the stage uses. `words` = (text, start ms, ms). With no word timings the
+/// whole line is shown. The result never ends in a space.
 pub fn visible_prefix(words: &[(String, u64, u64)], full: &str, t_ms: u64) -> String {
     if words.is_empty() {
         return full.to_string();
     }
-    let mut out: Vec<String> = Vec::new();
-    for (w, start, dur) in words {
-        if t_ms < *start {
-            break;
-        }
-        let chars: Vec<char> = w.chars().collect();
-        if t_ms >= start + dur || *dur == 0 {
-            out.push(w.clone());
-        } else {
-            let shown = (((t_ms - start) as f32 / *dur as f32) * chars.len() as f32).ceil() as usize;
-            out.push(chars.iter().take(shown.clamp(1, chars.len().max(1))).collect());
-            break;
-        }
+    let line: String = words.iter().map(|w| w.0.as_str()).collect::<Vec<_>>().join(" ");
+    let total = line.chars().count();
+    if total == 0 {
+        return String::new();
     }
-    out.join(" ")
+    let start = words[0].1;
+    let last = &words[words.len() - 1];
+    let end = (last.1 + last.2.max(1)).max(start + 1);
+    let shown = typed_length(total, start, end, t_ms);
+    line.chars().take(shown).collect::<String>().trim_end().to_string()
 }
 
-/// Evenly spread points on the unit sphere (Fibonacci lattice).
-pub fn sphere_points(n: usize) -> Vec<[f32; 3]> {
-    let golden = std::f32::consts::PI * (3.0 - 5.0f32.sqrt());
-    (0..n)
-        .map(|i| {
-            let y = 1.0 - 2.0 * (i as f32 + 0.5) / n as f32;
-            let r = (1.0 - y * y).max(0.0).sqrt();
-            let a = golden * i as f32;
-            [r * a.cos(), y, r * a.sin()]
-        })
-        .collect()
+/// How many of `total` characters are typed at `pos_ms` (the stage's `typedLength`).
+pub fn typed_length(total: usize, start_ms: u64, end_ms: u64, pos_ms: u64) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    if total == 1 {
+        return 1;
+    }
+    let span = end_ms.saturating_sub(start_ms).max(1) as f64;
+    let p = ((pos_ms as f64 - start_ms as f64) / span).clamp(0.0, 1.0);
+    (1 + ((total - 1) as f64 * p).floor() as usize).clamp(1, total)
 }
 
-// ─── software drawing into a premultiplied BGRA buffer ───────────────
+/// One dot of the baked orb: position and radius as fractions of the orb's square (0..1 across), the ink value
+/// (`white`: 0 = full ink, as in the engine) and the alpha.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BakedDot {
+    pub x: f32,
+    pub y: f32,
+    pub r: f32,
+    pub white: f32,
+    pub a: f32,
+}
 
-#[inline]
+/// The frames of the new dotted orb (idle circle -> speaking design) baked from the real engine, see
+/// `scripts/bake-early-orb.mjs` (layout described there).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BakedOrb {
+    pub fps: u32,
+    pub frames: Vec<Vec<BakedDot>>,
+}
+
+const BAKED: &[u8] = include_bytes!("../resources/early_orb_frames.bin");
+/// The last part of the bake is a steady speaking loop; a clip longer than the bake repeats it.
+const LOOP_TAIL_FRAMES: usize = 60;
+
+impl BakedOrb {
+    /// The orb baked into the program. An unreadable file draws no orb (the capsule and the caption still show).
+    pub fn load() -> BakedOrb {
+        BakedOrb::parse(BAKED).unwrap_or_default()
+    }
+
+    pub fn parse(b: &[u8]) -> Result<BakedOrb, String> {
+        if b.len() < 10 || &b[0..4] != b"EOB1" {
+            return Err("not an early orb file".into());
+        }
+        let u16at = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]) as usize;
+        let (fps, count) = (u16at(4), u16at(6));
+        let mut o = 10usize;
+        let mut frames = Vec::with_capacity(count);
+        for _ in 0..count {
+            if o + 2 > b.len() {
+                return Err("truncated".into());
+            }
+            let n = u16at(o);
+            o += 2;
+            if o + n * 7 > b.len() {
+                return Err("truncated".into());
+            }
+            let mut dots = Vec::with_capacity(n);
+            for _ in 0..n {
+                dots.push(BakedDot {
+                    x: u16at(o) as f32 / 32767.0 - 0.25,
+                    y: u16at(o + 2) as f32 / 32767.0 - 0.25,
+                    r: b[o + 4] as f32 / 1000.0,
+                    white: b[o + 5] as f32 / 255.0,
+                    a: b[o + 6] as f32 / 255.0,
+                });
+                o += 7;
+            }
+            frames.push(dots);
+        }
+        Ok(BakedOrb { fps: fps.max(1) as u32, frames })
+    }
+
+    /// The dots to draw `t_ms` after the speech started.
+    pub fn frame_at(&self, t_ms: u64) -> &[BakedDot] {
+        if self.frames.is_empty() {
+            return &[];
+        }
+        let mut i = (t_ms * self.fps as u64 / 1000) as usize;
+        let n = self.frames.len();
+        if i >= n {
+            let tail = LOOP_TAIL_FRAMES.min(n);
+            i = n - tail + (i - n) % tail;
+        }
+        &self.frames[i]
+    }
+}
+
 fn pack(a: f32, r: f32, g: f32, b: f32) -> u32 {
     let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
     (c(a) << 24) | (c(r) << 16) | (c(g) << 8) | c(b)
@@ -193,24 +262,22 @@ pub fn fill_black_shape(buf: &mut [u32], width: i32, r: Rect, r_top: f32, r_bott
     }
 }
 
-/// The white particle sphere. `amp` (0..1) swells it with the voice; `t_s` rotates it.
-pub fn draw_orb(buf: &mut [u32], width: i32, cx: f32, cy: f32, radius: f32, t_s: f32, amp: f32, alpha: f32, points: &[[f32; 3]]) {
+/// The dotted orb: `side` px across, centred at (cx, cy), white ink on the black capsule. `amp` (0..1, the voice) swells every dot
+/// a little, as the stage does (`LEVEL_RADIUS_GAIN`). `alpha` is the fade of the whole orb.
+pub fn draw_baked(buf: &mut [u32], width: i32, cx: f32, cy: f32, side: f32, amp: f32, alpha: f32, dots: &[BakedDot]) {
     if alpha <= 0.0 {
         return;
     }
     let height = buf.len() as i32 / width.max(1);
-    let (sy, cyw) = ((t_s * (0.55 + 0.9 * amp)).sin(), (t_s * (0.55 + 0.9 * amp)).cos());
-    let (sx, cxw) = (0.38f32.sin(), 0.38f32.cos());
-    let swell = radius * (1.0 + 0.16 * amp);
-    for p in points {
-        // rotate about Y, then tilt about X
-        let (x1, z1) = (p[0] * cyw + p[2] * sy, -p[0] * sy + p[2] * cyw);
-        let (y2, z2) = (p[1] * cxw - z1 * sx, p[1] * sx + z1 * cxw);
-        let depth = (z2 + 1.0) / 2.0; // 0 far .. 1 near
-        let persp = 1.0 + 0.12 * z2;
-        let (dx, dy) = (cx + x1 * swell * persp, cy + y2 * swell * persp);
-        let dot_r = (0.55 + 0.75 * depth) * (radius / SPHERE_RADIUS).max(0.5);
-        let a = (0.25 + 0.75 * depth) * alpha;
+    let swell = 1.0 + 0.32 * amp.clamp(0.0, 1.0);
+    let (left, top) = (cx - side / 2.0, cy - side / 2.0);
+    for d in dots {
+        let a = d.a * alpha;
+        if a < 0.02 {
+            continue;
+        }
+        let ink = 1.0 - d.white.clamp(0.0, 1.0);
+        let (dx, dy, dot_r) = (left + d.x * side, top + d.y * side, d.r * side * swell);
         let (bx0, bx1) = ((dx - dot_r - 1.0).floor() as i32, (dx + dot_r + 1.0).ceil() as i32);
         let (by0, by1) = ((dy - dot_r - 1.0).floor() as i32, (dy + dot_r + 1.0).ceil() as i32);
         for y in by0.max(0)..by1.min(height) {
@@ -218,7 +285,7 @@ pub fn draw_orb(buf: &mut [u32], width: i32, cx: f32, cy: f32, radius: f32, t_s:
                 let dist = ((x as f32 + 0.5 - dx).powi(2) + (y as f32 + 0.5 - dy).powi(2)).sqrt();
                 let cov = (dot_r + 0.5 - dist).clamp(0.0, 1.0) * a;
                 if cov > 0.0 {
-                    over(buf, (y * width + x) as usize, cov, cov, cov, cov);
+                    over(buf, (y * width + x) as usize, cov, cov * ink, cov * ink, cov * ink);
                 }
             }
         }
@@ -327,31 +394,29 @@ pub fn fill_pebble(buf: &mut [u32], width: i32, r: Rect, profile: &[f32], alpha:
     }
 }
 
-/// Draw one frame of the capsule window: the capsule background and the white particle sphere. Pure.
-pub fn render_frame(buf: &mut [u32], width: i32, capsule: Rect, scale: f32, t_ms: u64, s: &Show, points: &[[f32; 3]]) {
+/// Draw one frame of the capsule window: the capsule background and the dotted orb. Pure.
+pub fn render_frame(buf: &mut [u32], width: i32, capsule: Rect, scale: f32, t_ms: u64, s: &Show, orb: &BakedOrb) {
     for p in buf.iter_mut() {
         *p = 0;
     }
     let (orb_a, _, _) = alphas(t_ms, s.clip_ms);
     let amp = envelope_at(&s.env, s.env_frame_ms, t_ms);
     let (cx, mid_y) = (capsule.x as f32 + capsule.w as f32 / 2.0, capsule.y as f32 + capsule.h as f32 / 2.0);
-    let (cy, radius) = match s.style {
+    match s.style {
         Style::Pebble => {
             let wing = (120.0 * scale).min(capsule.w as f32 * 0.25);
             let profile = bowl_profile(capsule.w as f32, capsule.h as f32, wing);
             fill_pebble(buf, width, capsule, &profile, orb_a, s.rim_alpha);
-            // the sphere nestles in the pocket, a little above the lowest point
-            let off = capsule.h as f32 * 0.04;
-            (mid_y - off, SPHERE_RADIUS * scale)
         }
         Style::Classic => {
             // the plain capsule: the top screen-side corners are square, the bottom two are rounded by 10 px
             let corner = PILL_CORNER * scale;
             fill_black_shape(buf, width, capsule, 0.0, corner, orb_a, 0.16);
-            (mid_y, capsule.w as f32 * 0.30)
         }
-    };
-    draw_orb(buf, width, cx, cy, radius, t_ms as f32 / 1000.0, amp, orb_a, points);
+    }
+    // The stage measures the orb's cradle and draws the dotted orb as a square of its shorter side, centred.
+    let side = capsule.w.min(capsule.h) as f32;
+    draw_baked(buf, width, cx, mid_y, side, amp, orb_a, orb.frame_at(t_ms));
 }
 
 /// Draw the caption pill with soft black shadows and composited text into the caption window buffer. Pure.
@@ -410,10 +475,6 @@ pub fn render_caption(
 
 pub fn pill_corner(scale: f32) -> f32 {
     PILL_CORNER * scale
-}
-
-pub fn dot_count() -> usize {
-    DOTS
 }
 
 pub fn caption_max_width(scale: f32) -> i32 {
@@ -658,7 +719,7 @@ mod win {
         caption_canvas: Dib,
         text: Dib,
         font: isize,
-        points: Vec<[f32; 3]>,
+        orb: std::sync::Arc<BakedOrb>,
         hwnd_capsule: Hwnd,
         hwnd_caption: Hwnd,
     }
@@ -695,14 +756,13 @@ mod win {
     fn compose(st: &mut State, t_ms: u64) -> bool {
         let (_, cap_a, done) = alphas(t_ms, st.show.clip_ms);
 
-        // 1. Render capsule window (capsule + sphere)
+        // 1. Render capsule window (capsule + dotted orb)
         {
             let show = st.show.clone();
             let capsule_rect = st.capsule_rect;
             let scale = st.scale;
-            let points = std::mem::take(&mut st.points);
-            render_frame(st.capsule_canvas.pixels(), st.capsule_win.w, capsule_rect, scale, t_ms, &show, &points);
-            st.points = points;
+            let orb = st.orb.clone();
+            render_frame(st.capsule_canvas.pixels(), st.capsule_win.w, capsule_rect, scale, t_ms, &show, &orb);
         }
 
         // 2. Render caption window (pill + shadows + text)
@@ -776,7 +836,7 @@ mod win {
         }
     }
 
-    /// Everything except the windows: layout, bitmaps, font and particle sphere.
+    /// Everything except the windows: layout, bitmaps, font and the baked orb.
     unsafe fn build_state(s: Show) -> Result<State, String> {
         // draw in real pixels whatever the DPI of the process is this early in startup
         SetThreadDpiAwarenessContext(-4);
@@ -806,7 +866,7 @@ mod win {
             caption_canvas,
             text,
             font,
-            points: sphere_points(dot_count()),
+            orb: std::sync::Arc::new(BakedOrb::load()),
             hwnd_capsule: 0,
             hwnd_caption: 0,
         })
@@ -1020,15 +1080,29 @@ mod tests {
     }
 
     #[test]
-    fn the_caption_reveals_as_spoken_letter_by_letter() {
+    fn the_caption_types_at_one_steady_rate_like_the_stage() {
         let s = show_for(1_300);
-        assert_eq!(visible_prefix(&s.words, &s.text, 0), "G", "the first letter appears with the first word");
-        assert_eq!(visible_prefix(&s.words, &s.text, 150), "Go");
-        assert_eq!(visible_prefix(&s.words, &s.text, 299), "Good", "the first word is complete");
-        assert_eq!(visible_prefix(&s.words, &s.text, 300), "Good e", "and the next one starts with its first letter");
-        assert_eq!(visible_prefix(&s.words, &s.text, 600), "Good even", "half way through the 8 letters of 'evening,'");
-        assert_eq!(visible_prefix(&s.words, &s.text, 5_000), "Good evening, sir");
+        let total = "Good evening, sir".chars().count();
+        let (start, end) = (s.words[0].1, s.words[s.words.len() - 1].1 + s.words[s.words.len() - 1].2);
+        assert_eq!(visible_prefix(&s.words, &s.text, 0), "G", "the first letter appears as the line starts");
+        assert_eq!(visible_prefix(&s.words, &s.text, 5_000), "Good evening, sir", "all of it by the end");
         assert_eq!(visible_prefix(&[], "Good evening, sir", 10), "Good evening, sir", "no timings: the whole line");
+        // never behind a straight line from 1 character to all of them, never ahead of it by more than one
+        let mut last = 0;
+        for t in (start..=end).step_by(10) {
+            let n = visible_prefix(&s.words, &s.text, t).chars().count();
+            assert!(n >= last, "the caption only grows");
+            let line = 1.0 + (total as f64 - 1.0) * ((t - start) as f64 / (end - start) as f64);
+            assert!((n as f64 - line).abs() <= 2.0, "t={t}: {n} letters vs {line:.1}");
+            last = n;
+        }
+        // the same numbers as typedLength in frontend/src/audio/typedCaption.ts
+        assert_eq!(typed_length(10, 0, 900, 0), 1);
+        assert_eq!(typed_length(10, 0, 900, 450), 5);
+        assert_eq!(typed_length(10, 0, 900, 900), 10);
+        assert_eq!(typed_length(10, 100, 900, 50), 1, "before the start: the first letter");
+        assert_eq!(typed_length(1, 0, 900, 123), 1);
+        assert_eq!(typed_length(0, 0, 900, 123), 0);
     }
 
     #[test]
@@ -1042,15 +1116,31 @@ mod tests {
     }
 
     #[test]
-    fn the_sphere_points_lie_on_the_unit_sphere_and_are_spread_out() {
-        let pts = sphere_points(400);
-        assert_eq!(pts.len(), 400);
-        for p in &pts {
-            let r = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
-            assert!((r - 1.0).abs() < 1e-4, "{r}");
+    fn the_baked_new_orb_loads_and_is_a_circle_that_morphs_into_the_speaking_design() {
+        let orb = BakedOrb::load();
+        assert_eq!(orb.fps, 30);
+        assert_eq!(orb.frames.len(), 180, "6 s at 30 fps");
+        let first = orb.frame_at(0);
+        let later = orb.frame_at(3_000);
+        assert!(first.len() >= 24 && first.len() < later.len(), "the idle circle has fewer dots than the speaking sash: {} vs {}", first.len(), later.len());
+        for d in orb.frames.iter().flatten() {
+            assert!((-0.25..=1.25).contains(&d.x) && (-0.25..=1.25).contains(&d.y), "dot off the square: {d:?}");
+            assert!(d.r > 0.0 && d.r < 0.1 && (0.0..=1.0).contains(&d.a) && (0.0..=1.0).contains(&d.white));
         }
-        let mean_y: f32 = pts.iter().map(|p| p[1]).sum::<f32>() / 400.0;
-        assert!(mean_y.abs() < 0.01, "balanced top and bottom");
+        // the circle: its dots sit about 0.36 of the square from the centre (frameCircle)
+        let radii: Vec<f32> = first.iter().map(|d| ((d.x - 0.5).powi(2) + (d.y - 0.5).powi(2)).sqrt()).collect();
+        let mean = radii.iter().sum::<f32>() / radii.len() as f32;
+        assert!((mean - 0.36).abs() < 0.04, "mean radius {mean}");
+    }
+
+    #[test]
+    fn a_clip_longer_than_the_bake_repeats_its_speaking_loop_and_garbage_does_not_panic() {
+        let orb = BakedOrb::load();
+        assert_eq!(orb.frame_at(6_000).len(), orb.frames[120].len(), "7 s wraps to the start of the loop tail");
+        assert_eq!(orb.frame_at(60_000_000).len() > 0, true);
+        assert!(BakedOrb::parse(b"nope").is_err());
+        assert!(BakedOrb::parse(b"EOB1\x1e\x00\x02\x00\x69\x00\x05\x00").is_err(), "truncated");
+        assert!(BakedOrb::default().frame_at(100).is_empty());
     }
 
     #[test]
@@ -1066,7 +1156,7 @@ mod tests {
     #[test]
     fn each_style_draws_its_own_background() {
         let (win, cap) = layout(1920, 1.0, 301.0, 105.0);
-        let pts = sphere_points(dot_count());
+        let pts = BakedOrb::load();
         let alpha = |buf: &Vec<u32>, x: i32, y: i32| buf[(y * win.w + x) as usize] >> 24;
 
         // pebble: the bowl's upper corner area (near top-left) is empty sky beside the wing
@@ -1089,33 +1179,33 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_has_a_black_capsule_a_white_sphere_and_transparent_corners() {
+    fn a_frame_has_a_black_capsule_a_white_dotted_orb_and_transparent_corners() {
         let (win, cap) = layout(1920, 1.0, 200.0, 200.0);
         let mut buf = vec![0u32; (win.w * win.h) as usize];
         let mut s = show_for(2_000);
         s.style = Style::Classic;
-        let pts = sphere_points(dot_count());
+        let pts = BakedOrb::load();
         render_frame(&mut buf, win.w, cap, 1.0, 800, &s, &pts);
         let px = |x: i32, y: i32| buf[(y * win.w + x) as usize];
         let alpha = |v: u32| v >> 24;
-        // inside the capsule, away from the sphere: opaque black
+        // inside the capsule, away from the orb: opaque black
         assert_eq!(alpha(px(cap.x + 12, cap.y + 6)), 255);
         assert_eq!(px(cap.x + 12, cap.y + 6) & 0x00FF_FFFF, 0);
         // the bottom-left corner is rounded away: still transparent
         assert_eq!(alpha(px(cap.x, cap.y + cap.h - 1)), 0);
         // the top corners are square (the capsule hugs the screen edge)
         assert!(alpha(px(cap.x, cap.y)) > 200);
-        // the sphere: some bright pixel near the centre
+        // the orb: some bright pixel near the centre
         let (cx, cy) = (cap.x + cap.w / 2, cap.y + cap.h / 2);
-        let bright = (-30..30).flat_map(|dy| (-30..30).map(move |dx| (dx, dy))).filter(|(dx, dy)| px(cx + dx, cy + dy) & 255 > 200).count();
-        assert!(bright > 40, "the white sphere should light up pixels, found {bright}");
+        let bright = (-80..80).flat_map(|dy| (-80..80).map(move |dx| (dx, dy))).filter(|(dx, dy)| px(cx + dx, cy + dy) & 255 > 200).count();
+        assert!(bright > 40, "the white orb should light up pixels, found {bright}");
     }
 
     #[test]
     fn nothing_is_drawn_while_invisible_and_text_composites_where_asked() {
         let (win, cap) = layout(1920, 1.0, 301.0, 105.0);
         let mut buf = vec![0u32; (win.w * win.h) as usize];
-        render_frame(&mut buf, win.w, cap, 1.0, 0, &show_for(2_000), &sphere_points(50));
+        render_frame(&mut buf, win.w, cap, 1.0, 0, &show_for(2_000), &BakedOrb::load());
         assert!(buf.iter().all(|p| p >> 24 == 0), "alpha is zero at t=0");
         let mask = vec![255u8; 4 * 3];
         composite_mask(&mut buf, win.w, &mask, 4, 3, 10, 20, 1.0);

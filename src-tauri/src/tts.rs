@@ -512,7 +512,8 @@ pub async fn pregenerate_cache(
     // the first 429 (the rest are rendered locally and upgraded on a later boot).
     let mut cloud_throttled = false;
 
-    for phrase in CACHED_PHRASES {
+    // the stock lines plus the wording banks of the logon question and its answers (all short, all cacheable)
+    for phrase in CACHED_PHRASES.iter().copied().chain(crate::memcore::phrase_bank::stock_lines()) {
         // 1. disk
         if let Some(audio) = disk_lookup(phrase, voice).await {
             let cloud_available = crate::tts_health::edge_recently_ok()
@@ -579,6 +580,42 @@ pub async fn pregenerate_cache(
         from_edge,
         from_local
     );
+}
+
+/// Make sure a short line is ready to play with nothing left to synthesise: in the memory cache or on disk, else rendered
+/// now with the cloud voice and kept. Used while the greeting plays, so the line that follows it starts at once. `true` when
+/// the line is (now) cached. Never blocks speech that is already being prepared (bounded cloud wait).
+pub async fn prepare_line<R: tauri::Runtime>(app: &tauri::AppHandle<R>, text: &str) -> bool {
+    use tauri::Manager;
+    if !crate::tts_cache_disk::cacheable(text) {
+        return false;
+    }
+    let Some(state) = app.try_state::<TtsState>() else { return false };
+    let cache_arc = state.cache.clone();
+    let voice = crate::commands::read_edge_tts_voice(app);
+    if cache_arc.lock().await.contains_key(text) {
+        return true;
+    }
+    if let Some(audio) = disk_lookup(text, &voice).await {
+        cache_arc.lock().await.insert(text.to_string(), audio);
+        return true;
+    }
+    if crate::tts_health::edge_degraded() {
+        return false;
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(6), crate::tts_edge::synthesize_to_pcm(text, &voice)).await {
+        Ok(Ok((samples, sr, boundaries))) => {
+            crate::tts_health::edge_note_ok();
+            let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
+            let words = boundaries_to_words(&boundaries, 0);
+            let envelope = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
+            let caption = CaptionTrack { words, total_ms, estimated: false, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0, system: false };
+            persist_line_bg(text, &voice, &samples, sr, &caption);
+            cache_arc.lock().await.insert(text.to_string(), CachedAudio { samples, sample_rate: sr, caption });
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Global generation counter: incremented by `stop_tts` to signal the playback thread
