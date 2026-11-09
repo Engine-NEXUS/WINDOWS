@@ -347,7 +347,9 @@ export function OrbFrame() {
   const ghostOrb = useGhostOrbShown(ghostActive);
   // Calibration can still force the orb on; otherwise Ghost follows its own
   // idle-hide policy and every other mode follows the assistant's flag.
-  const isShown = stageOverride === true ? true : ghostActive ? ghostOrb.shown : Boolean(visible);
+  // Hand mode: the orb is always on the display (its shape is the status), whatever else hides it.
+  const handOn = useAssistant((s) => s.orbSignals.handActive);
+  const isShown = stageOverride === true ? true : handOn ? stageOverride !== false : ghostActive ? ghostOrb.shown : Boolean(visible);
 
   // One-time bootstrap: voice runtime + orchestrator/tts-activity listeners
   // (previously wired in main.tsx / App.tsx's mount effect).

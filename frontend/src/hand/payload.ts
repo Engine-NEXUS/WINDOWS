@@ -134,7 +134,7 @@ export function statusLine(s: HudState): string {
   if (!s.armed) {
     return s.note && s.note.startsWith("disarmed")
       ? s.note
-      : `palm → fist → palm → fist to arm (${s.arm_stage}/3)`;
+      : `show your palm 3 times to start (${s.arm_stage}/3)`;
   }
   const mode = s.live ? "LIVE" : "PREVIEW (not clicking)";
   const what = s.dragging ? "dragging" : s.scrolling ? "scrolling" : s.pressed ? "pinched" : s.pose;

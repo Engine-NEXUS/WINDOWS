@@ -52,6 +52,16 @@ function isTauri(): boolean {
 
 let started = false;
 
+/** What a `hand:state` payload says about the hand-mode orb: on, pointer armed, pointer switched off by a held palm. */
+export function handSignalsFor(payload: unknown, wasPaused: boolean): { handActive: true; handArmed: boolean; handPaused: boolean } {
+  const p = (payload && typeof payload === "object" ? payload : {}) as { armed?: unknown; note?: unknown };
+  const armed = p.armed === true;
+  const note = typeof p.note === "string" ? p.note : "";
+  // a held palm switches the pointer off: the square stays until three palms switch it on again
+  const paused = armed ? false : note.startsWith("disarmed (palm-hold") ? true : wasPaused;
+  return { handActive: true, handArmed: armed, handPaused: paused };
+}
+
 export function initOrbSignals(): void {
   if (started || !isTauri()) return;
   started = true;
@@ -69,15 +79,19 @@ export function initOrbSignals(): void {
     }
 
     let handTimer: ReturnType<typeof setTimeout> | null = null;
-    await listen<unknown>("hand:state", () => {
-      set({ handActive: true });
+    let handPaused = false;
+    await listen<unknown>("hand:state", (e) => {
+      const next = handSignalsFor(e.payload, handPaused);
+      handPaused = next.handPaused;
+      set(next);
       if (handTimer) clearTimeout(handTimer);
-      handTimer = setTimeout(() => set({ handActive: false }), HAND_STALE_MS);
+      handTimer = setTimeout(() => set({ handActive: false, handArmed: false, handPaused: false }), HAND_STALE_MS);
     });
     await listen<unknown>("hand:stopped", () => {
       if (handTimer) clearTimeout(handTimer);
       handTimer = null;
-      set({ handActive: false });
+      handPaused = false;
+      set({ handActive: false, handArmed: false, handPaused: false });
     });
 
     await listen<unknown>("task:update", (e) => set({ backgroundTasks: parseTasks(e.payload).length }));
