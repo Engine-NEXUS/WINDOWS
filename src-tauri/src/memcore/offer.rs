@@ -255,6 +255,8 @@ pub fn classify(text: &str) -> Reply {
         || has("no need")
         || has("it's fine")
         || has("its fine")
+        || has("i'm fine")
+        || has("im fine")
         || has("i'm good")
         || has("im good")
         || has("rehne do")
@@ -750,7 +752,7 @@ mod tests {
         let no = [
             "no", "no sir", "no thanks", "no thank you", "nope", "nah", "not now", "not today", "later", "maybe later", "skip", "skip it",
             "cancel", "never mind", "nevermind", "don't", "don't do it", "do not", "no don't open them", "stay closed", "leave them", "leave it",
-            "leave it closed", "no need", "i'm good", "it's fine", "not really", "absolutely not", "of course not", "definitely not",
+            "leave it closed", "no need", "i'm good", "it's fine", "i'm fine", "im fine", "i'm fine thanks", "not really", "absolutely not", "of course not", "definitely not",
             "nahi", "nahi karo", "rehne do", "mat karo", "no leave it", "not right now",
         ];
         for t in no {

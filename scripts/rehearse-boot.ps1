@@ -92,8 +92,9 @@ try {
     if ($m.Success) { $summary.hello_end_to_speech_audio_ms = [int]$m.Groups[2].Value; $summary.first_line = $m.Groups[1].Value } else { $summary.hello_end_to_speech_audio_ms = 'not measured' }
     $q = [regex]::Match($log, '\[BOOT\] (reopen question|briefing)[^\r\n]*'); if ($q.Success) { $summary.line_log = $q.Value }
 
-    # let the line finish, then answer through the normal turn path
-    Start-Sleep -Seconds 14
+    # let the line finish (the app logs the end of its speech), then answer through the normal turn path at once, as a person would
+    if ($m.Success -and $m.Groups[1].Value -eq 'question_audio_start') { [void](Wait-Log 'LoadingEnd\("sentinel_offer_boot_session"\)' 30) } else { Start-Sleep -Seconds 14 }
+    Start-Sleep -Milliseconds 300
     $stage = $null
     foreach ($e in (Page-List)) { if ($e.url -match 'stage.html') { $stage = [string]$e.webSocketDebuggerUrl } }
     if (-not $stage) { throw 'the stage page is not available over the debug port' }
