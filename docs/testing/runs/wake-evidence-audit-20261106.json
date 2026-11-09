@@ -1,0 +1,148 @@
+{
+  "date": "2026-11-06",
+  "kind": "read-only metadata/report audit; no audio inference or live measurement",
+  "application_build_or_runtime_changed": false,
+  "inputs": {
+    "src-tauri/resources/oww/nexus.onnx": {
+      "bytes": 860081,
+      "sha256": "f6a84129e9265f55c41a674e82950b637b56bbacfcd594189d1f3ec619a8259b"
+    },
+    "src-tauri/resources/oww/model_manifest.json": {
+      "bytes": 1125,
+      "sha256": "942535914996a3b42adad97112490d0cc58e205b51e3abf0c2ae3a95765933bb"
+    },
+    "src-tauri/resources/oww/acoustic_profile.json": {
+      "bytes": 481,
+      "sha256": "189fde3bf3abbaa551e820c5cb046ea16878a97782d51090335d2e5296c4efa5"
+    },
+    "src-tauri/resources/oww/dsp_spec.json": {
+      "bytes": 1119,
+      "sha256": "9e11903bd888aada888d85a314814cd76f9d489a2da10efcae31b565816eae17"
+    },
+    "wake_word_data/before.json": {
+      "bytes": 2996,
+      "sha256": "8d9bd2aff126d6f0b425e9e333ff996a34825742c7d95b6555bcd4617e945887"
+    },
+    "wake_word_data/after.json": {
+      "bytes": 2995,
+      "sha256": "dfe097f26be764c539c950787b204fcefda8a500612b67ebe97eedb49cc200d7"
+    },
+    "wake_word_data/train_report.dry.json": {
+      "bytes": 964,
+      "sha256": "bc87edc02c279277aeaf273ae35f4a6f680768b963f3affb618690aa25d8556f"
+    },
+    "wake_word_data/manifest.jsonl": {
+      "bytes": 1638120,
+      "sha256": "7b3413df28211e11b6c197e30def19e86e2c689eb430e19a679dd07cf264df3c"
+    },
+    "wake_word_data/sealed/manifest.jsonl": {
+      "bytes": 17673,
+      "sha256": "8f418541751fa3de14601f0ce0c027482996f0382c7aeffee292dd7ea05ab922"
+    },
+    "wake_word_data/public/heldout/manifest.jsonl": {
+      "bytes": 18040,
+      "sha256": "8f92b7f876c94d4d523e866c248a6a12b79f4c9877fc5a2abe6ad39ec01b51b3"
+    },
+    "wake_word_data/synth/manifest.jsonl": {
+      "bytes": 1945472,
+      "sha256": "496b553ffd557cc98529a4a22e99d618241d2e09ed278ab484c190eaef2568b9"
+    }
+  },
+  "shipped_model_manifest_hashes_match": true,
+  "current_accuracy": "not_established",
+  "eval_set_manifest_exists": false,
+  "main_manifest": {
+    "rows": 4159,
+    "positive_rows": 826,
+    "human_positive_rows": 448,
+    "human_positive_speaker_ids": 1,
+    "positive_phrases": {
+      "nexus": 727,
+      "hey_nexus": 99
+    }
+  },
+  "synthetic_manifest": {
+    "rows": 7600,
+    "positive_rows": 4000,
+    "synthetic_speaker_ids": 510,
+    "distinct_live_humans_proven": 0
+  },
+  "sealed_owner": {
+    "rows": 137,
+    "missing_files": 0,
+    "hours_from_wav_headers": 0.07346964742378433
+  },
+  "public_heldout": {
+    "rows": 166,
+    "missing_files": 0,
+    "hours_from_wav_headers": 34.152103211805546
+  },
+  "historical_results": {
+    "before": {
+      "model_hash_in_report": false,
+      "metrics": [
+        {
+          "key": "wake_owner_sealed",
+          "k": 33,
+          "n": 137,
+          "point": 0.24087591240875914,
+          "lo": 0.17696840103106276,
+          "hi": 0.3189191776388757
+        },
+        {
+          "key": "wake_false_alarm_per_hour",
+          "k": 12394,
+          "n": 34.15,
+          "point": 362.9060771411775,
+          "lo": null,
+          "hi": 369.35248078365606
+        },
+        {
+          "key": "wake_latency_p95_ms",
+          "k": 33,
+          "n": 33,
+          "point": 680.0,
+          "lo": null,
+          "hi": 680.0
+        }
+      ]
+    },
+    "after": {
+      "model_hash_in_report": false,
+      "metrics": [
+        {
+          "key": "wake_owner_sealed",
+          "k": 120,
+          "n": 137,
+          "point": 0.8759124087591241,
+          "lo": 0.8102535920218157,
+          "hi": 0.9210644276541893
+        },
+        {
+          "key": "wake_false_alarm_per_hour",
+          "k": 1504,
+          "n": 34.15,
+          "point": 44.03830401971365,
+          "lo": null,
+          "hi": 46.32161914855143
+        },
+        {
+          "key": "wake_latency_p95_ms",
+          "k": 120,
+          "n": 120,
+          "point": 600.0,
+          "lo": null,
+          "hi": 600.0
+        }
+      ]
+    }
+  },
+  "qualification_limits": [
+    "Historical reports do not bind model hash, complete runtime settings or exact source; no valid current before/after claim.",
+    "Sealing already recorded owner takes cannot retrospectively prove shipped-model holdout.",
+    "Synthetic voices are not independent human test speakers.",
+    "All current main-manifest human positives belong to one speaker identity.",
+    "34.15h public negatives have been evaluated previously and are not automatically untouched final certification data.",
+    "Wake score default execution builds via Cargo; only --list was run under owner build restriction."
+  ]
+}
