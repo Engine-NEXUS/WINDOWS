@@ -803,10 +803,11 @@ fn hud<R: Runtime>(app: &AppHandle<R>, s: &Session, snap: Snapshot) {
 
 /// What the wake orb shows for hand mode, on an event of its own (the orb's page must not share `hand:state` with the
 /// overlay: in testing a page's listener for it was sometimes never called). Sent when it changes and at least every 1.5 s.
+static ORB_LAST: Mutex<Option<(bool, bool, Instant)>> = Mutex::new(None);
+
 fn orb_state<R: Runtime>(app: &AppHandle<R>, armed: bool) {
-    static LAST: Mutex<Option<(bool, bool, Instant)>> = Mutex::new(None);
     let paused = !armed && PALM_PAUSED.load(Ordering::Relaxed);
-    let mut g = LAST.lock();
+    let mut g = ORB_LAST.lock();
     let due = match *g {
         Some((a, p, at)) => a != armed || p != paused || at.elapsed() >= Duration::from_millis(1500),
         None => true,
@@ -1227,6 +1228,7 @@ pub fn stop<R: Runtime>(app: &AppHandle<R>, reason: &str) {
     let _ = s.out.send(Out::Stop);
     STARTED_BY_GHOST.store(false, Ordering::Relaxed);
     PALM_PAUSED.store(false, Ordering::Relaxed);
+    *ORB_LAST.lock() = None;
     let epoch = FOCUS_EPOCH.swap(0, Ordering::SeqCst);
     if epoch != 0 {
         crate::focus_mode::release(epoch);

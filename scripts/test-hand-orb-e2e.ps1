@@ -138,9 +138,12 @@ try {
     Check '5 armed again: the triangle picture is back' ((Distance $f2 $f4) -lt (Distance $f2 $f3) / 2) "difference from first triangle $([int](Distance $f2 $f4))"
 
     Emit $ws 'hand:stopped' 'null'
+    Start-Sleep -Milliseconds 1000   # the triangle morphs back to the circle first
+    $ix = Shot '4b-exit-circle.png'; $fx = Fingerprint $ix; $ix.Dispose()
+    Check '6a exiting hand mode: the orb is still shown and is the circle again' ($fx.dark -gt 0.6 -and (Distance $f1 $fx) -lt (Distance $f2 $fx)) "black capsule share: $($fx.dark), distance to circle $([int](Distance $f1 $fx)), to triangle $([int](Distance $f2 $fx))"
     Start-Sleep -Seconds 3
     $i5 = Shot '5-after.png'; $f5 = Fingerprint $i5; $i5.Dispose()
-    Check '6 hand mode over: the orb is gone again' ($f5.dark -lt 0.3) "black capsule share: $($f5.dark)"
+    Check '6b then the orb has left the screen' ($f5.dark -lt 0.3) "black capsule share: $($f5.dark)"
 }
 finally {
     Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
