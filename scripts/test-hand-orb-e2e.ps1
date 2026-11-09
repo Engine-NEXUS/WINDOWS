@@ -108,7 +108,7 @@ function Fingerprint($img) {
 function Distance($a, $b) { $d = 0.0; for ($i = 0; $i -lt 96; $i++) { $d += [math]::Abs($a.cells[$i] - $b.cells[$i]) }; $d }
 
 $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$Port"
-$p = Start-Process $Exe -ArgumentList '--background' -PassThru -RedirectStandardOutput (Join-Path $Out 'run.log') -RedirectStandardError (Join-Path $Out 'run.err')
+$p = Start-Process $Exe -PassThru -RedirectStandardOutput (Join-Path $Out 'run.log') -RedirectStandardError (Join-Path $Out 'run.err')
 try {
     $end = (Get-Date).AddSeconds(150); $ws = $null
     while ((Get-Date) -lt $end -and -not $ws) {
