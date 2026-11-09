@@ -57,6 +57,16 @@ const KEY_RING: usize = 200;
 const HIGH_KEY_COOLDOWN_MS: u64 = 120_000;
 /// Heads-up beat between the nudge event and the spoken line.
 pub const HEADS_UP_MS: u64 = 300;
+
+/// The beat before a spoken alert. The scripted logon sequence (hello, then the question) has none: it is one conversation, and
+/// every 300 ms there is dead air after the greeting.
+pub fn heads_up_ms(id: &str) -> u64 {
+    if id.contains("boot_") {
+        0
+    } else {
+        HEADS_UP_MS
+    }
+}
 /// How long the meeting TTS mute is lifted for one Critical line.
 pub const MEETING_OVERRIDE_MS: u64 = 30_000;
 
@@ -514,8 +524,11 @@ fn execute<R: Runtime>(app: &AppHandle<R>, actions: Vec<Action>) {
                 }
                 let app2 = app.clone();
                 let line = format!("{}{}", lead_in.unwrap_or(""), text);
+                let beat = heads_up_ms(&id);
                 tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(HEADS_UP_MS)).await;
+                    if beat > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(beat)).await;
+                    }
                     let req = format!("sentinel_{id}");
                     // Register with the main command center like any other
                     // turn — otherwise has_active_request() can't see this
@@ -1045,5 +1058,13 @@ mod tests {
         // cut-off is not asserted, only that it never exceeds its cap.
         assert_eq!(linked_event("alt_99"), Some("ev_99".to_string()));
         assert!(alert_links().lock().map(|l| l.len() <= 64).unwrap_or(false));
+    }
+
+    #[test]
+    fn the_scripted_logon_lines_have_no_heads_up_beat_but_other_alerts_keep_it() {
+        assert_eq!(heads_up_ms("offer_boot_session"), 0);
+        assert_eq!(heads_up_ms("boot_hello_boot_1"), 0);
+        assert_eq!(heads_up_ms("boot_briefing"), 0);
+        assert_eq!(heads_up_ms("mail_deadline_7"), HEADS_UP_MS);
     }
 }

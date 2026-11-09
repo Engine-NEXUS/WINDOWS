@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-pub const MAX_ENTRIES: usize = 200;
+pub const MAX_ENTRIES: usize = 400;
 /// Only short lines are persisted: stock acknowledgements, not replies (which can contain private text).
 pub const MAX_WORDS: usize = 9;
 pub const MAX_CHARS: usize = 90;

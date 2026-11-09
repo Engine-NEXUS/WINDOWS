@@ -29,6 +29,7 @@ pub mod mailwording;
 pub mod selfnames;
 pub mod names;
 pub mod offer;
+pub mod phrase_bank;
 pub mod leavewatch;
 pub mod leases;
 pub mod people;

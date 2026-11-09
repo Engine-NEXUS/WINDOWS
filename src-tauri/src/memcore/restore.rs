@@ -12,7 +12,9 @@ use super::session::{SessionApp, Snapshot};
 
 /// Reopen at most this many things in one go.
 pub const MAX_ITEMS: usize = 8;
-const STAGGER_MS: u64 = 400;
+/// The apps are started together; this is only the gap between one start and the next, so that a dozen processes do not
+/// all begin in the same millisecond.
+const STAGGER_MS: u64 = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
@@ -106,8 +108,8 @@ pub fn describe(items: &[Item]) -> String {
 /// Short spoken result for `restore_session` (no list of apps): "Done, sir. I opened 5 apps." with "1 was / 2 were already
 /// open" only when something was already open; when something did not start, only those names are said:
 /// "I opened 4 apps, but I couldn't start Brave." Pure.
-pub fn restore_report_short(opened: &[String], failed: &[String], already_open: &[String]) -> String {
-    let (n, m) = (opened.len(), already_open.len());
+pub fn restore_report_short(opened: &[String], failed: &[String], already_open: &[String], done: &str) -> String {
+    let n = opened.len();
     let apps = if n == 1 { "app" } else { "apps" };
     if !failed.is_empty() {
         return if n > 0 {
@@ -116,13 +118,9 @@ pub fn restore_report_short(opened: &[String], failed: &[String], already_open: 
             format!("I couldn't start {}.", join_names(failed))
         };
     }
-    if m == 0 {
-        format!("Done, sir. I opened {n} {apps}.")
-    } else if m == 1 {
-        format!("Done, sir. I opened {n} {apps}. 1 was already open.")
-    } else {
-        format!("Done, sir. I opened {n} {apps}. {m} were already open.")
-    }
+    // Everything started: the line comes from the caller's wording bank (empty when an acknowledgement was already spoken).
+    let _ = already_open;
+    done.to_string()
 }
 
 fn join_names(items: &[String]) -> String {
@@ -216,11 +214,19 @@ where
     let launcher = Arc::new(launcher);
     let mut opened = vec![];
     let mut failed_items: Vec<Item> = vec![];
+    // First pass: every app is started on its own worker without waiting for the one before it; the results are read in order.
+    let mut running = Vec::with_capacity(items.len());
     for it in items {
         let label = it.label();
         let it2 = it.clone();
         let l = launcher.clone();
-        match tauri::async_runtime::spawn_blocking(move || l(&it2)).await {
+        running.push((it, label, tauri::async_runtime::spawn_blocking(move || l(&it2))));
+        if stagger_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(stagger_ms)).await;
+        }
+    }
+    for (it, label, handle) in running {
+        match handle.await {
             Ok(Ok(())) => {
                 println!("[SESSION] reopened {label}");
                 opened.push(label);
@@ -229,9 +235,6 @@ where
                 println!("[SESSION] could not reopen {label}: {other:?}");
                 failed_items.push(it);
             }
-        }
-        if stagger_ms > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(stagger_ms)).await;
         }
     }
 
@@ -448,13 +451,12 @@ mod tests {
 
     #[test]
     fn test_restore_report_short() {
-        assert_eq!(restore_report_short(&["VS Code".into()], &[], &[]), "Done, sir. I opened 1 app.");
-        assert_eq!(restore_report_short(&["VS Code".into(), "Brave".into()], &[], &[]), "Done, sir. I opened 2 apps.");
-        assert_eq!(restore_report_short(&["VS Code".into(), "Brave".into()], &[], &["Notepad".into()]), "Done, sir. I opened 2 apps. 1 was already open.");
-        assert_eq!(restore_report_short(&["Code".into()], &[], &["A".into(), "B".into()]), "Done, sir. I opened 1 app. 2 were already open.");
-        assert_eq!(restore_report_short(&[], &["Brave".into()], &[]), "I couldn't start Brave.");
-        assert_eq!(restore_report_short(&[], &["Brave".into(), "Spotify".into()], &[]), "I couldn't start Brave and Spotify.");
-        assert_eq!(restore_report_short(&["Code".into()], &["Brave".into()], &[]), "I opened 1 app, but I couldn't start Brave.");
+        assert_eq!(restore_report_short(&["VS Code".into()], &[], &[], "All back, sir."), "All back, sir.");
+        assert_eq!(restore_report_short(&["VS Code".into(), "Brave".into()], &[], &["Notepad".into()], "All set, sir."), "All set, sir.");
+        assert_eq!(restore_report_short(&["Code".into()], &[], &["A".into(), "B".into()], ""), "", "an acknowledgement was already spoken");
+        assert_eq!(restore_report_short(&[], &["Brave".into()], &[], "All back, sir."), "I couldn't start Brave.");
+        assert_eq!(restore_report_short(&[], &["Brave".into(), "Spotify".into()], &[], ""), "I couldn't start Brave and Spotify.");
+        assert_eq!(restore_report_short(&["Code".into()], &["Brave".into()], &[], ""), "I opened 1 app, but I couldn't start Brave.");
     }
 
     #[tokio::test]
@@ -475,5 +477,28 @@ mod tests {
         assert_eq!(opened, vec!["RetryApp".to_string()]);
         assert!(failed.is_empty());
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    /// The apps are started together, not one after another: five apps that each take 200 ms to start finish in about
+    /// 200 ms plus the small gap between starts, not in a second (the old 400 ms stagger made N x 0.4 s of silence).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_apps_start_together_not_one_after_the_other() {
+        let items: Vec<Item> = (0..5).map(|i| Item::Exe { path: format!(r"C:\app{i}.exe"), args: vec![], label: format!("App{i}") }).collect();
+        let started = std::sync::Arc::new(std::sync::Mutex::new(Vec::<std::time::Instant>::new()));
+        let log = started.clone();
+        let launcher = move |_: &Item| {
+            log.lock().unwrap().push(std::time::Instant::now());
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            Ok(())
+        };
+        let t0 = std::time::Instant::now();
+        let (opened, failed) = run_with(items, STAGGER_MS, launcher).await;
+        let took = t0.elapsed().as_millis();
+        assert_eq!(opened, vec!["App0", "App1", "App2", "App3", "App4"], "results stay in the order of the plan");
+        assert!(failed.is_empty());
+        assert!(took < 700, "five 200 ms launches must overlap, took {took} ms");
+        let times = started.lock().unwrap();
+        let spread = times.iter().max().unwrap().duration_since(*times.iter().min().unwrap()).as_millis();
+        assert!(spread < 400, "all five started within {spread} ms of each other");
     }
 }
