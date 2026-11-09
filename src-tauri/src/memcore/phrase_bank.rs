@@ -132,6 +132,7 @@ pub fn stock_lines() -> impl Iterator<Item = &'static str> {
 }
 
 /// Every line of every bank, with `{day}` left in (for tests and the cache-limit check).
+#[cfg(test)]
 pub fn all_templates() -> impl Iterator<Item = &'static str> {
     [Bank::Question, Bank::QuestionDay, Bank::AckYes, Bank::AckNo, Bank::AckLater, Bank::Done]
         .into_iter()

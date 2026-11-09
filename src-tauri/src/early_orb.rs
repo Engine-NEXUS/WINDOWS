@@ -1299,4 +1299,44 @@ mod tests {
             write_bmp(&format!("early_orb_{name}_caption.bmp"), &txt_px, txt_w, txt_h);
         }
     }
+
+    /// At 125, 150 and 200 % display scaling the capsule stays at the top centre, the caption slot stays on the screen, and the
+    /// dotted orb grows with the scale but never leaves the square the stage gives it (the capsule's shorter side).
+    #[test]
+    fn the_early_overlay_fits_at_125_150_and_200_percent_scaling() {
+        let orb = BakedOrb::load();
+        let mut widths = Vec::new();
+        for scale in [1.0f32, 1.25, 1.5, 2.0] {
+            let (sw, sh) = ((1920.0 * scale).round() as i32, (1080.0 * scale).round() as i32);
+            let (win, cap) = layout(sw, scale, 301.0, 105.0);
+            assert!(win.x >= 0 && win.x + win.w <= sw && win.y == 0, "capsule window on screen at {scale}: {win:?}");
+            assert!((win.x * 2 + win.w - sw).abs() <= 1, "centred at {scale}");
+            let slot = caption_slot(sw, sh, scale);
+            assert!(slot.x >= 0 && slot.x + slot.w <= sw && slot.y >= 0 && slot.y + slot.h <= sh, "caption slot on screen at {scale}: {slot:?}");
+
+            let mut buf = vec![0u32; (win.w * win.h) as usize];
+            render_frame(&mut buf, win.w, cap, scale, 1_200, &show_for(2_000), &orb);
+            let side = cap.w.min(cap.h) as f32;
+            let (mut x0, mut x1, mut y0, mut y1) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
+            for y in 0..win.h {
+                for x in 0..win.w {
+                    let p = buf[(y * win.w + x) as usize];
+                    if p & 255 > 110 && (p >> 24) > 200 {
+                        x0 = x0.min(x);
+                        x1 = x1.max(x);
+                        y0 = y0.min(y);
+                        y1 = y1.max(y);
+                    }
+                }
+            }
+            assert!(x1 > x0 && y1 > y0, "the orb is drawn at {scale}");
+            let (bw, bh) = ((x1 - x0) as f32, (y1 - y0) as f32);
+            assert!(bw <= side * 1.05 && bh <= side * 1.05, "orb {bw}x{bh} inside its {side}px square at {scale}");
+            assert!(bw >= side * 0.4, "and it fills a good part of it ({bw} of {side}) at {scale}");
+            let cx = (x0 + x1) as f32 / 2.0;
+            assert!((cx - (cap.x as f32 + cap.w as f32 / 2.0)).abs() < side * 0.1, "centred in the capsule at {scale}");
+            widths.push(bw);
+        }
+        assert!(widths.windows(2).all(|w| w[1] > w[0] * 1.1), "the orb grows with the scale: {widths:?}");
+    }
 }

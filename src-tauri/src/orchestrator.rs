@@ -5883,8 +5883,10 @@ async fn run_offer_reply<R: Runtime>(
             // The acknowledgement is said at once (a cached voice line, different every time) and the apps start
             // together while it plays; only a problem is said afterwards.
             let t0 = std::time::Instant::now();
+            crate::boot::mark("yes_received");
             if let Some(d) = &dir {
                 let ack = crate::memcore::phrase_bank::next(d, crate::memcore::phrase_bank::Bank::AckYes, None);
+                crate::boot::mark_next_audio("ack_audio_start");
                 speak_line(&app, ack, &request_id);
                 println!("[BOOT] yes -> acknowledgement handed to speech after {} ms", t0.elapsed().as_millis());
             }
@@ -8374,21 +8376,23 @@ async fn restore_session<R: Runtime>(app: &AppHandle<R>, acknowledged: bool) -> 
     let Ok(dir) = app.path().app_data_dir() else {
         return "I couldn't open my memory, sir.".to_string();
     };
-    let Some(snap) = session::load_pending(&dir) else {
+    let Some(snap) = session::pending_for_offer(&dir, chrono::Utc::now().timestamp()) else {
         return "I don't have a previous session to reopen, sir.".to_string();
     };
     let running = tauri::async_runtime::spawn_blocking(restore::running_exes).await.unwrap_or_default();
     let plan = restore::plan(&snap, &running, &|p| std::path::Path::new(p).exists());
     if plan.is_empty() {
-        session::clear_pending(&dir);
+        session::clear_pending_unless_rehearsal(&dir);
         return "Everything from your last session is already open, sir.".to_string();
     }
     let started = std::time::Instant::now();
+    crate::boot::mark("apps_started");
     let (opened, failed) = restore::run(plan.items.clone()).await;
+    crate::boot::mark("apps_done");
     println!("[BOOT] session reopened: {} started, {} failed in {} ms", opened.len(), failed.len(), started.elapsed().as_millis());
     // One attempt (with its own retry inside `run`) ends the offer. The apps that would not start are named aloud; keeping
     // the offer would ask the same question at every logon for an app that can never start (an elevated one, error 740).
-    session::clear_pending(&dir);
+    session::clear_pending_unless_rehearsal(&dir);
     let done = if acknowledged { String::new() } else { phrase_bank::next(&dir, phrase_bank::Bank::Done, None) };
     restore::restore_report_short(&opened, &failed, &plan.already_open, &done)
 }
@@ -9562,9 +9566,13 @@ pub fn speak_line<R: Runtime>(app: &AppHandle<R>, text: String, request_id: &str
     // A reminder that asks "Shall I start?" starts listening for the answer
     // only now that the question is being spoken.
     if request_id.starts_with("sentinel_offer_boot_session") {
+        crate::boot::mark_next_audio("question_audio_start");
         crate::memcore::offer::arm_reopen();
     } else if request_id.starts_with("sentinel_offer_") {
         crate::memcore::offer::arm();
+    }
+    if request_id == "sentinel_boot_briefing" {
+        crate::boot::mark_next_audio("briefing_audio_start");
     }
     // Record the on-device turn this line answers (proactive/boot speech is not a user turn).
     if !request_id.starts_with("sentinel_") && !request_id.starts_with("boot_") {

@@ -586,31 +586,47 @@ pub async fn pregenerate_cache(
 /// now with the cloud voice and kept. Used while the greeting plays, so the line that follows it starts at once. `true` when
 /// the line is (now) cached. Never blocks speech that is already being prepared (bounded cloud wait).
 pub async fn prepare_line<R: tauri::Runtime>(app: &tauri::AppHandle<R>, text: &str) -> bool {
-    use tauri::Manager;
     if !crate::tts_cache_disk::cacheable(text) {
         return false;
     }
+    prepare_inner(app, text, false).await
+}
+
+/// The same for a line that may hold private text (the daily briefing: mail subjects, calendar items): rendered into the
+/// MEMORY cache only, never written to the disk cache, and gone when NEXUS exits. Any length.
+pub async fn prepare_private_line<R: tauri::Runtime>(app: &tauri::AppHandle<R>, text: &str) -> bool {
+    prepare_inner(app, text, true).await
+}
+
+async fn prepare_inner<R: tauri::Runtime>(app: &tauri::AppHandle<R>, text: &str, private: bool) -> bool {
+    use tauri::Manager;
     let Some(state) = app.try_state::<TtsState>() else { return false };
     let cache_arc = state.cache.clone();
     let voice = crate::commands::read_edge_tts_voice(app);
     if cache_arc.lock().await.contains_key(text) {
         return true;
     }
-    if let Some(audio) = disk_lookup(text, &voice).await {
-        cache_arc.lock().await.insert(text.to_string(), audio);
-        return true;
+    if !private {
+        if let Some(audio) = disk_lookup(text, &voice).await {
+            cache_arc.lock().await.insert(text.to_string(), audio);
+            return true;
+        }
     }
     if crate::tts_health::edge_degraded() {
         return false;
     }
-    match tokio::time::timeout(std::time::Duration::from_secs(6), crate::tts_edge::synthesize_to_pcm(text, &voice)).await {
+    // a long briefing takes longer to render than a one-line question
+    let limit = if private { 14 } else { 6 };
+    match tokio::time::timeout(std::time::Duration::from_secs(limit), crate::tts_edge::synthesize_to_pcm(text, &voice)).await {
         Ok(Ok((samples, sr, boundaries))) => {
             crate::tts_health::edge_note_ok();
             let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
             let words = boundaries_to_words(&boundaries, 0);
             let envelope = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
             let caption = CaptionTrack { words, total_ms, estimated: false, envelope, frame_ms: ENVELOPE_FRAME_MS, envelope_start_ms: 0, system: false };
-            persist_line_bg(text, &voice, &samples, sr, &caption);
+            if !private {
+                persist_line_bg(text, &voice, &samples, sr, &caption);
+            }
             cache_arc.lock().await.insert(text.to_string(), CachedAudio { samples, sample_rate: sr, caption });
             true
         }
@@ -1213,6 +1229,7 @@ async fn play_audio(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     crate::boot::first_audio();
+    crate::boot::audio_started();
     // A lease taken before synthesis may have been ended (sleep, barge-in): re-assert the speech volume now.
     let _playback_volume = crate::volume::ensure_live_lease(read_tts_volume(&app));
     tokio::task::spawn_blocking(move || {
@@ -1609,6 +1626,7 @@ async fn play_audio_streamed(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     crate::boot::first_audio();
+    crate::boot::audio_started();
     let _playback_volume = crate::volume::ensure_live_lease(read_tts_volume(&app));
     tokio::task::spawn_blocking(move || {
         match OutputStream::try_default() {
@@ -2360,5 +2378,27 @@ mod voice_continuity_tests {
         assert!(stop_has_work(7, usize::MAX), "first stop ever");
         assert!(!stop_has_work(8, 8), "the burst after a stop: the generation it made is still current");
         assert!(stop_has_work(9, 8), "a line began after the last stop, so a stop must cancel it");
+    }
+
+    /// A private line (the daily briefing) is kept in memory only: in `prepare_inner` the disk write is guarded by `!private`
+    /// and the disk lookup too, so nothing about a private line can reach `tts_cache_disk`.
+    #[test]
+    fn a_private_prepared_line_is_never_written_to_or_read_from_the_disk_cache() {
+        let src = include_str!("tts.rs");
+        let start = src.find("async fn prepare_inner").expect("prepare_inner exists");
+        let body = &src[start..start + src[start..].find("
+}
+").expect("end of prepare_inner")];
+        let persist = body.find("persist_line_bg(").expect("the public lines are persisted");
+        let guard = body[..persist].rfind("if !private").expect("the write is guarded");
+        assert!(persist - guard < 80, "the persist call sits directly under the `if !private` guard");
+        assert_eq!(body.matches("persist_line_bg(").count(), 1, "one write only, and it is the guarded one");
+        let lookup = body.find("disk_lookup(").expect("the public lines are looked up on disk");
+        assert!(body[..lookup].rfind("if !private").is_some_and(|g| lookup - g < 60), "the disk lookup is guarded too");
+        // and the public entry refuses what the disk cache refuses
+        assert!(src.contains("if !crate::tts_cache_disk::cacheable(text) {
+        return false;
+    }
+    prepare_inner(app, text, false)"));
     }
 }

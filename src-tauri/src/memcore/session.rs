@@ -420,6 +420,49 @@ pub fn load_pending(dir: &std::path::Path) -> Option<Snapshot> {
     load(dir, META_PENDING).filter(|s| !s.is_empty())
 }
 
+/// Developer rehearsal of the logon sequence (`NEXUS_BOOT_REHEARSAL=1`): the "previous session" is one harmless app (Calculator)
+/// instead of the real one, and the real pending session is neither read nor cleared. Off unless the variable is set.
+pub fn rehearsal() -> bool {
+    rehearsal_flag(std::env::var("NEXUS_BOOT_REHEARSAL").ok().as_deref())
+}
+
+fn rehearsal_flag(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), Some("1") | Some("true"))
+}
+
+/// The synthetic session of the rehearsal: Calculator, last seen 90 minutes before `now`.
+pub fn rehearsal_snapshot(now: i64) -> Snapshot {
+    Snapshot {
+        ts: now - 90 * 60,
+        reason: REASON_SESSION_END.to_string(),
+        apps: vec![SessionApp {
+            exe: "calc.exe".into(),
+            path: r"C:\Windows\System32\calc.exe".into(),
+            args: vec![],
+            label: "Calculator".into(),
+            windows: 1,
+            packaged: false,
+            browser: false,
+        }],
+        folders: vec![],
+    }
+}
+
+/// The session to offer: the real pending one, or (rehearsal only) the synthetic one.
+pub fn pending_for_offer(dir: &std::path::Path, now: i64) -> Option<Snapshot> {
+    if rehearsal() {
+        return Some(rehearsal_snapshot(now));
+    }
+    load_pending(dir)
+}
+
+/// Forget the pending session, except while rehearsing (the real one must survive a rehearsal).
+pub fn clear_pending_unless_rehearsal(dir: &std::path::Path) {
+    if !rehearsal() {
+        clear_pending(dir);
+    }
+}
+
 pub fn clear_pending(dir: &std::path::Path) {
     super::with_store(dir, |s| s.meta_set(META_PENDING, ""));
 }
@@ -1238,5 +1281,28 @@ mod live_probe {
         }
         println!("folders: {}", s.folders.len());
         println!("summary: {}", summary(&s));
+    }
+
+    #[test]
+    fn the_rehearsal_is_off_unless_the_variable_says_so_and_never_touches_a_real_pending_session() {
+        assert!(!rehearsal_flag(None));
+        assert!(!rehearsal_flag(Some("")));
+        assert!(!rehearsal_flag(Some("0")));
+        assert!(!rehearsal_flag(Some("yes please")));
+        assert!(rehearsal_flag(Some("1")));
+        assert!(rehearsal_flag(Some(" true ")));
+        // the synthetic session is one harmless app, recent enough to be offered, and ends a session
+        let now = 1_800_000_000;
+        let s = rehearsal_snapshot(now);
+        assert_eq!(s.apps.len(), 1);
+        assert_eq!(s.apps[0].exe, "calc.exe");
+        assert!(s.ended_session() && now - s.ts < MAX_AGE_SECS && now - s.ts > MIN_GAP_SECS);
+        // in a normal run (variable not set in the test process) the real store is what is asked
+        if std::env::var_os("NEXUS_BOOT_REHEARSAL").is_none() {
+            let dir = std::env::temp_dir().join(format!("nexus_rehearsal_off_{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            assert!(pending_for_offer(&dir, now).is_none(), "nothing pending in an empty store");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
