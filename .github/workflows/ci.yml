@@ -55,6 +55,10 @@ jobs:
       - name: IPC + event contract gate
         run: node ../scripts/check-ipc-contract.mjs
 
+      # The logon greeting is drawn natively from frames of the real dotted orb; a change to the orb engine must be re-baked.
+      - name: Early orb frames up to date
+        run: node ../scripts/bake-early-orb.mjs --check
+
   worker-check:
     runs-on: ubuntu-latest
     defaults:

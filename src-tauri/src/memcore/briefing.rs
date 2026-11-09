@@ -101,6 +101,8 @@ pub struct Input {
     pub events: Vec<AgendaItem>,
     /// The previous session, when there is something to reopen.
     pub session: Option<SessionOffer>,
+    /// The reopen question chosen for today (varied wording, see `phrase_bank`); `None` falls back to the fixed rotation.
+    pub reopen_question: Option<String>,
     /// Connection problems worth mentioning (new or changed only).
     pub health_spoken: Option<String>,
     /// Card section listing every current connection problem.
@@ -432,9 +434,14 @@ pub fn build(input: &Input) -> Option<Briefing> {
         if input.overnight.is_some() {
             spoken.push_str("Do you want me to open the other apps you were using too?");
         } else {
-            let day = day_phrase(input.now, s.left_at);
-            let variant = (input.now.max(0) as u64) / 86_400;
-            spoken.push_str(&reopen_question(&day, variant));
+            match &input.reopen_question {
+                Some(q) => spoken.push_str(q),
+                None => {
+                    let day = day_phrase(input.now, s.left_at);
+                    let variant = (input.now.max(0) as u64) / 86_400;
+                    spoken.push_str(&reopen_question(&day, variant));
+                }
+            }
         }
     }
 
@@ -550,6 +557,7 @@ fn gather<R: tauri::Runtime>(
     resume: Vec<ResumeEntry>,
     events: Vec<AgendaItem>,
     session: Option<SessionOffer>,
+    reopen_question: Option<String>,
     health: super::health::Report,
     overnight: Option<crate::agent_outcomes::Record>,
 ) -> Input {
@@ -572,6 +580,7 @@ fn gather<R: tauri::Runtime>(
         unfinished: crate::conversation::unfinished_requests(dir, now),
         events,
         session,
+        reopen_question,
         health_spoken: super::health::spoken_line(&health.to_speak),
         health_card: super::health::card_section(&health.all),
         overnight,
@@ -582,14 +591,14 @@ fn gather<R: tauri::Runtime>(
 /// snapshot when everything in it is already open or it is too old. Blocking.
 pub fn session_offer(dir: &std::path::Path, now: i64) -> Option<SessionOffer> {
     use super::{restore, session};
-    let snap = session::load_pending(dir)?;
+    let snap = session::pending_for_offer(dir, now)?;
     if now - snap.ts > session::MAX_AGE_SECS {
-        session::clear_pending(dir);
+        session::clear_pending_unless_rehearsal(dir);
         return None;
     }
     let plan = restore::plan(&snap, &restore::running_exes(), &|p| std::path::Path::new(p).exists());
     if plan.is_empty() {
-        session::clear_pending(dir);
+        session::clear_pending_unless_rehearsal(dir);
         return None;
     }
     Some(SessionOffer { summary: restore::describe(&plan.items), left_at: snap.ts })
@@ -617,12 +626,12 @@ async fn wait_until_ready() -> u64 {
 /// Wait (bounded) until the line just handed to the speech policy has been spoken and is over.
 async fn wait_until_quiet(max_secs: u64) {
     let start = std::time::Instant::now();
-    // Give the policy + heads-up beat time to start the line before we look for its end.
-    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    // Give the policy time to start the line before we look for its end (the scripted logon lines have no heads-up beat).
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
     while (crate::orchestrator::has_active_request() || crate::early_hello::busy()) && start.elapsed().as_secs() < max_secs {
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
     }
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
 }
 
 /// Speak the plain time-of-day hello unless one was spoken recently. `tag` names the trigger in the log
@@ -632,7 +641,7 @@ async fn submit_hello<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std::p
     // this normal hello takes over, so nobody is left without a greeting.
     let waited = std::time::Instant::now();
     while crate::early_hello::busy() && waited.elapsed().as_secs() < 330 {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     }
     // The early hello (played at this logon) already greeted: never a second one. Only the logon start is covered; a
     // later resume from sleep greets again as usual.
@@ -734,92 +743,181 @@ pub fn start_boot_briefing<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             tokio::time::sleep(std::time::Duration::from_secs(PRESENCE_POLL_SECS)).await;
             presence_waited += PRESENCE_POLL_SECS;
         }
-        // 1. The hello: every logon, short, cached, immediate.
-        let hello_spoken = submit_hello(&app, &dir, "boot").await;
-
-        // 2. The details, once a day (and always when the agents left news before the last shutdown).
+        // What this logon says besides the hello is decided first, so ALL of its preparation can run while the hello plays.
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let overnight = crate::agent_outcomes::peek(&dir, chrono::Utc::now().timestamp());
         let already = super::with_store(&dir, |s| s.meta_get("last_briefing_day").as_deref() == Some(today.as_str()))
             .unwrap_or(true);
-        if already && overnight.is_none() {
+        // The reopen question does not depend on the daily briefing: every logon asks it when there is something from the last
+        // session to bring back (it was lost whenever the briefing had already run that day).
+        let want_briefing = !(already && overnight.is_none()) || super::session::rehearsal_briefing();
+        let snapshot = BOOT_SNAPSHOT.lock().ok().and_then(|g| g.clone()).unwrap_or_default();
+
+        // 1. The hello: every logon, short, cached, immediate. While it plays (the early hello can take seconds to start and to
+        //    finish) the rest is prepared in parallel: either the reopen question alone (what is left of the last session, the
+        //    wording, its voice line in the cache) or the whole daily briefing (calendar, health, session, text, and its voice
+        //    rendered into the memory cache), so what follows the hello starts the moment it ends.
+        let hello_started = std::time::Instant::now();
+        let (hello_spoken, prepared, briefing_prep) = tokio::join!(
+            submit_hello(&app, &dir, "boot"),
+            async {
+                if want_briefing {
+                    None
+                } else {
+                    prepare_reopen(&app, &dir).await
+                }
+            },
+            async {
+                if want_briefing {
+                    prepare_briefing(&app, &dir, snapshot, overnight).await
+                } else {
+                    None
+                }
+            }
+        );
+        let hello_over = std::time::Instant::now();
+        crate::boot::mark_with("hello_end", &format!("hello spoken: {hello_spoken}, {} ms after the boot step began", hello_started.elapsed().as_millis()));
+
+        if !want_briefing {
             println!("[BOOT] skip briefing: already briefed today ({today})");
-            // The reopen question does not depend on the daily briefing: every logon asks it when there is something
-            // from the last session to bring back (it was lost whenever the briefing had already run that day).
-            ask_reopen_only(&app, &dir, hello_spoken).await;
+            ask_reopen_only(&app, &dir, hello_spoken, prepared, hello_over, hello_started).await;
             return;
         }
-        let snapshot = BOOT_SNAPSHOT.lock().ok().and_then(|g| g.clone()).unwrap_or_default();
-        let cap = std::time::Duration::from_secs(GATHER_CAP_SECS);
-        let events_fut = async {
-            if super::flag(&dir, "memcoreMail", true) {
-                tokio::time::timeout(cap, today_events()).await.unwrap_or_default()
-            } else {
-                vec![]
-            }
-        };
-        let session_fut = async {
-            if super::flag(&dir, "memcoreSession", true) {
-                let d = dir.clone();
-                let now = chrono::Utc::now().timestamp();
-                tokio::time::timeout(cap, tauri::async_runtime::spawn_blocking(move || session_offer(&d, now)))
-                    .await
-                    .ok()
-                    .and_then(|r| r.ok())
-                    .flatten()
-            } else {
-                None
-            }
-        };
-        let health_fut = async {
-            if super::flag(&dir, "memcoreHealth", true) {
-                // Health never delays the hello; it only decorates the details, so it gets a cap too.
-                tokio::time::timeout(cap * 2, super::health::run(&app, &dir)).await.unwrap_or_default()
-            } else {
-                super::health::Report::default()
-            }
-        };
-        let (events, session, health) = tokio::join!(events_fut, session_fut, health_fut);
-        let input = gather(&app, &dir, snapshot, events, session, health, overnight);
-        let Some(briefing) = build(&input) else {
+        let Some(pb) = briefing_prep else {
             println!("[BOOT] skip briefing: nothing to say (no resume/mail/events/session/health)");
             return;
         };
-        super::with_store(&dir, |s| s.meta_set("last_briefing_day", &today));
-        if input.overnight.is_some() {
-            crate::agent_outcomes::mark_told(&dir);
+        if !super::session::rehearsal() {
+            super::with_store(&dir, |s| s.meta_set("last_briefing_day", &today));
+            if pb.overnight {
+                crate::agent_outcomes::mark_told(&dir);
+            }
         }
         println!(
-            "[BOOT] briefing: session_offer={} health_spoken={} open_items={}",
-            input.session.is_some(),
-            input.health_spoken.is_some(),
-            briefing.items
+            "[BOOT] briefing: session_offer={} health_spoken={} open_items={} (voice ready: {})",
+            pb.session, pb.health, pb.items, pb.audio_ready
         );
         let spoken = if hello_spoken {
-            // The hello already greeted; let it finish before the details start.
-            wait_until_quiet(20).await;
-            without_greeting(&briefing.spoken, input.hour, input.name.as_deref(), input.friend)
+            // The hello already greeted; the early hello (native player) is over when `submit_hello` returned, a hello spoken
+            // through the speech policy is only handed over, so its end is waited for.
+            if !crate::early_hello::played_this_run() {
+                wait_until_quiet(20).await;
+            }
+            pb.after_hello.clone()
         } else {
-            briefing.spoken.clone()
+            pb.full.clone()
         };
         // The question is only armed once it has been spoken (see `speak_line`: ids that
         // start with "offer_" arm the reply window).
-        let id = if briefing.offers_restore {
+        let id = if pb.offers_restore {
             super::offer::set(super::offer::Offer::ReopenSession, false);
             "offer_boot_session"
         } else {
             "boot_briefing"
         };
+        crate::boot::mark_with("briefing_handed", &format!("{} ms after the hello ended", hello_over.elapsed().as_millis()));
         crate::proactive_policy::submit(&app, id.to_string(), spoken, crate::google::types::AlertUrgency::High);
     });
 }
 
-/// Only the short question "Do you want me to open all the apps you closed yesterday?", after the hello has finished.
-/// Nothing is said when there is nothing to reopen. The reply window arms once it has been spoken (`offer_` id).
-async fn ask_reopen_only<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std::path::Path, hello_spoken: bool) {
+/// The daily briefing, built and rendered while the hello plays.
+pub struct PreparedBriefing {
+    /// With its own greeting (nobody greeted before it).
+    pub full: String,
+    /// Without the greeting (the hello already said it).
+    pub after_hello: String,
+    pub offers_restore: bool,
+    pub items: usize,
+    pub session: bool,
+    pub health: bool,
+    pub overnight: bool,
+    /// Both texts are in the memory cache: they play with nothing to synthesise.
+    pub audio_ready: bool,
+}
+
+async fn prepare_briefing<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    dir: &std::path::Path,
+    snapshot: Vec<ResumeEntry>,
+    overnight: Option<crate::agent_outcomes::Record>,
+) -> Option<PreparedBriefing> {
+    let started = std::time::Instant::now();
+    let cap = std::time::Duration::from_secs(GATHER_CAP_SECS);
+    let events_fut = async {
+        if super::flag(dir, "memcoreMail", true) {
+            tokio::time::timeout(cap, today_events()).await.unwrap_or_default()
+        } else {
+            vec![]
+        }
+    };
+    let session_fut = async {
+        if super::flag(dir, "memcoreSession", true) {
+            let d = dir.to_path_buf();
+            let now = chrono::Utc::now().timestamp();
+            tokio::time::timeout(cap, tauri::async_runtime::spawn_blocking(move || session_offer(&d, now)))
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .flatten()
+        } else {
+            None
+        }
+    };
+    let health_fut = async {
+        if super::flag(dir, "memcoreHealth", true) {
+            // Health never delays the hello; it only decorates the details, so it gets a cap too.
+            tokio::time::timeout(cap * 2, super::health::run(app, dir)).await.unwrap_or_default()
+        } else {
+            super::health::Report::default()
+        }
+    };
+    let (events, session, health) = tokio::join!(events_fut, session_fut, health_fut);
+    // The varied question of today (the overnight variant has its own fixed wording).
+    let question = match (&session, &overnight) {
+        (Some(s), None) => {
+            let day = day_phrase(chrono::Utc::now().timestamp(), s.left_at);
+            let d = dir.to_path_buf();
+            tauri::async_runtime::spawn_blocking(move || super::phrase_bank::reopen_question(&d, &day)).await.ok()
+        }
+        _ => None,
+    };
+    let input = gather(app, dir, snapshot, events, session, question, health, overnight);
+    let briefing = build(&input)?;
+    let full = briefing.spoken.clone();
+    let after_hello = without_greeting(&briefing.spoken, input.hour, input.name.as_deref(), input.friend);
+    // Rendered into the MEMORY cache only (mail subjects and calendar items must never reach the disk cache).
+    let (a, b) = if after_hello == full {
+        let ok = crate::tts::prepare_private_line(app, &full).await;
+        (ok, ok)
+    } else {
+        tokio::join!(crate::tts::prepare_private_line(app, &full), crate::tts::prepare_private_line(app, &after_hello))
+    };
+    println!("[BOOT] briefing prepared in {} ms (voice ready: {})", started.elapsed().as_millis(), a && b);
+    Some(PreparedBriefing {
+        full,
+        after_hello,
+        offers_restore: briefing.offers_restore,
+        items: briefing.items,
+        session: input.session.is_some(),
+        health: input.health_spoken.is_some(),
+        overnight: input.overnight.is_some(),
+        audio_ready: a && b,
+    })
+}
+
+/// The reopen question, worked out while the hello plays: what is left of the last session, the wording (different every
+/// time, see `phrase_bank`) and its audio rendered into the voice cache.
+pub struct PreparedReopen {
+    pub question: String,
+    /// The voice line is in the cache: it plays with nothing to synthesise.
+    pub audio_ready: bool,
+}
+
+async fn prepare_reopen<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std::path::Path) -> Option<PreparedReopen> {
     if !super::flag(dir, "memcoreSession", true) {
-        return;
+        return None;
     }
+    let started = std::time::Instant::now();
     let d = dir.to_path_buf();
     let now = chrono::Utc::now().timestamp();
     let offer = tokio::time::timeout(
@@ -829,12 +927,34 @@ async fn ask_reopen_only<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std
     .await
     .ok()
     .and_then(|r| r.ok())
-    .flatten();
-    let Some(offer) = offer else {
+    .flatten()?;
+    let day = day_phrase(now, offer.left_at);
+    let d2 = dir.to_path_buf();
+    let question = tauri::async_runtime::spawn_blocking(move || super::phrase_bank::reopen_question(&d2, &day)).await.ok()?;
+    let audio_ready = crate::tts::prepare_line(app, &question).await;
+    println!("[BOOT] reopen question prepared in {} ms (voice line ready: {audio_ready}): {question}", started.elapsed().as_millis());
+    crate::boot::mark_with("question_ready", &format!("voice line ready: {audio_ready}"));
+    Some(PreparedReopen { question, audio_ready })
+}
+
+/// Only the short question after the hello has finished. Nothing is said when there is nothing to reopen. The reply window arms
+/// once it has been spoken (`offer_` id). Prepared while the hello played, so it follows the hello without a gap.
+async fn ask_reopen_only<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    dir: &std::path::Path,
+    hello_spoken: bool,
+    prepared: Option<PreparedReopen>,
+    hello_over: std::time::Instant,
+    hello_started: std::time::Instant,
+) {
+    let _ = hello_started;
+    let Some(prepared) = prepared else {
         println!("[BOOT] no reopen question: nothing from the last session to bring back");
         return;
     };
-    if hello_spoken {
+    // The early hello (native player) is already over when `submit_hello` returned; a hello spoken through the speech policy
+    // is only handed over, so its end is waited for.
+    if hello_spoken && !crate::early_hello::played_this_run() {
         wait_until_quiet(20).await;
     }
     // Never replace a question that is already waiting for its answer (a shutdown, a confirmation).
@@ -842,10 +962,12 @@ async fn ask_reopen_only<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std
         println!("[BOOT] no reopen question: another question is waiting");
         return;
     }
-    let question = reopen_question(&day_phrase(now, offer.left_at), now as u64);
-    println!("[BOOT] reopen question: {question}");
+    let _ = dir;
+    println!("[BOOT] reopen question: {} (voice line ready: {})", prepared.question, prepared.audio_ready);
     super::offer::set(super::offer::Offer::ReopenSession, false);
-    crate::proactive_policy::submit(app, "offer_boot_session".to_string(), question, crate::google::types::AlertUrgency::High);
+    println!("[BOOT] reopen question handed to speech {} ms after the hello ended", hello_over.elapsed().as_millis());
+    crate::boot::mark("question_handed");
+    crate::proactive_policy::submit(app, "offer_boot_session".to_string(), prepared.question, crate::google::types::AlertUrgency::High);
 }
 
 /// "Where did I leave off / show my briefing": built now from live data,
@@ -857,7 +979,7 @@ pub async fn on_demand<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std::
         .into_iter()
         .filter(|r| now - r.last_seen > CURRENT_WINDOW_SECS)
         .collect();
-    build(&gather(app, dir, resume, events, None, super::health::Report::default(), None))
+    build(&gather(app, dir, resume, events, None, None, super::health::Report::default(), None))
 }
 
 #[cfg(test)]
@@ -879,6 +1001,7 @@ mod tests {
             unfinished: vec![],
             events: vec![],
             session: None,
+            reopen_question: None,
             health_spoken: None,
             health_card: None,
             overnight: None,
@@ -1238,6 +1361,7 @@ mod session_greeting_tests {
             unfinished: vec![],
             events: vec![],
             session: None,
+            reopen_question: None,
             health_spoken: None,
             health_card: None,
             overnight: None,
@@ -1372,5 +1496,32 @@ mod session_greeting_tests {
             &SelfNames::none(),
         );
         assert_eq!(kept[0].sender, "Prof. Rao");
+    }
+
+    /// The daily briefing ends with the question chosen for today (varied wording), not the old fixed rotation.
+    #[test]
+    fn the_daily_briefing_ends_with_the_varied_question_it_was_given() {
+        let mut i = base();
+        i.session = Some(SessionOffer { summary: "Brave".into(), left_at: i.now - 3_600 });
+        i.reopen_question = Some("Shall I reopen everything, sir?".into());
+        let b = build(&i).expect("a briefing");
+        assert!(b.offers_restore);
+        assert!(b.spoken.ends_with("Shall I reopen everything, sir?"), "{}", b.spoken);
+        // without a chosen question the fixed rotation still produces a question (on-demand and older callers)
+        i.reopen_question = None;
+        let b2 = build(&i).expect("a briefing");
+        assert!(b2.spoken.ends_with('?'), "{}", b2.spoken);
+    }
+
+    /// The text that is prepared in advance for the daily briefing exists in two forms (with and without its greeting) and
+    /// the one without really is the other minus the hello.
+    #[test]
+    fn the_briefing_without_its_greeting_is_the_same_text_minus_the_hello() {
+        let mut i = base();
+        i.session = Some(SessionOffer { summary: "Brave".into(), left_at: i.now - 3_600 });
+        i.reopen_question = Some("Want me to pick up where you left off?".into());
+        let b = build(&i).expect("a briefing");
+        let after = without_greeting(&b.spoken, i.hour, i.name.as_deref(), i.friend);
+        assert!(b.spoken.ends_with(&after) && after.len() < b.spoken.len() && !after.starts_with("Welcome"), "{} | {after}", b.spoken);
     }
 }

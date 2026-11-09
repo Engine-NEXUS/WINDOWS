@@ -25,6 +25,46 @@ pub fn first_audio() {
     FIRST_AUDIO.call_once(|| mark("first_audio"));
 }
 
+/// The next sound that starts playing gets this mark (used to time "line handed to speech" -> "audio is audible").
+static NEXT_AUDIO_MARK: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn mark_next_audio(name: &str) {
+    if let Ok(mut g) = NEXT_AUDIO_MARK.lock() {
+        *g = Some(name.to_string());
+    }
+}
+
+/// Called by the player the moment a sound starts: writes the pending mark, if any.
+pub fn audio_started() {
+    let pending = NEXT_AUDIO_MARK.lock().ok().and_then(|mut g| g.take());
+    if let Some(name) = pending {
+        mark(&name);
+    }
+}
+
+/// Milliseconds between the last `from` mark of `pid` and the first `to` mark after it, from the timeline text. Pure.
+pub fn gap_ms(timeline: &str, pid: u32, from: &str, to: &str) -> Option<i64> {
+    let marks: Vec<(u64, String)> = timeline
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["pid"].as_u64() == Some(pid as u64))
+        .filter_map(|v| Some((v["at"].as_u64()?, v["mark"].as_str()?.to_string())))
+        .collect();
+    let start = marks.iter().rposition(|(_, m)| m == from)?;
+    let end = marks[start..].iter().find(|(_, m)| m == to)?;
+    Some(end.0 as i64 - marks[start].0 as i64)
+}
+
+/// The mark a mark is measured from, for the spoken boot sequence.
+fn reference_for(name: &str) -> Option<&'static str> {
+    match name {
+        "question_audio_start" | "briefing_audio_start" => Some("hello_end"),
+        "ack_audio_start" | "apps_started" => Some("yes_received"),
+        "apps_done" => Some("apps_started"),
+        _ => None,
+    }
+}
+
 const TIMELINE_FILE: &str = "boot_timeline.jsonl";
 const TIMELINE_MAX_LINES: usize = 300;
 
@@ -161,11 +201,38 @@ pub fn mark_with(name: &str, note: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{line}");
     }
+    if let Some(from) = reference_for(name) {
+        if let Some(ms) = std::fs::read_to_string(&path).ok().and_then(|t| gap_ms(&t, std::process::id(), from, name)) {
+            println!("[BOOT-TIMING] {from} -> {name}: {ms} ms");
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_gap_between_two_marks_is_read_from_the_timeline_of_the_same_process() {
+        let line = |at: u64, pid: u32, m: &str| format_mark(at, pid, m, Some(1), "");
+        let t = [
+            line(1_000, 7, "hello_end"),
+            line(1_050, 9, "question_audio_start"), // another process: ignored
+            line(1_320, 7, "question_audio_start"),
+            line(2_000, 7, "yes_received"),
+            line(2_090, 7, "ack_audio_start"),
+        ]
+        .join("\n");
+        assert_eq!(gap_ms(&t, 7, "hello_end", "question_audio_start"), Some(320));
+        assert_eq!(gap_ms(&t, 7, "yes_received", "ack_audio_start"), Some(90));
+        assert_eq!(gap_ms(&t, 7, "yes_received", "apps_done"), None, "no such mark yet");
+        // a second run: the LAST start mark counts
+        let t2 = format!("{t}\n{}\n{}", line(5_000, 7, "hello_end"), line(5_100, 7, "question_audio_start"));
+        assert_eq!(gap_ms(&t2, 7, "hello_end", "question_audio_start"), Some(100));
+        assert_eq!(reference_for("question_audio_start"), Some("hello_end"));
+        assert_eq!(reference_for("apps_done"), Some("apps_started"));
+        assert_eq!(reference_for("hello_end"), None);
+    }
 
     #[test]
     fn profile_is_reused_when_the_build_type_is_unchanged() {
