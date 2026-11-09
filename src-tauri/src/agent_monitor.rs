@@ -858,6 +858,15 @@ fn read_settings(dir: &std::path::Path) -> Cfg {
 }
 
 /// The snapshot the island draws: sessions the user is watching are left out; permission requests never are.
+/// Session keys ("claude:<id>") of the agents whose window the user is looking at right now.
+static WATCHED_NOW: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Is the user looking at this agent's window right now? (Used to stay quiet about an agent they are watching finish.)
+pub fn is_watched_agent(agent_name: &str) -> bool {
+    let prefix = format!("{agent_name}:");
+    WATCHED_NOW.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|k| k.starts_with(&prefix))
+}
+
 fn island_view(snap: &Snapshot, watched: &std::collections::BTreeSet<String>) -> Snapshot {
     let sessions: Vec<SessionView> = snap.sessions.iter().filter(|s| !watched.contains(&s.key)).cloned().collect();
     Snapshot { running: sessions.len(), at_ms: snap.at_ms, sessions, approvals: snap.approvals.clone() }
@@ -969,6 +978,7 @@ pub fn start(app: tauri::AppHandle) {
                         tracing::info!("agent island: watching {:?}; showing {:?}", next, keys.iter().filter(|k| !next.contains(*k)).collect::<Vec<_>>());
                     }
                     watched = next;
+                    *WATCHED_NOW.lock().unwrap_or_else(|e| e.into_inner()) = watched.iter().cloned().collect();
                 }
             } else {
                 watched.clear();

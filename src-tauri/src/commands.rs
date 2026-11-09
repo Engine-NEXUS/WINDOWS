@@ -2035,7 +2035,7 @@ fn default_agent_monitor_display() -> String {
 }
 
 fn default_agent_monitor_welcome_after_min() -> u32 {
-    20
+    0 // 0 = "While you were away" only after the PC slept
 }
 
 fn default_agent_island_scale() -> f64 {
@@ -4382,13 +4382,13 @@ mod nexus_settings_tests {
         let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
         assert!(parsed.agent_monitor && parsed.agent_monitor_hover, "the island is on by default");
         assert_eq!(parsed.agent_monitor_display, "stay-awake", "blanking the display is opt-in");
-        assert_eq!(parsed.agent_monitor_welcome_after_min, 20);
+        assert_eq!(parsed.agent_monitor_welcome_after_min, 0);
         assert!(parsed.agent_island_hide_watched, "agents you are looking at stay off the island by default");
         assert_eq!(parsed.agent_island_scale, 0.75);
         let back = serde_json::to_value(&parsed).unwrap();
         assert_eq!(back.get("agentMonitor"), Some(&serde_json::json!(true)));
         assert_eq!(back.get("agentMonitorDisplay"), Some(&serde_json::json!("stay-awake")));
-        assert_eq!(back.get("agentMonitorWelcomeAfterMin"), Some(&serde_json::json!(20)));
+        assert_eq!(back.get("agentMonitorWelcomeAfterMin"), Some(&serde_json::json!(0)));
         assert_eq!(back.get("agentIslandScale"), Some(&serde_json::json!(0.75)));
         assert_eq!(back.get("agentIslandHideWatched"), Some(&serde_json::json!(true)));
         // a patch from the Command Hub changes only its keys

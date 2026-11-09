@@ -120,8 +120,27 @@ pub fn push(log: &mut Vec<Entry>, entry: Entry, now: i64) {
     }
 }
 
+/// How the entries are worded when the user is back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Form {
+    /// The PC slept (or the absence was long): "While you were away, sir: Claude Code has finished."
+    WhileAway,
+    /// The user was only idle at the PC: "Claude Code has finished, sir."
+    Plain,
+}
+
+/// Which wording a return gets: "While you were away" only when the PC went to sleep during the absence (or, when the
+/// setting asks for it, the absence lasted `welcome_after_min` minutes or more; 0 = sleep only).
+pub fn form_for(slept: bool, away_ms: u64, welcome_after_min: u32) -> Form {
+    if slept || (welcome_after_min > 0 && away_ms >= u64::from(welcome_after_min) * 60_000) {
+        Form::WhileAway
+    } else {
+        Form::Plain
+    }
+}
+
 /// The sentence spoken when the user is back, or `None` when there is nothing to say.
-pub fn summary(log: &[Entry], now: i64) -> Option<String> {
+pub fn summary(log: &[Entry], now: i64, form: Form) -> Option<String> {
     let fresh: Vec<&Entry> = log.iter().filter(|e| now - e.at >= 0 && now - e.at <= MAX_AGE_SECS).collect();
     if fresh.is_empty() {
         return None;
@@ -131,11 +150,14 @@ pub fn summary(log: &[Entry], now: i64) -> Option<String> {
     needs.extend(rest);
     let shown: Vec<&str> = needs.iter().take(6).map(|e| e.text.as_str()).collect();
     let more = needs.len().saturating_sub(shown.len());
-    let mut s = format!("While you were away, sir: {}", shown.join(". "));
+    let mut s = match form {
+        Form::WhileAway => format!("While you were away, sir: {}", shown.join(". ")),
+        Form::Plain => shown.join(". "),
+    };
     if more > 0 {
         s.push_str(&format!(". And {more} more"));
     }
-    s.push('.');
+    s.push_str(if form == Form::Plain { ", sir." } else { "." });
     Some(s)
 }
 
@@ -166,10 +188,17 @@ pub fn take_entries(dir: &std::path::Path) -> Vec<Entry> {
     log
 }
 
-/// Whether a user who was away for `away_ms` gets a spoken welcome-back summary. A short absence is told quietly
-/// (a toast per agent, no speech, no greeting): `agentMonitorWelcomeAfterMin`, default 20 minutes.
-pub fn welcome_due(away_ms: u64, welcome_after_min: u32) -> bool {
-    away_ms >= u64::from(welcome_after_min) * 60_000
+/// When the PC last woke from sleep (unix ms; 0 = not since the app started).
+static SLEEP_ENDED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The PC just woke from sleep (called by the sleep-wake watcher).
+pub fn note_sleep(now_ms: u64) {
+    SLEEP_ENDED_MS.store(now_ms, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Did the PC wake from sleep after `t_ms`? (A sleep during an absence that began at `t_ms`.)
+pub fn slept_since(t_ms: u64) -> bool {
+    SLEEP_ENDED_MS.load(std::sync::atomic::Ordering::SeqCst) > t_ms
 }
 
 fn welcome_after_min(dir: &std::path::Path) -> u32 {
@@ -189,6 +218,16 @@ fn idle_ms() -> Option<u64> {
 /// Pure: whether the user is currently away from the PC based on idle duration.
 pub fn is_away(idle_ms: Option<u64>) -> bool {
     idle_ms.map_or(false, |i| i >= AWAY_MS)
+}
+
+/// The plain line for an agent that finished while you are at the PC.
+pub fn finished_line(label: &str) -> String {
+    format!("{label} has finished, sir.")
+}
+
+/// Pure: whether a finish is spoken to a user who is at the PC: not when they are looking at that agent right now.
+pub fn finish_is_spoken(user_is_watching_that_agent: bool) -> bool {
+    !user_is_watching_that_agent
 }
 
 /// Pure: whether an agent alert toast should be published (only when user is present, so the away summary is not duplicated).
@@ -261,6 +300,15 @@ pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                         } else if should_publish_toast(away) {
                             let cwd = agent_hooks::last_cwd(*a);
                             crate::notify_hub::publish_agent(&app, a.name(), a.label(), cwd.as_deref(), false, stop);
+                            // You are at the PC: say it plainly, unless you are looking at that agent right now.
+                            if finish_is_spoken(crate::agent_monitor::is_watched_agent(a.name())) {
+                                crate::proactive_policy::submit(
+                                    &app,
+                                    format!("agent_done_{}_{}", a.name(), stop),
+                                    finished_line(a.label()),
+                                    crate::google::types::AlertUrgency::High,
+                                );
+                            }
                         }
                     }
                 }
@@ -269,27 +317,29 @@ pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                 away_since = Some(now);
             }
             if was_away && !away {
-                let away_ms = away_since.take().map_or(0, |t| now.saturating_sub(t));
-                // the user is back: tell it once, after the hello if there is one
+                let away_start = away_since.take();
+                let away_ms = away_start.map_or(0, |t| now.saturating_sub(t));
+                let slept = away_start.map_or(false, slept_since);
+                // the user is back: tell it once
                 tokio::time::sleep(Duration::from_secs(4)).await;
+                if slept {
+                    // the PC woke from sleep: "Welcome back" comes first, then what the agents did (the hello waits
+                    // for you to be at the keyboard, so wait for it, bounded)
+                    let waited = std::time::Instant::now();
+                    while crate::memcore::briefing::resume_hello_pending() && waited.elapsed() < Duration::from_secs(60) {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                }
                 let entries = take_entries(&dir);
-                if welcome_due(away_ms, welcome_after_min(&dir)) {
-                    // away long enough for a welcome-back: the spoken summary
-                    if let Some(line) = summary(&entries, chrono::Utc::now().timestamp()) {
-                        crate::proactive_policy::submit(
-                            &app,
-                            format!("agent_away_{}", chrono::Utc::now().timestamp()),
-                            line,
-                            crate::google::types::AlertUrgency::High,
-                        );
-                    }
-                } else {
-                    // a short absence: no welcome and no speech, one quiet toast per agent
-                    for e in &entries {
-                        let Some(agent) = ALL_AGENTS.iter().find(|a| a.label() == e.label) else { continue };
-                        let needs = e.text.contains("needs your input") || e.text.contains("permission");
-                        crate::notify_hub::publish_agent(&app, agent.name(), agent.label(), agent_hooks::last_cwd(*agent).as_deref(), needs, now);
-                    }
+                let form = form_for(slept, away_ms, welcome_after_min(&dir));
+                if let Some(line) = summary(&entries, chrono::Utc::now().timestamp(), form) {
+                    crate::proactive_policy::submit(
+                        &app,
+                        format!("agent_away_{}", chrono::Utc::now().timestamp()),
+                        line,
+                        crate::google::types::AlertUrgency::High,
+                    );
                 }
             }
             was_away = away;
@@ -316,13 +366,33 @@ mod tests {
     const T: u64 = 1_000_000;
 
     #[test]
-    fn a_welcome_back_needs_a_long_enough_absence() {
+    fn while_you_were_away_is_said_only_after_a_sleep_unless_the_setting_asks_for_long_absences() {
         let min = 60_000;
-        assert!(!welcome_due(19 * min + 59_000, 20), "under 20 minutes: no welcome");
-        assert!(welcome_due(20 * min, 20), "20 minutes: welcome");
-        assert!(welcome_due(3 * 60 * min, 20));
-        assert!(welcome_due(0, 0), "0 means always welcome");
-        assert!(!welcome_due(0, 20));
+        assert_eq!(form_for(false, 3 * min, 0), Form::Plain, "idle at the PC for 3 minutes: plain");
+        assert_eq!(form_for(false, 5 * 60 * min, 0), Form::Plain, "setting 0: even hours awake at the PC stay plain");
+        assert_eq!(form_for(true, 40 * min, 0), Form::WhileAway, "the PC slept");
+        assert_eq!(form_for(true, 1_000, 0), Form::WhileAway, "any sleep counts");
+        assert_eq!(form_for(false, 19 * min, 20), Form::Plain);
+        assert_eq!(form_for(false, 20 * min, 20), Form::WhileAway, "the setting can also ask for a long absence");
+    }
+
+    #[test]
+    fn a_sleep_is_noticed_only_if_it_ended_after_the_absence_began() {
+        note_sleep(5_000);
+        assert!(slept_since(4_000), "woke after the absence began");
+        assert!(!slept_since(5_000));
+        assert!(!slept_since(9_000), "an earlier sleep does not count");
+    }
+
+    #[test]
+    fn plain_and_while_away_wordings() {
+        let log = vec![Entry { at: 100, label: "Claude Code".into(), text: "Claude Code has finished".into() }];
+        assert_eq!(summary(&log, 120, Form::Plain).as_deref(), Some("Claude Code has finished, sir."));
+        assert_eq!(summary(&log, 120, Form::WhileAway).as_deref(), Some("While you were away, sir: Claude Code has finished."));
+        assert_eq!(summary(&[], 120, Form::Plain), None);
+        assert_eq!(finished_line("Claude Code"), "Claude Code has finished, sir.");
+        assert!(finish_is_spoken(false), "you are at the PC and not looking at it: say it");
+        assert!(!finish_is_spoken(true), "you are looking at that agent: stay quiet");
     }
 
     #[test]
@@ -399,14 +469,14 @@ mod tests {
         push(&mut log, entry(120, "Codex", "Codex finished clean"), 120); // it was answered and finished
         push(&mut log, entry(130, "OpenCode", "OpenCode needs your input"), 130);
         assert_eq!(log.len(), 3, "one line per agent");
-        let s = summary(&log, 200).unwrap();
+        let s = summary(&log, 200, Form::WhileAway).unwrap();
         assert_eq!(s, "While you were away, sir: OpenCode needs your input. Claude Code finished clean. Codex finished clean.");
     }
 
     #[test]
     fn an_empty_or_old_log_says_nothing() {
-        assert_eq!(summary(&[], 100), None);
-        assert_eq!(summary(&[entry(0, "Codex", "Codex finished clean")], MAX_AGE_SECS + 1), None);
+        assert_eq!(summary(&[], 100, Form::WhileAway), None);
+        assert_eq!(summary(&[entry(0, "Codex", "Codex finished clean")], MAX_AGE_SECS + 1, Form::WhileAway), None);
     }
 
     #[test]
@@ -415,7 +485,7 @@ mod tests {
         for i in 0..8 {
             push(&mut log, entry(100 + i, &format!("A{i}"), &format!("A{i} finished clean")), 100 + i);
         }
-        let s = summary(&log, 200).unwrap();
+        let s = summary(&log, 200, Form::WhileAway).unwrap();
         assert!(s.ends_with("And 2 more."), "{s}");
     }
 
@@ -430,7 +500,7 @@ mod tests {
         remember(&dir, "Claude Code", "Claude Code finished clean");
         remember(&dir, "Codex", &needs_fragment("Codex"));
         let entries = take_entries(&dir);
-        let said = summary(&entries, chrono::Utc::now().timestamp()).expect("something to say");
+        let said = summary(&entries, chrono::Utc::now().timestamp(), Form::WhileAway).expect("something to say");
         assert!(said.starts_with("While you were away, sir: Codex needs your input."), "{said}");
         assert!(take_entries(&dir).is_empty(), "told once");
         let _ = std::fs::remove_dir_all(&dir);

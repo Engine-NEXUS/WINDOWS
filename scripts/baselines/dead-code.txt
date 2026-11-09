@@ -21,7 +21,6 @@ browser_center.rs: constant ACTIONS
 browser_center.rs: function read_page_markdown
 browser_center.rs: function to_intent
 calibration.rs: function wheel_step
-center.rs: constant ALL_SUB_CENTERS
 center.rs: enum ConfirmKind
 center.rs: field decoder_bias
 center.rs: field language

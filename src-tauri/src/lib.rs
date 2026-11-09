@@ -803,6 +803,7 @@ pub fn run() {
                             tracing::info!("system resumed from sleep (gap {gap:?})");
                             // The renderer was frozen: do not call its stale heartbeat a blackout.
                             stage::note_resume();
+                            agent_attention::note_sleep(agent_hooks::now_ms());
                             // Speech that was in flight when the machine went to sleep must not play hours later.
                             orchestrator::request_barge_in("resume-from-sleep");
                             memcore::briefing::on_resume(app_for_resume.clone(), gap.as_secs());

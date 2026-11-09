@@ -16,7 +16,7 @@ const DEFAULTS: IslandSettings = {
   agentMonitor: true,
   agentMonitorHover: true,
   agentMonitorDisplay: "stay-awake",
-  agentMonitorWelcomeAfterMin: 20,
+  agentMonitorWelcomeAfterMin: 0,
   agentAutoHook: true,
   agentIslandHideWatched: true,
   agentIslandScale: SCALE_DEFAULT,
@@ -125,8 +125,8 @@ export function AgentIslandSection() {
       </label>
       <label className="setting-row">
         <div>
-          <div className="setting-label">Welcome back after</div>
-          <div className="setting-desc">Minutes away before NEXUS speaks a summary of what your agents did. A shorter absence is told quietly.</div>
+          <div className="setting-label">"While you were away" also after</div>
+          <div className="setting-desc">NEXUS says "While you were away" when the PC went to sleep. Set minutes here to also say it after a long absence without sleep; 0 = only after sleep. Otherwise it simply says "Claude Code has finished, sir."</div>
         </div>
         <input
           type="number"
