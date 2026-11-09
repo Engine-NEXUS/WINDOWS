@@ -169,6 +169,20 @@
   /* The orb pouch: black in Dark, near-white in Light, like the classic capsule (the particles turn to black ink in Light). */
   --orb-surface:         #000000;
   --stage-shadow-lg:     0 10px 34px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.14);
+  /* The Agent Island code pane: a darker well with a small fixed syntax palette and diff colours (always dark,
+     like every stage surface). */
+  --stage-code-bg:       #0d0e12;
+  --stage-linenum:       #4b5160;
+  --stage-syn-kw:        #c792ea;
+  --stage-syn-str:       #a5e075;
+  --stage-syn-num:       #f78c6c;
+  --stage-syn-fn:        #82aaff;
+  --stage-syn-type:      #ffcb6b;
+  --stage-syn-com:       #6b7280;
+  --stage-diff-add-bg:   #11301f;
+  --stage-diff-add-bar:  #2ea043;
+  --stage-diff-del-bg:   #3a1618;
+  --stage-diff-del-bar:  #e5534b;
 
   /* ── Typography ─────────────────────────────────────────────── */
   --nx-font: -apple-system, "Segoe UI", "Inter", Roboto, sans-serif;
