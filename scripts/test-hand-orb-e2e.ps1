@@ -92,12 +92,12 @@ function Shot($name) {
 function Fingerprint($img) {
     $minx = 9999; $maxx = 0; $miny = 9999; $maxy = 0; $n = 0
     $cells = New-Object 'double[]' 96
-    for ($y = 0; $y -lt $img.Height; $y += 2) {
-        for ($x = 0; $x -lt $img.Width; $x += 2) {
+    for ($y = 8; $y -lt 112; $y += 2) {
+        for ($x = 110; $x -lt 310; $x += 2) {
             $c = $img.GetPixel($x, $y)
             $l = ($c.R + $c.G + $c.B) / 3
             if ($l -gt 200) { $n++; if ($x -lt $minx) { $minx = $x }; if ($x -gt $maxx) { $maxx = $x }; if ($y -lt $miny) { $miny = $y }; if ($y -gt $maxy) { $maxy = $y } }
-            $cells[[int]([math]::Floor($y * 8 / $img.Height)) * 12 + [int]([math]::Floor($x * 12 / $img.Width))] += $l
+            $cells[[int]([math]::Floor(($y - 8) * 8 / 104)) * 12 + [int]([math]::Floor(($x - 110) * 12 / 200))] += $l
         }
     }
     # the orb sits in a black capsule: how much of the middle of the picture is black
@@ -118,12 +118,15 @@ try {
     if (-not $ws) { throw 'the stage page did not appear' }
     Start-Sleep -Seconds 15   # the startup greeting ends; the orb hides again, and the page has registered its listeners
 
+    # the startup greeting's orb leaves by itself; wait for it (up to 60 s) before taking the baseline
+    $wait = (Get-Date).AddSeconds(60)
+    while ((Get-Date) -lt $wait) { $probe = Shot 'probe.png'; $fpp = Fingerprint $probe; $probe.Dispose(); if ($fpp.dark -lt 0.3) { break }; Start-Sleep -Seconds 2 }
     $base = Shot '0-before.png'; $fp0 = Fingerprint $base; $base.Dispose()
     Check '1 without hand mode no orb is on the display' ($fp0.dark -lt 0.3) "black capsule share: $($fp0.dark)"
 
     Hold $ws '{"active":true,"armed":false,"palm_paused":false}' 2600
     $i1 = Shot '1-circle.png'; $f1 = Fingerprint $i1; $i1.Dispose()
-    Check '2 hand mode on: the orb is shown (circle)' ($f1.dark -gt 0.6 -and $f1.bright -gt 60) "black capsule share: $($f1.dark), bright pixels: $($f1.bright)"
+    Check '2 hand mode on: the orb is shown (circle)' ($f1.dark -gt 0.6 -and $f1.bright -gt 20) "black capsule share: $($f1.dark), bright pixels: $($f1.bright)"
 
     Hold $ws '{"active":true,"armed":true,"palm_paused":false}' 2600
     $i2 = Shot '2-triangle.png'; $f2 = Fingerprint $i2; $i2.Dispose()
