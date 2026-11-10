@@ -131,8 +131,10 @@
     "fetched": "2026-11-07"
   },
   "gemini": {
-    "source": "existing (theSVG / Iconify / Lobe Icons / NEXUS)",
-    "sha256": "2bbf76d70a46c5232054f7ba11cc8cd4ffed5044c13fb2910c7f643ca0f12f5d"
+    "source": "Simple Icons star path with the official blue-purple-red Gemini gradient",
+    "domain": "gemini.google.com",
+    "fetched": "2026-11-10",
+    "sha256": "bd9c90ceedb8075e8f2a557b8abbf2cd23360b1df5c19999c3046b67fae53951"
   },
   "genericapp": {
     "source": "existing (theSVG / Iconify / Lobe Icons / NEXUS)",
@@ -209,8 +211,11 @@
     "fetched": "2026-11-07"
   },
   "kilo": {
-    "source": "existing (theSVG / Iconify / Lobe Icons / NEXUS)",
-    "sha256": "d49d590b9d13917d0fb2ca6396fa325c51fdcf5edfe317255f615df1e37cc054"
+    "source": "official site favicon",
+    "url": "https://kilocode.ai/favicon.svg",
+    "domain": "kilocode.ai",
+    "fetched": "2026-11-10",
+    "sha256": "729bf088d9a114d567f133acf36f613cabd83662e4616afcea5ea403e87be8d2"
   },
   "linkedin": {
     "source": "existing (theSVG / Iconify / Lobe Icons / NEXUS)",
