@@ -225,6 +225,18 @@ pub fn finished_line(label: &str) -> String {
     format!("{label} has finished, sir.")
 }
 
+/// A turn shorter than this is a chat reply, not a task: an interactive agent stops after every answer, and telling
+/// "finished" each time would repeat itself all day.
+pub const MIN_TASK_MS: u64 = 45_000;
+/// After a finish is told for an agent, the next one waits at least this long.
+pub const TELL_COOLDOWN_MS: u64 = 180_000;
+
+/// Pure: is this finish worth telling? `turn_ms` = how long the turn that just ended ran (None = unknown start, assumed a
+/// task); `since_told_ms` = time since the last finish told for this agent (None = never).
+pub fn finish_worth_telling(turn_ms: Option<u64>, since_told_ms: Option<u64>) -> bool {
+    turn_ms.map_or(true, |t| t >= MIN_TASK_MS) && since_told_ms.map_or(true, |s| s >= TELL_COOLDOWN_MS)
+}
+
 /// Pure: whether a finish is spoken to a user who is at the PC: not when they are looking at that agent right now.
 pub fn finish_is_spoken(user_is_watching_that_agent: bool) -> bool {
     !user_is_watching_that_agent
@@ -255,6 +267,7 @@ pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
         let mut away_since: Option<u64> = None;
         let mut stops: BTreeMap<&'static str, u64> = BTreeMap::new();
         let mut toasted: BTreeMap<&'static str, u64> = BTreeMap::new();
+        let mut told: BTreeMap<&'static str, u64> = BTreeMap::new();
         loop {
             tokio::time::sleep(POLL).await;
             let now = agent_hooks::now_ms();
@@ -294,7 +307,14 @@ pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                 let Some(stop) = agent_hooks::last_event_ms(*a, agent_hooks::EventKind::Stop).filter(|t| *t > started) else { continue };
                 if stops.get(a.name()).map_or(true, |seen| stop > *seen) {
                     stops.insert(a.name(), stop);
-                    if agent_hooks::stop_is_latest(*a, started) {
+                    // how long the turn that just ended ran (stop minus the prompt that began it)
+                    let turn_ms = agent_hooks::last_event_ms(*a, agent_hooks::EventKind::Start).filter(|s| *s <= stop).map(|s| stop - s);
+                    let worth = finish_worth_telling(turn_ms, told.get(a.name()).map(|t| stop.saturating_sub(*t)));
+                    if !worth {
+                        println!("[AGENT] {} stop not told: turn {:?} ms (task needs {} ms), cooldown {} ms", a.name(), turn_ms, MIN_TASK_MS, TELL_COOLDOWN_MS);
+                    }
+                    if worth && agent_hooks::stop_is_latest(*a, started) {
+                        told.insert(a.name(), stop);
                         if away {
                             remember(&dir, a.label(), &format!("{} has finished", a.label()));
                         } else if should_publish_toast(away) {
@@ -382,6 +402,27 @@ mod tests {
         assert!(slept_since(4_000), "woke after the absence began");
         assert!(!slept_since(5_000));
         assert!(!slept_since(9_000), "an earlier sleep does not count");
+    }
+
+    #[test]
+    fn a_finish_is_told_for_a_task_not_for_every_chat_reply_and_not_again_within_the_cooldown() {
+        let s = 1_000;
+        assert!(!finish_worth_telling(Some(10 * s), None), "a ten-second reply is a chat answer");
+        assert!(!finish_worth_telling(Some(44 * s), None));
+        assert!(finish_worth_telling(Some(45 * s), None), "a 45 second turn is a task");
+        assert!(finish_worth_telling(None, None), "unknown start: assume a task");
+        assert!(!finish_worth_telling(Some(5 * 60 * s), Some(60 * s)), "told a minute ago: not again");
+        assert!(finish_worth_telling(Some(5 * 60 * s), Some(180 * s)), "the cooldown is over");
+        // three replies a minute apart: only the first long one is told
+        let mut told: Option<u64> = None;
+        let mut said = 0;
+        for (at, turn) in [(100 * s, 90 * s), (160 * s, 20 * s), (220 * s, 60 * s), (480 * s, 70 * s)] {
+            if finish_worth_telling(Some(turn), told.map(|t| at - t)) {
+                said += 1;
+                told = Some(at);
+            }
+        }
+        assert_eq!(said, 2, "the 100 s task and the 480 s task, not the short reply or the one inside the cooldown");
     }
 
     #[test]
