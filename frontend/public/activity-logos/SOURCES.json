@@ -8,8 +8,12 @@
     "sha256": "aa499b3b28532b4cfeb88002b2e964f177009898179c389cb2ca2d29ea694f1a"
   },
   "antigravity": {
-    "source": "existing (theSVG / Iconify / Lobe Icons / NEXUS)",
-    "sha256": "dbe6f08a095969a83e901c5d4fdf4000629cab93564649afcd28f9ab5bd2897a"
+    "source": "official site favicon",
+    "url": "https://antigravity.google/favicon.svg",
+    "domain": "antigravity.google",
+    "fetched": "2026-11-10",
+    "note": "background circle and dark-mode style removed, viewBox cropped to the mark",
+    "sha256": "d42fcfd9795b8f1eb11d94f7f482e6b460ac17111516a6b768072f850826d196"
   },
   "anydesk": {
     "source": "logoapi.sh",
