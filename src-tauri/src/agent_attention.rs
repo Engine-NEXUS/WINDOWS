@@ -308,7 +308,7 @@ pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                 if stops.get(a.name()).map_or(true, |seen| stop > *seen) {
                     stops.insert(a.name(), stop);
                     // how long the turn that just ended ran (stop minus the prompt that began it)
-                    let turn_ms = agent_hooks::last_event_ms(*a, agent_hooks::EventKind::Start).filter(|s| *s <= stop).map(|s| stop - s);
+                    let turn_ms = agent_hooks::turn_started_ms(*a, stop).map(|s| stop - s);
                     let worth = finish_worth_telling(turn_ms, told.get(a.name()).map(|t| stop.saturating_sub(*t)));
                     if !worth {
                         println!("[AGENT] {} stop not told: turn {:?} ms (task needs {} ms), cooldown {} ms", a.name(), turn_ms, MIN_TASK_MS, TELL_COOLDOWN_MS);
