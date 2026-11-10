@@ -43,7 +43,7 @@ jobs:
         run: node ../scripts/check-repo-hygiene.mjs
 
       - name: Logo files gate
-        run: node ../scripts/check-activity-icons.mjs
+        run: node ../scripts/check-activity-icons.mjs && node ../scripts/gen-icon-tiles.mjs --check
 
       # Every text/surface pair of the design tokens, dark and light, against WCAG 2.2 AA.
       - name: Theme contrast gate
