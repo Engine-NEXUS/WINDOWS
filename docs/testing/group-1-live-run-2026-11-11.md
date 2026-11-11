@@ -113,6 +113,26 @@ Not run: the GitHub Actions workflow itself, any installer build, anything in th
 
 ---
 
+### 4.4 Start-up of the new build, 2026-11-11 18:21 IST (BOT)
+
+Release `edfa406ab1f4f62a` was started as PID 19892. The log's `[CAPTURE]` records carry the same build identity, so the running process is the build described above.
+
+| Check | Reading | Meaning for the run |
+|---|---|---|
+| Stage | `[BOOT] stage ready after 1s`; fitted to 1366x768 | OK |
+| Preflight layers 1 to 4 | all `[OK]`, 18 of 18 sub-centres registered, 668 apps loaded from cache | OK |
+| Hotkeys | Ctrl+Space, Ctrl+Shift+S, Ctrl+Alt+X registered | OK for 5.1 |
+| Online voice | Edge-TTS online, Kokoro on standby | OK for 5.4 |
+| Microphone | `Microphone (USB PnP Audio Device)`, probe RMS 0.000003; first capture `rms_max=0.0021 voiced=0/75` | **Near-silent.** Every spoken step needs a louder microphone or a higher input level in Windows first. |
+| Provider keys | Groq missing, Gemini missing, Cerebras missing | **Blocks 5.5 (9Router)** and cloud speech-to-text. Add at least a Groq key in the Hub. |
+| Cloud link | "This device isn't linked to the NEXUS cloud service yet. Ask the NEXUS admin to approve it" | **Blocks 5.9 steps b and c** until this device is approved. |
+| Memory, 32 s after start | 523.7 MB working set over 7 processes (`nexus.exe` 127.6 MB, six WebView2 processes 396.1 MB) | Under the 700 MB ceiling but well above the old build's settled 292.7 MB. To be re-read at five minutes idle for 5.8. |
+| Launcher | `nexus start` failed: it calls `pwsh` (PowerShell 7), which is not installed on this PC. The executable was started directly instead. | **Defect found.** `nexus start` needs a fallback when PowerShell 7 is absent. |
+
+Cards that can run on this PC as it stands: 5.1 (hotkey, without the spoken parts), 5.8, 5.10, 5.11, 5.12. Everything spoken waits for the microphone; 5.5 waits for a key; 5.9 waits for the device approval.
+
+---
+
 ## 5. The runs
 
 Each card has the same parts: what the run proves, the steps, what counts as a pass, what would fail it, and the result. Results stay **PENDING** until the run is done on the new build.
