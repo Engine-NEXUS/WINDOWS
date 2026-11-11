@@ -672,6 +672,15 @@ export function followUpTurnAction(opts: {
   return "none";
 }
 
+/**
+ * A cancel or a fresh call by the user (hotkey, wake word, tray) starts a new attempt: an earlier silent miss
+ * must not make the next silent press answer "I didn't hear you" straight away.
+ * Not called by the silent auto-relisten, which is the same attempt continuing.
+ */
+export function resetMissStreak(): void {
+  missStreak = 0;
+}
+
 /** Test hook: read/reset the streak without touching turn flow. */
 export function __testMissStreak(): number {
   return missStreak;

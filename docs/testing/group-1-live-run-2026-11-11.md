@@ -164,7 +164,14 @@ Each card has the same parts: what the run proves, the steps, what counts as a p
 **Pass:** all six behave as expected, and the log shows one `CALLING agent` or `CANCELING calling agent` line per press with the right state flags.
 **Fail:** a press is ignored, a cancelled answer is still spoken, the orb stays on screen, or the Hub closes.
 
-**Result:** PENDING
+**Result:** NOT PASSED on the first attempt (2026-11-11 23:09 IST, build `edfa406ab1f4f62a`). Steps a and b only; the owner reported "something went wrong" and has not yet described what was seen. The log shows four presses, each logged once with correct state flags, and three findings:
+
+| # | Time (UTC) | What the log shows | Finding |
+|---|---|---|---|
+| 1 | 17:39:22 to 17:39:28 | NEXUS spoke "Claude Code has finished, sir." (agent-finished alert), then opened the microphone by itself (capture session 6). The owner's first press 2.5 s later was therefore treated as a **cancel**, not a call. | An alert that asks nothing should not open the microphone. To the owner, the first press appears to do nothing. |
+| 2 | 17:39:30 to 17:39:44 | Press, call, 8 s of silence, then a second 8 s listening window started silently (session 9). | A silent press keeps the orb up for about 16 s, not 8 s. This is the designed one silent retry; the card's "hides by itself" expectation was too short. |
+| 3 | 17:39:46 to 17:39:55 | Press, call, 8 s of silence, then NEXUS said "I didn't hear you, sir." | The miss counter was not reset by the owner's cancel or by the new press, so a first silent press after an earlier miss is answered aloud. Step a expects no speech. |
+| 4 | 17:39:31 to 17:40:01 | The local speech engine failed to start: `ModuleNotFoundError: No module named 'moonshine_voice'`; "STT server did not become ready in 15s". | With no Groq key and no local engine, **no spoken command can be understood on this PC**. Steps c, d and f, and every spoken card, are blocked until one of the two is in place. |
 
 ### 5.2 Open / close / focus apps (#31)
 
@@ -437,7 +444,7 @@ Filled in as each card is run.
 
 | # | Feature | Result | Ledger line added | Notes |
 |---:|---|---|---|---|
-| 2 | Global hotkey Ctrl+Space | PENDING | no | |
+| 2 | Global hotkey Ctrl+Space | NOT PASSED (first attempt, steps a and b) | no | Mic opens by itself after an agent alert; miss counter survives a cancel; spoken steps blocked (no speech engine). See 5.1. |
 | 31 | Open / close / focus apps | PENDING | no | |
 | 14 | Wake-up sound | PENDING | no | |
 | 9 | Online voice (Edge TTS) | PENDING | no | |
