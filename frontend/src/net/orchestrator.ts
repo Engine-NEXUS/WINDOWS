@@ -17,6 +17,7 @@
  * independent decisions about loading state or ack timing.
  */
 
+import { replyNeedsInput } from "./replyNeedsInput";
 import { classifyConfirmReply, isConfirmExpired } from "./confirmReply";
 import { useAssistant } from "../store/assistant";
 import { speak, stopTts } from "../audio/ttsPlayer";
@@ -403,6 +404,8 @@ export function __testSetPendingSpeechCloseFor(id: string | null): void {
 export interface FinishSpokenResultOptions {
   replyWasError?: boolean;
   isLongRunning?: boolean;
+  /** The reply that was spoken: only a reply that asks something reopens the mic (a statement lets the orb leave). */
+  spokenText?: string;
 }
 
 /**
@@ -441,14 +444,20 @@ export function finishSpokenResult(spokenFor: string, opts?: FinishSpokenResultO
         void (async () => {
           const offerOpened = await openPendingOfferWindow();
           if (!offerOpened && !wasLongRunning && !opts?.replyWasError) {
-            const { isBargedIn } = await import("./wsBridge");
-            if (!isBargedIn()) {
-              const { openFollowUpWindow } = await import("./followUp");
-              await openFollowUpWindow({
-                offerWindowOpened: false,
-                replyWasError: false,
-                bargedIn: false,
-              });
+            if (replyNeedsInput(opts?.spokenText)) {
+              const { isBargedIn } = await import("./wsBridge");
+              if (!isBargedIn()) {
+                const { openFollowUpWindow } = await import("./followUp");
+                await openFollowUpWindow({
+                  offerWindowOpened: false,
+                  replyWasError: false,
+                  bargedIn: false,
+                });
+              }
+            } else {
+              // A statement or an explanation: spoken, and the orb leaves (it is idle now, so nothing holds it).
+              console.log("[TURN] reply is a statement: no follow-up listening, orb hides");
+              hideOrbAfterSpeech(300);
             }
           }
         })();
@@ -782,10 +791,10 @@ export async function initOrchestratorListener(): Promise<void> {
           const resultCenter = ev.source_center;
           const speakResult = () => {
             speak(resultText, () => {
-              finishSpokenResult(spokenFor);
+              finishSpokenResult(spokenFor, { spokenText: resultText });
             }, { requestId: spokenFor, sourceCenter: resultCenter, kind: speechKindForResult(spokenFor) }).catch((err) => {
               console.warn("[NEXUS] orchestrator: result TTS failed:", err);
-              finishSpokenResult(spokenFor);
+              finishSpokenResult(spokenFor, { spokenText: resultText });
             });
           };
           // An ack that is already audible finishes first; speaking stops whatever is playing.
