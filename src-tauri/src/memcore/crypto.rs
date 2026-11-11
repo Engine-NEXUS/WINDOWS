@@ -159,15 +159,46 @@ pub fn load_or_create_key() -> Option<Key> {
     }
 }
 
-/// New data key for crypto-erase on wipe. Returns it only if it persisted.
+/// New data key for crypto-erase on wipe, committed safely.
+///
+/// The key in the OS store and the key the sealed file was written with must never drift apart: a file sealed with a key
+/// that is no longer stored can not be opened on the next start. Order: store the new key, then let `commit` re-seal the
+/// file with it. If `commit` reports failure the OLD key is put back, so the file on disk (still sealed with the old
+/// key) stays readable. On success the process-wide key is updated too, so every other sealed file written later in
+/// this run uses the key the next start will find.
 #[allow(dead_code)]
-pub fn rotate_key() -> Option<Key> {
+pub fn rotate_key_with(commit: impl FnOnce(&Key) -> bool) -> Option<Key> {
+    let old = read_keyring();
     let k = generate_key()?;
-    store_keyring(&k).then_some(k)
+    if !store_keyring(&k) {
+        // The store may hold a half-written value; put the old key back if there was one.
+        if let Some(o) = old {
+            let _ = store_keyring(&o);
+        }
+        return None;
+    }
+    if !commit(&k) {
+        match old {
+            Some(o) if store_keyring(&o) => {
+                tracing::warn!("memcore: the re-sealed memory could not be written; kept the previous data key");
+            }
+            _ => tracing::warn!("memcore: the re-sealed memory could not be written and the previous data key could not be restored"),
+        }
+        return None;
+    }
+    #[cfg(not(test))]
+    {
+        *PROCESS_KEY.lock() = Some(k);
+    }
+    Some(k)
 }
 
-/// Process-wide key (resolved once). Tests get a fixed key so they never
-/// touch Credential Manager.
+#[cfg(not(test))]
+static PROCESS_KEY: once_cell::sync::Lazy<parking_lot::Mutex<Option<Key>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(load_or_create_key()));
+
+/// Process-wide key (resolved once, replaced only by a committed rotation).
+/// Tests get a fixed key so they never touch Credential Manager.
 pub fn process_key() -> Option<Key> {
     #[cfg(test)]
     {
@@ -175,9 +206,7 @@ pub fn process_key() -> Option<Key> {
     }
     #[cfg(not(test))]
     {
-        use once_cell::sync::Lazy;
-        static KEY: Lazy<Option<Key>> = Lazy::new(load_or_create_key);
-        *KEY
+        *PROCESS_KEY.lock()
     }
 }
 

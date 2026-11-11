@@ -58,6 +58,14 @@ jobs:
       - name: IPC + event contract gate
         run: node ../scripts/check-ipc-contract.mjs
 
+      # Panel windows must stay solid; a new window surface class has to be listed in window-opacity-registry.json.
+      - name: Window opacity gate
+        run: node ../scripts/check-window-opacity.mjs
+
+      # The feature work cards are generated from scorecard-data.json; a hand edit or a stale card fails.
+      - name: Work-card drift gate
+        run: node ../scripts/make-work-cards.mjs --check
+
       # The logon greeting is drawn natively from frames of the real dotted orb; a change to the orb engine must be re-baked.
       - name: Early orb frames up to date
         run: node ../scripts/bake-early-orb.mjs --check
