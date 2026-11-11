@@ -1770,6 +1770,11 @@ async fn process_transcript_inner<R: Runtime>(
             ParsedIntent::AiReviewThis => {
                 return run_ai_review_this(app).await;
             }
+            // Was only handled inside a Ghost session: outside one, a spoken "list my pull requests" was routed,
+            // logged and then did nothing at all, with no word spoken (live log 2026-11-11 20:47:45).
+            ParsedIntent::OpenGitHubDashboard { subpage } => {
+                return run_open_github_dashboard(app, subpage.clone()).await;
+            }
             _ => {}
         }
     }

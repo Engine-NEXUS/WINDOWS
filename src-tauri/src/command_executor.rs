@@ -247,6 +247,16 @@ fn plan_close(target: &str) -> ClosePlan {
     ClosePlan::Close { display, exe }
 }
 
+/// Process names an app really runs under when the registered executable is only a launcher.
+/// `calc.exe` starts the Store Calculator and exits, so "close calculator" found nothing to close
+/// (live log 2026-11-11 20:46:07) while its window was on screen.
+fn running_process_names(exe: &str) -> &'static [&'static str] {
+    match exe.to_ascii_lowercase().as_str() {
+        "calc.exe" => &["CalculatorApp.exe", "Calculator.exe"],
+        _ => &[],
+    }
+}
+
 /// Close an application by name. Windows: a polite `taskkill` (WM_CLOSE: the app can ask
 /// to save), never `/F` and never a name-substring kill. Unix: `pkill -x`.
 fn close_app(target: &str) -> Result<CommandResult, String> {
@@ -259,7 +269,15 @@ fn close_app(target: &str) -> Result<CommandResult, String> {
     {
         // Polite close: posts WM_CLOSE to the app's windows, so unsaved work gets its
         // "save changes?" prompt. (It used to be `/F`, which loses that work.)
-        let output = crate::no_window::command("taskkill").args(["/IM", &exe_name]).output();
+        // Some apps are started by a small launcher and run under another name; try the real one first.
+        let mut output = crate::no_window::command("taskkill").args(["/IM", &exe_name]).output();
+        for real in running_process_names(&exe_name) {
+            let tried = crate::no_window::command("taskkill").args(["/IM", real]).output();
+            if matches!(&tried, Ok(o) if o.status.success()) {
+                output = tried;
+                break;
+            }
+        }
         match output {
             Ok(o) if o.status.success() => {
                 tracing::info!("closed app '{}' ({})", app_name, exe_name);
@@ -1592,6 +1610,13 @@ pub(crate) mod urlencoding {
 #[cfg(test)]
 mod safe_url_tests {
     use super::*;
+
+    #[test]
+    fn calculator_is_closed_under_the_name_it_really_runs_as() {
+        assert_eq!(running_process_names("calc.exe"), ["CalculatorApp.exe", "Calculator.exe"]);
+        assert_eq!(running_process_names("CALC.EXE").len(), 2);
+        assert!(running_process_names("notepad.exe").is_empty());
+    }
 
     #[test]
     fn web_urls_pass() {
