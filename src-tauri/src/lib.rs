@@ -18,6 +18,7 @@ mod window_manager;
 pub(crate) mod turn_detect;
 pub(crate) mod turn_complete;
 pub(crate) mod turn_continue;
+pub(crate) mod turn_pending;
 pub(crate) mod barge_gate;
 pub(crate) mod barge_classify;
 // Silero VAD (Handy-derived) — used by the STT capture loop when "vadSilero" is on.

@@ -488,6 +488,8 @@ pub(crate) fn install_new_request(subsystem: Subsystem) -> (String, Arc<AtomicBo
 /// `has_active_request()` can't see it as busy while it's speaking.
 pub(crate) fn install_new_request_with_id(id: String, subsystem: Subsystem) -> Arc<AtomicBool> {
     let cancel_flag = Arc::new(AtomicBool::new(false));
+    // A request owns the pipeline from here; the "heard turn on its way" mark has done its job.
+    crate::turn_pending::clear();
 
     // Cancel the previous request
     let mut guard = ACTIVE_REQUEST.lock().unwrap();
@@ -904,6 +906,13 @@ pub async fn process_transcript<R: Runtime>(
 ) -> Result<ProcessResult, String> {
     if let Some(turn) = turn_context.as_ref() {
         crate::capture_audit::dispatch_received(turn.session);
+        // Ctrl+Space was pressed while this capture was being transcribed: the user cancelled it.
+        if crate::turn_pending::was_cancelled(turn.session) {
+            tracing::info!("[DROP] capture session {} was cancelled by the user before routing", turn.session);
+            // The stage may have put the orb into "thinking" after the cancel reached it; close it again.
+            let _ = tauri::Emitter::emit(&app, "orb:cancel", ());
+            return Err("turn cancelled".into());
+        }
     }
     if transcript.trim().is_empty() {
         return Err("empty transcript".into());
