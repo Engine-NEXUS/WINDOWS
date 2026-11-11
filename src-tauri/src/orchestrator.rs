@@ -904,16 +904,44 @@ pub async fn process_transcript<R: Runtime>(
     dialog_context: Option<serde_json::Value>,
     turn_context: Option<crate::center::TurnContext>,
 ) -> Result<ProcessResult, String> {
-    if let Some(turn) = turn_context.as_ref() {
-        crate::capture_audit::dispatch_received(turn.session);
-        // Ctrl+Space was pressed while this capture was being transcribed: the user cancelled it.
-        if crate::turn_pending::was_cancelled(turn.session) {
-            tracing::info!("[DROP] capture session {} was cancelled by the user before routing", turn.session);
-            // The stage may have put the orb into "thinking" after the cancel reached it; close it again.
-            let _ = tauri::Emitter::emit(&app, "orb:cancel", ());
-            return Err("turn cancelled".into());
+    let Some(session) = turn_context.as_ref().map(|turn| turn.session) else {
+        return process_transcript_inner(app, transcript, dialog_context, turn_context).await;
+    };
+    crate::capture_audit::dispatch_received(session);
+    // Ctrl+Space pressed while this capture was being transcribed, or (below) while it is being routed and no
+    // request exists yet (the ML parse can take a few hundred ms): the user cancelled it, nothing may be said.
+    let dropped = |app: &AppHandle<R>, stage: &str| -> Result<ProcessResult, String> {
+        tracing::info!("[DROP] capture session {session} was cancelled by the user {stage}");
+        // A request this turn installed in the same instant must not stay behind as "busy".
+        cancel_active();
+        // The stage may have put the orb into "thinking" after the cancel reached it; close it again.
+        let _ = tauri::Emitter::emit(app, "orb:cancel", ());
+        Err("turn cancelled".into())
+    };
+    if crate::turn_pending::was_cancelled(session) {
+        return dropped(&app, "before routing");
+    }
+    let routing = process_transcript_inner(app.clone(), transcript, dialog_context, turn_context);
+    tokio::pin!(routing);
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(20));
+    loop {
+        tokio::select! {
+            result = &mut routing => return result,
+            _ = tick.tick() => {
+                if crate::turn_pending::was_cancelled(session) {
+                    return dropped(&app, "while it was being routed");
+                }
+            }
         }
     }
+}
+
+async fn process_transcript_inner<R: Runtime>(
+    app: AppHandle<R>,
+    transcript: String,
+    dialog_context: Option<serde_json::Value>,
+    turn_context: Option<crate::center::TurnContext>,
+) -> Result<ProcessResult, String> {
     if transcript.trim().is_empty() {
         return Err("empty transcript".into());
     }
