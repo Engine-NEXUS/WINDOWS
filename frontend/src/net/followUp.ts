@@ -9,6 +9,26 @@ import { isBargedIn } from "./wsBridge";
  */
 
 let open = false;
+let openedAtMs = 0;
+let windowMs = 0;
+
+/** A noise-only capture inside the window must not end it; below this much time left it is not worth re-arming. */
+export const REARM_MIN_LEFT_MS = 1500;
+
+/** Pure: how much of the follow-up window is left, never negative. */
+export function followUpTimeLeftMs(openedAt: number, windowLengthMs: number, now: number): number {
+  return Math.max(0, openedAt + windowLengthMs - now);
+}
+
+/** Pure: should an empty capture inside the window re-arm the mic (true) or close the window (false)? */
+export function shouldRearmFollowUp(timeLeftMs: number): boolean {
+  return timeLeftMs >= REARM_MIN_LEFT_MS;
+}
+
+/** Time left in the open window (0 when closed). */
+export function followUpTimeLeft(now: number = Date.now()): number {
+  return open ? followUpTimeLeftMs(openedAtMs, windowMs, now) : 0;
+}
 
 /** Check if the follow-up window is currently active. */
 export function isFollowUpOpen(): boolean {
@@ -104,6 +124,8 @@ export async function openFollowUpWindow(
   }
 
   open = true;
+  openedAtMs = Date.now();
+  windowMs = secs * 1000;
   console.log(`[TURN] followup open secs=${secs}`);
 
   try {
