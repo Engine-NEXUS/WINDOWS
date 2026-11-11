@@ -129,6 +129,17 @@ Release `edfa406ab1f4f62a` was started as PID 19892. The log's `[CAPTURE]` recor
 | Memory, 32 s after start | 523.7 MB working set over 7 processes (`nexus.exe` 127.6 MB, six WebView2 processes 396.1 MB) | Under the 700 MB ceiling but well above the old build's settled 292.7 MB. To be re-read at five minutes idle for 5.8. |
 | Launcher | `nexus start` failed: it calls `pwsh` (PowerShell 7), which is not installed on this PC. The executable was started directly instead. | **Defect found.** `nexus start` needs a fallback when PowerShell 7 is absent. |
 
+**Second reading, 143 minutes after start (20:44 IST), nobody at the PC:**
+
+| Check | Reading | Meaning |
+|---|---|---|
+| Process | PID 19892 still running, no panic, no stage blackout | Stable for 2 h 23 min idle |
+| Memory | 186.9 MB working set over 7 processes (`nexus.exe` 133.5 MB, six WebView2 processes 53.4 MB) | Idle reading for 5.8: far under the 700 MB ceiling. The 523.7 MB at 32 s was start-up load. |
+| Microphone | Highest level seen 0.073; 371 "mic has been silent" warnings; 21 stream restarts; 0 audio-service restarts | The microphone **does** pick up sound. The room was simply quiet. The earlier "near-silent" reading was a quiet moment, not a dead device. |
+| Wake fires and turns | 0 and 0 | No false wake in 143 minutes of an empty room. Nothing was spoken to it either. |
+
+Two things worth fixing, found from this reading: the silence warning tells the user to restart the "Intel SST driver" although this PC uses a USB microphone, and a quiet room is treated as a fault (a warning every 10 seconds and a stream restart every few minutes).
+
 Cards that can run on this PC as it stands: 5.1 (hotkey, without the spoken parts), 5.8, 5.10, 5.11, 5.12. Everything spoken waits for the microphone; 5.5 waits for a key; 5.9 waits for the device approval.
 
 ---
@@ -433,7 +444,7 @@ Filled in as each card is run.
 | 21 | 9Router | PENDING | no | |
 | 61 | Volume lease and restore | PENDING | no | |
 | 40 | Keep-awake | PENDING | no | |
-| 65 | Resource footprint | PENDING | no | Old-build reading: 292.7 MB |
+| 65 | Resource footprint | idle reading taken, after-use readings PENDING | no | New build: 523.7 MB at 32 s, 186.9 MB at 143 min idle |
 | 57 | Cloudflare Worker | health PASS, turn PENDING | no | 200 in 115 ms |
 | 64 | Command Hub / settings UI | PENDING | no | |
 | 69 | Solid panel windows | PENDING | no | |
