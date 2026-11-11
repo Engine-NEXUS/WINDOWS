@@ -2402,3 +2402,20 @@ mod voice_continuity_tests {
     prepare_inner(app, text, false)"));
     }
 }
+
+/// Pure: should a "tts-ended" that arrived when `starts_at_end` utterances had started clear the speaking flag now,
+/// when `starts_now` have started? Not if a newer one began during the grace period.
+pub(crate) fn tts_end_applies(starts_at_end: u64, starts_now: u64) -> bool {
+    starts_now == starts_at_end
+}
+
+#[cfg(test)]
+mod tts_end_tests {
+    use super::tts_end_applies;
+
+    #[test]
+    fn an_end_followed_by_a_newer_start_is_ignored() {
+        assert!(tts_end_applies(4, 4), "no new utterance: the end clears the flag");
+        assert!(!tts_end_applies(4, 5), "a new utterance started in the grace period: the old end must not clear it");
+    }
+}

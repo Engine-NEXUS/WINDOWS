@@ -16,12 +16,28 @@ pub const EMA_ALPHA: f32 = 0.03;
 /// Chunks (80 ms each) at the start of a TTS session during which the gate only LEARNS the echo gain
 /// and never reports an onset, so the default gain guess cannot duck every reply at its start.
 pub const WARMUP_CHUNKS: u32 = 10;
+/// While a reference level exists, an onset also needs the mic above this absolute level. Between words and in the
+/// tail of a reply the reference is near zero, so the relative threshold fell to the 0.01 floor and the room's reverb of
+/// the voice itself counted as someone talking over it. A person speaking over a reply is far louder (0.05 to 0.2).
+pub const ONSET_FLOOR: f32 = 0.03;
+/// The learned echo gain never goes below this: measured against a near-silent reference it collapsed to 0.01.
+pub const MIN_RATIO: f32 = 0.05;
+/// An onset needs the mic to exceed this multiple of the learned echo (was 2.5).
+pub const ONSET_MULT: f32 = 3.0;
+/// The mic hears the speaker a little after the reference level says it played, so a new word makes the mic briefly
+/// louder than the CURRENT reference. The threshold uses the loudest reference of the last `REF_WINDOW` chunks (400 ms).
+pub const REF_WINDOW: usize = 5;
+/// While learning (the first chunks of a reply) the echo gain moves this fast, from every chunk: the owner is not
+/// talking over the first 0.8 s of a reply, and learning only from "quiet" chunks left a too-low gain that then
+/// flagged the echo itself as an onset forever.
+pub const LEARN_ALPHA: f32 = 0.2;
 
 #[derive(Debug, Clone)]
 pub struct EchoGate {
     pub ratio_ema: f32,
     pub run: u32,
     pub seen: u32,
+    recent: [f32; REF_WINDOW],
 }
 
 impl EchoGate {
@@ -30,6 +46,7 @@ impl EchoGate {
             ratio_ema: DEFAULT_RATIO_EMA,
             run: 0,
             seen: 0,
+            recent: [0.0; REF_WINDOW],
         }
     }
 
@@ -37,6 +54,7 @@ impl EchoGate {
         self.ratio_ema = DEFAULT_RATIO_EMA;
         self.run = 0;
         self.seen = 0;
+        self.recent = [0.0; REF_WINDOW];
     }
 
     /// Is this chunk the owner's voice rather than NEXUS's own (possibly ducked) echo? Used by the
@@ -55,11 +73,21 @@ impl EchoGate {
     pub fn update(&mut self, mic_rms: f32, ref_level: Option<f32>) -> bool {
         match ref_level {
             Some(ref_lvl) => {
-                let denom = ref_lvl * REF_SCALE + EPS;
+                let slot = (self.seen as usize) % REF_WINDOW;
+                self.recent[slot] = ref_lvl;
+                let peak = self.recent.iter().copied().fold(0.0_f32, f32::max);
+                let denom = peak * REF_SCALE + EPS;
                 let r = mic_rms / denom;
-                let threshold = BARGE_RMS_FLOOR.max(2.5 * self.ratio_ema * denom);
+                let threshold = ONSET_FLOOR.max(ONSET_MULT * self.ratio_ema * denom);
                 self.seen = self.seen.saturating_add(1);
-                let is_onset = self.seen > WARMUP_CHUNKS && mic_rms > threshold;
+                if self.seen <= WARMUP_CHUNKS {
+                    // learning phase: every chunk teaches the echo gain, and nothing can fire
+                    if peak >= 0.01 {
+                        self.ratio_ema = (self.ratio_ema * (1.0 - LEARN_ALPHA) + r.clamp(0.0, 1.0) * LEARN_ALPHA).clamp(MIN_RATIO, 1.0);
+                    }
+                    return false;
+                }
+                let is_onset = mic_rms > threshold;
 
                 if is_onset {
                     self.run = self.run.saturating_add(1);
@@ -69,9 +97,9 @@ impl EchoGate {
                 } else {
                     self.run = 0;
                     // Only update ratio_ema when reference level indicates active speech
-                    if ref_lvl >= 0.01 {
+                    if peak >= 0.01 {
                         let r_clamped = r.clamp(0.0, 1.0);
-                        self.ratio_ema = (self.ratio_ema * (1.0 - EMA_ALPHA) + r_clamped * EMA_ALPHA).clamp(0.01, 1.0);
+                        self.ratio_ema = (self.ratio_ema * (1.0 - EMA_ALPHA) + r_clamped * EMA_ALPHA).clamp(MIN_RATIO, 1.0);
                     }
                 }
                 false
@@ -133,6 +161,46 @@ mod tests {
         assert_eq!(gate.run, 2);
         assert!(gate.update(0.25, Some(0.5)), "chunk 3 must fire");
         assert_eq!(gate.run, 3);
+    }
+
+    #[test]
+    fn a_loud_echo_is_learned_in_the_first_chunks_and_never_fires() {
+        // Mic next to the speaker: the echo is 30% of the reference, three times the default gain guess.
+        let mut gate = EchoGate::new();
+        for i in 0..200 {
+            assert!(!gate.update(0.15, Some(0.5)), "chunk {i}: steady loud echo is not the owner");
+        }
+        assert!(gate.ratio_ema > 0.25, "learned {}", gate.ratio_ema);
+    }
+
+    #[test]
+    fn a_word_onset_in_the_echo_that_arrives_late_does_not_fire() {
+        // The mic hears each reference level three chunks (240 ms) later, so in the pause after a word it is still
+        // louder than the reference of that moment.
+        let reference = [0.1_f32, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8];
+        let mut gate = EchoGate::new();
+        for (i, _) in reference.iter().enumerate() {
+            let heard = reference[i.saturating_sub(3)] * 0.3;
+            assert!(!gate.update(heard, Some(reference[i])), "chunk {i}");
+        }
+    }
+
+    #[test]
+    fn reverb_in_the_tail_of_a_reply_is_not_someone_talking_over_it() {
+        let mut gate = EchoGate::new();
+        for _ in 0..30 {
+            assert!(!gate.update(0.15, Some(0.5)));
+        }
+        // the reply ends: the reference falls to nothing, the room still rings at 0.015 for a second
+        for i in 0..20 {
+            assert!(!gate.update(0.015, Some(0.003)), "tail chunk {i}");
+        }
+        assert!(gate.ratio_ema >= MIN_RATIO, "the echo gain must not collapse: {}", gate.ratio_ema);
+        // a real voice over a quiet moment still gets through
+        for _ in 0..2 {
+            assert!(!gate.update(0.12, Some(0.003)));
+        }
+        assert!(gate.update(0.12, Some(0.003)));
     }
 
     #[test]
