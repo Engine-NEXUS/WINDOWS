@@ -743,8 +743,19 @@ export async function processTranscript(
     return;
   }
   if (!transcript) {
-    const { isFollowUpOpen, markFollowUpClosed } = await import("../net/followUp");
+    const { isFollowUpOpen, markFollowUpClosed, followUpTimeLeft, shouldRearmFollowUp } = await import("../net/followUp");
     if (isFollowUpOpen()) {
+      // A burst of noise (or the tail of our own voice) ends a capture with no words. The question is still
+      // waiting for an answer, so keep listening for what is left of the window instead of closing it.
+      const left = followUpTimeLeft();
+      if (shouldRearmFollowUp(left)) {
+        console.log(`[TURN] followup: empty capture, still listening (${Math.round(left)} ms left)`);
+        // turn-end:keep-raw reset FIRST so the re-arm is not read as a second-press cancel
+        useAssistant.getState().reset();
+        const { triggerFollowupListen } = await import("../stage/orbRuntime");
+        triggerFollowupListen(true, left);
+        return;
+      }
       markFollowUpClosed();
       console.log("[TURN] followup closed reason=silence");
       hideOrbIfIdle();

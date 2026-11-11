@@ -819,19 +819,31 @@ pub fn run() {
             {
                 let state_for_tts = meeting_state.clone();
                 let app_for_tts = app.handle().clone();
+                // Counts "tts-started" events. A "tts-ended" that is followed by a newer start within its grace
+                // period is the end of the PREVIOUS utterance (stopping one sends it just before the next begins):
+                // acting on it would lift the speaking flag 0.5 s into the new reply.
+                let tts_starts = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                let starts_on_start = tts_starts.clone();
                 app.handle().listen("tts-started", move |_event| {
+                    starts_on_start.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     state_for_tts.set_tts_playing(true);
-                    tracing::debug!("meeting: TTS started — suppressing wake detection");
+                    tracing::debug!("meeting: TTS started - suppressing wake detection");
                 });
 
                 let state_for_tts_end = meeting_state.clone();
                 app.handle().listen("tts-ended", move |_event| {
-                    // Don't immediately resume — wait 500ms for audio to settle
+                    // Don't immediately resume - wait 500ms for audio to settle
                     let state = state_for_tts_end.clone();
+                    let starts_seen = tts_starts.load(std::sync::atomic::Ordering::SeqCst);
+                    let starts = tts_starts.clone();
                     tauri::async_runtime::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        state.set_tts_playing(false);
-                        tracing::debug!("meeting: TTS ended — resuming wake detection");
+                        if tts::tts_end_applies(starts_seen, starts.load(std::sync::atomic::Ordering::SeqCst)) {
+                            state.set_tts_playing(false);
+                            tracing::debug!("meeting: TTS ended - resuming wake detection");
+                        } else {
+                            tracing::debug!("meeting: a newer TTS started during the grace period - the old end is ignored");
+                        }
                     });
                     let _ = app_for_tts;
                 });

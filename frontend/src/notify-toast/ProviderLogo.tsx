@@ -1,8 +1,10 @@
 import type { CSSProperties } from "react";
 import { LogoTile } from "../sidebar/kit/LogoTile";
 import activityIconColors from "../settings-sidebar/hub/activityIconColors.json";
+import activityIconTiles from "../settings-sidebar/hub/activityIconTiles.json";
 
 const ICON_COLORS = activityIconColors as Record<string, string>;
+const ICON_TILES = activityIconTiles as Record<string, string>;
 
 /** Recognized provider icon ids from Rust payload */
 export const KNOWN_ICONS = new Set<string>([
@@ -41,9 +43,9 @@ export function tileColor(icon?: string | null): string | undefined {
   if (!icon) return undefined;
   const id = icon.trim().toLowerCase();
   if (!id || id === "agent") return undefined;
-  // Marks drawn in black or near-black vanish on their dark brand tile, so the toast gives them a light one.
-  if (id === "render") return "#ffffff";
-  return ICON_COLORS[id];
+  // The tile is chosen per mark so the mark is visible on it (scripts/gen-icon-tiles.mjs, enforced by a test): the brand
+  // colour for white marks, a light tile for dark or same-coloured marks.
+  return ICON_TILES[id] ?? ICON_COLORS[id];
 }
 
 export interface ProviderLogoProps {

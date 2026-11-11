@@ -1505,6 +1505,30 @@ pub fn last_event_ms(agent: Agent, kind: EventKind) -> Option<u64> {
     EVENTS.lock().ok().and_then(|q| last_index(&q, agent, kind).map(|i| q[i].at_ms))
 }
 
+/// Pure: when the turn that ended at `stop_ms` began: the earliest Start after the previous Stop. (Some agents, such as
+/// Antigravity, report a Start before every model call, so the LAST Start would make every long task look short.)
+pub fn turn_start(events: &[(EventKind, u64)], stop_ms: u64) -> Option<u64> {
+    let mut start = None;
+    for (kind, at) in events.iter().rev() {
+        if *at > stop_ms {
+            continue;
+        }
+        match kind {
+            EventKind::Stop if *at < stop_ms => break,
+            EventKind::Start => start = Some(*at),
+            _ => {}
+        }
+    }
+    start
+}
+
+/// When the turn of this agent that ended at `stop_ms` began, if the agent reported its start.
+pub fn turn_started_ms(agent: Agent, stop_ms: u64) -> Option<u64> {
+    let q = EVENTS.lock().ok()?;
+    let ev: Vec<(EventKind, u64)> = q.iter().filter(|e| e.agent == agent.name()).map(|e| (e.kind, e.at_ms)).collect();
+    turn_start(&ev, stop_ms)
+}
+
 /// Has this agent stopped (at or after `since_ms`) with no new prompt since? A new prompt means a new turn
 /// is running, so the older stop no longer says "finished".
 pub fn stop_is_latest(agent: Agent, since_ms: u64) -> bool {
@@ -1802,6 +1826,16 @@ fn parse_all_sentence(text: &str) -> Option<HookAction> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_turn_starts_at_the_first_start_after_the_previous_stop() {
+        use EventKind::{Start, Stop};
+        // Antigravity: a Start before every model call
+        let ev = [(Start, 100), (Stop, 200), (Start, 1_000), (Start, 20_000), (Start, 40_000), (Start, 60_000), (Stop, 90_000)];
+        assert_eq!(turn_start(&ev, 90_000), Some(1_000), "not the last Start (60 s), the first one after the stop at 200");
+        assert_eq!(turn_start(&ev, 200), Some(100));
+        assert_eq!(turn_start(&[(Stop, 5)], 5), None, "no start reported");
+    }
+
     use super::*;
 
     fn script() -> PathBuf {

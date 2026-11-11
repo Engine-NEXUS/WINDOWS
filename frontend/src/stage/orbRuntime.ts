@@ -11,6 +11,7 @@
 //
 // Call `initOrbRuntime()` once from stage/main.tsx on mount.
 
+import { stateAfterBargeResume } from "./bargeOrb";
 import { preloadSileroVad, preloadMicVad, stopVad } from "../audio/vad";
 import { abortCapture, processTranscript } from "../audio/recorder";
 import { stopTts, isRustTtsPlaying } from "../audio/ttsPlayer";
@@ -274,7 +275,8 @@ async function setupOrbWakeListener() {
     await listen("barge:resume", () => {
       const s = useAssistant.getState();
       console.log("[TURN] barge resume: not for NEXUS, continuing speech");
-      if (s.state === "listening") s.setState(isRustTtsPlaying() ? "speaking" : "idle");
+      const next = stateAfterBargeResume(s.state, isRustTtsPlaying());
+      if (next) s.setState(next);
     });
     console.log("[NEXUS] orb:wake / orb:first_run_greeting / orb:cancel / barge listeners registered");
   } catch (err) {
