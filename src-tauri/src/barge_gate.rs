@@ -20,6 +20,10 @@ pub const WARMUP_CHUNKS: u32 = 10;
 /// tail of a reply the reference is near zero, so the relative threshold fell to the 0.01 floor and the room's reverb of
 /// the voice itself counted as someone talking over it. A person speaking over a reply is far louder (0.05 to 0.2).
 pub const ONSET_FLOOR: f32 = 0.03;
+/// With no reference level (the first 0.2 to 0.5 s of a reply, before playback is "playing") the mic must exceed this
+/// level, and only after the warm-up. Before, 2 x `BARGE_RMS_FLOOR` (0.02) with no warm-up let room noise start a
+/// barge-in right at the start of most replies; each one ducked the voice to 25% until the capture was classified.
+pub const NO_REF_ONSET: f32 = 0.04;
 /// The learned echo gain never goes below this: measured against a near-silent reference it collapsed to 0.01.
 pub const MIN_RATIO: f32 = 0.05;
 /// An onset needs the mic to exceed this multiple of the learned echo (was 2.5).
@@ -105,7 +109,8 @@ impl EchoGate {
                 false
             }
             None => {
-                let is_onset = mic_rms > 2.0 * BARGE_RMS_FLOOR;
+                self.seen = self.seen.saturating_add(1);
+                let is_onset = self.seen > WARMUP_CHUNKS && mic_rms > NO_REF_ONSET;
                 if is_onset {
                     self.run = self.run.saturating_add(1);
                     if self.run >= BARGE_ONSET_CHUNKS {
@@ -231,19 +236,33 @@ mod tests {
     #[test]
     fn test_none_reference_fallback() {
         let mut gate = EchoGate::new();
-        // Below 2 * BARGE_RMS_FLOOR (0.02)
-        for _ in 0..10 {
+        // Quiet room during the warm-up
+        for _ in 0..WARMUP_CHUNKS {
             assert!(!gate.update(0.015, None));
             assert_eq!(gate.run, 0);
         }
 
-        // Voice above fallback threshold: 0.030 > 0.020
-        assert!(!gate.update(0.030, None), "chunk 1 should not fire");
+        // A real voice well above the no-reference threshold fires after three chunks
+        assert!(!gate.update(0.08, None), "chunk 1 should not fire");
         assert_eq!(gate.run, 1);
-        assert!(!gate.update(0.030, None), "chunk 2 should not fire");
+        assert!(!gate.update(0.08, None), "chunk 2 should not fire");
         assert_eq!(gate.run, 2);
-        assert!(gate.update(0.030, None), "chunk 3 must fire");
+        assert!(gate.update(0.08, None), "chunk 3 must fire");
         assert_eq!(gate.run, 3);
+    }
+
+    #[test]
+    fn room_noise_at_the_start_of_a_reply_does_not_duck_the_voice() {
+        // No reference yet (playback not "playing"): a 0.03 burst for the whole first second used to fire at once
+        // (it exceeded 0.02) and duck the reply to 25%.
+        let mut gate = EchoGate::new();
+        for i in 0..WARMUP_CHUNKS {
+            assert!(!gate.update(0.5, None), "warm-up chunk {i}: nothing can fire, whatever the level");
+        }
+        for i in 0..30 {
+            assert!(!gate.update(0.03, None), "chunk {i}: ordinary room level is not someone talking over the reply");
+        }
+        assert_eq!(gate.run, 0);
     }
 
     #[test]
