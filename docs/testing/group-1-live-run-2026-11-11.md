@@ -3,9 +3,10 @@
 | | |
 |---|---|
 | **Date opened** | 2026-11-11 |
-| **Status** | **Prepared, not run.** No feature in this file is production-ready yet. |
+| **Status** | **Built, not run.** No feature in this file is production-ready yet. |
+| **Release built for this run** | identity `edfa406ab1f4f62a`, built 2026-11-11 17:26 IST from commit `f158144` (`b6b0a85` plus this file); executable SHA-256 `d7f18ebc…e73bb747` matches `nexus-build.json`. Not started yet. |
 | **Source commit to build** | `b6b0a85` on branch `fix/memory-key-safety-dictation-ci` (main `6820cff` + memory key safety, dictation fixes, two CI gates) |
-| **Build running when this was written** | release identity `8024418bab39dd49`, built 2026-11-07, PID 8536. This is **older code**; a run on it does not count (ledger rule 3). |
+| **Previous build** | release identity `8024418bab39dd49`, built 2026-11-07. It was stopped by the rebuild. Readings taken on it are marked preliminary and do not count (ledger rule 3). |
 | **Who runs what** | **OWNER** = you, with voice, ears and eyes. **BOT** = the assistant, reading the log and the OS while you run. |
 | **Your time** | About 45 minutes after the rebuild |
 
