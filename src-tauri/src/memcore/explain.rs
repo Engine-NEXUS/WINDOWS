@@ -151,7 +151,7 @@ pub fn find_when(text: &str) -> Option<String> {
     static RE: Lazy<Regex> = Lazy::new(|| {
         let month = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*";
         Regex::new(&format!(
-            r"(?i)\b(?:due|deadline(?:\s+is)?|by|before|until|expires?|closes?|last\s+date(?:\s+is)?)\s+(?:on\s+)?(?P<d>(?:next\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|tomorrow|today|tonight|end\s+of\s+(?:the\s+)?(?:day|week|month)|\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?{month}|{month}\s+\d{{1,2}}(?:st|nd|rd|th)?)(?:[\s,]+(?:at|by)?\s*(?P<t>\d{{1,2}}(?::\d{{2}})?\s*(?:am|pm)))?",
+            r"(?i)\b(?:due(?:\s+date)?(?:\s+is)?|deadline(?:\s+[a-z']+){{0,3}}?(?:\s+is)?|by|before|until|expires?|closes?|last\s+date(?:\s+is)?)\s+(?:on\s+)?(?P<d>(?:next\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|tomorrow|today|tonight|end\s+of\s+(?:the\s+)?(?:day|week|month)|\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?{month}|{month}\s+\d{{1,2}}(?:st|nd|rd|th)?)(?:[\s,]+(?:at|by)?\s*(?P<t>\d{{1,2}}(?::\d{{2}})?\s*(?:am|pm)))?",
         ))
         .unwrap()
     });
@@ -159,11 +159,32 @@ pub fn find_when(text: &str) -> Option<String> {
     // gives a time is the most precise, else the first.
     let all: Vec<_> = RE.captures_iter(text).collect();
     let c = all.iter().find(|c| c.name("t").is_some()).or_else(|| all.first())?;
-    let d = c.name("d")?.as_str().split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    let d = pretty_date(&c.name("d")?.as_str().split_whitespace().collect::<Vec<_>>().join(" "));
     Some(match c.name("t") {
         Some(t) => format!("{d} at {}", t.as_str().to_lowercase()),
         None => d,
     })
+}
+
+/// "20TH NOVEMBER" / "next friday" -> "20th November" / "next Friday": lower case, with month and weekday names capitalised.
+fn pretty_date(d: &str) -> String {
+    const NAMES: &[&str] = &[
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "january", "february", "march", "april", "may",
+        "june", "july", "august", "september", "october", "november", "december", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep",
+        "sept", "oct", "nov", "dec",
+    ];
+    d.to_lowercase()
+        .split_whitespace()
+        .map(|w| {
+            if NAMES.contains(&w) {
+                let mut c = w.chars();
+                c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+            } else {
+                w.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// What the mail asks of you, as a verb phrase after "needs you to".
@@ -391,7 +412,7 @@ mod tests {
         let m = meta("Prof Rao", "rao@uni.edu", "Assignment 3 reminder", "Please submit your report.",
             "Hello all, this is a reminder. Please submit your report, it is due Friday at 5 pm on the portal.");
         let e = explain(Category::Deadline, &m);
-        assert!(e.text.contains("friday at 5 pm"), "{}", e.text);
+        assert!(e.text.contains("Friday at 5 pm"), "{}", e.text);
         assert!(e.text.contains("submit"), "{}", e.text);
         assert_clean(&e, &m);
     }
@@ -399,14 +420,21 @@ mod tests {
     #[test]
     fn a_date_needs_a_due_word_in_front() {
         assert_eq!(find_when("the meeting is on Friday"), None);
-        assert_eq!(find_when("Report due 14th March, 9 am").as_deref(), Some("14th march at 9 am"));
-        assert_eq!(find_when("Report due 14th March.").as_deref(), Some("14th march"));
-        assert_eq!(find_when("deadline is next Monday at 10:30 am").as_deref(), Some("next monday at 10:30 am"));
+        assert_eq!(find_when("Report due 14th March, 9 am").as_deref(), Some("14th March at 9 am"));
+        assert_eq!(find_when("Report due 14th March.").as_deref(), Some("14th March"));
+        assert_eq!(find_when("deadline is next Monday at 10:30 am").as_deref(), Some("next Monday at 10:30 am"));
         assert_eq!(find_when("closes tomorrow").as_deref(), Some("tomorrow"));
         assert_eq!(find_when("nothing here"), None);
         assert_eq!(
+            find_when("The deadline for this is Friday at 5 pm. Please submit your report on the portal.").as_deref(),
+            Some("Friday at 5 pm"),
+            "the real test mail"
+        );
+        assert_eq!(find_when("Due date is 3 December").as_deref(), Some("3 December"));
+        assert_eq!(find_when("The deadline for the whole thing, as discussed in the long meeting, is Friday"), None, "too far from the date");
+        assert_eq!(
             find_when("submit by Friday. Reminder: the report is due Friday at 5 pm.").as_deref(),
-            Some("friday at 5 pm"),
+            Some("Friday at 5 pm"),
             "the date that also gives a time wins"
         );
     }
@@ -435,7 +463,7 @@ mod tests {
         let m = meta("Uni", "exams@uni.edu", "Hall ticket", "download", "Download it before the exam. Please confirm your details by Monday.");
         let e = explain_mail(&triage(Category::Exam), &m, Some("Uni released your hall ticket.".into()), &SelfNames::none());
         assert!(e.text.starts_with("Uni released your hall ticket."), "{}", e.text);
-        assert!(e.text.contains("confirm") && e.text.contains("monday"), "{}", e.text);
+        assert!(e.text.contains("confirm") && e.text.contains("Monday"), "{}", e.text);
         assert_clean(&e, &m);
     }
 

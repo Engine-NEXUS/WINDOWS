@@ -785,7 +785,7 @@ mod tests {
         let stored = to_stored(&t, &m, "me@gmail.com");
         let json = serde_json::to_string(&stored).unwrap();
         assert!(!json.contains("SECRET-BODY-TEXT") && !json.contains("9876543210"), "the body must not be stored: {json}");
-        assert!(stored.explain.contains("friday at 5 pm"), "the explanation uses what the body said: {}", stored.explain);
+        assert!(stored.explain.contains("Friday at 5 pm"), "the explanation uses what the body said: {}", stored.explain);
         let printed = format!("{m:?}");
         assert!(!printed.contains("SECRET-BODY-TEXT"), "Debug must hide the body: {printed}");
         assert!(printed.contains("chars, hidden"), "{printed}");
