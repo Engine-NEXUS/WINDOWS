@@ -141,8 +141,8 @@ pub fn last_alert_sender() -> Option<(String, String)> {
 // ─── Storing + alerting ─────────────────────────────────────────────
 
 /// Store a classified email. `true` = it is new (not seen before).
-fn store_mail(store: &Store, t: &Triage, m: &MailMeta, account: &str, now: i64) -> bool {
-    let stored = mailtriage::to_stored(t, m, account);
+fn store_mail(store: &Store, t: &Triage, m: &MailMeta, account: &str, now: i64, names: &SelfNames) -> bool {
+    let stored = mailtriage::to_stored_with(t, m, account, names);
     let value = serde_json::to_string(&stored).unwrap_or_default();
     matches!(
         store.observe(
@@ -162,7 +162,12 @@ fn store_mail(store: &Store, t: &Triage, m: &MailMeta, account: &str, now: i64) 
 
 /// Everything worth surfacing from a set of messages: classify, drop Low,
 /// store, and return the new ones in urgency order. Pure over the store.
+#[cfg(test)]
 pub fn triage_and_store(store: &Store, metas: &[MailMeta], account: &str, now: i64) -> Vec<(Triage, MailMeta)> {
+    triage_and_store_with(store, metas, account, now, &SelfNames::none())
+}
+
+pub fn triage_and_store_with(store: &Store, metas: &[MailMeta], account: &str, now: i64, names: &SelfNames) -> Vec<(Triage, MailMeta)> {
     let muted = muted_senders(store);
     let mut fresh: Vec<(Triage, MailMeta)> = vec![];
     for m in metas {
@@ -170,7 +175,7 @@ pub fn triage_and_store(store: &Store, metas: &[MailMeta], account: &str, now: i
         if mailtriage::urgency_rank(t.urgency) < mailtriage::urgency_rank(AlertUrgency::Medium) {
             continue;
         }
-        if store_mail(store, &t, m, account, now) {
+        if store_mail(store, &t, m, account, now, names) {
             fresh.push((t, m.clone()));
         }
     }
@@ -290,6 +295,33 @@ fn fire_alerts<R: Runtime>(app: &AppHandle<R>, items: &[(Triage, MailMeta)], acc
 
 // ─── Polling one account ────────────────────────────────────────────
 
+/// At most this many bodies are read in one poll.
+const MAX_BODIES_PER_POLL: usize = 5;
+
+/// Read the body of each NEW mail that triage already rates Medium or higher (never the poll's other mail, never the
+/// quiet baseline), so one sentence can say what it asks and by when. The text goes into `MailMeta::body` only: it is
+/// held in memory, not stored (`to_stored_with` never reads it), not logged (`MailMeta`'s `Debug` hides it) and not
+/// spoken. A failed read leaves the body empty and the explanation falls back to the subject and preview.
+async fn attach_bodies(dir: &std::path::Path, client: &crate::google::client::GoogleClient, metas: &mut [MailMeta]) {
+    let muted = super::with_store(dir, |s| muted_senders(s)).unwrap_or_default();
+    let medium = mailtriage::urgency_rank(AlertUrgency::Medium);
+    let mut read = 0;
+    for m in metas.iter_mut() {
+        if read >= MAX_BODIES_PER_POLL {
+            break;
+        }
+        let important = mailtriage::classify(m, &muted).is_some_and(|t| mailtriage::urgency_rank(t.urgency) >= medium);
+        if !important {
+            continue;
+        }
+        read += 1;
+        match google_io::gmail_body(client, &m.id).await {
+            Ok(b) => m.body = b,
+            Err(e) => tracing::debug!("mailwatch: could not read the body of {}: {e}", m.id),
+        }
+    }
+}
+
 async fn fetch_metas(client: &crate::google::client::GoogleClient, ids: &[String]) -> Vec<MailMeta> {
     let mut out = vec![];
     for id in ids.iter().take(MAX_FETCH_PER_POLL) {
@@ -319,11 +351,12 @@ async fn baseline(
     let history_id = google_io::gmail_history_id(client).await?;
     let ids = google_io::gmail_recent_ids(client).await.unwrap_or_default();
     let metas = fetch_metas(client, &ids).await;
+    let names = SelfNames::load(dir);
     let now = chrono::Utc::now().timestamp();
     let key = format!("gmail_hist:{account_key}");
     let n = super::with_store(dir, |s| {
         s.batch(|s| {
-            let n = triage_and_store(s, &metas, account_key, now).len();
+            let n = triage_and_store_with(s, &metas, account_key, now, &names).len();
             s.meta_set(&key, &history_id);
             n
         })
@@ -373,11 +406,13 @@ pub async fn poll_core(
         }
     }
 
-    let metas = fetch_metas(client, &ids).await;
+    let mut metas = fetch_metas(client, &ids).await;
+    attach_bodies(dir, client, &mut metas).await;
+    let names = SelfNames::load(dir);
     let now = chrono::Utc::now().timestamp();
     let fresh = super::with_store(dir, |s| {
         s.batch(|s| {
-            let fresh = triage_and_store(s, &metas, account_key, now);
+            let fresh = triage_and_store_with(s, &metas, account_key, now, &names);
             s.meta_set(&key, &newest);
             fresh
         })
@@ -538,6 +573,7 @@ mod tests {
             labels: labels.iter().map(|s| s.to_string()).collect(),
             date_ms: date,
             rfc822_id: String::new(),
+            body: String::new(),
         }
     }
 
@@ -774,8 +810,12 @@ mod tests {
             "{hist_calls:?}"
         );
         assert!(hist_calls[1].contains("pageToken=p2"), "{hist_calls:?}");
-        assert!(log.iter().all(|t| !t.contains("format=full")), "message bodies must never be requested: {log:?}");
-        assert!(log.iter().filter(|t| t.contains("/messages/")).all(|t| t.contains("format=metadata")));
+        // Bodies are read ONLY for new mail already rated important by the poll (e and c), never in the quiet baseline
+        // (a, b), never for mail the triage drops, and each once.
+        let full: Vec<&String> = log.iter().filter(|t| t.contains("format=full")).collect();
+        assert_eq!(full.len(), 2, "one body read per important new mail: {log:?}");
+        assert!(full.iter().any(|t| t.contains("/messages/e?")) && full.iter().any(|t| t.contains("/messages/c?")), "{full:?}");
+        assert!(log.iter().filter(|t| t.contains("/messages/")).filter(|t| !t.contains("format=full")).all(|t| t.contains("format=metadata")));
     }
 
     #[test]

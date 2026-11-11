@@ -74,6 +74,8 @@ pub struct MailItem {
     pub deadline: Option<String>,
     /// Inbox-triage category ("exam", "database", …) for mail the watcher filed.
     pub category: Option<String>,
+    /// The stored one-sentence explanation of the mail (what it is, what it asks, by when). Spoken instead of the subject.
+    pub explain: Option<String>,
 }
 
 /// What was open when the PC last went off and can be reopened ("shall I reopen it?").
@@ -327,6 +329,7 @@ pub fn scrub_mail(items: Vec<MailItem>, names: &SelfNames) -> Vec<MailItem> {
                 m.subject = short;
                 m.deadline = None;
                 m.category = None;
+                m.explain = None;
             } else if names.is_self(&m.sender) {
                 m.sender.clear();
             }
@@ -341,25 +344,24 @@ fn is_short_ci(subject: &str) -> bool {
 
 pub fn mail_line(m: &MailItem) -> String {
     let who = clip(&m.sender, 40);
-    let subj = clip(&m.subject, 60);
-    if who.trim().is_empty() {
-        if is_short_ci(&m.subject) {
-            return subj;
-        }
-        if let Some(cat) = m.category.as_deref().and_then(Category::from_str) {
-            return format!("{}: “{subj}”", cat.phrase());
-        }
-        return match m.deadline.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
-            Some(d) => format!("an email about “{subj}”, deadline {d}"),
-            None => format!("an email about “{subj}”"),
-        };
+    // CI failures keep their short live wording.
+    if who.trim().is_empty() && is_short_ci(&m.subject) {
+        return clip(&m.subject, 60);
     }
-    if let Some(cat) = m.category.as_deref().and_then(Category::from_str) {
-        return format!("{} from {who}: “{subj}”", cat.phrase());
+    // The stored explanation says what the mail is, what it asks and by when, in our own words.
+    if let Some(e) = m.explain.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+        return e.trim_end_matches('.').to_string();
     }
-    match m.deadline.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
-        Some(d) => format!("{who} emailed about “{subj}”, deadline {d}"),
-        None => format!("{who} emailed about “{subj}”"),
+    // Older records and watched threads have no explanation: say who and what kind, never the subject.
+    let deadline = m.deadline.as_deref().map(str::trim).filter(|d| !d.is_empty());
+    let kind = m.category.as_deref().and_then(Category::from_str).map(|c| c.phrase());
+    match (who.trim().is_empty(), kind, deadline) {
+        (true, Some(k), _) => k.to_string(),
+        (true, None, Some(d)) => format!("an email with a deadline of {d}"),
+        (true, None, None) => "an email I could not sum up".to_string(),
+        (false, Some(k), _) => format!("{k} from {who}"),
+        (false, None, Some(d)) => format!("{who} emailed you, with a deadline of {d}"),
+        (false, None, None) => format!("{who} emailed you"),
     }
 }
 
@@ -547,7 +549,13 @@ pub fn important_mail(dir: &std::path::Path, now_secs: i64) -> Vec<MailItem> {
     });
     rows.into_iter()
         .take(5)
-        .map(|m| MailItem { sender: m.sender, subject: m.subject, deadline: None, category: Some(m.category) })
+        .map(|m| MailItem {
+            sender: m.sender,
+            subject: m.subject,
+            deadline: None,
+            category: Some(m.category),
+            explain: Some(m.explain).filter(|e| !e.trim().is_empty()),
+        })
         .collect()
 }
 
@@ -566,7 +574,7 @@ fn gather<R: tauri::Runtime>(
     let mut mail: Vec<MailItem> = crate::memory::load_mail_watches(dir)
         .into_iter()
         .filter(|w| w.status == crate::google::types::WatchStatus::Active)
-        .map(|w| MailItem { sender: w.sender, subject: w.subject, deadline: w.initial_deadline_raw, category: None })
+        .map(|w| MailItem { sender: w.sender, subject: w.subject, deadline: w.initial_deadline_raw, category: None, explain: None })
         .collect();
     mail.extend(important_mail(dir, now));
     let mail = scrub_mail(mail, &SelfNames::load(dir));
@@ -1158,12 +1166,13 @@ mod tests {
     #[test]
     fn open_items_are_counted_never_invented() {
         let mut i = input();
-        i.mail = vec![MailItem { sender: "Prof. Rao".into(), subject: "Assignment 3".into(), deadline: Some("Friday 5 PM".into()), category: None }];
+        i.mail = vec![MailItem { sender: "Prof. Rao".into(), subject: "Assignment 3".into(), deadline: Some("Friday 5 PM".into()), category: None, explain: None }];
         i.unfinished = vec!["send the report to Asha".into()];
         let b = build(&i).unwrap();
         assert_eq!(b.items, 2);
         assert!(b.spoken.contains("2 things are open"), "{}", b.spoken);
-        assert!(b.spoken.contains("deadline Friday 5 PM"), "{}", b.spoken);
+        assert!(b.spoken.contains("Prof. Rao emailed you, with a deadline of Friday 5 PM"), "{}", b.spoken);
+        assert!(!b.spoken.contains("Assignment 3"), "the subject is not spoken: {}", b.spoken);
         assert!(b.card_md.contains("### Open (2)") && b.card_md.contains("I couldn’t finish"), "{}", b.card_md);
         assert!(!b.spoken.contains('%'), "no made-up progress numbers: {}", b.spoken);
     }
@@ -1173,7 +1182,7 @@ mod tests {
         let mut i = input();
         i.friend = true;
         i.hour = 2;
-        i.mail = vec![MailItem { sender: "GitHub".into(), subject: "Run failed".into(), deadline: None, category: None }];
+        i.mail = vec![MailItem { sender: "GitHub".into(), subject: "Run failed".into(), deadline: None, category: None, explain: None }];
         let b = build(&i).unwrap();
         assert!(b.spoken.starts_with("Welcome back, Lakshya."), "{}", b.spoken);
         i.name = None;
@@ -1206,6 +1215,7 @@ mod tests {
             subject: "Your project will be paused".into(),
             deadline: None,
             category: Some("database".into()),
+            explain: Some("Supabase may pause your project.".into()),
         }];
         i.events = vec![
             AgendaItem { summary: "Dentist".into(), all_day: false, start_epoch: 0, end_epoch: 0, when_label: "3 PM".into() },
@@ -1213,7 +1223,8 @@ mod tests {
         ];
         let b = build(&i).unwrap();
         assert!(b.spoken.contains("You have 2 events today; the first is Dentist at 3 PM."), "{}", b.spoken);
-        assert!(b.spoken.contains("a database service warning from Supabase"), "{}", b.spoken);
+        assert!(b.spoken.contains("Supabase may pause your project"), "{}", b.spoken);
+        assert!(!b.spoken.contains("will be paused"), "an explanation, not the subject: {}", b.spoken);
         assert!(b.card_md.contains("### Today's calendar") && b.card_md.contains("Team sync"), "{}", b.card_md);
         // A calendar alone is enough to say something.
         let mut only = input();
@@ -1240,6 +1251,7 @@ mod tests {
                 labels: vec![],
                 date_ms: (now - age_h * 3600) * 1000,
                 rfc822_id: String::new(),
+                body: String::new(),
             };
             (Triage { category: cat, urgency: u, reason: "r".into() }, m)
         };
@@ -1294,7 +1306,7 @@ mod tests {
     #[test]
     fn the_briefing_drops_its_greeting_once_a_hello_was_spoken() {
         let mut i = input();
-        i.mail = vec![MailItem { sender: "GitHub".into(), subject: "Run failed".into(), deadline: None, category: None }];
+        i.mail = vec![MailItem { sender: "GitHub".into(), subject: "Run failed".into(), deadline: None, category: None, explain: None }];
         let b = build(&i).unwrap();
         let g = greeting(i.hour, i.name.as_deref(), i.friend);
         assert!(b.spoken.starts_with(&g));
@@ -1489,24 +1501,24 @@ mod session_greeting_tests {
     fn the_owners_own_name_is_never_spoken_and_ci_mail_uses_the_short_line() {
         let names = SelfNames::from_parts(&["Chitkul Lakshya".to_string()]);
         let items = vec![
-            MailItem { sender: "Chitkul Lakshya".into(), subject: "[Engine-NEXUS/WINDOWS] Run failed: pages build and deployment".into(), deadline: None, category: Some("github".into()) },
-            MailItem { sender: "Chitkul Lakshya".into(), subject: "Assignment 3".into(), deadline: Some("Friday".into()), category: None },
-            MailItem { sender: "Prof. Rao".into(), subject: "Exam".into(), deadline: None, category: None },
+            MailItem { sender: "Chitkul Lakshya".into(), subject: "[Engine-NEXUS/WINDOWS] Run failed: pages build and deployment".into(), deadline: None, category: Some("github".into()), explain: None },
+            MailItem { sender: "Chitkul Lakshya".into(), subject: "Assignment 3".into(), deadline: Some("Friday".into()), category: None, explain: None },
+            MailItem { sender: "Prof. Rao".into(), subject: "Exam".into(), deadline: None, category: None, explain: None },
         ];
         let lines: Vec<String> = scrub_mail(items, &names).iter().map(mail_line).collect();
         assert!(lines[0].starts_with("Build failed in "), "{lines:?}");
-        assert!(lines[1].starts_with("an email about “Assignment 3”"), "{lines:?}");
+        assert_eq!(lines[1], "an email with a deadline of Friday", "no quoted subject: {lines:?}");
         assert!(lines[2].contains("Prof. Rao"), "someone else is still named: {lines:?}");
         assert!(lines.iter().all(|l| !l.contains("Chitkul") && !l.contains("Lakshya")), "{lines:?}");
         // A CI-looking subject from a non-GitHub sender is not shortened and keeps its sender and deadline.
         let spoof = scrub_mail(
-            vec![MailItem { sender: "Prof. Rao".into(), subject: "Run failed: CI - course/project".into(), deadline: Some("Friday".into()), category: None }],
+            vec![MailItem { sender: "Prof. Rao".into(), subject: "Run failed: CI - course/project".into(), deadline: Some("Friday".into()), category: None, explain: None }],
             &names,
         );
         assert_eq!((spoof[0].sender.as_str(), spoof[0].subject.as_str(), spoof[0].deadline.as_deref()), ("Prof. Rao", "Run failed: CI - course/project", Some("Friday")));
         // Nothing to hide: an empty name set keeps a plain sender.
         let kept = scrub_mail(
-            vec![MailItem { sender: "Prof. Rao".into(), subject: "Exam".into(), deadline: None, category: None }],
+            vec![MailItem { sender: "Prof. Rao".into(), subject: "Exam".into(), deadline: None, category: None, explain: None }],
             &SelfNames::none(),
         );
         assert_eq!(kept[0].sender, "Prof. Rao");
