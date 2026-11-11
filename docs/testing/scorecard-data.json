@@ -19,7 +19,7 @@
         "L": 85,
         "S": 85,
         "I": 80,
-        "note": "Cancel/call decision extracted and checked for all 16 states; stale doc comment rewritten."
+        "note": "Cancel/call decision checked for all 16 states. 2026-11-12: machine run of card 5.1 passed 6/6 on build df23b69c593545d4 after four fixes (miss counter, cancel during transcription and routing, alerts into an open mic). Owner voice and on-screen check still open."
     },
     {
         "area": "Voice front end",

@@ -63,6 +63,8 @@ Rules:
 
 | 2026-10-26 | f0988d95afbfac06176c923c2227e7e79e841013 / d846dd346c470b60 | Repaired release startup/configuration | BOT | Build46m14s, provenance verified; PID8460 reached stage ready; profile5 valid, diagnostics Off. Native lock initially Off, explicitly enabled for authorized trial and reread On before interruption | Startup/configuration observed only; no repaired owner action or accuracy claim. Owner subsequently requests edits only and manual runtime/build control. No automatic restoration or new runtime checks. Score41%, no queue advancement. | [Assessment](runs/windows1-20261026-neutral-local-assessment.json), [readback](runs/windows1-20261026-neutral-local-live-lock-on.json) |
 
+| 2026-11-12 | 02c2928 / df23b69c593545d4 | Global hotkey Ctrl+Space (call / cancel) | BOT | PID33244. Scripted Ctrl+Space presses and Windows-voice speech through the speakers into the USB microphone; six steps of card 5.1: silent press, double press, cancel while transcribing, cancel while speaking, press with the Hub open, call after cancels | PASS 6/6 in the log; 11/11 presses logged once with correct state flags; cancelled question not answered; speech stopped at the press and volume restored in 1.2 s. Not covered: owner voice, the screen (orb and Hub not watched), a live press in the routing gap (unit tests only). Three earlier builds of the same night failed this card; failures and fixes retained in the run sheet | [group-1-live-run-2026-11-11.md §5.1](group-1-live-run-2026-11-11.md) |
+
 ## 2026-10-26 — P3 offline tooling, no live trial
 
 - Requested editor: OpenCode `opencode/glm-5.3-flash-free`; no response or files after about five minutes, own request interrupted. Authorized supervisor fallback implemented the offline benchmark.

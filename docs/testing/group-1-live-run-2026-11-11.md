@@ -3,7 +3,8 @@
 | | |
 |---|---|
 | **Date opened** | 2026-11-11 |
-| **Status** | **Built, not run.** No feature in this file is production-ready yet. |
+| **Status** | **Run in progress.** 5.1 (hotkey) passed a machine run on build `df23b69c593545d4` after four fixes; the other 14 cards are pending. |
+| **Current build** | identity `df23b69c593545d4`, built 2026-11-12 02:07 IST from commit `02c2928` (main `0c7545b` merged in). Earlier builds of this run: `edfa406ab1f4f62a`, `adcc651268d5cc0e`, `e8f39727170b94e8`; results on them are kept below as history and do not count. |
 | **Release built for this run** | identity `edfa406ab1f4f62a`, built 2026-11-11 17:26 IST from commit `f158144` (`b6b0a85` plus this file); executable SHA-256 `d7f18ebc…e73bb747` matches `nexus-build.json`. Not started yet. |
 | **Source commit to build** | `b6b0a85` on branch `fix/memory-key-safety-dictation-ci` (main `6820cff` + memory key safety, dictation fixes, two CI gates) |
 | **Previous build** | release identity `8024418bab39dd49`, built 2026-11-07. It was stopped by the rebuild. Readings taken on it are marked preliminary and do not count (ledger rule 3). |
@@ -154,7 +155,7 @@ Each card has the same parts: what the run proves, the steps, what counts as a p
 
 | Step | You do | Expected |
 |---|---|---|
-| a | NEXUS idle. Press Ctrl+Space, say nothing. | Orb appears and listens, then hides by itself. No "didn't catch that" speech. |
+| a | NEXUS idle. Press Ctrl+Space, say nothing. | Orb appears and listens for about 8 s, listens once more without a word for about 8 s, then says "I didn't hear you, sir." once and hides. (Corrected 2026-11-12: the first version of this card expected no speech; one silent retry and one spoken line is the designed behaviour.) |
 | b | Press Ctrl+Space, then press it again within a second. | Listening is cancelled, orb hides. |
 | c | Press Ctrl+Space, say "what is the capital of France". While it is thinking, press Ctrl+Space. | The request is cancelled. No answer is spoken afterwards. |
 | d | Ask the same question, let it start speaking, press Ctrl+Space. | Speech stops at once. The orb goes idle. Volume returns to your level. |
@@ -164,14 +165,31 @@ Each card has the same parts: what the run proves, the steps, what counts as a p
 **Pass:** all six behave as expected, and the log shows one `CALLING agent` or `CANCELING calling agent` line per press with the right state flags.
 **Fail:** a press is ignored, a cancelled answer is still spoken, the orb stays on screen, or the Hub closes.
 
-**Result:** NOT PASSED on the first attempt (2026-11-11 23:09 IST, build `edfa406ab1f4f62a`). Steps a and b only; the owner reported "something went wrong" and has not yet described what was seen. The log shows four presses, each logged once with correct state flags, and three findings:
+**Result:** PASS by machine run, 2026-11-12 02:11 to 02:12 IST, build `df23b69c593545d4`, commit `02c2928`, NEXUS PID 33244. Proof kind: BOT. The presses were sent by script (`keybd_event`), and the spoken lines were played through this PC's speakers with the Windows voice and heard by the USB microphone. **Not covered:** the owner's own voice, and what the orb and the Hub look like on screen (nobody watched the screen).
 
-| # | Time (UTC) | What the log shows | Finding |
+| Step | Time (UTC) | Log evidence | Result |
 |---|---|---|---|
-| 1 | 17:39:22 to 17:39:28 | NEXUS spoke "Claude Code has finished, sir." (agent-finished alert), then opened the microphone by itself (capture session 6). The owner's first press 2.5 s later was therefore treated as a **cancel**, not a call. | An alert that asks nothing should not open the microphone. To the owner, the first press appears to do nothing. |
-| 2 | 17:39:30 to 17:39:44 | Press, call, 8 s of silence, then a second 8 s listening window started silently (session 9). | A silent press keeps the orb up for about 16 s, not 8 s. This is the designed one silent retry; the card's "hides by itself" expectation was too short. |
-| 3 | 17:39:46 to 17:39:55 | Press, call, 8 s of silence, then NEXUS said "I didn't hear you, sir." | The miss counter was not reset by the owner's cancel or by the new press, so a first silent press after an earlier miss is answered aloud. Step a expects no speech. |
-| 4 | 17:39:31 to 17:40:01 | The local speech engine failed to start: `ModuleNotFoundError: No module named 'moonshine_voice'`; "STT server did not become ready in 15s". | With no Groq key and no local engine, **no spoken command can be understood on this PC**. Steps c, d and f, and every spoken card, are blocked until one of the two is in place. |
+| a | 20:41:10 | `agent is idle, CALLING agent`; capture session 2 ended with no words after 10 s; silent second capture (session 3) 8 s; `speaking 'I didn't hear you, sir.'` once; volume 1.00 to 0.75 and back. The boot greeting waited until this was over (20:41:32). | Pass |
+| b | 20:41:36 | `CALLING agent`, then 0.78 s later `CANCELING calling agent` (capturing=true); capture aborted; nothing spoken. | Pass |
+| c | 20:41:43 | Question captured; press 0.41 s after the capture ended, while speech-to-text was running: `CANCELING` with thinking=true, `[TURN] capture session 6 cancelled before it reached the orchestrator`. The transcript arrived 1 s later and was not routed. No answer spoken. | Pass |
+| d | 20:42:01 | Answer `The capital of France is Paris.` started 20:42:05.45; press at 20:42:07.08: `CANCELING` with speaking=true; volume restored to 1.00 at 20:42:08.29. | Pass |
+| e | 20:42:19 | `opening settings sidebar`; 5 s later `CALLING agent`; 2 s later `CANCELING`. No window-destroy line for the Hub. | Pass in the log; not seen on screen |
+| f | 20:42:30 | `groq transcript: 'Open Notepad.'`, routed to LocalCommand, `speaking 'Ok sir.'`. | Pass |
+
+One press, one log line, correct state flags: 11 of 11 presses.
+
+**What was not exercised live:** a cancel in the roughly 100 to 300 ms after speech-to-text has answered and before a request exists (the routing gap). The press in step c landed earlier, during speech-to-text. That path is covered by the code change in `02c2928` and by the unit tests of `turn_pending`, not by a live press.
+
+#### History of this card (earlier builds, do not count)
+
+| Build | What failed | Fix |
+|---|---|---|
+| `edfa406ab1f4f62a` (owner pressing, 2026-11-11 23:09 IST) | After "Claude Code has finished, sir." the microphone opened by itself, so the owner's first press was a cancel. | Already fixed on main (`61c6bfd`: only a reply that asks something reopens the microphone); merged in `bd9d36c`. |
+| same | A silent press after an earlier miss was answered at once with "I didn't hear you, sir." | `79a760e`: a cancel or a fresh call clears the miss counter. |
+| same | No spoken command could be understood: no Groq key and `moonshine_voice` not installed. | Local engine package installed (`moonshine-voice` 0.1.6); a Groq key was present in NEXUS from the next start. |
+| `adcc651268d5cc0e` | A press while the question was being transcribed was read as "idle": NEXUS was called again, the old answer was spoken, and NEXUS then answered its own voice. | `4d97cd6`: new `turn_pending` marker; the hotkey treats a heard turn on its way as thinking, and its transcript is dropped. |
+| `e8f39727170b94e8` | The press was logged as a cancel but the answer was still spoken (the turn was already being routed). | `02c2928`: routing runs under a 20 ms cancel check until a request owns the turn. |
+| same | The boot briefing was spoken into a microphone the hotkey had just opened; NEXUS transcribed "Welcome back, sir." and replied to it. | `02c2928`: alerts wait while the user's microphone is open (a Ghost session is exempt). |
 
 ### 5.2 Open / close / focus apps (#31)
 
@@ -444,7 +462,7 @@ Filled in as each card is run.
 
 | # | Feature | Result | Ledger line added | Notes |
 |---:|---|---|---|---|
-| 2 | Global hotkey Ctrl+Space | NOT PASSED (first attempt, steps a and b) | no | Mic opens by itself after an agent alert; miss counter survives a cancel; spoken steps blocked (no speech engine). See 5.1. |
+| 2 | Global hotkey Ctrl+Space | PASS (machine run, build `df23b69c593545d4`) | Machine proof recorded. Owner still to confirm by eye and own voice. | Four defects found and fixed on the way. See 5.1. |
 | 31 | Open / close / focus apps | PENDING | no | |
 | 14 | Wake-up sound | PENDING | no | |
 | 9 | Online voice (Edge TTS) | PENDING | no | |
