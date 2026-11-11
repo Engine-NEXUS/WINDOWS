@@ -14,7 +14,7 @@ use crate::notify_brain::{Fact, Kind, Obs};
 use crate::pii_filter::sanitize;
 use crate::router::{read_provider_keys, route_with_system};
 use super::mailtriage::{
-    alert_text_with, sender_label, sender_label_with, subject_label, MailMeta, Triage, Category,
+    sender_label, sender_label_with, subject_label, MailMeta, Triage, Category,
     DB_HIGH, DB_MEDIUM, EXAM_STRONG, EXAM_WEAK, HACK_DEADLINE, HACK_RECEIVED,
 };
 use super::selfnames::SelfNames;
