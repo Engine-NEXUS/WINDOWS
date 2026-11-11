@@ -5,6 +5,7 @@ import {
   IDLE_HIDE_MS,
   THINKING_STUCK_MS,
   LISTENING_STUCK_MS,
+  SPEAKING_STALE_MS,
   type OrbSnapshot,
   type WatchdogState,
 } from "./orbIdleWatchdog";
@@ -94,7 +95,25 @@ describe("orb idle watchdog", () => {
     expect(r.next.busySince).toBe(25_000);
   });
 
-  it("never touches a speaking orb (the speaking failsafe owns that)", () => {
-    expect(run({ ...base, state: "speaking" }, 300_000).action).toBe("none");
+  it("closes an orb that says speaking while nothing is audible or shown", () => {
+    const r = run({ ...base, state: "speaking" }, 60_000);
+    expect(r.action).toBe("reset_and_hide");
+    expect(r.at).toBeGreaterThanOrEqual(SPEAKING_STALE_MS);
+    expect(r.at).toBeLessThan(SPEAKING_STALE_MS + 1000);
+  });
+
+  it("never touches a speaking orb while audio plays, a caption shows, or something is pending", () => {
+    for (const extra of [{ ttsActive: true }, { captionActive: true }, { awaitingInput: true }, { loadingVisible: true }, { ghostActive: true }, { pendingGithubCommand: true }]) {
+      expect(run({ ...base, state: "speaking", ...extra }, 300_000).action, JSON.stringify(extra)).toBe("none");
+    }
+  });
+
+  it("restarts the speaking clock when audio resumes", () => {
+    let st = INITIAL_WATCHDOG_STATE;
+    for (let t = 0; t < 3500; t += 500) st = stepWatchdog(st, { ...base, state: "speaking" }, t).next;
+    st = stepWatchdog(st, { ...base, state: "speaking", ttsActive: true }, 3500).next;
+    // silent again: the full window must pass again from here
+    expect(stepWatchdog(st, { ...base, state: "speaking" }, 4000).action).toBe("none");
+    expect(stepWatchdog(st, { ...base, state: "speaking" }, 4000 + SPEAKING_STALE_MS - 500).action).toBe("none");
   });
 });

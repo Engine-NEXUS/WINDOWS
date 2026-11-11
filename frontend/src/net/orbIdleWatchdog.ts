@@ -40,6 +40,12 @@ export const THINKING_STUCK_MS = 60_000;
 /** `listening` this long outside ghost mode -> the turn was lost (Rust ends real turns in <= 10 s). */
 export const LISTENING_STUCK_MS = 30_000;
 
+/**
+ * `speaking` this long with no audio playing, no caption on screen and nothing pending -> the speech is over and
+ * nobody closed the turn, so the orb would sit in its speaking shape in silence (it used to wait for a 60 s failsafe).
+ */
+export const SPEAKING_STALE_MS = 4000;
+
 export const INITIAL_WATCHDOG_STATE: WatchdogState = {
   idleSince: null,
   busySince: null,
@@ -74,6 +80,21 @@ export function isBusyWatchable(s: OrbSnapshot): boolean {
   );
 }
 
+/** True when the orb says "speaking" but nothing is being said or shown. */
+export function isSpeakingStale(s: OrbSnapshot): boolean {
+  return (
+    s.visible &&
+    s.state === "speaking" &&
+    !s.ttsActive &&
+    !s.captionActive &&
+    !s.ghostActive &&
+    !s.loadingVisible &&
+    !s.awaitingInput &&
+    !s.pendingGithubCommand &&
+    !s.calibrating
+  );
+}
+
 /** One watchdog tick. Returns the next bookkeeping state and the action to take. */
 export function stepWatchdog(
   prev: WatchdogState,
@@ -98,6 +119,17 @@ export function stepWatchdog(
   }
 
   idleSince = null;
+
+  if (isSpeakingStale(snap)) {
+    if (busyState !== "speaking" || busySince === null) {
+      busyState = "speaking";
+      busySince = now;
+    }
+    if (now - busySince >= SPEAKING_STALE_MS) {
+      return { next: { idleSince: null, busySince: null, busyState: null }, action: "reset_and_hide" };
+    }
+    return { next: { idleSince, busySince, busyState }, action: "none" };
+  }
 
   if (isBusyWatchable(snap)) {
     if (busyState !== snap.state || busySince === null) {
