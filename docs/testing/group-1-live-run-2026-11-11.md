@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date opened** | 2026-11-11 |
-| **Status** | **Run in progress.** 5.1 (hotkey) passed a machine run on build `df23b69c593545d4` after four fixes; the other 14 cards are pending. |
+| **Status** | **Run in progress, 2026-11-12.** Machine (BOT) passes with ledger lines for cards 5.1, 5.2, 5.4, 5.5, 5.6, 5.8, 5.13, 5.14 and, for "new tab" only, 5.15. Partial: 5.3, 5.7, 5.9. Not run: 5.10, 5.11, 5.12 (need your eyes). No feature is production-ready by the repository definition until the OWNER half of its proof is recorded. |
 | **Current build** | identity `df23b69c593545d4`, built 2026-11-12 02:07 IST from commit `02c2928` (main `0c7545b` merged in). Earlier builds of this run: `edfa406ab1f4f62a`, `adcc651268d5cc0e`, `e8f39727170b94e8`; results on them are kept below as history and do not count. |
 | **Release built for this run** | identity `edfa406ab1f4f62a`, built 2026-11-11 17:26 IST from commit `f158144` (`b6b0a85` plus this file); executable SHA-256 `d7f18ebc…e73bb747` matches `nexus-build.json`. Not started yet. |
 | **Source commit to build** | `b6b0a85` on branch `fix/memory-key-safety-dictation-ci` (main `6820cff` + memory key safety, dictation fixes, two CI gates) |
@@ -42,8 +42,8 @@ They were chosen from the 45 "working, needs live proof" features because each o
 | 21 | 9Router | BOT (during 5.4) | [5.5](#55-9router-21) |
 | 61 | Volume lease and restore | BOT (during 5.4) | [5.6](#56-volume-lease-and-restore-61) |
 | 40 | Keep-awake | BOT (during 5.4) | [5.7](#57-keep-awake-40) |
-| 65 | Resource footprint | PASS (638 / 630.5 / 628.9 MB, build `c315aa3ad3fc2ec2`) | yes, 2026-11-12 | About 60 MB below the ceiling. |
-| 57 | Cloudflare Worker | health PASS, real turn PENDING | no | 200 in 0.17 s; needs GitHub sign-in for step b. |
+| 65 | Resource footprint | BOT | [5.8](#58-resource-footprint-65) |
+| 57 | Cloudflare Worker | BOT + OWNER | [5.9](#59-cloudflare-worker-57) |
 | 64 | Command Hub / settings UI | OWNER | [5.10](#510-command-hub--settings-ui-64) |
 | 69 | Solid panel windows | OWNER (during 5.10) | [5.11](#511-solid-panel-windows-69) |
 | 78 | Themes and contrast | OWNER (during 5.10) | [5.12](#512-themes-and-contrast-78) |
@@ -517,15 +517,15 @@ Filled in as each card is run.
 
 | # | Feature | Result | Ledger line added | Notes |
 |---:|---|---|---|---|
-| 2 | Global hotkey Ctrl+Space | PASS (machine run, build `df23b69c593545d4`) | Machine proof recorded. Owner still to confirm by eye and own voice. | Four defects found and fixed on the way. See 5.1. |
-| 31 | Open / close / focus apps | PASS (machine run, build `df23b69c593545d4`) | Machine proof recorded. Owner voice still open. | 5 of 5 steps; no duplicate window. |
+| 2 | Global hotkey Ctrl+Space | PASS (machine run, build `df23b69c593545d4`) | yes, 2026-11-12 | Owner still to confirm by eye and own voice. Four defects found and fixed on the way. See 5.1. |
+| 31 | Open / close / focus apps | PASS (machine run, build `df23b69c593545d4`) | yes, 2026-11-12 | 5 of 5 steps; no duplicate window. Owner voice still open. |
 | 14 | Wake-up sound | PARTIAL: cue handed to the device in 0 to 15 ms (20 cues); audibility needs the owner | no | Owner ears needed. |
 | 9 | Online voice (Edge TTS) | PASS (machine run, build `c315aa3ad3fc2ec2`) | yes, 2026-11-12 | 11 of 11 replies on the online voice; totals 0.9 to 1.6 s. |
 | 21 | 9Router | PASS for Groq (build `c315aa3ad3fc2ec2`) | yes, 2026-11-12 | Fall-back providers not configured. |
 | 61 | Volume lease and restore | PASS (machine run, build `c315aa3ad3fc2ec2`) | yes, 2026-11-12 | OS volume read: 100% to 75% to 100%; no dip inside a reply. |
 | 40 | Keep-awake | PARTIAL | no | Log pairs seen; `powercfg` needs an administrator console. |
-| 65 | Resource footprint | idle reading taken, after-use readings PENDING | no | New build: 523.7 MB at 32 s, 186.9 MB at 143 min idle |
-| 57 | Cloudflare Worker | health PASS, turn PENDING | no | 200 in 115 ms |
+| 65 | Resource footprint | PASS (638 / 630.5 / 628.9 MB, build `c315aa3ad3fc2ec2`) | yes, 2026-11-12 | About 60 MB below the ceiling. |
+| 57 | Cloudflare Worker | health PASS, real turn PENDING | no | 200 in 0.17 s; step b needs a GitHub sign-in. |
 | 64 | Command Hub / settings UI | PENDING | no | |
 | 69 | Solid panel windows | PENDING | no | |
 | 78 | Themes and contrast | PENDING | no | |
@@ -533,7 +533,7 @@ Filled in as each card is run.
 | 27 | File control with undo | PASS with note (machine run, build `95f3621b8fbc0b88`) | yes, 2026-11-12 | Delete, yes, undo and wipe refusal pass; one spoken decline was mangled by the speech engine (nothing deleted). |
 | 25 | Shortcut map and action router | PASS for "new tab"; feature stays "working" (build `c315aa3ad3fc2ec2`) | yes, 2026-11-12 | Brave and Edge verified; Notepad and terminal unconfirmed; 22 actions have no phrase. |
 
-**Production-ready so far: 0 of 15.**
+**Production-ready so far: 0 of 15 by the repository definition.** Eight cards have a clean machine (BOT) pass and a ledger line: 2, 9, 20, 21, 27, 61, 65 and, for the one spoken action, 25. Features whose proof kind includes OWNER (2, 9, 14, 20, 25, 27, 31, 57) still need your half: your own voice, the wake word as the way in, and what you see and hear. Cards 64, 69 and 78 (the Hub, solid panels, themes) need your eyes; 40 needs an administrator console; 57 needs a GitHub sign-in.
 
 ## 8. After the run
 

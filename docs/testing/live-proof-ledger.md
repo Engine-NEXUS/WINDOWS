@@ -77,6 +77,8 @@ Rules:
 
 | 2026-11-12 | 2d0a291 / c315aa3ad3fc2ec2 | Resource footprint | BOT | Working set of nexus.exe and every child (8 processes) at idle, after replies and at the end | PASS 638, 630.5 and 628.9 MB, under the 700 MB ceiling and not growing; margin about 60 MB. Not covered: a long session, the Hub and sidebar open together | [group-1-live-run-2026-11-11.md 5.8](group-1-live-run-2026-11-11.md) |
 
+| 2026-11-12 | 02c2928 / df23b69c593545d4 | Open / close / focus apps | BOT | Spoken open Notepad (twice), open Calculator, close Notepad, open an unknown app; visible windows counted from the OS after each step | PASS 5/5: second open focused the same window (count stayed 1), Calculator opened, Notepad closed with Calculator untouched, unknown app answered "Didn't find that, sir.". "Close Calculator" failed on this build (looked for calc.exe) and is fixed from 2dd512c. Not covered: owner voice, the wake word | [group-1-live-run-2026-11-11.md 5.2](group-1-live-run-2026-11-11.md) |
+
 ## 2026-10-26 — P3 offline tooling, no live trial
 
 - Requested editor: OpenCode `opencode/glm-5.3-flash-free`; no response or files after about five minutes, own request interrupted. Authorized supervisor fallback implemented the offline benchmark.
