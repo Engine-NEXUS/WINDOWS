@@ -69,6 +69,8 @@ Rules:
 
 | 2026-11-12 | 4dd2d44 / 95f3621b8fbc0b88 | File control with undo | BOT | Folder Downloads\nexus-test with three throwaway .txt files; spoken delete, yes, undo, wipe request, then a declined delete | PASS delete read back and held for the yes, files moved to Downloads\.nexus-trash, undo restored all three, "delete everything" refused, audit file has one entry per step. Note: on this build a spoken "No." came back from the speech engine with extra invented words, so the decline was not recognised (nothing was deleted); a clean decline passed on build 504c08b43ccf2556. Not covered: owner voice, comparison with the Recycle Bin | [group-1-live-run-2026-11-11.md 5.14](group-1-live-run-2026-11-11.md) |
 
+| 2026-11-12 | 3d68263 / c315aa3ad3fc2ec2 | Shortcut map and action router | BOT | Spoken "new tab" with Brave, Edge, Notepad, Windows PowerShell and Calculator in front in turn | PASS Brave and Edge: one new tab each, verified in 42 and 45 ms, window title changed. Notepad (Ctrl+N) and the terminal (Ctrl+Shift+T) got their own chord, effect unconfirmed, no Ctrl+C sent. Calculator (unmapped): honest "can't confirm" line. Feature stays working: only 1 of 23 actions has a spoken phrase. Not covered: owner voice | [group-1-live-run-2026-11-11.md 5.15](group-1-live-run-2026-11-11.md) |
+
 ## 2026-10-26 — P3 offline tooling, no live trial
 
 - Requested editor: OpenCode `opencode/glm-5.3-flash-free`; no response or files after about five minutes, own request interrupted. Authorized supervisor fallback implemented the offline benchmark.

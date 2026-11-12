@@ -474,16 +474,17 @@ Known limit, stated before the run: only "new tab" has a spoken phrase today. Th
 **Pass:** steps a and b each produce exactly one tab in the right window, and `[SHORTCUT]` lines show the window was re-checked before the keys were sent.
 **Fail:** a tab opens in the wrong window, two tabs open, or keys reach a window that was not in front.
 
-**Result:** PARTIAL, machine run 2026-11-12, builds `504c08b43ccf2556` and `95f3621b8fbc0b88`. Proof kind: BOT.
+**Result:** PASS for the one spoken action ("new tab"); the feature stays at "working" because 22 of the 23 mapped actions have no spoken phrase. Machine run 2026-11-12 20:48 to 20:51 IST, build `c315aa3ad3fc2ec2` (commit `3d68263`). Proof kind: BOT.
 
-| Step | What happened | Result |
-|---|---|---|
-| b (Edge in front) | "New tab." gave `[SHORTCUT] new_tab -> Ctrl+T (family:browser) verified=Yes in 44ms`; the Edge window title changed to "New tab and 1 more page - Personal - Microsoft Edge". | Pass |
-| Calculator in front | `[SHORTCUT] new_tab: no binding for applicationframehost.exe (known_app=false)`, the old key path ran, and NEXUS said "New tab sir." with no tab opened: a claimed success. | Defect, fixed after the run: the line is now "I sent the new tab shortcut, sir, but I can't confirm this app took it." |
-| a (main browser, Brave) | Not run. | Open |
-| Notepad and a terminal | Not run. | Open |
+| Window in front | Log | Window title | Result |
+|---|---|---|---|
+| Brave (a) | `[SHORTCUT] new_tab -> Ctrl+T (family:browser) verified=Yes in 42ms` | "about:blank - Brave" became "New Tab - Brave" | Pass |
+| Edge (b) | `new_tab -> Ctrl+T (family:browser) verified=Yes in 45ms` | gained one page ("about:blank and 1 more page" became "New tab and 2 more pages") | Pass |
+| Notepad (c) | `new_tab -> Ctrl+N (family:notepad) verified=Unconfirmed in 732ms` ("Open a new tab." was heard; the first attempt, heard as "Newtap", went to the chat model and sent nothing) | title stays "Untitled - Notepad"; one Notepad process | Right chord for that app, effect not confirmable from the title. "New tab sir." was spoken. |
+| Windows PowerShell (d) | `new_tab -> Ctrl+Shift+T (family:terminal) verified=Unconfirmed in 734ms` | title stays "Windows PowerShell" | The terminal's own chord was used; no Ctrl+C or Ctrl+Z was sent. Effect not confirmable. "New tab sir." was spoken. |
+| Calculator (not in the map) | `new_tab: no binding for applicationframehost.exe (known_app=false)`, then the old key path | unchanged | NEXUS said "I sent the new tab shortcut, sir, but I can't confirm this app took it." (the false "New tab sir." seen on the earlier build is fixed) |
 
-Not production-ready: only one browser and the Calculator case have been seen.
+Open: for a mapped app whose effect cannot be seen (Notepad, terminal) the router speaks the success line although it logged "Unconfirmed"; a router test pins that wording and I did not change it. The other 22 actions (refresh, close tab, next tab and so on) are reachable only through `shortcut_do`. Next piece of work: spoken phrases for them.
 
 ## 6. Suggested order
 
@@ -522,7 +523,7 @@ Filled in as each card is run.
 | 78 | Themes and contrast | PENDING | no | |
 | 20 | Main centre and sub-centres | PASS (machine run, build `95f3621b8fbc0b88`) | yes, 2026-11-12 | 13 of 13 lines; 11 of 18 centres exercised; defects fixed on the way. |
 | 27 | File control with undo | PASS with note (machine run, build `95f3621b8fbc0b88`) | yes, 2026-11-12 | Delete, yes, undo and wipe refusal pass; one spoken decline was mangled by the speech engine (nothing deleted). |
-| 25 | Shortcut map and action router | PARTIAL (Edge pass; Calculator false claim fixed) | no | Brave, Notepad and a terminal not run. |
+| 25 | Shortcut map and action router | PASS for "new tab"; feature stays "working" (build `c315aa3ad3fc2ec2`) | yes, 2026-11-12 | Brave and Edge verified; Notepad and terminal unconfirmed; 22 actions have no phrase. |
 
 **Production-ready so far: 0 of 15.**
 
