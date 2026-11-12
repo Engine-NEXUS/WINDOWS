@@ -206,7 +206,17 @@ One press, one log line, correct state flags: 11 of 11 presses.
 **Pass:** exactly one Notepad window after step b (count them in the taskbar), honest answer in step e.
 **Fail:** a duplicate window, a spoken success for something that did not happen, or the wrong app closed.
 
-**Result:** PENDING
+**Result:** PASS by machine run, 2026-11-12 02:14 to 02:15 IST, build `df23b69c593545d4`, PID 33244. Proof kind: BOT (hotkey call in place of the wake word, Windows voice through the speakers, visible windows counted from the OS after each step).
+
+| Step | Heard as | What NEXUS did (log) | Windows after (Notepad / Calculator / in front) | Result |
+|---|---|---|---|---|
+| a | "Open Notepad." | `focus hit: 'Notepad' matched window 'Untitled - Notepad'`, then "Ok sir." | 1 / 0 / Notepad | Pass (a Notepad window from the hotkey card was already open, so this was a focus, not a launch) |
+| b | "Open Notepad." | same focus hit, "Ok sir." | 1 / 0 / Notepad | Pass: no second window |
+| c | "Open calculator." | `launching app: Calculator via Exe`, "Ok sir." | 1 / 1 / Calculator | Pass |
+| d | "Close Notepad." | `closed app 'Notepad'`, "Closed Notepad, sir." | 0 / 1 / Calculator | Pass: Calculator untouched |
+| e | "Open an app called Blue Elephant." | registry miss, legacy resolver, "Didn't find that, sir." | 0 / 1 / Calculator | Pass: no false "Ok sir." |
+
+A fresh launch of Notepad from nothing was seen earlier on build `adcc651268d5cc0e` (hotkey card, step f). **Not covered:** the owner's own voice and the wake word as the way in.
 
 ### 5.3 Wake-up sound (#14)
 
@@ -395,7 +405,24 @@ Not exercised here, because they change the mode of the whole machine or need se
 **Pass:** every line routes to the listed centre; the incomplete WhatsApp command and the shutdown both ask before doing anything; nothing is answered by the cloud model pretending an action happened.
 **Fail:** a wrong centre, a `[DROP]` for a clear command, or a claimed success with no action.
 
-**Result:** PENDING
+**Result:** NOT PASSED on the first machine run (2026-11-12 02:15 to 02:21 IST, build `df23b69c593545d4`). Proof kind: BOT (hotkey call, Windows voice through the speakers). Nine lines behaved correctly, three did not; the fixes are committed and the card is to be run again on the next build.
+
+| Said | Heard as | Centre in the log | What happened | Result |
+|---|---|---|---|---|
+| hello | "Hello." | GreetingCenter | "Hey, sir. What can I do for you?" | Pass |
+| open Calculator | "Open calculator." | AppCenter | Opened (card 5.2) | Pass |
+| what is the tallest mountain | exact | KnowledgeCenter, WorkerBackend | Spoken answer (Everest, 8,848 m) via 9Router | Pass |
+| remember that my favourite colour is blue | "...favorite color is blue." | logged as KnowledgeCenter; handled by the local memory hook | "Remembered my favorite color as blue.." | **Defect:** doubled full stop. Fixed in `2dd512c`. The centre label in the log is KnowledgeCenter although memory handled it; not changed. |
+| what do you remember | exact | MemoryCenter | "I remember 1 fact. my favorite color is blue.. across 8 recent conversations." | Pass for routing; same full-stop defect |
+| read my alerts | exact | AlertCenter | "Agent: Claude Code finished." three times, "and 94 more" | Pass for routing. The repeated wording is poor; a branch for it exists on GitHub (`feat/notifications-explain-not-repeat`), not merged. |
+| what's on my calendar today | exact | MemoryCenter (card expected GoogleCenter) | "I'm not connected to your calendar yet, sir..." | Pass: honest answer. The card's expected centre was wrong. |
+| list my pull requests | exact | AppCenter | **Nothing: no window, no word.** | **Defect:** the GitHub dashboard command was only handled inside a Ghost session. Fixed in `2dd512c`. |
+| send a WhatsApp message | exact | need_more_info | "Who should I message on WhatsApp, and what should I say?" Nothing sent. | Pass |
+| play some music | exact | MediaCenter path | "Play or pause sent, sir." | Pass |
+| shut down | "Shutdown." | SystemCenter path | "Did you want me to shut down your laptop, sir?" The scripted "no" was spoken while NEXUS was still talking and was heard as noise; NEXUS answered "Sorry sir, was that a yes or a no?" and did nothing. | Asked first: pass. A clean "no" still to be run. |
+| close Calculator (extra) | "Close calculator." | AppCenter | "I couldn't find Calculator running, sir." while its window was open | **Defect:** looked for `calc.exe`; the app runs as `CalculatorApp.exe`. Fixed in `2dd512c`. |
+
+"new tab" was not run in this pass. During the run the online voice failed twice in a row ("no audio was received from the service") and NEXUS switched to the local voice for 10 minutes; replies continued. That is recorded against card 5.4.
 
 ### 5.14 File control with undo (#27)
 
@@ -417,7 +444,7 @@ Set-up (OWNER): make a folder `Downloads\nexus-test` and put three throwaway `.t
 
 If NEXUS does not understand the folder name in step a, say what it heard; the assistant records the exact transcript and the run continues with the folder moved to `Downloads` directly ("delete the text files in downloads" is **not** to be used, as it would catch your real files).
 
-**Result:** PENDING
+**Result:** NOT PASSED on the first machine run (2026-11-12 02:23 IST, build `df23b69c593545d4`). Both phrasings of step a ("...in downloads nexus test" and "...in the nexus test folder in downloads") were answered "I couldn't match that command confidently. Please say it again." Nothing was deleted, and "undo that" correctly said "There's nothing to undo, sir." Cause: the word "text" marked the phrase as being about a message, and only a destination could be a folder inside a known place. Fixed in `9f72a4b` (79 file-control tests pass). To be run again on the next build with the phrase "delete the text files in the nexus test folder in downloads".
 
 ### 5.15 Shortcut map and action router (#25)
 
@@ -463,7 +490,7 @@ Filled in as each card is run.
 | # | Feature | Result | Ledger line added | Notes |
 |---:|---|---|---|---|
 | 2 | Global hotkey Ctrl+Space | PASS (machine run, build `df23b69c593545d4`) | Machine proof recorded. Owner still to confirm by eye and own voice. | Four defects found and fixed on the way. See 5.1. |
-| 31 | Open / close / focus apps | PENDING | no | |
+| 31 | Open / close / focus apps | PASS (machine run, build `df23b69c593545d4`) | Machine proof recorded. Owner voice still open. | 5 of 5 steps; no duplicate window. |
 | 14 | Wake-up sound | PENDING | no | |
 | 9 | Online voice (Edge TTS) | PENDING | no | |
 | 21 | 9Router | PENDING | no | |
