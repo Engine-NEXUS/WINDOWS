@@ -42,8 +42,8 @@ They were chosen from the 45 "working, needs live proof" features because each o
 | 21 | 9Router | BOT (during 5.4) | [5.5](#55-9router-21) |
 | 61 | Volume lease and restore | BOT (during 5.4) | [5.6](#56-volume-lease-and-restore-61) |
 | 40 | Keep-awake | BOT (during 5.4) | [5.7](#57-keep-awake-40) |
-| 65 | Resource footprint | BOT | [5.8](#58-resource-footprint-65) |
-| 57 | Cloudflare Worker | BOT + OWNER | [5.9](#59-cloudflare-worker-57) |
+| 65 | Resource footprint | PASS (638 / 630.5 / 628.9 MB, build `c315aa3ad3fc2ec2`) | yes, 2026-11-12 | About 60 MB below the ceiling. |
+| 57 | Cloudflare Worker | health PASS, real turn PENDING | no | 200 in 0.17 s; needs GitHub sign-in for step b. |
 | 64 | Command Hub / settings UI | OWNER | [5.10](#510-command-hub--settings-ui-64) |
 | 69 | Solid panel windows | OWNER (during 5.10) | [5.11](#511-solid-panel-windows-69) |
 | 78 | Themes and contrast | OWNER (during 5.10) | [5.12](#512-themes-and-contrast-78) |
@@ -235,7 +235,7 @@ A fresh launch of Notepad from nothing was seen earlier on build `adcc651268d5cc
 
 Tell the assistant how it sounded (clear, too loud, too quiet). That judgement is the OWNER half of this proof.
 
-**Result:** PENDING
+**Result:** PARTIAL: BOT half passes, OWNER half pending. Machine run 2026-11-12, build `c315aa3ad3fc2ec2`. In 20 wake cues (hotkey calls) the log shows `[CUE] queued -> audio handed to device` in 0 to 15 ms (6 at 0 ms, 4 at 7 ms, 3 at 9 ms, 3 at 10 ms, the rest 8, 14 and 15 ms), with no cue warning lines. The wake word as the way in, the first word of a command after the cue, the style picker and the off switch (steps a, b, d, e) were not run; whether the sound is audible, clear and at a good level needs your ears.
 
 ### 5.4 Online voice (Edge TTS) (#9)
 
@@ -254,7 +254,15 @@ Before you start, tell the assistant your current Windows volume number.
 
 There is no fixed latency limit in the plan; the earlier measurement was a 409 ms median to first audio per short line. The run records the real numbers and flags anything over 2 s.
 
-**Result:** PENDING
+**Result:** PASS by machine run, 2026-11-12 20:52 to 20:54 IST, build `c315aa3ad3fc2ec2`. Proof kind: BOT (speech through the speakers; the Windows volume read from Core Audio). Every `[TTS]` line in the window names the Edge engine: 11 of 11, none local, no fall-back line.
+
+| Turn | `[LAT]` line | Voice |
+|---|---|---|
+| "What is the capital of Japan?" | `stt 283ms | parse 35ms | answer 548ms | tts 117ms | total 984ms | mem 34ms` | edge, `en-US-AvaNeural`, 75% |
+| "Tell me three facts about the moon." | `stt 465ms | parse 440ms | tts 672ms | total 1577ms | mem 7ms` | edge; the answer is long, so NEXUS said "Here is the response in the sidebar, sir." and did not read it out |
+| "What is 2 plus 2?" | `stt 217ms | parse 14ms | answer 632ms | tts 31ms | total 895ms | mem 2ms` | edge |
+
+The one-voice-across-sentences check used a spoken two-sentence answer instead ("What is the tallest mountain?", 14 s of streamed playback): one voice, no change. Nothing is over 2 s. Earlier the same night the online voice failed twice in a row ("no audio was received from the service") and NEXUS used the local voice for 10 minutes; that is the designed breaker, not seen in this window.
 
 ### 5.5 9Router (#21)
 
@@ -265,7 +273,7 @@ No extra steps. The assistant reads the same three turns from 5.4.
 **Pass:** each turn has a `9router: trying <provider>` line followed by a success, and the `answer` stage of `[LAT]` is recorded. Earlier measurement: about 242 ms.
 **Fail:** every provider fails and the turn falls back to the Worker for a plain question, or a provider key is reported missing.
 
-**Result:** PENDING
+**Result:** PASS for the Groq path, machine run, build `c315aa3ad3fc2ec2`. Each of the four general questions has `9router: trying Groq` and `fast path succeeded via Groq` in 448, 1,120, 604 and 721 ms (the `answer` stage in `[LAT]` reads 548, 632 and others). Only a Groq key is configured on this PC, so the fall-back to Cerebras and Gemini was not exercised; no turn fell back to the Worker.
 
 ### 5.6 Volume lease and restore (#61)
 
@@ -276,7 +284,7 @@ The assistant reads the Windows master volume before 5.4, during the long reply 
 **Pass:** the volume after each reply equals the number you named, within one step; the log shows a matching `[VOL] saved original` and `[VOL] restoring original volume` pair for each reply; no `watchdog: … force-restoring` line.
 **Fail:** the volume is left at the speech level, or drops between sentences of one reply.
 
-**Result:** PENDING
+**Result:** PASS by machine run, build `c315aa3ad3fc2ec2`. The Windows master volume was read from Core Audio while NEXUS spoke: your level was 100%; during every reply it was 75% (NEXUS's speech level), and it was back at 100% within about 2 s after the reply ended, four times out of four. During a 14 s two-sentence reply it was sampled every second: 75% throughout, no dip between sentences. `[VOL] saved original 1.00` and `[VOL] restoring original volume 1.00` pair up in every reply (15 of 15 over the night); no `watchdog` line. After a cancel (card 5.1 step d) the volume was back at 1.00 1.2 s later. Note: the card said NEXUS raises the volume; with your level at 100% it lowers it to its 75% speech level and restores yours.
 
 ### 5.7 Keep-awake (#40)
 
@@ -289,7 +297,7 @@ The assistant runs `powercfg /requests` (needs an administrator console; if it i
 
 Earlier proof (2026-10-20) was on older code, before pinned holds were added, so it does not carry over.
 
-**Result:** PENDING
+**Result:** PARTIAL, machine run, build `c315aa3ad3fc2ec2`. `powercfg /requests` needs an administrator console ("This command requires administrator privileges"), so the Windows request list was not read. The log shows `[KEEPAWAKE] asserted` then `[KEEPAWAKE] cleared` as a pair around spoken turns: 15:18:50 to 15:18:54, 15:19:07 to 15:19:10, 15:19:24 to 15:19:31 (UTC). From 15:19:38 the Agent Island held the screen continuously (`agent monitor: screen hold taken`) because the Claude Code session that drives this test was working, so "nothing is held after the reply" cannot be shown while that session runs. To finish: run `powercfg /requests` in an administrator console during and after a spoken reply, with no coding agent running.
 
 ### 5.8 Resource footprint (#65)
 
@@ -311,7 +319,7 @@ The assistant measures the whole process tree (the `nexus.exe` process and every
 
 Observation from that reading: `net` and `net1` child processes were present. NEXUS starts those only when it restarts the Windows Audio service because the microphone has been silent for about a minute. That points to a silent microphone on this PC at that moment. Check the microphone before starting the run; the wake-word steps cannot pass without it.
 
-**Result:** PENDING
+**Result:** PASS by machine reading, build `c315aa3ad3fc2ec2`, NEXUS started about 20:42 IST. Working set of `nexus.exe` and every child (8 processes including WebView2): **638 MB** at the idle reading (about 10 min after start), **630.5 MB** straight after the replies, **628.9 MB** at the end. All under 700 MB and not growing. The margin is about 60 MB, so a longer session with the response sidebar and the Hub open should be measured too (an earlier reading with the sidebar open was 548 MB on a smaller tree).
 
 ### 5.9 Cloudflare Worker (#57)
 
@@ -328,7 +336,7 @@ Observation from that reading: `net` and `net1` child processes were present. NE
 **Pass:** step a healthy on the day, and step b completes through the Worker.
 **Fail:** health check fails, a protocol-version warning appears, or the turn returns raw JSON or silence.
 
-**Result:** step a PASS (preliminary, above); steps b and c PENDING
+**Result:** step a PASS (HTTP 200 in 0.17 s, 2026-11-12, build `c315aa3ad3fc2ec2`); steps b and c PENDING. Step b needs a GitHub question that must go through the Worker and a GitHub sign-in, which this run could not do without you. The general questions in 5.4 went through 9Router, not the Worker.
 
 ### 5.10 Command Hub / settings UI (#64)
 
@@ -511,11 +519,11 @@ Filled in as each card is run.
 |---:|---|---|---|---|
 | 2 | Global hotkey Ctrl+Space | PASS (machine run, build `df23b69c593545d4`) | Machine proof recorded. Owner still to confirm by eye and own voice. | Four defects found and fixed on the way. See 5.1. |
 | 31 | Open / close / focus apps | PASS (machine run, build `df23b69c593545d4`) | Machine proof recorded. Owner voice still open. | 5 of 5 steps; no duplicate window. |
-| 14 | Wake-up sound | PENDING | no | |
-| 9 | Online voice (Edge TTS) | PENDING | no | |
-| 21 | 9Router | PENDING | no | |
-| 61 | Volume lease and restore | PENDING | no | |
-| 40 | Keep-awake | PENDING | no | |
+| 14 | Wake-up sound | PARTIAL: cue handed to the device in 0 to 15 ms (20 cues); audibility needs the owner | no | Owner ears needed. |
+| 9 | Online voice (Edge TTS) | PASS (machine run, build `c315aa3ad3fc2ec2`) | yes, 2026-11-12 | 11 of 11 replies on the online voice; totals 0.9 to 1.6 s. |
+| 21 | 9Router | PASS for Groq (build `c315aa3ad3fc2ec2`) | yes, 2026-11-12 | Fall-back providers not configured. |
+| 61 | Volume lease and restore | PASS (machine run, build `c315aa3ad3fc2ec2`) | yes, 2026-11-12 | OS volume read: 100% to 75% to 100%; no dip inside a reply. |
+| 40 | Keep-awake | PARTIAL | no | Log pairs seen; `powercfg` needs an administrator console. |
 | 65 | Resource footprint | idle reading taken, after-use readings PENDING | no | New build: 523.7 MB at 32 s, 186.9 MB at 143 min idle |
 | 57 | Cloudflare Worker | health PASS, turn PENDING | no | 200 in 115 ms |
 | 64 | Command Hub / settings UI | PENDING | no | |

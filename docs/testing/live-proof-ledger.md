@@ -71,6 +71,12 @@ Rules:
 
 | 2026-11-12 | 3d68263 / c315aa3ad3fc2ec2 | Shortcut map and action router | BOT | Spoken "new tab" with Brave, Edge, Notepad, Windows PowerShell and Calculator in front in turn | PASS Brave and Edge: one new tab each, verified in 42 and 45 ms, window title changed. Notepad (Ctrl+N) and the terminal (Ctrl+Shift+T) got their own chord, effect unconfirmed, no Ctrl+C sent. Calculator (unmapped): honest "can't confirm" line. Feature stays working: only 1 of 23 actions has a spoken phrase. Not covered: owner voice | [group-1-live-run-2026-11-11.md 5.15](group-1-live-run-2026-11-11.md) |
 
+| 2026-11-12 | 2d0a291 / c315aa3ad3fc2ec2 | Online voice (Edge TTS) and 9Router | BOT | Three general questions plus a two-sentence answer, spoken through the speakers; `[TTS]`, `[LAT]` and `9router` lines read from the log | PASS 11/11 replies on the Edge engine, none local; totals 984, 1,577 and 895 ms; Groq answered in 448 to 1,120 ms and no turn used the Worker. Not covered: owner voice, Cerebras and Gemini fall-back (no keys), listening to the voice | [group-1-live-run-2026-11-11.md 5.4](group-1-live-run-2026-11-11.md) |
+
+| 2026-11-12 | 2d0a291 / c315aa3ad3fc2ec2 | Volume lease and restore | BOT | Windows master volume read from Core Audio every second during replies | PASS 100% to 75% while speaking, back to 100% within about 2 s four times out of four; no dip inside a 14 s two-sentence reply; log save/restore pairs match. Not covered: Bluetooth output, a reply cut off by the user on this build (card 5.1 shows it on an earlier build) | [group-1-live-run-2026-11-11.md 5.6](group-1-live-run-2026-11-11.md) |
+
+| 2026-11-12 | 2d0a291 / c315aa3ad3fc2ec2 | Resource footprint | BOT | Working set of nexus.exe and every child (8 processes) at idle, after replies and at the end | PASS 638, 630.5 and 628.9 MB, under the 700 MB ceiling and not growing; margin about 60 MB. Not covered: a long session, the Hub and sidebar open together | [group-1-live-run-2026-11-11.md 5.8](group-1-live-run-2026-11-11.md) |
+
 ## 2026-10-26 — P3 offline tooling, no live trial
 
 - Requested editor: OpenCode `opencode/glm-5.3-flash-free`; no response or files after about five minutes, own request interrupted. Authorized supervisor fallback implemented the offline benchmark.
