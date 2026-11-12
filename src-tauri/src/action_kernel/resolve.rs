@@ -61,6 +61,7 @@ fn types(word: &str) -> Option<(&'static [&'static str], Option<&'static str>)> 
         "spreadsheet" | "spreadsheets" | "excel" | "sheet" | "sheets" => (&["xls", "xlsx", "csv", "ods"], None),
         "presentation" | "presentations" | "powerpoint" | "slides" | "ppt" => (&["ppt", "pptx", "odp"], None),
         "installer" | "installers" => (&["exe", "msi"], None),
+        "text" | "txt" | "txts" => (&["txt"], None),
         "music" | "audio" | "song" | "songs" | "mp3" | "mp3s" => (&["mp3", "wav", "flac", "m4a", "aac", "ogg"], None),
         _ => return None,
     })
