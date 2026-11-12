@@ -111,7 +111,7 @@ pub fn clean_for_speech(s: &str) -> String {
     s.replace("...", " ").split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn any(hay: &str, kws: &[&str]) -> bool {
+pub(super) fn any(hay: &str, kws: &[&str]) -> bool {
     kws.iter().any(|k| hay.contains(k))
 }
 

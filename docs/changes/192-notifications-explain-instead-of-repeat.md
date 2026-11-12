@@ -16,3 +16,7 @@ Date: 2026-11-12. Branch `feat/notifications-explain-not-repeat`. Research: `doc
 ## Not verified
 
 Real mail through the new path on the owner's laptop; the AI helper against a real model; non-English mail.
+
+## Refactor pass (2026-11-12)
+
+No behaviour change. `mailwording.rs`: one keyword helper (`explain::any`) instead of two; the optional cloud step is its own function (`ai_explanation`) with early returns; the log label is `Source::label()`; the GitHub handle and owner/repo regexes are compiled once; two misplaced doc comments fixed. 430 memcore tests pass unchanged.

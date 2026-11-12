@@ -17,6 +17,7 @@ use super::mailtriage::{
     sender_label, sender_label_with, subject_label, MailMeta, Triage, Category,
     DB_HIGH, DB_MEDIUM, EXAM_STRONG, EXAM_WEAK, HACK_DEADLINE, HACK_RECEIVED,
 };
+use super::explain::any;
 use super::selfnames::SelfNames;
 use super::names;
 use super::{flag, log_egress};
@@ -27,6 +28,16 @@ pub enum Source {
     Local,
     Ai,
     Template,
+}
+
+impl Source {
+    fn label(self) -> &'static str {
+        match self {
+            Source::Local => "local",
+            Source::Ai => "ai",
+            Source::Template => "generic",
+        }
+    }
 }
 
 /// Local deterministic rewrite. GitHub uses pattern wording; the other
@@ -155,10 +166,6 @@ fn github_plain(t: &Triage, m: &MailMeta, address: Option<&str>, names: &SelfNam
     Some(tail(address, &sentence))
 }
 
-fn any_kw(hay: &str, kws: &[&str]) -> bool {
-    kws.iter().any(|k| hay.contains(k))
-}
-
 /// Short deterministic one-liners for the non-GitHub categories (plan 151,
 /// phase D). The keyword lists are the same ones `classify` used, so a line
 /// only appears for mail the rules already considered alert-worthy. Anything
@@ -178,7 +185,7 @@ fn category_plain(t: &Triage, m: &MailMeta, address: Option<&str>, names: &SelfN
     };
     let sentence = match t.category {
         Category::Database => {
-            if any_kw(&hay, &["will be deleted", "will be removed", "has been deleted", "scheduled for deletion", "deletion"]) {
+            if any(&hay, &["will be deleted", "will be removed", "has been deleted", "scheduled for deletion", "deletion"]) {
                 format!("{who} says your project will be deleted.")
             } else if hay.contains("paused") || hay.contains("pausing") {
                 format!("{who} may pause your project.")
@@ -186,63 +193,63 @@ fn category_plain(t: &Triage, m: &MailMeta, address: Option<&str>, names: &SelfN
                 format!("{who} suspended your service.")
             } else if hay.contains("payment failed") {
                 format!("{who} says your payment failed.")
-            } else if any_kw(&hay, &["read-only mode", "read only mode"]) {
+            } else if any(&hay, &["read-only mode", "read only mode"]) {
                 if is_self {
                     "Your project is read-only.".to_string()
                 } else {
                     format!("Your {who} project is read-only.")
                 }
-            } else if any_kw(&hay, &["exceeded", "over the limit", "disk space"]) {
+            } else if any(&hay, &["exceeded", "over the limit", "disk space"]) {
                 format!("{who} says you hit a usage limit.")
-            } else if any_kw(&hay, &["inactive", "inactivity"]) {
+            } else if any(&hay, &["inactive", "inactivity"]) {
                 format!("{who} warns your project is inactive.")
-            } else if any_kw(&hay, DB_HIGH) {
+            } else if any(&hay, DB_HIGH) {
                 format!("{who} sent a database warning.")
-            } else if any_kw(&hay, DB_MEDIUM) {
+            } else if any(&hay, DB_MEDIUM) {
                 format!("{who} sent a usage or billing notice.")
             } else {
                 return None;
             }
         }
         Category::Hackathon => {
-            if any_kw(&hay, &["waitlist", "wait list"]) {
+            if any(&hay, &["waitlist", "wait list"]) {
                 format!("{who} waitlisted your application.")
-            } else if any_kw(&hay, &["regret to inform", "not selected"]) {
+            } else if any(&hay, &["regret to inform", "not selected"]) {
                 format!("{who} says you were not selected.")
-            } else if any_kw(&hay, &["shortlisted", "selected", "accepted", "finalist", "next round", "congratulations"]) {
+            } else if any(&hay, &["shortlisted", "selected", "accepted", "finalist", "next round", "congratulations"]) {
                 format!("{who} says you were selected.")
-            } else if any_kw(&hay, HACK_RECEIVED) {
+            } else if any(&hay, HACK_RECEIVED) {
                 format!("{who} confirmed your registration.")
-            } else if any_kw(&hay, HACK_DEADLINE) {
+            } else if any(&hay, HACK_DEADLINE) {
                 format!("{who} says a hackathon deadline is near.")
             } else {
                 format!("{who} sent a hackathon update.")
             }
         }
-        Category::Exam if any_kw(&hay, EXAM_STRONG) => {
-            if any_kw(&hay, &["hall ticket", "admit card"]) {
+        Category::Exam if any(&hay, EXAM_STRONG) => {
+            if any(&hay, &["hall ticket", "admit card"]) {
                 format!("{who} released your hall ticket.")
             } else if hay.contains("seating arrangement") {
                 format!("{who} released the seating arrangement.")
-            } else if any_kw(&hay, &["exam schedule", "examination schedule", "exam timetable", "exam time table", "date sheet", "datesheet"]) {
+            } else if any(&hay, &["exam schedule", "examination schedule", "exam timetable", "exam time table", "date sheet", "datesheet"]) {
                 format!("{who} released the exam schedule.")
-            } else if any_kw(&hay, &["internal exam", "mid-sem", "midsem", "end-sem", "endsem", "semester exam"]) {
+            } else if any(&hay, &["internal exam", "mid-sem", "midsem", "end-sem", "endsem", "semester exam"]) {
                 format!("{who} sent a semester exam notice.")
-            } else if any_kw(&hay, &["re-exam", "backlog exam"]) {
+            } else if any(&hay, &["re-exam", "backlog exam"]) {
                 format!("{who} sent a backlog exam notice.")
             } else if hay.contains("viva") {
                 format!("{who} sent a viva notice.")
-            } else if any_kw(&hay, &["results declared", "result declared", "exam result"]) {
+            } else if any(&hay, &["results declared", "result declared", "exam result"]) {
                 format!("{who} declared results.")
             } else if hay.contains("revaluation") {
                 format!("{who} sent revaluation information.")
-            } else if any_kw(&hay, &["exam fee", "exam form", "examination form"]) {
+            } else if any(&hay, &["exam fee", "exam form", "examination form"]) {
                 format!("{who} sent an exam form notice.")
             } else {
                 format!("{who} sent an important exam notice.")
             }
         }
-        Category::Exam if any_kw(&hay, EXAM_WEAK) => format!("{who} sent an exam update."),
+        Category::Exam if any(&hay, EXAM_WEAK) => format!("{who} sent an exam update."),
         Category::Internship => format!("{who} sent an internship opportunity."),
         // A deadline mail has no fixed wording: the explainer names the topic and the date from the mail itself
         // (it used to speak the first ten words of the subject).
@@ -443,63 +450,59 @@ pub async fn plain_alert_text<R: Runtime>(
     let names = SelfNames::load(dir);
     let (explained, known) = explained_text(t, m, address, &names);
 
-    let mut ai: Option<String> = None;
-    if !known {
-        let use_ai = flag(dir, "memcoreMailPlain", false)
-            && !crate::commands::read_local_stt_only(app)
-            && !names::enabled(dir);
-        let keys = read_provider_keys(app);
-        let has_key = !keys.groq.is_empty() || !keys.gemini.is_empty() || !keys.cerebras.is_empty();
-        if use_ai && has_key && ai_budget_ok() {
-            let (system, user) = build_prompt_with(t, m, &names);
-            log_egress(dir, "mailwording", &user, "");
-            if let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(30)).build() {
-                ai = tokio::time::timeout(Duration::from_secs(4), route_with_system(&system, &user, 90, &keys, &client))
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|r| accept_line(&r.text, t, m))
-                    .map(|s| tail(address, &s));
-            }
-        }
-    }
+    let ai = if known { None } else { ai_explanation(app, dir, t, m, address, &names).await };
 
     let (text, source) = if known { (explained, Source::Local) } else { choose(None, ai, explained) };
-    println!(
-        "[MAILWATCH] plain={} id={}",
-        match source {
-            Source::Local => "local",
-            Source::Ai => "ai",
-            Source::Template => "generic",
-        },
-        m.id
-    );
+    println!("[MAILWATCH] plain={} id={}", source.label(), m.id);
     (text, source)
+}
+
+/// The optional cloud explanation: only with the owner's opt-in, not local-only STT, names not hidden, a provider key
+/// and today's budget. The redacted prompt is logged under Sent to cloud; the answer must pass `accept_line`.
+async fn ai_explanation<R: Runtime>(
+    app: &AppHandle<R>,
+    dir: &Path,
+    t: &Triage,
+    m: &MailMeta,
+    address: Option<&str>,
+    names: &SelfNames,
+) -> Option<String> {
+    let allowed = flag(dir, "memcoreMailPlain", false) && !crate::commands::read_local_stt_only(app) && !names::enabled(dir);
+    if !allowed {
+        return None;
+    }
+    let keys = read_provider_keys(app);
+    if keys.groq.is_empty() && keys.gemini.is_empty() && keys.cerebras.is_empty() {
+        return None;
+    }
+    if !ai_budget_ok() {
+        return None;
+    }
+    let (system, user) = build_prompt_with(t, m, names);
+    log_egress(dir, "mailwording", &user, "");
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().ok()?;
+    let reply = tokio::time::timeout(Duration::from_secs(4), route_with_system(&system, &user, 90, &keys, &client)).await.ok()??;
+    accept_line(&reply.text, t, m).map(|s| tail(address, &s))
 }
 
 /// Extract the first @handle from the subject (without @).
 fn extract_github_handle(subject: &str) -> Option<String> {
-    // Match @word in the subject
-    let re = regex::Regex::new(r"@([A-Za-z0-9_-]+)").ok()?;
-    re.captures(subject)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string())
+    static HANDLE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| regex::Regex::new(r"@([A-Za-z0-9_-]+)").unwrap());
+    HANDLE.captures(subject).and_then(|c| c.get(1)).map(|m| m.as_str().to_string())
 }
 
 /// Extract the first owner/repo token from the subject as a pair.
 pub(crate) fn extract_github_owner_repo(subject: &str) -> Option<(String, String)> {
-    // Match owner/repo (alphanumeric, hyphen, underscore)
-    let re = regex::Regex::new(r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)").ok()?;
-    let found = re.captures_iter(subject).find_map(|c| {
+    static OWNER_REPO: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)").unwrap());
+    OWNER_REPO.captures_iter(subject).find_map(|c| {
         let owner = c.get(1)?.as_str().to_string();
         let repo = c.get(2)?.as_str().trim_end_matches(&[':', '.', ']', ')'][..]).to_string();
         let has_letters = |t: &str| t.chars().filter(|ch| ch.is_alphabetic()).count() >= 2;
         (has_letters(&owner) && has_letters(&repo)).then_some((owner, repo))
-    });
-    found
+    })
 }
 
-/// Extract the first owner/repo token from the subject (repo name only).
 /// Short spoken wording for a GitHub CI failure subject ("Build failed in zync"). No person is named:
 /// on GitHub mail the From name is the actor, who is usually the owner.
 pub fn short_ci_wording(subject: &str) -> Option<String> {
@@ -511,6 +514,7 @@ pub fn short_ci_wording(subject: &str) -> Option<String> {
     }
 }
 
+/// The repo name of the first owner/repo token in the subject.
 pub(crate) fn extract_github_repo(subject: &str) -> Option<String> {
     extract_github_owner_repo(subject).map(|(_, repo)| repo)
 }
