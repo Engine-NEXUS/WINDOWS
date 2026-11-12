@@ -466,7 +466,9 @@ fn collect_signals<R: Runtime>(app: &AppHandle<R>) -> Signals {
         nexus_speaking: tts,
         working: crate::ghost::drill_running()
             || crate::orchestrator::has_active_request()
-            || crate::turn_pending::is_pending(),
+            || crate::turn_pending::is_pending()
+            // a question NEXUS just asked is waiting for its answer
+            || crate::memcore::offer::asked_within(std::time::Duration::from_secs(45)),
         meeting,
         focus: crate::focus_mode::paused(),
         idle_ms: if last == 0 { u64::MAX / 4 } else { now_ms().saturating_sub(last) },
