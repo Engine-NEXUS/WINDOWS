@@ -827,10 +827,16 @@ fn browser_key(keys: &str, label: &str) -> Result<CommandResult, String> {
         let _ = Command::new("xdotool").args(["key", keys]).spawn();
     }
     tracing::info!("browser key: {} ({})", keys, label);
+    // The window in front is not in the shortcut map, so nothing was checked: say what was done, not that it worked
+    // (a "new tab" said while Calculator was in front gave "New tab sir." with no tab, Group 1 run 2026-11-12).
     Ok(CommandResult {
         success: true,
-        message: format!("{} sir.", capitalize(label)),
+        message: unverified_key_line(label),
     })
+}
+
+fn unverified_key_line(label: &str) -> String {
+    format!("I sent the {label} shortcut, sir, but I can't confirm this app took it.")
 }
 
 /// Voice-driven browser hotkeys (orchestrator path). The deterministic
@@ -1610,6 +1616,13 @@ pub(crate) mod urlencoding {
 #[cfg(test)]
 mod safe_url_tests {
     use super::*;
+
+    #[test]
+    fn a_key_sent_to_an_unmapped_app_is_not_reported_as_done() {
+        let line = unverified_key_line("new tab");
+        assert!(line.contains("can't confirm"));
+        assert!(!line.starts_with("New tab"));
+    }
 
     #[test]
     fn calculator_is_closed_under_the_name_it_really_runs_as() {
