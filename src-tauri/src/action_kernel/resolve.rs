@@ -109,6 +109,11 @@ pub fn parse_object(phrase: &str) -> Query {
                 }
                 continue;
             }
+            // "the text files", "my pdf files": the noun carries the plural when the type word does not.
+            "files" => {
+                q.plural = true;
+                continue;
+            }
             _ => {}
         }
         if STOP.contains(&w.as_str()) {
@@ -274,6 +279,15 @@ mod tests {
             Resolved::Found(v) | Resolved::Ambiguous(v) => v.into_iter().map(|c| c.name).collect(),
             _ => vec![],
         }
+    }
+
+    #[test]
+    fn text_files_means_every_txt_file_not_one_of_them() {
+        let q = parse_object("text files");
+        assert_eq!(q.exts, vec!["txt".to_string()]);
+        assert!(q.plural, "'files' is plural even though 'text' is not");
+        assert!(q.tokens.is_empty());
+        assert!(!parse_object("text file").plural);
     }
 
     #[test]
