@@ -1940,6 +1940,15 @@ pub struct NexusSettings {
     /// Watch latest production deploys (Vercel, Render, Netlify) and announce failure/recovery.
     #[serde(default = "default_memcore")]
     pub memcore_deploy_watch: bool,
+    /// Local listener that coding-agent hooks and webhooks post to. Read at startup (restart to apply).
+    #[serde(default = "default_true")]
+    pub webhook_listener: bool,
+    /// Keeps the screen awake while a request or Ghost task runs. Read at startup (restart to apply).
+    #[serde(default = "default_true")]
+    pub keep_awake_poller: bool,
+    /// Warms local speech recognition ~20 s after boot. Read at startup (restart to apply).
+    #[serde(default = "default_true")]
+    pub stt_prewarm: bool,
     /// Open the CodeRabbit panel on a PR whose CI just failed.
     #[serde(default = "default_memcore")]
     pub coderabbit_auto_open: bool,
@@ -2363,6 +2372,9 @@ impl Default for NexusSettings {
             memcore_timetable: default_memcore(),
             memcore_mail: default_memcore(),
             memcore_github_watch: default_memcore(),
+            webhook_listener: true,
+            keep_awake_poller: true,
+            stt_prewarm: true,
             memcore_deploy_watch: default_memcore(),
             coderabbit_auto_open: default_memcore(),
             notify_native: true,
@@ -2688,6 +2700,29 @@ pub fn settings_patch<R: Runtime>(
     let merged = apply_settings_patch(&current, &patch)?;
     let voice_lock_change = patch.get("speakerVerification").and_then(serde_json::Value::as_bool);
     save_settings_with_voice_intent(app, merged, voice_lock_change)
+}
+
+/// Features page "Run full check": the same audit that runs at startup, returned as rows (OK / WARN / FAIL).
+#[tauri::command]
+pub async fn run_system_audit<R: Runtime>(app: tauri::AppHandle<R>) -> Result<crate::diagnostics::FullSystemAuditReport, String> {
+    use tauri::Manager;
+    let dir = app.path().app_data_dir().ok();
+    tauri::async_runtime::spawn_blocking(move || crate::diagnostics::run_full_system_audit(dir.as_deref()))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Features page test button for notifications: runs one `notify_selftest` scenario through the real pipeline.
+/// Only the fixed scenario names are accepted; nothing touches a provider or credentials.
+#[tauri::command]
+pub fn notify_test<R: Runtime>(app: tauri::AppHandle<R>, scenario: String) -> Result<String, String> {
+    let (_, s, expect) = crate::notify_selftest::SCENARIOS
+        .iter()
+        .find(|(n, _, _)| *n == scenario)
+        .ok_or_else(|| format!("unknown scenario '{scenario}'"))?;
+    let s = *s;
+    std::thread::spawn(move || crate::notify_selftest::run(&app, s));
+    Ok((*expect).to_string())
 }
 
 #[cfg(test)]
@@ -4398,6 +4433,18 @@ mod nexus_settings_tests {
         assert_eq!(merged.agent_monitor_welcome_after_min, 5);
         assert_eq!(merged.agent_island_scale, 1.25);
         assert!(merged.agent_monitor, "other settings are untouched");
+    }
+
+    #[test]
+    fn startup_switches_default_on_and_round_trip() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        for k in ["webhookListener", "keepAwakePoller", "sttPrewarm"] {
+            raw.as_object_mut().unwrap().remove(k);
+        }
+        let parsed: NexusSettings = serde_json::from_value(raw).unwrap();
+        assert!(parsed.webhook_listener && parsed.keep_awake_poller && parsed.stt_prewarm);
+        let back = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(back.get("sttPrewarm"), Some(&serde_json::json!(true)));
     }
 
     #[test]

@@ -58,6 +58,13 @@ jobs:
       - name: IPC + event contract gate
         run: node ../scripts/check-ipc-contract.mjs
 
+      # Every boolean in NexusSettings is a row on the Features page (or listed as internal, with a reason).
+      - name: Features page registry
+        run: node ../scripts/check-feature-registry.mjs
+
+      - name: Feature readiness drift
+        run: node ../scripts/gen-feature-readiness.mjs --check
+
       # The logon greeting is drawn natively from frames of the real dotted orb; a change to the orb engine must be re-baked.
       - name: Early orb frames up to date
         run: node ../scripts/bake-early-orb.mjs --check
@@ -118,7 +125,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
 
       - uses: actions/setup-node@v4
         with:
@@ -177,7 +184,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
 
       - name: Install LLVM
         run: choco install llvm -y

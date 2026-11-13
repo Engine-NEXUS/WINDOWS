@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { initialOf, type HubAccount, type UsageStats } from "./hubModel";
 
-export type HubPage = "home" | "keys" | "memory" | "actions" | "alerts" | "device-links" | "activity" | "audio" | "display" | "connections" | "advanced" | "appearance";
+export type HubPage = "home" | "keys" | "features" | "memory" | "actions" | "alerts" | "device-links" | "activity" | "audio" | "display" | "connections" | "advanced" | "appearance";
 
 interface AccountsApi {
   accounts: HubAccount[];
@@ -226,6 +226,7 @@ export function HubHome({ acc, insights: _insights, themeMode, onTheme: _onTheme
       </div>
 
       {/* ── Settings Navigation ── */}
+      <Row icon={ICONS.advanced} title="Features" sub="Switch every feature on or off" onClick={() => onOpen("features")} />
       <Row icon={ICONS.key} title="API Keys & Models" sub="Groq, Gemini & Providers" onClick={() => onOpen("keys")} />
       <Row icon={ICONS.vault} title="Memory Core" sub="Vault & Cloud Recall" onClick={() => onOpen("memory")} />
       <Row icon={ICONS.shield} title="Actions & Permissions" sub="Safety & Boundaries" onClick={() => onOpen("actions")} />
