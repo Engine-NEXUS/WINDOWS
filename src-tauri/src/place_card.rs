@@ -692,6 +692,34 @@ pub async fn build<R: Runtime>(app: &AppHandle<R>, query: &str, here: Option<Fix
     })
 }
 
+/// Distance and times to a spoken place, without the photo and the rest of the card: for a spoken answer when there is
+/// no Routes key, and for trip reminders. `approx` is true when no traffic data was used.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuickRoute {
+    pub name: String,
+    pub km: f64,
+    pub car_min: u32,
+    pub bike_min: u32,
+    pub approx: bool,
+}
+
+pub async fn quick_route<R: Runtime>(app: &AppHandle<R>, query: &str, here: Fix) -> Option<QuickRoute> {
+    let c = client();
+    let key = [crate::commands::read_api_key(app, "google_places"), crate::commands::read_api_key(app, "google_maps")].into_iter().find(|k| !k.trim().is_empty()).unwrap_or_default();
+    let found = match if key.is_empty() { None } else { google_lookup(&c, &key, query, Some(here)).await } {
+        Some(f) => f,
+        None => nominatim_lookup(&c, query).await?,
+    };
+    let (mode, server_url) = crate::commands::read_routing_settings(app);
+    let cfg = RoutingCfg {
+        mode,
+        server: server_url_ok(&server_url).map(|u| (u, crate::commands::read_api_key(app, "routing_server"))),
+        google_key: key,
+    };
+    let r = route(&c, &cfg, (here.lat, here.lon), (found.lat, found.lon)).await;
+    Some(QuickRoute { name: found.name, km: r.km, car_min: r.car_min, bike_min: r.bike_min, approx: r.travel_approx })
+}
+
 // ── window ──────────────────────────────────────────────────────────────────
 
 static PENDING: Mutex<Option<PlaceCard>> = Mutex::new(None);
