@@ -1283,6 +1283,7 @@ mod tests {
             labels: vec![],
             date_ms: 0,
             rfc822_id: "<CAF+abc@mail.gmail.com>".into(),
+            body: String::new(),
         }
     }
 

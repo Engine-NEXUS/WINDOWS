@@ -37,7 +37,6 @@ live_whatsapp_send
 live_whatsapp_type_message
 meeting_status
 memory_recall
-mic_self_test
 open_maps_window
 open_settings_window
 orchestrator_github_clear_token

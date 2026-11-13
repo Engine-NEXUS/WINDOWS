@@ -19,7 +19,7 @@ use serde_json::Value;
 use crate::google::types::AlertUrgency;
 use super::selfnames::SelfNames;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct MailMeta {
     pub id: String,
     pub thread_id: String,
@@ -31,6 +31,22 @@ pub struct MailMeta {
     pub date_ms: i64,
     /// RFC 822 `Message-ID` header (an id-independent way to find this mail in Gmail); empty when absent.
     pub rfc822_id: String,
+    /// A short plain-text extract of the body (at most `explain::BODY_EXTRACT_CHARS`), filled ONLY for mail that was
+    /// already triaged as important, held in memory long enough to write one spoken sentence, and never stored, logged
+    /// (`Debug` below hides it) or spoken. Empty for the metadata poll.
+    pub body: String,
+}
+
+impl std::fmt::Debug for MailMeta {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MailMeta")
+            .field("id", &self.id)
+            .field("thread_id", &self.thread_id)
+            .field("from_email", &self.from_email)
+            .field("subject", &self.subject)
+            .field("body", &format_args!("<{} chars, hidden>", self.body.chars().count()))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +149,7 @@ pub fn parse_message_meta(v: &Value) -> Option<MailMeta> {
             .unwrap_or_default(),
         date_ms: v.get("internalDate").and_then(|d| d.as_str()).and_then(|d| d.parse().ok()).unwrap_or(0),
         rfc822_id: header(v, "Message-ID"),
+        body: String::new(),
     })
 }
 
@@ -409,15 +426,10 @@ pub fn subject_label(m: &MailMeta) -> String {
     clip(s, 60)
 }
 
-/// One spoken alert: "Sir, a database service warning from Supabase: Your project will be paused."
+/// One spoken alert, without a model: an explanation of the mail, never its subject ("Supabase says your project will
+/// be deleted, sir.").
 pub fn alert_text_with(t: &Triage, m: &MailMeta, address: Option<&str>, names: &SelfNames) -> String {
-    let who = address.map(|a| format!("{a}, ")).unwrap_or_default();
-    capitalize(format!(
-        "{who}{} from {}: {}.",
-        t.category.phrase(),
-        sender_label_with(m, names),
-        subject_label(m).trim_end_matches('.')
-    ))
+    super::mailwording::explained_text(t, m, address, names).0
 }
 
 pub fn alert_text(t: &Triage, m: &MailMeta, address: Option<&str>) -> String {
@@ -428,13 +440,10 @@ pub fn alert_text(t: &Triage, m: &MailMeta, address: Option<&str>) -> String {
 pub fn batch_text_with(items: &[(Triage, MailMeta)], address: Option<&str>, names: &SelfNames) -> String {
     let who = address.map(|a| format!("{a}, ")).unwrap_or_default();
     let first = &items[0];
-    capitalize(format!(
-        "{who}{} important emails. The most urgent is {} from {}: {}. Say important emails for the rest.",
-        items.len(),
-        first.0.category.phrase(),
-        sender_label_with(&first.1, names),
-        subject_label(&first.1).trim_end_matches('.'),
-    ))
+    // The most urgent one, explained (no address, no final full stop), not its subject.
+    let top = super::mailwording::explained_text(&first.0, &first.1, None, names).0;
+    let top = top.trim_end_matches('.').to_string();
+    capitalize(format!("{who}{} important emails. The most urgent: {top}. Say important emails for the rest.", items.len()))
 }
 
 #[cfg(test)]
@@ -457,6 +466,10 @@ pub struct StoredMail {
     /// Which connected account it arrived in.
     #[serde(default)]
     pub account: String,
+    /// The one-sentence explanation (no address, no body, no subject copy) the briefing speaks instead of a quoted subject.
+    /// Empty for mail filed before this existed.
+    #[serde(default)]
+    pub explain: String,
 }
 
 pub fn urgency_str(u: AlertUrgency) -> &'static str {
@@ -488,7 +501,12 @@ pub fn urgency_rank(u: AlertUrgency) -> u8 {
 
 /// Build the stored record. Snippet is PII-redacted and everything is clipped
 /// so the JSON always fits the store's 500-char value cap.
+#[cfg(test)]
 pub fn to_stored(t: &Triage, m: &MailMeta, account: &str) -> StoredMail {
+    to_stored_with(t, m, account, &SelfNames::none())
+}
+
+pub fn to_stored_with(t: &Triage, m: &MailMeta, account: &str, names: &SelfNames) -> StoredMail {
     let mut s = StoredMail {
         sender: clip(&sender_label(m), 40),
         email: clip(&m.from_email, 60),
@@ -499,8 +517,10 @@ pub fn to_stored(t: &Triage, m: &MailMeta, account: &str) -> StoredMail {
         reason: clip(&t.reason, 80),
         ts_ms: m.date_ms,
         account: clip(account, 50),
+        explain: clip(&super::mailwording::explained_text(t, m, None, names).0, 160),
     };
-    if serde_json::to_string(&s).map(|j| j.chars().count()).unwrap_or(999) > 480 {
+    // The explanation is the useful part; the raw preview goes first when the row is over its cap.
+    if serde_json::to_string(&s).map(|j| j.chars().count()).unwrap_or(999) > 640 {
         s.snippet.clear();
     }
     s
@@ -531,6 +551,7 @@ mod tests {
             labels: labels.iter().map(|s| s.to_string()).collect(),
             date_ms: 1_700_000_000_000,
             rfc822_id: String::new(),
+            body: String::new(),
         }
     }
 
@@ -688,16 +709,15 @@ mod tests {
     fn alert_wording() {
         let m = mail("Supabase <noreply@supabase.io>", "Re: Your project will be paused.", "", &["INBOX"]);
         let t = classify(&m, &[]).unwrap();
-        assert_eq!(
-            alert_text(&t, &m, Some("sir")),
-            "Sir, a database service warning from Supabase: Your project will be paused."
-        );
-        assert!(alert_text(&t, &m, None).starts_with("A database service warning from Supabase"));
+        // an explanation, not the subject
+        assert_eq!(alert_text(&t, &m, Some("sir")), "Supabase may pause your project, sir.");
+        assert!(alert_text(&t, &m, None).starts_with("Supabase may pause your project"));
+        assert!(!alert_text(&t, &m, Some("sir")).contains("will be paused"), "the subject must not be copied");
         let anon = mail("<noreply@supabase.io>", "x", "", &[]);
         assert_eq!(sender_label(&anon), "Supabase");
         let items = vec![(t.clone(), m.clone()), (t, m)];
         let b = batch_text(&items, Some("sir"));
-        assert!(b.starts_with("Sir, 2 important emails.") && b.contains("Supabase"), "{b}");
+        assert!(b.starts_with("Sir, 2 important emails.") && b.contains("The most urgent: Supabase may pause your project"), "{b}");
     }
 
     #[test]
@@ -711,7 +731,7 @@ mod tests {
         let t = Triage { category: Category::Exam, urgency: AlertUrgency::High, reason: "r".repeat(300) };
         let s = to_stored(&t, &m, "me@gmail.com");
         let json = serde_json::to_string(&s).unwrap();
-        assert!(json.chars().count() <= 500, "{} chars", json.chars().count());
+        assert!(json.chars().count() <= 700, "{} chars", json.chars().count());
         assert!(!s.snippet.contains("9876543210") && !s.snippet.contains("me@example.com"), "{}", s.snippet);
         assert_eq!(urgency_from(urgency_str(AlertUrgency::High)), AlertUrgency::High);
         assert_eq!(Category::from_str("exam"), Some(Category::Exam));
@@ -734,12 +754,12 @@ mod tests {
         let names = SelfNames::from_parts(&["Chitkul Lakshya".into(), "chitkullakshya@gmail.com".into()]);
         assert_eq!(sender_label_with(&m, &names), "you");
         let a = alert_text_with(&t, &m, Some("sir"), &names);
-        assert_eq!(a, "Sir, a database service warning from you: Action required.");
-        assert!(!a.contains("Chitkul"));
+        assert_eq!(a, "An email arrived that I could not sum up. It is in the sidebar, sir.");
+        assert!(!a.contains("Chitkul") && !a.contains("Action required"), "{a}");
 
         let items = vec![(t.clone(), m.clone())];
         let b = batch_text_with(&items, Some("sir"), &names);
-        assert!(b.contains("from you: Action required."));
+        assert!(b.contains("The most urgent: An email arrived that I could not sum up") && !b.contains("Chitkul"), "{b}");
     }
 
     #[test]
@@ -751,4 +771,24 @@ mod tests {
         assert_eq!(s.chars().count(), 61);
         assert!(s.ends_with('…'), "{s}");
     }
+
+    #[test]
+    fn the_body_is_never_stored_and_never_printed_but_the_explanation_is() {
+        let mut m = mail(
+            "Prof Rao <rao@uni.edu>",
+            "Assignment 3 reminder",
+            "submit by Friday",
+            &["INBOX"],
+        );
+        m.body = "SECRET-BODY-TEXT please submit your report, it is due Friday at 5 pm. 9876543210".into();
+        let t = Triage { category: Category::Deadline, urgency: AlertUrgency::Medium, reason: "r".into() };
+        let stored = to_stored(&t, &m, "me@gmail.com");
+        let json = serde_json::to_string(&stored).unwrap();
+        assert!(!json.contains("SECRET-BODY-TEXT") && !json.contains("9876543210"), "the body must not be stored: {json}");
+        assert!(stored.explain.contains("Friday at 5 pm"), "the explanation uses what the body said: {}", stored.explain);
+        let printed = format!("{m:?}");
+        assert!(!printed.contains("SECRET-BODY-TEXT"), "Debug must hide the body: {printed}");
+        assert!(printed.contains("chars, hidden"), "{printed}");
+    }
+
 }
