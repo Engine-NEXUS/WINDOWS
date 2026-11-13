@@ -74,7 +74,7 @@ pub(crate) fn apply_duck(sink: &rodio::Sink) {
         DUCK_GAIN.store(1000, Ordering::Relaxed);
         DUCK_UNTIL_MS.store(0, Ordering::Relaxed);
     }
-    sink.set_volume(gain);
+    sink.set_volume(crate::quiet::gain(gain));
 }
 
 /// Speech calls in flight (speak_text / speak_cached). Background cache rendering waits for 0 so it
@@ -1237,6 +1237,7 @@ async fn play_audio(
             Ok((_stream, handle)) => {
                 match Sink::try_new(&handle) {
                     Ok(sink) => {
+                        crate::quiet::mute_sink(&sink);
                         if TTS_GENERATION.load(Ordering::SeqCst) > my_generation { return Ok(()); }
                         crate::speech_sync::prepare(my_generation as u64, caption.clone())?;
                         if TTS_GENERATION.load(Ordering::SeqCst) > my_generation { return Ok(()); }
@@ -1632,6 +1633,7 @@ async fn play_audio_streamed(
         match OutputStream::try_default() {
             Ok((_stream, handle)) => match Sink::try_new(&handle) {
                 Ok(sink) => {
+                    crate::quiet::mute_sink(&sink);
                     let mut cumulative_ms: u64 = 0;
                     let mut completed_ms: u64 = 0;
                     let mut queued_ms = std::collections::VecDeque::<u64>::new();
@@ -1918,6 +1920,7 @@ where
             Ok(s) => s,
             Err(e) => return NarrateOutcome::Unavailable(format!("audio sink: {e}")),
         };
+        crate::quiet::mute_sink(&sink);
         let mut tracker = NarrationTracker::new();
         let mut appended = 0usize;
         let mut cumulative_ms: u64 = 0;

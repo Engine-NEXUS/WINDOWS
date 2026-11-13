@@ -194,6 +194,7 @@ pub(crate) mod location;
 pub(crate) mod no_window;
 pub(crate) mod fares;
 pub(crate) mod directions;
+pub(crate) mod quiet;
 pub(crate) mod place_card;
 pub(crate) mod power_close;
 pub(crate) mod window_tile;

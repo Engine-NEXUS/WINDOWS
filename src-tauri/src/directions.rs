@@ -34,6 +34,14 @@ const TRIP_BUFFER_SECS: i64 = 5 * 60;
 /// A trip reminder is dropped this long after the time you wanted to arrive.
 const TRIP_KEEP_SECS: i64 = 30 * 60;
 const MAX_TRIPS: usize = 10;
+/// A trip reminder for a place that comes out further than this is a wrong match ("the airport" found on another
+/// continent), not a trip.
+const MAX_TRIP_ETA_SECS: i64 = 6 * 3600;
+
+/// Whether a measured travel time can be a real trip. Pure.
+pub fn trip_eta_plausible(eta_secs: i64) -> bool {
+    eta_secs > 0 && eta_secs <= MAX_TRIP_ETA_SECS
+}
 
 /// What the parser handed over for "directions to X".
 pub struct Request {
@@ -177,6 +185,30 @@ pub struct LineInput<'a> {
     pub question: bool,
     /// Tell the user once that a Maps key gives live traffic.
     pub hint: bool,
+    /// What a follow-up just did ("Switched to walking"), said instead of "The route to X is open".
+    pub update: Option<String>,
+}
+
+/// The first letter upper-case ("charminar" -> "Charminar"). Pure.
+pub fn cap_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// What a follow-up did, in a few words, for the start of the answer. Pure.
+pub fn update_phrase(action: &str, value: Option<&str>, mode: TravelMode) -> String {
+    let v = value.unwrap_or("").trim();
+    match action {
+        "mode" => format!("Switched to {}", mode_name(mode)),
+        "avoid" => format!("Avoiding {v}"),
+        "allow" => format!("Allowing {v} again"),
+        "stop" => format!("Added {v} as a stop"),
+        "clear_stops" => "Removed the stops".to_string(),
+        _ => "Done".to_string(),
+    }
 }
 
 /// The sentence NEXUS speaks for a route. Says what is known and what is not. Pure.
@@ -198,11 +230,14 @@ pub fn route_line(i: &LineInput) -> String {
                 detail.push_str(&format!(", arriving around {}", arrival_clock(now, min)));
             }
             if i.question {
-                format!("{} is {dist} away{detail}, sir.", i.dest)
+                format!("{} is {dist} away{detail}, sir.", cap_first(i.dest))
+            } else if let Some(u) = i.update.as_deref() {
+                format!("{u}, sir. It's {dist}{detail}.")
             } else {
                 format!("The route to {} is open, sir. It's {dist}{detail}.", i.dest)
             }
         }
+        None if i.update.is_some() && !i.question => format!("{}, sir.", i.update.as_deref().unwrap_or("Done")),
         None if i.question => format!("I opened the route to {}, sir, but I couldn't work out the distance.", i.dest),
         None if i.opts_spoken.is_empty() => format!("Opening the route to {}, sir.", i.dest),
         None => format!("Opening the route to {}, {}, sir.", i.dest, i.opts_spoken),
@@ -344,12 +379,18 @@ fn clock_of(epoch: i64) -> String {
     }
 }
 
-/// Today's `arrive_min` (minutes since midnight) as an epoch, or `None` when that time has already passed. Pure.
+/// The next time the clock shows `arrive_min` (minutes since midnight), as an epoch. A time that has passed today means
+/// tomorrow only when that is within 12 hours ("at 1 am" said at 11 pm); otherwise (said at 6 pm, "at 5 pm") it is
+/// `None`, because it was probably a slip. Pure.
 pub fn arrive_epoch_for(now: chrono::DateTime<chrono::Local>, arrive_min: u16) -> Option<i64> {
     use chrono::{Datelike, TimeZone};
     let (h, m) = ((arrive_min / 60) as u32, (arrive_min % 60) as u32);
     let at = chrono::Local.with_ymd_and_hms(now.year(), now.month(), now.day(), h, m, 0).single()?;
-    (at.timestamp() > now.timestamp()).then_some(at.timestamp())
+    if at.timestamp() > now.timestamp() {
+        return Some(at.timestamp());
+    }
+    let tomorrow = at.timestamp() + 24 * 3600;
+    (tomorrow - now.timestamp() <= 12 * 3600).then_some(tomorrow)
 }
 
 /// Speak now? From 5 minutes before the leave time until the arrival time; never after. Pure.
@@ -426,7 +467,7 @@ enum Card {
 }
 
 /// Open the route, look up the time, show the card, remember the route, and return the sentence to speak.
-async fn present<R: Runtime>(app: &AppHandle<R>, cur: &mut Current, card: Card, question: bool, here: Option<Fix>) -> Result<String, String> {
+async fn present<R: Runtime>(app: &AppHandle<R>, cur: &mut Current, card: Card, question: bool, here: Option<Fix>, update: Option<String>) -> Result<String, String> {
     use crate::place_card;
     let target = MapsTarget::Directions { origin: cur.origin.clone(), destination: cur.destination.clone(), mode: cur.mode, opts: cur.opts.clone() };
     if let Err(e) = crate::maps_panel::show_map(app, target).await {
@@ -449,7 +490,15 @@ async fn present<R: Runtime>(app: &AppHandle<R>, cur: &mut Current, card: Card, 
         }
         tokio::time::timeout(Duration::from_secs(6), place_card::build(app, &dest, here)).await.ok().flatten()
     };
-    let (routes, built) = tokio::join!(routes_task, card_task);
+    // Without a Routes key the distance and time come from a keyless estimate. It is fetched on its own, so a slow photo
+    // never costs the answer its numbers. Not for an own-address destination (that never reaches the lookup sources).
+    let estimate_task = async {
+        match here {
+            Some(h) if want_card && key.is_empty() => tokio::time::timeout(Duration::from_secs(5), place_card::quick_route(app, &dest, h)).await.ok().flatten(),
+            _ => None,
+        }
+    };
+    let (routes, built, quick) = tokio::join!(routes_task, card_task, estimate_task);
 
     if want_card {
         match built.as_ref() {
@@ -471,6 +520,11 @@ async fn present<R: Runtime>(app: &AppHandle<R>, cur: &mut Current, card: Card, 
         }
     }
 
+    if cur.base.is_none() {
+        if let Some(q) = quick {
+            cur.base = Some((q.km, q.car_min, q.bike_min, q.approx));
+        }
+    }
     let mut time_failed = false;
     let mut facts = match routes {
         Some(Ok(eta)) => {
@@ -499,6 +553,7 @@ async fn present<R: Runtime>(app: &AppHandle<R>, cur: &mut Current, card: Card, 
         time_failed,
         question,
         hint,
+        update,
     });
     if here.as_ref().is_some_and(crate::location::should_tell_about_exact_location) {
         line.push_str(" For an exact starting point, turn on location in Windows settings, sir.");
@@ -536,7 +591,7 @@ pub async fn run<R: Runtime>(app: AppHandle<R>, req: Request) -> Result<ProcessR
     };
     // Home / work / "my X": nothing about the user's own address goes to the photo sources, but a stale card is closed.
     let line = if photo_card {
-        present(&app, &mut cur, Card::Build, req.question, here).await
+        present(&app, &mut cur, Card::Build, req.question, here, None).await
     } else {
         present_without_card(&app, &mut cur, req.question, here).await
     };
@@ -551,7 +606,7 @@ async fn present_without_card<R: Runtime>(app: &AppHandle<R>, cur: &mut Current,
     if app.get_webview_window(crate::panel_layout::Panel::PlaceCard.label()).is_some() {
         let _ = crate::place_card::close_place_card(app.clone()).await;
     }
-    present(app, cur, Card::Keep, question, here).await
+    present(app, cur, Card::Keep, question, here, None).await
 }
 
 /// A change to, or a question about, the open route.
@@ -576,7 +631,8 @@ pub async fn follow_up<R: Runtime>(app: AppHandle<R>, action: String, value: Opt
                 if let Some(h) = here {
                     cur.origin = Some(h.as_point());
                 }
-                match present(&app, &mut cur, Card::Keep, false, here).await {
+                let update = update_phrase(&action, value.as_deref(), cur.mode);
+                match present(&app, &mut cur, Card::Keep, false, here, Some(update)).await {
                     Ok(l) | Err(l) => say_and_finish(&app, request_id, l),
                 }
             }
@@ -620,6 +676,7 @@ async fn status_line<R: Runtime>(app: &AppHandle<R>, cur: &mut Current) -> Strin
             time_failed: failed,
             question: true,
             hint: false,
+            update: None,
         }),
         None => "I can only update the time with a Maps key and a start point, sir.".into(),
     }
@@ -694,6 +751,13 @@ pub async fn trip_reminder<R: Runtime>(app: AppHandle<R>, destination: String, a
     let Some(eta_secs) = trip_eta_secs(&app, &dest, here).await else {
         return say_and_finish(&app, request_id, format!("I couldn't work out how long {destination} takes from here, sir."));
     };
+    if !trip_eta_plausible(eta_secs) {
+        return say_and_finish(
+            &app,
+            request_id,
+            format!("The {destination} I found is about {} away, sir, which looks wrong. Say its full name and the city.", minutes_phrase(((eta_secs + 59) / 60).max(1) as u32)),
+        );
+    }
     let now = chrono::Utc::now().timestamp();
     let leave_at = arrive_epoch - eta_secs - TRIP_BUFFER_SECS;
     let mins = ((eta_secs + 59) / 60).max(1) as u32;
@@ -825,7 +889,7 @@ mod tests {
     }
 
     fn input<'a>(dest: &'a str, facts: Option<Facts>) -> LineInput<'a> {
-        LineInput { dest, mode: TravelMode::Driving, facts, opts_spoken: String::new(), now_min: Some(16 * 60 + 13), origin_known: true, time_failed: false, question: false, hint: false }
+        LineInput { dest, mode: TravelMode::Driving, facts, opts_spoken: String::new(), now_min: Some(16 * 60 + 13), origin_known: true, time_failed: false, question: false, hint: false, update: None }
     }
 
     #[test]
@@ -864,6 +928,24 @@ mod tests {
         let mut avoid = input("T-Hub", None);
         avoid.opts_spoken = "avoiding tolls".into();
         assert_eq!(route_line(&avoid), "Opening the route to T-Hub, avoiding tolls, sir.");
+    }
+
+    #[test]
+    fn follow_up_answers_say_what_changed_and_names_start_with_a_capital() {
+        assert_eq!(cap_first("charminar"), "Charminar");
+        assert_eq!(cap_first(""), "");
+        assert_eq!(update_phrase("mode", Some("walking"), TravelMode::Walking), "Switched to walking");
+        assert_eq!(update_phrase("avoid", Some("tolls"), TravelMode::Driving), "Avoiding tolls");
+        assert_eq!(update_phrase("stop", Some("ATM"), TravelMode::Driving), "Added ATM as a stop");
+        let mut i = input("T-Hub", Some(Facts { meters: 5300, minutes: Some(22), via: None, exact: false }));
+        i.update = Some("Switched to walking".into());
+        assert!(route_line(&i).starts_with("Switched to walking, sir. It's 5.3 kilometres, roughly 22 minutes by car"), "{}", route_line(&i));
+        let mut none = input("T-Hub", None);
+        none.update = Some("Removed the stops".into());
+        assert_eq!(route_line(&none), "Removed the stops, sir.");
+        let mut q = input("charminar", Some(Facts { meters: 900, minutes: None, via: None, exact: false }));
+        q.question = true;
+        assert!(route_line(&q).starts_with("Charminar is 900 metres away"), "{}", route_line(&q));
     }
 
     #[test]
@@ -941,6 +1023,15 @@ mod tests {
     }
 
     #[test]
+    fn a_trip_on_another_continent_is_a_wrong_match() {
+        assert!(trip_eta_plausible(25 * 60));
+        assert!(trip_eta_plausible(6 * 3600));
+        assert!(!trip_eta_plausible(6 * 3600 + 1));
+        assert!(!trip_eta_plausible(124 * 3600));
+        assert!(!trip_eta_plausible(0));
+    }
+
+    #[test]
     fn old_trip_reminders_are_dropped_and_the_list_is_capped() {
         const NOW: i64 = 1_800_000_000;
         let mut v = vec![trip(-TRIP_KEEP_SECS - 1, 600), trip(-60, 600), trip(3600, 600)];
@@ -956,8 +1047,13 @@ mod tests {
         let now = chrono::Local.with_ymd_and_hms(2026, 11, 13, 16, 0, 0).unwrap();
         let five = arrive_epoch_for(now, 17 * 60).unwrap();
         assert_eq!(five - now.timestamp(), 3600);
+        // passed by an hour at 4 pm ("at 3 pm"): a slip, not tomorrow
         assert_eq!(arrive_epoch_for(now, 15 * 60), None);
         assert_eq!(arrive_epoch_for(now, 16 * 60), None);
+        // 11 pm, "at 1 am": tomorrow, two hours away
+        let late = chrono::Local.with_ymd_and_hms(2026, 11, 13, 23, 0, 0).unwrap();
+        assert_eq!(arrive_epoch_for(late, 60).unwrap() - late.timestamp(), 2 * 3600);
+        assert_eq!(arrive_epoch_for(late, 22 * 60), None);
     }
 
     #[test]

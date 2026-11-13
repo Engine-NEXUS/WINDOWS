@@ -305,6 +305,10 @@ pub fn start_working_poller() {
 #[cfg(target_os = "windows")]
 fn assert_awake() -> Result<(), String> {
     use windows::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED};
+    // Test-quiet mode: never ask Windows to keep the screen on, so the screensaver and display timeout are untouched.
+    if crate::quiet::on() {
+        return Ok(());
+    }
     // SAFETY: plain Win32 call, no pointers.
     let prev = unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED) };
     if prev.0 != 0 { Ok(()) } else { Err("SetThreadExecutionState (assert) failed".into()) }
@@ -313,6 +317,9 @@ fn assert_awake() -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn clear_awake() -> Result<(), String> {
     use windows::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS};
+    if crate::quiet::on() {
+        return Ok(());
+    }
     // SAFETY: plain Win32 call, no pointers.
     let prev = unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
     if prev.0 != 0 { Ok(()) } else { Err("SetThreadExecutionState (clear) failed".into()) }
