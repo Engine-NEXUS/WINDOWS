@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
+use crate::google::maps::RouteOpts;
 use crate::google::types::TravelMode;
 
 /// What to show.
@@ -19,7 +20,7 @@ pub enum MapsTarget {
     /// A search ("pharmacy near 12 High St").
     Search(String),
     /// A route. The embed needs both ends, so a route without an origin uses the old window.
-    Directions { origin: Option<String>, destination: String, mode: TravelMode },
+    Directions { origin: Option<String>, destination: String, mode: TravelMode, opts: RouteOpts },
 }
 
 fn enc(s: &str) -> String {
@@ -39,15 +40,37 @@ pub fn embed_url(target: &MapsTarget) -> Option<String> {
     let base = "https://www.google.com/maps";
     match target {
         MapsTarget::Place(q) | MapsTarget::Search(q) if !q.trim().is_empty() => Some(format!("{base}?q={}&output=embed", enc(q.trim()))),
-        MapsTarget::Directions { origin, destination, mode } if !destination.trim().is_empty() => {
-            let flag = match mode {
-                TravelMode::Walking => "w",
-                TravelMode::Bicycling => "b",
-                TravelMode::Transit => "r",
-                _ => "d",
+        MapsTarget::Directions { origin, destination, mode, opts } if !destination.trim().is_empty() => {
+            // Google's long-standing `dirflg`: d drive, w walk, b bike, r transit; h / t / f avoid highways / tolls / ferries.
+            let flag = if *mode == TravelMode::Driving && opts.any_avoid() {
+                let mut f = String::new();
+                if opts.avoid_highways {
+                    f.push('h');
+                }
+                if opts.avoid_tolls {
+                    f.push('t');
+                }
+                if opts.avoid_ferries {
+                    f.push('f');
+                }
+                f
+            } else {
+                match mode {
+                    TravelMode::Walking => "w",
+                    TravelMode::Bicycling => "b",
+                    TravelMode::Transit => "r",
+                    _ => "d",
+                }
+                .to_string()
             };
             let from = origin.as_deref().map(str::trim).filter(|o| !o.is_empty()).map(|o| format!("saddr={}&", enc(o))).unwrap_or_default();
-            Some(format!("{base}?{from}daddr={}&dirflg={flag}&output=embed", enc(destination.trim())))
+            // Stops on the way: "daddr=Stop+to:Destination" (not for transit, which takes none).
+            let via: String = if *mode == TravelMode::Transit {
+                String::new()
+            } else {
+                opts.stops.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| format!("{}+to:", enc(s))).collect()
+            };
+            Some(format!("{base}?{from}daddr={via}{}&dirflg={flag}&output=embed", enc(destination.trim())))
         }
         _ => None,
     }
@@ -58,7 +81,7 @@ pub fn legacy_url(target: &MapsTarget) -> String {
     use crate::google::maps::MapsService;
     match target {
         MapsTarget::Place(q) | MapsTarget::Search(q) => MapsService::build_place_search_url(q),
-        MapsTarget::Directions { origin, destination, mode } => MapsService::build_directions_url(origin.as_deref(), destination, *mode),
+        MapsTarget::Directions { origin, destination, mode, opts } => MapsService::build_directions_url_with(origin.as_deref(), destination, *mode, opts),
     }
 }
 
@@ -201,16 +224,37 @@ mod tests {
     fn embed_urls_per_target_need_no_key() {
         assert_eq!(embed_url(&MapsTarget::Place("Charminar, Hyderabad".into())).as_deref(), Some("https://www.google.com/maps?q=Charminar%2C+Hyderabad&output=embed"));
         assert!(embed_url(&MapsTarget::Search("pharmacy near me".into())).unwrap().contains("q=pharmacy+near+me"));
-        let route = MapsTarget::Directions { origin: Some("Home".into()), destination: "T-Hub".into(), mode: TravelMode::Walking };
+        let route = MapsTarget::Directions { origin: Some("Home".into()), destination: "T-Hub".into(), mode: TravelMode::Walking, opts: RouteOpts::default() };
         assert_eq!(embed_url(&route).as_deref(), Some("https://www.google.com/maps?saddr=Home&daddr=T-Hub&dirflg=w&output=embed"));
-        let no_origin = MapsTarget::Directions { origin: None, destination: "T-Hub".into(), mode: TravelMode::Driving };
+        let no_origin = MapsTarget::Directions { origin: None, destination: "T-Hub".into(), mode: TravelMode::Driving, opts: RouteOpts::default() };
         assert_eq!(embed_url(&no_origin).as_deref(), Some("https://www.google.com/maps?daddr=T-Hub&dirflg=d&output=embed"));
+    }
+
+    #[test]
+    fn embed_url_carries_avoid_flags_and_stops() {
+        let avoid = MapsTarget::Directions {
+            origin: Some("Home".into()),
+            destination: "T-Hub".into(),
+            mode: TravelMode::Driving,
+            opts: RouteOpts { avoid_tolls: true, avoid_highways: true, ..RouteOpts::default() },
+        };
+        assert_eq!(embed_url(&avoid).as_deref(), Some("https://www.google.com/maps?saddr=Home&daddr=T-Hub&dirflg=ht&output=embed"));
+        let stop = MapsTarget::Directions {
+            origin: Some("Home".into()),
+            destination: "T-Hub".into(),
+            mode: TravelMode::Walking,
+            opts: RouteOpts { avoid_tolls: true, stops: vec!["Cafe Bahar".into()], ..RouteOpts::default() },
+        };
+        // walking ignores the toll flag; the stop goes in front of the destination
+        assert_eq!(embed_url(&stop).as_deref(), Some("https://www.google.com/maps?saddr=Home&daddr=Cafe+Bahar+to:T-Hub&dirflg=w&output=embed"));
+        let transit = MapsTarget::Directions { origin: None, destination: "T-Hub".into(), mode: TravelMode::Transit, opts: RouteOpts { stops: vec!["X".into()], ..RouteOpts::default() } };
+        assert_eq!(embed_url(&transit).as_deref(), Some("https://www.google.com/maps?daddr=T-Hub&dirflg=r&output=embed"));
     }
 
     #[test]
     fn no_embed_for_empty_targets() {
         assert!(embed_url(&MapsTarget::Place("  ".into())).is_none());
-        assert!(embed_url(&MapsTarget::Directions { origin: None, destination: " ".into(), mode: TravelMode::Driving }).is_none());
+        assert!(embed_url(&MapsTarget::Directions { origin: None, destination: " ".into(), mode: TravelMode::Driving, opts: RouteOpts::default() }).is_none());
     }
 
     #[test]
@@ -223,7 +267,7 @@ mod tests {
     #[test]
     fn the_fallback_url_still_works_for_every_target() {
         assert!(legacy_url(&MapsTarget::Place("Charminar".into())).starts_with("https://www.google.com/maps/"));
-        let d = legacy_url(&MapsTarget::Directions { origin: None, destination: "T-Hub".into(), mode: TravelMode::Driving });
+        let d = legacy_url(&MapsTarget::Directions { origin: None, destination: "T-Hub".into(), mode: TravelMode::Driving, opts: RouteOpts::default() });
         assert!(d.contains("T-Hub") && d.starts_with("https://"));
     }
 }

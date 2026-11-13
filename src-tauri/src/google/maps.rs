@@ -160,6 +160,11 @@ impl MapsService {
     /// omits an empty origin (Maps then uses "your location") and fully
     /// percent-encodes every parameter.
     pub fn build_directions_url(origin: Option<&str>, destination: &str, mode: TravelMode) -> String {
+        Self::build_directions_url_with(origin, destination, mode, &RouteOpts::default())
+    }
+
+    /// The same URL with the route options: `avoid=tolls|highways|ferries` and `waypoints=a|b` (stops on the way).
+    pub fn build_directions_url_with(origin: Option<&str>, destination: &str, mode: TravelMode, opts: &RouteOpts) -> String {
         let mode_str = match mode {
             TravelMode::Driving => "driving",
             TravelMode::Walking => "walking",
@@ -171,11 +176,20 @@ impl MapsService {
             url.push_str(&format!("&origin={}", percent_encode(o)));
         }
         url.push_str(&format!("&travelmode={mode_str}"));
+        let avoid = opts.avoid_words();
+        if !avoid.is_empty() && mode == TravelMode::Driving {
+            url.push_str(&format!("&avoid={}", avoid.join("%7C")));
+        }
+        let stops: Vec<String> = opts.stops.iter().map(|s| percent_encode(s)).filter(|s| !s.is_empty()).collect();
+        if !stops.is_empty() && mode != TravelMode::Transit {
+            url.push_str(&format!("&waypoints={}", stops.join("%7C")));
+        }
         url
     }
 
     /// JSON body for Routes API v2 `computeRoutes` (address-based endpoints).
-    pub fn routes_request_body(origin: &str, destination: &str, mode: TravelMode) -> Value {
+    /// Avoid flags apply to driving only; stops are not allowed for transit.
+    pub fn routes_request_body_with(origin: &str, destination: &str, mode: TravelMode, opts: &RouteOpts) -> Value {
         let travel = match mode {
             TravelMode::Driving => "DRIVE",
             TravelMode::Walking => "WALK",
@@ -190,6 +204,16 @@ impl MapsService {
         // Traffic-aware routing is only valid for driving.
         if mode == TravelMode::Driving {
             body["routingPreference"] = serde_json::json!("TRAFFIC_AWARE");
+            if opts.any_avoid() {
+                body["routeModifiers"] = serde_json::json!({
+                    "avoidTolls": opts.avoid_tolls,
+                    "avoidHighways": opts.avoid_highways,
+                    "avoidFerries": opts.avoid_ferries,
+                });
+            }
+        }
+        if mode != TravelMode::Transit && !opts.stops.is_empty() {
+            body["intermediates"] = Value::Array(opts.stops.iter().take(10).map(|s| serde_json::json!({ "address": s })).collect());
         }
         body
     }
@@ -212,7 +236,20 @@ impl MapsService {
             .map(str::trim)
             .filter(|d| !d.is_empty())
             .map(String::from);
-        Ok(RouteEta { minutes: ((secs / 60.0).round() as u32).max(1), meters, via })
+        let steps: Vec<String> = route
+            .get("legs")
+            .and_then(|l| l.as_array())
+            .map(|legs| {
+                legs.iter()
+                    .flat_map(|leg| leg.get("steps").and_then(|s| s.as_array()).into_iter().flatten())
+                    .filter_map(|st| st.pointer("/navigationInstruction/instructions").and_then(|i| i.as_str()))
+                    .map(|i| i.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|i| !i.is_empty())
+                    .take(60)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(RouteEta { minutes: ((secs / 60.0).round() as u32).max(1), meters, via, steps })
     }
 
     pub const MAX_ADDRESS_LEN: usize = 250;
@@ -265,13 +302,31 @@ impl MapsService {
         destination: &str,
         mode: TravelMode,
     ) -> Result<RouteEta, GoogleError> {
+        Self::compute_route_with(client, api_key, origin, destination, mode, &RouteOpts::default(), false).await
+    }
+
+    /// `compute_route` with the route options; `want_steps` also asks for the turn-by-turn text.
+    pub async fn compute_route_with(
+        client: &reqwest::Client,
+        api_key: &str,
+        origin: &str,
+        destination: &str,
+        mode: TravelMode,
+        opts: &RouteOpts,
+        want_steps: bool,
+    ) -> Result<RouteEta, GoogleError> {
         let clean_origin = Self::clean_and_clip_address(origin, "origin")?;
         let clean_dest = Self::clean_and_clip_address(destination, "destination")?;
+        let mask = if want_steps {
+            "routes.duration,routes.distanceMeters,routes.description,routes.legs.steps.navigationInstruction"
+        } else {
+            "routes.duration,routes.distanceMeters,routes.description"
+        };
         let resp = client
             .post("https://routes.googleapis.com/directions/v2:computeRoutes")
             .header("X-Goog-Api-Key", api_key)
-            .header("X-Goog-FieldMask", "routes.duration,routes.distanceMeters,routes.description")
-            .json(&Self::routes_request_body(&clean_origin, &clean_dest, mode))
+            .header("X-Goog-FieldMask", mask)
+            .json(&Self::routes_request_body_with(&clean_origin, &clean_dest, mode, opts))
             .send()
             .await
             .map_err(|e| GoogleError::NetworkError(e.to_string()))?;
@@ -406,22 +461,52 @@ pub struct RouteEta {
     pub minutes: u32,
     pub meters: u64,
     pub via: Option<String>,
+    /// Turn-by-turn text, only when it was asked for.
+    pub steps: Vec<String>,
 }
 
-impl RouteEta {
-    /// "42 minutes via FDR Drive" / "1 hour 5 minutes".
-    pub fn spoken(&self) -> String {
-        let t = if self.minutes >= 60 {
-            let (h, m) = (self.minutes / 60, self.minutes % 60);
-            let hs = format!("{h} hour{}", if h == 1 { "" } else { "s" });
-            if m == 0 { hs } else { format!("{hs} {m} minute{}", if m == 1 { "" } else { "s" }) }
-        } else {
-            format!("{} minute{}", self.minutes, if self.minutes == 1 { "" } else { "s" })
-        };
-        match &self.via {
-            Some(v) => format!("{t} via {v}"),
-            None => t,
+/// What the user asked of a route beyond A to B: roads to avoid and stops on the way.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RouteOpts {
+    pub avoid_tolls: bool,
+    pub avoid_highways: bool,
+    pub avoid_ferries: bool,
+    pub stops: Vec<String>,
+}
+
+impl RouteOpts {
+    pub fn any_avoid(&self) -> bool {
+        self.avoid_tolls || self.avoid_highways || self.avoid_ferries
+    }
+
+    /// Words Google's URL uses for the avoided road types, in a fixed order.
+    pub fn avoid_words(&self) -> Vec<&'static str> {
+        let mut v = vec![];
+        if self.avoid_tolls {
+            v.push("tolls");
         }
+        if self.avoid_highways {
+            v.push("highways");
+        }
+        if self.avoid_ferries {
+            v.push("ferries");
+        }
+        v
+    }
+
+    /// "avoiding tolls and highways, with a stop at X" for the spoken line; empty when there is nothing to say.
+    pub fn spoken(&self) -> String {
+        let avoid = self.avoid_words();
+        let mut parts = vec![];
+        if !avoid.is_empty() {
+            parts.push(format!("avoiding {}", avoid.join(" and ")));
+        }
+        match self.stops.len() {
+            0 => {}
+            1 => parts.push(format!("with a stop at {}", self.stops[0])),
+            n => parts.push(format!("with {n} stops")),
+        }
+        parts.join(", ")
     }
 }
 
@@ -457,6 +542,58 @@ fn urlencoding_simple(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directions_url_carries_avoid_and_stops_only_where_google_allows() {
+        let opts = RouteOpts { avoid_tolls: true, avoid_highways: true, avoid_ferries: false, stops: vec!["Cafe Bahar".into(), "ATM".into()] };
+        let u = MapsService::build_directions_url_with(Some("Home"), "T-Hub", TravelMode::Driving, &opts);
+        assert!(u.contains("&avoid=tolls%7Chighways"), "{u}");
+        assert!(u.contains("&waypoints=Cafe%20Bahar%7CATM"), "{u}");
+        // walking has no toll roads; transit takes no stops
+        let w = MapsService::build_directions_url_with(None, "T-Hub", TravelMode::Walking, &opts);
+        assert!(!w.contains("avoid="), "{w}");
+        let t = MapsService::build_directions_url_with(None, "T-Hub", TravelMode::Transit, &opts);
+        assert!(!t.contains("waypoints="), "{t}");
+        // no options = the old URL
+        assert_eq!(
+            MapsService::build_directions_url_with(Some("A"), "B", TravelMode::Walking, &RouteOpts::default()),
+            MapsService::build_directions_url(Some("A"), "B", TravelMode::Walking)
+        );
+    }
+
+    #[test]
+    fn routes_body_has_modifiers_and_intermediates_per_mode() {
+        let opts = RouteOpts { avoid_tolls: true, stops: vec!["ATM".into()], ..RouteOpts::default() };
+        let d = MapsService::routes_request_body_with("A", "B", TravelMode::Driving, &opts);
+        assert_eq!(d["routeModifiers"]["avoidTolls"], true);
+        assert_eq!(d["routeModifiers"]["avoidHighways"], false);
+        assert_eq!(d["intermediates"][0]["address"], "ATM");
+        let w = MapsService::routes_request_body_with("A", "B", TravelMode::Walking, &opts);
+        assert!(w.get("routeModifiers").is_none() && w["intermediates"][0]["address"] == "ATM");
+        let t = MapsService::routes_request_body_with("A", "B", TravelMode::Transit, &opts);
+        assert!(t.get("routeModifiers").is_none() && t.get("intermediates").is_none());
+        let plain = MapsService::routes_request_body_with("A", "B", TravelMode::Driving, &RouteOpts::default());
+        assert!(plain.get("routeModifiers").is_none() && plain.get("intermediates").is_none() && plain["routingPreference"] == "TRAFFIC_AWARE");
+    }
+
+    #[test]
+    fn routes_answer_gives_steps_when_present_and_none_when_not() {
+        let with = serde_json::json!({"routes":[{"duration":"1320s","distanceMeters":5300,"description":"Road No. 1",
+            "legs":[{"steps":[{"navigationInstruction":{"instructions":"Head  north on Main St"}},{"navigationInstruction":{"instructions":"Turn left onto Park Rd"}},{"distanceMeters":10}]}]}]});
+        let e = MapsService::parse_routes_json(&with).unwrap();
+        assert_eq!((e.minutes, e.meters), (22, 5300));
+        assert_eq!(e.steps, ["Head north on Main St", "Turn left onto Park Rd"]);
+        let without = serde_json::json!({"routes":[{"duration":"60s","distanceMeters":100}]});
+        assert!(MapsService::parse_routes_json(&without).unwrap().steps.is_empty());
+    }
+
+    #[test]
+    fn route_opts_speak_what_they_change() {
+        assert_eq!(RouteOpts::default().spoken(), "");
+        let o = RouteOpts { avoid_tolls: true, avoid_ferries: true, stops: vec!["ATM".into()], ..RouteOpts::default() };
+        assert_eq!(o.spoken(), "avoiding tolls and ferries, with a stop at ATM");
+        assert_eq!(RouteOpts { stops: vec!["a".into(), "b".into()], ..RouteOpts::default() }.spoken(), "with 2 stops");
+    }
 
     #[test]
     fn test_parse_directions_json() {
@@ -574,10 +711,10 @@ mod tests {
 
     #[test]
     fn routes_body_is_traffic_aware_only_for_driving() {
-        let d = MapsService::routes_request_body("A", "B", TravelMode::Driving);
+        let d = MapsService::routes_request_body_with("A", "B", TravelMode::Driving, &RouteOpts::default());
         assert_eq!(d["travelMode"], "DRIVE");
         assert_eq!(d["routingPreference"], "TRAFFIC_AWARE");
-        let w = MapsService::routes_request_body("A", "B", TravelMode::Walking);
+        let w = MapsService::routes_request_body_with("A", "B", TravelMode::Walking, &RouteOpts::default());
         assert_eq!(w["travelMode"], "WALK");
         assert!(w.get("routingPreference").is_none());
     }
@@ -587,11 +724,10 @@ mod tests {
         let j = serde_json::json!({"routes":[{"duration":"1680s","distanceMeters":13520,"description":"FDR Drive"}]});
         let eta = MapsService::parse_routes_json(&j).unwrap();
         assert_eq!((eta.minutes, eta.meters, eta.via.as_deref()), (28, 13520, Some("FDR Drive")));
-        assert_eq!(eta.spoken(), "28 minutes via FDR Drive");
         let j = serde_json::json!({"routes":[{"duration":"3900s"}]});
-        assert_eq!(MapsService::parse_routes_json(&j).unwrap().spoken(), "1 hour 5 minutes");
+        assert_eq!(MapsService::parse_routes_json(&j).unwrap().minutes, 65);
         let j = serde_json::json!({"routes":[{"duration":"20s"}]});
-        assert_eq!(MapsService::parse_routes_json(&j).unwrap().spoken(), "1 minute");
+        assert_eq!(MapsService::parse_routes_json(&j).unwrap().minutes, 1);
         assert!(MapsService::parse_routes_json(&serde_json::json!({})).is_err());
         assert!(MapsService::parse_routes_json(&serde_json::json!({"routes":[{"distanceMeters":5}]})).is_err());
     }
@@ -607,7 +743,6 @@ mod tests {
         let eta = MapsService::parse_routes_json(&j).unwrap();
         assert_eq!(eta.minutes, 1, "duration of 0 seconds clamps to minimum 1 minute ETA");
         assert_eq!(eta.meters, 0);
-        assert_eq!(eta.spoken(), "1 minute");
     }
 
     #[test]
@@ -678,19 +813,19 @@ mod tests {
 
     #[test]
     fn travel_mode_routes_mapping_and_traffic_preference() {
-        let driving = MapsService::routes_request_body("Home", "Work", TravelMode::Driving);
+        let driving = MapsService::routes_request_body_with("Home", "Work", TravelMode::Driving, &RouteOpts::default());
         assert_eq!(driving["travelMode"], "DRIVE");
         assert_eq!(driving["routingPreference"], "TRAFFIC_AWARE");
 
-        let walking = MapsService::routes_request_body("Home", "Park", TravelMode::Walking);
+        let walking = MapsService::routes_request_body_with("Home", "Park", TravelMode::Walking, &RouteOpts::default());
         assert_eq!(walking["travelMode"], "WALK");
         assert!(walking.get("routingPreference").is_none());
 
-        let cycling = MapsService::routes_request_body("Home", "Store", TravelMode::Bicycling);
+        let cycling = MapsService::routes_request_body_with("Home", "Store", TravelMode::Bicycling, &RouteOpts::default());
         assert_eq!(cycling["travelMode"], "BICYCLE");
         assert!(cycling.get("routingPreference").is_none());
 
-        let transit = MapsService::routes_request_body("Home", "Airport", TravelMode::Transit);
+        let transit = MapsService::routes_request_body_with("Home", "Airport", TravelMode::Transit, &RouteOpts::default());
         assert_eq!(transit["travelMode"], "TRANSIT");
         assert!(transit.get("routingPreference").is_none());
     }

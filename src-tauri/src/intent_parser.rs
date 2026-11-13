@@ -274,7 +274,30 @@ pub enum ParsedIntent {
     PeopleList,
     /// "Directions to X" - opens real Google Maps in its own window.
     #[serde(rename = "directions")]
-    Directions { destination: String, origin: Option<String>, mode: String },
+    Directions {
+        destination: String,
+        origin: Option<String>,
+        mode: String,
+        /// "How far is X" / "how long to get to X": the answer is the point, the map is secondary.
+        #[serde(default)]
+        question: bool,
+    },
+    /// "Make it walking", "avoid tolls", "add a stop at X", "how long now", "read me the steps", "next step":
+    /// a change to, or a question about, the route that is open (`change` = mode | avoid | allow | stop | clear_stops |
+    /// status | steps | next_step | repeat_step).
+    #[serde(rename = "route_follow_up")]
+    RouteFollowUp {
+        change: String,
+        #[serde(default)]
+        value: Option<String>,
+    },
+    /// "Remind me to leave for the airport at 5 pm": a one-off leave-by reminder (`arrive_min` = minutes since midnight).
+    #[serde(rename = "trip_reminder")]
+    TripReminder {
+        destination: String,
+        #[serde(default)]
+        arrive_min: Option<u16>,
+    },
     /// "Nearest pharmacy" - Places API lookup + Maps search window.
     #[serde(rename = "places_search")]
     PlacesSearch { query: String, near: Option<String> },
@@ -478,6 +501,8 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::AlertDismiss { .. } => "alert_dismiss",
         ParsedIntent::AlertMuteSource { .. } => "alert_mute_source",
         ParsedIntent::Directions { .. } => "directions",
+        ParsedIntent::RouteFollowUp { .. } => "route_follow_up",
+        ParsedIntent::TripReminder { .. } => "trip_reminder",
         ParsedIntent::PlacesSearch { .. } => "places_search",
         ParsedIntent::PlaceInfo { .. } => "place_info",
         ParsedIntent::AnalyseThisEmail => "analyse_this_email",
@@ -901,6 +926,14 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
     }
     // --- AlertCenter voice commands: open, read, dismiss, mute ---
     if let Some(result) = parse_alert_command(&text) {
+        return Some(result);
+    }
+    // --- Leave-by reminder for a trip ("remind me to leave for the airport at 5") ---
+    if let Some(result) = parse_trip_reminder_command(&text) {
+        return Some(result);
+    }
+    // --- Changes to the open route ("make it walking", "avoid tolls", "next step") ---
+    if let Some(result) = parse_route_follow_up(&text) {
         return Some(result);
     }
     // --- Directions ("directions to X", "how do I get to X") ---
@@ -2890,21 +2923,219 @@ fn parse_study_pref(t: &str) -> Option<ParsedIntent> {
     Some(ParsedIntent::StudyPref { activity, choice: choice.as_str().to_string() })
 }
 
-/// "Directions to X" (P-maps). Anchored on "directions"/"route"/"how do I get to";
-/// bare "navigate to" is NOT claimed (it belongs to browser navigation).
+/// Well-known apps, sites, and things that are not a trip: "take me to youtube" is browser navigation, "how far is the
+/// moon" is not a route. Matched against the whole destination (after "the" / "my" is removed).
+const NOT_A_TRIP_TARGETS: &[&str] = &[
+    "youtube", "google", "gmail", "github", "whatsapp", "spotify", "netflix", "facebook", "instagram", "twitter", "reddit",
+    "linkedin", "amazon", "flipkart", "swiggy", "zomato", "chatgpt", "discord", "slack", "notion", "telegram", "twitch",
+    "wikipedia", "homepage", "home page", "dashboard", "calendar", "inbox", "desktop", "start menu", "top", "bottom",
+    "next page", "previous page", "beginning", "end", "bed", "sleep", "point", "next level", "level", "next step",
+    "moon", "sun", "mars", "earth", "pluto", "jupiter", "saturn", "venus", "mercury", "space", "infinity", "future",
+    "past", "heaven", "hell", "end of the world", "edge", "limit", "top of the screen",
+    "day", "night", "evening", "morning", "afternoon", "weekend", "week", "lunch", "dinner", "breakfast", "now", "today",
+    "tomorrow", "break", "vacation", "holiday", "meeting", "call", "job", "life",
+];
+
+/// A saved-place word ("home", "work", "office") needs no further check.
+fn is_saved_place_word(s: &str) -> bool {
+    crate::orchestrator::saved_place_kind(s).is_some()
+}
+
+/// Whether a destination for an AMBIGUOUS phrasing ("take me to X", "how far is X") is plausibly a place. The explicit
+/// phrasings ("directions to X") do not use this: there the user has said what they mean.
+fn trip_place_ok(dest: &str) -> bool {
+    let d = dest.trim().to_lowercase();
+    if d.is_empty() {
+        return false;
+    }
+    if is_saved_place_word(&d) {
+        return true;
+    }
+    let bare = d.trim_start_matches("the ").trim_start_matches("my ").trim();
+    let words: Vec<&str> = bare.split_whitespace().collect();
+    if words.is_empty() || words.len() > 8 {
+        return false;
+    }
+    if NOT_A_TRIP_TARGETS.contains(&bare) || words.iter().any(|w| PLACE_INFO_NOT_PLACES.contains(w)) {
+        return false;
+    }
+    // a web address or a file name, not a place
+    if words.len() == 1 && bare.contains('.') && !bare.ends_with('.') {
+        return false;
+    }
+    if matches!(words[0], "sleep" | "bed" | "know" | "grips" | "better" | "rich" | "fit" | "started" | "used" | "over" | "done" | "back") {
+        return false;
+    }
+    true
+}
+
+/// Strip a trailing travel-mode phrase ("by bus", "walking", "on foot") from a destination. Only when something is left.
+fn take_mode_suffix(dest: &mut String, mode: &mut Option<&'static str>) {
+    const SUFFIXES: &[(&str, &str)] = &[
+        (" by walking", "walking"), (" on foot", "walking"), (" walking", "walking"), (" by foot", "walking"),
+        (" by bus", "transit"), (" by train", "transit"), (" by metro", "transit"), (" by subway", "transit"),
+        (" by transit", "transit"), (" by public transport", "transit"), (" by public transit", "transit"),
+        (" on the bus", "transit"), (" on public transport", "transit"), (" using public transport", "transit"),
+        (" by bike", "bicycling"), (" by cycling", "bicycling"), (" on a bike", "bicycling"), (" by bicycle", "bicycling"),
+        (" cycling", "bicycling"), (" biking", "bicycling"),
+        (" by car", "driving"), (" by driving", "driving"), (" by cab", "driving"), (" by taxi", "driving"),
+        (" by auto", "driving"), (" driving", "driving"), (" in a car", "driving"),
+    ];
+    if let Some(p) = dest.strip_suffix(" please") {
+        *dest = p.trim().to_string();
+    }
+    for (suffix, m) in SUFFIXES {
+        if let Some(p) = dest.strip_suffix(suffix) {
+            if !p.trim().is_empty() {
+                *dest = p.trim().to_string();
+                *mode = Some(*m);
+            }
+        }
+    }
+}
+
+/// Split "X from Y" into destination and start.
+fn take_origin_suffix(dest: &mut String, origin: &mut Option<String>) {
+    if origin.is_none() {
+        if let Some((d, o)) = dest.rsplit_once(" from ") {
+            if !d.trim().is_empty() && !o.trim().is_empty() {
+                *origin = Some(o.trim().to_string());
+                *dest = d.trim().to_string();
+            }
+        }
+    }
+}
+
+fn directions_result(dest: String, origin: Option<String>, mode: Option<&'static str>, question: bool, source: &str) -> Option<ParseResult> {
+    let words = dest.split_whitespace().count();
+    let bad_dest = dest.is_empty()
+        || words > 10
+        || matches!(dest.as_str(), "it" | "there" | "here" | "that" | "this" | "the" | "a")
+        // "how do I get to sleep / know you / better / rich" are idioms, not places.
+        || matches!(dest.split_whitespace().next().unwrap_or(""), "sleep" | "bed" | "know" | "grips" | "better" | "rich" | "fit" | "started" | "used" | "over" | "done" | "back" | "inbox" | "zero");
+    if bad_dest || origin.as_deref().map(|o| o.is_empty() || o.split_whitespace().count() > 10).unwrap_or(false) {
+        return None;
+    }
+    Some(ParseResult {
+        intent: ParsedIntent::Directions { destination: dest, origin, mode: mode.unwrap_or("driving").to_string(), question },
+        confidence: 1.0,
+        source: source.to_string(),
+    })
+}
+
+/// "Directions to X" (P-maps). Explicit phrasings ("directions to", "route to", "how do I get to") take any destination;
+/// the ambiguous ones ("take me to X", "how far is X", "walk to X") only a plausible place (`trip_place_ok`).
+/// Bare "navigate to" is NOT claimed (it belongs to browser navigation).
 fn parse_directions_command(text: &str) -> Option<ParseResult> {
     let t = text.trim().to_lowercase();
     let t = t.trim_end_matches(['.', ',', '!', '?']).trim().to_string();
     let mut s = t.as_str();
-    for lead in ["please ", "can you ", "could you ", "nexus ", "show me ", "give me ", "get me ", "get ", "find ", "i need ", "i want ", "show "] {
+    for lead in ["please ", "can you ", "could you ", "nexus ", "nexus, ", "hey nexus ", "tell me ", "i need ", "i want ", "i wanna "] {
         if let Some(r) = s.strip_prefix(lead) {
             s = r;
         }
     }
-    let mut mode: Option<&str> = None;
+
+    // 1. "take me home", "how do I get home", "drive home": the saved home with no further words.
+    for (phrase, m) in [
+        ("take me home", None), ("get me home", None), ("how do i get home", None), ("how can i get home", None),
+        ("how to get home", None), ("go home", None), ("to go home", None), ("to get home", None),
+        ("drive me home", Some("driving")), ("drive home", Some("driving")), ("walk me home", Some("walking")),
+        ("walk home", Some("walking")), ("cycle home", Some("bicycling")), ("bike home", Some("bicycling")),
+        ("directions home", None), ("route home", None), ("a route home", None), ("the way home", None),
+        ("directions to home", None), ("the route home", None),
+    ] {
+        if s == phrase || s == format!("{phrase} please") {
+            // "go home" alone is too common a phrase to claim without the wish to travel
+            if phrase == "go home" || phrase == "to go home" || phrase == "to get home" {
+                if !(t.starts_with("i want to ") || t.starts_with("i need to ") || t.starts_with("i wanna ")) {
+                    return None;
+                }
+            }
+            return directions_result("home".to_string(), None, m, false, "deterministic-directions");
+        }
+    }
+
+    // 2. Questions: "how far is X", "how long will it take to get to X", "what is the distance to X".
+    const QUESTION_HEADS: &[(&str, Option<&str>)] = &[
+        ("how far is it to ", None), ("how far away is ", None), ("how far is ", None), ("how far to ", None),
+        ("how far is the drive to ", Some("driving")), ("how far is the walk to ", Some("walking")),
+        ("what is the distance to ", None), ("what's the distance to ", None), ("whats the distance to ", None),
+        ("distance to ", None), ("how long to get to ", None), ("how long to reach ", None),
+        ("how long to drive to ", Some("driving")), ("how long to walk to ", Some("walking")),
+        ("how long to cycle to ", Some("bicycling")), ("how long to bike to ", Some("bicycling")),
+        ("how long will it take to get to ", None), ("how long will it take to reach ", None),
+        ("how long would it take to get to ", None), ("how long does it take to get to ", None),
+        ("how long does it take to reach ", None), ("how long it takes to get to ", None),
+        ("how long will it take to drive to ", Some("driving")), ("how long does it take to drive to ", Some("driving")),
+        ("how long will it take to walk to ", Some("walking")), ("how long does it take to walk to ", Some("walking")),
+        ("how long is the drive to ", Some("driving")), ("how long is the walk to ", Some("walking")),
+        ("how long is the ride to ", Some("bicycling")), ("how long is the trip to ", None), ("how long is the commute to ", None),
+        ("how much time to get to ", None), ("how much time to reach ", None), ("how much time will it take to reach ", None),
+        ("travel time to ", None), ("drive time to ", Some("driving")), ("walking time to ", Some("walking")),
+        ("what's the eta to ", None), ("what is the eta to ", None), ("eta to ", None), ("the eta to ", None),
+    ];
+    for (head, m) in QUESTION_HEADS {
+        if let Some(r) = s.strip_prefix(head) {
+            let mut dest = r.trim().to_string();
+            let mut mode: Option<&'static str> = m.map(|x| match x {
+                "driving" => "driving",
+                "walking" => "walking",
+                _ => "bicycling",
+            });
+            let mut origin: Option<String> = None;
+            take_mode_suffix(&mut dest, &mut mode);
+            take_origin_suffix(&mut dest, &mut origin);
+            // "how far is the Charminar from here" -> the start is the user's own position
+            if origin.as_deref().is_some_and(|o| matches!(o, "here" | "me" | "my location" | "where i am" | "my place" | "where i am now")) {
+                origin = None;
+            }
+            if let Some(d) = dest.strip_suffix(" from here").or_else(|| dest.strip_suffix(" away")) {
+                dest = d.trim().to_string();
+            }
+            if !trip_place_ok(&dest) {
+                return None;
+            }
+            return directions_result(dest, origin, mode, true, "deterministic-directions-question");
+        }
+    }
+
+    // 3. Ambiguous "go to" phrasings: only a plausible place.
+    const TRIP_HEADS: &[(&str, Option<&str>)] = &[
+        ("take me to ", None), ("get me to ", None), ("to go to ", None), ("to get to ", None), ("i want to go to ", None), ("i need to go to ", None), ("i wanna go to ", None),
+        ("i want to get to ", None), ("i need to get to ", None), ("want to go to ", None), ("need to go to ", None),
+        ("walk me to ", Some("walking")), ("walk to ", Some("walking")), ("drive me to ", Some("driving")), ("drive to ", Some("driving")),
+        ("cycle to ", Some("bicycling")), ("bike to ", Some("bicycling")), ("cycle me to ", Some("bicycling")),
+    ];
+    for (head, m) in TRIP_HEADS {
+        if let Some(r) = s.strip_prefix(head) {
+            let mut dest = r.trim().to_string();
+            let mut mode: Option<&'static str> = m.map(|x| match x {
+                "driving" => "driving",
+                "walking" => "walking",
+                _ => "bicycling",
+            });
+            let mut origin: Option<String> = None;
+            take_mode_suffix(&mut dest, &mut mode);
+            take_origin_suffix(&mut dest, &mut origin);
+            if !trip_place_ok(&dest) {
+                return None;
+            }
+            return directions_result(dest, origin, mode, false, "deterministic-directions");
+        }
+    }
+
+    // 4. Explicit phrasings.
+    for lead in ["show me ", "give me ", "get me ", "get ", "find ", "show "] {
+        if let Some(r) = s.strip_prefix(lead) {
+            s = r;
+        }
+    }
+    let mut mode: Option<&'static str> = None;
     for (w, m) in [
-        ("walking ", "walking"), ("driving ", "driving"), ("cycling ", "bicycling"), ("biking ", "bicycling"),
-        ("transit ", "transit"), ("bus ", "transit"), ("train ", "transit"),
+        ("walking ", "walking"), ("walk ", "walking"), ("driving ", "driving"), ("drive ", "driving"), ("car ", "driving"),
+        ("cab ", "driving"), ("cycling ", "bicycling"), ("biking ", "bicycling"), ("bike ", "bicycling"), ("cycle ", "bicycling"),
+        ("transit ", "transit"), ("bus ", "transit"), ("train ", "transit"), ("metro ", "transit"), ("public transport ", "transit"),
     ] {
         if let Some(r) = s.strip_prefix(w) {
             s = r;
@@ -2924,6 +3155,9 @@ fn parse_directions_command(text: &str) -> Option<ParseResult> {
                 dest = Some(b.trim().to_string());
             } else if let Some(d) = r.strip_prefix("to ").or_else(|| r.strip_prefix("for ")) {
                 dest = Some(d.trim().to_string());
+            } else if is_saved_place_word(r.trim()) {
+                // "directions home", "directions work"
+                dest = Some(r.trim().to_string());
             }
             break;
         }
@@ -2931,9 +3165,13 @@ fn parse_directions_command(text: &str) -> Option<ParseResult> {
     if dest.is_none() {
         for head in [
             "route to ", "a route to ", "directions to ", "how do i get to ", "how can i get to ", "how to get to ",
-            "how do i reach ", "how do i drive to ", "how do i walk to ", "how do i get from ", "navigate me to ",
+            "how do i reach ", "how do i drive to ", "how do i walk to ", "how do i cycle to ", "how do i bike to ",
+            "how do i get from ", "navigate me to ", "route ",
         ] {
             if let Some(r) = s.strip_prefix(head) {
+                if head == "route " && !is_saved_place_word(r.trim()) {
+                    break;
+                }
                 if head.ends_with("from ") {
                     let (a, b) = r.split_once(" to ")?;
                     origin = Some(a.trim().to_string());
@@ -2945,48 +3183,208 @@ fn parse_directions_command(text: &str) -> Option<ParseResult> {
                     mode = Some("walking");
                 } else if head.ends_with("drive to ") {
                     mode = Some("driving");
+                } else if head.ends_with("cycle to ") || head.ends_with("bike to ") {
+                    mode = Some("bicycling");
                 }
                 break;
             }
         }
     }
     let mut dest = dest?;
-    // Trailing qualifiers: " from Y", " by bus", " on foot", " please".
-    if let Some(p) = dest.strip_suffix(" please") {
-        dest = p.trim().to_string();
-    }
-    for (suffix, m) in [
-        (" by walking", "walking"), (" on foot", "walking"), (" by bus", "transit"), (" by train", "transit"),
-        (" by transit", "transit"), (" by public transport", "transit"), (" by bike", "bicycling"),
-        (" by cycling", "bicycling"), (" by car", "driving"), (" by driving", "driving"),
-    ] {
-        if let Some(p) = dest.strip_suffix(suffix) {
-            dest = p.trim().to_string();
-            mode = Some(m);
-        }
-    }
-    if origin.is_none() {
-        if let Some((d, o)) = dest.rsplit_once(" from ") {
-            if !d.trim().is_empty() && !o.trim().is_empty() {
-                origin = Some(o.trim().to_string());
-                dest = d.trim().to_string();
+    take_mode_suffix(&mut dest, &mut mode);
+    take_origin_suffix(&mut dest, &mut origin);
+    directions_result(dest, origin, mode, false, "deterministic-directions")
+}
+
+/// Pull a clock time off the end of "... at 5 pm" / "... by 5:30": returns the text before it and the minutes since midnight.
+fn split_arrival_time(rest: &str) -> (String, Option<u16>) {
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    for i in (0..words.len()).rev() {
+        if matches!(words[i], "at" | "by" | "before") {
+            let tail: String = words[i + 1..].iter().filter(|w| !matches!(**w, "o'clock" | "sharp" | "latest")).copied().collect::<Vec<_>>().join("");
+            if let Some(min) = crate::memcore::timetable::parse_time(&tail) {
+                let mut head = words[..i].join(" ");
+                for cut in [" to be there", " to get there", " to arrive", " to reach it", " to be there on time", " to reach there"] {
+                    if let Some(h) = head.strip_suffix(cut) {
+                        head = h.to_string();
+                    }
+                }
+                return (head.trim().to_string(), Some(min));
             }
         }
     }
-    let words = dest.split_whitespace().count();
-    let bad_dest = dest.is_empty()
-        || words > 10
-        || matches!(dest.as_str(), "it" | "there" | "here" | "that" | "this" | "the" | "a")
-        // "how do I get to sleep / know you / better / rich" are idioms, not places.
-        || matches!(dest.split_whitespace().next().unwrap_or(""), "sleep" | "bed" | "know" | "grips" | "better" | "rich" | "fit" | "started" | "used" | "over" | "done" | "back" | "inbox" | "zero");
-    if bad_dest || origin.as_deref().map(|o| o.is_empty() || o.split_whitespace().count() > 10).unwrap_or(false) {
-        return None;
+    (rest.trim().to_string(), None)
+}
+
+/// "Remind me to leave for the airport at 5 pm", "when should I leave for T-Hub to be there by 9": a leave-by reminder
+/// for a trip. The time is optional here; the runner asks when it is missing.
+fn parse_trip_reminder_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase();
+    let t = t.trim_end_matches(['.', ',', '!', '?']).trim().to_string();
+    let mut s = t.as_str();
+    for lead in ["please ", "nexus ", "nexus, ", "hey nexus ", "can you ", "could you "] {
+        if let Some(r) = s.strip_prefix(lead) {
+            s = r;
+        }
     }
-    Some(ParseResult {
-        intent: ParsedIntent::Directions { destination: dest, origin, mode: mode.unwrap_or("driving").to_string() },
-        confidence: 1.0,
-        source: "deterministic-directions".to_string(),
+    const HEADS: &[&str] = &[
+        "remind me to leave for ", "remind me when to leave for ", "remind me to leave to get to ", "remind me to leave to reach ",
+        "remind me to head out for ", "remind me to set off for ", "remind me when i should leave for ",
+        "when should i leave for ", "when should i leave to get to ", "when should i leave to reach ", "when do i need to leave for ",
+        "when do i have to leave for ", "what time should i leave for ", "what time do i need to leave for ",
+        "what time should i leave to get to ", "tell me when to leave for ", "let me know when to leave for ",
+        "notify me when to leave for ", "set a leave reminder for ", "set a leave by reminder for ", "set a leave-by reminder for ",
+    ];
+    for head in HEADS {
+        if let Some(r) = s.strip_prefix(head) {
+            let (dest, arrive) = split_arrival_time(r);
+            let dest = dest.trim().to_string();
+            let words = dest.split_whitespace().count();
+            if dest.is_empty() || words > 10 || !trip_place_ok(&dest) {
+                return None;
+            }
+            return Some(ParseResult {
+                intent: ParsedIntent::TripReminder { destination: dest, arrive_min: arrive },
+                confidence: 1.0,
+                source: "deterministic-trip-reminder".to_string(),
+            });
+        }
+    }
+    None
+}
+
+/// What a spoken mode word means ("walking", "by bus", "the car"). Pure.
+fn follow_up_mode(s: &str) -> Option<&'static str> {
+    Some(match s.trim() {
+        "walking" | "walk" | "on foot" | "by foot" | "walking route" => "walking",
+        "driving" | "drive" | "car" | "by car" | "the car" | "a car" | "cab" | "taxi" | "by cab" | "by taxi" => "driving",
+        "cycling" | "bike" | "biking" | "bicycle" | "by bike" | "a bike" | "the bike" | "by bicycle" => "bicycling",
+        "bus" | "by bus" | "the bus" | "transit" | "by transit" | "train" | "by train" | "the train" | "metro" | "by metro"
+        | "public transport" | "by public transport" | "public transit" | "by public transit" => "transit",
+        _ => return None,
     })
+}
+
+/// Words about a road type to avoid.
+fn avoid_kind(s: &str) -> Option<&'static str> {
+    let s = s.trim().trim_start_matches("the ").trim_start_matches("any ").trim();
+    Some(match s {
+        "toll" | "tolls" | "toll roads" | "toll road" | "toll booths" => "tolls",
+        "highway" | "highways" | "freeway" | "freeways" | "expressway" | "expressways" | "motorway" | "motorways" => "highways",
+        "ferry" | "ferries" => "ferries",
+        _ => return None,
+    })
+}
+
+/// Follow-ups to the route that is open: "make it walking", "avoid tolls", "add a stop at X", "how long now",
+/// "read me the steps", "next step". The phrases are specific enough to claim without knowing whether a route is open;
+/// the runner answers "no route is open" when it is not.
+fn parse_route_follow_up(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase();
+    let t = t.trim_end_matches(['.', ',', '!', '?']).trim().to_string();
+    let mut s = t.as_str();
+    for lead in ["please ", "nexus ", "nexus, ", "hey nexus ", "can you ", "could you ", "ok ", "okay ", "now "] {
+        if let Some(r) = s.strip_prefix(lead) {
+            s = r;
+        }
+    }
+    let out = |action: &str, value: Option<String>| {
+        Some(ParseResult {
+            intent: ParsedIntent::RouteFollowUp { change: action.to_string(), value },
+            confidence: 1.0,
+            source: "deterministic-route-follow-up".to_string(),
+        })
+    };
+
+    // Switch the way of travel.
+    let mut m = s;
+    for lead in [
+        "make it ", "switch it to ", "switch to ", "switch it over to ", "change it to ", "change to ", "what about ", "how about ",
+        "try ", "use ", "go by ", "do it by ", "same route ", "same but ",
+    ] {
+        if let Some(r) = m.strip_prefix(lead) {
+            m = r;
+            break;
+        }
+    }
+    let m = m.trim_end_matches(" instead").trim_end_matches(" then").trim_end_matches(" please").trim_end_matches(" route").trim_end_matches(" option").trim_end_matches(" directions").trim();
+    if m.len() < s.len() || s.ends_with(" instead") {
+        if let Some(mode) = follow_up_mode(m) {
+            return out("mode", Some(mode.to_string()));
+        }
+    }
+    if let Some(mode) = s.strip_suffix(" instead").and_then(follow_up_mode) {
+        return out("mode", Some(mode.to_string()));
+    }
+
+    // Roads to avoid.
+    for lead in ["avoid ", "avoid the ", "no ", "without ", "skip the ", "skip ", "i don't want ", "i do not want "] {
+        if let Some(r) = s.strip_prefix(lead) {
+            let r = r.trim_end_matches(" please").trim_end_matches(" on the way").trim();
+            if let Some(k) = avoid_kind(r) {
+                return out("avoid", Some(k.to_string()));
+            }
+        }
+    }
+    for lead in ["allow ", "allow the ", "use the ", "stop avoiding ", "don't avoid ", "do not avoid ", "allow any "] {
+        if let Some(r) = s.strip_prefix(lead) {
+            if let Some(k) = avoid_kind(r) {
+                return out("allow", Some(k.to_string()));
+            }
+        }
+    }
+
+    // Stops on the way.
+    for lead in [
+        "add a stop at ", "add a stop to ", "add a stop for ", "add stop at ", "add a stop in ", "add a stop on the way at ",
+        "stop at ", "stop by ", "stop off at ", "go via ", "route via ", "route through ", "with a stop at ",
+        "add one stop at ", "make a stop at ", "make a stop at the ", "add a stop at the ",
+    ] {
+        if let Some(r) = s.strip_prefix(lead) {
+            let r = r.trim_end_matches(" on the way").trim_end_matches(" please").trim();
+            let words = r.split_whitespace().count();
+            if !r.is_empty() && words <= 8 && !r.contains(" and then ") {
+                return out("stop", Some(r.to_string()));
+            }
+        }
+    }
+    if let Some(r) = s.strip_prefix("add ").and_then(|r| r.strip_suffix(" as a stop").or_else(|| r.strip_suffix(" as a stop on the way"))) {
+        let r = r.trim();
+        if !r.is_empty() && r.split_whitespace().count() <= 8 {
+            return out("stop", Some(r.to_string()));
+        }
+    }
+    if matches!(s, "remove the stop" | "remove the stops" | "clear the stops" | "clear stops" | "remove stops" | "no stops" | "drop the stop" | "drop the stops" | "remove the stop on the way") {
+        return out("clear_stops", None);
+    }
+
+    // The state of the route.
+    if matches!(
+        s,
+        "how long now" | "how long is it now" | "how much longer" | "how much longer is it" | "what's the eta" | "what is the eta"
+            | "whats the eta" | "eta" | "how long will it take" | "how far is it now" | "how far now" | "update the eta"
+            | "update the route time" | "how long is the trip" | "how long is the route"
+    ) {
+        return out("status", None);
+    }
+
+    // Turn by turn.
+    if matches!(
+        s,
+        "read the steps" | "read me the steps" | "read the directions" | "read me the directions" | "what are the steps"
+            | "what are the directions" | "turn by turn" | "give me turn by turn" | "first step" | "what's the first step"
+            | "what is the first step" | "start navigation" | "start the navigation" | "read the route" | "read me the route"
+            | "read out the steps" | "read out the directions"
+    ) {
+        return out("steps", None);
+    }
+    if matches!(s, "next step" | "next direction" | "next turn" | "what's the next step" | "what is the next step" | "what's next step" | "next instruction") {
+        return out("next_step", None);
+    }
+    if matches!(s, "previous step" | "last step" | "go back a step" | "repeat the step" | "repeat that step" | "repeat the last step" | "repeat the instruction") {
+        return out("repeat_step", None);
+    }
+    None
 }
 
 /// Words that mean the thing asked about is not a place (a UI control, a person, an object, an idea).
@@ -11007,7 +11405,7 @@ mod tests {
     fn test_directions_phrases() {
         let dbg = |p: &str| format!("{:?}", parse_deterministic(p).map(|r| r.intent));
         let want = |d: &str, o: Option<&str>, m: &str| {
-            format!("Some(Directions {{ destination: {:?}, origin: {:?}, mode: {:?} }})", d, o.map(String::from), m)
+            format!("Some(Directions {{ destination: {:?}, origin: {:?}, mode: {:?}, question: false }})", d, o.map(String::from), m)
         };
         assert_eq!(dbg("directions to Central Park"), want("central park", None, "driving"));
         assert_eq!(dbg("Give me directions to Heathrow Airport."), want("heathrow airport", None, "driving"));
@@ -11027,6 +11425,124 @@ mod tests {
         ] {
             let got = dbg(p);
             assert!(!got.contains("Directions"), "'{p}' wrongly parsed as {got}");
+        }
+    }
+
+    fn dir_dbg(p: &str) -> String {
+        format!("{:?}", parse_deterministic(p).map(|r| r.intent))
+    }
+
+    fn dir(d: &str, o: Option<&str>, m: &str, q: bool) -> String {
+        format!("Some(Directions {{ destination: {:?}, origin: {:?}, mode: {:?}, question: {} }})", d, o.map(String::from), m, q)
+    }
+
+    #[test]
+    fn directions_new_ways_to_ask() {
+        // modes as a bare word, a prefix or a suffix
+        assert_eq!(dir_dbg("directions to the airport walking"), dir("the airport", None, "walking", false));
+        assert_eq!(dir_dbg("directions to T-Hub by bike"), dir("t-hub", None, "bicycling", false));
+        assert_eq!(dir_dbg("bike directions to T-Hub"), dir("t-hub", None, "bicycling", false));
+        assert_eq!(dir_dbg("directions to Charminar by cab"), dir("charminar", None, "driving", false));
+        assert_eq!(dir_dbg("directions to Gachibowli by metro"), dir("gachibowli", None, "transit", false));
+        assert_eq!(dir_dbg("directions to Gachibowli on foot please"), dir("gachibowli", None, "walking", false));
+        // the saved home and work
+        assert_eq!(dir_dbg("take me home"), dir("home", None, "driving", false));
+        assert_eq!(dir_dbg("how do I get home"), dir("home", None, "driving", false));
+        assert_eq!(dir_dbg("directions home"), dir("home", None, "driving", false));
+        assert_eq!(dir_dbg("route home"), dir("home", None, "driving", false));
+        assert_eq!(dir_dbg("walk me home"), dir("home", None, "walking", false));
+        assert_eq!(dir_dbg("take me to work"), dir("work", None, "driving", false));
+        assert_eq!(dir_dbg("directions to my office"), dir("my office", None, "driving", false));
+        // "take me to X" / "drive to X" / "I want to go to X": a place only
+        assert_eq!(dir_dbg("take me to Charminar"), dir("charminar", None, "driving", false));
+        assert_eq!(dir_dbg("walk to the station"), dir("the station", None, "walking", false));
+        assert_eq!(dir_dbg("drive to Gachibowli"), dir("gachibowli", None, "driving", false));
+        assert_eq!(dir_dbg("I want to go to Charminar"), dir("charminar", None, "driving", false));
+        assert_eq!(dir_dbg("take me to my college"), dir("my college", None, "driving", false));
+    }
+
+    #[test]
+    fn directions_questions_are_flagged_as_questions() {
+        assert_eq!(dir_dbg("how far is Charminar"), dir("charminar", None, "driving", true));
+        assert_eq!(dir_dbg("How far is the Charminar from here?"), dir("the charminar", None, "driving", true));
+        assert_eq!(dir_dbg("how long to get to T-Hub"), dir("t-hub", None, "driving", true));
+        assert_eq!(dir_dbg("how long will it take to get to the airport"), dir("the airport", None, "driving", true));
+        assert_eq!(dir_dbg("how long does it take to reach Gachibowli"), dir("gachibowli", None, "driving", true));
+        assert_eq!(dir_dbg("how long does it take to walk to the station"), dir("the station", None, "walking", true));
+        assert_eq!(dir_dbg("what is the distance to Charminar"), dir("charminar", None, "driving", true));
+        assert_eq!(dir_dbg("how far is Charminar from Gachibowli"), dir("charminar", Some("gachibowli"), "driving", true));
+        assert_eq!(dir_dbg("how far is T-Hub by bike"), dir("t-hub", None, "bicycling", true));
+    }
+
+    #[test]
+    fn directions_do_not_steal_ordinary_sentences() {
+        for p in [
+            "take me to settings", "take me to youtube", "take me to youtube.com", "take me to the top", "take me to my calendar",
+            "take me to the next page", "how far is the moon", "how far is it", "how far is the sun from the earth",
+            "how long to boil an egg", "how long to cook rice", "how long does it take to learn rust", "how long will it take",
+            "I want to go to sleep", "I want to go to bed", "go home", "walk the dog", "drive me crazy", "bike to",
+            "how far is my battery", "what is the distance to my phone", "walk to", "how far is the file",
+            "take me to the settings page", "how do I get to sleep", "directions", "how far is", "take me to github",
+        ] {
+            assert!(!dir_dbg(p).contains("Directions"), "'{p}' wrongly parsed as {}", dir_dbg(p));
+        }
+    }
+
+    fn fu(change: &str, value: Option<&str>) -> String {
+        format!("Some(RouteFollowUp {{ change: {:?}, value: {:?} }})", change, value.map(String::from))
+    }
+
+    #[test]
+    fn route_follow_ups_are_understood() {
+        assert_eq!(dir_dbg("make it walking"), fu("mode", Some("walking")));
+        assert_eq!(dir_dbg("switch to cycling"), fu("mode", Some("bicycling")));
+        assert_eq!(dir_dbg("what about the bus"), fu("mode", Some("transit")));
+        assert_eq!(dir_dbg("by car instead"), fu("mode", Some("driving")));
+        assert_eq!(dir_dbg("walking instead"), fu("mode", Some("walking")));
+        assert_eq!(dir_dbg("Nexus, try the train"), fu("mode", Some("transit")));
+        assert_eq!(dir_dbg("avoid tolls"), fu("avoid", Some("tolls")));
+        assert_eq!(dir_dbg("avoid the highways please"), fu("avoid", Some("highways")));
+        assert_eq!(dir_dbg("no ferries"), fu("avoid", Some("ferries")));
+        assert_eq!(dir_dbg("allow tolls"), fu("allow", Some("tolls")));
+        assert_eq!(dir_dbg("add a stop at Cafe Bahar"), fu("stop", Some("cafe bahar")));
+        assert_eq!(dir_dbg("stop at the petrol pump on the way"), fu("stop", Some("the petrol pump")));
+        assert_eq!(dir_dbg("add the ATM as a stop"), fu("stop", Some("the atm")));
+        assert_eq!(dir_dbg("remove the stops"), fu("clear_stops", None));
+        assert_eq!(dir_dbg("how long now"), fu("status", None));
+        assert_eq!(dir_dbg("what's the eta"), fu("status", None));
+        assert_eq!(dir_dbg("read me the steps"), fu("steps", None));
+        assert_eq!(dir_dbg("turn by turn"), fu("steps", None));
+        assert_eq!(dir_dbg("next step"), fu("next_step", None));
+        assert_eq!(dir_dbg("repeat the step"), fu("repeat_step", None));
+    }
+
+    #[test]
+    fn route_follow_ups_leave_everyday_words_alone() {
+        for p in [
+            "walking", "bus", "by car", "i like walking", "avoid", "avoid the crowd", "no thanks", "stop", "stop it", "stop at", "next",
+            "show me the bus", "what about lunch", "try again", "use the mouse", "go by the book", "how long", "eta soon",
+            "read the file", "read the steps of the recipe", "go through the email on screen", "go through the file", "via email",
+        ] {
+            assert!(!dir_dbg(p).contains("RouteFollowUp"), "'{p}' wrongly parsed as {}", dir_dbg(p));
+        }
+    }
+
+    fn trip(d: &str, t: Option<u16>) -> String {
+        format!("Some(TripReminder {{ destination: {:?}, arrive_min: {:?} }})", d, t)
+    }
+
+    #[test]
+    fn trip_reminders_are_understood() {
+        assert_eq!(dir_dbg("remind me to leave for the airport at 5 pm"), trip("the airport", Some(17 * 60)));
+        assert_eq!(dir_dbg("remind me to leave for T-Hub by 9:30 am"), trip("t-hub", Some(9 * 60 + 30)));
+        assert_eq!(dir_dbg("when should I leave for the airport to be there by 6 pm"), trip("the airport", Some(18 * 60)));
+        assert_eq!(dir_dbg("what time should I leave for Gachibowli to get there at 14:30"), trip("gachibowli", Some(14 * 60 + 30)));
+        // no time: the runner asks for it
+        assert_eq!(dir_dbg("remind me when to leave for the airport"), trip("the airport", None));
+        assert_eq!(dir_dbg("when should I leave for work"), trip("work", None));
+        // not a trip
+        for p in ["remind me to leave for the day", "remind me to leave a note", "remind me to call mom at 5 pm", "when should I leave my job"] {
+            assert!(!dir_dbg(p).contains("TripReminder"), "'{p}' wrongly parsed as {}", dir_dbg(p));
         }
     }
 

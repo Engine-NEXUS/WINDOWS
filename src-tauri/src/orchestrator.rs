@@ -803,6 +803,8 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         | ParsedIntent::CalendarAgenda { .. }
         | ParsedIntent::CalendarAdd { .. }
         | ParsedIntent::Directions { .. }
+        | ParsedIntent::RouteFollowUp { .. }
+        | ParsedIntent::TripReminder { .. }
         | ParsedIntent::PlacesSearch { .. }
         | ParsedIntent::PlaceInfo { .. }
         | ParsedIntent::AnalyseThisEmail
@@ -1646,8 +1648,18 @@ async fn process_transcript_inner<R: Runtime>(
             ParsedIntent::AlertMuteSource { provider } => {
                 return run_alert_mute_source(app, provider.as_deref()).await;
             }
-            ParsedIntent::Directions { destination, origin, mode } => {
-                return run_directions(app, destination.clone(), origin.clone(), mode.clone()).await;
+            ParsedIntent::Directions { destination, origin, mode, question } => {
+                return crate::directions::run(
+                    app,
+                    crate::directions::Request { destination: destination.clone(), origin: origin.clone(), mode: mode.clone(), question: *question },
+                )
+                .await;
+            }
+            ParsedIntent::RouteFollowUp { change, value } => {
+                return crate::directions::follow_up(app, change.clone(), value.clone()).await;
+            }
+            ParsedIntent::TripReminder { destination, arrive_min } => {
+                return crate::directions::trip_reminder(app, destination.clone(), *arrive_min).await;
             }
             ParsedIntent::PlacesSearch { query, near } => {
                 return run_places_search(app, query.clone(), near.clone()).await;
@@ -1986,8 +1998,18 @@ async fn process_transcript_inner<R: Runtime>(
             ParsedIntent::AlertMuteSource { provider } => {
                 return run_alert_mute_source(app, provider.as_deref()).await;
             }
-            ParsedIntent::Directions { destination, origin, mode } => {
-                return run_directions(app, destination.clone(), origin.clone(), mode.clone()).await;
+            ParsedIntent::Directions { destination, origin, mode, question } => {
+                return crate::directions::run(
+                    app,
+                    crate::directions::Request { destination: destination.clone(), origin: origin.clone(), mode: mode.clone(), question: *question },
+                )
+                .await;
+            }
+            ParsedIntent::RouteFollowUp { change, value } => {
+                return crate::directions::follow_up(app, change.clone(), value.clone()).await;
+            }
+            ParsedIntent::TripReminder { destination, arrive_min } => {
+                return crate::directions::trip_reminder(app, destination.clone(), *arrive_min).await;
             }
             ParsedIntent::PlacesSearch { query, near } => {
                 return run_places_search(app, query.clone(), near.clone()).await;
@@ -5609,7 +5631,7 @@ where
 }
 
 /// Speak `text` for a finished local turn.
-fn say_and_finish<R: Runtime>(app: &AppHandle<R>, request_id: String, text: String) -> Result<ProcessResult, String> {
+pub(crate) fn say_and_finish<R: Runtime>(app: &AppHandle<R>, request_id: String, text: String) -> Result<ProcessResult, String> {
     // An empty line means "already said" (an acknowledgement went out first): nothing more is spoken, the turn still ends.
     if !text.trim().is_empty() {
         speak_line(app, text, &request_id);
@@ -6172,73 +6194,10 @@ async fn run_alert_mute_source<R: Runtime>(app: AppHandle<R>, provider: Option<&
     }
 }
 
-// ─── Directions (Google Maps window) ──────────────────────────────────
-
-/// Spoken line for a directions request. Pure.
-fn directions_line(destination: &str, eta: Option<&str>) -> String {
-    match eta {
-        Some(e) => format!("Finding route to {destination}. About {e}, sir."),
-        None => format!("Finding the best route to {destination}, sir."),
-    }
-}
-
-/// "Directions to X": open the real Google Maps app first (so it appears
-/// at once), then - only if a Routes API key AND a spoken origin exist - ask
-/// the Routes API for a traffic-aware ETA (3 s cap) to speak. Any failure
-/// falls back to the plain acknowledgement; the map window is unaffected.
-async fn run_directions<R: Runtime>(
-    app: AppHandle<R>,
-    destination: String,
-    origin: Option<String>,
-    mode: String,
-) -> Result<ProcessResult, String> {
-    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-    let travel = crate::commands::parse_travel_mode(Some(&mode));
-    let (destination, origin) = match resolve_saved_places(&app, &destination, origin.as_deref()) {
-        Ok(r) => r,
-        Err(line) => return say_and_finish(&app, request_id, line),
-    };
-    let here = if origin.as_deref().is_none_or(|o| o.trim().is_empty()) { crate::location::current().await } else { None };
-    let origin = match origin.filter(|o| !o.trim().is_empty()) {
-        Some(o) => Some(o),
-        None => here.map(|f| f.as_point()),
-    };
-    if let Err(e) = crate::maps_panel::show_map(
-        &app,
-        crate::maps_panel::MapsTarget::Directions { origin: origin.clone(), destination: destination.clone(), mode: travel },
-    )
-    .await
-    {
-        tracing::warn!("directions: could not open Maps window: {e}");
-        return say_and_finish(&app, request_id, "I couldn't open the map window, sir.".into());
-    }
-    let key = crate::commands::read_api_key(&app, "google_maps");
-    let eta = match (key.is_empty(), origin.as_deref().map(str::trim).filter(|o| !o.is_empty())) {
-        (false, Some(o)) => {
-            let client = reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(2))
-                .timeout(std::time::Duration::from_secs(3))
-                .build()
-                .unwrap_or_default();
-            match crate::google::maps::MapsService::compute_route(&client, &key, o, &destination, travel).await {
-                Ok(eta) => Some(eta.spoken()),
-                Err(e) => {
-                    tracing::debug!("directions: routes api: {e}");
-                    None
-                }
-            }
-        }
-        _ => None,
-    };
-    let mut line = directions_line(&destination, eta.as_deref());
-    if here.as_ref().is_some_and(crate::location::should_tell_about_exact_location) {
-        line.push_str(" For an exact starting point, turn on location in Windows settings, sir.");
-    }
-    say_and_finish(&app, request_id, line)
-}
+// ─── Directions: see directions.rs ───────────────────────────────────
 
 /// Which saved place a spoken word means: "home" / "work" (None = a real address).
-fn saved_place_kind(s: &str) -> Option<&'static str> {
+pub(crate) fn saved_place_kind(s: &str) -> Option<&'static str> {
     match s.trim().to_lowercase().trim_start_matches("my ").trim_start_matches("the ") {
         "home" | "house" | "my place" | "home address" => Some("home"),
         "work" | "office" | "workplace" | "work address" => Some("work"),
@@ -6265,12 +6224,30 @@ fn saved_place<R: Runtime>(app: &AppHandle<R>, kind: &str) -> Option<String> {
     pick_saved_place(&crate::memory::recall(&dir, kind), kind)
 }
 
+/// The name in "my college" / "my gym" (one or two words); `None` for anything else. Pure.
+pub(crate) fn own_place_name(s: &str) -> Option<String> {
+    let l = s.trim().to_lowercase();
+    let name = l.strip_prefix("my ")?.trim();
+    let words = name.split_whitespace().count();
+    (1..=2).contains(&words).then(|| name.to_string())
+}
+
+/// The remembered address for a name ("college" -> the fact `college`, `college_address`, `my_college`, `college_location`).
+fn saved_place_named<R: Runtime>(app: &AppHandle<R>, name: &str) -> Option<String> {
+    let dir = app.path().app_data_dir().ok()?;
+    let key = name.replace(' ', "_");
+    let hits = crate::memory::recall(&dir, &key);
+    [key.clone(), format!("{key}_address"), format!("my_{key}"), format!("{key}_location")]
+        .iter()
+        .find_map(|k| hits.iter().find(|(hk, v)| hk.to_lowercase() == *k && !v.trim().is_empty()).map(|(_, v)| v.trim().to_string()))
+}
+
 fn unknown_place_line(kind: &str) -> String {
     format!("I don't know where your {kind} is yet, sir. Say: remember that my {kind} is, followed by the address.")
 }
 
 /// Replace "home"/"work" in a destination/origin with the remembered address.
-fn resolve_saved_places<R: Runtime>(
+pub(crate) fn resolve_saved_places<R: Runtime>(
     app: &AppHandle<R>,
     destination: &str,
     origin: Option<&str>,
@@ -6278,7 +6255,11 @@ fn resolve_saved_places<R: Runtime>(
     let one = |s: &str| -> Result<String, String> {
         match saved_place_kind(s) {
             Some(kind) => saved_place(app, kind).ok_or_else(|| unknown_place_line(kind)),
-            None => Ok(s.to_string()),
+            // "my college", "my gym": an address the user told NEXUS to remember
+            None => match own_place_name(s) {
+                Some(name) => saved_place_named(app, &name).ok_or_else(|| unknown_place_line(&name)),
+                None => Ok(s.to_string()),
+            },
         }
     };
     let d = one(destination)?;
@@ -6761,7 +6742,7 @@ async fn run_place_info<R: Runtime>(app: AppHandle<R>, query: String, ask: Strin
     if let Err(e) = crate::maps_panel::show_map(
         &app,
         // "Where is X" opens straight on the route to it from where the user is now; no navigation starts.
-        crate::maps_panel::MapsTarget::Directions { origin: here.map(|f| f.as_point()), destination: search_text.clone(), mode: crate::google::types::TravelMode::Driving },
+        crate::maps_panel::MapsTarget::Directions { origin: here.map(|f| f.as_point()), destination: search_text.clone(), mode: crate::google::types::TravelMode::Driving, opts: crate::google::maps::RouteOpts::default() },
     )
     .await
     {
@@ -12050,14 +12031,6 @@ mod tests {
         assert_eq!(screen_key_guidance(true, false), None);
     }
 
-    #[test]
-    fn directions_line_wording() {
-        assert_eq!(directions_line("Central Park", None), "Finding the best route to Central Park, sir.");
-        assert_eq!(
-            directions_line("Central Park", Some("28 minutes via FDR Drive")),
-            "Finding route to Central Park. About 28 minutes via FDR Drive, sir."
-        );
-    }
 
     #[test]
     fn a_title_name_must_be_in_the_users_github_but_a_real_repo_page_may_be_anyones() {

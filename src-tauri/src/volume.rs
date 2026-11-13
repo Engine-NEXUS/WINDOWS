@@ -338,6 +338,10 @@ pub fn init(app_data_dir: PathBuf) {
 
 /// Acquire an RAII lease for TTS volume (sets the system volume to `tts_volume`).
 pub fn acquire_volume_lease(tts_volume: f32) -> Option<TtsVolumeLease> {
+    // Test-quiet mode: playback is silent, so the user's master volume is never touched.
+    if crate::quiet::on() {
+        return None;
+    }
     ctrl().acquire(tts_volume)
 }
 
@@ -345,7 +349,7 @@ pub fn acquire_volume_lease(tts_volume: f32) -> Option<TtsVolumeLease> {
 /// have been ended by the watchdog; then the speech gets a fresh one so it never plays at the user's own volume.
 /// `None` when the volume setting is 0, or when a live lease already covers this playback.
 pub fn ensure_live_lease(tts_volume_pct: u8) -> Option<TtsVolumeLease> {
-    if tts_volume_pct == 0 || ctrl().lease_is_live() {
+    if tts_volume_pct == 0 || crate::quiet::on() || ctrl().lease_is_live() {
         return None;
     }
     ctrl().acquire(tts_volume_pct as f32 / 100.0)
