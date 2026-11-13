@@ -58,6 +58,10 @@ jobs:
       - name: IPC + event contract gate
         run: node ../scripts/check-ipc-contract.mjs
 
+      # Every boolean in NexusSettings is a row on the Features page (or listed as internal, with a reason).
+      - name: Features page registry
+        run: node ../scripts/check-feature-registry.mjs
+
       # The logon greeting is drawn natively from frames of the real dotted orb; a change to the orb engine must be re-baked.
       - name: Early orb frames up to date
         run: node ../scripts/bake-early-orb.mjs --check

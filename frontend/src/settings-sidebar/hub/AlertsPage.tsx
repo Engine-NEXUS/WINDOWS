@@ -88,16 +88,8 @@ export function AlertsPage({
   const saveSetting = async <K extends keyof AlertSettings>(key: K, value: AlertSettings[K]) => {
     setBusy(true);
     try {
-      const current = await invoke<Record<string, unknown>>("get_settings").catch(() => ({}));
-      await invoke("save_settings", {
-        settings: {
-          ...current,
-          [key]: value,
-          groqApiKey: "",
-          geminiApiKey: "",
-          cerebrasApiKey: "",
-        },
-      });
+      // Patch only this setting: writing the whole (possibly stale) settings object back could undo a change made elsewhere.
+      await invoke("settings_patch", { patch: { [key]: value } });
       setSettings((prev) => ({ ...prev, [key]: value }));
       onSettingChanged?.(key, value);
     } catch (err) {
