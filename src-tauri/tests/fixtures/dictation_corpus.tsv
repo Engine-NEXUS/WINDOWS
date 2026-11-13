@@ -88,7 +88,7 @@ send to john delete that send to mary	Send to mary	multi
 call tomorrow strike that call today	Call today	multi
 the price is ten scratch that twenty dollars	20 dollars	multi
 we should go north delete that head south	Head south	multi
-arriving monday strike that arriving tuesday	Arriving tuesday	multi
+arriving monday strike that arriving tuesday	Arriving Tuesday	multi
 first draft scratch that second draft delete that final draft	Final draft	multi
 good morning scratch that good evening everyone	Good evening everyone	multi
 please cancel scratch that please confirm the order	Please confirm the order	multi
@@ -102,10 +102,10 @@ send email to alice scratch that send message to bob	Send message to bob	multi
 # --- 5. Paused corrections and non-corrections (15 pairs) ---
 send it to bob, no, wait, send it to alice	Send it to alice	multi
 hello comma send it to bob, no wait, alice	Hello, alice	multi
-see you tomorrow, sorry I mean on friday	On friday	multi
+see you tomorrow, sorry I mean on friday	On Friday	multi
 call bob, wait, no, call charlie	Call charlie	multi
 meet at two, no, wait, meet at three	Meet at three	multi
-deliver on monday, sorry, I mean on tuesday	On tuesday	multi
+deliver on monday, sorry, I mean on tuesday	On Tuesday	multi
 invite david, wait, no, invite sarah	Invite sarah	multi
 send to john, no, wait, to mary	To mary	multi
 i have no wait time today	I have no wait time today	multi
@@ -127,11 +127,11 @@ interest rate of three percent	Interest rate of 3%	multi
 ninety nine percent complete	99% complete	multi
 about forty dollars	About 40 dollars	multi
 costs twenty dollars	Costs 20 dollars	multi
-give me one dollar	Give me 1 dollars	multi	doubt
+give me one dollar	Give me 1 dollar	multi	doubt
 price is fifty dollars	Price is 50 dollars	multi
 fee is seventy five rupees	Fee is 75 rupees	multi
 cost ten rupees	Cost 10 rupees	multi
-charge is one rupee	Charge is 1 rupees	multi	doubt
+charge is one rupee	Charge is 1 rupee	multi	doubt
 call at seven o'clock	Call at 7 o'clock	multi
 party at eleven o'clock	Party at 11 o'clock	multi
 i have five apples	I have five apples	multi

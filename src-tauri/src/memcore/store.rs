@@ -400,13 +400,17 @@ impl Store {
         out
     }
 
-    /// Swap the data key (crypto-erase after wipe) and re-seal.
-    pub fn rekey(&self, key: Key) {
-        let path = self.snapshot.borrow().as_ref().map(|(p, _)| p.clone());
-        if let Some(path) = path {
-            *self.snapshot.borrow_mut() = Some((path, key));
-            self.flush_now();
+    /// Swap the data key (crypto-erase after wipe) and re-seal. `false` = the snapshot could not be written with the
+    /// new key; the store then keeps using the previous key, which is the one the file on disk is sealed with.
+    pub fn rekey(&self, key: Key) -> bool {
+        let previous = self.snapshot.borrow().clone();
+        let Some((path, _)) = previous.clone() else { return true };
+        *self.snapshot.borrow_mut() = Some((path, key));
+        if self.flush_now() {
+            return true;
         }
+        *self.snapshot.borrow_mut() = previous;
+        false
     }
 
     fn migrate(&self) -> rusqlite::Result<()> {
@@ -1829,7 +1833,7 @@ mod tests {
         let sealed_before = std::fs::read(d.join(ENC_FILE)).unwrap();
         s.wipe("user", 2);
         let new = crypto::generate_key().unwrap();
-        s.rekey(new);
+        assert!(s.rekey(new));
         drop(s);
         assert!(crypto::open(&old, &std::fs::read(d.join(ENC_FILE)).unwrap()).is_none());
         // Even the pre-wipe ciphertext (e.g. recovered from a free block) is readable
@@ -1837,6 +1841,26 @@ mod tests {
         assert!(crypto::open(&new, &sealed_before).is_none());
         let reopened = Store::open(&d, Some(new)).unwrap();
         assert_eq!(reopened.count(Tier::Fact), 0);
+    }
+
+    #[test]
+    fn a_failed_rekey_keeps_the_key_the_file_was_sealed_with() {
+        let d = tmp("rekey_fail");
+        let old = crypto::generate_key().unwrap();
+        let s = Store::open(&d, Some(old)).unwrap();
+        s.observe(&obs("k", "v", Trust::UserSaid, true), 1).unwrap();
+        // Make the snapshot unwritable: a directory now sits where the file must go.
+        let enc = d.join(ENC_FILE);
+        let sealed = std::fs::read(&enc).unwrap();
+        std::fs::remove_file(&enc).unwrap();
+        std::fs::create_dir(&enc).unwrap();
+        assert!(!s.rekey(crypto::generate_key().unwrap()), "the write cannot succeed");
+        // The path is usable again: the store must still seal with the OLD key.
+        std::fs::remove_dir(&enc).unwrap();
+        std::fs::write(&enc, &sealed).unwrap();
+        s.observe(&obs("k2", "v2", Trust::UserSaid, true), 2).unwrap();
+        drop(s);
+        assert_eq!(Store::open(&d, Some(old)).unwrap().count(Tier::Fact), 2);
     }
 
     #[test]
