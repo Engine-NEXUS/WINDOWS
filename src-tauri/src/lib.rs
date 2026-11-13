@@ -903,9 +903,18 @@ pub fn run() {
                     }
                 });
             }
-            webhook::spawn_listener(app.handle().clone());
+            let startup_flag = |key: &str| {
+                app.path().app_data_dir().map(|d| memcore::flag(&d, key, true)).unwrap_or(true)
+            };
+            if startup_flag("webhookListener") {
+                webhook::spawn_listener(app.handle().clone());
+            } else {
+                tracing::info!("webhook listener off (Features page)");
+            }
             focus_throttle::spawn(app.handle());
-            keep_awake::start_working_poller(); // screen stays awake while a ghost drill/request is running
+            if startup_flag("keepAwakePoller") {
+                keep_awake::start_working_poller(); // screen stays awake while a ghost drill/request is running
+            }
             agent_watch::start_idle_monitor(); // kills the Node sidecar after 10 min with no active watch
             google::sentinel::start_sentinel_poller(app.handle().clone());
             proactive_policy::start_ticker(app.handle().clone()); // releases deferred alerts at breakpoints
@@ -1044,7 +1053,9 @@ pub fn run() {
             // the first voice command answers with zero cold-start delay.
             // No-op for Groq cloud users (saves RAM).
             if let Ok(dir) = app.path().app_data_dir() {
-                crate::lazy_stt::spawn_prewarm(dir);
+                if memcore::flag(&dir, "sttPrewarm", true) {
+                    crate::lazy_stt::spawn_prewarm(dir);
+                }
             }
 
             // NLU sidecar is on-demand fallback only (never pre-warmed at boot
@@ -1321,6 +1332,8 @@ pub fn run() {
             commands::voice_lock_enabled,
             commands::save_settings,
             commands::settings_patch,
+            commands::run_system_audit,
+            commands::notify_test,
             commands::export_settings,
             commands::import_settings,
             commands::memory_recall,

@@ -141,6 +141,9 @@ export const FEATURES: Feature[] = [
   // ── System ──
   { id: "autostart", group: "System", title: "Start with Windows", what: "Starts NEXUS when you sign in.", key: "autostart", kind: "bool", def: true, apply: "trigger", risk: "safe", keepInSafeMode: true },
   { id: "early-hello", group: "System", title: "Hello at sign-in", what: "A short greeting early at logon.", key: "earlyHello", kind: "bool", def: true, apply: "restart", risk: "safe" },
+  bool({ id: "webhook-listener", group: "System", title: "Agent hook and webhook listener", what: "The local listener coding-agent hooks report to. Off: agents are not tracked.", key: "webhookListener", def: true, apply: "restart", risk: "desktop" }),
+  bool({ id: "keep-awake", group: "System", title: "Keep the screen awake while working", what: "Stops the screen sleeping during a request or Ghost task.", key: "keepAwakePoller", def: true, apply: "restart" }),
+  bool({ id: "stt-prewarm", group: "System", title: "Warm local speech recognition at boot", what: "Loads local recognition shortly after start so the first command is fast. Uses memory.", key: "sttPrewarm", def: true, apply: "restart" }),
   bool({ id: "power-commands", group: "System", title: "Voice power commands", what: "\"Shut down\", \"restart\", \"good night\" (always asks first).", key: "powerCommands", def: true, risk: "desktop" }),
 ];
 

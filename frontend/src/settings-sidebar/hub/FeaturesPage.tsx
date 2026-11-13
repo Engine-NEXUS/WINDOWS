@@ -17,6 +17,9 @@ import {
   type SettingsMap,
 } from "./featureRegistry";
 import { writeAndVerify, type Invoke } from "./featureWrite";
+import { FEATURE_TESTS, runFullCheck, runTest, type AuditReport, type TestResult } from "./featureTests";
+import readiness from "./featureReadiness.json";
+import { appendLog, loadLog, type LogEntry } from "./featureLog";
 
 type Confirm = { kind: "off"; id: string } | { kind: "safe" } | { kind: "defaults" } | null;
 
@@ -37,6 +40,10 @@ export function FeaturesPage() {
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [confirm, setConfirm] = useState<Confirm>(null);
+  const [results, setResults] = useState<Record<string, TestResult>>({});
+  const [testing, setTesting] = useState<string | null>(null);
+  const [audit, setAudit] = useState<AuditReport | null>(null);
+  const [log, setLog] = useState<LogEntry[]>(() => loadLog());
 
   const reload = useCallback(async (): Promise<SettingsMap> => {
     const s = await invoke<SettingsMap>("get_settings");
@@ -57,6 +64,7 @@ export function FeaturesPage() {
     if (r.settings) setSettings(r.settings);
     else await reload().catch(() => {});
     if (!r.ok) setError(r.error ?? "Could not save.");
+    else setLog(appendLog(Object.entries(patch).map(([k, v]) => `${k} = ${String(v)}`).join(", ")));
     setBusy(null);
     return r.ok;
   }, [reload]);
@@ -67,6 +75,24 @@ export function FeaturesPage() {
       return;
     }
     void apply(patchFor(f, value), f.id);
+  };
+
+  const test = async (id: string) => {
+    setTesting(id);
+    const r = await runTest(invoke as Invoke, id);
+    setResults((m) => ({ ...m, [id]: r }));
+    setTesting(null);
+  };
+
+  const fullCheck = async () => {
+    setTesting("audit");
+    setError(null);
+    try {
+      setAudit(await runFullCheck(invoke as Invoke));
+    } catch (e) {
+      setError(`Full check failed: ${String(e)}`);
+    }
+    setTesting(null);
   };
 
   const list = useMemo(() => (settings ? FEATURES.filter((f) => matches(settings, f, filter, query)) : []), [settings, filter, query]);
@@ -110,7 +136,18 @@ export function FeaturesPage() {
           <button className="hx-btn hx-btn--tiny" disabled={busy !== null} onClick={() => setConfirm({ kind: "defaults" })}>
             Restore defaults
           </button>
+          <button className="hx-btn hx-btn--tiny" disabled={testing !== null} onClick={() => void fullCheck()}>
+            {testing === "audit" ? "Checking…" : "Run full check"}
+          </button>
         </div>
+        {audit && (
+          <div style={{ marginTop: 8 }}>
+            <div className="hx-switch-sub">{audit.allHealthy ? "All checks passed." : "Some checks need attention."}</div>
+            {audit.items.map((i, n) => (
+              <div key={n} className="hx-switch-sub">{i.status} · {i.name}: {i.detail}</div>
+            ))}
+          </div>
+        )}
 
         {confirm?.kind === "safe" && (
           <div className="hx-confirm-inline" style={{ marginTop: 8 }}>
@@ -176,10 +213,24 @@ export function FeaturesPage() {
                   </div>
                   <div className="hx-switch-sub">{f.what}</div>
                   <div className="hx-switch-sub" style={{ opacity: 0.8 }}>
-                    {[APPLY_LABEL[f.apply], risk, f.safety ? "Protects you" : "", parent ? `Needs "${parent.title}" on` : "", f.readiness ? `Readiness ${f.readiness}` : ""]
+                    {[APPLY_LABEL[f.apply], risk, f.safety ? "Protects you" : "", parent ? `Needs "${parent.title}" on` : "", (readiness as Record<string, { live: number }>)[f.id] ? `Live proof ${(readiness as Record<string, { live: number }>)[f.id].live}%` : "Live proof not tracked"]
                       .filter(Boolean)
                       .join(" · ")}
                   </div>
+                  {FEATURE_TESTS[f.id] ? (
+                    <div style={{ marginTop: 6 }}>
+                      <button className="hx-btn hx-btn--tiny" disabled={testing !== null} onClick={() => void test(f.id)}>
+                        {testing === f.id ? "Running…" : FEATURE_TESTS[f.id].label}
+                      </button>
+                      {results[f.id] && (
+                        <span className="hx-switch-sub" style={{ marginLeft: 8 }}>
+                          {results[f.id].status} · {results[f.id].detail} · {new Date(results[f.id].at).toLocaleTimeString()}
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="hx-switch-sub" style={{ opacity: 0.6 }}>No test button yet. Use the live checklist.</div>
+                  )}
                   {confirm?.kind === "off" && confirm.id === f.id && (
                     <div className="hx-confirm-inline" style={{ marginTop: 6 }}>
                       <span className="hx-switch-sub">This turns off a protection. Continue?</span>
@@ -202,6 +253,14 @@ export function FeaturesPage() {
         );
       })}
       {list.length === 0 && <div className="hx-empty">No feature matches.</div>}
+      {log.length > 0 && (
+        <div className="hx-card" style={{ padding: "8px 14px" }}>
+          <div className="hx-switch-title">What I switched</div>
+          {log.slice(0, 10).map((l, n) => (
+            <div key={n} className="hx-switch-sub">{new Date(l.at).toLocaleString()} · {l.text}</div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
