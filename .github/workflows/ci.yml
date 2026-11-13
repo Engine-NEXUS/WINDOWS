@@ -125,7 +125,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
 
       - uses: actions/setup-node@v4
         with:
@@ -184,7 +184,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
 
       - name: Install LLVM
         run: choco install llvm -y
