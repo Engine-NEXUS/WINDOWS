@@ -34,7 +34,6 @@ Which runtime processes and threads each feature depends on, and what Focus Mode
 | TTS offline (Kokoro-82M) | Edge TTS connection, Kokoro ONNX (lazy), rodio playback, volume lease watchdog | cache refresh, voice sync and swap downloads deferred |
 | Music control (Spotify / Apple Music) | media keys / deep links / Routes API | on demand |
 | Directed-speech gate (TV / side-talk filter) | capture loop, VAD, turn-detect ONNX | keeps running |
-| Main centre / 17 sub-centres validation | regex tier in-process; BERT-Mini NLU sidecar (39218, lazy, 60 s idle); 9Router HTTP | on demand |
 | Compound commands ("X then Y") | regex tier in-process; BERT-Mini NLU sidecar (39218, lazy, 60 s idle); 9Router HTTP | on demand |
 | Activity Manager (app-only history) | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | CI gates: dead code, IPC, turn-end, hygiene | build scripts / Hub WebView2 | n/a |
@@ -49,7 +48,6 @@ Which runtime processes and threads each feature depends on, and what Focus Mode
 | Mishearing normaliser + learned corrections | regex tier in-process; BERT-Mini NLU sidecar (39218, lazy, 60 s idle); 9Router HTTP | on demand |
 | Local STT fallback (Moonshine) | stt-capture-rx thread, Groq HTTP client; Moonshine Python sidecar (port 39217, lazy, killed after 60 s idle) | sidecar is lazy; diagnostics sweep paused |
 | Maps / Places / Directions | media keys / deep links / Routes API | on demand |
-| Shortcut map + action router | foreground/UI Automation calls, SendInput, keep-awake poller (3 s) | keep-awake never paused |
 | Voice personas + offline twin swap | Edge TTS connection, Kokoro ONNX (lazy), rodio playback, volume lease watchdog | cache refresh, voice sync and swap downloads deferred |
 | Agent hooks (Claude, Codex, Antigravity, Cursor, Gemini, OpenCode, Aider, Devin, Windsurf, Kilo, Copilot) | agent hooks webhook (port 39220), agent_watch Node sidecar (39222, lazy), watch_runner (3 s) | keeps running |
 | TTS volume lease / restore | Edge TTS connection, Kokoro ONNX (lazy), rodio playback, volume lease watchdog | cache refresh, voice sync and swap downloads deferred |
@@ -59,11 +57,12 @@ Which runtime processes and threads each feature depends on, and what Focus Mode
 | Window tiling + display off | foreground/UI Automation calls, SendInput, keep-awake poller (3 s) | keep-awake never paused |
 | 9Router (Cerebras > Groq > Gemini > Worker) | OAuth loopback listener, vault monitor (90 s), Worker HTTPS | vault monitor paused |
 | Command Hub / settings UI | build scripts / Hub WebView2 | n/a |
-| Open / close / focus apps | foreground/UI Automation calls, SendInput, keep-awake poller (3 s) | keep-awake never paused |
-| Action Kernel (voice file control, quarantine delete, undo) | action_kernel (paths, policy, journal, audit JSONL), quarantine folders on disk | on demand |
+| Main centre / 17 sub-centres validation | regex tier in-process; BERT-Mini NLU sidecar (39218, lazy, 60 s idle); 9Router HTTP | on demand |
 | Security: keychain, PII filter, sealed memory | OAuth loopback listener, vault monitor (90 s), Worker HTTPS | vault monitor paused |
+| Shortcut map + action router | foreground/UI Automation calls, SendInput, keep-awake poller (3 s) | keep-awake never paused |
 | Keep-awake | foreground/UI Automation calls, SendInput, keep-awake poller (3 s) | keep-awake never paused |
 | Memory core (encrypted store, ranked recall, context pack) | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
+| Open / close / focus apps | foreground/UI Automation calls, SendInput, keep-awake poller (3 s) | keep-awake never paused |
 | Architecture mapper | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | Deterministic intent parser (regex tier) | regex tier in-process; BERT-Mini NLU sidecar (39218, lazy, 60 s idle); 9Router HTTP | on demand |
 | GitHub commands (PRs, merge, review) | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
@@ -71,4 +70,5 @@ Which runtime processes and threads each feature depends on, and what Focus Mode
 | Cloudflare Worker | OAuth loopback listener, vault monitor (90 s), Worker HTTPS | vault monitor paused |
 | Global hotkey Ctrl+Space (call / cancel) | global shortcut handler, wake/cancel decision on the capture thread | keeps running |
 | TTS online (Edge, persistent connection) | Edge TTS connection, Kokoro ONNX (lazy), rodio playback, volume lease watchdog | cache refresh, voice sync and swap downloads deferred |
+| Action Kernel (voice file control, quarantine delete, undo) | action_kernel (paths, policy, journal, audit JSONL), quarantine folders on disk | on demand |
 | Cloud STT (Groq Whisper turbo) + hallucination filter | stt-capture-rx thread, Groq HTTP client; Moonshine Python sidecar (port 39217, lazy, killed after 60 s idle) | sidecar is lazy; diagnostics sweep paused |
