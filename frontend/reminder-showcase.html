@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- Dev playground (served by `npm run dev` only, like caption-showcase.html): the universal reminder animation, before it is wired into the stage. -->
+</head>
+<body>
+<title>Reminder Roll</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600&display=swap">
+<style>
+  /* Layout: a stage that stands in for the NEXUS overlay (orb capsule at top centre, chip docks beside it), the
+     controls under it, and the generic event the animation is driven by. Amber is the orb's own colour. */
+  :root {
+    --bg: #f3f4f6;
+    --surface: #ffffff;
+    --stage: #e9ecf0;
+    --line: #d4d9e0;
+    --fg: #14181d;
+    --muted: #5d6874;
+    --accent: #a5650a;
+    --accent-soft: rgba(165, 101, 10, 0.14);
+    --capsule: #000000;
+    --font-display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+    --font-body: "Inter", "Segoe UI", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+    --s: 1;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0c0e11; --surface: #141820; --stage: #10141a; --line: #262d37; --fg: #e8edf2; --muted: #8e9aa8;
+      --accent: #f2b859; --accent-soft: rgba(242, 184, 89, 0.16); color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0c0e11; --surface: #141820; --stage: #10141a; --line: #262d37; --fg: #e8edf2; --muted: #8e9aa8;
+    --accent: #f2b859; --accent-soft: rgba(242, 184, 89, 0.16); color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.5;
+    padding-inline: max(16px, env(safe-area-inset-left, 0px)) max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 28px 48px;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; display: grid; gap: 20px; }
+  header h1 { font-family: var(--font-display); font-weight: 600; font-size: 26px; letter-spacing: -0.01em; margin: 0 0 4px; text-wrap: balance; }
+  header p { margin: 0; color: var(--muted); max-width: 62ch; }
+
+  /* stage */
+  .stage {
+    position: relative; min-height: 380px; border: 1px solid var(--line); border-radius: 16px; background: var(--stage);
+    display: grid; place-items: center; overflow: hidden; padding: 64px 16px 36px;
+  }
+  .orbcap {
+    position: absolute; top: 0; left: 50%; width: 150px; height: 30px; transform: translateX(-50%);
+    background: var(--capsule); border-radius: 0 0 10px 10px; border: 1px solid rgba(255, 255, 255, 0.16); border-top: 0;
+  }
+  .orbcap::after { content: ""; position: absolute; left: 50%; top: 50%; width: 8px; height: 8px; margin: -4px 0 0 -4px; border-radius: 50%; background: #fff; opacity: 0.85; }
+
+  .comp { text-align: center; display: grid; justify-items: center; gap: 14px; max-width: 100%; transition: opacity calc(0.7s * var(--s)) ease, transform calc(0.9s * var(--s)) cubic-bezier(0.5, 0, 0.2, 1); transform-origin: 60% 0; }
+  .comp.docked { opacity: 0; transform: translate(26%, -90%) scale(0.18); pointer-events: none; }
+  .label { font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); min-height: 18px; transition: opacity 0.25s ease; }
+  .label.swap { opacity: 0; }
+  .clock { position: relative; display: inline-flex; align-items: baseline; gap: 0.04em; font-family: var(--font-display); font-weight: 500; font-size: clamp(56px, 15vw, 116px); line-height: 1; font-variant-numeric: tabular-nums; padding-bottom: 0.14em; }
+  .col { display: block; height: 1em; overflow: hidden; width: 0.62em; max-width: 0.62em; transition: max-width calc(0.5s * var(--s)) ease, width calc(0.5s * var(--s)) ease, opacity calc(0.4s * var(--s)) ease; }
+  .col.blank { width: 0; max-width: 0; opacity: 0; }
+  .strip { display: flex; flex-direction: column; transform: translateY(calc(var(--i, 0) * -1em)); transition: transform calc(1.5s * var(--s)) cubic-bezier(0.16, 0.84, 0.24, 1) calc(var(--d, 0) * 1s * var(--s)); }
+  .strip.nt { transition: none; }
+  .strip span { display: block; height: 1em; line-height: 1; text-align: center; }
+  .colon { padding-inline: 0.02em; opacity: 0.55; align-self: center; margin-top: -0.06em; }
+  .ampm { font-size: 0.26em; letter-spacing: 0.08em; color: var(--accent); margin-left: 0.5em; align-self: flex-end; padding-bottom: 0.3em; transition: opacity 0.25s ease; min-width: 2ch; text-align: left; }
+  .ampm.swap { opacity: 0; }
+  .clock::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--accent); transform: scaleX(0); transform-origin: left; transition: transform calc(0.8s * var(--s)) cubic-bezier(0.2, 0.8, 0.2, 1); border-radius: 2px; }
+  .clock.settled::after { transform: scaleX(1); }
+  .clock.settled { color: var(--fg); }
+
+  .tchip { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 5px 12px 5px 8px; font-size: 13px; opacity: 0; transform: translateY(6px); transition: opacity 0.4s ease, transform 0.4s ease; max-width: 100%; }
+  .tchip.on { opacity: 1; transform: none; }
+  .tchip b { font-weight: 600; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 2px 8px; flex: none; }
+  .tchip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .spoken { margin: 0; font-size: 18px; min-height: 28px; max-width: 34ch; text-wrap: balance; }
+  .sub { margin: 0; color: var(--muted); font-size: 13px; min-height: 20px; }
+
+  .hint { position: absolute; inset: auto 16px 18px; margin: 0; text-align: center; color: var(--muted); font-size: 13px; opacity: 0; transition: opacity 0.6s ease; pointer-events: none; }
+  .hint.on { opacity: 1; }
+  /* the chip that stays beside the orb until the reminder fires */
+  .chip {
+    position: absolute; top: 0; left: calc(50% + 92px); max-width: calc(50% - 104px); display: flex; align-items: center; gap: 10px;
+    background: var(--capsule); color: #fff; border: 1px solid rgba(255, 255, 255, 0.16); border-top: 0; border-radius: 0 0 12px 12px;
+    padding: 6px 14px 7px 10px; font-size: 13px; transform: translateY(-110%); transition: transform calc(0.6s * var(--s)) cubic-bezier(0.2, 0.9, 0.2, 1), max-width 0.4s ease, background 0.3s ease;
+    font-variant-numeric: tabular-nums;
+  }
+  .chip.on { transform: none; }
+  .chip .txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip .time { font-family: var(--font-mono); font-size: 12px; color: #f2b859; flex: none; }
+  .chip svg { flex: none; }
+  .chip .ring-bg { stroke: rgba(255, 255, 255, 0.2); }
+  .chip .ring-fg { stroke: #f2b859; transition: stroke-dashoffset 1s linear; }
+  .chip.firing { max-width: calc(100% - 24px); left: 12px; right: 12px; background: #2a1c05; border-color: #f2b859; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 5px rgba(242, 184, 89, 0.22); } }
+  @media (max-width: 560px) {
+    .chip { left: 50%; top: 30px; max-width: calc(100% - 24px); border-top: 1px solid rgba(255, 255, 255, 0.16); border-radius: 12px; margin-left: 0; translate: -50% 0; transform: translateY(-160%); }
+    .chip.on { transform: none; }
+    .chip.firing { left: 50%; right: auto; width: calc(100% - 24px); }
+  }
+
+  /* controls */
+  .panel { border: 1px solid var(--line); background: var(--surface); border-radius: 14px; padding: 18px; display: grid; gap: 16px; }
+  .panel h2 { margin: 0; font-family: var(--font-display); font-size: 15px; font-weight: 600; letter-spacing: 0.01em; }
+  .kinds { display: flex; flex-wrap: wrap; gap: 8px; }
+  button, input, select { font: inherit; color: inherit; }
+  .kinds button { border: 1px solid var(--line); background: transparent; border-radius: 999px; padding: 7px 14px; cursor: pointer; font-size: 13px; }
+  .kinds button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+  .row { display: grid; grid-template-columns: minmax(0, 1fr) 150px 130px; gap: 12px; }
+  label.f { display: grid; gap: 4px; font-size: 12px; color: var(--muted); min-width: 0; }
+  input, select { border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 9px 10px; width: 100%; min-width: 0; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; }
+  .actions button { border: 1px solid var(--line); background: transparent; border-radius: 8px; padding: 9px 16px; cursor: pointer; }
+  .actions button.primary { background: var(--accent); border-color: var(--accent); color: #14100a; font-weight: 600; }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .contract { display: grid; gap: 10px; }
+  .contract p { margin: 0; color: var(--muted); font-size: 13px; max-width: 70ch; }
+  pre { margin: 0; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 14px; overflow-x: auto; }
+  @media (max-width: 560px) { .row { grid-template-columns: 1fr 1fr; } .row label:first-child { grid-column: 1 / -1; } .stage { padding-top: 80px; } }
+  @media (prefers-reduced-motion: reduce) { .strip, .comp, .chip, .col, .clock::after { transition-duration: 0.01s !important; transition-delay: 0s !important; } .chip.firing { animation: none; } }
+</style>
+
+<main class="wrap">
+  <header>
+    <h1>Reminder Roll</h1>
+    <p>One animation for every reminder. The digits roll from the time it is now to the time you asked for, NEXUS says it, and a small chip counts down beside the orb until it fires. Nothing here knows about maps: a trip, a call, a calendar event, a timer and a study slot all send the same event.</p>
+  </header>
+
+  <section class="stage" id="stage" aria-label="Reminder animation preview">
+    <div class="orbcap" aria-hidden="true"></div>
+    <div class="chip" id="chip" aria-live="polite">
+      <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><circle class="ring-bg" cx="11" cy="11" r="9" fill="none" stroke-width="2.5"/><circle class="ring-fg" id="ring" cx="11" cy="11" r="9" fill="none" stroke-width="2.5" stroke-linecap="round" transform="rotate(-90 11 11)" stroke-dasharray="56.55" stroke-dashoffset="0"/></svg>
+      <span class="txt" id="chipTxt"></span><span class="time" id="chipTime"></span>
+    </div>
+    <p class="hint" id="hint">Docked beside the orb. The countdown runs there until the reminder fires.</p>
+    <div class="comp" id="comp">
+      <div class="label" id="label">Now</div>
+      <div class="clock" id="clock" role="img" aria-label="Clock"></div>
+      <div class="tchip" id="tchip"><b id="tkind"></b><span id="ttitle"></span></div>
+      <p class="spoken" id="spoken"></p>
+      <p class="sub" id="sub"></p>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="Controls">
+    <h2>Try a reminder</h2>
+    <div class="kinds" id="kinds" role="group" aria-label="Reminder kind">
+      <button type="button" data-kind="trip" aria-pressed="true">Trip</button>
+      <button type="button" data-kind="reminder" aria-pressed="false">Reminder</button>
+      <button type="button" data-kind="calendar" aria-pressed="false">Calendar event</button>
+      <button type="button" data-kind="timer" aria-pressed="false">Timer</button>
+      <button type="button" data-kind="study" aria-pressed="false">Study slot</button>
+    </div>
+    <div class="row">
+      <label class="f" for="title">What to remind you about<input id="title" type="text" value="Leave for the airport" maxlength="60"></label>
+      <label class="f" for="time">At<input id="time" type="time" value="17:00"></label>
+      <label class="f" for="speed">Speed<select id="speed"><option value="1">Normal</option><option value="2">Slow</option><option value="0.5">Fast</option></select></label>
+    </div>
+    <div class="actions">
+      <button type="button" class="primary" id="set">Set reminder</button>
+      <button type="button" id="replay">Replay</button>
+      <button type="button" id="fire">Preview the alert</button>
+    </div>
+  </section>
+
+  <section class="panel contract" aria-label="Event">
+    <h2>The event behind it</h2>
+    <p>Every feature that sets a reminder sends this one event to the stage. The animation reads only these fields, so a new kind of reminder needs no new animation code.</p>
+    <pre id="payload" tabindex="0"></pre>
+  </section>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var KINDS = {
+    trip:     { label: "Trip",     title: "Leave for the airport", offset: 134, source: "directions", alert: function (t) { return "Time to leave for " + lc(t) + ", sir."; } },
+    reminder: { label: "Reminder", title: "Call Mom",              offset: 45,  source: "voice",      alert: function (t) { return t + ", sir."; } },
+    calendar: { label: "Calendar", title: "Team standup",          offset: 95,  source: "calendar",   alert: function (t) { return t + " starts now, sir."; } },
+    timer:    { label: "Timer",    title: "Tea",                   offset: 10,  source: "timer",      alert: function (t) { return "Your " + lc(t) + " timer is done, sir."; } },
+    study:    { label: "Study",    title: "DSA practice",          offset: 185, source: "timetable",  alert: function (t) { return "Time for " + lc(t) + ", sir. Shall I start?"; } }
+  };
+  function lc(s) { return s.charAt(0).toLowerCase() + s.slice(1); }
+
+  var state = { kind: "trip", run: 0, ticker: null, payload: null, cols: [], ampmEl: null, startedAt: 0 };
+  var speedEl = $("speed");
+  function S() { return reduce ? 0.01 : parseFloat(speedEl.value) || 1; }
+  function applySpeed() { $("stage").style.setProperty("--s", String(S())); }
+
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+  function parts(d) {
+    var h = d.getHours(), m = d.getMinutes(), h12 = h % 12 || 12;
+    return { h1: h12 >= 10 ? 1 : 0, h2: h12 % 10, m1: Math.floor(m / 10), m2: m % 10, ap: h >= 12 ? "PM" : "AM", text: h12 + ":" + pad2(m) + " " + (h >= 12 ? "PM" : "AM") };
+  }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  /* clock: four digit columns that roll like an odometer */
+  function buildClock() {
+    var clock = $("clock"); clock.textContent = ""; state.cols = [];
+    function col(blankZero) {
+      var c = document.createElement("span"); c.className = "col";
+      var strip = document.createElement("span"); strip.className = "strip";
+      for (var i = 0; i < 40; i++) { var s = document.createElement("span"); s.textContent = (blankZero && i % 10 === 0) ? " " : String(i % 10); strip.appendChild(s); }
+      c.appendChild(strip); clock.appendChild(c);
+      var o = { el: c, strip: strip, idx: 0 }; state.cols.push(o); return o;
+    }
+    col(true); col(false);
+    var colon = document.createElement("span"); colon.className = "colon"; colon.textContent = ":"; clock.appendChild(colon);
+    col(false); col(false);
+    var ap = document.createElement("span"); ap.className = "ampm"; clock.appendChild(ap); state.ampmEl = ap;
+  }
+  function setIdx(o, i, instant, delay) {
+    o.idx = i;
+    if (instant) { o.strip.classList.add("nt"); }
+    o.strip.style.setProperty("--d", String(delay || 0));
+    o.strip.style.setProperty("--i", String(i));
+    if (instant) { void o.strip.offsetWidth; o.strip.classList.remove("nt"); }
+  }
+  function showNow() {
+    var p = parts(new Date()), want = [p.h1, p.h2, p.m1, p.m2];
+    state.cols.forEach(function (o, k) { setIdx(o, want[k], true, 0); });
+    state.cols[0].el.classList.toggle("blank", p.h1 === 0);
+    state.ampmEl.textContent = p.ap;
+    $("clock").setAttribute("aria-label", "Now " + p.text);
+  }
+  function rollTo(target) {
+    var want = [target.h1, target.h2, target.m1, target.m2];
+    state.cols.forEach(function (o, k) {
+      var cur = o.idx % 10;
+      setIdx(o, cur, true, 0);
+      var steps = (want[k] - cur + 10) % 10 + (k === 0 ? 0 : 10 + (k === 3 ? 10 : 0));
+      setIdx(o, cur + steps, false, 0.09 * k);
+    });
+    state.cols[0].el.classList.toggle("blank", target.h1 === 0);
+    state.ampmEl.classList.add("swap");
+    setTimeout(function () { state.ampmEl.textContent = target.ap; state.ampmEl.classList.remove("swap"); }, 700 * S());
+  }
+  function swapLabel(text) {
+    var l = $("label"); l.classList.add("swap");
+    setTimeout(function () { l.textContent = text; l.classList.remove("swap"); }, 250);
+  }
+  async function typeText(el, text, token) {
+    el.textContent = "";
+    if (reduce) { el.textContent = text; return; }
+    for (var i = 1; i <= text.length; i++) {
+      if (token !== state.run) return;
+      el.textContent = text.slice(0, i);
+      await sleep(26 * Math.max(S(), 0.5));
+    }
+  }
+  function until(ms) {
+    var d = Math.round(ms / 60000);
+    if (d < 1) return "in less than a minute";
+    var h = Math.floor(d / 60), m = d % 60, out = [];
+    if (h) out.push(h + (h === 1 ? " hour" : " hours"));
+    if (m) out.push(m + (m === 1 ? " minute" : " minutes"));
+    return "in " + out.join(" ");
+  }
+  function clockText(ms) {
+    if (ms <= 0) return "now";
+    var t = Math.round(ms / 1000), h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+    return h > 0 ? h + "h " + pad2(m) + "m" : pad2(m) + ":" + pad2(s);
+  }
+
+  function buildPayload() {
+    var kind = state.kind, def = KINDS[kind];
+    var tv = $("time").value || "17:00", hm = tv.split(":"), at = new Date();
+    at.setHours(parseInt(hm[0], 10), parseInt(hm[1], 10), 0, 0);
+    if (at.getTime() <= Date.now()) at = new Date(at.getTime() + 86400000);
+    var title = ($("title").value || def.title).trim().slice(0, 60);
+    var p = parts(at);
+    var tomorrow = at.getDate() !== new Date().getDate();
+    return {
+      event: "reminder:set",
+      id: "rem_" + Date.now().toString(36),
+      kind: kind,
+      title: title,
+      atMs: at.getTime(),
+      spoken: kind === "timer" ? "Sir, timer set for " + until(at.getTime() - Date.now()).replace("in ", "") + "." : "Sir, I will remind you at " + p.text + (tomorrow ? " tomorrow" : "") + ".",
+      alert: def.alert(title),
+      source: def.source
+    };
+  }
+  function showPayload(p) {
+    $("payload").textContent = JSON.stringify(p, null, 2);
+  }
+
+  function resetStage() {
+    clearInterval(state.ticker);
+    $("chip").classList.remove("on", "firing");
+    $("hint").classList.remove("on");
+    $("comp").classList.remove("docked");
+    $("clock").classList.remove("settled");
+    $("spoken").textContent = ""; $("sub").textContent = "";
+    $("tchip").classList.remove("on");
+    $("label").textContent = "Now";
+  }
+
+  async function play(p) {
+    var token = ++state.run;
+    applySpeed(); resetStage(); buildClock(); showNow();
+    state.payload = p; showPayload(p);
+    var def = KINDS[p.kind];
+    $("tkind").textContent = def.label; $("ttitle").textContent = p.title;
+    await sleep(200); if (token !== state.run) return;
+    $("tchip").classList.add("on");
+    await sleep(700 * S()); if (token !== state.run) return;
+    swapLabel("Reminder at");
+    var target = parts(new Date(p.atMs));
+    rollTo(target);
+    await sleep((1500 + 0.09 * 3 * 1000 + 250) * S()); if (token !== state.run) return;
+    $("clock").classList.add("settled");
+    $("clock").setAttribute("aria-label", "Reminder at " + target.text);
+    await typeText($("spoken"), p.spoken, token); if (token !== state.run) return;
+    $("sub").textContent = p.kind === "timer" ? "" : until(p.atMs - Date.now()) + " from now";
+    await sleep(2200 * S()); if (token !== state.run) return;
+    dock(p, token);
+  }
+
+  function dock(p, token) {
+    $("comp").classList.add("docked");
+    state.startedAt = Date.now();
+    $("chipTxt").textContent = p.title;
+    $("chip").classList.add("on");
+    $("hint").classList.add("on");
+    tick();
+    state.ticker = setInterval(function () { if (token !== state.run) { clearInterval(state.ticker); return; } tick(); }, 1000);
+  }
+  function tick() {
+    var p = state.payload; if (!p) return;
+    var left = p.atMs - Date.now(), total = Math.max(1, p.atMs - state.startedAt);
+    $("chipTime").textContent = clockText(left);
+    var frac = Math.min(1, Math.max(0, 1 - left / total));
+    $("ring").style.strokeDashoffset = String(56.55 * frac);
+    if (left <= 0) { clearInterval(state.ticker); fire(); }
+  }
+  async function fire() {
+    var p = state.payload; if (!p) return;
+    var token = state.run;
+    $("comp").classList.add("docked");
+    $("chip").classList.add("on", "firing");
+    $("chipTxt").textContent = p.alert; $("chipTime").textContent = "now";
+    await sleep(4500 * S()); if (token !== state.run) return;
+    $("chip").classList.remove("firing");
+    $("chipTxt").textContent = p.title; $("chipTime").textContent = "done";
+  }
+
+  /* controls */
+  function setKind(k, fill) {
+    state.kind = k;
+    Array.prototype.forEach.call(document.querySelectorAll("#kinds button"), function (b) { b.setAttribute("aria-pressed", String(b.dataset.kind === k)); });
+    if (fill) {
+      var d = new Date(Date.now() + KINDS[k].offset * 60000);
+      $("title").value = KINDS[k].title; $("time").value = pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+    }
+  }
+  $("kinds").addEventListener("click", function (e) {
+    var b = e.target.closest("button"); if (!b) return;
+    setKind(b.dataset.kind, true); play(buildPayload());
+  });
+  $("set").addEventListener("click", function () { play(buildPayload()); });
+  $("replay").addEventListener("click", function () { play(state.payload ? Object.assign({}, state.payload, { atMs: state.payload.atMs }) : buildPayload()); });
+  $("fire").addEventListener("click", function () { if (!state.payload) state.payload = buildPayload(); state.run++; clearInterval(state.ticker); resetStage(); $("comp").classList.add("docked"); fire(); });
+  speedEl.addEventListener("change", applySpeed);
+
+  setKind("trip", true);
+  applySpeed(); buildClock(); showNow(); showPayload(buildPayload());
+  $("spoken").textContent = ""; $("sub").textContent = "Pick a kind, or press Set reminder.";
+  setTimeout(function () { play(buildPayload()); }, 500);
+})();
+</script>
+
+</body>
+</html>
