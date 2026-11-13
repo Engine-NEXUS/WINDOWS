@@ -12,6 +12,7 @@ import { useArrowDock, usePanelResize } from "./dockKeys";
 import { MapsPanel } from "./MapsPanel";
 import { PlaceCard } from "./PlaceCard";
 import "./unified.css";
+import { VIEWS, resolveSidebarView, type SidebarView } from "./sidebarView";
 
 /**
  * Unified Dynamic Sidebar shell.
@@ -25,9 +26,7 @@ import "./unified.css";
  * stores survive across mounts; display:none keeps remount flicker at
  * zero and makes switches feel instant).
  */
-export type SidebarView = "assistant" | "settings" | "architect" | "pr-list" | "spatial" | "annotate" | "stack" | "maps" | "place";
-
-const VIEWS: SidebarView[] = ["assistant", "settings", "architect", "pr-list", "spatial", "annotate", "stack", "maps", "place"];
+export type { SidebarView };
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -66,8 +65,8 @@ export function UnifiedSidebar() {
   useEffect(() => {
     if (!isTauri() || pinned) return;
     const un = listen<{ view: string }>("sidebar:set_view", (event) => {
-      const v = event.payload.view as SidebarView;
-      if (VIEWS.includes(v)) {
+      const v = resolveSidebarView(event.payload.view);
+      if (v) {
         setView(v);
         setMounted((m) => (m.has(v) ? m : new Set([...m, v])));
       }
@@ -82,8 +81,8 @@ export function UnifiedSidebar() {
     invoke<string | null>("get_pending_sidebar_view")
       .then((v) => {
         if (v) {
-          const id = v as SidebarView;
-          if (VIEWS.includes(id)) {
+          const id = resolveSidebarView(v);
+          if (id) {
             setView(id);
             setMounted((m) => (m.has(id) ? m : new Set([...m, id])));
           }
