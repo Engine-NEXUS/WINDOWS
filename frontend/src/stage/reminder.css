@@ -1,0 +1,250 @@
+/* The universal reminder animation. Black, white and grey only, in the orb's own vocabulary: an obsidian capsule
+   (#000, 10px corners, a 1px white-16% edge, a deep shadow), white text, the orb slider's 0.72s entrance.
+   The stage is click-through, so nothing here is interactive. */
+
+.nx-rem-wrap {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 30%;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 28;
+}
+
+.nx-rem-panel {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 18px 30px 16px;
+  background: #000;
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  transform: scale(0.98);
+  filter: blur(0);
+  transition: opacity 0.4s cubic-bezier(0.22, 1, 0.36, 1), transform 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.nx-rem-in,
+.nx-rem-rolling,
+.nx-rem-settled {
+  opacity: 1;
+  transform: none;
+}
+/* once the time is set the panel vanishes where it stands, like breath in air: blur and thin out in place.
+   Nothing slides and nothing travels towards the top. */
+.nx-rem-vanish {
+  opacity: 0;
+  filter: blur(18px);
+  transform: scale(1.05);
+  transition: opacity 1s ease-out, filter 1s ease-out, transform 1s ease-out;
+}
+
+.nx-rem-label {
+  min-height: 16px;
+  font: 600 11px/1.2 "Segoe UI", system-ui, sans-serif;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.nx-rem-clock {
+  position: relative;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.04em;
+  padding-bottom: 0.14em;
+  font: 500 76px/1 "Segoe UI", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.nx-rem-col {
+  display: block;
+  width: 0.62em;
+  max-width: 0.62em;
+  height: 1em;
+  overflow: hidden;
+  transition: max-width 0.5s ease, width 0.5s ease, opacity 0.4s ease;
+}
+.nx-rem-blank {
+  width: 0;
+  max-width: 0;
+  opacity: 0;
+}
+.nx-rem-strip {
+  display: flex;
+  flex-direction: column;
+  transform: translateY(calc(var(--i, 0) * -1em));
+  transition: transform 1.5s cubic-bezier(0.16, 0.84, 0.24, 1) calc(var(--d, 0) * 1s);
+}
+.nx-rem-nt {
+  transition: none;
+}
+.nx-rem-strip > span {
+  display: block;
+  height: 1em;
+  line-height: 1;
+  text-align: center;
+}
+.nx-rem-colon {
+  align-self: center;
+  margin-top: -0.06em;
+  padding-inline: 0.02em;
+  opacity: 0.5;
+}
+.nx-rem-ampm {
+  align-self: flex-end;
+  min-width: 2ch;
+  margin-left: 0.5em;
+  padding-bottom: 0.3em;
+  font-size: 0.26em;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.6);
+}
+.nx-rem-rule {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: #fff;
+  opacity: 0.55;
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.nx-rem-rule-on {
+  transform: scaleX(1);
+}
+
+.nx-rem-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-height: 22px;
+  font: 400 13px/1.3 "Segoe UI", system-ui, sans-serif;
+}
+.nx-rem-title b {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  font: 600 10px/1.4 "Segoe UI", system-ui, sans-serif;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.nx-rem-title b:empty {
+  display: none;
+}
+.nx-rem-title span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nx-rem-sub {
+  min-height: 18px;
+  font: 400 12px/1.3 "Segoe UI", system-ui, sans-serif;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* the countdown chips beside the orb capsule */
+.nx-rem-chips {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+  pointer-events: none;
+  z-index: 29;
+}
+.nx-rem-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 100%;
+  padding: 6px 14px 7px 10px;
+  background: #000;
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  font: 500 13px/1.3 "Segoe UI", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  animation: nx-rem-in 0.72s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.nx-rem-chip:first-child {
+  border-top: 0;
+  border-radius: 0 0 10px 10px;
+}
+@keyframes nx-rem-in {
+  from {
+    transform: translateY(-120%);
+  }
+  to {
+    transform: none;
+  }
+}
+.nx-rem-chip svg {
+  flex: none;
+}
+.nx-rem-chip-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nx-rem-chip-time {
+  flex: none;
+  font: 500 12px/1 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  opacity: 0.75;
+}
+.nx-rem-ring-bg {
+  stroke: rgba(255, 255, 255, 0.2);
+}
+.nx-rem-ring-fg {
+  stroke: #fff;
+  transition: stroke-dashoffset 1s linear;
+}
+.nx-rem-more {
+  opacity: 0.75;
+}
+/* the alert: the chip inverts to white on black, with a slow pulse */
+.nx-rem-firing {
+  background: #fff;
+  color: #000;
+  border-color: #fff;
+  animation: nx-rem-in 0.72s cubic-bezier(0.22, 1, 0.36, 1) both, nx-rem-pulse 1.2s ease-in-out infinite;
+}
+.nx-rem-firing .nx-rem-ring-bg {
+  stroke: rgba(0, 0, 0, 0.2);
+}
+.nx-rem-firing .nx-rem-ring-fg {
+  stroke: #000;
+}
+@keyframes nx-rem-pulse {
+  50% {
+    box-shadow: 0 0 0 5px rgba(255, 255, 255, 0.25);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nx-rem-panel,
+  .nx-rem-strip,
+  .nx-rem-col,
+  .nx-rem-rule,
+  .nx-rem-vanish {
+    transition-duration: 0.01s !important;
+    transition-delay: 0s !important;
+  }
+  .nx-rem-chip,
+  .nx-rem-firing {
+    animation: none;
+  }
+}
