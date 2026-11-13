@@ -755,7 +755,7 @@ pub async fn trip_reminder<R: Runtime>(app: AppHandle<R>, destination: String, a
         return say_and_finish(
             &app,
             request_id,
-            format!("The {destination} I found is about {} away, sir, which looks wrong. Say its full name and the city.", minutes_phrase(((eta_secs + 59) / 60).max(1) as u32)),
+            format!("What I found for {destination} is about {} away, sir, which looks wrong. Say its full name and the city.", minutes_phrase(((eta_secs + 59) / 60).max(1) as u32)),
         );
     }
     let now = chrono::Utc::now().timestamp();
