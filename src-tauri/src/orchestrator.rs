@@ -6182,6 +6182,12 @@ fn directions_line(destination: &str, eta: Option<&str>) -> String {
     }
 }
 
+/// Whether "directions to X" also shows the place card (one photo of the destination). Not for "home" / "work": that
+/// would send the user's own address to the photo sources (Nominatim, Wikipedia), which the route itself does not. Pure.
+fn directions_wants_photo_card(spoken_destination: &str) -> bool {
+    saved_place_kind(spoken_destination).is_none() && !spoken_destination.trim().is_empty()
+}
+
 /// "Directions to X": open the real Google Maps app first (so it appears
 /// at once), then - only if a Routes API key AND a spoken origin exist - ask
 /// the Routes API for a traffic-aware ETA (3 s cap) to speak. Any failure
@@ -6194,6 +6200,7 @@ async fn run_directions<R: Runtime>(
 ) -> Result<ProcessResult, String> {
     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
     let travel = crate::commands::parse_travel_mode(Some(&mode));
+    let photo_card = directions_wants_photo_card(&destination);
     let (destination, origin) = match resolve_saved_places(&app, &destination, origin.as_deref()) {
         Ok(r) => r,
         Err(line) => return say_and_finish(&app, request_id, line),
@@ -6213,23 +6220,47 @@ async fn run_directions<R: Runtime>(
         return say_and_finish(&app, request_id, "I couldn't open the map window, sir.".into());
     }
     let key = crate::commands::read_api_key(&app, "google_maps");
-    let eta = match (key.is_empty(), origin.as_deref().map(str::trim).filter(|o| !o.is_empty())) {
-        (false, Some(o)) => {
-            let client = reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(2))
-                .timeout(std::time::Duration::from_secs(3))
-                .build()
-                .unwrap_or_default();
-            match crate::google::maps::MapsService::compute_route(&client, &key, o, &destination, travel).await {
-                Ok(eta) => Some(eta.spoken()),
-                Err(e) => {
-                    tracing::debug!("directions: routes api: {e}");
-                    None
+    // The time and the place card (one photo, the Maps link, distance) are fetched together, so the card costs no extra wait.
+    let eta_task = async {
+        match (key.is_empty(), origin.as_deref().map(str::trim).filter(|o| !o.is_empty())) {
+            (false, Some(o)) => {
+                let client = reqwest::Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(2))
+                    .timeout(std::time::Duration::from_secs(3))
+                    .build()
+                    .unwrap_or_default();
+                match crate::google::maps::MapsService::compute_route(&client, &key, o, &destination, travel).await {
+                    Ok(eta) => Some(eta.spoken()),
+                    Err(e) => {
+                        tracing::debug!("directions: routes api: {e}");
+                        None
+                    }
                 }
             }
+            _ => None,
         }
-        _ => None,
     };
+    let card_task = async {
+        if !photo_card {
+            return None;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(6), crate::place_card::build(&app, &destination, here)).await.ok().flatten()
+    };
+    let (eta, card) = tokio::join!(eta_task, card_task);
+    match card {
+        Some(card) => {
+            let link = crate::google::maps::MapsService::build_directions_url(origin.as_deref(), &destination, travel);
+            if let Err(e) = crate::place_card::show_card_for_route(&app, card, Some(link)) {
+                tracing::warn!("directions: could not show the place card: {e}");
+            }
+        }
+        None => {
+            // A card left over from an earlier place would be wrong beside this route.
+            if app.get_webview_window(crate::panel_layout::Panel::PlaceCard.label()).is_some() {
+                let _ = crate::place_card::close_place_card(app.clone()).await;
+            }
+        }
+    }
     let mut line = directions_line(&destination, eta.as_deref());
     if here.as_ref().is_some_and(crate::location::should_tell_about_exact_location) {
         line.push_str(" For an exact starting point, turn on location in Windows settings, sir.");
@@ -12048,6 +12079,16 @@ mod tests {
         assert!(!g.contains("Command Hub"));
         // Key + quota → silent (VLM path speaks for itself).
         assert_eq!(screen_key_guidance(true, false), None);
+    }
+
+    #[test]
+    fn directions_photo_card_never_looks_up_the_users_own_address() {
+        assert!(directions_wants_photo_card("Charminar"));
+        assert!(directions_wants_photo_card("T-Hub, Hyderabad"));
+        for own in ["home", "my home", "work", "the office", "Home"] {
+            assert!(!directions_wants_photo_card(own), "{own}");
+        }
+        assert!(!directions_wants_photo_card("  "));
     }
 
     #[test]

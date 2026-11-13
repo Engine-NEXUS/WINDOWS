@@ -696,6 +696,18 @@ pub async fn build<R: Runtime>(app: &AppHandle<R>, query: &str, here: Option<Fix
 
 static PENDING: Mutex<Option<PlaceCard>> = Mutex::new(None);
 
+/// The Maps link the card's "Maps" button opens when the card was shown for a route ("directions to X"): same
+/// start, destination and travel mode as the map panel. `None` = the plain link to the card's own coordinates.
+static ROUTE_LINK: Mutex<Option<String>> = Mutex::new(None);
+
+/// Which Maps link the "Maps" button opens. Pure.
+pub fn maps_link(route_link: Option<&str>, lat: f64, lon: f64) -> String {
+    match route_link.map(str::trim).filter(|l| l.starts_with("https://www.google.com/maps/")) {
+        Some(l) => l.to_string(),
+        None => format!("https://www.google.com/maps/dir/?api=1&destination={lat:.6},{lon:.6}"),
+    }
+}
+
 #[tauri::command]
 pub fn get_pending_place() -> Option<PlaceCard> {
     PENDING.lock().unwrap().clone()
@@ -716,7 +728,7 @@ pub async fn close_place_card<R: Runtime>(app: AppHandle<R>) -> Result<(), Strin
 pub fn place_card_open(kind: String) -> Result<(), String> {
     let card = PENDING.lock().unwrap().clone().ok_or("no place card")?;
     let url = match kind.as_str() {
-        "maps" => format!("https://www.google.com/maps/dir/?api=1&destination={:.6},{:.6}", card.lat, card.lon),
+        "maps" => maps_link(ROUTE_LINK.lock().unwrap().as_deref(), card.lat, card.lon),
         "uber" => format!(
             "https://m.uber.com/ul/?action=setPickup&pickup=my_location&dropoff[latitude]={:.6}&dropoff[longitude]={:.6}&dropoff[nickname]={}",
             card.lat,
@@ -752,6 +764,12 @@ pub async fn routing_server_test<R: Runtime>(app: AppHandle<R>, url: Option<Stri
 
 /// Show the card in its own panel beside the map.
 pub fn show_card<R: Runtime>(app: &AppHandle<R>, card: PlaceCard) -> Result<(), String> {
+    show_card_for_route(app, card, None)
+}
+
+/// Show the card for a route: its "Maps" button then opens `route_link` (the same route as the map panel).
+pub fn show_card_for_route<R: Runtime>(app: &AppHandle<R>, card: PlaceCard, route_link: Option<String>) -> Result<(), String> {
+    *ROUTE_LINK.lock().unwrap() = route_link;
     crate::panel_layout::note_opened(Panel::PlaceCard);
     *PENDING.lock().unwrap() = Some(card.clone());
     let existed = app.get_webview_window(Panel::PlaceCard.label()).is_some();
@@ -770,6 +788,16 @@ pub fn show_card<R: Runtime>(app: &AppHandle<R>, card: PlaceCard) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_maps_button_follows_the_route_link_only_when_it_is_a_maps_link() {
+        let route = "https://www.google.com/maps/dir/?api=1&destination=T-Hub&origin=Home&travelmode=walking";
+        assert_eq!(maps_link(Some(route), 17.4, 78.4), route);
+        assert_eq!(maps_link(None, 17.4, 78.4), "https://www.google.com/maps/dir/?api=1&destination=17.400000,78.400000");
+        // anything that is not a Google Maps address is ignored
+        assert!(maps_link(Some("https://evil.example/maps/"), 1.0, 2.0).starts_with("https://www.google.com/maps/dir/"));
+        assert!(maps_link(Some("   "), 1.0, 2.0).contains("destination=1.000000,2.000000"));
+    }
 
     #[test]
     fn distance_and_bike_helpers() {
