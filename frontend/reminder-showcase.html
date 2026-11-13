@@ -67,8 +67,10 @@
   @keyframes breathe { 50% { transform: scale(1.18); opacity: 1; } }
   @keyframes speak { 50% { transform: scale(1.45); opacity: 1; } }
 
-  .comp { text-align: center; display: grid; justify-items: center; gap: 14px; max-width: 100%; transition: opacity calc(0.72s * var(--s)) var(--ease-orb), transform calc(0.9s * var(--s)) var(--ease-orb); transform-origin: 60% 0; }
-  .comp.docked { opacity: 0; transform: translate(26%, -90%) scale(0.18); pointer-events: none; }
+  /* once the time is set the clock and the spoken line vanish where they stand, like breath in air: they blur and thin
+     out in place. Nothing slides, nothing travels towards the top. */
+  .comp { text-align: center; display: grid; justify-items: center; gap: 14px; max-width: 100%; filter: blur(0); transition: opacity calc(1s * var(--s)) ease-out, filter calc(1s * var(--s)) ease-out, transform calc(1s * var(--s)) ease-out; transform-origin: 50% 50%; }
+  .comp.docked { opacity: 0; filter: blur(18px); transform: scale(1.05); pointer-events: none; }
   .label { font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); min-height: 18px; transition: opacity 0.25s ease; }
   .label.swap { opacity: 0; }
   .clock { position: relative; display: inline-flex; align-items: baseline; gap: 0.04em; font-family: var(--font-display); font-weight: 500; font-size: clamp(56px, 15vw, 116px); line-height: 1; font-variant-numeric: tabular-nums; padding-bottom: 0.14em; }
