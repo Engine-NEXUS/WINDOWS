@@ -47,6 +47,20 @@ export function taskStackSlot(spinner: Rect | null, vp: Viewport): { top: number
   };
 }
 
+/**
+ * The reminder countdown chips hang to the right of the orb capsule, level with it (the orb's own dock: top or bottom).
+ * `orb` is the capsule's rect in CSS px, null before it is known. Falls back to the default centred position.
+ */
+export const REMINDER_CHIP_GAP = 12;
+export const REMINDER_CHIP_MAX_W = 300;
+
+export function reminderStackSlot(orb: Rect | null, vp: Viewport): { left: number; top: number; maxWidth: number } {
+  const left = orb && orb.w > 0 ? orb.x + orb.w + REMINDER_CHIP_GAP : vp.w / 2 + 75 + REMINDER_CHIP_GAP;
+  const top = orb && orb.h > 0 ? orb.y : 0;
+  const clampedLeft = Math.max(0, Math.min(Math.round(left), vp.w - 160));
+  return { left: clampedLeft, top: Math.max(0, Math.round(top)), maxWidth: Math.min(REMINDER_CHIP_MAX_W, Math.max(160, vp.w - clampedLeft - 16)) };
+}
+
 export function intersects(a: Rect, b: Rect): boolean {
   return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 }

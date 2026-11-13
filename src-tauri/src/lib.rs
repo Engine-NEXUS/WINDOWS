@@ -194,6 +194,7 @@ pub(crate) mod location;
 pub(crate) mod no_window;
 pub(crate) mod fares;
 pub(crate) mod directions;
+pub(crate) mod reminder;
 pub(crate) mod quiet;
 pub(crate) mod place_card;
 pub(crate) mod power_close;
@@ -1250,6 +1251,7 @@ pub fn run() {
             coderabbit_review::coderabbit_review_start,
             ai_review::ai_review_start,
             background_tasks::background_tasks_list,
+            reminder::reminder_list,
             ai_review::ai_review_job,
             coderabbit_review::coderabbit_set_context,
             notify_hub::notify_close_event,

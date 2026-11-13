@@ -1793,6 +1793,11 @@ pub struct NexusSettings {
     /// Touchpad-style gestures with 3 fingers: flick = next/previous tab, flick up = window switcher. Default on.
     #[serde(default = "default_true")]
     pub hand_gestures: bool,
+    /// Keep a small countdown chip beside the orb for every waiting reminder (trips, calendar, timers, study slots).
+    /// Off: nothing stays on screen, but each reminder still fires on time and NEXUS still says it. Default on.
+    /// The user's choice always wins over what a reminder asks for.
+    #[serde(default = "default_true")]
+    pub reminder_countdown: bool,
     /// Pause unneeded background work while Hand Mode runs. Default on.
     #[serde(default = "default_true")]
     pub hand_focus_mode: bool,
@@ -2324,6 +2329,7 @@ impl Default for NexusSettings {
             hand_with_ghost: false,
             hand_snap: true,
             hand_gestures: true,
+            reminder_countdown: true,
             hand_focus_mode: true,
             hand_focus_lower_apps: true,
             hand_gestures_desktop: false,
@@ -4351,6 +4357,22 @@ mod nexus_settings_tests {
         assert_eq!(parsed.turn_hold_ms, 3000, "turnHoldMs must default to 3000");
         let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
         assert_eq!(reserialized.get("turnHoldMs"), Some(&serde_json::json!(3000)));
+    }
+
+    #[test]
+    fn reminder_countdown_defaults_to_true_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("reminderCountdown");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert!(parsed.reminder_countdown, "reminderCountdown must default to true");
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("reminderCountdown"), Some(&serde_json::json!(true)));
+        // a user who turned it off keeps it off through a save
+        let mut off = serde_json::to_value(NexusSettings::default()).unwrap();
+        off["reminderCountdown"] = serde_json::json!(false);
+        let parsed_off: NexusSettings = serde_json::from_value(off).unwrap();
+        assert!(!parsed_off.reminder_countdown);
+        assert_eq!(serde_json::to_value(&parsed_off).unwrap().get("reminderCountdown"), Some(&serde_json::json!(false)));
     }
 
     #[test]
