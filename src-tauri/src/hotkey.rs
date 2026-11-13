@@ -78,7 +78,8 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                         .try_state::<std::sync::Arc<crate::meeting_detect::MeetingState>>()
                         .map(|ms| ms.tts_playing.load(std::sync::atomic::Ordering::Relaxed))
                         .unwrap_or(false),
-                    has_request: crate::orchestrator::has_active_request(),
+                    // A heard turn still being transcribed counts as "thinking": no request exists yet.
+                    has_request: crate::orchestrator::has_active_request() || crate::turn_pending::is_pending(),
                     ghost: crate::ghost::session_active(),
                 };
 
@@ -118,6 +119,8 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
 
                         // 2. Cancel in-flight orchestrator requests
                         crate::orchestrator::cancel_active();
+                        // ... and the turn that is still on its way from speech-to-text, if any
+                        crate::turn_pending::cancel();
 
                         // 3. Abort STT capture
                         crate::wakeword_oww::abort_stt_capture();

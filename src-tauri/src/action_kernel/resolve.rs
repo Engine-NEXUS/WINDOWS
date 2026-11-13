@@ -61,6 +61,7 @@ fn types(word: &str) -> Option<(&'static [&'static str], Option<&'static str>)> 
         "spreadsheet" | "spreadsheets" | "excel" | "sheet" | "sheets" => (&["xls", "xlsx", "csv", "ods"], None),
         "presentation" | "presentations" | "powerpoint" | "slides" | "ppt" => (&["ppt", "pptx", "odp"], None),
         "installer" | "installers" => (&["exe", "msi"], None),
+        "text" | "txt" | "txts" => (&["txt"], None),
         "music" | "audio" | "song" | "songs" | "mp3" | "mp3s" => (&["mp3", "wav", "flac", "m4a", "aac", "ogg"], None),
         _ => return None,
     })
@@ -106,6 +107,11 @@ pub fn parse_object(phrase: &str) -> Query {
                 if w.ends_with('s') {
                     q.plural = true;
                 }
+                continue;
+            }
+            // "the text files", "my pdf files": the noun carries the plural when the type word does not.
+            "files" => {
+                q.plural = true;
                 continue;
             }
             _ => {}
@@ -273,6 +279,15 @@ mod tests {
             Resolved::Found(v) | Resolved::Ambiguous(v) => v.into_iter().map(|c| c.name).collect(),
             _ => vec![],
         }
+    }
+
+    #[test]
+    fn text_files_means_every_txt_file_not_one_of_them() {
+        let q = parse_object("text files");
+        assert_eq!(q.exts, vec!["txt".to_string()]);
+        assert!(q.plural, "'files' is plural even though 'text' is not");
+        assert!(q.tokens.is_empty());
+        assert!(!parse_object("text file").plural);
     }
 
     #[test]

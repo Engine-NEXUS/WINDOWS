@@ -550,6 +550,8 @@ pub fn center_id_for(intent: &ParsedIntent) -> CenterId {
 
         ParsedIntent::WatchScreenEmail
         | ParsedIntent::Directions { .. }
+        | ParsedIntent::RouteFollowUp { .. }
+        | ParsedIntent::TripReminder { .. }
         | ParsedIntent::PlacesSearch { .. }
         | ParsedIntent::PlaceInfo { .. }
         | ParsedIntent::AnalyseThisEmail

@@ -18,6 +18,7 @@ mod window_manager;
 pub(crate) mod turn_detect;
 pub(crate) mod turn_complete;
 pub(crate) mod turn_continue;
+pub(crate) mod turn_pending;
 pub(crate) mod barge_gate;
 pub(crate) mod barge_classify;
 // Silero VAD (Handy-derived) — used by the STT capture loop when "vadSilero" is on.
@@ -192,6 +193,8 @@ pub(crate) mod maps_panel;
 pub(crate) mod location;
 pub(crate) mod no_window;
 pub(crate) mod fares;
+pub(crate) mod directions;
+pub(crate) mod quiet;
 pub(crate) mod place_card;
 pub(crate) mod power_close;
 pub(crate) mod window_tile;
@@ -931,6 +934,7 @@ pub fn run() {
             memcore::mailwatch::start(app.handle().clone()); // Gmail history.list watcher (idle until Google is connected)
             memcore::github_watch::start(app.handle().clone()); // GitHub Actions watcher (idle until GitHub token present)
             memcore::deploy_watch::start(app.handle().clone()); // Deploy watcher (idle until deploy tokens present)
+            directions::start(app.handle().clone()); // "remind me to leave for X at 5 pm": checks saved trip reminders once a minute
             memcore::leavewatch::start(app.handle().clone()); // leave-by reminders (needs calendar + Routes key + saved home)
             memcore::leases::start(app.handle().clone()); // temporary action leases (auto-unblock)
             memcore::wa::start(app.handle().clone()); // WhatsApp priority watcher (read-only; off unless memcoreWhatsapp)

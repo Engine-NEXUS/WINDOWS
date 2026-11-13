@@ -443,6 +443,14 @@ fn read_cfg<R: Runtime>(app: &AppHandle<R>) -> Config {
     }
 }
 
+/// Is the microphone the user's right now? A voice is being heard, or the user opened the mic themselves (hotkey,
+/// wake word, an answer window) and has not spoken yet. An alert spoken into that open mic was transcribed as
+/// if the user had said it and NEXUS answered its own greeting (live log 2026-11-11 20:25:53). A Ghost session
+/// keeps the mic open all the time, so there only a heard voice counts.
+fn mic_belongs_to_user(voice_heard: bool, capturing: bool, ghost_session: bool) -> bool {
+    voice_heard || (capturing && !ghost_session)
+}
+
 fn collect_signals<R: Runtime>(app: &AppHandle<R>) -> Signals {
     let (meeting, tts) = app
         .try_state::<std::sync::Arc<crate::meeting_detect::MeetingState>>()
@@ -450,9 +458,17 @@ fn collect_signals<R: Runtime>(app: &AppHandle<R>) -> Signals {
         .unwrap_or((false, false));
     let last = LAST_USER_ACTIVITY_MS.load(Ordering::Relaxed);
     Signals {
-        user_speaking: crate::wakeword_oww::stt_user_speaking(),
+        user_speaking: mic_belongs_to_user(
+            crate::wakeword_oww::stt_user_speaking(),
+            crate::wakeword_oww::stt_capturing(),
+            crate::ghost::session_active(),
+        ),
         nexus_speaking: tts,
-        working: crate::ghost::drill_running() || crate::orchestrator::has_active_request(),
+        working: crate::ghost::drill_running()
+            || crate::orchestrator::has_active_request()
+            || crate::turn_pending::is_pending()
+            // a question NEXUS just asked is waiting for its answer
+            || crate::memcore::offer::asked_within(std::time::Duration::from_secs(45)),
         meeting,
         focus: crate::focus_mode::paused(),
         idle_ms: if last == 0 { u64::MAX / 4 } else { now_ms().saturating_sub(last) },
@@ -645,6 +661,15 @@ mod tests {
     }
     fn texts(a: &[Action]) -> Vec<String> {
         a.iter().filter_map(|x| if let Action::Speak { text, .. } = x { Some(text.clone()) } else { None }).collect()
+    }
+
+    #[test]
+    fn an_open_mic_the_user_asked_for_holds_alerts_but_a_ghost_hot_mic_does_not() {
+        assert!(mic_belongs_to_user(true, false, false));
+        assert!(mic_belongs_to_user(false, true, false), "hotkey pressed, nothing said yet");
+        assert!(!mic_belongs_to_user(false, true, true), "ghost hot mic is always open");
+        assert!(mic_belongs_to_user(true, true, true));
+        assert!(!mic_belongs_to_user(false, false, false));
     }
 
     #[test]

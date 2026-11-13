@@ -4456,6 +4456,9 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     continue;
                 }
 
+                // From here until the orchestrator installs a request nothing else says "busy": mark the gap so
+                // Ctrl+Space cancels this turn and does not call NEXUS a second time.
+                crate::turn_pending::mark(session);
                 tracing::info!(
                     "stt-capture: {} samples ({}ms audio), starting transcription",
                     samples.len(),
@@ -4639,6 +4642,10 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     // Unlike a routing/action success, this only proves the
                     // native event emit completed. A missing frontend still
                     // remains visible as delivered without dispatch entry.
+                    if final_payload.text.is_empty() {
+                        // No words: no request will follow, so the turn is no longer "on its way".
+                        crate::turn_pending::clear();
+                    }
                     let delivered = app_for_stt.emit("stt:transcript", &final_payload).is_ok();
                     let outcome = if !delivered { Outcome::DeliveryFailed }
                         else if stt_failed { Outcome::SttError }

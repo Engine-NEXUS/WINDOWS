@@ -372,6 +372,12 @@ pub fn clean(raw: &str, ctx: &Ctx) -> Cleaned {
                     toks.push(Tok::Word(format!("{n}%")));
                 } else {
                     toks.push(Tok::Word(n.to_string()));
+                    // "one dollar" is written "1 dollar", never "1 dollars".
+                    let unit = match (n, unit.as_str()) {
+                        (1, "dollars") => "dollar".to_string(),
+                        (1, "rupees") => "rupee".to_string(),
+                        _ => unit,
+                    };
                     toks.push(Tok::Word(unit));
                 }
                 i += used + uused;
@@ -473,6 +479,13 @@ fn finish_word(word: &str, capitalise: bool) -> String {
     } else if let Some(rest) = w.strip_prefix("i'") {
         w = format!("I'{rest}");
     }
+    // Weekdays and months are always written with a capital. "may" and "march" are left out: they are ordinary
+    // words far more often than months.
+    const ALWAYS_CAPITAL: &[&str] = &[
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "january", "february", "april",
+        "june", "july", "august", "september", "october", "november", "december",
+    ];
+    let capitalise = capitalise || ALWAYS_CAPITAL.contains(&w.as_str());
     if capitalise {
         let mut c = w.chars();
         if let Some(f) = c.next() {
@@ -580,7 +593,9 @@ mod tests {
     fn a_paused_correction_replaces_the_last_clause() {
         assert_eq!(t("send it to bob, no, wait, send it to alice"), "Send it to alice");
         assert_eq!(t("hello comma send it to bob, no wait, alice"), "Hello, alice");
-        assert_eq!(t("see you tomorrow, sorry I mean on friday"), "On friday");
+        assert_eq!(t("see you tomorrow, sorry I mean on friday"), "On Friday");
+        assert_eq!(t("the meeting is on tuesday in october"), "The meeting is on Tuesday in October");
+        assert_eq!(t("you may march with us"), "You may march with us");
     }
 
     #[test]
@@ -594,6 +609,10 @@ mod tests {
         assert_eq!(t("meet at five p m"), "Meet at 5 pm");
         assert_eq!(t("it grew twenty five percent"), "It grew 25%");
         assert_eq!(t("about forty dollars"), "About 40 dollars");
+        assert_eq!(t("it costs one dollar"), "It costs 1 dollar");
+        assert_eq!(t("one dollars"), "1 dollar");
+        assert_eq!(t("give him one rupee"), "Give him 1 rupee");
+        assert_eq!(t("two rupees"), "2 rupees");
         assert_eq!(t("i have five apples"), "I have five apples");
         assert_eq!(t("call at seven o'clock"), "Call at 7 o'clock");
     }

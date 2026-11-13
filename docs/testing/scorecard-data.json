@@ -19,7 +19,7 @@
         "L": 85,
         "S": 85,
         "I": 80,
-        "note": "Cancel/call decision extracted and checked for all 16 states; stale doc comment rewritten."
+        "note": "Cancel/call decision checked for all 16 states. 2026-11-12: machine run of card 5.1 passed 6/6 on build df23b69c593545d4 after four fixes (miss counter, cancel during transcription and routing, alerts into an open mic). Owner voice and on-screen check still open."
     },
     {
         "area": "Voice front end",
@@ -218,10 +218,10 @@
         "tests": "16 tests",
         "B": 100,
         "T": 65,
-        "L": 45,
+        "L": 75,
         "S": 80,
         "I": 60,
-        "note": "Typed ActionSpec, shared policy; live walkthrough pending."
+        "note": "Typed ActionSpec, shared policy; live walkthrough pending. 2026-11-12: machine run of card 5.13 passed 13/13 on build 95f3621b8fbc0b88; 11 of 18 centres exercised; owner voice open."
     },
     {
         "area": "Understanding",
@@ -273,10 +273,10 @@
         "tests": "55",
         "B": 90,
         "T": 85,
-        "L": 45,
+        "L": 60,
         "S": 95,
         "I": 70,
-        "note": "16 new tests: seed validity, precedence for 5 real app cases, terminals never inherit Ctrl+C/Z/S/X/A/Y, router gates and call order. No wrong chord found in the seed. Tested on Notepad only live."
+        "note": "16 new tests: seed validity, precedence for 5 real app cases, terminals never inherit Ctrl+C/Z/S/X/A/Y, router gates and call order. No wrong chord found in the seed. Tested on Notepad only live. 2026-11-12: new tab verified in Edge (44 ms); unmapped-app claim made honest; Brave, Notepad, terminal not run."
     },
     {
         "area": "Desktop control",
@@ -295,10 +295,10 @@
         "tests": "53",
         "B": 100,
         "T": 90,
-        "L": 45,
+        "L": 75,
         "S": 95,
         "I": 75,
-        "note": "Spoken grammar -> confirm -> trash -> undo on real folders (unicode, long names, clashes, forbidden places, wrong origin). Still needs: one spoken delete and undo by voice (W3)."
+        "note": "Spoken grammar -> confirm -> trash -> undo on real folders (unicode, long names, clashes, forbidden places, wrong origin). Still needs: one spoken delete and undo by voice (W3). 2026-11-12: machine run of card 5.14 on build 95f3621b8fbc0b88: read-back, yes, trash, undo, wipe refusal pass; one decline mangled by the speech engine; owner voice open."
     },
     {
         "area": "Desktop control",
@@ -339,10 +339,10 @@
         "tests": "15+ tests",
         "B": 100,
         "T": 55,
-        "L": 80,
+        "L": 90,
         "S": 75,
         "I": 70,
-        "note": "Used constantly; duplicate-window bug fixed."
+        "note": "Used constantly; duplicate-window bug fixed. 2026-11-12: machine run of card 5.2 passed 5/5 on build df23b69c593545d4; Calculator close fixed after."
     },
     {
         "area": "Desktop control",

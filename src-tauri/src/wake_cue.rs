@@ -269,7 +269,7 @@ fn player_loop(rx: mpsc::Receiver<Cmd>) {
                 if let Some(o) = open.as_mut() {
                     match rodio::Sink::try_new(&o.handle) {
                         Ok(sink) => {
-                            sink.set_volume(gain);
+                            sink.set_volume(crate::quiet::gain(gain));
                             sink.append(rodio::buffer::SamplesBuffer::new(1, SAMPLE_RATE, samples));
                             sink.detach();
                             o.last_use = Instant::now();

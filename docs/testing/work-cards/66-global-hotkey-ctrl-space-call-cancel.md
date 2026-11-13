@@ -16,7 +16,7 @@ Evidence today: 5.
 
 ## Known gap (from the scorecard)
 
-Cancel/call decision extracted and checked for all 16 states; stale doc comment rewritten.
+Cancel/call decision checked for all 16 states. 2026-11-12: machine run of card 5.1 passed 6/6 on build df23b69c593545d4 after four fixes (miss counter, cancel during transcription and routing, alerts into an open mic). Owner voice and on-screen check still open.
 
 ## Runs as (processes, for contention and Focus Mode)
 

@@ -101,8 +101,12 @@ pub fn store_handle(app_data_dir: &Path) -> Option<Arc<Mutex<Store>>> {
     if !enabled(app_data_dir) {
         return None;
     }
+    // One store per real directory. Two spellings of the same folder (case, `..`, a junction) would otherwise open two
+    // in-memory copies that overwrite each other's snapshot, and after a wipe one of them would keep sealing with the
+    // retired key.
+    let map_key = std::fs::canonicalize(app_data_dir).unwrap_or_else(|_| app_data_dir.to_path_buf());
     let mut map = STORES.lock();
-    if let Some(h) = map.get(app_data_dir) {
+    if let Some(h) = map.get(&map_key) {
         return Some(h.clone());
     }
     let store = match Store::open(
@@ -118,7 +122,7 @@ pub fn store_handle(app_data_dir: &Path) -> Option<Arc<Mutex<Store>>> {
     store.batch(|s| import_legacy(s, app_data_dir));
     store.prune(now_ts());
     let h = Arc::new(Mutex::new(store));
-    map.insert(app_data_dir.to_path_buf(), h.clone());
+    map.insert(map_key, h.clone());
     Some(h)
 }
 
@@ -253,13 +257,13 @@ pub fn wipe(app_data_dir: &Path) -> usize {
     with_store(app_data_dir, |s| {
         let n = s.wipe("user", now_ts());
         if s.is_encrypted() {
+            // The new key is stored, the file re-sealed, and the old key put back if that write fails
+            // (see `rotate_key_with`): the stored key always opens the file on disk.
             #[cfg(not(test))]
-            if let Some(k) = crypto::rotate_key() {
-                s.rekey(k);
-            }
+            let _ = crypto::rotate_key_with(|k| s.rekey(*k));
             #[cfg(test)]
             if let Some(k) = crypto::generate_key() {
-                s.rekey(k);
+                let _ = s.rekey(k);
             }
         }
         n
@@ -797,6 +801,18 @@ mod tests {
         assert_eq!(status(&d).facts, 0);
         mirror_core_fact(&d, "city", "Pune");
         assert_eq!(recall(&d, "city", 5).unwrap()[0].1, "Pune");
+    }
+
+    #[test]
+    fn two_spellings_of_one_folder_share_one_store() {
+        let d = tmpdir("one_store");
+        let other = d.join("sub").join("..");
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        mirror_core_fact(&d, "dog_name", "Bruno");
+        mirror_core_fact(&other, "city", "Pune");
+        // A second in-memory copy would have overwritten the snapshot without "dog_name".
+        assert_eq!(status(&d).facts, 2);
+        assert!(Arc::ptr_eq(&store_handle(&d).unwrap(), &store_handle(&other).unwrap()));
     }
 
     #[test]
