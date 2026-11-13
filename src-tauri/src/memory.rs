@@ -135,8 +135,8 @@ pub fn parse_remember(transcript: &str) -> Option<(String, String)> {
             let orig_rest = t.get(prefix.len()..).unwrap_or("");
             if let Some((k, v)) = split_is(orig_rest) {
                 let key = normalize_key(k);
-                if !key.is_empty() && !v.trim().is_empty() {
-                    return Some((key, v.trim().to_string()));
+                if !key.is_empty() && !clean_value(v).is_empty() {
+                    return Some((key, clean_value(v)));
                 }
             }
         }
@@ -146,12 +146,18 @@ pub fn parse_remember(transcript: &str) -> Option<(String, String)> {
         let orig_rest = t.get(3..).unwrap_or("");
         if let Some((k, v)) = split_is(orig_rest) {
             let key = normalize_key(k);
-            if is_personal_attribute(&key) && !v.trim().is_empty() {
-                return Some((key, v.trim().to_string()));
+            if is_personal_attribute(&key) && !clean_value(v).is_empty() {
+                return Some((key, clean_value(v)));
             }
         }
     }
     None
+}
+
+/// The value as it should be stored and spoken: speech-to-text ends a sentence with a full stop, and keeping
+/// it gave "Remembered my favorite color as blue.." (live log 2026-11-11 20:46:40).
+fn clean_value(v: &str) -> String {
+    v.trim().trim_end_matches(['.', '!', '?', ',', ';']).trim().to_string()
 }
 
 fn split_is(s: &str) -> Option<(&str, &str)> {
@@ -901,6 +907,16 @@ pub fn wipe_memory(app_data_dir: &Path) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_remembered_value_loses_the_full_stop_speech_to_text_adds() {
+        assert_eq!(
+            parse_remember("Remember that my favorite color is blue."),
+            Some((normalize_key("my favorite color"), "blue".to_string()))
+        );
+        assert_eq!(parse_remember("remember that the code is 3.5!").map(|p| p.1), Some("3.5".to_string()));
+        assert_eq!(parse_remember("remember that my name is ."), None);
+    }
+
     #[test]
     fn call_me_requests_are_not_nicknames() {
         for t in ["call me later", "please call me back", "call me tomorrow", "call me when you can"] {

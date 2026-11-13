@@ -104,11 +104,32 @@ fn split_folder(s: &str) -> (String, Option<String>) {
         if let Some((head, tail)) = s.rsplit_once(sep) {
             let t = strip_articles(tail).trim_end_matches(" folder").trim_end_matches(" directory").to_string();
             if is_alias(&t) {
+                // "<object> in the <name> folder in <alias>": a folder inside a known place. Only with the word
+                // "folder" (or "directory"), so an ordinary phrase with "in" in it is never read as a place.
+                for inner in [" from ", " in ", " inside ", " out of ", " under "] {
+                    if let Some((obj, sub)) = head.rsplit_once(inner) {
+                        let sub = strip_articles(sub);
+                        let name = sub.strip_suffix(" folder").or_else(|| sub.strip_suffix(" directory"));
+                        if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
+                            return (obj.trim().to_string(), Some(format!("{name} folder in {t}")));
+                        }
+                    }
+                }
                 return (head.trim().to_string(), Some(t));
             }
         }
     }
     (s.trim().to_string(), None)
+}
+
+/// The object names something that is not a file ("the text", "my last message"). "text files" and
+/// "text documents" ARE files: the word "text" used to make "delete the text files in ..." unknown
+/// (live log 2026-11-11 20:53:32).
+fn not_about_files(words: &[&str]) -> bool {
+    words.iter().enumerate().any(|(i, w)| {
+        NOT_FILES.contains(w)
+            && !(*w == "text" && matches!(words.get(i + 1), Some(&"file" | &"files" | &"document" | &"documents")))
+    })
 }
 
 fn has_file_cue(obj: &str) -> bool {
@@ -147,7 +168,7 @@ pub fn parse(transcript: &str) -> Option<ParsedIntent> {
         let obj = c[1].to_string();
         let verb_wipe = t.starts_with("wipe") || t.starts_with("format") || t.starts_with("erase") || t.starts_with("destroy") || t.starts_with("shred");
         let words: Vec<&str> = obj.split_whitespace().collect();
-        if words.iter().any(|w| NOT_FILES.contains(w)) && !wipes_everything(&obj) {
+        if not_about_files(&words) && !wipes_everything(&obj) {
             return None;
         }
         if wipes_everything(&obj) || (verb_wipe && !has_file_cue(&obj) && words.len() <= 4) {
@@ -267,8 +288,14 @@ fn resolve_dest(spoken: &str, ctx: &Ctx) -> Result<PathBuf, String> {
 
 fn default_folder(ctx: &Ctx, spoken: Option<&str>, fallback: &str) -> Result<PathBuf, String> {
     let name = spoken.unwrap_or(fallback);
-    resolve::resolve_folder(name, ctx.policy, ctx.roots)
-        .ok_or_else(|| format!("I don't know a folder called {name} that I'm allowed to use, sir."))
+    if let Some(p) = resolve::resolve_folder(name, ctx.policy, ctx.roots) {
+        return Ok(p);
+    }
+    // "<name> folder in <alias>" (see `split_folder`): one existing folder inside an allowed place, or a reason.
+    if name.contains(" folder in ") {
+        return resolve_dest(name, ctx);
+    }
+    Err(format!("I don't know a folder called {name} that I'm allowed to use, sir."))
 }
 
 const EVERYTHING_REFUSAL: &str =
@@ -416,6 +443,15 @@ mod tests {
 
     #[test]
     fn delete_phrases_parse_with_object_and_folder() {
+        // "text files" are files; "the text" is not
+        assert_eq!(fa("delete the text files in downloads"), Some(("delete".into(), "text files".into(), Some("downloads".into()), None)));
+        assert_eq!(fa("delete the text"), None);
+        assert_eq!(fa("delete my last text"), None);
+        // a named folder inside a known place
+        assert_eq!(
+            fa("delete the text files in the nexus test folder in downloads"),
+            Some(("delete".into(), "text files".into(), Some("nexus test folder in downloads".into()), None))
+        );
         assert_eq!(fa("delete the pdfs in downloads"), Some(("delete".into(), "pdfs".into(), Some("downloads".into()), None)));
         assert_eq!(fa("Nexus, please delete my latest screenshot."), Some(("delete".into(), "latest screenshot".into(), None, None)));
         assert_eq!(fa("remove the old stuff folder from my desktop").unwrap().2.as_deref(), Some("desktop"));

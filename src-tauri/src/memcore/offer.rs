@@ -155,6 +155,23 @@ pub fn take() -> Option<Offer> {
     o
 }
 
+/// A question was asked (or asked again) within `within` and has no answer yet: the next thing heard should be
+/// that answer. The proactive-speech policy holds alerts for this long, because an alert released in the
+/// half second between the end of the question and the answer window opening was heard as the answer
+/// ("Claude Code has finished, sir." -> "Sorry sir, was that a yes or a no?", live log 2026-11-12 04:35:37).
+pub fn asked_within(within: Duration) -> bool {
+    let g = lock();
+    match g.as_ref() {
+        Some(s) if s.armed => {
+            let now = Instant::now();
+            let window = s.offer.reply_window();
+            // `expires` was set to "asked at + reply window" when the question was armed or re-asked.
+            s.expires > now && s.expires.saturating_duration_since(now) + within >= window
+        }
+        _ => false,
+    }
+}
+
 /// True while a spoken question is waiting for its answer.
 pub fn is_armed() -> bool {
     let mut g = lock();
@@ -568,6 +585,20 @@ mod tests {
         assert_eq!(Offer::ReopenSession.reply_window(), REPLY_WINDOW_HIGH);
         assert_eq!(Offer::Start { title: "DSA".into(), activity: "dsa".into() }.reply_window(), REPLY_WINDOW_LOW);
         assert!(REPLY_WINDOW_HIGH < REPLY_WINDOW_MEDIUM && REPLY_WINDOW_MEDIUM < REPLY_WINDOW_LOW);
+    }
+
+    #[test]
+    fn a_just_asked_question_holds_alerts_but_an_old_or_unspoken_one_does_not() {
+        let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        assert!(!asked_within(Duration::from_secs(45)));
+        set(Offer::ClearTimetable, false);
+        assert!(!asked_within(Duration::from_secs(45)), "not spoken yet");
+        arm();
+        assert!(asked_within(Duration::from_secs(45)));
+        assert!(!asked_within(Duration::ZERO), "asked a moment ago is outside a zero window");
+        clear();
+        assert!(!asked_within(Duration::from_secs(45)));
     }
 
     #[test]

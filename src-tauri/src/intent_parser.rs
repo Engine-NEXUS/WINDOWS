@@ -825,6 +825,13 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
         });
     }
 
+    // A bare power verb ("shut down", "turn it off") is ASKED about by the orchestrator, never acted on here.
+    // It must not reach the close-app parser either: speech-to-text wrote "Shut down." with a space and
+    // NEXUS answered "I couldn't find Down running, sir." (live log 2026-11-12 04:23:07).
+    if crate::power_cmd::parse_weak(&text).is_some() {
+        return None;
+    }
+
     // --- File actions (Action Kernel): delete/move/copy/rename/create/list/undo ---
     // Claimed before the open/close parsers; broad wipe phrases are claimed too so they are refused
     // locally instead of reaching a chat model.
@@ -11698,6 +11705,9 @@ mod power_and_session_tests {
 
     #[test]
     fn closing_an_app_still_closes_it() {
+        for t in ["shut down", "Shut down.", "Nexus, shut down.", "shutdown", "turn it off"] {
+            assert!(parse_deterministic(t).is_none(), "{t} must be left for the ask-first power path, not close_app");
+        }
         match parse_deterministic("shut down notepad").map(|r| r.intent) {
             Some(ParsedIntent::CloseApp { target }) => assert_eq!(target, "notepad"),
             other => panic!("expected CloseApp, got {other:?}"),

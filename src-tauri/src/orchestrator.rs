@@ -488,6 +488,8 @@ pub(crate) fn install_new_request(subsystem: Subsystem) -> (String, Arc<AtomicBo
 /// `has_active_request()` can't see it as busy while it's speaking.
 pub(crate) fn install_new_request_with_id(id: String, subsystem: Subsystem) -> Arc<AtomicBool> {
     let cancel_flag = Arc::new(AtomicBool::new(false));
+    // A request owns the pipeline from here; the "heard turn on its way" mark has done its job.
+    crate::turn_pending::clear();
 
     // Cancel the previous request
     let mut guard = ACTIVE_REQUEST.lock().unwrap();
@@ -902,9 +904,44 @@ pub async fn process_transcript<R: Runtime>(
     dialog_context: Option<serde_json::Value>,
     turn_context: Option<crate::center::TurnContext>,
 ) -> Result<ProcessResult, String> {
-    if let Some(turn) = turn_context.as_ref() {
-        crate::capture_audit::dispatch_received(turn.session);
+    let Some(session) = turn_context.as_ref().map(|turn| turn.session) else {
+        return process_transcript_inner(app, transcript, dialog_context, turn_context).await;
+    };
+    crate::capture_audit::dispatch_received(session);
+    // Ctrl+Space pressed while this capture was being transcribed, or (below) while it is being routed and no
+    // request exists yet (the ML parse can take a few hundred ms): the user cancelled it, nothing may be said.
+    let dropped = |app: &AppHandle<R>, stage: &str| -> Result<ProcessResult, String> {
+        tracing::info!("[DROP] capture session {session} was cancelled by the user {stage}");
+        // A request this turn installed in the same instant must not stay behind as "busy".
+        cancel_active();
+        // The stage may have put the orb into "thinking" after the cancel reached it; close it again.
+        let _ = tauri::Emitter::emit(app, "orb:cancel", ());
+        Err("turn cancelled".into())
+    };
+    if crate::turn_pending::was_cancelled(session) {
+        return dropped(&app, "before routing");
     }
+    let routing = process_transcript_inner(app.clone(), transcript, dialog_context, turn_context);
+    tokio::pin!(routing);
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(20));
+    loop {
+        tokio::select! {
+            result = &mut routing => return result,
+            _ = tick.tick() => {
+                if crate::turn_pending::was_cancelled(session) {
+                    return dropped(&app, "while it was being routed");
+                }
+            }
+        }
+    }
+}
+
+async fn process_transcript_inner<R: Runtime>(
+    app: AppHandle<R>,
+    transcript: String,
+    dialog_context: Option<serde_json::Value>,
+    turn_context: Option<crate::center::TurnContext>,
+) -> Result<ProcessResult, String> {
     if transcript.trim().is_empty() {
         return Err("empty transcript".into());
     }
@@ -1732,6 +1769,11 @@ pub async fn process_transcript<R: Runtime>(
             }
             ParsedIntent::AiReviewThis => {
                 return run_ai_review_this(app).await;
+            }
+            // Was only handled inside a Ghost session: outside one, a spoken "list my pull requests" was routed,
+            // logged and then did nothing at all, with no word spoken (live log 2026-11-11 20:47:45).
+            ParsedIntent::OpenGitHubDashboard { subpage } => {
+                return run_open_github_dashboard(app, subpage.clone()).await;
             }
             _ => {}
         }

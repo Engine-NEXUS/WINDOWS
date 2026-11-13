@@ -15,6 +15,7 @@ import {
   isAdministratorControlText,
   nextMissAction,
   processTranscript,
+  resetMissStreak,
 } from "./recorder";
 
 describe("Administrator capture routing", () => {
@@ -122,6 +123,13 @@ describe("nextMissAction (approach E retry-with-escalation)", () => {
   it("2nd consecutive miss nags once", () => {
     expect(nextMissAction(2)).toBe("nag");
     expect(nextMissAction(5)).toBe("nag");
+  });
+
+  it("a cancel or a fresh call clears an earlier miss, so the next silent press relistens and does not nag", () => {
+    __testSetMissStreak(1);
+    resetMissStreak();
+    expect(__testMissStreak()).toBe(0);
+    expect(nextMissAction(__testMissStreak() + 1)).toBe("relisten");
   });
 
   it("streak helpers round-trip", () => {
