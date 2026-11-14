@@ -195,6 +195,7 @@ pub(crate) mod no_window;
 pub(crate) mod fares;
 pub(crate) mod directions;
 pub(crate) mod reminder;
+pub(crate) mod voice_reminders;
 pub(crate) mod quiet;
 pub(crate) mod place_card;
 pub(crate) mod power_close;
@@ -926,6 +927,7 @@ pub fn run() {
             memcore::mailwatch::start(app.handle().clone()); // Gmail history.list watcher (idle until Google is connected)
             memcore::github_watch::start(app.handle().clone()); // GitHub Actions watcher (idle until GitHub token present)
             memcore::deploy_watch::start(app.handle().clone()); // Deploy watcher (idle until deploy tokens present)
+            voice_reminders::start(app.handle().clone()); // spoken reminders and timers: restores the saved ones, fires what is due
             directions::start(app.handle().clone()); // "remind me to leave for X at 5 pm": checks saved trip reminders once a minute
             memcore::leavewatch::start(app.handle().clone()); // leave-by reminders (needs calendar + Routes key + saved home)
             memcore::leases::start(app.handle().clone()); // temporary action leases (auto-unblock)

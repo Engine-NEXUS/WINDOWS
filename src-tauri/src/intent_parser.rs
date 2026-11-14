@@ -364,6 +364,9 @@ pub enum ParsedIntent {
     /// Explicit Alexa-style voice reminder with repeat-back.
     #[serde(rename = "create_voice_reminder")]
     CreateVoiceReminder { task: String, minutes: u32 },
+    /// "Remind me to call mom at 5 pm", "set a timer for 10 minutes", "cancel the timer", "what reminders do I have".
+    #[serde(rename = "voice_reminders")]
+    VoiceReminders { cmd: crate::voice_reminders::Cmd },
     /// WhatsApp chat document downloader and evaluator.
     #[serde(rename = "analyse_chat_docs")]
     AnalyseChatDocs { contact: String },
@@ -527,6 +530,7 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::CodingAgentTask { .. } => "coding_agent_task",
         ParsedIntent::ScanInternshipEmails => "scan_internship_emails",
         ParsedIntent::CreateVoiceReminder { .. } => "create_voice_reminder",
+        ParsedIntent::VoiceReminders { .. } => "voice_reminders",
         ParsedIntent::AnalyseChatDocs { .. } => "analyse_chat_docs",
         ParsedIntent::WatchAgentTask { .. } => "watch_agent_task",
         ParsedIntent::WatchThenPower { .. } => "watch_then_power",
@@ -886,6 +890,17 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
     // --- Coding agent & localhost commands ("run this on localhost", "plan and create...") ---
     if let Some(result) = parse_coding_command(&text) {
         return Some(result);
+    }
+
+    // --- Spoken reminders and timers (a leave-by trip reminder is claimed by the directions parser below) ---
+    if parse_trip_reminder_command(&text).is_none() {
+        if let Some(cmd) = crate::voice_reminders::parse(&text) {
+            return Some(ParseResult {
+                intent: ParsedIntent::VoiceReminders { cmd },
+                confidence: 1.0,
+                source: "deterministic-voice-reminders".to_string(),
+            });
+        }
     }
 
     // --- Executive assistant: voice reminders, college internship emails, and chat docs ---
@@ -11425,6 +11440,33 @@ mod tests {
         ] {
             let got = dbg(p);
             assert!(!got.contains("Directions"), "'{p}' wrongly parsed as {got}");
+        }
+    }
+
+    #[test]
+    fn spoken_reminders_and_timers_reach_the_shared_module_and_trips_keep_theirs() {
+        for (p, want) in [
+            ("remind me to call mom at 5 pm", "VoiceReminders"),
+            ("remind me in 45 seconds to check the oven", "VoiceReminders"),
+            ("set a timer for 10 minutes", "VoiceReminders"),
+            ("cancel the timer", "VoiceReminders"),
+            ("what reminders do I have", "VoiceReminders"),
+            ("nexus, remind me to stretch tomorrow at 8 am", "VoiceReminders"),
+            ("remind me to leave for the airport at 5 pm", "TripReminder"),
+            ("remind me when to leave for T-Hub", "TripReminder"),
+        ] {
+            let got = dir_dbg(p);
+            assert!(got.contains(want), "'{p}' parsed as {got}");
+            if want == "VoiceReminders" {
+                assert!(!got.contains("TripReminder"), "'{p}' parsed as {got}");
+            }
+        }
+        // the older minutes-only forms still land on the same module
+        assert!(dir_dbg("remind me to call prem sai in 30 minutes").contains("VoiceReminders"));
+        assert!(dir_dbg("set a reminder to submit assignment in 2 hours").contains("VoiceReminders"));
+        // ordinary talk and other commands are not taken
+        for p in ["cancel the order", "stop the music", "open the timer app", "what time is it"] {
+            assert!(!dir_dbg(p).contains("VoiceReminders"), "'{p}' wrongly parsed as {}", dir_dbg(p));
         }
     }
 

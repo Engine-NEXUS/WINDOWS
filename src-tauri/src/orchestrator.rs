@@ -842,6 +842,7 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         | ParsedIntent::OpenMusicPlayer { .. }
         | ParsedIntent::ScanInternshipEmails
         | ParsedIntent::CreateVoiceReminder { .. }
+        | ParsedIntent::VoiceReminders { .. }
         | ParsedIntent::AnalyseChatDocs { .. } => Subsystem::LocalCommand,
 
         // Counsel runs through cloud backends (9Router → Worker) with the
@@ -1767,6 +1768,9 @@ async fn process_transcript_inner<R: Runtime>(
             ParsedIntent::CreateVoiceReminder { task, minutes } => {
                 return run_create_voice_reminder(app, task.clone(), *minutes).await;
             }
+            ParsedIntent::VoiceReminders { cmd } => {
+                return crate::voice_reminders::run(app, cmd.clone()).await;
+            }
             ParsedIntent::AnalyseChatDocs { contact } => {
                 return run_analyse_chat_docs(app, contact.clone()).await;
             }
@@ -2147,6 +2151,9 @@ async fn process_transcript_inner<R: Runtime>(
             }
             ParsedIntent::CreateVoiceReminder { task, minutes } => {
                 return run_create_voice_reminder(app, task.clone(), *minutes).await;
+            }
+            ParsedIntent::VoiceReminders { cmd } => {
+                return crate::voice_reminders::run(app, cmd.clone()).await;
             }
             ParsedIntent::AnalyseChatDocs { contact } => {
                 return run_analyse_chat_docs(app, contact.clone()).await;
@@ -8061,59 +8068,20 @@ async fn run_scan_internship_emails<R: Runtime>(app: AppHandle<R>) -> Result<Pro
     )
 }
 
-/// "Remind me to call Prem Sai in 30 minutes" (Alexa-style explicit reminder with repeat-back)
+/// "Remind me to call Prem Sai in 30 minutes": the same universal reminder as every other spoken reminder.
 async fn run_create_voice_reminder<R: Runtime>(
     app: AppHandle<R>,
     task: String,
     minutes: u32,
 ) -> Result<ProcessResult, String> {
-    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-    let Ok(dir) = app.path().app_data_dir() else {
-        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    let cmd = crate::voice_reminders::Cmd::Remind {
+        task,
+        in_secs: Some(minutes.saturating_mul(60)),
+        at_min: None,
+        ambiguous: false,
+        tomorrow: false,
     };
-
-    let now = chrono::Utc::now().timestamp();
-    let expires_at = now + (minutes as i64 * 60);
-    let lease_id = format!("remind_{}_{}", task.to_lowercase().replace(' ', "_"), now);
-
-    let lease = crate::memcore::store::ActionLease {
-        id: lease_id,
-        action_type: "reminder".into(),
-        target_name: task.clone(),
-        platform: "voice".into(),
-        target_identifier: task.clone(),
-        expires_at,
-        created_at: now,
-        status: "active".into(),
-    };
-
-    // Never promise a reminder that was not stored.
-    let stored = crate::memcore::with_store(&dir, |s| s.create_action_lease(&lease).is_ok()).unwrap_or(false);
-    if !stored {
-        tracing::warn!("run_create_voice_reminder: lease not stored (memory off or write failed)");
-        return say_and_finish(
-            &app,
-            request_id,
-            "I couldn't save that reminder, sir, because my memory isn't available. Nothing is set.".into(),
-        );
-    }
-
-    let time_str = if minutes == 1 {
-        "1 minute".to_string()
-    } else if minutes < 60 {
-        format!("{} minutes", minutes)
-    } else {
-        let hours = minutes / 60;
-        let rem_mins = minutes % 60;
-        if rem_mins == 0 {
-            if hours == 1 { "1 hour".to_string() } else { format!("{} hours", hours) }
-        } else {
-            format!("{} hours and {} minutes", hours, rem_mins)
-        }
-    };
-
-    let speech = format!("I will remind you to {} in {}, sir.", task, time_str);
-    say_and_finish(&app, request_id, speech)
+    crate::voice_reminders::run(app, cmd).await
 }
 
 /// "Analyse docs in chat with Eesah and tell me how they are"
