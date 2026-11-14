@@ -13,7 +13,8 @@ When NEXUS sets any reminder, the user sees one consistent, minimal, orb-matched
 | Directions: parser, photo card, honest answers, follow-ups, trip reminders, route options | Built, tested (3,225 Rust tests), proven by a machine run on a hidden desktop in quiet mode |
 | Test-quiet mode and hidden-desktop runner | Built, measured |
 | Reminder Roll animation | Built as a browser preview (`frontend/reminder-showcase.html`); owner reviewed and approved the look; changes made after review (monochrome, countdown option, vanish in place) |
-| `reminder:set` event in Rust, stage component, setting, producers | **Not built** (this plan) |
+| `reminder.rs` (event, list, announce/retime/fired/cancel, `reminder_list`), stage `ReminderRoll` with model, slot and styles, `reminderCountdown` setting and Command Hub switch, directions trip reminders sending the event | **Built (R0 to R3), commit `83f9d06` and `4ae79e6`, 3,233 Rust and 1,154 frontend tests, one machine run on the stage; not yet looked at by the owner in the real overlay.** The spoken line is shown by the existing caption system, not by the component. |
+| Voice reminders and timers (R4), timetable and calendar producers (R5), the real-overlay proof (R6) | **Not built** |
 | Owner's own-voice and ears-and-eyes proofs for directions | Not done |
 
 ## 3. Architecture
