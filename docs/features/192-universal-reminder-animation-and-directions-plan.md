@@ -15,7 +15,8 @@ When NEXUS sets any reminder, the user sees one consistent, minimal, orb-matched
 | Reminder Roll animation | Built as a browser preview (`frontend/reminder-showcase.html`); owner reviewed and approved the look; changes made after review (monochrome, countdown option, vanish in place) |
 | `reminder.rs` (event, list, announce/retime/fired/cancel, `reminder_list`), stage `ReminderRoll` with model, slot and styles, `reminderCountdown` setting and Command Hub switch, directions trip reminders sending the event | **Built (R0 to R3), commit `83f9d06` and `4ae79e6`, 3,233 Rust and 1,154 frontend tests, one machine run on the stage; not yet looked at by the owner in the real overlay.** The spoken line is shown by the existing caption system, not by the component. |
 | Voice reminders and timers (R4): `voice_reminders.rs`, "remind me to X at T / in D", "set a timer", "cancel the timer / reminder", "what reminders do I have" | **Built in source, 19 module tests and 1 pipeline test, full lib 3,226 passed; not run live, not heard.** Record: `docs/changes/196-voice-reminders-and-timers.md` |
-| Timetable and calendar producers (R5), the real-overlay proof (R6) | **Not built** |
+| Timetable and calendar producers (R5): study-slot chip 30 minutes ahead, calendar leave-by chip once the trip time is known, alert chip for both | **Built in source, tests added, full lib 3,231 passed; not run live.** Record: `docs/changes/197-timetable-and-calendar-reminders-on-the-universal-reminder.md` |
+| The real-overlay proof (R6) | **Not done** |
 | Owner's own-voice and ears-and-eyes proofs for directions | Not done |
 
 ## 3. Architecture

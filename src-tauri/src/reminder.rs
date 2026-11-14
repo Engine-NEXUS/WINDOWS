@@ -199,6 +199,43 @@ pub fn cancel<R: Runtime>(app: &AppHandle<R>, id: &str) -> bool {
     removed
 }
 
+/// A moved time is worth updating only when it moved by a minute or more. Pure.
+pub fn moved_enough(old_ms: i64, new_ms: i64) -> bool {
+    (new_ms - old_ms).abs() >= 60_000
+}
+
+/// Keep a chip for something that was not "just set" by the user (a timetable slot coming up, a calendar leave-by): show
+/// it with no roll animation, and move it only when its time really moved. Called every tick by the producer, so it
+/// publishes nothing when nothing changed.
+pub fn track<R: Runtime>(app: &AppHandle<R>, ev: ReminderEvent) {
+    let existing = ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|e| e.id == ev.id).map(|e| e.at_ms);
+    match existing {
+        None => {
+            if let Err(e) = restore(app, ev) {
+                tracing::debug!("reminder: not tracked: {e}");
+            }
+        }
+        Some(old) if moved_enough(old, ev.at_ms) => {
+            retime(app, &ev.id, ev.at_ms);
+        }
+        Some(_) => {}
+    }
+}
+
+/// The time has come for something that may or may not be showing as a chip: show the alert chip with the line that was
+/// actually spoken, then drop the entry.
+pub fn fire_now<R: Runtime>(app: &AppHandle<R>, ev: ReminderEvent, line: &str) {
+    if let Err(e) = validate(&ev, now_ms(), false) {
+        tracing::debug!("reminder: no alert chip: {e}");
+        return;
+    }
+    {
+        let mut g = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+        upsert(&mut g, ev.clone());
+    }
+    fired(app, &ev.id, Some(line));
+}
+
 /// IPC: the current list, for a stage that mounted after a reminder was set.
 #[tauri::command]
 pub fn reminder_list() -> Vec<ReminderEvent> {
@@ -267,6 +304,15 @@ mod tests {
         }
         assert_eq!(l.len(), MAX_ACTIVE);
         assert!(l.iter().all(|e| e.id != "a"), "the oldest entry is the one that goes");
+    }
+
+    #[test]
+    fn a_time_that_moved_less_than_a_minute_is_not_worth_an_update() {
+        assert!(!moved_enough(NOW, NOW));
+        assert!(!moved_enough(NOW, NOW + 59_999));
+        assert!(!moved_enough(NOW + 59_999, NOW));
+        assert!(moved_enough(NOW, NOW + 60_000));
+        assert!(moved_enough(NOW + 120_000, NOW));
     }
 
     #[test]
