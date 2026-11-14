@@ -580,7 +580,8 @@ pub fn center_id_for(intent: &ParsedIntent) -> CenterId {
         | ParsedIntent::BlockContact { .. }
         | ParsedIntent::UnblockContact { .. }
         | ParsedIntent::ListBlockedContacts
-        | ParsedIntent::CreateVoiceReminder { .. } => CenterId::Memory,
+        | ParsedIntent::CreateVoiceReminder { .. }
+        | ParsedIntent::VoiceReminders { .. } => CenterId::Memory,
 
         ParsedIntent::PersonaFriend
         | ParsedIntent::PersonaButler
