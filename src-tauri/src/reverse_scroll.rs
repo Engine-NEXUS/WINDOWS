@@ -1,7 +1,7 @@
 //! Pure logic for the scrolling page tour behind "Nexus, reverse engineer this
-//! website": where the browser is placed next to the sidebar, how the wheel
-//! burst adapts to the page, and how far the content actually moved between two
-//! captured frames. No Win32, no network, no Tauri — the caller supplies the
+//! website": where the browser is placed next to the sidebar, when one
+//! viewport step is done, whether the user took over, and how far the content
+//! actually moved between two captured frames. No Win32, no network, no Tauri — the caller supplies the
 //! work area and the frames; everything here is arithmetic that can be unit
 //! tested on any platform.
 
@@ -9,102 +9,129 @@
 use base64::Engine;
 use crate::window_tile::Rect;
 
-/// Left-docked sidebar width + the gap kept between it and the browser.
-pub const SIDEBAR_W: i32 = 540;
 /// Narrower work areas get no sidebar share at all.
 pub const MIN_WORK_W: i32 = 1100;
 /// The browser slice itself must stay at least this wide.
 pub const MIN_PAGE_W: i32 = 640;
 
-/// Where the browser goes and how wide the NEXUS sidebar is. Returns None when
-/// the work area is too small to share (caller then tours in place).
-pub fn plan_page_rect(work: Rect, sidebar_w: i32) -> Option<Rect> {
+/// The browser rectangle for a sidebar whose REAL right edge is `sidebar_right` (physical px, read from the placed
+/// window, so the pair is flush at any display scale): from just right of it to the work area's right/bottom edge.
+/// None when the work area is too small to share (the caller then scans in place and moves nothing).
+pub fn plan_page_rect_beside(work: Rect, sidebar_right: i32, gap: i32) -> Option<Rect> {
     if work.width() < MIN_WORK_W {
         return None;
     }
-    let remaining = work.width() - sidebar_w - 10;
-    if remaining < MIN_PAGE_W {
+    let left = (sidebar_right + gap).max(work.left);
+    if work.right - left < MIN_PAGE_W {
         return None;
     }
-    Some(Rect {
-        left: work.left + sidebar_w + 10,
-        top: work.top,
-        right: work.right,
-        bottom: work.bottom,
-    })
+    Some(Rect { left, top: work.top, right: work.right, bottom: work.bottom })
 }
 
-/// What the tour should do after a scroll + capture step.
+/// What the tour does after one page step (UI Automation scroll or PageDown)
+/// and a fresh capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScrollDecision {
-    /// Keep scrolling (possibly with a different notch count).
-    Continue,
-    /// The page cannot move any further.
-    AtEnd,
-    /// The shift could not be measured; stop rather than scroll blindly.
+pub enum StepDecision {
+    /// Moved far enough: tour this new view.
+    Moved,
+    /// Moved too little: step once more before touring.
+    Retry,
+    /// Moved and reached the bottom: tour this view, then stop.
+    LastView,
+    /// The page did not move at all: stop now, nothing new to show.
+    NoMove,
+    /// Could not tell whether it moved: stop rather than scroll blindly.
     Stalled,
 }
 
-/// Wheel-notch controller: targets a shift of about 80 % of the viewport per
-/// step, widening the burst when the page barely moved and narrowing it when a
-/// single step overshot the viewport.
-pub struct ScrollController {
+/// Steps allowed per viewport (each one is a whole page, so two is plenty).
+pub const MAX_STEPS_PER_VIEWPORT: u32 = 2;
+/// A scroll percentage at or above this is the bottom of the page.
+pub const BOTTOM_PERCENT: f64 = 99.5;
+
+/// Decides one viewport's step. Created fresh for every viewport, so a long
+/// page can never run out of steps halfway (the old shared controller ended
+/// the whole tour after 12 wheel bursts in total).
+pub struct ViewportStepper {
     viewport_h: i32,
-    notches: i32,
-    consecutive_zero: i32,
-    consecutive_none: i32,
-    steps: i32,
+    steps: u32,
 }
 
-impl ScrollController {
+impl ViewportStepper {
     pub fn new(viewport_h: i32) -> Self {
-        Self {
-            viewport_h: if viewport_h <= 0 { 1 } else { viewport_h },
-            notches: 3,
-            consecutive_zero: 0,
-            consecutive_none: 0,
-            steps: 0,
-        }
+        Self { viewport_h: viewport_h.max(1), steps: 0 }
     }
 
-    /// How many wheel notches to send next (starts at 3, always 1..=40).
-    pub fn notches(&self) -> i32 {
-        self.notches
-    }
-
-    /// Call after each scroll + capture with the measured vertical shift in px
-    /// (None = could not measure).
-    pub fn observe(&mut self, shift_px: Option<i32>) -> ScrollDecision {
+    /// `shift_px`: measured content movement between the frames (None = could
+    /// not measure). `pct_before` / `pct_after`: the page's vertical scroll
+    /// percentage from UI Automation when available.
+    pub fn observe(&mut self, shift_px: Option<i32>, pct_before: Option<f64>, pct_after: Option<f64>) -> StepDecision {
         self.steps += 1;
-        if self.steps >= 12 {
-            return ScrollDecision::AtEnd;
+        let last_try = self.steps >= MAX_STEPS_PER_VIEWPORT;
+        let pct_moved = matches!((pct_before, pct_after), (Some(b), Some(a)) if a - b > 0.1);
+        let pixels_moved = shift_px.is_some_and(|s| s >= 4);
+        let at_bottom = pct_after.is_some_and(|p| p >= BOTTOM_PERCENT);
+        if at_bottom && (pct_moved || pixels_moved) {
+            return StepDecision::LastView;
         }
-        let Some(s) = shift_px else {
-            self.consecutive_none += 1;
-            return if self.consecutive_none >= 2 {
-                ScrollDecision::Stalled
-            } else {
-                ScrollDecision::Continue
-            };
-        };
-        self.consecutive_none = 0;
-        if s < 4 {
-            self.consecutive_zero += 1;
-            return if self.consecutive_zero >= 2 {
-                ScrollDecision::AtEnd
-            } else {
-                ScrollDecision::Continue
-            };
+        match shift_px {
+            Some(s) if s as f64 >= 0.5 * self.viewport_h as f64 => StepDecision::Moved,
+            Some(s) if s >= 4 => {
+                if last_try { StepDecision::Moved } else { StepDecision::Retry }
+            }
+            Some(_) => {
+                if pct_moved {
+                    StepDecision::Moved
+                } else if last_try {
+                    StepDecision::NoMove
+                } else {
+                    StepDecision::Retry
+                }
+            }
+            None => {
+                if pct_moved {
+                    StepDecision::Moved
+                } else if last_try {
+                    StepDecision::Stalled
+                } else {
+                    StepDecision::Retry
+                }
+            }
         }
-        self.consecutive_zero = 0;
-        let vh = self.viewport_h as f64;
-        if (s as f64) < 0.55 * vh {
-            self.notches = (self.notches * 3 / 2 + 1).clamp(1, 40);
-        } else if (s as f64) > 0.95 * vh {
-            self.notches = (self.notches * 2 / 3).max(1);
-        }
-        ScrollDecision::Continue
     }
+}
+
+/// Did the user touch the mouse or keyboard since the tour started?
+/// Ticks are `GetTickCount` milliseconds (they wrap every ~49 days, hence the
+/// wrapping arithmetic). NEXUS's own key presses also reset the input clock,
+/// so input within `slack_ms` of `our_send_tick` is ours, not the user's.
+pub fn user_took_over(last_input_tick: u32, baseline_tick: u32, our_send_tick: Option<u32>, slack_ms: u32) -> bool {
+    let newer = (last_input_tick.wrapping_sub(baseline_tick) as i32) > 0;
+    if !newer {
+        return false;
+    }
+    if let Some(ours) = our_send_tick {
+        let delta = last_input_tick.wrapping_sub(ours) as i32;
+        if (0..=slack_ms as i32).contains(&delta) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The area whose movement tells whether the page scrolled: the browser's
+/// document rectangle when UI Automation gives one (no tab strip, no address
+/// bar, which never move and fooled the estimator), otherwise the window minus
+/// its top 12 %.
+pub fn measure_region(doc: Option<(i32, i32, i32, i32)>, win: (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
+    if let Some((x, y, w, h)) = doc {
+        if w >= 100 && h >= 100 {
+            return (x, y, w, h);
+        }
+    }
+    let (x, y, w, h) = win;
+    let cut = h * 12 / 100;
+    (x, y + cut, w, (h - cut).max(1))
 }
 
 /// Grayscale rows for shift estimation: a frame reduced to at most [`GRAY_W`]
@@ -258,96 +285,101 @@ mod tests {
     }
 
     #[test]
-    fn plan_page_rect_splits_a_wide_work_area() {
-        let w = work(100, 50, 1920, 1040);
-        let r = plan_page_rect(w, SIDEBAR_W).expect("1920 shares");
-        assert_eq!(r.left, w.left + SIDEBAR_W + 10);
-        assert_eq!(r.left, w.left + 550);
-        assert_eq!(r.right, w.right);
-        assert_eq!(r.top, w.top);
-        assert_eq!(r.bottom, w.bottom);
+    fn page_rect_sits_flush_beside_the_real_sidebar() {
+        let w = work(0, 0, 1920, 1040);
+        // a 520 px sidebar at x=10 on a 150 % display is 780 px wide: the page starts right after it, not under it
+        let r = plan_page_rect_beside(w, 10 + 780, 12).expect("shares");
+        assert_eq!(r.left, 802);
+        assert_eq!((r.top, r.right, r.bottom), (0, 1920, 1040));
+        // too little room left, or a small screen: nothing is moved
+        assert!(plan_page_rect_beside(w, 1500, 12).is_none());
+        assert!(plan_page_rect_beside(work(0, 0, 1024, 768), 500, 12).is_none());
+        // a sidebar left of the work area never pushes the page outside it
+        assert_eq!(plan_page_rect_beside(work(100, 0, 1920, 1000), 0, 0).unwrap().left, 100);
     }
 
     #[test]
-    fn plan_page_rect_refuses_a_narrow_work_area() {
-        assert!(plan_page_rect(work(0, 0, 1024, 768), SIDEBAR_W).is_none());
-        // 1100 is the floor, but the leftover page half must also fit.
-        assert!(plan_page_rect(work(0, 0, 1100, 800), SIDEBAR_W).is_none());
+    fn stepper_tours_after_one_full_page() {
+        let mut s = ViewportStepper::new(900);
+        assert_eq!(s.observe(Some(860), Some(0.0), Some(30.0)), StepDecision::Moved);
     }
 
     #[test]
-    fn plan_page_rect_holds_the_minimum_page_width() {
-        let w = work(0, 0, 1100, 800);
-        // 1100 - 450 - 10 = 640 == MIN_PAGE_W -> allowed, left = 460.
-        let r = plan_page_rect(w, 450).expect("exact minimum fits");
-        assert_eq!(r.left, w.left + 450 + 10);
-        assert_eq!(r.right - r.left, MIN_PAGE_W);
-        // One more pixel of sidebar and the page half is too narrow.
-        assert!(plan_page_rect(w, 451).is_none());
+    fn stepper_retries_once_then_accepts_a_small_move() {
+        let mut s = ViewportStepper::new(900);
+        assert_eq!(s.observe(Some(120), None, None), StepDecision::Retry);
+        assert_eq!(s.observe(Some(120), None, None), StepDecision::Moved);
     }
 
     #[test]
-    fn controller_converges_to_most_of_a_viewport() {
-        // Each notch scrolls 40 px; the viewport is 900 px.
-        let mut c = ScrollController::new(900);
-        assert_eq!(c.notches(), 3);
-        let mut in_band = false;
-        for _ in 0..5 {
-            let s = c.notches() * 40;
-            let frac = s as f64 / 900.0;
-            if (0.55..=0.95).contains(&frac) {
-                in_band = true;
-            }
-            assert_eq!(c.observe(Some(s)), ScrollDecision::Continue);
+    fn stepper_reports_the_bottom_as_a_last_view() {
+        let mut s = ViewportStepper::new(900);
+        assert_eq!(s.observe(Some(400), Some(80.0), Some(100.0)), StepDecision::LastView);
+        let mut s2 = ViewportStepper::new(900);
+        // already at the bottom and nothing moved: no new view
+        assert_eq!(s2.observe(Some(0), Some(100.0), Some(100.0)), StepDecision::Retry);
+        assert_eq!(s2.observe(Some(0), Some(100.0), Some(100.0)), StepDecision::NoMove);
+    }
+
+    #[test]
+    fn stepper_trusts_the_scroll_percentage_when_pixels_are_unclear() {
+        let mut s = ViewportStepper::new(900);
+        assert_eq!(s.observe(None, Some(10.0), Some(35.0)), StepDecision::Moved);
+        let mut s2 = ViewportStepper::new(900);
+        assert_eq!(s2.observe(Some(0), Some(10.0), Some(35.0)), StepDecision::Moved);
+    }
+
+    #[test]
+    fn stepper_stalls_when_nothing_can_be_measured() {
+        let mut s = ViewportStepper::new(800);
+        assert_eq!(s.observe(None, None, None), StepDecision::Retry);
+        assert_eq!(s.observe(None, None, None), StepDecision::Stalled);
+    }
+
+    #[test]
+    fn stepper_cap_is_per_viewport_not_per_tour() {
+        // Ten viewports in a row, each needing its retry, never run out.
+        for _ in 0..10 {
+            let mut s = ViewportStepper::new(900);
+            assert_eq!(s.observe(Some(200), None, None), StepDecision::Retry);
+            assert_eq!(s.observe(Some(200), None, None), StepDecision::Moved);
         }
-        assert!(in_band, "never landed a step within 55-95 % of the viewport");
+        assert_eq!(MAX_STEPS_PER_VIEWPORT, 2);
     }
 
     #[test]
-    fn controller_ends_a_finite_page_without_asking_for_too_many_notches() {
-        // 3000 px page, 900 px viewport -> 2100 px of scrollable range.
-        let mut c = ScrollController::new(900);
-        let max_scroll = 3000 - 900;
-        let mut pos = 0;
-        let mut ended = false;
-        for step in 0..40 {
-            let want = c.notches() * 40;
-            assert!((1..=40).contains(&c.notches()), "notch out of range");
-            let s = want.min(max_scroll - pos);
-            pos += s;
-            if c.observe(Some(s)) == ScrollDecision::AtEnd {
-                ended = true;
-                assert!(step < 12, "took too long to notice the end");
-                break;
-            }
-        }
-        assert!(ended, "never reported AtEnd");
-        assert_eq!(pos, max_scroll, "never reached the page bottom");
+    fn stepper_needs_no_sane_viewport() {
+        let mut s = ViewportStepper::new(0);
+        assert_eq!(s.observe(Some(100), None, None), StepDecision::Moved);
     }
 
     #[test]
-    fn controller_stalls_after_two_unmeasurable_steps() {
-        let mut c = ScrollController::new(800);
-        assert_eq!(c.observe(None), ScrollDecision::Continue);
-        assert_eq!(c.observe(None), ScrollDecision::Stalled);
+    fn user_took_over_ignores_old_input_and_our_own_keys() {
+        // no input since the tour started
+        assert!(!user_took_over(1_000, 1_000, None, 300));
+        assert!(!user_took_over(900, 1_000, None, 300));
+        // the user moved the mouse
+        assert!(user_took_over(1_500, 1_000, None, 300));
+        // our PageDown at 1_400 reset the clock to 1_450: ours
+        assert!(!user_took_over(1_450, 1_000, Some(1_400), 300));
+        // input long after our key press: the user
+        assert!(user_took_over(2_000, 1_000, Some(1_400), 300));
     }
 
     #[test]
-    fn controller_gives_up_after_twelve_steps() {
-        let mut c = ScrollController::new(900);
-        for _ in 0..11 {
-            assert_eq!(c.observe(Some(700)), ScrollDecision::Continue);
-        }
-        assert_eq!(c.observe(Some(700)), ScrollDecision::AtEnd);
+    fn user_took_over_survives_tick_wraparound() {
+        let baseline = u32::MAX - 100;
+        assert!(user_took_over(50, baseline, None, 300), "input after the wrap is newer");
+        assert!(!user_took_over(baseline - 10, baseline, None, 300));
+        assert!(!user_took_over(20, baseline, Some(u32::MAX - 5), 300), "ours across the wrap");
     }
 
     #[test]
-    fn controller_needs_no_sane_viewport() {
-        let mut c = ScrollController::new(0);
-        assert_eq!(c.observe(Some(100)), ScrollDecision::Continue);
-        assert_eq!(c.observe(Some(0)), ScrollDecision::Continue);
-        assert_eq!(c.observe(None), ScrollDecision::Continue);
-        assert!((1..=40).contains(&c.notches()));
+    fn measure_region_prefers_the_document_rect() {
+        assert_eq!(measure_region(Some((560, 120, 1300, 900)), (550, 0, 1370, 1040)), (560, 120, 1300, 900));
+        // too small or missing: window minus its toolbar band
+        assert_eq!(measure_region(Some((0, 0, 50, 50)), (0, 0, 1000, 1000)), (0, 120, 1000, 880));
+        assert_eq!(measure_region(None, (10, 20, 800, 500)), (10, 80, 800, 440));
     }
 
     /// Deterministic pseudo-random frame (no `rand` dependency).

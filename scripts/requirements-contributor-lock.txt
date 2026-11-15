@@ -1,0 +1,47 @@
+# Runtime dependency closure for Python 3.12; generated from the inspected environment.
+# Includes Windows x64, macOS arm64 and Linux x64 marker branches. Fresh installs pending.
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.14.2
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
+click==8.5.0
+colorama==0.4.6; platform_system == "Windows"
+fastapi==0.141.1
+filelock==3.32.4
+flatbuffers==25.12.19
+fsspec==2026.7.0
+google-crc32c==1.8.0
+h11==0.16.0
+hf-xet==1.6.0
+httptools==0.8.0
+huggingface-hub==0.36.2
+idna==3.19
+moonshine-voice==0.1.5
+numpy==2.5.2
+onnxruntime==1.29.0
+packaging==26.3
+platformdirs==4.11.7
+protobuf==7.36.0
+pycparser==3.0
+pydantic==2.13.5
+pydantic-core==2.46.5
+python-dotenv==1.2.3
+python-multipart==0.0.32
+pyyaml==6.0.3
+regex==2026.8.31
+requests==2.34.2
+safetensors==0.8.0
+sounddevice==0.5.6
+starlette==1.6.0
+tokenizers==0.22.2
+tqdm==4.70.0
+transformers==4.57.6
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+urllib3==2.7.0
+uvicorn==0.52.4
+uvloop==0.23.0; platform_system == "Darwin" or platform_system == "Linux"
+watchfiles==1.2.0
+websockets==17.1

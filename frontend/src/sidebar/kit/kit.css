@@ -75,6 +75,23 @@
   border: 1px solid var(--hub-border);
 }
 
+.kit-logo-tile--image[data-tone="dark"] {
+  background-color: #1f2937;
+}
+
+.kit-logo-tile--glyph {
+  border: 1px solid var(--hub-border);
+}
+
+.kit-logo-glyph {
+  display: inline-flex;
+}
+
+.kit-logo-glyph svg {
+  width: 100%;
+  height: 100%;
+}
+
 .kit-logo-tile--monogram {
   border: 1px solid rgba(255, 255, 255, 0.16);
   color: #ffffff;

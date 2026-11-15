@@ -1,0 +1,55 @@
+{
+  "scope": "offline disposable mirror; no desktop actions",
+  "results": [
+    {
+      "rule": "voice_choice_capture",
+      "killed_by_assertion": true
+    },
+    {
+      "rule": "unique_target",
+      "killed_by_assertion": true
+    },
+    {
+      "rule": "protected_control",
+      "killed_by_assertion": true
+    },
+    {
+      "rule": "current_window",
+      "killed_by_assertion": true
+    },
+    {
+      "rule": "cancellation",
+      "killed_by_assertion": true
+    },
+    {
+      "rule": "effect_success",
+      "killed_by_assertion": true
+    },
+    {
+      "rule": "stale_choice",
+      "killed_by_assertion": true
+    },
+    {
+      "rule": "expired_choice",
+      "killed_by_assertion": true
+    },
+    {
+      "rule": "keyboard_process_lifetime",
+      "killed_by_assertion": true
+    },
+    {
+      "rule": "single_dispatch",
+      "killed_by_assertion": true
+    },
+    {
+      "rule": "request_cancellation",
+      "killed_by_assertion": true
+    },
+    {
+      "rule": "late_dispatch",
+      "killed_by_assertion": true
+    }
+  ],
+  "source_manifest_sha256": "bf825a2782496565399dab2ce6d7acc66197a1e710c5bdfd9c58e4e6ce45cd57",
+  "assessment": "desktop-control-offline-20261106/assessment.json"
+}

@@ -12,7 +12,7 @@
 // Call `initOrbRuntime()` once from stage/main.tsx on mount.
 
 import { preloadSileroVad, preloadMicVad, stopVad } from "../audio/vad";
-import { abortCapture, processTranscript } from "../audio/recorder";
+import { abortCapture, processTranscript, resetMissStreak } from "../audio/recorder";
 import { stopTts, isRustTtsPlaying } from "../audio/ttsPlayer";
 import { transcribeAudio } from "../audio/stt";
 import { useAssistant } from "../store/assistant";
@@ -243,6 +243,7 @@ async function setupOrbWakeListener() {
   try {
     const { listen } = await import("@tauri-apps/api/event");
     await listen<{ source?: string }>("orb:wake", (event) => {
+      resetMissStreak();
       (window as any).__NEXUS_WAKE_SOURCE = event.payload?.source ?? "orb:wake";
       (window as any).__NEXUS_WAKE__?.();
     });
@@ -251,6 +252,7 @@ async function setupOrbWakeListener() {
     });
     await listen("orb:cancel", async () => {
       console.log("[NEXUS] orb:cancel received — canceling active agent & resetting orb");
+      resetMissStreak();
       stopTts();
       stopVad();
       await abortCapture().catch((e) => console.warn("[NEXUS] cancel abortCapture failed:", e));

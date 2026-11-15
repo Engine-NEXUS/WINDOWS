@@ -4,6 +4,7 @@ NEXUS is a Windows-first desktop assistant you talk to. A native client (Tauri v
 
 > **Status: pre-release (v0.1, development builds).** Many features are built and unit-tested but have not been exercised live on real hardware — the engineering log in [`AGENTS.md`](AGENTS.md) lists what was and was not run live for each one. Builds are not code-signed yet.
 
+* Developer setup: [CONTRIBUTING.md](CONTRIBUTING.md) (isolated contributor workflow; device qualification pending)
 * Quick start: [QUICKSTART.md](QUICKSTART.md)
 * Documentation index: [docs/README.md](docs/README.md)
 * Privacy and what leaves your device: [privacy.html](privacy.html) · [terms.html](terms.html)
@@ -57,32 +58,25 @@ The Memory page in the Command Hub shows a 7-day log of exactly what each cloud 
 
 ## Build and run (development)
 
-Prerequisites: Node.js 20+, Rust 1.77+, Windows 10/11 with WebView2. Python 3.11/3.12 is needed for the local STT/NLU sidecars; Node is needed for the agent watcher.
+Start with Git and Node 22 (24 also accepted). From a cloned checkout:
 
-```bash
-npm --prefix frontend install
-node nexus.mjs build        # frontend + Rust release build (adds the required custom-protocol feature)
-node nexus.mjs start        # run with the unified console
+```text
+node nexus.mjs doctor       # read-only prerequisite report
+node nexus.mjs build        # approved setup + isolated contributor compilation
+node nexus.mjs start        # matching existing build only; never stops another instance
 ```
 
-A bare `cargo build --release` produces a binary that points at the Vite dev server; always build through `nexus build` or pass `--features custom-protocol`. `nexus help` lists the other commands (`dev`, `check`, `train`, `collect`, `audit`, `wake`).
+System installations require approval; Python 3.12 is managed in `.venv` and Rust is pinned to 1.93.1. Default contributor builds use separate settings, accounts, credentials and output, exclude the admin brain, and disable personal autostart changes. Existing installed personal builds retain their identity. Global `nexus` registration is optional.
 
-Run the checks CI runs:
-
-```bash
-(cd frontend && npx tsc --noEmit)
-(cd frontend && npm test)
-(cd src-tauri && cargo test --lib --features custom-protocol,admin-brain -- --test-threads=1)
-(cd server/worker && npm test)
-```
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for OS prerequisites, development/test commands, explicit personal builds, packaging, limitations and clean-machine verification. Contributor source/offline checks are not real-device support proof. Do not use a bare Cargo build for onboarding.
 
 ## Platforms
 
 | Platform | State |
 |---|---|
 | Windows 10/11 | Primary target. Installer builds in CI; **unsigned**. |
-| macOS | Compiles in release CI; not tested. Ghost, Hand mode and UIA are Windows-only; the OS keychain is not wired up on macOS yet, so do not use it with real credentials. |
-| Linux | Media control only; not supported. |
+| macOS | Port/setup code and native Keychain dependency exist; live behavior unverified. Initial contributor target: macOS 15+ Apple Silicon. |
+| Linux | Initial contributor target: Ubuntu 24.04 x64 X11. Persistent Secret Service configured; clean-machine/device proofs pending. Other desktops/distributions experimental. |
 
 ## License and third-party software
 

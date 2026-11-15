@@ -1,0 +1,1166 @@
+{
+ "adobe-fonts": {
+  "tone": "light"
+ },
+ "adsense": {
+  "tone": "light"
+ },
+ "adyen": {
+  "tone": "light"
+ },
+ "aider": {
+  "tone": "light"
+ },
+ "akamai": {
+  "tone": "light"
+ },
+ "algolia": {
+  "tone": "light"
+ },
+ "alpine": {
+  "tone": "light"
+ },
+ "amazon-api-gateway": {
+  "tone": "light"
+ },
+ "amplitude": {
+  "tone": "light"
+ },
+ "android": {
+  "tone": "light"
+ },
+ "androidstudio": {
+  "tone": "light"
+ },
+ "angular": {
+  "tone": "light"
+ },
+ "angularjs": {
+  "tone": "light"
+ },
+ "ant-design": {
+  "tone": "light"
+ },
+ "anthropic": {
+  "tone": "light"
+ },
+ "antigravity": {
+  "tone": "light"
+ },
+ "anydesk": {
+  "tone": "light"
+ },
+ "apache": {
+  "tone": "light"
+ },
+ "apollo-graphql": {
+  "tone": "light"
+ },
+ "apple": {
+  "tone": "light"
+ },
+ "appwrite": {
+  "tone": "light"
+ },
+ "aspnet": {
+  "tone": "light"
+ },
+ "astro": {
+  "tone": "light"
+ },
+ "astro-routes": {
+  "tone": "light"
+ },
+ "auth0": {
+  "tone": "light"
+ },
+ "autohotkey": {
+  "tone": "light"
+ },
+ "aws-cloudfront": {
+  "tone": "light"
+ },
+ "aws-s3": {
+  "tone": "light"
+ },
+ "axios": {
+  "tone": "light"
+ },
+ "azure-app-service": {
+  "tone": "light"
+ },
+ "azure-frontdoor": {
+  "tone": "light"
+ },
+ "azure-static-web-apps": {
+  "tone": "light"
+ },
+ "backbone": {
+  "tone": "light"
+ },
+ "balena": {
+  "tone": "light"
+ },
+ "base2": {
+  "tone": "light"
+ },
+ "bentojs": {
+  "tone": "light"
+ },
+ "bigcommerce": {
+  "tone": "light"
+ },
+ "blackmagic": {
+  "tone": "light"
+ },
+ "blender": {
+  "tone": "light"
+ },
+ "bootstrap": {
+  "tone": "light"
+ },
+ "boq": {
+  "tone": "light"
+ },
+ "brave": {
+  "tone": "light"
+ },
+ "brotli": {
+  "tone": "light"
+ },
+ "bugsnag": {
+  "tone": "light"
+ },
+ "bulma": {
+  "tone": "light"
+ },
+ "bun": {
+  "tone": "light"
+ },
+ "c": {
+  "tone": "light"
+ },
+ "c3": {
+  "tone": "light"
+ },
+ "caddy": {
+  "tone": "light"
+ },
+ "canjs": {
+  "tone": "light"
+ },
+ "canva": {
+  "tone": "light"
+ },
+ "chakra-ui": {
+  "tone": "light"
+ },
+ "chart-js": {
+  "tone": "light"
+ },
+ "chatgpt": {
+  "tone": "light"
+ },
+ "chrome": {
+  "tone": "light"
+ },
+ "claude": {
+  "tone": "light"
+ },
+ "clerk": {
+  "tone": "light"
+ },
+ "clipchamp": {
+  "tone": "light"
+ },
+ "cloudflare": {
+  "tone": "light"
+ },
+ "cloudflare-analytics": {
+  "tone": "light"
+ },
+ "cloudflare-cdn": {
+  "tone": "light"
+ },
+ "cloudflare-pages": {
+  "tone": "light"
+ },
+ "cloudflare-turnstile": {
+  "tone": "light"
+ },
+ "cmake": {
+  "tone": "light"
+ },
+ "codex": {
+  "tone": "light"
+ },
+ "contentful": {
+  "tone": "light"
+ },
+ "coop": {
+  "tone": "light"
+ },
+ "copilot": {
+  "tone": "light"
+ },
+ "core-js": {
+  "tone": "light"
+ },
+ "cpp": {
+  "tone": "light"
+ },
+ "createjs": {
+  "tone": "light"
+ },
+ "csharp": {
+  "tone": "light"
+ },
+ "cursor": {
+  "tone": "light"
+ },
+ "d3": {
+  "tone": "light"
+ },
+ "dart": {
+  "tone": "light"
+ },
+ "datadog-logs": {
+  "tone": "light"
+ },
+ "datadog-rum": {
+  "tone": "light"
+ },
+ "davinci": {
+  "tone": "light"
+ },
+ "deepnote": {
+  "tone": "light"
+ },
+ "delphi-cppbuilder": {
+  "tone": "light"
+ },
+ "deno": {
+  "tone": "dark"
+ },
+ "digitalocean": {
+  "tone": "light"
+ },
+ "discord": {
+  "tone": "light"
+ },
+ "django": {
+  "tone": "light"
+ },
+ "docker": {
+  "tone": "light"
+ },
+ "dojo": {
+  "tone": "light"
+ },
+ "dotnet": {
+  "tone": "light"
+ },
+ "dribbble": {
+  "tone": "light"
+ },
+ "drift": {
+  "tone": "light"
+ },
+ "drupal": {
+  "tone": "light"
+ },
+ "edge": {
+  "tone": "light"
+ },
+ "electron": {
+  "tone": "light"
+ },
+ "electron-builder": {
+  "tone": "light"
+ },
+ "elementor": {
+  "tone": "light"
+ },
+ "elixir": {
+  "tone": "light"
+ },
+ "ember": {
+  "tone": "light"
+ },
+ "envoy": {
+  "tone": "light"
+ },
+ "excel": {
+  "tone": "light"
+ },
+ "express": {
+  "tone": "light"
+ },
+ "fastclick": {
+  "tone": "light"
+ },
+ "fastly": {
+  "tone": "light"
+ },
+ "fathom": {
+  "tone": "light"
+ },
+ "figma": {
+  "tone": "light"
+ },
+ "fileexplorer": {
+  "tone": "light"
+ },
+ "firebase": {
+  "tone": "light"
+ },
+ "firebase-auth": {
+  "tone": "light"
+ },
+ "firefox": {
+  "tone": "light"
+ },
+ "flask": {
+  "tone": "light"
+ },
+ "flutter": {
+  "tone": "light"
+ },
+ "flyio": {
+  "tone": "light"
+ },
+ "font-awesome": {
+  "tone": "light"
+ },
+ "foundation": {
+  "tone": "light"
+ },
+ "framer": {
+  "tone": "light"
+ },
+ "framer-motion": {
+  "tone": "light"
+ },
+ "front-matter": {
+  "tone": "light"
+ },
+ "gamemaker": {
+  "tone": "light"
+ },
+ "gatsby": {
+  "tone": "light"
+ },
+ "gatsby-image": {
+  "tone": "light"
+ },
+ "gemini": {
+  "tone": "light"
+ },
+ "ghost": {
+  "tone": "light"
+ },
+ "git": {
+  "tone": "light"
+ },
+ "github": {
+  "tone": "light"
+ },
+ "github-pages": {
+  "tone": "light"
+ },
+ "gitlab": {
+  "tone": "light"
+ },
+ "gmail": {
+  "tone": "light"
+ },
+ "go": {
+  "tone": "light"
+ },
+ "godot": {
+  "tone": "light"
+ },
+ "google": {
+  "tone": "light"
+ },
+ "google-ads": {
+  "tone": "light"
+ },
+ "google-analytics": {
+  "tone": "light"
+ },
+ "google-cloud-firebase": {
+  "tone": "light"
+ },
+ "google-fonts": {
+  "tone": "light"
+ },
+ "google-maps": {
+  "tone": "light"
+ },
+ "google-signin": {
+  "tone": "light"
+ },
+ "google-tag-manager": {
+  "tone": "light"
+ },
+ "googlecalendar": {
+  "tone": "light"
+ },
+ "googlecloud": {
+  "tone": "light"
+ },
+ "googlecolab": {
+  "tone": "light"
+ },
+ "googledrive": {
+  "tone": "light"
+ },
+ "googlemeet": {
+  "tone": "light"
+ },
+ "googlephotos": {
+  "tone": "light"
+ },
+ "googlesheets": {
+  "tone": "light"
+ },
+ "graphael": {
+  "tone": "light"
+ },
+ "gray-matter": {
+  "tone": "light"
+ },
+ "gsap": {
+  "tone": "light"
+ },
+ "gtk": {
+  "tone": "light"
+ },
+ "handlebars": {
+  "tone": "light"
+ },
+ "haskell": {
+  "tone": "light"
+ },
+ "hasura": {
+  "tone": "light"
+ },
+ "hcaptcha": {
+  "tone": "light"
+ },
+ "heap": {
+  "tone": "light"
+ },
+ "heroku": {
+  "tone": "light"
+ },
+ "highcharts": {
+  "tone": "light"
+ },
+ "hotjar": {
+  "tone": "light"
+ },
+ "htmx": {
+  "tone": "light"
+ },
+ "http2": {
+  "tone": "light"
+ },
+ "hubspot": {
+  "tone": "light"
+ },
+ "iconify": {
+  "tone": "light"
+ },
+ "iis": {
+  "tone": "light"
+ },
+ "inertia": {
+  "tone": "light"
+ },
+ "ink": {
+  "tone": "light"
+ },
+ "innosetup": {
+  "tone": "light"
+ },
+ "instagram": {
+  "tone": "light"
+ },
+ "intercom": {
+  "tone": "dark"
+ },
+ "java": {
+  "tone": "light"
+ },
+ "javascript": {
+  "tone": "dark"
+ },
+ "joomla": {
+  "tone": "light"
+ },
+ "jotai": {
+  "tone": "light"
+ },
+ "jquery": {
+  "tone": "light"
+ },
+ "jquery-mobile": {
+  "tone": "light"
+ },
+ "jules": {
+  "tone": "light"
+ },
+ "kendoui": {
+  "tone": "light"
+ },
+ "knockout": {
+  "tone": "light"
+ },
+ "kotlin": {
+  "tone": "light"
+ },
+ "kubernetes": {
+  "tone": "light"
+ },
+ "labjs": {
+  "tone": "light"
+ },
+ "laravel": {
+  "tone": "light"
+ },
+ "launchdarkly": {
+  "tone": "light"
+ },
+ "leaflet": {
+  "tone": "light"
+ },
+ "linkedin": {
+  "tone": "light"
+ },
+ "linkedin-insight": {
+  "tone": "light"
+ },
+ "linux": {
+  "tone": "light"
+ },
+ "lit": {
+  "tone": "light"
+ },
+ "livewire": {
+  "tone": "light"
+ },
+ "locomotive-scroll": {
+  "tone": "light"
+ },
+ "lodash": {
+  "tone": "light"
+ },
+ "lottie": {
+  "tone": "light"
+ },
+ "lottiefiles": {
+  "tone": "light"
+ },
+ "lovable": {
+  "tone": "light"
+ },
+ "lua": {
+  "tone": "light"
+ },
+ "lucide": {
+  "tone": "light"
+ },
+ "magento": {
+  "tone": "light"
+ },
+ "mailchimp": {
+  "tone": "dark"
+ },
+ "mantine": {
+  "tone": "light"
+ },
+ "mapbox": {
+  "tone": "light"
+ },
+ "marionette": {
+  "tone": "light"
+ },
+ "material-ui": {
+  "tone": "light"
+ },
+ "matomo": {
+  "tone": "light"
+ },
+ "matterjs": {
+  "tone": "light"
+ },
+ "maui": {
+  "tone": "light"
+ },
+ "mdx": {
+  "tone": "light"
+ },
+ "medium": {
+  "tone": "light"
+ },
+ "meta-pixel": {
+  "tone": "light"
+ },
+ "microsoft-clarity": {
+  "tone": "light"
+ },
+ "microsofttodo": {
+  "tone": "light"
+ },
+ "mixpanel": {
+  "tone": "light"
+ },
+ "mobx": {
+  "tone": "light"
+ },
+ "modernizr": {
+  "tone": "light"
+ },
+ "moment-timezone": {
+  "tone": "light"
+ },
+ "momentjs": {
+  "tone": "light"
+ },
+ "mongodb": {
+  "tone": "light"
+ },
+ "mootools": {
+  "tone": "light"
+ },
+ "move": {
+  "tone": "light"
+ },
+ "mustache": {
+  "tone": "light"
+ },
+ "netflix": {
+  "tone": "light"
+ },
+ "netlify": {
+  "tone": "light"
+ },
+ "netlify-analytics": {
+  "tone": "light"
+ },
+ "newrelic": {
+  "tone": "light"
+ },
+ "next-image": {
+  "tone": "light"
+ },
+ "next-router": {
+  "tone": "light"
+ },
+ "nextjs": {
+  "tone": "light"
+ },
+ "nginx": {
+  "tone": "light"
+ },
+ "nodejs": {
+  "tone": "light"
+ },
+ "notepad": {
+  "tone": "light"
+ },
+ "notion": {
+  "tone": "light"
+ },
+ "npm": {
+  "tone": "light"
+ },
+ "nsis": {
+  "tone": "light"
+ },
+ "nuxt": {
+  "tone": "light"
+ },
+ "obsidian": {
+  "tone": "light"
+ },
+ "okta": {
+  "tone": "light"
+ },
+ "onedrive": {
+  "tone": "light"
+ },
+ "onenote": {
+  "tone": "light"
+ },
+ "openai": {
+  "tone": "light"
+ },
+ "opencode": {
+  "tone": "light"
+ },
+ "optimizely": {
+  "tone": "light"
+ },
+ "outlook": {
+  "tone": "light"
+ },
+ "parcel": {
+  "tone": "light"
+ },
+ "paypal": {
+  "tone": "light"
+ },
+ "perl": {
+  "tone": "light"
+ },
+ "perplexity": {
+  "tone": "light"
+ },
+ "phosphor-icons": {
+  "tone": "light"
+ },
+ "php": {
+  "tone": "light"
+ },
+ "plausible": {
+  "tone": "light"
+ },
+ "plotly": {
+  "tone": "light"
+ },
+ "pnpm": {
+  "tone": "light"
+ },
+ "pocketbase": {
+  "tone": "dark"
+ },
+ "polymer": {
+  "tone": "light"
+ },
+ "popcornjs": {
+  "tone": "light"
+ },
+ "postgresql": {
+  "tone": "light"
+ },
+ "posthog": {
+  "tone": "light"
+ },
+ "postman": {
+  "tone": "light"
+ },
+ "powerpoint": {
+  "tone": "light"
+ },
+ "powershell": {
+  "tone": "light"
+ },
+ "powertoys": {
+  "tone": "light"
+ },
+ "preact": {
+  "tone": "light"
+ },
+ "prestashop": {
+  "tone": "light"
+ },
+ "prismic": {
+  "tone": "light"
+ },
+ "pusher": {
+  "tone": "light"
+ },
+ "pwa": {
+  "tone": "light"
+ },
+ "python": {
+  "tone": "light"
+ },
+ "qbittorrent": {
+  "tone": "light"
+ },
+ "qt": {
+  "tone": "light"
+ },
+ "qwik": {
+  "tone": "light"
+ },
+ "r": {
+  "tone": "light"
+ },
+ "radix-ui": {
+  "tone": "light"
+ },
+ "rails": {
+  "tone": "light"
+ },
+ "rainmeter": {
+  "tone": "light"
+ },
+ "raphael": {
+  "tone": "light"
+ },
+ "razorpay": {
+  "tone": "light"
+ },
+ "react": {
+  "tone": "light"
+ },
+ "react-headless-ui": {
+  "tone": "light"
+ },
+ "react-hook-form": {
+  "tone": "light"
+ },
+ "react-native-windows": {
+  "tone": "light"
+ },
+ "react-query": {
+  "tone": "light"
+ },
+ "react-router": {
+  "tone": "light"
+ },
+ "recaptcha": {
+  "tone": "light"
+ },
+ "recoil": {
+  "tone": "light"
+ },
+ "reddit": {
+  "tone": "light"
+ },
+ "redis": {
+  "tone": "light"
+ },
+ "redux": {
+  "tone": "light"
+ },
+ "regenerator-runtime": {
+  "tone": "light"
+ },
+ "remix": {
+  "tone": "light"
+ },
+ "remix-router": {
+  "tone": "light"
+ },
+ "render": {
+  "tone": "light"
+ },
+ "riot": {
+  "tone": "light"
+ },
+ "rockstar": {
+  "tone": "light"
+ },
+ "ruby": {
+  "tone": "light"
+ },
+ "rust": {
+  "tone": "light"
+ },
+ "samsung": {
+  "tone": "light"
+ },
+ "sanity": {
+  "tone": "light"
+ },
+ "scala": {
+  "tone": "light"
+ },
+ "scriptaculous": {
+  "tone": "light"
+ },
+ "segment": {
+  "tone": "light"
+ },
+ "semantic-ui": {
+  "tone": "light"
+ },
+ "sentry": {
+  "tone": "light"
+ },
+ "sentry-tracing": {
+  "tone": "light"
+ },
+ "shadcn-ui": {
+  "tone": "light"
+ },
+ "shopify": {
+  "tone": "light"
+ },
+ "signal": {
+  "tone": "light"
+ },
+ "skype": {
+  "tone": "light"
+ },
+ "slack": {
+  "tone": "light"
+ },
+ "socketio": {
+  "tone": "light"
+ },
+ "solid": {
+  "tone": "light"
+ },
+ "spf": {
+  "tone": "light"
+ },
+ "spine": {
+  "tone": "light"
+ },
+ "spotify": {
+  "tone": "light"
+ },
+ "spring": {
+  "tone": "light"
+ },
+ "sql": {
+  "tone": "light"
+ },
+ "sqlite": {
+  "tone": "light"
+ },
+ "square": {
+  "tone": "light"
+ },
+ "squarespace": {
+  "tone": "light"
+ },
+ "squirrel": {
+  "tone": "light"
+ },
+ "steam": {
+  "tone": "light"
+ },
+ "stimulus": {
+  "tone": "light"
+ },
+ "storyblok": {
+  "tone": "light"
+ },
+ "strapi": {
+  "tone": "light"
+ },
+ "stripe": {
+  "tone": "light"
+ },
+ "supabase": {
+  "tone": "light"
+ },
+ "svelte": {
+  "tone": "light"
+ },
+ "svelte-headless-ui": {
+  "tone": "light"
+ },
+ "svelte-routing": {
+  "tone": "light"
+ },
+ "sveltekit": {
+  "tone": "light"
+ },
+ "svg-sprite": {
+  "tone": "light"
+ },
+ "swift": {
+  "tone": "light"
+ },
+ "swiper": {
+  "tone": "light"
+ },
+ "tailscale": {
+  "tone": "light"
+ },
+ "tailwind": {
+  "tone": "light"
+ },
+ "tanstack-router": {
+  "tone": "light"
+ },
+ "tauri": {
+  "tone": "light"
+ },
+ "tauri-webview2": {
+  "tone": "light"
+ },
+ "teams": {
+  "tone": "light"
+ },
+ "telegram": {
+  "tone": "light"
+ },
+ "terminal": {
+  "tone": "light"
+ },
+ "threejs": {
+  "tone": "light"
+ },
+ "tiktok": {
+  "tone": "light"
+ },
+ "tiktok-pixel": {
+  "tone": "light"
+ },
+ "trae": {
+  "tone": "light"
+ },
+ "turbo": {
+  "tone": "light"
+ },
+ "turbopack": {
+  "tone": "light"
+ },
+ "tweenjs": {
+  "tone": "light"
+ },
+ "twitter": {
+  "tone": "light"
+ },
+ "typescript": {
+  "tone": "light"
+ },
+ "typesense": {
+  "tone": "light"
+ },
+ "umami": {
+  "tone": "light"
+ },
+ "underscore": {
+  "tone": "light"
+ },
+ "unity": {
+  "tone": "dark"
+ },
+ "unreal": {
+  "tone": "light"
+ },
+ "vaadin": {
+  "tone": "light"
+ },
+ "vercel": {
+  "tone": "light"
+ },
+ "vercel-analytics": {
+  "tone": "light"
+ },
+ "vercel-speed-insights": {
+  "tone": "light"
+ },
+ "vimeo-embed": {
+  "tone": "light"
+ },
+ "visibilityjs": {
+  "tone": "light"
+ },
+ "visualstudio": {
+  "tone": "light"
+ },
+ "vite": {
+  "tone": "light"
+ },
+ "vlc": {
+  "tone": "light"
+ },
+ "vscode": {
+  "tone": "light"
+ },
+ "vue": {
+  "tone": "light"
+ },
+ "vue-headless-ui": {
+  "tone": "light"
+ },
+ "vue-query": {
+  "tone": "light"
+ },
+ "vue-router": {
+  "tone": "light"
+ },
+ "vwo": {
+  "tone": "light"
+ },
+ "web-vitals": {
+  "tone": "light"
+ },
+ "webflow": {
+  "tone": "light"
+ },
+ "webfontloader": {
+  "tone": "light"
+ },
+ "webpack": {
+  "tone": "light"
+ },
+ "webview2": {
+  "tone": "light"
+ },
+ "whatsapp": {
+  "tone": "light"
+ },
+ "windows": {
+  "tone": "light"
+ },
+ "windsurf": {
+  "tone": "light"
+ },
+ "wix": {
+  "tone": "light"
+ },
+ "woocommerce": {
+  "tone": "light"
+ },
+ "word": {
+  "tone": "light"
+ },
+ "wordpress": {
+  "tone": "light"
+ },
+ "xbox": {
+  "tone": "light"
+ },
+ "yarn": {
+  "tone": "light"
+ },
+ "yoast": {
+  "tone": "light"
+ },
+ "youtube": {
+  "tone": "light"
+ },
+ "youtube-embed": {
+  "tone": "light"
+ },
+ "yup": {
+  "tone": "light"
+ },
+ "zed": {
+  "tone": "light"
+ },
+ "zendesk": {
+  "tone": "light"
+ },
+ "zig": {
+  "tone": "light"
+ },
+ "zod": {
+  "tone": "light"
+ },
+ "zoom": {
+  "tone": "light"
+ },
+ "zstd": {
+  "tone": "light"
+ },
+ "zurb": {
+  "tone": "light"
+ },
+ "zustand": {
+  "tone": "light"
+ }
+}

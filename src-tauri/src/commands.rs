@@ -1192,12 +1192,16 @@ pub(crate) fn finish_sidebar<R: Runtime>(
     dock: Option<&str>,
 ) -> Result<(), String> {
     win.show().map_err(|e| format!("sidebar show: {e}"))?;
+    let sent_back = SIDEBAR_SENT_BACK.load(std::sync::atomic::Ordering::SeqCst);
     // Panels beside it (Architecture map, Maps, place card) were arranged around where the sidebar WAS: move them out of
     // its way now that it is placed and visible, so they sit side by side instead of underneath it.
     crate::panel_layout::apply(app);
-    let _ = win.set_focus();
+    // Sent back (Down arrow): stay behind the other windows until Up or the end of a scan raises it.
+    if !sent_back {
+        let _ = win.set_focus();
+    }
     #[cfg(target_os = "windows")]
-    {
+    if !sent_back {
         if let Ok(hwnd) = win.hwnd() {
             unsafe {
                 use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
@@ -1277,6 +1281,60 @@ pub async fn show_sidebar_view<R: Runtime>(
         .map(|_| ())
 }
 
+/// True while the owner has sent the sidebar behind every other window (Down arrow). Docking, view changes and
+/// updates must not pull it forward again; only `set_sidebar_depth("front")` or the end of a scan does.
+static SIDEBAR_SENT_BACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Pure: what a depth request means for the "sent back" flag. `None` for an unknown word.
+pub(crate) fn depth_flag(depth: &str) -> Option<bool> {
+    match depth {
+        "back" => Some(true),
+        "front" => Some(false),
+        _ => None,
+    }
+}
+
+/// Send the sidebar behind every window (`true`) or raise it to the front, topmost again (`false`).
+pub(crate) fn apply_sidebar_depth<R: Runtime>(app: &tauri::AppHandle<R>, back: bool) {
+    SIDEBAR_SENT_BACK.store(back, std::sync::atomic::Ordering::SeqCst);
+    let Some(win) = app.get_webview_window("sidebar") else {
+        println!("[SIDEBAR] depth {}: no sidebar window open", if back { "back" } else { "front" });
+        return;
+    };
+    println!("[SIDEBAR] depth {}", if back { "back (behind every window)" } else { "front (topmost)" });
+    #[cfg(target_os = "windows")]
+    if let Ok(hwnd) = win.hwnd() {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, HWND_BOTTOM, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        };
+        let _ = win.set_always_on_top(!back);
+        let target = if back { HWND_BOTTOM } else { HWND_TOPMOST };
+        unsafe {
+            let _ = SetWindowPos(HWND(hwnd.0 as _), target, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = win.set_always_on_top(!back);
+    }
+}
+
+/// Raise the sidebar to the front (end of a scan, or any time it was sent back).
+pub(crate) fn raise_sidebar<R: Runtime>(app: &tauri::AppHandle<R>) {
+    if SIDEBAR_SENT_BACK.load(std::sync::atomic::Ordering::SeqCst) {
+        apply_sidebar_depth(app, false);
+    }
+}
+
+/// IPC: Up/Down arrow in the sidebar. "back" = behind every window so the whole screen is visible; "front" = back on top.
+#[tauri::command]
+pub fn set_sidebar_depth<R: Runtime>(app: tauri::AppHandle<R>, depth: String) -> Result<(), String> {
+    let back = depth_flag(&depth).ok_or_else(|| format!("unknown depth '{depth}'"))?;
+    apply_sidebar_depth(&app, back);
+    Ok(())
+}
+
 /// IPC: Re-anchor the unified sidebar to a dock position ("left",
 /// "right", or "center"/"float") keeping the currently active view.
 #[tauri::command]
@@ -1303,6 +1361,7 @@ pub async fn set_sidebar_dock<R: Runtime>(
 pub fn hide_sidebar<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
+    crate::desktop_choices::clear();
     // Destroy the unified sidebar window to free its ~250 MB WebView2 tree.
     let _ = crate::dyn_windows::destroy_window(&app, "sidebar");
     crate::panel_layout::apply(&app);
@@ -1380,24 +1439,40 @@ pub fn active_sidebar_view_for_notify<R: Runtime>(app: &tauri::AppHandle<R>) -> 
     (Some(view), pinned)
 }
 
+/// Gives still-waiting pending content its backdrop; content the sidebar already took stays taken.
+fn attach_backdrop(pending: &mut Option<PendingSidebar>, backdrop: Option<String>) {
+    if let Some(p) = pending.as_mut() {
+        p.backdrop = backdrop;
+    }
+}
+
+/// Stores the alert detail the sidebar reads on mount (see `show_event_detail`).
+fn store_event_detail(payload: &serde_json::Value, backdrop: Option<String>) {
+    let mut pending = PENDING_SIDEBAR.lock().unwrap();
+    *pending = Some(PendingSidebar {
+        // Must not contain the word "coderabbit": that routes the payload to the PR-list panel instead.
+        query: "GitHub alert".to_string(),
+        text: String::new(),
+        backdrop,
+        analysis: Some(payload.clone()),
+        confirmation: None,
+    });
+}
+
 /// Shows a notification's detail in the existing right-docked sidebar (cold mount reads PENDING_SIDEBAR, a live
 /// window receives `sidebar:analysis`). The payload is built in Rust from validated ledger state.
 pub async fn show_event_detail<R: Runtime>(app: tauri::AppHandle<R>, payload: serde_json::Value) -> Result<(), String> {
     let window_existed = app.get_webview_window("sidebar").is_some();
     use crate::notify_hub::{DETAIL_DOCK, DETAIL_VIEW};
+    // The content must be waiting BEFORE a cold sidebar window exists: a fresh window reads it once on mount, and
+    // capturing the backdrop takes a few hundred ms, so storing it afterwards let the window mount first and show an
+    // empty sidebar (the click opened the panel but the alert never appeared). The backdrop is added once captured.
+    store_event_detail(&payload, None);
     let prep = prepare_sidebar(&app, DETAIL_VIEW, Some(DETAIL_DOCK)).await?;
     let backdrop = capture_and_emit_backdrop(&app, &prep);
-    {
-        let mut pending = PENDING_SIDEBAR.lock().unwrap();
-        *pending = Some(PendingSidebar {
-            // Must not contain the word "coderabbit": that routes the payload to the PR-list panel instead.
-            query: "GitHub alert".to_string(),
-            text: String::new(),
-            backdrop,
-            analysis: Some(payload.clone()),
-            confirmation: None,
-        });
-    }
+    // Add the backdrop only if the window has not already taken the content (it is cleared on read); storing it again
+    // here would leave a stale alert to appear in the next cold sidebar.
+    attach_backdrop(&mut PENDING_SIDEBAR.lock().unwrap(), backdrop);
     finish_sidebar(&app, &prep.win, DETAIL_VIEW, Some(DETAIL_DOCK))?;
     spawn_sidebar_live_blur(&app, &prep.win);
     if window_existed {
@@ -1601,7 +1676,8 @@ pub struct NexusSettings {
     #[serde(default = "default_orb_size")]
     pub orb_size: u32,
     /// Orb color theme (hex string, e.g. "#f2b859").
-    /// Default: "#f2b859" (golden amber).
+    /// Default: "#ffffff" (pure white). Profiles saved before the dotted orb hold the old default "#f2b859",
+    /// which the frontend treats as "no choice" (white).
     #[serde(default = "default_orb_color")]
     pub orb_color: String,
     /// Orb fixed position: "top" or "bottom".
@@ -1915,6 +1991,15 @@ pub struct NexusSettings {
     /// Watch latest production deploys (Vercel, Render, Netlify) and announce failure/recovery.
     #[serde(default = "default_memcore")]
     pub memcore_deploy_watch: bool,
+    /// Local listener that coding-agent hooks and webhooks post to. Read at startup (restart to apply).
+    #[serde(default = "default_true")]
+    pub webhook_listener: bool,
+    /// Keeps the screen awake while a request or Ghost task runs. Read at startup (restart to apply).
+    #[serde(default = "default_true")]
+    pub keep_awake_poller: bool,
+    /// Warms local speech recognition ~20 s after boot. Read at startup (restart to apply).
+    #[serde(default = "default_true")]
+    pub stt_prewarm: bool,
     /// Open the CodeRabbit panel on a PR whose CI just failed.
     #[serde(default = "default_memcore")]
     pub coderabbit_auto_open: bool,
@@ -2319,6 +2404,9 @@ impl Default for NexusSettings {
             memcore_timetable: default_memcore(),
             memcore_mail: default_memcore(),
             memcore_github_watch: default_memcore(),
+            webhook_listener: true,
+            keep_awake_poller: true,
+            stt_prewarm: true,
             memcore_deploy_watch: default_memcore(),
             coderabbit_auto_open: default_memcore(),
             notify_native: true,
@@ -2644,6 +2732,29 @@ pub fn settings_patch<R: Runtime>(
     let merged = apply_settings_patch(&current, &patch)?;
     let voice_lock_change = patch.get("speakerVerification").and_then(serde_json::Value::as_bool);
     save_settings_with_voice_intent(app, merged, voice_lock_change)
+}
+
+/// Features page "Run full check": the same audit that runs at startup, returned as rows (OK / WARN / FAIL).
+#[tauri::command]
+pub async fn run_system_audit<R: Runtime>(app: tauri::AppHandle<R>) -> Result<crate::diagnostics::FullSystemAuditReport, String> {
+    use tauri::Manager;
+    let dir = app.path().app_data_dir().ok();
+    tauri::async_runtime::spawn_blocking(move || crate::diagnostics::run_full_system_audit(dir.as_deref()))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Features page test button for notifications: runs one `notify_selftest` scenario through the real pipeline.
+/// Only the fixed scenario names are accepted; nothing touches a provider or credentials.
+#[tauri::command]
+pub fn notify_test<R: Runtime>(app: tauri::AppHandle<R>, scenario: String) -> Result<String, String> {
+    let (_, s, expect) = crate::notify_selftest::SCENARIOS
+        .iter()
+        .find(|(n, _, _)| *n == scenario)
+        .ok_or_else(|| format!("unknown scenario '{scenario}'"))?;
+    let s = *s;
+    std::thread::spawn(move || crate::notify_selftest::run(&app, s));
+    Ok((*expect).to_string())
 }
 
 #[cfg(test)]
@@ -2989,6 +3100,8 @@ pub fn set_autostart<R: Runtime>(
     app: tauri::AppHandle<R>,
     enabled: bool,
 ) -> Result<bool, String> {
+    if cfg!(feature = "contributor") { return Err("Autostart is disabled for contributor builds".into()); }
+
     #[cfg(target_os = "windows")]
     {
         let _ = &app; // unused on Windows — autostart uses PowerShell directly
@@ -3073,6 +3186,8 @@ pub fn set_autostart<R: Runtime>(
 pub fn is_autostart_enabled<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<bool, String> {
+    if cfg!(feature = "contributor") { return Ok(false); }
+
     #[cfg(target_os = "windows")]
     {
         let _ = app; // unused on Windows
@@ -4065,6 +4180,14 @@ pub fn import_settings<R: Runtime>(app: AppHandle<R>, json_str: String) -> Resul
 
 #[cfg(test)]
 mod sidebar_geometry_tests {
+    #[test]
+    fn depth_words_map_to_the_sent_back_flag() {
+        assert_eq!(super::depth_flag("back"), Some(true));
+        assert_eq!(super::depth_flag("front"), Some(false));
+        assert_eq!(super::depth_flag("up"), None);
+        assert_eq!(super::depth_flag(""), None);
+    }
+
     use super::sidebar_geometry;
 
     #[test]
@@ -4330,6 +4453,18 @@ mod nexus_settings_tests {
     }
 
     #[test]
+    fn startup_switches_default_on_and_round_trip() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        for k in ["webhookListener", "keepAwakePoller", "sttPrewarm"] {
+            raw.as_object_mut().unwrap().remove(k);
+        }
+        let parsed: NexusSettings = serde_json::from_value(raw).unwrap();
+        assert!(parsed.webhook_listener && parsed.keep_awake_poller && parsed.stt_prewarm);
+        let back = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(back.get("sttPrewarm"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
     fn memcore_github_watch_defaults_to_true_and_round_trips() {
         let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
         raw.as_object_mut().unwrap().remove("memcoreGithubWatch");
@@ -4370,11 +4505,6 @@ mod nexus_settings_tests {
     }
 
     #[test]
-    fn barge_in_no_wake_defaults_to_true_and_round_trips() {
-        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
-        raw.as_object_mut().unwrap().remove("bargeInNoWake");
-        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
-    #[test]
     fn orb_designs_defaults_empty_and_round_trips() {
         let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
         raw.as_object_mut().unwrap().remove("orbDesigns");
@@ -4391,6 +4521,11 @@ mod nexus_settings_tests {
         assert_eq!(reserialized["orbDesigns"]["idle"], serde_json::json!("breathing"));
     }
 
+    #[test]
+    fn barge_in_no_wake_defaults_to_true_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("bargeInNoWake");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
         assert!(parsed.barge_in_no_wake, "bargeInNoWake must default to true");
         let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
         assert_eq!(reserialized.get("bargeInNoWake"), Some(&serde_json::json!(true)));
@@ -4460,5 +4595,29 @@ mod settings_robustness_tests {
         assert!(parse_settings_lenient("{not json").is_none());
         assert!(parse_settings_lenient("[1,2]").is_none());
         assert!(parse_settings_lenient("").is_none());
+    }
+}
+
+#[cfg(test)]
+mod pending_event_detail_tests {
+    use super::*;
+
+    fn waiting() -> Option<PendingSidebar> {
+        Some(PendingSidebar { query: "GitHub alert".into(), text: String::new(), backdrop: None, analysis: Some(serde_json::json!({"mode":"event_detail"})), confirmation: None })
+    }
+
+    #[test]
+    fn backdrop_is_added_to_content_that_is_still_waiting() {
+        let mut p = waiting();
+        attach_backdrop(&mut p, Some("data:image/png;base64,x".into()));
+        assert_eq!(p.unwrap().backdrop.as_deref(), Some("data:image/png;base64,x"));
+    }
+
+    #[test]
+    fn content_the_sidebar_already_took_is_not_stored_again() {
+        // The sidebar clears pending content when it reads it; a late backdrop must not bring a stale alert back.
+        let mut p: Option<PendingSidebar> = None;
+        attach_backdrop(&mut p, Some("data:image/png;base64,x".into()));
+        assert!(p.is_none());
     }
 }

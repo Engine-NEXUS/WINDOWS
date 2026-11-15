@@ -69,7 +69,7 @@ pub use windows_impl::*;
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use super::eased_steps;
-    use enigo::{Axis, Button, Coordinate, Direction, Enigo, Mouse, Settings};
+    use enigo::{Button, Coordinate, Direction, Enigo, Mouse, Settings};
     use std::thread;
     use std::time::Duration;
     use tauri::Manager;
@@ -176,15 +176,6 @@ mod windows_impl {
         thread::sleep(Duration::from_millis(80));
         e.button(Button::Left, Direction::Click)
             .map_err(|e| format!("double-click 2: {e}"))
-    }
-
-    /// Vertical scroll by lines (positive = down). No cursor motion —
-    /// takeover-safe by construction.
-    #[allow(dead_code)]
-    pub fn scroll(lines: i32) -> Result<(), String> {
-        enigo()?
-            .scroll(lines, Axis::Vertical)
-            .map_err(|e| format!("mouse scroll: {e}"))
     }
 
     /// Drag from current position to a point (press → eased glide → release).

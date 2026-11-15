@@ -587,6 +587,13 @@ pub(crate) fn to_local_intent(intent: &ParsedIntent) -> Option<crate::command_ex
         ParsedIntent::Greeting { reply } => L::Greeting {
             reply: reply.clone(),
         },
+        ParsedIntent::SetAppWebPref { target, pref } => L::SetAppWebPref {
+            target: target.clone(),
+            pref: *pref,
+        },
+        ParsedIntent::ClearAppWebPref { target } => L::ClearAppWebPref {
+            target: target.clone(),
+        },
         _ => return None,
     })
 }
@@ -658,16 +665,50 @@ pub(crate) async fn execute_step<R: Runtime>(
                 ));
             };
             match crate::command_executor::execute_command(local).await {
-                Ok(res) => StepOutcome::Done(mk(
-                    if res.success {
-                        StepStatus::Succeeded
-                    } else {
-                        StepStatus::Failed
-                    },
-                    res.message.clone(),
-                    if res.success { None } else { Some(res.message) },
-                )),
-                Err(e) => StepOutcome::Done(mk(StepStatus::Failed, e.clone(), Some(e))),
+                Ok(res) => {
+                    if let ParsedIntent::OpenUrl { target, url } = &step.intent {
+                        let subject_input = if url.is_empty() { target } else { url };
+                        crate::action_receipt::emit(
+                            app,
+                            &crate::action_receipt::ActionReceipt::for_open_site(subject_input, res.success),
+                        );
+                    } else if res.success {
+                        match &step.intent {
+                            ParsedIntent::MediaPlayPause => {
+                                crate::action_receipt::emit(app, &crate::action_receipt::ActionReceipt::for_media("play_pause"));
+                            }
+                            ParsedIntent::MediaNext => {
+                                crate::action_receipt::emit(app, &crate::action_receipt::ActionReceipt::for_media("next"));
+                            }
+                            ParsedIntent::MediaPrevious => {
+                                crate::action_receipt::emit(app, &crate::action_receipt::ActionReceipt::for_media("previous"));
+                            }
+                            ParsedIntent::MediaStop => {
+                                crate::action_receipt::emit(app, &crate::action_receipt::ActionReceipt::for_media("stop"));
+                            }
+                            _ => {}
+                        }
+                    }
+                    StepOutcome::Done(mk(
+                        if res.success {
+                            StepStatus::Succeeded
+                        } else {
+                            StepStatus::Failed
+                        },
+                        res.message.clone(),
+                        if res.success { None } else { Some(res.message) },
+                    ))
+                }
+                Err(e) => {
+                    if let ParsedIntent::OpenUrl { target, url } = &step.intent {
+                        let subject_input = if url.is_empty() { target } else { url };
+                        crate::action_receipt::emit(
+                            app,
+                            &crate::action_receipt::ActionReceipt::for_open_site(subject_input, false),
+                        );
+                    }
+                    StepOutcome::Done(mk(StepStatus::Failed, e.clone(), Some(e)))
+                }
             }
         }
 

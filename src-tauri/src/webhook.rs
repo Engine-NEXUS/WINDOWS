@@ -143,6 +143,7 @@ fn handle_conn(
     mut stream: std::net::TcpStream,
     token: &str,
     agent_token: &str,
+    on_agent: impl Fn(&crate::agent_hooks::ParsedEvent),
 ) -> Option<String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -210,6 +211,7 @@ fn handle_conn(
                 ev.info.fully_idle,
                 ev.tail.as_ref().map_or(0, |t| t.len())
             );
+            on_agent(&ev);
             crate::agent_hooks::record_event_at(ev.agent, ev.kind, crate::agent_hooks::now_ms(), ev.tail, ev.info);
         }
         respond(&mut stream, code, reply);
@@ -264,7 +266,7 @@ pub fn spawn_listener<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                 if !peer_local {
                     continue;
                 }
-                if let Some(transcript) = handle_conn(stream, &token, &agent_token) {
+                if let Some(transcript) = handle_conn(stream, &token, &agent_token, |ev| crate::agent_lifecycle_runtime::record_hook(&app,ev)) {
                     tracing::info!(
                         "webhook: trigger {:?}...",
                         transcript.chars().take(60).collect::<String>()
@@ -357,7 +359,7 @@ mod agent_event_http_tests {
         let addr = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            handle_conn(stream, "trigger-token", "agent-token")
+            handle_conn(stream, "trigger-token", "agent-token", |_| {})
         });
         let mut c = std::net::TcpStream::connect(addr).unwrap();
         c.write_all(request.as_bytes()).unwrap();
@@ -492,7 +494,7 @@ mod agent_script_tests {
     #[test]
     fn the_generated_script_posts_the_right_request_through_cmd_and_curl() {
         let Some(request) = run_script(&["claude", "notification"], None) else { return };
-        assert!(request.starts_with("POST /agent-event?agent=claude&event=notification HTTP/1.1"), "{request}");
+        assert!(request.starts_with("POST /agent-event?agent=claude&event=notification"), "{request}");
         assert!(request.to_lowercase().contains("authorization: bearer agent-token"), "{request}");
         let ev = parse_event(query_of(&request), body_of(&request)).expect("a valid event");
         assert_eq!((ev.agent, ev.kind, ev.tail), (Agent::Claude, EventKind::Notification, None), "{request}");
@@ -538,7 +540,7 @@ mod agent_script_tests {
         let cwd = std::env::temp_dir().join(format!("nexus aider (x86) {}", std::process::id()));
         std::fs::create_dir_all(&cwd).unwrap();
         let Some((request, out)) = run_script_full(&["aider", "stop"], None, Some(&cwd)) else { return };
-        assert!(request.starts_with("POST /agent-event?agent=aider&event=stop HTTP/1.1"), "{request}");
+        assert!(request.starts_with("POST /agent-event?agent=aider&event=stop"), "{request}");
         assert_eq!(out.trim(), "{}");
         let ev = parse_event(query_of(&request), body_of(&request)).expect("a valid event");
         assert_eq!((ev.agent, ev.kind), (Agent::Aider, EventKind::Stop));

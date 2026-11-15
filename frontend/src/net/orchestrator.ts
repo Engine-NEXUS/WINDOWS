@@ -1254,11 +1254,12 @@ export async function processViaOrchestrator(
 }
 
 /** Cancel the active orchestrator request (barge-in / new wake). */
-export async function cancelOrchestrator(): Promise<void> {
+export async function cancelOrchestrator(forCapture = false): Promise<void> {
   clearClarificationRequest();
   if (!isTauri()) return;
   try {
-    await invoke("orchestrator_cancel");
+    if (forCapture) await invoke("orchestrator_cancel", {forCapture: true});
+    else await invoke("orchestrator_cancel");
     stopTts();
     currentRequestId = null;
   } catch (err) {

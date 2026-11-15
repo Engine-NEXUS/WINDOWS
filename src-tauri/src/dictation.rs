@@ -35,10 +35,14 @@ pub fn refusal(t: &Target) -> Option<String> {
         return Some("That window is protected, sir. I didn't type anything.".to_string());
     }
     if t.process.eq_ignore_ascii_case("nexus.exe") {
-        return Some("The focus is on NEXUS itself, sir. Click where you want the text.".to_string());
+        return Some(
+            "The focus is on NEXUS itself, sir. Click where you want the text.".to_string(),
+        );
     }
     if t.elevated_blocks_us {
-        return Some("That window runs as administrator, so I can't type into it, sir.".to_string());
+        return Some(
+            "That window runs as administrator, so I can't type into it, sir.".to_string(),
+        );
     }
     if t.password_field {
         return Some("That's a password field, sir. I never type into those.".to_string());
@@ -140,10 +144,15 @@ pub fn is_stop_phrase(raw: &str) -> bool {
         .map(|w| w.to_string())
         .collect();
     let mut w: Vec<&str> = words.iter().map(|x| x.as_str()).collect();
-    while w.first().map_or(false, |x| matches!(*x, "nexus" | "hey" | "okay" | "ok" | "please")) {
+    while w.first().map_or(false, |x| {
+        matches!(*x, "nexus" | "hey" | "okay" | "ok" | "please")
+    }) {
         w.remove(0);
     }
-    while w.last().map_or(false, |x| matches!(*x, "please" | "now" | "nexus")) {
+    while w
+        .last()
+        .map_or(false, |x| matches!(*x, "please" | "now" | "nexus"))
+    {
         w.pop();
     }
     matches!(
@@ -170,7 +179,11 @@ pub fn load_dictionary(app_data_dir: &std::path::Path) -> Vec<(String, String)> 
 
 pub fn parse_dictionary(json: &str) -> Vec<(String, String)> {
     serde_json::from_str::<std::collections::BTreeMap<String, String>>(json)
-        .map(|m| m.into_iter().filter(|(k, v)| !k.trim().is_empty() && !v.is_empty()).collect())
+        .map(|m| {
+            m.into_iter()
+                .filter(|(k, v)| !k.trim().is_empty() && !v.is_empty())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -179,6 +192,7 @@ pub fn parse_dictionary(json: &str) -> Vec<(String, String)> {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
     Typed(String),
+    Unconfirmed,
     Undone,
     /// Nothing to type (a pure command with no effect, or only fillers).
     Nothing,
@@ -205,7 +219,11 @@ fn dictate_inner(raw: &str, dictionary: Vec<(String, String)>, oneshot: bool) ->
     }
     let single = single_line_target(&target);
     let ctx = Ctx {
-        at_sentence_start: if oneshot { !single } else { AT_SENTENCE_START.load(Ordering::Relaxed) },
+        at_sentence_start: if oneshot {
+            !single
+        } else {
+            AT_SENTENCE_START.load(Ordering::Relaxed)
+        },
         single_line: single,
         dictionary,
     };
@@ -213,7 +231,10 @@ fn dictate_inner(raw: &str, dictionary: Vec<(String, String)>, oneshot: bool) ->
     LAST_LINE_MS.store(now_ms(), Ordering::Relaxed);
 
     if cleaned.scratch_previous {
-        let undo = HISTORY.lock().map(|mut h| h.undo(&target.title)).unwrap_or(Undo::Nothing);
+        let undo = HISTORY
+            .lock()
+            .map(|mut h| h.undo(&target.title))
+            .unwrap_or(Undo::Nothing);
         return match undo {
             Undo::Backspace(n) => {
                 for _ in 0..n {
@@ -246,22 +267,40 @@ fn dictate_inner(raw: &str, dictionary: Vec<(String, String)>, oneshot: bool) ->
         " "
     };
     let to_type = format!("{joiner}{}", cleaned.text);
-    if let Err(e) = crate::live::commands::keyboard::type_text(&to_type) {
-        return Outcome::Refused(format!("Typing failed: {e}"));
-    }
-    AT_SENTENCE_START.store(dictation_text::ends_sentence(&cleaned.text), Ordering::Relaxed);
+    #[cfg(target_os = "windows")]
+    let insertion = crate::desktop_native::insert_text_checked(&to_type, || {
+        crate::live::commands::keyboard::type_text(&to_type)
+    });
+    #[cfg(not(target_os = "windows"))]
+    let insertion = crate::live::commands::keyboard::type_text(&to_type).map(|_| false);
+    let verified =
+        match insertion {
+            Ok(v) => v,
+            Err(_) => return Outcome::Refused(
+                "The target changed or typing failed. Check the field before trying again, sir."
+                    .into(),
+            ),
+        };
+    AT_SENTENCE_START.store(
+        dictation_text::ends_sentence(&cleaned.text),
+        Ordering::Relaxed,
+    );
     AT_SENTENCE_START_AFTER_BREAK.store(cleaned.text.ends_with('\n'), Ordering::Relaxed);
     if let Ok(mut h) = HISTORY.lock() {
-        h.push(Insertion { chars: to_type.chars().count(), title: target.title.clone() });
+        h.push(Insertion {
+            chars: to_type.chars().count(),
+            title: target.title.clone(),
+        });
     }
-    println!(
-        "[DICT] raw='{}' -> typed {} chars into '{}' ({})",
-        crate::tts::truncate_for_log(raw, 60),
-        to_type.chars().count(),
-        crate::tts::truncate_for_log(&target.title, 40),
-        target.process
+    tracing::info!(
+        "[DICT] inserted_chars={} verified={verified}",
+        to_type.chars().count()
     );
-    Outcome::Typed(cleaned.text)
+    if verified {
+        Outcome::Typed(cleaned.text)
+    } else {
+        Outcome::Unconfirmed
+    }
 }
 
 static AT_SENTENCE_START_AFTER_BREAK: AtomicBool = AtomicBool::new(false);
@@ -270,14 +309,20 @@ static AT_SENTENCE_START_AFTER_BREAK: AtomicBool = AtomicBool::new(false);
 fn foreground_target() -> Target {
     let title = crate::browser_url::foreground_window_title().unwrap_or_default();
     let process = crate::browser_url::foreground_process_name().unwrap_or_default();
-    let mut t = Target { title, process, ..Default::default() };
+    let mut t = Target {
+        title,
+        process,
+        ..Default::default()
+    };
     unsafe {
         use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
         let hwnd = GetForegroundWindow();
         if hwnd.0 != 0 {
             let target_elevated = crate::live::commands::window::window_process_elevated(hwnd);
             let ours = crate::live::commands::window::our_process_elevated();
-            t.elevated_blocks_us = crate::live::commands::window::elevated_block_reason(target_elevated, ours).is_some();
+            t.elevated_blocks_us =
+                crate::live::commands::window::elevated_block_reason(target_elevated, ours)
+                    .is_some();
         }
     }
     t.password_field = focused_is_password();
@@ -305,7 +350,11 @@ mod tests {
     use super::*;
 
     fn tgt(title: &str, process: &str) -> Target {
-        Target { title: title.into(), process: process.into(), ..Default::default() }
+        Target {
+            title: title.into(),
+            process: process.into(),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -315,22 +364,39 @@ mod tests {
         assert!(refusal(&tgt("1Password", "1password.exe")).is_some());
         assert!(refusal(&tgt("Online Banking", "brave.exe")).is_some());
         assert!(refusal(&tgt("NEXUS", "nexus.exe")).is_some());
-        assert!(refusal(&Target { elevated_blocks_us: true, ..tgt("Admin shell", "cmd.exe") }).is_some());
-        assert!(refusal(&Target { password_field: true, ..tgt("Sign in - Brave", "brave.exe") }).is_some());
+        assert!(refusal(&Target {
+            elevated_blocks_us: true,
+            ..tgt("Admin shell", "cmd.exe")
+        })
+        .is_some());
+        assert!(refusal(&Target {
+            password_field: true,
+            ..tgt("Sign in - Brave", "brave.exe")
+        })
+        .is_some());
     }
 
     #[test]
     fn chat_and_search_targets_are_single_line() {
         assert!(single_line_target(&tgt("WhatsApp", "whatsapp.root.exe")));
         assert!(single_line_target(&tgt("Search - Brave", "brave.exe")));
-        assert!(!single_line_target(&tgt("Untitled - Notepad", "notepad.exe")));
+        assert!(!single_line_target(&tgt(
+            "Untitled - Notepad",
+            "notepad.exe"
+        )));
     }
 
     #[test]
     fn undo_backspaces_in_the_same_window_and_falls_back_to_ctrl_z_elsewhere() {
         let mut h = History::default();
-        h.push(Insertion { chars: 12, title: "Notes".into() });
-        h.push(Insertion { chars: 5, title: "Notes".into() });
+        h.push(Insertion {
+            chars: 12,
+            title: "Notes".into(),
+        });
+        h.push(Insertion {
+            chars: 5,
+            title: "Notes".into(),
+        });
         assert!(matches!(h.undo("Notes"), Undo::Backspace(5)));
         assert!(matches!(h.undo("Other window"), Undo::CtrlZ));
         assert!(matches!(h.undo("Notes"), Undo::Nothing));
@@ -340,7 +406,10 @@ mod tests {
     fn history_is_bounded() {
         let mut h = History::default();
         for i in 0..80 {
-            h.push(Insertion { chars: i, title: "t".into() });
+            h.push(Insertion {
+                chars: i,
+                title: "t".into(),
+            });
         }
         assert_eq!(h.items.len(), 50);
     }
@@ -358,10 +427,22 @@ mod tests {
 
     #[test]
     fn stop_phrases_survive_stt_punctuation_and_an_address() {
-        for p in ["Stop typing.", "stop typing", "Nexus, stop dictation.", "Okay, stop.", "Done typing!", "stand down please"] {
+        for p in [
+            "Stop typing.",
+            "stop typing",
+            "Nexus, stop dictation.",
+            "Okay, stop.",
+            "Done typing!",
+            "stand down please",
+        ] {
             assert!(is_stop_phrase(p), "{p}");
         }
-        for p in ["stop the music", "typing is fun", "please stop typing so loudly", "cancel my order"] {
+        for p in [
+            "stop the music",
+            "typing is fun",
+            "please stop typing so loudly",
+            "cancel my order",
+        ] {
             assert!(!is_stop_phrase(p), "{p}");
         }
     }

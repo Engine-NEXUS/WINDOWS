@@ -242,10 +242,10 @@ set AG=%~1\r\n\
 set EV=%~2\r\n\
 if \"%EV%\"==\"\" set EV=stop\r\n\
 if /i \"%AG%\"==\"aider\" goto aider\r\n\
-curl.exe -s -m 3 -X POST \"http://127.0.0.1:@PORT@/agent-event?agent=%AG%&event=%EV%\" -H \"Authorization: Bearer @TOKEN@\" -H \"Content-Type: application/json\" --data-binary @- >nul 2>&1\r\n\
+curl.exe -s -m 3 -X POST \"http://127.0.0.1:@PORT@/agent-event?agent=%AG%&event=%EV%&watch=%NEXUS_WATCH_ID%\" -H \"Authorization: Bearer @TOKEN@\" -H \"Content-Type: application/json\" --data-binary @- >nul 2>&1\r\n\
 goto out\r\n\
 :aider\r\n\
-curl.exe -s -m 3 -X POST \"http://127.0.0.1:@PORT@/agent-event?agent=%AG%&event=%EV%\" -H \"Authorization: Bearer @TOKEN@\" --data-urlencode \"cwd=%CD%\" >nul 2>&1\r\n\
+curl.exe -s -m 3 -X POST \"http://127.0.0.1:@PORT@/agent-event?agent=%AG%&event=%EV%&watch=%NEXUS_WATCH_ID%\" -H \"Authorization: Bearer @TOKEN@\" --data-urlencode \"cwd=%CD%\" >nul 2>&1\r\n\
 :out\r\n\
 if /i \"%AG%\"==\"cursor\" goto cursor\r\n\
 echo {}\r\n\
@@ -259,7 +259,7 @@ const SCRIPT_TEMPLATE: &str = "#!/bin/sh\n\
 # NEXUS agent hook: tells NEXUS that an agent stopped.\n\
 AG=\"$1\"\n\
 EV=\"${2:-stop}\"\n\
-URL=\"http://127.0.0.1:@PORT@/agent-event?agent=$AG&event=$EV\"\n\
+URL=\"http://127.0.0.1:@PORT@/agent-event?agent=$AG&event=$EV&watch=${NEXUS_WATCH_ID:-}\"\n\
 if [ \"$AG\" = \"aider\" ]; then\n\
   curl -s -m 3 -X POST \"$URL\" -H \"Authorization: Bearer @TOKEN@\" --data-urlencode \"cwd=$PWD\" >/dev/null 2>&1\n\
 else\n\
@@ -742,7 +742,7 @@ const post = async (event, body) => {
     await fetch(ENDPOINT + "?agent=opencode&event=" + event, {
       method: "POST",
       headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
-      body: JSON.stringify(body || {}),
+      body: JSON.stringify({ ...(body || {}), nexus_watch_id: process.env.NEXUS_WATCH_ID || undefined }),
       signal: AbortSignal.timeout(3000),
     });
   } catch (_) {}
@@ -754,7 +754,7 @@ export const NexusAgentEvent = async ({ client }) => {
       const res = await client.session.get({ path: { id } });
       return !!(res && res.data && res.data.parentID);
     } catch (_) {
-      return false;
+      return true; // Cannot verify the parent: do not announce this session as a root task.
     }
   };
   const lastAssistantText = async (id) => {
@@ -778,14 +778,16 @@ export const NexusAgentEvent = async ({ client }) => {
     event: async ({ event }) => {
       if (!event || !event.type) return;
       const props = event.properties || {};
+      const rootId = props.sessionID || (props.info && props.info.sessionID);
+      if (rootId && (await isSubSession(rootId))) return;
       if (event.type === "session.idle") {
         const id = props.sessionID;
         if (id && (await isSubSession(id))) return;
-        await post("stop", { last_assistant_message: id ? await lastAssistantText(id) : "" });
+        await post("stop", { session_id: id, last_assistant_message: id ? await lastAssistantText(id) : "" });
       } else if (event.type === "permission.updated" || event.type === "permission.asked") {
-        await post("notification", {});
+        await post("notification", { session_id: rootId });
       } else if (event.type === "message.updated" && props.info && props.info.role === "user") {
-        await post("start", {});
+        await post("start", { session_id: props.info && props.info.sessionID, event_id: props.info.id ? "user:" + props.info.id : undefined });
       }
     },
   };
@@ -808,7 +810,7 @@ const post = async (event, body) => {
     await fetch(ENDPOINT + "?agent=kilo&event=" + event, {
       method: "POST",
       headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
-      body: JSON.stringify(body || {}),
+      body: JSON.stringify({ ...(body || {}), nexus_watch_id: process.env.NEXUS_WATCH_ID || undefined }),
       signal: AbortSignal.timeout(3000),
     });
   } catch (_) {}
@@ -820,7 +822,7 @@ const server = async ({ client }) => {
       const res = await client.session.get({ path: { id } });
       return !!(res && res.data && res.data.parentID);
     } catch (_) {
-      return false;
+      return true; // Cannot verify the parent: do not announce this session as a root task.
     }
   };
   const lastAssistantText = async (id) => {
@@ -844,14 +846,16 @@ const server = async ({ client }) => {
     event: async ({ event }) => {
       if (!event || !event.type) return;
       const props = event.properties || {};
+      const rootId = props.sessionID || (props.info && props.info.sessionID);
+      if (rootId && (await isSubSession(rootId))) return;
       if (event.type === "session.idle") {
         const id = props.sessionID;
         if (id && (await isSubSession(id))) return;
-        await post("stop", { last_assistant_message: id ? await lastAssistantText(id) : "" });
+        await post("stop", { session_id: id, last_assistant_message: id ? await lastAssistantText(id) : "" });
       } else if (event.type === "permission.updated" || event.type === "permission.asked") {
-        await post("notification", {});
+        await post("notification", { session_id: rootId });
       } else if (event.type === "message.updated" && props.info && props.info.role === "user") {
-        await post("start", {});
+        await post("start", { session_id: props.info && props.info.sessionID, event_id: props.info.id ? "user:" + props.info.id : undefined });
       }
     },
   };
@@ -1147,6 +1151,7 @@ pub struct ParsedEvent {
     pub source: Option<TailSource>,
     /// The folder the agent works in, when its hook says (`cwd`, or the first of Antigravity's `workspacePaths`).
     pub cwd: Option<String>,
+    pub identity: crate::agent_lifecycle::Identity,
 }
 
 fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
@@ -1295,7 +1300,20 @@ pub fn parse_event(query: &str, body: &str) -> Option<ParsedEvent> {
             .map(String::from)
     });
     let cwd = cwd.or_else(|| form_value(body, "cwd")).filter(|c| !c.trim().is_empty());
-    Some(ParsedEvent { agent, kind, tail, info, source, cwd })
+    let field = |names: &[&str]| -> Option<String> {
+        names.iter().find_map(|name| json.as_ref().and_then(|v|v.get(*name)).and_then(|v|v.as_str()))
+            .filter(|v| !v.is_empty() && v.len()<=512 && !v.chars().any(char::is_control)).map(str::to_string)
+    };
+    let identity = crate::agent_lifecycle::Identity {
+        // Transcript paths are often Stop-only; using them as sessions would strand a legacy Start in another scope.
+        session: field(&["session_id","sessionID","thread-id","conversation_id","conversationId","trajectory_id","trajectoryId"]),
+        // Antigravity's invocation ids must not be mistaken for outer task executions.
+        execution: if agent==Agent::Antigravity {None} else {field(&["execution_id","executionID","turn_id","turn-id"])},
+        event: field(&["event_id","eventID"]),
+        owned_watch: query_value(query,"watch").filter(|v| !v.is_empty() && v.len()<=80 && v.bytes().all(|c|c.is_ascii_alphanumeric() || c==b'-' || c==b'_'))
+            .map(str::to_string).or_else(||field(&["nexus_watch_id"])),
+    };
+    Some(ParsedEvent { agent, kind, tail, info, source, cwd, identity })
 }
 
 static CWDS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
@@ -1941,7 +1959,7 @@ mod tests {
 
     #[test]
     fn the_endpoint_accepts_only_an_authorised_known_agent_and_event() {
-        let ev = |agent, kind| Some(ParsedEvent { agent, kind, tail: None, info: StopInfo::default(), source: None, cwd: None });
+        let ev = |agent, kind| Some(ParsedEvent { agent, kind, tail: None, info: StopInfo::default(), source: None, cwd: None, identity: Default::default() });
         // new script: agent and event in the URL
         assert_eq!(route_event(true, "agent=claude&event=stop", ""), (202, r#"{"ok":true}"#, ev(Agent::Claude, EventKind::Stop)));
         assert_eq!(route_event(true, "agent=codex&event=notification", "{}").2, ev(Agent::Codex, EventKind::Notification));
@@ -2646,7 +2664,7 @@ await hooks.event({ event: { type: "session.idle", properties: { sessionID: "roo
     }
 
     fn transcript_event(raw: &str) -> ParsedEvent {
-        ParsedEvent { agent: Agent::Antigravity, kind: EventKind::Stop, tail: None, info: StopInfo::default(), source: Some(TailSource::Transcript(raw.to_string())), cwd: None }
+        ParsedEvent { agent: Agent::Antigravity, kind: EventKind::Stop, tail: None, info: StopInfo::default(), source: Some(TailSource::Transcript(raw.to_string())), cwd: None, identity: Default::default() }
     }
 
     #[test]
@@ -2771,7 +2789,7 @@ await hooks.event({ event: { type: "session.idle", properties: { sessionID: "roo
         let dir = tmp("aider_cwd");
         let history = "# aider chat started at 2026-10-19 10:00:00\n\n> Model: x\n\n#### add a retry\n\nI added a retry loop.\n\n> Applied edit to a.py\n\n#### now run the tests\n\nAll 4 tests passed.\n\n> Tokens: 1k sent\n";
         std::fs::write(dir.join(".aider.chat.history.md"), history).unwrap();
-        let mk = |cwd: String| ParsedEvent { agent: Agent::Aider, kind: EventKind::Stop, tail: None, info: StopInfo::default(), source: Some(TailSource::AiderCwd(cwd)), cwd: None };
+        let mk = |cwd: String| ParsedEvent { agent: Agent::Aider, kind: EventKind::Stop, tail: None, info: StopInfo::default(), source: Some(TailSource::AiderCwd(cwd)), cwd: None, identity: Default::default() };
         let mut ev = mk(dir.display().to_string());
         resolve_tail_with(&mut ev, Some(&dir));
         assert_eq!(ev.tail.as_deref(), Some("All 4 tests passed."));

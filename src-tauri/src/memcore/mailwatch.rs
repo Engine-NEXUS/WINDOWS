@@ -141,8 +141,8 @@ pub fn last_alert_sender() -> Option<(String, String)> {
 // ─── Storing + alerting ─────────────────────────────────────────────
 
 /// Store a classified email. `true` = it is new (not seen before).
-fn store_mail(store: &Store, t: &Triage, m: &MailMeta, account: &str, now: i64) -> bool {
-    let stored = mailtriage::to_stored(t, m, account);
+fn store_mail(store: &Store, t: &Triage, m: &MailMeta, account: &str, now: i64, names: &SelfNames) -> bool {
+    let stored = mailtriage::to_stored_with(t, m, account, names);
     let value = serde_json::to_string(&stored).unwrap_or_default();
     matches!(
         store.observe(
@@ -162,15 +162,23 @@ fn store_mail(store: &Store, t: &Triage, m: &MailMeta, account: &str, now: i64) 
 
 /// Everything worth surfacing from a set of messages: classify, drop Low,
 /// store, and return the new ones in urgency order. Pure over the store.
+#[cfg(test)]
 pub fn triage_and_store(store: &Store, metas: &[MailMeta], account: &str, now: i64) -> Vec<(Triage, MailMeta)> {
+    triage_and_store_with(store, metas, account, now, &SelfNames::none())
+}
+
+pub fn triage_and_store_with(store: &Store, metas: &[MailMeta], account: &str, now: i64, names: &SelfNames) -> Vec<(Triage, MailMeta)> {
     let muted = muted_senders(store);
     let mut fresh: Vec<(Triage, MailMeta)> = vec![];
     for m in metas {
+        if mailtriage::is_self_sent(&m.from_email, account, names) {
+            continue;
+        }
         let Some(t) = mailtriage::classify(m, &muted) else { continue };
         if mailtriage::urgency_rank(t.urgency) < mailtriage::urgency_rank(AlertUrgency::Medium) {
             continue;
         }
-        if store_mail(store, &t, m, account, now) {
+        if store_mail(store, &t, m, account, now, names) {
             fresh.push((t, m.clone()));
         }
     }
@@ -180,6 +188,22 @@ pub fn triage_and_store(store: &Store, metas: &[MailMeta], account: &str, now: i
             .then(b.1.date_ms.cmp(&a.1.date_ms))
     });
     fresh
+}
+
+/// Remove filed mail the owner sent from one of their own addresses (filed before `is_self_sent` existed).
+/// Returns how many records were removed.
+pub fn purge_self_sent(store: &Store, names: &SelfNames, now: i64) -> usize {
+    let doomed: Vec<String> = store
+        .recent(Tier::Mail, 500)
+        .into_iter()
+        .filter(|h| {
+            serde_json::from_str::<mailtriage::StoredMail>(&h.value)
+                .map(|m| mailtriage::is_self_sent(&m.email, &m.account, names))
+                .unwrap_or(false)
+        })
+        .map(|h| h.key)
+        .collect();
+    doomed.iter().map(|k| store.forget_key(k, "mailwatch", now)).sum()
 }
 
 fn speak_address<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
@@ -219,7 +243,10 @@ fn fire_alerts<R: Runtime>(app: &AppHandle<R>, items: &[(Triage, MailMeta)], acc
         let dir = app.path().app_data_dir().ok();
         let names = dir.as_deref().map(SelfNames::load).unwrap_or_else(SelfNames::none);
         let text = mailtriage::batch_text_with(items, address.as_deref(), &names);
-        crate::proactive_policy::submit_event(app, format!("mail_batch_{}", items[0].1.id), text, top, batch_key(items));
+        let alert_id = format!("mail_batch_{}", items[0].1.id);
+        let ids: Vec<String> = items.iter().map(|(_, m)| m.id.clone()).collect();
+        super::briefing::note_batch(&alert_id, &ids);
+        crate::proactive_policy::submit_event(app, alert_id, text, top, batch_key(items));
         return;
     }
     // Spawn one task to compute plain wording and submit alerts in order.
@@ -290,6 +317,33 @@ fn fire_alerts<R: Runtime>(app: &AppHandle<R>, items: &[(Triage, MailMeta)], acc
 
 // ─── Polling one account ────────────────────────────────────────────
 
+/// At most this many bodies are read in one poll.
+const MAX_BODIES_PER_POLL: usize = 5;
+
+/// Read the body of each NEW mail that triage already rates Medium or higher (never the poll's other mail, never the
+/// quiet baseline), so one sentence can say what it asks and by when. The text goes into `MailMeta::body` only: it is
+/// held in memory, not stored (`to_stored_with` never reads it), not logged (`MailMeta`'s `Debug` hides it) and not
+/// spoken. A failed read leaves the body empty and the explanation falls back to the subject and preview.
+async fn attach_bodies(dir: &std::path::Path, client: &crate::google::client::GoogleClient, metas: &mut [MailMeta]) {
+    let muted = super::with_store(dir, |s| muted_senders(s)).unwrap_or_default();
+    let medium = mailtriage::urgency_rank(AlertUrgency::Medium);
+    let mut read = 0;
+    for m in metas.iter_mut() {
+        if read >= MAX_BODIES_PER_POLL {
+            break;
+        }
+        let important = mailtriage::classify(m, &muted).is_some_and(|t| mailtriage::urgency_rank(t.urgency) >= medium);
+        if !important {
+            continue;
+        }
+        read += 1;
+        match google_io::gmail_body(client, &m.id).await {
+            Ok(b) => m.body = b,
+            Err(e) => tracing::debug!("mailwatch: could not read the body of {}: {e}", m.id),
+        }
+    }
+}
+
 async fn fetch_metas(client: &crate::google::client::GoogleClient, ids: &[String]) -> Vec<MailMeta> {
     let mut out = vec![];
     for id in ids.iter().take(MAX_FETCH_PER_POLL) {
@@ -319,11 +373,12 @@ async fn baseline(
     let history_id = google_io::gmail_history_id(client).await?;
     let ids = google_io::gmail_recent_ids(client).await.unwrap_or_default();
     let metas = fetch_metas(client, &ids).await;
+    let names = SelfNames::load(dir);
     let now = chrono::Utc::now().timestamp();
     let key = format!("gmail_hist:{account_key}");
     let n = super::with_store(dir, |s| {
         s.batch(|s| {
-            let n = triage_and_store(s, &metas, account_key, now).len();
+            let n = triage_and_store_with(s, &metas, account_key, now, &names).len();
             s.meta_set(&key, &history_id);
             n
         })
@@ -373,11 +428,13 @@ pub async fn poll_core(
         }
     }
 
-    let metas = fetch_metas(client, &ids).await;
+    let mut metas = fetch_metas(client, &ids).await;
+    attach_bodies(dir, client, &mut metas).await;
+    let names = SelfNames::load(dir);
     let now = chrono::Utc::now().timestamp();
     let fresh = super::with_store(dir, |s| {
         s.batch(|s| {
-            let fresh = triage_and_store(s, &metas, account_key, now);
+            let fresh = triage_and_store_with(s, &metas, account_key, now, &names);
             s.meta_set(&key, &newest);
             fresh
         })
@@ -475,11 +532,20 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
         let mut next_due: HashMap<String, Instant> = HashMap::new();
         let mut failures: HashMap<String, u32> = HashMap::new();
         let mut noted_auth: HashMap<String, bool> = HashMap::new();
+        let mut purged = false;
         loop {
             tokio::time::sleep(Duration::from_secs(TICK_SECS)).await;
             let Ok(dir) = app.path().app_data_dir() else { continue };
             if !super::enabled(&dir) || !super::flag(&dir, "memcoreMail", true) {
                 continue;
+            }
+            if !purged {
+                purged = true;
+                let names = SelfNames::load(&dir);
+                let now = chrono::Utc::now().timestamp();
+                if let Some(n) = super::with_store(&dir, |s| purge_self_sent(s, &names, now)).filter(|n| *n > 0) {
+                    tracing::info!("mailwatch: removed {n} filed email(s) you sent yourself");
+                }
             }
             let accounts = google_io::list_accounts(google_io::can_read_mail);
             if accounts.is_empty() {
@@ -538,6 +604,7 @@ mod tests {
             labels: labels.iter().map(|s| s.to_string()).collect(),
             date_ms: date,
             rfc822_id: String::new(),
+            body: String::new(),
         }
     }
 
@@ -560,6 +627,27 @@ mod tests {
         ];
         assert_eq!(batch_key(&mixed), None);
         assert_eq!(batch_key(&[]), None);
+    }
+
+    #[test]
+    fn mail_from_your_own_addresses_is_never_filed_and_old_copies_are_purged() {
+        let s = Store::open_in_memory().unwrap();
+        let names = SelfNames::from_parts(&["Chitkul Lakshya".into(), "me@gmail.com".into(), "me@college.ac.in".into()]);
+        let hall = |id: &str, from: &str| mail(id, from, "Hall ticket released for end-sem exams", &["INBOX"], 100);
+        // from the other connected account, and from the receiving account itself: skipped
+        let fresh = triage_and_store_with(&s, &[hall("a", "Me <me@college.ac.in>"), hall("b", "Me <me@gmail.com>")], "me@gmail.com", 1_000, &names);
+        assert!(fresh.is_empty());
+        assert_eq!(s.count(Tier::Mail), 0);
+        // a real exam cell still files
+        let fresh = triage_and_store_with(&s, &[hall("c", "Exam Cell <exams@vit.edu>")], "me@gmail.com", 1_000, &names);
+        assert_eq!(fresh.len(), 1);
+        // a self-sent copy filed before the rule existed is removed; the real one stays
+        let old = triage_and_store(&s, &[hall("d", "Me <me@college.ac.in>")], "me@gmail.com", 1_000);
+        assert_eq!(old.len(), 1);
+        assert_eq!(s.count(Tier::Mail), 2);
+        assert_eq!(purge_self_sent(&s, &names, 2_000), 1);
+        assert_eq!(s.count(Tier::Mail), 1);
+        assert_eq!(purge_self_sent(&s, &names, 2_000), 0);
     }
 
     #[test]
@@ -774,8 +862,12 @@ mod tests {
             "{hist_calls:?}"
         );
         assert!(hist_calls[1].contains("pageToken=p2"), "{hist_calls:?}");
-        assert!(log.iter().all(|t| !t.contains("format=full")), "message bodies must never be requested: {log:?}");
-        assert!(log.iter().filter(|t| t.contains("/messages/")).all(|t| t.contains("format=metadata")));
+        // Bodies are read ONLY for new mail already rated important by the poll (e and c), never in the quiet baseline
+        // (a, b), never for mail the triage drops, and each once.
+        let full: Vec<&String> = log.iter().filter(|t| t.contains("format=full")).collect();
+        assert_eq!(full.len(), 2, "one body read per important new mail: {log:?}");
+        assert!(full.iter().any(|t| t.contains("/messages/e?")) && full.iter().any(|t| t.contains("/messages/c?")), "{full:?}");
+        assert!(log.iter().filter(|t| t.contains("/messages/")).filter(|t| !t.contains("format=full")).all(|t| t.contains("format=metadata")));
     }
 
     #[test]

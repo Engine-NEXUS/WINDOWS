@@ -649,7 +649,7 @@ mod tests {
         let path = std::env::var("APPDATA")
             .map(std::path::PathBuf::from)
             .unwrap()
-            .join("com.nexus.assistant")
+            .join(crate::app_dirs::APP_ID)
             .join("missed_intents.jsonl");
         let Ok(text) = std::fs::read_to_string(&path) else {
             eprintln!("no missed_intents.jsonl — skipping");

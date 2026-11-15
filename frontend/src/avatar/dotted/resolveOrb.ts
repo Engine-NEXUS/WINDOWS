@@ -4,12 +4,16 @@
 
 import { MODE_FRAMES } from "./engine/registry";
 import { BASE_PROFILES, scaleCounts, scaleRadii, type ModeOpts } from "./engine/profiles";
-import { PRESETS, STATE_TO_MODE, type ModeKey } from "./presets";
+import type { ModeFrame } from "./engine/types";
+import { frameCircle } from "./nexusModes";
+import { PRESETS, STATE_TO_MODE } from "./presets";
 import type { OrbState } from "./types";
 
-export type OrbDesign = OrbState;
+/** The nine upstream designs plus NEXUS's own plain `circle` (idle). */
+export type OrbDesign = OrbState | "circle";
 
 export const ORB_DESIGNS: readonly OrbDesign[] = [
+  "circle",
   "breathing",
   "listening",
   "working",
@@ -22,7 +26,9 @@ export const ORB_DESIGNS: readonly OrbDesign[] = [
 ];
 
 export interface ResolvedOrb {
-  mode: ModeKey;
+  design: OrbDesign;
+  /** Geometry for one instant: (size, t, opts) -> finished frame. */
+  frame: ModeFrame;
   /** Clock multiplier baked into the preset. */
   speed: number;
   opts: ModeOpts;
@@ -41,6 +47,12 @@ export function resolveOrb(design: OrbDesign, size: number): ResolvedOrb {
   const hit = cache.get(key);
   if (hit) return hit;
 
+  if (design === "circle") {
+    const own: ResolvedOrb = { design, frame: frameCircle, speed: 1, opts: {} };
+    cache.set(key, own);
+    return own;
+  }
+
   const mode = STATE_TO_MODE[design];
   const preset = PRESETS[mode][64];
   // Count multiplier relative to the dense base profile; never denser than the base (1).
@@ -50,7 +62,7 @@ export function resolveOrb(design: OrbDesign, size: number): ResolvedOrb {
   if (preset.size !== 1) opts = scaleRadii(opts, preset.size);
   if (preset.extra) opts = { ...opts, ...preset.extra };
 
-  const resolved: ResolvedOrb = { mode, speed: preset.speed, opts };
+  const resolved: ResolvedOrb = { design, frame: MODE_FRAMES[mode], speed: preset.speed, opts };
   cache.set(key, resolved);
   return resolved;
 }
@@ -58,5 +70,5 @@ export function resolveOrb(design: OrbDesign, size: number): ResolvedOrb {
 /** One finished frame (pure geometry) for tests and the preview thumbnails. */
 export function frameFor(design: OrbDesign, size: number, tSeconds: number) {
   const r = resolveOrb(design, size);
-  return MODE_FRAMES[r.mode](size, tSeconds * r.speed, r.opts);
+  return r.frame(size, tSeconds * r.speed, r.opts);
 }

@@ -320,7 +320,14 @@ screen or stated by the context (names, numbers, prices, claims).",
 /// spoken word budgets) plus a mode block that asks HOW each section is
 /// built and ties it to the detected stack. `techs` are `(id, display name)`
 /// pairs from the scanner; `prior_sections` are the section names already
-/// covered by earlier viewports. Pure.
+/// covered by earlier viewports. `target` picks website or desktop-app
+/// wording (an app has no "page", "footer" or scrolling). Pure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevTarget {
+    Site,
+    App,
+}
+
 pub fn build_reverse_prompt(
     user_prompt: &str,
     context_block: &str,
@@ -329,6 +336,7 @@ pub fn build_reverse_prompt(
     viewport_idx: usize,
     viewport_total_hint: usize,
     prior_sections: &[String],
+    target: RevTarget,
 ) -> String {
     let base = build_tour_prompt(user_prompt, context_block);
     let known = if techs.is_empty() {
@@ -353,6 +361,26 @@ pub fn build_reverse_prompt(
             .join("; ");
         if joined.is_empty() { "none".to_string() } else { joined }
     };
+    if target == RevTarget::App {
+        return format!(
+            "{base}\n\n\
+REVERSE ENGINEER MODE. The user wants to understand how this desktop application is built. This \
+image is the application's current window. Detected technology stack (from the app's install \
+folder, not from the image): {stack}. Known technology ids you may reference: {known}.\n\
+For each item explain HOW it is built and how one could recreate it: layout (sidebar, tabs, \
+panels, toolbar…), the control type (list, tree, editor, settings form…), notable visual effects, \
+and where the screen supports it, which detected technology likely produces it. Only claim a \
+technology link when the screen or the stack list plausibly supports it; otherwise leave \
+\"stack_refs\" empty. Never present a guess as fact: say 'likely' when inferring. This is an \
+application window, not a web page: do not talk about scrolling, page sections or a footer. At \
+most 4 items. Start the overview by naming the main area of the window.\n\
+Add to every item an optional field \"stack_refs\": array of technology ids from the list above \
+(at most 3).",
+            stack = stack,
+            known = known,
+            base = base,
+        );
+    }
     format!(
         "{base}\n\n\
 REVERSE ENGINEER MODE. The user wants to understand how this website is built. This image is \
@@ -1165,6 +1193,7 @@ pub async fn analyze_reverse_image<R: Runtime>(
     prior_sections: &[String],
     b64: &str,
     region: (i32, i32, i32, i32),
+    target: RevTarget,
 ) -> Result<TourScript, String> {
     let prompt = build_reverse_prompt(
         user_prompt,
@@ -1174,6 +1203,7 @@ pub async fn analyze_reverse_image<R: Runtime>(
         viewport_idx,
         viewport_total_hint,
         prior_sections,
+        target,
     );
     let ids: Vec<String> = techs.iter().map(|(id, _)| id.clone()).collect();
     analyze_tour_script(app, &prompt, b64, region, move |text| {
@@ -1958,6 +1988,7 @@ mod tests {
             1,
             5,
             &prior,
+            RevTarget::Site,
         );
         for needle in [
             "REVERSE ENGINEER MODE",
@@ -1985,12 +2016,35 @@ mod tests {
 
     #[test]
     fn reverse_prompt_handles_empty_stack_and_history() {
-        let p = build_reverse_prompt("how is this built", "", "", &[], 0, 1, &[]);
+        let p = build_reverse_prompt("how is this built", "", "", &[], 0, 1, &[], RevTarget::Site);
         assert!(p.contains("section 1 of about 1"));
         assert!(p.contains(
             "Detected technology stack (from the page's code, not from the image): none detected."
         ));
         assert!(p.contains("Known technology ids you may reference: none."));
         assert!(p.contains("Do not repeat sections already covered: none."));
+    }
+
+    #[test]
+    fn reverse_prompt_app_mode_never_talks_about_a_page() {
+        let techs = vec![("electron".to_string(), "Electron".to_string())];
+        let p = build_reverse_prompt(
+            "reverse engineer this app",
+            "ctx",
+            "Electron (confirmed)",
+            &techs,
+            0,
+            1,
+            &[],
+            RevTarget::App,
+        );
+        assert!(p.contains("desktop application"));
+        assert!(p.contains("install folder"));
+        assert!(p.contains("electron (Electron)"));
+        assert!(p.contains("stack_refs"));
+        let mode = p.split("REVERSE ENGINEER MODE").nth(1).unwrap();
+        for banned in ["website", "section 1 of about", "footer or the last section", "scrolled top to bottom"] {
+            assert!(!mode.contains(banned), "app prompt must not say {banned:?}");
+        }
     }
 }

@@ -290,6 +290,10 @@ export const useSidebar = create<SidebarState>((set, get) => ({
     // that already arrived.
     const prior = incoming?.scanning ? null : get().stackLogoPatch;
     const data = incoming && prior ? applyLogoPatch(incoming, prior) : incoming;
+    if (incoming?.scanning) {
+      // The previous scan's "done" strip and lit cards must not linger.
+      set({ stackProgress: null, stackFocus: [] });
+    }
     set({
       stackLogoPatch: prior,
       visible: true,

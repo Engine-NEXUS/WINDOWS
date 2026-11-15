@@ -666,6 +666,44 @@ pub fn force_refresh() {
     refresh_from_os(registry);
 }
 
+static LAST_MISS_REFRESH: Lazy<RwLock<Option<Instant>>> = Lazy::new(|| RwLock::new(None));
+
+/// On a registry MISS for an open request, do one force_refresh() rate-limited to once per 60 seconds.
+/// Returns true if a refresh was performed, or false if skipped due to the rate limit.
+pub fn refresh_on_miss() -> bool {
+    let now = Instant::now();
+    let mut last = LAST_MISS_REFRESH.write();
+    if let Some(prev) = *last {
+        if now.duration_since(prev) < Duration::from_secs(60) {
+            return false;
+        }
+    }
+    *last = Some(now);
+    drop(last);
+    tracing::info!("app registry: miss detected, triggering force_refresh (rate-limited to 60s)");
+    force_refresh();
+    true
+}
+
+#[cfg(test)]
+pub fn reset_miss_refresh_rate_limit() {
+    *LAST_MISS_REFRESH.write() = None;
+}
+
+#[cfg(test)]
+static TEST_DISCOVERY_HOOK: Lazy<RwLock<Option<Box<dyn Fn(&mut Vec<AppEntry>) + Send + Sync>>>> =
+    Lazy::new(|| RwLock::new(None));
+
+#[cfg(test)]
+pub(crate) fn set_test_discovery_hook<F: Fn(&mut Vec<AppEntry>) + Send + Sync + 'static>(f: F) {
+    *TEST_DISCOVERY_HOOK.write() = Some(Box::new(f));
+}
+
+#[cfg(test)]
+pub(crate) fn clear_test_discovery_hook() {
+    *TEST_DISCOVERY_HOOK.write() = None;
+}
+
 /// Get all search names from the registry (for phonetic/fuzzy matching
 /// in the intent parser). Returns a Vec of lowercase app name strings.
 pub fn all_search_names() -> Vec<String> {
@@ -790,6 +828,53 @@ struct CachedWindow {
     pid: u32,
     title: String,
     process_name: String,
+    aumid: Option<String>,
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn window_aumid(hwnd: isize) -> Option<String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
+    use windows::Win32::UI::Shell::PropertiesSystem::{
+        IPropertyStore, PropVariantToString, SHGetPropertyStoreForWindow, PROPERTYKEY,
+    };
+    use windows::core::Interface;
+
+    // PKEY_AppUserModel_ID = {9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}, 5
+    const PKEY_APP_USER_MODEL_ID: PROPERTYKEY = PROPERTYKEY {
+        fmtid: windows::core::GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3),
+        pid: 5,
+    };
+
+    unsafe {
+        let mut raw: *mut std::ffi::c_void = std::ptr::null_mut();
+        if SHGetPropertyStoreForWindow(HWND(hwnd), &IPropertyStore::IID, &mut raw).is_err()
+            || raw.is_null()
+        {
+            return None;
+        }
+        let store: IPropertyStore = std::mem::transmute(raw);
+        let mut propvar = match store.GetValue(&PKEY_APP_USER_MODEL_ID) {
+            Ok(pv) => pv,
+            Err(_) => return None,
+        };
+        let mut buf = [0u16; 256];
+        let res = PropVariantToString(&propvar, &mut buf);
+        let _ = PropVariantClear(&mut propvar);
+        if res.is_ok() {
+            let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+            let s = String::from_utf16_lossy(&buf[..len]).trim().to_string();
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+        None
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn window_aumid(_hwnd: isize) -> Option<String> {
+    None
 }
 
 static WINDOW_CACHE: Lazy<RwLock<Vec<CachedWindow>>> = Lazy::new(|| RwLock::new(Vec::new()));
@@ -827,24 +912,32 @@ pub fn try_focus_existing(entry: &AppEntry) -> bool {
     }
     let own_pid = std::process::id();
 
-    // Process identity first (most reliable), then title identity. Both
-    // require a real name — a generic word like "chat"/"assistant" never
-    // identifies a window (it focused a ChatGPT window and NEXUS's own stage).
+    // Exact identity (process identity or exact AUMID match) first (most reliable),
+    // then title identity. Both require a real name — a generic word like
+    // "chat"/"assistant" never identifies a window.
     for pass_title in [false, true] {
         for w in cache.iter() {
-            if !window_matches_entry(&w.title, &w.process_name, entry, w.pid == own_pid) {
+            if !window_matches_entry(&w.title, &w.process_name, entry, w.pid == own_pid, w.aumid.as_deref()) {
                 continue;
             }
             let by_process = process_identity_matches(&w.process_name, entry);
-            if by_process == pass_title {
+            let by_aumid = match &entry.launch {
+                LaunchMethod::Aumid { aumid } => {
+                    w.aumid.as_deref().map(|wa| wa.eq_ignore_ascii_case(aumid)).unwrap_or(false)
+                }
+                _ => false,
+            };
+            let is_exact = by_process || by_aumid;
+            if is_exact == pass_title {
                 continue; // handled in the other pass
             }
             tracing::info!(
-                "focus hit: '{}' matched window '{}' / process '{}' (pid={})",
+                "focus hit: '{}' matched window '{}' / process '{}' (pid={}, aumid={:?})",
                 entry.display_name,
                 w.title,
                 w.process_name,
-                w.pid
+                w.pid,
+                w.aumid
             );
             focus_window(w.hwnd);
             return true;
@@ -901,6 +994,21 @@ fn process_identity_matches(process_name: &str, entry: &AppEntry) -> bool {
     })
 }
 
+/// Pure fn: is this process name a known browser host?
+pub(crate) fn is_browser_process(process_name: &str) -> bool {
+    let stem = process_stem(process_name);
+    matches!(
+        stem.as_str(),
+        "brave" | "chrome" | "msedge" | "firefox" | "opera" | "vivaldi" | "arc" | "iexplore"
+    )
+}
+
+/// Pure fn: is the app entry itself a browser app?
+pub(crate) fn entry_is_browser(entry: &AppEntry) -> bool {
+    is_browser_process(&entry.display_name)
+        || entry.search_names.iter().any(|s| is_browser_process(s))
+}
+
 /// Pure: does this window belong to `entry`? (`is_own_window` = it belongs to
 /// the NEXUS process itself and is never a candidate.)
 pub(crate) fn window_matches_entry(
@@ -908,13 +1016,36 @@ pub(crate) fn window_matches_entry(
     process_name: &str,
     entry: &AppEntry,
     is_own_window: bool,
+    window_aumid: Option<&str>,
 ) -> bool {
     if is_own_window {
         return false;
     }
+
+    // When entry is an AUMID app:
+    // A window matches ONLY if its window AUMID equals that aumid (case-insensitive)
+    // OR its process identity matches (existing rule) AND the process is not a known browser host.
+    if let LaunchMethod::Aumid { aumid } = &entry.launch {
+        if window_aumid.is_some_and(|wa| wa.eq_ignore_ascii_case(aumid)) {
+            return true;
+        }
+        if process_identity_matches(process_name, entry) && !is_browser_process(process_name) {
+            return true;
+        }
+        return false;
+    }
+
     if process_identity_matches(process_name, entry) {
         return true;
     }
+
+    // TITLE matching must NEVER match a window whose process is a browser
+    // (brave, chrome, msedge, firefox, opera, vivaldi, arc, iexplore)
+    // unless the entry itself is that browser app.
+    if is_browser_process(process_name) && !entry_is_browser(entry) {
+        return false;
+    }
+
     let title_lower = title.to_lowercase();
     if title_lower.is_empty() {
         return false;
@@ -1018,11 +1149,14 @@ fn refresh_window_cache() {
             let mut pid: u32 = 0;
             GetWindowThreadProcessId(hwnd, &mut pid);
 
+            let aumid = window_aumid(hwnd.0);
+
             windows.push(CachedWindow {
                 hwnd: hwnd.0,
                 pid,
                 title,
                 process_name: String::new(), // filled in below
+                aumid,
             });
             BOOL(1)
         }
@@ -1079,6 +1213,7 @@ fn refresh_window_cache() {
                         pid,
                         title,
                         process_name: String::new(),
+                        aumid: None,
                     });
                 }
                 *WINDOW_CACHE.write() = windows;
@@ -1279,6 +1414,13 @@ fn refresh_from_os(registry: &AppRegistry) {
     discover_macos(&mut entries);
     #[cfg(target_os = "linux")]
     discover_linux(&mut entries);
+
+    #[cfg(test)]
+    {
+        if let Some(ref hook) = *TEST_DISCOVERY_HOOK.read() {
+            hook(&mut entries);
+        }
+    }
 
     // Always add URL fallbacks
     add_url_fallbacks(&mut entries);
@@ -2511,19 +2653,115 @@ mod tests {
     fn window_focus_needs_a_real_identity_not_a_generic_word() {
         let chat = app("Google Chat", &["google chat", "chat"], r"C:\x\chat.exe");
         // The live bug: "chat" matched a ChatGPT window.
-        assert!(!window_matches_entry("ChatGPT Classic", "chatgpt.exe", &chat, false));
+        assert!(!window_matches_entry("ChatGPT Classic", "chatgpt.exe", &chat, false, None));
         // ...and our own window titled com.nexus.assistant-siw matched "assistant".
         let intel = app("Intel® Driver & Support Assistant", &["intel®", "driver", "support", "assistant"], r"C:\x\i.exe");
-        assert!(!window_matches_entry("com.nexus.assistant-siw", "nexus.exe", &intel, true));
-        assert!(!window_matches_entry("Assistant", "other.exe", &intel, false));
-        // Real identities still focus.
-        assert!(window_matches_entry("Google Chat - Brave", "brave.exe", &chat, false));
-        let brave = app("Brave", &["brave", "brave browser"], r"C:\x\brave.exe");
-        assert!(window_matches_entry("New Tab", "brave.exe", &brave, false));
+        assert!(!window_matches_entry("com.nexus.assistant-siw", "nexus.exe", &intel, true, None));
+        assert!(!window_matches_entry("Assistant", "other.exe", &intel, false, None));
+        // Browser tab windows must NEVER match a non-browser app by title:
+        assert!(!window_matches_entry("Google Chat - Brave", "brave.exe", &chat, false, None));
         let yt = app("YouTube", &["youtube"], r"C:\x\yt.exe");
-        assert!(window_matches_entry("YouTube - Brave", "brave.exe", &yt, false));
+        assert!(!window_matches_entry("YouTube - Brave", "brave.exe", &yt, false, None));
+        // Real identities still focus when process is the app itself:
+        assert!(window_matches_entry("Google Chat", "chat.exe", &chat, false, None));
+        let brave = app("Brave", &["brave", "brave browser"], r"C:\x\brave.exe");
+        assert!(window_matches_entry("New Tab", "brave.exe", &brave, false, None));
         let notepad = app("Notepad", &["notepad"], r"C:\x\notepad.exe");
-        assert!(window_matches_entry("Untitled - Notepad", "notepad.exe", &notepad, false));
+        assert!(window_matches_entry("Untitled - Notepad", "notepad.exe", &notepad, false, None));
+    }
+
+    #[test]
+    fn test_window_identity_by_aumid_and_browser_process_isolation() {
+        let yt_aumid = AppEntry {
+            display_name: "YouTube".into(),
+            search_names: vec!["youtube".into()],
+            launch: LaunchMethod::Aumid { aumid: "Brave._crx_agimnkijcamfeangaknmldooml".into() },
+            use_count: 0,
+            last_used: 0,
+        };
+        let brave = AppEntry {
+            display_name: "Brave".into(),
+            search_names: vec!["brave".into(), "brave browser".into()],
+            launch: LaunchMethod::Exe { path: r"C:\Program Files\Brave\brave.exe".into() },
+            use_count: 0,
+            last_used: 0,
+        };
+        let notepad = AppEntry {
+            display_name: "Notepad".into(),
+            search_names: vec!["notepad".into()],
+            launch: LaunchMethod::Exe { path: r"C:\Windows\notepad.exe".into() },
+            use_count: 0,
+            last_used: 0,
+        };
+
+        // 1. Ordinary Brave TAB window titled "x - YouTube - Brave" must NOT match installed YouTube AUMID app:
+        assert!(!window_matches_entry("x - YouTube - Brave", "brave.exe", &yt_aumid, false, None));
+        // 2. Window whose AUMID matches entry's AUMID -> matches:
+        assert!(window_matches_entry("YouTube", "brave.exe", &yt_aumid, false, Some("Brave._crx_agimnkijcamfeangaknmldooml")));
+        // Case-insensitive AUMID match:
+        assert!(window_matches_entry("YouTube", "brave.exe", &yt_aumid, false, Some("brave._crx_agimnkijcamfeangaknmldooml")));
+        // 3. Entry Brave itself + brave.exe -> matches:
+        assert!(window_matches_entry("New Tab - Brave", "brave.exe", &brave, false, None));
+        // 4. Notepad unaffected:
+        assert!(window_matches_entry("Untitled - Notepad", "notepad.exe", &notepad, false, None));
+        // 5. Browser process helper tests:
+        assert!(is_browser_process("brave.exe"));
+        assert!(is_browser_process("chrome"));
+        assert!(is_browser_process("msedge.exe"));
+        assert!(is_browser_process("firefox"));
+        assert!(is_browser_process("opera.exe"));
+        assert!(is_browser_process("vivaldi.exe"));
+        assert!(is_browser_process("arc.exe"));
+        assert!(is_browser_process("iexplore.exe"));
+        assert!(!is_browser_process("notepad.exe"));
+        assert!(!is_browser_process("spotify.exe"));
+    }
+
+    #[test]
+    fn test_refresh_on_miss_learns_installed_app() {
+        struct Installed {
+            app: AppEntry,
+        }
+        impl Installed {
+            fn new(name: &str, exe: &str) -> Self {
+                let entry = AppEntry {
+                    display_name: name.to_string(),
+                    search_names: vec![name.to_lowercase()],
+                    launch: LaunchMethod::Exe { path: exe.to_string() },
+                    use_count: 0,
+                    last_used: 0,
+                };
+                Self { app: entry }
+            }
+            fn install(&self) {
+                let e = self.app.clone();
+                set_test_discovery_hook(move |entries| {
+                    entries.push(e.clone());
+                });
+            }
+        }
+
+        reset_miss_refresh_rate_limit();
+        clear_test_discovery_hook();
+
+        // 1. Initial lookup misses
+        let installed = Installed::new("CustomTestApp", r"C:\apps\custom.exe");
+        assert!(lookup_strict("customtestapp").is_none());
+
+        // 2. User installs app
+        installed.install();
+
+        // 3. On-miss refresh triggers force_refresh and picks up newly installed app
+        assert!(refresh_on_miss());
+        let found = lookup_strict("customtestapp");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().display_name, "CustomTestApp");
+
+        // 4. Rate-limit: second immediate refresh_on_miss returns false
+        assert!(!refresh_on_miss());
+
+        clear_test_discovery_hook();
+        reset_miss_refresh_rate_limit();
     }
 
     fn live_like_entries() -> Vec<AppEntry> {

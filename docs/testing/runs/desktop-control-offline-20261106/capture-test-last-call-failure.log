@@ -1,0 +1,401 @@
+
+ RUN  v2.1.9 D:/ULTRON/frontend
+
+ ✓ src/sidebar/stackModel.test.ts (26 tests) 82ms
+ ✓ src/settings/voiceLockState.test.ts (23 tests) 56ms
+ ✓ src/settings-sidebar/hub/memoryModelBoundaries.test.ts (24 tests) 18ms
+ ✓ src/settings-sidebar/hub/memoryModel.test.ts (18 tests) 26ms
+ ✓ src/pr-list/prListStore.test.ts (17 tests) 19ms
+ ✓ src/stage/annotations/drawKit.test.ts (40 tests) 55ms
+stdout | src/store/assistantStore.test.ts > useAssistant store state and thinking dwell > enters thinking state immediately and arms the dwell timer
+[ORB] state idle → thinking (1.0s dwell armed)
+
+stdout | src/store/assistantStore.test.ts > useAssistant store state and thinking dwell > holds thinking state for the minimum 1000ms dwell before transitioning to speaking
+[ORB] state idle → thinking (1.0s dwell armed)
+[ORB] state thinking holding for remaining 1000ms (dwell floor 1000ms)
+
+stdout | src/store/assistantStore.test.ts > useAssistant store state and thinking dwell > transitions immediately if requested after the dwell time has already elapsed
+[ORB] state idle → thinking (1.0s dwell armed)
+[ORB] state thinking → speaking
+
+stdout | src/store/assistantStore.test.ts > useAssistant store state and thinking dwell > clearThinkingDwell cancels pending transitions
+[ORB] state idle → thinking (1.0s dwell armed)
+[ORB] state thinking holding for remaining 1000ms (dwell floor 1000ms)
+
+stdout | src/store/assistantStore.test.ts > useAssistant visibility rules > setVisible toggles visibility when ghost mode is inactive
+[ORB] setVisible(false) from D:\ULTRON\frontend\src\store\assistantStore.test.ts:170:29 < file:///D:/ULTRON/frontend/node_modules/@vitest/runner/dist/index.js:146:14 < file:///D:/ULTRON/frontend/node_modules/@vitest/runner/dist/index.js:533:11
+
+stdout | src/store/assistantStore.test.ts > useAssistant visibility rules > setVisible cannot hide the orb when ghostActive is true
+[ORB] setVisible(false) from D:\ULTRON\frontend\src\store\assistantStore.test.ts:176:29 < file:///D:/ULTRON/frontend/node_modules/@vitest/runner/dist/index.js:146:14 < file:///D:/ULTRON/frontend/node_modules/@vitest/runner/dist/index.js:533:11
+
+stdout | src/store/assistantStore.test.ts > useAssistant visibility rules > setGhostActive controls ghost mode and enforces visibility on entry
+[ORB] setGhostActive(true) from:false visible:false state:idle
+[ORB] setGhostActive(false) from:true visible:true state:idle
+
+stdout | src/store/assistantStore.test.ts > assert every public setter once > verifies setLoadingVisible updates loadingVisible snapshot
+[NEXUS] loading: false → true (req=true)
+[NEXUS] loading: true → true (req=false)
+
+stdout | src/store/assistantStore.test.ts > assert every public setter once > verifies setCaptionActive updates captionActive
+[ORB] setCaptionActive(true) (was:false)
+[ORB] setCaptionActive(false) (was:true)
+
+ ✓ src/store/assistantStore.test.ts (31 tests) 69ms
+ ✓ src/avatar/avatarAnim.test.tsx (32 tests) 55ms
+ ✓ src/net/ghostHotMic.test.ts (21 tests) 587ms
+   ✓ endGhostTurn > inside ghost mode it relistens before resetting (loop stays alive) 408ms
+stdout | src/net/orchestrator.test.ts > processViaOrchestrator confirmation approvals > speaking 'proceed' confirms pending MCP command immediately
+[NEXUS] orchestrator: confirming pending MCP call {
+  kind: 'mcp',
+  server: 'whatsapp',
+  tool: 'send_message',
+  params: { recipient: 'Mommy', message: 'Hi' }
+}
+[NEXUS] orchestrator: mcp_confirm result undefined
+
+stdout | src/net/orchestrator.test.ts > processViaOrchestrator confirmation approvals > speaking 'approved' confirms pending MCP command immediately
+[NEXUS] orchestrator: confirming pending MCP call { kind: 'mcp', server: 'swiggy-food', tool: 'place_order' }
+[NEXUS] orchestrator: mcp_confirm result undefined
+
+stdout | src/net/orchestrator.test.ts > processViaOrchestrator confirmation approvals > does not let uncertain or rejected audio approve a pending command
+[NEXUS] orchestrator: unowned turn cannot approve a pending command — ambient drop
+[NEXUS] orchestrator: unowned turn cannot approve a pending command — ambient drop
+
+stdout | src/net/orchestrator.test.ts > processViaOrchestrator ghost invoke timeout > distinguishes a capture transition from explicit cancellation
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+
+stdout | src/net/orchestrator.test.ts > processViaOrchestrator ghost invoke timeout > no timeout by default: slow backends still resolve (long-running safe)
+[NEXUS] orchestrator: process result {"request_id":"r1","subsystem":"x","handled_locally":true}
+
+stdout | src/net/orchestrator.test.ts > hideOrbAfterSpeech (Main Center UI-director, feature 75 P-B) > hides once the turn is fully done (idle)
+[ORB] hide by hideOrbAfterSpeech (speech and caption finished) (turn=none, newest=none, state=idle, loading=false)
+[ORB] setVisible(false) from hideOrbLogged (D:\ULTRON\frontend\src\net\orchestrator.ts:523:27) < apply (D:\ULTRON\frontend\src\net\orchestrator.ts:592:11) < D:\ULTRON\frontend\src\net\orchestrator.ts:609:5
+
+stdout | src/net/orchestrator.test.ts > hideOrbAfterSpeech (Main Center UI-director, feature 75 P-B) > never hides while speaking — re-arms until TTS ends
+[ORB] hide by hideOrbAfterSpeech (speech and caption finished) (turn=none, newest=none, state=idle, loading=false)
+[ORB] setVisible(false) from hideOrbLogged (D:\ULTRON\frontend\src\net\orchestrator.ts:523:27) < apply (D:\ULTRON\frontend\src\net\orchestrator.ts:592:11) < D:\ULTRON\frontend\src\net\orchestrator.ts:609:5
+
+stdout | src/net/orchestrator.test.ts > hideOrbAfterSpeech (Main Center UI-director, feature 75 P-B) > exit race-proof: timer armed mid-session still hides after session ends
+[ORB] hide by hideOrbAfterSpeech (speech and caption finished) (turn=none, newest=none, state=idle, loading=false)
+[ORB] setVisible(false) from hideOrbLogged (D:\ULTRON\frontend\src\net\orchestrator.ts:523:27) < apply (D:\ULTRON\frontend\src\net\orchestrator.ts:592:11) < D:\ULTRON\frontend\src\net\orchestrator.ts:609:5
+
+stdout | src/net/orchestrator.test.ts > loading-state step 2: per-turn guards > a chain for an older turn does not hide the orb of the newer one
+[ORB] hide chain for turn a1 ended: turn b2 is newer
+
+stdout | src/net/orchestrator.test.ts > loading-state step 2: per-turn guards > the same turn's chain still hides the orb once speech is done
+[ORB] hide by hideOrbAfterSpeech (speech and caption finished) (turn=none, newest=a1, state=idle, loading=false)
+[ORB] setVisible(false) from hideOrbLogged (D:\ULTRON\frontend\src\net\orchestrator.ts:523:27) < apply (D:\ULTRON\frontend\src\net\orchestrator.ts:592:11) < D:\ULTRON\frontend\src\net\orchestrator.ts:609:5
+[ORB] hide by hideOrbAfterSpeech (speech and caption finished) (turn=a1, newest=a1, state=idle, loading=false)
+[ORB] setVisible(false) from hideOrbLogged (D:\ULTRON\frontend\src\net\orchestrator.ts:523:27) < apply (D:\ULTRON\frontend\src\net\orchestrator.ts:592:11) < D:\ULTRON\frontend\src\net\orchestrator.ts:609:5
+
+stdout | src/net/orchestrator.test.ts > loading-state step 4: the orb after an acknowledgement > an ack that has ended while the spinner is up leaves the orb visible in the thinking pose
+[ORB] ack finished while loading is up (turn=none): back to thinking, orb stays
+[ORB] state speaking → thinking (1.0s dwell armed)
+
+ ❯ src/net/orchestrator.test.ts (32 tests | 1 failed) 393ms
+   × processViaOrchestrator ghost invoke timeout > distinguishes a capture transition from explicit cancellation 43ms
+     → expected last "spy" call to have been called with [ 'orchestrator_cancel', …(1) ]
+stdout | src/audio/captionScheduler.test.ts > captionScheduler line partitioning and lifecycle > partitions words into clean 5-word clauses and sentence boundaries
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+
+stdout | src/audio/captionScheduler.test.ts > captionScheduler line partitioning and lifecycle > partitions by 10-word limit even without punctuation
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+
+stdout | src/audio/captionScheduler.test.ts > captionScheduler line partitioning and lifecycle > suppressNextCaption cancels the next scheduleChunk and resets
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+
+stdout | src/audio/captionScheduler.test.ts > captionScheduler line partitioning and lifecycle > unescapes SSML/XML entities like didn&apos;t during partition as a complete sentence
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+
+stdout | src/audio/captionScheduler.test.ts > captionScheduler line partitioning and lifecycle > stores words array per partitioned line for incremental spoken reveal
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+
+stdout | src/audio/captionScheduler.test.ts > scheduleChunk utterance-end grace window (Part 5 of the sync audit) > a late-arriving next chunk cancels the premature close (never flips captionActive false)
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(true) (was:false)
+[ORB] setCaptionActive(false) (was:true)
+
+stdout | src/audio/captionScheduler.test.ts > scheduleChunk utterance-end grace window (Part 5 of the sync audit) > with no next chunk, the caption actually closes after the grace window
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(true) (was:false)
+[ORB] setCaptionActive(false) (was:true)
+[ORB] setCaptionActive(false) (was:false)
+
+stdout | src/audio/captionScheduler.test.ts > scheduleChunk utterance-end grace window (Part 5 of the sync audit) > estimated (local-engine) tracks get a wider safety margin before fading
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(true) (was:false)
+[ORB] setCaptionActive(false) (was:true)
+[CAPTION] estimated timing (local TTS engine, no real word-boundary data)
+[ORB] setCaptionActive(true) (was:false)
+[ORB] setCaptionActive(false) (was:true)
+
+ ✓ src/audio/captionScheduler.test.ts (8 tests) 47ms
+ ✓ src/sidebar/stackView.test.tsx (10 tests) 328ms
+ ✓ src/stage/tourGeometry.test.ts (17 tests) 25ms
+ ✓ src/settings-sidebar/hub/alertsModel.test.ts (12 tests) 71ms
+ ✓ src/settings-sidebar/hub/actionsModelBoundaries.test.ts (14 tests) 23ms
+ ✓ src/sidebar/lensMath.test.ts (10 tests) 15ms
+ ✓ src/sidebar/kit/kit.test.tsx (11 tests) 43ms
+ ✓ src/sidebar/spatialDashboard.test.tsx (8 tests) 69ms
+ ✓ src/settings-sidebar/hub/hubModelBoundaries.test.ts (18 tests) 30ms
+ ✓ src/stage/handOverlayModel.test.ts (20 tests) 17ms
+ ✓ src/sidebar/lensComponents.test.tsx (5 tests) 49ms
+ ✓ src/setup/enrollmentSession.test.ts (9 tests) 32ms
+ ✓ src/stage/handOverlayModelBoundaries.test.ts (15 tests) 22ms
+ ✓ src/stage/tourGeometryBoundaries.test.ts (10 tests) 14ms
+ ✓ src/hand/payload.test.ts (20 tests) 30ms
+ ✓ src/sidebar/reportModel.test.ts (9 tests) 22ms
+ ✓ src/settings-sidebar/hub/actionsModel.test.ts (7 tests) 20ms
+ ✓ src/calibration/geometry.test.ts (16 tests) 23ms
+ ✓ src/stage/annotationTypes.test.ts (11 tests) 22ms
+stdout | src/audio/recorder.test.ts > hideOrbIfIdle (Main Center UI-director rule, doc 74 P2) > hides the orb on turn end outside ghost mode
+[ORB] setVisible(false) from Module.hideOrbIfIdle (D:\ULTRON\frontend\src\audio\recorder.ts:645:27) < D:\ULTRON\frontend\src\audio\recorder.test.ts:42:5 < file:///D:/ULTRON/frontend/node_modules/@vitest/runner/dist/index.js:146:14
+
+stdout | src/audio/recorder.test.ts > processTranscript provenance gating > drops a rejected turn without relistening, nagging, learning, or remembering
+[NEXUS] non-owner turn rejected — ambient drop
+[ORB] setVisible(false) from Module.processTranscript (D:\ULTRON\frontend\src\audio\recorder.ts:739:31) < processTicksAndRejections (node:internal/process/task_queues:103:5) < D:\ULTRON\frontend\src\audio\recorder.test.ts:70:5
+
+ ✓ src/settings-sidebar/mcpRegistry.test.ts (8 tests) 21ms
+stdout | src/audio/recorder.test.ts > processTranscript provenance gating > sends native raw and corrected text to Rust without local execution
+[NEXUS] STT correction: "analyze my screen." → "analyse my screen."
+[ORB] state listening → thinking (1.0s dwell armed)
+[NEXUS] orchestrator: process result {"request_id":"native-1","subsystem":"local_command","handled_locally":false}
+
+ ✓ src/audio/recorder.test.ts (12 tests) 223ms
+stdout | src/net/screenTour.test.ts > screen tour orb flow > hides the orb after the ack finishes while the tour fetches
+[ORB] setGhostActive(false) from:false visible:false state:idle
+[ORB] state idle → speaking
+[ORB] state speaking → idle
+[ORB] setVisible(false) from tick (D:\ULTRON\frontend\src\net\screenTour.ts:65:7) < callTimer (file:///D:/ULTRON/frontend/node_modules/vitest/dist/chunks/vi.DgezovHB.js:2300:25) < doTickInner (file:///D:/ULTRON/frontend/node_modules/vitest/dist/chunks/vi.DgezovHB.js:2886:30)
+
+stdout | src/net/screenTour.test.ts > screen tour orb flow > does not wait forever for a stuck ack
+[ORB] setGhostActive(false) from:false visible:false state:idle
+[ORB] state idle → speaking
+[ORB] state speaking → idle
+[ORB] setVisible(false) from tick (D:\ULTRON\frontend\src\net\screenTour.ts:65:7) < callTimer (file:///D:/ULTRON/frontend/node_modules/vitest/dist/chunks/vi.DgezovHB.js:2300:25) < doTickInner (file:///D:/ULTRON/frontend/node_modules/vitest/dist/chunks/vi.DgezovHB.js:2886:30)
+
+stdout | src/net/screenTour.test.ts > screen tour orb flow > never hides the ghost-session orb
+[ORB] setGhostActive(false) from:false visible:false state:idle
+[ORB] state idle → speaking
+[ORB] setGhostActive(true) from:false visible:true state:speaking
+
+stdout | src/net/screenTour.test.ts > screen tour orb flow > a fallback cancels the pending hide (legacy speech owns the orb)
+[ORB] setGhostActive(false) from:true visible:true state:idle
+[ORB] state idle → speaking
+
+stdout | src/net/screenTour.test.ts > screen tour orb flow > tour start brings the orb back speaking and flags narration
+[ORB] setGhostActive(false) from:false visible:true state:idle
+[ORB] state idle → speaking
+[ORB] state speaking → idle
+[ORB] setVisible(false) from tick (D:\ULTRON\frontend\src\net\screenTour.ts:65:7) < callTimer (file:///D:/ULTRON/frontend/node_modules/vitest/dist/chunks/vi.DgezovHB.js:2300:25) < doTickInner (file:///D:/ULTRON/frontend/node_modules/vitest/dist/chunks/vi.DgezovHB.js:2886:30)
+[ORB] state idle → speaking
+
+stdout | src/net/screenTour.test.ts > screen tour orb flow > done end leaves orb reset to the shared done handler
+[ORB] setGhostActive(false) from:false visible:true state:idle
+[ORB] state idle → speaking
+[ORB] state speaking → speaking
+
+stdout | src/net/screenTour.test.ts > screen tour orb flow > a cancelled tour closes the orb unless a newer turn took over
+[ORB] setGhostActive(false) from:false visible:true state:idle
+[ORB] state idle → speaking
+[ORB] state speaking → speaking
+[ORB] setVisible(false) from D:\ULTRON\frontend\src\net\screenTour.ts:97:9 < callTimer (file:///D:/ULTRON/frontend/node_modules/vitest/dist/chunks/vi.DgezovHB.js:2300:25) < doTickInner (file:///D:/ULTRON/frontend/node_modules/vitest/dist/chunks/vi.DgezovHB.js:2886:30)
+[ORB] state idle → speaking
+[ORB] state speaking → listening
+
+stdout | src/net/screenTour.test.ts > screen tour orb flow > ignores an end from a stale tour
+[ORB] setGhostActive(false) from:false visible:true state:idle
+[ORB] state idle → speaking
+[ORB] state speaking → speaking
+
+ ✓ src/net/screenTour.test.ts (8 tests) 31ms
+ ✓ src/stage/annotations/Annotation.test.tsx (13 tests) 32ms
+ ✓ src/net/orbIdleWatchdog.test.ts (16 tests) 15ms
+ ✓ src/settings-sidebar/hub/AlertsPage.test.tsx (6 tests) 30ms
+ ✓ src/net/followUp.test.ts (11 tests) 33ms
+stdout | src/audio/speechStage.test.ts > rejects duplicate, late, and cancelled playback frames before showing a successor
+[SPEECH] playback receipt {
+  utteranceId: 999,
+  requestId: 'r1',
+  sourceCenter: 'main',
+  kind: 'result',
+  completion: 'cancelled',
+  positionMs: 300,
+  displayedClause: 0,
+  orbVisible: true,
+  eventLagP95Ms: 0,
+  droppedUpdates: 0
+}
+[ORB] setCaptionActive(false) (was:true)
+[ORB] setCaptionActive(false) (was:true)
+
+stdout | src/audio/speechStage.test.ts > does not revive an old finished caption when the stage restarts
+[ORB] setCaptionActive(false) (was:false)
+
+ ✓ src/audio/speechStage.test.ts (6 tests) 13ms
+ ✓ src/stage/layoutSlots.test.ts (7 tests) 13ms
+stdout | src/sidebar/sidebarStoreStack.test.ts > sidebarStore stack actions > showStack sets stackData, visible, query, and resets other view state
+[sidebarStore] showStack called: Acme Cloud Platform
+
+stdout | src/sidebar/sidebarStoreStack.test.ts > sidebarStore stack actions > hide resets stackData, stackProgress, and stackFocus
+[sidebarStore] showStack called: Acme Cloud Platform
+
+stdout | src/sidebar/sidebarStoreStack.test.ts > sidebarStore stack actions > other show actions clear stackData
+[sidebarStore] showStack called: Acme Cloud Platform
+[sidebarStore] show called: query= General Query text= Response text
+
+stdout | src/sidebar/sidebarStoreStack.test.ts > sidebarStore stack actions > mergeStackLogos adds logos to matching detections and keeps them on later payloads
+[sidebarStore] showStack called: Acme Cloud Platform
+[sidebarStore] showStack called: Acme Cloud Platform
+[sidebarStore] showStack called: Acme Cloud Platform
+
+ ✓ src/sidebar/sidebarStoreStack.test.ts (6 tests) 12ms
+ ✓ src/net/orbPolicyBoundaries.test.ts (8 tests) 7ms
+ ✓ src/sidebar/EventDetailView.test.tsx (7 tests) 24ms
+ ✓ src/net/confirmReplyBoundaries.test.ts (9 tests) 14ms
+ ✓ src/audio/ttsActivity.test.ts (6 tests) 19ms
+stdout | src/audio/ttsPlayer.test.ts > speak()/speakCached() force the orb visible before any sound plays > speak() shows the orb and marks it speaking before invoking
+[ORB] state idle → speaking
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+
+stdout | src/audio/ttsPlayer.test.ts > speak()/speakCached() force the orb visible before any sound plays > speakCached() shows the orb and marks it speaking before invoking
+[ORB] state idle → speaking
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+
+stdout | src/audio/ttsPlayer.test.ts > stopTts idempotency (Alexa-style barge-in) > stops cleanly when nothing is playing (unconditional wake stop)
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+
+stdout | src/audio/ttsPlayer.test.ts > stopTts idempotency (Alexa-style barge-in) > stays stopped after repeated calls (no stuck-playing flag)
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+
+stdout | src/audio/ttsPlayer.test.ts > playing flag belongs to the newest utterance (stuck-speaking watchdog regression) > a superseded speakCached() finishing late does not clear the flag of the newer reply
+[ORB] state idle → speaking
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+
+stdout | src/audio/ttsPlayer.test.ts > playing flag belongs to the newest utterance (stuck-speaking watchdog regression) > a superseded speakCached() finishing late does not clear the flag of the newer reply
+[ORB] state speaking → speaking
+[ORB] setCaptionActive(false) (was:false)
+[ORB] setCaptionActive(false) (was:false)
+
+ ✓ src/audio/learnedCorrections.test.ts (7 tests) 11ms
+ ✓ src/audio/ttsPlayer.test.ts (5 tests) 206ms
+ ✓ src/store/sentinel.test.ts (4 tests) 41ms
+ ✓ src/settings-sidebar/hub/hubModel.test.ts (9 tests) 12ms
+ ✓ src/companion-hud/history.test.ts (6 tests) 12ms
+ ✓ src/sidebar/diagramSerializer.test.ts (8 tests) 13ms
+ ✓ src/sidebar/theme.test.ts (4 tests) 21ms
+ ✓ src/stage/liveRegionModel.test.ts (9 tests) 9ms
+ ✓ src/settings/VoiceLockStatus.test.tsx (8 tests) 19ms
+ ✓ src/net/confirmReply.test.ts (7 tests) 11ms
+ ✓ src/net/workerApi.test.ts (6 tests) 12ms
+ ✓ src/notify-toast/notifyToastModel.test.ts (7 tests) 11ms
+ ✓ src/net/orbPolicy.test.ts (5 tests) 12ms
+ ✓ src/notify-toast/ProviderLogo.test.ts (8 tests) 16ms
+ ✓ src/store/loadingMachine.test.ts (7 tests) 9ms
+ ✓ src/stage/annotations/pointerTrail.test.ts (5 tests) 13ms
+ ✓ src/sidebar/spatialView.test.tsx (2 tests) 26ms
+ ✓ src/audio/speechArbiter.test.ts (7 tests) 7ms
+ ✓ src/stage/liquidGlass.test.ts (2 tests) 7ms
+ ✓ src/stage/annotations/mockTauriBridge.test.ts (3 tests) 9ms
+ ✓ src/net/orbVisibility.test.ts (8 tests) 8ms
+ ✓ src/net/directedGate.test.ts (5 tests) 15ms
+ ✓ src/settings-sidebar/apiKeyIcons.test.tsx (3 tests) 35ms
+ ✓ src/companion-hud/calibrationKeys.test.ts (3 tests) 8ms
+ ✓ src/stage/notifyExpandModel.test.ts (4 tests) 8ms
+ ✓ src/theme/themeContrast.test.ts (4 tests) 19ms
+ ✓ src/ipc.test.ts (3 tests) 18ms
+ ✓ src/setup/identityBanner.test.ts (6 tests) 9ms
+ ✓ src/net/ackDefer.test.ts (3 tests) 13ms
+ ✓ src/sidebar/desktopChoiceModel.test.ts (4 tests) 8ms
+ ✓ src/stage/geometry.test.ts (6 tests) 12ms
+ ✓ src/sidebar/kit/dockButtons.test.tsx (4 tests) 27ms
+ ✓ src/sidebar/mapsPanel.test.ts (3 tests) 8ms
+ ✓ src/audio/micHolders.test.ts (6 tests) 11ms
+ ✓ src/sidebar/spatialShared.test.ts (6 tests) 9ms
+ ✓ src/setup/setupKeys.test.ts (5 tests) 8ms
+ ✓ src/net/turnChain.test.ts (3 tests) 91ms
+ ✓ src/net/listenDedupe.test.ts (5 tests) 6ms
+ ✓ src/intent/parserWhatsapp.test.ts (3 tests) 22ms
+ ✓ src/settings-sidebar/hub/needsSignin.test.ts (3 tests) 6ms
+ ✓ src/stage/backgroundTaskModel.test.ts (3 tests) 8ms
+stdout | src/store/assistant.test.ts > setGhostActive (P-C ghost exits, feature 75) > enter shows the orb — visibility is the listener's job
+[ORB] setGhostActive(true) from:false visible:false state:idle
+
+stdout | src/store/assistant.test.ts > setGhostActive (P-C ghost exits, feature 75) > exit lands on the visible normal orb — no longer invisible
+[ORB] setGhostActive(false) from:true visible:true state:idle
+
+ ✓ src/store/assistant.test.ts (2 tests) 8ms
+ ✓ src/sidebar/codeRabbitPanel.test.ts (3 tests) 8ms
+ ✓ src/settings-sidebar/keyHints.test.ts (3 tests) 6ms
+ ✓ src/settings-sidebar/wakeSounds.test.ts (3 tests) 8ms
+ ✓ src/settings-sidebar/keyFormat.test.ts (3 tests) 9ms
+ ✓ src/sidebar/sidebarEsc.test.ts (2 tests) 6ms
+ ✓ src/avatar/voiceOrb.test.ts (1 test) 5ms
+ ✓ src/sidebar/placeCard.test.ts (6 tests) 16ms
+ ✓ src/sidebar/pinnedView.test.ts (2 tests) 8ms
+
+ Test Files  1 failed | 92 passed (93)
+      Tests  1 failed | 850 passed (851)
+   Start at  16:02:05
+   Duration  19.54s (transform 12.97s, setup 1.65s, collect 35.06s, tests 3.65s, environment 48ms, prepare 50.79s)
+
+stderr | src/net/ghostHotMic.test.ts > ghost stall watchdog (hung turns re-arm the mic) > re-arms once when a turn stays open past the stall budget
+[NEXUS] ghost watchdog: turn open with no completion — re-arming listen
+
+stderr | src/net/ghostHotMic.test.ts > ghost stall watchdog (hung turns re-arm the mic) > does not re-arm during a meeting (guarded path, not a raw trigger)
+[NEXUS] ghost watchdog: turn open with no completion — re-arming listen
+
+stderr | src/net/orchestrator.test.ts > processViaOrchestrator confirmation approvals > holds a pending MCP approval when Voice Lock is on and capture provenance is missing
+[NEXUS] Voice Lock held a turn without verified provenance
+
+stderr | src/net/orchestrator.test.ts > hideOrbAfterSpeech (Main Center UI-director, feature 75 P-B) > stuck-speaking watchdog: silent 10s with dead TTS forces the turn close
+[NEXUS] stuck-speaking watchdog: silent 10s, forcing turn close
+
+stderr | src/net/orchestrator.test.ts > loading-state step 2: per-turn guards > two live chains no longer share one stuck-speaking counter
+[NEXUS] stuck-speaking watchdog: silent 10s, forcing turn close
+[NEXUS] stuck-speaking watchdog: silent 10s, forcing turn close
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/net/orchestrator.test.ts > processViaOrchestrator ghost invoke timeout > distinguishes a capture transition from explicit cancellation
+AssertionError: expected last "spy" call to have been called with [ 'orchestrator_cancel', …(1) ]
+
+- Expected
++ Received
+
+  Array [
+-   "orchestrator_cancel",
+-   Object {
+-     "forCapture": true,
+-   },
++   "stop_tts",
+  ]
+
+ ❯ src/net/orchestrator.test.ts:323:24
+    321|     invokeMock.mockResolvedValue(undefined);
+    322|     await cancelOrchestrator(true);
+    323|     expect(invokeMock).toHaveBeenLastCalledWith("orchestrator_cancel",…
+       |                        ^
+    324|     await cancelOrchestrator();
+    325|     expect(invokeMock).toHaveBeenLastCalledWith("orchestrator_cancel");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+

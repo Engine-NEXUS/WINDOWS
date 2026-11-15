@@ -74,6 +74,10 @@ pub struct MailItem {
     pub deadline: Option<String>,
     /// Inbox-triage category ("exam", "database", …) for mail the watcher filed.
     pub category: Option<String>,
+    /// The stored one-sentence explanation of the mail (what it is, what it asks, by when). Spoken instead of the subject.
+    pub explain: Option<String>,
+    /// Stable identity for "already told" ("mail:<gmail id>", or a watched thread at its current state). `None` = always new.
+    pub key: Option<String>,
 }
 
 /// What was open when the PC last went off and can be reopened ("shall I reopen it?").
@@ -325,6 +329,7 @@ pub fn scrub_mail(items: Vec<MailItem>, names: &SelfNames) -> Vec<MailItem> {
                 m.subject = short;
                 m.deadline = None;
                 m.category = None;
+                m.explain = None;
             } else if names.is_self(&m.sender) {
                 m.sender.clear();
             }
@@ -339,25 +344,24 @@ fn is_short_ci(subject: &str) -> bool {
 
 pub fn mail_line(m: &MailItem) -> String {
     let who = clip(&m.sender, 40);
-    let subj = clip(&m.subject, 60);
-    if who.trim().is_empty() {
-        if is_short_ci(&m.subject) {
-            return subj;
-        }
-        if let Some(cat) = m.category.as_deref().and_then(Category::from_str) {
-            return format!("{}: “{subj}”", cat.phrase());
-        }
-        return match m.deadline.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
-            Some(d) => format!("an email about “{subj}”, deadline {d}"),
-            None => format!("an email about “{subj}”"),
-        };
+    // CI failures keep their short live wording.
+    if who.trim().is_empty() && is_short_ci(&m.subject) {
+        return clip(&m.subject, 60);
     }
-    if let Some(cat) = m.category.as_deref().and_then(Category::from_str) {
-        return format!("{} from {who}: “{subj}”", cat.phrase());
+    // The stored explanation says what the mail is, what it asks and by when, in our own words.
+    if let Some(e) = m.explain.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+        return e.trim_end_matches('.').to_string();
     }
-    match m.deadline.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
-        Some(d) => format!("{who} emailed about “{subj}”, deadline {d}"),
-        None => format!("{who} emailed about “{subj}”"),
+    // Older records and watched threads have no explanation: say who and what kind, never the subject.
+    let deadline = m.deadline.as_deref().map(str::trim).filter(|d| !d.is_empty());
+    let kind = m.category.as_deref().and_then(Category::from_str).map(|c| c.phrase());
+    match (who.trim().is_empty(), kind, deadline) {
+        (true, Some(k), _) => k.to_string(),
+        (true, None, Some(d)) => format!("an email with a deadline of {d}"),
+        (true, None, None) => "an email I could not sum up".to_string(),
+        (false, Some(k), _) => format!("{k} from {who}"),
+        (false, None, Some(d)) => format!("{who} emailed you, with a deadline of {d}"),
+        (false, None, None) => format!("{who} emailed you"),
     }
 }
 
@@ -522,26 +526,125 @@ pub fn snapshot_at_boot(app_data_dir: &std::path::Path) {
 /// Important mail the inbox watcher filed in the last 3 days (Medium and up),
 /// most urgent first, at most 5.
 pub fn important_mail(dir: &std::path::Path, now_secs: i64) -> Vec<MailItem> {
-    let mut rows: Vec<StoredMail> = super::with_store(dir, |s| {
+    important_mail_with(dir, now_secs, &SelfNames::load(dir))
+}
+
+/// `important_mail` with the owner's names given (mail sent from one of their own addresses is never listed).
+pub fn important_mail_with(dir: &std::path::Path, now_secs: i64, names: &SelfNames) -> Vec<MailItem> {
+    let mut rows: Vec<(String, StoredMail)> = super::with_store(dir, |s| {
         s.recent(Tier::Mail, 60)
             .into_iter()
-            .filter_map(|h| serde_json::from_str::<StoredMail>(&h.value).ok())
+            .filter_map(|h| serde_json::from_str::<StoredMail>(&h.value).ok().map(|m| (h.key, m)))
             .collect()
     })
     .unwrap_or_default();
-    rows.retain(|m| {
+    rows.retain(|(_, m)| {
         now_secs - m.ts_ms / 1000 <= 3 * 24 * 3600
             && mailtriage::urgency_rank(mailtriage::urgency_from(&m.urgency)) >= mailtriage::urgency_rank(crate::google::types::AlertUrgency::Medium)
+            && !mailtriage::is_self_sent(&m.email, &m.account, names)
     });
-    rows.sort_by(|a, b| {
+    rows.sort_by(|(_, a), (_, b)| {
         mailtriage::urgency_rank(mailtriage::urgency_from(&b.urgency))
             .cmp(&mailtriage::urgency_rank(mailtriage::urgency_from(&a.urgency)))
             .then(b.ts_ms.cmp(&a.ts_ms))
     });
     rows.into_iter()
         .take(5)
-        .map(|m| MailItem { sender: m.sender, subject: m.subject, deadline: None, category: Some(m.category) })
+        .map(|(key, m)| MailItem {
+            sender: m.sender,
+            subject: m.subject,
+            deadline: None,
+            category: Some(m.category),
+            explain: Some(m.explain).filter(|e| !e.trim().is_empty()),
+            key: Some(key),
+        })
         .collect()
+}
+
+// ─── "Already told" ─────────────────────────────────────────────────
+
+/// Store meta key holding the mail the owner has already been told about (key -> unix seconds).
+const TOLD_META: &str = "briefing_told_mail";
+/// A told entry is forgotten after this long (a watched thread unchanged for a month may be mentioned once more).
+const TOLD_KEEP_SECS: i64 = 30 * 24 * 3600;
+/// At most this many told entries are kept (oldest dropped).
+const TOLD_MAX: usize = 400;
+
+/// The identity of a watched thread at its current state: a new reply or a moved deadline makes it new again.
+pub fn watch_key(w: &crate::google::types::ThreadWatchTarget) -> String {
+    format!("watch:{}:{}:{}", w.watch_id, w.message_count, w.initial_deadline_raw.as_deref().unwrap_or("").trim())
+}
+
+/// Only the mail the owner has not been told about yet. Items without a key are always kept.
+pub fn untold(items: Vec<MailItem>, told: &std::collections::HashMap<String, i64>) -> Vec<MailItem> {
+    items.into_iter().filter(|m| m.key.as_ref().map_or(true, |k| !told.contains_key(k))).collect()
+}
+
+/// `told` with `keys` added at `now`, entries older than a month dropped and the newest `TOLD_MAX` kept.
+pub fn told_with(
+    mut told: std::collections::HashMap<String, i64>,
+    keys: &[String],
+    now: i64,
+) -> std::collections::HashMap<String, i64> {
+    for k in keys {
+        told.insert(k.clone(), now);
+    }
+    told.retain(|_, ts| now - *ts <= TOLD_KEEP_SECS);
+    if told.len() > TOLD_MAX {
+        let mut v: Vec<(String, i64)> = told.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        v.truncate(TOLD_MAX);
+        told = v.into_iter().collect();
+    }
+    told
+}
+
+fn load_told(s: &super::store::Store) -> std::collections::HashMap<String, i64> {
+    s.meta_get(TOLD_META).and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
+}
+
+/// Record that the owner has been told about these mail keys (spoken, or shown on the briefing card).
+pub fn mark_told(dir: &std::path::Path, keys: &[String]) {
+    if keys.is_empty() {
+        return;
+    }
+    let now = chrono::Utc::now().timestamp();
+    super::with_store(dir, |s| {
+        let told = told_with(load_told(s), keys, now);
+        s.meta_set(TOLD_META, &serde_json::to_string(&told).unwrap_or_default());
+    });
+}
+
+/// A live mail alert was spoken: its mail is told, so the next briefing does not repeat it.
+/// Alert ids are "mail_<gmail id>" (one email) and "mail_batch_<first id>" (several, see `note_batch`).
+pub fn on_alert_spoken(dir: &std::path::Path, alert_id: &str) {
+    mark_told(dir, &alert_mail_keys(alert_id));
+}
+
+static BATCHES: Mutex<Vec<(String, Vec<String>)>> = Mutex::new(Vec::new());
+
+/// Remember which emails a batch alert covers, so speaking it marks all of them told.
+pub fn note_batch(alert_id: &str, mail_ids: &[String]) {
+    let Ok(mut g) = BATCHES.lock() else { return };
+    g.retain(|(a, _)| a != alert_id);
+    if g.len() >= 32 {
+        g.remove(0);
+    }
+    g.push((alert_id.to_string(), mail_ids.iter().map(|id| format!("mail:{id}")).collect()));
+}
+
+fn alert_mail_keys(alert_id: &str) -> Vec<String> {
+    if alert_id.starts_with("mail_batch_") {
+        return BATCHES
+            .lock()
+            .ok()
+            .and_then(|mut g| g.iter().position(|(a, _)| a == alert_id).map(|i| g.remove(i).1))
+            .unwrap_or_default();
+    }
+    match alert_id.strip_prefix("mail_") {
+        Some(id) if !id.is_empty() => vec![format!("mail:{id}")],
+        _ => vec![],
+    }
 }
 
 fn gather<R: tauri::Runtime>(
@@ -555,13 +658,17 @@ fn gather<R: tauri::Runtime>(
 ) -> Input {
     use chrono::Timelike;
     let now = chrono::Utc::now().timestamp();
+    let names = SelfNames::load(dir);
     let mut mail: Vec<MailItem> = crate::memory::load_mail_watches(dir)
         .into_iter()
         .filter(|w| w.status == crate::google::types::WatchStatus::Active)
-        .map(|w| MailItem { sender: w.sender, subject: w.subject, deadline: w.initial_deadline_raw, category: None })
+        .map(|w| {
+            let key = Some(watch_key(&w));
+            MailItem { sender: w.sender, subject: w.subject, deadline: w.initial_deadline_raw, category: None, explain: None, key }
+        })
         .collect();
-    mail.extend(important_mail(dir, now));
-    let mail = scrub_mail(mail, &SelfNames::load(dir));
+    mail.extend(important_mail_with(dir, now, &names));
+    let mail = scrub_mail(mail, &names);
     Input {
         now,
         hour: chrono::Local::now().hour(),
@@ -780,12 +887,18 @@ pub fn start_boot_briefing<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             }
         };
         let (events, session, health) = tokio::join!(events_fut, session_fut, health_fut);
-        let input = gather(&app, &dir, snapshot, events, session, health, overnight);
+        let mut input = gather(&app, &dir, snapshot, events, session, health, overnight);
+        // Mail the owner was already told about (an earlier briefing, or a live alert) is never repeated:
+        // with nothing new the briefing says nothing about mail at all.
+        let told = super::with_store(&dir, load_told).unwrap_or_default();
+        input.mail = untold(std::mem::take(&mut input.mail), &told);
+        let told_now: Vec<String> = input.mail.iter().filter_map(|m| m.key.clone()).collect();
         let Some(briefing) = build(&input) else {
             println!("[BOOT] skip briefing: nothing to say (no resume/mail/events/session/health)");
             return;
         };
         super::with_store(&dir, |s| s.meta_set("last_briefing_day", &today));
+        mark_told(&dir, &told_now);
         if input.overnight.is_some() {
             crate::agent_outcomes::mark_told(&dir);
         }
@@ -1021,12 +1134,13 @@ mod tests {
     #[test]
     fn open_items_are_counted_never_invented() {
         let mut i = input();
-        i.mail = vec![MailItem { sender: "Prof. Rao".into(), subject: "Assignment 3".into(), deadline: Some("Friday 5 PM".into()), category: None }];
+        i.mail = vec![MailItem { sender: "Prof. Rao".into(), subject: "Assignment 3".into(), deadline: Some("Friday 5 PM".into()), category: None, explain: None, key: None }];
         i.unfinished = vec!["send the report to Asha".into()];
         let b = build(&i).unwrap();
         assert_eq!(b.items, 2);
         assert!(b.spoken.contains("2 things are open"), "{}", b.spoken);
-        assert!(b.spoken.contains("deadline Friday 5 PM"), "{}", b.spoken);
+        assert!(b.spoken.contains("Prof. Rao emailed you, with a deadline of Friday 5 PM"), "{}", b.spoken);
+        assert!(!b.spoken.contains("Assignment 3"), "the subject is not spoken: {}", b.spoken);
         assert!(b.card_md.contains("### Open (2)") && b.card_md.contains("I couldn’t finish"), "{}", b.card_md);
         assert!(!b.spoken.contains('%'), "no made-up progress numbers: {}", b.spoken);
     }
@@ -1036,7 +1150,7 @@ mod tests {
         let mut i = input();
         i.friend = true;
         i.hour = 2;
-        i.mail = vec![MailItem { sender: "GitHub".into(), subject: "Run failed".into(), deadline: None, category: None }];
+        i.mail = vec![MailItem { sender: "GitHub".into(), subject: "Run failed".into(), deadline: None, category: None, explain: None, key: None }];
         let b = build(&i).unwrap();
         assert!(b.spoken.starts_with("Welcome back, Lakshya."), "{}", b.spoken);
         i.name = None;
@@ -1069,6 +1183,8 @@ mod tests {
             subject: "Your project will be paused".into(),
             deadline: None,
             category: Some("database".into()),
+            explain: Some("Supabase may pause your project.".into()),
+            key: None,
         }];
         i.events = vec![
             AgendaItem { summary: "Dentist".into(), all_day: false, start_epoch: 0, end_epoch: 0, when_label: "3 PM".into() },
@@ -1076,7 +1192,8 @@ mod tests {
         ];
         let b = build(&i).unwrap();
         assert!(b.spoken.contains("You have 2 events today; the first is Dentist at 3 PM."), "{}", b.spoken);
-        assert!(b.spoken.contains("a database service warning from Supabase"), "{}", b.spoken);
+        assert!(b.spoken.contains("Supabase may pause your project"), "{}", b.spoken);
+        assert!(!b.spoken.contains("will be paused"), "an explanation, not the subject: {}", b.spoken);
         assert!(b.card_md.contains("### Today's calendar") && b.card_md.contains("Team sync"), "{}", b.card_md);
         // A calendar alone is enough to say something.
         let mut only = input();
@@ -1103,6 +1220,7 @@ mod tests {
                 labels: vec![],
                 date_ms: (now - age_h * 3600) * 1000,
                 rfc822_id: String::new(),
+                body: String::new(),
             };
             (Triage { category: cat, urgency: u, reason: "r".into() }, m)
         };
@@ -1130,6 +1248,89 @@ mod tests {
         let got = important_mail(&dir, now);
         assert_eq!(got.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), vec!["High older", "Medium recent"]);
         assert_eq!(got[0].category.as_deref(), Some("exam"));
+        // each item carries its record key, so "already told" can follow it
+        assert_eq!(got[0].key.as_deref(), Some("mail:2"));
+        // mail the owner sent from one of their own addresses is never listed (it was "A message released your hall ticket")
+        let names = SelfNames::from_parts(&["me".into(), "me@college.ac.in".into()]);
+        let (t5, m5) = mk("5", "Hall ticket released", Category::Exam, AlertUrgency::High, 1);
+        let own = MailMeta { from_email: "me@college.ac.in".into(), ..m5 };
+        super::super::with_store(&dir, |s| {
+            s.observe(
+                &super::super::store::Observation {
+                    tier: Tier::Mail,
+                    key: "mail:5".into(),
+                    value: serde_json::to_string(&to_stored(&t5, &own, "me")).unwrap(),
+                    source: "gmail:me".into(),
+                    trust: super::super::store::Trust::Untrusted,
+                    pinned: false,
+                },
+                now,
+            )
+            .unwrap();
+        });
+        let got = important_mail_with(&dir, now, &names);
+        assert!(got.iter().all(|m| m.subject != "Hall ticket released"), "{got:?}");
+        assert_eq!(got.len(), 2);
+    }
+
+    fn item(key: Option<&str>) -> MailItem {
+        MailItem { sender: "Prof. Rao".into(), subject: "Exam".into(), deadline: None, category: None, explain: None, key: key.map(str::to_string) }
+    }
+
+    #[test]
+    fn mail_already_told_is_never_repeated_and_new_mail_still_is() {
+        let told = told_with(Default::default(), &["mail:a".into(), "watch:w:3:Friday".into()], 1_000);
+        let left = untold(vec![item(Some("mail:a")), item(Some("mail:b")), item(Some("watch:w:3:Friday")), item(None)], &told);
+        assert_eq!(left.iter().map(|m| m.key.clone()).collect::<Vec<_>>(), vec![Some("mail:b".to_string()), None]);
+        // nothing new at all: no mail line in the briefing
+        let mut i = input();
+        i.mail = untold(vec![item(Some("mail:a"))], &told);
+        assert!(build(&i).map_or(true, |b| b.items == 0), "no open items when every email was already told");
+    }
+
+    #[test]
+    fn told_entries_expire_and_stay_bounded() {
+        let day = 24 * 3600;
+        let told = told_with(Default::default(), &["old".into()], 0);
+        let told = told_with(told, &["new".into()], 31 * day);
+        assert!(!told.contains_key("old") && told.contains_key("new"));
+        let keys: Vec<String> = (0..TOLD_MAX + 50).map(|n| format!("k{n}")).collect();
+        let told = told_with(Default::default(), &keys, 5);
+        assert_eq!(told.len(), TOLD_MAX);
+    }
+
+    #[test]
+    fn a_watched_thread_is_new_again_when_it_changes() {
+        let mut w = crate::google::types::ThreadWatchTarget {
+            watch_id: "w1".into(),
+            thread_id: "t".into(),
+            account_email: None,
+            initial_history_id: None,
+            sender: "Prof. Rao".into(),
+            subject: "Assignment".into(),
+            initial_deadline_raw: Some("Friday".into()),
+            message_count: 2,
+            created_at_ms: 0,
+            last_checked_ms: 0,
+            status: crate::google::types::WatchStatus::Active,
+        };
+        let first = watch_key(&w);
+        assert_eq!(first, watch_key(&w.clone()));
+        w.initial_deadline_raw = Some("Monday".into());
+        assert_ne!(first, watch_key(&w));
+        w.message_count = 3;
+        assert_ne!(first, watch_key(&w));
+    }
+
+    #[test]
+    fn a_spoken_live_alert_names_its_mail() {
+        assert_eq!(alert_mail_keys("mail_18f3"), vec!["mail:18f3".to_string()]);
+        assert!(alert_mail_keys("boot_briefing").is_empty());
+        assert!(alert_mail_keys("mail_").is_empty());
+        note_batch("mail_batch_x1", &["x1".into(), "x2".into(), "x3".into()]);
+        assert_eq!(alert_mail_keys("mail_batch_x1"), vec!["mail:x1".to_string(), "mail:x2".into(), "mail:x3".into()]);
+        // taken once
+        assert!(alert_mail_keys("mail_batch_x1").is_empty());
     }
 
     #[test]
@@ -1157,7 +1358,7 @@ mod tests {
     #[test]
     fn the_briefing_drops_its_greeting_once_a_hello_was_spoken() {
         let mut i = input();
-        i.mail = vec![MailItem { sender: "GitHub".into(), subject: "Run failed".into(), deadline: None, category: None }];
+        i.mail = vec![MailItem { sender: "GitHub".into(), subject: "Run failed".into(), deadline: None, category: None, explain: None, key: None }];
         let b = build(&i).unwrap();
         let g = greeting(i.hour, i.name.as_deref(), i.friend);
         assert!(b.spoken.starts_with(&g));
@@ -1351,24 +1552,24 @@ mod session_greeting_tests {
     fn the_owners_own_name_is_never_spoken_and_ci_mail_uses_the_short_line() {
         let names = SelfNames::from_parts(&["Chitkul Lakshya".to_string()]);
         let items = vec![
-            MailItem { sender: "Chitkul Lakshya".into(), subject: "[Engine-NEXUS/WINDOWS] Run failed: pages build and deployment".into(), deadline: None, category: Some("github".into()) },
-            MailItem { sender: "Chitkul Lakshya".into(), subject: "Assignment 3".into(), deadline: Some("Friday".into()), category: None },
-            MailItem { sender: "Prof. Rao".into(), subject: "Exam".into(), deadline: None, category: None },
+            MailItem { sender: "Chitkul Lakshya".into(), subject: "[Engine-NEXUS/WINDOWS] Run failed: pages build and deployment".into(), deadline: None, category: Some("github".into()), explain: None, key: None },
+            MailItem { sender: "Chitkul Lakshya".into(), subject: "Assignment 3".into(), deadline: Some("Friday".into()), category: None, explain: None, key: None },
+            MailItem { sender: "Prof. Rao".into(), subject: "Exam".into(), deadline: None, category: None, explain: None, key: None },
         ];
         let lines: Vec<String> = scrub_mail(items, &names).iter().map(mail_line).collect();
         assert!(lines[0].starts_with("Build failed in "), "{lines:?}");
-        assert!(lines[1].starts_with("an email about “Assignment 3”"), "{lines:?}");
+        assert_eq!(lines[1], "an email with a deadline of Friday", "no quoted subject: {lines:?}");
         assert!(lines[2].contains("Prof. Rao"), "someone else is still named: {lines:?}");
         assert!(lines.iter().all(|l| !l.contains("Chitkul") && !l.contains("Lakshya")), "{lines:?}");
         // A CI-looking subject from a non-GitHub sender is not shortened and keeps its sender and deadline.
         let spoof = scrub_mail(
-            vec![MailItem { sender: "Prof. Rao".into(), subject: "Run failed: CI - course/project".into(), deadline: Some("Friday".into()), category: None }],
+            vec![MailItem { sender: "Prof. Rao".into(), subject: "Run failed: CI - course/project".into(), deadline: Some("Friday".into()), category: None, explain: None, key: None }],
             &names,
         );
         assert_eq!((spoof[0].sender.as_str(), spoof[0].subject.as_str(), spoof[0].deadline.as_deref()), ("Prof. Rao", "Run failed: CI - course/project", Some("Friday")));
         // Nothing to hide: an empty name set keeps a plain sender.
         let kept = scrub_mail(
-            vec![MailItem { sender: "Prof. Rao".into(), subject: "Exam".into(), deadline: None, category: None }],
+            vec![MailItem { sender: "Prof. Rao".into(), subject: "Exam".into(), deadline: None, category: None, explain: None, key: None }],
             &SelfNames::none(),
         );
         assert_eq!(kept[0].sender, "Prof. Rao");

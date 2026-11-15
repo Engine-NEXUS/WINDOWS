@@ -236,4 +236,74 @@ describe("StackView component rendering (Phone Layout)", () => {
 
     expect(() => renderToString(<StackView />)).not.toThrow();
   });
+
+  it("words an app scan as an app and never parses the exe as a web address", () => {
+    const html = renderToString(
+      <StackView
+        payload={{
+          ...SAMPLE_PAYLOAD,
+          kind: "app",
+          title: "Slack",
+          url: "slack.exe",
+          final_url: "slack.exe",
+          sections: [{ idx: 0, title: "Channel list", summary: "Left rail", stack_refs: [] }],
+        }}
+      />,
+    );
+    expect(html).toContain("slack.exe");
+    expect(html).toContain("App stack");
+    expect(html).toContain("In this window");
+    expect(html).toContain("install folder only");
+    expect(html).not.toContain("Security headers");
+    expect(html).not.toContain("Page weight");
+    expect(html).not.toContain("third-party hosts");
+    // Sections are numbered from 1, not from their 0-based index.
+    expect(html).toMatch(/stack-section-num">1</);
+  });
+
+  it("explains a thin scan and shows the deeper render while it runs", () => {
+    const html = renderToString(
+      <StackView
+        payload={{
+          ...SAMPLE_PAYLOAD,
+          rendering: true,
+          thin: ["The site showed me a Cloudflare bot check, so I could only see its hosting."],
+        }}
+      />,
+    );
+    expect(html).toContain("stack-thin-list");
+    expect(html).toContain("Cloudflare bot check");
+    expect(html).toContain("hidden browser window");
+    expect(html).toContain("kit-app-bar-status-dot--scanning");
+  });
+
+  it("shows a captured version next to the technology name", () => {
+    const html = renderToString(
+      <StackView
+        payload={{
+          ...SAMPLE_PAYLOAD,
+          detections: [
+            { ...SAMPLE_PAYLOAD.detections[0], version: "14.2.3" },
+            ...SAMPLE_PAYLOAD.detections.slice(1),
+          ],
+        }}
+      />,
+    );
+    expect(html).toContain("stack-tech-version");
+    expect(html).toContain("14.2.3");
+  });
+
+  it("a new scan clears the previous scan's progress and lit cards", () => {
+    useSidebar.setState({
+      stackProgress: { phase: "done", text: "Reverse engineering done" },
+      stackFocus: ["nextjs"],
+    });
+    useSidebar.getState().showStack({ ...SAMPLE_PAYLOAD, scanning: true });
+    expect(useSidebar.getState().stackProgress).toBeNull();
+    expect(useSidebar.getState().stackFocus).toEqual([]);
+    // a later payload of the same scan keeps the live progress
+    useSidebar.getState().setStackProgress({ phase: "touring", text: "Touring", step: 1, total: 4 });
+    useSidebar.getState().showStack({ ...SAMPLE_PAYLOAD, scanning: false });
+    expect(useSidebar.getState().stackProgress?.phase).toBe("touring");
+  });
 });

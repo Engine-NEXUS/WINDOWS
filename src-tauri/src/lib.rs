@@ -18,6 +18,7 @@ mod window_manager;
 pub(crate) mod turn_detect;
 pub(crate) mod turn_complete;
 pub(crate) mod turn_continue;
+pub(crate) mod turn_pending;
 pub(crate) mod barge_gate;
 pub(crate) mod barge_classify;
 // Silero VAD (Handy-derived) — used by the STT capture loop when "vadSilero" is on.
@@ -53,7 +54,10 @@ pub(crate) mod brand_logo;
 pub(crate) mod github_profile;
 pub(crate) mod screen_tour;
 pub(crate) mod site_probe;
+pub(crate) mod site_render;
+pub mod site_eval;
 pub(crate) mod reverse_scroll;
+pub(crate) mod scan_window;
 pub(crate) mod app_probe;
 pub(crate) mod reverse_engineer;
 // Kokoro-82M local TTS (replaces Piper) — see docs/research/jarvis-landscape/09
@@ -83,7 +87,9 @@ mod tray;
 pub(crate) mod commands;
 mod command_executor;
 mod app_registry;
+pub(crate) mod app_web_pref;
 pub(crate) mod action_kernel;
+pub(crate) mod action_receipt;
 pub(crate) mod wake_names;
 pub(crate) mod wake_dsp;
 pub mod intent_parser;
@@ -159,6 +165,10 @@ pub mod shortcuts;
 pub(crate) mod telegram;
 pub(crate) mod command_center;
 pub(crate) mod ghost_center;
+pub(crate) mod desktop_control;
+pub(crate) mod desktop_choices;
+#[cfg(target_os = "windows")]
+pub(crate) mod desktop_native;
 pub(crate) mod ghost_learning;
 pub(crate) mod nlu_update;
 pub(crate) mod power;
@@ -174,6 +184,10 @@ pub(crate) mod watch_runner;
 pub(crate) mod agent_tracker;
 pub(crate) mod agent_outcomes;
 pub(crate) mod agent_attention;
+pub(crate) mod agent_lifecycle;
+pub(crate) mod agent_lifecycle_runtime;
+#[cfg(target_os = "windows")]
+mod power_thread;
 pub(crate) mod repo_review;
 pub(crate) mod pr_screen;
 pub(crate) mod early_hello;
@@ -186,6 +200,8 @@ pub(crate) mod maps_panel;
 pub(crate) mod location;
 pub(crate) mod no_window;
 pub(crate) mod fares;
+pub(crate) mod directions;
+pub(crate) mod quiet;
 pub(crate) mod place_card;
 pub(crate) mod power_close;
 pub(crate) mod window_tile;
@@ -253,7 +269,7 @@ fn cleanup_webview2_profile() {
         Ok(v) => v,
         Err(_) => return,
     };
-    let base = std::path::PathBuf::from(&local_appdata).join("com.nexus.assistant");
+    let base = std::path::PathBuf::from(&local_appdata).join(crate::app_dirs::APP_ID);
     let webview_dir = base.join("EBWebView");
 
     // Reset only when the build type changed (dev <-> release). Doing it on every start
@@ -289,7 +305,7 @@ fn reset_webview2_profile(webview_dir: &std::path::Path) {
     // we use PowerShell to find processes by command-line match and kill
     // them. This is the most reliable approach on Windows.
     let ps_script = r#"
-        $target = 'com.nexus.assistant\EBWebView'
+        $target = $env:NEXUS_WEBVIEW_TARGET
         $procs = Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" |
             Where-Object { $_.CommandLine -like "*$target*" }
         if ($procs) {
@@ -303,6 +319,7 @@ fn reset_webview2_profile(webview_dir: &std::path::Path) {
 
     let _ = std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", ps_script])
+        .env("NEXUS_WEBVIEW_TARGET", format!("{}\\EBWebView", crate::app_dirs::APP_ID))
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .output();
 
@@ -393,7 +410,7 @@ fn init_logging() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,nexus=debug"));
     #[cfg(target_os = "windows")]
     if no_stdout() {
-        if let Some(dir) = std::env::var_os("APPDATA").map(|a| std::path::PathBuf::from(a).join("com.nexus.assistant").join("logs")) {
+        if let Some(dir) = std::env::var_os("APPDATA").map(|a| std::path::PathBuf::from(a).join(crate::app_dirs::APP_ID).join("logs")) {
             let _ = std::fs::create_dir_all(&dir);
             let file = dir.join("nexus.log");
             if std::fs::metadata(&file).map(|m| m.len() > 5_000_000).unwrap_or(false) {
@@ -445,6 +462,9 @@ pub fn run() {
     // secondary one falls through to the single-instance plugin, which hands the request to
     // the running instance and exits.
     let primary = crate::boot::claim_primary_instance();
+    // The shared Windows boot mutex belongs to the personal instance too. Never touch its WebView.
+    // Session refusal happens first in setup, AFTER the single-instance plugin has had
+    // the chance to deliver a same-profile OAuth/notification activation and exit.
     #[cfg(target_os = "windows")]
     if primary {
         cleanup_webview2_profile();
@@ -465,14 +485,14 @@ pub fn run() {
                 return;
             }
             // Handle deep-link redirects on Windows/Linux (passed as CLI arg)
-            if let Some(url) = args.iter().find(|a| a.starts_with("nexus://")) {
+            if let Some(url) = args.iter().find(|a| a.starts_with(&format!("{}://", crate::app_dirs::DEEP_LINK_SCHEME))) {
                 tracing::info!("single-instance: deep-link callback received");
                 if let Some(event_id) = crate::notify_activation::parse_activation(url) {
                     let app_clone = app.clone();
                     tauri::async_runtime::spawn(crate::notify_hub::activate(app_clone, event_id));
                     return;
                 }
-                if url == "nexus://settings" {
+                if url == &format!("{}://settings", crate::app_dirs::DEEP_LINK_SCHEME) {
                     // Open settings sidebar via deep link
                     let app_clone = app.clone();
                     tauri::async_runtime::spawn(async move {
@@ -535,7 +555,11 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
     }
 
-    builder.setup(|app| {
+    builder.setup(move |app| {
+        if cfg!(feature = "contributor") && (!primary || !crate::app_dirs::claim_contributor_session()) {
+            return Err(std::io::Error::new(std::io::ErrorKind::AddrInUse,
+                "Another NEXUS session or sidecar is active; contributor launch refused. No process was stopped.").into());
+        }
         crate::boot::mark("setup_begin");
         stt_diagnostics::start_retention_sweep(app.handle());
         // Stage FIRST (docs/features/123, P3): WebView2's cold start (~8 s) now overlaps the rest of setup
@@ -614,7 +638,7 @@ pub fn run() {
             // macOS uses Info.plist CFBundleURLTypes (already configured).
             #[cfg(desktop)]
             {
-                let _ = app.deep_link().register("nexus");
+                let _ = app.deep_link().register(crate::app_dirs::DEEP_LINK_SCHEME);
             }
 
             // ─── Autostart: respect settings.autostart ───────────────────
@@ -629,6 +653,8 @@ pub fn run() {
             //
             // The autostart setting is read from settings.json. If the file
             // doesn't exist yet (first run), we default to enabled.
+            // Contributor launches must not register, remove or overwrite the personal logon task.
+            if !cfg!(feature = "contributor") {
             let autostart_enabled = {
                 let dir = app.path().app_data_dir();
                 let settings_path = dir
@@ -732,6 +758,8 @@ pub fn run() {
                     let _ = autostart.disable();
                     tracing::info!("autostart: disabled");
                 }
+            }
+
             }
 
             // Tray menu.
@@ -884,9 +912,18 @@ pub fn run() {
                     }
                 });
             }
-            webhook::spawn_listener(app.handle().clone());
+            let startup_flag = |key: &str| {
+                app.path().app_data_dir().map(|d| memcore::flag(&d, key, true)).unwrap_or(true)
+            };
+            if startup_flag("webhookListener") {
+                webhook::spawn_listener(app.handle().clone());
+            } else {
+                tracing::info!("webhook listener off (Features page)");
+            }
             focus_throttle::spawn(app.handle());
-            keep_awake::start_working_poller(); // screen stays awake while a ghost drill/request is running
+            if startup_flag("keepAwakePoller") {
+                keep_awake::start_working_poller(); // screen stays awake while a ghost drill/request is running
+            }
             agent_watch::start_idle_monitor(); // kills the Node sidecar after 10 min with no active watch
             google::sentinel::start_sentinel_poller(app.handle().clone());
             proactive_policy::start_ticker(app.handle().clone()); // releases deferred alerts at breakpoints
@@ -901,6 +938,7 @@ pub fn run() {
             memcore::mailwatch::start(app.handle().clone()); // Gmail history.list watcher (idle until Google is connected)
             memcore::github_watch::start(app.handle().clone()); // GitHub Actions watcher (idle until GitHub token present)
             memcore::deploy_watch::start(app.handle().clone()); // Deploy watcher (idle until deploy tokens present)
+            directions::start(app.handle().clone()); // "remind me to leave for X at 5 pm": checks saved trip reminders once a minute
             memcore::leavewatch::start(app.handle().clone()); // leave-by reminders (needs calendar + Routes key + saved home)
             memcore::leases::start(app.handle().clone()); // temporary action leases (auto-unblock)
             memcore::wa::start(app.handle().clone()); // WhatsApp priority watcher (read-only; off unless memcoreWhatsapp)
@@ -1023,7 +1061,9 @@ pub fn run() {
             // the first voice command answers with zero cold-start delay.
             // No-op for Groq cloud users (saves RAM).
             if let Ok(dir) = app.path().app_data_dir() {
-                crate::lazy_stt::spawn_prewarm(dir);
+                if memcore::flag(&dir, "sttPrewarm", true) {
+                    crate::lazy_stt::spawn_prewarm(dir);
+                }
             }
 
             // NLU sidecar is on-demand fallback only (never pre-warmed at boot
@@ -1042,9 +1082,9 @@ pub fn run() {
                     if let Some(event_id) = crate::notify_activation::parse_activation(url_str) {
                         let app_clone = handle.clone();
                         tauri::async_runtime::spawn(crate::notify_hub::activate(app_clone, event_id));
-                    } else if url_str.starts_with("nexus://oauth/") {
+                    } else if url_str.starts_with(&format!("{}://oauth/", crate::app_dirs::DEEP_LINK_SCHEME)) {
                         let _ = handle.emit("deep-link://oauth-callback", url_str);
-                    } else if url_str == "nexus://settings" {
+                    } else if url_str == format!("{}://settings", crate::app_dirs::DEEP_LINK_SCHEME) {
                         // Deep link to open settings sidebar
                         let app_clone = handle.clone();
                         tauri::async_runtime::spawn(async move {
@@ -1199,6 +1239,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            desktop_choices::ghost_pending_choice,
+            desktop_choices::ghost_cancel_choice,
+            desktop_choices::ghost_choose_control,
             window_manager::set_orb_interactive,
             window_manager::get_pending_orb_rect,
             window_manager::get_pending_orb_position,
@@ -1230,6 +1273,9 @@ pub fn run() {
             notify_hub::notify_close_event,
             notify_hub::notify_event_ready,
             notify_hub::notify_open_external,
+            notify_hub::notify_list_events,
+            notify_hub::notify_alert_open,
+            notify_hub::notify_alerts_clear,
             notify_toast::get_pending_toast,
             notify_toast::notify_toast_close,
             notify_toast::notify_toast_fit,
@@ -1238,9 +1284,6 @@ pub fn run() {
             stage::stage_show,
             stage::stage_hide,
             stage::stage_heartbeat,
-            notify_hub::notify_list_events,
-            notify_hub::notify_alert_open,
-            notify_hub::notify_alerts_clear,
             stage::stage_take_pending_transcript,
             stage::stage_set_hitboxes,
             stage::stage_hide_kill,
@@ -1300,6 +1343,8 @@ pub fn run() {
             commands::voice_lock_enabled,
             commands::save_settings,
             commands::settings_patch,
+            commands::run_system_audit,
+            commands::notify_test,
             commands::export_settings,
             commands::import_settings,
             commands::memory_recall,
@@ -1347,6 +1392,7 @@ pub fn run() {
             commands::get_pending_sidebar_content,
             commands::show_sidebar_view,
             commands::set_sidebar_dock,
+            commands::set_sidebar_depth,
             commands::get_pending_sidebar_view,
             commands::get_pending_spatial,
             reverse_engineer::get_pending_stack,
@@ -1376,6 +1422,7 @@ pub fn run() {
             proactive_policy::proactive_snooze,
             commands::stop_stt_capture,
             commands::stt_capture_had_speech,
+            commands::follow_up_window_secs,
             commands::google_get_accounts,
             commands::google_connect_account,
             commands::google_connect_extended,
@@ -1392,7 +1439,6 @@ pub fn run() {
             stt_stream::stt_stream_push_chunk,
             stt_stream::stt_stream_stop,
             tts::speak_text,
-            commands::follow_up_window_secs,
             tts::speak_cached,
             speech_sync::speech_stage_register,
             speech_sync::speech_stage_ack,

@@ -12,11 +12,11 @@ Area: Desktop control. Queue position 4 of 68. Raw score **48.0%** (production n
 | S | 80 | 80 | met |
 | I | 40 | 60 | **gap 20** |
 
-Evidence today: 28 scanner + 15 app + 21 scroll + 12 runner tests.
+Evidence today: 140 focused tests (scanner, hidden render, accuracy replay, scroll stepper, runner outcomes, phrasings) + 8 safety mutations.
 
 ## Known gap (from the scorecard)
 
-Built, never run live: stack scanner (private-address safe; a disguised-IPv6 hole was found by tests and fixed), app inspector, Tech Stack sidebar view (previewed light and dark), scrolling tour runner (window move, scroll and restore are untested). Needs the owner walkthrough on two real sites.
+Change 197 (source only): honest outcomes (no tour after a refusal, no 'found 0'), cancel everywhere, hidden InPrivate render for SPAs, bot-wall/sign-in/SPA-shell reasons, mouse-free UIA scrolling that stops when the user takes over, table cleanup, offline accuracy harness. Live 2026-11-15 on bb04c8bb: voice dispatch works after the normal-mode arm fix, but the tab address could not be read (likely a full-screen browser); source now leaves full screen with F11 to read it, accepts Brave's location bar class and logs a [REVERSE] url diag line. Table 243 -> 364 with Retire.js (Apache-2.0) and Library Detector (MIT) fingerprints; Wappalyzer forks are GPL-3.0 and not used. Still no successful live scan: needs a rebuild and the owner walkthrough (Next.js, WordPress, Cloudflare-protected site, one desktop app) and the 50-site capture.
 
 ## Runs as (processes, for contention and Focus Mode)
 

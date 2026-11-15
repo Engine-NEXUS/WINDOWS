@@ -1,0 +1,45 @@
+{
+  "date": "2026-11-05",
+  "kind": "dirty-tree source/offline checkpoint; not a release assessment",
+  "head": "38647c1db3967789fe1654f6b5276ae0da6344ac",
+  "applicationBuildOrLaunchPerformed": false,
+  "runtimeSettingsChanged": false,
+  "tests": {
+    "node": 30,
+    "pythonLock": 2,
+    "standaloneRust": 5,
+    "frontend": 831,
+    "worker": 145,
+    "safetyMutations": 17
+  },
+  "passed": [
+    "frontend/Worker TypeScript",
+    "IPC/turn-end/hygiene",
+    "locked Cargo metadata without compilation",
+    "Rust parsing",
+    "shell/PowerShell parsing",
+    "documentation links/workflow YAML"
+  ],
+  "notRun": [
+    "full application Rust/integration compilation",
+    "new CI workflow execution",
+    "clean-machine installs/builds",
+    "native launch/voice/permissions/credential/installer/signing proofs"
+  ],
+  "sha256": {
+    "nexus.mjs": "66a9eaf07ae1d1df84d1751a22daeb4efb1ca5a79cd2074ae72d8db723eae798",
+    "scripts/contributor-cli.mjs": "c5d033cfec7a60d267f413a9469ef8049be6766d44e2134a96c57d3b88089d79",
+    "scripts/build-provenance.mjs": "df6d3265f84145eaefadc87f99cc92b998f4abfb08b102f93d2c3568e1e49f84",
+    "scripts/requirements-contributor.txt": "8720e274d501418b60122dfea07758b05cc45d398b9d9fbb01c54df471b264a3",
+    "scripts/requirements-contributor-lock.txt": "5674c2b34f6a3a37af1f00cc1aad6653c548bc173770ddf8310713e79b5595aa",
+    "scripts/check-contributor-python.py": "9b5ba9cef2eb0ca3ddcfbaa6dfa9f1b68c4ee03b00b31798abfbdcbc39cb1c48",
+    "src-tauri/Cargo.toml": "a7f9cd841cae8d59645b6aac261078faeae1c23f3672de4e00ff49e98722ed6b",
+    "src-tauri/Cargo.lock": "b96d4252fe08fec916e48231fa063edd292cc144a4a586154b4066f53d4829e3",
+    "src-tauri/build.rs": "1a918b4f7dbccbfca39664d99e67d88a857e961d64f3d4ac7264abf9d1dbded2",
+    "src-tauri/src/app_dirs.rs": "3cc87a3bf9e4922ec7b607add47b4609bae704f2d8d2d2e8d657f666a13aa520",
+    "src-tauri/src/lib.rs": "8d5a012c0f48a9248bef868c41e24efe2dea5008ab4ff67354a3e82e21fbdf81",
+    "src-tauri/src/auth_vault.rs": "a9cd186a81e3c311d82ba1cf5be1128e6777de49896509a1df1d185a40230d70",
+    "src-tauri/src/voice_profile.rs": "284ab3fe8940c99d86a56b0af98e113de76a091ec1685fc6e12d70b8ee86f1b1",
+    "src-tauri/src/memcore/crypto.rs": "92cab41467f246f04ae4afe4f247f8406e70dd2230dfe84b0ba2c153b8fb6a89"
+  }
+}

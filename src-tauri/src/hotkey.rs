@@ -24,6 +24,10 @@ const HOTKEYS: &[&str] = &[
     "CommandOrControl+Space",
     "CommandOrControl+Shift+S",
     "CommandOrControl+Alt+X",
+    // Sidebar depth, from any window: the sidebar cannot hear the plain arrow keys while another window has focus
+    // (or while it is behind everything), so these work without focusing it.
+    "CommandOrControl+Alt+Down",
+    "CommandOrControl+Alt+Up",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +42,8 @@ pub(crate) struct AgentState {
 pub(crate) enum Press {
     OpenSettings,
     KillStage,
+    /// Sidebar behind every window (`true`) or back in front (`false`).
+    SidebarDepth { back: bool },
     Cancel { abort_ghost: bool },
     Call,
 }
@@ -47,6 +53,8 @@ pub(crate) fn decide(hotkey: &str, state: AgentState) -> Press {
     match hotkey {
         "CommandOrControl+Shift+S" => Press::OpenSettings,
         "CommandOrControl+Alt+X" => Press::KillStage,
+        "CommandOrControl+Alt+Down" => Press::SidebarDepth { back: true },
+        "CommandOrControl+Alt+Up" => Press::SidebarDepth { back: false },
         _ => {
             if state.capturing || state.speaking || state.has_request || state.ghost {
                 Press::Cancel {
@@ -78,7 +86,8 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                         .try_state::<std::sync::Arc<crate::meeting_detect::MeetingState>>()
                         .map(|ms| ms.tts_playing.load(std::sync::atomic::Ordering::Relaxed))
                         .unwrap_or(false),
-                    has_request: crate::orchestrator::has_active_request(),
+                    // A heard turn still being transcribed counts as "thinking": no request exists yet.
+                    has_request: crate::orchestrator::has_active_request() || crate::turn_pending::is_pending(),
                     ghost: crate::ghost::session_active(),
                 };
 
@@ -90,6 +99,10 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                         tauri::async_runtime::spawn(async move {
                             let _ = crate::commands::show_settings_sidebar(app_clone).await;
                         });
+                    }
+                    Press::SidebarDepth { back } => {
+                        tracing::info!("hotkey ({}) → sidebar {}", hk, if back { "behind every window" } else { "to the front" });
+                        crate::commands::apply_sidebar_depth(&handle, back);
                     }
                     Press::KillStage => {
                         // Ctrl+Alt+X → stage kill-switch: destroy + disable the
@@ -118,6 +131,8 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
 
                         // 2. Cancel in-flight orchestrator requests
                         crate::orchestrator::cancel_active();
+                        // ... and the turn that is still on its way from speech-to-text, if any
+                        crate::turn_pending::cancel();
 
                         // 3. Abort STT capture
                         crate::wakeword_oww::abort_stt_capture();
@@ -258,26 +273,36 @@ mod tests {
             parsed.push(sc);
         }
 
-        assert_eq!(parsed.len(), 3);
-        assert_ne!(parsed[0], parsed[1]);
-        assert_ne!(parsed[0], parsed[2]);
-        assert_ne!(parsed[1], parsed[2]);
-
-        assert_ne!(HOTKEYS[0], HOTKEYS[1]);
-        assert_ne!(HOTKEYS[0], HOTKEYS[2]);
-        assert_ne!(HOTKEYS[1], HOTKEYS[2]);
+        assert_eq!(parsed.len(), HOTKEYS.len());
+        for i in 0..parsed.len() {
+            for j in (i + 1)..parsed.len() {
+                assert_ne!(parsed[i], parsed[j], "{} and {} must be different chords", HOTKEYS[i], HOTKEYS[j]);
+                assert_ne!(HOTKEYS[i], HOTKEYS[j]);
+            }
+        }
     }
 
     #[test]
-    fn hotkeys_has_exactly_three_documented_entries() {
-        assert_eq!(HOTKEYS.len(), 3);
+    fn hotkeys_has_exactly_the_documented_entries() {
         assert_eq!(
             HOTKEYS,
             &[
                 "CommandOrControl+Space",
                 "CommandOrControl+Shift+S",
                 "CommandOrControl+Alt+X",
+                "CommandOrControl+Alt+Down",
+                "CommandOrControl+Alt+Up",
             ]
         );
+    }
+
+    #[test]
+    fn depth_chords_move_the_sidebar_without_touching_the_agent() {
+        let idle = AgentState { capturing: false, speaking: false, has_request: false, ghost: false };
+        let busy = AgentState { capturing: true, speaking: true, has_request: true, ghost: true };
+        for st in [idle, busy] {
+            assert_eq!(decide("CommandOrControl+Alt+Down", st), Press::SidebarDepth { back: true });
+            assert_eq!(decide("CommandOrControl+Alt+Up", st), Press::SidebarDepth { back: false });
+        }
     }
 }

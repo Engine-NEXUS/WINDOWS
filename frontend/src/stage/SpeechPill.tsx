@@ -8,6 +8,8 @@ import {
   formatFinalText,
   formatPartialText,
 } from "./speechPillModel";
+import { useReducedMotion } from "../avatar/dotted/theme";
+import { useTypedText } from "./useTypedText";
 
 interface OrbRect {
   x: number;
@@ -35,6 +37,7 @@ export function SpeechPill() {
   const captionActive = useAssistant((s) => s.captionActive);
   const ttsActive = useAssistant((s) => s.ttsActive);
   const isReplying = replyActive || captionActive || ttsActive;
+  const typed = useTypedText(text, visible && !isReplying, useReducedMotion());
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pillRef = useRef<HTMLDivElement | null>(null);
@@ -205,7 +208,7 @@ export function SpeechPill() {
           <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
           <line x1="12" y1="19" x2="12" y2="22" />
         </svg>
-        <span className="speech-pill-text">{text}</span>
+        <span className="speech-pill-text">{typed || text.slice(0, 1)}</span>
       </div>
     </div>
   );

@@ -5,8 +5,8 @@
 //! Two parts, both pure where it matters:
 //!   * `Attention`: from "since when is each agent waiting for the user" and "how long has the user been idle" it decides
 //!     who to tell, each wait exactly once (plus a reminder every 10 minutes while the user is still away, at most 3).
-//!   * the away log: one line per agent about what it did while the user was gone ("Claude Code finished clean",
-//!     "Codex needs your input"), kept in the sealed memory store and spoken ONCE when the user is back at the keyboard.
+//!   * the legacy away log retains input requests only. Completion delivery uses
+//!     independent sealed lifecycle receipts, shared by all completion publishers.
 //!
 //! An agent only reports a wait through its Notification hook (Claude Code, Gemini CLI, OpenCode, Devin, Kilo, Copilot);
 //! Codex, Antigravity, Cursor, Windsurf and Trae cannot, so they are never reported here (no guessing).
@@ -161,7 +161,8 @@ pub fn remember(dir: &std::path::Path, label: &str, text: &str) {
 pub fn take_summary(dir: &std::path::Path) -> Option<String> {
     let now = chrono::Utc::now().timestamp();
     let log = load(dir);
-    let said = summary(&log, now);
+    let qualified: Vec<_> = log.iter().filter(|e| e.text == needs_fragment(&e.label)).cloned().collect();
+    let said = summary(&qualified, now);
     if !log.is_empty() {
         save(dir, &[]);
     }
@@ -201,7 +202,7 @@ pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
         let started = agent_hooks::now_ms();
         let mut attention = Attention::default();
         let mut was_away = false;
-        let mut stops: BTreeMap<&'static str, u64> = BTreeMap::new();
+
         let mut toasted: BTreeMap<&'static str, u64> = BTreeMap::new();
         loop {
             tokio::time::sleep(POLL).await;
@@ -236,22 +237,8 @@ pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                     crate::notify_hub::publish_agent(&app, agent.name(), agent.label(), cwd.as_deref(), true, since);
                 }
             }
-            // a finish while nobody is here is remembered even when no plan is watching (a plan's own, richer line
-            // replaces this one for the same agent a few seconds later)
-            for a in ALL_AGENTS.iter() {
-                let Some(stop) = agent_hooks::last_event_ms(*a, agent_hooks::EventKind::Stop).filter(|t| *t > started) else { continue };
-                if stops.get(a.name()).map_or(true, |seen| stop > *seen) {
-                    stops.insert(a.name(), stop);
-                    if agent_hooks::stop_is_latest(*a, started) {
-                        if away {
-                            remember(&dir, a.label(), &format!("{} has finished", a.label()));
-                        } else if should_publish_toast(away) {
-                            let cwd = agent_hooks::last_cwd(*a);
-                            crate::notify_hub::publish_agent(&app, a.name(), a.label(), cwd.as_deref(), false, stop);
-                        }
-                    }
-                }
-            }
+            // All completions share durable task receipts; raw Stop receipt time is not a task end.
+            crate::agent_lifecycle_runtime::poll(&app, away);
             if was_away && !away {
                 // the user is back: say it once, after the hello if there is one
                 tokio::time::sleep(Duration::from_secs(4)).await;

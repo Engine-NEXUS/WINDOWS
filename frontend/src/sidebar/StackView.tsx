@@ -6,6 +6,7 @@ import type {
   StackFocusPayload,
   StackLogoPatch,
 } from "./stackTypes";
+import { techIconFor, techIconForHost } from "./kit/techIcon";
 import {
   confidenceLabel,
   securityScore,
@@ -218,9 +219,12 @@ export function StackView({
     return securityScore(stackData?.security);
   }, [stackData?.security]);
 
+  const isApp = stackData?.kind === "app";
   const host = useMemo(() => {
+    // Apps carry the exe file name, not a web address.
+    if (stackData?.kind === "app") return stackData?.url || "";
     return extractHost(stackData?.final_url || stackData?.url);
-  }, [stackData?.final_url, stackData?.url]);
+  }, [stackData?.kind, stackData?.final_url, stackData?.url]);
 
   const topTech = useMemo(() => {
     return findTopTechnology(stackData?.detections);
@@ -258,7 +262,8 @@ export function StackView({
     );
   }
 
-  const isScanning = Boolean(stackData.scanning);
+  const isScanning = Boolean(stackData.scanning) || Boolean(stackData.rendering);
+  const thin = Array.isArray(stackData.thin) ? stackData.thin : [];
   const thirdPartyHosts = stackData.stats?.third_party_hosts || [];
   const visibleHosts = showAllHosts ? thirdPartyHosts : thirdPartyHosts.slice(0, 8);
   const sections = Array.isArray(stackData.sections) ? stackData.sections : [];
@@ -277,12 +282,13 @@ export function StackView({
           <LogoTile
             src={stackData.site_logo}
             name={host || stackData.title || "Site"}
+            techId={isApp ? stackData.title : undefined}
             size={36}
             rounded="lg"
           />
         }
-        title={stackData.title || host || "Website Tech Stack"}
-        subtitle={`${host || "site"} · Tech stack`}
+        title={stackData.title || host || (isApp ? "App Tech Stack" : "Website Tech Stack")}
+        subtitle={`${host || (isApp ? "app" : "site")} · ${isApp ? "App stack" : "Tech stack"}`}
         status={isScanning ? "scanning" : "done"}
         actions={
           <>
@@ -304,7 +310,7 @@ export function StackView({
           <Card className="stack-hero-card">
             {topTech && (
               <div className="stack-hero-top-badge">
-                <LogoTile src={topTech.logo} name={topTech.name} size={22} rounded="lg" />
+                <LogoTile src={topTech.logo} name={topTech.name} techId={topTech.id} category={topTech.category} size={22} rounded="lg" />
                 <span className="stack-hero-top-name">{topTech.name}</span>
                 <Chip
                   tone={
@@ -329,10 +335,24 @@ export function StackView({
             )}
 
             <p className="stack-hero-sub">
-              {`${stackData.detections?.length ?? 0} technologies · ${
-                stackData.stats?.script_count ?? 0
-              } scripts · ${thirdPartyHosts.length} third-party hosts`}
+              {isApp
+                ? `${stackData.detections?.length ?? 0} technologies`
+                : `${stackData.detections?.length ?? 0} technologies · ${
+                    stackData.stats?.script_count ?? 0
+                  } scripts · ${thirdPartyHosts.length} third-party hosts`}
             </p>
+
+            {thin.length > 0 && (
+              <ul className="stack-thin-list" aria-label="Why this scan is limited">
+                {thin.map((t, i) => (
+                  <li key={i}>{t}</li>
+                ))}
+              </ul>
+            )}
+
+            {stackData.rendering && (
+              <p className="stack-rendering-note">Looking deeper in a hidden browser window…</p>
+            )}
 
             <button
               type="button"
@@ -410,7 +430,8 @@ export function StackView({
             )}
           </Card>
 
-          {/* ── 4. Security Headers Card ───────────────────────────── */}
+          {/* ── 4. Security Headers Card (websites only) ───────────── */}
+          {!isApp && (
           <Card
             title="Security headers"
             trailing={
@@ -434,6 +455,7 @@ export function StackView({
               })}
             </div>
           </Card>
+          )}
 
           {/* ── 5. Technologies Card ───────────────────────────────── */}
           <Card title="Technologies">
@@ -484,11 +506,18 @@ export function StackView({
                         <LogoTile
                           src={detection.logo}
                           name={detection.name}
+                          techId={detection.id}
+                          category={detection.category}
                           size={32}
                           rounded="lg"
                         />
                         <div className="stack-tech-info">
-                          <span className="stack-tech-name">{detection.name}</span>
+                          <span className="stack-tech-name">
+                            {detection.name}
+                            {detection.version ? (
+                              <span className="stack-tech-version">{` ${detection.version}`}</span>
+                            ) : null}
+                          </span>
                           <span className="stack-tech-cat">
                             {formatCategoryLabel(detection.category)}
                           </span>
@@ -513,7 +542,8 @@ export function StackView({
             </div>
           </Card>
 
-          {/* ── 6. Page Weight Card ────────────────────────────────── */}
+          {/* ── 6. Page Weight Card (websites only) ────────────────── */}
+          {!isApp && (
           <Card title="Page weight">
             <div className="stack-weight-big-figures">
               <div className="stack-weight-figure-card">
@@ -547,6 +577,10 @@ export function StackView({
                 <div className="stack-hosts-chips">
                   {visibleHosts.map((h, i) => (
                     <span key={i} className="stack-host-chip">
+                      {(() => {
+                        const ic = techIconForHost(h);
+                        return ic ? <img className="stack-chip-icon" src={ic.src} alt="" data-tone={ic.tone} /> : null;
+                      })()}
                       {h}
                     </span>
                   ))}
@@ -565,15 +599,16 @@ export function StackView({
               </div>
             )}
           </Card>
+          )}
 
           {/* ── 7. On This Page Card (only when sections.length > 0) ─── */}
           {sections.length > 0 && (
-            <Card title="On this page">
+            <Card title={isApp ? "In this window" : "On this page"}>
               <div className="stack-sections-list">
                 {sections.map((sec) => (
                   <div key={sec.idx} className="stack-section-item">
                     <div className="stack-section-num-title">
-                      <span className="stack-section-num">{sec.idx}</span>
+                      <span className="stack-section-num">{(sec.idx ?? 0) + 1}</span>
                       <span>{sec.title}</span>
                     </div>
                     {sec.summary && (
@@ -600,6 +635,10 @@ export function StackView({
                               }}
                               title={`Focus ${name} row`}
                             >
+                              {(() => {
+                                const ic = techIconFor(refId, name);
+                                return ic ? <img className="stack-chip-icon" src={ic.src} alt="" data-tone={ic.tone} /> : null;
+                              })()}
                               {name}
                             </button>
                           );
@@ -615,7 +654,9 @@ export function StackView({
           {/* ── 8. Footer ──────────────────────────────────────────── */}
           <footer className="stack-footer">
             <p className="stack-footer-disclaimer">
-              Not detectable from outside: server code, databases, private APIs
+              {isApp
+                ? "Read from the install folder only; the app was never run."
+                : "Not detectable from outside: server code, databases, private APIs"}
             </p>
             <div className="stack-footer-actions">
               <button

@@ -1,0 +1,267 @@
+{
+ "alasql": {
+  "ext": "png",
+  "source": "https://static.tildacdn.com/img/tildafavicon.ico",
+  "tone": "light"
+ },
+ "amcharts": {
+  "ext": "ico",
+  "source": "https://www.amcharts.com/favicon.ico",
+  "tone": "light"
+ },
+ "apexcharts": {
+  "ext": "svg",
+  "source": "https://apexcharts.com/favicon.svg?v=20260408",
+  "tone": "light"
+ },
+ "apple-signin": {
+  "ext": "ico",
+  "source": "https://developer.apple.com/favicon.ico",
+  "tone": "light"
+ },
+ "avalonia": {
+  "ext": "png",
+  "source": "https://avaloniaui.net/apple-touch-icon.png",
+  "tone": "light"
+ },
+ "chromium": {
+  "ext": "png",
+  "source": "https://www.chromium.org/apple-touch-icon.png",
+  "tone": "light"
+ },
+ "ckeditor": {
+  "ext": "png",
+  "source": "https://ckeditor.com/assets/images/favicons/180x180.png",
+  "tone": "light"
+ },
+ "ckeditor5": {
+  "ext": "png",
+  "source": "https://ckeditor.com/assets/images/favicons/180x180.png",
+  "tone": "light"
+ },
+ "cookiebot": {
+  "ext": "svg",
+  "source": "https://www.cookiebot.com/favicon.svg",
+  "tone": "light"
+ },
+ "crisp": {
+  "ext": "png",
+  "source": "https://crisp.chat/favicons/apple-touch-icon-144x144.png",
+  "tone": "light"
+ },
+ "echarts": {
+  "ext": "png",
+  "source": "https://echarts.apache.org/en/images/favicon.png?_v_=20240226",
+  "tone": "light"
+ },
+ "extjs": {
+  "ext": "png",
+  "source": "https://www.sencha.com/wp-content/uploads/2024/09/cropped-icon-product-ExtJS-removebg-preview-180x180.png",
+  "tone": "light"
+ },
+ "ezoic": {
+  "ext": "png",
+  "source": "https://www.ezoic.com/brand/emblem-green.png",
+  "tone": "light"
+ },
+ "feather-icons": {
+  "ext": "png",
+  "source": "https://feathericons.com/favicon-32x32.png",
+  "tone": "light"
+ },
+ "flotcharts": {
+  "ext": "ico",
+  "source": "https://www.flotcharts.org/favicon.ico",
+  "tone": "light"
+ },
+ "flowplayer": {
+  "ext": "png",
+  "source": "https://flowplayer.com/user/themes/flowplayer-web/images/favicon.png",
+  "tone": "light"
+ },
+ "froala": {
+  "ext": "png",
+  "source": "https://froala.com/favicon.ico",
+  "tone": "light"
+ },
+ "fullstory": {
+  "ext": "svg",
+  "source": "https://www.fullstory.com/favicon.svg?v=7cac1bc6d731746740d72903d25cd5bf",
+  "tone": "light"
+ },
+ "fusejs": {
+  "ext": "png",
+  "source": "https://www.fusejs.io/icons/apple-icon-114x114.png",
+  "tone": "light"
+ },
+ "goatcounter": {
+  "ext": "png",
+  "source": "https://static.zgo.at/favicon/apple-touch-icon.png",
+  "tone": "light"
+ },
+ "handsontable": {
+  "ext": "svg",
+  "source": "https://handsontable.com/favicon/favicon.svg",
+  "tone": "light"
+ },
+ "highlightjs": {
+  "ext": "png",
+  "source": "https://highlightjs.org/icon.png",
+  "tone": "light"
+ },
+ "jquery-datatables": {
+  "ext": "svg",
+  "source": "https://datatables.net/media/images/favicon.svg",
+  "tone": "dark"
+ },
+ "jquery-migrate": {
+  "ext": "ico",
+  "source": "https://jquery.com/wp-content/themes/jquery.com/i/favicon.ico",
+  "tone": "light"
+ },
+ "jquery-terminal": {
+  "ext": "ico",
+  "source": "https://terminal.jcubic.pl/favicon.ico",
+  "tone": "light"
+ },
+ "jquery-ui": {
+  "ext": "ico",
+  "source": "https://jqueryui.com/wp-content/themes/jqueryui.com/i/favicon.ico",
+  "tone": "light"
+ },
+ "lenis": {
+  "ext": "png",
+  "source": "https://lenis.dev/apple-touch-icon.png",
+  "tone": "light"
+ },
+ "litespeed": {
+  "ext": "png",
+  "source": "https://www.litespeedtech.com/images/icons/lsws-icon_167px.png",
+  "tone": "light"
+ },
+ "logrocket": {
+  "ext": "svg",
+  "source": "https://logrocket.com/favicon/favicon.svg",
+  "tone": "light"
+ },
+ "marked": {
+  "ext": "ico",
+  "source": "https://marked.js.org/favicon.ico",
+  "tone": "dark"
+ },
+ "mathjax": {
+  "ext": "ico",
+  "source": "https://www.mathjax.org/favicon.ico",
+  "tone": "light"
+ },
+ "nextauth": {
+  "ext": "ico",
+  "source": "https://next-auth.js.org/img/favicon.ico",
+  "tone": "light"
+ },
+ "onetrust": {
+  "ext": "ico",
+  "source": "https://www.onetrust.com/favicon.ico",
+  "tone": "light"
+ },
+ "paperjs": {
+  "ext": "ico",
+  "source": "https://paperjs.org/assets/favicon.ico",
+  "tone": "light"
+ },
+ "pdf-js": {
+  "ext": "ico",
+  "source": "https://mozilla.github.io/pdf.js/images/favicon.ico",
+  "tone": "light"
+ },
+ "pdfobject": {
+  "ext": "png",
+  "source": "https://pdfobject.com/favicons/apple-touch-icon.png",
+  "tone": "light"
+ },
+ "pendo": {
+  "ext": "png",
+  "source": "https://www.pendo.io/apple-touch-icon.png",
+  "tone": "light"
+ },
+ "qooxdoo": {
+  "ext": "png",
+  "source": "https://qooxdoo.org/images/favicon/apple-icon-180x180.png",
+  "tone": "light"
+ },
+ "quill": {
+  "ext": "ico",
+  "source": "https://quilljs.com/assets/images/favicon.ico",
+  "tone": "light"
+ },
+ "scrollmagic": {
+  "ext": "png",
+  "source": "https://scrollmagic.io/assets/img/apple-touch-icon-precomposed.png",
+  "tone": "light"
+ },
+ "select2": {
+  "ext": "ico",
+  "source": "https://select2.org/images/favicon.ico",
+  "tone": "light"
+ },
+ "sliderrevolution": {
+  "ext": "png",
+  "source": "https://www.sliderrevolution.com/favicon.ico",
+  "tone": "light"
+ },
+ "sugar": {
+  "ext": "png",
+  "source": "https://sugarjs.com/assets/images/favicon-152.png",
+  "tone": "dark"
+ },
+ "tabler-icons": {
+  "ext": "ico",
+  "source": "https://tabler.io/favicon.ico?favicon.1wwitlnk8ws_k.ico",
+  "tone": "light"
+ },
+ "tawkto": {
+  "ext": "ico",
+  "source": "https://www.tawk.to/favicon.ico",
+  "tone": "light"
+ },
+ "termly": {
+  "ext": "svg",
+  "source": "https://termly.io/wp-content/themes/genesis-tly-v4/images/favicons/favicon.svg",
+  "tone": "dark"
+ },
+ "tinymce": {
+  "ext": "png",
+  "source": "https://www.tiny.cloud/favicon-32x32.png",
+  "tone": "light"
+ },
+ "ua-parser-js": {
+  "ext": "png",
+  "source": "https://uaparser.dev/images/uap-logo.png",
+  "tone": "light"
+ },
+ "videojs": {
+  "ext": "svg",
+  "source": "https://videojs.org/favicon.svg",
+  "tone": "light"
+ },
+ "wxwidgets": {
+  "ext": "png",
+  "source": "https://wxwidgets.org/assets/ico/apple-touch-icon-144-precomposed.png",
+  "tone": "light"
+ },
+ "x-twitter-pixel": {
+  "ext": "png",
+  "source": "https://ads.twitter.com/favicon.ico",
+  "tone": "light"
+ },
+ "yui": {
+  "ext": "png",
+  "source": "https://clarle.github.io/yui3/img/favicon.png",
+  "tone": "light"
+ },
+ "zepto": {
+  "ext": "png",
+  "source": "https://zeptojs.com/favicon.png",
+  "tone": "light"
+ }
+}

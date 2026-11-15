@@ -1,0 +1,1 @@
+This folder contains the built output assets for the worker "nexus-worker" generated at 2026-10-19T08:04:39.014Z.

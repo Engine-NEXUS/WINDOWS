@@ -5,6 +5,7 @@ import { ORB_DESIGNS, type OrbDesign } from "../avatar/dotted/resolveOrb";
 import { DEFAULT_ORB_DESIGNS, designFor, normalizeOrbDesigns, ORB_ACTIVITIES } from "../avatar/orbActivity";
 
 const DESIGN_LABELS: Record<OrbDesign, string> = {
+  circle: "Plain circle",
   breathing: "Breathing ring",
   listening: "Listening waves",
   working: "Working orbits",

@@ -684,6 +684,16 @@ pub fn publish_agent<R: Runtime>(
     }
 }
 
+/// A lifecycle receipt, rather than a newly received timestamp, identifies this task's notification.
+pub fn publish_agent_task<R: Runtime>(app: &AppHandle<R>, agent: &str, label: &str, cwd: Option<&str>, receipt: &str, text: &str) -> Option<String> {
+    let mut ev=agent_event(agent,label,cwd,false,0,now_ms())?;
+    ev.source_ref=receipt.to_string();
+    ev.original_source_ref=receipt.to_string();
+    ev.title=crate::notify_event::sanitize_text(text,120);
+    ev.event_id=event_id(&ev.entity_key,&ev.source_ref,ev.status);
+    publish_event(app,ev,None)
+}
+
 /// Record any source's alert in the ledger and deliver it: the NEXUS toast, the Windows toast, or history only.
 pub fn publish_event<R: Runtime>(app: &AppHandle<R>, mut ev: NotifyEvent, ttl_ms: Option<u64>) -> Option<String> {
     let now = now_ms();
@@ -1283,6 +1293,7 @@ mod tests {
             labels: vec![],
             date_ms: 0,
             rfc822_id: "<CAF+abc@mail.gmail.com>".into(),
+            body: String::new(),
         }
     }
 
