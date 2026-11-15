@@ -79,6 +79,14 @@
     "feature": "WhatsApp priority people (read-only)",
     "live": 5
   },
+  "agent-monitor": {
+    "feature": "Track all agents (announce each, summary)",
+    "live": 5
+  },
+  "agent-hook": {
+    "feature": "Agent hooks (Claude, Codex, Antigravity, Cursor, Gemini, OpenCode, Aider, Devin, Windsurf, Kilo, Copilot)",
+    "live": 40
+  },
   "watch-power": {
     "feature": "Watch one agent, then power off",
     "live": 65

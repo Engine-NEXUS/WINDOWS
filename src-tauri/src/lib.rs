@@ -188,6 +188,12 @@ pub(crate) mod agent_lifecycle;
 pub(crate) mod agent_lifecycle_runtime;
 #[cfg(target_os = "windows")]
 mod power_thread;
+// Agent Island: monitor (sessions, approvals, screen hold), the hover window, and the approval reply contract
+pub(crate) mod agent_autohook;
+pub(crate) mod agent_monitor;
+pub(crate) mod agent_island;
+pub(crate) mod agent_watching;
+pub(crate) mod agent_approval_reply;
 pub(crate) mod repo_review;
 pub(crate) mod pr_screen;
 pub(crate) mod early_hello;
@@ -825,6 +831,7 @@ pub fn run() {
                             tracing::info!("system resumed from sleep (gap {gap:?})");
                             // The renderer was frozen: do not call its stale heartbeat a blackout.
                             stage::note_resume();
+                            agent_attention::note_sleep(agent_hooks::now_ms());
                             // Speech that was in flight when the machine went to sleep must not play hours later.
                             orchestrator::request_barge_in("resume-from-sleep");
                             memcore::briefing::on_resume(app_for_resume.clone(), gap.as_secs());
@@ -840,19 +847,31 @@ pub fn run() {
             {
                 let state_for_tts = meeting_state.clone();
                 let app_for_tts = app.handle().clone();
+                // Counts "tts-started" events. A "tts-ended" that is followed by a newer start within its grace
+                // period is the end of the PREVIOUS utterance (stopping one sends it just before the next begins):
+                // acting on it would lift the speaking flag 0.5 s into the new reply.
+                let tts_starts = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                let starts_on_start = tts_starts.clone();
                 app.handle().listen("tts-started", move |_event| {
+                    starts_on_start.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     state_for_tts.set_tts_playing(true);
-                    tracing::debug!("meeting: TTS started — suppressing wake detection");
+                    tracing::debug!("meeting: TTS started - suppressing wake detection");
                 });
 
                 let state_for_tts_end = meeting_state.clone();
                 app.handle().listen("tts-ended", move |_event| {
-                    // Don't immediately resume — wait 500ms for audio to settle
+                    // Don't immediately resume - wait 500ms for audio to settle
                     let state = state_for_tts_end.clone();
+                    let starts_seen = tts_starts.load(std::sync::atomic::Ordering::SeqCst);
+                    let starts = tts_starts.clone();
                     tauri::async_runtime::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        state.set_tts_playing(false);
-                        tracing::debug!("meeting: TTS ended — resuming wake detection");
+                        if tts::tts_end_applies(starts_seen, starts.load(std::sync::atomic::Ordering::SeqCst)) {
+                            state.set_tts_playing(false);
+                            tracing::debug!("meeting: TTS ended - resuming wake detection");
+                        } else {
+                            tracing::debug!("meeting: a newer TTS started during the grace period - the old end is ignored");
+                        }
                     });
                     let _ = app_for_tts;
                 });
@@ -930,6 +949,8 @@ pub fn run() {
             memcore::resume::start_recorder(app.handle().clone()); // 30 s foreground-window resume points
             memcore::briefing::start_boot_briefing(app.handle().clone()); // once-a-day spoken "where you left off"
             agent_attention::start(app.handle().clone()); // "Codex needs your input, sir" + what happened while you were away
+            agent_autohook::start(app.handle().clone()); // finds installed coding agents and connects them (setting agentAutoHook)
+            agent_monitor::start(app.handle().clone()); // Agent Island: running agents, permission cards, screen on while they work
             memcore::routines::start_suggester(app.handle().clone()); // offers a routine when it notices a repeated sequence
             memcore::curator::start_curator(app.handle().clone()); // daily idle upkeep: retire unused routines, keep used profile facts
             memcore::review::start_reviewer(app.handle().clone()); // optional, default off: suggests profile facts for approval
@@ -1439,6 +1460,7 @@ pub fn run() {
             stt_stream::stt_stream_push_chunk,
             stt_stream::stt_stream_stop,
             tts::speak_text,
+            commands::follow_up_window_secs,
             tts::speak_cached,
             speech_sync::speech_stage_register,
             speech_sync::speech_stage_ack,
@@ -1485,6 +1507,11 @@ pub fn run() {
             // Agent-completion watcher (Claude Code, Gemini CLI, Codex, Aider, Hermes, opencode)
             agent_watch::agent_watch_unavailable_reason,
             agent_watch::agent_watch_stop,
+            agent_monitor::agent_approval_decide,
+            agent_island::agent_island_mode,
+            agent_island::agent_island_set_obstacle,
+            agent_island::agent_island_snapshot,
+            agent_island::agent_island_preview,
             agent_watch::agent_watch_list_watches,
             // Live mode commands
             live::live_type_text,

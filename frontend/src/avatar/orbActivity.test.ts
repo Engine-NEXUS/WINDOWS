@@ -30,6 +30,11 @@ describe("deriveOrbActivity priority", () => {
     ["listening beats ghost (hot mic turn)", { ghostActive: true, state: "listening" }, "listening"],
     ["speaking beats ghost", { ghostActive: true, state: "speaking" }, "speaking"],
     ["hand mode while idle", { handActive: true }, "hand"],
+    ["hand mode with the pointer on", { handActive: true, handArmed: true }, "handArmed"],
+    ["hand mode with the pointer switched off by a palm", { handActive: true, handPaused: true }, "handPaused"],
+    ["armed beats paused", { handActive: true, handArmed: true, handPaused: true }, "handArmed"],
+    ["armed without hand mode is nothing", { handArmed: true }, "idle"],
+    ["speaking beats the hand shapes", { handActive: true, handArmed: true, state: "speaking" }, "speaking"],
     ["ghost beats hand", { ghostActive: true, handActive: true }, "ghost"],
     ["dictation while idle", { dictationActive: true }, "dictation"],
     ["hand beats dictation", { handActive: true, dictationActive: true }, "hand"],
@@ -100,7 +105,7 @@ describe("orbLevel (voice coupling)", () => {
     expect(orbLevel("speaking", i)).toBe(0);
   });
   it("every other activity is a steady animation", () => {
-    for (const a of ["idle", "thinking", "ghost", "hand", "dictation", "agent", "background", "analysing", "waiting"] as const) {
+    for (const a of ["idle", "thinking", "ghost", "hand", "handArmed", "handPaused", "dictation", "agent", "background", "analysing", "waiting"] as const) {
       expect(orbLevel(a, { ...i, envelope: 1, ttsActive: true })).toBe(0);
     }
   });

@@ -11,6 +11,7 @@
 //
 // Call `initOrbRuntime()` once from stage/main.tsx on mount.
 
+import { stateAfterBargeResume } from "./bargeOrb";
 import { preloadSileroVad, preloadMicVad, stopVad } from "../audio/vad";
 import { abortCapture, processTranscript, resetMissStreak } from "../audio/recorder";
 import { stopTts, isRustTtsPlaying } from "../audio/ttsPlayer";
@@ -168,7 +169,7 @@ async function startListening() {
       console.log("[NEXUS] barge-in/turn-transition: cancelling current turn");
       stopTts();
       stopVad();
-      await abortCapture(true).catch((e) => console.warn("[NEXUS] barge-in abortCapture failed:", e));
+      await abortCapture().catch((e) => console.warn("[NEXUS] barge-in abortCapture failed:", e));
     }
     if (wasSpeaking && !isAutoReopen) {
       await new Promise((r) => setTimeout(r, 100));
@@ -276,7 +277,8 @@ async function setupOrbWakeListener() {
     await listen("barge:resume", () => {
       const s = useAssistant.getState();
       console.log("[TURN] barge resume: not for NEXUS, continuing speech");
-      if (s.state === "listening") s.setState(isRustTtsPlaying() ? "speaking" : "idle");
+      const next = stateAfterBargeResume(s.state, isRustTtsPlaying());
+      if (next) s.setState(next);
     });
     console.log("[NEXUS] orb:wake / orb:first_run_greeting / orb:cancel / barge listeners registered");
   } catch (err) {

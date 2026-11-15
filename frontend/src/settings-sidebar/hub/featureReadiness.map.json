@@ -19,6 +19,8 @@
   "github-watch": "Notification brain",
   "deploy-watch": "Notification brain",
   "wa-watch": "WhatsApp priority people",
+  "agent-monitor": "Track all agents",
+  "agent-hook": "Agent hooks",
   "watch-power": "Watch one agent, then power off",
   "power-commands": "Ask-first shutdown",
   "maps-embed": "Maps / Places / Directions",

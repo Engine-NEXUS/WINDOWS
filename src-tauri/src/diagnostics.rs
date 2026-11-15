@@ -588,7 +588,7 @@ pub struct FullSystemAuditReport {
 /// Layer 1: Frontend & Animation Subsystem
 /// Layer 2: Audio, Hardware & Wake-Word Pipeline
 /// Layer 3: Main Command Center Validation & Dispatch
-/// Layer 4: 15 Action Sub-Centers Health
+/// Layer 4: Action Sub-Centers Health (every center in `center::ALL_SUB_CENTERS`)
 /// Layer 5: Cloud, Vault & Credentials Audit
 pub fn run_full_system_audit(app_data_dir: Option<&std::path::Path>) -> FullSystemAuditReport {
     let mut items = Vec::new();
@@ -758,25 +758,33 @@ pub fn run_full_system_audit(app_data_dir: Option<&std::path::Path>) -> FullSyst
         });
     }
 
-    // ─── Layer 4: 15 Sub-Centers Readiness ─────────────────────────────────
+    // ─── Layer 4: Sub-Centers Readiness ────────────────────────────────────
     {
         let app_count = crate::app_registry::cached_app_count();
         let crawler_script = crate::browser_center::resolve_crawler_script_path().is_some();
         let ufo_script = crate::system_center::resolve_ufo_script_path().is_some();
         let youtube_script = crate::youtube_center::resolve_youtube_engine_path().is_some();
 
+        let n = crate::center::ALL_SUB_CENTERS.len();
+        let missing: Vec<&str> = [("Crawler", crawler_script), ("UFO UIA", ufo_script), ("YouTube Engine", youtube_script)]
+            .iter()
+            .filter(|(_, ok)| !ok)
+            .map(|(name, _)| *name)
+            .collect();
         let subcenter_details = format!(
-            "15/15 Sub-Centers Registered — Apps indexed: {} | Crawler: {} | UFO UIA: {} | YouTube Engine: {}",
+            "{n}/{n} Sub-Centers Registered — Apps indexed: {} | Crawler: {} | UFO UIA: {} | YouTube Engine: {}",
             app_count,
             if crawler_script { "Ready" } else { "Missing" },
             if ufo_script { "Ready" } else { "Missing" },
             if youtube_script { "Ready" } else { "Missing" }
         );
-        println!("[PREFLIGHT] [OK] Layer 4 (15 Action Sub-Centers): {}", subcenter_details);
+        // a missing helper script is a warning, not "OK" (the line used to say OK whatever was missing)
+        let status = if missing.is_empty() { "OK" } else { "WARN" };
+        println!("[PREFLIGHT] [{status}] Layer 4 ({n} Action Sub-Centers): {}", subcenter_details);
         items.push(SystemAuditItem {
             layer: 4,
-            name: "Action Sub-Centers (15/15)".into(),
-            status: "OK".into(),
+            name: format!("Action Sub-Centers ({n}/{n})"),
+            status: status.into(),
             detail: subcenter_details,
         });
     }
@@ -818,6 +826,19 @@ pub fn run_full_system_audit(app_data_dir: Option<&std::path::Path>) -> FullSyst
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The preflight must count the centers that exist (it printed a hard-coded 15/15 after three more were added) and
+    /// must not call a missing helper script "OK".
+    #[test]
+    fn the_preflight_counts_every_registered_sub_center() {
+        let n = crate::center::ALL_SUB_CENTERS.len();
+        let report = run_full_system_audit(None);
+        let layer4 = report.items.iter().find(|i| i.layer == 4).expect("layer 4 is reported");
+        assert!(layer4.name.contains(&format!("{n}/{n}")), "{}", layer4.name);
+        assert!(layer4.detail.starts_with(&format!("{n}/{n} Sub-Centers Registered")), "{}", layer4.detail);
+        let all_ready = !layer4.detail.contains("Missing");
+        assert_eq!(layer4.status == "OK", all_ready, "status {} vs {}", layer4.status, layer4.detail);
+    }
 
     #[test]
     fn test_provider_expired_scoped_per_provider() {

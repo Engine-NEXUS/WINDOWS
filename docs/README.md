@@ -10,9 +10,11 @@
 - [Agent-watch cross-check, November 6](changes/2026-11-06-agent-watch-cross-check.md) — original fixes retained, fresh checks and three remaining edge cases.
 - [Agent completion and keep-awake reliability](changes/2026-11-05-agent-completion-reliability.md) — shared receipts, false-finish fixes, repeated offline checks and owner-operated acceptance.
 - [Contributor setup and onboarding](../CONTRIBUTING.md) — isolated development, platform limits and commands.
+- [Wake-word evidence and multi-user laptop training plan](research/voice-accuracy/03-current-evidence-and-training-plan-2026-11-06.md) — historical measurements, commercial research and participant/device qualification.
 
 > NEXUS is a Windows-first voice desktop assistant: a Tauri v2 / Rust client with a React UI, a Cloudflare Worker backend, and on-demand local Python helpers (speech fallback, intent classifier).
 > **Where the truth lives:** [`../AGENTS.md`](../AGENTS.md) is the engineering log — newest entries first, each with *Verify* and *Not run live* lines. These docs add design, research and plans around it. Where a document disagrees with `AGENTS.md` or the code, trust those.
+- **Session 2026-11-10/11 research and plans:** [research record](research/session-2026-11-10/README.md) (agent tracking, icons, finish announcements, caption/orb/barge-in), [production-readiness plan](testing/production-readiness-plan-2026-11-10.md), [implementation plan](features/191-production-readiness-implementation-plan.md), [change 191](changes/191-icons-finish-announcements-barge-echo-and-orb-watchdog.md). Nothing in it is a readiness promotion.
 
 ---
 

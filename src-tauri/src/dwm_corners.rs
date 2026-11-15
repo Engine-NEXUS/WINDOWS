@@ -36,6 +36,31 @@ extern "system" {
 
 const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
 const DWMWCP_ROUND: i32 = 2;
+const DWMWCP_DONOTROUND: i32 = 1;
+const DWMWA_BORDER_COLOR: u32 = 34;
+/// DWMWA_COLOR_NONE: draw no border at all.
+const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
+
+/// For a transparent window that draws its own rounded shape (the Agent Island): no OS rounding and no OS border.
+/// Windows 11 outlines every rounded window with a thin border; on a window much bigger than what it shows that
+/// reads as an empty frame around the bar.
+pub fn no_frame<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32_handle) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = win32_handle.hwnd.get() as isize;
+    // SAFETY: both attributes are plain 32-bit values; an OS that does not know them returns a failure code we ignore.
+    unsafe {
+        let pref: i32 = DWMWCP_DONOTROUND;
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref as *const i32 as *const c_void, 4);
+        let none: u32 = DWMWA_COLOR_NONE;
+        let hr = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &none as *const u32 as *const c_void, 4);
+        tracing::info!("agent island: window frame removed (hr={hr:#x})");
+    }
+}
 
 /// Rounds the given Tauri window's corners to match the CSS card's
 /// `border-radius`, so the native DWM-painted window rectangle and the

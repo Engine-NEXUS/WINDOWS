@@ -120,6 +120,10 @@ export const FEATURES: Feature[] = [
   bool({ id: "cr-review", group: "Notifications", title: "CodeRabbit: review automatically", what: "Runs a review on new PRs. Sends the diff to a review service.", key: "coderabbitAutoReview", def: false, risk: "cloud" }),
 
   // ── Agents ──
+  bool({ id: "agent-monitor", group: "Agents", title: "Show running agents", what: "Agent Island: logos of your coding agents at the top of the screen. Keeps the screen awake while they work.", key: "agentMonitor", def: true }),
+  bool({ id: "agent-hover", group: "Agents", title: "Agent Island on hover", what: "Hovering shows each agent's detail.", key: "agentMonitorHover", def: true, dependsOn: "agentMonitor" }),
+  bool({ id: "agent-hook", group: "Agents", title: "Connect coding agents automatically", what: "Finds Claude Code, Codex, Antigravity and others and connects them. A backup of each one's settings is made first.", key: "agentAutoHook", def: true, risk: "desktop" }),
+  bool({ id: "agent-hide-watched", group: "Agents", title: "Hide agents NEXUS is already watching", what: "Keeps the island tidy.", key: "agentIslandHideWatched", def: true, dependsOn: "agentMonitor" }),
   {
     id: "watch-power",
     group: "Agents",

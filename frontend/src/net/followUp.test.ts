@@ -113,3 +113,15 @@ describe("followUp state and lifecycle", () => {
     expect(triggerFollowupListenMock).not.toHaveBeenCalled();
   });
 });
+
+describe("an empty capture inside the follow-up window", () => {
+  it("keeps the window until little time is left", async () => {
+    const { followUpTimeLeftMs, shouldRearmFollowUp, REARM_MIN_LEFT_MS } = await import("./followUp");
+    expect(followUpTimeLeftMs(1000, 6000, 2850)).toBe(4150);
+    expect(followUpTimeLeftMs(1000, 6000, 9000)).toBe(0);
+    expect(shouldRearmFollowUp(4150)).toBe(true);
+    expect(shouldRearmFollowUp(REARM_MIN_LEFT_MS)).toBe(true);
+    expect(shouldRearmFollowUp(REARM_MIN_LEFT_MS - 1)).toBe(false);
+    expect(shouldRearmFollowUp(0)).toBe(false);
+  });
+});

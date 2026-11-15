@@ -42,6 +42,9 @@ jobs:
       - name: Repo hygiene gate (no tracked secrets, databases, logs, key files)
         run: node ../scripts/check-repo-hygiene.mjs
 
+      - name: Logo files gate
+        run: node ../scripts/check-activity-icons.mjs && node ../scripts/gen-icon-tiles.mjs --check
+
       # Every text/surface pair of the design tokens, dark and light, against WCAG 2.2 AA.
       - name: Theme contrast gate
         run: node ../scripts/check-theme-contrast.mjs
@@ -54,6 +57,25 @@ jobs:
       # the one-sided leftovers are frozen in scripts/baselines/ and may only shrink.
       - name: IPC + event contract gate
         run: node ../scripts/check-ipc-contract.mjs
+
+      # Panel windows must stay solid; a new window surface class has to be listed in window-opacity-registry.json.
+      - name: Window opacity gate
+        run: node ../scripts/check-window-opacity.mjs
+
+      # The feature work cards are generated from scorecard-data.json; a hand edit or a stale card fails.
+      - name: Work-card drift gate
+        run: node ../scripts/make-work-cards.mjs --check
+
+      # Every boolean in NexusSettings is a row on the Features page (or listed as internal, with a reason).
+      - name: Features page registry
+        run: node ../scripts/check-feature-registry.mjs
+
+      - name: Feature readiness drift
+        run: node ../scripts/gen-feature-readiness.mjs --check
+
+      # The logon greeting is drawn natively from frames of the real dotted orb; a change to the orb engine must be re-baked.
+      - name: Early orb frames up to date
+        run: node ../scripts/bake-early-orb.mjs --check
 
   worker-check:
     runs-on: ubuntu-latest
@@ -111,7 +133,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
 
       - uses: actions/setup-node@v4
         with:
@@ -170,7 +192,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
 
       - name: Install LLVM
         run: choco install llvm -y

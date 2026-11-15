@@ -242,8 +242,13 @@ set AG=%~1\r\n\
 set EV=%~2\r\n\
 if \"%EV%\"==\"\" set EV=stop\r\n\
 if /i \"%AG%\"==\"aider\" goto aider\r\n\
+if /i \"%EV%\"==\"permission\" goto perm\r\n\
 curl.exe -s -m 3 -X POST \"http://127.0.0.1:@PORT@/agent-event?agent=%AG%&event=%EV%&watch=%NEXUS_WATCH_ID%\" -H \"Authorization: Bearer @TOKEN@\" -H \"Content-Type: application/json\" --data-binary @- >nul 2>&1\r\n\
 goto out\r\n\
+:perm\r\n\
+rem a permission request is held open until the Agent Island answers; curl prints the reply the agent expects\r\n\
+curl.exe -s -m 112 -X POST \"http://127.0.0.1:@PORT@/agent-approval?agent=%AG%\" -H \"Authorization: Bearer @TOKEN@\" -H \"Content-Type: application/json\" --data-binary @-\r\n\
+exit /b 0\r\n\
 :aider\r\n\
 curl.exe -s -m 3 -X POST \"http://127.0.0.1:@PORT@/agent-event?agent=%AG%&event=%EV%&watch=%NEXUS_WATCH_ID%\" -H \"Authorization: Bearer @TOKEN@\" --data-urlencode \"cwd=%CD%\" >nul 2>&1\r\n\
 :out\r\n\
@@ -260,6 +265,10 @@ const SCRIPT_TEMPLATE: &str = "#!/bin/sh\n\
 AG=\"$1\"\n\
 EV=\"${2:-stop}\"\n\
 URL=\"http://127.0.0.1:@PORT@/agent-event?agent=$AG&event=$EV&watch=${NEXUS_WATCH_ID:-}\"\n\
+if [ \"$EV\" = \"permission\" ]; then\n\
+  curl -s -m 112 -X POST \"http://127.0.0.1:@PORT@/agent-approval?agent=$AG\" -H \"Authorization: Bearer @TOKEN@\" -H \"Content-Type: application/json\" --data-binary @-\n\
+  exit 0\n\
+fi\n\
 if [ \"$AG\" = \"aider\" ]; then\n\
   curl -s -m 3 -X POST \"$URL\" -H \"Authorization: Bearer @TOKEN@\" --data-urlencode \"cwd=$PWD\" >/dev/null 2>&1\n\
 else\n\
@@ -301,6 +310,10 @@ const CLAUDE_EVENTS: HookEvents = &[
     ("Stop", "stop", None),
     ("Notification", "notification", Some("permission_prompt|elicitation_dialog")),
     ("UserPromptSubmit", "start", None),
+    // The Agent Island (agent_monitor.rs): what the agent is doing, and permission requests held for Allow / Deny.
+    ("PreToolUse", "pretool", None),
+    ("SessionEnd", "end", None),
+    ("PermissionRequest", "permission", None),
 ];
 
 /// Gemini CLI: `AfterAgent` fires when the agent loop completes and carries `prompt_response`.
@@ -412,7 +425,11 @@ fn hooks_map_add(existing: &str, script: &Path, agent: &str, events: HookEvents,
         list.retain(|e| !entry_is_ours(e));
         let cmd = command_line(script, agent, kind)?;
         let mut entry = match shape {
-            Shape::Nested { timeout } => json!({ "hooks": [ { "type": "command", "command": cmd, "timeout": timeout } ] }),
+            // a permission request is held open for the user's click (agent_monitor::APPROVAL_WAIT = 108 s)
+            Shape::Nested { timeout } => {
+                let timeout = if *kind == "permission" { timeout.max(120) } else { timeout };
+                json!({ "hooks": [ { "type": "command", "command": cmd, "timeout": timeout } ] })
+            }
             Shape::Flat => json!({ "command": cmd }),
         };
         if let Some(m) = matcher {
@@ -951,9 +968,47 @@ pub fn agents_present_in(home: &Path) -> Vec<Agent> {
         .collect()
 }
 
-/// `agents_present_in` for the real home folder.
+/// The command each agent's CLI is run with. A fresh install often has no settings folder yet, so the program on
+/// PATH is the earlier sign that the tool is there.
+fn cli_names(a: Agent) -> &'static [&'static str] {
+    match a {
+        Agent::Claude => &["claude"],
+        Agent::Codex => &["codex"],
+        Agent::Antigravity => &["agy"],
+        Agent::Gemini => &["gemini"],
+        Agent::Aider => &["aider"],
+        Agent::OpenCode => &["opencode"],
+        Agent::Kilo => &["kilo", "kilocode"],
+        Agent::Copilot => &["copilot"],
+        _ => &[],
+    }
+}
+
+/// Agents whose CLI is found in one of the `path_var` folders (`name`, `name.exe`, `.cmd`, `.bat`, `.ps1`). Pure.
+pub fn agents_on_path_in(path_var: &std::ffi::OsStr) -> Vec<Agent> {
+    let dirs: Vec<PathBuf> = std::env::split_paths(path_var).collect();
+    ALL_AGENTS
+        .iter()
+        .copied()
+        .filter(|a| {
+            cli_names(*a).iter().any(|n| {
+                dirs.iter().any(|d| ["", ".exe", ".cmd", ".bat", ".ps1"].iter().any(|ext| d.join(format!("{n}{ext}")).is_file()))
+            })
+        })
+        .collect()
+}
+
+/// Agents found by settings folder or by their CLI on PATH, in `ALL_AGENTS` order.
 pub fn agents_present() -> Vec<Agent> {
-    home().map(|h| agents_present_in(&h)).unwrap_or_default()
+    let mut found = home().map(|h| agents_present_in(&h)).unwrap_or_default();
+    if let Some(p) = std::env::var_os("PATH") {
+        for a in agents_on_path_in(&p) {
+            if !found.contains(&a) {
+                found.push(a);
+            }
+        }
+    }
+    ALL_AGENTS.iter().copied().filter(|a| found.contains(a)).collect()
 }
 
 /// The agents "hook up all agents" would touch: present ones that have a hook of their own to install (not Devin,
@@ -1468,6 +1523,30 @@ pub fn last_event_ms(agent: Agent, kind: EventKind) -> Option<u64> {
     EVENTS.lock().ok().and_then(|q| last_index(&q, agent, kind).map(|i| q[i].at_ms))
 }
 
+/// Pure: when the turn that ended at `stop_ms` began: the earliest Start after the previous Stop. (Some agents, such as
+/// Antigravity, report a Start before every model call, so the LAST Start would make every long task look short.)
+pub fn turn_start(events: &[(EventKind, u64)], stop_ms: u64) -> Option<u64> {
+    let mut start = None;
+    for (kind, at) in events.iter().rev() {
+        if *at > stop_ms {
+            continue;
+        }
+        match kind {
+            EventKind::Stop if *at < stop_ms => break,
+            EventKind::Start => start = Some(*at),
+            _ => {}
+        }
+    }
+    start
+}
+
+/// When the turn of this agent that ended at `stop_ms` began, if the agent reported its start.
+pub fn turn_started_ms(agent: Agent, stop_ms: u64) -> Option<u64> {
+    let q = EVENTS.lock().ok()?;
+    let ev: Vec<(EventKind, u64)> = q.iter().filter(|e| e.agent == agent.name()).map(|e| (e.kind, e.at_ms)).collect();
+    turn_start(&ev, stop_ms)
+}
+
 /// Has this agent stopped (at or after `since_ms`) with no new prompt since? A new prompt means a new turn
 /// is running, so the older stop no longer says "finished".
 pub fn stop_is_latest(agent: Agent, since_ms: u64) -> bool {
@@ -1765,6 +1844,16 @@ fn parse_all_sentence(text: &str) -> Option<HookAction> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_turn_starts_at_the_first_start_after_the_previous_stop() {
+        use EventKind::{Start, Stop};
+        // Antigravity: a Start before every model call
+        let ev = [(Start, 100), (Stop, 200), (Start, 1_000), (Start, 20_000), (Start, 40_000), (Start, 60_000), (Stop, 90_000)];
+        assert_eq!(turn_start(&ev, 90_000), Some(1_000), "not the last Start (60 s), the first one after the stop at 200");
+        assert_eq!(turn_start(&ev, 200), Some(100));
+        assert_eq!(turn_start(&[(Stop, 5)], 5), None, "no start reported");
+    }
+
     use super::*;
 
     fn script() -> PathBuf {

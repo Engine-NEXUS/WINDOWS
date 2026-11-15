@@ -17,6 +17,13 @@ export const FEATURE_TESTS: Record<string, FeatureTest> = {
       return ok("Played the wake-up sound. Did you hear it?");
     },
   },
+  "agent-monitor": {
+    label: "Preview",
+    run: async (invoke) => {
+      await invoke("agent_island_preview");
+      return ok("Showed the Agent Island preview at the top of the screen.");
+    },
+  },
   "mic-keepalive": {
     label: "Mic check",
     run: async (invoke) => {

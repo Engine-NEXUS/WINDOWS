@@ -14,7 +14,7 @@ describe("feature tests", () => {
     expect(r).toEqual({ status: "WARN", detail: "No test for this feature yet.", at: 5 });
   });
   it("a failing command is a FAIL with its message", async () => {
-    const r = await runTest(vi.fn().mockRejectedValue(new Error("no bridge")), "wake-sound", () => 1);
+    const r = await runTest(vi.fn().mockRejectedValue(new Error("no bridge")), "agent-monitor", () => 1);
     expect(r.status).toBe("FAIL");
     expect(r.detail).toBe("no bridge");
   });
