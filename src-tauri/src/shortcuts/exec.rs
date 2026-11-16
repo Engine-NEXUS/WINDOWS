@@ -11,7 +11,14 @@ use super::router::{self, Env, Foreground, Outcome};
 /// ("bank", "ledger", …) are far too common in ordinary page titles, so they are matched against the
 /// executable name only.
 const TITLE_PROTECTED: &[&str] = &[
-    "1password", "bitwarden", "keychain", "lastpass", "keepass", "dashlane", "metamask", "trezor",
+    "1password",
+    "bitwarden",
+    "keychain",
+    "lastpass",
+    "keepass",
+    "dashlane",
+    "metamask",
+    "trezor",
 ];
 
 /// Pure (unit-tested): should keystrokes be refused for this window?
@@ -25,12 +32,38 @@ pub fn is_protected_window(exe: &str, title: &str) -> bool {
 
 /// Kill switch: `NEXUS_SHORTCUTS_LEGACY=1` makes every call site use its previous implementation.
 pub fn enabled() -> bool {
-    !std::env::var("NEXUS_SHORTCUTS_LEGACY").map(|v| v == "1").unwrap_or(false)
+    !std::env::var("NEXUS_SHORTCUTS_LEGACY")
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
 pub struct WinEnv;
 
 impl Env for WinEnv {
+    fn identity_required(&self) -> bool {
+        cfg!(target_os = "windows")
+    }
+    fn window_identity(&self) -> Option<crate::desktop_control::WindowIdentity> {
+        #[cfg(target_os = "windows")]
+        {
+            crate::desktop_native::foreground()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            None
+        }
+    }
+    fn effect_snapshot(&self, action: Action) -> Option<crate::desktop_control::EffectState> {
+        #[cfg(target_os = "windows")]
+        {
+            crate::desktop_native::shortcut_snapshot(action)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = action;
+            None
+        }
+    }
     fn foreground(&self) -> Option<Foreground> {
         #[cfg(target_os = "windows")]
         {
@@ -42,7 +75,12 @@ impl Env for WinEnv {
             let exe = crate::browser_url::foreground_process_name()?;
             let title = crate::browser_url::foreground_window_title().unwrap_or_default();
             let elevated = crate::live::commands::window::window_process_elevated(hwnd);
-            Some(Foreground { exe, title, hwnd: hwnd.0, elevated })
+            Some(Foreground {
+                exe,
+                title,
+                hwnd: hwnd.0,
+                elevated,
+            })
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -60,7 +98,9 @@ impl Env for WinEnv {
 
     fn now_ms(&self) -> u64 {
         static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-        T0.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+        T0.get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis() as u64
     }
 
     fn stop_requested(&self) -> bool {
@@ -88,8 +128,8 @@ fn send_chord(chord: &Chord) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 pub fn send_events(events: &[KeyEvent]) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY,
-        KEYEVENTF_KEYUP, VIRTUAL_KEY,
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
     let inputs: Vec<INPUT> = events
         .iter()
@@ -143,80 +183,93 @@ fn send_chord(chord: &Chord) -> Result<(), String> {
 fn vk_to_mac(vk: u16) -> Option<u16> {
     Some(match vk {
         // Whitespace/control keys
-        0x08 => 51,   // Backspace      kVK_Delete
-        0x09 => 48,   // Tab            kVK_Tab
-        0x0D => 36,   // Enter          kVK_Return
-        0x1B => 53,   // Esc            kVK_Escape
-        0x20 => 49,   // Space          kVK_Space
+        0x08 => 51, // Backspace      kVK_Delete
+        0x09 => 48, // Tab            kVK_Tab
+        0x0D => 36, // Enter          kVK_Return
+        0x1B => 53, // Esc            kVK_Escape
+        0x20 => 49, // Space          kVK_Space
         // Editing keys
-        0x2D => 114,  // Insert         kVK_Help
-        0x2E => 117,  // Delete         kVK_ForwardDelete
-        0x21 => 116,  // PageUp         kVK_PageUp
-        0x22 => 121,  // PageDown       kVK_PageDown
-        0x23 => 119,  // End            kVK_End
-        0x24 => 115,  // Home           kVK_Home
+        0x2D => 114, // Insert         kVK_Help
+        0x2E => 117, // Delete         kVK_ForwardDelete
+        0x21 => 116, // PageUp         kVK_PageUp
+        0x22 => 121, // PageDown       kVK_PageDown
+        0x23 => 119, // End            kVK_End
+        0x24 => 115, // Home           kVK_Home
         // Arrow block
-        0x25 => 123,  // Left           kVK_LeftArrow
-        0x26 => 126,  // Up             kVK_UpArrow
-        0x27 => 124,  // Right          kVK_RightArrow
-        0x28 => 125,  // Down           kVK_DownArrow
+        0x25 => 123, // Left           kVK_LeftArrow
+        0x26 => 126, // Up             kVK_UpArrow
+        0x27 => 124, // Right          kVK_RightArrow
+        0x28 => 125, // Down           kVK_DownArrow
         // Modifiers (Windows sends the generic VK; mac needs the concrete key)
-        0x10 => 56,   // Shift          kVK_Shift
-        0x11 => 59,   // Control        kVK_Control
-        0x12 => 58,   // Alt/Option     kVK_Option
-        0x5B => 55,   // Win/Command    kVK_Command
+        0x10 => 56, // Shift          kVK_Shift
+        0x11 => 59, // Control        kVK_Control
+        0x12 => 58, // Alt/Option     kVK_Option
+        0x5B => 55, // Win/Command    kVK_Command
         // OEM punctuation (matched to `keys.rs::parse_chord`)
-        0xBA => 41,   // ;              kVK_ANSI_Semicolon
-        0xBB => 24,   // =/+            kVK_ANSI_Equal
-        0xBD => 27,   // -/_            kVK_ANSI_Minus
-        0xBC => 43,   // ,              kVK_ANSI_Comma
-        0xBE => 47,   // .              kVK_ANSI_Period
-        0xBF => 44,   // /              kVK_ANSI_Slash
-        0xC0 => 50,   // `              kVK_ANSI_Grave
-        0xDB => 33,   // [              kVK_ANSI_LeftBracket
-        0xDC => 42,   // \              kVK_ANSI_Backslash
-        0xDD => 30,   // ]              kVK_ANSI_RightBracket
-        0xDE => 39,   // '              kVK_ANSI_Quote
-        0x6B => 69,   // NumAdd         kVK_ANSI_KeypadPlus
-        0x6D => 78,   // NumSubtract    kVK_ANSI_KeypadMinus
+        0xBA => 41, // ;              kVK_ANSI_Semicolon
+        0xBB => 24, // =/+            kVK_ANSI_Equal
+        0xBD => 27, // -/_            kVK_ANSI_Minus
+        0xBC => 43, // ,              kVK_ANSI_Comma
+        0xBE => 47, // .              kVK_ANSI_Period
+        0xBF => 44, // /              kVK_ANSI_Slash
+        0xC0 => 50, // `              kVK_ANSI_Grave
+        0xDB => 33, // [              kVK_ANSI_LeftBracket
+        0xDC => 42, // \              kVK_ANSI_Backslash
+        0xDD => 30, // ]              kVK_ANSI_RightBracket
+        0xDE => 39, // '              kVK_ANSI_Quote
+        0x6B => 69, // NumAdd         kVK_ANSI_KeypadPlus
+        0x6D => 78, // NumSubtract    kVK_ANSI_KeypadMinus
         // Function keys F1..F12 (Windows 0x70.. — mac has no contiguous range)
-        0x70 => 122, 0x71 => 120, 0x72 => 99, 0x73 => 118,
-        0x74 => 96,   // F5
-        0x75 => 97, 0x76 => 98, 0x77 => 100, 0x78 => 101, 0x79 => 109,
-        0x7A => 103,  // F11
-        0x7B => 111,  // F12
+        0x70 => 122,
+        0x71 => 120,
+        0x72 => 99,
+        0x73 => 118,
+        0x74 => 96, // F5
+        0x75 => 97,
+        0x76 => 98,
+        0x77 => 100,
+        0x78 => 101,
+        0x79 => 109,
+        0x7A => 103, // F11
+        0x7B => 111, // F12
         // Letters: each maps independently (no linear offset)
-        0x41 => 0,    // A
-        0x42 => 11,   // B
-        0x43 => 8,    // C
-        0x44 => 2,    // D
-        0x45 => 14,   // E
-        0x46 => 3,    // F
-        0x47 => 5,    // G
-        0x48 => 4,    // H
-        0x49 => 34,   // I
-        0x4A => 38,   // J
-        0x4B => 40,   // K
-        0x4C => 37,   // L
-        0x4D => 46,   // M
-        0x4E => 45,   // N
-        0x4F => 31,   // O
-        0x50 => 35,   // P
-        0x51 => 12,   // Q
-        0x52 => 15,   // R
-        0x53 => 1,    // S
-        0x54 => 17,   // T
-        0x55 => 32,   // U
-        0x56 => 9,    // V
-        0x57 => 13,   // W
-        0x58 => 7,    // X
-        0x59 => 16,   // Y
-        0x5A => 6,    // Z
+        0x41 => 0,  // A
+        0x42 => 11, // B
+        0x43 => 8,  // C
+        0x44 => 2,  // D
+        0x45 => 14, // E
+        0x46 => 3,  // F
+        0x47 => 5,  // G
+        0x48 => 4,  // H
+        0x49 => 34, // I
+        0x4A => 38, // J
+        0x4B => 40, // K
+        0x4C => 37, // L
+        0x4D => 46, // M
+        0x4E => 45, // N
+        0x4F => 31, // O
+        0x50 => 35, // P
+        0x51 => 12, // Q
+        0x52 => 15, // R
+        0x53 => 1,  // S
+        0x54 => 17, // T
+        0x55 => 32, // U
+        0x56 => 9,  // V
+        0x57 => 13, // W
+        0x58 => 7,  // X
+        0x59 => 16, // Y
+        0x5A => 6,  // Z
         // Digits row
-        0x30 => 29, 0x31 => 18, 0x32 => 19, 0x33 => 20, 0x34 => 21,
-        0x35 => 23,   // 5
-        0x36 => 22, 0x37 => 26, 0x38 => 28,
-        0x39 => 25,   // 9
+        0x30 => 29,
+        0x31 => 18,
+        0x32 => 19,
+        0x33 => 20,
+        0x34 => 21,
+        0x35 => 23, // 5
+        0x36 => 22,
+        0x37 => 26,
+        0x38 => 28,
+        0x39 => 25, // 9
         _ => return None,
     })
 }
@@ -231,7 +284,11 @@ pub fn send_events(events: &[KeyEvent]) -> Result<(), String> {
     for ev in events {
         let code = vk_to_mac(ev.vk)
             .ok_or_else(|| format!("virtual key 0x{:02X} has no macOS mapping yet", ev.vk))?;
-        let dir = if ev.up { Direction::Release } else { Direction::Press };
+        let dir = if ev.up {
+            Direction::Release
+        } else {
+            Direction::Press
+        };
         e.key(Key::Raw(code), dir).map_err(|err| err.to_string())?;
     }
     Ok(())
@@ -249,6 +306,14 @@ pub fn send_events(_events: &[KeyEvent]) -> Result<(), String> {
 
 /// Perform `action` in the application that is in front right now. Blocking (≤ ~0.8 s when it verifies a
 /// title change, a few ms otherwise): call from a blocking context, not from a latency-critical async task.
+pub fn do_action_cancelled(
+    action: Action,
+    arg: Option<u32>,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Outcome {
+    router::run_cancelled(&WinEnv, &SEED, action, arg, cancel)
+}
+
 pub fn do_action(action: Action, arg: Option<u32>) -> Outcome {
     let out = router::run(&WinEnv, &SEED, action, arg);
     log_outcome(action, arg, &out);
@@ -261,7 +326,12 @@ fn log_outcome(action: Action, arg: Option<u32>, out: &Outcome) {
         None => action.id().to_string(),
     };
     match out {
-        Outcome::Sent { chord, scope, verified, ms } => tracing::info!(
+        Outcome::Sent {
+            chord,
+            scope,
+            verified,
+            ms,
+        } => tracing::info!(
             "[SHORTCUT] {a} -> {chord} ({}) verified={verified:?} in {ms}ms",
             scope.describe()
         ),
@@ -288,10 +358,17 @@ pub enum Spoken {
     Fallback,
 }
 
-pub fn do_action_spoken(action: Action, arg: Option<u32>, legacy_ok_for_unknown_app: bool) -> Spoken {
+pub fn do_action_spoken(
+    action: Action,
+    arg: Option<u32>,
+    legacy_ok_for_unknown_app: bool,
+) -> Spoken {
     let out = do_action(action, arg);
     if legacy_ok_for_unknown_app {
-        if let Outcome::NoBinding { known_app: false, .. } = out {
+        if let Outcome::NoBinding {
+            known_app: false, ..
+        } = out
+        {
             return Spoken::Fallback;
         }
     }
@@ -325,8 +402,13 @@ pub fn run_or_legacy(
     let out = do_action(action, arg);
     match &out {
         Outcome::Sent { verified, .. } => Ok(Sent::Router(*verified)),
-        Outcome::NoBinding { known_app: false, .. } => {
-            tracing::info!("[SHORTCUT] {}: unknown app, using the legacy hotkey", action.id());
+        Outcome::NoBinding {
+            known_app: false, ..
+        } => {
+            tracing::info!(
+                "[SHORTCUT] {}: unknown app, using the legacy hotkey",
+                action.id()
+            );
             legacy().map(|_| Sent::Legacy)
         }
         other => Err(router::reason(action, other).unwrap_or_else(|| "refused".to_string())),
@@ -338,7 +420,8 @@ pub fn run_or_legacy(
 /// Runs on a blocking thread (verification may wait up to ~0.8 s).
 #[tauri::command]
 pub async fn shortcut_do(action: String, arg: Option<u32>) -> Result<String, String> {
-    let act = Action::from_id(&action).ok_or_else(|| format!("unknown shortcut action '{action}'"))?;
+    let act =
+        Action::from_id(&action).ok_or_else(|| format!("unknown shortcut action '{action}'"))?;
     if !enabled() {
         return Err("shortcut brain is disabled (NEXUS_SHORTCUTS_LEGACY=1)".into());
     }
@@ -362,8 +445,14 @@ mod tests {
         assert!(is_protected_window("brave.exe", "Bitwarden Web Vault"));
         assert!(is_protected_window("chrome.exe", "MetaMask Notification"));
         // Ordinary pages that merely contain a money word are NOT blocked (Ctrl+W on them is harmless).
-        assert!(!is_protected_window("brave.exe", "Memory Bank notes - Brave"));
-        assert!(!is_protected_window("chrome.exe", "Ledger of expenses - Google Sheets"));
+        assert!(!is_protected_window(
+            "brave.exe",
+            "Memory Bank notes - Brave"
+        ));
+        assert!(!is_protected_window(
+            "chrome.exe",
+            "Ledger of expenses - Google Sheets"
+        ));
         assert!(!is_protected_window("notepad.exe", "Untitled - Notepad"));
     }
 

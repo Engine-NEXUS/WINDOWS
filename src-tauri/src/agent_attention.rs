@@ -5,8 +5,8 @@
 //! Two parts, both pure where it matters:
 //!   * `Attention`: from "since when is each agent waiting for the user" and "how long has the user been idle" it decides
 //!     who to tell, each wait exactly once (plus a reminder every 10 minutes while the user is still away, at most 3).
-//!   * the away log: one line per agent about what it did while the user was gone ("Claude Code finished clean",
-//!     "Codex needs your input"), kept in the sealed memory store and spoken ONCE when the user is back at the keyboard.
+//!   * the legacy away log retains input requests only. Completion delivery uses
+//!     independent sealed lifecycle receipts, shared by all completion publishers.
 //!
 //! An agent only reports a wait through its Notification hook (Claude Code, Gemini CLI, OpenCode, Devin, Kilo, Copilot);
 //! Codex, Antigravity, Cursor, Windsurf and Trae cannot, so they are never reported here (no guessing).
@@ -333,6 +333,10 @@ pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                     }
                 }
             }
+            // The Agent Island speaks and shows every finish above. The shared task receipts keep running underneath it:
+            // `away = true` ticks the registry, keeps the screen-awake lease in step and saves the receipts, but never
+            // claims or announces a task, so nothing is said twice.
+            crate::agent_lifecycle_runtime::poll(&app, true);
             if away && !was_away {
                 away_since = Some(now);
             }

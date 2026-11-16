@@ -903,6 +903,15 @@ pub(crate) mod engine {
             nexus_model_path: &Path,
             _app_data_dir: PathBuf,
         ) -> anyhow::Result<Self> {
+            let profile = crate::acoustic_profile::AcousticProfile::load_or_default(Some(oww_dir));
+            Self::with_acoustic_profile(oww_dir, nexus_model_path, profile)
+        }
+
+        pub(crate) fn with_acoustic_profile(
+            oww_dir: &Path,
+            nexus_model_path: &Path,
+            profile: crate::acoustic_profile::AcousticProfile,
+        ) -> anyhow::Result<Self> {
             let oww_dir = oww_dir.to_path_buf();
             tracing::info!("Loading openWakeWord classifier: {}", nexus_model_path.display());
             let classifier = load_onnx_model(nexus_model_path)?;
@@ -912,7 +921,6 @@ pub(crate) mod engine {
 
 
 
-            let profile = crate::acoustic_profile::AcousticProfile::load_or_default(Some(&oww_dir));
             let threshold = profile.kws_threshold;
             tracing::info!(
                 "openWakeWord KWS engine initialized \
@@ -4456,6 +4464,9 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     continue;
                 }
 
+                // From here until the orchestrator installs a request nothing else says "busy": mark the gap so
+                // Ctrl+Space cancels this turn and does not call NEXUS a second time.
+                crate::turn_pending::mark(session);
                 tracing::info!(
                     "stt-capture: {} samples ({}ms audio), starting transcription",
                     samples.len(),
@@ -4639,6 +4650,10 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     // Unlike a routing/action success, this only proves the
                     // native event emit completed. A missing frontend still
                     // remains visible as delivered without dispatch entry.
+                    if final_payload.text.is_empty() {
+                        // No words: no request will follow, so the turn is no longer "on its way".
+                        crate::turn_pending::clear();
+                    }
                     let delivered = app_for_stt.emit("stt:transcript", &final_payload).is_ok();
                     let outcome = if !delivered { Outcome::DeliveryFailed }
                         else if stt_failed { Outcome::SttError }

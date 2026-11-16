@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { DesktopChoices } from "./DesktopChoices";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { SidebarApp } from "./SidebarApp";
@@ -138,6 +139,7 @@ export function UnifiedSidebar() {
 
   return (
     <div className="unified-shell">
+      {!pinned && <DesktopChoices />}
       {/* ── View host: keep-mounted views, display toggled ──────────── */}
       <div className="unified-view-host">
         {mounted.has("assistant") && (

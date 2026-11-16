@@ -499,6 +499,14 @@ pub fn urgency_rank(u: AlertUrgency) -> u8 {
     }
 }
 
+/// Mail the owner sent from one of their own addresses: to themself, or from one connected account to another.
+/// It is never news, and filing it produced lines like "A message released your hall ticket" (the sender is the
+/// owner, so it was spoken as "A message").
+pub fn is_self_sent(from_email: &str, account: &str, names: &SelfNames) -> bool {
+    let from = from_email.trim().to_lowercase();
+    !from.is_empty() && (from == account.trim().to_lowercase() || names.is_own_address(&from))
+}
+
 /// Build the stored record. Snippet is PII-redacted and everything is clipped
 /// so the JSON always fits the store's 500-char value cap.
 #[cfg(test)]
@@ -553,6 +561,18 @@ mod tests {
             rfc822_id: String::new(),
             body: String::new(),
         }
+    }
+
+    #[test]
+    fn mail_from_an_own_address_is_self_sent() {
+        let names = SelfNames::from_parts(&["Chitkul Lakshya".into(), "me@gmail.com".into(), "me@college.ac.in".into()]);
+        // to the same account, or from the other connected account
+        assert!(is_self_sent("Me@Gmail.com", "me@gmail.com", &SelfNames::none()));
+        assert!(is_self_sent("me@college.ac.in", "me@gmail.com", &names));
+        // a stranger, a name-token lookalike, and an empty sender are not
+        assert!(!is_self_sent("exams@vit.edu", "me@gmail.com", &names));
+        assert!(!is_self_sent("lakshya@gmail.com", "me@gmail.com", &names));
+        assert!(!is_self_sent("", "", &names));
     }
 
     fn cls(from: &str, subject: &str, snippet: &str, labels: &[&str]) -> Option<(Category, AlertUrgency)> {

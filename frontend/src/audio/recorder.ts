@@ -672,6 +672,15 @@ export function followUpTurnAction(opts: {
   return "none";
 }
 
+/**
+ * A cancel or a fresh call by the user (hotkey, wake word, tray) starts a new attempt: an earlier silent miss
+ * must not make the next silent press answer "I didn't hear you" straight away.
+ * Not called by the silent auto-relisten, which is the same attempt continuing.
+ */
+export function resetMissStreak(): void {
+  missStreak = 0;
+}
+
 /** Test hook: read/reset the streak without touching turn flow. */
 export function __testMissStreak(): number {
   return missStreak;
@@ -1489,7 +1498,7 @@ export async function finishCapture(): Promise<void> {
 
 /** Called on error / cancel: stop everything and close the session.
  *  If finishCapture is in progress, don't clear the buffer — let it finish. */
-export async function abortCapture(): Promise<void> {
+export async function abortCapture(forCapture = false): Promise<void> {
   // If finishCapture is mid-flight, don't interfere — it has already copied
   // the buffer synchronously and is processing it. Just stop the recording.
   if (captureInProgress) {
@@ -1503,7 +1512,7 @@ export async function abortCapture(): Promise<void> {
   // (worker_url, user_id, device_id) stored in Rust. Closing it on every
   // barge-in causes "no session open" errors on subsequent orchestrator
   // calls. The session should persist for the app lifetime.
-  void cancelOrchestrator();
+  await cancelOrchestrator(forCapture);
   releaseMicStream();
   // turn-end:keep-raw (explicit user cancel/barge-in must stay cancelled)
   useAssistant.getState().reset();

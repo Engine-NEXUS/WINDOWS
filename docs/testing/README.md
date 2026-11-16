@@ -62,3 +62,7 @@ nexus check
 ```
 
 Do not promote a model merely because training or ONNX export completed. Follow the promotion gates in the NLU playbook.
+
+## Live runs
+
+- [Group 1 live run, 2026-11-11](group-1-live-run-2026-11-11.md): run sheet and record for the 15 features closest to production-ready (prepared, not yet run).

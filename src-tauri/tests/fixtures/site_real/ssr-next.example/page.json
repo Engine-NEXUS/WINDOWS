@@ -1,0 +1,18 @@
+{
+  "initial_url": "https://ssr-next.example/",
+  "final_url": "https://ssr-next.example/",
+  "status": 200,
+  "headers": [
+    ["content-type", "text/html; charset=utf-8"],
+    ["server", "Vercel"],
+    ["x-vercel-id", "bom1::abcd-1700000000000"],
+    ["x-vercel-cache", "HIT"],
+    ["strict-transport-security", "max-age=63072000"]
+  ],
+  "html": "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"/><title>Acme Docs</title><link rel=\"stylesheet\" href=\"/_next/static/css/app-1a2b.css\"/><script src=\"/_next/static/chunks/webpack-3c4d.js\" async=\"\"></script><script src=\"/_next/static/chunks/main-app-5e6f.js\" async=\"\"></script></head><body><main><h1>Acme Docs</h1><p>Guides, reference and examples for building with Acme. Start with the quick tour, then read the concepts section to understand projects, environments and deployments in depth before shipping your first app.</p></main><script>(self.__next_f=self.__next_f||[]).push([0]);self.__next_f.push([1,\"1:HL[\\\"/_next/static/css/app-1a2b.css\\\",\\\"style\\\"]\"])</script></body></html>",
+  "scripts": [],
+  "styles": [],
+  "redirect_hosts": ["ssr-next.example"],
+  "truncated": false,
+  "skipped": 0
+}

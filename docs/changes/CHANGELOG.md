@@ -1,5 +1,17 @@
 # NEXUS — Changelog
 
+## 2026-11-06 — Native desktop-control reliability
+
+Contextual UIA matching, ephemeral sidebar/voice choices, exact window/control revalidation, semantic keyboard/native result probes and no blind retries. Isolated offline checks and safety mutations; a fixed qualification matrix and result reporter. No application build/runtime operation or readiness promotion. [Record](2026-11-06-desktop-control-reliability.md).
+
+## 2026-11-05 — Agent completion and keep-awake reliability
+
+One shared task lifecycle and durable completion receipts replace independent completion publishers. Busy invocations, file silence and generic output cannot announce a desktop finish; cancellation wins late callbacks; Windows power calls use one owner thread. Offline tests/mutations and two-pass evidence are documented; no application build/runtime changes or readiness promotion. [Record](2026-11-05-agent-completion-reliability.md).
+
+## 2026-11-05 — Contributor setup
+
+Shared CLI preparation/build/start/package paths, separate contributor identity and credentials, locked native/JS dependencies, Python environment, offline safety checks and staged CI. Native builds and device proofs remain pending. [Record](2026-11-05-contributor-setup.md).
+
 - 2026-10-29: [UI plan Phase 4 - stage layout and overlays](178-ui-phase-4-stage-layout-and-overlays.md) — stage chips could not read their colours (stage never loaded the tokens): fixed; one layout module so the hand chip stacks above the caption and task chips hang under the spinner (no-collision test on 6 screen sizes); pebble orb visible in Light; live caption on a solid pill; stage window fitted to the primary monitor on show. All 16 local CI checks pass; not run on a scaled display or in the live app.
 
 - 2026-10-29: [UI plan Phase 3c - Hub, Settings, Setup and HUD on the theme tokens](177-ui-phase-3c-hub-settings-setup-and-hud.md) — Hub palette is the shared tokens; ~390 colours tokenised; measured contrast pass over every Hub page and theme: 0 failures in 1,088 text elements (was 21 in Light); HUD sliders follow the app theme. 761 frontend tests pass; checked in the dev browser, not the live app.

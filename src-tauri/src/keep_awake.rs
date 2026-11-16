@@ -303,20 +303,25 @@ pub fn start_working_poller() {
 // ─── Windows: SetThreadExecutionState ──────────────────────────────────
 
 #[cfg(target_os = "windows")]
-fn assert_awake() -> Result<(), String> {
-    use windows::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED};
-    // SAFETY: plain Win32 call, no pointers.
-    let prev = unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED) };
-    if prev.0 != 0 { Ok(()) } else { Err("SetThreadExecutionState (assert) failed".into()) }
+fn windows_power(awake: bool) -> Result<(), String> {
+    // Test-quiet mode: never ask Windows to keep the screen on, so the screensaver and display timeout are untouched.
+    if crate::quiet::on() {
+        return Ok(());
+    }
+    static OWNER: OnceLock<Result<crate::power_thread::PowerThread,String>> = OnceLock::new();
+    let worker=OWNER.get_or_init(||crate::power_thread::PowerThread::new(|held| {
+        use windows::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED};
+        let flags=if held {ES_CONTINUOUS|ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED} else {ES_CONTINUOUS};
+        // SAFETY: plain Win32 call. All assertions and releases run on this single owner thread.
+        let previous=unsafe {SetThreadExecutionState(flags)};
+        if previous.0!=0 {Ok(())} else {Err("SetThreadExecutionState failed".into())}
+    }));
+    match worker {Ok(worker)=>worker.set(awake),Err(e)=>Err(e.clone())}
 }
-
 #[cfg(target_os = "windows")]
-fn clear_awake() -> Result<(), String> {
-    use windows::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS};
-    // SAFETY: plain Win32 call, no pointers.
-    let prev = unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
-    if prev.0 != 0 { Ok(()) } else { Err("SetThreadExecutionState (clear) failed".into()) }
-}
+fn assert_awake() -> Result<(), String> {windows_power(true)}
+#[cfg(target_os = "windows")]
+fn clear_awake() -> Result<(), String> {windows_power(false)}
 
 /// macOS: a `caffeinate -dis` child holds the display + idle assertions while
 /// it lives. The watchdog's periodic re-assert doubles as a respawn check in

@@ -1192,12 +1192,16 @@ pub(crate) fn finish_sidebar<R: Runtime>(
     dock: Option<&str>,
 ) -> Result<(), String> {
     win.show().map_err(|e| format!("sidebar show: {e}"))?;
+    let sent_back = SIDEBAR_SENT_BACK.load(std::sync::atomic::Ordering::SeqCst);
     // Panels beside it (Architecture map, Maps, place card) were arranged around where the sidebar WAS: move them out of
     // its way now that it is placed and visible, so they sit side by side instead of underneath it.
     crate::panel_layout::apply(app);
-    let _ = win.set_focus();
+    // Sent back (Down arrow): stay behind the other windows until Up or the end of a scan raises it.
+    if !sent_back {
+        let _ = win.set_focus();
+    }
     #[cfg(target_os = "windows")]
-    {
+    if !sent_back {
         if let Ok(hwnd) = win.hwnd() {
             unsafe {
                 use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
@@ -1277,6 +1281,60 @@ pub async fn show_sidebar_view<R: Runtime>(
         .map(|_| ())
 }
 
+/// True while the owner has sent the sidebar behind every other window (Down arrow). Docking, view changes and
+/// updates must not pull it forward again; only `set_sidebar_depth("front")` or the end of a scan does.
+static SIDEBAR_SENT_BACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Pure: what a depth request means for the "sent back" flag. `None` for an unknown word.
+pub(crate) fn depth_flag(depth: &str) -> Option<bool> {
+    match depth {
+        "back" => Some(true),
+        "front" => Some(false),
+        _ => None,
+    }
+}
+
+/// Send the sidebar behind every window (`true`) or raise it to the front, topmost again (`false`).
+pub(crate) fn apply_sidebar_depth<R: Runtime>(app: &tauri::AppHandle<R>, back: bool) {
+    SIDEBAR_SENT_BACK.store(back, std::sync::atomic::Ordering::SeqCst);
+    let Some(win) = app.get_webview_window("sidebar") else {
+        println!("[SIDEBAR] depth {}: no sidebar window open", if back { "back" } else { "front" });
+        return;
+    };
+    println!("[SIDEBAR] depth {}", if back { "back (behind every window)" } else { "front (topmost)" });
+    #[cfg(target_os = "windows")]
+    if let Ok(hwnd) = win.hwnd() {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, HWND_BOTTOM, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        };
+        let _ = win.set_always_on_top(!back);
+        let target = if back { HWND_BOTTOM } else { HWND_TOPMOST };
+        unsafe {
+            let _ = SetWindowPos(HWND(hwnd.0 as _), target, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = win.set_always_on_top(!back);
+    }
+}
+
+/// Raise the sidebar to the front (end of a scan, or any time it was sent back).
+pub(crate) fn raise_sidebar<R: Runtime>(app: &tauri::AppHandle<R>) {
+    if SIDEBAR_SENT_BACK.load(std::sync::atomic::Ordering::SeqCst) {
+        apply_sidebar_depth(app, false);
+    }
+}
+
+/// IPC: Up/Down arrow in the sidebar. "back" = behind every window so the whole screen is visible; "front" = back on top.
+#[tauri::command]
+pub fn set_sidebar_depth<R: Runtime>(app: tauri::AppHandle<R>, depth: String) -> Result<(), String> {
+    let back = depth_flag(&depth).ok_or_else(|| format!("unknown depth '{depth}'"))?;
+    apply_sidebar_depth(&app, back);
+    Ok(())
+}
+
 /// IPC: Re-anchor the unified sidebar to a dock position ("left",
 /// "right", or "center"/"float") keeping the currently active view.
 #[tauri::command]
@@ -1303,6 +1361,7 @@ pub async fn set_sidebar_dock<R: Runtime>(
 pub fn hide_sidebar<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
+    crate::desktop_choices::clear();
     // Destroy the unified sidebar window to free its ~250 MB WebView2 tree.
     let _ = crate::dyn_windows::destroy_window(&app, "sidebar");
     crate::panel_layout::apply(&app);
@@ -1617,7 +1676,8 @@ pub struct NexusSettings {
     #[serde(default = "default_orb_size")]
     pub orb_size: u32,
     /// Orb color theme (hex string, e.g. "#f2b859").
-    /// Default: "#f2b859" (golden amber).
+    /// Default: "#ffffff" (pure white). Profiles saved before the dotted orb hold the old default "#f2b859",
+    /// which the frontend treats as "no choice" (white).
     #[serde(default = "default_orb_color")]
     pub orb_color: String,
     /// Orb fixed position: "top" or "bottom".
@@ -3084,6 +3144,8 @@ pub fn set_autostart<R: Runtime>(
     app: tauri::AppHandle<R>,
     enabled: bool,
 ) -> Result<bool, String> {
+    if cfg!(feature = "contributor") { return Err("Autostart is disabled for contributor builds".into()); }
+
     #[cfg(target_os = "windows")]
     {
         let _ = &app; // unused on Windows — autostart uses PowerShell directly
@@ -3168,6 +3230,8 @@ pub fn set_autostart<R: Runtime>(
 pub fn is_autostart_enabled<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<bool, String> {
+    if cfg!(feature = "contributor") { return Ok(false); }
+
     #[cfg(target_os = "windows")]
     {
         let _ = app; // unused on Windows
@@ -4160,6 +4224,14 @@ pub fn import_settings<R: Runtime>(app: AppHandle<R>, json_str: String) -> Resul
 
 #[cfg(test)]
 mod sidebar_geometry_tests {
+    #[test]
+    fn depth_words_map_to_the_sent_back_flag() {
+        assert_eq!(super::depth_flag("back"), Some(true));
+        assert_eq!(super::depth_flag("front"), Some(false));
+        assert_eq!(super::depth_flag("up"), None);
+        assert_eq!(super::depth_flag(""), None);
+    }
+
     use super::sidebar_geometry;
 
     #[test]
@@ -4504,11 +4576,6 @@ mod nexus_settings_tests {
     }
 
     #[test]
-    fn barge_in_no_wake_defaults_to_true_and_round_trips() {
-        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
-        raw.as_object_mut().unwrap().remove("bargeInNoWake");
-        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
-    #[test]
     fn orb_designs_defaults_empty_and_round_trips() {
         let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
         raw.as_object_mut().unwrap().remove("orbDesigns");
@@ -4525,6 +4592,11 @@ mod nexus_settings_tests {
         assert_eq!(reserialized["orbDesigns"]["idle"], serde_json::json!("breathing"));
     }
 
+    #[test]
+    fn barge_in_no_wake_defaults_to_true_and_round_trips() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("bargeInNoWake");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
         assert!(parsed.barge_in_no_wake, "bargeInNoWake must default to true");
         let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
         assert_eq!(reserialized.get("bargeInNoWake"), Some(&serde_json::json!(true)));

@@ -1,0 +1,22 @@
+{
+  "synthetic": true,
+  "bucket": "ssr",
+  "must": [
+    "nextjs",
+    "vercel",
+    "react"
+  ],
+  "may": [
+    "nodejs",
+    "webpack",
+    "hsts"
+  ],
+  "must_not": [
+    "nuxt",
+    "wordpress",
+    "shopify",
+    "angular"
+  ],
+  "expect_thin": [],
+  "sources": {}
+}

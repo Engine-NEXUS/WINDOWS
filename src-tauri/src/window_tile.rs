@@ -426,6 +426,9 @@ fn close_enough(want: Rect, got: Rect) -> bool {
 /// which can hang the caller on one unresponsive window. Callers must check `may_blank_display` first.
 #[cfg(target_os = "windows")]
 pub(crate) fn display_off() -> Result<(), String> {
+    if crate::quiet::on() {
+        return Err("test-quiet mode: the display is left alone".to_string());
+    }
     use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
         GetDesktopWindow, SendMessageTimeoutW, SMTO_ABORTIFHUNG, SMTO_NORMAL, WM_SYSCOMMAND,

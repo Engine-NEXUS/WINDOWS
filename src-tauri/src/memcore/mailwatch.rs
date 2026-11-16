@@ -171,6 +171,9 @@ pub fn triage_and_store_with(store: &Store, metas: &[MailMeta], account: &str, n
     let muted = muted_senders(store);
     let mut fresh: Vec<(Triage, MailMeta)> = vec![];
     for m in metas {
+        if mailtriage::is_self_sent(&m.from_email, account, names) {
+            continue;
+        }
         let Some(t) = mailtriage::classify(m, &muted) else { continue };
         if mailtriage::urgency_rank(t.urgency) < mailtriage::urgency_rank(AlertUrgency::Medium) {
             continue;
@@ -185,6 +188,22 @@ pub fn triage_and_store_with(store: &Store, metas: &[MailMeta], account: &str, n
             .then(b.1.date_ms.cmp(&a.1.date_ms))
     });
     fresh
+}
+
+/// Remove filed mail the owner sent from one of their own addresses (filed before `is_self_sent` existed).
+/// Returns how many records were removed.
+pub fn purge_self_sent(store: &Store, names: &SelfNames, now: i64) -> usize {
+    let doomed: Vec<String> = store
+        .recent(Tier::Mail, 500)
+        .into_iter()
+        .filter(|h| {
+            serde_json::from_str::<mailtriage::StoredMail>(&h.value)
+                .map(|m| mailtriage::is_self_sent(&m.email, &m.account, names))
+                .unwrap_or(false)
+        })
+        .map(|h| h.key)
+        .collect();
+    doomed.iter().map(|k| store.forget_key(k, "mailwatch", now)).sum()
 }
 
 fn speak_address<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
@@ -224,7 +243,10 @@ fn fire_alerts<R: Runtime>(app: &AppHandle<R>, items: &[(Triage, MailMeta)], acc
         let dir = app.path().app_data_dir().ok();
         let names = dir.as_deref().map(SelfNames::load).unwrap_or_else(SelfNames::none);
         let text = mailtriage::batch_text_with(items, address.as_deref(), &names);
-        crate::proactive_policy::submit_event(app, format!("mail_batch_{}", items[0].1.id), text, top, batch_key(items));
+        let alert_id = format!("mail_batch_{}", items[0].1.id);
+        let ids: Vec<String> = items.iter().map(|(_, m)| m.id.clone()).collect();
+        super::briefing::note_batch(&alert_id, &ids);
+        crate::proactive_policy::submit_event(app, alert_id, text, top, batch_key(items));
         return;
     }
     // Spawn one task to compute plain wording and submit alerts in order.
@@ -510,11 +532,20 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
         let mut next_due: HashMap<String, Instant> = HashMap::new();
         let mut failures: HashMap<String, u32> = HashMap::new();
         let mut noted_auth: HashMap<String, bool> = HashMap::new();
+        let mut purged = false;
         loop {
             tokio::time::sleep(Duration::from_secs(TICK_SECS)).await;
             let Ok(dir) = app.path().app_data_dir() else { continue };
             if !super::enabled(&dir) || !super::flag(&dir, "memcoreMail", true) {
                 continue;
+            }
+            if !purged {
+                purged = true;
+                let names = SelfNames::load(&dir);
+                let now = chrono::Utc::now().timestamp();
+                if let Some(n) = super::with_store(&dir, |s| purge_self_sent(s, &names, now)).filter(|n| *n > 0) {
+                    tracing::info!("mailwatch: removed {n} filed email(s) you sent yourself");
+                }
             }
             let accounts = google_io::list_accounts(google_io::can_read_mail);
             if accounts.is_empty() {
@@ -596,6 +627,27 @@ mod tests {
         ];
         assert_eq!(batch_key(&mixed), None);
         assert_eq!(batch_key(&[]), None);
+    }
+
+    #[test]
+    fn mail_from_your_own_addresses_is_never_filed_and_old_copies_are_purged() {
+        let s = Store::open_in_memory().unwrap();
+        let names = SelfNames::from_parts(&["Chitkul Lakshya".into(), "me@gmail.com".into(), "me@college.ac.in".into()]);
+        let hall = |id: &str, from: &str| mail(id, from, "Hall ticket released for end-sem exams", &["INBOX"], 100);
+        // from the other connected account, and from the receiving account itself: skipped
+        let fresh = triage_and_store_with(&s, &[hall("a", "Me <me@college.ac.in>"), hall("b", "Me <me@gmail.com>")], "me@gmail.com", 1_000, &names);
+        assert!(fresh.is_empty());
+        assert_eq!(s.count(Tier::Mail), 0);
+        // a real exam cell still files
+        let fresh = triage_and_store_with(&s, &[hall("c", "Exam Cell <exams@vit.edu>")], "me@gmail.com", 1_000, &names);
+        assert_eq!(fresh.len(), 1);
+        // a self-sent copy filed before the rule existed is removed; the real one stays
+        let old = triage_and_store(&s, &[hall("d", "Me <me@college.ac.in>")], "me@gmail.com", 1_000);
+        assert_eq!(old.len(), 1);
+        assert_eq!(s.count(Tier::Mail), 2);
+        assert_eq!(purge_self_sent(&s, &names, 2_000), 1);
+        assert_eq!(s.count(Tier::Mail), 1);
+        assert_eq!(purge_self_sent(&s, &names, 2_000), 0);
     }
 
     #[test]

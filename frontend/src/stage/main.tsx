@@ -7,6 +7,7 @@ import { OrbFrame } from "./OrbFrame";
 import { LoadingIndicator } from "./LoadingIndicator";
 import { ResponseCaption } from "./ResponseCaption";
 import { SpeechPill } from "./SpeechPill";
+import { ActionReceipt } from "./ActionReceipt";
 import { TourOverlay } from "./TourOverlay";
 import { HandOverlay } from "./HandOverlay";
 import { NotifyExpand } from "./NotifyExpand";
@@ -381,6 +382,7 @@ function StageApp() {
       <BackgroundTaskChip />
       <ResponseCaption />
       <SpeechPill />
+      <ActionReceipt />
       <CaptionLiveRegion />
     </div>
   );
