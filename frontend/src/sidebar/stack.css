@@ -605,11 +605,11 @@
   height: 14px;
   object-fit: contain;
   border-radius: 3px;
-  background: #fff;
+  background: var(--sv-white);
   padding: 1px;
   margin-right: 6px;
   vertical-align: -3px;
   flex-shrink: 0;
 }
-.stack-chip-icon[data-tone="dark"] { background: #1f2937; }
+.stack-chip-icon[data-tone="dark"] { background: var(--ui-tile-dark); }
 .stack-host-chip, .stack-section-tech-btn { display: inline-flex; align-items: center; }

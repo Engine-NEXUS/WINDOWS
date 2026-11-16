@@ -76,7 +76,7 @@
 }
 
 .kit-logo-tile--image[data-tone="dark"] {
-  background-color: #1f2937;
+  background-color: var(--ui-tile-dark);
 }
 
 .kit-logo-tile--glyph {
