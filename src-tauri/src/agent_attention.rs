@@ -306,6 +306,12 @@ pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             for a in ALL_AGENTS.iter() {
                 let Some(stop) = agent_hooks::last_event_ms(*a, agent_hooks::EventKind::Stop).filter(|t| *t > started) else { continue };
                 if stops.get(a.name()).map_or(true, |seen| stop > *seen) {
+                    // A Stop hook alone is not an end: while the shared lifecycle still sees this agent's work running
+                    // (settle window, background work, an IDE agent that is not fully idle) nothing is announced and
+                    // the stop is looked at again on the next tick.
+                    if crate::agent_lifecycle_runtime::busy_since(a.name(), started) {
+                        continue;
+                    }
                     stops.insert(a.name(), stop);
                     // how long the turn that just ended ran (stop minus the prompt that began it)
                     let turn_ms = agent_hooks::turn_started_ms(*a, stop).map(|s| stop - s);

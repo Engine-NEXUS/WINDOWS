@@ -4,10 +4,16 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import vm from 'node:vm';
 const read = p => readFileSync(process.env.NEXUS_AGENT_CONTRACT_ROOT ? join(process.env.NEXUS_AGENT_CONTRACT_ROOT,p) : new URL('../'+p,import.meta.url),'utf8');
-test('background completion uses the shared lifecycle, not raw stop receipt time',()=>{
+test('a finish is announced only once the shared lifecycle no longer sees the agent busy',()=>{
  const s=read('src-tauri/src/agent_attention.rs');
- assert.ok(s.includes('agent_lifecycle_runtime::poll'));
- assert.ok(!s.includes('format!("{} has finished", a.label())'));
+ // receipts keep running underneath the Agent Island (poll with away=true never claims or announces)
+ assert.ok(s.includes('agent_lifecycle_runtime::poll(&app, true)'));
+ // a raw Stop hook is not an end: the loop defers while the lifecycle still sees work in progress
+ const gate=s.indexOf('agent_lifecycle_runtime::busy_since(a.name(), started)');
+ assert.ok(gate>0);
+ assert.ok(gate<s.indexOf('stops.insert(a.name(), stop)'));
+ // and nothing is announced before that gate
+ assert.ok(gate<s.indexOf('finished_line(a.label())'));
 });
 test('Windows power assertions are serialized on a dedicated owner thread',()=>{
  assert.ok(read('src-tauri/src/keep_awake.rs').includes('PowerThread'));
