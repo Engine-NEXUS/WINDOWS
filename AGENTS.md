@@ -1,5 +1,9 @@
 # NEXUS — Project Notes
 
+## Sidebar keys without clicking, unselectable captions, speech pill dots (2026-11-16)
+
+Owner: the sidebar's arrow keys and Esc only worked after clicking it; NEXUS's captions looked like selected text. `sidebar_keys.rs` registers Esc and the four arrows as global shortcuts only while the sidebar is open, not focused and not sent behind the other windows (Esc is left to Ghost mode when a session runs), and forwards them as `sidebar:key`, which `UnifiedSidebar.tsx` replays as keydown events for the existing handlers. Stage captions and cards are `user-select: none` with a transparent selection colour. The speech pill shows three dots while you speak and the finished transcript at once (no typing animation for a final transcript). Owner confirmed it works in a live run. Tests: `sidebar_keys` unit tests, frontend 1230, colour/opacity/IPC/dead-code gates.
+
 ## Scan window matching fix and Tech Stack Console redesign (2026-11-16)
 
 Live log showed `place: no new browser window appeared` (Brave opened the window, NEXUS did not match it). `scan_window::pick_new_window` now matches the exe stem, any known browser exe, or a new foreground browser window, waits about 10 s and logs what appeared when it still finds none. The stack sidebar was rebuilt from the owner's reference designs (`StackView.tsx`, `stack-v2.css`, `Card id`): no scrollbars, full-width cards, KPI tiles, grouped technology cards with confidence bars, filled-pill filter, icon tab bar, black/white/grey with colour only in logos. Frontend 1230 tests, opacity and IPC gates pass. NOT verified live: the latest log has no scan (it ends with the owner's spoken shutdown, which ran). Doc: `docs/changes/200-scan-window-matching-and-stack-console-redesign.md`.

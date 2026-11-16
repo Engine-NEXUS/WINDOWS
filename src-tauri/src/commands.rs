@@ -1192,6 +1192,7 @@ pub(crate) fn finish_sidebar<R: Runtime>(
     dock: Option<&str>,
 ) -> Result<(), String> {
     win.show().map_err(|e| format!("sidebar show: {e}"))?;
+    crate::sidebar_keys::attach(app, win);
     let sent_back = SIDEBAR_SENT_BACK.load(std::sync::atomic::Ordering::SeqCst);
     // Panels beside it (Architecture map, Maps, place card) were arranged around where the sidebar WAS: move them out of
     // its way now that it is placed and visible, so they sit side by side instead of underneath it.
@@ -1285,6 +1286,11 @@ pub async fn show_sidebar_view<R: Runtime>(
 /// updates must not pull it forward again; only `set_sidebar_depth("front")` or the end of a scan does.
 static SIDEBAR_SENT_BACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// True while the sidebar is sent behind every window.
+pub(crate) fn sidebar_sent_back() -> bool {
+    SIDEBAR_SENT_BACK.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Pure: what a depth request means for the "sent back" flag. `None` for an unknown word.
 pub(crate) fn depth_flag(depth: &str) -> Option<bool> {
     match depth {
@@ -1302,6 +1308,12 @@ pub(crate) fn apply_sidebar_depth<R: Runtime>(app: &tauri::AppHandle<R>, back: b
         return;
     };
     println!("[SIDEBAR] depth {}", if back { "back (behind every window)" } else { "front (topmost)" });
+    // Sent back = the owner is working elsewhere: give them their own Esc and arrows; front = forward them again.
+    if back {
+        crate::sidebar_keys::disarm(app);
+    } else {
+        crate::sidebar_keys::refresh(app, win.is_focused().unwrap_or(false));
+    }
     #[cfg(target_os = "windows")]
     if let Ok(hwnd) = win.hwnd() {
         use windows::Win32::Foundation::HWND;

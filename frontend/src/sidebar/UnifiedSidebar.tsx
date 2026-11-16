@@ -126,6 +126,20 @@ export function UnifiedSidebar() {
     return () => window.removeEventListener("keydown", handleKeyDown, { capture: true });
   }, []);
 
+  // Esc and the arrow keys also work while another app has focus: Rust forwards them as `sidebar:key` while the sidebar
+  // is open and unfocused, and they are replayed here as the same key events the handlers below already listen for.
+  useEffect(() => {
+    if (!isTauri() || pinned) return;
+    const un = listen<string>("sidebar:key", (event) => {
+      const key = event.payload;
+      if (typeof key !== "string") return;
+      window.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    });
+    return () => {
+      un.then((u) => u());
+    };
+  }, [pinned]);
+
   // Exported for view components to call
   const dock = (d: string) => {
     if (!isTauri() || pinned) return; // a pinned window must not move the response sidebar
