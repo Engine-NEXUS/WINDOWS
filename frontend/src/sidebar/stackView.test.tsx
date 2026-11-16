@@ -44,9 +44,12 @@ describe("StackView component rendering (Phone Layout)", () => {
     // 2. Hero Card
     expect(html).toContain("Acme is a modern Next.js 15 web application");
     expect(html).toContain("Next.js 15");
-    expect(html).toContain("technologies");
-    expect(html).toContain("scripts");
-    expect(html).toContain("third-party hosts");
+    // hero stat tiles (technologies / scripts / hosts) replaced the one-line summary
+    expect(html).toContain("stack-stat-tiles");
+    expect(html).toContain("Technologies");
+    expect(html).toContain("Scripts");
+    expect(html).toContain("Hosts");
+    expect(html).toContain("stack-avatars");
     expect(html).toContain("Copy report →");
 
     // 3. Stack Mix Card
