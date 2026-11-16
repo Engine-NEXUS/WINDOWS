@@ -10,7 +10,8 @@ const cases = [
   ['personal-default', "profile: 'contributor', yes:", "profile: 'personal', yes:"],
   ['shared-identity', "? '.contributor' : ''", "? '' : ''"],
   ['admin-guard', "if (result.admin && result.profile !== 'personal')", 'if (false)'],
-  ['stale-start', "ctx.provenance.verifyBuild({ directory: join(cfg.targetDir, 'release'), metadata: cfg.metadata });", '// omitted verification'],
+  // A stale build is only a reminder now; the safety rule is that a missing or invalid build record still stops a launch.
+  ['stale-start', "ctx.provenance.verifyBuild({ warnStale: true, directory: join(cfg.targetDir, 'release'), metadata: cfg.metadata });", 'undefined; /* omitted verification */'],
   ['start-interpreter', "if (!ctx.exists(cfg.python)) throw new Error('Managed Python is missing; run setup.');", '// interpreter check removed'],
   ['start-session', 'await (ctx.assertIdle || assertIdle)(ctx);', '// session check removed'],
   ['unsafe-update', "[npm, '--prefix', 'frontend', 'ci']", "[npm, '--prefix', 'frontend', 'install']"],
