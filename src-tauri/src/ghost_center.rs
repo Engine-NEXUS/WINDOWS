@@ -720,7 +720,8 @@ fn run_query(
                 Resolution::Unavailable => {
                     Err("No matching accessible control is available.".into())
                 }
-                Resolution::Blocked(_) => {
+                Resolution::Blocked(reason) => {
+                    tracing::debug!("desktop control: target blocked ({reason})");
                     Err("Too many or unsafe matches; name the control and containing panel.".into())
                 }
             }

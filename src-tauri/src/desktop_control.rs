@@ -407,9 +407,6 @@ impl ChoiceSlot {
     pub fn replace(&mut self, p: PendingChoice) {
         self.pending = Some(p)
     }
-    pub fn clear(&mut self) {
-        self.pending = None
-    }
     pub fn view(&self, now: u64) -> Option<ChoiceView> {
         self.pending.as_ref()?.view(now)
     }
