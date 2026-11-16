@@ -37,12 +37,16 @@ pub mod orchestration_boundary;
 pub mod app_registry {
     pub enum LaunchMethod {
         Exe { path: String },
+        Aumid { aumid: String },
         Other,
     }
     pub struct AppEntry {
         pub launch: LaunchMethod,
     }
     pub fn lookup_strict(_: &str) -> Option<AppEntry> {
+        None
+    }
+    pub fn window_aumid(_: isize) -> Option<String> {
         None
     }
 }
