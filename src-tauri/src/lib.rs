@@ -58,6 +58,7 @@ pub(crate) mod site_render;
 pub mod site_eval;
 pub(crate) mod reverse_scroll;
 pub(crate) mod scan_window;
+pub(crate) mod sidebar_keys;
 pub(crate) mod app_probe;
 pub(crate) mod reverse_engineer;
 // Kokoro-82M local TTS (replaces Piper) — see docs/research/jarvis-landscape/09
