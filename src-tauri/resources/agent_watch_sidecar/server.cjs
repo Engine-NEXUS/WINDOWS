@@ -38,8 +38,8 @@ class AntigravityAdapter extends BaseCodingAdapter {
     this.readySettleMs = 2000;
   }
   isResponseComplete(output) {
-    const clean = this.stripAnsi(output);
-    return clean.includes('Done') || clean.includes('Task complete') || /(?:^|\n)[>❯$]\s*$/.test(clean);
+    // A word/prompt in streamed output is not an outer task completion. Use a hook or process exit.
+    return false;
   }
 }
 
@@ -51,8 +51,7 @@ class GenericTerminalAdapter extends BaseCodingAdapter {
     this.readySettleMs = 2000;
   }
   isResponseComplete(output) {
-    const clean = this.stripAnsi(output);
-    return clean.includes('Done') || clean.includes('Finished') || /(?:^|\n)[>❯$]\s*$/.test(clean);
+    return false;
   }
 }
 
@@ -148,10 +147,13 @@ manager.on('session_error', (evt) => {
   const w = findWatchBySession(evt.id);
   if (w) setStatus(w, 'error', { reason: 'session_error', ...evt });
 });
-manager.on('session_stopped', (evt) => {
+manager.on('session_stopped', (evt, reason) => {
   const w = findWatchBySession(evt.id);
   // Only a soft "stopped" if nothing better (done/error) already fired.
-  if (w) setStatus(w, 'stopped', { reason: 'session_stopped', ...evt });
+  if (w) {
+    const code = Number.isInteger(evt.exitCode) ? evt.exitCode : reason === 'normal exit' ? 0 : null;
+    setStatus(w, code === 0 ? 'done' : code !== null ? 'error' : 'stopped', { reason: 'process_exit', ...evt });
+  }
 });
 manager.on('login_required', (evt) => {
   const w = findWatchBySession(evt.id);
@@ -250,6 +252,7 @@ const server = http.createServer(async (req, res) => {
           name: `nexus-watch-${id}`,
           type,
           workdir,
+          env: { ...process.env, NEXUS_WATCH_ID: id },
           // only the vetted preset is forwarded: nothing else from the request can change how the CLI is started
           adapterConfig: { approvalPreset: approval.preset },
         });
@@ -296,10 +299,21 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    // The authenticated Rust lifecycle accepted a hook completion for this owned watch. No process is stopped.
+    if (req.method === 'POST' && parts.length === 3 && parts[0] === 'watch' && parts[2] === 'observed') {
+      const w = watches.get(parts[1]);
+      if (!w) return sendJson(res, 404, { error: 'not found' });
+      const body = JSON.parse((await readBody(req)) || '{}');
+      if (!['done', 'error', 'stopped', 'expired'].includes(body.status)) return sendJson(res, 400, { error: 'invalid observed status' });
+      setStatus(w, body.status === 'expired' ? 'stopped' : body.status, { reason: 'verified_hook' });
+      return sendJson(res, 200, { ok: true });
+    }
     // POST /watch/:id/stop
     if (req.method === 'POST' && parts.length === 3 && parts[0] === 'watch' && parts[2] === 'stop') {
       const w = watches.get(parts[1]);
       if (!w) return sendJson(res, 404, { error: 'not found' });
+      // Mark cancellation BEFORE manager.stop can synchronously report a normal process exit.
+      setStatus(w, 'stopped', { reason: 'user_stop' });
       if (w.sessionId) {
         try {
           await manager.stop(w.sessionId);

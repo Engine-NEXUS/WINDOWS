@@ -125,6 +125,13 @@ fn stt_child_env() -> Vec<(String, String)> {
 /// 2. Windows registry: HKCU/HKLM PythonCore\3.13, 3.12, 3.11, 3.10
 /// 3. Common per-user and system install locations
 pub fn find_python() -> Option<String> {
+    // Contributor binaries must never silently adopt a personal/system interpreter.
+    if cfg!(feature = "contributor") || option_env!("NEXUS_MANAGED_PYTHON").is_some() {
+        let path = option_env!("NEXUS_MANAGED_PYTHON")?;
+        let output = crate::no_window::command(path).arg("--version").output().ok()?;
+        return (output.status.success() && String::from_utf8_lossy(&output.stdout).trim().starts_with("Python 3.12."))
+            .then(|| path.to_string());
+    }
     // 1. Try PATH-based commands â€” verify each actually works
     for cmd in &["python", "python3", "py"] {
         if let Ok(output) = crate::no_window::command(cmd).arg("--version").output() {

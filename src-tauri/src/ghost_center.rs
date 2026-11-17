@@ -2,9 +2,11 @@
 //! ownership/validity gates; this center owns only foreground desktop actions.
 //! Each sub-center returns an honest receipt. No vision/OCR path exists here.
 
+use crate::desktop_control::{Resolution, TargetQuery, Verification};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::shortcuts::{map::Action, router};
@@ -14,6 +16,8 @@ use crate::shortcuts::{map::Action, router};
 pub enum GhostStep {
     Shortcut { action: String, arg: Option<u32> },
     AccessibleClick { name: String },
+    TargetClick { query: TargetQuery },
+    Choose { number: usize },
     Learn { alias: String },
     Forget { alias: String },
     LearnedClick { alias: String },
@@ -49,10 +53,17 @@ pub struct Receipt {
     pub outcome: Outcome,
     pub detail: String,
     pub elapsed_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 
 impl Receipt {
     pub fn spoken(&self) -> String {
+        if self.reason_code.as_deref() == Some("clarification_required") {
+            return self.detail.clone();
+        }
         match self.outcome {
             Outcome::Verified => format!("{}, sir.", self.detail),
             Outcome::Unconfirmed => format!(
@@ -94,6 +105,20 @@ pub fn parse(transcript: &str) -> Option<GhostTask> {
 
 fn parse_step(raw: &str) -> Option<GhostStep> {
     let t = raw.trim().trim_start_matches("please ").trim();
+    for prefix in ["choose ", "option ", "number "] {
+        if let Some(n) = t.strip_prefix(prefix).and_then(|v| match v {
+            "one" => Some(1),
+            "two" => Some(2),
+            "three" => Some(3),
+            "four" => Some(4),
+            "five" => Some(5),
+            _ => v.parse::<usize>().ok(),
+        }) {
+            return (1..=5)
+                .contains(&n)
+                .then_some(GhostStep::Choose { number: n });
+        }
+    }
     let t = t.trim_start_matches("the ");
     for prefix in [
         "learn this as ",
@@ -164,6 +189,49 @@ fn parse_step(raw: &str) -> Option<GhostStep> {
         .or_else(|| t.strip_prefix("press "))?
         .trim_start_matches("the ")
         .trim();
+    if let Some((label, panel)) = name.rsplit_once(" in ") {
+        let mut q = TargetQuery::named(label);
+        q.container = Some(panel.to_string());
+        for (suffix, role) in [
+            (" button", "button"),
+            (" tab", "tabitem"),
+            (" option", "listitem"),
+        ] {
+            if let Some(v) = label.strip_suffix(suffix) {
+                q.label = v.into();
+                q.role = Some(role.into());
+                break;
+            }
+        }
+        if q.label.len() < 2
+            || q.label.len() > 80
+            || panel.is_empty()
+            || panel.len() > 80
+            || is_risky_target(&q.label)
+            || is_ambiguous_target(&q.label)
+        {
+            return None;
+        }
+        return Some(GhostStep::TargetClick { query: q });
+    }
+    for (suffix, role) in [
+        (" button", "button"),
+        (" tab", "tabitem"),
+        (" option", "listitem"),
+    ] {
+        if let Some(label) = name.strip_suffix(suffix) {
+            if label.len() < 2
+                || label.len() > 80
+                || is_risky_target(label)
+                || is_ambiguous_target(label)
+            {
+                return None;
+            }
+            let mut query = TargetQuery::named(label);
+            query.role = Some(role.into());
+            return Some(GhostStep::TargetClick { query });
+        }
+    }
     let name = name
         .strip_suffix(" button")
         .or_else(|| name.strip_suffix(" tab"))
@@ -278,6 +346,33 @@ pub fn validate(task: &GhostTask) -> bool {
                     && !is_risky_target(name)
                     && !is_ambiguous_target(name)
             }
+            GhostStep::Choose { number } => task.steps.len() == 1 && (1..=5).contains(number),
+            GhostStep::TargetClick { query } => {
+                query.label.len() >= 2
+                    && query.label.len() <= 80
+                    && !is_risky_target(&query.label)
+                    && !is_ambiguous_target(&query.label)
+                    && query
+                        .container
+                        .as_ref()
+                        .is_none_or(|v| !v.is_empty() && v.len() <= 80)
+                    && query.role.as_ref().is_none_or(|v| {
+                        [
+                            "button",
+                            "tabitem",
+                            "menuitem",
+                            "listitem",
+                            "edit",
+                            "checkbox",
+                            "radiobutton",
+                            "combobox",
+                            "hyperlink",
+                            "splitbutton",
+                        ]
+                        .contains(&v.as_str())
+                    })
+                    && query.learned_alias.as_ref().is_none_or(|v| valid_alias(v))
+            }
             GhostStep::Learn { alias }
             | GhostStep::Forget { alias }
             | GhostStep::LearnedClick { alias } => valid_alias(alias),
@@ -291,6 +386,27 @@ pub fn execute_with_store(
     cancel: &AtomicBool,
     store_dir: Option<&Path>,
 ) -> Vec<Receipt> {
+    execute_inner(task, cancel, store_dir, None)
+}
+
+pub fn execute_authorized(
+    task: &GhostTask,
+    cancel: Arc<AtomicBool>,
+    store_dir: Option<&Path>,
+) -> Vec<Receipt> {
+    execute_inner(task, &cancel, store_dir, Some(cancel.clone()))
+}
+fn execute_inner(
+    task: &GhostTask,
+    cancel: &AtomicBool,
+    store_dir: Option<&Path>,
+    owner: Option<Arc<AtomicBool>>,
+) -> Vec<Receipt> {
+    let operation_id = crate::network::uuid_v4();
+    if let [GhostStep::Choose { number }] = task.steps.as_slice() {
+        return crate::desktop_choices::choose_voice(*number, cancel);
+    }
+    crate::desktop_choices::clear();
     if !validate(task) {
         return vec![Receipt {
             step: 0,
@@ -298,6 +414,8 @@ pub fn execute_with_store(
             outcome: Outcome::Blocked,
             detail: "The Ghost command is incomplete or unsafe.".into(),
             elapsed_ms: 0,
+            reason_code: Some("blocked".into()),
+            operation_id: Some(operation_id.clone()),
         }];
     }
     let mut receipts = Vec::with_capacity(task.steps.len());
@@ -312,13 +430,35 @@ pub fn execute_with_store(
                 outcome: Outcome::Stopped,
                 detail: "The task was stopped.".into(),
                 elapsed_ms: 0,
+                reason_code: Some("blocked".into()),
+                operation_id: Some(operation_id.clone()),
             });
             break;
         }
         let start = Instant::now();
         let (route, outcome, detail) = match step {
             GhostStep::Shortcut { action, arg } => keyboard_subcenter(action, *arg, cancel),
-            GhostStep::AccessibleClick { name } => accessibility_subcenter(name, cancel),
+            GhostStep::AccessibleClick { name } => run_query(
+                &TargetQuery::named(name),
+                None,
+                cancel,
+                owner.clone(),
+                task.steps[index + 1..].to_vec(),
+                store_dir,
+            ),
+            GhostStep::TargetClick { query } => run_query(
+                query,
+                None,
+                cancel,
+                owner.clone(),
+                task.steps[index + 1..].to_vec(),
+                store_dir,
+            ),
+            GhostStep::Choose { .. } => (
+                Route::AccessibilityCenter,
+                Outcome::Blocked,
+                "A choice must be a separate request.".into(),
+            ),
             GhostStep::Learn { alias } => learning_subcenter(alias, store_dir, true),
             GhostStep::Forget { alias } => learning_subcenter(alias, store_dir, false),
             GhostStep::LearnedClick { alias } => learned_click_subcenter(alias, store_dir, cancel),
@@ -329,9 +469,23 @@ pub fn execute_with_store(
             outcome,
             detail,
             elapsed_ms: start.elapsed().as_millis() as u64,
+            reason_code: Some(
+                match outcome {
+                    Outcome::Verified => "effect_verified",
+                    Outcome::Unconfirmed if crate::desktop_choices::has_pending() => {
+                        "clarification_required"
+                    }
+                    Outcome::Unconfirmed => "effect_unconfirmed",
+                    Outcome::Blocked => "blocked",
+                    Outcome::Stopped => "stopped",
+                }
+                .into(),
+            ),
+            operation_id: Some(operation_id.clone()),
         };
         tracing::info!(
-            "[GHOST-CENTER] step={} route={route:?} outcome={outcome:?} elapsed_ms={}",
+            "[GHOST-CENTER] operation={} step={} route={route:?} outcome={outcome:?} elapsed_ms={}",
+            operation_id,
             index,
             receipt.elapsed_ms
         );
@@ -346,7 +500,9 @@ pub fn execute_with_store(
 fn route_for(step: &GhostStep) -> Route {
     match step {
         GhostStep::Shortcut { .. } => Route::KeyboardCenter,
-        GhostStep::AccessibleClick { .. } => Route::AccessibilityCenter,
+        GhostStep::AccessibleClick { .. }
+        | GhostStep::TargetClick { .. }
+        | GhostStep::Choose { .. } => Route::AccessibilityCenter,
         GhostStep::Learn { .. } | GhostStep::Forget { .. } | GhostStep::LearnedClick { .. } => {
             Route::LearningCenter
         }
@@ -436,7 +592,7 @@ fn keyboard_subcenter(
             "Keyboard routing is disabled.".into(),
         );
     }
-    let out = crate::shortcuts::exec::do_action(action, arg);
+    let out = crate::shortcuts::exec::do_action_cancelled(action, arg, cancel);
     match &out {
         router::Outcome::Sent {
             verified: router::Verified::Yes,
@@ -480,10 +636,6 @@ fn focused_field_is_secure() -> bool {
     true
 }
 
-fn accessibility_subcenter(name: &str, cancel: &AtomicBool) -> (Route, Outcome, String) {
-    accessibility_subcenter_with_id(name, None, cancel)
-}
-
 fn accessibility_subcenter_with_id(
     name: &str,
     expected_id: Option<&str>,
@@ -507,151 +659,111 @@ fn accessibility_subcenter_with_id(
     }
 }
 
+fn run_query(
+    query: &TargetQuery,
+    expected_id: Option<&str>,
+    cancel: &AtomicBool,
+    owner: Option<Arc<AtomicBool>>,
+    remaining: Vec<GhostStep>,
+    store: Option<&Path>,
+) -> (Route, Outcome, String) {
+    #[cfg(target_os = "windows")]
+    {
+        let result = (|| -> Result<(Route, Outcome, String), String> {
+            let learned = query
+                .learned_alias
+                .as_ref()
+                .map(|alias| {
+                    store
+                        .ok_or_else(|| "Learning store unavailable.".to_string())
+                        .and_then(|dir| crate::ghost_learning::resolve(dir, alias))
+                })
+                .transpose()?;
+            let mut query = query.clone();
+            if let Some((name, _)) = &learned {
+                query.label = name.clone()
+            }
+            let expected_id = learned.as_ref().map(|(_, id)| id.as_str()).or(expected_id);
+            let candidates = crate::desktop_native::candidates()?;
+            const ALIASES: &[(&str, &str, &str)] = &[("msedge.exe", "preferences", "settings")];
+            match crate::desktop_control::resolve(&query, &candidates, expected_id, ALIASES) {
+                Resolution::Unique(candidate) => {
+                    let (route, verified) = crate::desktop_native::perform(&candidate, cancel)?;
+                    Ok((
+                        route,
+                        match verified {
+                            Verification::Verified => Outcome::Verified,
+                            Verification::Stopped => Outcome::Stopped,
+                            Verification::ForegroundChanged => Outcome::Blocked,
+                            Verification::Unconfirmed => Outcome::Unconfirmed,
+                        },
+                        "Control action processed".into(),
+                    ))
+                }
+                Resolution::Clarify(choices) => {
+                    let owner = owner.ok_or("Several controls match; use a more specific name.")?;
+                    if cancel.load(Ordering::Relaxed) || crate::ghost::stop_requested() {
+                        return Err("Stopped.".into());
+                    }
+                    crate::desktop_choices::offer(
+                        choices,
+                        owner,
+                        remaining,
+                        store.map(Path::to_path_buf),
+                    );
+                    Ok((
+                        Route::AccessibilityCenter,
+                        Outcome::Unconfirmed,
+                        "Which control? Choose a number from the sidebar, sir.".into(),
+                    ))
+                }
+                Resolution::Unavailable => {
+                    Err("No matching accessible control is available.".into())
+                }
+                Resolution::Blocked(reason) => {
+                    tracing::debug!("desktop control: target blocked ({reason})");
+                    Err("Too many or unsafe matches; name the control and containing panel.".into())
+                }
+            }
+        })();
+        result.unwrap_or_else(|e| {
+            (
+                Route::AccessibilityCenter,
+                if cancel.load(Ordering::Relaxed) || crate::ghost::stop_requested() {
+                    Outcome::Stopped
+                } else {
+                    Outcome::Blocked
+                },
+                e,
+            )
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (query, expected_id, cancel, owner, remaining, store);
+        (
+            Route::AccessibilityCenter,
+            Outcome::Blocked,
+            "Native desktop control requires Windows.".into(),
+        )
+    }
+}
+
 #[cfg(target_os = "windows")]
 mod windows_accessibility {
-    use super::{Outcome, Route};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use uiautomation::controls::ControlType;
-    use uiautomation::patterns::{UIInvokePattern, UISelectionItemPattern, UITogglePattern};
-    use uiautomation::types::{Handle, PropertyConditionFlags, TreeScope, UIProperty};
-    use uiautomation::variants::Variant;
-    use uiautomation::UIAutomation;
-    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-
+    use super::*;
     pub fn act(
         name: &str,
-        expected_id: Option<&str>,
+        id: Option<&str>,
         cancel: &AtomicBool,
     ) -> Result<(Route, Outcome, String), String> {
-        let automation = UIAutomation::new().map_err(|e| e.to_string())?;
-        let hwnd = unsafe { GetForegroundWindow() };
-        if hwnd.0 == 0 {
-            return Err("I can't identify the foreground window.".into());
-        }
-        let exe = crate::browser_url::foreground_process_name()
-            .ok_or_else(|| "I can't identify the foreground app.".to_string())?;
-        let title = crate::browser_url::foreground_window_title().unwrap_or_default();
-        if crate::shortcuts::exec::is_protected_window(&exe, &title) {
-            return Err("That window is protected.".into());
-        }
-        if crate::live::commands::window::window_process_elevated(hwnd)
-            && !crate::live::commands::window::our_process_elevated()
-        {
-            return Err("That app runs as administrator.".into());
-        }
-        let root = automation
-            .element_from_handle(Handle::from(hwnd.0))
-            .map_err(|e| e.to_string())?;
-        let cond = automation
-            .create_property_condition(
-                UIProperty::Name,
-                Variant::from(name.to_string()),
-                Some(PropertyConditionFlags::IgnoreCase),
-            )
-            .map_err(|e| e.to_string())?;
-        let matches = root
-            .find_all(TreeScope::Descendants, &cond)
-            .map_err(|e| e.to_string())?;
-        let eligible = matches
-            .into_iter()
-            .filter(|el| {
-                el.get_name().is_ok_and(|n| n.eq_ignore_ascii_case(name))
-                    && expected_id
-                        .is_none_or(|id| el.get_automation_id().is_ok_and(|current| current == id))
-                    && el.get_control_type().is_ok_and(|kind| {
-                        matches!(
-                            kind,
-                            ControlType::Button
-                                | ControlType::Hyperlink
-                                | ControlType::TabItem
-                                | ControlType::MenuItem
-                                | ControlType::ListItem
-                                | ControlType::CheckBox
-                                | ControlType::RadioButton
-                                | ControlType::SplitButton
-                                | ControlType::ComboBox
-                                | ControlType::Edit
-                        )
-                    })
-                    && el.is_enabled().unwrap_or(false)
-                    && !el.is_offscreen().unwrap_or(true)
-                    && !el.is_password().unwrap_or(true)
-            })
-            .collect::<Vec<_>>();
-        if eligible.len() != 1 {
-            return Err(if eligible.is_empty() {
-                format!("I couldn't find an accessible control named {name}.")
-            } else {
-                format!("More than one control is named {name}; please be more specific.")
-            });
-        }
-        let el = &eligible[0];
-        let same_window = || unsafe { GetForegroundWindow() }.0 == hwnd.0
-            && crate::ghost::session_active() && !crate::ghost::stop_requested()
-            && !cancel.load(Ordering::Relaxed);
-        if !same_window() {
-            return Err("The window changed before I could act.".into());
-        }
-        if let Ok(toggle) = el.get_pattern::<UITogglePattern>() {
-            let before = toggle.get_toggle_state().map_err(|e| e.to_string())?;
-            toggle.toggle().map_err(|e| e.to_string())?;
-            let after = toggle.get_toggle_state().ok();
-            return Ok((
-                Route::AccessibilityCenter,
-                if after.is_some_and(|state| state != before) {
-                    Outcome::Verified
-                } else {
-                    Outcome::Unconfirmed
-                },
-                format!("Toggled {name}."),
-            ));
-        }
-        if let Ok(selection) = el.get_pattern::<UISelectionItemPattern>() {
-            selection.select().map_err(|e| e.to_string())?;
-            return Ok((
-                Route::AccessibilityCenter,
-                if selection.is_selected().unwrap_or(false) {
-                    Outcome::Verified
-                } else {
-                    Outcome::Unconfirmed
-                },
-                format!("Selected {name}."),
-            ));
-        }
-        if let Ok(invoke) = el.get_pattern::<UIInvokePattern>() {
-            invoke.invoke().map_err(|e| e.to_string())?;
-            // Invoke returning success proves dispatch, not the app's effect.
-            return Ok((
-                Route::AccessibilityCenter,
-                Outcome::Unconfirmed,
-                format!("Activated {name}, but the app did not expose a verifiable result."),
-            ));
-        }
-        let point = el
-            .get_clickable_point()
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("{name} has no safe clickable point."))?;
-        let x = point.get_x();
-        let y = point.get_y();
-        let intended_id = el.get_runtime_id().map_err(|e| e.to_string())?;
-        let checked = || {
-            if !same_window() {
-                return Err("The foreground window changed.".into());
-            }
-            let hit = automation
-                .element_from_point(point)
-                .map_err(|e| e.to_string())?;
-            if hit.get_runtime_id().map_err(|e| e.to_string())? != intended_id {
-                return Err("Another control covers the target point.".into());
-            }
-            Ok(())
-        };
-        checked()?;
-        crate::live::commands::mouse::click_at_checked(x, y, || !same_window(), checked)?;
-        Ok((
-            Route::CursorCenter,
-            Outcome::Unconfirmed,
-            format!("Clicked {name}, but the app did not expose a verifiable result."),
+        Ok(run_query(
+            &TargetQuery::named(name),
+            id,
+            cancel,
+            None,
+            vec![],
+            None,
         ))
     }
 }
@@ -688,8 +800,13 @@ mod tests {
             parse("Nexus, can you please click the Settings button")
                 .unwrap()
                 .steps[0],
-            GhostStep::AccessibleClick {
-                name: "settings".into()
+            GhostStep::TargetClick {
+                query: TargetQuery {
+                    label: "settings".into(),
+                    role: Some("button".into()),
+                    container: None,
+                    learned_alias: None
+                }
             }
         );
     }
@@ -745,8 +862,34 @@ mod tests {
             outcome: Outcome::Unconfirmed,
             detail: "Save shortcut was sent.".into(),
             elapsed_ms: 1,
+            reason_code: None,
+            operation_id: None,
         };
         assert!(r.spoken().contains("couldn't verify"));
         assert!(!r.spoken().starts_with("Done"));
+    }
+    #[test]
+    fn contextual_targets_and_spoken_choices_keep_typed_scope() {
+        let task = parse("click Open button in Toolbar").unwrap();
+        assert!(
+            matches!(&task.steps[0],GhostStep::TargetClick{query} if query.label=="open"&&query.role.as_deref()==Some("button")&&query.container.as_deref()==Some("toolbar"))
+        );
+        assert!(matches!(
+            parse("choose two").unwrap().steps[0],
+            GhostStep::Choose { number: 2 }
+        ));
+        assert!(!validate(&GhostTask {
+            steps: vec![
+                GhostStep::Choose { number: 1 },
+                GhostStep::Shortcut {
+                    action: "save".into(),
+                    arg: None
+                }
+            ]
+        }));
+        assert!(serde_json::from_str::<GhostTask>(
+            r#"{"steps":[{"kind":"accessible_click","name":"Open"}]}"#
+        )
+        .is_ok());
     }
 }

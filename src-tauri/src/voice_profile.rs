@@ -44,7 +44,7 @@ fn profile_key() -> Option<crate::memcore::crypto::Key> {
     #[cfg(not(test))]
     {
         static KEY: once_cell::sync::Lazy<Option<crate::memcore::crypto::Key>> = once_cell::sync::Lazy::new(|| {
-            let entry = keyring::Entry::new("com.nexus.assistant", "voice_profile_data_key_v1").ok()?;
+            let entry = keyring::Entry::new(crate::app_dirs::APP_ID, "voice_profile_data_key_v1").ok()?;
             let decode = |encoded: &str| -> Option<crate::memcore::crypto::Key> {
                 if encoded.len() != crate::memcore::crypto::KEY_LEN * 2 { return None; }
                 let mut key = [0u8; crate::memcore::crypto::KEY_LEN];
@@ -62,7 +62,7 @@ fn profile_key() -> Option<crate::memcore::crypto::Key> {
             let encoded: String = key.iter().map(|value| format!("{value:02x}")).collect();
             entry.set_password(&encoded).ok()?;
             // Read through a fresh handle to reject a non-persistent backend.
-            let persisted = keyring::Entry::new("com.nexus.assistant", "voice_profile_data_key_v1").ok()?
+            let persisted = keyring::Entry::new(crate::app_dirs::APP_ID, "voice_profile_data_key_v1").ok()?
                 .get_password().ok()?;
             (persisted == encoded).then_some(key)
         });

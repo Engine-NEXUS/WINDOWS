@@ -316,6 +316,17 @@ describe("processViaOrchestrator ghost invoke timeout", () => {
     useAssistant.setState({ pendingGithubCommand: null });
   });
 
+  it("distinguishes a capture transition from explicit cancellation", async () => {
+    const {cancelOrchestrator}=await import("./orchestrator");
+    invokeMock.mockResolvedValue(undefined);
+    await cancelOrchestrator(true);
+    expect(invokeMock).toHaveBeenCalledWith("orchestrator_cancel", {forCapture:true});
+    invokeMock.mockClear();
+    await cancelOrchestrator();
+    expect(invokeMock).toHaveBeenCalledWith("orchestrator_cancel");
+    expect(invokeMock).not.toHaveBeenCalledWith("orchestrator_cancel", {forCapture:true});
+  });
+
   it("cancels Rust and throws GhostInvokeTimeout when a ghost turn hangs", async () => {
     const { GhostInvokeTimeout, processViaOrchestrator } = await import("./orchestrator");
     // Backend hangs forever; cancel resolves instantly.

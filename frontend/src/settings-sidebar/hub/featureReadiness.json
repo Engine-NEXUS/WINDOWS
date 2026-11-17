@@ -1,0 +1,106 @@
+{
+  "wake-verify": {
+    "feature": "Wake word \"NEXUS\" (openWakeWord, own model)",
+    "live": 55
+  },
+  "wake-sound": {
+    "feature": "Wake-up sound",
+    "live": 10
+  },
+  "voice-lock": {
+    "feature": "Speaker verification / owner check",
+    "live": 10
+  },
+  "directed-gate": {
+    "feature": "Directed-speech gate (TV / side-talk filter)",
+    "live": 35
+  },
+  "stt-local": {
+    "feature": "Local STT fallback (Moonshine)",
+    "live": 60
+  },
+  "screen-tour": {
+    "feature": "Screen analysis / narrated tour",
+    "live": 30
+  },
+  "hand-mode": {
+    "feature": "Hand mode (camera pointer)",
+    "live": 55
+  },
+  "hand-focus": {
+    "feature": "Focus Mode (Hand Mode load control)",
+    "live": 0
+  },
+  "memcore": {
+    "feature": "Memory core (encrypted store, ranked recall, context pack)",
+    "live": 55
+  },
+  "mem-briefing": {
+    "feature": "Boot briefing + resume points",
+    "live": 25
+  },
+  "mem-activity": {
+    "feature": "Boot briefing + resume points",
+    "live": 25
+  },
+  "mem-session": {
+    "feature": "Session snapshot / restore",
+    "live": 20
+  },
+  "mem-timetable": {
+    "feature": "Timetable from an image + reminders",
+    "live": 45
+  },
+  "mem-leaveby": {
+    "feature": "Leave-by reminders",
+    "live": 0
+  },
+  "mem-routines": {
+    "feature": "Profile, corrections, routines, review, curator",
+    "live": 10
+  },
+  "mem-review": {
+    "feature": "Profile, corrections, routines, review, curator",
+    "live": 10
+  },
+  "mail-watch": {
+    "feature": "Important-mail watcher + triage",
+    "live": 10
+  },
+  "github-watch": {
+    "feature": "Notification brain: state machine and GitHub Actions / deploy watchers",
+    "live": 0
+  },
+  "deploy-watch": {
+    "feature": "Notification brain: state machine and GitHub Actions / deploy watchers",
+    "live": 0
+  },
+  "wa-watch": {
+    "feature": "WhatsApp priority people (read-only)",
+    "live": 5
+  },
+  "agent-monitor": {
+    "feature": "Track all agents (announce each, summary)",
+    "live": 5
+  },
+  "agent-hook": {
+    "feature": "Agent hooks (Claude, Codex, Antigravity, Cursor, Gemini, OpenCode, Aider, Devin, Windsurf, Kilo, Copilot)",
+    "live": 40
+  },
+  "watch-power": {
+    "feature": "Watch one agent, then power off",
+    "live": 65
+  },
+  "power-commands": {
+    "feature": "Ask-first shutdown / sleep / restart",
+    "live": 50
+  },
+  "maps-embed": {
+    "feature": "Maps / Places / Directions",
+    "live": 55
+  },
+  "cr-review": {
+    "feature": "GitHub commands (PRs, merge, review)",
+    "live": 70
+  }
+}

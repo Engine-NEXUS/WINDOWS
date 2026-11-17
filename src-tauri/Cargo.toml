@@ -26,8 +26,14 @@ path = "dev_tools/shortcut_live.rs"
 name = "wake_replay"
 path = "dev_tools/wake_replay.rs"
 
+# Owner-run: saves one public site as a stack-scanner accuracy fixture (site_eval.rs).
+[[example]]
+name = "site_capture"
+path = "dev_tools/site_capture.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+serde_json = "1"
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
@@ -167,6 +173,7 @@ windows = { version = "0.36", features = [
     "Win32_Security",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse", # GetLastInputInfo: "is the user at the PC" for the activity recorder
     "Win32_System_Threading",
@@ -211,11 +218,12 @@ keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5"
-# No platform feature on Linux: keyring falls back to its mock store (as today).
-keyring = "3"
+# Persistent desktop Secret Service. An unavailable/locked service is an error, never a mock store.
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
 [features]
 default = ["wakeword-oww"]
+contributor = [] # separate app identity, credentials and managed Python; opt-in at build time
 # REQUIRED FOR PRODUCTION BUILDS — DO NOT REMOVE.
 # Tauri decides whether to load `frontendDist` (bundled assets, served over the
 # custom `tauri://` protocol) or `devUrl` (http://localhost:5173) purely from

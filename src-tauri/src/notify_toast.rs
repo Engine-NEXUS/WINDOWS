@@ -382,7 +382,7 @@ pub fn is_fullscreen_rect(win: (i32, i32, i32, i32), monitor: (i32, i32, i32, i3
 }
 
 #[cfg(target_os = "windows")]
-fn foreground_fullscreen() -> bool {
+pub(crate) fn foreground_fullscreen() -> bool {
     #[repr(C)]
     struct Rect {
         l: i32,

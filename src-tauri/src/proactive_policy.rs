@@ -564,6 +564,12 @@ fn execute<R: Runtime>(app: &AppHandle<R>, actions: Vec<Action>) {
                     );
                     crate::orchestrator::speak_line(&app2, line, &req);
                     on_spoken(&id);
+                    // A spoken mail alert is "told": the next briefing must not repeat it.
+                    if id.starts_with("mail_") {
+                        if let Ok(dir) = tauri::Manager::path(&app2).app_data_dir() {
+                            crate::memcore::briefing::on_alert_spoken(&dir, &id);
+                        }
+                    }
                 });
             }
         }

@@ -354,7 +354,7 @@ pub async fn live_browser_search(query: String) -> Result<LiveResult, String> {
 
 /// Open a website by name (e.g., "wikipedia", "github").
 #[tauri::command]
-pub async fn live_open_site(site: String) -> Result<LiveResult, String> {
+pub async fn live_open_site<R: tauri::Runtime>(app: tauri::AppHandle<R>, site: String) -> Result<LiveResult, String> {
     let verdict = safety::safety_check("open_url", Some(&site));
     if let safety::SafetyVerdict::Blocked(msg) = verdict {
         return Ok(LiveResult::err(msg));
@@ -362,12 +362,16 @@ pub async fn live_open_site(site: String) -> Result<LiveResult, String> {
 
     match commands::browser::open_site(&site) {
         Ok(()) => {
+            crate::action_receipt::emit(&app, &crate::action_receipt::ActionReceipt::for_open_site(&site, true));
             let ctx = state::context();
             ctx.transition(state::LiveState::BrowserOpen { url: None });
             Ok(LiveResult::ok(format!("Opening {site}"))
                 .with_state(ctx.state()))
         }
-        Err(e) => Ok(LiveResult::err(e)),
+        Err(e) => {
+            crate::action_receipt::emit(&app, &crate::action_receipt::ActionReceipt::for_open_site(&site, false));
+            Ok(LiveResult::err(e))
+        }
     }
 }
 

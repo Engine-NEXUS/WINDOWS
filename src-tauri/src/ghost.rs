@@ -190,6 +190,7 @@ pub fn is_stop_phrase(text: &str) -> bool {
 /// Request cancellation of the running ghost task (voice stop path).
 /// The runner observes it at the next step boundary and aborts cleanly.
 pub fn request_stop() {
+    crate::desktop_choices::clear();
     GHOST_CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 

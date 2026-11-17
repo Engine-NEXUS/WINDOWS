@@ -72,6 +72,12 @@ pub(crate) fn extract_host(url: &str) -> Option<String> {
     reqwest::Url::parse(url).ok()?.host_str().map(|s| s.to_string())
 }
 
+/// Chromium's location bar view, under any vendor prefix: "LocationBarView" (Chrome, Edge) and
+/// "BraveLocationBarView" (Brave). Pure.
+fn is_location_bar_class(class: &str) -> bool {
+    class.ends_with("LocationBarView")
+}
+
 fn is_address_bar_identity(name: &str, automation_id: &str) -> bool {
     let name = name.to_ascii_lowercase();
     let id = automation_id.to_ascii_lowercase();
@@ -126,7 +132,7 @@ fn get_browser_url_windows_inner(require_no_focus: bool) -> Option<String> {
         .create_matcher()
         .from(window.clone())
         .timeout(400)
-        .classname("LocationBarView")
+        .filter_fn(Box::new(|element: &UIElement| Ok(is_location_bar_class(&element.get_classname().unwrap_or_default()))))
         .find_first()
         .ok();
     let edit = location.and_then(|bar| {
@@ -197,6 +203,19 @@ pub(crate) async fn resolve_foreground_url_for_command() -> Option<String> {
         return Some(url);
     }
 
+    // Full screen (F11, or a video's full screen): the toolbar and its address bar are not on screen, so no reader can
+    // see them. Leave full screen for a moment, read the address, and go back.
+    let fullscreen = tokio::task::spawn_blocking(|| foreground_is_browser() && crate::notify_toast::foreground_fullscreen())
+        .await
+        .unwrap_or(false);
+    if fullscreen {
+        let result = read_out_of_fullscreen(initial_hwnd.0).await;
+        log_result("fullscreen", &result);
+        if let Some(url) = result {
+            return Some(url);
+        }
+    }
+
     // Stages 1-3: Retry verified up to 3 times with 350ms delay
     for _retry in 1..=3 {
         tokio::time::sleep(std::time::Duration::from_millis(350)).await;
@@ -242,12 +261,135 @@ pub(crate) async fn resolve_foreground_url_for_command() -> Option<String> {
         return None;
     }
 
-    let result = tokio::task::spawn_blocking(|| get_browser_url_windows_relaxed()).await.ok().flatten();
+    let mut result = tokio::task::spawn_blocking(|| get_browser_url_windows_relaxed()).await.ok().flatten();
+    if result.is_none() && unsafe { GetForegroundWindow() }.0 == initial_hwnd.0 {
+        // The browser exposes no accessibility tree (Brave does this until a screen reader is detected), so copy the
+        // selected address instead and put the owner's clipboard text back.
+        let before = tokio::task::spawn_blocking(|| arboard::Clipboard::new().ok().and_then(|mut c| c.get_text().ok()))
+            .await
+            .ok()
+            .flatten();
+        let _ = press_hotkey(&["ctrl", "c"]);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        result = tokio::task::spawn_blocking(move || {
+            let mut cb = arboard::Clipboard::new().ok()?;
+            let copied = cb.get_text().ok();
+            if let Some(old) = before.as_deref() {
+                let _ = cb.set_text(old);
+            }
+            // an unchanged clipboard means the copy did not happen
+            copied.filter(|c| Some(c.as_str()) != before.as_deref())
+        })
+        .await
+        .ok()
+        .flatten()
+        .and_then(|t| {
+            let t = t.trim().to_string();
+            let url = if t.starts_with("http://") || t.starts_with("https://") {
+                t
+            } else if !t.contains(char::is_whitespace) && t.contains('.') && t.len() < 2048 {
+                format!("https://{t}")
+            } else {
+                return None;
+            };
+            Some(url)
+        });
+        log_result("clipboard", &result);
+    }
     // ALWAYS send Escape to give focus back to the page
     let _ = press_hotkey(&["escape"]);
 
     log_result("ctrl_l", &result);
+    if result.is_none() {
+        // Say why, so a failed read can be fixed from the log (names of controls only, never a URL).
+        let diag = tokio::task::spawn_blocking(url_read_diagnostics).await.unwrap_or_default();
+        println!("[REVERSE] url diag: {diag}");
+    }
     result
+}
+
+/// F11 out of full screen, read the address bar, F11 back in. Only acts while the same window stays in front, and only
+/// sends the second F11 when the first one really left full screen (so the user is never left switched the other way).
+#[cfg(target_os = "windows")]
+async fn read_out_of_fullscreen(hwnd: isize) -> Option<String> {
+    use crate::live::commands::keyboard::press_hotkey;
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let same_window = || unsafe { GetForegroundWindow() }.0 == hwnd;
+    let still_fullscreen = || async {
+        tokio::task::spawn_blocking(crate::notify_toast::foreground_fullscreen).await.unwrap_or(true)
+    };
+    if press_hotkey(&["f11"]).is_err() {
+        println!("[REVERSE] url stage=fullscreen send_failed");
+        return None;
+    }
+    let mut left = false;
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        if !same_window() {
+            println!("[REVERSE] url stage=fullscreen hwnd_changed");
+            return None;
+        }
+        if !still_fullscreen().await {
+            left = true;
+            break;
+        }
+    }
+    let mut result = None;
+    if left {
+        // The toolbar is laid out a moment after the window leaves full screen.
+        for _ in 0..4 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            result = tokio::task::spawn_blocking(get_browser_url_windows_relaxed).await.ok().flatten();
+            if result.is_some() || !same_window() {
+                break;
+            }
+        }
+        if same_window() && !still_fullscreen().await {
+            let _ = press_hotkey(&["f11"]);
+        }
+    } else {
+        println!("[REVERSE] url stage=fullscreen did_not_leave");
+    }
+    result
+}
+
+/// One line on why the address could not be read: the foreground program, whether it is full screen, whether a
+/// location bar exists, and how many edit fields the window shows (with their accessible names, never their values).
+#[cfg(target_os = "windows")]
+fn url_read_diagnostics() -> String {
+    use uiautomation::controls::ControlType;
+    use uiautomation::types::Handle;
+    use uiautomation::{UIAutomation, UIElement};
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    let hwnd = unsafe { GetForegroundWindow() };
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    let exe = get_process_name(pid).unwrap_or_else(|| "?".into());
+    let fullscreen = crate::notify_toast::foreground_fullscreen();
+    let mut out = format!("exe={exe} browser={} fullscreen={fullscreen}", is_browser_process(&exe));
+    let Some(automation) = UIAutomation::new().ok() else { return out };
+    let Some(window) = automation.element_from_handle(Handle::from(hwnd.0 as isize)).ok() else {
+        return out + " window=unreadable";
+    };
+    let bar = automation
+        .create_matcher()
+        .from(window.clone())
+        .timeout(300)
+        .filter_fn(Box::new(|e: &UIElement| Ok(is_location_bar_class(&e.get_classname().unwrap_or_default()))))
+        .find_first()
+        .ok();
+    out.push_str(&format!(" location_bar={}", bar.and_then(|b| b.get_classname().ok()).unwrap_or_else(|| "none".into())));
+    let edits = automation.create_matcher().from(window).timeout(400).control_type(ControlType::Edit).find_all().unwrap_or_default();
+    let names: Vec<String> = edits
+        .iter()
+        .take(3)
+        .map(|e| {
+            let n: String = e.get_name().unwrap_or_default().chars().take(40).collect();
+            format!("{n:?}/{}", e.get_classname().unwrap_or_default())
+        })
+        .collect();
+    out.push_str(&format!(" edits={} [{}]", edits.len(), names.join(", ")));
+    out
 }
 
 // Non-Windows stub: just call the existing accessor.
@@ -749,6 +891,14 @@ pub fn extract_gmail_account_index_from_url(url: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_vendor_location_bar_class_is_recognised() {
+        assert!(super::is_location_bar_class("LocationBarView"));
+        assert!(super::is_location_bar_class("BraveLocationBarView"));
+        assert!(!super::is_location_bar_class("BraveOmniboxViewViews"));
+        assert!(!super::is_location_bar_class("ToolbarView"));
+    }
+
     use super::*;
 
     #[test]

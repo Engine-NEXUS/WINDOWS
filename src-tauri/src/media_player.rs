@@ -35,7 +35,7 @@ pub fn resolve_player(requested: Option<&str>) -> String {
 
     // Try reading default from local settings.json
     if let Some(config_dir) = dirs_next::data_dir() {
-        let settings_path = config_dir.join("com.nexus.assistant").join("settings.json");
+        let settings_path = config_dir.join(crate::app_dirs::APP_ID).join("settings.json");
         if let Ok(content) = std::fs::read_to_string(&settings_path) {
             if let Some(p) = player_from_settings(&content) {
                 return p;

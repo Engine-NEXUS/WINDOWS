@@ -399,7 +399,7 @@ fn get_corrections_file_path() -> std::path::PathBuf {
         std::path::PathBuf::from(".")
     });
     data_dir
-        .join("com.nexus.assistant")
+        .join(crate::app_dirs::APP_ID)
         .join("learned_corrections.json")
 }
 

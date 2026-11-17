@@ -67,7 +67,7 @@ static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
 
 #[cfg(not(test))]
 fn cache_dir() -> Option<std::path::PathBuf> {
-    dirs_next::data_dir().map(|d| d.join("com.nexus.assistant").join("logo_cache"))
+    dirs_next::data_dir().map(|d| d.join(crate::app_dirs::APP_ID).join("logo_cache"))
 }
 
 #[cfg(test)]
@@ -113,7 +113,7 @@ pub(crate) fn logo_dev_key() -> Option<String> {
 
 #[cfg(not(test))]
 fn read_key_from_settings_file() -> Option<String> {
-    let dir = dirs_next::data_dir()?.join("com.nexus.assistant");
+    let dir = dirs_next::data_dir()?.join(crate::app_dirs::APP_ID);
     let content = std::fs::read_to_string(dir.join("settings.json")).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
     let val = json
@@ -424,6 +424,27 @@ pub(crate) fn remember_for_test(domain: &str, data_url: &str) {
     remember(domain, data_url);
 }
 
+/// A logo with no account or key: the site's own `apple-touch-icon.png` (a PNG or JPEG up to 200 KB), cached like
+/// any other logo. `None` when the site has none. Used only after the keyed lookup came up empty, for the page header
+/// and for hosts the bundled icon sets do not cover. The domain is already a validated public host name.
+pub(crate) async fn keyless_logo(domain: &str) -> Option<String> {
+    let domain = valid_domain(domain)?;
+    cache_dir()?;
+    let url = reqwest::Url::parse(&format!("https://{domain}/apple-touch-icon.png")).ok()?;
+    bump_net_calls();
+    let resp = CLIENT.get(url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let bytes = resp.bytes().await.ok()?;
+    if bytes.len() > 200_000 || !looks_like_image(&bytes) {
+        return None;
+    }
+    let png = normalise_to_png(&bytes).ok()?;
+    write_png_cache(&domain, &png);
+    Some(to_data_url(&png))
+}
+
 /// Logos for many domains, fetched in parallel (max 6 at a time),
 /// de-duplicated, keyed by the validated domain. Misses and failures are
 /// simply absent from the map.
@@ -441,7 +462,10 @@ pub(crate) async fn logos_for_domains(
         let sem = sem.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await;
-            let url = logo_data_url(&vd).await;
+            let url = match logo_data_url(&vd).await {
+                Some(u) => Some(u),
+                None => keyless_logo(&vd).await,
+            };
             (vd, url)
         }));
     }

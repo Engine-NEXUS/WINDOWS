@@ -1,11 +1,13 @@
 import { useEffect, useState, useRef, useMemo, useCallback } from "react";
 import { useSidebar } from "./sidebarStore";
 import type {
+  StackDetection,
   StackPayload,
   StackProgress,
   StackFocusPayload,
   StackLogoPatch,
 } from "./stackTypes";
+import { techIconFor, techIconForHost } from "./kit/techIcon";
 import {
   confidenceLabel,
   securityScore,
@@ -29,6 +31,7 @@ import {
   BarChart,
 } from "./kit";
 import "./stack.css";
+import "./stack-v2.css";
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -83,6 +86,26 @@ function downloadMarkdown(markdown: string, host: string) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+/** Groups detections by category, keeping the incoming (confidence) order inside a group and the first-seen group order. */
+function groupByCategory(list: StackDetection[]) {
+  const order: string[] = [];
+  const map = new Map<string, StackDetection[]>();
+  for (const d of list) {
+    const c = d.category || "other";
+    if (!map.has(c)) {
+      map.set(c, []);
+      order.push(c);
+    }
+    map.get(c)!.push(d);
+  }
+  return order.map((category, i) => ({
+    category,
+    label: formatCategoryLabel(category),
+    colorIndex: i,
+    items: map.get(category)!,
+  }));
 }
 
 export function StackView({
@@ -218,9 +241,12 @@ export function StackView({
     return securityScore(stackData?.security);
   }, [stackData?.security]);
 
+  const isApp = stackData?.kind === "app";
   const host = useMemo(() => {
+    // Apps carry the exe file name, not a web address.
+    if (stackData?.kind === "app") return stackData?.url || "";
     return extractHost(stackData?.final_url || stackData?.url);
-  }, [stackData?.final_url, stackData?.url]);
+  }, [stackData?.kind, stackData?.final_url, stackData?.url]);
 
   const topTech = useMemo(() => {
     return findTopTechnology(stackData?.detections);
@@ -258,7 +284,8 @@ export function StackView({
     );
   }
 
-  const isScanning = Boolean(stackData.scanning);
+  const isScanning = Boolean(stackData.scanning) || Boolean(stackData.rendering);
+  const thin = Array.isArray(stackData.thin) ? stackData.thin : [];
   const thirdPartyHosts = stackData.stats?.third_party_hosts || [];
   const visibleHosts = showAllHosts ? thirdPartyHosts : thirdPartyHosts.slice(0, 8);
   const sections = Array.isArray(stackData.sections) ? stackData.sections : [];
@@ -277,12 +304,13 @@ export function StackView({
           <LogoTile
             src={stackData.site_logo}
             name={host || stackData.title || "Site"}
+            techId={isApp ? stackData.title : undefined}
             size={36}
             rounded="lg"
           />
         }
-        title={stackData.title || host || "Website Tech Stack"}
-        subtitle={`${host || "site"} · Tech stack`}
+        title={stackData.title || host || (isApp ? "App Tech Stack" : "Website Tech Stack")}
+        subtitle={`${host || (isApp ? "app" : "site")} · ${isApp ? "App stack" : "Tech stack"}`}
         status={isScanning ? "scanning" : "done"}
         actions={
           <>
@@ -301,10 +329,29 @@ export function StackView({
       <div className="stack-scroll-body">
         <div className="stack-phone-col">
           {/* ── 2. Hero Card ───────────────────────────────────────── */}
-          <Card className="stack-hero-card">
+          <Card id="sv-overview" className="stack-hero-card">
+            {(stackData.detections?.length ?? 0) > 0 && (
+              <div className="stack-avatars" aria-hidden="true">
+                {(stackData.detections ?? []).slice(0, 7).map((d) => (
+                  <LogoTile
+                    key={d.id}
+                    src={d.logo}
+                    name={d.name}
+                    techId={d.id}
+                    category={d.category}
+                    size={34}
+                    rounded="full"
+                    className="stack-avatar"
+                  />
+                ))}
+                {(stackData.detections?.length ?? 0) > 7 && (
+                  <span className="stack-avatar stack-avatar--more">{`+${(stackData.detections?.length ?? 0) - 7}`}</span>
+                )}
+              </div>
+            )}
             {topTech && (
               <div className="stack-hero-top-badge">
-                <LogoTile src={topTech.logo} name={topTech.name} size={22} rounded="lg" />
+                <LogoTile src={topTech.logo} name={topTech.name} techId={topTech.id} category={topTech.category} size={22} rounded="lg" />
                 <span className="stack-hero-top-name">{topTech.name}</span>
                 <Chip
                   tone={
@@ -328,11 +375,46 @@ export function StackView({
               <h2 className="stack-hero-headline">{stackData.title || host}</h2>
             )}
 
-            <p className="stack-hero-sub">
-              {`${stackData.detections?.length ?? 0} technologies · ${
-                stackData.stats?.script_count ?? 0
-              } scripts · ${thirdPartyHosts.length} third-party hosts`}
-            </p>
+            <div className="stack-stat-tiles">
+              <div className="stack-stat-tile" data-accent="blue">
+                <span className="stack-stat-label">Technologies</span>
+                <span className="stack-stat-num">{stackData.detections?.length ?? 0}</span>
+                <span className="stack-stat-hint">{`${new Set((stackData.detections ?? []).map((d) => d.category)).size} layers`}</span>
+              </div>
+              {!isApp && (
+                <div className="stack-stat-tile" data-accent="violet">
+                  <span className="stack-stat-label">Scripts</span>
+                  <span className="stack-stat-num">{stackData.stats?.script_count ?? 0}</span>
+                  <span className="stack-stat-hint">{`${stackData.stats?.inline_script_count ?? 0} inline`}</span>
+                </div>
+              )}
+              {!isApp && (
+                <div className="stack-stat-tile" data-accent="amber">
+                  <span className="stack-stat-label">Hosts</span>
+                  <span className="stack-stat-num">{thirdPartyHosts.length}</span>
+                  <span className="stack-stat-hint">third-party</span>
+                </div>
+              )}
+              {!isApp && (
+                <div className="stack-stat-tile" data-accent="green">
+                  <span className="stack-stat-label">Security</span>
+                  <span className="stack-stat-num">{`${secScore.passed}/${secScore.total}`}</span>
+                  <span className="stack-stat-hint">headers set</span>
+                </div>
+              )}
+            </div>
+
+            {thin.length > 0 && (
+              <ul className="stack-thin-list" aria-label="Why this scan is limited">
+                {thin.map((t, i) => (
+                  <li key={i}>{t}</li>
+                ))}
+              </ul>
+            )}
+
+            {stackData.rendering && (
+              <p className="stack-rendering-note">Looking deeper in a hidden browser window…</p>
+            )}
 
             <button
               type="button"
@@ -379,6 +461,7 @@ export function StackView({
 
           {/* ── 3. Stack Mix Card ──────────────────────────────────── */}
           <Card
+            className="stack-mix-card"
             title="Stack mix"
             trailing={
               <DropdownChip
@@ -397,21 +480,24 @@ export function StackView({
             />
             {mixSlices.length > 0 && (
               <div className="stack-mix-legend">
-                {mixSlices.map((s, idx) => (
-                  <Chip
-                    key={idx}
-                    dot={`var(--kit-c${s.colorIndex % 8})`}
-                    tone="neutral"
-                  >
-                    {`${s.label} (${s.value})`}
-                  </Chip>
-                ))}
+                {mixSlices.map((sl, idx) => {
+                  const total = mixSlices.reduce((n, x) => n + x.value, 0) || 1;
+                  return (
+                    <div key={idx} className="stack-layer-row" style={{ ["--c" as any]: `var(--kit-c${sl.colorIndex % 8})` }}>
+                      <span className="stack-layer-label">{sl.label}</span>
+                      <span className="stack-layer-count">{`(${sl.value})`}</span>
+                      <span className="stack-layer-bar"><i style={{ width: `${Math.max(6, Math.round((sl.value / total) * 100))}%` }} /></span>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </Card>
 
-          {/* ── 4. Security Headers Card ───────────────────────────── */}
+          {/* ── 4. Security Headers Card (websites only) ───────────── */}
+          {!isApp && (
           <Card
+            id="sv-security"
             title="Security headers"
             trailing={
               <Chip
@@ -427,6 +513,22 @@ export function StackView({
               </Chip>
             }
           >
+            <div className="stack-sec-ring-row">
+              <div
+                className="stack-sec-ring"
+                style={{ ["--pct" as any]: `${Math.round((secScore.passed / Math.max(1, secScore.total)) * 100)}%` }}
+                role="img"
+                aria-label={`${secScore.passed} of ${secScore.total} security headers present`}
+              >
+                <span className="stack-sec-ring-num">{secScore.passed}</span>
+                <span className="stack-sec-ring-of">{`of ${secScore.total}`}</span>
+              </div>
+              <p className="stack-sec-note">
+                {secScore.passed === secScore.total
+                  ? "Every common protection header is set."
+                  : `${secScore.total - secScore.passed} common protection headers are missing.`}
+              </p>
+            </div>
             <div className="stack-sec-grid">
               {SECURITY_HEADER_KEYS.map(({ key, label }) => {
                 const pass = stackData.security ? Boolean(stackData.security[key]) : false;
@@ -434,9 +536,10 @@ export function StackView({
               })}
             </div>
           </Card>
+          )}
 
           {/* ── 5. Technologies Card ───────────────────────────────── */}
-          <Card title="Technologies">
+          <Card id="sv-stack" title="Technologies">
             <div className="stack-tech-controls">
               <input
                 type="text"
@@ -446,12 +549,20 @@ export function StackView({
                 className="stack-search-input"
                 aria-label="Search technologies"
               />
-              <DropdownChip
-                value={filterConfidence}
-                options={["All", "Confirmed", "Likely", "Possible"]}
-                onChange={setFilterConfidence}
-                ariaLabel="Filter by confidence"
-              />
+              <div className="stack-seg" role="tablist" aria-label="Filter by confidence">
+                {["All", "Confirmed", "Likely", "Possible"].map((opt) => (
+                  <button
+                    key={opt}
+                    type="button"
+                    role="tab"
+                    aria-selected={filterConfidence === opt}
+                    className={`stack-seg-btn ${filterConfidence === opt ? "stack-seg-btn--on" : ""}`}
+                    onClick={() => setFilterConfidence(opt)}
+                  >
+                    {opt}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div className="stack-tech-list">
@@ -462,7 +573,14 @@ export function StackView({
                     : "No technologies found"}
                 </div>
               ) : (
-                filteredDetections.map((detection) => {
+                groupByCategory(filteredDetections).map((group) => (
+                  <div key={group.category} className="stack-tech-group">
+                    <div className="stack-tech-group-head">
+                      <span className="stack-tech-group-dot" style={{ background: `var(--kit-c${group.colorIndex % 8})` }} />
+                      <span className="stack-tech-group-name">{group.label}</span>
+                      <span className="stack-tech-group-count">{group.items.length}</span>
+                    </div>
+                    {group.items.map((detection) => {
                   const isFocused = stackFocus.includes(detection.id);
                   const isExpanded = Boolean(expandedEvidence[detection.id]);
                   const confTag = confidenceLabel(detection.confidence);
@@ -484,17 +602,28 @@ export function StackView({
                         <LogoTile
                           src={detection.logo}
                           name={detection.name}
+                          techId={detection.id}
+                          category={detection.category}
                           size={32}
                           rounded="lg"
                         />
                         <div className="stack-tech-info">
-                          <span className="stack-tech-name">{detection.name}</span>
+                          <span className="stack-tech-name">
+                            {detection.name}
+                            {detection.version ? (
+                              <span className="stack-tech-version">{` ${detection.version}`}</span>
+                            ) : null}
+                          </span>
                           <span className="stack-tech-cat">
-                            {formatCategoryLabel(detection.category)}
+                            {evidenceList[0] ?? formatCategoryLabel(detection.category)}
                           </span>
                         </div>
-                        <span className={`stack-conf-pill stack-conf-pill--${confLower}`}>
-                          {confTag}
+                        <span className={`stack-conf-pill stack-conf-pill--${confLower}`} title={`${Math.round(detection.confidence * 100)}% sure`}>
+                          <span className="stack-conf-label">{confTag}</span>
+                          <span className="stack-conf-bar" aria-hidden="true">
+                            <i style={{ width: `${Math.max(8, Math.round(detection.confidence * 100))}%` }} />
+                          </span>
+                          <span className="stack-conf-pct">{`${Math.round(detection.confidence * 100)}%`}</span>
                         </span>
                       </div>
 
@@ -508,13 +637,16 @@ export function StackView({
                       )}
                     </div>
                   );
-                })
+                    })}
+                  </div>
+                ))
               )}
             </div>
           </Card>
 
-          {/* ── 6. Page Weight Card ────────────────────────────────── */}
-          <Card title="Page weight">
+          {/* ── 6. Page Weight Card (websites only) ────────────────── */}
+          {!isApp && (
+          <Card id="sv-weight" title="Page weight">
             <div className="stack-weight-big-figures">
               <div className="stack-weight-figure-card">
                 <span className="stack-weight-figure-val">
@@ -547,6 +679,10 @@ export function StackView({
                 <div className="stack-hosts-chips">
                   {visibleHosts.map((h, i) => (
                     <span key={i} className="stack-host-chip">
+                      {(() => {
+                        const ic = techIconForHost(h);
+                        return ic ? <img className="stack-chip-icon" src={ic.src} alt="" data-tone={ic.tone} /> : null;
+                      })()}
                       {h}
                     </span>
                   ))}
@@ -565,15 +701,16 @@ export function StackView({
               </div>
             )}
           </Card>
+          )}
 
           {/* ── 7. On This Page Card (only when sections.length > 0) ─── */}
           {sections.length > 0 && (
-            <Card title="On this page">
+            <Card title={isApp ? "In this window" : "On this page"}>
               <div className="stack-sections-list">
                 {sections.map((sec) => (
                   <div key={sec.idx} className="stack-section-item">
                     <div className="stack-section-num-title">
-                      <span className="stack-section-num">{sec.idx}</span>
+                      <span className="stack-section-num">{(sec.idx ?? 0) + 1}</span>
                       <span>{sec.title}</span>
                     </div>
                     {sec.summary && (
@@ -600,6 +737,10 @@ export function StackView({
                               }}
                               title={`Focus ${name} row`}
                             >
+                              {(() => {
+                                const ic = techIconFor(refId, name);
+                                return ic ? <img className="stack-chip-icon" src={ic.src} alt="" data-tone={ic.tone} /> : null;
+                              })()}
                               {name}
                             </button>
                           );
@@ -615,7 +756,9 @@ export function StackView({
           {/* ── 8. Footer ──────────────────────────────────────────── */}
           <footer className="stack-footer">
             <p className="stack-footer-disclaimer">
-              Not detectable from outside: server code, databases, private APIs
+              {isApp
+                ? "Read from the install folder only; the app was never run."
+                : "Not detectable from outside: server code, databases, private APIs"}
             </p>
             <div className="stack-footer-actions">
               <button
@@ -633,6 +776,24 @@ export function StackView({
           </footer>
         </div>
       </div>
+      <nav className="stack-tabbar" aria-label="Sections">
+        {[
+          { id: "sv-overview", label: "Overview", icon: "M4 11l8-7 8 7v8a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1z" },
+          { id: "sv-stack", label: "Stack", icon: "M12 3 3 8l9 5 9-5-9-5zm-9 9 9 5 9-5M3 16l9 5 9-5" },
+          ...(!isApp ? [{ id: "sv-security", label: "Security", icon: "M12 3 5 6v5.5c0 4.4 2.9 7.9 7 9.5 4.1-1.6 7-5.1 7-9.5V6z" }] : []),
+          ...(!isApp ? [{ id: "sv-weight", label: "Weight", icon: "M4 20V10M10 20V4M16 20v-7M22 20H2" }] : []),
+        ].map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            className="stack-tab"
+            onClick={() => document.getElementById(t.id)?.scrollIntoView({ block: "start", behavior: "smooth" })}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d={t.icon} /></svg>
+            <span>{t.label}</span>
+          </button>
+        ))}
+      </nav>
     </div>
   );
 }

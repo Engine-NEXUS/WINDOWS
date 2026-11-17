@@ -165,6 +165,14 @@ pub async fn gmail_meta(c: &GoogleClient, id: &str) -> Result<MailMeta, GoogleEr
     mailtriage::parse_message_meta(&v).ok_or_else(|| GoogleError::SerializationError("bad message metadata".into()))
 }
 
+/// The readable body of ONE message (at most `explain::BODY_EXTRACT_CHARS`), for explaining a mail that was already
+/// triaged as important. Held in memory only: the caller must never store, log or speak it.
+pub async fn gmail_body(c: &GoogleClient, id: &str) -> Result<String, GoogleError> {
+    let url = format!("{}/messages/{}?format=full", gmail_base(), mailtriage::pct_encode(id));
+    let v: Value = c.get_json(&url).await?;
+    Ok(super::explain::extract_body_text(&v, super::explain::BODY_EXTRACT_CHARS))
+}
+
 /// Ids of recent inbox mail, for the quiet catch-up on first connect.
 pub async fn gmail_recent_ids(c: &GoogleClient) -> Result<Vec<String>, GoogleError> {
     let url = format!(

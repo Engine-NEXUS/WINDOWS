@@ -10,3 +10,4 @@ shortcuts       # dev_tools/shortcut_live.rs
 wake_eval       # dev_tools/wake_replay.rs
 github_cmd      # tests/test_user_commands.rs (pins the GitHubCommand the parser returns)
 voice_eval      # examples/wake_eval.rs, examples/stt_eval.rs
+site_eval       # dev_tools/site_capture.rs (captures real-site fixtures for the stack-scanner accuracy test)

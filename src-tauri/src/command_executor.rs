@@ -92,6 +92,13 @@ pub enum Intent {
     /// Partial intent prompt (e.g. "What should I say to mummy?")
     #[serde(rename = "need_more_info")]
     NeedMoreInfo { prompt: String },
+    #[serde(rename = "set_app_web_pref")]
+    SetAppWebPref {
+        target: String,
+        pref: crate::app_web_pref::Pref,
+    },
+    #[serde(rename = "clear_app_web_pref")]
+    ClearAppWebPref { target: String },
     #[serde(rename = "unknown")]
     Unknown { raw: String },
     #[serde(other)]
@@ -113,6 +120,30 @@ pub async fn execute_command(intent: Intent) -> Result<CommandResult, String> {
     match intent {
         Intent::OpenUrl { target, url } => open_url(&target, &url),
         Intent::OpenApp { target } => resolve_and_open_app(&target),
+        Intent::SetAppWebPref { target, pref } => {
+            let display = app_display_name(&target.to_lowercase());
+            crate::app_web_pref::set(&target, pref);
+            let message = match pref {
+                crate::app_web_pref::Pref::Web => {
+                    format!("I'll always open {} in the browser, sir.", display)
+                }
+                crate::app_web_pref::Pref::App => {
+                    format!("I'll always open the {} app, sir.", display)
+                }
+            };
+            Ok(CommandResult {
+                success: true,
+                message,
+            })
+        }
+        Intent::ClearAppWebPref { target } => {
+            let display = app_display_name(&target.to_lowercase());
+            crate::app_web_pref::clear(&target);
+            Ok(CommandResult {
+                success: true,
+                message: format!("I've cleared your preference for {}, sir.", display),
+            })
+        }
         Intent::CloseApp { target } => close_app(&target),
         Intent::WhatsappChat { contact } => whatsapp_chat(&contact),
         Intent::Search { query } => open_search(&query),
@@ -336,7 +367,7 @@ fn close_app(target: &str) -> Result<CommandResult, String> {
 fn whatsapp_chat(contact: &str) -> Result<CommandResult, String> {
     // Load contacts from nexus config dir
     let contacts_path = dirs_next::config_dir()
-        .map(|d| d.join("com.nexus.assistant").join("contacts.json"))
+        .map(|d| d.join(crate::app_dirs::APP_ID).join("contacts.json"))
         .or_else(|| dirs_next::home_dir().map(|h| h.join(".nexus").join("contacts.json")));
 
     // Try to find the contact in the local contacts file
@@ -408,6 +439,18 @@ fn is_safe_web_url(url: &str) -> bool {
         && !u.chars().any(|c| c.is_control() || c.is_whitespace())
 }
 
+fn open_that(target: &str) -> std::io::Result<()> {
+    #[cfg(test)]
+    {
+        let _ = target;
+        Ok(())
+    }
+    #[cfg(not(test))]
+    {
+        open::that(target)
+    }
+}
+
 fn open_url(target: &str, url: &str) -> Result<CommandResult, String> {
     if !is_safe_web_url(url) {
         tracing::warn!("refused to open non-web URL for '{}'", target);
@@ -416,7 +459,7 @@ fn open_url(target: &str, url: &str) -> Result<CommandResult, String> {
             message: "I can only open web links from a voice command, sir.".to_string(),
         });
     }
-    match open::that(url.trim()) {
+    match open_that(url.trim()) {
         Ok(()) => {
             tracing::info!("opened URL for '{}': {}", target, url);
             Ok(CommandResult {
@@ -865,9 +908,30 @@ pub fn browser_close_tab_cmd(index: Option<u32>) -> Result<CommandResult, String
 //   3. If app is a known web service → OPEN as URL in browser
 //   4. If nothing found → "Didn't find that, sir."
 
+/// Truthful reply when the user prefers the app but none is installed: never claims it opened.
+fn pref_app_missing_message(display_name: &str, web_opened: bool) -> String {
+    if web_opened {
+        format!("I can't find the {display_name} app installed, sir, opening the website instead.")
+    } else {
+        format!("I can't find the {display_name} app installed, sir.")
+    }
+}
+
 pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String> {
     let start = std::time::Instant::now();
     tracing::info!("resolving app: {}", target);
+
+    let target_lower = target.to_lowercase();
+    let display_name = app_display_name(&target_lower);
+    let pref = crate::app_web_pref::get(target);
+
+    // Rule: Pref Web: open the website in the default/foreground browser, even if an app exists.
+    if pref == Some(crate::app_web_pref::Pref::Web) {
+        if let Some(url) = url_fallback(&target_lower) {
+            return open_url(&display_name, &url);
+        }
+        return open_url(&display_name, &format!("https://{}.com", target_lower));
+    }
 
     // Match-kind + installer gate: only an exact / resolved / well-covered
     // prefix match may launch. A guess ("mummy chat" -> Google Chat) is
@@ -875,7 +939,7 @@ pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String
     // refused. Both return Ok(success: false) with a speakable message —
     // callers speak it instead of drilling or claiming "Ok sir.". Registry
     // misses still fall through to the legacy chain below.
-    let assessed = match crate::app_registry::assess_open_target(target) {
+    let mut assessed = match crate::app_registry::assess_open_target(target) {
         crate::app_registry::OpenAssessment::Refuse { message } => {
             return Ok(CommandResult { success: false, message });
         }
@@ -897,6 +961,25 @@ pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String
         }
         crate::app_registry::OpenAssessment::ProceedLegacy => None,
     };
+
+    // On registry miss for an open request, do one force_refresh() (rate-limited to 60s) and retry
+    if assessed.is_none() && crate::app_registry::refresh_on_miss() {
+        if let crate::app_registry::OpenAssessment::Proceed(entry) = crate::app_registry::assess_open_target(target) {
+            assessed = Some(entry);
+        }
+    }
+
+    // Rule: Pref App but no app installed: say so truthfully ("I can't find the X app installed, sir, opening the website instead") - do not claim the app opened.
+    if pref == Some(crate::app_web_pref::Pref::App) && assessed.is_none() {
+        let web = url_fallback(&target_lower);
+        if let Some(url) = &web {
+            let _ = open_that(url);
+        }
+        return Ok(CommandResult {
+            success: false,
+            message: pref_app_missing_message(&display_name, web.is_some()),
+        });
+    }
 
     // Registry hit (O(1) HashMap + tiered match, ~0.1ms)
     if let Some(entry) = assessed {
@@ -1522,7 +1605,7 @@ fn find_desktop_entry(name: &str) -> Option<String> {
 
 // ─── Tier 3: URL fallback ──────────────────────────────────────────────────
 
-fn url_fallback(target: &str) -> Option<String> {
+pub(crate) fn url_fallback(target: &str) -> Option<String> {
     let url_map: &[(&str, &str)] = &[
         ("gmail", "https://mail.google.com"),
         ("google mail", "https://mail.google.com"),
@@ -1723,5 +1806,14 @@ mod close_plan_tests {
             plan_close("zzqqxx"),
             ClosePlan::Close { display: "zzqqxx".into(), exe: "zzqqxx.exe".into() }
         );
+    }
+
+    #[test]
+    fn pref_app_missing_message_never_claims_the_app_opened() {
+        let with_web = pref_app_missing_message("YouTube", true);
+        assert_eq!(with_web, "I can't find the YouTube app installed, sir, opening the website instead.");
+        let without_web = pref_app_missing_message("Foo", false);
+        assert_eq!(without_web, "I can't find the Foo app installed, sir.");
+        assert!(!with_web.contains("Ok sir") && !without_web.contains("Opened"));
     }
 }

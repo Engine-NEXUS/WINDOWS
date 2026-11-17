@@ -903,6 +903,15 @@ pub(crate) mod engine {
             nexus_model_path: &Path,
             _app_data_dir: PathBuf,
         ) -> anyhow::Result<Self> {
+            let profile = crate::acoustic_profile::AcousticProfile::load_or_default(Some(oww_dir));
+            Self::with_acoustic_profile(oww_dir, nexus_model_path, profile)
+        }
+
+        pub(crate) fn with_acoustic_profile(
+            oww_dir: &Path,
+            nexus_model_path: &Path,
+            profile: crate::acoustic_profile::AcousticProfile,
+        ) -> anyhow::Result<Self> {
             let oww_dir = oww_dir.to_path_buf();
             tracing::info!("Loading openWakeWord classifier: {}", nexus_model_path.display());
             let classifier = load_onnx_model(nexus_model_path)?;
@@ -912,7 +921,6 @@ pub(crate) mod engine {
 
 
 
-            let profile = crate::acoustic_profile::AcousticProfile::load_or_default(Some(&oww_dir));
             let threshold = profile.kws_threshold;
             tracing::info!(
                 "openWakeWord KWS engine initialized \

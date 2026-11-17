@@ -42,6 +42,8 @@ add("frontend", "Logo files gate", "frontend", "node ../scripts/check-activity-i
 add("frontend", "Theme contrast gate", "frontend", "node ../scripts/check-theme-contrast.mjs");
 add("frontend", "Hard-coded colour ratchet", "frontend", "node ../scripts/check-hardcoded-colors.mjs");
 add("frontend", "IPC + event contract gate", "frontend", "node ../scripts/check-ipc-contract.mjs");
+add("frontend", "Features page registry", ".", "node scripts/check-feature-registry.mjs");
+add("frontend", "Feature readiness drift", ".", "node scripts/gen-feature-readiness.mjs --check");
 add("frontend", "Window opacity registry", ".", "node scripts/check-window-opacity.mjs");
 add("frontend", "Work-card drift", ".", "node scripts/make-work-cards.mjs --check");
 

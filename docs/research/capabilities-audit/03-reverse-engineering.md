@@ -226,6 +226,19 @@ On SSR/CMS sites (WordPress, Shopify, Next.js on Vercel) it will probably be rig
 
 ## 6. Ranked improvements (largest gain per effort first)
 
+> **Status 2026-11-14 (change 197, source only, not run live):**
+> - Done in source:
+>   - 1: inline scripts
+>   - 2: real render, as a hidden InPrivate WebView2 of the same public page rather than the user's own tab, so logged-in
+>     pages are still out of reach
+>   - 3: harness and CI gate (the fixtures are synthetic so far)
+>   - 5: thin reasons
+>   - 6: small bugs (Clarity, never-detectable entries, implies, public-suffix list, closing line, app wording, "what's"
+>     phrasings)
+>   - 7: scrolling via UI Automation, with a PageDown fallback, stopping on user input
+>   - 10: privacy footnote in the report
+> - Not done: 4 (table growth), 8 (app_probe depth), 9 (DNS/TLS). The section 7 real-site measurement is still owed by the owner.
+
 1. **Search inline scripts with `script_text`** (add inline `<script>` bodies to `ctx.scripts`). Small change, large recall gain. Add JSON-in-HTML state markers (`__NUXT__`, `__remixContext`, `self.__next_f`, `ng-version`, `data-v-app`, `__sveltekit`).
 2. **Read the real tab, not an anonymous copy.** Through the browser (CDP on Chromium/Brave, or a small extension), read `document`, the JS globals (`React?.version`, `__VUE__`, `ng`, `jQuery.fn.jquery`, `Shopify`, `wp`), the hydrated DOM and the network resource list (`performance.getEntriesByType('resource')`). This fixes SPAs, login walls and bot walls at once, and keeps everything local. Keep the anonymous probe as the fallback.
 3. **Labelled accuracy set + CI score** (test plan in §7) before claiming any number.

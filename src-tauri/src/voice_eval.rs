@@ -214,6 +214,21 @@ pub fn new_wake_engine(resources: Option<&Path>) -> Result<WakeEngine, String> {
     WakeEngine::new(resource_dir, scratch).map_err(|e| e.to_string())
 }
 
+/// Use the supplied cohort assets without searching the working directory or AppData.
+pub fn new_cohort_wake_engine(resources: &Path) -> Result<WakeEngine, String> {
+    let oww = resources.join("oww");
+    let spec = std::fs::read(oww.join("dsp_spec.json")).map_err(|e| e.to_string())?;
+    if spec.as_slice() != include_bytes!("../resources/oww/dsp_spec.json") {
+        return Err("Supplied DSP spec differs from the evaluator's compiled DSP spec".into());
+    }
+    let profile = crate::acoustic_profile::AcousticProfile::try_load_from_path(
+        &oww.join("acoustic_profile.json"),
+    )
+    .ok_or_else(|| "Cannot load the supplied acoustic profile".to_string())?;
+    WakeEngine::with_acoustic_profile(&oww, &oww.join("nexus.onnx"), profile)
+        .map_err(|e| e.to_string())
+}
+
 /// Clear all streaming state so consecutive clips cannot influence each other.
 pub fn reset_engine_state(e: &mut WakeEngine) {
     e.audio_features.reset();

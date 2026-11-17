@@ -742,6 +742,8 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         // Local commands — handled in Rust, no network
         ParsedIntent::OpenApp { .. }
         | ParsedIntent::OpenUrl { .. }
+        | ParsedIntent::SetAppWebPref { .. }
+        | ParsedIntent::ClearAppWebPref { .. }
         | ParsedIntent::CloseApp { .. }
         | ParsedIntent::WhatsappChat { .. }
         | ParsedIntent::MediaPlayPause
@@ -985,6 +987,8 @@ async fn process_transcript_inner<R: Runtime>(
         });
     }
 
+    let desktop_selection=crate::ghost_center::parse(&transcript).is_some_and(|t|matches!(t.steps.as_slice(),[crate::ghost_center::GhostStep::Choose{..}]));
+    if !desktop_selection {crate::desktop_choices::clear();}
     // A question NEXUS just asked ("Shall I start?", "App or browser?",
     // "Add these slots?") owns the next short answer. Anything that is not a
     // clear answer drops the offer and is handled as a normal command.
@@ -1450,8 +1454,10 @@ async fn process_transcript_inner<R: Runtime>(
         let outcome = tokio::task::spawn_blocking(move || crate::dictation::dictate(&raw_line, dictionary))
             .await
             .map_err(|e| e.to_string())?;
-        if let crate::dictation::Outcome::Refused(msg) = outcome {
-            speak_line(&app, msg, &request_id);
+        match outcome {
+            crate::dictation::Outcome::Refused(msg)=>speak_line(&app,msg,&request_id),
+            crate::dictation::Outcome::Unconfirmed=>speak_line(&app,"Text was sent once, but I couldn't verify it in the intended field. Please check it before repeating, sir.".into(),&request_id),
+            _=>{},
         }
         clear_active_request(&request_id);
         return Ok(ProcessResult {
@@ -1590,6 +1596,14 @@ async fn process_transcript_inner<R: Runtime>(
             ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_analysis" => {
                 let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("analyze the screen").to_string();
                 return run_screen_analysis(app, prompt).await;
+            }
+            // Normal-mode dispatch for "reverse engineer this website/app". Until
+            // 2026-11-14 this arm existed only in the Ghost-session table below, so
+            // outside Ghost Mode the intent fell through to a no-op LocalCommand
+            // (found in the first live run of build a3d6200b246d9b4a).
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "reverse_engineer" => {
+                let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("reverse engineer this website").to_string();
+                return crate::reverse_engineer::run(app, prompt).await;
             }
             ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_annotation" => {
                 let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("annotate the screen").to_string();
@@ -2374,6 +2388,39 @@ async fn process_transcript_inner<R: Runtime>(
                 if is_cancelled(&cancel_flag) {
                     clear_active_request(&request_id);
                     return Ok(local_result(request_id, Subsystem::LocalCommand));
+                }
+                if let ParsedIntent::OpenUrl { target, url } = &intent {
+                    let verified = outcome.as_ref().map(|r| r.success).unwrap_or(false);
+                    let subject_input = if url.is_empty() { target } else { url };
+                    crate::action_receipt::emit(
+                        &app,
+                        &crate::action_receipt::ActionReceipt::for_open_site(subject_input, verified),
+                    );
+                } else if let (ParsedIntent::OpenApp { target }, true) =
+                    (&intent, outcome.as_ref().is_ok_and(|r| r.success))
+                {
+                    // Claim "Opened" only after the window is verified in front.
+                    let in_front = open_target_in_front(target.clone(), cancel_flag.clone()).await;
+                    crate::action_receipt::emit(
+                        &app,
+                        &crate::action_receipt::ActionReceipt::for_open_app(target, in_front),
+                    );
+                } else if outcome.as_ref().is_ok_and(|r| r.success) {
+                    match &intent {
+                        ParsedIntent::MediaPlayPause => {
+                            crate::action_receipt::emit(&app, &crate::action_receipt::ActionReceipt::for_media("play_pause"));
+                        }
+                        ParsedIntent::MediaNext => {
+                            crate::action_receipt::emit(&app, &crate::action_receipt::ActionReceipt::for_media("next"));
+                        }
+                        ParsedIntent::MediaPrevious => {
+                            crate::action_receipt::emit(&app, &crate::action_receipt::ActionReceipt::for_media("previous"));
+                        }
+                        ParsedIntent::MediaStop => {
+                            crate::action_receipt::emit(&app, &crate::action_receipt::ActionReceipt::for_media("stop"));
+                        }
+                        _ => {}
+                    }
                 }
                 let message = match outcome {
                     Ok(result) => result.message,
@@ -3387,7 +3434,10 @@ pub(crate) const BARGE_DAC_DRAIN_MS: u64 = 250;
 /// stop) — never duplicate these four lines elsewhere.
 pub(crate) fn request_barge_in(reason: &str) {
     let _ = crate::tts::stop_tts();
-    cancel_active();
+    if crate::desktop_choices::capture_preserves_choice(reason) {
+        crate::desktop_choices::cancel_running();
+        cancel_current_request();
+    } else { cancel_active(); }
     crate::wakeword_oww::clear_tts_playing();
     crate::ghost::drop_followups();
     tracing::info!("barge-in: audio cut + turn cancelled ({reason})");
@@ -3395,6 +3445,10 @@ pub(crate) fn request_barge_in(reason: &str) {
 
 /// Cancel the active request (if any). Called on barge-in or new wake.
 pub fn cancel_active() {
+    crate::desktop_choices::clear();
+    cancel_current_request();
+}
+fn cancel_current_request() {
     let mut guard = ACTIVE_REQUEST.lock().unwrap();
     if let Some(req) = guard.as_ref() {
         req.cancelled.store(true, Ordering::Relaxed);
@@ -9072,6 +9126,7 @@ async fn run_browser_search<R: Runtime>(
         // Bracket the action (see run_ghost_open): mid-search speech
         // queues; the guard drops before the drain so dequeued steps
         // execute instead of re-queueing.
+        let query_receipt = query.clone();
         let outcome = {
             let _guard = crate::ghost::GhostDrillGuard::new();
             let r = tokio::task::spawn_blocking(move || {
@@ -9086,6 +9141,11 @@ async fn run_browser_search<R: Runtime>(
 
         if let Err(e) = outcome {
             tracing::warn!("browser search failed: {}", e);
+        } else {
+            crate::action_receipt::emit(
+                &app,
+                &crate::action_receipt::ActionReceipt::for_search(&query_receipt, "google.com"),
+            );
         }
     }
     clear_active_request(&request_id);
@@ -9127,6 +9187,11 @@ async fn run_browser_search_focus<R: Runtime>(
 
         if let Err(e) = outcome {
             tracing::warn!("browser focus_search_bar failed: {}", e);
+        } else {
+            crate::action_receipt::emit(
+                &app,
+                &crate::action_receipt::ActionReceipt::for_search("", "google.com"),
+            );
         }
         speak_line(&app, "Ready to search, sir.".to_string(), &request_id);
     }
@@ -9282,8 +9347,10 @@ async fn run_type_text<R: Runtime>(
             .await
             .map_err(|e| e.to_string())?;
 
-        if let crate::dictation::Outcome::Refused(msg) = outcome {
-            speak_line(&app, msg, &request_id);
+        match outcome {
+            crate::dictation::Outcome::Refused(msg)=>speak_line(&app,msg,&request_id),
+            crate::dictation::Outcome::Unconfirmed=>speak_line(&app,"Text was sent once, but I couldn't verify it in the intended field. Please check it before repeating, sir.".into(),&request_id),
+            _=>{},
         }
     }
     clear_active_request(&request_id);
@@ -9297,16 +9364,12 @@ async fn run_type_text<R: Runtime>(
 /// Focus an already-running app/window by (partial, case-insensitive)
 /// title. Local, instant, no network — see doc 07 P2.
 async fn run_focus_app<R: Runtime>(app: AppHandle<R>, target: String) -> Result<ProcessResult, String> {
-    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let (request_id, cancel_flag) = install_new_request(Subsystem::LocalCommand);
     if target.trim().is_empty() {
         speak_line(&app, "Which app should I focus, sir?".to_string(), &request_id);
     } else {
         let target_clone = target.clone();
-        let found = tokio::task::spawn_blocking(move || {
-            crate::live::commands::window::focus_app_by_title(&target_clone)
-        })
-        .await
-        .unwrap_or(false);
+        let found = open_target_in_front(target_clone,cancel_flag).await;
         let reply = if found {
             "Ok sir.".to_string()
         } else {
@@ -9648,7 +9711,7 @@ async fn run_watch_screen_email<R: Runtime>(
     let app_data_dir = app
         .path()
         .app_data_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("com.nexus.assistant"));
+        .unwrap_or_else(|_| std::path::PathBuf::from(crate::app_dirs::APP_ID));
 
     // Resolve matching connected Google account for this active email
     let connected_accounts = crate::auth_vault::get_google_accounts();
@@ -10067,21 +10130,36 @@ async fn run_ghost_center_task<R: Runtime>(
     app: AppHandle<R>,
     task: crate::ghost_center::GhostTask,
 ) -> Result<ProcessResult, String> {
+    let total_requested=task.steps.len();
+    let lock_at_start=crate::commands::read_speaker_verification(&app);
     let (request_id, cancel_flag) = install_new_request(Subsystem::LocalCommand);
     let guard = crate::ghost::GhostDrillGuard::new();
     let worker_cancel = cancel_flag.clone();
     let store_dir = app.path().app_data_dir().ok();
-    let receipts = tokio::task::spawn_blocking(move || {
-        crate::ghost_center::execute_with_store(&task, &worker_cancel, store_dir.as_deref())
-    }).await.map_err(|e| e.to_string())?;
+    let is_selection = matches!(task.steps.as_slice(), [crate::ghost_center::GhostStep::Choose {..}]);
+    let worker = tokio::task::spawn_blocking(move || {
+        if let [crate::ghost_center::GhostStep::Choose{number}]=task.steps.as_slice(){crate::desktop_choices::choose_voice_with_lock(*number,&worker_cancel,lock_at_start)}
+        else{crate::ghost_center::execute_authorized(&task, worker_cancel, store_dir.as_deref())}
+    });
+    let receipts = match tokio::time::timeout(std::time::Duration::from_secs(20), worker).await {
+        Ok(result) => result.map_err(|e| e.to_string())?,
+        Err(_) => {
+            cancel_flag.store(true, Ordering::Relaxed);
+            crate::desktop_choices::clear();
+            drop(guard);
+            return say_and_finish(&app, request_id, "Desktop observation timed out. I will not repeat the action; please check the application, sir.".into());
+        }
+    };
     let stopped_in_run = crate::ghost::stop_requested() || is_cancelled(&cancel_flag);
+    if !is_selection {crate::desktop_choices::bind(&cancel_flag, lock_at_start);}
+    if !stopped_in_run {crate::desktop_choices::publish(&app).await;}
     drop(guard);
     let reply = match receipts.last() {
         Some(receipt) if receipts.len() > 1 && receipt.outcome == crate::ghost_center::Outcome::Verified =>
             format!("Completed all {} Ghost steps, sir.", receipts.len()),
         Some(receipt) if receipts.len() > 1 =>
             format!("Completed {} of {} Ghost steps. {}",
-                receipts.len() - 1, receipts.len(), receipt.spoken()),
+                receipts.len() - 1, total_requested.max(receipts.len()), receipt.spoken()),
         Some(receipt) => receipt.spoken(),
         None => "I couldn't start that Ghost task, sir.".into(),
     };
@@ -10205,29 +10283,37 @@ fn opened_message(in_front: bool) -> String {
     }
 }
 
-/// Wait for `target`'s window to come to the front (title match, then the foreground process name
-/// as a second opinion for apps whose title does not contain their name).
-async fn open_target_in_front(target: String) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        tokio::task::spawn_blocking(move || {
-            if crate::live::commands::window::wait_and_focus_app(&target, 2500) {
-                return true;
+/// Resolve an exact executable identity and verify its window becomes foreground.
+/// Titles never authorize app focus; activation is requested at most once.
+async fn open_target_in_front(target: String, cancel: Arc<AtomicBool>) -> bool {
+    #[cfg(target_os="windows")] {
+        tokio::task::spawn_blocking(move||{
+            if let Some(entry) = crate::app_registry::lookup_strict(&target) {
+                if let crate::app_registry::LaunchMethod::Aumid { ref aumid } = entry.launch {
+                    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+                    let start = std::time::Instant::now();
+                    while start.elapsed().as_millis() <= 3000 {
+                        if cancel.load(std::sync::atomic::Ordering::Relaxed) || crate::ghost::stop_requested() {
+                            return false;
+                        }
+                        let fg = unsafe { GetForegroundWindow() };
+                        if fg.0 != 0 {
+                            if let Some(w_aumid) = crate::app_registry::window_aumid(fg.0) {
+                                if w_aumid.eq_ignore_ascii_case(aumid) {
+                                    return true;
+                                }
+                            }
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    return false;
+                }
             }
-            let want: String = target.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
-            !want.is_empty()
-                && crate::browser_url::foreground_process_name()
-                    .map(|p| p.to_lowercase().contains(&want))
-                    .unwrap_or(false)
-        })
-        .await
-        .unwrap_or(false)
+            let exe=crate::desktop_control::expected_executable(&target).map(str::to_string).or_else(||crate::app_registry::lookup_strict(&target).and_then(|entry|match entry.launch{crate::app_registry::LaunchMethod::Exe{path}=>std::path::Path::new(&path).file_name().map(|v|v.to_string_lossy().to_lowercase()),_=>None}));
+            exe.is_some_and(|exe|crate::desktop_native::focus_executable(&exe,&cancel))
+        }).await.unwrap_or(false)
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = target;
-        true
-    }
+    #[cfg(not(target_os="windows"))]{let _=(target,cancel);false}
 }
 
 async fn run_ghost_open<R: Runtime>(
@@ -10250,7 +10336,7 @@ async fn run_ghost_open<R: Runtime>(
         let (request_id, _) = install_new_request(Subsystem::LocalCommand);
         return finish(&app, request_id, msg);
     }
-    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let (request_id, cancel_flag) = install_new_request(Subsystem::LocalCommand);
     if crate::ghost::stop_requested() || !crate::ghost::session_active() {
         return finish(&app, request_id, "Stopped, sir.".to_string());
     }
@@ -10265,16 +10351,11 @@ async fn run_ghost_open<R: Runtime>(
             // speak the refusal — never drill, never claim success.
             Ok(res) if !res.success => res.message,
             Ok(_) => {
-                let focused = open_target_in_front(target_clone).await;
+                let focused = open_target_in_front(target_clone,cancel_flag.clone()).await;
+                crate::action_receipt::emit(&app, &crate::action_receipt::ActionReceipt::for_open_app(&target, focused));
                 opened_message(focused)
             }
-            Err(_) => match crate::live::commands::launcher::open_app_via_search(&target) {
-                Ok(()) => {
-                    let focused = open_target_in_front(target_clone).await;
-                    opened_message(focused)
-                }
-                Err(e) => e,
-            },
+            Err(_) => "I couldn't confirm the app launch. I won't retry it automatically; check the desktop first, sir.".into(),
         };
         // Read the stop BEFORE the guard drops: ending the last drill consumes it.
         let stopped = crate::ghost::stop_requested();
@@ -10555,8 +10636,8 @@ pub async fn orchestrator_process<R: Runtime>(
 
 /// IPC: Cancel the active orchestrator request (barge-in / new wake / dismiss).
 #[tauri::command]
-pub async fn orchestrator_cancel() -> Result<(), String> {
-    request_barge_in("ipc-cancel");
+pub async fn orchestrator_cancel(for_capture: Option<bool>) -> Result<(), String> {
+    request_barge_in(if for_capture == Some(true) { "barge" } else { "ipc-cancel" });
     Ok(())
 }
 

@@ -69,7 +69,7 @@ fn kr(user: &str) -> keyring::Result<keyring::Entry> {
             }
         });
     }
-    keyring::Entry::new("com.nexus.assistant", user)
+    keyring::Entry::new(crate::app_dirs::APP_ID, user)
 }
 
 /// Stored keyring payload: "<token>|<expires_at_unix>".

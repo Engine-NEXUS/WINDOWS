@@ -1,0 +1,27 @@
+name: Desktop control offline contracts
+on:
+  push:
+  pull_request:
+jobs:
+  offline:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.93.1'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cargo test --locked --manifest-path scripts/desktop-control-harness/Cargo.toml
+      - run: python -m unittest discover -s scripts -p test_desktop_control_trials.py
+      - run: node --test scripts/desktop-control-contract.test.mjs
+      - run: npm --prefix frontend ci
+      - run: npm --prefix frontend test -- src/sidebar/desktopChoiceModel.test.ts
+      - run: npx --prefix frontend tsc --noEmit -p frontend/tsconfig.json

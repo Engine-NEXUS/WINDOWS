@@ -158,7 +158,7 @@ pub const VOICE_FILE: &str = "active_voice.bin";
 /// Managed slot directory: %APPDATA%/com.nexus.assistant/voices/.
 /// Holds at most: shared model + ONE voice pack + manifest (+ transient `.tmp` files).
 pub fn managed_voices_dir() -> Option<std::path::PathBuf> {
-    dirs_next::data_dir().map(|d| d.join("com.nexus.assistant").join("voices"))
+    dirs_next::data_dir().map(|d| d.join(crate::app_dirs::APP_ID).join("voices"))
 }
 
 /// Slot manifest: which voice occupies the slot and the hashes it was verified against.

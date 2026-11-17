@@ -1,0 +1,16 @@
+{
+  "initial_url": "https://vite-spa.example/",
+  "final_url": "https://vite-spa.example/",
+  "status": 200,
+  "headers": [
+    ["content-type", "text/html"],
+    ["server", "Netlify"],
+    ["x-nf-request-id", "01HXYZ"]
+  ],
+  "html": "<!doctype html><html lang=\"en\"><head><meta charset=\"UTF-8\" /><title>Planner</title><script type=\"module\" crossorigin src=\"/assets/index-B1c2D3e4.js\"></script><link rel=\"stylesheet\" crossorigin href=\"/assets/index-F5g6H7i8.css\"></head><body><div id=\"root\"></div></body></html>",
+  "scripts": [],
+  "styles": [],
+  "redirect_hosts": ["vite-spa.example"],
+  "truncated": false,
+  "skipped": 0
+}

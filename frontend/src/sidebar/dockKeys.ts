@@ -12,6 +12,14 @@ export function nextDock(current: Dock, key: string): Dock {
   return current;
 }
 
+/** Up/Down arrow: depth. Down sends the window behind every other window, Up brings it back in front. */
+export type Depth = "back" | "front";
+export function depthForKey(key: string): Depth | null {
+  if (key === "ArrowDown") return "back";
+  if (key === "ArrowUp") return "front";
+  return null;
+}
+
 /** True when the key press belongs to a text field and must not move the window. */
 export function isTyping(target: EventTarget | null): boolean {
   const t = target as HTMLElement | null;
@@ -27,8 +35,14 @@ export function useArrowDock(initial: Dock, onDock: (d: Dock) => void, enabled =
   useEffect(() => {
     if (!enabled) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const depth = depthForKey(e.key);
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight" && !depth) return;
       if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || isTyping(e.target)) return;
+      if (depth) {
+        e.preventDefault();
+        void import("@tauri-apps/api/core").then(({ invoke }) => invoke("set_sidebar_depth", { depth })).catch(() => {});
+        return;
+      }
       const next = nextDock(dock.current, e.key);
       if (next === dock.current) return;
       e.preventDefault();
