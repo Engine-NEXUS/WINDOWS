@@ -75,6 +75,72 @@ Cost to the project: a handful of Opus calls per week. Cost to users: zero.
 | P5 | Layer B live (ask-assist) behind a switch | Owner and cohort trial: no added delay, no wrong actions |
 | P6 | Optional: consented upload; optional bring-your-own stronger provider slot | Only after P4 is stable |
 
+## Does Layer A use memory? Not zero, but small if we build it right
+
+**Short answer: a few megabytes at most, and only if we avoid one trap.** Nothing in Layer A is a new always-loaded model.
+
+| Piece | Memory | Basis |
+|---|---:|---|
+| Entity lexicon (the user's apps, contacts, repos, command verbs, about 5,000 words with pronunciations) | about 0.1 MB | estimate: 5,000 words at roughly 17 bytes each in a compact table |
+| Optional full pronunciation dictionary (CMUdict: 126,052 words, 800,198 phonemes) | about 2.8 MB if loaded, less if memory-mapped (only touched pages count) | measured counts, compact one-byte-per-phoneme estimate |
+| Homophone groups, grammar templates, confusion pairs, learned corrections | under 1 MB together | data files of tens of kilobytes |
+| Matcher code | negligible | it is a small edit-distance routine |
+| Existing intent model | **0 new**; it is the model NEXUS already lazy-loads (about +42 MB when loaded, from the project's own earlier measurement) | not added by this plan |
+| Existing local recogniser (Moonshine) | **0 new**; already optional and lazy | not added by this plan |
+
+**The trap:** the project's offline voice already ships a pronunciation tool, and its dictionary measured **about +125 MB** when loaded (project notes). Reusing that tool for the matcher would quietly add that. **Rule: the matcher gets its own compact lexicon, never the offline voice's G2P**, and a test asserts the added memory stays under a stated budget (proposed: 5 MB with the full dictionary, 1 MB without).
+
+**CPU:** the unoptimised Python prototype takes about 1.8 ms per utterance on this laptop; a Rust version should be well under that. It runs only on turns where the local layers are unsure, not on every audio chunk, so there is no always-on CPU cost.
+
+**Disk:** the shared data files add a few megabytes to the download; the full dictionary is optional.
+
+Every option on the Hub page below shows its memory and data cost next to its switch, so users on weak laptops can choose.
+
+## Command Hub: "Understanding" page (what the user can choose)
+
+Goal: the user picks how much help NEXUS gets, supplies their own key if they want cloud help, and decides exactly **when** it is used. Everything is off or local by default, and every choice is reversible.
+
+**1. Choose a mode** (one selector, with a one-line cost label each):
+- **Local only (default).** Layer A. No key, no network, about +1 MB (no dictionary) or +3 MB (full dictionary).
+- **Local plus free cloud assist.** Layer A plus Layer B using the user's own free keys.
+- **Local plus my own provider.** Same, using any provider the user configures (below).
+- **Off.** Plain recognition only, for the lowest footprint and strictest privacy.
+- Quick presets that fill the settings below: **Privacy first**, **Balanced**, **Most accurate**.
+
+**2. Provider and key** (only shown for the cloud modes):
+- Provider list: Cerebras, Groq, Gemini (free tiers), **Custom OpenAI-compatible endpoint** (base address, model name), and optionally Anthropic or others the user has a key for.
+- Each provider has a **masked key field** stored in the operating-system keychain (the existing key storage), a **model field with a sensible default and a pick-list**, and a **Test** button that checks the key and shows "works / quota reached / bad key".
+- A drag-to-order list for the **fallback order** when several keys exist.
+- Nothing here is required; no key means the cloud options stay disabled.
+
+**3. When to use it** (the part you asked for, all user-adjustable):
+- **Only when NEXUS is unsure** (default), or never, or also for compound commands ("X then Y").
+- **Also after I correct it** ("no, I said…").
+- **Never for:** sending messages, deleting files, purchases, shutdown (fixed on, shown greyed out: these always use their own confirmation).
+- **Pause during** meetings, on battery saver, offline, and optionally at set quiet hours.
+- **Daily limit** (a number the user sets; default low) and **wait at most** N ms before falling back to the local question.
+- **Use for these kinds of words only:** apps, contacts, repositories, websites (tick boxes).
+- **Shadow mode:** run the advisor but only log what it would have said, for a trial week.
+
+**4. Privacy controls and visibility:**
+- **"What gets sent"** preview showing a real example payload (transcript text and candidate names only; never audio, memory, keys or screen).
+- Existing **hide-names** and **local-only speech** switches are honoured and shown here; local-only turns the cloud modes off with an explanation.
+- **Last 20 advisor calls** list (what was asked, what it picked, whether you agreed), deletable.
+
+**5. Status panel:** calls today against the limit, each provider's health (OK, rate-limited, bad key, offline), last error in plain words, and the memory the page's active options add.
+
+**6. Contribute (optional):** the "Export my misheard commands" button from Layer C, with a preview of the file before it is saved.
+
+**How it fits what exists (so it is a small change, not a rewrite):**
+- Key storage and masked display reuse the existing API-keys store; the Test button reuses the existing key-check flows.
+- Switches are Features-page rows with the existing effective-value read-back and drift check, so a switch only moves when the app confirms it.
+- Calls go through the existing router cascade, extended with the "custom endpoint" provider and per-provider limits read from live responses.
+- Settings are saved with the existing merge-only patch command, so this page cannot overwrite other pages' settings.
+- New settings (names proposed, all with safe defaults): `understandingMode`, `advisorProviders` (ordered list), `advisorModelByProvider`, `advisorWhenUnsure`, `advisorOnCorrection`, `advisorForCompound`, `advisorPauseMeeting`, `advisorPauseBattery`, `advisorKinds`, `advisorDailyCap`, `advisorMaxWaitMs`, `advisorShadow`.
+- Every option carries a cost label (memory, network, key needed) in the same registry row, so the drift check keeps the labels honest.
+
+**Hub acceptance checks (when built):** the page works with no key and shows only local options; a wrong key shows "bad key" without breaking anything; hitting the daily limit falls back to the local question with no error spoken; switching modes takes effect without a restart and the status panel reflects it; turning on local-only speech disables the cloud modes with an explanation.
+
 ## How we will know it works for "every user"
 
 Report each of these with numerator and denominator, and per cohort (laptop, microphone, accent):
