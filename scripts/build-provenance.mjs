@@ -2,7 +2,7 @@
 // Release identity shared by `nexus start` and the direct Windows launcher.
 // A missing or mismatched record fails closed before either launcher stops the app.
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync, renameSync, realpathSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -77,7 +77,10 @@ export function verifyBuild({ warnStale = false, directory, metadata } = {}) {
   return warnings.length ? { ...record, warnings } : record;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Compare real paths: on macOS a temp folder is reached through a symlink (/var -> /private/var), and a plain string
+// comparison made the command-line entry silently do nothing there.
+const sameFile = (a, b) => { try { return realpathSync(a) === realpathSync(b); } catch { return resolve(a) === resolve(b); } };
+if (process.argv[1] && sameFile(resolve(process.argv[1]), fileURLToPath(import.meta.url))) {
   try {
     const op = process.argv[2];
     if (op === "source") console.log(sourceHash());
