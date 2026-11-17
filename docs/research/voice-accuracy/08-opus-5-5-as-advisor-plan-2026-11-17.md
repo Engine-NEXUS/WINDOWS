@@ -1,5 +1,7 @@
 # Plan: Claude Opus 5.5 as an advisor that only plans (2026-11-17)
 
+> **Superseded for runtime by [note 09](09-free-for-everyone-advisor-plan-2026-11-17.md).** NEXUS is open source and free for every user, so Opus 5.5 is a maintainer-side tool, not a per-user dependency. Track 2 (plan-only Opus in development work) and the validation rules below still stand.
+
 Status: **plan only.** No code, settings or runtime changed. Reading of the request: Opus 5.5 should *advise and plan*, never act or edit; cheaper or free models do the work.
 
 ## What Anthropic's advisor pattern is (verified in the docs)
