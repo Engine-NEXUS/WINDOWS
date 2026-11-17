@@ -88,6 +88,7 @@ mod tray;
 pub(crate) mod commands;
 mod command_executor;
 mod app_registry;
+pub(crate) mod sound_match;
 pub(crate) mod app_web_pref;
 pub(crate) mod action_kernel;
 pub(crate) mod action_receipt;

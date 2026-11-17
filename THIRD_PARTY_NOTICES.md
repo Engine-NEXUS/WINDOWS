@@ -59,6 +59,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 21 product logos in `frontend/public/activity-logos` were downloaded from https://logoapi.sh (embedding in an app is
 allowed by its terms; the whole catalog is not copied; takedown contact takedown@logoapi.sh). Per-file url, hash and
 date: `frontend/public/activity-logos/SOURCES.json`. The marks belong to their owners.
+| Pronunciation table for sound-based matching (126,000 English words with phonemes, compacted to one character per phoneme) | `src-tauri/src/sound_match_cmudict.txt`, built by `scripts/gen_pron_lexicon.py`, used by `src-tauri/src/sound_match.rs` | The CMU Pronouncing Dictionary, Copyright (C) 1993-2015 Carnegie Mellon University (cmusphinx/cmudict; data file taken from the `cmudict` Python package data directory, whose wrapper code is GPL and is NOT used) | BSD-style (CMU licence: keep the copyright notice, the conditions and the disclaimer in source and binary distributions) | Derived data only (first pronunciation, stress removed). The CMU copyright notice, conditions and disclaimer are reproduced in `src-tauri/src/sound_match_cmudict.LICENSE`. |
 
 ## Trademarks
 
