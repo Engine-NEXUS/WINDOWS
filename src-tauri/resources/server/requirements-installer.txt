@@ -1,0 +1,19 @@
+# Python packages the NEXUS installer installs for the local speech (STT) and understanding (NLU) servers.
+# One file, version-bounded (plan 194, P2). scripts/check-installer-pins.mjs requires an upper bound or "=="
+# on every line. Keep in step with server/nlu/requirements.txt and the imports of server/stt_server.py and
+# server/nlu_server.py. These are ranges, not a lock: an exact, hash-checked lock needs a resolver run on
+# the Windows build machine and is still open.
+
+# STT server (Moonshine fallback)
+moonshine-voice>=0.1.6,<0.2
+python-multipart>=0.0.9,<1.0
+
+# NLU server (BERT-Mini ONNX)
+numpy>=1.26,<3.0
+onnxruntime>=1.18,<2.0
+pydantic>=2.0,<3.0
+transformers>=4.40,<5.0
+
+# both servers; [standard] brings the websockets library the STT live-caption stream needs
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0

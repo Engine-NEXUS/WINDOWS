@@ -2514,6 +2514,10 @@ static WAKE_ENGINE_GLOBAL: once_cell::sync::Lazy<parking_lot::Mutex<Option<std::
 /// thread can monitor without accessing function-local statics.
 static CALLBACK_COUNT_GLOBAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static LAST_NONSILENT_FOR_RECOVERY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Number of microphone callbacks so far (read-only; used by the locked-screen probe, plan 193 L0).
+pub(crate) fn mic_callback_count() -> u64 {
+    CALLBACK_COUNT_GLOBAL.load(std::sync::atomic::Ordering::Relaxed)
+}
 static LAST_CALLBACK_FOR_RECOVERY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Tracks how many times the silence-recovery has restarted the stream.

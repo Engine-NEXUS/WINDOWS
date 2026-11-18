@@ -5,7 +5,6 @@ Which runtime processes and threads each feature depends on, and what Focus Mode
 | Feature | Processes / threads | Under Hand Mode Focus Mode |
 |---|---|---|
 | Speaker verification / owner check | wake receiver thread, enrollment pipeline (Setup/Hub), keychain key | keeps running |
-| Installer / release pipeline | build scripts / Hub WebView2 | n/a |
 | Focus Mode (Hand Mode load control) | hand WebView2 renderer (camera + MediaPipe), hand-out thread, 80 ms watchdog, GPU shared with the stage WebView2 | owner of Focus Mode |
 | Reverse engineer website/app | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | GitHub by voice without owner (repo, PR list, PR number search) | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
@@ -24,6 +23,7 @@ Which runtime processes and threads each feature depends on, and what Focus Mode
 | NLU fallback (BERT-Mini ONNX) | regex tier in-process; BERT-Mini NLU sidecar (39218, lazy, 60 s idle); 9Router HTTP | on demand |
 | Endpointing / VAD / turn detection | capture loop, VAD, turn-detect ONNX | keeps running |
 | Device Links (phone / laptop pairing) | OAuth loopback listener, vault monitor (90 s), Worker HTTPS | vault monitor paused |
+| Installer / release pipeline | build scripts / Hub WebView2 | n/a |
 | Boot briefing + resume points | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Session snapshot / restore | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Screen analysis / narrated tour | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |

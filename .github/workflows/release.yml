@@ -1,8 +1,17 @@
 name: release
+
+# A tag push (vX.Y.Z) builds the FAMILY installers (personal profile, no admin-brain) for each platform,
+# checks the version and the installer download pins first, then a final job writes SHA256SUMS.txt and
+# creates a DRAFT GitHub release for the owner to review and publish by hand (plan 194).
+# workflow_dispatch builds the same artifacts without creating a release.
+
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -10,7 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: windows-latest,  target: "",                              bundle: "nsis" }
+          - { os: windows-latest,  target: "",                              bundle: "nsis,msi" }
           - { os: macos-15,        target: "aarch64-apple-darwin",          bundle: "dmg" }
           - { os: ubuntu-24.04,    target: "",                              bundle: "appimage,deb" }
     runs-on: ${{ matrix.os }}
@@ -22,6 +31,25 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+
+      # Gates run before the long build so a mismatch fails in seconds.
+      - name: Version gate (tag must match tauri.conf.json, Cargo.toml and package.json)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/sync-version.mjs --check --tag "${{ github.ref_name }}"
+
+      - name: Version gate (files agree)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: node scripts/sync-version.mjs --check
+
+      # A tagged release refuses an unpinned Python download; a manual dry run only warns.
+      - name: Installer download pins
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            node scripts/check-installer-pins.mjs --strict
+          else
+            node scripts/check-installer-pins.mjs
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -40,7 +68,7 @@ jobs:
       - name: Build frontend
         run: npm --prefix frontend run build
 
-      - name: Build Tauri app
+      - name: Build Tauri app (family installer)
         env:
           NEXUS_SERVER_URL: https://nexus-worker.chitkullakshya.workers.dev
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -60,3 +88,35 @@ jobs:
             src-tauri/target-personal/**/bundle/**
             src-tauri/target-personal/release/bundle/**
           if-no-files-found: error
+
+  # Draft only: the owner reads the notes and the checksums, then publishes by hand.
+  draft-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect installers and write checksums
+        shell: bash
+        run: |
+          mkdir -p release-out
+          find artifacts -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) \
+            -not -path '*/_up_/*' -exec cp {} release-out/ \;
+          if [ -z "$(ls -A release-out)" ]; then echo "No installer was produced"; exit 1; fi
+          (cd release-out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NEXUS-release-files
+          path: release-out/*
+          if-no-files-found: error
+
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ github.ref_name }}" --repo "${{ github.repository }}" --draft --title "NEXUS ${{ github.ref_name }}" --generate-notes release-out/*

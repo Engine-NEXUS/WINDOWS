@@ -6,7 +6,7 @@
 //   node scripts/ci-local.mjs --fast          # skips the Rust test run (compile checks still run)
 //   node scripts/ci-local.mjs --list          # print the checks and exit
 //   node scripts/ci-local.mjs --ci            # also `npm ci` first (a clean install, as on the runner)
-//   node scripts/ci-local.mjs --installer     # also the NSIS installer build of build-windows.yml (slow, ~15 min)
+//   node scripts/ci-local.mjs --installer     # also the NSIS installer build (same bundler as release.yml) (slow, ~15 min)
 //
 // Jobs: frontend, worker, voice (wake data + tools), python, rust.
 // The Rust steps also FAIL on any compiler warning: a green build with warnings is not what you asked for.
@@ -88,7 +88,7 @@ add("rust", "Cargo check (shipped features, all targets)", "src-tauri", "cargo c
 add("rust", "Dead-code ratchet", ".", "node scripts/dead-code-audit.mjs");
 add("rust", "Cargo test (lib + integration)", "src-tauri", "cargo test --tests --features custom-protocol,admin-brain -- --test-threads=1", { noWarnings: true, slow: true });
 
-// ── build-windows.yml (opt-in) ───────────────────────────────────────────────
+// ── installer build (opt-in; mirrors the windows-installer job in ci.yml) ───────────────────────────────────────────────
 add("installer", "NSIS installer build", ".", "npx --yes @tauri-apps/cli build --bundles nsis --features custom-protocol", { noWarnings: true, slow: true, optIn: true });
 
 if (flag("--list")) {

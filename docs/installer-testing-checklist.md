@@ -1,158 +1,52 @@
-# NEXUS Installer Testing Checklist
+# NEXUS installer: live test script (plan 194, P5)
 
-**Purpose:** Verify NEXUS works perfectly when installed from the GitHub Actions installer artifact on a fresh laptop.
+Rewritten 2026-11-16. The old checklist described Piper-era voices, a retired branch and "Python 3.10+ already installed", and could not be used as written. This is the owner-run script behind the **Live-proven** score of the installer. Plan: [194](features/194-installer-release-pipeline-above-4-stars-plan.md). What the installer does: [194a](features/194a-installer-inventory.md).
 
-**Prerequisites on target laptop:**
-- Windows 10/11 64-bit
-- 16 GB RAM
-- Python 3.10+ installed (`python --version` works in Command Prompt)
-- Microphone (built-in or USB)
-- Internet connection (for first-run model downloads + Cloudflare Worker)
+**Rules:** use Windows Sandbox, a fresh VM, or a spare account for the clean-machine cases; never test on a machine whose settings you cannot lose without a backup. Record each case as one line in `docs/testing/live-proof-ledger.md` with the build identity and the log under `docs/testing/runs/<date>-installer-<case>.log`.
 
-**Installer artifact:** Download from GitHub Actions → `phase-1` branch → `windows-installer` job → `nexus-windows-exe` artifact
+## Fast path: the automated smoke script (cases 1, 3 and 8 in one run)
 
----
+`scripts/installer-smoke.ps1` installs silently, checks about 30 things (files, Add/Remove entry and Publisher, `nexus://` link, Start-menu shortcut, Python, the pip packages, no old Kokoro cache), uninstalls, and checks that nothing is left. It writes a JSON report and exits 0 only when every check passes. **It refuses to run when NEXUS is running or already installed**, so it cannot touch a real install.
 
-## Pre-Install Checks
+* **Windows Sandbox (recommended).** One-time, in an administrator PowerShell, then restart: `Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All`. Needs virtualization on in the BIOS. Then double-click `docs/testing/installer-sandbox.wsb` (it maps the installer read-only, the script read-only and `D:
+exus-installer-results` for the report). Update the installer path and hash in that file after each rebuild.
+* **Spare VM (Hyper-V, VirtualBox, VMware).** Copy the installer and `scripts\installer-smoke.ps1` into it and run: `powershell -ExecutionPolicy Bypass -File installer-smoke.ps1 -Installer <path> -ExpectedSha256 <hash> -ReportPath report.json`. Use a snapshot so each run starts clean.
+* **CI.** The `windows-installer` job in `ci.yml` runs the same script after the build (informational until it has passed once) and uploads `installer-smoke-report`.
 
-- [ ] Download `nexus-windows-exe` artifact from GitHub Actions
-- [ ] Verify the `.exe` file exists and is ~50-100 MB
-- [ ] Check Python is installed: `python --version` (needs 3.10+)
-- [ ] Check microphone is connected and not muted
+The script covers a clean online install. Cases 2, 4, 5, 6, 7, 9 and 10 still need the manual steps below.
 
-## Installation
+## Before you start
 
-- [ ] Run `NEXUS_0.1.0_x64-setup.exe`
-- [ ] Installer shows white theme with NEXUS branding
-- [ ] Install completes without errors
-- [ ] NEXUS launches automatically after install (setup wizard)
-- [ ] NEXUS tray icon appears in system tray
+* [ ] Take the installer from the `NEXUS-windows` artifact of a `release.yml` run (or `ci.yml` on `main`) and `SHA256SUMS.txt` from the same run.
+* [ ] `certutil -hashfile <installer> SHA256` matches `SHA256SUMS.txt`.
+* [ ] `PYTHON_SHA256` in the template is filled (it is, since 2026-11-16); case 6 needs a separate test build with a deliberately wrong value.
+* [ ] Write down: installer name, size, build identity (`nexus-build.json`), date, machine.
 
-## First-Run Setup
+## Cases (pass means exactly what is written)
 
-- [ ] Setup wizard appears
-- [ ] Voice selection works (Sky, Adam, or Emma)
-- [ ] Click "Launch Assistant" — orb appears at bottom-center
-- [ ] Check logs for pre-warm messages:
-  - `tts: startup pre-warm starting...`
-  - `stt: startup pre-warm starting...`
-  - `nlu: startup pre-warm starting...`
-- [ ] Wait for pre-warm to complete (check logs):
-  - `tts: startup pre-warm complete — engine ready for instant ack`
-  - `stt: startup pre-warm complete`
-  - `nlu: startup pre-warm complete`
-- [ ] Note: First launch may take 30-60s for model downloads (Kokoro 337 MB from GitHub, Whisper ~40 MB from HuggingFace)
+| # | Case | Steps | Pass means |
+| --- | --- | --- | --- |
+| 1 | Clean Windows 11, no Python, online | Run the installer. Let it finish. Start NEXUS. Say the wake word and "what time is it". | Installs without an administrator prompt; Python 3.12 installed per user; first-run setup opens; the command is answered; time from double-click to first answer noted. |
+| 2 | Store Python stub present, no real Python | Same as 1 on a machine where `python.exe` only opens the Microsoft Store. | The stub is not mistaken for Python; real Python is installed. |
+| 3 | Python already installed (3.11, then 3.12, then 3.13) | Run the installer on each. | Reuses the existing Python; no second Python appears; STT and NLU start. |
+| 4 | Offline install | Disconnect the network, run the installer. | Honest message naming what is missing (WebView2 or Python or pip packages); the app starts in its offline mode; nothing half-installed. |
+| 5 | Interrupted download | Start the installer online, cut the network during the Python download. | A retry works; no partial Python installer is run; no stale file in `%TEMP%`. |
+| 6 | Wrong checksum | Use a test build with a deliberately wrong `PYTHON_SHA256`. | The installer says the checksum did not match and **does not run** the Python installer; NEXUS itself is installed. |
+| 7 | Upgrade over the old install on the owner's laptop | Back up `%APPDATA%\com.nexus.assistant\` first. Install over the 2026-08-31 build. | New exe runs; the Start-menu shortcut and the `NEXUS` scheduled task point at the new exe; settings, memory and the Voice Lock profile are intact; wake word still works. |
+| 8 | Uninstall | Uninstall twice: once keeping app data, once with the delete box ticked. | No NEXUS process, shortcut or scheduled task left; app data kept or removed as chosen; the Add/Remove entry is gone. |
+| 9 | Ten install and uninstall cycles | Repeat 1 and 8 ten times. | Same result each time; time per cycle recorded; no growth in leftover files. |
+| 10 | SmartScreen and Defender | Download the installer through a browser and run it. | The warning (if any) is recorded exactly; with signing, the publisher name is shown. |
 
-## Voice Command Tests
+Cases 1, 3, 4, 7, 8 and 9 must pass on one assessed build before the installer's Live-proven score is raised.
 
-### Test 1: Wake Word + Architecture Mapper
-- [ ] Say "Nexus" — orb illuminates
-- [ ] Say "open architecture mapper"
-- [ ] Hear "On it sir" within 2-3 seconds
-- [ ] Orb disappears after "On it sir"
-- [ ] Loading animation appears at top-right corner
-- [ ] Architecture Mapper window opens with completed map
-- [ ] Loading animation disappears after map is shown
-- [ ] Map shows correct repository (from active browser tab)
+## Quick checks after any install
 
-### Test 2: Hotkey + Architecture Mapper
-- [ ] Press `Ctrl+Space` — orb illuminates
-- [ ] Say "open architecture mapper"
-- [ ] Same flow as Test 1
+* [ ] `%LOCALAPPDATA%\Programs\NEXUS` (or the chosen folder) holds `nexus.exe` and the `resources` folder.
+* [ ] Start menu shows one NEXUS entry; it opens the exe in that folder.
+* [ ] `schtasks /Query /TN NEXUS` shows the task (after the first start) with the same exe path.
+* [ ] `%APPDATA%\com.nexus.assistant\` exists after the first start.
+* [ ] The log has `autostart: scheduled task 'NEXUS' created` and no installer errors.
 
-### Test 3: Truncated Transcript Recovery
-- [ ] If mic cuts out and STT returns "open-" or "open"
-- [ ] Check logs for: `truncated 'open-' → open_architect (mic silence recovery)`
-- [ ] Architecture mapper should still open (not Microsoft Office)
+## Notes to fill in per run
 
-### Test 4: App Launch Command
-- [ ] Say "Nexus" → "open Chrome" (or any installed app)
-- [ ] Hear "On it sir" within 1-2 seconds
-- [ ] Chrome launches
-
-### Test 5: Invalid Command
-- [ ] Say "Nexus" → "blah blah blah"
-- [ ] Hear "Didn't catch that sir" or "Didn't understand that sir"
-- [ ] No window opens, no loading animation
-
-### Test 6: Close Command
-- [ ] Say "Nexus" → "close Chrome"
-- [ ] Chrome closes
-
-## Architecture Mapper Tests
-
-### Test 7: Phase 1 Architecture Map
-- [ ] Architecture Mapper shows 5+ layers
-- [ ] AI enrichment labels are visible
-- [ ] Summary text is shown
-- [ ] Graph is interactive (zoom, pan, click nodes)
-
-### Test 8: Phase 2 Deep Scan
-- [ ] Check logs for: `Phase 2: Starting deep graph scan`
-- [ ] Hotspots appear on the map
-- [ ] Circular dependencies are detected
-- [ ] No errors in logs
-
-### Test 9: Blast Radius
-- [ ] Click a file in the architecture map
-- [ ] Ask "What breaks if I change this file?"
-- [ ] Blast radius highlights in red
-- [ ] Dependency paths are shown
-
-## Latency Measurements
-
-### Test 10: First Command Latency
-- [ ] Time from end of speech to "On it sir": _____ seconds (target: ≤3s)
-- [ ] Time from "On it sir" to architecture window: _____ seconds (target: ≤10s)
-
-### Test 11: Subsequent Command Latency
-- [ ] Time from end of speech to "On it sir": _____ seconds (target: ≤2s)
-- [ ] Should be faster than first command (models already warm)
-
-## RAM Verification
-
-### Test 12: Idle RAM
-- [ ] Open Task Manager after 5 minutes idle
-- [ ] `nexus.exe` RSS: _____ MB (target: ~350 MB)
-- [ ] `python.exe` (STT) RSS: _____ MB (target: ~150 MB)
-- [ ] `python.exe` (NLU) RSS: _____ MB (target: ~100 MB)
-- [ ] Total: _____ MB (target: ~800 MB with all pre-warmed)
-
-## Log Inspection
-
-### Test 13: Log File Location
-- [ ] Logs at: `%APPDATA%\com.nexus.assistant\`
-- [ ] Latest log file has today's date
-- [ ] No `ERROR` lines in log (warnings are OK)
-
-### Test 14: Pre-warm Timeline
-- [ ] TTS pre-warm completed in: _____ seconds
-- [ ] STT pre-warm completed in: _____ seconds
-- [ ] NLU pre-warm completed in: _____ seconds
-- [ ] All three completed before first voice command
-
-## Edge Cases
-
-### Test 15: No Browser Open
-- [ ] Close all browsers
-- [ ] Say "Nexus" → "open architecture mapper"
-- [ ] Architecture mapper should show manual URL entry (not crash)
-
-### Test 16: No Internet
-- [ ] Disconnect internet after first launch
-- [ ] Say "Nexus" → "open Chrome"
-- [ ] Should still work (local command, no internet needed)
-- [ ] Say "Nexus" → "analyse PR 5 in owner/repo"
-- [ ] Should show error (needs internet for GitHub)
-
-### Test 17: Rapid Commands
-- [ ] Say "Nexus" → "open Chrome"
-- [ ] Immediately say "Nexus" → "close Chrome"
-- [ ] Both commands should be handled (no race condition)
-
-## Cleanup
-
-- [ ] Right-click tray icon → Quit
-- [ ] Verify no `nexus.exe` process in Task Manager
-- [ ] Right-click tray icon → Settings → check all settings persist
-- [ ] Uninstall via Add/Remove Programs — verify clean uninstall
+Build identity: ______  Installer SHA-256: ______  Machine: ______  Case: ______  Result: ______  Log: ______

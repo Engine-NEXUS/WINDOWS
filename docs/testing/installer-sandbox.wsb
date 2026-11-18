@@ -1,0 +1,30 @@
+﻿<!-- Windows Sandbox kit for the NEXUS installer (plan 194, P5). Double-click this file on a machine where
+     Windows Sandbox is enabled. It maps the installer (read-only), the smoke script (read-only) and a results
+     folder, then runs scripts\installer-smoke.ps1 inside a clean, throw-away Windows. The sandbox needs the
+     network (it downloads Python and the pip packages). Nothing inside survives closing the window.
+     Update the installer path and the hash after each rebuild. -->
+<Configuration>
+  <VGpu>Disable</VGpu>
+  <Networking>Enable</Networking>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>D:\nexus-installer-target\release\bundle\nsis</HostFolder>
+      <SandboxFolder>C:\kit\installer</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>D:\WINDOWS\scripts</HostFolder>
+      <SandboxFolder>C:\kit\scripts</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>D:\nexus-installer-results</HostFolder>
+      <SandboxFolder>C:\kit\results</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>powershell.exe -NoExit -ExecutionPolicy Bypass -File C:\kit\scripts\installer-smoke.ps1 -Installer C:\kit\installer\NEXUS_0.1.0_x64-setup.exe -ExpectedSha256 d3e4906e20425b6ca35fa2631d66c8248e306e6305103b3d52f7761fdff0ef1f -ReportPath C:\kit\results\report-sandbox.json</Command>
+  </LogonCommand>
+</Configuration>
+

@@ -5,25 +5,25 @@ One card per in-scope feature, in queue order (lowest raw score first). Generate
 | # | Feature | Area | Raw | Gaps |
 |---:|---|---|---:|---|
 | 1 | [Speaker verification / owner check](01-speaker-verification-owner-check.md) | Voice front end | 41.0% | B T L S I |
-| 2 | [Installer / release pipeline](02-installer-release-pipeline.md) | Platform and quality | 47.0% | B T L S I |
-| 3 | [Focus Mode (Hand Mode load control)](03-focus-mode-hand-mode-load-control.md) | Desktop control | 48.0% | L I |
-| 4 | [Reverse engineer website/app](04-reverse-engineer-website-app.md) | Desktop control | 48.0% | B T L I |
-| 5 | [GitHub by voice without owner (repo, PR list, PR number search)](05-github-by-voice-without-owner-repo-pr-list-pr-number-search.md) | Integrations | 50.5% | L I |
-| 6 | [Notification brain: state machine and GitHub Actions / deploy watchers](06-notification-brain-state-machine-and-github-actions-deploy-w.md) | Memory and proactive | 50.5% | L I |
-| 7 | [Window theming (solid panels)](07-window-theming-solid-panels.md) | Platform and quality | 51.5% | L S |
-| 8 | [WhatsApp priority people (read-only)](08-whatsapp-priority-people-read-only.md) | Memory and proactive | 52.5% | B T L I |
-| 9 | [Vision-grounded click](09-vision-grounded-click.md) | Desktop control | 54.2% | B T L S I |
-| 10 | [Agent watch sidecar (spawn + watch CLIs)](10-agent-watch-sidecar-spawn-watch-clis.md) | Agent control | 55.0% | B T L S |
-| 11 | [Leave-by reminders](11-leave-by-reminders.md) | Memory and proactive | 56.0% | L I |
-| 12 | [Proactive-speech policy](12-proactive-speech-policy.md) | Memory and proactive | 56.0% | L I |
-| 13 | [Boot hello / shutdown flow / resume hello](13-boot-hello-shutdown-flow-resume-hello.md) | Voice front end | 57.0% | T L S |
-| 14 | [Wake-up sound](14-wake-up-sound.md) | Voice front end | 57.0% | T L |
-| 15 | [Profile, corrections, routines, review, curator](15-profile-corrections-routines-review-curator.md) | Memory and proactive | 58.8% | L |
-| 16 | [Track all agents (announce each, summary)](16-track-all-agents-announce-each-summary.md) | Agent control | 58.8% | L |
-| 17 | [Important-mail watcher + triage](17-important-mail-watcher-triage.md) | Memory and proactive | 59.5% | L |
-| 18 | [NLU fallback (BERT-Mini ONNX)](18-nlu-fallback-bert-mini-onnx.md) | Understanding | 59.8% | T L S |
-| 19 | [Endpointing / VAD / turn detection](19-endpointing-vad-turn-detection.md) | Voice front end | 60.0% | T L S I |
-| 20 | [Device Links (phone / laptop pairing)](20-device-links-phone-laptop-pairing.md) | Integrations | 61.3% | B L |
+| 2 | [Focus Mode (Hand Mode load control)](02-focus-mode-hand-mode-load-control.md) | Desktop control | 48.0% | L I |
+| 3 | [Reverse engineer website/app](03-reverse-engineer-website-app.md) | Desktop control | 48.0% | B T L I |
+| 4 | [GitHub by voice without owner (repo, PR list, PR number search)](04-github-by-voice-without-owner-repo-pr-list-pr-number-search.md) | Integrations | 50.5% | L I |
+| 5 | [Notification brain: state machine and GitHub Actions / deploy watchers](05-notification-brain-state-machine-and-github-actions-deploy-w.md) | Memory and proactive | 50.5% | L I |
+| 6 | [Window theming (solid panels)](06-window-theming-solid-panels.md) | Platform and quality | 51.5% | L S |
+| 7 | [WhatsApp priority people (read-only)](07-whatsapp-priority-people-read-only.md) | Memory and proactive | 52.5% | B T L I |
+| 8 | [Vision-grounded click](08-vision-grounded-click.md) | Desktop control | 54.2% | B T L S I |
+| 9 | [Agent watch sidecar (spawn + watch CLIs)](09-agent-watch-sidecar-spawn-watch-clis.md) | Agent control | 55.0% | B T L S |
+| 10 | [Leave-by reminders](10-leave-by-reminders.md) | Memory and proactive | 56.0% | L I |
+| 11 | [Proactive-speech policy](11-proactive-speech-policy.md) | Memory and proactive | 56.0% | L I |
+| 12 | [Boot hello / shutdown flow / resume hello](12-boot-hello-shutdown-flow-resume-hello.md) | Voice front end | 57.0% | T L S |
+| 13 | [Wake-up sound](13-wake-up-sound.md) | Voice front end | 57.0% | T L |
+| 14 | [Profile, corrections, routines, review, curator](14-profile-corrections-routines-review-curator.md) | Memory and proactive | 58.8% | L |
+| 15 | [Track all agents (announce each, summary)](15-track-all-agents-announce-each-summary.md) | Agent control | 58.8% | L |
+| 16 | [Important-mail watcher + triage](16-important-mail-watcher-triage.md) | Memory and proactive | 59.5% | L |
+| 17 | [NLU fallback (BERT-Mini ONNX)](17-nlu-fallback-bert-mini-onnx.md) | Understanding | 59.8% | T L S |
+| 18 | [Endpointing / VAD / turn detection](18-endpointing-vad-turn-detection.md) | Voice front end | 60.0% | T L S I |
+| 19 | [Device Links (phone / laptop pairing)](19-device-links-phone-laptop-pairing.md) | Integrations | 61.3% | B L |
+| 20 | [Installer / release pipeline](20-installer-release-pipeline.md) | Platform and quality | 61.8% | B T L S I |
 | 21 | [Boot briefing + resume points](21-boot-briefing-resume-points.md) | Memory and proactive | 63.1% | L |
 | 22 | [Session snapshot / restore](22-session-snapshot-restore.md) | Memory and proactive | 63.5% | L |
 | 23 | [Screen analysis / narrated tour](23-screen-analysis-narrated-tour.md) | Desktop control | 64.2% | L S I |

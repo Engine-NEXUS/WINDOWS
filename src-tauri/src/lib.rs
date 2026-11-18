@@ -198,6 +198,7 @@ pub(crate) mod agent_approval_reply;
 pub(crate) mod repo_review;
 pub(crate) mod pr_screen;
 pub(crate) mod early_hello;
+pub(crate) mod locked_probe;
 pub(crate) mod early_orb;
 pub(crate) mod howto;
 pub(crate) mod email_brief;
@@ -444,6 +445,7 @@ pub fn run() {
     init_logging();
     // The greeting at logon: waits for the desktop, then plays a cached clip while the rest of the app is still starting.
     early_hello::start_if_logon();
+    locked_probe::start_if_enabled();
 
     // ─── WebView2 stale profile cleanup ───────────────────────────────
     //

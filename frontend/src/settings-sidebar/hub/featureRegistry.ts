@@ -101,6 +101,7 @@ export const FEATURES: Feature[] = [
   bool({ id: "mem-routines", group: "Memory and proactive", title: "Routine suggestions", what: "Offers to save app sequences you repeat.", key: "memcoreRoutines", def: true, dependsOn: "memcore" }),
   bool({ id: "mem-timetable", group: "Memory and proactive", title: "Timetable reminders", what: "Reminds you of your timetable slots.", key: "memcoreTimetable", def: true, dependsOn: "memcore" }),
   bool({ id: "mem-leaveby", group: "Memory and proactive", title: "Leave-by reminders", what: "\"Time to leave\" from calendar events and traffic.", key: "memcoreLeaveBy", def: true, dependsOn: "memcore" }),
+  bool({ id: "mem-reminder-countdown", group: "Memory and proactive", title: "Reminder countdown chip", what: "Shows a countdown chip beside the orb while a reminder is waiting.", key: "reminderCountdown", def: true }),
   bool({ id: "mem-session", group: "Memory and proactive", title: "Session restore", what: "Offers to reopen your apps after a restart.", key: "memcoreSession", def: true, dependsOn: "memcore" }),
   bool({ id: "mem-health", group: "Memory and proactive", title: "Health notes", what: "Mentions problems NEXUS notices with itself.", key: "memcoreHealth", def: true, dependsOn: "memcore" }),
   bool({ id: "mem-redact", group: "Memory and proactive", title: "Hide names from the cloud", what: "Swaps known names for Person A, B before cloud requests.", key: "memcoreRedactNames", def: false, dependsOn: "memcore", safety: true }),
