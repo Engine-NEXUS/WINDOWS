@@ -534,13 +534,13 @@
     {
         "area": "Memory and proactive",
         "feature": "Proactive-speech policy",
-        "tests": "15 tests",
+        "tests": "29 policy tests incl. 300 replayed 2-hour timelines (checked on every spoken line), 14/14 mutations killed",
         "B": 90,
-        "T": 70,
+        "T": 88,
         "L": 10,
         "S": 85,
         "I": 55,
-        "note": "Thresholds are hypotheses; nothing emits a Critical alert yet."
+        "note": "Replay of 1,000 generated timelines measured: Critical p95 8 s, Medium p50 20 s, 84 % of Medium and 86 % of High alerts spoken (docs/testing/runs/proactive-policy-timeline-20261122.md); the timelines are generated, not recorded, so thresholds are still hypotheses and I is unchanged. Nothing emits a Critical alert yet. Not run live (meeting, Focus Mode): owner script part C."
     },
     {
         "area": "Memory and proactive",

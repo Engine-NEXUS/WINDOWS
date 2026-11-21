@@ -14,12 +14,12 @@ One card per in-scope feature, in queue order (lowest raw score first). Generate
 | 8 | [Agent watch sidecar (spawn + watch CLIs)](08-agent-watch-sidecar-spawn-watch-clis.md) | Agent control | 55.0% | B T L S |
 | 9 | [Window theming (solid panels)](09-window-theming-solid-panels.md) | Platform and quality | 55.7% | L S |
 | 10 | [Leave-by reminders](10-leave-by-reminders.md) | Memory and proactive | 56.0% | L I |
-| 11 | [Proactive-speech policy](11-proactive-speech-policy.md) | Memory and proactive | 56.0% | L I |
-| 12 | [Boot hello / shutdown flow / resume hello](12-boot-hello-shutdown-flow-resume-hello.md) | Voice front end | 57.0% | T L S |
-| 13 | [Wake-up sound](13-wake-up-sound.md) | Voice front end | 57.0% | T L |
-| 14 | [Profile, corrections, routines, review, curator](14-profile-corrections-routines-review-curator.md) | Memory and proactive | 58.8% | L |
-| 15 | [Track all agents (announce each, summary)](15-track-all-agents-announce-each-summary.md) | Agent control | 58.8% | L |
-| 16 | [Important-mail watcher + triage](16-important-mail-watcher-triage.md) | Memory and proactive | 59.5% | L |
+| 11 | [Boot hello / shutdown flow / resume hello](11-boot-hello-shutdown-flow-resume-hello.md) | Voice front end | 57.0% | T L S |
+| 12 | [Wake-up sound](12-wake-up-sound.md) | Voice front end | 57.0% | T L |
+| 13 | [Profile, corrections, routines, review, curator](13-profile-corrections-routines-review-curator.md) | Memory and proactive | 58.8% | L |
+| 14 | [Track all agents (announce each, summary)](14-track-all-agents-announce-each-summary.md) | Agent control | 58.8% | L |
+| 15 | [Important-mail watcher + triage](15-important-mail-watcher-triage.md) | Memory and proactive | 59.5% | L |
+| 16 | [Proactive-speech policy](16-proactive-speech-policy.md) | Memory and proactive | 59.6% | L I |
 | 17 | [NLU fallback (BERT-Mini ONNX)](17-nlu-fallback-bert-mini-onnx.md) | Understanding | 59.8% | T L S |
 | 18 | [Endpointing / VAD / turn detection](18-endpointing-vad-turn-detection.md) | Voice front end | 60.0% | T L S I |
 | 19 | [Device Links (phone / laptop pairing)](19-device-links-phone-laptop-pairing.md) | Integrations | 61.3% | B L |
