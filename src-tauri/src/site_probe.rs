@@ -2586,6 +2586,27 @@ mod tests {
     }
 
     #[test]
+    fn a_manifest_link_alone_is_not_a_pwa_and_the_word_auth0_alone_is_not_auth0() {
+        let url = Url::parse("https://docs.example.com/").unwrap();
+        let html = "<html><head><title>Docs</title><link rel=\"manifest\" href=\"/manifest.json\"></head><body><p>Hello there, plenty of visible text so this page is not thin at all.</p></body></html>";
+        let script = "var plan = {name: 'auth0'}; // a pricing table mentions auth0 by name";
+        let r = analyse(&url, 200, &[], html, &[script.to_string()], &[]);
+        let strong = |id: &str| r.detections.iter().find(|d| d.id == id).map(|d| d.confidence >= 0.5).unwrap_or(false);
+        assert!(!strong("pwa"), "{:?}", r.detections.iter().find(|d| d.id == "pwa"));
+        assert!(!strong("auth0"), "{:?}", r.detections.iter().find(|d| d.id == "auth0"));
+        // real evidence still counts: Auth0 own CDN script
+        let real = analyse(
+            &url,
+            200,
+            &[],
+            "<html><head><title>Docs</title><link rel=\"manifest\" href=\"/manifest.json\"><script src=\"https://cdn.auth0.com/js/auth0/9.0/auth0.min.js\"></script></head><body><p>Hello there, plenty of visible text so this page is not thin at all.</p></body></html>",
+            &[],
+            &[],
+        );
+        assert!(real.detections.iter().any(|d| d.id == "auth0" && d.confidence >= 0.8));
+    }
+
+    #[test]
     fn analyse_flags_an_empty_spa_shell() {
         let url = Url::parse("https://app.example.com/").unwrap();
         let html = "<html><head><title>App</title></head><body><div id=\"root\"></div><script type=\"module\" src=\"/assets/index-a1b2.js\"></script></body></html>";

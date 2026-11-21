@@ -300,6 +300,8 @@ pub enum MatchKind {
     Contains,
     /// Within two edits of a key ("chroem" -> "chrome").
     Fuzzy,
+    /// Sounds like a key although the letters differ ("load pad" -> "notepad"). Always a guess: the user is asked.
+    Phonetic,
 }
 
 /// Words that may trail an app key without changing which app is meant.
@@ -359,6 +361,32 @@ pub fn lookup_with_kind(query: &str) -> Option<(AppEntry, String, MatchKind)> {
 
     let cache = registry.cache.read();
     lookup_in(&cache, &q)
+}
+
+/// Sound-based suggestion for a phrase the tiered lookup found nothing for ("load pad" -> Notepad). Used only by the launch gate, where
+/// every hit is a question ("did you mean …?"), never by callers that act on a lookup directly. Set `NEXUS_NO_SOUND_MATCH=1` to disable.
+pub fn lookup_phonetic(query: &str) -> Option<(AppEntry, String)> {
+    if std::env::var_os("NEXUS_NO_SOUND_MATCH").is_some() {
+        return None;
+    }
+    let cache = REGISTRY.cache.read();
+    phonetic_in(&cache, &query.to_lowercase())
+}
+
+/// Pure core of [`lookup_phonetic`] (unit-tested).
+fn phonetic_in(cache: &HashMap<String, AppEntry>, q: &str) -> Option<(AppEntry, String)> {
+    let index = crate::sound_match::PhoneticIndex::new(
+        cache.iter().map(|(key, entry)| (key.clone(), entry.display_name.to_lowercase())),
+    );
+    let hit = index.nearest(q)?;
+    tracing::info!(
+        "[SOUND-MATCH] '{}' sounds like '{}' (distance {:.2}, margin {:.2}); asking before opening",
+        q,
+        hit.label,
+        hit.dist,
+        hit.margin
+    );
+    cache.get(&hit.label).map(|e| (e.clone(), hit.label))
 }
 
 /// Strict lookup for callers that REWRITE the spoken text (the intent parser):
@@ -546,7 +574,9 @@ pub(crate) fn launch_looks_like_installer(entry: &AppEntry) -> bool {
 /// - registry miss → ProceedLegacy (legacy resolvers keep working).
 /// Pure decision apart from the registry read itself (unit-tested).
 pub fn assess_open_target(query: &str) -> OpenAssessment {
-    let Some((entry, matched, kind)) = lookup_with_kind(query) else {
+    let Some((entry, matched, kind)) = lookup_with_kind(query)
+        .or_else(|| lookup_phonetic(query).map(|(entry, key)| (entry, key, MatchKind::Phonetic)))
+    else {
         return OpenAssessment::ProceedLegacy;
     };
     let query_has_installer_word = query
@@ -569,11 +599,7 @@ pub fn assess_open_target(query: &str) -> OpenAssessment {
         };
     }
     let confidence = match_confidence(query, &matched);
-    let confident = match kind {
-        MatchKind::Resolved | MatchKind::Exact => true,
-        MatchKind::Prefix => confidence >= 0.5,
-        MatchKind::Contains | MatchKind::Fuzzy => false,
-    };
+    let confident = kind_may_launch(kind, confidence);
     if !confident {
         tracing::warn!(
             "app-match: guess ({:?}, coverage {:.2}) '{}' → '{}', asking first",
@@ -590,6 +616,15 @@ pub fn assess_open_target(query: &str) -> OpenAssessment {
         return OpenAssessment::Confirm { entry, message };
     }
     OpenAssessment::Proceed(entry)
+}
+
+/// Only Resolved / Exact / well-covered Prefix matches may launch without asking. Sound-alike (Phonetic), Contains and Fuzzy hits are guesses.
+fn kind_may_launch(kind: MatchKind, coverage: f32) -> bool {
+    match kind {
+        MatchKind::Resolved | MatchKind::Exact => true,
+        MatchKind::Prefix => coverage >= 0.5,
+        MatchKind::Contains | MatchKind::Fuzzy | MatchKind::Phonetic => false,
+    }
 }
 
 /// Remember that the user confirmed `spoken` means `display_name`, so the
@@ -716,6 +751,41 @@ pub fn all_search_names() -> Vec<String> {
     names
 }
 
+/// Pick up to `n` display names for a speech-recogniser hint: apps the user has actually launched, most used first,
+/// never installers, never duplicates. Pure so it can be tested without a registry.
+pub(crate) fn pick_hint_names(entries: &[AppEntry], n: usize) -> Vec<String> {
+    let mut used: Vec<&AppEntry> = entries
+        .iter()
+        .filter(|e| e.use_count > 0 && !is_installer_name(&e.display_name) && !launch_looks_like_installer(e))
+        .collect();
+    used.sort_by(|a, b| b.use_count.cmp(&a.use_count).then(b.last_used.cmp(&a.last_used)).then(a.display_name.cmp(&b.display_name)));
+    let mut seen = std::collections::HashSet::new();
+    used.into_iter()
+        .filter(|e| seen.insert(e.display_name.to_lowercase()))
+        .take(n)
+        .map(|e| e.display_name.clone())
+        .collect()
+}
+
+/// The user's most-used app names, for the optional speech-recogniser hint.
+pub fn hint_names(n: usize) -> Vec<String> {
+    let entries = deduplicated_entries(&REGISTRY.cache.read());
+    pick_hint_names(&entries, n)
+}
+
+/// Count one use for the app that was actually opened, whatever phrase found it. `record_usage` only counts when the spoken phrase is
+/// one of the app's own search names, so a heard-wrong phrase that still resolved ("note pad") never counted and favourites stayed at 0.
+pub fn count_use(entry: &AppEntry) {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let mut cache = REGISTRY.cache.write();
+    for e in cache.values_mut() {
+        if e.display_name.eq_ignore_ascii_case(&entry.display_name) {
+            e.use_count += 1;
+            e.last_used = now;
+        }
+    }
+}
+
 /// Record that an app was used (for usage-weighted ranking + resolution cache).
 /// Also saves the phrase → app mapping so future lookups are instant.
 pub fn record_usage(query: &str) {
@@ -733,8 +803,7 @@ pub fn record_usage(query: &str) {
         let mut matched = None;
         for entry in cache.values_mut() {
             if entry.search_names.contains(&q) {
-                entry.use_count += 1;
-                entry.last_used = now;
+                // use_count itself is bumped by `count_use` (called with the opened entry), so a use is never counted twice.
                 if matched.is_none() {
                     matched = Some(entry.clone());
                 }
@@ -2548,6 +2617,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn count_use_counts_the_opened_app_even_when_the_phrase_was_heard_wrong() {
+        let inst = test_support::install(vec![app("Notepad", &["notepad"], r"C:\Apps\notepad.exe")]);
+        let opened = lookup("notepad").expect("installed");
+        count_use(&opened);
+        count_use(&opened);
+        let names = hint_names(5);
+        drop(inst);
+        assert_eq!(names, vec!["Notepad"]);
+    }
+
+    #[test]
+    fn hint_names_are_the_most_used_real_apps_only() {
+        let mut brave = app("Brave", &["brave"], r"C:\Appsrave.exe");
+        brave.use_count = 9;
+        let mut spotify = app("Spotify", &["spotify"], r"C:\Apps\spotify.exe");
+        spotify.use_count = 4;
+        let mut dup = app("brave", &["brave2"], r"C:\Appsrave2.exe");
+        dup.use_count = 2;
+        let unused = app("Calculator", &["calculator"], r"C:\Apps\calc.exe");
+        let mut installer = app("Intel Driver Setup", &["intel"], r"C:\Temp\Intel-Installer.exe");
+        installer.use_count = 50;
+        let picked = pick_hint_names(&[spotify, unused, installer, dup, brave], 5);
+        assert_eq!(picked, vec!["Brave", "Spotify"]);
+        assert_eq!(pick_hint_names(&[], 5), Vec::<String>::new());
+    }
+
     /// A registry shaped like the user's real one: five `®` keys (the Intel
     /// installer family), a bare `chat` key (Google Chat), and normal apps.
     fn live_like_cache() -> HashMap<String, AppEntry> {
@@ -2604,6 +2700,42 @@ mod tests {
                 hit.map(|(e, k, kind)| (e.display_name, k, kind))
             );
         }
+    }
+
+    #[test]
+    fn a_sound_alike_hit_is_always_a_question_never_a_launch() {
+        for coverage in [0.0f32, 0.5, 1.0] {
+            assert!(!kind_may_launch(MatchKind::Phonetic, coverage), "coverage {coverage}");
+        }
+        assert!(kind_may_launch(MatchKind::Exact, 0.0));
+        assert!(kind_may_launch(MatchKind::Prefix, 0.5));
+        assert!(!kind_may_launch(MatchKind::Fuzzy, 1.0));
+    }
+
+    #[test]
+    fn phonetic_tier_finds_the_app_a_sound_alike_phrase_meant() {
+        let mut c = live_like_cache();
+        for (display, names, exe) in [("Notepad", vec!["notepad"], r"C:\x\notepad.exe"), ("Spotify", vec!["spotify"], r"C:\x\spotify.exe")] {
+            let a = app(display, &names, exe);
+            for n in &a.search_names {
+                c.insert(n.clone(), a.clone());
+            }
+        }
+        for (heard, meant) in [("load pad", "Notepad"), ("note pad", "Notepad"), ("brief", "Brave"), ("what's up", "WhatsApp"), ("spot if I", "Spotify")] {
+            let (entry, _) = phonetic_in(&c, heard).unwrap_or_else(|| panic!("{heard:?} got no sound-alike suggestion"));
+            assert_eq!(entry.display_name, meant, "{heard:?}");
+        }
+    }
+
+    #[test]
+    fn phonetic_tier_stays_quiet_for_unrelated_phrases_and_never_picks_the_intel_installer() {
+        let c = live_like_cache();
+        for q in ["my chart with mommy and what so", "mommychart", "m ommychart", "the window", "something completely different", "a", ""] {
+            if let Some((e, key)) = phonetic_in(&c, q) {
+                assert!(!e.display_name.contains('®'), "{q:?} must never reach an Intel® entry, got {key}");
+            }
+        }
+        assert!(phonetic_in(&c, "elephant parade tomorrow").is_none());
     }
 
     #[test]
