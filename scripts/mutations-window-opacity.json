@@ -1,0 +1,70 @@
+{
+  "file": "frontend/src/sidebar/unified.css",
+  "cwd": ".",
+  "command": [
+    "node",
+    "scripts/check-window-opacity.mjs"
+  ],
+  "mutations": [
+    {
+      "name": "light theme shell becomes slash-alpha (token)",
+      "file": "frontend/src/sidebar/unified.css",
+      "find": "  --hub-bg: #f8f9fa;",
+      "replace": "  --hub-bg: rgb(248 249 250 / 0.9);"
+    },
+    {
+      "name": "sidebar card base becomes rgba (token)",
+      "file": "frontend/src/sidebar/sidebar.css",
+      "find": "  --apple-surface-base:    #0a0a0c;",
+      "replace": "  --apple-surface-base:    rgba(10, 10, 12, 0.7);"
+    },
+    {
+      "name": "blur added to an unregistered rule in a panel file",
+      "file": "frontend/src/settings/settings.css",
+      "find": ".nx-footer {",
+      "replace": ".nx-footer-extra { backdrop-filter: blur(8px); }\n.nx-footer {"
+    },
+    {
+      "name": "hub background becomes transparent (token)",
+      "file": "frontend/src/settings-sidebar/hub/hub.css",
+      "find": "  --hx-bg: #f8f8fa;",
+      "replace": "  --hx-bg: transparent;"
+    },
+    {
+      "name": "architect surface becomes 8-digit hex (token)",
+      "file": "frontend/src/architect/architect.css",
+      "find": "  --apple-surface-base:    #0a0a0c;",
+      "replace": "  --apple-surface-base:    #0a0a0ccc;"
+    },
+    {
+      "name": "stage surface token becomes hsla",
+      "file": "frontend/src/theme/tokens.css",
+      "find": "  --stage-surface:       #151515;",
+      "replace": "  --stage-surface:       hsla(0, 0%, 8%, 0.6);"
+    },
+    {
+      "name": "companion hud surface becomes color-mix with transparent",
+      "file": "frontend/src/companion-hud/companion-hud.css",
+      "find": "  --hud-bg: #15151b;",
+      "replace": "  --hud-bg: color-mix(in srgb, #15151b 70%, transparent);"
+    },
+    {
+      "name": "github dashboard background becomes transparent",
+      "file": "frontend/src/pr-list/pr-list.css",
+      "find": "  --gh-bg: #0d1117;",
+      "replace": "  --gh-bg: transparent;"
+    },
+    {
+      "name": "setup window root becomes translucent (token shared by all panels)",
+      "file": "frontend/src/theme/tokens.css",
+      "find": "  --nx-bg:             #f8f9fa;",
+      "replace": "  --nx-bg:             rgb(248 249 250 / 0.5);"
+    },
+    {
+      "name": "stack view background becomes translucent",
+      "file": "frontend/src/theme/tokens.css",
+      "find": "  --sv-bg: #ecedf0;",
+      "replace": "  --sv-bg: rgba(236, 237, 240, 0.8);"
+    }
+  ]
+}

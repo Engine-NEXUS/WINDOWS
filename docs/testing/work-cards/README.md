@@ -9,10 +9,10 @@ One card per in-scope feature, in queue order (lowest raw score first). Generate
 | 3 | [Reverse engineer website/app](03-reverse-engineer-website-app.md) | Desktop control | 48.0% | B T L I |
 | 4 | [GitHub by voice without owner (repo, PR list, PR number search)](04-github-by-voice-without-owner-repo-pr-list-pr-number-search.md) | Integrations | 50.5% | L I |
 | 5 | [Notification brain: state machine and GitHub Actions / deploy watchers](05-notification-brain-state-machine-and-github-actions-deploy-w.md) | Memory and proactive | 50.5% | L I |
-| 6 | [Window theming (solid panels)](06-window-theming-solid-panels.md) | Platform and quality | 51.5% | L S |
-| 7 | [WhatsApp priority people (read-only)](07-whatsapp-priority-people-read-only.md) | Memory and proactive | 52.5% | B T L I |
-| 8 | [Vision-grounded click](08-vision-grounded-click.md) | Desktop control | 54.2% | B T L S I |
-| 9 | [Agent watch sidecar (spawn + watch CLIs)](09-agent-watch-sidecar-spawn-watch-clis.md) | Agent control | 55.0% | B T L S |
+| 6 | [WhatsApp priority people (read-only)](06-whatsapp-priority-people-read-only.md) | Memory and proactive | 52.5% | B T L I |
+| 7 | [Vision-grounded click](07-vision-grounded-click.md) | Desktop control | 54.2% | B T L S I |
+| 8 | [Agent watch sidecar (spawn + watch CLIs)](08-agent-watch-sidecar-spawn-watch-clis.md) | Agent control | 55.0% | B T L S |
+| 9 | [Window theming (solid panels)](09-window-theming-solid-panels.md) | Platform and quality | 55.7% | L S |
 | 10 | [Leave-by reminders](10-leave-by-reminders.md) | Memory and proactive | 56.0% | L I |
 | 11 | [Proactive-speech policy](11-proactive-speech-policy.md) | Memory and proactive | 56.0% | L I |
 | 12 | [Boot hello / shutdown flow / resume hello](12-boot-hello-shutdown-flow-resume-hello.md) | Voice front end | 57.0% | T L S |

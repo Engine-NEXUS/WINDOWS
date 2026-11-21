@@ -9,10 +9,10 @@ Which runtime processes and threads each feature depends on, and what Focus Mode
 | Reverse engineer website/app | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | GitHub by voice without owner (repo, PR list, PR number search) | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | Notification brain: state machine and GitHub Actions / deploy watchers | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
-| Window theming (solid panels) | stage WebView2 (fullscreen overlay), hitbox thread (30-250 ms), stage watchdog (2 s), WebGL orb loop | never paused (a starved heartbeat destroys the stage) |
 | WhatsApp priority people (read-only) | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Vision-grounded click | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | Agent watch sidecar (spawn + watch CLIs) | agent hooks webhook (port 39220), agent_watch Node sidecar (39222, lazy), watch_runner (3 s) | keeps running |
+| Window theming (solid panels) | stage WebView2 (fullscreen overlay), hitbox thread (30-250 ms), stage watchdog (2 s), WebGL orb loop | never paused (a starved heartbeat destroys the stage) |
 | Leave-by reminders | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Proactive-speech policy | proactive_policy engine + 2 s ticker | Medium alerts held, not dropped |
 | Boot hello / shutdown flow / resume hello | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
