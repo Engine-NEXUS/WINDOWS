@@ -392,6 +392,12 @@ fn phonetic_pair_in(cache: &HashMap<String, AppEntry>, q: &str) -> Option<[AppEn
         return None;
     };
     let (ea, eb) = (cache.get(&a.label)?.clone(), cache.get(&b.label)?.clone());
+    // Both must have matched on the app's whole name. On the owner's 320-app list a short phrase otherwise pairs with one
+    // word of a longer name ("lock" -> Clock or Phone Link, "trey" -> Trae or Google Drive): a question nobody would ask.
+    if !is_whole_name_key(&a.label, &ea.display_name) || !is_whole_name_key(&b.label, &eb.display_name) {
+        tracing::debug!("[SOUND-MATCH] '{}': close pair '{}' / '{}' dropped (part of a longer name)", q, a.label, b.label);
+        return None;
+    }
     // An installer is never offered as a choice: say the full name to launch one.
     let bad = |e: &AppEntry| is_installer_name(&e.display_name) || launch_looks_like_installer(e);
     if ea.display_name == eb.display_name || bad(&ea) || bad(&eb) {
@@ -402,6 +408,34 @@ fn phonetic_pair_in(cache: &HashMap<String, AppEntry>, q: &str) -> Option<[AppEn
         q, a.label, a.dist, b.label, b.dist
     );
     Some([ea, eb])
+}
+
+/// Is `key` the app's whole name, not one word of a longer one? A version, a "(User)" tag and a vendor prefix
+/// (Google, Microsoft, Windows) may be dropped: "spline" for "Spline 0.20.51", "kiro" for "Kiro (User)", "photos" for
+/// "Google Photos" count; "link" for "Phone Link" and "compass" for "MongoDB Compass" do not.
+fn is_whole_name_key(key: &str, display_name: &str) -> bool {
+    let lower = display_name.to_lowercase();
+    let mut no_paren = String::with_capacity(lower.len());
+    let mut depth = 0u32;
+    for ch in lower.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => no_paren.push(ch),
+            _ => {}
+        }
+    }
+    let cleaned: Vec<&str> = no_paren.split_whitespace().filter(|t| !t.chars().any(|c| c.is_ascii_digit())).collect();
+    let full = cleaned.join(" ");
+    let key = key.trim();
+    if key.is_empty() || full.is_empty() {
+        return false;
+    }
+    let covers = |name: &str| name == key || (name.starts_with(key) && key.len() * 10 >= name.len() * 6);
+    if covers(&full) {
+        return true;
+    }
+    ["google ", "microsoft ", "windows "].iter().any(|v| full.strip_prefix(v).is_some_and(|rest| covers(rest)))
 }
 
 /// Pure core of [`lookup_phonetic`] (unit-tested).
@@ -2808,6 +2842,38 @@ mod tests {
         assert!(phonetic_pair_in(&c, "lock").is_none(), "an installer is not a choice");
         let c = pair_cache(&[("Clock", &["clock", "klock"], r"C:\x\clock.exe")]);
         assert!(phonetic_pair_in(&c, "lock").is_none(), "one app under two names is not a pair");
+    }
+
+    #[test]
+    fn only_whole_names_can_be_one_of_the_two_choices() {
+        for (key, name) in [("clock", "Clock"), ("spline", "Spline 0.20.51"), ("kiro", "Kiro (User)"), ("photos", "Google Photos"),
+            ("teams", "Microsoft Teams"), ("winword", "Winword"), ("visual studio", "Visual Studio Code")] {
+            assert!(is_whole_name_key(key, name), "{key} / {name}");
+        }
+        for (key, name) in [("link", "Phone Link"), ("drive", "Google Drive Sync Tool"), ("compass", "MongoDB Compass"),
+            ("steam", "Steam Support Center"), ("click", "Click to Do"), ("x86", "Windows PowerShell (x86)"), ("", "Clock")] {
+            assert!(!is_whole_name_key(key, name), "{key} / {name}");
+        }
+    }
+
+    #[test]
+    fn a_pair_with_one_word_of_a_longer_name_is_not_asked() {
+        // The owner's real list: "lock" was Clock or Phone Link.
+        let c = pair_cache(&[
+            ("Clock", &["clock"], r"C:\x\clock.exe"),
+            ("Phone Link", &["phone link", "link"], r"C:\x\phone.exe"),
+        ]);
+        assert!(phonetic_pair_in(&c, "lock").is_none());
+        // Real names that do sound alike still ask: "slap" -> Slack or Skype.
+        let c = pair_cache(&[
+            ("Slack", &["slack"], r"C:\x\slack.exe"),
+            ("Skype", &["skype"], r"C:\x\skype.exe"),
+            ("Phone Link", &["phone link", "link"], r"C:\x\phone.exe"),
+        ]);
+        let [a, b] = phonetic_pair_in(&c, "slap").expect("slap sounds like Slack and Skype");
+        let mut got = [a.display_name, b.display_name];
+        got.sort();
+        assert_eq!(got, ["Skype".to_string(), "Slack".to_string()]);
     }
 
     #[test]

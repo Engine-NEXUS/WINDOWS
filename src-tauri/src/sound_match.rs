@@ -251,8 +251,9 @@ pub enum Found {
     Close(Hit, Hit),
 }
 
-/// How much further than [`MAX_DIST`] the runner-up may be and still be offered as the second choice.
-pub const PAIR_SLACK: f32 = 0.06;
+/// How much further than [`MAX_DIST`] the runner-up may be and still be offered as the second choice. Zero: on the owner's
+/// 320-app list a runner-up at 0.39 ("trey" -> Google Drive, "jim" -> Gmail) was never a sensible second choice.
+pub const PAIR_SLACK: f32 = 0.0;
 
 impl PhoneticIndex {
     /// Like [`nearest`](Self::nearest), but when two DIFFERENT things are about equally close (the case `nearest` refuses),
