@@ -299,7 +299,7 @@ pub fn get_or_create_window<R: Runtime>(
 /// panel resident (hide instead of destroy) so UI changes can be
 /// cross-checked live without rebuilding + relaunching nexus. FLIP TO
 /// FALSE BEFORE ANY RELEASE BUILD.
-const DEV_KEEP_WINDOWS_ALIVE: bool = true;
+const DEV_KEEP_WINDOWS_ALIVE: bool = false;
 
 pub fn destroy_window<R: Runtime>(
     app: &tauri::AppHandle<R>,
