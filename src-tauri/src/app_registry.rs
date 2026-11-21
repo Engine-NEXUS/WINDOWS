@@ -373,6 +373,71 @@ pub fn lookup_phonetic(query: &str) -> Option<(AppEntry, String)> {
     phonetic_in(&cache, &query.to_lowercase())
 }
 
+/// The two apps a phrase sounds about equally like (never an installer, never one app twice), for the numbered "which one?" ask.
+/// Only consulted after [`lookup_phonetic`] found nothing clear. `NEXUS_NO_SOUND_MATCH=1` disables it.
+pub fn lookup_phonetic_pair(query: &str) -> Option<[AppEntry; 2]> {
+    if std::env::var_os("NEXUS_NO_SOUND_MATCH").is_some() {
+        return None;
+    }
+    let cache = REGISTRY.cache.read();
+    phonetic_pair_in(&cache, &query.to_lowercase())
+}
+
+/// Pure core of [`lookup_phonetic_pair`] (unit-tested).
+fn phonetic_pair_in(cache: &HashMap<String, AppEntry>, q: &str) -> Option<[AppEntry; 2]> {
+    let index = crate::sound_match::PhoneticIndex::new(
+        cache.iter().map(|(key, entry)| (key.clone(), entry.display_name.to_lowercase())),
+    );
+    let crate::sound_match::Found::Close(a, b) = index.nearest_or_close(q)? else {
+        return None;
+    };
+    let (ea, eb) = (cache.get(&a.label)?.clone(), cache.get(&b.label)?.clone());
+    // Both must have matched on the app's whole name. On the owner's 320-app list a short phrase otherwise pairs with one
+    // word of a longer name ("lock" -> Clock or Phone Link, "trey" -> Trae or Google Drive): a question nobody would ask.
+    if !is_whole_name_key(&a.label, &ea.display_name) || !is_whole_name_key(&b.label, &eb.display_name) {
+        tracing::debug!("[SOUND-MATCH] '{}': close pair '{}' / '{}' dropped (part of a longer name)", q, a.label, b.label);
+        return None;
+    }
+    // An installer is never offered as a choice: say the full name to launch one.
+    let bad = |e: &AppEntry| is_installer_name(&e.display_name) || launch_looks_like_installer(e);
+    if ea.display_name == eb.display_name || bad(&ea) || bad(&eb) {
+        return None;
+    }
+    tracing::info!(
+        "[SOUND-MATCH] '{}' sounds like both '{}' ({:.2}) and '{}' ({:.2}); asking which",
+        q, a.label, a.dist, b.label, b.dist
+    );
+    Some([ea, eb])
+}
+
+/// Is `key` the app's whole name, not one word of a longer one? A version, a "(User)" tag and a vendor prefix
+/// (Google, Microsoft, Windows) may be dropped: "spline" for "Spline 0.20.51", "kiro" for "Kiro (User)", "photos" for
+/// "Google Photos" count; "link" for "Phone Link" and "compass" for "MongoDB Compass" do not.
+fn is_whole_name_key(key: &str, display_name: &str) -> bool {
+    let lower = display_name.to_lowercase();
+    let mut no_paren = String::with_capacity(lower.len());
+    let mut depth = 0u32;
+    for ch in lower.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => no_paren.push(ch),
+            _ => {}
+        }
+    }
+    let cleaned: Vec<&str> = no_paren.split_whitespace().filter(|t| !t.chars().any(|c| c.is_ascii_digit())).collect();
+    let full = cleaned.join(" ");
+    let key = key.trim();
+    if key.is_empty() || full.is_empty() {
+        return false;
+    }
+    let covers = |name: &str| name == key || (name.starts_with(key) && key.len() * 10 >= name.len() * 6);
+    if covers(&full) {
+        return true;
+    }
+    ["google ", "microsoft ", "windows "].iter().any(|v| full.strip_prefix(v).is_some_and(|rest| covers(rest)))
+}
+
 /// Pure core of [`lookup_phonetic`] (unit-tested).
 fn phonetic_in(cache: &HashMap<String, AppEntry>, q: &str) -> Option<(AppEntry, String)> {
     let index = crate::sound_match::PhoneticIndex::new(
@@ -537,6 +602,8 @@ pub enum OpenAssessment {
     /// A guess (contains / fuzzy / low coverage): speak `message` and arm an
     /// "open this app?" offer for `entry`. Nothing is launched.
     Confirm { entry: AppEntry, message: String },
+    /// Two different apps sound about equally close to what was heard: ask which ("A or B? Say one or two"). Nothing is launched.
+    Pick { entries: [AppEntry; 2] },
     /// Unconfirmed installer — caller must speak this message and execute
     /// NOTHING (no launch, no Win-search drill).
     Refuse { message: String },
@@ -577,6 +644,10 @@ pub fn assess_open_target(query: &str) -> OpenAssessment {
     let Some((entry, matched, kind)) = lookup_with_kind(query)
         .or_else(|| lookup_phonetic(query).map(|(entry, key)| (entry, key, MatchKind::Phonetic)))
     else {
+        // Nothing clear: two apps may sound equally close, which is a question with two answers.
+        if let Some(entries) = lookup_phonetic_pair(query) {
+            return OpenAssessment::Pick { entries };
+        }
         return OpenAssessment::ProceedLegacy;
     };
     let query_has_installer_word = query
@@ -600,6 +671,13 @@ pub fn assess_open_target(query: &str) -> OpenAssessment {
     }
     let confidence = match_confidence(query, &matched);
     let confident = kind_may_launch(kind, confidence);
+    // A text-level guess (a substring or typo match) is weaker evidence than the whole phrase sounding like two whole app
+    // names. Live, "windsor" matched "Where Winds Meet" by text while it sounded like Windsurf and Winword: ask those two.
+    if !confident && matches!(kind, MatchKind::Contains | MatchKind::Fuzzy) {
+        if let Some(entries) = lookup_phonetic_pair(query) {
+            return OpenAssessment::Pick { entries };
+        }
+    }
     if !confident {
         tracing::warn!(
             "app-match: guess ({:?}, coverage {:.2}) '{}' → '{}', asking first",
@@ -2727,6 +2805,109 @@ mod tests {
         }
     }
 
+    fn pair_cache(extra: &[(&str, &[&str], &str)]) -> HashMap<String, AppEntry> {
+        let mut c = HashMap::new();
+        for (display, names, exe) in extra {
+            let a = app(display, names, exe);
+            for n in &a.search_names {
+                c.insert(n.clone(), a.clone());
+            }
+        }
+        c
+    }
+
+    #[test]
+    fn two_equally_close_apps_become_a_numbered_question() {
+        let c = pair_cache(&[
+            ("Clock", &["clock"], r"C:\x\clock.exe"),
+            ("Block", &["block"], r"C:\x\block.exe"),
+            ("Calendar", &["calendar"], r"C:\x\cal.exe"),
+        ]);
+        let [a, b] = phonetic_pair_in(&c, "lock").expect("lock sounds like both");
+        let mut got = [a.display_name, b.display_name];
+        got.sort();
+        assert_eq!(got, ["Block".to_string(), "Clock".to_string()]);
+        // A clear single answer is the single "did you mean" path, never a pair.
+        assert!(phonetic_pair_in(&c, "calendar").is_none());
+        assert!(phonetic_pair_in(&c, "elephant parade tomorrow").is_none());
+    }
+
+    #[test]
+    fn a_pair_never_includes_an_installer_or_one_app_twice() {
+        let c = pair_cache(&[
+            ("Clock", &["clock"], r"C:\x\clock.exe"),
+            ("Block Setup", &["block"], r"C:\Package Cache\{a}\block-installer.exe"),
+        ]);
+        assert!(phonetic_pair_in(&c, "lock").is_none(), "an installer is not a choice");
+        let c = pair_cache(&[("Clock", &["clock", "klock"], r"C:\x\clock.exe")]);
+        assert!(phonetic_pair_in(&c, "lock").is_none(), "one app under two names is not a pair");
+    }
+
+    #[test]
+    fn only_whole_names_can_be_one_of_the_two_choices() {
+        for (key, name) in [("clock", "Clock"), ("spline", "Spline 0.20.51"), ("kiro", "Kiro (User)"), ("photos", "Google Photos"),
+            ("teams", "Microsoft Teams"), ("winword", "Winword"), ("visual studio", "Visual Studio Code")] {
+            assert!(is_whole_name_key(key, name), "{key} / {name}");
+        }
+        for (key, name) in [("link", "Phone Link"), ("drive", "Google Drive Sync Tool"), ("compass", "MongoDB Compass"),
+            ("steam", "Steam Support Center"), ("click", "Click to Do"), ("x86", "Windows PowerShell (x86)"), ("", "Clock")] {
+            assert!(!is_whole_name_key(key, name), "{key} / {name}");
+        }
+    }
+
+    #[test]
+    fn a_pair_with_one_word_of_a_longer_name_is_not_asked() {
+        // The owner's real list: "lock" was Clock or Phone Link.
+        let c = pair_cache(&[
+            ("Clock", &["clock"], r"C:\x\clock.exe"),
+            ("Phone Link", &["phone link", "link"], r"C:\x\phone.exe"),
+        ]);
+        assert!(phonetic_pair_in(&c, "lock").is_none());
+        // Real names that do sound alike still ask: "slap" -> Slack or Skype.
+        let c = pair_cache(&[
+            ("Slack", &["slack"], r"C:\x\slack.exe"),
+            ("Skype", &["skype"], r"C:\x\skype.exe"),
+            ("Phone Link", &["phone link", "link"], r"C:\x\phone.exe"),
+        ]);
+        let [a, b] = phonetic_pair_in(&c, "slap").expect("slap sounds like Slack and Skype");
+        let mut got = [a.display_name, b.display_name];
+        got.sort();
+        assert_eq!(got, ["Skype".to_string(), "Slack".to_string()]);
+    }
+
+    #[test]
+    fn the_launch_gate_asks_which_when_two_apps_sound_alike() {
+        let _g = test_support::install(vec![
+            app("Clock", &["clock"], r"C:\x\clock.exe"),
+            app("Block", &["block"], r"C:\x\block.exe"),
+            app("Calendar", &["calendar"], r"C:\x\cal.exe"),
+        ]);
+        match assess_open_target("lock") {
+            OpenAssessment::Pick { entries } => {
+                let names: Vec<&str> = entries.iter().map(|e| e.display_name.as_str()).collect();
+                assert!(names.contains(&"Clock") && names.contains(&"Block"), "{names:?}");
+            }
+            other => panic!("expected Pick, got {}", label(&other)),
+        }
+        // An exact name still opens at once.
+        assert!(matches!(assess_open_target("clock"), OpenAssessment::Proceed(_)));
+        drop(_g);
+        // The live case: "windsor" is a text match for Where Winds Meet but sounds like Windsurf and Winword.
+        let _g = test_support::install(vec![
+            app("Windsurf", &["windsurf"], r"C:\x\windsurf.exe"),
+            app("Winword", &["winword"], r"C:\x\winword.exe"),
+            app("Where Winds Meet", &["where winds meet", "winds"], r"C:\x\wwm.exe"),
+        ]);
+        match assess_open_target("windsor") {
+            OpenAssessment::Pick { entries } => {
+                let mut names: Vec<&str> = entries.iter().map(|e| e.display_name.as_str()).collect();
+                names.sort();
+                assert_eq!(names, ["Windsurf", "Winword"]);
+            }
+            other => panic!("expected Pick for windsor, got {}", label(&other)),
+        }
+    }
+
     #[test]
     fn phonetic_tier_stays_quiet_for_unrelated_phrases_and_never_picks_the_intel_installer() {
         let c = live_like_cache();
@@ -2909,6 +3090,7 @@ mod tests {
             OpenAssessment::Proceed(_) => "Proceed",
             OpenAssessment::ProceedLegacy => "ProceedLegacy",
             OpenAssessment::Confirm { .. } => "Confirm",
+            OpenAssessment::Pick { .. } => "Pick",
             OpenAssessment::Refuse { .. } => "Refuse",
         }
     }

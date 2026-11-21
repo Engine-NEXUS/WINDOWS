@@ -953,6 +953,15 @@ pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String
             );
             return Ok(CommandResult { success: false, message });
         }
+        crate::app_registry::OpenAssessment::Pick { entries } => {
+            let choices: Vec<String> = entries.iter().map(|e| e.display_name.clone()).collect();
+            let message = crate::memcore::offer::pick_question(target, &choices);
+            crate::memcore::offer::set(
+                crate::memcore::offer::Offer::OpenAppPick { choices, spoken: target.trim().to_string() },
+                true,
+            );
+            return Ok(CommandResult { success: false, message });
+        }
         // Confident match: name it in the trace so the next live log
         // shows exactly which entry the gate approved before launching.
         crate::app_registry::OpenAssessment::Proceed(entry) => {

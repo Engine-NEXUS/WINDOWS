@@ -242,6 +242,58 @@ impl PhoneticIndex {
     }
 }
 
+/// What the sound search found for a phrase.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Found {
+    /// One clearly-best name.
+    One(Hit),
+    /// Two different things sound about equally close: the right move is to ask which one.
+    Close(Hit, Hit),
+}
+
+/// How much further than [`MAX_DIST`] the runner-up may be and still be offered as the second choice. Zero: on the owner's
+/// 320-app list a runner-up at 0.39 ("trey" -> Google Drive, "jim" -> Gmail) was never a sensible second choice.
+pub const PAIR_SLACK: f32 = 0.0;
+
+impl PhoneticIndex {
+    /// Like [`nearest`](Self::nearest), but when two DIFFERENT things are about equally close (the case `nearest` refuses),
+    /// returns both so the caller can ask "A or B?". `None` when the best is too far away, or the runner-up is.
+    pub fn nearest_or_close(&self, query: &str) -> Option<Found> {
+        if let Some(hit) = self.nearest(query) {
+            return Some(Found::One(hit));
+        }
+        let qp = phrase_phones(query);
+        if qp.len() < MIN_PHONES {
+            return None;
+        }
+        let mut scored: Vec<(f32, usize)> = Vec::with_capacity(self.entries.len());
+        for (i, e) in self.entries.iter().enumerate() {
+            let (a, b) = (qp.len() as f32, e.phones.len() as f32);
+            if a / b > 2.0 || b / a > 2.0 {
+                continue;
+            }
+            let d = phoneme_distance(&qp, &e.phones) / qp.len().max(e.phones.len()) as f32;
+            scored.push((d, i));
+        }
+        scored.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+        let (bd, bi) = *scored.first()?;
+        if bd > MAX_DIST {
+            return None;
+        }
+        let (sd, si) = *scored.iter().find(|(_, i)| self.entries[*i].group != self.entries[bi].group)?;
+        if sd > MAX_DIST + PAIR_SLACK {
+            return None;
+        }
+        let hit = |d: f32, i: usize, other: f32| Hit {
+            label: self.entries[i].label.clone(),
+            group: self.entries[i].group.clone(),
+            dist: d,
+            margin: (other - d).abs(),
+        };
+        Some(Found::Close(hit(bd, bi, sd), hit(sd, si, bd)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,5 +478,53 @@ mod tests {
         for q in ["", " ", "a", "to", "is it"] {
             assert!(idx.nearest(q).is_none(), "'{q}'");
         }
+    }
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+
+    fn idx(names: &[&str]) -> PhoneticIndex {
+        PhoneticIndex::new(names.iter().map(|a| (a.to_lowercase(), a.to_lowercase())))
+    }
+
+    #[test]
+    fn two_equally_close_apps_are_returned_as_a_pair() {
+        let i = idx(&["Clock", "Block", "Calendar", "Mail", "Zoom"]);
+        match i.nearest_or_close("lock") {
+            Some(Found::Close(a, b)) => {
+                let mut got = [a.label, b.label];
+                got.sort();
+                assert_eq!(got, ["block".to_string(), "clock".to_string()]);
+            }
+            other => panic!("expected a close pair, got {other:?}"),
+        }
+        // "potion" is as near to Notion as to Motion.
+        let i = idx(&["Notion", "Motion", "Calendar"]);
+        assert!(matches!(i.nearest_or_close("potion"), Some(Found::Close(..))));
+    }
+
+    #[test]
+    fn a_clear_winner_is_not_a_question() {
+        let i = idx(&["Clock", "Block", "Calendar", "Mail", "Zoom", "Cursor"]);
+        assert!(matches!(i.nearest_or_close("calendar"), Some(Found::One(h)) if h.label == "calendar"));
+        assert!(matches!(i.nearest_or_close("cursor"), Some(Found::One(_))));
+    }
+
+    #[test]
+    fn nothing_close_gives_no_pair_even_if_two_names_exist() {
+        let i = idx(&["Clock", "Block", "Calendar"]);
+        assert_eq!(i.nearest_or_close("elephant parade tomorrow"), None);
+        assert_eq!(i.nearest_or_close("a"), None);
+    }
+
+    #[test]
+    fn names_of_the_same_app_are_not_rivals() {
+        let i = PhoneticIndex::new([
+            ("google chrome".to_string(), "google chrome".to_string()),
+            ("chrome".to_string(), "google chrome".to_string()),
+        ]);
+        assert!(!matches!(i.nearest_or_close("crome"), Some(Found::Close(..))));
     }
 }
