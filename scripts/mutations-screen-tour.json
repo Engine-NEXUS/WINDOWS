@@ -1,0 +1,99 @@
+{
+  "file": "src-tauri/src/screen_tour.rs",
+  "cwd": "src-tauri",
+  "targetDir": "D:/nexus-screen-target",
+  "testArgs": [
+    "--lib",
+    "--",
+    "--test-threads=1",
+    "screen_tour::",
+    "screen_context::",
+    "vision::tour_ladder_tests"
+  ],
+  "mutations": [
+    {
+      "name": "tour shows a callout without clearing the previous one",
+      "file": "src-tauri/src/screen_tour.rs",
+      "find": "        // Jumping forward (a lost event) still clears first.\n        self.clear_if_showing(&mut out);",
+      "replace": ""
+    },
+    {
+      "name": "tour End can be emitted twice",
+      "file": "src-tauri/src/screen_tour.rs",
+      "find": "        let mut out = Vec::new();\n        if self.ended {\n            return out;\n        }\n        self.clear_if_showing(&mut out);\n        self.ended = true;",
+      "replace": "        let mut out = Vec::new();\n        self.clear_if_showing(&mut out);\n        self.ended = true;"
+    },
+    {
+      "name": "tour accepts a stale step-ended event",
+      "file": "src-tauri/src/screen_tour.rs",
+      "find": "if self.ended || self.current_step != Some(i) {",
+      "replace": "if self.ended {"
+    },
+    {
+      "name": "tour replays a duplicate or stale step start",
+      "file": "src-tauri/src/screen_tour.rs",
+      "find": " || i >= self.item_for_step.len() || i < self.next_step {",
+      "replace": " || i >= self.item_for_step.len() {"
+    },
+    {
+      "name": "rejected-key failure spoken as the generic line",
+      "file": "src-tauri/src/screen_tour.rs",
+      "find": "ERR_REJECTED => \"Gemini rejected the key, sir. Check it in Command Hub, Accounts. Reading the visible text on your screen instead.\",",
+      "replace": "ERR_REJECTED => \"I'm having trouble with the vision service, sir. Reading the visible text on your screen instead.\","
+    },
+    {
+      "name": "503 failure spoken as an exhausted allowance",
+      "file": "src-tauri/src/screen_tour.rs",
+      "find": "ERR_BUSY => \"Gemini is overloaded right now, sir. Reading the visible text on your screen instead.\",",
+      "replace": "ERR_BUSY => \"Today's Gemini allowance is used up, sir. Reading the visible text on your screen instead.\","
+    },
+    {
+      "name": "read/scan requests go to the paid vision tour",
+      "file": "src-tauri/src/screen_tour.rs",
+      "find": "    if transcribe && !analyse {\n        return false;\n    }",
+      "replace": ""
+    },
+    {
+      "name": "any failure marks the day's quota used",
+      "file": "src-tauri/src/vision.rs",
+      "find": "if ladder_end(c.n_429, c.n_auth + c.n_5xx + c.n_net + c.n_other) {",
+      "replace": "if c.n_429 > 0 {"
+    },
+    {
+      "name": "a mixed failure is reported as a rejected key",
+      "file": "src-tauri/src/vision.rs",
+      "find": "} else if c.n_auth > 0 && c.n_429 + c.n_5xx + c.n_net + c.n_other == 0 {",
+      "replace": "} else if c.n_auth > 0 {"
+    },
+    {
+      "name": "sensitive window is analysed",
+      "file": "src-tauri/src/screen_context.rs",
+      "find": "    if ctx.sensitive {\n        Some(\"This window is sensitive, so I won't analyse it.\")",
+      "replace": "    if false {\n        Some(\"This window is sensitive, so I won't analyse it.\")"
+    },
+    {
+      "name": "unverified capture region is analysed",
+      "file": "src-tauri/src/screen_context.rs",
+      "find": "        || !ctx.region_verified\n    {",
+      "replace": "    {"
+    },
+    {
+      "name": "focus change of window title ignored before capture",
+      "file": "src-tauri/src/screen_context.rs",
+      "find": "        && expected.window_title == current.window_title\n",
+      "replace": ""
+    },
+    {
+      "name": "moved window region ignored before capture",
+      "file": "src-tauri/src/screen_context.rs",
+      "find": "        && expected.region == current.region\n",
+      "replace": ""
+    },
+    {
+      "name": "changed page address fingerprint ignored before capture",
+      "file": "src-tauri/src/screen_context.rs",
+      "find": "        && expected.url_fingerprint == current.url_fingerprint\n",
+      "replace": ""
+    }
+  ]
+}

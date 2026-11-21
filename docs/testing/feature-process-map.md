@@ -26,12 +26,12 @@ Which runtime processes and threads each feature depends on, and what Focus Mode
 | Installer / release pipeline | build scripts / Hub WebView2 | n/a |
 | Boot briefing + resume points | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Session snapshot / restore | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
-| Screen analysis / narrated tour | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | Overnight record + morning briefing | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Live mode: WhatsApp / browser flows | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Timetable from an image + reminders | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Calendar read / add | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | TTS offline (Kokoro-82M) | Edge TTS connection, Kokoro ONNX (lazy), rodio playback, volume lease watchdog | cache refresh, voice sync and swap downloads deferred |
+| Screen analysis / narrated tour | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | Music control (Spotify / Apple Music) | media keys / deep links / Routes API | on demand |
 | Directed-speech gate (TV / side-talk filter) | capture loop, VAD, turn-detect ONNX | keeps running |
 | Compound commands ("X then Y") | regex tier in-process; BERT-Mini NLU sidecar (39218, lazy, 60 s idle); 9Router HTTP | on demand |

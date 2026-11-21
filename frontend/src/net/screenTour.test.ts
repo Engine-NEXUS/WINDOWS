@@ -121,6 +121,45 @@ describe("screen tour orb flow", () => {
     expect(orb().state).toBe("listening");
   });
 
+  it("a second fetch supersedes the first one's pending hide", () => {
+    ttsMock.playing = true;
+    handleTourPhase({ phase: "fetching", request_id: "r1" });
+    handleTourPhase({ phase: "fetching", request_id: "r2" });
+    ttsMock.playing = false;
+    vi.advanceTimersByTime(600);
+    // exactly one hide happened (r2's); r1's timer returned without touching the orb
+    expect(orb().visible).toBe(false);
+    orb().setVisible(true);
+    orb().setState("speaking");
+    vi.advanceTimersByTime(2000);
+    expect(orb().visible).toBe(true);
+  });
+
+  it("a failed tour closes the orb like a cancelled one", () => {
+    handleTourStart({ request_id: "r1" });
+    handleTourEnd({ request_id: "r1", reason: "failed" });
+    expect(isTourActive()).toBe(false);
+    expect(ttsMock.narration.at(-1)).toBe(false);
+    vi.advanceTimersByTime(1500);
+    expect(orb().visible).toBe(false);
+  });
+
+  it("a cancelled tour does not close the orb while speech is playing again", () => {
+    handleTourStart({ request_id: "r1" });
+    handleTourEnd({ request_id: "r1", reason: "cancelled" });
+    ttsMock.playing = true; // the legacy answer started speaking
+    vi.advanceTimersByTime(1500);
+    expect(orb().visible).toBe(true);
+    expect(orb().state).toBe("speaking");
+  });
+
+  it("a fallback for another request does not cancel this request's hide", () => {
+    handleTourPhase({ phase: "fetching", request_id: "r1" });
+    handleTourPhase({ phase: "fallback", request_id: "r0" });
+    vi.advanceTimersByTime(600);
+    expect(orb().visible).toBe(false);
+  });
+
   it("ignores an end from a stale tour", () => {
     handleTourStart({ request_id: "r2" });
     handleTourEnd({ request_id: "r1", reason: "done" });

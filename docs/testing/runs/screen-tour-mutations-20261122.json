@@ -1,0 +1,76 @@
+{
+  "file": "src-tauri/src/screen_tour.rs",
+  "test": "--lib -- --test-threads=1 screen_tour:: screen_context:: vision::tests::ladder",
+  "results": [
+    {
+      "name": "tour shows a callout without clearing the previous one",
+      "status": "KILLED",
+      "detail": "panicked at src\\screen_tour.rs:1584:9: assertion `left == right` failed"
+    },
+    {
+      "name": "tour End can be emitted twice",
+      "status": "KILLED",
+      "detail": "panicked at src\\screen_tour.rs:1600:13: assertion failed: e.end(EndReason::Cancelled).is_empty()"
+    },
+    {
+      "name": "tour accepts a stale step-ended event",
+      "status": "KILLED",
+      "detail": "panicked at src\\screen_tour.rs:1574:9: assertion failed: e.step_ended(0).is_empty()"
+    },
+    {
+      "name": "tour replays a duplicate or stale step start",
+      "status": "KILLED",
+      "detail": "panicked at src\\screen_tour.rs:1572:9: assertion failed: e.step_started(1).is_empty()"
+    },
+    {
+      "name": "rejected-key failure spoken as the generic line",
+      "status": "KILLED",
+      "detail": "panicked at src\\screen_tour.rs:1256:17: assertion `left != right` failed: Gemini rejected the key fell to the generic line"
+    },
+    {
+      "name": "503 failure spoken as an exhausted allowance",
+      "status": "KILLED",
+      "detail": "panicked at src\\screen_tour.rs:1265:9: assertion failed: failure_speech(ERR_BUSY).contains(\"overloaded\")"
+    },
+    {
+      "name": "read/scan requests go to the paid vision tour",
+      "status": "KILLED",
+      "detail": "panicked at src\\screen_tour.rs:1705:13: should stay OCR: read what is on my screen"
+    },
+    {
+      "name": "any failure marks the day's quota used",
+      "status": "SURVIVED",
+      "detail": ""
+    },
+    {
+      "name": "a mixed failure is reported as a rejected key",
+      "status": "SURVIVED",
+      "detail": ""
+    },
+    {
+      "name": "sensitive window is analysed",
+      "status": "KILLED",
+      "detail": "panicked at src\\screen_context.rs:801:9: assertion failed: capture_block_reason(&build_context(&changed, None, 1920, 1080)).is_some()"
+    },
+    {
+      "name": "unverified capture region is analysed",
+      "status": "KILLED",
+      "detail": "panicked at src\\screen_context.rs:797:9: assertion failed: capture_block_reason(&build_context(&changed, None, 1920, 1080)).is_some()"
+    },
+    {
+      "name": "focus change of window title ignored before capture",
+      "status": "KILLED",
+      "detail": "panicked at src\\screen_context.rs:783:9: assertion failed: !same_capture_target(&expected, &build_context(&changed, None, 1920, 1080))"
+    },
+    {
+      "name": "moved window region ignored before capture",
+      "status": "KILLED",
+      "detail": "panicked at src\\screen_context.rs:794:9: assertion failed: !same_capture_target(&expected, &build_context(&changed, None, 1920, 1080))"
+    },
+    {
+      "name": "changed page address ignored before capture",
+      "status": "SURVIVED",
+      "detail": ""
+    }
+  ]
+}

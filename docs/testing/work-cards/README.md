@@ -26,12 +26,12 @@ One card per in-scope feature, in queue order (lowest raw score first). Generate
 | 20 | [Installer / release pipeline](20-installer-release-pipeline.md) | Platform and quality | 61.8% | B T L S I |
 | 21 | [Boot briefing + resume points](21-boot-briefing-resume-points.md) | Memory and proactive | 63.1% | L |
 | 22 | [Session snapshot / restore](22-session-snapshot-restore.md) | Memory and proactive | 63.5% | L |
-| 23 | [Screen analysis / narrated tour](23-screen-analysis-narrated-tour.md) | Desktop control | 64.2% | L S I |
-| 24 | [Overnight record + morning briefing](24-overnight-record-morning-briefing.md) | Agent control | 64.8% | L |
-| 25 | [Live mode: WhatsApp / browser flows](25-live-mode-whatsapp-browser-flows.md) | Desktop control | 65.3% | L I |
-| 26 | [Timetable from an image + reminders](26-timetable-from-an-image-reminders.md) | Memory and proactive | 65.5% | T L |
-| 27 | [Calendar read / add](27-calendar-read-add.md) | Memory and proactive | 66.3% | L |
-| 28 | [TTS offline (Kokoro-82M)](28-tts-offline-kokoro-82m.md) | Voice front end | 66.5% | L I |
+| 23 | [Overnight record + morning briefing](23-overnight-record-morning-briefing.md) | Agent control | 64.8% | L |
+| 24 | [Live mode: WhatsApp / browser flows](24-live-mode-whatsapp-browser-flows.md) | Desktop control | 65.3% | L I |
+| 25 | [Timetable from an image + reminders](25-timetable-from-an-image-reminders.md) | Memory and proactive | 65.5% | T L |
+| 26 | [Calendar read / add](26-calendar-read-add.md) | Memory and proactive | 66.3% | L |
+| 27 | [TTS offline (Kokoro-82M)](27-tts-offline-kokoro-82m.md) | Voice front end | 66.5% | L I |
+| 28 | [Screen analysis / narrated tour](28-screen-analysis-narrated-tour.md) | Desktop control | 66.7% | L I |
 | 29 | [Music control (Spotify / Apple Music)](29-music-control-spotify-apple-music.md) | Desktop control | 67.0% | L |
 | 30 | [Directed-speech gate (TV / side-talk filter)](30-directed-speech-gate-tv-side-talk-filter.md) | Voice front end | 67.0% | L I |
 | 31 | [Compound commands ("X then Y")](31-compound-commands-x-then-y.md) | Understanding | 68.0% | L I |

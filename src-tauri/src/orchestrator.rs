@@ -5387,7 +5387,7 @@ async fn run_screen_tour<R: Runtime>(
                 serde_json::json!({ "phase": "fallback", "request_id": rid }),
             );
             if spoken {
-                speak_line(app, "I'm having trouble reaching the vision service, sir. Reading the visible text on your screen instead.".to_string(), &rid);
+                speak_line(app, st::failure_speech(&e).to_string(), &rid);
             }
             if let Some(res) = explain_screen_text(app, prompt, &rid, &ctx).await {
                 clear_active_request(&rid);
@@ -6739,6 +6739,9 @@ async fn read_screen_json<R: Runtime, T>(
             crate::vision::mark_exhausted(&dir, "gemini");
             Err("My vision allowance for today is used up, sir.".into())
         }
+        Ok(crate::vision::JsonStep::Rejected) => Err("Gemini rejected the key, sir. Check it in Command Hub, Accounts.".into()),
+        Ok(crate::vision::JsonStep::Busy) => Err("Gemini is overloaded right now, sir. Try again in a minute.".into()),
+        Ok(crate::vision::JsonStep::Offline) => Err("I can't reach the vision service, sir. Are we offline?".into()),
         Ok(crate::vision::JsonStep::Miss) => Err("I couldn't read that, sir.".into()),
     }
 }
@@ -6884,6 +6887,15 @@ async fn run_analyse_this_email<R: Runtime>(app: AppHandle<R>) -> Result<Process
             Ok(crate::vision::JsonStep::Quota) => {
                 crate::vision::mark_exhausted(&dir, "gemini");
                 return say_and_finish(&app, request_id, "My vision allowance for today is used up, sir.".into());
+            }
+            Ok(crate::vision::JsonStep::Rejected) => {
+                return say_and_finish(&app, request_id, "Gemini rejected the key, sir. Check it in Command Hub, Accounts.".into());
+            }
+            Ok(crate::vision::JsonStep::Busy) => {
+                return say_and_finish(&app, request_id, "Gemini is overloaded right now, sir. Try again in a minute.".into());
+            }
+            Ok(crate::vision::JsonStep::Offline) => {
+                return say_and_finish(&app, request_id, "I can't reach the vision service, sir. Are we offline?".into());
             }
             Ok(crate::vision::JsonStep::Miss) => {
                 return say_and_finish(&app, request_id, "I couldn't read an email on this screen, sir.".into());

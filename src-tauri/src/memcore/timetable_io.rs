@@ -92,7 +92,10 @@ pub async fn extract<R: Runtime>(
             crate::vision::mark_exhausted(&dir, "gemini");
             Err(ExtractError::Quota)
         }
-        Ok(crate::vision::JsonStep::Miss) => Err(ExtractError::Unreadable),
+        Ok(crate::vision::JsonStep::Offline) => Err(ExtractError::Timeout),
+        Ok(crate::vision::JsonStep::Miss)
+        | Ok(crate::vision::JsonStep::Rejected)
+        | Ok(crate::vision::JsonStep::Busy) => Err(ExtractError::Unreadable),
     }
 }
 
@@ -222,7 +225,7 @@ mod tests {
                 assert_eq!(picked.len(), 3, "expected DSA practice, Revision, Dinner");
             }
             crate::vision::JsonStep::Quota => panic!("quota"),
-            crate::vision::JsonStep::Miss => panic!("no usable answer"),
+            _ => panic!("no usable answer"),
         }
     }
 }
