@@ -300,6 +300,8 @@ pub enum MatchKind {
     Contains,
     /// Within two edits of a key ("chroem" -> "chrome").
     Fuzzy,
+    /// Sounds like a key although the letters differ ("load pad" -> "notepad"). Always a guess: the user is asked.
+    Phonetic,
 }
 
 /// Words that may trail an app key without changing which app is meant.
@@ -359,6 +361,32 @@ pub fn lookup_with_kind(query: &str) -> Option<(AppEntry, String, MatchKind)> {
 
     let cache = registry.cache.read();
     lookup_in(&cache, &q)
+}
+
+/// Sound-based suggestion for a phrase the tiered lookup found nothing for ("load pad" -> Notepad). Used only by the launch gate, where
+/// every hit is a question ("did you mean …?"), never by callers that act on a lookup directly. Set `NEXUS_NO_SOUND_MATCH=1` to disable.
+pub fn lookup_phonetic(query: &str) -> Option<(AppEntry, String)> {
+    if std::env::var_os("NEXUS_NO_SOUND_MATCH").is_some() {
+        return None;
+    }
+    let cache = REGISTRY.cache.read();
+    phonetic_in(&cache, &query.to_lowercase())
+}
+
+/// Pure core of [`lookup_phonetic`] (unit-tested).
+fn phonetic_in(cache: &HashMap<String, AppEntry>, q: &str) -> Option<(AppEntry, String)> {
+    let index = crate::sound_match::PhoneticIndex::new(
+        cache.iter().map(|(key, entry)| (key.clone(), entry.display_name.to_lowercase())),
+    );
+    let hit = index.nearest(q)?;
+    tracing::info!(
+        "[SOUND-MATCH] '{}' sounds like '{}' (distance {:.2}, margin {:.2}); asking before opening",
+        q,
+        hit.label,
+        hit.dist,
+        hit.margin
+    );
+    cache.get(&hit.label).map(|e| (e.clone(), hit.label))
 }
 
 /// Strict lookup for callers that REWRITE the spoken text (the intent parser):
@@ -546,7 +574,9 @@ pub(crate) fn launch_looks_like_installer(entry: &AppEntry) -> bool {
 /// - registry miss → ProceedLegacy (legacy resolvers keep working).
 /// Pure decision apart from the registry read itself (unit-tested).
 pub fn assess_open_target(query: &str) -> OpenAssessment {
-    let Some((entry, matched, kind)) = lookup_with_kind(query) else {
+    let Some((entry, matched, kind)) = lookup_with_kind(query)
+        .or_else(|| lookup_phonetic(query).map(|(entry, key)| (entry, key, MatchKind::Phonetic)))
+    else {
         return OpenAssessment::ProceedLegacy;
     };
     let query_has_installer_word = query
@@ -569,11 +599,7 @@ pub fn assess_open_target(query: &str) -> OpenAssessment {
         };
     }
     let confidence = match_confidence(query, &matched);
-    let confident = match kind {
-        MatchKind::Resolved | MatchKind::Exact => true,
-        MatchKind::Prefix => confidence >= 0.5,
-        MatchKind::Contains | MatchKind::Fuzzy => false,
-    };
+    let confident = kind_may_launch(kind, confidence);
     if !confident {
         tracing::warn!(
             "app-match: guess ({:?}, coverage {:.2}) '{}' → '{}', asking first",
@@ -590,6 +616,15 @@ pub fn assess_open_target(query: &str) -> OpenAssessment {
         return OpenAssessment::Confirm { entry, message };
     }
     OpenAssessment::Proceed(entry)
+}
+
+/// Only Resolved / Exact / well-covered Prefix matches may launch without asking. Sound-alike (Phonetic), Contains and Fuzzy hits are guesses.
+fn kind_may_launch(kind: MatchKind, coverage: f32) -> bool {
+    match kind {
+        MatchKind::Resolved | MatchKind::Exact => true,
+        MatchKind::Prefix => coverage >= 0.5,
+        MatchKind::Contains | MatchKind::Fuzzy | MatchKind::Phonetic => false,
+    }
 }
 
 /// Remember that the user confirmed `spoken` means `display_name`, so the
@@ -2604,6 +2639,42 @@ mod tests {
                 hit.map(|(e, k, kind)| (e.display_name, k, kind))
             );
         }
+    }
+
+    #[test]
+    fn a_sound_alike_hit_is_always_a_question_never_a_launch() {
+        for coverage in [0.0f32, 0.5, 1.0] {
+            assert!(!kind_may_launch(MatchKind::Phonetic, coverage), "coverage {coverage}");
+        }
+        assert!(kind_may_launch(MatchKind::Exact, 0.0));
+        assert!(kind_may_launch(MatchKind::Prefix, 0.5));
+        assert!(!kind_may_launch(MatchKind::Fuzzy, 1.0));
+    }
+
+    #[test]
+    fn phonetic_tier_finds_the_app_a_sound_alike_phrase_meant() {
+        let mut c = live_like_cache();
+        for (display, names, exe) in [("Notepad", vec!["notepad"], r"C:\x\notepad.exe"), ("Spotify", vec!["spotify"], r"C:\x\spotify.exe")] {
+            let a = app(display, &names, exe);
+            for n in &a.search_names {
+                c.insert(n.clone(), a.clone());
+            }
+        }
+        for (heard, meant) in [("load pad", "Notepad"), ("note pad", "Notepad"), ("brief", "Brave"), ("what's up", "WhatsApp"), ("spot if I", "Spotify")] {
+            let (entry, _) = phonetic_in(&c, heard).unwrap_or_else(|| panic!("{heard:?} got no sound-alike suggestion"));
+            assert_eq!(entry.display_name, meant, "{heard:?}");
+        }
+    }
+
+    #[test]
+    fn phonetic_tier_stays_quiet_for_unrelated_phrases_and_never_picks_the_intel_installer() {
+        let c = live_like_cache();
+        for q in ["my chart with mommy and what so", "mommychart", "m ommychart", "the window", "something completely different", "a", ""] {
+            if let Some((e, key)) = phonetic_in(&c, q) {
+                assert!(!e.display_name.contains('®'), "{q:?} must never reach an Intel® entry, got {key}");
+            }
+        }
+        assert!(phonetic_in(&c, "elephant parade tomorrow").is_none());
     }
 
     #[test]
