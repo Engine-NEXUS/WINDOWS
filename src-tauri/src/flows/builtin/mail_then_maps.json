@@ -1,0 +1,18 @@
+{
+  "id": "mail_then_maps",
+  "description": "Check the mail, take the place or Maps link inside it, open directions to it.",
+  "enabled": true,
+  "signature": ["mail_check", "maps_from_mail"],
+  "examples": [
+    "check the email and open maps to the location link in the email",
+    "read my latest email and open the location in maps",
+    "check my mail and open the address from it in maps",
+    "check the email and show the location in that mail on maps"
+  ],
+  "slots": [],
+  "steps": [
+    { "id": "mail", "cap": "mail.check" },
+    { "id": "place", "cap": "mail.extract_place", "in": { "mail": "$mail.ref" } },
+    { "id": "route", "cap": "maps.open_route", "in": { "destination": "$place.place" } }
+  ]
+}

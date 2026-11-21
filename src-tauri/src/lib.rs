@@ -165,6 +165,7 @@ pub mod screen;
 pub mod shortcuts;
 pub(crate) mod telegram;
 pub(crate) mod command_center;
+pub(crate) mod flows;
 pub(crate) mod ghost_center;
 pub(crate) mod desktop_control;
 pub(crate) mod desktop_choices;

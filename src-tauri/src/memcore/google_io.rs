@@ -173,6 +173,13 @@ pub async fn gmail_body(c: &GoogleClient, id: &str) -> Result<String, GoogleErro
     Ok(super::explain::extract_body_text(&v, super::explain::BODY_EXTRACT_CHARS))
 }
 
+/// ONE message as Gmail returns it (`format=full`), for pulling a place or link out of a mail the user asked about.
+/// Held in memory only: the caller must never store, log or speak it.
+pub async fn gmail_full(c: &GoogleClient, id: &str) -> Result<Value, GoogleError> {
+    let url = format!("{}/messages/{}?format=full", gmail_base(), mailtriage::pct_encode(id));
+    c.get_json(&url).await
+}
+
 /// Ids of recent inbox mail, for the quiet catch-up on first connect.
 pub async fn gmail_recent_ids(c: &GoogleClient) -> Result<Vec<String>, GoogleError> {
     let url = format!(
