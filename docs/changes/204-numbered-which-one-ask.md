@@ -46,7 +46,6 @@ every other phrase keeps the earlier behaviour (one "did you mean", an exact ope
   message and offer window as the single question, but no one has said it to a running NEXUS.
 - How often real speech produces a close pair. The probe phrases were typed, not heard; live `[SOUND-MATCH] ... both`
   lines will show it.
-- Separate, pre-existing: `cargo test` writes to the real `%APPDATA%
-exuspp_cache.json` and
+- Separate, pre-existing: `cargo test` writes to the real `%APPDATA%\nexus\app_cache.json` and
   `app_resolution_cache.json` (it inserts "CustomTestApp" and touches timestamps), and both the personal and
   contributor builds share that folder.
