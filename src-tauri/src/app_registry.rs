@@ -671,12 +671,11 @@ pub fn assess_open_target(query: &str) -> OpenAssessment {
     }
     let confidence = match_confidence(query, &matched);
     let confident = kind_may_launch(kind, confidence);
-    // A text-level guess ("lock" is inside "clock") that sounds just as much like another app is a question with two answers.
+    // A text-level guess (a substring or typo match) is weaker evidence than the whole phrase sounding like two whole app
+    // names. Live, "windsor" matched "Where Winds Meet" by text while it sounded like Windsurf and Winword: ask those two.
     if !confident && matches!(kind, MatchKind::Contains | MatchKind::Fuzzy) {
         if let Some(entries) = lookup_phonetic_pair(query) {
-            if entries.iter().any(|e| e.display_name == entry.display_name) {
-                return OpenAssessment::Pick { entries };
-            }
+            return OpenAssessment::Pick { entries };
         }
     }
     if !confident {
@@ -2892,6 +2891,21 @@ mod tests {
         }
         // An exact name still opens at once.
         assert!(matches!(assess_open_target("clock"), OpenAssessment::Proceed(_)));
+        drop(_g);
+        // The live case: "windsor" is a text match for Where Winds Meet but sounds like Windsurf and Winword.
+        let _g = test_support::install(vec![
+            app("Windsurf", &["windsurf"], r"C:\x\windsurf.exe"),
+            app("Winword", &["winword"], r"C:\x\winword.exe"),
+            app("Where Winds Meet", &["where winds meet", "winds"], r"C:\x\wwm.exe"),
+        ]);
+        match assess_open_target("windsor") {
+            OpenAssessment::Pick { entries } => {
+                let mut names: Vec<&str> = entries.iter().map(|e| e.display_name.as_str()).collect();
+                names.sort();
+                assert_eq!(names, ["Windsurf", "Winword"]);
+            }
+            other => panic!("expected Pick for windsor, got {}", label(&other)),
+        }
     }
 
     #[test]

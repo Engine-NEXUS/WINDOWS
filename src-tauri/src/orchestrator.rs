@@ -1040,7 +1040,11 @@ async fn process_transcript_inner<R: Runtime>(
                     && offer::reask_once()
                 {
                     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-                    return say_and_finish(&app, request_id, "Sorry sir, was that a yes or a no?".into());
+                    let again = match offer::peek() {
+                        Some(Offer::OpenAppPick { choices, spoken }) => format!("Sorry sir, which one? {}", offer::pick_question(&spoken, &choices)),
+                        _ => "Sorry sir, was that a yes or a no?".to_string(),
+                    };
+                    return say_and_finish(&app, request_id, again);
                 }
                 offer::clear();
                 crate::action_kernel::pending::clear();
