@@ -738,6 +738,19 @@ pub fn hint_names(n: usize) -> Vec<String> {
     pick_hint_names(&entries, n)
 }
 
+/// Count one use for the app that was actually opened, whatever phrase found it. `record_usage` only counts when the spoken phrase is
+/// one of the app's own search names, so a heard-wrong phrase that still resolved ("note pad") never counted and favourites stayed at 0.
+pub fn count_use(entry: &AppEntry) {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let mut cache = REGISTRY.cache.write();
+    for e in cache.values_mut() {
+        if e.display_name.eq_ignore_ascii_case(&entry.display_name) {
+            e.use_count += 1;
+            e.last_used = now;
+        }
+    }
+}
+
 /// Record that an app was used (for usage-weighted ranking + resolution cache).
 /// Also saves the phrase → app mapping so future lookups are instant.
 pub fn record_usage(query: &str) {
@@ -755,8 +768,7 @@ pub fn record_usage(query: &str) {
         let mut matched = None;
         for entry in cache.values_mut() {
             if entry.search_names.contains(&q) {
-                entry.use_count += 1;
-                entry.last_used = now;
+                // use_count itself is bumped by `count_use` (called with the opened entry), so a use is never counted twice.
                 if matched.is_none() {
                     matched = Some(entry.clone());
                 }
@@ -2568,6 +2580,17 @@ mod tests {
             use_count: 0,
             last_used: 0,
         }
+    }
+
+    #[test]
+    fn count_use_counts_the_opened_app_even_when_the_phrase_was_heard_wrong() {
+        let inst = test_support::install(vec![app("Notepad", &["notepad"], r"C:\Apps\notepad.exe")]);
+        let opened = lookup("notepad").expect("installed");
+        count_use(&opened);
+        count_use(&opened);
+        let names = hint_names(5);
+        drop(inst);
+        assert_eq!(names, vec!["Notepad"]);
     }
 
     #[test]
