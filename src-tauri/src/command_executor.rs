@@ -993,6 +993,7 @@ pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String
 
         // PRIORITY 1: Focus existing window if app is already running
         if app_registry::try_focus_existing(&entry) {
+            app_registry::count_use(&entry);
             app_registry::record_usage(target);
             return Ok(CommandResult {
                 success: true,
@@ -1019,6 +1020,7 @@ pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String
         match app_registry::launch(&entry) {
             Ok(()) => {
                 app_registry::note_launched(&entry);
+                app_registry::count_use(&entry);
                 app_registry::record_usage(target);
                 return Ok(CommandResult {
                     success: true,
