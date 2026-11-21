@@ -36,9 +36,92 @@ pub fn restyle_greeting(reply: &str, name: Option<&str>) -> String {
     reply.replace(", sir", &addr).replace("  ", " ")
 }
 
+/// Words that may precede a vocative name ("Hi Lakshya.", "Okay Lakshya,").
+const LEAD_IN: &[&str] = &["hi", "hello", "hey", "ok", "okay", "thanks", "thank", "sure", "yes", "no", "right", "well", "good"];
+
+/// Butler mode guard, independent of what the model was told: when a reply addresses the owner by name
+/// ("Sure, Lakshya." / "Lakshya, here you go") the name becomes "sir". Only the vocative position is touched
+/// (name right after a comma, the start of the text or a lead-in word, and followed by punctuation or the end),
+/// so a repository, file or person that merely shares the name is left alone. Pure.
+pub fn enforce_address(reply: &str, names: &[String]) -> String {
+    let wanted: Vec<String> = names
+        .iter()
+        .flat_map(|n| n.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()).collect::<Vec<_>>())
+        .filter(|w| w.chars().count() >= 3 && w != "sir")
+        .collect();
+    if wanted.is_empty() {
+        return reply.to_string();
+    }
+    let chars: Vec<char> = reply.chars().collect();
+    let mut out = String::with_capacity(reply.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if !chars[i].is_alphanumeric() {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '\'') {
+            i += 1;
+        }
+        let word: String = chars[start..i].iter().collect();
+        let lower = word.to_lowercase();
+        let hit = wanted.contains(&lower) && {
+            // previous non-space char / previous word
+            let mut p = start;
+            while p > 0 && chars[p - 1] == ' ' {
+                p -= 1;
+            }
+            let prev_ok = p == 0 || matches!(chars[p - 1], ',' | '.' | '!' | '?' | '\n') || {
+                let mut q = p;
+                while q > 0 && chars[q - 1].is_alphanumeric() {
+                    q -= 1;
+                }
+                let prev_word: String = chars[q..p].iter().collect::<String>().to_lowercase();
+                LEAD_IN.contains(&prev_word.as_str())
+            };
+            let mut n = i;
+            while n < chars.len() && chars[n] == ' ' {
+                n += 1;
+            }
+            let next_ok = n >= chars.len() || matches!(chars[n], ',' | '.' | '!' | '?' | ';' | ':' | '\n');
+            prev_ok && next_ok
+        };
+        if hit {
+            // keep sentence-initial capitalisation: "sir" mid-sentence, "Sir" at the start
+            let at_start = out.trim_end().is_empty() || out.trim_end().ends_with(['.', '!', '?']);
+            out.push_str(if at_start { "Sir" } else { "sir" });
+        } else {
+            out.push_str(&word);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn me() -> Vec<String> {
+        vec!["chitkul lakshya.".into(), "Lakshya".into(), "Lakshya Official".into()]
+    }
+
+    #[test]
+    fn name_used_as_address_becomes_sir() {
+        assert_eq!(enforce_address("Sure, Lakshya.", &me()), "Sure, sir.");
+        assert_eq!(enforce_address("Lakshya, here you go.", &me()), "Sir, here you go.");
+        assert_eq!(enforce_address("Hi Lakshya! It is sunny.", &me()), "Hi sir! It is sunny.");
+        assert_eq!(enforce_address("Done, Chitkul.", &me()), "Done, sir.");
+    }
+
+    #[test]
+    fn names_that_are_content_are_left_alone() {
+        assert_eq!(enforce_address("Your repo Lakshya Official has 3 PRs.", &me()), "Your repo Lakshya Official has 3 PRs.");
+        assert_eq!(enforce_address("Opening the lakshya folder.", &me()), "Opening the lakshya folder.");
+        assert_eq!(enforce_address("Sure, sir.", &me()), "Sure, sir.");
+        assert_eq!(enforce_address("Sure, Lakshya.", &[]), "Sure, Lakshya.");
+    }
 
     #[test]
     fn test_butler_always_sir() {

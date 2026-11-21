@@ -423,12 +423,33 @@ async fn speak_prompt_and_hold<R: Runtime>(
     })
 }
 
+/// Butler mode: whatever produced a result (local line, 9Router, Worker), the owner is addressed as "sir", never by
+/// name. The cloud prompts ask for it too, but a model can ignore a prompt; this guard cannot be ignored.
+fn enforce_butler_address<R: Runtime>(app: &AppHandle<R>, payload: &mut serde_json::Value) {
+    if crate::persona::is_friend(&crate::commands::read_persona_mode(app)) {
+        return;
+    }
+    let Some(text) = payload.get("text").and_then(|v| v.as_str()) else { return };
+    let Ok(dir) = app.path().app_data_dir() else { return };
+    let names: Vec<String> = ["name", "user_first_name", "user_name", "nickname"]
+        .iter()
+        .filter_map(|k| crate::memory::core_value(&dir, k))
+        .collect();
+    let fixed = crate::persona::enforce_address(text, &names);
+    if fixed != text {
+        payload["text"] = serde_json::Value::String(fixed);
+    }
+}
+
 /// Emit an orchestrator event to the frontend.
 pub(crate) fn emit<R: Runtime>(app: &AppHandle<R>, event: &OrchestratorEvent) {
     if matches!(event, OrchestratorEvent::Result { .. }) {
         crate::latency::mark(crate::latency::Stage::Answer);
     }
     let mut payload = serde_json::to_value(event).unwrap_or_default();
+    if matches!(event, OrchestratorEvent::Result { .. }) {
+        enforce_butler_address(app, &mut payload);
+    }
     if let Some(id) = payload.get("request_id").and_then(|v| v.as_str()) {
         let source = ACTIVE_REQUEST.try_lock().ok()
             .and_then(|guard| guard.as_ref().filter(|active| active.id == id)
