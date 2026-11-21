@@ -1014,6 +1014,20 @@ async fn process_transcript_inner<R: Runtime>(
             Some(Offer::FileConfirm) if reply != Reply::Other => {
                 return run_file_confirm(app, reply, &transcript, origin).await;
             }
+            // "Notepad or Notion? Say one or two": a number or a distinctive name picks; "no" drops it; a bare "yes" asks again.
+            Some(Offer::OpenAppPick { ref choices, ref spoken })
+                if pick_route(choices, &transcript, reply) == PickRoute::AskAgain =>
+            {
+                let question = offer::pick_question(spoken, choices);
+                let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                offer::set(Offer::OpenAppPick { choices: choices.clone(), spoken: spoken.clone() }, true);
+                return say_and_finish(&app, request_id, format!("Which one, sir? {question}"));
+            }
+            Some(o @ Offer::OpenAppPick { .. })
+                if matches!(&o, Offer::OpenAppPick { choices, .. } if pick_route(choices, &transcript, reply) == PickRoute::Answer) =>
+            {
+                return run_offer_reply(app, o, reply, &transcript).await;
+            }
             Some(o @ Offer::Choose { .. }) if has_choice || reply != Reply::Other => {
                 return run_offer_reply(app, o, reply, &transcript).await;
             }
@@ -5899,6 +5913,30 @@ async fn start_activity<R: Runtime>(
     timetable_io::start_speech(title, &targets, &outcomes, youtube_missing)
 }
 
+/// How a reply to "A or B? Say one or two" is handled.
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum PickRoute {
+    /// A number, a distinctive name, "no" or "later": answer the question (a "no" drops it).
+    Answer,
+    /// A bare "yes" does not say which: ask again instead of guessing.
+    AskAgain,
+    /// Anything else is an ordinary command; the question is dropped.
+    NotAnAnswer,
+}
+
+fn pick_route(choices: &[String], transcript: &str, reply: crate::memcore::offer::Reply) -> PickRoute {
+    use crate::memcore::offer::{parse_pick, Reply};
+    if parse_pick(transcript, choices).is_some() {
+        PickRoute::Answer
+    } else if reply == Reply::Yes {
+        PickRoute::AskAgain
+    } else if reply != Reply::Other {
+        PickRoute::Answer
+    } else {
+        PickRoute::NotAnAnswer
+    }
+}
+
 /// The user answered a question NEXUS asked (see the intercept in
 /// `process_transcript`).
 async fn run_offer_reply<R: Runtime>(
@@ -6072,6 +6110,17 @@ async fn run_offer_reply<R: Runtime>(
             }
         }
         (Offer::OpenApp { .. }, _) => "Understood, sir. I won't open anything.".to_string(),
+        (Offer::OpenAppPick { choices, spoken }, _) => match offer::parse_pick(text, &choices).and_then(|i| choices.get(i).cloned()) {
+            Some(display_name) => {
+                // The pick is the training signal: next time this phrase goes straight to that app.
+                crate::app_registry::confirm_resolution(&spoken, &display_name);
+                match crate::command_executor::resolve_and_open_app(&display_name.to_lowercase()) {
+                    Ok(r) => r.message,
+                    Err(e) => e,
+                }
+            }
+            None => "Understood, sir. I won't open anything.".to_string(),
+        },
         (Offer::CodeRabbitReview { repo, pr }, Reply::Yes) => match crate::coderabbit_review::start_review(app.clone(), repo, pr).await {
             Ok(_) => crate::coderabbit_review::next_working_line().to_string(),
             Err(why) => why,
@@ -10256,6 +10305,7 @@ fn may_answer_offer(
                 | Offer::HookSetup { .. }
                 | Offer::FileConfirm
                 | Offer::OpenApp { .. }
+                | Offer::OpenAppPick { .. }
                 | Offer::AddEvent { .. }
                 | Offer::ClearTimetable
                 | Offer::ReopenSession
@@ -11285,6 +11335,22 @@ mod tests {
     }
 
     #[test]
+    fn replies_to_the_numbered_app_question_are_routed_safely() {
+        use super::{pick_route, PickRoute};
+        use crate::memcore::offer::{classify, Reply};
+        let c = vec!["Clock".to_string(), "Block".to_string()];
+        let route = |t: &str| pick_route(&c, t, classify(t));
+        assert_eq!(route("one"), PickRoute::Answer);
+        assert_eq!(route("the second one"), PickRoute::Answer);
+        assert_eq!(route("clock"), PickRoute::Answer);
+        assert_eq!(route("no"), PickRoute::Answer, "a no drops the question");
+        assert_eq!(route("not now"), PickRoute::Answer);
+        assert_eq!(route("yes"), PickRoute::AskAgain, "yes does not say which");
+        assert_eq!(route("what is the weather today"), PickRoute::NotAnAnswer);
+        assert_eq!(pick_route(&c, "maybe", Reply::Other), PickRoute::NotAnAnswer);
+    }
+
+    #[test]
     fn who_may_answer_an_offer() {
         use super::may_answer_offer as ok;
         use crate::memcore::offer::Offer;
@@ -11292,6 +11358,8 @@ mod tests {
         let power = Offer::Power { kind: "shutdown".into() };
         let open = Offer::OpenApp { display_name: "Google Chat".into(), spoken: "mummy chat".into() };
         let start = Offer::Start { title: "DSA".into(), activity: "dsa".into() };
+        let pick = Offer::OpenAppPick { choices: vec!["Clock".into(), "Block".into()], spoken: "lock".into() };
+        assert!(ok(Verified, &pick) && !ok(Rejected, &pick) && !ok(Uncertain, &pick), "an app launch is never answered by an uncertain voice");
         // The owner (or an unenrolled setup) may answer anything.
         for o in [&power, &open, &start] {
             assert!(ok(Verified, o));

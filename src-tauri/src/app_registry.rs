@@ -373,6 +373,37 @@ pub fn lookup_phonetic(query: &str) -> Option<(AppEntry, String)> {
     phonetic_in(&cache, &query.to_lowercase())
 }
 
+/// The two apps a phrase sounds about equally like (never an installer, never one app twice), for the numbered "which one?" ask.
+/// Only consulted after [`lookup_phonetic`] found nothing clear. `NEXUS_NO_SOUND_MATCH=1` disables it.
+pub fn lookup_phonetic_pair(query: &str) -> Option<[AppEntry; 2]> {
+    if std::env::var_os("NEXUS_NO_SOUND_MATCH").is_some() {
+        return None;
+    }
+    let cache = REGISTRY.cache.read();
+    phonetic_pair_in(&cache, &query.to_lowercase())
+}
+
+/// Pure core of [`lookup_phonetic_pair`] (unit-tested).
+fn phonetic_pair_in(cache: &HashMap<String, AppEntry>, q: &str) -> Option<[AppEntry; 2]> {
+    let index = crate::sound_match::PhoneticIndex::new(
+        cache.iter().map(|(key, entry)| (key.clone(), entry.display_name.to_lowercase())),
+    );
+    let crate::sound_match::Found::Close(a, b) = index.nearest_or_close(q)? else {
+        return None;
+    };
+    let (ea, eb) = (cache.get(&a.label)?.clone(), cache.get(&b.label)?.clone());
+    // An installer is never offered as a choice: say the full name to launch one.
+    let bad = |e: &AppEntry| is_installer_name(&e.display_name) || launch_looks_like_installer(e);
+    if ea.display_name == eb.display_name || bad(&ea) || bad(&eb) {
+        return None;
+    }
+    tracing::info!(
+        "[SOUND-MATCH] '{}' sounds like both '{}' ({:.2}) and '{}' ({:.2}); asking which",
+        q, a.label, a.dist, b.label, b.dist
+    );
+    Some([ea, eb])
+}
+
 /// Pure core of [`lookup_phonetic`] (unit-tested).
 fn phonetic_in(cache: &HashMap<String, AppEntry>, q: &str) -> Option<(AppEntry, String)> {
     let index = crate::sound_match::PhoneticIndex::new(
@@ -537,6 +568,8 @@ pub enum OpenAssessment {
     /// A guess (contains / fuzzy / low coverage): speak `message` and arm an
     /// "open this app?" offer for `entry`. Nothing is launched.
     Confirm { entry: AppEntry, message: String },
+    /// Two different apps sound about equally close to what was heard: ask which ("A or B? Say one or two"). Nothing is launched.
+    Pick { entries: [AppEntry; 2] },
     /// Unconfirmed installer — caller must speak this message and execute
     /// NOTHING (no launch, no Win-search drill).
     Refuse { message: String },
@@ -577,6 +610,10 @@ pub fn assess_open_target(query: &str) -> OpenAssessment {
     let Some((entry, matched, kind)) = lookup_with_kind(query)
         .or_else(|| lookup_phonetic(query).map(|(entry, key)| (entry, key, MatchKind::Phonetic)))
     else {
+        // Nothing clear: two apps may sound equally close, which is a question with two answers.
+        if let Some(entries) = lookup_phonetic_pair(query) {
+            return OpenAssessment::Pick { entries };
+        }
         return OpenAssessment::ProceedLegacy;
     };
     let query_has_installer_word = query
@@ -600,6 +637,14 @@ pub fn assess_open_target(query: &str) -> OpenAssessment {
     }
     let confidence = match_confidence(query, &matched);
     let confident = kind_may_launch(kind, confidence);
+    // A text-level guess ("lock" is inside "clock") that sounds just as much like another app is a question with two answers.
+    if !confident && matches!(kind, MatchKind::Contains | MatchKind::Fuzzy) {
+        if let Some(entries) = lookup_phonetic_pair(query) {
+            if entries.iter().any(|e| e.display_name == entry.display_name) {
+                return OpenAssessment::Pick { entries };
+            }
+        }
+    }
     if !confident {
         tracing::warn!(
             "app-match: guess ({:?}, coverage {:.2}) '{}' → '{}', asking first",
@@ -2727,6 +2772,62 @@ mod tests {
         }
     }
 
+    fn pair_cache(extra: &[(&str, &[&str], &str)]) -> HashMap<String, AppEntry> {
+        let mut c = HashMap::new();
+        for (display, names, exe) in extra {
+            let a = app(display, names, exe);
+            for n in &a.search_names {
+                c.insert(n.clone(), a.clone());
+            }
+        }
+        c
+    }
+
+    #[test]
+    fn two_equally_close_apps_become_a_numbered_question() {
+        let c = pair_cache(&[
+            ("Clock", &["clock"], r"C:\x\clock.exe"),
+            ("Block", &["block"], r"C:\x\block.exe"),
+            ("Calendar", &["calendar"], r"C:\x\cal.exe"),
+        ]);
+        let [a, b] = phonetic_pair_in(&c, "lock").expect("lock sounds like both");
+        let mut got = [a.display_name, b.display_name];
+        got.sort();
+        assert_eq!(got, ["Block".to_string(), "Clock".to_string()]);
+        // A clear single answer is the single "did you mean" path, never a pair.
+        assert!(phonetic_pair_in(&c, "calendar").is_none());
+        assert!(phonetic_pair_in(&c, "elephant parade tomorrow").is_none());
+    }
+
+    #[test]
+    fn a_pair_never_includes_an_installer_or_one_app_twice() {
+        let c = pair_cache(&[
+            ("Clock", &["clock"], r"C:\x\clock.exe"),
+            ("Block Setup", &["block"], r"C:\Package Cache\{a}\block-installer.exe"),
+        ]);
+        assert!(phonetic_pair_in(&c, "lock").is_none(), "an installer is not a choice");
+        let c = pair_cache(&[("Clock", &["clock", "klock"], r"C:\x\clock.exe")]);
+        assert!(phonetic_pair_in(&c, "lock").is_none(), "one app under two names is not a pair");
+    }
+
+    #[test]
+    fn the_launch_gate_asks_which_when_two_apps_sound_alike() {
+        let _g = test_support::install(vec![
+            app("Clock", &["clock"], r"C:\x\clock.exe"),
+            app("Block", &["block"], r"C:\x\block.exe"),
+            app("Calendar", &["calendar"], r"C:\x\cal.exe"),
+        ]);
+        match assess_open_target("lock") {
+            OpenAssessment::Pick { entries } => {
+                let names: Vec<&str> = entries.iter().map(|e| e.display_name.as_str()).collect();
+                assert!(names.contains(&"Clock") && names.contains(&"Block"), "{names:?}");
+            }
+            other => panic!("expected Pick, got {}", label(&other)),
+        }
+        // An exact name still opens at once.
+        assert!(matches!(assess_open_target("clock"), OpenAssessment::Proceed(_)));
+    }
+
     #[test]
     fn phonetic_tier_stays_quiet_for_unrelated_phrases_and_never_picks_the_intel_installer() {
         let c = live_like_cache();
@@ -2909,6 +3010,7 @@ mod tests {
             OpenAssessment::Proceed(_) => "Proceed",
             OpenAssessment::ProceedLegacy => "ProceedLegacy",
             OpenAssessment::Confirm { .. } => "Confirm",
+            OpenAssessment::Pick { .. } => "Pick",
             OpenAssessment::Refuse { .. } => "Refuse",
         }
     }
