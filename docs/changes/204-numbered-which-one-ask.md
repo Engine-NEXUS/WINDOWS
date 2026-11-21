@@ -34,7 +34,7 @@ Owner: when a spoken app name sounds about equally like two different apps, NEXU
 ## Checked against the owner's real app list (320 apps)
 
 The first version, tuned on 5-app test lists, asked nonsense on the real list: "lock" -> Clock or Phone Link, "trey" ->
-Trae or Google Drive, "photo" -> Google Photos or Grand Theft Auto V, "said" -> Zed or Windows App Cert Kit, "x" -> two
+Trae or Google Drive, "photo" -> Google Photos or a game title containing "Auto", "said" -> Zed or Windows App Cert Kit, "x" -> two
 VS command prompts. Each bad second choice had matched one word of a longer name ("link", "drive", "auto", "cert",
 "x86"), or sat at distance 0.39 inside the 0.06 slack. Two rules fixed it: whole-name keys only, and no slack. Over 69
 probe phrases the questions left are Slack or Skype ("slap"), Windsurf or Winword ("windsor") and Kiro or Curl ("kilo");
@@ -49,3 +49,5 @@ every other phrase keeps the earlier behaviour (one "did you mean", an exact ope
 - Separate, pre-existing: `cargo test` writes to the real `%APPDATA%\nexus\app_cache.json` and
   `app_resolution_cache.json` (it inserts "CustomTestApp" and touches timestamps), and both the personal and
   contributor builds share that folder.
+
+Full plan and implementation record: `docs/features/194-misheard-command-correction-plan-and-implementation.md`; research sources and experiments: NEXUS-PAPERS `research/voice-accuracy/misheard-words-research-sources-plan-and-implementation-2026-11-22.md`.
