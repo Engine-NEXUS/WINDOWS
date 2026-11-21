@@ -1,0 +1,18 @@
+{"id":"A1","phrase":"check the email and send a test message to ravi on whatsapp","flow":"mail_then_whatsapp","kind":"positive"}
+{"id":"A2","phrase":"check my mail and message ravi on whatsapp saying test","flow":"mail_then_whatsapp","kind":"positive"}
+{"id":"B1","phrase":"check the email and open maps to the location link in the email","flow":"mail_then_maps","kind":"positive"}
+{"id":"B2","phrase":"read my latest email and open the location in maps","flow":"mail_then_maps","kind":"positive"}
+{"id":"C1","phrase":"check the email and add the deadline to my calendar","flow":"mail_then_calendar","kind":"positive"}
+{"id":"D1","phrase":"give me directions to the address in the last email","flow":"mail_address_directions","kind":"positive"}
+{"id":"E1","phrase":"read my whatsapp messages and reply to ravi","flow":"whatsapp_read_reply","kind":"positive"}
+{"id":"F1","phrase":"order what i ordered last time and tell ravi on whatsapp","flow":"order_then_message","kind":"positive"}
+{"id":"G1","phrase":"summarise the latest pr in zync and message the team","flow":"pr_then_message","kind":"positive"}
+{"id":"H1","phrase":"open my study setup and start the timer","flow":"study_setup","kind":"positive"}
+{"id":"S1","phrase":"check the email","flow":"single_mail","kind":"single"}
+{"id":"S2","phrase":"send a test message to ravi on whatsapp","flow":"single_whatsapp","kind":"single"}
+{"id":"S3","phrase":"open maps","flow":"single_maps","kind":"single"}
+{"id":"S4","phrase":"open chrome then search for cats","flow":"existing_then_compound","kind":"single"}
+{"id":"N1","phrase":"search and rescue training near me","flow":"none","kind":"negative"}
+{"id":"N2","phrase":"mum and dad are coming tomorrow","flow":"none","kind":"negative"}
+{"id":"N3","phrase":"what is salt and pepper made of","flow":"none","kind":"negative"}
+{"id":"N4","phrase":"tell me a joke and make it short","flow":"none","kind":"negative"}
