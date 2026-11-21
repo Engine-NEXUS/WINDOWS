@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd ~/.cargo/registry/src/*/keyring-3.6.3 2>/dev/null && grep -n \"^\\\\[features\\\\]\" -A 20 Cargo.toml | head -40; grep -n \"cfg\\(\" src/lib.rs | head -20)"
+    ]
+  }
+}
