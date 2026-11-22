@@ -787,6 +787,41 @@ pub fn ingest(query: &str, body: &str) {
     }
 }
 
+/// How long the loop sleeps (ms): fast while the island is up (the hover test) or a change waits out its guard time,
+/// the normal pace while something is running, and slow when idle. Hook and window events wake it sooner than any of these.
+pub(crate) fn tick_ms(island_visible: bool, change_waiting: bool, busy: bool) -> u64 {
+    if island_visible || change_waiting {
+        33
+    } else if busy {
+        150
+    } else {
+        1000
+    }
+}
+
+/// Everything that makes the loop look at the windows again. Looking costs a window list, so it is done only for one of these.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct WindowsLook {
+    /// Windows reported a foreground, minimise or move event.
+    pub windows_changed: bool,
+    /// A session the loop has not seen before (its window is found before the bar may show it).
+    pub fresh_session: bool,
+    /// A permission card appeared or went (a card for the agent you are in is handed back).
+    pub approvals_changed: bool,
+    /// A change is waiting out its guard time (the 100 ms show guard, the 400 ms hand-back).
+    pub change_waiting: bool,
+    pub since_last_look_ms: u64,
+}
+
+impl WindowsLook {
+    /// The safety net: even with no event the windows are looked at once a second.
+    pub(crate) const SAFETY_NET_MS: u64 = 1_000;
+
+    pub(crate) fn due(&self) -> bool {
+        self.windows_changed || self.fresh_session || self.approvals_changed || self.change_waiting || self.since_last_look_ms >= Self::SAFETY_NET_MS
+    }
+}
+
 /// Pure: does this event end a turn that the user was waiting for? A Stop of a session that was running, for any coding
 /// agent whose hook says the turn is over: Antigravity's Stop ends one invocation, so it counts only when the agent says
 /// it is fully idle; any agent that says background work is still running (`fully_idle` false) has not finished. A Stop
@@ -1078,7 +1113,7 @@ pub fn start(app: tauri::AppHandle) {
             let busy = DIRTY.load(Ordering::Relaxed) || running > 0 || island.visible();
             // the hover test needs a fast tick while the island is up, and so does a window change that is waiting out
             // its short guard time; everything else keeps the old cadence and is woken by events instead
-            let tick = if island.visible() || debounce.pending() || focus_hold.waiting() { 33 } else if busy { 150 } else { 1000 };
+            let tick = tick_ms(island.visible(), debounce.pending() || focus_hold.waiting(), busy);
             let woken = tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(tick)) => false,
                 _ = wake().notified() => true,
@@ -1139,7 +1174,8 @@ pub fn start(app: tauri::AppHandle) {
                 known_keys = keys_now;
                 let approvals_changed = snap.approvals.len() != last_approvals;
                 last_approvals = snap.approvals.len();
-                if windows_changed || fresh || approvals_changed || debounce.pending() || focus_hold.waiting() || now.saturating_sub(watch_at) >= 1_000 {
+                let look = WindowsLook { windows_changed, fresh_session: fresh, approvals_changed, change_waiting: debounce.pending() || focus_hold.waiting(), since_last_look_ms: now.saturating_sub(watch_at) };
+                if look.due() {
                     watch_at = now;
                     let refs: Vec<crate::agent_watching::SessionRef> = snap
                         .sessions
@@ -1729,6 +1765,28 @@ mod finish_tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         panic!("a hang-up was never noticed");
+    }
+
+    #[test]
+    fn the_loop_sleeps_short_only_when_something_needs_a_quick_look() {
+        assert_eq!(tick_ms(true, false, true), 33, "the island is up: the hover test");
+        assert_eq!(tick_ms(false, true, true), 33, "a change waits out its guard time");
+        assert_eq!(tick_ms(false, false, true), 150, "an agent is running, window events wake it sooner");
+        assert_eq!(tick_ms(false, false, false), 1000, "idle");
+    }
+
+    #[test]
+    fn the_windows_are_looked_at_for_a_reason_and_never_for_none() {
+        let quiet = WindowsLook::default();
+        assert!(!quiet.due(), "nothing happened");
+        assert!(WindowsLook { windows_changed: true, ..quiet }.due());
+        assert!(WindowsLook { fresh_session: true, ..quiet }.due());
+        assert!(WindowsLook { approvals_changed: true, ..quiet }.due());
+        assert!(WindowsLook { change_waiting: true, ..quiet }.due());
+        let net = WindowsLook::SAFETY_NET_MS;
+        assert!(!WindowsLook { since_last_look_ms: net - 1, ..quiet }.due());
+        assert!(WindowsLook { since_last_look_ms: net, ..quiet }.due(), "the safety net: once a second even with no event");
+        assert!(net <= 1_000);
     }
 
     #[test]

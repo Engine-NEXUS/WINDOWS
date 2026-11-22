@@ -274,6 +274,12 @@ pub fn fast_told_near(agent_name: &str, stop_ms: u64) -> bool {
         .is_some_and(|t| t.abs_diff(stop_ms) <= FINISH_SAME_MS)
 }
 
+/// Pure: should the lifecycle receipt stay silent because the finish was already told (on the bar and by voice) the moment
+/// it happened? Only a normal completion: a failure or an expired watch is still told.
+pub fn receipt_already_told(complete: bool, agent_name: &str, stop_ms: Option<u64>) -> bool {
+    complete && stop_ms.is_some_and(|s| fast_told_near(agent_name, s))
+}
+
 fn fast_told_ago(agent_name: &str, now_ms: u64) -> Option<u64> {
     FAST_TOLD.lock().unwrap_or_else(|e| e.into_inner()).get(agent_name).map(|t| now_ms.saturating_sub(*t))
 }
@@ -716,6 +722,16 @@ mod finish_now_tests {
         let body = &src[src.find("pub fn finish_now<").unwrap()..];
         let body = &body[..body.find("\n}\n").unwrap()];
         assert!(!body.contains("publish_agent"), "the immediate finish must not publish a toast");
+    }
+
+    #[test]
+    fn the_receipt_stays_silent_only_for_a_completion_already_told() {
+        note_fast_told("receipttest", 2_000_000);
+        assert!(receipt_already_told(true, "receipttest", Some(2_000_100)));
+        assert!(!receipt_already_told(false, "receipttest", Some(2_000_100)), "a failure or an expired watch is still told");
+        assert!(!receipt_already_told(true, "receipttest", Some(2_000_000 + FINISH_SAME_MS + 1)), "a later turn");
+        assert!(!receipt_already_told(true, "receipttest", None), "no stop time: nothing to match");
+        assert!(!receipt_already_told(true, "nobody", Some(2_000_100)));
     }
 
     #[test]

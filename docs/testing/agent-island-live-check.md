@@ -12,3 +12,10 @@ Needs a build that contains change 205 and Claude Code hooked up ("hook up claud
 8. **Away.** Leave the PC for a minute while an agent finishes: nothing should show or speak; on return the usual welcome tells it.
 
 Write the result next to each number. Anything that blinks, lags or says it twice is the finding I need.
+
+## Added for changes 205 and 206 (input cards and the plan)
+
+9. **Plan card.** Put Claude in plan mode and let it finish a plan while you are in another app. The bar should open on the plan as readable text (headings, lists, bold, code, tables), scrolling inside the card, with Approve plan and Keep planning. Click Approve plan: Claude should continue within a second.
+10. **Answer in the terminal.** Ask for a permission request (a Bash command) while you are elsewhere, then go to the terminal and answer there. The card on the bar should be gone at once (rule 2: the agent hangs up its hook), or at the latest when Claude runs its next tool (rule 3). Write down which one you saw, and whether the terminal showed its own prompt while the bar card was still up. That answers the one question the docs do not.
+11. **Be in the window when it asks.** Stay in the agent terminal and trigger a permission request. After about half a second the card should not appear (or disappear) and the terminal should show its own prompt. Alt-Tab through the window quickly: a card should not be taken away.
+12. **Where hooks run.** Look in the NEXUS log for `agent island: window event hooks installed (foreground true, minimise true, move true)` at start.
