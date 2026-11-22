@@ -357,8 +357,8 @@ function PlanBlocks({ blocks }: { blocks: Block[] }) {
               <L key={i} start={b.ordered ? b.start : undefined}>
                 {b.items.map((it, j) => (
                   <li key={j} className={it.checked === null ? undefined : "ai-task"}>
-                    {it.checked !== null && <span className={`ai-box${it.checked ? " ai-box--on" : ""}`} aria-hidden="true" />}
-                    <PlanBlocks blocks={it.blocks} />
+                    {it.checked !== null && <span className={`ai-box${it.checked ? " ai-box--on" : ""}`} role="img" aria-label={it.checked ? "done" : "not done"} />}
+                    {it.checked === null ? <PlanBlocks blocks={it.blocks} /> : <div className="ai-task-body"><PlanBlocks blocks={it.blocks} /></div>}
                   </li>
                 ))}
               </L>

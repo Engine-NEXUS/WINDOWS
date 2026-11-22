@@ -130,7 +130,10 @@ pub(crate) fn is_agent_process(p: &ProcSnap, words: &[&str]) -> bool {
             cmd.split_once(' ').map_or("", |(_, r)| r)
         };
         let script = rest.split_whitespace().find(|a| !a.starts_with('-')).unwrap_or("").trim_matches('"');
-        return direct(script);
+        // A hidden folder in the path (`.claude`, `.codex`: where worktrees, settings and caches live) is not the agent: a dev
+        // server run from a `.claude` worktree is not Claude Code. Only the visible parts of the path are read.
+        let visible: Vec<&str> = script.split([std::path::MAIN_SEPARATOR, '/']).filter(|c| !c.starts_with('.')).collect();
+        return direct(&visible.join("/"));
     }
     false
 }
@@ -317,6 +320,9 @@ pub(crate) fn snapshot_windows() -> (Vec<Placed>, Vec<Rect>, Option<isize>) {
 /// The monitor sets this while at least one agent session exists; with none, window events are ignored entirely.
 pub(crate) static HOOK_WANTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// How many of the three window event hooks Windows accepted (0 until the thread has tried).
+pub(crate) static HOOKS_INSTALLED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 /// Pure: should this window event wake the monitor? A foreground change, a minimise or restore, and a move or resize of
 /// a top-level window (`id_object` 0 is the window itself; the caret, the cursor and every child control also send
 /// location events, thousands a second) - and only while something is watching.
@@ -360,6 +366,7 @@ pub(crate) fn start_window_events() {
         let b = SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, HINSTANCE(0), Some(on_event), 0, 0, flags);
         let c = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, HINSTANCE(0), Some(on_event), 0, 0, flags);
         tracing::info!("agent island: window event hooks installed (foreground {}, minimise {}, move {})", a.0 != 0, b.0 != 0, c.0 != 0);
+        HOOKS_INSTALLED.store([a.0, b.0, c.0].iter().filter(|h| **h != 0).count() as u8 + 1, std::sync::atomic::Ordering::Relaxed);
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, HWND(0), 0, 0).as_bool() {
             TranslateMessage(&msg);
@@ -586,6 +593,21 @@ mod tests {
         assert!(WATCH_OFF_MS <= 150, "the guard is a flicker filter, not a delay");
     }
 
+    /// The real thing: Windows accepts the three hooks (no desktop input is sent, nothing on screen changes).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_accepts_the_three_window_event_hooks() {
+        start_window_events();
+        for _ in 0..200 {
+            if HOOKS_INSTALLED.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // stored as installed + 1 so that 0 can mean "not tried yet"
+        assert_eq!(HOOKS_INSTALLED.load(std::sync::atomic::Ordering::Relaxed), 4, "foreground, minimise and move hooks");
+    }
+
     #[test]
     fn only_the_window_events_that_can_change_what_you_see_wake_the_monitor() {
         const FOREGROUND: u32 = 0x0003;
@@ -617,6 +639,16 @@ mod tests {
         assert!(is_agent_process(&proc(7, 1, "codex.exe", r"c:\tools\codex.exe --flag"), words));
         assert!(is_agent_process(&proc(8, 1, "node.exe", r#""c:\program files\nodejs\node.exe" c:\npm\node_modules\@openai\codex\bin\codex.js exec"#), words));
         assert!(!is_agent_process(&proc(9, 1, "node.exe", "node.exe server.js --name codex"), words));
+    }
+
+    #[test]
+    fn a_dev_server_run_from_a_dot_claude_worktree_is_not_claude_code() {
+        // found by the live probe on the owner's laptop: this vite server was taken for the agent
+        let words = crate::session_observer::agent_words("claude");
+        let vite = proc(10, 1, "node.exe", r"node d:\windows\.claude\worktrees\screen-tour\frontend\node_modules\.bin\..\vite\bin\vite.js --port 5174");
+        assert!(!is_agent_process(&vite, words));
+        let cli = proc(11, 1, "node.exe", r#""c:\program files\nodejs\node.exe" c:\users\me\appdata\roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js"#);
+        assert!(is_agent_process(&cli, words), "the real Claude Code script still counts");
     }
 
     #[test]

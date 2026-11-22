@@ -802,19 +802,27 @@
   font-weight: 700;
 }
 
+/* a task list line: the box and the words side by side */
 .ai-task {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
   list-style: none;
   margin-left: -18px;
+}
+
+.ai-task-body {
+  min-width: 0;
 }
 
 .ai-box {
   display: inline-block;
   width: 11px;
   height: 11px;
-  margin-right: 6px;
+  flex: none;
+  margin-top: 3px;
   border: 1.5px solid var(--stage-text-muted);
   border-radius: 3px;
-  vertical-align: -1px;
 }
 
 .ai-box--on {

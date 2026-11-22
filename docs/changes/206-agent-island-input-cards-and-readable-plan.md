@@ -26,8 +26,14 @@ The dev preview (`/dev-agent-island.html`) gained a "Plan to approve" button and
 - Mutations: `scripts/mutations-agent-island-p3.json`, result `docs/testing/runs/agent-island-mutations-p3-20261122.json`.
 - Gates: frontend tsc, vitest 1269, build; opacity, turn-end, hygiene, IPC, dead-code (139 known, none new).
 
+## Review pass (same day): what was looked at and what it found
+- **Looked at in the browser pane** (`/dev-agent-island.html`, dark, size 75 %): the plan card (heading, ordered and nested lists, table, code block, quote, task list, scrolling inside the card, Approve plan / Keep planning), the question card, and the pill for one agent finishing (Codex finished, Antigravity finished) and for two (2 agents finished), each with the check badge. No console errors. Found and fixed: a task-list box sat on its own line above its text. A truncated "Codex finis..." in one screenshot was the 220 ms width transition, not a bug.
+- **Real socket, real code:** the hook door is tested end to end: a card goes within 3 s when the hook is hung up, and a click still reaches the agent through the same request (`webhook::agent_event_http_tests`).
+- **Real Windows:** Windows accepts the three window event hooks (test). The read-only live probe on the owner laptop finds the Claude window, its z-order and that it is watched. The probe also exposed a bug that was already there: a node dev server run from a `.claude` worktree (vite) was taken for Claude Code because the folder name contains "claude", which can map a session to the wrong window. Fixed: hidden folders in a script path are ignored (mutation-checked).
+- Gates: Rust lib 3456 passed, frontend 1269, tsc, build, opacity, turn-end, hygiene, IPC, dead-code, work cards.
+
 ## Not done / not proven
-- **Not seen on a screen.** The browser preview of the plan card was cancelled before it started: how the card looks, scrolls and fits the 760 x 430 panel is unchecked. `/dev-agent-island.html` is the quick way to look.
+- **Still never seen in the real app:** the pill and the plan card in the real transparent window, hide and show speed, the 4 s hold, several monitors and scaling, and the spoken line. The preview was dark theme only.
 - Whether Claude Code stops the hook when you answer in its terminal (rule 2) and whether its terminal prompt appears beside the hook or after it: one real session decides this. Rule 1 is safe either way.
 - A long `Bash` command is still shown in the monospaced box, not as a code block (not asked for).
 - Other agents' permission hooks (Codex, Copilot, OpenCode) are not installed with these events; only Claude Code's hook reaches this code today.

@@ -812,6 +812,12 @@ fn release_waiter(id: u64) {
     }
 }
 
+/// Does this pending request belong to session `session_id` of Claude Code? (Test helper for the webhook round trip.)
+#[cfg(test)]
+pub fn approval_session_is(id: u64, session_id: &str) -> bool {
+    lock_monitor().approvals.iter().any(|a| a.id == id && a.session_key == format!("claude:{session_id}"))
+}
+
 /// (approval id, session key) of every request still waiting.
 fn pending_approvals() -> Vec<(u64, String)> {
     lock_monitor().approvals.iter().map(|a| (a.id, a.session_key.clone())).collect()

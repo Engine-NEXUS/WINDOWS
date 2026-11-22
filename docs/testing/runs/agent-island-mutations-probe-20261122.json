@@ -1,0 +1,11 @@
+{
+  "file": "src-tauri/src/agent_watching.rs",
+  "test": "--lib -- --test-threads=1 agent_watching::",
+  "results": [
+    {
+      "name": "a hidden folder in a script path counts as the agent",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_watching.rs:649:9: assertion failed: !is_agent_process(&vite, words)"
+    }
+  ]
+}

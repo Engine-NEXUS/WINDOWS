@@ -1,0 +1,19 @@
+{
+  "file": "src-tauri/src/agent_watching.rs",
+  "cwd": "src-tauri",
+  "targetDir": "D:/nexus-screen-target",
+  "testArgs": [
+    "--lib",
+    "--",
+    "--test-threads=1",
+    "agent_watching::"
+  ],
+  "mutations": [
+    {
+      "name": "a hidden folder in a script path counts as the agent",
+      "file": "src-tauri/src/agent_watching.rs",
+      "find": ".filter(|c| !c.starts_with('.')).collect();",
+      "replace": ".collect();"
+    }
+  ]
+}
