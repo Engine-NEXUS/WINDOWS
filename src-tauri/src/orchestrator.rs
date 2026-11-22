@@ -400,7 +400,7 @@ fn clarification_for(intent: &ParsedIntent) -> (String, String) {
 /// Speak a clarification prompt and keep the turn open for one bounded reply.
 /// Unlike `speak_prompt_and_finish`, this does not emit `Done` or clear the
 /// active request. The frontend auto-listens after TTS and cancels on timeout.
-async fn speak_prompt_and_hold<R: Runtime>(
+pub(crate) async fn speak_prompt_and_hold<R: Runtime>(
     app: &AppHandle<R>,
     prompt: String,
     expected_slot: String,
@@ -423,12 +423,33 @@ async fn speak_prompt_and_hold<R: Runtime>(
     })
 }
 
+/// Butler mode: whatever produced a result (local line, 9Router, Worker), the owner is addressed as "sir", never by
+/// name. The cloud prompts ask for it too, but a model can ignore a prompt; this guard cannot be ignored.
+fn enforce_butler_address<R: Runtime>(app: &AppHandle<R>, payload: &mut serde_json::Value) {
+    if crate::persona::is_friend(&crate::commands::read_persona_mode(app)) {
+        return;
+    }
+    let Some(text) = payload.get("text").and_then(|v| v.as_str()) else { return };
+    let Ok(dir) = app.path().app_data_dir() else { return };
+    let names: Vec<String> = ["name", "user_first_name", "user_name", "nickname"]
+        .iter()
+        .filter_map(|k| crate::memory::core_value(&dir, k))
+        .collect();
+    let fixed = crate::persona::enforce_address(text, &names);
+    if fixed != text {
+        payload["text"] = serde_json::Value::String(fixed);
+    }
+}
+
 /// Emit an orchestrator event to the frontend.
 pub(crate) fn emit<R: Runtime>(app: &AppHandle<R>, event: &OrchestratorEvent) {
     if matches!(event, OrchestratorEvent::Result { .. }) {
         crate::latency::mark(crate::latency::Stage::Answer);
     }
     let mut payload = serde_json::to_value(event).unwrap_or_default();
+    if matches!(event, OrchestratorEvent::Result { .. }) {
+        enforce_butler_address(app, &mut payload);
+    }
     if let Some(id) = payload.get("request_id").and_then(|v| v.as_str()) {
         let source = ACTIVE_REQUEST.try_lock().ok()
             .and_then(|guard| guard.as_ref().filter(|active| active.id == id)
@@ -1015,6 +1036,20 @@ async fn process_transcript_inner<R: Runtime>(
             Some(Offer::FileConfirm) if reply != Reply::Other => {
                 return run_file_confirm(app, reply, &transcript, origin).await;
             }
+            // "Notepad or Notion? Say one or two": a number or a distinctive name picks; "no" drops it; a bare "yes" asks again.
+            Some(Offer::OpenAppPick { ref choices, ref spoken })
+                if pick_route(choices, &transcript, reply) == PickRoute::AskAgain =>
+            {
+                let question = offer::pick_question(spoken, choices);
+                let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                offer::set(Offer::OpenAppPick { choices: choices.clone(), spoken: spoken.clone() }, true);
+                return say_and_finish(&app, request_id, format!("Which one, sir? {question}"));
+            }
+            Some(o @ Offer::OpenAppPick { .. })
+                if matches!(&o, Offer::OpenAppPick { choices, .. } if pick_route(choices, &transcript, reply) == PickRoute::Answer) =>
+            {
+                return run_offer_reply(app, o, reply, &transcript).await;
+            }
             Some(o @ Offer::Choose { .. }) if has_choice || reply != Reply::Other => {
                 return run_offer_reply(app, o, reply, &transcript).await;
             }
@@ -1027,7 +1062,11 @@ async fn process_transcript_inner<R: Runtime>(
                     && offer::reask_once()
                 {
                     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-                    return say_and_finish(&app, request_id, "Sorry sir, was that a yes or a no?".into());
+                    let again = match offer::peek() {
+                        Some(Offer::OpenAppPick { choices, spoken }) => format!("Sorry sir, which one? {}", offer::pick_question(&spoken, &choices)),
+                        _ => "Sorry sir, was that a yes or a no?".to_string(),
+                    };
+                    return say_and_finish(&app, request_id, again);
                 }
                 offer::clear();
                 crate::action_kernel::pending::clear();
@@ -1286,6 +1325,10 @@ async fn process_transcript_inner<R: Runtime>(
     let center_name = crate::center::center_id_for(&intent).as_str();
     let evidence = crate::center::command_evidence(&intent, &transcript, source);
     let turn = turn_context.unwrap_or_default();
+    // A multi-flow workflow asked a follow-up question ("What should the message say?"): this turn may answer it.
+    if let Some(handled) = crate::flows::live::try_fill_slot(&app, &transcript, turn.ownership).await {
+        return handled;
+    }
     let corrected_action = crate::center::correction_needs_repeat(&turn.raw_text, &transcript, &intent)
         || (turn.session != 0 && !turn.corrected_text.is_empty() && turn.corrected_text != transcript);
     let unknown_command = matches!(intent, ParsedIntent::Unknown { .. })
@@ -2209,6 +2252,10 @@ async fn process_transcript_inner<R: Runtime>(
     // routing. This must run BEFORE routing because a compound transcript
     // won't parse as a single intent anyway (the deterministic parser
     // would return Unknown or a wrong partial match).
+    // Multi-flow workflows (plan 193): runs for real when `flowsLive` is on, otherwise only logs what it would do.
+    if let Some(handled) = crate::flows::live::try_run(&app, &transcript, turn.ownership).await {
+        return handled;
+    }
     let request_id_probe = new_request_id();
     if let Some(plan) =
         crate::command_center::build_plan_with_brain(&transcript, &request_id_probe).await
@@ -5906,6 +5953,30 @@ async fn start_activity<R: Runtime>(
     timetable_io::start_speech(title, &targets, &outcomes, youtube_missing)
 }
 
+/// How a reply to "A or B? Say one or two" is handled.
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum PickRoute {
+    /// A number, a distinctive name, "no" or "later": answer the question (a "no" drops it).
+    Answer,
+    /// A bare "yes" does not say which: ask again instead of guessing.
+    AskAgain,
+    /// Anything else is an ordinary command; the question is dropped.
+    NotAnAnswer,
+}
+
+fn pick_route(choices: &[String], transcript: &str, reply: crate::memcore::offer::Reply) -> PickRoute {
+    use crate::memcore::offer::{parse_pick, Reply};
+    if parse_pick(transcript, choices).is_some() {
+        PickRoute::Answer
+    } else if reply == Reply::Yes {
+        PickRoute::AskAgain
+    } else if reply != Reply::Other {
+        PickRoute::Answer
+    } else {
+        PickRoute::NotAnAnswer
+    }
+}
+
 /// The user answered a question NEXUS asked (see the intercept in
 /// `process_transcript`).
 async fn run_offer_reply<R: Runtime>(
@@ -6079,6 +6150,17 @@ async fn run_offer_reply<R: Runtime>(
             }
         }
         (Offer::OpenApp { .. }, _) => "Understood, sir. I won't open anything.".to_string(),
+        (Offer::OpenAppPick { choices, spoken }, _) => match offer::parse_pick(text, &choices).and_then(|i| choices.get(i).cloned()) {
+            Some(display_name) => {
+                // The pick is the training signal: next time this phrase goes straight to that app.
+                crate::app_registry::confirm_resolution(&spoken, &display_name);
+                match crate::command_executor::resolve_and_open_app(&display_name.to_lowercase()) {
+                    Ok(r) => r.message,
+                    Err(e) => e,
+                }
+            }
+            None => "Understood, sir. I won't open anything.".to_string(),
+        },
         (Offer::CodeRabbitReview { repo, pr }, Reply::Yes) => match crate::coderabbit_review::start_review(app.clone(), repo, pr).await {
             Ok(_) => crate::coderabbit_review::next_working_line().to_string(),
             Err(why) => why,
@@ -10236,6 +10318,7 @@ fn may_answer_offer(
                 | Offer::HookSetup { .. }
                 | Offer::FileConfirm
                 | Offer::OpenApp { .. }
+                | Offer::OpenAppPick { .. }
                 | Offer::AddEvent { .. }
                 | Offer::ClearTimetable
                 | Offer::ReopenSession
@@ -10915,6 +10998,10 @@ pub async fn orchestrator_mcp_confirm<R: Runtime>(
     use crate::mcp_client::{call_tool, extract_text, McpServer};
 
     if !confirmed {
+        // A paused multi-flow workflow waits in Rust under its token: a "no" forgets it.
+        if pending["server"].as_str() == Some(crate::flows::live::CONFIRM_SERVER) {
+            crate::flows::live::discard(pending["params"]["nonce"].as_str().unwrap_or(""));
+        }
         emit(
             &app,
             &OrchestratorEvent::Result {
@@ -10941,6 +11028,11 @@ pub async fn orchestrator_mcp_confirm<R: Runtime>(
         .as_str()
         .ok_or("invalid pending payload: missing tool")?;
     let params = pending["params"].clone();
+
+    // A multi-flow workflow (plan 193) asked for this confirmation: it resumes itself.
+    if server_name == crate::flows::live::CONFIRM_SERVER {
+        return crate::flows::live::resume(&app, request_id, params).await;
+    }
 
     let server = match server_name {
         "swiggy-food" => McpServer::SwiggyFood,
@@ -11265,6 +11357,22 @@ mod tests {
     }
 
     #[test]
+    fn replies_to_the_numbered_app_question_are_routed_safely() {
+        use super::{pick_route, PickRoute};
+        use crate::memcore::offer::{classify, Reply};
+        let c = vec!["Clock".to_string(), "Block".to_string()];
+        let route = |t: &str| pick_route(&c, t, classify(t));
+        assert_eq!(route("one"), PickRoute::Answer);
+        assert_eq!(route("the second one"), PickRoute::Answer);
+        assert_eq!(route("clock"), PickRoute::Answer);
+        assert_eq!(route("no"), PickRoute::Answer, "a no drops the question");
+        assert_eq!(route("not now"), PickRoute::Answer);
+        assert_eq!(route("yes"), PickRoute::AskAgain, "yes does not say which");
+        assert_eq!(route("what is the weather today"), PickRoute::NotAnAnswer);
+        assert_eq!(pick_route(&c, "maybe", Reply::Other), PickRoute::NotAnAnswer);
+    }
+
+    #[test]
     fn who_may_answer_an_offer() {
         use super::may_answer_offer as ok;
         use crate::memcore::offer::Offer;
@@ -11272,6 +11380,8 @@ mod tests {
         let power = Offer::Power { kind: "shutdown".into() };
         let open = Offer::OpenApp { display_name: "Google Chat".into(), spoken: "mummy chat".into() };
         let start = Offer::Start { title: "DSA".into(), activity: "dsa".into() };
+        let pick = Offer::OpenAppPick { choices: vec!["Clock".into(), "Block".into()], spoken: "lock".into() };
+        assert!(ok(Verified, &pick) && !ok(Rejected, &pick) && !ok(Uncertain, &pick), "an app launch is never answered by an uncertain voice");
         // The owner (or an unenrolled setup) may answer anything.
         for o in [&power, &open, &start] {
             assert!(ok(Verified, o));

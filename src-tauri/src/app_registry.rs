@@ -300,6 +300,8 @@ pub enum MatchKind {
     Contains,
     /// Within two edits of a key ("chroem" -> "chrome").
     Fuzzy,
+    /// Sounds like a key although the letters differ ("load pad" -> "notepad"). Always a guess: the user is asked.
+    Phonetic,
 }
 
 /// Words that may trail an app key without changing which app is meant.
@@ -359,6 +361,97 @@ pub fn lookup_with_kind(query: &str) -> Option<(AppEntry, String, MatchKind)> {
 
     let cache = registry.cache.read();
     lookup_in(&cache, &q)
+}
+
+/// Sound-based suggestion for a phrase the tiered lookup found nothing for ("load pad" -> Notepad). Used only by the launch gate, where
+/// every hit is a question ("did you mean …?"), never by callers that act on a lookup directly. Set `NEXUS_NO_SOUND_MATCH=1` to disable.
+pub fn lookup_phonetic(query: &str) -> Option<(AppEntry, String)> {
+    if std::env::var_os("NEXUS_NO_SOUND_MATCH").is_some() {
+        return None;
+    }
+    let cache = REGISTRY.cache.read();
+    phonetic_in(&cache, &query.to_lowercase())
+}
+
+/// The two apps a phrase sounds about equally like (never an installer, never one app twice), for the numbered "which one?" ask.
+/// Only consulted after [`lookup_phonetic`] found nothing clear. `NEXUS_NO_SOUND_MATCH=1` disables it.
+pub fn lookup_phonetic_pair(query: &str) -> Option<[AppEntry; 2]> {
+    if std::env::var_os("NEXUS_NO_SOUND_MATCH").is_some() {
+        return None;
+    }
+    let cache = REGISTRY.cache.read();
+    phonetic_pair_in(&cache, &query.to_lowercase())
+}
+
+/// Pure core of [`lookup_phonetic_pair`] (unit-tested).
+fn phonetic_pair_in(cache: &HashMap<String, AppEntry>, q: &str) -> Option<[AppEntry; 2]> {
+    let index = crate::sound_match::PhoneticIndex::new(
+        cache.iter().map(|(key, entry)| (key.clone(), entry.display_name.to_lowercase())),
+    );
+    let crate::sound_match::Found::Close(a, b) = index.nearest_or_close(q)? else {
+        return None;
+    };
+    let (ea, eb) = (cache.get(&a.label)?.clone(), cache.get(&b.label)?.clone());
+    // Both must have matched on the app's whole name. On the owner's 320-app list a short phrase otherwise pairs with one
+    // word of a longer name ("lock" -> Clock or Phone Link, "trey" -> Trae or Google Drive): a question nobody would ask.
+    if !is_whole_name_key(&a.label, &ea.display_name) || !is_whole_name_key(&b.label, &eb.display_name) {
+        tracing::debug!("[SOUND-MATCH] '{}': close pair '{}' / '{}' dropped (part of a longer name)", q, a.label, b.label);
+        return None;
+    }
+    // An installer is never offered as a choice: say the full name to launch one.
+    let bad = |e: &AppEntry| is_installer_name(&e.display_name) || launch_looks_like_installer(e);
+    if ea.display_name == eb.display_name || bad(&ea) || bad(&eb) {
+        return None;
+    }
+    tracing::info!(
+        "[SOUND-MATCH] '{}' sounds like both '{}' ({:.2}) and '{}' ({:.2}); asking which",
+        q, a.label, a.dist, b.label, b.dist
+    );
+    Some([ea, eb])
+}
+
+/// Is `key` the app's whole name, not one word of a longer one? A version, a "(User)" tag and a vendor prefix
+/// (Google, Microsoft, Windows) may be dropped: "spline" for "Spline 0.20.51", "kiro" for "Kiro (User)", "photos" for
+/// "Google Photos" count; "link" for "Phone Link" and "compass" for "MongoDB Compass" do not.
+fn is_whole_name_key(key: &str, display_name: &str) -> bool {
+    let lower = display_name.to_lowercase();
+    let mut no_paren = String::with_capacity(lower.len());
+    let mut depth = 0u32;
+    for ch in lower.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => no_paren.push(ch),
+            _ => {}
+        }
+    }
+    let cleaned: Vec<&str> = no_paren.split_whitespace().filter(|t| !t.chars().any(|c| c.is_ascii_digit())).collect();
+    let full = cleaned.join(" ");
+    let key = key.trim();
+    if key.is_empty() || full.is_empty() {
+        return false;
+    }
+    let covers = |name: &str| name == key || (name.starts_with(key) && key.len() * 10 >= name.len() * 6);
+    if covers(&full) {
+        return true;
+    }
+    ["google ", "microsoft ", "windows "].iter().any(|v| full.strip_prefix(v).is_some_and(|rest| covers(rest)))
+}
+
+/// Pure core of [`lookup_phonetic`] (unit-tested).
+fn phonetic_in(cache: &HashMap<String, AppEntry>, q: &str) -> Option<(AppEntry, String)> {
+    let index = crate::sound_match::PhoneticIndex::new(
+        cache.iter().map(|(key, entry)| (key.clone(), entry.display_name.to_lowercase())),
+    );
+    let hit = index.nearest(q)?;
+    tracing::info!(
+        "[SOUND-MATCH] '{}' sounds like '{}' (distance {:.2}, margin {:.2}); asking before opening",
+        q,
+        hit.label,
+        hit.dist,
+        hit.margin
+    );
+    cache.get(&hit.label).map(|e| (e.clone(), hit.label))
 }
 
 /// Strict lookup for callers that REWRITE the spoken text (the intent parser):
@@ -509,6 +602,8 @@ pub enum OpenAssessment {
     /// A guess (contains / fuzzy / low coverage): speak `message` and arm an
     /// "open this app?" offer for `entry`. Nothing is launched.
     Confirm { entry: AppEntry, message: String },
+    /// Two different apps sound about equally close to what was heard: ask which ("A or B? Say one or two"). Nothing is launched.
+    Pick { entries: [AppEntry; 2] },
     /// Unconfirmed installer — caller must speak this message and execute
     /// NOTHING (no launch, no Win-search drill).
     Refuse { message: String },
@@ -546,7 +641,13 @@ pub(crate) fn launch_looks_like_installer(entry: &AppEntry) -> bool {
 /// - registry miss → ProceedLegacy (legacy resolvers keep working).
 /// Pure decision apart from the registry read itself (unit-tested).
 pub fn assess_open_target(query: &str) -> OpenAssessment {
-    let Some((entry, matched, kind)) = lookup_with_kind(query) else {
+    let Some((entry, matched, kind)) = lookup_with_kind(query)
+        .or_else(|| lookup_phonetic(query).map(|(entry, key)| (entry, key, MatchKind::Phonetic)))
+    else {
+        // Nothing clear: two apps may sound equally close, which is a question with two answers.
+        if let Some(entries) = lookup_phonetic_pair(query) {
+            return OpenAssessment::Pick { entries };
+        }
         return OpenAssessment::ProceedLegacy;
     };
     let query_has_installer_word = query
@@ -569,11 +670,14 @@ pub fn assess_open_target(query: &str) -> OpenAssessment {
         };
     }
     let confidence = match_confidence(query, &matched);
-    let confident = match kind {
-        MatchKind::Resolved | MatchKind::Exact => true,
-        MatchKind::Prefix => confidence >= 0.5,
-        MatchKind::Contains | MatchKind::Fuzzy => false,
-    };
+    let confident = kind_may_launch(kind, confidence);
+    // A text-level guess (a substring or typo match) is weaker evidence than the whole phrase sounding like two whole app
+    // names. Live, "windsor" matched "Where Winds Meet" by text while it sounded like Windsurf and Winword: ask those two.
+    if !confident && matches!(kind, MatchKind::Contains | MatchKind::Fuzzy) {
+        if let Some(entries) = lookup_phonetic_pair(query) {
+            return OpenAssessment::Pick { entries };
+        }
+    }
     if !confident {
         tracing::warn!(
             "app-match: guess ({:?}, coverage {:.2}) '{}' → '{}', asking first",
@@ -590,6 +694,15 @@ pub fn assess_open_target(query: &str) -> OpenAssessment {
         return OpenAssessment::Confirm { entry, message };
     }
     OpenAssessment::Proceed(entry)
+}
+
+/// Only Resolved / Exact / well-covered Prefix matches may launch without asking. Sound-alike (Phonetic), Contains and Fuzzy hits are guesses.
+fn kind_may_launch(kind: MatchKind, coverage: f32) -> bool {
+    match kind {
+        MatchKind::Resolved | MatchKind::Exact => true,
+        MatchKind::Prefix => coverage >= 0.5,
+        MatchKind::Contains | MatchKind::Fuzzy | MatchKind::Phonetic => false,
+    }
 }
 
 /// Remember that the user confirmed `spoken` means `display_name`, so the
@@ -716,6 +829,41 @@ pub fn all_search_names() -> Vec<String> {
     names
 }
 
+/// Pick up to `n` display names for a speech-recogniser hint: apps the user has actually launched, most used first,
+/// never installers, never duplicates. Pure so it can be tested without a registry.
+pub(crate) fn pick_hint_names(entries: &[AppEntry], n: usize) -> Vec<String> {
+    let mut used: Vec<&AppEntry> = entries
+        .iter()
+        .filter(|e| e.use_count > 0 && !is_installer_name(&e.display_name) && !launch_looks_like_installer(e))
+        .collect();
+    used.sort_by(|a, b| b.use_count.cmp(&a.use_count).then(b.last_used.cmp(&a.last_used)).then(a.display_name.cmp(&b.display_name)));
+    let mut seen = std::collections::HashSet::new();
+    used.into_iter()
+        .filter(|e| seen.insert(e.display_name.to_lowercase()))
+        .take(n)
+        .map(|e| e.display_name.clone())
+        .collect()
+}
+
+/// The user's most-used app names, for the optional speech-recogniser hint.
+pub fn hint_names(n: usize) -> Vec<String> {
+    let entries = deduplicated_entries(&REGISTRY.cache.read());
+    pick_hint_names(&entries, n)
+}
+
+/// Count one use for the app that was actually opened, whatever phrase found it. `record_usage` only counts when the spoken phrase is
+/// one of the app's own search names, so a heard-wrong phrase that still resolved ("note pad") never counted and favourites stayed at 0.
+pub fn count_use(entry: &AppEntry) {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let mut cache = REGISTRY.cache.write();
+    for e in cache.values_mut() {
+        if e.display_name.eq_ignore_ascii_case(&entry.display_name) {
+            e.use_count += 1;
+            e.last_used = now;
+        }
+    }
+}
+
 /// Record that an app was used (for usage-weighted ranking + resolution cache).
 /// Also saves the phrase → app mapping so future lookups are instant.
 pub fn record_usage(query: &str) {
@@ -733,8 +881,7 @@ pub fn record_usage(query: &str) {
         let mut matched = None;
         for entry in cache.values_mut() {
             if entry.search_names.contains(&q) {
-                entry.use_count += 1;
-                entry.last_used = now;
+                // use_count itself is bumped by `count_use` (called with the opened entry), so a use is never counted twice.
                 if matched.is_none() {
                     matched = Some(entry.clone());
                 }
@@ -2548,6 +2695,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn count_use_counts_the_opened_app_even_when_the_phrase_was_heard_wrong() {
+        let inst = test_support::install(vec![app("Notepad", &["notepad"], r"C:\Apps\notepad.exe")]);
+        let opened = lookup("notepad").expect("installed");
+        count_use(&opened);
+        count_use(&opened);
+        let names = hint_names(5);
+        drop(inst);
+        assert_eq!(names, vec!["Notepad"]);
+    }
+
+    #[test]
+    fn hint_names_are_the_most_used_real_apps_only() {
+        let mut brave = app("Brave", &["brave"], r"C:\Appsrave.exe");
+        brave.use_count = 9;
+        let mut spotify = app("Spotify", &["spotify"], r"C:\Apps\spotify.exe");
+        spotify.use_count = 4;
+        let mut dup = app("brave", &["brave2"], r"C:\Appsrave2.exe");
+        dup.use_count = 2;
+        let unused = app("Calculator", &["calculator"], r"C:\Apps\calc.exe");
+        let mut installer = app("Intel Driver Setup", &["intel"], r"C:\Temp\Intel-Installer.exe");
+        installer.use_count = 50;
+        let picked = pick_hint_names(&[spotify, unused, installer, dup, brave], 5);
+        assert_eq!(picked, vec!["Brave", "Spotify"]);
+        assert_eq!(pick_hint_names(&[], 5), Vec::<String>::new());
+    }
+
     /// A registry shaped like the user's real one: five `®` keys (the Intel
     /// installer family), a bare `chat` key (Google Chat), and normal apps.
     fn live_like_cache() -> HashMap<String, AppEntry> {
@@ -2604,6 +2778,145 @@ mod tests {
                 hit.map(|(e, k, kind)| (e.display_name, k, kind))
             );
         }
+    }
+
+    #[test]
+    fn a_sound_alike_hit_is_always_a_question_never_a_launch() {
+        for coverage in [0.0f32, 0.5, 1.0] {
+            assert!(!kind_may_launch(MatchKind::Phonetic, coverage), "coverage {coverage}");
+        }
+        assert!(kind_may_launch(MatchKind::Exact, 0.0));
+        assert!(kind_may_launch(MatchKind::Prefix, 0.5));
+        assert!(!kind_may_launch(MatchKind::Fuzzy, 1.0));
+    }
+
+    #[test]
+    fn phonetic_tier_finds_the_app_a_sound_alike_phrase_meant() {
+        let mut c = live_like_cache();
+        for (display, names, exe) in [("Notepad", vec!["notepad"], r"C:\x\notepad.exe"), ("Spotify", vec!["spotify"], r"C:\x\spotify.exe")] {
+            let a = app(display, &names, exe);
+            for n in &a.search_names {
+                c.insert(n.clone(), a.clone());
+            }
+        }
+        for (heard, meant) in [("load pad", "Notepad"), ("note pad", "Notepad"), ("brief", "Brave"), ("what's up", "WhatsApp"), ("spot if I", "Spotify")] {
+            let (entry, _) = phonetic_in(&c, heard).unwrap_or_else(|| panic!("{heard:?} got no sound-alike suggestion"));
+            assert_eq!(entry.display_name, meant, "{heard:?}");
+        }
+    }
+
+    fn pair_cache(extra: &[(&str, &[&str], &str)]) -> HashMap<String, AppEntry> {
+        let mut c = HashMap::new();
+        for (display, names, exe) in extra {
+            let a = app(display, names, exe);
+            for n in &a.search_names {
+                c.insert(n.clone(), a.clone());
+            }
+        }
+        c
+    }
+
+    #[test]
+    fn two_equally_close_apps_become_a_numbered_question() {
+        let c = pair_cache(&[
+            ("Clock", &["clock"], r"C:\x\clock.exe"),
+            ("Block", &["block"], r"C:\x\block.exe"),
+            ("Calendar", &["calendar"], r"C:\x\cal.exe"),
+        ]);
+        let [a, b] = phonetic_pair_in(&c, "lock").expect("lock sounds like both");
+        let mut got = [a.display_name, b.display_name];
+        got.sort();
+        assert_eq!(got, ["Block".to_string(), "Clock".to_string()]);
+        // A clear single answer is the single "did you mean" path, never a pair.
+        assert!(phonetic_pair_in(&c, "calendar").is_none());
+        assert!(phonetic_pair_in(&c, "elephant parade tomorrow").is_none());
+    }
+
+    #[test]
+    fn a_pair_never_includes_an_installer_or_one_app_twice() {
+        let c = pair_cache(&[
+            ("Clock", &["clock"], r"C:\x\clock.exe"),
+            ("Block Setup", &["block"], r"C:\Package Cache\{a}\block-installer.exe"),
+        ]);
+        assert!(phonetic_pair_in(&c, "lock").is_none(), "an installer is not a choice");
+        let c = pair_cache(&[("Clock", &["clock", "klock"], r"C:\x\clock.exe")]);
+        assert!(phonetic_pair_in(&c, "lock").is_none(), "one app under two names is not a pair");
+    }
+
+    #[test]
+    fn only_whole_names_can_be_one_of_the_two_choices() {
+        for (key, name) in [("clock", "Clock"), ("spline", "Spline 0.20.51"), ("kiro", "Kiro (User)"), ("photos", "Google Photos"),
+            ("teams", "Microsoft Teams"), ("winword", "Winword"), ("visual studio", "Visual Studio Code")] {
+            assert!(is_whole_name_key(key, name), "{key} / {name}");
+        }
+        for (key, name) in [("link", "Phone Link"), ("drive", "Google Drive Sync Tool"), ("compass", "MongoDB Compass"),
+            ("steam", "Steam Support Center"), ("click", "Click to Do"), ("x86", "Windows PowerShell (x86)"), ("", "Clock")] {
+            assert!(!is_whole_name_key(key, name), "{key} / {name}");
+        }
+    }
+
+    #[test]
+    fn a_pair_with_one_word_of_a_longer_name_is_not_asked() {
+        // The owner's real list: "lock" was Clock or Phone Link.
+        let c = pair_cache(&[
+            ("Clock", &["clock"], r"C:\x\clock.exe"),
+            ("Phone Link", &["phone link", "link"], r"C:\x\phone.exe"),
+        ]);
+        assert!(phonetic_pair_in(&c, "lock").is_none());
+        // Real names that do sound alike still ask: "slap" -> Slack or Skype.
+        let c = pair_cache(&[
+            ("Slack", &["slack"], r"C:\x\slack.exe"),
+            ("Skype", &["skype"], r"C:\x\skype.exe"),
+            ("Phone Link", &["phone link", "link"], r"C:\x\phone.exe"),
+        ]);
+        let [a, b] = phonetic_pair_in(&c, "slap").expect("slap sounds like Slack and Skype");
+        let mut got = [a.display_name, b.display_name];
+        got.sort();
+        assert_eq!(got, ["Skype".to_string(), "Slack".to_string()]);
+    }
+
+    #[test]
+    fn the_launch_gate_asks_which_when_two_apps_sound_alike() {
+        let _g = test_support::install(vec![
+            app("Clock", &["clock"], r"C:\x\clock.exe"),
+            app("Block", &["block"], r"C:\x\block.exe"),
+            app("Calendar", &["calendar"], r"C:\x\cal.exe"),
+        ]);
+        match assess_open_target("lock") {
+            OpenAssessment::Pick { entries } => {
+                let names: Vec<&str> = entries.iter().map(|e| e.display_name.as_str()).collect();
+                assert!(names.contains(&"Clock") && names.contains(&"Block"), "{names:?}");
+            }
+            other => panic!("expected Pick, got {}", label(&other)),
+        }
+        // An exact name still opens at once.
+        assert!(matches!(assess_open_target("clock"), OpenAssessment::Proceed(_)));
+        drop(_g);
+        // The live case: "windsor" is a text match for Where Winds Meet but sounds like Windsurf and Winword.
+        let _g = test_support::install(vec![
+            app("Windsurf", &["windsurf"], r"C:\x\windsurf.exe"),
+            app("Winword", &["winword"], r"C:\x\winword.exe"),
+            app("Where Winds Meet", &["where winds meet", "winds"], r"C:\x\wwm.exe"),
+        ]);
+        match assess_open_target("windsor") {
+            OpenAssessment::Pick { entries } => {
+                let mut names: Vec<&str> = entries.iter().map(|e| e.display_name.as_str()).collect();
+                names.sort();
+                assert_eq!(names, ["Windsurf", "Winword"]);
+            }
+            other => panic!("expected Pick for windsor, got {}", label(&other)),
+        }
+    }
+
+    #[test]
+    fn phonetic_tier_stays_quiet_for_unrelated_phrases_and_never_picks_the_intel_installer() {
+        let c = live_like_cache();
+        for q in ["my chart with mommy and what so", "mommychart", "m ommychart", "the window", "something completely different", "a", ""] {
+            if let Some((e, key)) = phonetic_in(&c, q) {
+                assert!(!e.display_name.contains('®'), "{q:?} must never reach an Intel® entry, got {key}");
+            }
+        }
+        assert!(phonetic_in(&c, "elephant parade tomorrow").is_none());
     }
 
     #[test]
@@ -2777,6 +3090,7 @@ mod tests {
             OpenAssessment::Proceed(_) => "Proceed",
             OpenAssessment::ProceedLegacy => "ProceedLegacy",
             OpenAssessment::Confirm { .. } => "Confirm",
+            OpenAssessment::Pick { .. } => "Pick",
             OpenAssessment::Refuse { .. } => "Refuse",
         }
     }

@@ -46,7 +46,7 @@ describe("generalSystem persona variant (F0)", () => {
   test("butler (default) sends the unchanged base prompt", () => {
     const base = generalSystem(undefined);
     expect(base).not.toMatch(/friend tone/i);
-    expect(base).not.toMatch(/sir/i);
+    expect(base).toMatch(/Address the user as 'sir'/);
     expect(generalSystem("butler")).toBe(base);
   });
 

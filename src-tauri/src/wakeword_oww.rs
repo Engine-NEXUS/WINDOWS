@@ -5906,6 +5906,16 @@ fn try_device(
 mod tests {
     use std::path::PathBuf;
 
+    /// The capture lifecycle is process-wide state: the STT_* counters and buffer, the ring, the capture session id and
+    /// the mic baton. Under the parallel test runner, tests that read or write it raced each other (one sets the baton,
+    /// another starts a capture and finds it refused). Each such test holds this lock for its whole body. parking_lot
+    /// does not poison, so a failing assertion in one test cannot cascade into the others.
+    static CAPTURE_STATE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    fn capture_state() -> parking_lot::MutexGuard<'static, ()> {
+        CAPTURE_STATE.lock()
+    }
+
     use super::level_from_rms;
     use super::VerifyMode;
 
@@ -5948,6 +5958,7 @@ mod tests {
     #[test]
     #[cfg(not(feature = "mock-wake"))]
     fn enrollment_mic_baton_blocks_native_capture() {
+        let _capture = capture_state();
         use std::sync::atomic::Ordering::SeqCst;
         struct Restore(bool, bool);
         impl Drop for Restore {
@@ -5966,6 +5977,7 @@ mod tests {
     #[test]
     #[cfg(not(feature = "mock-wake"))]
     fn enrollment_pause_waits_for_in_flight_wake_dispatch() {
+        let _capture = capture_state();
         use std::sync::atomic::Ordering::SeqCst;
         let previous = super::MIC_BATON_PASSED.load(SeqCst);
         let dispatch = super::WAKE_DISPATCH.lock();
@@ -6669,6 +6681,7 @@ mod tests {
     /// B9: the offline endpointer must behave exactly like the live atomics.
     #[test]
     fn test_endpoint_sim_matches_live_path() {
+        let _capture = capture_state();
         use std::sync::atomic::Ordering;
         use super::{EndpointSim, STT_SPEECH_DETECTED, STT_SILENCE_CHUNKS, STT_VOICED_CHUNKS,
                     STT_PAUSE_COUNT, STT_TOTAL_CHUNKS, CAPTURE_FLOOR_BITS};
@@ -6753,6 +6766,7 @@ mod tests {
     /// audio callback already saw are marked so they are not appended twice.
     #[test]
     fn test_seeded_capture_keeps_post_detection_speech() {
+        let _capture = capture_state();
         use std::sync::atomic::Ordering;
         const CH: usize = 1280;
         let reset = || {
@@ -7222,6 +7236,7 @@ mod tests {
     #[cfg(not(feature = "mock-wake"))]
     #[test]
     fn test_capture_had_speech_query() {
+        let _capture = capture_state();
         use std::sync::atomic::Ordering;
         super::STT_CAPTURING.store(false, Ordering::Relaxed);
         super::STT_VOICED_CHUNKS.store(9, Ordering::Relaxed);
@@ -7244,6 +7259,7 @@ mod tests {
     #[cfg(not(feature = "mock-wake"))]
     #[test]
     fn test_abort_resets_capture_state() {
+        let _capture = capture_state();
         use std::sync::atomic::Ordering;
         super::STT_CAPTURING.store(true, Ordering::Relaxed);
         super::STT_SPEECH_DETECTED.store(true, Ordering::Relaxed);
@@ -7270,6 +7286,7 @@ mod tests {
     #[cfg(not(feature = "mock-wake"))]
     #[test]
     fn test_abort_had_speech_arms() {
+        let _capture = capture_state();
         use std::sync::atomic::Ordering;
         super::STT_CAPTURING.store(true, Ordering::Relaxed);
         super::STT_VOICED_CHUNKS.store(5, Ordering::Relaxed);
@@ -7320,7 +7337,9 @@ mod tests {
     /// Abort bumps the session generation so in-flight buffers die on arrival.
     #[cfg(not(feature = "mock-wake"))]
     #[test]
-    fn test_abort_invalidates_session() {        use std::sync::atomic::Ordering;
+    fn test_abort_invalidates_session() {
+        let _capture = capture_state();
+        use std::sync::atomic::Ordering;
         let before = super::CAPTURE_SESSION_ID.load(Ordering::Relaxed);
         let _ = super::abort_stt_capture();
         let after = super::CAPTURE_SESSION_ID.load(Ordering::Relaxed);
