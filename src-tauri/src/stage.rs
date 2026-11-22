@@ -82,21 +82,175 @@ impl StageRect {
 /// (frontend-facing, legacy single-source callers) writes under the
 /// "legacy" key; `set_hitbox_source` (Rust-internal, window_manager.rs /
 /// calibration.rs) writes under a named key.
-static HITBOXES: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::HashMap<String, Vec<StageRect>>>> =
-    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+static HITBOXES: once_cell::sync::Lazy<parking_lot::Mutex<HitBook>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(HitBook::default()));
+
+/// A source that registers rects and then never clears them (a hide that skipped its clean-up, a stuck state, a crashed
+/// component) used to block that part of the user's screen until NEXUS restarted. Every source therefore has to
+/// refresh its rects or they expire, and a rect that covers most of the screen is refused outright.
+const DEFAULT_HIT_TTL_SECS: u64 = 60;
+/// Sources whose rects legitimately stay up for a long time (a callout, annotation pins).
+const LONG_HIT_TTL_SECS: u64 = 180;
+/// A single interactive rect larger than this share of the screen is a bug, not a button.
+const MAX_RECT_SCREEN_SHARE: f64 = 0.35;
+
+fn hit_ttl(source: &str) -> std::time::Duration {
+    match source {
+        "tour" | "spatial" | "annotation" => std::time::Duration::from_secs(LONG_HIT_TTL_SECS),
+        _ => std::time::Duration::from_secs(DEFAULT_HIT_TTL_SECS),
+    }
+}
+
+struct HitEntry {
+    rects: Vec<StageRect>,
+    at: std::time::Instant,
+    /// Calibration sessions hold their drag targets for as long as the session lasts: never expire, never size-capped.
+    pinned: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct HitBook {
+    entries: std::collections::HashMap<String, HitEntry>,
+    /// Physical size of the stage (the primary monitor), once known.
+    screen: Option<(i32, i32)>,
+}
+
+impl HitBook {
+    pub(crate) fn set_screen(&mut self, w: i32, h: i32) {
+        if w > 0 && h > 0 {
+            self.screen = Some((w, h));
+        }
+    }
+
+    /// Clamp a rect to the screen and refuse an empty, off-screen or oversized one.
+    fn sanitise(&self, r: StageRect, pinned: bool) -> Option<StageRect> {
+        if r.w <= 0 || r.h <= 0 {
+            return None;
+        }
+        let Some((sw, sh)) = self.screen else { return Some(r) };
+        let (x0, y0) = (r.x.max(0), r.y.max(0));
+        let (x1, y1) = ((r.x + r.w).min(sw), (r.y + r.h).min(sh));
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let c = StageRect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+        if !pinned && (c.w as f64) * (c.h as f64) > MAX_RECT_SCREEN_SHARE * (sw as f64) * (sh as f64) {
+            return None;
+        }
+        Some(c)
+    }
+
+    /// Replace one source's rects (empty clears it). Returns how many rects were refused.
+    pub(crate) fn set(&mut self, source: &str, rects: Vec<StageRect>, pinned: bool, now: std::time::Instant) -> usize {
+        let total = rects.len();
+        let kept: Vec<StageRect> = rects.into_iter().filter_map(|r| self.sanitise(r, pinned)).collect();
+        let refused = total - kept.len();
+        if kept.is_empty() {
+            self.entries.remove(source);
+        } else {
+            self.entries.insert(source.to_string(), HitEntry { rects: kept, at: now, pinned });
+        }
+        refused
+    }
+
+    /// Drop every source that was not refreshed in time; returns the live rects and the names that expired.
+    pub(crate) fn live(&mut self, now: std::time::Instant) -> (Vec<StageRect>, Vec<(String, u64)>) {
+        let mut expired = Vec::new();
+        self.entries.retain(|name, e| {
+            let age = now.saturating_duration_since(e.at);
+            if !e.pinned && age > hit_ttl(name) {
+                expired.push((name.clone(), age.as_secs()));
+                false
+            } else {
+                true
+            }
+        });
+        (self.entries.values().flat_map(|e| e.rects.iter().copied()).collect(), expired)
+    }
+
+    /// One short line per source, sorted, so a change in the set can be logged once instead of every tick.
+    pub(crate) fn signature(&self) -> String {
+        let mut parts: Vec<String> = self
+            .entries
+            .iter()
+            .map(|(n, e)| {
+                let rs: Vec<String> = e.rects.iter().map(|r| format!("{}x{}@{},{}", r.w, r.h, r.x, r.y)).collect();
+                format!("{n}[{}]", rs.join(" "))
+            })
+            .collect();
+        parts.sort();
+        parts.join(" ")
+    }
+}
 
 /// Rust-internal: replace one named source's hitbox rects. Empty = that
 /// source has nothing interactive right now (does not affect other
-/// sources). Used by window_manager.rs (orb) and calibration.rs (orb +
-/// loading preview, both interactive for drag during a calibration
-/// session).
+/// sources). The rects expire unless the source refreshes them (see `HitBook`).
 pub fn set_hitbox_source(source: &str, rects: Vec<StageRect>) {
-    let mut map = HITBOXES.lock();
-    if rects.is_empty() {
-        map.remove(source);
-    } else {
-        map.insert(source.to_string(), rects);
+    set_hitbox_source_with(source, rects, false);
+}
+
+/// Same, for a calibration session: its drag targets stay for the whole session (no expiry, no size cap).
+pub fn set_hitbox_source_pinned(source: &str, rects: Vec<StageRect>) {
+    set_hitbox_source_with(source, rects, true);
+}
+
+fn set_hitbox_source_with(source: &str, rects: Vec<StageRect>, pinned: bool) {
+    let refused = HITBOXES.lock().set(source, rects, pinned, std::time::Instant::now());
+    if refused > 0 {
+        tracing::warn!(
+            "[HITBOX] '{source}': refused {refused} rect(s) (empty, off-screen, or covering over {}% of the screen)",
+            (MAX_RECT_SCREEN_SHARE * 100.0) as u32
+        );
     }
+}
+
+/// Windows extended-style bits that decide how the stage treats the mouse and the keyboard focus.
+const WS_EX_TRANSPARENT_BIT: isize = 0x0000_0020;
+const WS_EX_TOOLWINDOW_BIT: isize = 0x0000_0080;
+const WS_EX_APPWINDOW_BIT: isize = 0x0004_0000;
+const WS_EX_NOACTIVATE_BIT: isize = 0x0800_0000;
+
+/// The stage's extended style: never takes keyboard focus (a click on one of its rects used to activate NEXUS, so the
+/// next Ctrl+C or Ctrl+V went to the overlay instead of the user's app), never appears in Alt+Tab or the taskbar, and
+/// is click-through unless the cursor is over a registered rect. Every other bit is left exactly as it is.
+pub(crate) fn stage_ex_style(ex: isize, click_through: bool) -> isize {
+    let v = (ex | WS_EX_TOOLWINDOW_BIT | WS_EX_NOACTIVATE_BIT) & !WS_EX_APPWINDOW_BIT;
+    if click_through {
+        v | WS_EX_TRANSPARENT_BIT
+    } else {
+        v & !WS_EX_TRANSPARENT_BIT
+    }
+}
+
+/// Set the stage's click-through state by flipping the style bits directly. tao's `set_ignore_cursor_events` rebuilds the
+/// whole style from tao's own flags and drops NOACTIVATE / TOOLWINDOW, which is how the overlay could take focus.
+/// Reading the style first makes every call also repair any other code that changed the bits. Returns false if the
+/// window handle is unavailable.
+#[cfg(target_os = "windows")]
+fn apply_click_through<R: Runtime>(win: &tauri::WebviewWindow<R>, through: bool) -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
+        fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
+    }
+    const GWL_EXSTYLE: i32 = -20;
+    let Ok(hwnd) = win.hwnd() else { return false };
+    let hwnd = hwnd.0 as isize;
+    // SAFETY: plain user32 calls on the stage's own window handle; only the style bits named above change.
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let next = stage_ex_style(ex, through);
+        if next != ex {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next);
+        }
+    }
+    true
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_click_through<R: Runtime>(win: &tauri::WebviewWindow<R>, through: bool) -> bool {
+    win.set_ignore_cursor_events(through).is_ok()
 }
 
 static LAST_BEAT: once_cell::sync::Lazy<parking_lot::Mutex<Option<std::time::Instant>>> =
@@ -134,6 +288,7 @@ fn ensure_stage<R: Runtime>(app: &AppHandle<R>) -> Result<tauri::WebviewWindow<R
     let win = crate::dyn_windows::get_or_create_window(app, crate::dyn_windows::WindowConfig::stage())?;
     win.set_ignore_cursor_events(true)
         .map_err(|e| format!("stage click-through: {e}"))?;
+    apply_click_through(&win, true);
     Ok(win)
 }
 
@@ -166,6 +321,7 @@ fn fit_to_primary_monitor<R: Runtime>(win: &tauri::WebviewWindow<R>) {
         tracing::warn!("stage: primary monitor reported an empty size; keeping the configured size");
         return;
     };
+    HITBOXES.lock().set_screen(w as i32, h as i32);
     let moved = win.set_position(tauri::PhysicalPosition::new(x, y));
     let sized = win.set_size(tauri::PhysicalSize::new(w, h));
     tracing::info!(
@@ -187,6 +343,8 @@ pub fn stage_show_sync<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     // strictly click-through before the hitbox loop re-opens holes.
     win.set_ignore_cursor_events(true)
         .map_err(|e| format!("stage click-through: {e}"))?;
+    // tao just rebuilt the style from its own flags: put NOACTIVATE / TOOLWINDOW / TRANSPARENT back before anything can click it.
+    apply_click_through(&win, true);
     VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
     *SHOWN_AT.lock() = Some(std::time::Instant::now());
     tracing::info!("stage: shown (click-through enforced)");
@@ -413,82 +571,134 @@ pub fn spawn_hitbox_loop<R: Runtime>(app: AppHandle<R>) {
     std::thread::Builder::new()
         .name("stage-hitbox".into())
         .spawn(move || {
-            let mut last_ignore: Option<bool> = None;
+            let mut state = HitLoopState::default();
             loop {
-                if !visible() || disabled() {
-                    last_ignore = None;
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    continue;
-                }
-                let Some(win) = app.get_webview_window(LABEL) else {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    continue;
-                };
-
-                let ghost_active = crate::ghost::session_active();
-                let rects: Vec<StageRect> = HITBOXES.lock().values().flatten().copied().collect();
-                let has_glass = crate::live_glass::has_active_hitboxes();
-
-                // If no hitboxes are registered and no ghost session is running,
-                // the transparent stage window has ZERO interactive elements.
-                // Force ignore_cursor_events(true) and deep-sleep for 250ms to allow
-                // the CPU package to enter deep low-power C-states (C8/C10).
-                if rects.is_empty() && !ghost_active && !has_glass {
-                    if last_ignore != Some(true) {
-                        let _ = win.set_ignore_cursor_events(true);
-                        last_ignore = Some(true);
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(250));
-                    continue;
-                }
-
-                let pos = cursor_pos();
-                if ghost_active {
-                    crate::ghost::observe_cursor(crate::ghost::ghost_wry::g_wry_ref(&app), pos);
-                }
-
-                let (inside, min_dist) = match pos {
-                    Some((x, y)) => {
-                        let mut in_rect = false;
-                        let mut min_d = i32::MAX;
-                        for r in &rects {
-                            if r.contains(x, y) {
-                                in_rect = true;
-                                min_d = 0;
-                                break;
-                            }
-                            let d = r.distance_to_point(x, y);
-                            if d < min_d {
-                                min_d = d;
-                            }
+                // A panic in one tick (a poisoned lock elsewhere, a bad handle) must never leave the full-screen overlay
+                // stuck in its interactive state: that would block every click on the user's screen until restart.
+                let sleep_ms = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hit_tick(&app, &mut state))) {
+                    Ok(ms) => ms,
+                    Err(_) => {
+                        tracing::error!("[HITBOX] the hitbox loop panicked; forcing the stage click-through and carrying on");
+                        if let Some(win) = app.get_webview_window(LABEL) {
+                            apply_click_through(&win, true);
                         }
-                        let inside = in_rect || crate::live_glass::is_cursor_inside_hitbox(x, y);
-                        (inside, if inside { 0 } else { min_d })
+                        state = HitLoopState::default();
+                        500
                     }
-                    None => (false, i32::MAX),
                 };
-
-                let want_ignore = !inside;
-                if last_ignore != Some(want_ignore) && win.set_ignore_cursor_events(want_ignore).is_ok() {
-                    last_ignore = Some(want_ignore);
-                }
-
-                // Adaptive Sleep Interval:
-                // - Proximity (inside or <= 120px): 16ms (60Hz seamless entry)
-                // - Ghost active: 30ms (smooth cursor follower)
-                // - Distant: 100ms (enables CPU deep sleep)
-                let sleep_ms = if inside || min_dist <= 120 {
-                    16
-                } else if ghost_active {
-                    30
-                } else {
-                    100
-                };
-
                 std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
             }
         })
         .ok();
+}
+
+#[derive(Default)]
+struct HitLoopState {
+    last_ignore: Option<bool>,
+    last_signature: String,
+    interactive_since: Option<std::time::Instant>,
+    warned_stuck: bool,
+}
+
+/// How long the stage may stay interactive without a break before it is logged as a possible stuck hitbox.
+const STUCK_INTERACTIVE_WARN_SECS: u64 = 20;
+
+/// One pass of the loop: returns how long to sleep before the next one.
+fn hit_tick<R: Runtime>(app: &AppHandle<R>, st: &mut HitLoopState) -> u64 {
+    if !visible() || disabled() {
+        st.last_ignore = None;
+        st.interactive_since = None;
+        return 500;
+    }
+    let Some(win) = app.get_webview_window(LABEL) else { return 500 };
+
+    let ghost_active = crate::ghost::session_active();
+    let (rects, expired, signature) = {
+        let mut book = HITBOXES.lock();
+        let (rects, expired) = book.live(std::time::Instant::now());
+        (rects, expired, book.signature())
+    };
+    for (name, age) in expired {
+        tracing::warn!("[HITBOX] '{name}' expired after {age}s without a refresh (a stale hitbox would have blocked that part of the screen)");
+    }
+    if signature != st.last_signature {
+        tracing::info!("[HITBOX] interactive rects now: {}", if signature.is_empty() { "none".to_string() } else { signature.clone() });
+        st.last_signature = signature.clone();
+    }
+    let has_glass = crate::live_glass::has_active_hitboxes();
+
+    // If no hitboxes are registered and no ghost session is running,
+    // the transparent stage window has ZERO interactive elements.
+    // Force click-through and deep-sleep for 250ms to allow the CPU
+    // package to enter deep low-power C-states (C8/C10). The style is re-checked
+    // on every pass, so anything that changed it behind our back is repaired.
+    if rects.is_empty() && !ghost_active && !has_glass {
+        apply_click_through(&win, true);
+        st.last_ignore = Some(true);
+        st.interactive_since = None;
+        st.warned_stuck = false;
+        return 250;
+    }
+
+    let pos = cursor_pos();
+    if ghost_active {
+        crate::ghost::observe_cursor(crate::ghost::ghost_wry::g_wry_ref(app), pos);
+    }
+
+    let (inside, min_dist) = match pos {
+        Some((x, y)) => {
+            let mut in_rect = false;
+            let mut min_d = i32::MAX;
+            for r in &rects {
+                if r.contains(x, y) {
+                    in_rect = true;
+                    min_d = 0;
+                    break;
+                }
+                let d = r.distance_to_point(x, y);
+                if d < min_d {
+                    min_d = d;
+                }
+            }
+            let inside = in_rect || crate::live_glass::is_cursor_inside_hitbox(x, y);
+            (inside, if inside { 0 } else { min_d })
+        }
+        None => (false, i32::MAX),
+    };
+
+    let want_ignore = !inside;
+    if apply_click_through(&win, want_ignore) {
+        st.last_ignore = Some(want_ignore);
+    }
+
+    // Diagnostics: the cursor resting on an interactive rect for a long time is either a user reading a callout or a
+    // stuck hitbox. Say so once, with the rects, so the next report names its cause.
+    if inside {
+        let since = *st.interactive_since.get_or_insert_with(std::time::Instant::now);
+        if !st.warned_stuck && since.elapsed().as_secs() >= STUCK_INTERACTIVE_WARN_SECS {
+            st.warned_stuck = true;
+            tracing::warn!(
+                "[HITBOX] the stage has been interactive for {STUCK_INTERACTIVE_WARN_SECS}s (cursor at {:?}); rects: {}",
+                pos,
+                st.last_signature
+            );
+        }
+    } else {
+        st.interactive_since = None;
+        st.warned_stuck = false;
+    }
+
+    // Adaptive Sleep Interval:
+    // - Proximity (inside or <= 120px): 16ms (60Hz seamless entry)
+    // - Ghost active: 30ms (smooth cursor follower)
+    // - Distant: 100ms (enables CPU deep sleep)
+    if inside || min_dist <= 120 {
+        16
+    } else if ghost_active {
+        30
+    } else {
+        100
+    }
 }
 
 /// Speak one line through the orb (separate window — unaffected by a
@@ -790,5 +1000,175 @@ mod stage_fit_tests {
     fn a_monitor_with_no_size_is_ignored() {
         assert_eq!(stage_target_rect((0, 0), (0, 1080)), None);
         assert_eq!(stage_target_rect((0, 0), (1920, 0)), None);
+    }
+}
+
+
+#[cfg(test)]
+mod hitbook_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn r(x: i32, y: i32, w: i32, h: i32) -> StageRect {
+        StageRect { x, y, w, h }
+    }
+
+    fn book() -> HitBook {
+        let mut b = HitBook::default();
+        b.set_screen(2880, 1800);
+        b
+    }
+
+    #[test]
+    fn a_source_that_is_never_refreshed_expires() {
+        let mut b = book();
+        let t0 = Instant::now();
+        b.set("orb", vec![r(1240, 0, 400, 400)], false, t0);
+        let (live, expired) = b.live(t0 + Duration::from_secs(DEFAULT_HIT_TTL_SECS - 1));
+        assert_eq!(live.len(), 1);
+        assert!(expired.is_empty());
+        let (live, expired) = b.live(t0 + Duration::from_secs(DEFAULT_HIT_TTL_SECS + 1));
+        assert!(live.is_empty(), "a stale hitbox must stop blocking the screen");
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].0, "orb");
+    }
+
+    #[test]
+    fn refreshing_restarts_the_clock() {
+        let mut b = book();
+        let t0 = Instant::now();
+        b.set("orb", vec![r(10, 10, 50, 50)], false, t0);
+        b.set("orb", vec![r(10, 10, 50, 50)], false, t0 + Duration::from_secs(50));
+        let (live, _) = b.live(t0 + Duration::from_secs(100));
+        assert_eq!(live.len(), 1);
+    }
+
+    #[test]
+    fn long_lived_sources_get_the_long_window() {
+        let mut b = book();
+        let t0 = Instant::now();
+        b.set("tour", vec![r(100, 100, 300, 120)], false, t0);
+        b.set("other", vec![r(500, 100, 300, 120)], false, t0);
+        let (live, expired) = b.live(t0 + Duration::from_secs(DEFAULT_HIT_TTL_SECS + 5));
+        assert_eq!(live.len(), 1, "the tour callout is still up, the unknown source is gone");
+        assert_eq!(expired.len(), 1);
+        let (live, _) = b.live(t0 + Duration::from_secs(LONG_HIT_TTL_SECS + 5));
+        assert!(live.is_empty());
+    }
+
+    #[test]
+    fn calibration_sources_are_pinned_for_the_whole_session() {
+        let mut b = book();
+        let t0 = Instant::now();
+        b.set("orb", vec![r(1240, 0, 400, 400)], true, t0);
+        let (live, expired) = b.live(t0 + Duration::from_secs(3600));
+        assert_eq!(live.len(), 1);
+        assert!(expired.is_empty());
+    }
+
+    #[test]
+    fn a_rect_covering_most_of_the_screen_is_refused() {
+        let mut b = book();
+        let refused = b.set("bug", vec![r(0, 0, 2880, 1800)], false, Instant::now());
+        assert_eq!(refused, 1);
+        assert!(b.live(Instant::now()).0.is_empty());
+        // a 200x200 logical orb (400 px at 200%) is fine
+        assert_eq!(b.set("ok", vec![r(1240, 0, 400, 400)], false, Instant::now()), 0);
+        // just over the cap is refused, just under is kept
+        let w = (2880.0 * 0.6) as i32;
+        assert_eq!(b.set("big", vec![r(0, 0, w, 1800)], false, Instant::now()), 1);
+    }
+
+    #[test]
+    fn empty_and_off_screen_rects_are_refused_and_edges_are_clamped() {
+        let mut b = book();
+        assert_eq!(b.set("a", vec![r(0, 0, 0, 40)], false, Instant::now()), 1);
+        assert_eq!(b.set("b", vec![r(5000, 5000, 100, 100)], false, Instant::now()), 1);
+        assert_eq!(b.set("c", vec![r(-50, -50, 150, 150)], false, Instant::now()), 0);
+        let (live, _) = b.live(Instant::now());
+        assert_eq!(live.len(), 1);
+        assert_eq!((live[0].x, live[0].y, live[0].w, live[0].h), (0, 0, 100, 100));
+    }
+
+    #[test]
+    fn replacing_a_source_with_only_bad_rects_clears_it() {
+        let mut b = book();
+        let t0 = Instant::now();
+        b.set("tour", vec![r(100, 100, 300, 100)], false, t0);
+        b.set("tour", vec![r(0, 0, 2880, 1800)], false, t0);
+        assert!(b.live(t0).0.is_empty(), "the old rect must not linger after a refused update");
+        b.set("tour", vec![r(100, 100, 300, 100)], false, t0);
+        b.set("tour", Vec::new(), false, t0);
+        assert!(b.live(t0).0.is_empty());
+    }
+
+    #[test]
+    fn sources_do_not_clobber_each_other() {
+        let mut b = book();
+        let t0 = Instant::now();
+        b.set("tour", vec![r(100, 100, 300, 100)], false, t0);
+        b.set("spatial", vec![r(900, 100, 50, 50), r(1000, 100, 50, 50)], false, t0);
+        b.set("tour", Vec::new(), false, t0);
+        assert_eq!(b.live(t0).0.len(), 2);
+        assert!(b.signature().starts_with("spatial["));
+    }
+
+    #[test]
+    fn without_a_known_screen_only_empty_rects_are_refused() {
+        let mut b = HitBook::default();
+        assert_eq!(b.set("x", vec![r(0, 0, 0, 0), r(1, 1, 5000, 5000)], false, Instant::now()), 1);
+        assert_eq!(b.live(Instant::now()).0.len(), 1);
+    }
+
+    #[test]
+    fn the_stage_style_never_takes_focus_and_is_click_through_on_demand() {
+        let base: isize = 0x000C_0138; // the style measured on the running stage: APPWINDOW, TRANSPARENT, LAYERED, TOPMOST ...
+        let through = stage_ex_style(base, true);
+        assert_ne!(through & WS_EX_NOACTIVATE_BIT, 0, "a click must never activate the overlay (it stole Ctrl+C)");
+        assert_ne!(through & WS_EX_TOOLWINDOW_BIT, 0, "no Alt+Tab entry for an invisible overlay");
+        assert_eq!(through & WS_EX_APPWINDOW_BIT, 0);
+        assert_ne!(through & WS_EX_TRANSPARENT_BIT, 0);
+        let interactive = stage_ex_style(base, false);
+        assert_eq!(interactive & WS_EX_TRANSPARENT_BIT, 0);
+        assert_ne!(interactive & WS_EX_NOACTIVATE_BIT, 0, "still non-activating while the mouse is over a rect");
+        // layered + topmost bits are never touched
+        assert_eq!(through & 0x0008_0008, base & 0x0008_0008);
+        // idempotent
+        assert_eq!(stage_ex_style(through, true), through);
+    }
+
+    fn production_source(file: &str) -> String {
+        let text = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(file)).unwrap();
+        text.split("#[cfg(test)]").next().unwrap().to_string()
+    }
+
+    #[test]
+    fn the_hit_loop_never_uses_taos_set_ignore_cursor_events() {
+        // tao rebuilds the whole style on that call and drops NOACTIVATE; the loop must flip the bits itself.
+        let src = production_source("stage.rs");
+        let start = src.find("fn hit_tick").expect("hit_tick");
+        let end = src[start..].find("/// Speak one line through the orb").map(|i| start + i).expect("end marker");
+        let body: Vec<&str> = src[start..end].lines().filter(|l| !l.trim_start().starts_with("//")).collect();
+        assert!(
+            !body.iter().any(|l| l.contains(".set_ignore_cursor_events(")),
+            "hit_tick must call apply_click_through, not tao's set_ignore_cursor_events"
+        );
+        assert!(body.iter().any(|l| l.contains("apply_click_through(")));
+    }
+
+    #[test]
+    fn waking_the_orb_never_registers_an_interactive_hitbox() {
+        // The 200x200 logical orb rect at the top centre swallowed Brave's tabs and address bar after every wake.
+        let src = production_source("window_manager.rs");
+        let start = src.find("pub fn show_orb_interactive").expect("show_orb_interactive");
+        let end = src[start..].find("\n}\n").map(|i| start + i).expect("end of fn");
+        let body: Vec<&str> = src[start..end].lines().filter(|l| !l.trim_start().starts_with("//")).collect();
+        assert!(!body.iter().any(|l| l.contains("set_orb_hitbox_interactive") || l.contains("set_hitbox_source")));
+    }
+
+    #[test]
+    fn the_orb_is_only_interactive_during_calibration() {
+        assert!(crate::window_manager::orb_hitbox_allowed(true));
+        assert!(!crate::window_manager::orb_hitbox_allowed(false));
     }
 }

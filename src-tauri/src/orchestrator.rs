@@ -5306,6 +5306,14 @@ async fn run_screen_tour<R: Runtime>(
             &OrchestratorEvent::Loading { visible: true, request_id: rid.clone() },
         );
         crate::center::direct_ui(app, crate::center::UiDirective::Loading(true));
+        // One burst of rings leaves the orb and covers the screen the moment NEXUS acknowledges (docs/features/195).
+        // It plays at once because the context gathering below takes seconds. The picture is never polluted: the stage is
+        // capture-excluded for the shot itself. Not in a meeting (the overlay would show in the screen share).
+        crate::commands::emit_logged(
+            app,
+            "screen:analyse_wave",
+            serde_json::json!({ "request_id": rid }),
+        );
     }
 
     // 2. Enrich the frozen target with local OCR and public video metadata

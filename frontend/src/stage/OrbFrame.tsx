@@ -643,16 +643,13 @@ export function OrbFrame() {
     };
   }, [state]);
 
-  // Orb interactivity: when the state is active (not idle), the orb's
-  // rect becomes a stage hitbox so pointer events reach it (replaces the
-  // old `set_click_through` call on the `main` window).
+  // Orb interactivity: ONLY while animation calibration is open (drag / wheel resize). At any other time the orb is a
+  // picture with nothing to click, and an interactive orb rect (200x200 logical at the top centre) blocks every click
+  // under it: Brave's tabs and address bar included. Rust refuses it outside calibration too.
+  const calibrating = useAssistant((s) => !!s.calibrationTarget);
   useEffect(() => {
-    if (state === "idle" && !useAssistant.getState().calibrationTarget) {
-      tauriInvoke("set_orb_interactive", { interactive: false }).catch(() => {});
-      return;
-    }
-    tauriInvoke("set_orb_interactive", { interactive: true }).catch(() => {});
-  }, [state]);
+    tauriInvoke("set_orb_interactive", { interactive: calibrating }).catch(() => {});
+  }, [calibrating]);
 
   // The loading spinner is owned by Rust (`show_loading` / `hide_loading_for`, and `orchestrator_done` at the end
   // of a turn); LoadingIndicator.tsx renders from those stage events. This component used to echo every store
