@@ -400,7 +400,7 @@ fn clarification_for(intent: &ParsedIntent) -> (String, String) {
 /// Speak a clarification prompt and keep the turn open for one bounded reply.
 /// Unlike `speak_prompt_and_finish`, this does not emit `Done` or clear the
 /// active request. The frontend auto-listens after TTS and cancels on timeout.
-async fn speak_prompt_and_hold<R: Runtime>(
+pub(crate) async fn speak_prompt_and_hold<R: Runtime>(
     app: &AppHandle<R>,
     prompt: String,
     expected_slot: String,
@@ -1324,6 +1324,10 @@ async fn process_transcript_inner<R: Runtime>(
     let center_name = crate::center::center_id_for(&intent).as_str();
     let evidence = crate::center::command_evidence(&intent, &transcript, source);
     let turn = turn_context.unwrap_or_default();
+    // A multi-flow workflow asked a follow-up question ("What should the message say?"): this turn may answer it.
+    if let Some(handled) = crate::flows::live::try_fill_slot(&app, &transcript, turn.ownership).await {
+        return handled;
+    }
     let corrected_action = crate::center::correction_needs_repeat(&turn.raw_text, &transcript, &intent)
         || (turn.session != 0 && !turn.corrected_text.is_empty() && turn.corrected_text != transcript);
     let unknown_command = matches!(intent, ParsedIntent::Unknown { .. })
