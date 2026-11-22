@@ -423,12 +423,33 @@ async fn speak_prompt_and_hold<R: Runtime>(
     })
 }
 
+/// Butler mode: whatever produced a result (local line, 9Router, Worker), the owner is addressed as "sir", never by
+/// name. The cloud prompts ask for it too, but a model can ignore a prompt; this guard cannot be ignored.
+fn enforce_butler_address<R: Runtime>(app: &AppHandle<R>, payload: &mut serde_json::Value) {
+    if crate::persona::is_friend(&crate::commands::read_persona_mode(app)) {
+        return;
+    }
+    let Some(text) = payload.get("text").and_then(|v| v.as_str()) else { return };
+    let Ok(dir) = app.path().app_data_dir() else { return };
+    let names: Vec<String> = ["name", "user_first_name", "user_name", "nickname"]
+        .iter()
+        .filter_map(|k| crate::memory::core_value(&dir, k))
+        .collect();
+    let fixed = crate::persona::enforce_address(text, &names);
+    if fixed != text {
+        payload["text"] = serde_json::Value::String(fixed);
+    }
+}
+
 /// Emit an orchestrator event to the frontend.
 pub(crate) fn emit<R: Runtime>(app: &AppHandle<R>, event: &OrchestratorEvent) {
     if matches!(event, OrchestratorEvent::Result { .. }) {
         crate::latency::mark(crate::latency::Stage::Answer);
     }
     let mut payload = serde_json::to_value(event).unwrap_or_default();
+    if matches!(event, OrchestratorEvent::Result { .. }) {
+        enforce_butler_address(app, &mut payload);
+    }
     if let Some(id) = payload.get("request_id").and_then(|v| v.as_str()) {
         let source = ACTIVE_REQUEST.try_lock().ok()
             .and_then(|guard| guard.as_ref().filter(|active| active.id == id)
@@ -2220,6 +2241,10 @@ async fn process_transcript_inner<R: Runtime>(
     // routing. This must run BEFORE routing because a compound transcript
     // won't parse as a single intent anyway (the deterministic parser
     // would return Unknown or a wrong partial match).
+    // Multi-flow workflows (plan 193): runs for real when `flowsLive` is on, otherwise only logs what it would do.
+    if let Some(handled) = crate::flows::live::try_run(&app, &transcript, turn.ownership).await {
+        return handled;
+    }
     let request_id_probe = new_request_id();
     if let Some(plan) =
         crate::command_center::build_plan_with_brain(&transcript, &request_id_probe).await
@@ -10989,6 +11014,10 @@ pub async fn orchestrator_mcp_confirm<R: Runtime>(
     use crate::mcp_client::{call_tool, extract_text, McpServer};
 
     if !confirmed {
+        // A paused multi-flow workflow waits in Rust under its token: a "no" forgets it.
+        if pending["server"].as_str() == Some(crate::flows::live::CONFIRM_SERVER) {
+            crate::flows::live::discard(pending["params"]["nonce"].as_str().unwrap_or(""));
+        }
         emit(
             &app,
             &OrchestratorEvent::Result {
@@ -11015,6 +11044,11 @@ pub async fn orchestrator_mcp_confirm<R: Runtime>(
         .as_str()
         .ok_or("invalid pending payload: missing tool")?;
     let params = pending["params"].clone();
+
+    // A multi-flow workflow (plan 193) asked for this confirmation: it resumes itself.
+    if server_name == crate::flows::live::CONFIRM_SERVER {
+        return crate::flows::live::resume(&app, request_id, params).await;
+    }
 
     let server = match server_name {
         "swiggy-food" => McpServer::SwiggyFood,
