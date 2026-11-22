@@ -97,18 +97,8 @@ enum Outcome {
     Say(String),
     /// A confirmation was shown; the turn continues in `resume`.
     Asked,
-}
-
-fn missing_prompt(missing: &[String]) -> String {
-    let what: Vec<&str> = missing
-        .iter()
-        .map(|m| match m.as_str() {
-            "body" => "what the message should say",
-            "contact" => "who to send it to",
-            _ => "the missing detail",
-        })
-        .collect();
-    format!("Tell me {} in the same sentence, sir.", what.join(" and "))
+    /// The user said stop: end the turn without speaking over them.
+    Stopped,
 }
 
 /// The saved contact for a spoken name: (name as saved, WhatsApp number). Several matches or none is an error
@@ -134,41 +124,144 @@ fn resolve_contact(dir: &std::path::Path, spoken: &str) -> Result<(String, Strin
     }
 }
 
+// ─── Follow-up questions ("What should the message say?") ─────────────
+
+/// A flow waiting for one more answer from the user.
+struct SlotWait {
+    flow_id: String,
+    slots: BTreeMap<String, String>,
+    missing: Vec<String>,
+    created: Instant,
+}
+
+static SLOT_WAIT: Lazy<Mutex<Option<SlotWait>>> = Lazy::new(|| Mutex::new(None));
+
+/// How long a follow-up question stays open.
+const SLOT_TTL: Duration = Duration::from_secs(90);
+
+fn ask_for(slot: &str) -> String {
+    match slot {
+        "body" => "What should the message say, sir?".into(),
+        "contact" => "Who should I send it to, sir?".into(),
+        _ => "I need one more detail, sir. What is it?".into(),
+    }
+}
+
+/// Called early on every turn: if a flow asked a follow-up question, this reply answers it. `None` = nothing was
+/// waiting (or the reply is a new workflow sentence, which then routes normally).
+pub(crate) async fn try_fill_slot<R: Runtime>(app: &AppHandle<R>, transcript: &str, ownership: TurnOwnership) -> Option<Result<ProcessResult, String>> {
+    let wait = {
+        let mut g = SLOT_WAIT.lock().unwrap_or_else(|e| e.into_inner());
+        match g.take() {
+            Some(w) if w.created.elapsed() <= SLOT_TTL => w,
+            _ => return None,
+        }
+    };
+    if matches!(ownership, TurnOwnership::Uncertain | TurnOwnership::Rejected) {
+        tracing::info!("[FLOW] follow-up answer ignored: not clearly the owner's voice");
+        return None;
+    }
+    if super::is_cancel_reply(transcript) {
+        let (request_id, _) = orchestrator::install_new_request(Subsystem::Mcp);
+        return Some(orchestrator::say_and_finish(app, request_id, "Okay, I won't do it, sir.".into()));
+    }
+    if !matches!(super::route(transcript, builtin(), true), Route::NotAFlow) {
+        return None;
+    }
+    let flow = builtin().iter().find(|f| f.id == wait.flow_id)?.clone();
+    let slot = wait.missing.first()?.clone();
+    let Some(answer) = super::answer_for(&slot, transcript) else {
+        let (request_id, _) = orchestrator::install_new_request(Subsystem::Mcp);
+        return Some(orchestrator::say_and_finish(app, request_id, "I didn't catch that, sir, so I haven't done anything.".into()));
+    };
+    let mut slots = wait.slots;
+    slots.insert(slot.clone(), answer);
+    let missing = super::missing_for(&flow, &slots);
+    tracing::info!("[FLOW] follow-up answer filled slot={slot} flow={}", flow.id);
+    Some(start(app, flow, slots, missing, ownership).await)
+}
+
+// ─── Entry point ───────────────────────────────────────────────────────
+
+/// Ask the user's own BYOK cloud model which workflow a reworded sentence means (layer 3). Only the sentence and the
+/// flow descriptions are sent; the reply is checked against the user's words before anything is used.
+async fn cloud_choose<R: Runtime>(app: &AppHandle<R>, transcript: &str) -> Option<(String, BTreeMap<String, String>)> {
+    let keys = crate::router::read_provider_keys(app);
+    if keys.groq.is_empty() && keys.gemini.is_empty() && keys.cerebras.is_empty() {
+        return None;
+    }
+    let client = crate::stt::shared_client();
+    let system = super::chooser_system(builtin());
+    let reply = tokio::time::timeout(Duration::from_secs(4), crate::router::route_with_system(&system, transcript, 120, &keys, &client))
+        .await
+        .ok()
+        .flatten()?;
+    let choice = super::parse_choice(&reply.text, transcript, builtin());
+    tracing::info!("[FLOW] cloud chooser ({:?}) -> {:?}", reply.provider, choice.as_ref().map(|(id, s)| (id.clone(), s.keys().cloned().collect::<Vec<_>>())));
+    choice
+}
+
 /// Called once per turn. `None` = not a flow (or shadow mode): carry on with the normal pipeline.
 pub(crate) async fn try_run<R: Runtime>(app: &AppHandle<R>, transcript: &str, ownership: TurnOwnership) -> Option<Result<ProcessResult, String>> {
     let split_and = flag(app, "flowsAndSplit", true);
-    let Route::Flow { id, mut slots, missing } = super::route(transcript, builtin(), split_and) else { return None };
-    if !flag(app, "flowsLive", false) {
+    let live = flag(app, "flowsLive", false);
+    let (id, slots, layer) = match super::route(transcript, builtin(), split_and) {
+        Route::Flow { id, slots, .. } => (id, slots, "L1"),
+        Route::NotAFlow => {
+            if !live || !flag(app, "flowsCloudChooser", false) || !super::worth_asking_cloud(transcript) {
+                return None;
+            }
+            let (id, slots) = cloud_choose(app, transcript).await?;
+            (id, slots, "L3")
+        }
+    };
+    if !live {
         super::shadow(transcript, split_and);
         return None;
     }
     let flow = builtin().iter().find(|f| f.id == id)?.clone();
+    let missing = super::missing_for(&flow, &slots);
+    tracing::info!("[FLOW] live route layer={layer} chosen={id} slots={:?} missing={missing:?} owner={}", slots.keys().collect::<Vec<_>>(), ownership.as_str());
+    Some(start(app, flow, slots, missing, ownership).await)
+}
+
+/// Start (or continue) a flow: owner check, follow-up question for a missing detail, contact lookup, then run.
+async fn start<R: Runtime>(
+    app: &AppHandle<R>,
+    flow: super::Flow,
+    mut slots: BTreeMap<String, String>,
+    missing: Vec<String>,
+    ownership: TurnOwnership,
+) -> Result<ProcessResult, String> {
     let (request_id, cancel) = orchestrator::install_new_request(Subsystem::Mcp);
-    tracing::info!("[FLOW] live route chosen={id} slots={:?} missing={missing:?} owner={}", slots.keys().collect::<Vec<_>>(), ownership.as_str());
     // A workflow can end in something that cannot be undone, so a voice that is not clearly the owner's
     // does not start one (the same rule the other side-effect paths use).
     if matches!(ownership, TurnOwnership::Uncertain | TurnOwnership::Rejected) {
-        return Some(orchestrator::say_and_finish(app, request_id, "I couldn't be sure that was you, sir, so I haven't started that. Please ask again.".into()));
+        return orchestrator::say_and_finish(app, request_id, "I couldn't be sure that was you, sir, so I haven't started that. Please ask again.".into());
     }
-    if !missing.is_empty() {
-        return Some(orchestrator::say_and_finish(app, request_id, missing_prompt(&missing)));
+    if let Some(slot) = missing.first() {
+        *SLOT_WAIT.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(SlotWait { flow_id: flow.id.clone(), slots, missing: missing.clone(), created: Instant::now() });
+        return orchestrator::speak_prompt_and_hold(app, ask_for(slot), slot.clone()).await;
     }
     if flow.slots.iter().any(|s| s.name == "contact_number") {
         let spoken = slots.get("contact").cloned().unwrap_or_default();
         let Ok(dir) = app.path().app_data_dir() else {
-            return Some(orchestrator::say_and_finish(app, request_id, "I couldn't open my memory, sir.".into()));
+            return orchestrator::say_and_finish(app, request_id, "I couldn't open my memory, sir.".into());
         };
         match resolve_contact(&dir, &spoken) {
             Ok((name, number)) => {
                 slots.insert("contact".into(), name);
                 slots.insert("contact_number".into(), number);
             }
-            Err(line) => return Some(orchestrator::say_and_finish(app, request_id, line)),
+            Err(line) => return orchestrator::say_and_finish(app, request_id, line),
         }
     }
     match drive(app, FlowRun::new(flow, &slots), request_id.clone(), cancel, Vec::new()).await {
-        Outcome::Say(text) => Some(orchestrator::say_and_finish(app, request_id, text)),
-        Outcome::Asked => Some(Ok(ProcessResult { request_id, subsystem: Subsystem::Mcp, handled_locally: false })),
+        Outcome::Say(text) => orchestrator::say_and_finish(app, request_id, text),
+        // an empty line ends the turn without speech
+        Outcome::Stopped => orchestrator::say_and_finish(app, request_id, String::new()),
+        Outcome::Asked => Ok(ProcessResult { request_id, subsystem: Subsystem::Mcp, handled_locally: false }),
     }
 }
 
@@ -197,8 +290,13 @@ pub(crate) async fn resume<R: Runtime>(app: &AppHandle<R>, request_id: String, p
             tracing::info!("[FLOW] confirmed, resuming");
             // A fresh cancel flag under the same request id: "stop" from here on reaches the remaining steps.
             let cancel = orchestrator::install_new_request_with_id(request_id.clone(), Subsystem::Mcp);
-            if let Outcome::Say(text) = drive(app, run, request_id.clone(), cancel, Vec::new()).await {
-                finish(app, &request_id, text);
+            match drive(app, run, request_id.clone(), cancel, Vec::new()).await {
+                Outcome::Say(text) => finish(app, &request_id, text),
+                Outcome::Stopped => {
+                    orchestrator::emit(app, &OrchestratorEvent::Done { request_id: request_id.clone() });
+                    orchestrator::clear_active_request(&request_id);
+                }
+                Outcome::Asked => {}
             }
             Ok(serde_json::json!({ "ok": true }))
         }
@@ -206,10 +304,13 @@ pub(crate) async fn resume<R: Runtime>(app: &AppHandle<R>, request_id: String, p
 }
 
 async fn drive<R: Runtime>(app: &AppHandle<R>, mut run: FlowRun, request_id: String, cancel: Arc<AtomicBool>, mut said: Vec<String>) -> Outcome {
+    let stopped = |run: &FlowRun| {
+        tracing::info!("[FLOW] {}", run.stopped_line());
+        Outcome::Stopped
+    };
     loop {
         if cancel.load(Ordering::Relaxed) {
-            said.push(run.stopped_line());
-            return Outcome::Say(said.join(" "));
+            return stopped(&run);
         }
         match run.next_action() {
             Next::Done => {
@@ -243,16 +344,23 @@ async fn drive<R: Runtime>(app: &AppHandle<R>, mut run: FlowRun, request_id: Str
                 }
                 return Outcome::Asked;
             }
-            Next::Run { cap, inputs } => match run_cap(app, cap, &inputs).await {
-                Ok((out, line)) => {
-                    said.extend(line);
-                    run.record(out);
+            Next::Run { cap, inputs } => {
+                let result = run_cap(app, cap, &inputs, &cancel).await;
+                // A stop that arrived while the step ran wins over its result: nothing more is said or done.
+                if cancel.load(Ordering::Relaxed) {
+                    return stopped(&run);
                 }
-                Err(e) => {
-                    said.push(run.failure_line(&e));
-                    return Outcome::Say(said.join(" "));
+                match result {
+                    Ok((out, line)) => {
+                        said.extend(line);
+                        run.record(out);
+                    }
+                    Err(e) => {
+                        said.push(run.failure_line(&e));
+                        return Outcome::Say(said.join(" "));
+                    }
                 }
-            },
+            }
         }
     }
 }
@@ -305,7 +413,7 @@ fn sender_label(msg: &serde_json::Value) -> String {
 
 /// The place in the mail just read (whichever connected account holds it), else in the newest mail of every
 /// connected account: the first one that carries a Maps link or a location line. Returns (place, origin label).
-async fn find_place(mail_id: &str) -> Result<(String, String), String> {
+async fn find_place(mail_id: &str, cancel: &Arc<AtomicBool>) -> Result<(String, String), String> {
     use crate::memcore::{explain, google_io};
     let accounts = google_io::list_accounts(google_io::can_read_mail);
     if accounts.is_empty() {
@@ -323,6 +431,10 @@ async fn find_place(mail_id: &str) -> Result<(String, String), String> {
     }
     for acc in &accounts {
         for id in recent_ids(acc.email.as_deref()).await.into_iter().filter(|m| m != mail_id).take(5) {
+            // each mail is a network round trip: a stop must not wait for all of them
+            if cancel.load(Ordering::Relaxed) {
+                return Err("stopped".into());
+            }
             if let Some(msg) = fetch_full(acc.email.clone(), id).await {
                 if let Some(p) = explain::extract_place(&msg) {
                     return Ok((p, sender_label(&msg)));
@@ -334,7 +446,7 @@ async fn find_place(mail_id: &str) -> Result<(String, String), String> {
 }
 
 /// Each adapter wraps an existing center function and reports provenance on what it returns.
-async fn run_cap<R: Runtime>(app: &AppHandle<R>, cap: &str, inputs: &BTreeMap<String, Value>) -> Result<CapOut, String> {
+async fn run_cap<R: Runtime>(app: &AppHandle<R>, cap: &str, inputs: &BTreeMap<String, Value>, cancel: &Arc<AtomicBool>) -> Result<CapOut, String> {
     let text = |k: &str| inputs.get(k).map(|v| v.text.clone()).unwrap_or_default();
     match cap {
         "mail.check" => {
@@ -362,7 +474,7 @@ async fn run_cap<R: Runtime>(app: &AppHandle<R>, cap: &str, inputs: &BTreeMap<St
             Ok((out, Some(said)))
         }
         "mail.extract_place" => {
-            let (place, origin) = find_place(&text("mail")).await?;
+            let (place, origin) = find_place(&text("mail"), cancel).await?;
             let mut out = BTreeMap::new();
             out.insert("place".into(), value(place, Trust::Untrusted, &origin));
             Ok((out, None))

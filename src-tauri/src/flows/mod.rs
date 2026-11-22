@@ -190,12 +190,30 @@ pub enum Route {
 const VERBS: &[&str] = &[
     "check", "read", "open", "show", "send", "message", "text", "tell", "give", "get", "start", "play", "add", "order",
     "call", "find", "search", "remind", "set", "summarise", "summarize", "analyse", "analyze", "navigate", "see", "whatsapp",
+    "ping", "drop", "shoot", "write", "look", "go", "any", "take", "scan", "have",
 ];
 
+/// Openers that carry no meaning for routing ("could you check ...", "please send ...").
+const POLITE: &[&str] = &["please ", "could you ", "can you ", "would you ", "will you ", "nexus ", "hey nexus "];
+
+/// The clause without polite openers.
+fn core(clause: &str) -> &str {
+    let mut t = clause.trim();
+    loop {
+        let before = t;
+        for p in POLITE {
+            if let Some(rest) = t.strip_prefix(p) {
+                t = rest.trim_start();
+            }
+        }
+        if t == before {
+            return t;
+        }
+    }
+}
+
 fn first_word(clause: &str) -> &str {
-    let t = clause.trim();
-    let t = t.strip_prefix("please ").unwrap_or(t);
-    t.split_whitespace().next().unwrap_or("")
+    core(clause).split_whitespace().next().unwrap_or("")
 }
 
 fn starts_with_verb(clause: &str) -> bool {
@@ -226,7 +244,7 @@ pub fn split_clause_pairs(text: &str, split_and: bool) -> Vec<(String, String)> 
     // Offsets are shared between the two strings only when lowercasing kept every byte length.
     let orig = if low.len() == trimmed.len() { trimmed.to_string() } else { low.clone() };
     let mut spans = vec![(0, low.len())];
-    for sep in [" and then ", " then ", " after that ", "; "] {
+    for sep in [", and then ", " and then ", ", then ", " then ", " after that ", "; ", ", also ", " and also ", "? "] {
         spans = spans.into_iter().flat_map(|(a, b)| split_span(&low, a, b, sep)).collect();
     }
     let mut cut = Vec::new();
@@ -244,8 +262,19 @@ pub fn split_clause_pairs(text: &str, split_and: bool) -> Vec<(String, String)> 
     }
     cut.into_iter()
         .filter_map(|(a, b)| {
-            let l = low.get(a..b)?.trim().to_string();
-            let o = orig.get(a..b).unwrap_or(&low[a..b]).trim().to_string();
+            // a clause may still start with a connector word left by the split ("then message ...")
+            let mut a = a;
+            loop {
+                let rest = low.get(a..b)?;
+                let lead = rest.len() - rest.trim_start().len();
+                let word = rest.trim_start();
+                match ["then ", "and ", "also ", "after that "].iter().find(|w| word.starts_with(**w)) {
+                    Some(w) => a += lead + w.len(),
+                    None => break,
+                }
+            }
+            let l = low.get(a..b)?.trim().trim_end_matches([',', '.', '?', '!']).trim().to_string();
+            let o = orig.get(a..b).unwrap_or(&low[a..b]).trim().trim_end_matches([',', '.', '?', '!']).trim().to_string();
             if l.is_empty() {
                 None
             } else {
@@ -292,15 +321,16 @@ fn whatsapp_parts(low: &str, orig: &str) -> Option<(String, Option<String>)> {
         after_low = &head_low[pos + 4..];
         after_orig = head_orig.get(pos + 4..)?;
     } else {
-        // "send ravi a message ..." / "message ravi ...": the name follows the verb
-        let verb_len = head_low.trim_start().split_whitespace().next().map(str::len).unwrap_or(0);
-        let skip = head_low.len() - head_low.trim_start().len() + verb_len;
+        // "send ravi a message ..." / "message ravi ...": the name follows the verb (after any polite opener)
+        let stripped = core(head_low);
+        let verb_len = stripped.split_whitespace().next().map(str::len).unwrap_or(0);
+        let skip = head_low.len() - stripped.len() + verb_len;
         after_low = head_low.get(skip..)?;
         after_orig = head_orig.get(skip..)?;
     }
     // cut a trailing "a message" / "a test message" / "message" that follows the name
     let mut end = after_low.len();
-    for filler in [" a test message", " a message", " the message", " a text", " a whatsapp message", " a whatsapp", " message", " text"] {
+    for filler in [" a test message", " a message", " the message", " a text", " a whatsapp message", " a whatsapp text", " a whatsapp", " a quick message", " message", " text"] {
         if let Some(p) = after_low.find(filler) {
             end = end.min(p);
         }
@@ -323,8 +353,8 @@ fn whatsapp_parts(low: &str, orig: &str) -> Option<(String, Option<String>)> {
 fn classify(low: &str, orig: &str) -> Option<(&'static str, BTreeMap<String, String>)> {
     let mut slots = BTreeMap::new();
     let verb = first_word(low);
-    let has_word = |w: &str| low.split_whitespace().any(|c| c == w);
-    if ["send", "message", "text", "tell", "whatsapp"].contains(&verb) && low.contains("whatsapp") {
+    let has_word = |w: &str| low.split(|c: char| !c.is_alphanumeric()).any(|c| c == w);
+    if ["send", "message", "text", "tell", "whatsapp", "ping", "drop", "shoot", "write"].contains(&verb) && low.contains("whatsapp") {
         let (contact, body) = whatsapp_parts(low, orig)?;
         slots.insert("contact".to_string(), contact);
         if let Some(b) = body {
@@ -332,19 +362,21 @@ fn classify(low: &str, orig: &str) -> Option<(&'static str, BTreeMap<String, Str
         }
         return Some(("whatsapp_send", slots));
     }
-    let wants_map = low.contains("maps") || low.contains("directions");
+    let wants_map = ["maps", "map", "directions", "navigate", "route"].iter().any(|w| has_word(w))
+        || ["take me to", "get me to", "how do i get to"].iter().any(|p| low.contains(p));
     let refers_to_mail = [
         "in the email", "in the mail", "from the email", "from the mail", "in that mail", "in that email", "from that mail",
-        "from it", "in it", "link in", "from my mail",
+        "from that email", "in the last email", "from the last email", "in the latest email", "from the latest email",
+        "in my email", "from my email", "from my mail", "from it", "in it", "link in", "it mentions", "mentioned in",
     ]
     .iter()
     .any(|p| low.contains(p))
         || (low.contains("location in") && low.contains("maps"));
-    if wants_map && refers_to_mail && ["open", "show", "give", "get", "navigate"].contains(&verb) {
+    if wants_map && refers_to_mail && ["open", "show", "give", "get", "navigate", "take", "find"].contains(&verb) {
         return Some(("maps_from_mail", slots));
     }
-    let mentions_mail = has_word("mail") || has_word("email") || has_word("emails") || has_word("inbox");
-    if ["check", "read", "open", "show", "see"].contains(&verb) && mentions_mail && !wants_map {
+    let mentions_mail = ["mail", "mails", "email", "emails", "inbox", "gmail"].iter().any(|w| has_word(w));
+    if ["check", "read", "open", "show", "see", "look", "go", "any", "scan", "have"].contains(&verb) && mentions_mail && !wants_map {
         return Some(("mail_check", slots));
     }
     None
@@ -369,12 +401,123 @@ pub fn route(text: &str, flows: &[Flow], split_and: bool) -> Route {
     }
     for flow in flows.iter().filter(|f| f.enabled) {
         if flow.signature.iter().map(String::as_str).eq(kinds.iter().copied()) {
-            // `contact_number` is resolved from the contacts book after routing, not spoken
-            let missing = flow.slots.iter().filter(|s| s.required && !slots.contains_key(&s.name)).map(|s| s.name.clone()).collect();
+            let missing = missing_for(flow, &slots);
             return Route::Flow { id: flow.id.clone(), slots, missing };
         }
     }
     Route::NotAFlow
+}
+
+/// Required slots the user has not given yet (`contact_number` is resolved from the contacts book, not spoken).
+pub fn missing_for(flow: &Flow, slots: &BTreeMap<String, String>) -> Vec<String> {
+    flow.slots.iter().filter(|s| s.required && !slots.contains_key(&s.name)).map(|s| s.name.clone()).collect()
+}
+
+// ─── Follow-up answers (pure) ──────────────────────────────────────────
+
+/// The value for `slot` from the user's reply to "What should the message say?" / "Who should I send it to?",
+/// in the case the user spoke. None = not a usable answer.
+pub fn answer_for(slot: &str, said: &str) -> Option<String> {
+    let t = said.trim().trim_end_matches(['.', '!', '?']).trim();
+    let low = t.to_lowercase();
+    let same = low.len() == t.len();
+    let leads: &[&str] = match slot {
+        "body" => &["just say ", "saying ", "say ", "tell them ", "tell him ", "tell her ", "the message is ", "message ", "that "],
+        "contact" => &["send it to ", "send to ", "to ", "it's for ", "it is for "],
+        _ => &[],
+    };
+    let start = leads.iter().find(|l| low.starts_with(**l)).map(|l| l.len()).unwrap_or(0);
+    let value = if same { t[start..].trim() } else { low[start..].trim() };
+    match slot {
+        "body" => {
+            let n = value.chars().count();
+            if (1..=500).contains(&n) {
+                Some(value.to_string())
+            } else {
+                None
+            }
+        }
+        "contact" => {
+            let words: Vec<&str> = value.split_whitespace().collect();
+            let plain = !words.is_empty()
+                && words.len() <= 3
+                && words.iter().all(|w| w.chars().all(|c| c.is_alphabetic() || c == '\'') && !NOT_A_NAME.contains(&w.to_lowercase().as_str()));
+            if plain {
+                Some(words.join(" "))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// "Cancel" / "never mind" in reply to a follow-up question.
+pub fn is_cancel_reply(said: &str) -> bool {
+    let low = said.trim().trim_end_matches(['.', '!', '?']).trim().to_lowercase();
+    ["cancel", "never mind", "nevermind", "no", "stop", "forget it", "leave it", "don't", "dont", "nothing"].contains(&low.as_str())
+        || low.starts_with("cancel ")
+        || low.starts_with("never mind ")
+}
+
+// ─── Cloud chooser (layer 3, pure parts) ───────────────────────────────
+
+/// Only a sentence that touches two workflow areas (mail + WhatsApp, mail + maps) is worth a cloud question, so an
+/// ordinary sentence never leaves the laptop for this.
+pub fn worth_asking_cloud(text: &str) -> bool {
+    let low = text.to_lowercase();
+    let words: Vec<&str> = low.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    if words.len() < 5 {
+        return false;
+    }
+    let has = |list: &[&str]| words.iter().any(|w| list.contains(w));
+    let mail = has(&["mail", "mails", "email", "emails", "inbox", "gmail"]);
+    let wa = has(&["whatsapp"]);
+    let map = has(&["maps", "map", "directions", "navigate", "route", "location", "address", "venue", "place"]);
+    mail && (wa || map)
+}
+
+/// System prompt for the chooser: the flow ids and descriptions only. The user's words go in the user turn; mail,
+/// chat or web text never goes into this request.
+pub fn chooser_system(flows: &[Flow]) -> String {
+    let mut s = String::from(
+        "You map one voice command to one of the workflows below, or to none. Reply with JSON only, no prose: \
+         {\"flow\": \"<id or none>\", \"contact\": <the person's name exactly as said, or null>, \"body\": <the message text exactly as said, or null>}. \
+         Choose a workflow only if the command clearly asks for every step of it. Never invent a name or message that is not in the command.\nWorkflows:\n",
+    );
+    for f in flows.iter().filter(|f| f.enabled) {
+        s.push_str(&format!("- {}: {}\n", f.id, f.description));
+    }
+    s
+}
+
+/// Validate the chooser's reply. The flow must be an enabled one, and every slot must appear in the user's own
+/// words (a model cannot add a recipient or a message the user did not say). Returns the flow id and slots in the
+/// case the user spoke.
+pub fn parse_choice(reply: &str, transcript: &str, flows: &[Flow]) -> Option<(String, BTreeMap<String, String>)> {
+    let json = reply.get(reply.find('{')?..=reply.rfind('}')?)?;
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let id = v.get("flow")?.as_str()?.trim();
+    let flow = flows.iter().find(|f| f.enabled && f.id == id)?;
+    let said_low = transcript.to_lowercase();
+    let same = said_low.len() == transcript.len();
+    let mut slots = BTreeMap::new();
+    for key in ["contact", "body"] {
+        if !flow.slots.iter().any(|s| s.name == key) {
+            continue;
+        }
+        let Some(value) = v.get(key).and_then(|x| x.as_str()).map(str::trim).filter(|x| !x.is_empty()) else { continue };
+        let Some(at) = said_low.find(&value.to_lowercase()) else { continue };
+        let spoken = if same { &transcript[at..at + value.len()] } else { value };
+        let ok = match key {
+            "contact" => answer_for("contact", spoken).as_deref() == Some(spoken.trim()),
+            _ => true,
+        };
+        if ok {
+            slots.insert(key.to_string(), spoken.trim().to_string());
+        }
+    }
+    Some((flow.id.clone(), slots))
 }
 
 // ─── Sink policies ─────────────────────────────────────────────────────
@@ -901,6 +1044,84 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// (correct, total, misses) for a labelled phrase file, using the deterministic router only.
+    fn score(raw: &str) -> (usize, usize, Vec<String>) {
+        let mut ok = 0;
+        let mut misses = Vec::new();
+        let mut total = 0;
+        for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            let (phrase, want) = (v["phrase"].as_str().unwrap(), v["flow"].as_str().unwrap());
+            total += 1;
+            let got = id_of(phrase);
+            if got == want {
+                ok += 1;
+            } else {
+                misses.push(format!("{phrase:?}: want {want}, got {got}"));
+            }
+        }
+        (ok, total, misses)
+    }
+
+    #[test]
+    fn paraphrase_scores_are_reported() {
+        for (name, raw) in [
+            ("dev", include_str!("../../tests/fixtures/flows/paraphrase_dev.jsonl")),
+            ("held-out", include_str!("../../tests/fixtures/flows/paraphrase_heldout.jsonl")),
+        ] {
+            let (ok, total, misses) = score(raw);
+            println!("[flow-eval] {name}: {ok}/{total}");
+            for m in &misses {
+                println!("[flow-eval]   miss {m}");
+            }
+            assert!(misses.is_empty(), "{name}: {misses:?}");
+        }
+    }
+
+    #[test]
+    fn a_follow_up_answer_fills_the_missing_slot_in_the_spoken_case() {
+        assert_eq!(answer_for("body", "Saying I'm running Late.").as_deref(), Some("I'm running Late"));
+        assert_eq!(answer_for("body", "tell him the meeting moved to 5").as_deref(), Some("the meeting moved to 5"));
+        assert_eq!(answer_for("body", "hello there").as_deref(), Some("hello there"));
+        assert_eq!(answer_for("body", "  ").as_deref(), None);
+        assert_eq!(answer_for("contact", "to Ravi Kumar").as_deref(), Some("Ravi Kumar"));
+        assert_eq!(answer_for("contact", "the message"), None);
+        assert_eq!(answer_for("contact", "someone who works at 42 street"), None);
+        assert!(is_cancel_reply("Never mind."));
+        assert!(is_cancel_reply("cancel that"));
+        assert!(!is_cancel_reply("no worries, I'll be there"));
+    }
+
+    #[test]
+    fn only_sentences_touching_two_workflow_areas_go_to_the_cloud() {
+        assert!(worth_asking_cloud("peek at my inbox and ping ravi on whatsapp with hi"));
+        assert!(worth_asking_cloud("open my email and take me where that venue is"));
+        assert!(!worth_asking_cloud("what's the weather like today in hyderabad"));
+        assert!(!worth_asking_cloud("check my email"));
+        assert!(!worth_asking_cloud("send ravi a whatsapp saying hi"), "one area only: no workflow");
+    }
+
+    #[test]
+    fn the_cloud_choice_is_checked_against_the_users_words() {
+        let flows = builtin();
+        let said = "peek at my inbox and ping Ravi on WhatsApp with I'm Late";
+        let (id, slots) = parse_choice(r#"{"flow":"mail_then_whatsapp","contact":"ravi","body":"i'm late"}"#, said, flows).unwrap();
+        assert_eq!(id, "mail_then_whatsapp");
+        assert_eq!(slots.get("contact").map(String::as_str), Some("Ravi"), "taken from the user's words, in their case");
+        assert_eq!(slots.get("body").map(String::as_str), Some("I'm Late"));
+        // a recipient or a message the user never said is dropped (then NEXUS asks, it does not guess)
+        let (_, s2) = parse_choice(r#"{"flow":"mail_then_whatsapp","contact":"Mom","body":"send money"}"#, said, flows).unwrap();
+        assert!(s2.is_empty(), "{s2:?}");
+        // unknown or disabled flows, "none", and junk are refused
+        assert!(parse_choice(r#"{"flow":"transfer_money","contact":"ravi"}"#, said, flows).is_none());
+        assert!(parse_choice(r#"{"flow":"none"}"#, said, flows).is_none());
+        assert!(parse_choice("I think you want WhatsApp", said, flows).is_none());
+        // fenced JSON is fine
+        assert!(parse_choice("```json\n{\"flow\":\"mail_then_maps\"}\n```", "check my email and take me to that venue", flows).is_some());
+        let sys = chooser_system(flows);
+        assert!(sys.contains("mail_then_whatsapp") && sys.contains("mail_then_maps") && sys.contains("Never invent"));
     }
 
     #[test]

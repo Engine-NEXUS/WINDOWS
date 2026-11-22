@@ -114,6 +114,27 @@ fn message_parts(msg: &Value) -> (String, String) {
     (plain, html)
 }
 
+/// Words that mark a mail's footer (company address, legal lines). A Maps link there is the sender's office, not
+/// the place the mail is about (seen live: a Vercel notification's footer address).
+const FOOTER_MARKERS: &[&str] = &[
+    "unsubscribe", "all rights reserved", "\u{a9}", "&copy;", "privacy policy", "you are receiving", "you received this",
+    "manage preferences", "email preferences", "notification settings", "view in browser",
+];
+
+/// True when the text around `start..end` of `src` (600 bytes each side) carries footer markers.
+fn near_footer(src: &str, start: usize, end: usize) -> bool {
+    let mut lo = start.saturating_sub(600);
+    while lo > 0 && !src.is_char_boundary(lo) {
+        lo -= 1;
+    }
+    let mut hi = (end + 600).min(src.len());
+    while hi < src.len() && !src.is_char_boundary(hi) {
+        hi += 1;
+    }
+    let window = src[lo..hi].to_lowercase();
+    FOOTER_MARKERS.iter().any(|m| window.contains(m))
+}
+
 /// The place a mail points to: the first Google Maps link (links are read BEFORE the markup is stripped, because
 /// the link usually lives in an `href`), else a `Location:` / `Venue:` / `Address:` line. The result is
 /// untrusted text: the caller must still pass it through the Maps sink rule. Held in memory only.
@@ -123,14 +144,21 @@ pub fn place_from_parts(plain: &str, html: &str) -> Option<String> {
         for m in URL.find_iter(src) {
             let url = m.as_str().replace("&amp;", "&");
             let url = url.trim_end_matches(['.', ',', ';']);
-            if crate::flows::is_allowed_maps_url(url).is_ok() {
+            if crate::flows::is_allowed_maps_url(url).is_ok() && !near_footer(src, m.start(), m.end()) {
                 return Some(url.to_string());
             }
         }
     }
     let flat = strip_html(html);
-    for line in plain.lines().chain(flat.lines()) {
-        let line = line.trim();
+    for src in [plain, flat.as_str()] {
+        let mut offset = 0;
+        for raw_line in src.split_inclusive('\n') {
+            let line_start = offset;
+            offset += raw_line.len();
+            if near_footer(src, line_start, offset) {
+                continue;
+            }
+            let line = raw_line.trim();
         let lower = line.to_lowercase();
         for label in ["location:", "venue:", "address:", "where:", "place:"] {
             if lower.starts_with(label) {
@@ -140,6 +168,7 @@ pub fn place_from_parts(plain: &str, html: &str) -> Option<String> {
                     return Some(value.to_string());
                 }
             }
+        }
         }
     }
     None
@@ -171,6 +200,21 @@ mod place_tests {
         assert_eq!(place_from_parts("", html).as_deref(), Some("https://maps.app.goo.gl/AbC123?g_st=ic"));
         let amp = r#"<a href="https://www.google.com/maps/place/Hitech+City?a=1&amp;b=2">map</a>"#;
         assert_eq!(place_from_parts("", amp).as_deref(), Some("https://www.google.com/maps/place/Hitech+City?a=1&b=2"));
+    }
+
+    #[test]
+    fn a_maps_link_in_the_footer_is_the_senders_office_not_the_place() {
+        let footer = "<p>Your deployment failed.</p><footer>Vercel Inc. <a href=\"https://www.google.com/maps/search/?api=1&amp;query=440+N+Barranca+Ave\">440 N Barranca Ave</a> &copy; 2026 All rights reserved. <a href=\"https://x.example/unsub\">Unsubscribe</a></footer>";
+        assert_eq!(place_from_parts("", footer), None);
+        let body = format!(
+            "<p>The meetup is at <a href=\"https://maps.app.goo.gl/Venue1\">the venue</a> on Friday.</p>{}{}",
+            "<p>filler text so the footer is far away from the invitation.</p>".repeat(20),
+            footer
+        );
+        assert_eq!(place_from_parts("", &body).as_deref(), Some("https://maps.app.goo.gl/Venue1"));
+        let plain = format!("Location: Hitech City, Hyderabad\n{}\nAcme Inc, Address: 1 Market St\nUnsubscribe here", "x\n".repeat(400));
+        assert_eq!(place_from_parts(&plain, "").as_deref(), Some("Hitech City, Hyderabad"));
+        assert_eq!(place_from_parts("Acme Inc. Address: 1 Market St. Unsubscribe | Privacy policy", ""), None);
     }
 
     #[test]
