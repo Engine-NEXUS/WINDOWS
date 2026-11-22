@@ -1,0 +1,20 @@
+{
+  "file": "src-tauri/src/agent_watching.rs",
+  "cwd": "src-tauri",
+  "targetDir": "D:/nexus-screen-target",
+  "testArgs": [
+    "--lib",
+    "--",
+    "--test-threads=1",
+    "agent_watching::",
+    "agent_monitor::"
+  ],
+  "mutations": [
+    {
+      "name": "a closed connection is read as open",
+      "file": "src-tauri/src/agent_monitor.rs",
+      "find": "        Ok(0) => true,\n        Ok(_) => false,",
+      "replace": "        Ok(0) => false,\n        Ok(_) => false,"
+    }
+  ]
+}

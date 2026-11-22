@@ -1,0 +1,36 @@
+{
+  "file": "src-tauri/src/agent_watching.rs",
+  "test": "--lib -- --test-threads=1 agent_watching:: agent_monitor::",
+  "results": [
+    {
+      "name": "a card is handed back the moment you touch the agent window",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_watching.rs:528:9: just arrived"
+    },
+    {
+      "name": "passing through the window does not restart the clock",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_watching.rs:533:9: assertion failed: h.step(5_000, &none, &pending).is_empty()"
+    },
+    {
+      "name": "a window that is only visible counts as focused",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_watching.rs:518:9: {\"claude:a\", \"codex:a\"}"
+    },
+    {
+      "name": "the next tool call does not clear an answered card",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1674:9: assertion `left == right` failed"
+    },
+    {
+      "name": "a hung-up agent is never noticed while waiting",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1689:13: assertion `left == right` failed"
+    },
+    {
+      "name": "a closed connection is read as open",
+      "status": "SURVIVED",
+      "detail": ""
+    }
+  ]
+}

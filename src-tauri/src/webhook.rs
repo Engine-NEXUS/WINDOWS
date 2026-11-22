@@ -207,7 +207,10 @@ fn handle_conn(
             respond(&mut stream, 401, r#"{"error":"unauthorized"}"#);
             return None;
         }
-        let line = crate::agent_monitor::handle_approval(&req.query, &req.body);
+        // the agent stops its hook when the question is answered in the agent itself: the closed connection clears the card
+        let probe = stream.try_clone().ok();
+        let alive = move || probe.as_ref().is_none_or(|p| !crate::agent_monitor::peer_closed(p));
+        let line = crate::agent_monitor::handle_approval(&req.query, &req.body, &alive);
         respond(&mut stream, 200, &line);
         return None;
     }

@@ -185,6 +185,51 @@ pub(crate) fn watched_now(
         .collect()
 }
 
+/// Session keys whose window is the FOREGROUND window right now: the user is typing in that agent.
+pub(crate) fn focused_now(sessions: &[SessionRef], procs: &[ProcSnap], placed: &[Placed], foreground: Option<isize>, own_pid: u32) -> BTreeSet<String> {
+    let Some(fg) = foreground else { return BTreeSet::new() };
+    let wins: Vec<TopWin> = placed.iter().map(|p| p.win.clone()).collect();
+    sessions.iter().filter(|s| session_window(s, procs, &wins, own_pid) == Some(fg)).map(|s| s.key.clone()).collect()
+}
+
+/// How long the user must stay in an agent's window before a permission card for that agent is handed back to it
+/// (alt-tab passing through the window must not take the card away).
+pub(crate) const FOCUS_RELEASE_MS: u64 = 400;
+
+/// A pending permission card whose agent window the user has been in for `FOCUS_RELEASE_MS` is handed back: the hook is
+/// released with no answer, so the agent asks in its own terminal at once, right where the user is, and the card leaves
+/// the bar. Safe in both cases of how the agent shows its own prompt (beside the hook or after it).
+#[derive(Debug, Default)]
+pub(crate) struct FocusHold {
+    since: BTreeMap<String, u64>,
+    waiting: bool,
+}
+
+impl FocusHold {
+    /// `focused` = sessions whose window is in front; `pending` = (approval id, session key). Returns the ids to hand back.
+    pub(crate) fn step(&mut self, now_ms: u64, focused: &BTreeSet<String>, pending: &[(u64, String)]) -> Vec<u64> {
+        self.since.retain(|k, _| focused.contains(k));
+        for k in focused {
+            self.since.entry(k.clone()).or_insert(now_ms);
+        }
+        let mut out = Vec::new();
+        self.waiting = false;
+        for (id, key) in pending {
+            match self.since.get(key) {
+                Some(s) if now_ms.saturating_sub(*s) >= FOCUS_RELEASE_MS => out.push(*id),
+                Some(_) => self.waiting = true,
+                None => {}
+            }
+        }
+        out
+    }
+
+    /// A card is waiting out its 400 ms: the caller must look again soon.
+    pub(crate) fn waiting(&self) -> bool {
+        self.waiting
+    }
+}
+
 /// Debounce: a session changes between watched and not watched only after the new state held for a while. A session
 /// seen for the first time takes its raw state at once (a freshly started agent appears without a delay).
 #[derive(Debug, Default)]
@@ -460,6 +505,38 @@ mod tests {
         let w = watched_now(&ss, &procs, &p, &[SCREEN], Some(1), 999);
         assert!(w.contains("claude:a"));
         assert!(!w.contains("codex:a"), "codex is behind the maximised terminal, so it shows on the island");
+    }
+
+    #[test]
+    fn only_the_window_in_front_is_focused_not_one_that_is_merely_visible() {
+        let procs = vec![proc(10, 1, "windowsterminal.exe", ""), proc(11, 10, "node.exe", "node claude"), proc(20, 1, "code.exe", ""), proc(21, 20, "node.exe", "node codex")];
+        let p = vec![placed(1, 10, "windowsterminal.exe", "claude", r(0, 0, 960, 1080)), placed(2, 20, "code.exe", "codex", r(960, 0, 1920, 1080))];
+        let ss = vec![sess("claude:a", "claude", None), sess("codex:a", "codex", None)];
+        // a split screen: both are watched (visible), only the one in front is focused
+        assert_eq!(watched_now(&ss, &procs, &p, &[SCREEN], Some(2), 999).len(), 2);
+        let f = focused_now(&ss, &procs, &p, Some(2), 999);
+        assert!(f.contains("codex:a") && !f.contains("claude:a"), "{f:?}");
+        assert!(focused_now(&ss, &procs, &p, None, 999).is_empty());
+    }
+
+    #[test]
+    fn a_card_is_handed_back_after_the_user_stayed_in_the_agent_window() {
+        let mut h = FocusHold::default();
+        let focused: BTreeSet<String> = ["claude:a".to_string()].into();
+        let none: BTreeSet<String> = BTreeSet::new();
+        let pending = vec![(7u64, "claude:a".to_string()), (8u64, "codex:a".to_string())];
+        assert!(h.step(1_000, &focused, &pending).is_empty(), "just arrived");
+        assert!(h.waiting());
+        assert!(h.step(1_000 + FOCUS_RELEASE_MS - 1, &focused, &pending).is_empty());
+        assert_eq!(h.step(1_000 + FOCUS_RELEASE_MS, &focused, &pending), vec![7], "only the card of the agent you are in");
+        assert!(!h.waiting() || pending.len() == 2);
+        // passing through the window (alt-tab) and leaving restarts the clock
+        assert!(h.step(5_000, &none, &pending).is_empty());
+        assert!(h.step(5_100, &focused, &pending).is_empty());
+        assert!(h.step(5_100 + FOCUS_RELEASE_MS - 1, &focused, &pending).is_empty());
+        // nothing pending, nothing to hand back
+        assert!(h.step(9_000, &focused, &[]).is_empty());
+        assert!(!h.waiting());
     }
 
     #[test]

@@ -423,11 +423,15 @@ impl Monitor {
     }
 
     /// Ids of the pending requests of `session_key` that an event proves were answered in the agent itself: every one when the
-    /// session starts a new turn, stops or ends; only the one for the same tool when that tool reports it finished.
+    /// session starts a new turn, stops, ends or starts its next tool call; only the one for the same tool when that tool
+/// reports it finished.
     pub fn answered_elsewhere(&self, session_key: &str, kind: &Kind, finished_tool: Option<&str>) -> Vec<u64> {
         let mine = self.approvals.iter().filter(|a| a.session_key == session_key);
         match kind {
             Kind::Prompt | Kind::Stop | Kind::End => mine.map(|a| a.id).collect(),
+            // A tool call starts only after the permission for the one before it was decided (one session asks one request at a
+            // time, and a call's own request comes AFTER its PreToolUse), so any card still pending was answered in the agent.
+            Kind::PreTool(_) => mine.map(|a| a.id).collect(),
             Kind::PostTool => mine.filter(|a| finished_tool.map(|t| t == a.tool).unwrap_or(true)).map(|a| a.id).collect(),
             _ => Vec::new(),
         }
@@ -808,6 +812,11 @@ fn release_waiter(id: u64) {
     }
 }
 
+/// (approval id, session key) of every request still waiting.
+fn pending_approvals() -> Vec<(u64, String)> {
+    lock_monitor().approvals.iter().map(|a| (a.id, a.session_key.clone())).collect()
+}
+
 pub fn snapshot_now() -> Snapshot {
     let now = crate::agent_hooks::now_ms();
     let mut m = lock_monitor();
@@ -816,6 +825,43 @@ pub fn snapshot_now() -> Snapshot {
 }
 
 /// Wait for the slot to be filled, up to `timeout`. Returns the decision, or `None` on timeout.
+/// How often a waiting request looks whether the agent has hung up (it was answered in the agent's own prompt).
+const ALIVE_CHECK: Duration = Duration::from_millis(150);
+
+/// `wait_for`, and it also returns (as answered elsewhere) the moment `alive` says the agent hung up on its hook: an
+/// agent that is answered in its own terminal stops its hook, and that closes the connection this request came in on.
+fn wait_for_alive(slot: &Slot, timeout: Duration, alive: &dyn Fn() -> bool) -> Option<String> {
+    let started = std::time::Instant::now();
+    loop {
+        let left = timeout.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            return slot.decision.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        }
+        if let Some(d) = wait_for(slot, left.min(ALIVE_CHECK)) {
+            return Some(d);
+        }
+        if !alive() {
+            return Some(ANSWERED_ELSEWHERE.to_string());
+        }
+    }
+}
+
+/// Has the other end of this connection gone away? (A peek that reads nothing: zero bytes or an error other than "would
+/// block" means closed.) The socket is put back to blocking mode at once, the reply is written on it later.
+pub fn peer_closed(stream: &std::net::TcpStream) -> bool {
+    if stream.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let mut one = [0u8; 1];
+    let closed = match stream.peek(&mut one) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+    };
+    let _ = stream.set_nonblocking(false);
+    closed
+}
+
 fn wait_for(slot: &Slot, timeout: Duration) -> Option<String> {
     let guard = slot.decision.lock().unwrap_or_else(|e| e.into_inner());
     let (guard, _) = slot.cv.wait_timeout_while(guard, timeout, |d| d.is_none()).unwrap_or_else(|e| e.into_inner());
@@ -833,7 +879,13 @@ pub struct ApprovalRequest {
 
 /// Show a permission request on the island and block until it is answered or `timeout` passes. `None` means
 /// "nobody decided": the caller prints nothing and the agent asks in its own terminal.
+#[cfg(test)]
 pub fn request_approval(req: ApprovalRequest, timeout: Duration) -> Option<String> {
+    request_approval_alive(req, timeout, &|| true)
+}
+
+/// As `request_approval`; `alive` is asked while it waits and says whether the agent is still holding its hook open.
+pub fn request_approval_alive(req: ApprovalRequest, timeout: Duration, alive: &dyn Fn() -> bool) -> Option<String> {
     if !ENABLED.load(Ordering::Relaxed) {
         return None;
     }
@@ -842,7 +894,7 @@ pub fn request_approval(req: ApprovalRequest, timeout: Duration) -> Option<Strin
     let slot = Arc::new(Slot { decision: Mutex::new(None), cv: Condvar::new() });
     lock_waiters().push((id, slot.clone()));
     DIRTY.store(true, Ordering::Relaxed);
-    let decision = wait_for(&slot, timeout);
+    let decision = wait_for_alive(&slot, timeout, alive);
     lock_waiters().retain(|(i, _)| *i != id);
     lock_monitor().remove_approval(id, crate::agent_hooks::now_ms());
     DIRTY.store(true, Ordering::Relaxed);
@@ -867,7 +919,7 @@ fn note_unanswered(label: &str) {
 
 /// The webhook's `/agent-approval` handler: the hook's stdin JSON in, the line the agent expects on stdout out
 /// (empty = print nothing).
-pub fn handle_approval(query: &str, body: &str) -> String {
+pub fn handle_approval(query: &str, body: &str, alive: &dyn Fn() -> bool) -> String {
     let Some(agent) = query_value(query, "agent").and_then(Agent::from_name) else { return String::new() };
     let reply_name = crate::agent_approval_reply::reply_agent(agent.name());
     if !crate::agent_approval_reply::takes_decisions(reply_name) {
@@ -885,7 +937,7 @@ pub fn handle_approval(query: &str, body: &str) -> String {
         tool,
         question: question.clone(),
     };
-    let decision = request_approval(req, APPROVAL_WAIT);
+    let decision = request_approval_alive(req, APPROVAL_WAIT, alive);
     crate::agent_approval_reply::stdout(reply_name, "PermissionRequest", decision.as_deref(), question.as_ref()).unwrap_or_default()
 }
 
@@ -1009,6 +1061,8 @@ pub fn start(app: tauri::AppHandle) {
         let mut known_keys: std::collections::BTreeSet<String> = Default::default();
         let sampler = Arc::new(Mutex::new(crate::session_observer::ProcSampler::new()));
         let mut debounce = crate::agent_watching::Debounce::default();
+        let mut focus_hold = crate::agent_watching::FocusHold::default();
+        let mut last_approvals = 0usize;
         let mut watched: std::collections::BTreeSet<String> = Default::default();
         let own_pid = std::process::id();
         loop {
@@ -1018,7 +1072,7 @@ pub fn start(app: tauri::AppHandle) {
             let busy = DIRTY.load(Ordering::Relaxed) || running > 0 || island.visible();
             // the hover test needs a fast tick while the island is up, and so does a window change that is waiting out
             // its short guard time; everything else keeps the old cadence and is woken by events instead
-            let tick = if island.visible() || debounce.pending() { 33 } else if busy { 150 } else { 1000 };
+            let tick = if island.visible() || debounce.pending() || focus_hold.waiting() { 33 } else if busy { 150 } else { 1000 };
             let woken = tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(tick)) => false,
                 _ = wake().notified() => true,
@@ -1077,7 +1131,9 @@ pub fn start(app: tauri::AppHandle) {
                     });
                 }
                 known_keys = keys_now;
-                if windows_changed || fresh || debounce.pending() || now.saturating_sub(watch_at) >= 1_000 {
+                let approvals_changed = snap.approvals.len() != last_approvals;
+                last_approvals = snap.approvals.len();
+                if windows_changed || fresh || approvals_changed || debounce.pending() || focus_hold.waiting() || now.saturating_sub(watch_at) >= 1_000 {
                     watch_at = now;
                     let refs: Vec<crate::agent_watching::SessionRef> = snap
                         .sessions
@@ -1086,12 +1142,17 @@ pub fn start(app: tauri::AppHandle) {
                         .collect();
                     let keys: Vec<String> = refs.iter().map(|r| r.key.clone()).collect();
                     let procs_now = procs.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    let raw = tauri::async_runtime::spawn_blocking(move || {
+                    let (raw, focused) = tauri::async_runtime::spawn_blocking(move || {
                         let (placed, screens, fg) = crate::agent_watching::snapshot_windows();
-                        crate::agent_watching::watched_now(&refs, &procs_now, &placed, &screens, fg, own_pid)
+                        (crate::agent_watching::watched_now(&refs, &procs_now, &placed, &screens, fg, own_pid), crate::agent_watching::focused_now(&refs, &procs_now, &placed, fg, own_pid))
                     })
                     .await
                     .unwrap_or_default();
+                    // a permission card for the agent you are typing in is handed back to it: it asks in its own terminal now
+                    for id in focus_hold.step(now, &focused, &pending_approvals()) {
+                        tracing::info!("agent island: you are in that agent's window, request {id} handed back to its own prompt");
+                        release_waiter(id);
+                    }
                     let next = debounce.step(now, &raw, &keys);
                     if next != watched {
                         tracing::info!("agent island: watching {:?}; showing {:?}", next, keys.iter().filter(|k| !next.contains(*k)).collect::<Vec<_>>());
@@ -1101,6 +1162,7 @@ pub fn start(app: tauri::AppHandle) {
                 }
             } else {
                 watched.clear();
+                focus_hold = crate::agent_watching::FocusHold::default();
                 known_keys.clear();
                 WATCHED_NOW.lock().unwrap_or_else(|e| e.into_inner()).clear();
                 debounce = crate::agent_watching::Debounce::default();
@@ -1602,6 +1664,65 @@ mod finish_tests {
         for id in ["seen1", "away1"] {
             ingest(&q("end"), &body(id));
         }
+    }
+
+    #[test]
+    fn the_next_tool_call_proves_an_earlier_card_was_answered_in_the_agent() {
+        let mut m = Monitor::new();
+        m.apply(&Ev { agent: Agent::Claude, session_id: "p1".into(), cwd: None, kind: Kind::Prompt }, 4_000_000);
+        let id = m.add_approval(Agent::Claude, "p1", None, "Bash".into(), "ls".into(), None, 4_000_001, APPROVAL_WAIT).unwrap();
+        assert_eq!(m.answered_elsewhere("claude:p1", &Kind::PreTool(ToolUse::named("Read")), Some("Read")), vec![id]);
+        assert!(m.answered_elsewhere("claude:other", &Kind::PreTool(ToolUse::named("Read")), Some("Read")).is_empty(), "another session says nothing");
+    }
+
+    #[test]
+    fn a_waiting_request_ends_when_the_agent_hangs_up() {
+        let slot = Slot { decision: Mutex::new(None), cv: Condvar::new() };
+        let t0 = std::time::Instant::now();
+        let hung_up = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|sc| {
+            sc.spawn(|| {
+                std::thread::sleep(Duration::from_millis(300));
+                hung_up.store(true, Ordering::Relaxed);
+            });
+            let d = wait_for_alive(&slot, Duration::from_secs(20), &|| !hung_up.load(Ordering::Relaxed));
+            assert_eq!(d.as_deref(), Some(ANSWERED_ELSEWHERE));
+        });
+        assert!(t0.elapsed() < Duration::from_secs(3), "released at once, not after the 20 s wait");
+        // a click still wins, and an agent that keeps holding on waits the whole time
+        *slot.decision.lock().unwrap() = Some("allow".into());
+        assert_eq!(wait_for_alive(&slot, Duration::from_secs(5), &|| true).as_deref(), Some("allow"));
+        let idle = Slot { decision: Mutex::new(None), cv: Condvar::new() };
+        assert_eq!(wait_for_alive(&idle, Duration::from_millis(350), &|| true), None);
+    }
+
+    #[test]
+    fn a_closed_connection_is_seen_and_an_open_one_is_not() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        assert!(!peer_closed(&server), "the agent is still holding its hook");
+        client.write_all(b"x").unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!peer_closed(&server), "data waiting is not a hang-up");
+        let mut s2 = server.try_clone().unwrap();
+        assert!(s2.write_all(b"reply").is_ok(), "the socket is back in blocking mode for the reply");
+        // the agent reads its reply and closes cleanly (a FIN, read as zero bytes), not with unread data (a reset)
+        let mut got = [0u8; 5];
+        std::io::Read::read_exact(&mut client, &mut got).unwrap();
+        assert_eq!(&got, b"reply");
+        // the byte it sent was never read by the server: read it so the close below is clean on this side too
+        let mut sink = [0u8; 1];
+        std::io::Read::read_exact(&mut &server, &mut sink).unwrap();
+        drop(client);
+        for _ in 0..50 {
+            if peer_closed(&server) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("a hang-up was never noticed");
     }
 
     #[test]

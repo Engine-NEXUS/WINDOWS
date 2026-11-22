@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { diffOf, fileName, type DiffLine } from "./diff";
 import { languageOf, tokenize } from "./syntax";
+import { planBlocks, type Block, type Inline } from "./planMarkdown";
 import {
   EMPTY,
   answersJson,
@@ -328,6 +329,89 @@ function Approvals({ approvals, now, decide }: { approvals: ApprovalView[]; now:
   );
 }
 
+/** The plan as text you can read: headings, lists, bold, code, tables (planMarkdown.ts turns the markdown into data; elements are built here, never HTML). */
+export function PlanView({ text }: { text: string }) {
+  const blocks = useMemo(() => planBlocks(text), [text]);
+  if (blocks.length === 0) return <div className="ai-plan"><p>(no details)</p></div>;
+  return (
+    <div className="ai-plan" tabIndex={0}>
+      <PlanBlocks blocks={blocks} />
+    </div>
+  );
+}
+
+function PlanBlocks({ blocks }: { blocks: Block[] }) {
+  return (
+    <>
+      {blocks.map((b, i) => {
+        switch (b.t) {
+          case "heading": {
+            const H = (`h${b.level}`) as "h1" | "h2" | "h3" | "h4";
+            return <H key={i}><PlanInline xs={b.inlines} /></H>;
+          }
+          case "paragraph":
+            return <p key={i}><PlanInline xs={b.inlines} /></p>;
+          case "list": {
+            const L = b.ordered ? "ol" : "ul";
+            return (
+              <L key={i} start={b.ordered ? b.start : undefined}>
+                {b.items.map((it, j) => (
+                  <li key={j} className={it.checked === null ? undefined : "ai-task"}>
+                    {it.checked !== null && <span className={`ai-box${it.checked ? " ai-box--on" : ""}`} aria-hidden="true" />}
+                    <PlanBlocks blocks={it.blocks} />
+                  </li>
+                ))}
+              </L>
+            );
+          }
+          case "code":
+            return <pre key={i} className="ai-plan-code"><code>{b.text}</code></pre>;
+          case "quote":
+            return <blockquote key={i}><PlanBlocks blocks={b.blocks} /></blockquote>;
+          case "table":
+            return (
+              <div key={i} className="ai-plan-table">
+                <table>
+                  <thead>
+                    <tr>{b.head.map((c, j) => <th key={j}><PlanInline xs={c} /></th>)}</tr>
+                  </thead>
+                  <tbody>
+                    {b.rows.map((r, j) => <tr key={j}>{r.map((c, k) => <td key={k}><PlanInline xs={c} /></td>)}</tr>)}
+                  </tbody>
+                </table>
+              </div>
+            );
+          default:
+            return <hr key={i} />;
+        }
+      })}
+    </>
+  );
+}
+
+function PlanInline({ xs }: { xs: Inline[] }) {
+  return (
+    <>
+      {xs.map((x, i) => {
+        switch (x.t) {
+          case "text":
+            return x.text;
+          case "code":
+            return <code key={i}>{x.text}</code>;
+          case "br":
+            return <br key={i} />;
+          case "strong":
+            return <strong key={i}><PlanInline xs={x.children} /></strong>;
+          case "em":
+            return <em key={i}><PlanInline xs={x.children} /></em>;
+          default:
+            return <del key={i}><PlanInline xs={x.children} /></del>;
+        }
+      })}
+    </>
+  );
+}
+
 function ApprovalCard({ a, now, decide }: { a: ApprovalView; now: number; decide: (id: number, d: string) => void }) {
   const questions = useMemo(() => questionsOf(a.question), [a.question]);
   const [picks, setPicks] = useState<Record<string, string[]>>({});
@@ -349,13 +433,13 @@ function ApprovalCard({ a, now, decide }: { a: ApprovalView; now: number; decide
       </div>
       {questions.length === 0 ? (
         <>
-          <pre className={a.tool === "ExitPlanMode" ? "ai-summary ai-summary--plan" : "ai-summary"}>{a.summary || "(no details)"}</pre>
+          {a.tool === "ExitPlanMode" ? <PlanView text={a.summary} /> : <pre className="ai-summary">{a.summary || "(no details)"}</pre>}
           <div className="ai-actions">
             <button className="ai-btn ai-btn--allow" onClick={() => decide(a.id, "allow")}>
-              Allow
+              {a.tool === "ExitPlanMode" ? "Approve plan" : "Allow"}
             </button>
             <button className="ai-btn ai-btn--deny" onClick={() => decide(a.id, "deny")}>
-              Deny
+              {a.tool === "ExitPlanMode" ? "Keep planning" : "Deny"}
             </button>
           </div>
         </>
