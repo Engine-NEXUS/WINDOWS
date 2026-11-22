@@ -154,6 +154,8 @@ fn deliver<R: Runtime>(app: &tauri::AppHandle<R>, away: bool, labels: Option<&[S
         ready
     };
     for (t,cwd) in ready {
+        // a finish already told the moment it happened (agent_attention::finish_now) is not told again 15 s later
+        if t.phase==Phase::Complete && t.stop_ms.is_some_and(|s| crate::agent_attention::fast_told_near(&t.agent, s)) { continue; }
         let name=label(&t.agent);
         let text=match t.phase {
             Phase::Complete=>format!("{name} finished, sir."),

@@ -1,0 +1,22 @@
+{
+  "file": "src-tauri/src/agent_watching.rs",
+  "cwd": "src-tauri",
+  "targetDir": "D:/nexus-screen-target",
+  "testArgs": [
+    "--lib",
+    "--",
+    "--test-threads=1",
+    "agent_watching::",
+    "agent_monitor::",
+    "agent_attention::",
+    "agent_island::"
+  ],
+  "mutations": [
+    {
+      "name": "a running session is given a finish notice",
+      "file": "src-tauri/src/agent_monitor.rs",
+      "find": "            if !s.state.running() {\n                s.linger_ms = linger_ms;",
+      "replace": "            if true {\n                s.linger_ms = linger_ms;"
+    }
+  ]
+}

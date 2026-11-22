@@ -25,6 +25,8 @@ export interface SessionView {
   edit: EditView | null;
   startedMs: number;
   updatedMs: number;
+  /** The turn ended with an error (only meaningful when `state` is done). */
+  failed?: boolean;
 }
 
 export interface ApprovalView {
@@ -69,12 +71,26 @@ export function clampScale(v: unknown): number {
 export const PANEL = { w: 760, h: 430 } as const;
 export const PILL_H = 40;
 
-export function pillWidth(logos: number): number {
-  return Math.max(64, 28 + 32 * Math.min(8, Math.max(1, Math.round(logos) || 1)));
+/** Extra width of the pill while it says "<agent> finished" (mirrors agent_island.rs FINISH_W). */
+export const FINISH_W = 156;
+
+export function pillWidth(logos: number, finished = false): number {
+  return Math.max(64, 28 + 32 * Math.min(8, Math.max(1, Math.round(logos) || 1))) + (finished ? FINISH_W : 0);
 }
 
-export function islandSize(mode: "collapsed" | "expanded", logos: number): { w: number; h: number } {
-  return mode === "expanded" ? { w: PANEL.w, h: PANEL.h } : { w: pillWidth(logos), h: PILL_H };
+export function islandSize(mode: "collapsed" | "expanded", logos: number, finished = false): { w: number; h: number } {
+  return mode === "expanded" ? { w: PANEL.w, h: PANEL.h } : { w: pillWidth(logos, finished), h: PILL_H };
+}
+
+/** What the pill says when every agent on it has just finished: "Claude Code finished" (one agent), "Claude Code failed"
+ *  (it ended with an error) or "2 agents finished". The bar is the finish notice: no toast is shown for it. `null` while
+ *  anything is still running or waiting. */
+export function finishedText(s: Snapshot): string | null {
+  if (s.sessions.length === 0 || s.sessions.some((x) => x.state !== "done")) return null;
+  const agents = new Set(s.sessions.map((x) => x.agent));
+  if (agents.size > 1) return `${agents.size} agents finished`;
+  const x = s.sessions[s.sessions.length - 1];
+  return `${x.label} ${s.sessions.some((y) => y.failed) ? "failed" : "finished"}`;
 }
 
 /** How an agent's logo is drawn on the island: the SVG and the tile it sits on. A mark is drawn in the vendor's own

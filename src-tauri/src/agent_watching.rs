@@ -13,10 +13,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// At least this share of a window must be visible for its agent to count as watched.
 pub(crate) const MIN_VISIBLE: f64 = 0.5;
-/// A newly watched agent leaves the island after this long (so passing through a window does not flash the bar).
-pub(crate) const WATCH_ON_MS: u64 = 500;
-/// A no-longer-watched agent appears on the island after this long (alt-tab and back must not flash it).
-pub(crate) const WATCH_OFF_MS: u64 = 1_500;
+/// A newly watched agent leaves the island at once: you opened its window, the bar has nothing to tell you.
+pub(crate) const WATCH_ON_MS: u64 = 0;
+/// A no-longer-watched agent appears on the island after this long. Only a guard against one frame of flicker while the
+/// foreground window changes twice in a row (alt-tab through a window). It was 1,500 ms.
+pub(crate) const WATCH_OFF_MS: u64 = 100;
 
 /// A top-level window with where it is, topmost first in the list that carries it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +193,11 @@ pub(crate) struct Debounce {
 }
 
 impl Debounce {
+    /// A change is waiting out its guard time, so the caller must look again soon even if no window event arrives.
+    pub(crate) fn pending(&self) -> bool {
+        self.state.values().any(|(_, since)| since.is_some())
+    }
+
     pub(crate) fn step(&mut self, now_ms: u64, raw: &BTreeSet<String>, keys: &[String]) -> BTreeSet<String> {
         self.state.retain(|k, _| keys.contains(k));
         for k in keys {
@@ -260,6 +266,68 @@ pub(crate) fn snapshot_windows() -> (Vec<Placed>, Vec<Rect>, Option<isize>) {
 pub(crate) fn snapshot_windows() -> (Vec<Placed>, Vec<Rect>, Option<isize>) {
     (vec![], vec![], None)
 }
+
+// ─── Window events: nothing is polled, the answer is recomputed when Windows says the windows changed ────────────────
+
+/// The monitor sets this while at least one agent session exists; with none, window events are ignored entirely.
+pub(crate) static HOOK_WANTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Pure: should this window event wake the monitor? A foreground change, a minimise or restore, and a move or resize of
+/// a top-level window (`id_object` 0 is the window itself; the caret, the cursor and every child control also send
+/// location events, thousands a second) - and only while something is watching.
+pub(crate) fn event_wakes(event: u32, id_object: i32, has_window: bool, wanted: bool) -> bool {
+    const FOREGROUND: u32 = 0x0003;
+    const MINIMIZE_START: u32 = 0x0016;
+    const MINIMIZE_END: u32 = 0x0017;
+    const LOCATION_CHANGE: u32 = 0x800B;
+    if !wanted {
+        return false;
+    }
+    match event {
+        FOREGROUND | MINIMIZE_START | MINIMIZE_END => true,
+        LOCATION_CHANGE => id_object == 0 && has_window,
+        _ => false,
+    }
+}
+
+/// Install the event hooks on a thread of their own (a hook needs a message loop). Windows only; call once.
+#[cfg(target_os = "windows")]
+pub(crate) fn start_window_events() {
+    use windows::Win32::Foundation::{HWND, HINSTANCE};
+    use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, GetMessageW, TranslateMessage, EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
+        EVENT_SYSTEM_MINIMIZESTART, MSG, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    };
+
+    // SAFETY: a WinEvent callback runs on the thread that installed it, between its GetMessage calls. It reads one
+    // atomic and calls `poke_windows`, which never blocks.
+    unsafe extern "system" fn on_event(_h: HWINEVENTHOOK, event: u32, hwnd: HWND, id_object: i32, _id_child: i32, _thread: u32, _time: u32) {
+        let wanted = HOOK_WANTED.load(std::sync::atomic::Ordering::Relaxed);
+        if event_wakes(event, id_object, hwnd.0 != 0, wanted) {
+            crate::agent_monitor::poke_windows();
+        }
+    }
+
+    let spawned = std::thread::Builder::new().name("agent-win-events".into()).spawn(|| unsafe {
+        let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
+        let a = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, HINSTANCE(0), Some(on_event), 0, 0, flags);
+        let b = SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, HINSTANCE(0), Some(on_event), 0, 0, flags);
+        let c = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, HINSTANCE(0), Some(on_event), 0, 0, flags);
+        tracing::info!("agent island: window event hooks installed (foreground {}, minimise {}, move {})", a.0 != 0, b.0 != 0, c.0 != 0);
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, HWND(0), 0, 0).as_bool() {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("agent island: could not start the window event thread: {e}");
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn start_window_events() {}
 
 #[cfg(test)]
 mod tests {
@@ -418,23 +486,41 @@ mod tests {
     }
 
     #[test]
-    fn debounce_hides_after_half_a_second_and_shows_after_a_second_and_a_half() {
+    fn the_bar_leaves_the_moment_you_open_the_window_and_returns_within_a_tenth_of_a_second() {
         let mut d = Debounce::default();
         let keys = vec!["a".to_string()];
         let none: BTreeSet<String> = BTreeSet::new();
         let a: BTreeSet<String> = ["a".to_string()].into();
         // a brand-new session takes its raw state at once: unwatched = it shows right away
         assert!(d.step(0, &none, &keys).is_empty());
-        // the user opens its window: still shown until the watch has held WATCH_ON_MS
-        assert!(d.step(100, &a, &keys).is_empty());
-        assert!(d.step(100 + WATCH_ON_MS - 1, &a, &keys).is_empty());
-        assert!(d.step(100 + WATCH_ON_MS, &a, &keys).contains("a"));
+        assert!(!d.pending());
+        // the user opens its window: it is gone in the same step, no waiting
+        assert!(d.step(100, &a, &keys).contains("a"), "hidden at once");
+        assert_eq!(WATCH_ON_MS, 0);
         // an alt-tab away and back inside WATCH_OFF_MS never shows it
         assert!(d.step(2_000, &none, &keys).contains("a"));
+        assert!(d.pending(), "the caller is told to look again");
         assert!(d.step(2_000 + WATCH_OFF_MS - 1, &a, &keys).contains("a"));
+        assert!(!d.pending());
         assert!(d.step(2_000 + WATCH_OFF_MS, &none, &keys).contains("a"), "the timer restarted when it was watched again");
-        // staying away long enough shows it
-        assert!(d.step(2_000 + 2 * WATCH_OFF_MS + 1, &none, &keys).is_empty());
+        // leaving for good shows it after the short guard, not after a second and a half
+        assert!(d.step(2_000 + 2 * WATCH_OFF_MS - 1, &none, &keys).contains("a"));
+        assert!(d.step(2_000 + 2 * WATCH_OFF_MS, &none, &keys).is_empty(), "back on the bar after {WATCH_OFF_MS} ms");
+        assert!(WATCH_OFF_MS <= 150, "the guard is a flicker filter, not a delay");
+    }
+
+    #[test]
+    fn only_the_window_events_that_can_change_what_you_see_wake_the_monitor() {
+        const FOREGROUND: u32 = 0x0003;
+        const LOCATION: u32 = 0x800B;
+        const NAME_CHANGE: u32 = 0x800C;
+        assert!(event_wakes(FOREGROUND, 0, true, true));
+        assert!(event_wakes(0x0016, 0, true, true) && event_wakes(0x0017, 0, true, true), "minimise and restore");
+        assert!(event_wakes(LOCATION, 0, true, true), "a window moved or resized");
+        assert!(!event_wakes(LOCATION, -2, true, true), "the cursor and the caret move constantly");
+        assert!(!event_wakes(LOCATION, 0, false, true), "no window");
+        assert!(!event_wakes(NAME_CHANGE, 0, true, true), "a title change is not a layout change");
+        assert!(!event_wakes(FOREGROUND, 0, true, false), "with no agent running every event is ignored");
     }
 
     #[test]

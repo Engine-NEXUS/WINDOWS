@@ -147,6 +147,33 @@
   border-radius: 20px;
 }
 
+/* A finished agent keeps its logo for a moment with a check, and the pill says so: the bar is the notice. */
+.ai-check {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--stage-text);
+  color: var(--stage-surface);
+}
+
+.ai-finished {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 140px;
+  margin-left: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--stage-text);
+  font: 600 12px/1 "Segoe UI", system-ui, sans-serif;
+}
+
 .ai-count {
   position: absolute;
   left: -3px;

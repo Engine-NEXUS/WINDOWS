@@ -225,6 +225,91 @@ pub fn finished_line(label: &str) -> String {
     format!("{label} has finished, sir.")
 }
 
+// ─── A finish told the moment it happens ─────────────────────────────
+
+/// After a Stop, wait this long for a new prompt or tool before calling it a finish (a queued message follows a Stop
+/// within a few hundred milliseconds). The only delay between "Claude stopped" and the toast and the spoken line.
+pub const FINISH_GRACE_MS: u64 = 700;
+/// Two finishes of one agent closer than this are one finish (a repeated Stop hook).
+const FINISH_DUP_MS: u64 = 10_000;
+/// Another path (the settled one below, the lifecycle receipt) names the same finish this close to the one told here.
+const FINISH_SAME_MS: u64 = 5_000;
+
+static FAST_TOLD: std::sync::Mutex<BTreeMap<String, u64>> = std::sync::Mutex::new(BTreeMap::new());
+
+/// What to do for a finish that just happened. There is never a toast: the top bar already shows "<agent> finished",
+/// a second notice at the side of the screen would say it twice. Only NEXUS's spoken line is left.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FinishAct {
+    pub speak: bool,
+    /// Remember this finish as handled, so the settled path adds no toast for it either: told, or seen by the user.
+    pub handled: bool,
+}
+
+/// Pure: a finish is told at once only to a user who is at the PC and NOT looking at that agent (they were seeing it on the
+/// bar). Away: the away log and the welcome tell it. Watching: they saw it end. A repeated Stop: told already. Whatever
+/// the turn's length: you had the agent on your bar, so its end is news, a chat reply or not.
+pub fn finish_now_plan(away: bool, watched: bool, since_told_ms: Option<u64>) -> FinishAct {
+    let told_just_now = since_told_ms.is_some_and(|s| s < FINISH_DUP_MS);
+    let speak = !away && !watched && !told_just_now;
+    FinishAct { speak, handled: speak || (!away && watched) }
+}
+
+/// The spoken line for a finish, or for a turn that ended with an error.
+pub fn finish_line(label: &str, failed: bool) -> String {
+    if failed {
+        format!("{label} stopped with an error, sir.")
+    } else {
+        finished_line(label)
+    }
+}
+
+/// Was a finish of this agent at about `stop_ms` already told by the immediate path? The settled path and the lifecycle
+/// receipt ask, so one finish is never told two or three times.
+pub fn fast_told_near(agent_name: &str, stop_ms: u64) -> bool {
+    FAST_TOLD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(agent_name)
+        .is_some_and(|t| t.abs_diff(stop_ms) <= FINISH_SAME_MS)
+}
+
+fn fast_told_ago(agent_name: &str, now_ms: u64) -> Option<u64> {
+    FAST_TOLD.lock().unwrap_or_else(|e| e.into_inner()).get(agent_name).map(|t| now_ms.saturating_sub(*t))
+}
+
+fn note_fast_told(agent_name: &str, stop_ms: u64) {
+    FAST_TOLD.lock().unwrap_or_else(|e| e.into_inner()).insert(agent_name.to_string(), stop_ms);
+}
+
+/// The agent's turn just ended (its Stop hook arrived). The bar already shows it (see `agent_monitor::FINISH_SHOW_MS`);
+/// after a very short grace NEXUS says it, with no settle window and no minimum task length, and no toast.
+/// `watched` was read at the moment of the Stop.
+pub fn finish_now<R: tauri::Runtime>(app: tauri::AppHandle<R>, agent: Agent, session_key: String, stop_ms: u64, watched: bool, failed: bool) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(FINISH_GRACE_MS)).await;
+        if crate::agent_monitor::session_resumed(&session_key) {
+            println!("[AGENT] {} stop was not the end: the session started again within {} ms", agent.name(), FINISH_GRACE_MS);
+            return;
+        }
+        let now = agent_hooks::now_ms();
+        let act = finish_now_plan(is_away(idle_ms()), watched, fast_told_ago(agent.name(), now));
+        if act.handled {
+            note_fast_told(agent.name(), stop_ms);
+        }
+        if !act.speak {
+            return;
+        }
+        println!("[AGENT-LAT] {} stop -> told after {} ms", agent.name(), agent_hooks::now_ms().saturating_sub(stop_ms));
+        crate::proactive_policy::submit(
+            &app,
+            format!("agent_done_{}_{}", agent.name(), stop_ms),
+            finish_line(agent.label(), failed),
+            crate::google::types::AlertUrgency::High,
+        );
+    });
+}
+
 /// A turn shorter than this is a chat reply, not a task: an interactive agent stops after every answer, and telling
 /// "finished" each time would repeat itself all day.
 pub const MIN_TASK_MS: u64 = 45_000;
@@ -306,6 +391,11 @@ pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             for a in ALL_AGENTS.iter() {
                 let Some(stop) = agent_hooks::last_event_ms(*a, agent_hooks::EventKind::Stop).filter(|t| *t > started) else { continue };
                 if stops.get(a.name()).map_or(true, |seen| stop > *seen) {
+                    // already told the moment it happened (`finish_now`): neither a second toast nor a second line
+                    if fast_told_near(a.name(), stop) {
+                        stops.insert(a.name(), stop);
+                        continue;
+                    }
                     // A Stop hook alone is not an end: while the shared lifecycle still sees this agent's work running
                     // (settle window, background work, an IDE agent that is not fully idle) nothing is announced and
                     // the stop is looked at again on the next tick.
@@ -579,5 +669,67 @@ mod tests {
         // Toasts are published ONLY when user is present (!away)
         assert!(should_publish_toast(false), "present user gets real-time toast");
         assert!(!should_publish_toast(true), "away user toast is suppressed so return summary is not duplicated");
+    }
+}
+
+#[cfg(test)]
+mod finish_now_tests {
+    use super::*;
+
+    #[test]
+    fn a_finish_is_told_to_a_user_who_is_here_and_not_in_that_window() {
+        assert_eq!(finish_now_plan(false, false, None), FinishAct { speak: true, handled: true });
+    }
+
+    #[test]
+    fn it_is_not_told_to_someone_who_is_away_or_looking_at_the_agent() {
+        let away = FinishAct { speak: false, handled: false };
+        assert_eq!(finish_now_plan(true, false, None), away, "away: the away log tells it on return, the settled path stays in charge");
+        let saw = FinishAct { speak: false, handled: true };
+        assert_eq!(finish_now_plan(false, true, None), saw, "watching: they saw it end, no line and no toast either");
+    }
+
+    #[test]
+    fn a_repeated_stop_is_one_finish_but_the_next_turn_is_another() {
+        assert!(!finish_now_plan(false, false, Some(FINISH_DUP_MS - 1)).speak);
+        assert!(finish_now_plan(false, false, Some(FINISH_DUP_MS)).speak);
+    }
+
+    #[test]
+    fn there_is_no_minimum_task_length_and_no_cooldown_for_an_agent_you_had_on_the_bar() {
+        // the settled path ignores a turn under MIN_TASK_MS and a finish within TELL_COOLDOWN_MS of the last one;
+        // the immediate path does neither: a 12 s turn, 40 s after the previous finish, is told.
+        assert!(!finish_worth_telling(Some(12_000), Some(40_000)));
+        assert!(finish_now_plan(false, false, Some(40_000)).speak);
+    }
+
+    #[test]
+    fn the_line_names_the_agent_and_says_when_it_ended_with_an_error() {
+        assert_eq!(finish_line("Codex", false), "Codex has finished, sir.");
+        assert_eq!(finish_line("OpenCode", true), "OpenCode stopped with an error, sir.");
+    }
+
+    #[test]
+    fn the_bar_is_the_only_notice_so_the_plan_has_no_toast_at_all() {
+        // FinishAct has no toast field: the top bar shows the finish, a second notice at the side would repeat it.
+        let src = include_str!("agent_attention.rs");
+        let body = &src[src.find("pub fn finish_now<").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(!body.contains("publish_agent"), "the immediate finish must not publish a toast");
+    }
+
+    #[test]
+    fn the_wait_before_it_is_told_is_under_a_second() {
+        assert!(FINISH_GRACE_MS < 1_000);
+    }
+
+    #[test]
+    fn the_settled_path_and_the_receipt_know_a_finish_was_told() {
+        note_fast_told("testagent", 1_000_000);
+        assert!(fast_told_near("testagent", 1_000_000));
+        assert!(fast_told_near("testagent", 1_000_000 + FINISH_SAME_MS));
+        assert!(fast_told_near("testagent", 1_000_000 - FINISH_SAME_MS));
+        assert!(!fast_told_near("testagent", 1_000_000 + FINISH_SAME_MS + 1), "a later turn is another finish");
+        assert!(!fast_told_near("other", 1_000_000));
     }
 }

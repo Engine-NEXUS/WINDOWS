@@ -1,0 +1,154 @@
+{
+  "file": "src-tauri/src/agent_watching.rs",
+  "cwd": "src-tauri",
+  "targetDir": "D:/nexus-screen-target",
+  "testArgs": [
+    "--lib",
+    "--",
+    "--test-threads=1",
+    "agent_watching::",
+    "agent_monitor::",
+    "agent_attention::",
+    "agent_island::"
+  ],
+  "mutations": [
+    {
+      "name": "bar waits half a second before leaving when you open the window",
+      "file": "src-tauri/src/agent_watching.rs",
+      "find": "pub(crate) const WATCH_ON_MS: u64 = 0;",
+      "replace": "pub(crate) const WATCH_ON_MS: u64 = 500;"
+    },
+    {
+      "name": "bar waits a second and a half before returning",
+      "file": "src-tauri/src/agent_watching.rs",
+      "find": "pub(crate) const WATCH_OFF_MS: u64 = 100;",
+      "replace": "pub(crate) const WATCH_OFF_MS: u64 = 1_500;"
+    },
+    {
+      "name": "every move of a caret or child control wakes the monitor",
+      "file": "src-tauri/src/agent_watching.rs",
+      "find": "LOCATION_CHANGE => id_object == 0 && has_window,",
+      "replace": "LOCATION_CHANGE => true,"
+    },
+    {
+      "name": "window events wake the monitor with no agent running",
+      "file": "src-tauri/src/agent_watching.rs",
+      "find": "    if !wanted {\n        return false;\n    }\n    match event {",
+      "replace": "    match event {"
+    },
+    {
+      "name": "a change waiting out its guard time is not reported as pending",
+      "file": "src-tauri/src/agent_watching.rs",
+      "find": "self.state.values().any(|(_, since)| since.is_some())",
+      "replace": "false"
+    },
+    {
+      "name": "a finish is spoken to a user who is away",
+      "file": "src-tauri/src/agent_attention.rs",
+      "find": "let speak = !away && !watched && !told_just_now;",
+      "replace": "let speak = !watched && !told_just_now;"
+    },
+    {
+      "name": "a finish is spoken to a user looking at that agent",
+      "file": "src-tauri/src/agent_attention.rs",
+      "find": "let speak = !away && !watched && !told_just_now;",
+      "replace": "let speak = !away && !told_just_now;"
+    },
+    {
+      "name": "a repeated Stop is spoken twice",
+      "file": "src-tauri/src/agent_attention.rs",
+      "find": "let speak = !away && !watched && !told_just_now;",
+      "replace": "let speak = !away && !watched;"
+    },
+    {
+      "name": "a finish the user saw is still toasted by the settled path",
+      "file": "src-tauri/src/agent_attention.rs",
+      "find": "handled: speak || (!away && watched)",
+      "replace": "handled: speak"
+    },
+    {
+      "name": "an agent that stopped with an error is told as finished",
+      "file": "src-tauri/src/agent_attention.rs",
+      "find": "    if failed {\n        format!(\"{label} stopped with an error, sir.\")",
+      "replace": "    if false {\n        format!(\"{label} stopped with an error, sir.\")"
+    },
+    {
+      "name": "the grace before a finish is told is fifteen seconds",
+      "file": "src-tauri/src/agent_attention.rs",
+      "find": "pub const FINISH_GRACE_MS: u64 = 700;",
+      "replace": "pub const FINISH_GRACE_MS: u64 = 15_000;"
+    },
+    {
+      "name": "the settled path and the receipt do not know a finish was told",
+      "file": "src-tauri/src/agent_attention.rs",
+      "find": ".is_some_and(|t| t.abs_diff(stop_ms) <= FINISH_SAME_MS)",
+      "replace": ".is_some_and(|_| false)"
+    },
+    {
+      "name": "background work still running counts as a finish",
+      "file": "src-tauri/src/agent_monitor.rs",
+      "find": "if !(matches!(kind, Kind::Stop) && was_running) || fully_idle == Some(false) {",
+      "replace": "if !(matches!(kind, Kind::Stop) && was_running) {"
+    },
+    {
+      "name": "an Antigravity invocation Stop counts as a finish",
+      "file": "src-tauri/src/agent_monitor.rs",
+      "find": "*agent != Agent::Antigravity || fully_idle == Some(true)",
+      "replace": "true"
+    },
+    {
+      "name": "a Stop of a session that was not running is a finish",
+      "file": "src-tauri/src/agent_monitor.rs",
+      "find": "if !(matches!(kind, Kind::Stop) && was_running) || fully_idle == Some(false) {",
+      "replace": "if !matches!(kind, Kind::Stop) || fully_idle == Some(false) {"
+    },
+    {
+      "name": "a finished agent lingers on the bar for a second and a half",
+      "file": "src-tauri/src/agent_monitor.rs",
+      "find": "pub const DONE_LINGER_MS: u64 = 300;",
+      "replace": "pub const DONE_LINGER_MS: u64 = 1_500;"
+    },
+    {
+      "name": "the finished notice lasts a third of a second",
+      "file": "src-tauri/src/agent_monitor.rs",
+      "find": "pub const FINISH_SHOW_MS: u64 = 4_000;",
+      "replace": "pub const FINISH_SHOW_MS: u64 = 300;"
+    },
+    {
+      "name": "the bar ignores the per-session notice time",
+      "file": "src-tauri/src/agent_monitor.rs",
+      "find": "now.saturating_sub(t) < s.linger_ms,",
+      "replace": "now.saturating_sub(t) < DONE_LINGER_MS,"
+    },
+    {
+      "name": "a running session is drawn as failed",
+      "file": "src-tauri/src/agent_monitor.rs",
+      "find": "failed: s.failed && !s.state.running(),",
+      "replace": "failed: s.failed,"
+    },
+    {
+      "name": "a running session is given a finish notice",
+      "file": "src-tauri/src/agent_monitor.rs",
+      "find": "            if !s.state.running() {\n                s.linger_ms = linger_ms;",
+      "replace": "            if true {\n                s.linger_ms = linger_ms;"
+    },
+    {
+      "name": "an agent you are looking at keeps its logo on the bar",
+      "file": "src-tauri/src/agent_monitor.rs",
+      "find": "if finishing && was_running && !watched {",
+      "replace": "if finishing && was_running {"
+    },
+    {
+      "name": "a session that started again after a Stop is not noticed",
+      "file": "src-tauri/src/agent_monitor.rs",
+      "find": "m.index(key).is_some_and(|i| m.sessions[i].state.running())\n}",
+      "replace": "false\n}"
+    },
+    {
+      "name": "the pill is not wider for the finished text",
+      "file": "src-tauri/src/agent_island.rs",
+      "find": "+ if finished { FINISH_W } else { 0.0 }",
+      "replace": "+ if finished { 0.0 } else { 0.0 }"
+    }
+  ]
+}

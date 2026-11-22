@@ -15,8 +15,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
-/// A finished agent stays in the snapshot this long so the page can fade its logo out.
-pub const DONE_LINGER_MS: u64 = 1_500;
+/// A finished agent stays in the snapshot this long, only so the page can fade its logo out (it was 1,500 ms).
+pub const DONE_LINGER_MS: u64 = 300;
+/// An agent that finished while you were NOT looking at it stays on the bar this long, with a check and "<agent> finished":
+/// the bar is the notice, no toast is shown for it.
+pub const FINISH_SHOW_MS: u64 = 4_000;
 /// A "running" session that has said nothing for this long is treated as lost (a Stop that never arrived).
 pub const STALE_MS: u64 = 15 * 60_000;
 /// How long a permission request waits for a click before the agent is left to ask in its own terminal.
@@ -114,6 +117,10 @@ pub struct Session {
     pub started_ms: u64,
     pub updated_ms: u64,
     pub ended_ms: Option<u64>,
+    /// How long a finished session stays on the bar (the fade, or the "finished" notice).
+    pub linger_ms: u64,
+    /// The turn ended with an error.
+    pub failed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -288,6 +295,8 @@ impl Monitor {
             started_ms: now,
             updated_ms: now,
             ended_ms: None,
+            linger_ms: DONE_LINGER_MS,
+            failed: false,
         });
         self.sessions.len() - 1
     }
@@ -360,6 +369,8 @@ impl Monitor {
                     s.steps.remove(0);
                 }
                 s.ended_ms = Some(now);
+                s.linger_ms = DONE_LINGER_MS;
+                s.failed = false;
                 self.approvals.retain(|a| a.session_key != key);
             }
             Kind::End => unreachable!("handled above"),
@@ -422,10 +433,21 @@ impl Monitor {
         }
     }
 
+    /// A session that has just stopped stays on the bar for `linger_ms`, drawn as finished (or failed).
+    pub fn show_finish(&mut self, key: &str, linger_ms: u64, failed: bool) {
+        if let Some(i) = self.index(key) {
+            let s = &mut self.sessions[i];
+            if !s.state.running() {
+                s.linger_ms = linger_ms;
+                s.failed = failed;
+            }
+        }
+    }
+
     pub fn prune(&mut self, now: u64) {
         let pending: Vec<String> = self.approvals.iter().map(|a| a.session_key.clone()).collect();
         self.sessions.retain(|s| match s.ended_ms {
-            Some(t) if !s.state.running() => now.saturating_sub(t) < DONE_LINGER_MS,
+            Some(t) if !s.state.running() => now.saturating_sub(t) < s.linger_ms,
             _ => pending.contains(&s.key) || now.saturating_sub(s.updated_ms) < STALE_MS,
         });
         self.approvals.retain(|a| now < a.deadline_ms + 5_000);
@@ -458,6 +480,7 @@ impl Monitor {
                     edit: s.edit.clone(),
                     started_ms: s.started_ms,
                     updated_ms: s.updated_ms,
+                    failed: s.failed && !s.state.running(),
                 })
                 .collect(),
             approvals: self
@@ -496,6 +519,7 @@ pub struct SessionView {
     pub edit: Option<EditView>,
     pub started_ms: u64,
     pub updated_ms: u64,
+    pub failed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -678,9 +702,35 @@ static MONITOR: Mutex<Monitor> = Mutex::new(Monitor::new());
 static WAITERS: Mutex<Vec<(u64, Arc<Slot>)>> = Mutex::new(Vec::new());
 static DIRTY: AtomicBool = AtomicBool::new(true);
 
+/// Wakes the loop at once instead of letting it finish its sleep (a hook event, a window event, a preview).
+static WAKE: OnceLock<tokio::sync::Notify> = OnceLock::new();
+fn wake() -> &'static tokio::sync::Notify {
+    WAKE.get_or_init(tokio::sync::Notify::new)
+}
+/// The windows changed (foreground, minimise, move): the watched set must be looked at again.
+static WINDOWS_DIRTY: AtomicBool = AtomicBool::new(true);
+/// What to do the moment an agent's turn ends. Set by `start` (it closes over the app handle); never set in unit tests, so
+/// nothing in a test run reaches the window-system code behind it.
+type FinishHook = Box<dyn Fn(Agent, String, u64, bool, bool) + Send + Sync>;
+static ON_FINISH: OnceLock<FinishHook> = OnceLock::new();
+
 /// Ask the loop for an immediate rebuild of the snapshot (the island preview uses it).
 pub fn mark_dirty() {
     DIRTY.store(true, Ordering::Relaxed);
+    wake().notify_one();
+}
+
+/// Called from the Win32 event hook: cheap, never blocks.
+pub fn poke_windows() {
+    WINDOWS_DIRTY.store(true, Ordering::Relaxed);
+    DIRTY.store(true, Ordering::Relaxed);
+    wake().notify_one();
+}
+
+/// Has this session started working again (a new prompt or tool) - so a Stop was not the end after all?
+pub fn session_resumed(key: &str) -> bool {
+    let m = lock_monitor();
+    m.index(key).is_some_and(|i| m.sessions[i].state.running())
 }
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
@@ -698,18 +748,50 @@ pub fn ingest(query: &str, body: &str) {
     if let Some(ev) = parse(query, body) {
         let tool = serde_json::from_str::<Value>(body).ok().and_then(|v| v.get("tool_name").and_then(|t| t.as_str()).map(|t| clean_token(t, 40)));
         let key = format!("{}:{}", ev.agent.name(), ev.session_id);
-        let answered = {
+        let now = crate::agent_hooks::now_ms();
+        // what the agent says about this stop (an error; background work still running): only a Stop carries it
+        let (failed, fully_idle) = if matches!(ev.kind, Kind::Stop) {
+            crate::agent_hooks::parse_event(query, body).map_or((false, None), |p| (p.info.ok == Some(false), p.info.fully_idle))
+        } else {
+            (false, None)
+        };
+        let finishing = matches!(ev.kind, Kind::Stop) && finish_is_immediate(&ev.agent, &ev.kind, true, fully_idle);
+        let watched = is_watched_agent(ev.agent.name());
+        let (answered, was_running) = {
             let mut m = lock_monitor();
             let ids = m.answered_elsewhere(&key, &ev.kind, tool.as_deref());
-            m.apply(&ev, crate::agent_hooks::now_ms());
-            ids
+            let was_running = m.index(&key).is_some_and(|i| m.sessions[i].state.running());
+            m.apply(&ev, now);
+            // an agent you were not looking at keeps its logo on the bar with the finish written next to it
+            if finishing && was_running && !watched {
+                m.show_finish(&key, FINISH_SHOW_MS, failed);
+            }
+            (ids, was_running)
         };
         // the user answered in the agent's own window: take the card off the bar and let the waiting hook go (it prints nothing)
         for id in answered {
             release_waiter(id);
         }
+        // a turn that was running just stopped: the bar drops it now and the finish is told now (see `agent_attention::finish_now`)
+        if finishing && was_running {
+            if let Some(hook) = ON_FINISH.get() {
+                hook(ev.agent, key.clone(), now, watched, failed);
+            }
+        }
         DIRTY.store(true, Ordering::Relaxed);
+        wake().notify_one();
     }
+}
+
+/// Pure: does this event end a turn that the user was waiting for? A Stop of a session that was running, for any coding
+/// agent whose hook says the turn is over: Antigravity's Stop ends one invocation, so it counts only when the agent says
+/// it is fully idle; any agent that says background work is still running (`fully_idle` false) has not finished. A Stop
+/// for a session that never started, or a second Stop for the same turn, says nothing.
+pub(crate) fn finish_is_immediate(agent: &Agent, kind: &Kind, was_running: bool, fully_idle: Option<bool>) -> bool {
+    if !(matches!(kind, Kind::Stop) && was_running) || fully_idle == Some(false) {
+        return false;
+    }
+    *agent != Agent::Antigravity || fully_idle == Some(true)
 }
 
 /// The sentinel decision of a request that was answered somewhere else. Never accepted from the island's buttons.
@@ -885,6 +967,7 @@ fn demo_snapshot(now: u64) -> Snapshot {
         edit: None,
         started_ms: now.saturating_sub(95_000),
         updated_ms: now,
+        failed: false,
     };
     let sessions = vec![
         s("demo:claude", "claude", "Claude Code", "zync", State::Working, Some("Edit")),
@@ -904,6 +987,11 @@ pub fn start(app: tauri::AppHandle) {
     if let Ok(dir) = app.path().app_data_dir() {
         let _ = DIR.set(dir);
     }
+    {
+        let handle = app.clone();
+        let _ = ON_FINISH.set(Box::new(move |agent, key, stop_ms, watched, failed| crate::agent_attention::finish_now(handle.clone(), agent, key, stop_ms, watched, failed)));
+    }
+    crate::agent_watching::start_window_events();
     tauri::async_runtime::spawn(async move {
         let mut power = Power::default();
         let mut lease: Option<crate::keep_awake::KeepAwakeLease> = None;
@@ -915,16 +1003,30 @@ pub fn start(app: tauri::AppHandle) {
         let mut full_at = 0u64;
         let mut watch_at = 0u64;
         let mut procs_at = 0u64;
-        let mut procs: Vec<crate::session_observer::ProcSnap> = vec![];
+        // The process list is refreshed off the loop (every 3 s, or at once for a session never seen before), so the
+        // loop itself never waits for it between two window events.
+        let procs: Arc<Mutex<Vec<crate::session_observer::ProcSnap>>> = Arc::new(Mutex::new(vec![]));
+        let mut known_keys: std::collections::BTreeSet<String> = Default::default();
         let sampler = Arc::new(Mutex::new(crate::session_observer::ProcSampler::new()));
         let mut debounce = crate::agent_watching::Debounce::default();
         let mut watched: std::collections::BTreeSet<String> = Default::default();
         let own_pid = std::process::id();
         loop {
-            let busy = DIRTY.load(Ordering::Relaxed) || lock_monitor().running() > 0 || island.visible();
-            // the hover test needs a fast tick while the island is up; everything else keeps the old cadence
-            let tick = if island.visible() { 33 } else if busy { 150 } else { 1000 };
-            tokio::time::sleep(Duration::from_millis(tick)).await;
+            let running = lock_monitor().running();
+            // window events matter only while an agent session exists
+            crate::agent_watching::HOOK_WANTED.store(running > 0, Ordering::Relaxed);
+            let busy = DIRTY.load(Ordering::Relaxed) || running > 0 || island.visible();
+            // the hover test needs a fast tick while the island is up, and so does a window change that is waiting out
+            // its short guard time; everything else keeps the old cadence and is woken by events instead
+            let tick = if island.visible() || debounce.pending() { 33 } else if busy { 150 } else { 1000 };
+            let woken = tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(tick)) => false,
+                _ = wake().notified() => true,
+            };
+            if woken {
+                // a burst of window events (a drag sends dozens) is answered once
+                tokio::time::sleep(Duration::from_millis(12)).await;
+            }
             let now = crate::agent_hooks::now_ms();
             if now.saturating_sub(settings_at) > 2_000 {
                 if let Some(dir) = DIR.get() {
@@ -949,16 +1051,33 @@ pub fn start(app: tauri::AppHandle) {
             };
             DIRTY.store(false, Ordering::Relaxed);
 
-            // which agents the user is already looking at (windows twice a second, processes every 3 s)
+            // which agents the user is already looking at: the windows are looked at again when Windows reports a change
+            // (foreground, minimise, move), while a change waits out its guard time, and once a second as a safety net;
+            // the process list is refreshed off the loop every 3 s
+            let windows_changed = WINDOWS_DIRTY.swap(false, Ordering::Relaxed);
             if cfg.hide_watched && !preview && !snap.sessions.is_empty() {
-                if now.saturating_sub(procs_at) >= 3_000 {
+                let keys_now: std::collections::BTreeSet<String> = snap.sessions.iter().map(|s| s.key.clone()).collect();
+                let fresh = keys_now.iter().any(|k| !known_keys.contains(k));
+                if fresh {
+                    // a session never seen before: its window can only be found with a current process list, so the
+                    // first look waits for one (the bar must not flash for an agent you are already in)
                     procs_at = now;
                     let sampler = sampler.clone();
                     if let Ok(p) = tauri::async_runtime::spawn_blocking(move || sampler.lock().map(|mut g| g.sample()).unwrap_or_default()).await {
-                        procs = p;
+                        *procs.lock().unwrap_or_else(|e| e.into_inner()) = p;
                     }
+                } else if now.saturating_sub(procs_at) >= 3_000 {
+                    procs_at = now;
+                    let (sampler, cache) = (sampler.clone(), procs.clone());
+                    tauri::async_runtime::spawn(async move {
+                        if let Ok(p) = tauri::async_runtime::spawn_blocking(move || sampler.lock().map(|mut g| g.sample()).unwrap_or_default()).await {
+                            *cache.lock().unwrap_or_else(|e| e.into_inner()) = p;
+                            WINDOWS_DIRTY.store(true, Ordering::Relaxed);
+                        }
+                    });
                 }
-                if now.saturating_sub(watch_at) >= 500 {
+                known_keys = keys_now;
+                if windows_changed || fresh || debounce.pending() || now.saturating_sub(watch_at) >= 1_000 {
                     watch_at = now;
                     let refs: Vec<crate::agent_watching::SessionRef> = snap
                         .sessions
@@ -966,7 +1085,7 @@ pub fn start(app: tauri::AppHandle) {
                         .map(|s| crate::agent_watching::SessionRef { key: s.key.clone(), agent: s.agent.clone(), folder: s.folder.clone() })
                         .collect();
                     let keys: Vec<String> = refs.iter().map(|r| r.key.clone()).collect();
-                    let procs_now = procs.clone();
+                    let procs_now = procs.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     let raw = tauri::async_runtime::spawn_blocking(move || {
                         let (placed, screens, fg) = crate::agent_watching::snapshot_windows();
                         crate::agent_watching::watched_now(&refs, &procs_now, &placed, &screens, fg, own_pid)
@@ -982,6 +1101,8 @@ pub fn start(app: tauri::AppHandle) {
                 }
             } else {
                 watched.clear();
+                known_keys.clear();
+                WATCHED_NOW.lock().unwrap_or_else(|e| e.into_inner()).clear();
                 debounce = crate::agent_watching::Debounce::default();
             }
             let view = island_view(&snap, &watched);
@@ -1411,5 +1532,111 @@ mod tests {
         assert_eq!(decision, None, "the hook prints nothing: the agent already has its answer");
         assert!(t0.elapsed() < Duration::from_secs(3), "released at once, not after the timeout");
         assert!(!lock_monitor().approvals.iter().any(|a| a.session_key == "claude:elsewhere1"));
+    }
+}
+
+#[cfg(test)]
+mod finish_tests {
+    use super::*;
+
+    #[test]
+    fn a_stop_of_a_running_session_is_a_finish_for_every_coding_agent() {
+        for a in [Agent::Claude, Agent::Codex, Agent::OpenCode, Agent::Devin] {
+            assert!(finish_is_immediate(&a, &Kind::Stop, true, None), "{a:?}");
+        }
+        assert!(!finish_is_immediate(&Agent::Claude, &Kind::Stop, false, None), "a Stop for a session that was not running says nothing");
+        assert!(!finish_is_immediate(&Agent::Claude, &Kind::Prompt, true, None));
+    }
+
+    #[test]
+    fn background_work_still_running_is_not_a_finish_and_antigravity_must_say_it_is_idle() {
+        assert!(!finish_is_immediate(&Agent::Claude, &Kind::Stop, true, Some(false)), "the agent says work is still running");
+        assert!(!finish_is_immediate(&Agent::Antigravity, &Kind::Stop, true, None), "one invocation ended, not the task");
+        assert!(finish_is_immediate(&Agent::Antigravity, &Kind::Stop, true, Some(true)));
+    }
+
+    #[test]
+    fn an_agent_you_were_not_looking_at_stays_on_the_bar_as_finished_then_leaves() {
+        let mut m = Monitor::new();
+        let ev = |kind| Ev { agent: Agent::Codex, session_id: "c1".into(), cwd: None, kind };
+        m.apply(&ev(Kind::Prompt), 1_000_000);
+        m.apply(&ev(Kind::Stop), 1_000_100);
+        m.show_finish("codex:c1", FINISH_SHOW_MS, false);
+        let s = m.snapshot(1_000_200).sessions;
+        assert_eq!((s.len(), s[0].state, s[0].failed), (1, State::Done, false));
+        m.prune(1_000_100 + FINISH_SHOW_MS - 1);
+        assert_eq!(m.snapshot(1_000_100 + FINISH_SHOW_MS).sessions.len(), 1, "still on the bar");
+        m.prune(1_000_100 + FINISH_SHOW_MS);
+        assert!(m.snapshot(1_000_100 + FINISH_SHOW_MS).sessions.is_empty(), "gone after the notice");
+    }
+
+    #[test]
+    fn a_failed_turn_is_drawn_as_failed_and_a_new_prompt_clears_the_notice() {
+        let mut m = Monitor::new();
+        let ev = |kind| Ev { agent: Agent::Claude, session_id: "f1".into(), cwd: None, kind };
+        m.apply(&ev(Kind::Prompt), 2_000_000);
+        m.apply(&ev(Kind::Stop), 2_000_100);
+        m.show_finish("claude:f1", FINISH_SHOW_MS, true);
+        assert!(m.snapshot(2_000_200).sessions[0].failed);
+        m.apply(&ev(Kind::Prompt), 2_000_300);
+        let s = m.snapshot(2_000_400).sessions;
+        assert!(!s[0].failed && s[0].state == State::Thinking, "a running session is never shown as failed");
+    }
+
+    #[test]
+    fn only_an_agent_you_were_not_looking_at_keeps_its_logo_on_the_bar() {
+        let q = |e: &str| format!("agent=claude&event={e}");
+        let body = |id: &str| format!(r#"{{"session_id":"{id}","cwd":"C:/work/zync"}}"#);
+        let linger_of = |id: &str| lock_monitor().sessions.iter().find(|s| s.key == format!("claude:{id}")).map(|s| s.linger_ms);
+        // you are looking at it: it leaves with the finish
+        *WATCHED_NOW.lock().unwrap_or_else(|e| e.into_inner()) = vec!["claude:seen1".to_string()];
+        ingest(&q("start"), &body("seen1"));
+        ingest(&q("stop"), &body("seen1"));
+        assert_eq!(linger_of("seen1"), Some(DONE_LINGER_MS));
+        // you are elsewhere: it stays, written as finished
+        WATCHED_NOW.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        ingest(&q("start"), &body("away1"));
+        ingest(&q("stop"), &body("away1"));
+        assert_eq!(linger_of("away1"), Some(FINISH_SHOW_MS));
+        assert!(FINISH_SHOW_MS >= 3_000 && FINISH_SHOW_MS <= 6_000, "long enough to read, short enough to leave");
+        for id in ["seen1", "away1"] {
+            ingest(&q("end"), &body(id));
+        }
+    }
+
+    #[test]
+    fn a_session_still_running_is_never_given_a_finish_notice() {
+        let mut m = Monitor::new();
+        m.apply(&Ev { agent: Agent::Claude, session_id: "r1".into(), cwd: None, kind: Kind::Prompt }, 3_000_000);
+        m.show_finish("claude:r1", FINISH_SHOW_MS, true);
+        assert!(!m.snapshot(3_000_100).sessions[0].failed);
+        assert_eq!(m.sessions[0].linger_ms, DONE_LINGER_MS, "a running session keeps no notice time");
+        assert!(!m.sessions[0].failed);
+    }
+
+    #[test]
+    fn a_stop_followed_by_a_new_prompt_is_not_a_finish() {
+        let body = r#"{"session_id":"resume1","cwd":"C:/work/zync"}"#;
+        ingest("agent=claude&event=start", body);
+        assert!(session_resumed("claude:resume1"), "working");
+        ingest("agent=claude&event=stop", body);
+        assert!(!session_resumed("claude:resume1"), "stopped: nothing started it again");
+        ingest("agent=claude&event=start", body);
+        assert!(session_resumed("claude:resume1"), "a queued message started the next turn within the grace time");
+        ingest("agent=claude&event=end", body);
+        assert!(!session_resumed("claude:resume1"));
+        assert!(!session_resumed("claude:never-seen"));
+    }
+
+    #[test]
+    fn the_bar_drops_a_finished_agent_within_a_third_of_a_second() {
+        assert!(DONE_LINGER_MS <= 400);
+        let mut m = Monitor::new();
+        let ev = |kind| Ev { agent: Agent::Claude, session_id: "s1".into(), cwd: None, kind };
+        m.apply(&ev(Kind::Prompt), 1_000_000);
+        m.apply(&ev(Kind::Stop), 1_000_100);
+        assert_eq!(m.snapshot(1_000_101).sessions.len(), 1, "still there for the fade");
+        m.prune(1_000_100 + DONE_LINGER_MS);
+        assert!(m.snapshot(1_000_100 + DONE_LINGER_MS).sessions.is_empty());
     }
 }

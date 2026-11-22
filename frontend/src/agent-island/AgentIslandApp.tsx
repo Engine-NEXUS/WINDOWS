@@ -11,6 +11,7 @@ import {
   asSnapshot,
   defaultTab,
   elapsedLabel,
+  finishedText,
   focusSession,
   islandSize,
   pillLogos,
@@ -86,17 +87,18 @@ export function Island(p: {
   const { snap, mode, tab, setTab, now, decide, scale = 1, hot = false, host } = p;
   const ref = useRef<HTMLDivElement | null>(null);
   const logos = pillLogos(snap).length;
+  const finished = finishedText(snap) !== null;
   const [keepPanel, setKeepPanel] = useState(mode === "expanded");
 
   // sizes go in through CSS custom properties (the CSSOM is allowed under the window's CSP; the transition does the rest)
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const { w, h } = islandSize(mode, logos);
+    const { w, h } = islandSize(mode, logos, finished);
     el.style.setProperty("--ai-w", `${w}px`);
     el.style.setProperty("--ai-h", `${h}px`);
     el.style.setProperty("--ai-scale", String(scale));
-  }, [mode, logos, scale]);
+  }, [mode, logos, finished, scale]);
 
   useEffect(() => {
     if (mode === "expanded") {
@@ -121,14 +123,21 @@ export function Island(p: {
 
 export function Pill({ snap }: { snap: Snapshot }) {
   const logos = useMemo(() => pillLogos(snap), [snap]);
+  const finished = useMemo(() => finishedText(snap), [snap]);
   return (
-    <div className="ai-pill" role="status" aria-label={`${logos.length} agent${logos.length === 1 ? "" : "s"} running`}>
+    <div className="ai-pill" role="status" aria-label={finished ?? `${logos.length} agent${logos.length === 1 ? "" : "s"} running`}>
       {logos.map((l) => (
         <div key={l.agent} className={`ai-chip ai-chip--${l.state}`} title={`${l.label}: ${stateWord(l.state, null)}`}>
           <AgentLogo agent={l.agent} label={l.label} className="" />
           {l.count > 1 && <span className="ai-count">{l.count}</span>}
+          {l.state === "done" && (
+            <span className="ai-check" aria-hidden="true">
+              <Icon d={ICON.check} size={9} />
+            </span>
+          )}
         </div>
       ))}
+      {finished && <span className="ai-finished">{finished}</span>}
     </div>
   );
 }
