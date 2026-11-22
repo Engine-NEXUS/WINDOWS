@@ -2371,7 +2371,7 @@ impl Default for NexusSettings {
                 .to_string(),
             user_id: String::new(),
             device_id: String::new(),
-            tts_voice: "af_sky".to_string(),
+            tts_voice: "en-US-AvaNeural".to_string(),
             speech_rate: 1.15,
             tts_provider: "kokoro".to_string(),
             tts_volume: 75,
