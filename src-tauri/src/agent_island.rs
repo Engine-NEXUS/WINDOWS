@@ -26,11 +26,13 @@ const PILL_MIN_W: f64 = 64.0;
 const PANEL_W: f64 = 760.0;
 const PANEL_H: f64 = 430.0;
 const TOP_GAP: f64 = 6.0;
-/// Cursor margin around the drawn island that still counts as "on the island", logical px. Generous on purpose: the
-/// one-agent pill is only ~48 px wide at the smallest size, and the hover must be easy to hit.
-const MARGIN: f64 = 24.0;
 /// Extra width of the pill while it says "<agent> finished" (the page's FINISH_W).
 pub const FINISH_W: f64 = 156.0;
+/// Cursor margin around the drawn island that still counts as "on the island", logical px. The same zone decides hover
+/// (expand) and which clicks the island takes, so it is kept small: the island sits at the top centre of the screen,
+/// where a browser's tab strip and address bar are, and a wide invisible halo there swallowed clicks meant for them
+/// (2026-11-22; it was 24). The one-agent pill is ~48 px wide at the smallest size, so 8 px keeps the hover reachable.
+const MARGIN: f64 = 8.0;
 const HOVER_DWELL_MS: u64 = 180;
 const LEAVE_DWELL_MS: u64 = 450;
 /// A hidden island's window is destroyed after this long (a WebView2 costs RAM).
@@ -347,17 +349,20 @@ impl Island {
         } else {
             self.y_off = obstacle();
         }
-        // clicks pass through everywhere except over the drawn island
+        // clicks pass through everywhere except over the drawn island. Applied on EVERY tick, not only on a change:
+        // set_click_through reads the style first and writes only what differs, so it also repairs the window if
+        // anything else changed its style (tao rebuilds it on some calls).
         if self.shown != Mode::Hidden {
             let want_ignore = !inside;
-            if self.ignoring != Some(want_ignore) {
-                if let Some(w) = app.get_webview_window(LABEL) {
-                    if let Err(e) = set_click_through(&w, want_ignore) {
+            let state_changed = self.ignoring != Some(want_ignore);
+            if let Some(w) = app.get_webview_window(LABEL) {
+                if let Err(e) = set_click_through(&w, want_ignore) {
+                    if state_changed {
                         tracing::warn!("agent island: click-through: {e}");
                     }
                 }
-                self.ignoring = Some(want_ignore);
             }
+            self.ignoring = Some(want_ignore);
         }
     }
 }
@@ -378,6 +383,9 @@ fn place_and_show(app: &AppHandle, scale: f64, was_hidden: bool) -> Result<(), S
     if was_hidden || !win.is_visible().unwrap_or(false) {
         crate::notify_toast::show_without_focus(&win, crate::work_area::PRect { x, y, w, h })?;
     }
+    // Layered + click-through from the first moment it is on screen: a new window is click-through until the cursor
+    // reaches the island (the loop in `tick` then opens it).
+    let _ = set_click_through(&win, true);
     Ok(())
 }
 
@@ -393,35 +401,54 @@ fn move_to_offset(app: &AppHandle, win: &tauri::WebviewWindow, off: f64) {
 }
 
 const WS_EX_TRANSPARENT: isize = 0x0000_0020;
+const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
+const WS_EX_APPWINDOW: isize = 0x0004_0000;
+const WS_EX_LAYERED: isize = 0x0008_0000;
+const WS_EX_NOACTIVATE: isize = 0x0800_0000;
 
-/// The extended window style with the click-through bit on or off, every other bit untouched.
+/// The island's extended window style with click-through on or off.
+///
+/// WS_EX_TRANSPARENT only lets the mouse through a window that is ALSO layered (WS_EX_LAYERED). The island window was
+/// never layered (it is shown with raw Win32 calls, and tao only adds LAYERED inside its own set_ignore_cursor_events),
+/// so the flag did nothing: while the island was on screen its whole panel-sized window (570 x 323 logical px at the
+/// top centre) took every click, over a browser's tabs and address bar (measured live 2026-11-22: all 20 sample points
+/// across the window belonged to the island). So LAYERED is always on, the island never takes keyboard focus
+/// (NOACTIVATE), and it has no Alt+Tab / taskbar entry (TOOLWINDOW, no APPWINDOW). Every other bit is left alone.
 pub fn click_through_style(ex: isize, through: bool) -> isize {
+    let v = (ex | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) & !WS_EX_APPWINDOW;
     if through {
-        ex | WS_EX_TRANSPARENT
+        v | WS_EX_TRANSPARENT
     } else {
-        ex & !WS_EX_TRANSPARENT
+        v & !WS_EX_TRANSPARENT
     }
 }
 
-/// Click-through on or off by flipping ONLY WS_EX_TRANSPARENT on the window. Do NOT use `set_ignore_cursor_events` here:
+/// Click-through on or off by setting the style bits directly. Do NOT use `set_ignore_cursor_events` here:
 /// the island is shown with raw Win32 calls (`show_without_focus`, so it never takes focus), and tao, which does not
 /// know that, rebuilds the whole style from its own flags on that call: it hid the window the moment the cursor
-/// entered it (the pill vanished on hover) and dropped TOOLWINDOW / NOACTIVATE.
+/// entered it (the pill vanished on hover) and dropped TOOLWINDOW / NOACTIVATE. Reads the style first and writes only
+/// when it differs, so calling it on every tick also repairs the window; a window that has just become layered is given
+/// full opacity (a layered window draws nothing until its alpha is set).
 #[cfg(target_os = "windows")]
 fn set_click_through(win: &tauri::WebviewWindow, through: bool) -> Result<(), String> {
     #[link(name = "user32")]
     extern "system" {
         fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
         fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
+        fn SetLayeredWindowAttributes(hwnd: isize, color_key: u32, alpha: u8, flags: u32) -> i32;
     }
     const GWL_EXSTYLE: i32 = -20;
+    const LWA_ALPHA: u32 = 0x2;
     let hwnd = win.hwnd().map_err(|e| e.to_string())?.0 as isize;
-    // SAFETY: plain user32 calls on the island's own window handle; only one style bit changes.
+    // SAFETY: plain user32 calls on the island's own window handle; only the style bits named above change.
     unsafe {
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let next = click_through_style(ex, through);
         if next != ex {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next);
+        }
+        if ex & WS_EX_LAYERED == 0 {
+            SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
         }
     }
     Ok(())
@@ -598,26 +625,58 @@ mod tests {
     }
 
     #[test]
-    fn the_hot_zone_is_easy_to_hit_but_not_huge() {
+    fn the_hot_zone_is_small_but_reachable() {
         // the smallest one-agent pill (75%): 48 x 30 logical px at x 261..309, y 0..30 in a 570-wide window
         let (lw, lh) = size_for(Mode::Collapsed, 1, 0.75);
         let rect = drawn_rect(0.0, 0.0, 570.0, Mode::Collapsed, 1, 0.75, 1.0);
         assert_eq!((rect.2, rect.3), (lw, lh));
         let cx = rect.0 + rect.2 / 2.0;
-        assert!(near(rect, cx, rect.1 + rect.3 + 20.0, MARGIN), "20 px below the pill still counts");
-        assert!(near(rect, rect.0 - 20.0, rect.1 + 10.0, MARGIN), "20 px to the side still counts");
-        assert!(!near(rect, cx, rect.1 + rect.3 + 60.0, MARGIN), "60 px below does not");
-        assert!(!near(rect, rect.0 - 80.0, rect.1 + 10.0, MARGIN), "80 px to the side does not");
+        assert!(near(rect, cx, rect.1 + rect.3 + 6.0, MARGIN), "6 px below the pill still counts");
+        assert!(near(rect, rect.0 - 6.0, rect.1 + 10.0, MARGIN), "6 px to the side still counts");
+        assert!(!near(rect, cx, rect.1 + rect.3 + 20.0, MARGIN), "20 px below no longer counts: that is the browser's tab strip");
+        assert!(!near(rect, rect.0 - 20.0, rect.1 + 10.0, MARGIN), "20 px to the side no longer counts");
+        assert!(MARGIN <= 8.0, "a wider invisible halo at the top centre swallows clicks meant for the browser (was 24)");
     }
 
     #[test]
-    fn click_through_changes_only_its_own_bit() {
-        let ex: isize = 0x080C_01B8; // layered, tool window, no-activate, topmost ... as the live island has it
+    fn the_island_is_always_layered_so_click_through_really_works() {
+        // WS_EX_TRANSPARENT does nothing on a window that is not layered. These are the style values measured on the live
+        // island (no LAYERED: it blocked every click across its whole window), the value an older test assumed, and two styles that\n        // have none of the bits at all (so each bit must be SET by the function, not merely kept).
+        for ex in [0x0804_01B8_isize, 0x080C_01B8_isize, 0x0004_0100_isize, 0x0_isize] {
+            for through in [true, false] {
+                let s = click_through_style(ex, through);
+                assert_ne!(s & WS_EX_LAYERED, 0, "ex {ex:#x} through={through}: must be layered");
+                assert_ne!(s & WS_EX_NOACTIVATE, 0, "never takes keyboard focus");
+                assert_ne!(s & WS_EX_TOOLWINDOW, 0);
+                assert_eq!(s & WS_EX_APPWINDOW, 0, "no Alt+Tab / taskbar entry");
+                assert_eq!(s & WS_EX_TRANSPARENT != 0, through);
+                assert_eq!(s & 0x8, ex & 0x8, "topmost is left alone");
+            }
+        }
+    }
+
+    #[test]
+    fn click_through_style_is_idempotent_and_reversible() {
+        let ex: isize = 0x0804_01B8;
         let through = click_through_style(ex, true);
-        assert_eq!(through & !WS_EX_TRANSPARENT, ex & !WS_EX_TRANSPARENT, "no other bit moves");
-        assert_ne!(through & WS_EX_TRANSPARENT, 0);
-        assert_eq!(click_through_style(through, false), ex & !WS_EX_TRANSPARENT);
-        assert_eq!(click_through_style(click_through_style(ex, true), true), through, "idempotent");
+        assert_eq!(click_through_style(through, true), through, "idempotent");
+        assert_eq!(click_through_style(click_through_style(through, false), true), through);
+        assert_eq!(through & !(WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_APPWINDOW), ex & !(WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_APPWINDOW), "no other bit moves");
+    }
+
+    /// The window must be made click-through and layered the moment it is shown, and again on every tick (it repairs the
+    /// style if anything else changed it): a source scan, because the calls need a real window.
+    #[test]
+    fn the_style_is_applied_when_shown_and_on_every_tick() {
+        let src = include_str!("agent_island.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let shown = prod.split("fn place_and_show").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(shown.contains("set_click_through(&win, true)"), "place_and_show must apply the style");
+        let tick = prod.split("pub fn tick").nth(1).unwrap().split("\n/// Create (if needed)").next().unwrap();
+        let lines: Vec<&str> = tick.lines().collect();
+        let call = lines.iter().position(|l| l.contains("set_click_through(&w, want_ignore)")).expect("tick applies the style");
+        let guard = lines.iter().position(|l| l.contains("if self.ignoring != Some(want_ignore)"));
+        assert!(guard.is_none(), "the style must not be applied only when the state changed (line {call})");
     }
 
     /// The island is shown with raw Win32 calls, so tao's `set_ignore_cursor_events` would hide it on hover (found by the
