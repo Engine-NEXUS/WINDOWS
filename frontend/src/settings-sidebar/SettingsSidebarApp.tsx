@@ -131,6 +131,7 @@ interface Settings {
   ghostDepthAck?: boolean;
   sttConfidenceGate?: boolean;
   sttCommandHints?: boolean;
+  sttLiveCaptions?: boolean;
   wakeSeedOffsetMs?: number;
   wakeDspProfile?: string;
   wakeVerifyMode?: string;
@@ -222,6 +223,7 @@ const DEFAULT_SETTINGS: Settings = {
   ghostDepthAck: true,
   sttConfidenceGate: false,
   sttCommandHints: false,
+  sttLiveCaptions: false,
   wakeSeedOffsetMs: 0,
   wakeDspProfile: "legacy",
   wakeVerifyMode: "",
@@ -1066,6 +1068,18 @@ function AudioTab({ settings, update, voiceLock }: {
               <option value="tiered">Tiered</option>
               <option value="off">Off</option>
             </select>
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Live captions while you speak</div>
+            <div className="setting-desc">Shows your words on screen while you are still speaking, instead of only after you finish. With a Deepgram key it streams to Deepgram; with a Groq key it asks Groq every second or so (about 4 extra requests per command from your free quota); otherwise it needs the local speech server. Off when "Local speech only" is on, in meetings and in Ghost mode.</div>
+          </div>
+          <div className="setting-control">
+            <div
+              className={`settings-toggle ${settings.sttLiveCaptions ? "settings-toggle--on" : ""}`}
+              onClick={() => update("sttLiveCaptions", !settings.sttLiveCaptions)}
+            />
           </div>
         </div>
         <div className="setting-row">

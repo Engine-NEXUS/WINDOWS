@@ -51,3 +51,27 @@ A rewrite of `stt_stream.rs`; the browser path is removed; the native capture fe
 2. Add a Deepgram key, `localSttOnly` false: the same, now through Deepgram. Check the Deepgram usage page: one connection per turn.
 3. Set `localSttOnly` true with the key still present. Expected: the pill still works (local stream) and Deepgram's usage page shows **no** new connections.
 4. Start a meeting call: no partials. Ghost mode: no partials.
+
+## Follow-up 2026-11-24 (owner report: "a lot of delay between speaking and the caption")
+
+**Why there was a delay.** Without live captions the pill shows nothing while you speak. The words appear only after the whole sentence is finished and transcribed: end of speech, then the endpoint silence (400 ms, 800 ms in "patient" mode, up to a 3 s hold if the sentence looks unfinished), then the Groq round trip (about 300 ms; the one capture in the current log shows 306 ms). For a 4 second sentence nothing is on screen for 4 seconds and then everything appears. That is the delay, and it is structural, not a bug in one line.
+
+**Why the first version of live captions would not have fixed it on this machine.** Checked here: no Deepgram key is set, and the local speech server is not running (it is shut down 60 seconds after use to keep the RAM under the 150 MB idle limit; `lazy_stt.rs`, `STT_KEEP_ALIVE = false`). So the Deepgram stream had no key and the local stream had nothing to connect to.
+
+**What was built.**
+* **A Groq progressive source** (`Plan::Groq`): with a Groq key, no Deepgram key and privacy mode off, while you speak the audio so far is sent to Groq (the same service and key the final transcript already uses, so no new party hears you) and the answer replaces the pill text. First request after 0.9 s of audio, then at most every 1.2 s, only with 0.6 s of new audio, one at a time, at most 6 per command, at most 10 per minute across commands (Groq's free tier is 20 per minute and the final transcript needs the rest), only the last 12 s of audio, never for silence or room noise (peak under 700), silence hallucinations filtered with the same filter as the final transcript. An error (for example a 429) stops it for that command and for a minute. The final transcript is untouched.
+* **The Command Hub switch**: Voice, "Live captions while you speak" (Features page and the Audio tab), off by default, marked as a cloud-using feature, with the quota cost stated. `sttLiveCaptions` was also failing the feature-registry gate (`scripts/check-feature-registry.mjs`); that gate now passes.
+* Source order: Deepgram stream (real streaming) if a Deepgram key exists, else Groq progressive if a Groq key exists, else the local server. Privacy mode (`localSttOnly`) always means the local server only.
+
+**Expected effect (not measured live).** The caption should lag your voice by about one to one and a half seconds, in steps, instead of appearing after the sentence ends. It will not be word-by-word smooth: Groq has no streaming. For smooth word-by-word text the options are a Deepgram key, or keeping the local server warm (about 300 MB of RAM, which breaks the RAM rule).
+
+**Cost.** About 4 extra Groq requests for a 5 second command. The free tier is 2,000 requests a day, so roughly 330 commands a day with captions on instead of roughly 2,000 without.
+
+**Verification.** 11 new tests in `stt_stream::tests` with a fake transcriber (waits for enough audio; sends everything so far, not just the new part; no new audio, no request; one at a time; per-turn cap; silence never sent; error stops the turn and blocks the budget; exhausted budget means no request; silence hallucination filtered; a finished turn shows nothing; Stop ends the task; only the recent window is sent) plus the plan and budget rules, 1 registry test. Mutation checks: 10 rules, 9 killed first time; the survivor was two guards backing each other up (the turn flag and the budget block), re-checked together and killed. Records: `docs/testing/runs/eight-weak-features-mutations-c*.json`.
+
+**Owner checklist.**
+1. Command Hub, Features, Voice, switch on "Live captions while you speak" (restart not needed; read on every command).
+2. Say a 5 to 8 word command. Expected: text appears about a second after you start, grows in steps, and the final text replaces it.
+3. Check the Groq console: about 4 extra requests per command.
+4. Switch "Local speech recognition only" on: expected, no captions from Groq (the local server is needed).
+5. If the text lags more than 2 seconds or shows junk, tell me the numbers in the log (`stt-groq: transcript ... in Nms`).

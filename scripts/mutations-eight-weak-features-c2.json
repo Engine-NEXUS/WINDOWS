@@ -1,0 +1,21 @@
+{
+  "file": "src-tauri/src/stt_stream.rs",
+  "cwd": "src-tauri",
+  "targetDir": "D:/nexus-screen-target",
+  "testArgs": [
+    "--lib",
+    "--features",
+    "custom-protocol,admin-brain",
+    "--",
+    "--test-threads=1",
+    "stt_stream"
+  ],
+  "mutations": [
+    {
+      "name": "an error neither stops this turn nor blocks the budget (two guards back each other up, so both go)",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "                        failed = true;\n                        if let Ok(mut b) = budget.lock() { b.back_off(std::time::Instant::now(), Duration::from_secs(60)); }",
+      "replace": "                        failed = false;"
+    }
+  ]
+}

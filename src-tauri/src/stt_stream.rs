@@ -47,6 +47,10 @@ pub enum Plan {
     Local,
     /// Deepgram: audio goes to the cloud. Only with a key, and never in privacy mode.
     Cloud,
+    /// No streaming server at all: while you speak, the audio so far is sent to Groq (the same service and key the
+    /// final transcript uses, so no new party sees your voice) every second or so and the text is shown provisionally.
+    /// Costs extra Groq requests; limited per turn and per minute. Never in privacy mode.
+    Groq,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -57,6 +61,7 @@ pub struct Gates {
     pub ghost: bool,
     pub speaking: bool,
     pub has_cloud_key: bool,
+    pub has_groq_key: bool,
 }
 
 pub fn plan_for(g: &Gates) -> Plan {
@@ -72,10 +77,16 @@ pub fn plan_for(g: &Gates) -> Plan {
     if g.speaking {
         return Plan::Off("NEXUS is speaking");
     }
-    if g.local_only || !g.has_cloud_key {
+    if g.local_only {
         return Plan::Local;
     }
-    Plan::Cloud
+    if g.has_cloud_key {
+        return Plan::Cloud;
+    }
+    if g.has_groq_key {
+        return Plan::Groq;
+    }
+    Plan::Local
 }
 
 /// What the "this stream is finished" message looks like for each server.
@@ -137,14 +148,86 @@ impl Assembler {
 
 // ── The stream ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StreamCfg {
     pub plan: Plan,
     pub url: String,
     pub authorization: Option<String>,
+    /// Only for Plan::Groq: how to turn the audio so far into text.
+    pub transcribe: Option<Transcribe>,
 }
 
-enum Cmd {
+/// Audio so far (16 kHz mono PCM16) in, provisional text out.
+pub type Transcribe = Arc<dyn Fn(Vec<i16>) -> futures_util::future::BoxFuture<'static, Result<String, String>> + Send + Sync>;
+
+/// How often and how much the progressive (Groq) stream may ask. Every request spends the free Groq quota the final
+/// transcript also needs, so it is rationed per turn and per minute.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// Do not ask before this much audio exists.
+    pub min_samples: usize,
+    /// Do not ask again before this much NEW audio exists.
+    pub new_samples: usize,
+    /// Minimum time between two requests of one turn.
+    pub min_gap: Duration,
+    pub max_per_turn: usize,
+    pub tick: Duration,
+    /// Only the last this-many samples are sent (long monologues stay cheap and fast).
+    pub window_samples: usize,
+    /// Below this peak the new audio is silence or room noise: do not ask.
+    pub min_peak: i16,
+}
+
+impl Limits {
+    pub const PRODUCTION: Limits = Limits {
+        min_samples: 14_400,    // 0.9 s
+        new_samples: 9_600,     // 0.6 s
+        min_gap: Duration::from_millis(1_200),
+        max_per_turn: 6,
+        tick: Duration::from_millis(150),
+        window_samples: 16_000 * 12,
+        min_peak: 700,
+    };
+}
+
+/// Requests allowed across turns: at most `max` in any `per` window, and none for a while after an error (a 429 means
+/// the free quota is nearly gone: the final transcript must have it).
+#[derive(Debug)]
+pub struct Budget {
+    stamps: std::collections::VecDeque<std::time::Instant>,
+    max: usize,
+    per: Duration,
+    blocked_until: Option<std::time::Instant>,
+}
+
+impl Budget {
+    pub fn new(max: usize, per: Duration) -> Self {
+        Self { stamps: Default::default(), max, per, blocked_until: None }
+    }
+    pub fn production() -> Self {
+        Self::new(10, Duration::from_secs(60))
+    }
+    /// Takes one request from the budget if there is one.
+    pub fn take(&mut self, now: std::time::Instant) -> bool {
+        if self.blocked_until.is_some_and(|t| now < t) {
+            return false;
+        }
+        while self.stamps.front().is_some_and(|t| now.duration_since(*t) > self.per) {
+            self.stamps.pop_front();
+        }
+        if self.stamps.len() >= self.max {
+            return false;
+        }
+        self.stamps.push_back(now);
+        true
+    }
+    /// An error came back: stop asking for `for_`.
+    pub fn back_off(&mut self, now: std::time::Instant, for_: Duration) {
+        self.blocked_until = Some(now + for_);
+    }
+}
+
+pub enum Cmd {
     Audio(Vec<i16>),
     Stop,
 }
@@ -250,6 +333,85 @@ async fn run_session(cfg: StreamCfg, mut rx: mpsc::Receiver<Cmd>, my_gen: u64, s
     reader.abort();
 }
 
+static BUDGET: Lazy<Arc<std::sync::Mutex<Budget>>> = Lazy::new(|| Arc::new(std::sync::Mutex::new(Budget::production())));
+
+fn peak(samples: &[i16]) -> i16 {
+    samples.iter().map(|s| s.saturating_abs()).max().unwrap_or(0)
+}
+
+/// Provisional captions without a streaming server: while the turn runs, send the audio so far to the transcriber at
+/// most every `min_gap`, one request at a time, and show what comes back. The final transcript is untouched.
+pub async fn run_progressive(
+    transcribe: Transcribe,
+    mut rx: mpsc::Receiver<Cmd>,
+    my_gen: u64,
+    shared: Arc<Shared>,
+    emit: Emit,
+    limits: Limits,
+    budget: Arc<std::sync::Mutex<Budget>>,
+) {
+    let mut audio: Vec<i16> = Vec::new();
+    let mut asked_at_len = 0usize;
+    let mut asked = 0usize;
+    let mut last_ask: Option<std::time::Instant> = None;
+    let mut in_flight: Option<tokio::task::JoinHandle<Result<String, String>>> = None;
+    let mut failed = false;
+    let mut tick = tokio::time::interval(limits.tick);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            cmd = rx.recv() => match cmd {
+                Some(Cmd::Audio(v)) => audio.extend_from_slice(&v),
+                Some(Cmd::Stop) | None => {
+                    if let Some(h) = in_flight.take() { h.abort(); }
+                    return;
+                }
+            },
+            res = async { match in_flight.as_mut() { Some(h) => h.await, None => std::future::pending().await } } => {
+                in_flight = None;
+                match res {
+                    Ok(Ok(text)) => {
+                        if let Some(t) = crate::stt::interim_transcript(&text) {
+                            if shared.active_gen.load(Ordering::SeqCst) == my_gen {
+                                emit(my_gen, t);
+                            }
+                        }
+                    }
+                    _ => {
+                        // a failed or rate-limited request: stop asking this turn and for a minute after
+                        failed = true;
+                        if let Ok(mut b) = budget.lock() { b.back_off(std::time::Instant::now(), Duration::from_secs(60)); }
+                    }
+                }
+            },
+            _ = tick.tick() => {}
+        }
+        if failed || in_flight.is_some() || asked >= limits.max_per_turn {
+            continue;
+        }
+        if audio.len() < limits.min_samples || audio.len() < asked_at_len + limits.new_samples {
+            continue;
+        }
+        let now = std::time::Instant::now();
+        if last_ask.is_some_and(|t| now.duration_since(t) < limits.min_gap) {
+            continue;
+        }
+        if peak(&audio[asked_at_len..]) < limits.min_peak {
+            continue; // the new audio is silence or room noise
+        }
+        if !budget.lock().map(|mut b| b.take(now)).unwrap_or(false) {
+            continue;
+        }
+        let from = audio.len().saturating_sub(limits.window_samples);
+        let snapshot = audio[from..].to_vec();
+        asked_at_len = audio.len();
+        asked += 1;
+        last_ask = Some(now);
+        let f = transcribe(snapshot);
+        in_flight = Some(tokio::spawn(f));
+    }
+}
+
 /// The one task that owns the current stream. `plan_fn` is asked at every Begin (settings can change between turns).
 pub async fn dispatch(
     mut rx: mpsc::Receiver<Feed>,
@@ -280,7 +442,14 @@ pub async fn dispatch(
                 let (tx, srx) = mpsc::channel(SESSION_DEPTH);
                 current = Some(tx);
                 shared.armed.store(true, Ordering::SeqCst);
-                tokio::spawn(run_session(cfg, srx, my_gen, shared.clone(), emit.clone()));
+                if cfg.plan == Plan::Groq {
+                    let Some(transcribe) = cfg.transcribe.clone() else { continue };
+                    tokio::spawn(run_progressive(
+                        transcribe, srx, my_gen, shared.clone(), emit.clone(), Limits::PRODUCTION, BUDGET.clone(),
+                    ));
+                } else {
+                    tokio::spawn(run_session(cfg, srx, my_gen, shared.clone(), emit.clone()));
+                }
             }
             Feed::Chunk(v) => {
                 if let Some(s) = &current {
@@ -345,13 +514,28 @@ pub fn init<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     let plan_fn: Box<dyn Fn() -> Plan + Send + Sync> = Box::new(move || plan_for(&current_gates(&plan_app)));
     let key_app = app.clone();
     let cfg_fn: Box<dyn Fn(Plan) -> Option<StreamCfg> + Send + Sync> = Box::new(move |plan| match plan {
-        Plan::Local => Some(StreamCfg { plan, url: LOCAL_URL.to_string(), authorization: None }),
+        Plan::Local => Some(StreamCfg { plan, url: LOCAL_URL.to_string(), authorization: None, transcribe: None }),
         Plan::Cloud => {
             let key = crate::commands::read_api_key(&key_app, "deepgram");
             (!key.is_empty()).then(|| StreamCfg {
                 plan,
                 url: DEEPGRAM_URL.to_string(),
                 authorization: Some(format!("Token {key}")),
+                transcribe: None,
+            })
+        }
+        Plan::Groq => {
+            let key = crate::commands::read_groq_api_key(&key_app);
+            (!key.is_empty()).then(|| StreamCfg {
+                plan,
+                url: String::new(),
+                authorization: None,
+                transcribe: Some(Arc::new(move |samples| {
+                    let key = key.clone();
+                    Box::pin(async move {
+                        crate::stt_groq::transcribe_with_groq(&samples, &key, crate::stt::shared_client(), None).await
+                    })
+                })),
             })
         }
         Plan::Off(_) => None,
@@ -380,6 +564,7 @@ fn current_gates<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Gates {
         ghost: crate::ghost::session_active(),
         speaking,
         has_cloud_key: !crate::commands::read_api_key(app, "deepgram").is_empty(),
+        has_groq_key: !crate::commands::read_groq_api_key(app).is_empty(),
     }
 }
 
@@ -559,7 +744,7 @@ mod tests {
         let e = emitted.clone();
         let emit: Emit = Arc::new(move |g, t| e.lock().unwrap().push((g, t)));
         let cfg_fn: Box<dyn Fn(Plan) -> Option<StreamCfg> + Send + Sync> =
-            Box::new(move |p| Some(StreamCfg { plan: p, url: url.clone(), authorization: None }));
+            Box::new(move |p| Some(StreamCfg { plan: p, url: url.clone(), authorization: None, transcribe: None }));
         tokio::spawn(dispatch(rx, shared.clone(), Box::new(move || plan), cfg_fn, emit));
         Rig { handle, shared, emitted }
     }
@@ -610,7 +795,7 @@ mod tests {
             if p == Plan::Cloud {
                 flag.store(true, Ordering::SeqCst);
             }
-            Some(StreamCfg { plan: p, url: url.clone(), authorization: None })
+            Some(StreamCfg { plan: p, url: url.clone(), authorization: None, transcribe: None })
         });
         let emit: Emit = Arc::new(|_, _| {});
         tokio::spawn(dispatch(rx, shared.clone(), Box::new(move || plan_for(&gates)), cfg_fn, emit));
@@ -668,6 +853,208 @@ mod tests {
         assert_eq!(shared.dropped.load(Ordering::Relaxed), 50, "everything past the queue depth is dropped and counted");
         handle.end();
         assert!(!shared.armed.load(Ordering::SeqCst) && shared.active_gen.load(Ordering::SeqCst) == 0, "end() stops emission even with a full queue");
+    }
+
+    // ── progressive (Groq) captions ──
+
+    #[test]
+    fn with_a_groq_key_and_no_streaming_server_the_progressive_plan_is_used_but_never_in_privacy_mode() {
+        let g = Gates { enabled: true, has_groq_key: true, ..Default::default() };
+        assert_eq!(plan_for(&g), Plan::Groq);
+        assert_eq!(plan_for(&Gates { local_only: true, ..g }), Plan::Local, "privacy mode: never Groq");
+        assert_eq!(plan_for(&Gates { has_cloud_key: true, ..g }), Plan::Cloud, "a real streaming server beats the progressive one");
+        assert_eq!(plan_for(&Gates { has_groq_key: false, ..g }), Plan::Local);
+        assert!(matches!(plan_for(&Gates { meeting: true, ..g }), Plan::Off(_)));
+    }
+
+    #[test]
+    fn the_budget_rations_requests_per_minute_and_backs_off_after_an_error() {
+        let t0 = std::time::Instant::now();
+        let mut b = Budget::new(3, Duration::from_secs(60));
+        assert!(b.take(t0) && b.take(t0) && b.take(t0));
+        assert!(!b.take(t0), "the fourth in a minute is refused");
+        assert!(b.take(t0 + Duration::from_secs(61)), "a minute later there is room again");
+        b.back_off(t0 + Duration::from_secs(61), Duration::from_secs(60));
+        assert!(!b.take(t0 + Duration::from_secs(90)), "blocked after an error");
+        assert!(b.take(t0 + Duration::from_secs(130)), "and free again afterwards");
+    }
+
+    #[test]
+    fn production_limits_leave_room_for_the_final_transcript_on_the_free_tier() {
+        let l = Limits::PRODUCTION;
+        assert!(l.min_samples >= 14_400, "no request before 0.9 s of audio");
+        assert!(l.max_per_turn <= 6);
+        let b = Budget::production();
+        assert!(b.max <= 10, "Groq's free tier is 20 requests a minute; the finals need the other half");
+    }
+
+    fn test_limits() -> Limits {
+        Limits { min_samples: 1_600, new_samples: 800, min_gap: Duration::from_millis(30), max_per_turn: 3, tick: Duration::from_millis(10), window_samples: 100_000, min_peak: 700 }
+    }
+
+    /// A fake transcriber: records the length of each request, and answers from a script.
+    #[derive(Clone)]
+    struct Fake {
+        calls: Arc<Mutex<Vec<usize>>>,
+        replies: Arc<Mutex<Vec<Result<String, String>>>>,
+        delay: Duration,
+        running: Arc<std::sync::atomic::AtomicUsize>,
+        max_running: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl Fake {
+        fn new(replies: Vec<Result<String, String>>, delay_ms: u64) -> Self {
+            Self {
+                calls: Default::default(),
+                replies: Arc::new(Mutex::new(replies)),
+                delay: Duration::from_millis(delay_ms),
+                running: Default::default(),
+                max_running: Default::default(),
+            }
+        }
+        fn transcribe(&self) -> Transcribe {
+            let me = self.clone();
+            Arc::new(move |samples: Vec<i16>| {
+                let me = me.clone();
+                Box::pin(async move {
+                    me.calls.lock().unwrap().push(samples.len());
+                    let now = me.running.fetch_add(1, Ordering::SeqCst) + 1;
+                    me.max_running.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(me.delay).await;
+                    me.running.fetch_sub(1, Ordering::SeqCst);
+                    let mut r = me.replies.lock().unwrap();
+                    if r.is_empty() { Ok(String::new()) } else { r.remove(0) }
+                })
+            })
+        }
+    }
+
+    struct Prog {
+        tx: mpsc::Sender<Cmd>,
+        shared: Arc<Shared>,
+        emitted: Arc<Mutex<Vec<(u64, String)>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    fn start_progressive(fake: &Fake, limits: Limits, budget: Budget) -> Prog {
+        let shared = Arc::new(Shared::new());
+        shared.active_gen.store(5, Ordering::SeqCst);
+        let (tx, rx) = mpsc::channel(256);
+        let emitted: Arc<Mutex<Vec<(u64, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let e = emitted.clone();
+        let emit: Emit = Arc::new(move |g, t| e.lock().unwrap().push((g, t)));
+        let task = tokio::spawn(run_progressive(fake.transcribe(), rx, 5, shared.clone(), emit, limits, Arc::new(Mutex::new(budget))));
+        Prog { tx, shared, emitted, task }
+    }
+
+    fn loud(n: usize) -> Cmd {
+        Cmd::Audio(vec![5000i16; n])
+    }
+
+    #[tokio::test]
+    async fn it_waits_for_enough_audio_then_sends_everything_so_far_and_shows_the_text() {
+        let fake = Fake::new(vec![Ok("hello".into()), Ok("hello there".into())], 5);
+        let p = start_progressive(&fake, test_limits(), Budget::new(100, Duration::from_secs(60)));
+        p.tx.send(loud(1_000)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(fake.calls.lock().unwrap().is_empty(), "1000 samples is too little to ask");
+        p.tx.send(loud(1_000)).await.unwrap();
+        wait_for(|| p.emitted.lock().unwrap().len() == 1).await;
+        assert_eq!(*fake.calls.lock().unwrap(), vec![2_000], "the first request carries everything said so far");
+        // less than 800 new samples: no second request yet
+        p.tx.send(loud(400)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert_eq!(fake.calls.lock().unwrap().len(), 1, "not enough new audio");
+        p.tx.send(loud(1_000)).await.unwrap();
+        wait_for(|| p.emitted.lock().unwrap().len() == 2).await;
+        assert_eq!(*fake.calls.lock().unwrap(), vec![2_000, 3_400], "the second request is cumulative, not just the new part");
+        let texts: Vec<String> = p.emitted.lock().unwrap().iter().map(|(_, t)| t.clone()).collect();
+        assert_eq!(texts, vec!["hello", "hello there"], "each answer replaces the last on screen");
+        let _ = p.tx.send(Cmd::Stop).await;
+        let _ = p.task.await;
+    }
+
+    #[tokio::test]
+    async fn only_one_request_at_a_time_and_never_more_than_the_turn_limit() {
+        let fake = Fake::new(vec![Ok("a".into()), Ok("b".into()), Ok("c".into()), Ok("d".into())], 60);
+        let p = start_progressive(&fake, test_limits(), Budget::new(100, Duration::from_secs(60)));
+        for _ in 0..20 {
+            p.tx.send(loud(1_000)).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(fake.max_running.load(Ordering::SeqCst), 1, "never two requests in flight");
+        assert_eq!(fake.calls.lock().unwrap().len(), 3, "at most max_per_turn requests");
+        let _ = p.tx.send(Cmd::Stop).await;
+    }
+
+    #[tokio::test]
+    async fn silence_and_room_noise_are_never_sent() {
+        let fake = Fake::new(vec![Ok("you".into())], 5);
+        let p = start_progressive(&fake, test_limits(), Budget::new(100, Duration::from_secs(60)));
+        p.tx.send(Cmd::Audio(vec![120i16; 6_000])).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(fake.calls.lock().unwrap().is_empty(), "a peak of 120 is room noise: no request, no quota spent");
+        let _ = p.tx.send(Cmd::Stop).await;
+    }
+
+    #[tokio::test]
+    async fn an_error_stops_the_requests_for_this_turn_and_blocks_the_budget() {
+        let fake = Fake::new(vec![Err("Groq rate limit hit".into())], 5);
+        let budget = Arc::new(Mutex::new(Budget::new(100, Duration::from_secs(60))));
+        let shared = Arc::new(Shared::new());
+        shared.active_gen.store(5, Ordering::SeqCst);
+        let (tx, rx) = mpsc::channel(256);
+        let emit: Emit = Arc::new(|_, _| {});
+        let task = tokio::spawn(run_progressive(fake.transcribe(), rx, 5, shared, emit, test_limits(), budget.clone()));
+        for _ in 0..10 {
+            tx.send(loud(1_000)).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        assert_eq!(fake.calls.lock().unwrap().len(), 1, "after the failure nothing more is asked this turn");
+        assert!(!budget.lock().unwrap().take(std::time::Instant::now()), "and the budget is blocked for the next turns too");
+        let _ = tx.send(Cmd::Stop).await;
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_budget_means_no_request_at_all() {
+        let fake = Fake::new(vec![Ok("x".into())], 5);
+        let p = start_progressive(&fake, test_limits(), Budget::new(0, Duration::from_secs(60)));
+        p.tx.send(loud(5_000)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(fake.calls.lock().unwrap().is_empty());
+        let _ = p.tx.send(Cmd::Stop).await;
+    }
+
+    #[tokio::test]
+    async fn junk_the_recogniser_invents_on_silence_is_not_shown_and_a_stale_turn_shows_nothing() {
+        let fake = Fake::new(vec![Ok("Thanks for watching!".into()), Ok("open whatsapp".into())], 120);
+        let p = start_progressive(&fake, test_limits(), Budget::new(100, Duration::from_secs(60)));
+        p.tx.send(loud(2_000)).await.unwrap();
+        wait_for(|| fake.calls.lock().unwrap().len() == 1).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(p.emitted.lock().unwrap().is_empty(), "a known silence hallucination is filtered");
+        // the turn ends (generation 0) while the second request is in flight: its answer must not show
+        p.tx.send(loud(2_000)).await.unwrap();
+        wait_for(|| fake.calls.lock().unwrap().len() == 2).await;
+        p.shared.active_gen.store(0, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(p.emitted.lock().unwrap().is_empty(), "nothing shows after the turn ended");
+        let _ = p.tx.send(Cmd::Stop).await;
+    }
+
+    #[tokio::test]
+    async fn stop_ends_the_task_at_once_and_a_long_turn_sends_only_the_recent_window() {
+        let fake = Fake::new(vec![Ok("x".into())], 5);
+        let mut l = test_limits();
+        l.window_samples = 1_000;
+        let p = start_progressive(&fake, l, Budget::new(100, Duration::from_secs(60)));
+        p.tx.send(loud(3_000)).await.unwrap();
+        wait_for(|| fake.calls.lock().unwrap().len() == 1).await;
+        assert_eq!(*fake.calls.lock().unwrap(), vec![1_000], "only the last window is sent");
+        p.tx.send(Cmd::Stop).await.unwrap();
+        let done = tokio::time::timeout(Duration::from_millis(500), p.task).await;
+        assert!(done.is_ok(), "Stop ends the task");
     }
 
     #[test]

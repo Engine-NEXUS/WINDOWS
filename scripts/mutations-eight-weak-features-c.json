@@ -1,0 +1,75 @@
+{
+  "file": "src-tauri/src/stt_stream.rs",
+  "cwd": "src-tauri",
+  "targetDir": "D:/nexus-screen-target",
+  "testArgs": [
+    "--lib",
+    "--features",
+    "custom-protocol,admin-brain",
+    "--",
+    "--test-threads=1",
+    "stt_stream"
+  ],
+  "mutations": [
+    {
+      "name": "progressive captions run in privacy mode",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "    if g.local_only {\n        return Plan::Local;\n    }\n    if g.has_cloud_key {",
+      "replace": "    if g.has_cloud_key {"
+    },
+    {
+      "name": "progressive beats a real streaming server",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "    if g.has_cloud_key {\n        return Plan::Cloud;\n    }\n    if g.has_groq_key {\n        return Plan::Groq;\n    }",
+      "replace": "    if g.has_groq_key {\n        return Plan::Groq;\n    }\n    if g.has_cloud_key {\n        return Plan::Cloud;\n    }"
+    },
+    {
+      "name": "requests start before enough audio exists",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "if audio.len() < limits.min_samples || audio.len() < asked_at_len + limits.new_samples {",
+      "replace": "if false {"
+    },
+    {
+      "name": "two requests can be in flight",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "if failed || in_flight.is_some() || asked >= limits.max_per_turn {",
+      "replace": "if failed || asked >= limits.max_per_turn {"
+    },
+    {
+      "name": "silence is sent to the recogniser",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "if peak(&audio[asked_at_len..]) < limits.min_peak {",
+      "replace": "if false {"
+    },
+    {
+      "name": "the per-minute budget is ignored",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "if !budget.lock().map(|mut b| b.take(now)).unwrap_or(false) {",
+      "replace": "if false {"
+    },
+    {
+      "name": "an error does not stop further requests",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "                        failed = true;",
+      "replace": "                        failed = false;"
+    },
+    {
+      "name": "silence hallucinations are shown",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "if let Some(t) = crate::stt::interim_transcript(&text) {",
+      "replace": "if let Some(t) = Some(text.clone()) {"
+    },
+    {
+      "name": "a finished turn still shows its late answer",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "                            if shared.active_gen.load(Ordering::SeqCst) == my_gen {\n                                emit(my_gen, t);",
+      "replace": "                            if true {\n                                emit(my_gen, t);"
+    },
+    {
+      "name": "the whole turn is sent however long it is",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "let from = audio.len().saturating_sub(limits.window_samples);",
+      "replace": "let from = 0;"
+    }
+  ]
+}

@@ -133,3 +133,14 @@ describe("filters", () => {
     expect(matches(s, find("screenTour"), "all", "nonsense-word")).toBe(false);
   });
 });
+
+describe("live captions switch", () => {
+  it("is a Voice feature, off by default, and says it can use a cloud service", () => {
+    const f = FEATURES.find((x) => x.key === "sttLiveCaptions");
+    expect(f).toBeDefined();
+    expect(f?.group).toBe("Voice");
+    expect(f?.def).toBe(false);
+    expect(f?.risk).toBe("cloud");
+    expect(f?.what).toMatch(/Groq|Deepgram/);
+  });
+});

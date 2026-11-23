@@ -1029,6 +1029,12 @@ fn is_known_command(text: &str) -> bool {
         || crate::power_cmd::parse_casual(text).is_some()
 }
 
+/// The hallucination filter for text that is only SHOWN while the user still speaks (live captions): the same rules as the
+/// final transcript, but none of its per-turn counters, logs or missed-intent records. None means "show nothing".
+pub(crate) fn interim_transcript(text: &str) -> Option<String> {
+    evaluate_transcript(text).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
+}
+
 /// `Ok(kept text)` or `Err(reason code)`.
 fn evaluate_transcript(text: &str) -> Result<String, u8> {
     let normalized = normalize_english_punctuation(text);
