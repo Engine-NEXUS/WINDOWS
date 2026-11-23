@@ -75,3 +75,44 @@ A rewrite of `stt_stream.rs`; the browser path is removed; the native capture fe
 3. Check the Groq console: about 4 extra requests per command.
 4. Switch "Local speech recognition only" on: expected, no captions from Groq (the local server is needed).
 5. If the text lags more than 2 seconds or shows junk, tell me the numbers in the log (`stt-groq: transcript ... in Nms`).
+
+## Cost reduction (2026-11-24, after an Opus 5.5 advisor review; supersedes the numbers above)
+
+**Measured, not guessed.** `stt_stream::tests::measure_cost_and_lag` (ignored; `cargo test --lib stt_stream::tests::measure_cost_and_lag -- --ignored --nocapture`) replays utterances in real time through the real scheduling code with a recogniser that answers in 300 ms (Groq's typical figure):
+
+| spoken | requests, first version | requests, now | audio sent, now | first caption |
+|---|---|---|---|---|
+| 1.0 s ("open whatsapp") | 1 | **0** | 0 s | none needed |
+| 1.5 s | 1 (answer arrived after the end: wasted) | **0** | 0 s | none needed |
+| 2.0 s | 2 | **1** | 1.6 s | about 2.1 s |
+| 3.0 s | 3 | **2** | 4.6 s | about 2.1 s |
+| 5.0 s | 4 | **3** | 8.9 s | about 2.1 s |
+| 8.0 s | 6 | **4** | 14.5 s | about 2.1 s |
+
+**What the advisor found (read only, it also read Groq's pages).**
+* Groq bills a **minimum of 10 seconds per request**, so shorter audio chunks save nothing and the "cumulative resend multiplies audio-seconds" worry was overstated for paid keys: on a paid key an interim costs well under a hundredth of a cent. On the free tier the constraint is **requests per day**, not seconds.
+* Groq's rate-limits page lists `whisper-large-v3` and `whisper-large-v3-turbo` as separate rows with the same numbers, but also says limits apply at the organisation level. **Whether the two models have separate free-tier allowances is not verified**; it needs your own limits page.
+* A speculative final (reuse the last interim as the final) is **not safe** as built: interim uses neutral decoding, the final uses the owner or entity vocabulary prompt and the confidence gate, plain `json` has no `avg_logprob`, and the admin-privilege proof path never saw the interim. Only a request made with exactly the final's function and prompt could be reused. Not built.
+
+**What was changed (the advisor's items 2, 3, 4, 5).**
+1. **Fewer, later requests.** First request after **1.6 s** of audio (was 0.9 s), then at most every **1.5 s** with 0.8 s of new audio, at most **4 per command** (was 6). A one-breath command costs nothing.
+2. **No request while the speaker has just stopped.** If the last 200 ms are quiet the final transcript is about to be asked for; an interim then would duplicate it and could still be in flight when the turn ends.
+3. **A different Groq model for captions** (`whisper-large-v3`, the larger one): if the free-tier allowance is per model, captions no longer spend the final transcript's turbo allowance. If it turns out to be per organisation this changes nothing except a slightly slower answer.
+4. **Budget:** at most **8 per minute** across commands (was 10), a **daily cap of 600**, a **2-minute** pause after any error (was 1).
+5. **Counted separately.** Caption requests are counted as `stt_interim` and are **not** added to the Command Hub's "requests today" (they had been inflating it two to three times). The rate-limit error text no longer hard-codes "2,000 req/day".
+
+**Not done (and why).** Local on-device recognition for captions (Vosk, sherpa-onnx, Windows speech): each is either a sidecar of about 300 MB (breaks the RAM rule), sends audio to Microsoft (privacy), or is unverified here. Stopping captions when the stage is hidden, and reading Groq's remaining-requests header for an adaptive budget, were left because their effect is unverified for audio endpoints.
+
+**Cost now, in the owner's terms.** Free tier: a typical 3 s long command spends 1 final plus 2 caption requests; a 5 s command 1 plus 3. With captions on, expect roughly 2 to 4 times the requests of captions off for long commands, none for short ones, and never more than 600 caption requests a day. A paid key: negligible (the 10 s minimum makes each interim cost about the same as 10 s of audio, under a hundredth of a cent).
+
+**Whole-chain test.** `a_real_recording_goes_through_the_whole_chain_and_ends_cleanly` feeds the project's real "open whatsapp" recording in 80 ms chunks through the microphone-side handle, the dispatcher, the plan, the progressive session and the emit, then ends the turn and starts a second one.
+
+**What to test yourself (10 minutes).**
+1. Features, Voice, "Live captions while you speak" on.
+2. Short command ("open notepad"): no caption appears and the Groq console shows only the normal request.
+3. Long command (6 to 8 words, a pause-free sentence of about 4 seconds): a caption appears about 2 seconds in, then updates once or twice; the final text replaces it.
+4. In the Command Hub the "requests today" figure goes up by 1 per command, not 3.
+5. `usage_stats.json` in the app data folder shows `stt_interim` counts separately.
+6. Look at your Groq limits page: do `whisper-large-v3` and `whisper-large-v3-turbo` show separate daily counters? Tell me what you see.
+
+**Verification of the cost cuts.** Rust 3531 passed, frontend 1283 passed, all gates pass, family build compiles. Mutation checks for the caption rules (specs `scripts/mutations-eight-weak-features-b/c/c2/d.json`, records in `docs/testing/runs/`): every rule is caught. Three first-try survivors were guards that back each other up (the speaker-stopped gate and the quiet-audio gate; the per-turn failure flag and the budget block); each was re-checked by removing both together, and the speaker-stopped gate got a stronger test (one block with loud audio and a quiet tail) after its mutation survived. One process note: an earlier mutation run was started twice by mistake, the two runs raced on the same file and the killed run left two mutations in the source; they were found by checking that every mutation target was present, restored by hand, and the whole stream test file re-run before this commit.

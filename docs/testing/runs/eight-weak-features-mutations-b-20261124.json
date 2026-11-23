@@ -5,12 +5,12 @@
     {
       "name": "BOTH generation guards removed: an older turn late text is emitted (the two guards back each other up, so one alone is an equivalent mutant)",
       "status": "KILLED",
-      "detail": "panicked at src\\stt_stream.rs:468:9: assertion failed: !deliver(Plan::Cloud, &mut asm, &dg(\"LATE\", false), &shared, 7, &emit)"
+      "detail": "panicked at src\\stt_stream.rs:695:9: assertion failed: !deliver(Plan::Cloud, &mut asm, &dg(\"LATE\", false), &shared, 7, &emit)"
     },
     {
       "name": "a second start keeps the first stream alive (its sender is leaked, so dropping it no longer ends the session)",
       "status": "KILLED",
-      "detail": "panicked at src\\stt_stream.rs:637:9: the first socket was closed properly: [Connected(1), Audio(2560), Connected(2), Audio(2560)]"
+      "detail": "panicked at src\\stt_stream.rs:864:9: the first socket was closed properly: [Connected(1), Audio(2560), Connected(2), Audio(2560)]"
     }
   ]
 }

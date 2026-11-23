@@ -1,0 +1,16 @@
+{
+  "file": "src-tauri/src/stt_stream.rs",
+  "test": "--lib --features custom-protocol,admin-brain -- --test-threads=1 stt_stream",
+  "results": [
+    {
+      "name": "silence is sent to the recogniser (both quiet-audio gates removed; each alone is covered by the other)",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:1049:9: a quiet tail: nothing is asked"
+    },
+    {
+      "name": "a request is made while the speaker has just stopped (tail gate removed)",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:1052:9: a quiet tail: nothing is asked"
+    }
+  ]
+}

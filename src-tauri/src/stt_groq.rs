@@ -245,6 +245,25 @@ pub async fn transcribe_with_groq(
     client: &Client,
     prompt: Option<&'static str>,
 ) -> Result<String, String> {
+    transcribe_plain(samples, api_key, client, prompt, GROQ_MODEL, "stt").await
+}
+
+/// Provisional text for LIVE CAPTIONS while the user is still speaking. Differs from the final transcript on purpose:
+/// the larger model (Groq lists limits per model, so these requests are meant not to spend the final transcript's
+/// turbo allowance; unverified for free-tier keys, see docs/research/eight-weak-features/04), neutral decoding, and a
+/// separate usage-counter kind so the Command Hub's "requests today" is not inflated by captions.
+pub async fn transcribe_interim_with_groq(samples: &[i16], api_key: &str, client: &Client) -> Result<String, String> {
+    transcribe_plain(samples, api_key, client, None, GROQ_MODEL_LARGE, "stt_interim").await
+}
+
+async fn transcribe_plain(
+    samples: &[i16],
+    api_key: &str,
+    client: &Client,
+    prompt: Option<&'static str>,
+    model: &'static str,
+    counter: &'static str,
+) -> Result<String, String> {
     if api_key.is_empty() {
         return Err("No Groq API key provided".to_string());
     }
@@ -256,12 +275,13 @@ pub async fn transcribe_with_groq(
         samples.len() / 16
     );
 
-    let fields = transcription_fields("audio.wav", "audio/wav", prompt, false);
+    let mut fields = transcription_fields("audio.wav", "audio/wav", prompt, false);
+    fields.model = model;
     let form = groq_transcription_form(wav_bytes, &fields)?;
 
     let start = std::time::Instant::now();
 
-    crate::usage_counter::bump("stt");
+    crate::usage_counter::bump(counter);
     let resp = client
         .post(GROQ_STT_URL)
         .bearer_auth(api_key)
@@ -278,7 +298,7 @@ pub async fn transcribe_with_groq(
         let body = resp.text().await.unwrap_or_default();
         // Check for rate limit (429) or auth error (401) for better error messages
         if status.as_u16() == 429 {
-            return Err("Groq rate limit hit (2,000 req/day free tier)".to_string());
+            return Err("Groq rate limit hit (free-tier request limit)".to_string());
         }
         if status.as_u16() == 401 {
             return Err("Groq API key invalid — check Settings".to_string());

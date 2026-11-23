@@ -1073,7 +1073,7 @@ function AudioTab({ settings, update, voiceLock }: {
         <div className="setting-row">
           <div>
             <div className="setting-label">Live captions while you speak</div>
-            <div className="setting-desc">Shows your words on screen while you are still speaking, instead of only after you finish. With a Deepgram key it streams to Deepgram; with a Groq key it asks Groq every second or so (about 4 extra requests per command from your free quota); otherwise it needs the local speech server. Off when "Local speech only" is on, in meetings and in Ghost mode.</div>
+            <div className="setting-desc">Shows your words on screen while you are still speaking, instead of only after you finish. With a Deepgram key it streams to Deepgram; with a Groq key it asks Groq every 1.5 seconds or so, only for commands longer than about 1.6 seconds (1 to 3 extra requests for a typical long command, none for short ones; capped at 600 a day); otherwise it needs the local speech server. Off when "Local speech only" is on, in meetings and in Ghost mode.</div>
           </div>
           <div className="setting-control">
             <div

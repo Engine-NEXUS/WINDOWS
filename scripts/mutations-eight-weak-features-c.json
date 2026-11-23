@@ -36,22 +36,10 @@
       "replace": "if failed || asked >= limits.max_per_turn {"
     },
     {
-      "name": "silence is sent to the recogniser",
-      "file": "src-tauri/src/stt_stream.rs",
-      "find": "if peak(&audio[asked_at_len..]) < limits.min_peak {",
-      "replace": "if false {"
-    },
-    {
       "name": "the per-minute budget is ignored",
       "file": "src-tauri/src/stt_stream.rs",
       "find": "if !budget.lock().map(|mut b| b.take(now)).unwrap_or(false) {",
       "replace": "if false {"
-    },
-    {
-      "name": "an error does not stop further requests",
-      "file": "src-tauri/src/stt_stream.rs",
-      "find": "                        failed = true;",
-      "replace": "                        failed = false;"
     },
     {
       "name": "silence hallucinations are shown",

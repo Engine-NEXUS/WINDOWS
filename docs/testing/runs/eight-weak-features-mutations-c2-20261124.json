@@ -5,7 +5,7 @@
     {
       "name": "an error neither stops this turn nor blocks the budget (two guards back each other up, so both go)",
       "status": "KILLED",
-      "detail": "panicked at src\\stt_stream.rs:1012:9: assertion `left == right` failed: after the failure nothing more is asked this turn"
+      "detail": "panicked at src\\stt_stream.rs:1092:9: assertion `left == right` failed: after the failure nothing more is asked this turn"
     }
   ]
 }
