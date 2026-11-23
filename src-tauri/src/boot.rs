@@ -77,13 +77,25 @@ const TIMELINE_MAX_LINES: usize = 300;
 /// Separate from the single-instance plugin's own mutex on purpose: the plugin only checks
 /// inside `Builder::run`, which is after the work this guard has to precede.
 pub fn claim_primary_instance() -> bool {
+    claim_primary_instance_inner()
+}
+
+/// The start-up lock's name for an app identity. A personal build keeps the historical name
+/// `Local\com.nexus.assistant-boot`; a contributor build has its own identity and so its own lock, which lets a
+/// contributor (or a tester) run beside an installed personal NEXUS instead of being refused by it. Found 2026-11-24:
+/// the isolated test copy exited at once because both identities shared one fixed lock name.
+pub(crate) fn primary_mutex_name(app_id: &str) -> String {
+    format!("Local\\{app_id}-boot\0")
+}
+
+fn claim_primary_instance_inner() -> bool {
     #[cfg(target_os = "windows")]
     {
         use windows::core::PCWSTR;
         use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
         use windows::Win32::System::Threading::CreateMutexW;
 
-        let name: Vec<u16> = "Local\\com.nexus.assistant-boot\0".encode_utf16().collect();
+        let name: Vec<u16> = primary_mutex_name(crate::app_dirs::APP_ID).encode_utf16().collect();
         // The handle is intentionally never closed: the mutex must live as long as the process.
         let _handle = unsafe { CreateMutexW(std::ptr::null(), true, PCWSTR(name.as_ptr())) };
         let already = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
@@ -285,5 +297,24 @@ mod tests {
         // ERROR_ALREADY_EXISTS, which is exactly the signal a second process would get.)
         let _first = claim_primary_instance(); // true unless a real NEXUS is running right now
         assert!(!claim_primary_instance());
+    }
+}
+
+#[cfg(test)]
+mod primary_lock_tests {
+    use super::primary_mutex_name;
+
+    #[test]
+    fn the_personal_lock_name_is_unchanged_and_a_contributor_has_its_own() {
+        assert_eq!(primary_mutex_name("com.nexus.assistant"), "Local\\com.nexus.assistant-boot\0", "installed personal builds keep the name older builds use");
+        assert_ne!(primary_mutex_name("com.nexus.assistant.contributor"), primary_mutex_name("com.nexus.assistant"));
+        assert!(primary_mutex_name("com.nexus.assistant.contributor").ends_with("-boot\0"));
+    }
+
+    #[test]
+    fn the_claim_uses_the_identity_of_the_build() {
+        let src = include_str!("boot.rs");
+        let body = src.split("fn claim_primary_instance_inner").nth(1).unwrap().split("// ---- WebView2 profile reset decision").next().unwrap();
+        assert!(body.contains("primary_mutex_name(crate::app_dirs::APP_ID)"));
     }
 }
