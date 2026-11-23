@@ -46,13 +46,13 @@
     {
         "area": "Voice front end",
         "feature": "Streaming partial captions (Deepgram, optional)",
-        "tests": "3 tests",
-        "B": 80,
-        "T": 25,
+        "tests": "4 + 14 stream tests (real localhost WebSocket) + 2 frontend",
+        "B": 90,
+        "T": 75,
         "L": 20,
-        "S": 60,
+        "S": 85,
         "I": 60,
-        "note": "Optional, needs a key; stream module has no tests.",
+        "note": "2026-11-24: it never ran (its only caller had no callers). Rewritten and fed by the native mic capture; default OFF (sttLiveCaptions); privacy mode never uses the cloud; generation ids; CloseStream; stale-timer in the pill; Deepgram nova-2 now gets keywords= not keyterm= (11 mutations). Not run against a real Deepgram or local stream; no Hub switch yet. Optional, needs a key; stream module has no tests.",
         "scope": "out",
         "scope_reason": "D4: optional streaming captions needing a paid key; revisit if wanted"
     },
@@ -191,13 +191,13 @@
     {
         "area": "Understanding",
         "feature": "Admin brain (Qwen, admin only)",
-        "tests": "0 client tests",
+        "tests": "10 client + 5 gate tests",
         "B": 80,
-        "T": 30,
+        "T": 55,
         "L": 35,
-        "S": 70,
+        "S": 80,
         "I": 50,
-        "note": "Compiled out of family builds.",
+        "note": "2026-11-24: one gate (sanitise, cap invented labels, configured confidence floor) now covers single commands AND every step of \"X then Y\" (it had none); one port source; admin check on phrasing; atomic start (5 mutations). brain_server.py is not in the repo, so the trust handshake is not done. Compiled out of family builds.",
         "scope": "out",
         "scope_reason": "D2: compiled out of family builds; scored only for the admin build"
     },
@@ -314,13 +314,13 @@
     {
         "area": "Desktop control",
         "feature": "Vision-grounded click",
-        "tests": "43 tests",
+        "tests": "81 + 3 wiring tests",
         "B": 85,
-        "T": 66,
+        "T": 75,
         "L": 25,
-        "S": 70,
+        "S": 85,
         "I": 40,
-        "note": "Measurement harness written (UIA ground truth vs the vision model, kept in the working tree with other uncommitted vision work); NOT run: it sends a screenshot of the whole screen to a cloud provider, so it needs a clean desktop. Found: Groq vision models are decommissioned, so auto uses Gemini only."
+        "note": "2026-11-24: the vision path now vets the foreground window before any screenshot is sent (bank / password-manager / unidentified windows refused aloud), rechecks the window before clicking, and says \"appears to be\" for a cloud-found click (3 mutations). Whole-primary-screen only; second monitor and race mode (sends to both providers) still open; measurement harness still not run. Measurement harness written (UIA ground truth vs the vision model, kept in the working tree with other uncommitted vision work); NOT run: it sends a screenshot of the whole screen to a cloud provider, so it needs a clean desktop. Found: Groq vision models are decommissioned, so auto uses Gemini only."
     },
     {
         "area": "Desktop control",
@@ -545,13 +545,13 @@
     {
         "area": "Memory and proactive",
         "feature": "WhatsApp priority people (read-only)",
-        "tests": "17+8 tests",
+        "tests": "17+8 + 1 wording test",
         "B": 85,
-        "T": 65,
+        "T": 70,
         "L": 5,
         "S": 90,
         "I": 50,
-        "note": "OFF by default; read-receipt side effects unknown."
+        "note": "2026-11-24: removed the unverified \"sender will not see blue ticks\" promise from the chat card and the settings panel (1 mutation). The two-phone read-receipt experiment is still the only thing that moves Live. OFF by default; read-receipt side effects unknown."
     },
     {
         "area": "Memory and proactive",
@@ -747,13 +747,13 @@
     {
         "area": "Desktop control",
         "feature": "Reverse engineer website/app",
-        "tests": "140 focused tests (scanner, hidden render, accuracy replay, scroll stepper, runner outcomes, phrasings) + 8 safety mutations",
+        "tests": "140 focused tests + 3 real-site fixtures + 8 safety mutations",
         "B": 85,
-        "T": 65,
+        "T": 70,
         "L": 0,
-        "S": 80,
+        "S": 85,
         "I": 40,
-        "note": "Change 197 (source only): honest outcomes (no tour after a refusal, no 'found 0'), cancel everywhere, hidden InPrivate render for SPAs, bot-wall/sign-in/SPA-shell reasons, mouse-free UIA scrolling that stops when the user takes over, table cleanup, offline accuracy harness. Live 2026-11-15 on bb04c8bb: voice dispatch works after the normal-mode arm fix, but the tab address could not be read (likely a full-screen browser); source now leaves full screen with F11 to read it, accepts Brave's location bar class and logs a [REVERSE] url diag line. Table 243 -> 364 with Retire.js (Apache-2.0) and Library Detector (MIT) fingerprints; Wappalyzer forks are GPL-3.0 and not used. Still no successful live scan: needs a rebuild and the owner walkthrough (Next.js, WordPress, Cloudflare-protected site, one desktop app) and the 50-site capture."
+        "note": "2026-11-24: 8 real public sites replayed offline: headline stack right on 6; found VitePress missing from the table (added, with Docusaurus / Hugo / Jekyll / MkDocs); scanner client now ignores system proxies so the SSRF pin cannot be bypassed. n=3 real fixtures is not a measurement; no live scan yet. Change 197 (source only): honest outcomes (no tour after a refusal, no 'found 0'), cancel everywhere, hidden InPrivate render for SPAs, bot-wall/sign-in/SPA-shell reasons, mouse-free UIA scrolling that stops when the user takes over, table cleanup, offline accuracy harness. Live 2026-11-15 on bb04c8bb: voice dispatch works after the normal-mode arm fix, but the tab address could not be read (likely a full-screen browser); source now leaves full screen with F11 to read it, accepts Brave's location bar class and logs a [REVERSE] url diag line. Table 243 -> 364 with Retire.js (Apache-2.0) and Library Detector (MIT) fingerprints; Wappalyzer forks are GPL-3.0 and not used. Still no successful live scan: needs a rebuild and the owner walkthrough (Next.js, WordPress, Cloudflare-protected site, one desktop app) and the 50-site capture."
     },
     {
         "area": "Platform and quality",
@@ -769,34 +769,34 @@
     {
         "area": "Desktop control",
         "feature": "Focus Mode (Hand Mode load control)",
-        "tests": "~60 tests, 4 mutations",
+        "tests": "~65 tests incl. 4 real-process tests, 7 mutations",
         "B": 90,
-        "T": 75,
+        "T": 85,
         "L": 0,
         "S": 80,
         "I": 20,
-        "note": "Own-loop gating, CPU-priority lowering of other heavy apps with exact restore and crash recovery; unit-tested only. No Task Manager before/during/after proof and no Hand Mode lag baseline; GPU share is not controlled."
+        "note": "2026-11-24: lower / restore now proven on a real child process (priority class and EcoQoS read back, reused-PID and dead-process guards, 3 mutations). Still no Task Manager proof on the owner apps and no Hand Mode lag baseline. Own-loop gating, CPU-priority lowering of other heavy apps with exact restore and crash recovery; unit-tested only. No Task Manager before/during/after proof and no Hand Mode lag baseline; GPU share is not controlled."
     },
     {
         "area": "Integrations",
         "feature": "GitHub by voice without owner (repo, PR list, PR number search)",
-        "tests": "~70 tests",
+        "tests": "~75 tests",
         "B": 90,
-        "T": 80,
+        "T": 83,
         "L": 0,
         "S": 80,
         "I": 30,
-        "note": "analyse zync, the PR in zync (list), PR 34 (search all repos); pinned sidebar list and set_view race fixed. Not run against real accounts, an SSO org or a name under two owners."
+        "note": "2026-11-24: pinned that every destructive confirmation names the resolved owner/repo after a loose match. Still not run against real accounts, SSO or a name under two owners. analyse zync, the PR in zync (list), PR 34 (search all repos); pinned sidebar list and set_view race fixed. Not run against real accounts, an SSO org or a name under two owners."
     },
     {
         "area": "Memory and proactive",
         "feature": "Notification brain: state machine and GitHub Actions / deploy watchers",
-        "tests": "~90 tests, 12 mutations",
+        "tests": "~100 tests, 15 mutations",
         "B": 90,
-        "T": 80,
+        "T": 90,
         "L": 0,
-        "S": 80,
+        "S": 85,
         "I": 30,
-        "note": "Failed / still failing / fixed per entity, persisted; GitHub Actions plus Vercel, Render, Netlify watchers. No live failing workflow or deploy, restart-while-failing, or team account run."
+        "note": "2026-11-24: GitHub watcher now groups runs by workflow and branch (a passing docs workflow no longer announces \"green again\" while CI is red; a failing feature branch is not the build); real public Actions payload used as a fixture (3 mutations). Still no live failing workflow or deploy. Failed / still failing / fixed per entity, persisted; GitHub Actions plus Vercel, Render, Netlify watchers. No live failing workflow or deploy, restart-while-failing, or team account run."
     }
 ]

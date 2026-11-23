@@ -601,12 +601,13 @@ async fn parse_with_ml(transcript: &str) -> Option<crate::intent_parser::ParseRe
                 if cap_ml_window_open(&mut result) {
                     tracing::info!("orchestrator: capped ML Architect → NLU fallback");
                 }
-                if result.confidence >= 0.5 {
+                let floor = brain_floor(crate::admin_config::min_confidence());
+                if result.confidence >= floor {
                     return Some(result);
                 }
                 tracing::info!(
-                    "orchestrator: brain confidence too low ({:.2}), falling back to NLU",
-                    result.confidence
+                    "orchestrator: brain confidence too low ({:.2} < {:.2}), falling back to NLU",
+                    result.confidence, floor
                 );
             }
         }
@@ -628,6 +629,25 @@ async fn parse_with_ml(transcript: &str) -> Option<crate::intent_parser::ParseRe
     }
 
     None
+}
+
+/// The least confidence the Qwen brain may have for NEXUS to act on its label. Never below 0.5 (the old fixed gate); the
+/// admin's `min_confidence` (default 0.90) raises it. A non-finite or silly value falls back to the default.
+#[cfg(feature = "admin-brain")]
+pub(crate) fn brain_floor(configured: f32) -> f32 {
+    if configured.is_finite() { configured.clamp(0.5, 1.0) } else { 0.90 }
+}
+
+/// One gate for EVERY place the brain's classification can become a command (single intents and the steps of an
+/// "X then Y" plan): sanitise the slots, cap the labels the 0.5B model is known to invent, then require the floor.
+/// Returns true only when the result may be acted on. (The compound path used to take the label unchecked.)
+#[cfg(feature = "admin-brain")]
+pub(crate) fn accept_brain_result(result: &mut crate::intent_parser::ParseResult) -> bool {
+    sanitize_ml_intent(result);
+    if cap_ml_window_open(result) {
+        return false;
+    }
+    result.confidence >= brain_floor(crate::admin_config::min_confidence())
 }
 
 /// Cap ML-only window-opening intents. Returns true when capped.
@@ -9507,6 +9527,13 @@ async fn run_maximize_window<R: Runtime>(app: AppHandle<R>) -> Result<ProcessRes
     Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true })
 }
 
+/// What NEXUS says when it will not send the screen to a cloud model to find a click target.
+fn vision_click_refusal(reason: &str) -> String {
+    format!("{reason} I did not look for it, sir.")
+}
+
+const VISION_CLICK_WINDOW_CHANGED: &str = "The window changed while I was looking, so I did not click, sir.";
+
 /// Click an on-screen element by name, OUTSIDE a ghost session: a single
 /// confirmed action, not a driving session (no ring, no Esc-arming). UIA
 /// bounds first (exact, free, ~ms) — reuses the exact resolver Ghost Mode
@@ -9535,6 +9562,7 @@ async fn run_click_element<R: Runtime>(app: AppHandle<R>, name: String) -> Resul
         .await
         .unwrap_or(None);
 
+        let mut vision_found = false;
         let el = match resolved {
             Some(el) => Some(el),
             None => {
@@ -9548,24 +9576,42 @@ async fn run_click_element<R: Runtime>(app: AppHandle<R>, name: String) -> Resul
                 if !crate::vision::has_usable_vision_key(&order, &groq_key, &gemini_key) {
                     None
                 } else {
+                    // The vision model is sent a picture of the WHOLE screen. Freeze and vet the foreground window
+                    // first, exactly as the screen tour does: a bank, password manager or wallet window, or one we
+                    // cannot identify, is never uploaded (2026-11-24 audit: this path had no such check).
+                    let (sw, sh) = crate::screen::primary_monitor_size().unwrap_or((1920, 1080));
+                    let frozen = crate::screen_context::collect_target(sw, sh).await;
+                    if let Some(reason) = crate::screen_context::capture_block_reason(&frozen) {
+                        speak_line(&app, vision_click_refusal(reason), &request_id);
+                        clear_active_request(&request_id);
+                        return Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true });
+                    }
                     let usage_dir = app
                         .path()
                         .app_data_dir()
                         .unwrap_or_else(|_| std::path::PathBuf::from("."));
                     let order = crate::vision::read_vision_provider(&usage_dir);
                     // Feature 98: pooled keep-alive client (no cold TLS).
-                    crate::vision::locate_with_fallback(
+                    let located = crate::vision::locate_with_fallback(
                         &name, &groq_key, &gemini_key, &order, &usage_dir,
                         &crate::vision::shared_vision_client(),
                     )
-                    .await
-                    .map(|t| {
-                        tracing::info!(
-                            "vision click: fallback={} raced={}",
-                            t.fell_back, t.raced
-                        );
-                        t.el
-                    })
+                    .await;
+                    match located {
+                        None => None,
+                        Some(t) => {
+                            tracing::info!("vision click: fallback={} raced={}", t.fell_back, t.raced);
+                            // The cloud call takes seconds. If the foreground window is no longer the one that was
+                            // looked at, these coordinates belong to a different window: do not click.
+                            if !crate::screen_context::foreground_still_matches(&frozen, sw, sh).await {
+                                speak_line(&app, VISION_CLICK_WINDOW_CHANGED.to_string(), &request_id);
+                                clear_active_request(&request_id);
+                                return Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true });
+                            }
+                            vision_found = true;
+                            Some(t.el)
+                        }
+                    }
                 }
             }
         };
@@ -9579,6 +9625,8 @@ async fn run_click_element<R: Runtime>(app: AppHandle<R>, name: String) -> Resul
                 .await
                 .unwrap_or_else(|e| Err(e.to_string()));
                 let reply = match clicked {
+                    // A click sent where a cloud model THINKS the element is is not a confirmed press: say so.
+                    Ok(()) if vision_found => format!("I clicked where {name} appears to be, sir."),
                     Ok(()) => format!("Clicked {name}, sir."),
                     Err(e) => e,
                 };
@@ -12440,5 +12488,113 @@ mod continuation_tests {
         let taken = take_awaiting_continuation();
         assert_eq!(taken, Some("previous prompt".into()));
         assert_eq!(take_awaiting_continuation(), None);
+    }
+}
+
+/// The vision click used to send a picture of the whole screen to a cloud model with no check of which window was
+/// showing, and clicked after a multi-second call without looking again (2026-11-24 audit). These pin the wiring: a
+/// source scan, because the path needs a real screen and a cloud key.
+#[cfg(test)]
+mod vision_click_gate_tests {
+    fn click_fn() -> String {
+        let src = include_str!("orchestrator.rs");
+        let after = src.split("async fn run_click_element<R").nth(1).expect("run_click_element exists");
+        after.split("/// Open the NEXUS Command Hub sidebar").next().unwrap().to_string()
+    }
+
+    #[test]
+    fn the_window_is_vetted_before_any_screenshot_leaves_and_rechecked_before_the_click() {
+        let f = click_fn();
+        let at = |needle: &str| f.find(needle).unwrap_or_else(|| panic!("missing `{needle}` in run_click_element"));
+        let freeze = at("collect_target(");
+        let block = at("capture_block_reason(");
+        let locate = at("locate_with_fallback(");
+        let recheck = at("foreground_still_matches(");
+        let click = at("click_at(");
+        assert!(freeze < block && block < locate, "vet the window BEFORE the screenshot is sent");
+        assert!(locate < recheck && recheck < click, "recheck the window AFTER the cloud call and BEFORE the click");
+    }
+
+    #[test]
+    fn a_click_found_by_a_cloud_model_is_not_reported_as_a_confirmed_press() {
+        let f = click_fn();
+        assert!(f.contains("appears to be"), "vision-found clicks say where it appears to be");
+        assert!(f.contains("vision_found"));
+        assert!(super::VISION_CLICK_WINDOW_CHANGED.contains("did not click"));
+        assert!(super::vision_click_refusal("This window is sensitive, so I won't analyse it.").contains("did not look"));
+    }
+
+    #[test]
+    fn a_sensitive_or_unidentified_window_is_refused_by_the_shared_gate() {
+        use crate::screen_context::{build_context, capture_block_reason, RawContext};
+        let bank = RawContext { app: "chrome.exe".into(), title: "Online Banking - Bank".into(), window_rect: Some((0, 0, 1280, 720)), ..Default::default() };
+        assert!(capture_block_reason(&build_context(&bank, None, 1920, 1080)).is_some(), "a bank window is never uploaded");
+        let pw = RawContext { app: "1password.exe".into(), title: "Vault".into(), window_rect: Some((0, 0, 1280, 720)), ..Default::default() };
+        assert!(capture_block_reason(&build_context(&pw, None, 1920, 1080)).is_some(), "a password manager is never uploaded");
+        let unknown = RawContext::default();
+        assert!(capture_block_reason(&build_context(&unknown, None, 1920, 1080)).is_some(), "an unidentified window is never uploaded");
+        let notepad = RawContext { app: "notepad.exe".into(), title: "notes.txt - Notepad".into(), window_rect: Some((0, 0, 1280, 720)), ..Default::default() };
+        assert!(capture_block_reason(&build_context(&notepad, None, 1920, 1080)).is_none(), "an ordinary window is allowed");
+    }
+}
+
+/// The Qwen brain's label can become a command in two places (a single command and each step of "X then Y"). The second
+/// used to take it with no gate at all; the configured confidence was never read (2026-11-24 audit).
+#[cfg(all(test, feature = "admin-brain"))]
+mod brain_gate_tests {
+    use crate::intent_parser::{ParseResult, ParsedIntent};
+
+    fn brain(intent: ParsedIntent, confidence: f32) -> ParseResult {
+        ParseResult { intent, confidence, source: "brain".to_string() }
+    }
+
+    #[test]
+    fn the_floor_is_the_configured_value_but_never_below_the_old_fixed_gate() {
+        assert_eq!(super::brain_floor(0.90), 0.90);
+        assert_eq!(super::brain_floor(0.2), 0.5, "a low config cannot open the gate below 0.5");
+        assert_eq!(super::brain_floor(7.0), 1.0);
+        assert_eq!(super::brain_floor(f32::NAN), 0.90, "garbage falls back to the default");
+    }
+
+    #[test]
+    fn a_confident_ordinary_label_passes_and_a_low_one_does_not() {
+        let mut ok = brain(ParsedIntent::OpenSettings, 0.97);
+        assert!(super::accept_brain_result(&mut ok));
+        let mut low = brain(ParsedIntent::OpenSettings, 0.62);
+        assert!(!super::accept_brain_result(&mut low), "below the configured floor: not acted on");
+    }
+
+    #[test]
+    fn labels_the_small_model_is_known_to_invent_are_rejected_even_at_full_confidence() {
+        let mut arch = brain(ParsedIntent::OpenArchitect, 1.0);
+        assert!(!super::accept_brain_result(&mut arch), "an ML-only window open is capped");
+        let mut click = brain(
+            ParsedIntent::NluResult { intent: "system_click_element".into(), slots: serde_json::json!({}), confidence: 1.0 },
+            1.0,
+        );
+        assert!(!super::accept_brain_result(&mut click), "brain-only click labels are capped");
+    }
+
+    #[test]
+    fn the_single_command_path_uses_the_configured_floor_not_a_fixed_number() {
+        let src = include_str!("orchestrator.rs");
+        let body = src.split("async fn parse_with_ml(").nth(1).unwrap().split("// 2. Try NLU server").next().unwrap();
+        assert!(body.contains("brain_floor(crate::admin_config::min_confidence())"));
+        assert!(!body.contains("confidence >= 0.5"), "no hard-coded gate");
+    }
+
+    #[test]
+    fn the_compound_path_and_the_brain_client_use_the_same_gate_port_and_admin_check() {
+        let cc = include_str!("command_center.rs");
+        let step = cc.split("brain_classify(part)").nth(1).expect("compound path calls the brain").split("let spec").next().unwrap();
+        assert!(step.contains("accept_brain_result"), "every compound step goes through the shared gate");
+        let bc = include_str!("brain_client.rs");
+        let prod = bc.split("#[cfg(test)]").next().unwrap();
+        assert!(!prod.contains("BRAIN_PORT"), "one port source: admin.json");
+        assert_eq!(prod.matches("127.0.0.1:{}").count(), prod.matches("admin_config::brain_port()").count(), "every URL uses the configured port");
+        let phr = prod.split("pub async fn brain_generate_phrasings").nth(1).unwrap().split("pub async fn").next().unwrap();
+        assert!(phr.contains("is_admin()"), "phrasing generation is admin-only like classification");
+        let lb = include_str!("lazy_brain.rs");
+        assert!(lb.split("#[cfg(test)]").next().unwrap().contains("compare_exchange"), "the start is claimed atomically");
     }
 }

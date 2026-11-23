@@ -947,6 +947,7 @@ pub fn run() {
                 tracing::info!("webhook listener off (Features page)");
             }
             focus_throttle::spawn(app.handle());
+            stt_stream::init(app.handle().clone());
             if startup_flag("keepAwakePoller") {
                 keep_awake::start_working_poller(); // screen stays awake while a ghost drill/request is running
             }
@@ -1465,9 +1466,6 @@ pub fn run() {
             stt::stt_filter_stats,
             stt_diagnostics::stt_diagnostics_list,
             stt_diagnostics::stt_diagnostics_delete,
-            stt_stream::stt_stream_start,
-            stt_stream::stt_stream_push_chunk,
-            stt_stream::stt_stream_stop,
             tts::speak_text,
             commands::follow_up_window_secs,
             tts::speak_cached,

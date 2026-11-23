@@ -511,7 +511,13 @@ pub async fn build_plan_with_brain(transcript: &str, task_id: &str) -> Option<Ta
             let parsed = match parse_deterministic(part) {
                 Some(p) => p,
                 None => match crate::brain_client::brain_classify(part).await {
-                    Some(p) => p,
+                    // the same gate as a single command: sanitised, capped, above the confidence floor
+                    Some(mut p) => {
+                        if !crate::orchestrator::accept_brain_result(&mut p) {
+                            return None;
+                        }
+                        p
+                    }
                     None => return None,
                 },
             };

@@ -2,21 +2,21 @@
 
 Generated from `docs/testing/scorecard-data.json` by `scripts/make-work-cards.mjs`. Do not edit by hand: put findings in the run records and the live-proof ledger, then update the scorecard data and regenerate.
 
-Area: Desktop control. Queue position 3 of 68. Raw score **48.0%** (production needs ≥ 90% and every axis gate).
+Area: Desktop control. Queue position 3 of 68. Raw score **50.0%** (production needs ≥ 90% and every axis gate).
 
 | Axis | Now | Gate | Status |
 |---|---:|---:|---|
 | B | 90 | 90 | met |
-| T | 75 | 70 | met |
+| T | 85 | 70 | met |
 | L | 0 | 70 | **gap 70** |
 | S | 80 | 80 | met |
 | I | 20 | 60 | **gap 40** |
 
-Evidence today: ~60 tests, 4 mutations.
+Evidence today: ~65 tests incl. 4 real-process tests, 7 mutations.
 
 ## Known gap (from the scorecard)
 
-Own-loop gating, CPU-priority lowering of other heavy apps with exact restore and crash recovery; unit-tested only. No Task Manager before/during/after proof and no Hand Mode lag baseline; GPU share is not controlled.
+2026-11-24: lower / restore now proven on a real child process (priority class and EcoQoS read back, reused-PID and dead-process guards, 3 mutations). Still no Task Manager proof on the owner apps and no Hand Mode lag baseline. Own-loop gating, CPU-priority lowering of other heavy apps with exact restore and crash recovery; unit-tested only. No Task Manager before/during/after proof and no Hand Mode lag baseline; GPU share is not controlled.
 
 ## Runs as (processes, for contention and Focus Mode)
 

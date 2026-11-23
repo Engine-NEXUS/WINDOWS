@@ -2,21 +2,21 @@
 
 Generated from `docs/testing/scorecard-data.json` by `scripts/make-work-cards.mjs`. Do not edit by hand: put findings in the run records and the live-proof ledger, then update the scorecard data and regenerate.
 
-Area: Integrations. Queue position 4 of 68. Raw score **50.5%** (production needs ≥ 90% and every axis gate).
+Area: Integrations. Queue position 4 of 68. Raw score **51.1%** (production needs ≥ 90% and every axis gate).
 
 | Axis | Now | Gate | Status |
 |---|---:|---:|---|
 | B | 90 | 90 | met |
-| T | 80 | 70 | met |
+| T | 83 | 70 | met |
 | L | 0 | 70 | **gap 70** |
 | S | 80 | 80 | met |
 | I | 30 | 60 | **gap 30** |
 
-Evidence today: ~70 tests.
+Evidence today: ~75 tests.
 
 ## Known gap (from the scorecard)
 
-analyse zync, the PR in zync (list), PR 34 (search all repos); pinned sidebar list and set_view race fixed. Not run against real accounts, an SSO org or a name under two owners.
+2026-11-24: pinned that every destructive confirmation names the resolved owner/repo after a loose match. Still not run against real accounts, SSO or a name under two owners. analyse zync, the PR in zync (list), PR 34 (search all repos); pinned sidebar list and set_view race fixed. Not run against real accounts, an SSO org or a name under two owners.
 
 ## Runs as (processes, for contention and Focus Mode)
 

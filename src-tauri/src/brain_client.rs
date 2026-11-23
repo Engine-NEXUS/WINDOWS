@@ -15,8 +15,6 @@ use crate::intent_parser::{ParseResult, ParsedIntent};
 use serde::Deserialize;
 use std::time::Duration;
 
-/// Brain server port (separate from STT 39217 and NLU 39218).
-const BRAIN_PORT: u16 = 39219;
 
 /// Brain server response format.
 #[derive(Debug, Deserialize)]
@@ -104,7 +102,10 @@ pub async fn brain_generate_phrasings(
     slots: &serde_json::Value,
     count: u32,
 ) -> Option<Vec<String>> {
-    let url = format!("http://127.0.0.1:{}/generate_phrasings", BRAIN_PORT);
+    if !crate::admin_config::is_admin() {
+        return None;
+    }
+    let url = format!("http://127.0.0.1:{}/generate_phrasings", crate::admin_config::brain_port());
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -132,7 +133,7 @@ pub async fn brain_generate_phrasings(
 
 /// Get the current pronunciation map.
 pub async fn brain_get_pronunciation_map() -> Option<PronunciationMapResponse> {
-    let url = format!("http://127.0.0.1:{}/pronunciation_map", BRAIN_PORT);
+    let url = format!("http://127.0.0.1:{}/pronunciation_map", crate::admin_config::brain_port());
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(500))
@@ -149,7 +150,7 @@ pub async fn brain_get_pronunciation_map() -> Option<PronunciationMapResponse> {
 
 /// Check if the brain server is running.
 pub async fn is_brain_available() -> bool {
-    let url = format!("http://127.0.0.1:{}/health", BRAIN_PORT);
+    let url = format!("http://127.0.0.1:{}/health", crate::admin_config::brain_port());
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_millis(500))
         .build()

@@ -1646,6 +1646,9 @@ pub struct NexusSettings {
     pub meeting_mode_auto: bool,
     pub suppress_tts_in_meetings: bool,
     pub local_stt_only: bool,
+    /// Live partial captions while you speak (off by default; never in privacy mode toward the cloud). See stt_stream.rs.
+    #[serde(default)]
+    pub stt_live_captions: bool,
     pub server_url: String,
     pub user_id: String,
     pub device_id: String,
@@ -2371,6 +2374,7 @@ impl Default for NexusSettings {
             meeting_mode_auto: true,
             suppress_tts_in_meetings: true,
             local_stt_only: DEFAULT_LOCAL_STT_ONLY,
+            stt_live_captions: false,
             server_url: option_env!("NEXUS_SERVER_URL")
                 .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev")
                 .to_string(),
@@ -2949,6 +2953,16 @@ pub fn read_local_stt_only<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool
     let Ok(content) = std::fs::read_to_string(&path) else { return DEFAULT_LOCAL_STT_ONLY; };
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return DEFAULT_LOCAL_STT_ONLY; };
     local_stt_only_from_json(&json)
+}
+
+/// Live partial captions (`sttLiveCaptions`), off unless the owner turned them on.
+pub fn read_stt_live_captions<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return false; };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("sttLiveCaptions").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
 }
 
 /// Read `wakeSensitivity` ("low" | "medium" | "high") from settings.json.

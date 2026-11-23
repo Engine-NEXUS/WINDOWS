@@ -28,6 +28,8 @@ interface OrbRect {
  * - Hides when the response caption or TTS starts, and on `orb:cancel`.
  * - Shares the caption slot family (layoutSlots.ts), yielding to the response caption.
  */
+const PARTIAL_STALE_MS = 6000;
+
 export function SpeechPill() {
   const [rect, setRect] = useState<OrbRect | null>(null);
   const [text, setText] = useState("");
@@ -116,6 +118,12 @@ export function SpeechPill() {
           setIsFinal(false);
           setText(formatted);
           setVisible(true);
+          // A partial that is never followed by a final (the turn was cancelled, the stream died) must not leave the
+          // pill on screen for ever: hide it if nothing else arrives.
+          timerRef.current = setTimeout(() => {
+            setVisible(false);
+            timerRef.current = null;
+          }, PARTIAL_STALE_MS);
         }
       });
 

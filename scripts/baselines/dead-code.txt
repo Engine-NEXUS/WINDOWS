@@ -3,9 +3,7 @@
 # Never add a line by hand to silence a new finding.
 admin_config.rs: field auto_train
 admin_config.rs: field brain_model
-admin_config.rs: field min_confidence
 admin_config.rs: field retrain_threshold
-admin_config.rs: function min_confidence
 admin_config.rs: function retrain_threshold
 architect.rs: field process_name
 architect.rs: variant AiExplanation

@@ -1,0 +1,13 @@
+{
+  "_note": "Real capture 2026-11-24 (https://svelte.dev, one guarded fetch). Untouched by any fingerprint change: held out.",
+  "synthetic": false,
+  "bucket": "ssr",
+  "must": ["sveltekit", "svelte"],
+  "may": ["vercel", "hsts", "nodejs"],
+  "must_not": ["nextjs", "nuxt", "wordpress", "shopify", "angular", "react", "vue"],
+  "expect_thin": [],
+  "sources": {
+    "sveltekit": "https://github.com/sveltejs/svelte.dev (the site's own repository: a SvelteKit app)",
+    "svelte": "https://github.com/sveltejs/svelte.dev (the site is the Svelte project's website)"
+  }
+}

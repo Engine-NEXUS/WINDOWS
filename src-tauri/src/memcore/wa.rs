@@ -8,7 +8,8 @@
 //!    caller in `mcp_client::call_tool`.
 //! 2. **Message text is data.** It is clipped, PII-redacted and stored as an
 //!    untrusted preview; it is never used to decide priority (only counts and
-//!    timestamps are) and never reaches a cloud model.
+//!    timestamps are) and never reaches a cloud model. (The sender's NAME is spoken aloud in an alert, and the
+//!    voice is a cloud service, so the name does leave the device then; the message text does not.)
 //! 3. **Quiet start.** First sight of a chat records its history statistics
 //!    and speaks nothing; only messages that arrive afterwards can interrupt.
 //!
@@ -518,7 +519,7 @@ pub fn card_markdown(name: &str, msgs: &[ChatMsg]) -> String {
         let who = if m.from_me { "You" } else { name };
         md.push_str(&format!("- **{}**: {}\n", esc(who), esc(&gist(&m.text, 300))));
     }
-    md.push_str("\n---\nNEXUS did not mark this chat as read — the sender will not see blue ticks from this.\n");
+    md.push_str("\n---\nNEXUS did not mark this chat as read.\n");
     md
 }
 
@@ -1183,5 +1184,21 @@ mod tests {
         assert!(t.reachable && t.paired && t.has_read_tools && t.format_ok, "{t:?}");
         assert_eq!(t.chats_parsed, 2);
         assert!(t.guarded_tools_present.contains(&"mark_read".to_string()) && t.guarded_tools_present.contains(&"send_presence".to_string()), "{t:?}");
+    }
+}
+
+/// The read-only promise is about what NEXUS asks the bridge to do. Whether the bridge's own read calls send receipts or
+/// presence is unverified (docs/testing/whatsapp-read-receipt-test.md), so no text may promise the sender sees nothing.
+#[cfg(test)]
+mod honest_wording_tests {
+    #[test]
+    fn nothing_promises_what_has_not_been_verified() {
+        let src = include_str!("wa.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(!prod.contains("will not see blue ticks"), "an unverified guarantee");
+        assert!(prod.contains("NEXUS did not mark this chat as read."));
+        let panel = include_str!("../../../frontend/src/settings-sidebar/McpServersPanel.tsx");
+        assert!(!panel.contains("(no blue ticks)"), "the settings panel must not promise it either");
+        assert!(panel.contains("has not been verified yet"));
     }
 }

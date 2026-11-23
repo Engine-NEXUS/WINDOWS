@@ -892,7 +892,7 @@ export function McpServersPanel({
                                 </p>
                               )}
                               <p style={{ marginTop: 6, fontSize: "0.82em", color: "var(--accent, #60a5fa)" }}>
-                                🔒 <strong>Privacy Guarantee:</strong> NEXUS never marks chats as read (no blue ticks) during background checks until you open them personally.
+                                🔒 <strong>Privacy Guarantee:</strong> NEXUS never asks the bridge to mark a chat as read during background checks. Whether the bridge itself sends read receipts has not been verified yet, so Priority People stays off until you have tested it.
                               </p>
                               {details?.qr_image_uri && (
                                 <img

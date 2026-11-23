@@ -1,0 +1,12 @@
+{
+  "_note": "Real capture 2026-11-24 (https://wordpress.org). Untouched by any fingerprint change: held out.",
+  "synthetic": false,
+  "bucket": "cms",
+  "must": ["wordpress"],
+  "may": ["php", "nginx", "cloudflare-cdn", "hsts", "jquery"],
+  "must_not": ["nextjs", "nuxt", "shopify", "angular", "react", "sveltekit", "drupal", "joomla"],
+  "expect_thin": [],
+  "sources": {
+    "wordpress": "https://make.wordpress.org/meta/handbook/ (wordpress.org runs on WordPress with a custom theme; the page's generator meta says WordPress)"
+  }
+}

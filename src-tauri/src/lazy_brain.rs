@@ -148,13 +148,13 @@ pub fn ensure_brain_running() {
     }
 
     // Already running (or spawning)?
-    if BRAIN_RUNNING.load(Ordering::Relaxed) {
+    // Claim the start atomically: two callers racing here used to both spawn a server.
+    if BRAIN_RUNNING.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
         return;
     }
 
     // Check if an external brain server is already running
     if is_brain_responsive() {
-        BRAIN_RUNNING.store(true, Ordering::Relaxed);
         tracing::info!("[lazy_brain] external brain server detected on port {}", crate::admin_config::brain_port());
         return;
     }
@@ -164,6 +164,7 @@ pub fn ensure_brain_running() {
         None => {
             tracing::warn!("[lazy_brain] cannot start brain server — script not found");
             tracing::warn!("[lazy_brain] admin-only: ensure server/admin/brain_server.py exists");
+            BRAIN_RUNNING.store(false, Ordering::Release);
             return;
         }
     };
@@ -175,6 +176,7 @@ pub fn ensure_brain_running() {
                 "[lazy_brain] no Python interpreter found. Install Python 3.12+ and run: \
                  pip install -r server/admin/requirements-brain.txt"
             );
+            BRAIN_RUNNING.store(false, Ordering::Release);
             return;
         }
     };
@@ -229,6 +231,7 @@ pub fn ensure_brain_running() {
         }
         Err(e) => {
             tracing::error!("[lazy_brain] failed to spawn brain server: {}", e);
+            BRAIN_RUNNING.store(false, Ordering::Release);
         }
     }
 }

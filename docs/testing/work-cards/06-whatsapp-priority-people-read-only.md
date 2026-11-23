@@ -2,21 +2,21 @@
 
 Generated from `docs/testing/scorecard-data.json` by `scripts/make-work-cards.mjs`. Do not edit by hand: put findings in the run records and the live-proof ledger, then update the scorecard data and regenerate.
 
-Area: Memory and proactive. Queue position 6 of 68. Raw score **52.5%** (production needs ≥ 90% and every axis gate).
+Area: Memory and proactive. Queue position 6 of 68. Raw score **53.5%** (production needs ≥ 90% and every axis gate).
 
 | Axis | Now | Gate | Status |
 |---|---:|---:|---|
 | B | 85 | 90 | **gap 5** |
-| T | 65 | 70 | **gap 5** |
+| T | 70 | 70 | met |
 | L | 5 | 70 | **gap 65** |
 | S | 90 | 80 | met |
 | I | 50 | 60 | **gap 10** |
 
-Evidence today: 17+8 tests.
+Evidence today: 17+8 + 1 wording test.
 
 ## Known gap (from the scorecard)
 
-OFF by default; read-receipt side effects unknown.
+2026-11-24: removed the unverified "sender will not see blue ticks" promise from the chat card and the settings panel (1 mutation). The two-phone read-receipt experiment is still the only thing that moves Live. OFF by default; read-receipt side effects unknown.
 
 ## Runs as (processes, for contention and Focus Mode)
 
@@ -26,7 +26,6 @@ OFF by default; read-receipt side effects unknown.
 ## How to close each gap
 
 - **B** (85 → 90): Wire it end to end in the shipping path (no dead code, reachable by the user, IPC registered, setting kept in `NexusSettings`).
-- **T** (65 → 70): Add focused tests for the unproven paths; mutation-check each safety rule (break it, a test must fail); keep fixtures independent of the author's own phrasing where the feature is voice-facing.
 - **L** (5 → 70): Run it on the real app and hardware with a fresh release (`nexus build` + provenance verify), follow the live script below, and record logs under `docs/testing/runs/` and a line in `live-proof-ledger.md`.
 - **I** (50 → 60): Measure against a stated reference (published number or the previous build) on a held-out set; record the measurement and its uncertainty, not an estimate.
 

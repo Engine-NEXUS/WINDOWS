@@ -1,0 +1,186 @@
+{
+  "file": "src-tauri/src/orchestrator.rs",
+  "cwd": "src-tauri",
+  "targetDir": "D:/nexus-screen-target",
+  "testArgs": [
+    "--lib",
+    "--features",
+    "custom-protocol,admin-brain",
+    "--",
+    "--test-threads=1",
+    "vision_click_gate",
+    "brain_gate",
+    "github_watch",
+    "stt_stream",
+    "focus_throttle",
+    "honest_wording",
+    "no_proxy_tests",
+    "site_eval",
+    "stt_deepgram",
+    "confirmation_names"
+  ],
+  "mutations": [
+    {
+      "name": "vision click does not vet the window before sending the screen",
+      "file": "src-tauri/src/orchestrator.rs",
+      "find": "crate::screen_context::capture_block_reason(&frozen)",
+      "replace": "None::<&str>"
+    },
+    {
+      "name": "vision click does not recheck the window before clicking",
+      "file": "src-tauri/src/orchestrator.rs",
+      "find": "if !crate::screen_context::foreground_still_matches(&frozen, sw, sh).await {",
+      "replace": "if false {"
+    },
+    {
+      "name": "vision click claims a confirmed press",
+      "file": "src-tauri/src/orchestrator.rs",
+      "find": "format!(\"I clicked where {name} appears to be, sir.\")",
+      "replace": "format!(\"Clicked {name}, sir.\")"
+    },
+    {
+      "name": "brain floor can go below the old fixed gate",
+      "file": "src-tauri/src/orchestrator.rs",
+      "find": "configured.clamp(0.5, 1.0)",
+      "replace": "configured.clamp(0.0, 1.0)"
+    },
+    {
+      "name": "brain gate does not cap known-invented labels",
+      "file": "src-tauri/src/orchestrator.rs",
+      "find": "    if cap_ml_window_open(result) {\n        return false;\n    }\n    result.confidence >= brain_floor(crate::admin_config::min_confidence())",
+      "replace": "    result.confidence >= brain_floor(crate::admin_config::min_confidence())"
+    },
+    {
+      "name": "single brain path ignores the configured floor",
+      "file": "src-tauri/src/orchestrator.rs",
+      "find": "let floor = brain_floor(crate::admin_config::min_confidence());",
+      "replace": "let floor = 0.5_f32;"
+    },
+    {
+      "name": "compound steps skip the brain gate",
+      "file": "src-tauri/src/command_center.rs",
+      "find": "if !crate::orchestrator::accept_brain_result(&mut p) {",
+      "replace": "if false {"
+    },
+    {
+      "name": "brain phrasing generation has no admin check",
+      "file": "src-tauri/src/brain_client.rs",
+      "find": "    count: u32,\n) -> Option<Vec<String>> {\n    if !crate::admin_config::is_admin() {\n        return None;\n    }\n",
+      "replace": "    count: u32,\n) -> Option<Vec<String>> {\n"
+    },
+    {
+      "name": "brain start is not claimed atomically",
+      "file": "src-tauri/src/lazy_brain.rs",
+      "find": "BRAIN_RUNNING.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err()",
+      "replace": "BRAIN_RUNNING.load(Ordering::Relaxed)"
+    },
+    {
+      "name": "github watcher ignores workflow and branch (newest run of anything)",
+      "file": "src-tauri/src/memcore/github_watch.rs",
+      "find": "let key = (r.workflow_id, r.head_branch.as_str());",
+      "replace": "let key = (0u64, \"\");"
+    },
+    {
+      "name": "github watcher counts feature branches as the build",
+      "file": "src-tauri/src/memcore/github_watch.rs",
+      "find": "if !r.head_branch.is_empty() && r.head_branch != def {",
+      "replace": "if false {"
+    },
+    {
+      "name": "github watcher prefers a green run over a red one",
+      "file": "src-tauri/src/memcore/github_watch.rs",
+      "find": "newest_of(Obs::Failed).map(|r| (r, Obs::Failed)).or_else(|| newest_of(Obs::Fixed).map(|r| (r, Obs::Fixed)))",
+      "replace": "newest_of(Obs::Fixed).map(|r| (r, Obs::Fixed)).or_else(|| newest_of(Obs::Failed).map(|r| (r, Obs::Failed)))"
+    },
+    {
+      "name": "stream uses the cloud in privacy mode",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "if g.local_only || !g.has_cloud_key {",
+      "replace": "if !g.has_cloud_key {"
+    },
+    {
+      "name": "stream runs in a meeting",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "    if g.meeting {\n        return Plan::Off(\"a meeting is on\");\n    }\n",
+      "replace": ""
+    },
+    {
+      "name": "stream runs in the Ghost hot mic",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "    if g.ghost {\n        return Plan::Off(\"Ghost hot mic\");\n    }\n",
+      "replace": ""
+    },
+    {
+      "name": "stale text of an older turn is emitted",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "                if rshared.active_gen.load(Ordering::SeqCst) == my_gen {\n                    emit(my_gen, text);",
+      "replace": "                if true {\n                    emit(my_gen, text);"
+    },
+    {
+      "name": "a second start leaves the first stream open",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "                if let Some(old) = current.take() {\n                    let _ = old.try_send(Cmd::Stop);\n                }\n                let plan = plan_fn();",
+      "replace": "                let plan = plan_fn();"
+    },
+    {
+      "name": "only the latest segment is shown",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "self.finals.push_str(&text);",
+      "replace": "self.finals = text.clone();"
+    },
+    {
+      "name": "deepgram is never told to close",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "Plan::Cloud => r#\"{\"type\":\"CloseStream\"}\"#,",
+      "replace": "Plan::Cloud => r#\"{\"cmd\":\"stop\"}\"#,"
+    },
+    {
+      "name": "the microphone chunk is not fed to the stream",
+      "file": "src-tauri/src/wakeword_oww.rs",
+      "find": "                    crate::stt_stream::feed(&chunk);\n",
+      "replace": ""
+    },
+    {
+      "name": "deepgram nova-2 gets the nova-3 keyterm parameter again",
+      "file": "src-tauri/src/stt_deepgram.rs",
+      "find": "url.push_str(&format!(\"&keywords={encoded}\"));",
+      "replace": "url.push_str(&format!(\"&keyterm={encoded}\"));"
+    },
+    {
+      "name": "scanner client uses a system proxy again",
+      "file": "src-tauri/src/site_probe.rs",
+      "find": "        .no_proxy()\n        .redirect(reqwest::redirect::Policy::none())",
+      "replace": "        .redirect(reqwest::redirect::Policy::none())"
+    },
+    {
+      "name": "VitePress is missing from the fingerprint table",
+      "file": "src-tauri/src/site_fingerprints.json",
+      "find": "\"id\": \"vitepress\",",
+      "replace": "\"id\": \"vitepress-x\","
+    },
+    {
+      "name": "restore touches a reused pid",
+      "file": "src-tauri/src/focus_throttle.rs",
+      "find": "if created_u64 != lowered.created {",
+      "replace": "if false {"
+    },
+    {
+      "name": "lowering an already-lowered process is allowed",
+      "file": "src-tauri/src/focus_throttle.rs",
+      "find": "if orig_priority == IDLE_PRIORITY_CLASS.0 || orig_priority == BELOW_NORMAL_PRIORITY_CLASS.0 {",
+      "replace": "if false {"
+    },
+    {
+      "name": "restore does not put the priority class back",
+      "file": "src-tauri/src/focus_throttle.rs",
+      "find": "SetPriorityClass(proc, PROCESS_CREATION_FLAGS(lowered.orig_priority));",
+      "replace": "let _ = proc;"
+    },
+    {
+      "name": "whatsapp text promises no blue ticks again",
+      "file": "src-tauri/src/memcore/wa.rs",
+      "find": "NEXUS did not mark this chat as read.\\n",
+      "replace": "NEXUS did not mark this chat as read — the sender will not see blue ticks from this.\\n"
+    }
+  ]
+}

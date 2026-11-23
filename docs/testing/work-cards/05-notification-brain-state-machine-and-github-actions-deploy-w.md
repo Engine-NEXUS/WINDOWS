@@ -2,21 +2,21 @@
 
 Generated from `docs/testing/scorecard-data.json` by `scripts/make-work-cards.mjs`. Do not edit by hand: put findings in the run records and the live-proof ledger, then update the scorecard data and regenerate.
 
-Area: Memory and proactive. Queue position 5 of 68. Raw score **50.5%** (production needs ≥ 90% and every axis gate).
+Area: Memory and proactive. Queue position 5 of 68. Raw score **53.3%** (production needs ≥ 90% and every axis gate).
 
 | Axis | Now | Gate | Status |
 |---|---:|---:|---|
 | B | 90 | 90 | met |
-| T | 80 | 70 | met |
+| T | 90 | 70 | met |
 | L | 0 | 70 | **gap 70** |
-| S | 80 | 80 | met |
+| S | 85 | 80 | met |
 | I | 30 | 60 | **gap 30** |
 
-Evidence today: ~90 tests, 12 mutations.
+Evidence today: ~100 tests, 15 mutations.
 
 ## Known gap (from the scorecard)
 
-Failed / still failing / fixed per entity, persisted; GitHub Actions plus Vercel, Render, Netlify watchers. No live failing workflow or deploy, restart-while-failing, or team account run.
+2026-11-24: GitHub watcher now groups runs by workflow and branch (a passing docs workflow no longer announces "green again" while CI is red; a failing feature branch is not the build); real public Actions payload used as a fixture (3 mutations). Still no live failing workflow or deploy. Failed / still failing / fixed per entity, persisted; GitHub Actions plus Vercel, Render, Netlify watchers. No live failing workflow or deploy, restart-while-failing, or team account run.
 
 ## Runs as (processes, for contention and Focus Mode)
 

@@ -1,0 +1,27 @@
+{
+  "file": "src-tauri/src/stt_stream.rs",
+  "cwd": "src-tauri",
+  "targetDir": "D:/nexus-screen-target",
+  "testArgs": [
+    "--lib",
+    "--features",
+    "custom-protocol,admin-brain",
+    "--",
+    "--test-threads=1",
+    "stt_stream"
+  ],
+  "mutations": [
+    {
+      "name": "BOTH generation guards removed: an older turn late text is emitted (the two guards back each other up, so one alone is an equivalent mutant)",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "    if shared.active_gen.load(Ordering::SeqCst) != my_gen {\n        return false;\n    }\n    let out = match plan {\n        Plan::Cloud => asm.feed_deepgram(text),\n        _ => asm.feed_local(text),\n    };\n    if let Some(text) = out {\n        if shared.active_gen.load(Ordering::SeqCst) == my_gen {\n            emit(my_gen, text);\n        }\n    }\n    true",
+      "replace": "    let out = match plan {\n        Plan::Cloud => asm.feed_deepgram(text),\n        _ => asm.feed_local(text),\n    };\n    if let Some(text) = out {\n        emit(my_gen, text);\n    }\n    true"
+    },
+    {
+      "name": "a second start keeps the first stream alive (its sender is leaked, so dropping it no longer ends the session)",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "                if let Some(old) = current.take() {\n                    let _ = old.try_send(Cmd::Stop);\n                }\n                let plan = plan_fn();",
+      "replace": "                if let Some(old) = current.take() {\n                    std::mem::forget(old);\n                }\n                let plan = plan_fn();"
+    }
+  ]
+}
