@@ -35,6 +35,7 @@ Models (CPU, ONNX Runtime):
 from __future__ import annotations
 
 import os
+import sys
 import logging
 import time
 import io
@@ -137,6 +138,7 @@ async def health() -> JSONResponse:
         "model": f"moonshine-{_model_arch_name}",
         "language": LANGUAGE,
         "engine": "moonshine-voice (ONNX Runtime)",
+        "model_loaded": _transcriber is not None,
     })
 
 
@@ -352,6 +354,13 @@ async def _startup():
 
 
 if __name__ == "__main__":
+    if "--prefetch" in sys.argv:
+        # Download the model files into the cache and exit (no server, no model in memory). NEXUS runs this in the
+        # background from the Command Hub so the first spoken command never waits for a 250 MB download.
+        from moonshine_voice import get_model_for_language
+        _p, _a = get_model_for_language(LANGUAGE)
+        print("READY", _p, flush=True)
+        sys.exit(0)
     import uvicorn
     port = int(os.environ.get("NEXUS_STT_PORT", "39217"))
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

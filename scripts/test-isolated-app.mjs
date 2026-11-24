@@ -68,7 +68,7 @@ check('a real capture starts', !String(started).startsWith('ERR'), String(starte
 await sleep(5000);
 let fresh = logSince(mark).join('\n');
 check('the capture started and stopped in the log', /stt-capture: started/.test(fresh), (fresh.match(/stt-capture: (started|stopping)[^\n]*/g) || []).join(' | ').slice(0, 160));
-check('the stream dispatcher saw the turn (tried the local server, which is not running here)', /stt_stream: (connect failed|connect timed out|not streaming)/.test(fresh), (fresh.match(/stt_stream: [^\n]*/) || ['(no stt_stream line: RUST_LOG may hide debug lines)'])[0].slice(0, 140));
+check('the stream dispatcher saw the turn (it tried the local server, or chose it)', /stt_stream: (connect failed|connect timed out|not streaming|this turn's live captions come from)/.test(fresh), (fresh.match(/stt_stream: [^\n]*/) || ['(no stt_stream line: RUST_LOG may hide debug lines)'])[0].slice(0, 140));
 check('no panic during the capture', !/panicked/i.test(fresh));
 await inv('stop_stt_capture');
 
@@ -170,6 +170,7 @@ if (!hub) {
     const shown = await hasText();
     check(`the "${page}" page shows "Live captions while you speak"`, shown);
     if (page === 'Features') check('the Features page shows the battery guard row', await hub.evalJs(`document.body.innerText.includes('Battery guard')`));
+    if (page === 'Features') { await sleep(1500); const card = await hub.evalJs(`(document.querySelector('[data-testid="speech-model-card"]')||{}).innerText || ''`); check('the Features page shows the local speech model card with its state', /Local speech model/.test(card) && /(Downloaded|Downloading|Not downloaded|cannot check)/.test(card), String(card).replace(/\s+/g, ' ').slice(0, 120)); }
     if (!shown) continue;
     const before = j(await inv('get_settings')).sttLiveCaptions;
     const clicked = await rowToggle(); await sleep(2500);

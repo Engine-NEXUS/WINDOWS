@@ -46,13 +46,13 @@
     {
         "area": "Voice front end",
         "feature": "Live captions while you speak (local / Groq / Deepgram)",
-        "tests": "4 + 14 stream tests (real localhost WebSocket) + pre-roll 3 + stability 1 + Groq request 3 (stand-in server) + typing 9 + fake mic 2; 10 mutations; whole-app script (scripts/test-live-captions-e2e.mjs)",
-        "B": 95,
-        "T": 88,
-        "L": 35,
+        "tests": "4 + 14 stream tests (real localhost WebSocket) + pre-roll 3 + stability 1 + Groq request 3 (stand-in server) + typing 9 + fake mic 2; 10 mutations; whole-app script (scripts/test-live-captions-e2e.mjs); second round: warm-server preference 1, model status 6 + card model 3, live source script (cold/warm) and Hub card check",
+        "B": 97,
+        "T": 90,
+        "L": 40,
         "S": 85,
-        "I": 65,
-        "note": "2026-11-24: real local engine measured with synthetic speech through the whole app (first caption about 0.65 s, median word lag about 0.8 s, 0 confirmed words changed, words in the pill while speech still playing). Fixed: text only grows, all lines kept, pre-roll + seed fed, model off the event loop, unconfirmed tail dimmed. NOT run: a real microphone or person, Groq or Deepgram with a key; Groq (the default source with a key) is 1.5 to 2.5 s behind. Cold-start model download (~250 MB) and the end-of-speech flush are open. docs/research/live-captions-4-star-2026-11-24.md"
+        "I": 68,
+        "note": "2026-11-24: real local engine measured with synthetic speech through the whole app (first caption about 0.65 s, median word lag about 0.8 s, 0 confirmed words changed, words in the pill while speech still playing). Fixed: text only grows, all lines kept, pre-roll + seed fed, model off the event loop, unconfirmed tail dimmed. NOT run: a real microphone or person, Groq or Deepgram with a key; Groq (the default source with a key) is 1.5 to 2.5 s behind. Second round: a warm local server is preferred over Groq, the 250 MB model status + background download + Hub card exist (proven in the real app). Open: auto-start of the download, keeping the server warm by choice, the end-of-speech flush. docs/research/live-captions-4-star-2026-11-24.md"
     },
     {
         "area": "Voice front end",

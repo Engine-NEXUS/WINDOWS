@@ -62,6 +62,9 @@ pub struct Gates {
     pub speaking: bool,
     pub has_cloud_key: bool,
     pub has_groq_key: bool,
+    /// The local speech server is already running (so its model is loaded). Starting it just for captions would cost
+    /// RAM, so this is only ever a free choice, never a reason to start it.
+    pub local_warm: bool,
 }
 
 pub fn plan_for(g: &Gates) -> Plan {
@@ -81,7 +84,12 @@ pub fn plan_for(g: &Gates) -> Plan {
         return Plan::Local;
     }
     if g.has_cloud_key {
-        return Plan::Cloud;
+        return Plan::Cloud; // the owner added a streaming key on purpose
+    }
+    // A warm local server beats Groq: real streaming (words in about half a second instead of 1.5 to 2.5 s), no request
+    // quota, and the audio stays on this machine. Groq only when the local one is not already up.
+    if g.local_warm {
+        return Plan::Local;
     }
     if g.has_groq_key {
         return Plan::Groq;
@@ -527,6 +535,7 @@ pub async fn dispatch_with(
                     shared.clear_preroll();
                     continue;
                 };
+                tracing::info!("stt_stream: this turn's live captions come from {:?}", cfg.plan);
                 let my_gen = shared.new_gen();
                 shared.active_gen.store(my_gen, Ordering::SeqCst);
                 let (tx, srx) = mpsc::channel(SESSION_DEPTH);
@@ -685,6 +694,7 @@ fn current_gates<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Gates {
         speaking,
         has_cloud_key: !crate::commands::read_api_key(app, "deepgram").is_empty(),
         has_groq_key: !crate::commands::read_groq_api_key(app).is_empty(),
+        local_warm: crate::lazy_stt::is_stt_responsive(),
     }
 }
 
@@ -735,6 +745,22 @@ mod tests {
         assert!(matches!(plan_for(&Gates { ghost: true, ..on }), Plan::Off(_)));
         assert!(matches!(plan_for(&Gates { speaking: true, ..on }), Plan::Off(_)));
         assert_eq!(Gates::default().enabled, false);
+    }
+
+    #[test]
+    fn a_warm_local_server_is_preferred_over_groq_but_never_over_a_streaming_key_and_is_never_started_for_captions() {
+        let base = Gates { enabled: true, ..Default::default() };
+        assert_eq!(plan_for(&Gates { has_groq_key: true, ..base }), Plan::Groq, "a cold local server: Groq, as before");
+        assert_eq!(plan_for(&Gates { has_groq_key: true, local_warm: true, ..base }), Plan::Local, "warm: free, private, true streaming");
+        assert_eq!(plan_for(&Gates { has_groq_key: true, has_cloud_key: true, local_warm: true, ..base }), Plan::Cloud, "a streaming key the owner added wins");
+        assert!(matches!(plan_for(&Gates { enabled: false, local_warm: true, ..base }), Plan::Off(_)), "off stays off");
+        assert!(matches!(plan_for(&Gates { meeting: true, local_warm: true, ..base }), Plan::Off(_)));
+        assert!(matches!(plan_for(&Gates { speaking: true, local_warm: true, ..base }), Plan::Off(_)));
+        assert!(matches!(plan_for(&Gates { ghost: true, local_warm: true, ..base }), Plan::Off(_)));
+        // asking for the plan must never start the server: the gate is a plain connection check
+        let src = include_str!("stt_stream.rs").split("mod tests {").next().unwrap().to_string();
+        assert!(src.contains("local_warm: crate::lazy_stt::is_stt_responsive()"));
+        assert!(!src.contains("ensure_stt_running"), "captions never start the local server by themselves");
     }
 
     #[test]

@@ -185,6 +185,7 @@ pub(crate) mod agent_followup;
 pub(crate) mod session_observer;
 pub(crate) mod watch_runner;
 pub(crate) mod battery_guard;
+pub(crate) mod stt_model;
 #[cfg(debug_assertions)]
 pub(crate) mod debug_mic;
 pub(crate) mod agent_tracker;
@@ -1328,6 +1329,8 @@ pub fn run() {
             ghost::ghost_exit,
             ghost::ghost_abort,
             ghost::get_pending_ghost_session,
+            stt_model::stt_model_status,
+            stt_model::stt_model_prefetch,
             ghost::ghost_drill_running,
             calibration::show_calibration_hud,
             calibration::preview_companion_hud,

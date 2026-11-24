@@ -38,15 +38,15 @@ One card per in-scope feature, in queue order (lowest raw score first). Generate
 | 32 | [Activity Manager (app-only history)](32-activity-manager-app-only-history.md) | Integrations | 68.0% | L I |
 | 33 | [CI gates: dead code, IPC, turn-end, hygiene](33-ci-gates-dead-code-ipc-turn-end-hygiene.md) | Platform and quality | 69.0% | L |
 | 34 | [Hand mode (camera pointer)](34-hand-mode-camera-pointer.md) | Desktop control | 69.0% | L I |
-| 35 | [Live captions while you speak (local / Groq / Deepgram)](35-live-captions-while-you-speak-local-groq-deepgram.md) | Voice front end | 69.6% | L |
-| 36 | [MCP connect system (Swiggy, Amazon, WhatsApp)](36-mcp-connect-system-swiggy-amazon-whatsapp.md) | Integrations | 70.3% | L |
-| 37 | [Google accounts + OAuth](37-google-accounts-oauth.md) | Integrations | 71.0% | L |
-| 38 | [Captions (word-by-word, black capsule)](38-captions-word-by-word-black-capsule.md) | Voice front end | 71.5% | L S |
-| 39 | [Dictation (type what I say)](39-dictation-type-what-i-say.md) | Desktop control | 71.5% | L |
-| 40 | [Wake word "NEXUS" (openWakeWord, own model)](40-wake-word-nexus-openwakeword-own-model.md) | Voice front end | 71.8% | L S I |
-| 41 | [Orb UI and turn lifecycle](41-orb-ui-and-turn-lifecycle.md) | Voice front end | 71.9% | L S |
-| 42 | [Ghost mode (voice drives the PC)](42-ghost-mode-voice-drives-the-pc.md) | Desktop control | 72.0% | T L I |
-| 43 | [Mishearing normaliser + learned corrections](43-mishearing-normaliser-learned-corrections.md) | Understanding | 72.0% | L S |
+| 35 | [MCP connect system (Swiggy, Amazon, WhatsApp)](35-mcp-connect-system-swiggy-amazon-whatsapp.md) | Integrations | 70.3% | L |
+| 36 | [Google accounts + OAuth](36-google-accounts-oauth.md) | Integrations | 71.0% | L |
+| 37 | [Captions (word-by-word, black capsule)](37-captions-word-by-word-black-capsule.md) | Voice front end | 71.5% | L S |
+| 38 | [Dictation (type what I say)](38-dictation-type-what-i-say.md) | Desktop control | 71.5% | L |
+| 39 | [Wake word "NEXUS" (openWakeWord, own model)](39-wake-word-nexus-openwakeword-own-model.md) | Voice front end | 71.8% | L S I |
+| 40 | [Orb UI and turn lifecycle](40-orb-ui-and-turn-lifecycle.md) | Voice front end | 71.9% | L S |
+| 41 | [Ghost mode (voice drives the PC)](41-ghost-mode-voice-drives-the-pc.md) | Desktop control | 72.0% | T L I |
+| 42 | [Mishearing normaliser + learned corrections](42-mishearing-normaliser-learned-corrections.md) | Understanding | 72.0% | L S |
+| 43 | [Live captions while you speak (local / Groq / Deepgram)](43-live-captions-while-you-speak-local-groq-deepgram.md) | Voice front end | 72.4% | L |
 | 44 | [Local STT fallback (Moonshine)](44-local-stt-fallback-moonshine.md) | Voice front end | 72.5% | L S |
 | 45 | [Maps / Places / Directions](45-maps-places-directions.md) | Integrations | 72.7% | L |
 | 46 | [Voice personas + offline twin swap](46-voice-personas-offline-twin-swap.md) | Voice front end | 73.8% | L |

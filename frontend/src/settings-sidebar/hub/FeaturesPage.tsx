@@ -20,6 +20,7 @@ import { writeAndVerify, type Invoke } from "./featureWrite";
 import { FEATURE_TESTS, runFullCheck, runTest, type AuditReport, type TestResult } from "./featureTests";
 import readiness from "./featureReadiness.json";
 import { appendLog, loadLog, type LogEntry } from "./featureLog";
+import { SpeechModelCard } from "./SpeechModelCard";
 
 type Confirm = { kind: "off"; id: string } | { kind: "safe" } | { kind: "defaults" } | null;
 
@@ -249,6 +250,7 @@ export function FeaturesPage() {
                 </div>
               );
             })}
+            {g === "Voice" && <SpeechModelCard />}
           </div>
         );
       })}

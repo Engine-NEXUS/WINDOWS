@@ -1,6 +1,6 @@
 # Live captions: what was measured, what was fixed, and where the stars stand (2026-11-24)
 
-Goal from the owner: make "live captions while you speak" more than 4 stars today. Result: **3.0 to 3.5 stars (60.8 % to about 69.6 %)**, not yet 4. The gap to 4.0 is now one thing nothing in an empty room can supply: a person speaking into the real microphone (about 10 minutes). This document records the measurements, the defects found and fixed, the scoring rule used, and exactly what is left.
+Goal from the owner: make "live captions while you speak" more than 4 stars today. Result: **3.0 to 3.5 stars (60.8 % to about 72.4 %)**, not yet 4. The gap to 4.0 is now one thing nothing in an empty room can supply: a person speaking into the real microphone (about 10 minutes). This document records the measurements, the defects found and fixed, the scoring rule used, and exactly what is left.
 
 Method: verification before plan. An Opus 5.5 advisor (read-only) audited the code first; I checked each of its findings in the code before acting on it, then measured the real engine.
 
@@ -34,7 +34,8 @@ Honest limits of this evidence: the speech is clean, synthetic and in one voice;
 | The model ran on the server's event loop and could hold up the final transcript | yes (`stt_server.py`) | `add_audio` and the final flush run in a thread |
 | Early guesses are revised ("link in" became "best pizza", "video" became "browser", "5am" became "5:30") and look like flicker | measured | words are shown at once; the **not yet confirmed tail is drawn dimmer** (a word is confirmed when two hypotheses in a row agree). Showing only confirmed words was simulated first and **rejected**: it removed all retractions but doubled the lag (median 665 ms to 1425 ms) |
 | The Groq request had no test because its address was a constant | yes | the address can be pointed at a stand-in server in tests; 3 tests |
-| Cold start: the first use downloads the Moonshine model (about 250 MB); on this machine it took more than 10 minutes at 100 kB/s | measured | **not fixed** (see section 5) |
+| Cold start: the first use downloads the Moonshine model (about 250 MB); on this machine it took more than 10 minutes at 100 kB/s, with no sign of it anywhere | measured | **second round, done:** `stt_model.rs` reads the model cache (ready / downloading with MB / missing), the Command Hub (Features, Voice) shows it with a **Download now** button, and the download runs in the background as `stt_server.py --prefetch` (no server, no model in memory). `/health` now says `model_loaded` |
+| A warm local server was never preferred; with a Groq key every turn used Groq (1.5 to 2.5 s behind, request quota) | yes (`plan_for`) | **second round, done:** a streaming key the owner added still wins; otherwise a local server that is **already running** is used before Groq (checked by one local connection per turn); captions never start the server (RAM contract) |
 | The last caption before the end of a short command can still be a wrong guess ("open the connection" for "open the command hub") because the engine's end-of-speech flush is dropped on purpose | measured | **not fixed**: a late caption could overwrite the final text; the final transcript replaces it about a second later and the unconfirmed tail is dimmed |
 
 One test artefact worth knowing: the e2e test speaks real commands, so the app really answers aloud, and captions are off while NEXUS speaks (by design). The test waits for that.
@@ -48,25 +49,30 @@ Rule for Live-proven (proposed by the advisor, adopted here): real engine on rea
 | | Built | Tested | Live | Safety | Industry | Score | Stars |
 |---|---|---|---|---|---|---|---|
 | Before | 90 | 75 | 20 | 85 | 60 | 60.8 | 3.0 |
-| Now | 95 | 88 | 35 | 85 | 65 | **69.6** | **3.5** |
+| First round | 95 | 88 | 35 | 85 | 65 | 69.6 | 3.5 |
+| Now (second round) | 97 | 90 | 40 | 85 | 68 | **72.4** | **3.5** |
 
 * Built 95: the defects above are fixed.
 * Tested 88: new tests for every fix (Groq request 3, pre-roll 3, stability 1, typing 5 and 4, fake microphone 2), 10 Rust mutations all killed (one by hand; the typing and confirmed-word functions in the frontend are covered by tests but were not mutation-checked), an end to end script. Not 90+: the pill is still tested as a model plus a source scan, not by rendering.
 * Live 35: the first two rows of the rule. **Not 50**: no person, no real microphone, one source, clean synthetic speech.
-* Industry 65 only: the default source for anyone with a Groq key is Groq, which shows text in steps 1.5 to 2.5 s after speech starts. The local numbers do not count for the default source.
+* Built 97: the model status and background download, and the warm-server preference.
+* Tested 90: the warm preference (1 test) and the model status (6), the card's model (3), a live script for both choices.
+* Live 40 (was 35): the choice of source (Groq with a cold server, Local with a warm one), the model status command and the Hub card were proven in the real app. Not more: still no person or real microphone, and no real key.
+* Industry 68 (was 65): still held down by Groq for anyone with a key and no local server running; a local server that is already up is now used by default, and the unconfirmed words are shown dimmed.
 
 ## 4. What it takes to cross 4.0 (75 %) and 4.5 (85 %)
 
-* **4.0:** one owner session on the real microphone with the local source and 10 or more commands (about 10 minutes, checklist in section 6): Live 35 to 55 gives 69.6 to 75.6. Or, with no person: make the warm local server the preferred source (Industry 65 to 75: +1.5) and handle the cold start; that alone is 71.1 and still short.
+* **4.0:** one owner session on the real microphone with the local source and 10 or more commands (about 10 minutes, checklist in section 6): Live 40 to 60 gives 72.4 to 78.4. Without a person nothing left is large enough: the work in section 5 items 1 and 2 are done, and the rest adds under 1 point.
 * **4.5:** needs Live near 80 (real use plus Groq and Deepgram each proven with a real key) and Industry near 80 (first word within 400 ms and word-by-word growth on the default source). Not reachable today without the owner and keys.
 
 ## 5. Next work, ranked (not done)
 
-1. **Prefer the local server when it is already warm** (no quota, private, true streaming), cached so choosing the source never makes a network call.
-2. **Cold start:** never download the model on the caption path; show "downloading" in the Command Hub with progress, and use Groq or nothing until it is there. Add `model_loaded` to `/health`.
-3. **Use the end-of-speech flush** safely: hold the final transcript for it or ignore it once the final has arrived.
-4. **Earlier Groq captions** (first request at 1.0 s while the day's count is low): trades quota for speed, do last.
-5. A rendered pill test (not only the model).
+1. ~~Prefer the local server when it is already warm~~ **done** (second round).
+2. ~~Cold start: show the download, offer it in the Command Hub, fetch it in the background~~ **done** (second round). Still open: start the download by itself (today the owner presses the button), and show it in the first-run setup.
+3. **A way to keep the local server warm on purpose** for people who want local captions with a Groq key (it costs about 300 MB of RAM, so it must be a switch). Today the server is only up when no key is set, in privacy mode, or as the fallback.
+4. **Use the end-of-speech flush** safely: hold the final transcript for it or ignore it once the final has arrived.
+5. **Earlier Groq captions** (first request at 1.0 s while the day's count is low): trades quota for speed, do last.
+6. A rendered pill test (not only the model).
 
 ## 6. Owner checklist (about 10 minutes, real microphone, local source)
 

@@ -27,7 +27,7 @@ const STT_KEEP_ALIVE: bool = false; // Kill idle STT fallback after 60s to enfor
 const STT_PORT: u16 = 39217;
 
 /// Get the STT server script path.
-fn stt_script_path() -> Option<std::path::PathBuf> {
+pub(crate) fn stt_script_path() -> Option<std::path::PathBuf> {
     // Try several locations relative to the executable and project root
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     // Each candidate is built independently: an app installed in a shallow folder (for example
@@ -95,7 +95,7 @@ pub(crate) fn is_stt_responsive() -> bool {
 /// Environment for the local STT child process. Moonshine language is locked
 /// here rather than inherited from the operator shell: English-only operation
 /// must not depend on ambient process configuration.
-fn stt_child_env() -> Vec<(String, String)> {
+pub(crate) fn stt_child_env() -> Vec<(String, String)> {
     vec![
         ("MOONSHINE_MODEL".to_string(), read_moonshine_model()),
         ("MOONSHINE_LANG".to_string(), "en".to_string()),
