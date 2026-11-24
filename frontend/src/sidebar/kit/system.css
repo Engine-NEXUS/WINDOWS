@@ -1,0 +1,141 @@
+/* ═══════════════════════════════════════════════════════════
+   Sidebar system — the shared look of every sidebar view (docs/features/197).
+   Built on the Tech Stack "Console" layout: charcoal canvas (soft grey in light), rounded cards with a hairline border,
+   big numerals over tiny caps labels, KPI tiles, bars with the value on the right, a filled-pill segmented control.
+   Black, white and grey only (colour lives inside logos). Every surface is solid. No scrollbars. Container queries.
+   No literal colours here: tokens come from theme/tokens.css (`.sv`).
+   ═══════════════════════════════════════════════════════════ */
+
+.sv-view {
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  background-color: var(--sv-bg);
+  color: var(--sv-text);
+  font-family: "Plus Jakarta Sans", "Inter", "Segoe UI Variable Text", "Segoe UI", -apple-system, Roboto, sans-serif;
+  font-feature-settings: "tnum", "cv11";
+  -webkit-font-smoothing: antialiased;
+}
+.sv-view *, .sv-view *::before, .sv-view *::after { box-sizing: border-box; }
+.sv-view, .sv-view * { scrollbar-width: none; -ms-overflow-style: none; }
+.sv-view *::-webkit-scrollbar { display: none; width: 0; height: 0; }
+.sv-view button { font: inherit; color: inherit; cursor: pointer; }
+.sv-view button:focus-visible, .sv-view a:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: 2px; }
+
+/* header (no dock or close buttons: arrows and Esc do that) */
+.sv-bar { display: flex; align-items: center; gap: 12px; padding: 16px 18px 14px; min-height: 74px; border-bottom: 1px solid var(--sv-line); background: var(--sv-bg); flex: none; }
+.sv-bar-logo { width: 44px; height: 44px; border-radius: 14px; display: grid; place-items: center; background: var(--sv-ink); color: var(--sv-ink-on); flex: none; }
+.sv-bar-logo svg { width: 22px; height: 22px; }
+.sv-bar-titles { min-width: 0; flex: 1; }
+.sv-bar-title { display: block; margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -0.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sv-bar-sub { display: inline-block; max-width: 100%; margin-top: 4px; padding: 2px 10px; border-radius: 999px; background: var(--sv-card); border: 1px solid var(--sv-line); font-size: 11.5px; font-weight: 600; color: var(--sv-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: top; }
+
+/* scroll body */
+.sv-scroll { flex: 1; min-height: 0; overflow-y: auto; scroll-behavior: smooth; overscroll-behavior: contain;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, var(--sv-mask-ink) 10px, var(--sv-mask-ink) calc(100% - 14px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, var(--sv-mask-ink) 10px, var(--sv-mask-ink) calc(100% - 14px), transparent 100%); }
+.sv-col { display: grid; gap: 12px; align-content: start; padding: 14px 16px 22px; }
+
+/* card */
+.sv-card { background: var(--sv-card); border: 1px solid var(--sv-line); border-radius: var(--sv-radius); padding: 18px; box-shadow: var(--sv-shadow); min-width: 0; }
+.sv-card-hd { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+.sv-cap { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--sv-dim); }
+.sv-h { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.25; overflow-wrap: anywhere; }
+.sv-lead { margin: 0; font-size: 15px; line-height: 1.5; font-weight: 500; overflow-wrap: anywhere; }
+.sv-p { margin: 0; font-size: 13px; line-height: 1.55; color: var(--sv-dim); overflow-wrap: anywhere; }
+.sv-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sv-grow { flex: 1; min-width: 0; }
+.sv-dim { color: var(--sv-dim); }
+
+/* pills and chips: severity and status are shape + word, never colour alone */
+.sv-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--sv-line); background: var(--sv-card2); font-size: 11.5px; font-weight: 600; color: var(--sv-dim); white-space: nowrap; }
+.sv-pill svg { width: 12px; height: 12px; flex: none; }
+.sv-pill--solid { background: var(--sv-ink); border-color: var(--sv-ink); color: var(--sv-ink-on); }
+.sv-pill--outline { background: transparent; border-color: var(--sv-text); color: var(--sv-text); }
+.sv-pill--dash { background: transparent; border-style: dashed; color: var(--sv-dim); }
+.sv-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 5px 11px; border-radius: 10px; background: var(--sv-card2); border: 1px solid var(--sv-line); font: 12px "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace; color: var(--sv-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sv-seg { display: flex; padding: 3px; border-radius: 999px; background: var(--sv-card2); border: 1px solid var(--sv-line); gap: 2px; overflow-x: auto; }
+.sv-seg button { flex: none; padding: 6px 13px; border: 0; border-radius: 999px; background: transparent; font-size: 12px; font-weight: 600; color: var(--sv-dim); }
+.sv-seg button[aria-pressed="true"] { background: var(--sv-ink); color: var(--sv-ink-on); }
+
+/* KPI tiles */
+.sv-kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+@container (min-width: 600px) { .sv-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.sv-kpi { background: var(--sv-card); border: 1px solid var(--sv-line); border-radius: 16px; padding: 14px; box-shadow: var(--sv-shadow); min-width: 0; }
+.sv-kpi .sv-cap { font-size: 10px; }
+.sv-kpi-v { margin-top: 8px; font-size: 28px; font-weight: 800; letter-spacing: -0.03em; line-height: 1; overflow-wrap: anywhere; }
+.sv-kpi-s { display: block; margin-top: 6px; font-size: 11.5px; color: var(--sv-faint); }
+
+/* bars: the value sits on the right */
+.sv-bars { display: grid; gap: 12px; }
+.sv-bar-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 10px; align-items: center; font-size: 13px; }
+.sv-bar-row > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sv-bar-val { font-weight: 700; font-variant-numeric: tabular-nums; }
+.sv-track { grid-column: 1 / -1; height: 7px; border-radius: 99px; background: var(--sv-track); overflow: hidden; }
+.sv-fill { height: 100%; border-radius: 99px; background: var(--sv-ink); transform-origin: left; animation: sv-grow 0.7s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.sv-fill--mid { background: var(--sv-dim); }
+.sv-fill--low { background: var(--sv-faint); }
+@keyframes sv-grow { from { transform: scaleX(0); } }
+
+/* numbered list: the ink circle, the title and one line */
+.sv-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.sv-li { display: flex; gap: 12px; align-items: flex-start; padding: 13px 0; border-top: 1px solid var(--sv-line); min-width: 0; }
+.sv-li:first-child { border-top: 0; padding-top: 2px; }
+.sv-num { width: 26px; height: 26px; border-radius: 50%; background: var(--sv-ink); color: var(--sv-ink-on); display: grid; place-items: center; font-size: 12px; font-weight: 800; flex: none; margin-top: 1px; }
+.sv-li-t { display: block; margin-bottom: 3px; font-size: 14px; font-weight: 700; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+
+/* callout: an icon and a word, never colour alone */
+.sv-callout { display: flex; gap: 12px; padding: 14px; border-radius: var(--sv-radius-sm); background: var(--sv-card2); border: 1px solid var(--sv-line); border-left: 3px solid var(--sv-ink); }
+.sv-callout--dim { border-left-color: var(--sv-dim); }
+.sv-callout svg { width: 18px; height: 18px; flex: none; margin-top: 1px; }
+.sv-callout-w { display: block; margin-bottom: 4px; font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+
+/* code */
+.sv-code { position: relative; margin: 0; padding: 14px; background: var(--sv-card2); border: 1px solid var(--sv-line); border-radius: var(--sv-radius-sm); font: 12.5px/1.6 "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace; overflow-x: auto; white-space: pre; }
+.sv-copy { position: absolute; top: 8px; right: 8px; padding: 4px 9px; border-radius: 8px; border: 1px solid var(--sv-line); background: var(--sv-card); font-size: 11px; font-weight: 600; color: var(--sv-dim); }
+
+/* sources (research) */
+.sv-src { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; padding: 13px 0; border-top: 1px solid var(--sv-line); }
+.sv-src:first-child { border-top: 0; padding-top: 2px; }
+.sv-fav { width: 34px; height: 34px; border-radius: 10px; background: var(--sv-card2); border: 1px solid var(--sv-line); display: grid; place-items: center; font-weight: 800; font-size: 13px; }
+.sv-cite { display: inline-grid; place-items: center; min-width: 17px; height: 17px; margin: 0 1px; border-radius: 6px; background: var(--sv-card2); border: 1px solid var(--sv-line); font-size: 10px; font-weight: 800; vertical-align: 2px; }
+
+/* action bar: pinned at the bottom, every action shows its key */
+.sv-actions { display: flex; gap: 10px; padding: 12px 16px 14px; border-top: 1px solid var(--sv-line); background: var(--sv-bg); flex: none; }
+.sv-actions--sticky { position: sticky; bottom: 0; margin: 0 -16px -22px; }
+.sv-btn { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--sv-line); background: var(--sv-card); font-size: 14px; font-weight: 700; }
+.sv-btn--primary { background: var(--sv-ink); border-color: var(--sv-ink); color: var(--sv-ink-on); }
+.sv-btn:disabled { opacity: 0.6; cursor: wait; }
+.sv-btn:active:not(:disabled) { transform: scale(0.985); }
+.sv-kbd { padding: 2px 6px; border-radius: 6px; background: var(--sv-card2); border: 1px solid var(--sv-line); font: 600 10.5px "JetBrains Mono", ui-monospace, Consolas, monospace; color: var(--sv-dim); }
+.sv-btn--primary .sv-kbd { background: transparent; border-color: var(--sv-ink-on); color: var(--sv-ink-on); }
+
+/* voice timer and choices */
+.sv-timer { height: 3px; margin-top: 12px; border-radius: 3px; background: var(--sv-track); overflow: hidden; }
+.sv-timer > i { display: block; height: 100%; width: 100%; background: var(--sv-ink); transform-origin: left; animation: sv-drain linear forwards; }
+@keyframes sv-drain { to { transform: scaleX(0); } }
+.sv-bubble { padding: 12px 14px; border-radius: 16px 16px 16px 6px; background: var(--sv-card2); border: 1px solid var(--sv-line); font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.sv-choice { display: flex; align-items: center; gap: 14px; width: 100%; margin-bottom: 8px; padding: 14px; border: 1px solid var(--sv-line); border-radius: 14px; background: var(--sv-card2); text-align: left; }
+.sv-choice:hover:not(:disabled) { border-color: var(--sv-text); }
+.sv-choice:disabled { opacity: 0.65; cursor: wait; }
+.sv-choice .sv-num { width: 30px; height: 30px; font-size: 14px; margin: 0; }
+.sv-choice-t { display: block; font-size: 15px; font-weight: 700; overflow-wrap: anywhere; }
+.sv-choice-s { display: block; font-size: 12px; color: var(--sv-faint); overflow-wrap: anywhere; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sv-view *, .sv-view *::before, .sv-view *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+/* search box, pull request rows and the small back button (PR list) */
+.sv-search { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border: 1px solid var(--sv-line); border-radius: 14px; background: var(--sv-card); color: var(--sv-dim); }
+.sv-search svg { width: 16px; height: 16px; flex: none; }
+.sv-search input { flex: 1; min-width: 0; background: none; border: 0; outline: 0; color: var(--sv-text); font: inherit; font-size: 14px; }
+.sv-search:focus-within { border-color: var(--sv-text); }
+.sv-pr { display: grid; gap: 8px; width: 100%; padding: 13px 0; border: 0; border-top: 1px solid var(--sv-line); background: none; text-align: left; }
+li:first-child > .sv-pr { border-top: 0; padding-top: 2px; }
+.sv-pr:hover .sv-pr-t { text-decoration: underline; }
+.sv-pr-t { font-size: 14px; font-weight: 700; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.sv-back { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--sv-line); background: var(--sv-card); font-size: 12px; font-weight: 600; color: var(--sv-dim); }
+.sv-back svg { width: 14px; height: 14px; transform: scaleX(-1); }

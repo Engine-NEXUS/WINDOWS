@@ -1,0 +1,112 @@
+/* Screen time "Ledger" view. Every selector starts with .view-screentime (scripts/check-sidebar-scopes.mjs). Colours are tokens only. */
+.view-screentime .st-hero {
+  padding: 20px 18px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.view-screentime .st-cap {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--st-meta);
+}
+.view-screentime .st-big {
+  font-size: 44px;
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+}
+.view-screentime .st-vs {
+  font-size: 13px;
+  color: var(--st-meta);
+}
+.view-screentime .st-week {
+  margin: 14px 18px 4px;
+  padding: 16px 14px 10px;
+  border-radius: 16px;
+  background: var(--st-card);
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 8px;
+  align-items: end;
+}
+.view-screentime .st-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.view-screentime .st-bar-wrap {
+  height: 96px;
+  width: 100%;
+  display: flex;
+  align-items: flex-end;
+}
+.view-screentime .st-bar {
+  width: 100%;
+  min-height: 4px;
+  border-radius: 6px 6px 3px 3px;
+  background: var(--st-bar);
+}
+.view-screentime .st-col.is-today .st-bar {
+  background: var(--st-bar-today);
+}
+.view-screentime .st-day {
+  font-size: 11px;
+  color: var(--st-meta);
+}
+.view-screentime .st-col.is-today .st-day {
+  color: var(--st-text);
+  font-weight: 700;
+}
+.view-screentime .st-section {
+  padding: 16px 18px 2px;
+}
+.view-screentime .st-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 10px;
+}
+.view-screentime .st-row-top {
+  display: flex;
+  justify-content: space-between;
+  font-size: 14px;
+  margin-bottom: 5px;
+}
+.view-screentime .st-row-top span:last-child {
+  color: var(--st-meta);
+}
+.view-screentime .st-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--st-track);
+  overflow: hidden;
+}
+.view-screentime .st-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--st-bar-today);
+}
+.view-screentime .st-off {
+  margin: 24px 18px;
+  padding: 20px;
+  border-radius: 16px;
+  background: var(--st-card);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--st-meta);
+}
+.view-screentime .st-off b {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 16px;
+  color: var(--st-text);
+}
+.view-screentime .st-foot {
+  padding: 12px 18px 16px;
+  font-size: 12px;
+  color: var(--st-meta);
+}

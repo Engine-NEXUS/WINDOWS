@@ -3,6 +3,7 @@ import { isTyping, nextDock } from "./dockKeys";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
 import { ReviewControls } from "./ReviewControls";
+import { KpiGrid, KpiTile, Pill, SegPill, SeverityPill, SvButton, SvCard, SvChip, SvIcon, severityOf, type PillTone, type SvIconName } from "./kit/system";
 
 export interface CodeRabbitFinding {
   id: string;
@@ -58,52 +59,129 @@ const VERDICT_LABEL: Record<string, string> = {
   NOT_REVIEWED: "Not reviewed yet",
 };
 
-const LOCKED = ["Triage", "Analytics"];
+/** The verdict as a pill: a word and a shape (solid, outline, dashed), never colour alone. */
+export function verdictLook(v: string): { tone: PillTone; icon: SvIconName; label: string } {
+  switch (v) {
+    case "APPROVE":
+      return { tone: "solid", icon: "check", label: VERDICT_LABEL.APPROVE };
+    case "REQUEST_CHANGES":
+      return { tone: "solid", icon: "alert", label: VERDICT_LABEL.REQUEST_CHANGES };
+    case "COMMENT":
+      return { tone: "outline", icon: "info", label: VERDICT_LABEL.COMMENT };
+    default:
+      return { tone: "dash", icon: "info", label: VERDICT_LABEL[v] ?? "Not reviewed yet" };
+  }
+}
+
+/** The severity filter's buttons and how many findings each holds; the first button is "All". */
+export function severityFilters(findings: Pick<CodeRabbitFinding, "severity">[]): { label: string; word: string | null; count: number }[] {
+  const count = (w: string) => findings.filter((f) => severityOf(f.severity).word === w).length;
+  return [
+    { label: `All ${findings.length}`, word: null, count: findings.length },
+    { label: `High ${count("High")}`, word: "High", count: count("High") },
+    { label: `Medium ${count("Medium")}`, word: "Medium", count: count("Medium") },
+    { label: `Low ${count("Low")}`, word: "Low", count: count("Low") },
+  ];
+}
+
+/** The findings that pass the filter, worst first (stable inside a severity). */
+export function visibleFindings<T extends Pick<CodeRabbitFinding, "severity">>(findings: T[], word: string | null): T[] {
+  return findings
+    .map((f, i) => ({ f, i }))
+    .filter(({ f }) => word === null || severityOf(f.severity).word === word)
+    .sort((a, b) => severityOf(a.f.severity).rank - severityOf(b.f.severity).rank || a.i - b.i)
+    .map(({ f }) => f);
+}
+
 const APP = "https://app.coderabbit.ai";
 
 function go(url: string) {
   openExternal(url).catch(() => window.open(url, "_blank"));
 }
 
-/** The CodeRabbit review of one pull request: title, branches, verdict, summary and every finding. */
-export const ReviewBody: React.FC<{ review: CodeRabbitReviewData }> = ({ review }) => (
-  <>
-    <h1 className="crp-title">{review.title || `PR #${review.prNumber}`}</h1>
-    <div className="crp-meta">
-      {review.repo} · #{review.prNumber} · {review.headBranch} → {review.baseBranch}
-    </div>
-    <div className="crp-row">
-      <span className={`crp-pill crp-pill--${review.verdict.toLowerCase()}`}>{VERDICT_LABEL[review.verdict] ?? review.verdict}</span>
-      <span className="crp-meta">
-        {review.stats.filesChanged} files · +{review.stats.additions} −{review.stats.deletions}
-      </span>
-    </div>
-    <ReviewControls repo={review.repo} prNumber={review.prNumber} />
-    {review.summary && <pre className="crp-summary">{review.summary}</pre>}
-    {review.verdict === "NOT_REVIEWED" && (
-      <button type="button" className="crp-link" onClick={() => go(APP)}>
-        Add this repository in CodeRabbit
+function CopyCode({ code }: { code: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <pre className="sv-code">
+      <button
+        type="button"
+        className="sv-copy"
+        onClick={() => {
+          void navigator.clipboard?.writeText(code);
+          setDone(true);
+          setTimeout(() => setDone(false), 1100);
+        }}
+      >
+        {done ? "Copied" : "Copy"}
       </button>
-    )}
-    {review.findings.map((f) => (
-      <article key={f.id} className="crp-card">
-        <div className="crp-row">
-          <span className={`crp-sev crp-sev--${f.severity}`}>{f.severity}</span>
-          <span className="crp-file">
-            {f.file}:{f.lineRange}
-          </span>
+      {code}
+    </pre>
+  );
+}
+
+/** The CodeRabbit review of one pull request: the verdict first, the numbers, the review actions, then every finding. */
+export const ReviewBody: React.FC<{ review: CodeRabbitReviewData }> = ({ review }) => {
+  const [filter, setFilter] = useState(0);
+  const filters = useMemo(() => severityFilters(review.findings), [review.findings]);
+  const shown = useMemo(() => visibleFindings(review.findings, filters[filter]?.word ?? null), [review.findings, filters, filter]);
+  const verdict = verdictLook(review.verdict);
+  const high = filters[1].count;
+  return (
+    <>
+      <SvCard>
+        <div className="sv-row" style={{ marginBottom: 10 }}>
+          <Pill tone={verdict.tone} icon={verdict.icon}>{verdict.label}</Pill>
+          <SvChip icon="pr">{review.headBranch} → {review.baseBranch}</SvChip>
         </div>
-        <h2 className="crp-card-title">{f.title}</h2>
-        <pre className="crp-body">{f.description}</pre>
-        {f.suggestedCode && (
-          <pre className="crp-code" onClick={() => navigator.clipboard?.writeText(f.suggestedCode ?? "")}>
-            {f.suggestedCode}
-          </pre>
+        <h2 className="sv-h">{review.title || `PR #${review.prNumber}`}</h2>
+        <p className="sv-p" style={{ marginTop: 8 }}>{review.repo} · #{review.prNumber}</p>
+      </SvCard>
+
+      <KpiGrid>
+        <KpiTile label="Files" value={review.stats.filesChanged} />
+        <KpiTile label="Added" value={`+${review.stats.additions}`} sub="lines" />
+        <KpiTile label="Removed" value={`−${review.stats.deletions}`} sub="lines" />
+        <KpiTile label="Findings" value={review.findings.length} sub={high ? `${high} high` : "none high"} />
+      </KpiGrid>
+
+      <SvCard title="Review">
+        <ReviewControls repo={review.repo} prNumber={review.prNumber} />
+        {review.verdict === "NOT_REVIEWED" && (
+          <div style={{ marginTop: 10 }}>
+            <SvButton onClick={() => go(APP)}>Add this repository in CodeRabbit</SvButton>
+          </div>
         )}
-      </article>
-    ))}
-  </>
-);
+      </SvCard>
+
+      {review.summary && (
+        <SvCard title="Summary">
+          <p className="sv-p" style={{ whiteSpace: "pre-wrap", color: "var(--sv-text)" }}>{review.summary}</p>
+        </SvCard>
+      )}
+
+      {review.findings.length > 0 && (
+        <SvCard title="Findings" right={<Pill tone="solid">{shown.length}</Pill>}>
+          <div style={{ marginBottom: 12 }}>
+            <SegPill label="Filter findings by severity" items={filters.map((f) => f.label)} active={filter} onChange={setFilter} />
+          </div>
+          <ul className="sv-list">
+            {shown.map((f) => (
+              <li className="sv-li" key={f.id} style={{ flexDirection: "column", alignItems: "stretch", gap: 8 }}>
+                <div className="sv-row">
+                  <SeverityPill severity={f.severity} />
+                  <SvChip icon="file">{f.file}:{f.lineRange}</SvChip>
+                </div>
+                <b className="sv-li-t">{f.title}</b>
+                <p className="sv-p" style={{ whiteSpace: "pre-wrap" }}>{f.description}</p>
+                {f.suggestedCode ? <CopyCode code={f.suggestedCode} /> : null}
+              </li>
+            ))}
+          </ul>
+        </SvCard>
+      )}
+    </>
+  );
+};
 
 export const CodeRabbitPanel: React.FC<{ data: PanelData }> = ({ data }) => {
   const [review, setReview] = useState<CodeRabbitReviewData | null>(isReview(data) ? data : null);
@@ -153,58 +231,53 @@ export const CodeRabbitPanel: React.FC<{ data: PanelData }> = ({ data }) => {
 
   if (review) {
     return (
-      <div className="crp">
-        <button type="button" className="crp-back" onClick={() => setReview(null)}>
-          ← Pull requests
-        </button>
+      <>
+        <div>
+          <button type="button" className="sv-back" onClick={() => setReview(null)}>
+            <SvIcon name="arrow" />
+            Pull requests
+          </button>
+        </div>
         <ReviewBody review={review} />
-      </div>
+      </>
     );
   }
 
   return (
-    <div className="crp">
-      <div className="crp-search">
-        <input
-          ref={search}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search"
-          aria-label="Search pull requests"
-        />
-        <kbd>Ctrl K</kbd>
-      </div>
-      <nav className="crp-nav">
-        {LOCKED.map((n) => (
-          <div key={n} className="crp-nav-row crp-nav-row--locked" aria-disabled="true">
-            {n}
-          </div>
-        ))}
-        <button type="button" className="crp-nav-row" onClick={() => go(`${APP}`)}>
-          New coding task
-        </button>
-        <button type="button" className="crp-nav-row" onClick={() => go(`${APP}`)}>
-          Run deep scan
-        </button>
-      </nav>
-      <div className="crp-section">Recents{repo ? ` · ${repo}` : ""}</div>
-      {error && <div className="crp-error">{error}</div>}
-      {prs.length === 0 && !error && <div className="crp-empty">No open pull requests found.</div>}
-      {prs.map((p) => (
-        <button key={p.prNumber} type="button" className="crp-pr" onClick={() => openPr(p.prNumber)}>
-          <span className="crp-pr-title">{p.title}</span>
-          <span className="crp-meta">
-            #{p.prNumber} · {p.author} · {busy === p.prNumber ? "Loading…" : p.issuesSummary}
-          </span>
-        </button>
-      ))}
-      <div className="crp-section">Quick access</div>
-      <button type="button" className="crp-nav-row" onClick={() => go(APP)}>
-        Open CodeRabbit
-      </button>
-      <button type="button" className="crp-nav-row" onClick={() => go("https://docs.coderabbit.ai")}>
-        Documentation
-      </button>
-    </div>
+    <>
+      <label className="sv-search">
+        <SvIcon name="link" />
+        <input ref={search} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search pull requests" aria-label="Search pull requests" />
+        <kbd className="sv-kbd">Ctrl K</kbd>
+      </label>
+
+      <SvCard title={`Recents${repo ? ` · ${repo}` : ""}`} right={<Pill tone="solid">{prs.length}</Pill>}>
+        {error && <p className="sv-p" role="alert" style={{ color: "var(--sv-text)", fontWeight: 600 }}>{error}</p>}
+        {prs.length === 0 && !error && <p className="sv-p">No open pull requests found.</p>}
+        <ul className="sv-list">
+          {prs.map((p) => (
+            <li key={p.prNumber} style={{ listStyle: "none" }}>
+              <button type="button" className="sv-pr" onClick={() => openPr(p.prNumber)}>
+                <span className="sv-pr-t">{p.title}</span>
+                <span className="sv-row">
+                  <SvChip icon="pr">#{p.prNumber}</SvChip>
+                  <Pill>{p.author}</Pill>
+                  <Pill tone="dash">{busy === p.prNumber ? "Loading…" : p.issuesSummary}</Pill>
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </SvCard>
+
+      <SvCard title="Quick access">
+        <div className="sv-row">
+          <SvButton onClick={() => go(APP)}>New coding task</SvButton>
+          <SvButton onClick={() => go(APP)}>Run deep scan</SvButton>
+          <SvButton onClick={() => go(APP)}>Open CodeRabbit</SvButton>
+          <SvButton onClick={() => go("https://docs.coderabbit.ai")}>Documentation</SvButton>
+        </div>
+      </SvCard>
+    </>
   );
 };

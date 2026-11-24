@@ -80,6 +80,15 @@ pub struct MailItem {
     pub key: Option<String>,
 }
 
+/// The structured payload for the Gmail briefing view (`analysis.kind == "mail"`).
+pub fn mail_payload(items: &[MailItem]) -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = items
+        .iter()
+        .map(|m| serde_json::json!({ "sender": m.sender, "subject": m.subject, "deadline": m.deadline, "category": m.category, "explain": m.explain }))
+        .collect();
+    serde_json::json!({ "kind": "mail", "items": rows })
+}
+
 /// What was open when the PC last went off and can be reopened ("shall I reopen it?").
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionOffer {
@@ -1115,6 +1124,25 @@ pub async fn on_demand<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mail_payload_carries_the_fields_the_view_reads_and_not_the_internal_key() {
+        let items = vec![MailItem {
+            sender: "GitHub <noreply@github.com>".into(),
+            subject: "Run failed".into(),
+            deadline: Some("Friday 5 PM".into()),
+            category: Some("github".into()),
+            explain: None,
+            key: Some("mail:abc".into()),
+        }];
+        let p = mail_payload(&items);
+        assert_eq!(p["kind"], "mail");
+        assert_eq!(p["items"][0]["subject"], "Run failed");
+        assert_eq!(p["items"][0]["deadline"], "Friday 5 PM");
+        assert_eq!(p["items"][0]["category"], "github");
+        assert!(p["items"][0]["explain"].is_null());
+        assert!(p["items"][0].get("key").is_none());
+    }
 
     fn sample(app: &str, title: &str, url: Option<&str>) -> Sample {
         Sample { app: app.into(), title: title.into(), url: url.map(String::from), activity: None }

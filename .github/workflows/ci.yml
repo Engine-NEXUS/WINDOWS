@@ -62,6 +62,10 @@ jobs:
       - name: Window opacity gate
         run: node ../scripts/check-window-opacity.mjs
 
+      # Every sidebar view (frontend/src/sidebar/views/<name>/) styles only itself: each selector starts with .view-<name>.
+      - name: Sidebar view scope gate
+        run: node ../scripts/check-sidebar-scopes.mjs --selftest && node ../scripts/check-sidebar-scopes.mjs
+
       # The feature work cards are generated from scorecard-data.json; a hand edit or a stale card fails.
       - name: Work-card drift gate
         run: node ../scripts/make-work-cards.mjs --check

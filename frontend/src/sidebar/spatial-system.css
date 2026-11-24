@@ -1,0 +1,54 @@
+/* Screen analysis (SpatialDashboard) on the shared sidebar system (docs/features/197). Scoped to `.sv`, tokens only. The kit's
+   Card and Chip also work inside `.sv`, so any view that still uses them looks the same as the new ones. */
+
+.sv .kit-card { background: var(--sv-card); border: 1px solid var(--sv-line); border-radius: var(--sv-radius); padding: 18px; box-shadow: var(--sv-shadow); }
+.sv .kit-card-header { margin-bottom: 12px; }
+.sv .kit-card-title { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--sv-dim); }
+.sv .kit-chip { background: var(--sv-card2); border: 1px solid var(--sv-line); border-radius: 999px; color: var(--sv-dim); font-size: 11.5px; font-weight: 600; }
+
+.sv .spatial-dashboard { flex: 1; min-height: 0; display: flex; flex-direction: column; background: none; color: var(--sv-text); }
+.sv .spatial-dashboard--empty { padding: 28px 20px; color: var(--sv-dim); font-size: 14px; }
+.sv .spatial-scroll-body { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: none; scroll-behavior: smooth; overscroll-behavior: contain;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, var(--sv-mask-ink) 10px, var(--sv-mask-ink) calc(100% - 14px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, var(--sv-mask-ink) 10px, var(--sv-mask-ink) calc(100% - 14px), transparent 100%); }
+.sv .spatial-scroll-body::-webkit-scrollbar { display: none; width: 0; }
+.sv .spatial-phone-col { display: grid; gap: 12px; align-content: start; padding: 14px 16px 22px; max-width: none; }
+
+.sv .spatial-screen-image { width: 100%; display: block; border-radius: var(--sv-radius-sm); border: 1px solid var(--sv-line); }
+.sv .spatial-overview { margin-top: 14px; font-size: 15px; line-height: 1.5; font-weight: 500; color: var(--sv-text); }
+.sv .spatial-hero-provider { margin-top: 12px; }
+
+/* one finding per row, numbered with an ink circle that matches the pin on the screen */
+.sv .spatial-cards { display: grid; gap: 0; }
+.sv .spatial-card { display: grid; gap: 8px; padding: 14px 0; border: 0; border-top: 1px solid var(--sv-line); border-radius: 0; background: none; box-shadow: none; }
+.sv .spatial-card:first-child { border-top: 0; padding-top: 2px; }
+.sv .spatial-card:hover, .sv .spatial-card--active { background: none; box-shadow: none; }
+.sv .spatial-card--active .spatial-label { text-decoration: underline; text-underline-offset: 4px; }
+.sv .spatial-card-header { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.sv .spatial-badge { width: 26px; height: 26px; border-radius: 50%; background: var(--sv-ink); color: var(--sv-ink-on); display: grid; place-items: center; font-size: 12px; font-weight: 800; flex: none; }
+.sv .spatial-label { flex: 1; min-width: 0; font-size: 14px; font-weight: 700; letter-spacing: -0.01em; color: var(--sv-text); overflow-wrap: anywhere; }
+.sv .spatial-summary { font-size: 13px; line-height: 1.55; color: var(--sv-dim); }
+.sv .spatial-card-image { width: 100%; border-radius: var(--sv-radius-sm); border: 1px solid var(--sv-line); }
+.sv .spatial-detail-grid { display: grid; gap: 0; margin: 0; }
+.sv .spatial-detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--sv-line); }
+.sv .spatial-detail-title { font-size: 12px; color: var(--sv-dim); }
+.sv .spatial-detail-value { margin: 0; font-size: 13px; font-weight: 600; text-align: right; overflow-wrap: anywhere; }
+
+/* the saved foreground review */
+.sv .foreground-review { display: grid; gap: 10px; }
+.sv .foreground-review h3 { margin: 6px 0 0; font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--sv-dim); }
+.sv .foreground-review p { margin: 0; font-size: 13px; line-height: 1.55; color: var(--sv-dim); }
+.sv .foreground-review__meta strong { display: block; font-size: 15px; color: var(--sv-text); }
+.sv .foreground-review__meta span, .sv .foreground-review__source, .sv .foreground-review__page small, .sv .foreground-review__claim small { font-size: 12px; color: var(--sv-faint); overflow-wrap: anywhere; }
+.sv .foreground-review__claim, .sv .foreground-review__page { padding: 12px; border: 1px solid var(--sv-line); border-radius: var(--sv-radius-sm); background: var(--sv-card2); display: grid; gap: 6px; }
+.sv .foreground-review__claim strong, .sv .foreground-review__page strong { color: var(--sv-text); font-size: 13.5px; }
+.sv .foreground-review__claim span { font-size: 11.5px; font-weight: 600; color: var(--sv-dim); }
+.sv .foreground-review__page img { width: 100%; border-radius: 10px; border: 1px solid var(--sv-line); }
+.sv .foreground-review__warnings p { color: var(--sv-text); font-weight: 600; }
+.sv .foreground-review label { font-size: 12px; font-weight: 600; color: var(--sv-dim); }
+.sv .foreground-review input { padding: 11px 12px; border: 1px solid var(--sv-line); border-radius: 12px; background: var(--sv-card2); color: var(--sv-text); font: inherit; font-size: 13px; outline: 0; }
+.sv .foreground-review input:focus { border-color: var(--sv-text); }
+.sv .foreground-review__actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.sv .foreground-review__actions button { flex: 1; padding: 11px 14px; border-radius: 12px; border: 1px solid var(--sv-line); background: var(--sv-card2); font-size: 13px; font-weight: 700; color: var(--sv-text); cursor: pointer; }
+.sv .foreground-review__actions button:first-child:not(:disabled) { background: var(--sv-ink); border-color: var(--sv-ink); color: var(--sv-ink-on); }
+.sv .foreground-review__actions button:disabled { opacity: 0.55; cursor: not-allowed; }

@@ -277,8 +277,9 @@ select:focus-visible {
 }
 
 
-/* ── Tech Stack sidebar palette (monochrome console). Kept here so component CSS holds no literal colours. ── */
-.stack-view {
+/* ── Sidebar palette (monochrome console): the Tech Stack view and every sidebar view built on the shared kit (.sv). Kept here so component CSS holds no literal colours. ── */
+.stack-view,
+.sv {
   --sv-bg: #08090c;
   --sv-card: #111317;
   --sv-card2: #181b20;
@@ -304,8 +305,11 @@ select:focus-visible {
   --sv-shadow-ink: rgba(0, 0, 0, 0.55);
   --sv-white: #ffffff;
   --sv-mask-ink: #000;
+  --sv-faint: #666b78;     /* third text step: captions, units */
 }
-[data-theme="light"] .stack-view {
+[data-theme="light"] .stack-view,
+[data-theme="light"] .sv {
+  --sv-faint: #8d93a0;
   --sv-bg: #ecedf0;
   --sv-card: #ffffff;
   --sv-card2: #f5f6f8;
@@ -325,6 +329,64 @@ select:focus-visible {
   --kit-c5: #262a34;
   --kit-c6: #6a707d;
   --kit-c7: #c2c6ce;
+}
+
+/* Screen time "Ledger" view. */
+.view-screentime {
+  --st-card: #14161d;
+  --st-bar: #3a3f4b;
+  --st-bar-today: #e6e8ee;
+  --st-track: #262a34;
+  --st-meta: #7d8390;
+  --st-text: #e6e8ee;
+}
+[data-theme="light"] .view-screentime {
+  --st-card: #ffffff;
+  --st-bar: #c2c6ce;
+  --st-bar-today: #0c0e14;
+  --st-track: #e4e6eb;
+  --st-meta: #6a707d;
+  --st-text: #0c0e14;
+}
+
+/* Gmail "Inbox briefing" view. */
+.view-gmail {
+  --gm-stat-bg: #14161d;
+  --gm-mail-bg: #14161d;
+  --gm-rule: #262a34;
+  --gm-urgent: #e6e8ee;
+  --gm-meta: #7d8390;
+  --gm-body: #b3b8c4;
+}
+[data-theme="light"] .view-gmail {
+  --gm-stat-bg: #ffffff;
+  --gm-mail-bg: #ffffff;
+  --gm-rule: #d0d4dc;
+  --gm-urgent: #0c0e14;
+  --gm-meta: #6a707d;
+  --gm-body: #3a3f4b;
+}
+
+/* WhatsApp "Chat" view: bubbles. Mine = ink, theirs = raised card. */
+.view-whatsapp {
+  --wa-me-bg: #e9ebf0;
+  --wa-me-fg: #0c0e14;
+  --wa-them-bg: #1b1e27;
+  --wa-them-fg: #e6e8ee;
+  --wa-meta: #7d8390;
+  --wa-day-bg: #14161d;
+  --wa-avatar-bg: #262a34;
+  --wa-avatar-fg: #e6e8ee;
+}
+[data-theme="light"] .view-whatsapp {
+  --wa-me-bg: #0c0e14;
+  --wa-me-fg: #ffffff;
+  --wa-them-bg: #ffffff;
+  --wa-them-fg: #0c0e14;
+  --wa-meta: #8d93a0;
+  --wa-day-bg: #e4e6eb;
+  --wa-avatar-bg: #d0d4dc;
+  --wa-avatar-fg: #0c0e14;
 }
 
 :root {

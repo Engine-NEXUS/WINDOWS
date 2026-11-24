@@ -2,6 +2,7 @@ import {useEffect,useRef,useState} from "react";
 import {invoke} from "@tauri-apps/api/core";
 import {maySelect,validChoices,type DesktopChoices as Choices} from "./desktopChoiceModel";
 import "./desktop-choices.css";
+import { SvButton, SvCard, SvIcon, VoiceTimer } from "./kit/system";
 
 /** Native pending state is authoritative. No control identity/coordinates are sent back from UI. */
 export function DesktopChoices(){
@@ -38,10 +39,33 @@ export function DesktopChoices(){
     }catch{if(current.current?.token===token)setMessage("That choice is no longer available. Ask NEXUS again.")}
     finally{if(current.current?.token===token){current.current=null;setChoices(null)}busyRef.current=false;setBusy(false)}
   };
-  return choices?<section className="desktop-choice-panel" aria-label="Choose a desktop control" aria-busy={busy}>
-    <h2>Which control?</h2><p>Say “choose 1” or select a control below. Choices expire after 30 seconds.</p>
-    <ol>{choices.choices.map(c=><li key={c.number}><button type="button" disabled={busy} onClick={()=>void select(c.number)}>
-      <strong>{c.number}. {c.label}</strong><span>{c.role}{c.container?` · ${c.container}`:""}</span>
-    </button></li>)}</ol><button type="button" onClick={cancel}>Cancel</button>
-  </section>:message?<p className="desktop-choice-status" role="status">{message}</p>:null;
+  return choices ? (
+    <section className="sv sv-choices" aria-label="Choose a desktop control" aria-busy={busy}>
+      <SvCard>
+        <h2 className="sv-h">Which control?</h2>
+        <p className="sv-p" style={{ marginTop: 6 }}>Say “choose 1” or select a control below. Choices expire after 30 seconds.</p>
+        <VoiceTimer seconds={Math.round(choices.expires_in_ms / 1000)} runKey={choices.token} />
+        <ol className="sv-list" style={{ marginTop: 14 }}>
+          {choices.choices.map((c) => (
+            <li key={c.number}>
+              <button type="button" className="sv-choice" disabled={busy} onClick={() => void select(c.number)}>
+                <span className="sv-num" aria-hidden="true">{c.number}</span>
+                <span className="sv-grow">
+                  <span className="sv-choice-t">{c.label}</span>
+                  <span className="sv-choice-s">{c.role}{c.container ? ` · ${c.container}` : ""}</span>
+                </span>
+                <span style={{ width: 16, height: 16, display: "inline-flex" }}><SvIcon name="arrow" /></span>
+              </button>
+            </li>
+          ))}
+        </ol>
+        <SvButton onClick={cancel}>
+          <SvIcon name="x" />
+          Cancel
+        </SvButton>
+      </SvCard>
+    </section>
+  ) : message ? (
+    <p className="desktop-choice-status" role="status">{message}</p>
+  ) : null;
 }

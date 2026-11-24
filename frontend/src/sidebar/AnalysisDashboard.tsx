@@ -1,4 +1,5 @@
-import { LanguageChart, FrameworkChart } from "./Charts";
+import { BarRow, KpiGrid, KpiTile, Pill, SvCard } from "./kit/system";
+import { compactCount, languageRows } from "./repoModel";
 
 /**
  * Analysis data structure returned by the Worker.
@@ -22,106 +23,91 @@ interface RepoAnalysis {
 }
 
 /**
- * Rich repository analysis dashboard.
- * Renders in the NEXUS sidebar when the user says "analyse owner/repo".
- * Minimalist design without colorful charts or emojis in headings.
+ * Repository analysis, on the shared sidebar kit (docs/features/197): four number tiles, an About card, the languages as bars,
+ * frameworks and databases as lists, and the quality facts as pills. Renders when the user says "analyse owner/repo".
  */
 export function AnalysisDashboard({ data }: { data: RepoAnalysis }) {
+  const langs = languageRows(data.languages);
+  const hasDescription = Boolean(data.description && data.description !== "No description provided.");
   return (
-    <div className="analysis-dashboard">
-      {/* ── Overview Card ── */}
-      <div className="analysis-card analysis-overview">
-        <div className="analysis-card-icon">📦</div>
-        <div className="analysis-overview-stats">
-          <span className="analysis-badge analysis-badge--visibility">
-            {data.visibility === "private" ? "🔒 Private" : "🌐 Public"}
-          </span>
-          <span className="analysis-badge">⭐ {data.stars} stars</span>
-          <span className="analysis-badge">🍴 {data.forks} forks</span>
-          <span className="analysis-badge">📁 {data.totalFiles} files</span>
-          <span className="analysis-badge">🌿 {data.defaultBranch}</span>
-        </div>
-      </div>
+    <>
+      <KpiGrid>
+        <KpiTile label="Stars" value={compactCount(data.stars)} />
+        <KpiTile label="Forks" value={compactCount(data.forks)} />
+        <KpiTile label="Files" value={compactCount(data.totalFiles)} />
+        <KpiTile label="Branch" value={data.defaultBranch || "–"} />
+      </KpiGrid>
 
-      {/* ── Description ── */}
-      {data.description && data.description !== "No description provided." && (
-        <div className="analysis-card">
-          <div className="analysis-card-title">DESCRIPTION</div>
-          <p className="analysis-description">{data.description}</p>
-        </div>
-      )}
+      <SvCard title="About" right={<Pill tone="outline" icon={data.visibility === "private" ? "shield" : "globe"}>{data.visibility === "private" ? "Private" : "Public"}</Pill>}>
+        {hasDescription ? <p className="sv-lead">{data.description}</p> : <p className="sv-p">No description provided.</p>}
+        {data.architecture ? <p className="sv-p" style={{ marginTop: 10 }}>{data.architecture}</p> : null}
+      </SvCard>
 
-      {/* ── Languages ── */}
-      {data.languages && data.languages.length > 0 && (
-        <div className="analysis-card">
-          <div className="analysis-card-title">LANGUAGES</div>
-          <LanguageChart languages={data.languages} />
-        </div>
-      )}
-
-      {/* ── Frameworks ── */}
-      {data.frameworks && data.frameworks.length > 0 && (
-        <div className="analysis-card">
-          <div className="analysis-card-title">FRAMEWORKS & TOOLS</div>
-          <FrameworkChart frameworks={data.frameworks} />
-        </div>
-      )}
-
-      {/* ── Databases ── */}
-      {data.databases && data.databases.length > 0 && (
-        <div className="analysis-card">
-          <div className="analysis-card-title">DATABASES</div>
-          <div className="minimal-list">
-            {data.databases.map((db) => (
-              <div key={db.name} className="minimal-list-item">
-                <span className="minimal-list-name">{db.name}</span>
-                <span className="minimal-list-sub">{db.evidence}</span>
-              </div>
+      {langs.length > 0 && (
+        <SvCard title="Languages">
+          <div className="sv-bars">
+            {langs.map((l) => (
+              <BarRow key={l.name} label={l.name} value={`${l.percent} %`} percent={l.percent} tone={l.tone} />
             ))}
           </div>
-        </div>
+        </SvCard>
       )}
 
-      {/* ── Features ── */}
-      {data.features && data.features.length > 0 && (
-        <div className="analysis-card">
-          <div className="analysis-card-title">FEATURES</div>
-          <ul className="analysis-features-minimal">
-            {data.features.map((feature, i) => (
-              <li key={i} className="analysis-feature-item-minimal">
-                {feature}
+      {data.frameworks && data.frameworks.length > 0 && (
+        <SvCard title="Frameworks & tools">
+          <div className="sv-row">
+            {data.frameworks.map((f) => (
+              <Pill key={f.name} icon="layers">
+                {f.name}
+              </Pill>
+            ))}
+          </div>
+        </SvCard>
+      )}
+
+      {data.databases && data.databases.length > 0 && (
+        <SvCard title="Databases">
+          <ul className="sv-list">
+            {data.databases.map((db) => (
+              <li className="sv-li" key={db.name}>
+                <div className="sv-grow">
+                  <b className="sv-li-t">{db.name}</b>
+                  <p className="sv-p">{db.evidence}</p>
+                </div>
               </li>
             ))}
           </ul>
-        </div>
+        </SvCard>
       )}
 
-      {/* ── Architecture ── */}
-      {data.architecture && (
-        <div className="analysis-card">
-          <div className="analysis-card-title">ARCHITECTURE</div>
-          <p className="analysis-architecture">{data.architecture}</p>
-        </div>
+      {data.features && data.features.length > 0 && (
+        <SvCard title="Features">
+          <ul className="sv-list">
+            {data.features.map((feature, i) => (
+              <li className="sv-li" key={i}>
+                <span className="sv-num" aria-hidden="true">{i + 1}</span>
+                <div className="sv-grow">
+                  <p className="sv-p" style={{ color: "var(--sv-text)" }}>{feature}</p>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </SvCard>
       )}
 
-      {/* ── Activity / Quality ── */}
-      <div className="analysis-card analysis-activity">
-        <div className="analysis-card-title">QUALITY & CI</div>
-        <div className="minimal-list">
-          <div className="minimal-list-item">
-            <span className="minimal-list-name">Tests</span>
-            <span className="minimal-list-value">{data.tests ? "Yes" : "No"}</span>
-          </div>
-          <div className="minimal-list-item">
-            <span className="minimal-list-name">CI</span>
-            <span className="minimal-list-value">{data.ci !== "none" ? data.ci : "None"}</span>
-          </div>
-          <div className="minimal-list-item">
-            <span className="minimal-list-name">Docker</span>
-            <span className="minimal-list-value">{data.docker ? "Yes" : "No"}</span>
-          </div>
+      <SvCard title="Quality & CI">
+        <div className="sv-row">
+          <Pill tone={data.tests ? "solid" : "dash"} icon={data.tests ? "check" : "x"}>
+            Tests {data.tests ? "yes" : "no"}
+          </Pill>
+          <Pill tone={data.ci && data.ci !== "none" ? "solid" : "dash"} icon={data.ci && data.ci !== "none" ? "check" : "x"}>
+            CI: {data.ci && data.ci !== "none" ? data.ci : "none"}
+          </Pill>
+          <Pill tone={data.docker ? "solid" : "dash"} icon={data.docker ? "check" : "x"}>
+            Docker {data.docker ? "yes" : "no"}
+          </Pill>
         </div>
-      </div>
-    </div>
+      </SvCard>
+    </>
   );
 }

@@ -2,6 +2,8 @@ import { useEffect, useState, useCallback } from "react";
 import { useSidebar, type SpatialData, type SpatialItemCard } from "./sidebarStore";
 import { Lens } from "./Lens";
 import { Card, Chip, LogoTile } from "./kit";
+import { SvBar } from "./kit/system";
+import "./spatial-system.css";
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -62,8 +64,8 @@ export function SpatialView({
 
   if (!spatialData) {
     return (
-      <div className="sidebar-view-col">
-        <div className="sidebar-drag-strip" data-tauri-drag-region />
+      <div className="sidebar-view-col sv sv-view">
+        <SvBar icon="monitor" title="Screen analysis" subtitle="Nothing analysed yet" />
         <div className="spatial-dashboard spatial-dashboard--empty">
           No spatial analysis yet, sir. Say "Analyse the screen".
         </div>
@@ -72,8 +74,8 @@ export function SpatialView({
   }
 
   return (
-    <div className="sidebar-view-col">
-      <div className="sidebar-drag-strip" data-tauri-drag-region />
+    <div className="sidebar-view-col sv sv-view">
+      <SvBar icon="monitor" title="Screen analysis" subtitle={spatialData.provider_used || spatialData.review?.target_app || undefined} />
       <SpatialDashboard data={spatialData} onDock={onDock} />
     </div>
   );

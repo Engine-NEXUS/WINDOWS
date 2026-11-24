@@ -106,7 +106,7 @@ describe("SpatialDashboard and SpatialCard Kit Restyle", () => {
     expect(inactiveHtml).not.toContain("spatial-card--active");
   });
 
-  it("has no header row and no dock buttons; the drag strip is the first child of .sidebar-view-col", () => {
+  it("has the shared header and no dock buttons; the header is the first child of .sidebar-view-col", () => {
     let viewEl: any;
     function TestView() {
       viewEl = SpatialView({ data: MOCK_DATA, onDock: vi.fn() });
@@ -114,10 +114,11 @@ describe("SpatialDashboard and SpatialCard Kit Restyle", () => {
     }
     const html = renderToString(<TestView />);
 
-    expect(html).toMatch(/<div class="sidebar-view-col">\s*<div class="sidebar-drag-strip"/);
+    expect(html).toMatch(/<div class="sidebar-view-col sv sv-view"><header class="sv-bar"/);
     expect(html).not.toContain("sidebar-header-row");
     expect(html).not.toContain("Dock Left");
-    expect(viewEl.props.children[0].props.className).toBe("sidebar-drag-strip");
+    expect(html).not.toContain("Dock Right");
+    expect(viewEl.props.children[0].props.icon).toBe("monitor");
   });
 
   it("renders 380px phone column, hero card, item list card, and definition list", () => {

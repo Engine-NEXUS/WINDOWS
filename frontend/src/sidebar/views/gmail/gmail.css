@@ -1,0 +1,84 @@
+/* Gmail "Inbox briefing" view. Every selector starts with .view-gmail (scripts/check-sidebar-scopes.mjs). Colours are tokens only. */
+.view-gmail .gm-top {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding: 14px 18px 4px;
+}
+.view-gmail .gm-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: var(--gm-stat-bg);
+}
+.view-gmail .gm-stat b {
+  font-size: 26px;
+  font-weight: 800;
+  line-height: 1;
+}
+.view-gmail .gm-stat span {
+  font-size: 12px;
+  color: var(--gm-meta);
+}
+.view-gmail .gm-group {
+  padding: 14px 18px 2px;
+}
+.view-gmail .gm-group-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--gm-meta);
+}
+.view-gmail .gm-mail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  border-radius: 14px;
+  background: var(--gm-mail-bg);
+  border-left: 3px solid var(--gm-rule);
+}
+.view-gmail .gm-mail.has-deadline {
+  border-left-color: var(--gm-urgent);
+}
+.view-gmail .gm-from {
+  font-size: 12px;
+  color: var(--gm-meta);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.view-gmail .gm-subject {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.view-gmail .gm-explain {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--gm-body);
+}
+.view-gmail .gm-due {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+.view-gmail .gm-empty {
+  padding: 40px 24px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--gm-meta);
+}
+.view-gmail .gm-foot {
+  padding: 8px 18px 16px;
+  font-size: 12px;
+  color: var(--gm-meta);
+}

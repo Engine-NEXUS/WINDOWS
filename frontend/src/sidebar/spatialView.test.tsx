@@ -32,7 +32,7 @@ describe("SpatialView is a plain window: no heading, no dock buttons", () => {
     });
   });
 
-  it("renders the dashboard in .sidebar-view-col behind an invisible drag strip, with no header row or dock buttons", () => {
+  it("renders the dashboard in .sidebar-view-col under the shared header (the drag handle), with no dock buttons and no close button", () => {
     const html = renderToString(
       <div className="unified-view" style={{ display: "flex", flexDirection: "row" }}>
         <SpatialView data={MOCK_SPATIAL_DATA} onDock={() => {}} />
@@ -40,13 +40,15 @@ describe("SpatialView is a plain window: no heading, no dock buttons", () => {
     );
 
     expect(html).toContain('class="unified-view"');
-    expect(html).toMatch(/<div class="sidebar-view-col">\s*<div class="sidebar-drag-strip"/);
+    expect(html).toMatch(/<div class="sidebar-view-col sv sv-view"><header class="sv-bar"/);
+    expect(html).toContain('Screen analysis');
     expect(html).toContain('class="spatial-dashboard"');
     // The window is plain: no title bar and no dock buttons (arrow keys dock it).
     expect(html).not.toContain("sidebar-header-row");
     expect(html).not.toContain('title="Dock Left"');
     expect(html).not.toContain('title="Dock Right"');
     expect(html).not.toContain("dock-icon");
+    expect(html).not.toContain("<button type=\"button\" class=\"sv-");
   });
 
   it("renders the empty state the same way", () => {
@@ -56,7 +58,7 @@ describe("SpatialView is a plain window: no heading, no dock buttons", () => {
       </div>,
     );
 
-    expect(html).toMatch(/<div class="sidebar-view-col">\s*<div class="sidebar-drag-strip"/);
+    expect(html).toMatch(/<div class="sidebar-view-col sv sv-view"><header class="sv-bar"/);
     expect(html).not.toContain("sidebar-header-row");
     expect(html).toContain('class="spatial-dashboard spatial-dashboard--empty"');
     expect(html).toContain("No spatial analysis yet, sir");
