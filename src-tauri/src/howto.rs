@@ -113,6 +113,16 @@ Or just say **\"shut down my laptop\"** and I will do it for you."
 Or just say **\"restart my laptop\"** and I will do it for you."
                 .to_string(),
         },
+        PowerKind::Hibernate => StepsCard {
+            title: "How to hibernate your laptop",
+            markdown: "# Hibernate your laptop (Windows)
+
+1. **Command line**: press **Win + R**, type `shutdown /h` and press Enter.
+2. If it says hibernation is not available, open a terminal as administrator and run `powercfg /hibernate on`.
+
+Everything open is saved to disk and the laptop powers off."
+                .to_string(),
+        },
         PowerKind::Sleep => StepsCard {
             title: "How to put your laptop to sleep",
             markdown: "# Put your laptop to sleep (Windows)\n\n\

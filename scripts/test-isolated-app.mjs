@@ -104,6 +104,50 @@ for (const phrase of ['hello', 'what time is it']) {
 const usage = j(await inv('get_usage_stats'));
 check('the usage figure is readable', usage && typeof usage.today === 'number', JSON.stringify(usage).slice(0, 140));
 
+// ── 6b. the battery guard and Kiro, through the real app ──
+import { execSync } from 'node:child_process';
+const batteryNow = (() => {
+  try {
+    const out = execSync('powershell -NoProfile -Command "$b = Get-CimInstance Win32_Battery | Select-Object -First 1; if ($b) { \\"$($b.EstimatedChargeRemaining),$($b.BatteryStatus)\\" } else { \\"none\\" }"', { encoding: 'utf8' }).trim();
+    if (out === 'none') return null;
+    const [pct, status] = out.split(',').map(Number);
+    return { pct, ac: status === 2 || status === 6 || status === 7 || status === 8 || status === 9 };
+  } catch { return null; }
+})();
+// the one safe thing to find out first: could switching the guard ON do anything on this machine right now?
+const safeToArm = !batteryNow || batteryNow.ac || batteryNow.pct >= 40;
+record('PASS', 'the battery on this test machine is read', batteryNow ? `${batteryNow.pct}% ${batteryNow.ac ? 'charging / on AC' : 'on battery'}; arming-on is ${safeToArm ? 'safe to test' : 'NOT tested: too low'}` : 'no battery (a desktop)');
+s = j(await inv('get_settings'));
+check('the guard is OFF by default with the documented defaults', s.batteryGuard === 'off' && s.batteryGuardPercent === 5 && s.batteryGuardAction === 'shutdown' && s.batteryGuardStopAgents === true, JSON.stringify({ g: s.batteryGuard, p: s.batteryGuardPercent, a: s.batteryGuardAction, st: s.batteryGuardStopAgents }));
+const say = async (phrase) => {
+  const m = logLen();
+  const r = await inv('orchestrator_process', { transcript: phrase, dialogContext: null, turnContext: null });
+  await sleep(2500);
+  return { r: String(r), log: logSince(m).join('\n') };
+};
+let res = await say('when the battery is below 8 percent stop claude and hibernate the laptop');
+s = j(await inv('get_settings'));
+check('the owner\'s kind of sentence is understood and stored', /battery_guard|local_command/.test(res.r) && s.batteryGuardPercent === 8 && s.batteryGuardAction === 'hibernate', res.r.slice(0, 100) + ' ' + JSON.stringify({ p: s.batteryGuardPercent, a: s.batteryGuardAction }));
+check('a sentence NEVER switches the guard on (off became practice)', s.batteryGuard === 'dry', 'batteryGuard=' + s.batteryGuard);
+res = await say('battery guard status');
+check('"battery guard status" is answered', !res.r.startsWith('ERR') && !/panicked/i.test(res.log), res.r.slice(0, 90));
+res = await say("don't allow battery shutdown");
+s = j(await inv('get_settings'));
+check('a negated sentence changes nothing', s.batteryGuard === 'dry', 'batteryGuard=' + s.batteryGuard);
+if (safeToArm) {
+  res = await say('allow battery shutdown');
+  s = j(await inv('get_settings'));
+  check('"allow battery shutdown" is the step that switches it on', s.batteryGuard === 'on', 'batteryGuard=' + s.batteryGuard);
+  await sleep(6000);
+  check('with plenty of battery the guard does nothing', !/\[BATTERY\] (countdown|stop order)/.test(logText()), (logText().match(/\[BATTERY\][^\n]*/g) || ['(no [BATTERY] lines)']).slice(-2).join(' | '));
+}
+res = await say('turn off the battery guard');
+s = j(await inv('get_settings'));
+check('"turn off the battery guard" switches it off', s.batteryGuard === 'off', 'batteryGuard=' + s.batteryGuard);
+await inv('settings_patch', { patch: { batteryGuardPercent: 5, batteryGuardAction: 'shutdown', batteryGuard: 'off' } });
+check('the shutdown-after-agent sentence for Kiro is understood by the real app', !String((await say('after kiro finishes shut down the laptop')).r).startsWith('ERR'));
+await say('cancel the shutdown plan');
+
 // ── 7. the Command Hub shows the switch ──
 await inv('show_settings_sidebar');
 await sleep(5000);
@@ -125,6 +169,7 @@ if (!hub) {
     if (!opened) { record('FAIL', `the hub has a "${page}" page to open`, 'row not found'); continue; }
     const shown = await hasText();
     check(`the "${page}" page shows "Live captions while you speak"`, shown);
+    if (page === 'Features') check('the Features page shows the battery guard row', await hub.evalJs(`document.body.innerText.includes('Battery guard')`));
     if (!shown) continue;
     const before = j(await inv('get_settings')).sttLiveCaptions;
     const clicked = await rowToggle(); await sleep(2500);

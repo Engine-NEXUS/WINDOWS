@@ -2003,6 +2003,19 @@ pub struct NexusSettings {
     /// Anything else is read as "off". Changed by voice ("allow unattended shutdown").
     #[serde(default = "default_watch_power")]
     pub watch_power: String,
+    /// Battery guard (battery_guard.rs): "off" (default), "dry" (practice) or "on": at the chosen percent on battery, ask
+    /// the coding agents to stop, then shut down or hibernate after a 30 second cancellable countdown.
+    #[serde(default = "default_watch_power")]
+    pub battery_guard: String,
+    /// The trigger level in percent (3 to 20).
+    #[serde(default = "default_battery_guard_percent")]
+    pub battery_guard_percent: u32,
+    /// "shutdown" (default) or "hibernate".
+    #[serde(default = "default_battery_guard_action")]
+    pub battery_guard_action: String,
+    /// Ask coding agents to stop before powering off (Claude Code only; the others are told aloud).
+    #[serde(default = "default_true")]
+    pub battery_guard_stop_agents: bool,
     /// Agent Island: show running coding agents as logos at the top of the screen, with live tracking and Allow / Deny
     /// cards (agent_monitor.rs). Also keeps the screen awake while an agent works.
     #[serde(default = "default_memcore")]
@@ -2143,6 +2156,14 @@ fn default_follow_up_window_secs() -> u32 {
 
 fn default_watch_power() -> String {
     "off".to_string()
+}
+
+fn default_battery_guard_percent() -> u32 {
+    5
+}
+
+fn default_battery_guard_action() -> String {
+    "shutdown".to_string()
 }
 
 fn default_agent_monitor_display() -> String {
@@ -2470,6 +2491,10 @@ impl Default for NexusSettings {
             flows_cloud_chooser: false,
             memcore_review: false,
             watch_power: default_watch_power(),
+            battery_guard: default_watch_power(),
+            battery_guard_percent: default_battery_guard_percent(),
+            battery_guard_action: default_battery_guard_action(),
+            battery_guard_stop_agents: true,
             agent_monitor: true,
             agent_monitor_hover: true,
             agent_monitor_display: default_agent_monitor_display(),

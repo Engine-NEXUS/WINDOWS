@@ -154,7 +154,7 @@ pub struct Ev {
     pub kind: Kind,
 }
 
-fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     query.split('&').find_map(|kv| kv.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| v))
 }
 

@@ -184,6 +184,7 @@ pub(crate) mod session_verdict;
 pub(crate) mod agent_followup;
 pub(crate) mod session_observer;
 pub(crate) mod watch_runner;
+pub(crate) mod battery_guard;
 pub(crate) mod agent_tracker;
 pub(crate) mod agent_outcomes;
 pub(crate) mod agent_attention;
@@ -948,6 +949,7 @@ pub fn run() {
             }
             focus_throttle::spawn(app.handle());
             stt_stream::init(app.handle().clone());
+            battery_guard::spawn(app.handle());
             if startup_flag("keepAwakePoller") {
                 keep_awake::start_working_poller(); // screen stays awake while a ghost drill/request is running
             }

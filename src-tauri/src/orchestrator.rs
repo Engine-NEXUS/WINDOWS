@@ -880,6 +880,7 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         | ParsedIntent::WatchAgentTask { .. }
         | ParsedIntent::WatchThenPower { .. }
         | ParsedIntent::WatchPlanCommand { .. }
+        | ParsedIntent::BatteryGuardCommand { .. }
         | ParsedIntent::AgentHookCommand { .. }
         | ParsedIntent::PlayMusic { .. }
         | ParsedIntent::OpenMusicPlayer { .. }
@@ -1830,6 +1831,9 @@ async fn process_transcript_inner<R: Runtime>(
             ParsedIntent::WatchPlanCommand { command } => {
                 return run_watch_plan_command(app, command.clone()).await;
             }
+            ParsedIntent::BatteryGuardCommand { command } => {
+                return run_battery_guard_command(app, command.clone()).await;
+            }
             ParsedIntent::AgentHookCommand { hook_action, agent } => {
                 return run_agent_hook_command(app, hook_action.clone(), agent.clone()).await;
             }
@@ -2213,6 +2217,9 @@ async fn process_transcript_inner<R: Runtime>(
             }
             ParsedIntent::WatchPlanCommand { command } => {
                 return run_watch_plan_command(app, command.clone()).await;
+            }
+            ParsedIntent::BatteryGuardCommand { command } => {
+                return run_battery_guard_command(app, command.clone()).await;
             }
             ParsedIntent::AgentHookCommand { hook_action, agent } => {
                 return run_agent_hook_command(app, hook_action.clone(), agent.clone()).await;
@@ -8011,6 +8018,72 @@ async fn run_agent_hook_command<R: Runtime>(app: AppHandle<R>, action: String, a
                 ),
             }
         }
+    };
+    say_and_finish(&app, request_id, speech)
+}
+
+/// "When the battery is under 5 percent stop claude and shut down the laptop" / "allow battery shutdown" /
+/// "battery guard status" (battery_guard.rs). A sentence that sets the trigger NEVER switches the guard on by itself:
+/// if it is off it goes to practice, and "allow battery shutdown" is the separate, explicit step (as with watchPower).
+async fn run_battery_guard_command<R: Runtime>(app: AppHandle<R>, command: String) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    use crate::battery_guard::{Command, Mode};
+    let save = |patch: serde_json::Map<String, serde_json::Value>| crate::commands::settings_patch(app.clone(), patch);
+    let speech = match Command::from_str(&command) {
+        Some(Command::SetMode(m)) => {
+            let mut patch = serde_json::Map::new();
+            patch.insert(crate::battery_guard::SETTING_MODE.to_string(), serde_json::Value::String(m.as_str().to_string()));
+            match save(patch) {
+                Ok(()) => {
+                    let mut said = crate::battery_guard::describe(&crate::battery_guard::read_config(&app));
+                    if m == Mode::On && crate::battery_guard::read_battery().is_none() {
+                        said.push_str(" I cannot read a battery on this machine, so it will never act here.");
+                    }
+                    said
+                }
+                Err(e) => {
+                    tracing::warn!("batteryGuard: could not save the setting: {e}");
+                    "I couldn't save that setting, sir, so nothing changed.".to_string()
+                }
+            }
+        }
+        Some(Command::Arm { percent, end, stop_agents }) => {
+            let before = crate::battery_guard::read_config(&app);
+            let mut patch = serde_json::Map::new();
+            patch.insert(crate::battery_guard::SETTING_PERCENT.to_string(), serde_json::json!(percent));
+            patch.insert(crate::battery_guard::SETTING_ACTION.to_string(), serde_json::Value::String(end.as_str().to_string()));
+            patch.insert(crate::battery_guard::SETTING_STOP_AGENTS.to_string(), serde_json::Value::Bool(stop_agents));
+            // never switch it on from a sentence: off becomes practice, on stays on
+            if before.mode == Mode::Off {
+                patch.insert(crate::battery_guard::SETTING_MODE.to_string(), serde_json::Value::String(Mode::Dry.as_str().to_string()));
+            }
+            match save(patch) {
+                Ok(()) => {
+                    let cfg = crate::battery_guard::read_config(&app);
+                    let hibernate_ok = crate::battery_guard::hibernate_available();
+                    let mut said = crate::battery_guard::describe(&crate::battery_guard::Config { end: cfg.end.effective(hibernate_ok), ..cfg });
+                    if cfg.end == crate::battery_guard::End::Hibernate && !hibernate_ok {
+                        said.push_str(" Hibernation is not switched on in Windows, so I will shut down instead.");
+                    }
+                    if before.mode == Mode::Off {
+                        said = format!("Noted, sir. {said}");
+                    }
+                    said
+                }
+                Err(e) => {
+                    tracing::warn!("batteryGuard: could not save the settings: {e}");
+                    "I couldn't save that setting, sir, so nothing changed.".to_string()
+                }
+            }
+        }
+        Some(Command::Status) => {
+            let cfg = crate::battery_guard::read_config(&app);
+            let level = crate::battery_guard::read_battery()
+                .map(|r| format!(" The battery is at {} percent{}.", r.percent, if r.on_ac { " and the charger is connected" } else { "" }))
+                .unwrap_or_else(|| " I cannot read a battery on this machine.".to_string());
+            format!("{}{level}", crate::battery_guard::describe(&cfg))
+        }
+        None => "I didn't catch what to do with the battery guard, sir.".to_string(),
     };
     say_and_finish(&app, request_id, speech)
 }

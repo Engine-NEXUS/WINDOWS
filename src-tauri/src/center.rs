@@ -526,6 +526,7 @@ pub fn center_id_for(intent: &ParsedIntent) -> CenterId {
         | ParsedIntent::WatchAgentTask { .. }
         | ParsedIntent::WatchThenPower { .. }
         | ParsedIntent::WatchPlanCommand { .. }
+        | ParsedIntent::BatteryGuardCommand { .. }
         | ParsedIntent::AgentHookCommand { .. } => CenterId::Architect,
 
         ParsedIntent::Search { .. } => CenterId::Knowledge,

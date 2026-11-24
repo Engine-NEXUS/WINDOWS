@@ -1,0 +1,54 @@
+{
+  "file": "src-tauri/src/battery_guard.rs",
+  "cwd": "src-tauri",
+  "targetDir": "D:/nexus-screen-target",
+  "testArgs": [
+    "--lib",
+    "--features",
+    "custom-protocol,admin-brain",
+    "--",
+    "--test-threads=1",
+    "battery_guard",
+    "the_pretool_hook",
+    "agent_hooks::",
+    "power_cmd::"
+  ],
+  "mutations": [
+    {
+      "name": "a connected charger no longer stands the guard down",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "if r.on_ac || recovered {",
+      "replace": "if recovered {"
+    },
+    {
+      "name": "saying cancel no longer cancels",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "} else if o.cancelled {",
+      "replace": "} else if false {"
+    },
+    {
+      "name": "the stop order never expires",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "    if age >= STOP_ORDER_MAX_MS {\n        return None;\n    }",
+      "replace": "    if false {\n        return None;\n    }"
+    },
+    {
+      "name": "the power call skips the last look at the setting",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "if read_config(&app).mode != Mode::On {",
+      "replace": "if false {"
+    },
+    {
+      "name": "the hook script no longer prints the answer for a tool call",
+      "file": "src-tauri/src/agent_hooks.rs",
+      "find": "if /i \\\"%EV%\\\"==\\\"pretool\\\" goto pre\\r\\n\\\n",
+      "replace": ""
+    },
+    {
+      "name": "the webhook never answers pretool with the stop order",
+      "file": "src-tauri/src/webhook.rs",
+      "find": "reply.as_deref().unwrap_or(neutral)",
+      "replace": "neutral"
+    }
+  ]
+}

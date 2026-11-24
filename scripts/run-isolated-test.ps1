@@ -53,6 +53,19 @@ public static class IsolatedDesktop {
   }
 }
 "@
+# The isolated copy has its own data folder but the SAME home folder as the owner's NEXUS: left alone, its "connect coding
+# agents automatically" step (agentAutoHook, 25 s after start) would look at the owner's real ~/.claude, ~/.cursor, ...
+# settings. Found 2026-11-24 in the test log ("[AUTOHOOK] Codex not hooked up"); nothing was changed (every hook was
+# already installed), but a test copy must never write there. Switch it off in the test profile BEFORE it starts.
+$profileDir = Join-Path $env:APPDATA "com.nexus.assistant.contributor"
+New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
+$settingsFile = Join-Path $profileDir "settings.json"
+$cfg = if (Test-Path $settingsFile) { try { Get-Content $settingsFile -Raw | ConvertFrom-Json } catch { $null } } else { $null }
+if (-not $cfg) { $cfg = [pscustomobject]@{} }
+$cfg | Add-Member -NotePropertyName agentAutoHook -NotePropertyValue $false -Force
+$cfg | Add-Member -NotePropertyName agentMonitor -NotePropertyValue $false -Force
+# UTF-8 WITHOUT a byte-order mark: Windows PowerShell 5.1 Set-Content -Encoding UTF8 writes one, and a BOM stopped the app starting
+[System.IO.File]::WriteAllText($settingsFile, ($cfg | ConvertTo-Json -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
 $env:NEXUS_QUIET = "1"
 $env:RUST_LOG = "info,nexus=debug"
 $env:NEXUS_PROFILE = "contributor"

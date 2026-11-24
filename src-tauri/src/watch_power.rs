@@ -115,6 +115,8 @@ const AGENTS: &[(&str, &str)] = &[
     ("devin", "devin"),
     ("kilo", "kilo"),
     ("copilot", "copilot"),
+    ("kiro", "kiro"),
+    ("kyro", "kiro"),
     ("vscode", "vscode"),
 ];
 
@@ -506,6 +508,7 @@ pub fn read_back(plan: &WatchPlan) -> String {
         PowerKind::Shutdown => "shut down your laptop",
         PowerKind::Restart => "restart your laptop",
         PowerKind::Sleep => "put your laptop to sleep",
+        PowerKind::Hibernate => "hibernate your laptop",
         PowerKind::Lock => "lock your screen",
         PowerKind::SignOut => "sign you out",
     };
@@ -764,5 +767,18 @@ mod tests {
         assert!(!track("watch claude and shut down my laptop when it is done").followup);
         // "commit" alone, or a pull request that is only mentioned, is not a request
         assert!(parse("when claude finishes commit").map_or(true, |p| !p.followup));
+    }
+
+    #[test]
+    fn kiro_is_a_watchable_agent_in_the_spoken_sentence() {
+        for (said, who) in [
+            ("after kiro finishes shut down the laptop", "kiro"),
+            ("when kiro is done shut down my laptop", "kiro"),
+            ("shut down the laptop when kyro finishes", "kiro"),
+        ] {
+            let plan = parse(said).unwrap_or_else(|| panic!("not understood: {said}"));
+            assert_eq!(plan.agent.as_deref(), Some(who), "{said}");
+            assert_eq!(plan.kind, PowerKind::Shutdown);
+        }
     }
 }

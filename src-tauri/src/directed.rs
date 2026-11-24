@@ -287,7 +287,7 @@ const STARTERS: &[&str] = &[
 /// ("tell him", "tell her", "tell mom"), "tell" indicates side conversation.
 const TELL_TARGETS: &[&str] = &[
     "me", "us", "nexus", "claude", "codex", "gemini", "antigravity", "cursor", "aider", "opencode",
-    "devin", "windsurf", "kilo", "copilot", "agent",
+    "devin", "windsurf", "kilo", "copilot", "kiro", "agent",
 ];
 
 /// "tell" is a valid command starter only when addressed to NEXUS or a coding agent.

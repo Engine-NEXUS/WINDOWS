@@ -1,0 +1,126 @@
+{
+  "file": "src-tauri/src/battery_guard.rs",
+  "test": "--lib --features custom-protocol,admin-brain -- --test-threads=1 battery_guard webhook::tests::the_pretool agent_hooks:: power_cmd::",
+  "results": [
+    {
+      "name": "a connected charger no longer stands the guard down",
+      "status": "BAD_SPEC",
+      "detail": "find text occurs 0 times"
+    },
+    {
+      "name": "an unknown charger state counts as on battery",
+      "status": "KILLED",
+      "detail": "panicked at src\\battery_guard.rs:730:9: charger state unknown counts as plugged in"
+    },
+    {
+      "name": "a machine with no battery is read as a battery",
+      "status": "KILLED",
+      "detail": "panicked at src\\battery_guard.rs:726:9: assertion `left == right` failed: no battery at all"
+    },
+    {
+      "name": "the countdown is zero seconds",
+      "status": "KILLED",
+      "detail": "panicked at src\\battery_guard.rs:787:9: assertion failed: e.step(&c, &obs(39_000, 4, false, &[\"Claude Code\"])).is_empty()"
+    },
+    {
+      "name": "the power call comes before the countdown ends",
+      "status": "KILLED",
+      "detail": "panicked at src\\battery_guard.rs:787:9: assertion failed: e.step(&c, &obs(39_000, 4, false, &[\"Claude Code\"])).is_empty()"
+    },
+    {
+      "name": "saying cancel no longer cancels",
+      "status": "BAD_SPEC",
+      "detail": "find text occurs 0 times"
+    },
+    {
+      "name": "a hand-edited percent is not limited",
+      "status": "KILLED",
+      "detail": "panicked at src\\battery_guard.rs:884:9: assertion `left == right` failed"
+    },
+    {
+      "name": "an unknown setting value arms the guard",
+      "status": "KILLED",
+      "detail": "panicked at src\\battery_guard.rs:890:9: assertion `left == right` failed: a typo never arms it"
+    },
+    {
+      "name": "the stop order never expires",
+      "status": "BAD_SPEC",
+      "detail": "find text occurs 0 times"
+    },
+    {
+      "name": "every agent is answered with the stop order",
+      "status": "KILLED",
+      "detail": "panicked at src\\battery_guard.rs:914:9: assertion `left == right` failed: no verified way to stop the others"
+    },
+    {
+      "name": "a question about the battery arms the guard",
+      "status": "KILLED",
+      "detail": "panicked at src\\battery_guard.rs:953:9: assertion `left == right` failed"
+    },
+    {
+      "name": "a level outside 3 to 20 percent is accepted from speech",
+      "status": "KILLED",
+      "detail": "panicked at src\\battery_guard.rs:972:13: assertion `left == right` failed: when the battery is below 50 percent shut down the laptop"
+    },
+    {
+      "name": "the first warning is spoken with no agent working",
+      "status": "KILLED",
+      "detail": "panicked at src\\battery_guard.rs:772:9: no agent working: Windows' own warning is enough"
+    },
+    {
+      "name": "practice mode makes the power call",
+      "status": "KILLED",
+      "detail": "panicked at src\\battery_guard.rs:868:9: assertion `left == right` failed: [Say(\"Practice, sir: the battery is at 5 percent, so I would ask Claude Code to stop and then shut the laptop down in 30 secon"
+    },
+    {
+      "name": "the power call skips the last look at the setting",
+      "status": "BAD_SPEC",
+      "detail": "find text occurs 0 times"
+    },
+    {
+      "name": "Kiro hook uses the wrong trigger name",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_hooks.rs:2414:101: no Stop hook"
+    },
+    {
+      "name": "Kiro is not found by its folder",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_hooks.rs:2456:9: assertion failed: agents_present_in(&d).contains(&Agent::Kiro)"
+    },
+    {
+      "name": "Kiro is not understood by name",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_hooks.rs:2312:13: assertion `left == right` failed"
+    },
+    {
+      "name": "Kiro hook file is not removable",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_hooks.rs:1201:102: internal error: entered unreachable code: handled above"
+    },
+    {
+      "name": "Kiro stop text field is not read",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_hooks.rs:2450:9: assertion `left == right` failed"
+    },
+    {
+      "name": "hibernate ends the session like a shutdown",
+      "status": "KILLED",
+      "detail": "panicked at src\\power_cmd.rs:1204:9: assertion failed: !PowerKind::Hibernate.ends_session() && !PowerKind::Hibernate.needs_snapshot()"
+    },
+    {
+      "name": "hibernate only sleeps",
+      "status": "KILLED",
+      "detail": "panicked at src\\power_cmd.rs:1209:9: the first argument is what makes it a hibernate and not a sleep"
+    },
+    {
+      "name": "the hook script no longer prints the answer for a tool call",
+      "status": "SURVIVED",
+      "detail": ""
+    },
+    {
+      "name": "the webhook never answers pretool with the stop order",
+      "status": "SURVIVED",
+      "detail": ""
+    }
+  ]
+}

@@ -410,6 +410,8 @@ pub enum ParsedIntent {
     /// power_plan::PlanCommand::as_str). Only about the plan NEXUS is holding; nothing else is claimed.
     #[serde(rename = "watch_plan_command")]
     WatchPlanCommand { command: String },
+    /// "when the battery is under 5 percent stop claude and shut down" / "allow battery shutdown" (battery_guard.rs).
+    BatteryGuardCommand { command: String },
     /// "Hook up Claude" / "remove the Codex hook" / "is the Claude hook installed"
     /// (`hook_action` = agent_hooks::HookAction::as_str, `agent` = agent_hooks::Agent::name).
     #[serde(rename = "agent_hook_command")]
@@ -546,6 +548,7 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::WatchAgentTask { .. } => "watch_agent_task",
         ParsedIntent::WatchThenPower { .. } => "watch_then_power",
         ParsedIntent::WatchPlanCommand { .. } => "watch_plan_command",
+        ParsedIntent::BatteryGuardCommand { .. } => "battery_guard_command",
         ParsedIntent::AgentHookCommand { .. } => "agent_hook_command",
         ParsedIntent::PlayMusic { .. } => "play_music",
         ParsedIntent::OpenMusicPlayer { .. } => "open_music_player",
@@ -714,6 +717,16 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
     // Normalize common STT phonetic mishearings and soundalike phrases
     // (e.g. "goes to mode" -> "ghost mode", "open what's up" -> "open whatsapp")
     let text = normalize_phonetic_mishearings(&text);
+
+    // --- Battery guard ("when the battery is under 5 percent stop claude and shut down the laptop") ---
+    // Claimed first: the sentence contains "stop", "shut down" and an agent name, which other parsers would take.
+    if let Some(cmd) = crate::battery_guard::parse_command(&text) {
+        return Some(ParseResult {
+            intent: ParsedIntent::BatteryGuardCommand { command: cmd.as_str() },
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        });
+    }
 
     // --- Open Architecture Mapper ---
     if is_architect_command(&text) {

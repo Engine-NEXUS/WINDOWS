@@ -28,7 +28,7 @@ const HAND: &[(&str, &str)] = &[
     ("nexus", "N EH K S AH S"), ("spotify", "S P AA T AH F AY"), ("whatsapp", "W AA T S AE P"), ("antigravity", "AE N T IY G R AE V AH T IY"),
     ("github", "G IH T HH AH B"), ("vscode", "V IY EH S K OW D"), ("vs", "V IY EH S"), ("notepad", "N OW T P AE D"), ("chrome", "K R OW M"),
     ("discord", "D IH S K AO R D"), ("youtube", "Y UW T UW B"), ("opencode", "OW P AH N K OW D"), ("copilot", "K OW P AY L AH T"),
-    ("cursor", "K ER S ER"), ("codex", "K OW D EH K S"), ("gemini", "JH EH M AH N AY"), ("windsurf", "W IH N D S ER F"), ("kilo", "K IY L OW"),
+    ("cursor", "K ER S ER"), ("codex", "K OW D EH K S"), ("gemini", "JH EH M AH N AY"), ("windsurf", "W IH N D S ER F"), ("kilo", "K IY L OW"), ("kiro", "K IY R OW"),
     ("aider", "EY D ER"), ("telegram", "T EH L AH G R AE M"), ("brave", "B R EY V"), ("laptop", "L AE P T AA P"), ("shutdown", "SH AH T D AW N"),
     ("onenote", "W AH N N OW T"), ("powerpoint", "P AW ER P OY N T"), ("outlook", "AW T L UH K"), ("zoom", "Z UW M"), ("steam", "S T IY M"),
     ("figma", "F IH G M AH"), ("postman", "P OW S T M AH N"), ("vlc", "V IY EH L S IY"),

@@ -1,0 +1,162 @@
+{
+  "file": "src-tauri/src/battery_guard.rs",
+  "cwd": "src-tauri",
+  "targetDir": "D:/nexus-screen-target",
+  "testArgs": [
+    "--lib",
+    "--features",
+    "custom-protocol,admin-brain",
+    "--",
+    "--test-threads=1",
+    "battery_guard",
+    "the_pretool_hook",
+    "agent_hooks::",
+    "power_cmd::"
+  ],
+  "mutations": [
+    {
+      "name": "a connected charger no longer stands the guard down",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "if r.on_ac || recovered {",
+      "replace": "if recovered {"
+    },
+    {
+      "name": "an unknown charger state counts as on battery",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "Some(Reading { percent, on_ac: ac_line != 0 })",
+      "replace": "Some(Reading { percent, on_ac: ac_line == 1 })"
+    },
+    {
+      "name": "a machine with no battery is read as a battery",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "if battery_flag == 128 || percent > 100 {",
+      "replace": "if percent > 100 {"
+    },
+    {
+      "name": "the countdown is zero seconds",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "pub const COUNTDOWN_MS: u64 = 30_000;",
+      "replace": "pub const COUNTDOWN_MS: u64 = 0;"
+    },
+    {
+      "name": "the power call comes before the countdown ends",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "if o.now_ms.saturating_sub(since_ms) >= COUNTDOWN_MS {",
+      "replace": "if true {"
+    },
+    {
+      "name": "saying cancel no longer cancels",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "} else if o.cancelled {",
+      "replace": "} else if false {"
+    },
+    {
+      "name": "a hand-edited percent is not limited",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "p.clamp(MIN_PERCENT as u32, MAX_PERCENT as u32) as u8",
+      "replace": "p.min(100) as u8"
+    },
+    {
+      "name": "an unknown setting value arms the guard",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "            _ => Mode::Off,\n        }\n    }\n}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum End {",
+      "replace": "            _ => Mode::On,\n        }\n    }\n}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum End {"
+    },
+    {
+      "name": "the stop order never expires",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "    if age >= STOP_ORDER_MAX_MS {\n        return None;\n    }",
+      "replace": "    if false {\n        return None;\n    }"
+    },
+    {
+      "name": "every agent is answered with the stop order",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "    if !matches!(agent, \"claude\" | \"devin\") {",
+      "replace": "    if false {"
+    },
+    {
+      "name": "a question about the battery arms the guard",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "if QUESTION_STARTS.contains(&first) && !has_any(&[\"allow\", \"practice\", \"enable\", \"disable\"]) {",
+      "replace": "if false && !has_any(&[\"allow\", \"practice\", \"enable\", \"disable\"]) {"
+    },
+    {
+      "name": "a level outside 3 to 20 percent is accepted from speech",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "if !(MIN_PERCENT as u32..=MAX_PERCENT as u32).contains(&percent) {",
+      "replace": "if false {"
+    },
+    {
+      "name": "the first warning is spoken with no agent working",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "} else if r.percent <= cfg.warn_high() && !self.said_high && !o.working.is_empty() {",
+      "replace": "} else if r.percent <= cfg.warn_high() && !self.said_high {"
+    },
+    {
+      "name": "practice mode makes the power call",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "                            self.stage = Stage::Spent;\n                        }\n                        Mode::On => {",
+      "replace": "                            out.push(Action::Fire(cfg.end));\n                            self.stage = Stage::Spent;\n                        }\n                        Mode::On => {"
+    },
+    {
+      "name": "the power call skips the last look at the setting",
+      "file": "src-tauri/src/battery_guard.rs",
+      "find": "if read_config(&app).mode != Mode::On {",
+      "replace": "if false {"
+    },
+    {
+      "name": "Kiro hook uses the wrong trigger name",
+      "file": "src-tauri/src/agent_hooks.rs",
+      "find": "entry(\"nexus-agent-event-stop\", \"Stop\", \"stop\")?",
+      "replace": "entry(\"nexus-agent-event-stop\", \"stop\", \"stop\")?"
+    },
+    {
+      "name": "Kiro is not found by its folder",
+      "file": "src-tauri/src/agent_hooks.rs",
+      "find": "            Agent::Kiro => dir(\".kiro\"),",
+      "replace": "            Agent::Kiro => false,"
+    },
+    {
+      "name": "Kiro is not understood by name",
+      "file": "src-tauri/src/agent_hooks.rs",
+      "find": "\"kiro\" | \"kyro\" | \"kiro cli\" | \"kiro-cli\" | \"kiro ide\" => Some(Agent::Kiro),",
+      "replace": "\"kiro-never\" => Some(Agent::Kiro),"
+    },
+    {
+      "name": "Kiro hook file is not removable",
+      "file": "src-tauri/src/agent_hooks.rs",
+      "find": "if matches!(agent, Agent::OpenCode | Agent::Kilo | Agent::Copilot | Agent::Kiro) {\n        let text",
+      "replace": "if matches!(agent, Agent::OpenCode | Agent::Kilo | Agent::Copilot) {\n        let text"
+    },
+    {
+      "name": "Kiro stop text field is not read",
+      "file": "src-tauri/src/agent_hooks.rs",
+      "find": "\"prompt_response\", \"assistant_response\"];",
+      "replace": "\"prompt_response\"];"
+    },
+    {
+      "name": "hibernate ends the session like a shutdown",
+      "file": "src-tauri/src/power_cmd.rs",
+      "find": "matches!(self, PowerKind::Shutdown | PowerKind::Restart | PowerKind::SignOut)",
+      "replace": "matches!(self, PowerKind::Shutdown | PowerKind::Restart | PowerKind::SignOut | PowerKind::Hibernate)"
+    },
+    {
+      "name": "hibernate only sleeps",
+      "file": "src-tauri/src/power_cmd.rs",
+      "find": "SetSuspendState(BOOLEAN(1), BOOLEAN(0), BOOLEAN(0))",
+      "replace": "SetSuspendState(BOOLEAN(0), BOOLEAN(0), BOOLEAN(0))"
+    },
+    {
+      "name": "the hook script no longer prints the answer for a tool call",
+      "file": "src-tauri/src/agent_hooks.rs",
+      "find": "if /i \\\"%EV%\\\"==\\\"pretool\\\" goto pre\\r\\n\\\n",
+      "replace": ""
+    },
+    {
+      "name": "the webhook never answers pretool with the stop order",
+      "file": "src-tauri/src/webhook.rs",
+      "find": "reply.as_deref().unwrap_or(neutral)",
+      "replace": "neutral"
+    }
+  ]
+}

@@ -17,6 +17,8 @@ pub enum PowerKind {
     Shutdown,
     Restart,
     Sleep,
+    /// Saves the whole session to disk and powers off (what a dying battery needs); used by the battery guard.
+    Hibernate,
     Lock,
     SignOut,
 }
@@ -27,6 +29,7 @@ impl PowerKind {
             PowerKind::Shutdown => "shutdown",
             PowerKind::Restart => "restart",
             PowerKind::Sleep => "sleep",
+            PowerKind::Hibernate => "hibernate",
             PowerKind::Lock => "lock",
             PowerKind::SignOut => "signout",
         }
@@ -37,6 +40,7 @@ impl PowerKind {
             "shutdown" => PowerKind::Shutdown,
             "restart" => PowerKind::Restart,
             "sleep" => PowerKind::Sleep,
+            "hibernate" => PowerKind::Hibernate,
             "lock" => PowerKind::Lock,
             "signout" => PowerKind::SignOut,
             _ => return None,
@@ -57,7 +61,7 @@ impl PowerKind {
     pub fn countdown_secs(self) -> u64 {
         match self {
             PowerKind::Shutdown | PowerKind::Restart | PowerKind::SignOut => 12,
-            PowerKind::Sleep => 4,
+            PowerKind::Sleep | PowerKind::Hibernate => 4,
             PowerKind::Lock => 1,
         }
     }
@@ -68,6 +72,7 @@ impl PowerKind {
             PowerKind::Restart => "Restart your laptop, sir? I'll note what's open first so I can offer to reopen it.",
             PowerKind::SignOut => "Sign you out of Windows, sir? I'll note what's open first.",
             PowerKind::Sleep => "Putting the laptop to sleep.",
+            PowerKind::Hibernate => "Hibernating the laptop; everything open is saved to disk.",
             PowerKind::Lock => "Locking the screen.",
         }
     }
@@ -78,6 +83,7 @@ impl PowerKind {
             PowerKind::Shutdown => "Did you want me to shut down your laptop, sir?",
             PowerKind::Restart => "Did you want me to restart your laptop, sir?",
             PowerKind::Sleep => "Did you want me to put the laptop to sleep, sir?",
+            PowerKind::Hibernate => "Did you want me to hibernate the laptop, sir?",
             PowerKind::Lock => "Did you want me to lock the screen, sir?",
             PowerKind::SignOut => "Did you want me to sign you out of Windows, sir?",
         }
@@ -89,6 +95,7 @@ impl PowerKind {
             PowerKind::Restart => "restarting",
             PowerKind::SignOut => "signing out",
             PowerKind::Sleep => "going to sleep",
+            PowerKind::Hibernate => "hibernating",
             PowerKind::Lock => "locking",
         }
     }
@@ -564,8 +571,17 @@ pub fn countdown_active() -> bool {
     ACTIVE.load(Ordering::SeqCst) != 0
 }
 
+static CANCELS: AtomicU64 = AtomicU64::new(0);
+
+/// How many times a spoken "cancel" aborted a power command since NEXUS started. A countdown that wants to know whether
+/// IT was cancelled compares this number, because starting another power command also moves the generation on.
+pub fn cancel_count() -> u64 {
+    CANCELS.load(Ordering::SeqCst)
+}
+
 /// Abort a pending power command. Returns whether one was pending.
 pub fn cancel() -> bool {
+    CANCELS.fetch_add(1, Ordering::SeqCst);
     GENERATION.fetch_add(1, Ordering::SeqCst);
     ACTIVE.swap(0, Ordering::SeqCst) != 0
 }
@@ -688,6 +704,13 @@ fn execute(kind: PowerKind) -> Result<(), String> {
             let ok = unsafe { SetSuspendState(BOOLEAN(0), BOOLEAN(0), BOOLEAN(0)) };
             if ok.0 != 0 { Ok(()) } else { Err("SetSuspendState failed".into()) }
         }
+        PowerKind::Hibernate => {
+            use windows::Win32::Foundation::BOOLEAN;
+            use windows::Win32::System::Power::SetSuspendState;
+            // SAFETY: plain Win32 call with no pointers. The first argument selects hibernate (it needs hibernation to be enabled).
+            let ok = unsafe { SetSuspendState(BOOLEAN(1), BOOLEAN(0), BOOLEAN(0)) };
+            if ok.0 != 0 { Ok(()) } else { Err("hibernate failed (is hibernation switched on in Windows?)".into()) }
+        }
     }
 }
 
@@ -714,7 +737,7 @@ fn execute(kind: PowerKind) -> Result<(), String> {
         PowerKind::Shutdown => osa("tell application \"System Events\" to shut down"),
         PowerKind::Restart => osa("tell application \"System Events\" to restart"),
         PowerKind::SignOut => osa("tell application \"System Events\" to log out"),
-        PowerKind::Sleep => osa("tell application \"System Events\" to sleep"),
+        PowerKind::Sleep | PowerKind::Hibernate => osa("tell application \"System Events\" to sleep"),
         PowerKind::Lock => {
             osa("tell application \"System Events\" to keystroke \"q\" using {command down, control down}")
         }
@@ -1163,5 +1186,26 @@ mod end_of_day_tests {
         assert!(!is_learned_shutdown(&d, "that's it for tonight"));
         assert!(!add_alias(&d, "that's it for the video"));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn only_a_real_cancel_moves_the_cancel_count_not_another_power_command_starting() {
+        let before = cancel_count();
+        let g = begin();
+        finish(g);
+        let _ = begin(); // a second power command takes over the cancel window
+        assert_eq!(cancel_count(), before, "starting power commands is not a cancel");
+        cancel();
+        assert_eq!(cancel_count(), before + 1);
+    }
+
+    #[test]
+    fn hibernate_keeps_the_session_and_does_not_end_it() {
+        assert!(!PowerKind::Hibernate.ends_session() && !PowerKind::Hibernate.needs_snapshot());
+        assert_eq!(PowerKind::from_str("hibernate"), Some(PowerKind::Hibernate));
+        assert_eq!(PowerKind::Hibernate.as_str(), "hibernate");
+        let src = include_str!("power_cmd.rs");
+        let hib = src.split("PowerKind::Hibernate => {").nth(1).unwrap().split("}\n").next().unwrap();
+        assert!(hib.contains("SetSuspendState(BOOLEAN(1)"), "the first argument is what makes it a hibernate and not a sleep");
     }
 }

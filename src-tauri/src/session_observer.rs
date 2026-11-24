@@ -61,6 +61,7 @@ pub(crate) fn agent_words(agent: &str) -> &'static [&'static str] {
         "devin" => &["devin"],
         "kilo" => &["kilo"],
         "copilot" => &["copilot"],
+        "kiro" => &["kiro"],
         "vscode" => &["code.exe", "visual studio code", "/code "],
         _ => &[],
     }
