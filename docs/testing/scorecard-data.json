@@ -45,16 +45,14 @@
     },
     {
         "area": "Voice front end",
-        "feature": "Streaming partial captions (Deepgram, optional)",
-        "tests": "4 + 14 stream tests (real localhost WebSocket) + 2 frontend",
-        "B": 90,
-        "T": 75,
-        "L": 20,
+        "feature": "Live captions while you speak (local / Groq / Deepgram)",
+        "tests": "4 + 14 stream tests (real localhost WebSocket) + pre-roll 3 + stability 1 + Groq request 3 (stand-in server) + typing 9 + fake mic 2; 10 mutations; whole-app script (scripts/test-live-captions-e2e.mjs)",
+        "B": 95,
+        "T": 88,
+        "L": 35,
         "S": 85,
-        "I": 60,
-        "note": "2026-11-24: it never ran (its only caller had no callers). Rewritten and fed by the native mic capture; default OFF (sttLiveCaptions); privacy mode never uses the cloud; generation ids; CloseStream; stale-timer in the pill; Deepgram nova-2 now gets keywords= not keyterm= (11 mutations). Not run against a real Deepgram or local stream; no Hub switch yet. Optional, needs a key; stream module has no tests.",
-        "scope": "out",
-        "scope_reason": "D4: optional streaming captions needing a paid key; revisit if wanted"
+        "I": 65,
+        "note": "2026-11-24: real local engine measured with synthetic speech through the whole app (first caption about 0.65 s, median word lag about 0.8 s, 0 confirmed words changed, words in the pill while speech still playing). Fixed: text only grows, all lines kept, pre-roll + seed fed, model off the event loop, unconfirmed tail dimmed. NOT run: a real microphone or person, Groq or Deepgram with a key; Groq (the default source with a key) is 1.5 to 2.5 s behind. Cold-start model download (~250 MB) and the end-of-speech flush are open. docs/research/live-captions-4-star-2026-11-24.md"
     },
     {
         "area": "Voice front end",

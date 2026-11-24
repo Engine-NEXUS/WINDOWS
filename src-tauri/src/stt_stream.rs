@@ -265,6 +265,33 @@ pub enum Feed {
 }
 
 /// State shared between the microphone thread and the stream task. One per dispatcher (tests make their own).
+/// Which words of a caption can be trusted. A streaming recogniser guesses the newest words first and corrects them a
+/// moment later ("link in" becomes "best pizza"), which a reader sees as flicker. Showing only the words two hypotheses in a
+/// row agree on removes that but doubles the delay (measured on real speech: median 0.67 s to 1.4 s), so the text is shown
+/// at once and the screen draws the words that are not yet confirmed dimmer. `step` returns how many leading words of
+/// `text` the previous hypothesis of the SAME turn also had, comparing without case or punctuation.
+#[derive(Default)]
+pub struct Stability {
+    gen: u64,
+    prev: Vec<String>,
+}
+
+impl Stability {
+    pub fn step(&mut self, gen: u64, text: &str) -> usize {
+        let words: Vec<String> = text
+            .split_whitespace()
+            .map(|w| w.chars().filter(|c| c.is_alphanumeric() || *c == '\'').collect::<String>().to_lowercase())
+            .collect();
+        if gen != self.gen {
+            self.gen = gen;
+            self.prev.clear(); // a new turn starts with nothing confirmed
+        }
+        let n = words.iter().zip(&self.prev).take_while(|(a, b)| a == b).count();
+        self.prev = words;
+        n
+    }
+}
+
 pub struct Shared {
     /// 0 = nothing is streaming; otherwise the generation allowed to emit.
     pub active_gen: AtomicU64,
@@ -272,11 +299,30 @@ pub struct Shared {
     /// Cheap flag the audio callback reads; true only while a stream is wanted and allowed.
     pub armed: AtomicBool,
     pub dropped: AtomicU64,
+    /// A turn has begun and not ended. Until the dispatcher has decided the plan (it reads settings, so it takes a moment) the
+    /// audio is kept in `preroll` instead of being dropped: the first words of a command must not be missing from the caption.
+    wanted: AtomicBool,
+    preroll: std::sync::Mutex<Vec<i16>>,
 }
+
+/// The most audio kept while the plan is being decided (4 s at 16 kHz).
+const PREROLL_CAP: usize = 16_000 * 4;
 
 impl Shared {
     pub fn new() -> Self {
-        Self { active_gen: AtomicU64::new(0), next_gen: AtomicU64::new(1), armed: AtomicBool::new(false), dropped: AtomicU64::new(0) }
+        Self {
+            active_gen: AtomicU64::new(0),
+            next_gen: AtomicU64::new(1),
+            armed: AtomicBool::new(false),
+            dropped: AtomicU64::new(0),
+            wanted: AtomicBool::new(false),
+            preroll: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+    fn clear_preroll(&self) {
+        if let Ok(mut p) = self.preroll.lock() {
+            p.clear();
+        }
     }
     fn new_gen(&self) -> u64 {
         self.next_gen.fetch_add(1, Ordering::SeqCst)
@@ -477,13 +523,23 @@ pub async fn dispatch_with(
                         tracing::debug!("stt_stream: not streaming this turn ({why})");
                     }
                     shared.armed.store(false, Ordering::SeqCst);
+                    shared.wanted.store(false, Ordering::SeqCst); // no stream this turn: stop keeping its audio
+                    shared.clear_preroll();
                     continue;
                 };
                 let my_gen = shared.new_gen();
                 shared.active_gen.store(my_gen, Ordering::SeqCst);
                 let (tx, srx) = mpsc::channel(SESSION_DEPTH);
+                // The audio that came in while the plan was being decided goes first, in order, and the stream is armed
+                // under the same lock, so a chunk can never overtake it.
+                {
+                    let mut pre = shared.preroll.lock().unwrap_or_else(|e| e.into_inner());
+                    for c in std::mem::take(&mut *pre).chunks(1280) {
+                        let _ = tx.try_send(Cmd::Audio(c.to_vec()));
+                    }
+                    shared.armed.store(true, Ordering::SeqCst);
+                }
                 current = Some(tx);
-                shared.armed.store(true, Ordering::SeqCst);
                 if cfg.plan == Plan::Groq {
                     let Some(transcribe) = cfg.transcribe.clone() else { continue };
                     tokio::spawn(run_progressive(
@@ -502,6 +558,8 @@ pub async fn dispatch_with(
             }
             Feed::End => {
                 shared.armed.store(false, Ordering::SeqCst);
+                shared.wanted.store(false, Ordering::SeqCst);
+                shared.clear_preroll();
                 shared.active_gen.store(0, Ordering::SeqCst);
                 if let Some(s) = current.take() {
                     let _ = s.try_send(Cmd::Stop);
@@ -524,12 +582,28 @@ impl Handle {
         (Self { shared, tx }, rx)
     }
     pub fn begin(&self) {
-        // armed is set by the dispatcher once the plan allows a stream; chunks before that are simply not sent
+        // armed is set by the dispatcher once the plan allows a stream; audio before that waits in the pre-roll
+        self.shared.clear_preroll();
+        self.shared.wanted.store(true, Ordering::SeqCst);
         let _ = self.tx.try_send(Feed::Begin);
     }
     pub fn feed(&self, samples: &[f32]) {
         if !self.shared.armed.load(Ordering::Relaxed) {
-            return;
+            if !self.shared.wanted.load(Ordering::Relaxed) {
+                return; // nothing is streaming and no turn is waiting for a plan: an atomic read and out
+            }
+            // a turn has begun but the plan is not decided yet: keep the audio (never wait for the dispatcher)
+            let Ok(mut pre) = self.shared.preroll.try_lock() else {
+                self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+                return;
+            };
+            if !self.shared.armed.load(Ordering::SeqCst) {
+                if self.shared.wanted.load(Ordering::SeqCst) && pre.len() < PREROLL_CAP {
+                    pre.extend(to_i16(samples));
+                }
+                return;
+            }
+            // armed while we took the lock: the dispatcher has already moved the pre-roll on, send this one normally
         }
         if self.tx.try_send(Feed::Chunk(to_i16(samples))).is_err() {
             self.shared.dropped.fetch_add(1, Ordering::Relaxed);
@@ -538,7 +612,9 @@ impl Handle {
     pub fn end(&self) {
         // stop emitting at once even if the queue is full and the End message cannot be queued
         self.shared.armed.store(false, Ordering::SeqCst);
+        self.shared.wanted.store(false, Ordering::SeqCst);
         self.shared.active_gen.store(0, Ordering::SeqCst);
+        self.shared.clear_preroll();
         let _ = self.tx.try_send(Feed::End);
     }
 }
@@ -583,8 +659,10 @@ pub fn init<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
         Plan::Off(_) => None,
     });
     let emit_app = app.clone();
+    let stability = std::sync::Mutex::new(Stability::default());
     let emit: Emit = Arc::new(move |gen, text| {
-        let _ = emit_app.emit("stt:partial", serde_json::json!({ "text": text, "session": gen }));
+        let stable = stability.lock().map(|mut s| s.step(gen, &text)).unwrap_or(0);
+        let _ = emit_app.emit("stt:partial", serde_json::json!({ "text": text, "session": gen, "stable_words": stable }));
     });
     tauri::async_runtime::spawn(dispatch(rx, SHARED.clone(), plan_fn, cfg_fn, emit));
 }
@@ -868,6 +946,65 @@ mod tests {
         assert_eq!(gens.len(), 2, "two different generations were used: {texts:?}");
     }
 
+    #[test]
+    fn stability_counts_only_the_words_two_hypotheses_in_a_row_agree_on() {
+        let mut s = Stability::default();
+        assert_eq!(s.step(1, "Search for the link in"), 0, "the first hypothesis of a turn confirms nothing");
+        assert_eq!(s.step(1, "Search for the best pizza"), 3, "search for the: the same as before, the rest was revised");
+        assert_eq!(s.step(1, "search, for the best pizza places"), 5, "case and punctuation do not count as a change");
+        assert_eq!(s.step(1, "Search for the best pizza places near me"), 6);
+        assert_eq!(s.step(1, "Something else entirely"), 0, "a rewrite from the start confirms nothing");
+        assert_eq!(s.step(2, "Something else entirely now"), 0, "a new turn forgets the old one even with the same words");
+        assert_eq!(s.step(2, "Something else entirely now"), 4);
+        assert_eq!(s.step(2, ""), 0, "empty text confirms nothing and does not panic");
+    }
+
+    #[tokio::test]
+    async fn audio_fed_before_the_plan_is_decided_is_not_lost_and_arrives_first_and_in_order() {
+        let (url, seen) = mock_server(vec![vec![dg("hello", false)]]).await;
+        let r = rig(Plan::Cloud, url);
+        // begin and feed with no pause: the dispatcher has not armed the stream yet (the real start-up feeds the seed this way)
+        r.handle.begin();
+        r.handle.feed(&[0.1f32; 1280]);
+        r.handle.feed(&[0.1f32; 640]);
+        wait_for(|| r.shared.armed.load(Ordering::SeqCst)).await;
+        r.handle.feed(&[0.1f32; 1280]); // after arming: goes the normal way
+        wait_for(|| seen.lock().unwrap().iter().filter(|x| matches!(x, Seen::Audio(_))).count() >= 2).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let lens: Vec<usize> = seen.lock().unwrap().iter().filter_map(|x| if let Seen::Audio(n) = x { Some(*n) } else { None }).collect();
+        let total: usize = lens.iter().sum();
+        assert_eq!(total, (1280 + 640 + 1280) * 2, "every sample fed reached the server: {lens:?}");
+        assert_eq!(lens.last(), Some(&2560), "the chunk fed after arming is the last one: {lens:?}");
+    }
+
+    #[test]
+    fn the_pre_roll_is_bounded_and_nothing_is_kept_when_no_turn_is_waiting() {
+        let shared = Arc::new(Shared::new());
+        let (handle, _rx) = Handle::new(shared.clone());
+        handle.feed(&[0.2f32; 1280]);
+        assert!(shared.preroll.lock().unwrap().is_empty(), "no turn has begun: not even a copy is made");
+        handle.begin();
+        for _ in 0..200 {
+            handle.feed(&[0.2f32; 1280]);
+        }
+        assert_eq!(shared.preroll.lock().unwrap().len(), PREROLL_CAP, "200 chunks fed, only 4 seconds are kept");
+        handle.end();
+        assert!(shared.preroll.lock().unwrap().is_empty(), "the end of the turn frees it");
+        handle.feed(&[0.2f32; 1280]);
+        assert!(shared.preroll.lock().unwrap().is_empty(), "and nothing is kept after the end");
+    }
+
+    #[tokio::test]
+    async fn when_no_stream_is_wanted_this_turn_the_waiting_audio_is_freed() {
+        let r = rig(Plan::Off("live captions are off"), String::new());
+        r.handle.begin();
+        r.handle.feed(&[0.1f32; 1280]);
+        wait_for(|| !r.shared.wanted.load(Ordering::SeqCst)).await;
+        assert!(r.shared.preroll.lock().unwrap().is_empty());
+        r.handle.feed(&[0.1f32; 1280]);
+        assert!(r.shared.preroll.lock().unwrap().is_empty(), "an off turn keeps nothing");
+    }
+
     #[tokio::test]
     async fn nothing_is_emitted_after_the_turn_ends() {
         let (url, _seen) = mock_server(vec![vec![dg("hello", false), dg("hello there", false)]]).await;
@@ -1073,7 +1210,7 @@ mod tests {
     #[test]
     fn caption_requests_do_not_inflate_the_requests_today_figure() {
         let src = include_str!("stt_groq.rs");
-        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let prod = src.split("mod tests {").next().unwrap(); // the production part (it has a test-only URL override of its own above the test module)
         assert!(prod.contains("transcribe_plain(samples, api_key, client, None, GROQ_MODEL_LARGE, \"stt_interim\")"));
         assert!(prod.contains("transcribe_plain(samples, api_key, client, prompt, GROQ_MODEL, \"stt\")"), "the final transcript is unchanged");
         let cfg = include_str!("stt_stream.rs").split("#[cfg(test)]").next().unwrap().to_string();

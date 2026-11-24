@@ -35,6 +35,25 @@ export function formatPartialText(raw: unknown): string {
 }
 
 /**
+ * How many leading characters of the DISPLAYED partial text (`formatPartialText`) are confirmed: the recogniser has said them
+ * twice in a row, so they will not change. The words after that are still a guess and are drawn dimmer. `stable_words`
+ * counts from the start of the whole text; the display shows only the last PARTIAL_WINDOW_WORDS of it. A payload without the
+ * field (an older sender, a final) counts as fully confirmed.
+ */
+export function partialStableChars(raw: unknown): number {
+  const shown = formatPartialText(raw);
+  if (!raw || typeof raw !== "object") return shown.length;
+  const p = raw as { text?: unknown; stable_words?: unknown };
+  if (typeof p.text !== "string" || typeof p.stable_words !== "number") return shown.length;
+  const total = p.text.trim().split(/\s+/).filter(Boolean).length;
+  const inWindow = Math.min(total, PARTIAL_WINDOW_WORDS);
+  const stable = Math.max(0, Math.min(inWindow, Math.floor(p.stable_words) - (total - inWindow)));
+  if (stable >= inWindow) return shown.length;
+  const words = shown.split(" ");
+  return words.slice(0, stable).join(" ").length + (stable > 0 ? 1 : 0); // the space after the last confirmed word is confirmed too
+}
+
+/**
  * Format final text:
  * Extracts transcript text from string or `{ session, text, raw_text, ... }` object.
  * Caps at ~12 words with a leading ellipsis ("… ") if longer. Empty/whitespace returns "".
@@ -179,7 +198,7 @@ export class SpeechPillModel {
 /** Typing speed (characters per second) for short texts. */
 export const TYPE_CPS = 55;
 /** A text never takes longer than this to finish typing, however long it is. */
-export const TYPE_MAX_MS = 1200;
+export const TYPE_MAX_MS = 500;
 
 /**
  * Characters typed (fractional) `elapsedMs` after typing started from `base` characters towards `total`.
@@ -193,6 +212,39 @@ export function typingProgress(base: number, total: number, elapsedMs: number, c
   const duration = Math.max(1, Math.min(maxMs, (remaining / cps) * 1000));
   const p = Math.min(1, Math.max(0, elapsedMs / duration));
   return from + remaining * p;
+}
+
+/**
+ * How many characters of `target` can stay on screen when the text changes from `shown` to `target` (the part that does NOT
+ * need typing again). The caption shows a sliding window of the last few words, so the next partial is usually the old one
+ * shifted by a word or two, and a hypothesis can also be revised in its tail ("open cervix" -> "open servx"). Typing on from
+ * the old CHARACTER COUNT made such a text jump sideways; this keeps exactly what the two texts share:
+ *  - the longest common start ("open " in the revision case), or
+ *  - the longest ending of `shown` that starts `target` at a word boundary ("and send a" in the sliding case).
+ * Never more than `target.length`; 0 when nothing is shared.
+ */
+export function typingStart(shown: string, target: string): number {
+  if (!shown || !target) return 0;
+  let prefix = 0;
+  const max = Math.min(shown.length, target.length);
+  while (prefix < max && shown[prefix] === target[prefix]) prefix++;
+  if (prefix === shown.length) return prefix; // the target grows what is shown
+  // Back off to the last word boundary so a half-changed word is typed again whole.
+  if (prefix < target.length && prefix > 0 && target[prefix - 1] !== " ") {
+    const cut = shown.lastIndexOf(" ", prefix - 1);
+    prefix = cut >= 0 ? cut + 1 : 0;
+  }
+  // A word-aligned ending of `shown` that begins `target`.
+  let overlap = 0;
+  for (let i = 0; i < shown.length; i++) {
+    if (i > 0 && shown[i - 1] !== " ") continue;
+    const tail = shown.slice(i);
+    if (target.startsWith(tail) && (tail.length === target.length || target[tail.length] === " " || tail.endsWith(" "))) {
+      overlap = tail.length;
+      break; // the earliest start is the longest ending
+    }
+  }
+  return Math.max(prefix, overlap);
 }
 
 /** The visible slice for a fractional typed length: at least the first letter, never a trailing space. */

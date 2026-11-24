@@ -3457,6 +3457,10 @@ fn start_stt_capture_inner(origin: crate::directed::Origin, seed: Option<(Vec<f3
     });
     STT_CAPTURING.store(true, std::sync::atomic::Ordering::Release);
     crate::stt_stream::begin(); // live captions: the dispatcher decides (setting, privacy, meeting, Ghost, own voice)
+    if let Some((samples, _)) = &seed {
+        // the words already spoken after the detection point are in the command audio, so they belong in the caption too
+        crate::stt_stream::feed(samples);
+    }
     match seeded {
         Some(n) => tracing::info!(
             "stt-capture: started (session={session}, seeded {n} samples = {}ms after the detection point)",

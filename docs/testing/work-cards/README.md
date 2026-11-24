@@ -38,37 +38,38 @@ One card per in-scope feature, in queue order (lowest raw score first). Generate
 | 32 | [Activity Manager (app-only history)](32-activity-manager-app-only-history.md) | Integrations | 68.0% | L I |
 | 33 | [CI gates: dead code, IPC, turn-end, hygiene](33-ci-gates-dead-code-ipc-turn-end-hygiene.md) | Platform and quality | 69.0% | L |
 | 34 | [Hand mode (camera pointer)](34-hand-mode-camera-pointer.md) | Desktop control | 69.0% | L I |
-| 35 | [MCP connect system (Swiggy, Amazon, WhatsApp)](35-mcp-connect-system-swiggy-amazon-whatsapp.md) | Integrations | 70.3% | L |
-| 36 | [Google accounts + OAuth](36-google-accounts-oauth.md) | Integrations | 71.0% | L |
-| 37 | [Captions (word-by-word, black capsule)](37-captions-word-by-word-black-capsule.md) | Voice front end | 71.5% | L S |
-| 38 | [Dictation (type what I say)](38-dictation-type-what-i-say.md) | Desktop control | 71.5% | L |
-| 39 | [Wake word "NEXUS" (openWakeWord, own model)](39-wake-word-nexus-openwakeword-own-model.md) | Voice front end | 71.8% | L S I |
-| 40 | [Orb UI and turn lifecycle](40-orb-ui-and-turn-lifecycle.md) | Voice front end | 71.9% | L S |
-| 41 | [Ghost mode (voice drives the PC)](41-ghost-mode-voice-drives-the-pc.md) | Desktop control | 72.0% | T L I |
-| 42 | [Mishearing normaliser + learned corrections](42-mishearing-normaliser-learned-corrections.md) | Understanding | 72.0% | L S |
-| 43 | [Local STT fallback (Moonshine)](43-local-stt-fallback-moonshine.md) | Voice front end | 72.5% | L S |
-| 44 | [Maps / Places / Directions](44-maps-places-directions.md) | Integrations | 72.7% | L |
-| 45 | [Voice personas + offline twin swap](45-voice-personas-offline-twin-swap.md) | Voice front end | 73.8% | L |
-| 46 | [Agent hooks (Claude, Codex, Antigravity, Cursor, Gemini, OpenCode, Aider, Devin, Windsurf, Kilo, Copilot)](46-agent-hooks-claude-codex-antigravity-cursor-gemini-opencode-.md) | Agent control | 74.0% | L |
-| 47 | [TTS volume lease / restore](47-tts-volume-lease-restore.md) | Platform and quality | 74.5% | L |
-| 48 | [Ask-first shutdown / sleep / restart](48-ask-first-shutdown-sleep-restart.md) | Agent control | 74.8% | L |
-| 49 | [Gated commit + draft PR](49-gated-commit-draft-pr.md) | Agent control | 75.0% | L |
-| 50 | [Resource footprint (RAM / CPU / battery)](50-resource-footprint-ram-cpu-battery.md) | Platform and quality | 75.3% | T S |
-| 51 | [Window tiling + display off](51-window-tiling-display-off.md) | Desktop control | 75.7% | L |
-| 52 | [9Router (Cerebras > Groq > Gemini > Worker)](52-9router-cerebras-groq-gemini-worker.md) | Understanding | 76.0% | T S |
-| 53 | [Command Hub / settings UI](53-command-hub-settings-ui.md) | Platform and quality | 76.1% | L S |
-| 54 | [Main centre / 17 sub-centres validation](54-main-centre-17-sub-centres-validation.md) | Understanding | 76.5% | T |
-| 55 | [Security: keychain, PII filter, sealed memory](55-security-keychain-pii-filter-sealed-memory.md) | Platform and quality | 77.4% | L |
-| 56 | [Shortcut map + action router](56-shortcut-map-action-router.md) | Desktop control | 77.8% | L |
-| 57 | [Keep-awake](57-keep-awake.md) | Agent control | 78.0% | L |
-| 58 | [Memory core (encrypted store, ranked recall, context pack)](58-memory-core-encrypted-store-ranked-recall-context-pack.md) | Memory and proactive | 78.5% | L |
-| 59 | [Open / close / focus apps](59-open-close-focus-apps.md) | Desktop control | 79.8% | T S |
-| 60 | [Architecture mapper](60-architecture-mapper.md) | Integrations | 79.9% | S |
-| 61 | [Deterministic intent parser (regex tier)](61-deterministic-intent-parser-regex-tier.md) | Understanding | 81.0% | S I |
-| 62 | [GitHub commands (PRs, merge, review)](62-github-commands-prs-merge-review.md) | Integrations | 81.3% | none |
-| 63 | [Watch one agent, then power off](63-watch-one-agent-then-power-off.md) | Agent control | 81.3% | L |
-| 64 | [Cloudflare Worker](64-cloudflare-worker.md) | Integrations | 82.5% | none |
-| 65 | [Global hotkey Ctrl+Space (call / cancel)](65-global-hotkey-ctrl-space-call-cancel.md) | Voice front end | 85.3% | none |
-| 66 | [TTS online (Edge, persistent connection)](66-tts-online-edge-persistent-connection.md) | Voice front end | 85.8% | none |
-| 67 | [Action Kernel (voice file control, quarantine delete, undo)](67-action-kernel-voice-file-control-quarantine-delete-undo.md) | Desktop control | 86.0% | none |
-| 68 | [Cloud STT (Groq Whisper turbo) + hallucination filter](68-cloud-stt-groq-whisper-turbo-hallucination-filter.md) | Voice front end | 87.7% | none |
+| 35 | [Live captions while you speak (local / Groq / Deepgram)](35-live-captions-while-you-speak-local-groq-deepgram.md) | Voice front end | 69.6% | L |
+| 36 | [MCP connect system (Swiggy, Amazon, WhatsApp)](36-mcp-connect-system-swiggy-amazon-whatsapp.md) | Integrations | 70.3% | L |
+| 37 | [Google accounts + OAuth](37-google-accounts-oauth.md) | Integrations | 71.0% | L |
+| 38 | [Captions (word-by-word, black capsule)](38-captions-word-by-word-black-capsule.md) | Voice front end | 71.5% | L S |
+| 39 | [Dictation (type what I say)](39-dictation-type-what-i-say.md) | Desktop control | 71.5% | L |
+| 40 | [Wake word "NEXUS" (openWakeWord, own model)](40-wake-word-nexus-openwakeword-own-model.md) | Voice front end | 71.8% | L S I |
+| 41 | [Orb UI and turn lifecycle](41-orb-ui-and-turn-lifecycle.md) | Voice front end | 71.9% | L S |
+| 42 | [Ghost mode (voice drives the PC)](42-ghost-mode-voice-drives-the-pc.md) | Desktop control | 72.0% | T L I |
+| 43 | [Mishearing normaliser + learned corrections](43-mishearing-normaliser-learned-corrections.md) | Understanding | 72.0% | L S |
+| 44 | [Local STT fallback (Moonshine)](44-local-stt-fallback-moonshine.md) | Voice front end | 72.5% | L S |
+| 45 | [Maps / Places / Directions](45-maps-places-directions.md) | Integrations | 72.7% | L |
+| 46 | [Voice personas + offline twin swap](46-voice-personas-offline-twin-swap.md) | Voice front end | 73.8% | L |
+| 47 | [Agent hooks (Claude, Codex, Antigravity, Cursor, Gemini, OpenCode, Aider, Devin, Windsurf, Kilo, Copilot)](47-agent-hooks-claude-codex-antigravity-cursor-gemini-opencode-.md) | Agent control | 74.0% | L |
+| 48 | [TTS volume lease / restore](48-tts-volume-lease-restore.md) | Platform and quality | 74.5% | L |
+| 49 | [Ask-first shutdown / sleep / restart](49-ask-first-shutdown-sleep-restart.md) | Agent control | 74.8% | L |
+| 50 | [Gated commit + draft PR](50-gated-commit-draft-pr.md) | Agent control | 75.0% | L |
+| 51 | [Resource footprint (RAM / CPU / battery)](51-resource-footprint-ram-cpu-battery.md) | Platform and quality | 75.3% | T S |
+| 52 | [Window tiling + display off](52-window-tiling-display-off.md) | Desktop control | 75.7% | L |
+| 53 | [9Router (Cerebras > Groq > Gemini > Worker)](53-9router-cerebras-groq-gemini-worker.md) | Understanding | 76.0% | T S |
+| 54 | [Command Hub / settings UI](54-command-hub-settings-ui.md) | Platform and quality | 76.1% | L S |
+| 55 | [Main centre / 17 sub-centres validation](55-main-centre-17-sub-centres-validation.md) | Understanding | 76.5% | T |
+| 56 | [Security: keychain, PII filter, sealed memory](56-security-keychain-pii-filter-sealed-memory.md) | Platform and quality | 77.4% | L |
+| 57 | [Shortcut map + action router](57-shortcut-map-action-router.md) | Desktop control | 77.8% | L |
+| 58 | [Keep-awake](58-keep-awake.md) | Agent control | 78.0% | L |
+| 59 | [Memory core (encrypted store, ranked recall, context pack)](59-memory-core-encrypted-store-ranked-recall-context-pack.md) | Memory and proactive | 78.5% | L |
+| 60 | [Open / close / focus apps](60-open-close-focus-apps.md) | Desktop control | 79.8% | T S |
+| 61 | [Architecture mapper](61-architecture-mapper.md) | Integrations | 79.9% | S |
+| 62 | [Deterministic intent parser (regex tier)](62-deterministic-intent-parser-regex-tier.md) | Understanding | 81.0% | S I |
+| 63 | [GitHub commands (PRs, merge, review)](63-github-commands-prs-merge-review.md) | Integrations | 81.3% | none |
+| 64 | [Watch one agent, then power off](64-watch-one-agent-then-power-off.md) | Agent control | 81.3% | L |
+| 65 | [Cloudflare Worker](65-cloudflare-worker.md) | Integrations | 82.5% | none |
+| 66 | [Global hotkey Ctrl+Space (call / cancel)](66-global-hotkey-ctrl-space-call-cancel.md) | Voice front end | 85.3% | none |
+| 67 | [TTS online (Edge, persistent connection)](67-tts-online-edge-persistent-connection.md) | Voice front end | 85.8% | none |
+| 68 | [Action Kernel (voice file control, quarantine delete, undo)](68-action-kernel-voice-file-control-quarantine-delete-undo.md) | Desktop control | 86.0% | none |
+| 69 | [Cloud STT (Groq Whisper turbo) + hallucination filter](69-cloud-stt-groq-whisper-turbo-hallucination-filter.md) | Voice front end | 87.7% | none |

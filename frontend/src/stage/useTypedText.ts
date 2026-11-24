@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { typedSlice, typingProgress } from "./speechPillModel";
+import { typedSlice, typingProgress, typingStart } from "./speechPillModel";
 
 /**
  * Types `target` letter by letter while `active`. A longer target (the next partial, the final text) continues from the
@@ -23,8 +23,10 @@ export function useTypedText(target: string, active: boolean, reduced = false): 
       return;
     }
     const s = st.current;
-    // Continue from what is on screen; a target that is shorter than the typed count just shows in full.
-    s.base = Math.min(s.typed, target.length);
+    // Continue from what the old text and the new one SHARE (see typingStart), not from the old letter count.
+    const onScreen = typedSlice(s.target, s.typed);
+    s.base = typingStart(onScreen, target);
+    s.typed = s.base;
     s.startedAt = performance.now();
     s.target = target;
     let raf = 0;

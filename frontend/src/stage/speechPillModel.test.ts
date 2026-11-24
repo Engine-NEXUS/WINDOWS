@@ -13,6 +13,8 @@ import {
   TYPE_MAX_MS,
   typedSlice,
   typingProgress,
+  typingStart,
+  partialStableChars,
   FINAL_LINGER_MS,
   INITIAL_SPEECH_PILL_STATE,
 } from "./speechPillModel";
@@ -294,6 +296,64 @@ describe("letter-by-letter typing", () => {
       const visible = typedSlice(text, typingProgress(0, text.length, t)).replace(/\s/g, "").length;
       expect(visible - prev).toBeLessThanOrEqual(2);
       prev = visible;
+    }
+  });
+});
+
+describe("typingStart: what stays on screen when the caption text changes", () => {
+  it("a text that grows keeps everything already shown", () => {
+    expect(typingStart("open what", "open whatsapp and")).toBe("open what".length); // a true start of the new text stays
+    expect(typingStart("open whatsapp ", "open whatsapp and")).toBe("open whatsapp ".length);
+    expect(typingStart("open", "open whatsapp")).toBe(4);
+  });
+  it("the sliding window keeps the words it still shares (no sideways jump)", () => {
+    expect(typingStart("open whatsapp and send a", "and send a message to")).toBe("and send a".length);
+    expect(typingStart("a b c d e", "d e f g h")).toBe("d e".length);
+  });
+  it("a revised tail keeps the start and types the revision", () => {
+    expect(typingStart("open cervix", "open servx")).toBe("open ".length);
+    expect(typingStart("search for pizza", "search for peace")).toBe("search for ".length);
+  });
+  it("nothing shared, or nothing on screen, starts from zero", () => {
+    expect(typingStart("", "hello there")).toBe(0);
+    expect(typingStart("hello", "")).toBe(0);
+    expect(typingStart("alpha beta", "gamma delta")).toBe(0);
+  });
+  it("never more than the new text, and a shorter new text that is a start of the old one shows in full", () => {
+    expect(typingStart("open whatsapp and send", "open whatsapp")).toBe("open whatsapp".length);
+    for (const [a, b] of [["x y z", "x"], ["x y z", "y z q"], ["one two", "one two three four"]]) {
+      expect(typingStart(a, b)).toBeLessThanOrEqual(b.length);
+    }
+  });
+});
+
+describe("partialStableChars: how much of the shown caption is confirmed", () => {
+  it("a payload without the field, or with every word confirmed, is fully confirmed", () => {
+    expect(partialStableChars("open the hub")).toBe("open the hub".length);
+    expect(partialStableChars({ text: "open the hub" })).toBe("open the hub".length);
+    expect(partialStableChars({ text: "open the hub", stable_words: 3 })).toBe("open the hub".length);
+    expect(partialStableChars({ text: "open the hub", stable_words: 9 })).toBe("open the hub".length);
+  });
+  it("the words after the confirmed ones are the unconfirmed tail", () => {
+    expect(partialStableChars({ text: "search for the best pizza", stable_words: 3 })).toBe("search for the ".length);
+    expect(partialStableChars({ text: "search for the best pizza", stable_words: 0 })).toBe(0);
+    expect(partialStableChars({ text: "search for the best pizza", stable_words: 4 })).toBe("search for the best ".length);
+  });
+  it("counts from the start of the whole text even though only the last five words are shown", () => {
+    // 8 words, 6 confirmed: the window shows words 4..8 (5 words); word 4 and 5 are confirmed in it, 6 is the first guess...
+    const text = "one two three four five six seven eight";
+    // window "four five six seven eight"; confirmed = 6 of 8, so 3 of the 5 shown (four five six)
+    expect(partialStableChars({ text, stable_words: 6 })).toBe("four five six ".length);
+    // everything shown is confirmed once the confirmed count reaches the end of the text
+    expect(partialStableChars({ text, stable_words: 8 })).toBe("four five six seven eight".length);
+    // the confirmed part is entirely off the left edge: all five shown words are guesses
+    expect(partialStableChars({ text, stable_words: 2 })).toBe(0);
+  });
+  it("never goes past the displayed text", () => {
+    for (const sw of [-3, 0, 1, 2, 5, 7, 8, 100]) {
+      const n = partialStableChars({ text: "a b c d e f g", stable_words: sw });
+      expect(n).toBeGreaterThanOrEqual(0);
+      expect(n).toBeLessThanOrEqual("c d e f g".length);
     }
   });
 });

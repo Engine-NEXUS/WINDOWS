@@ -38,6 +38,7 @@ Which runtime processes and threads each feature depends on, and what Focus Mode
 | Activity Manager (app-only history) | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | CI gates: dead code, IPC, turn-end, hygiene | build scripts / Hub WebView2 | n/a |
 | Hand mode (camera pointer) | hand WebView2 renderer (camera + MediaPipe), hand-out thread, 80 ms watchdog, GPU shared with the stage WebView2 | owner of Focus Mode |
+| Live captions while you speak (local / Groq / Deepgram) | Edge TTS connection, Kokoro ONNX (lazy), rodio playback, volume lease watchdog | cache refresh, voice sync and swap downloads deferred |
 | MCP connect system (Swiggy, Amazon, WhatsApp) | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Google accounts + OAuth | OAuth loopback listener, vault monitor (90 s), Worker HTTPS | vault monitor paused |
 | Captions (word-by-word, black capsule) | Edge TTS connection, Kokoro ONNX (lazy), rodio playback, volume lease watchdog | cache refresh, voice sync and swap downloads deferred |
