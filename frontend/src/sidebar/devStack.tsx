@@ -417,6 +417,33 @@ function DevStackHarness() {
     }
   };
 
+  // Change 197 states: a bot-checked site while the hidden render runs, and a desktop-app scan.
+  const showThin = () => {
+    useSidebar.getState().showStack({
+      ...SAMPLE_PAYLOAD,
+      rendering: true,
+      thin: ["The site showed me a Cloudflare bot check, so I could only see its hosting."],
+      detections: SAMPLE_PAYLOAD.detections.map((d) => (d.id === "nextjs" ? { ...d, version: "15.0.3" } : d)),
+    });
+  };
+  const showApp = () => {
+    useSidebar.getState().showStack({
+      ...SAMPLE_PAYLOAD,
+      kind: "app",
+      title: "Slack",
+      url: "slack.exe",
+      final_url: "slack.exe",
+      summary: "This looks like Electron, running on Node.js. I found 3 technologies; 3 are confirmed.",
+      detections: [
+        { id: "electron", name: "Electron", category: "app-framework", confidence: 0.95, status: "detected", evidence: ["resources/app.asar found"] },
+        { id: "nodejs", name: "Node.js", category: "runtime", confidence: 0.85, status: "detected", evidence: ["node runtime found"] },
+        { id: "chromium", name: "Chromium", category: "browser-engine", confidence: 0.8, status: "detected", evidence: ["icudtl.dat found"] },
+      ],
+      groups: [],
+      sections: [{ idx: 0, title: "Channel list", summary: "A left rail of channels beside the message pane.", stack_refs: ["electron"] }],
+    });
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", width: "100%" }}>
       {/* Dev control toolbar */}
@@ -509,6 +536,12 @@ function DevStackHarness() {
           }}
         >
           Scanning state ({isScanning ? "ON" : "OFF"})
+        </button>
+        <button type="button" onClick={showThin} style={{ background: "#242432", color: "#fff", border: "1px solid rgba(255, 255, 255, 0.15)", padding: "5px 10px", borderRadius: "4px", cursor: "pointer", fontSize: "12px" }}>
+          Bot check + rendering
+        </button>
+        <button type="button" onClick={showApp} style={{ background: "#242432", color: "#fff", border: "1px solid rgba(255, 255, 255, 0.15)", padding: "5px 10px", borderRadius: "4px", cursor: "pointer", fontSize: "12px" }}>
+          App scan
         </button>
         <div style={{ width: "1px", height: "20px", background: "rgba(255, 255, 255, 0.15)" }} />
         <button

@@ -1,5 +1,15 @@
 # NEXUS Documentation Index
 
+- [Wake-word evidence and training plan](research/voice-accuracy/03-current-evidence-and-training-plan-2026-11-06.md) — current model identity, historical measurements, commercial research and a staged measurement/training budget.
+
+- [Native desktop-control reliability implementation](changes/2026-11-06-desktop-control-reliability.md) — contextual controls, safe choices, effect verification, offline checks and pending owner qualification.
+- [Desktop-control work card and owner runbook](testing/desktop-control/work-card.md) — fixed 300-run matrix, 20 held-out scenarios and separate voice pass.
+- [Hitodama installer inspection feasibility](research/hitodama-installer-inspection-feasibility-2026-11-06.md) — account-gated download, package/source distinction and newly verified public requirements.
+- [Desktop-control accuracy comparison and plan](features/desktop-control-accuracy-comparison-and-plan.md) — current exact-name accessibility route, coverage gaps, effect verification and matched benchmarking.
+- [Hitodama research and NEXUS comparison](research/hitodama-nexus-comparison-2026-11-06.md), with a [connected assistant improvement plan](features/hitodama-inspired-nexus-improvement-plan.md) — planning only, preserving the active readiness queue.
+- [Agent-watch cross-check, November 6](changes/2026-11-06-agent-watch-cross-check.md) — original fixes retained, fresh checks and three remaining edge cases.
+- [Agent completion and keep-awake reliability](changes/2026-11-05-agent-completion-reliability.md) — shared receipts, false-finish fixes, repeated offline checks and owner-operated acceptance.
+- [Contributor setup and onboarding](../CONTRIBUTING.md) — isolated development, platform limits and commands.
 - [Wake-word evidence and multi-user laptop training plan](research/voice-accuracy/03-current-evidence-and-training-plan-2026-11-06.md) — historical measurements, commercial research and participant/device qualification.
 
 > NEXUS is a Windows-first voice desktop assistant: a Tauri v2 / Rust client with a React UI, a Cloudflare Worker backend, and on-demand local Python helpers (speech fallback, intent classifier).

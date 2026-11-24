@@ -60,8 +60,10 @@ pub fn get_pending_stack() -> Result<Option<serde_json::Value>, String> {
     Ok(pending.take())
 }
 
-pub(crate) fn scanning_payload(title: &str, url: &str) -> serde_json::Value {
+/// `kind` is "site" or "app" (the Tech Stack view words its heading by it).
+pub(crate) fn scanning_payload_kind(title: &str, url: &str, kind: &str) -> serde_json::Value {
     serde_json::json!({
+        "kind": kind,
         "title": title,
         "url": url,
         "final_url": url,
@@ -69,6 +71,8 @@ pub(crate) fn scanning_payload(title: &str, url: &str) -> serde_json::Value {
         "lang": "",
         "description": "",
         "scanning": true,
+        "rendering": false,
+        "thin": [],
         "detections": [],
         "groups": [],
         "security": {
@@ -121,6 +125,14 @@ fn logo_domains(report: &crate::site_probe::SiteReport) -> Vec<String> {
 /// `{ "site_logo": <data url|null>, "logos": { "<detection id>": <data url> } }`.
 /// A patch (not a second full payload) so it can never overwrite sections or
 /// the summary that were emitted in the meantime. Pure over the logo memory.
+/// Ids of the detections the sidebar has no bundled logo for (it then draws a category glyph). The bundled table is the
+/// same JSON the sidebar resolves from, so this reports exactly what the owner will see.
+pub(crate) fn ids_without_icon(ids: &[String]) -> Vec<String> {
+    let bundled: serde_json::Value = serde_json::from_str(include_str!("../../frontend/src/sidebar/techIcons.json")).unwrap_or_default();
+    let scraped: serde_json::Value = serde_json::from_str(include_str!("../../frontend/src/sidebar/techIconsScraped.json")).unwrap_or_default();
+    ids.iter().filter(|id| bundled.get(id.as_str()).is_none() && scraped.get(id.as_str()).is_none()).cloned().collect()
+}
+
 pub(crate) fn logo_patch_json(report: &crate::site_probe::SiteReport) -> serde_json::Value {
     let mut logos = serde_json::Map::new();
     for d in &report.detections {
@@ -185,13 +197,9 @@ pub(crate) fn stack_payload_for_site(
     let mut markdown = crate::site_probe::report_markdown(&report.title, report);
     if !sections.is_empty() {
         markdown.push_str("\n## Page walkthrough\n\n");
-        for s in sections {
-            markdown.push_str(&format!("### {}. {}\n{}\n\n", s.idx + 1, s.title, s.summary));
-            if !s.stack_refs.is_empty() {
-                markdown.push_str(&format!("*Technologies used: {}*\n\n", s.stack_refs.join(", ")));
-            }
-        }
+        markdown.push_str(&sections_markdown(sections));
     }
+    markdown.push_str(PRIVACY_FOOTNOTE);
 
     let sections_json: Vec<serde_json::Value> = sections
         .iter()
@@ -205,7 +213,9 @@ pub(crate) fn stack_payload_for_site(
         })
         .collect();
 
+    let thin: Vec<String> = report.thin.iter().map(|t| t.spoken()).collect();
     serde_json::json!({
+        "kind": "site",
         "title": report.title,
         "url": report.url,
         "final_url": report.final_url,
@@ -213,6 +223,8 @@ pub(crate) fn stack_payload_for_site(
         "lang": report.lang,
         "description": report.description,
         "scanning": scanning,
+        "rendering": false,
+        "thin": thin,
         "site_logo": site_logo_domain(report).and_then(|dom| crate::brand_logo::memory_logo(&dom)),
         "detections": detections,
         "groups": groups,
@@ -316,13 +328,8 @@ pub(crate) fn stack_payload_for_app(
 
     let mut markdown = crate::app_probe::report_markdown(report);
     if !sections.is_empty() {
-        markdown.push_str("\n## Page walkthrough\n\n");
-        for s in sections {
-            markdown.push_str(&format!("### {}. {}\n{}\n\n", s.idx + 1, s.title, s.summary));
-            if !s.stack_refs.is_empty() {
-                markdown.push_str(&format!("*Technologies used: {}*\n\n", s.stack_refs.join(", ")));
-            }
-        }
+        markdown.push_str("\n## App walkthrough\n\n");
+        markdown.push_str(&sections_markdown(sections));
     }
 
     let sections_json: Vec<serde_json::Value> = sections
@@ -347,10 +354,16 @@ pub(crate) fn stack_payload_for_app(
         report.exe_name.clone()
     };
 
+    // The exe file name only: the full path can carry the user's name, and the
+    // Tech Stack view would otherwise try to read it as a web address.
+    let exe_file = exe_file_name(&report.exe_path);
     serde_json::json!({
+        "kind": "app",
         "title": title,
-        "url": report.exe_path,
-        "final_url": report.exe_path,
+        "url": exe_file,
+        "final_url": exe_file,
+        "rendering": false,
+        "thin": [],
         "status_code": 0,
         "lang": "",
         "description": report.company.clone().unwrap_or_default(),
@@ -382,47 +395,54 @@ pub(crate) fn stack_payload_for_app(
     })
 }
 
+/// "Next.js 14.2" when a version was captured, else the plain name.
+fn name_with_version(d: &crate::site_probe::Detection) -> String {
+    match d.version.as_deref() {
+        Some(v) if !v.is_empty() => format!("{} {v}", d.name),
+        _ => d.name.clone(),
+    }
+}
+
+/// One spoken sentence about a website's stack. The verb follows the
+/// confidence of the lead technology, so a guess never sounds like a fact:
+/// Detected "is built with", Likely "looks like", Inferred "my best guess is".
 pub(crate) fn summary_sentence_site(report: &crate::site_probe::SiteReport) -> String {
+    let why = report.thin.first().map(|t| format!(" {}", t.spoken())).unwrap_or_default();
     if report.detections.is_empty() {
-        return "I couldn't identify the technologies from outside, sir.".to_string();
+        return format!("I couldn't identify the technologies from outside, sir.{why}");
     }
 
-    let fw = report
-        .detections
-        .iter()
-        .find(|d| d.category == "meta-framework")
-        .or_else(|| report.detections.iter().find(|d| d.category == "frontend-framework"))
-        .map(|d| d.name.as_str());
-
-    let host = report
-        .detections
-        .iter()
-        .find(|d| d.category == "hosting")
-        .or_else(|| report.detections.iter().find(|d| d.category == "cdn"))
-        .map(|d| d.name.as_str());
-
-    let style = report
-        .detections
-        .iter()
-        .find(|d| d.category == "css-framework")
-        .or_else(|| report.detections.iter().find(|d| d.category == "ui-library"))
-        .map(|d| d.name.as_str());
-
-    let head = match (fw, host, style) {
-        (Some(f), Some(h), Some(s)) => {
-            format!("This looks like {f} on {h}, styled with {s}.")
-        }
-        (Some(f), Some(h), None) => format!("This looks like {f} on {h}."),
-        (Some(f), None, Some(s)) => format!("This looks like {f}, styled with {s}."),
-        (Some(f), None, None) => format!("This looks like {f}."),
-        (None, Some(h), Some(s)) => {
-            format!("This looks like a site hosted on {h}, styled with {s}.")
-        }
-        (None, Some(h), None) => format!("This looks like a site hosted on {h}."),
-        (None, None, Some(s)) => format!("This looks like a site styled with {s}."),
-        (None, None, None) => format!("This looks like it uses {} .", report.detections[0].name)
-            .replace(" .", "."),
+    let find_cat = |cats: &[&str]| {
+        cats.iter()
+            .find_map(|c| report.detections.iter().find(|d| d.category == *c))
     };
+    let fw = find_cat(&["meta-framework", "frontend-framework", "cms", "ecommerce"]);
+    let host = find_cat(&["hosting", "cdn"]);
+    let style = find_cat(&["css-framework", "ui-library"]);
+
+    let lead = fw.or(host).or(style).unwrap_or(&report.detections[0]);
+    let opener = match lead.status {
+        crate::site_probe::Status::Detected => "This is built with",
+        crate::site_probe::Status::Likely => "This looks like",
+        crate::site_probe::Status::Inferred => "I can't confirm it, but my best guess is",
+    };
+    let mut head = match (fw, host, style) {
+        (Some(f), Some(h), Some(s)) => format!(
+            "{opener} {} on {}, styled with {}.",
+            name_with_version(f), h.name, s.name
+        ),
+        (Some(f), Some(h), None) => format!("{opener} {} on {}.", name_with_version(f), h.name),
+        (Some(f), None, Some(s)) => format!("{opener} {}, styled with {}.", name_with_version(f), s.name),
+        (Some(f), None, None) => format!("{opener} {}.", name_with_version(f)),
+        (None, Some(h), Some(s)) => format!("{opener} a site hosted on {}, styled with {}.", h.name, s.name),
+        (None, Some(h), None) => format!("{opener} a site hosted on {}.", h.name),
+        (None, None, Some(s)) => format!("{opener} a site styled with {}.", s.name),
+        (None, None, None) => format!("{opener} {}.", name_with_version(lead)),
+    };
+    if lead.status == crate::site_probe::Status::Detected && fw.is_none() {
+        // "This is built with a site hosted on X" reads badly.
+        head = head.replacen("This is built with a site", "This is a site", 1);
+    }
 
     let total = report.detections.len();
     let confirmed = report.detections.iter().filter(|d| d.confidence >= 0.8).count();
@@ -436,7 +456,7 @@ pub(crate) fn summary_sentence_site(report: &crate::site_probe::SiteReport) -> S
     } else {
         format!("{confirmed} are confirmed")
     };
-    format!("{head} I found {tech_str}; {conf_str}.")
+    format!("{head} I found {tech_str}; {conf_str}.{why}")
 }
 
 pub(crate) fn summary_sentence_app(report: &crate::app_probe::AppReport) -> String {
@@ -546,22 +566,210 @@ pub(crate) fn opening_line(seed: u8) -> &'static str {
     OPENING_LINES[(seed as usize) % OPENING_LINES.len()]
 }
 
-pub(crate) fn closing_line(sections: usize, techs: usize) -> String {
-    let sec_str = if sections == 1 {
-        "1 section".to_string()
-    } else {
-        format!("{sections} sections")
-    };
-    let tech_str = if techs == 1 {
-        "1 technology".to_string()
-    } else {
-        format!("{techs} technologies")
-    };
-    format!("Walkthrough complete, sir. I covered {sec_str} and found {tech_str}.")
+/// How the scan went, which decides the tour and the closing line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ScanOutcome {
+    /// Not allowed (private address, banking page, system app): no screenshots,
+    /// no tour. Holds the spoken refusal.
+    Refused(String),
+    /// Allowed but could not be read (timeout, not HTML, unreadable exe): a
+    /// visual-only tour may still run. Holds the spoken reason.
+    Failed(String),
+    /// Read, but the page was a bot check, a sign-in page, an empty shell, or
+    /// nothing was recognised. Holds the spoken reasons (may be empty).
+    Thin(Vec<String>),
+    Ok,
 }
 
-pub(crate) fn needs_restore(moved: bool, _cancelled: bool) -> bool {
-    moved
+pub(crate) fn site_outcome(
+    res: &Result<crate::site_probe::SiteReport, crate::site_probe::ProbeRefusal>,
+) -> ScanOutcome {
+    use crate::site_probe::ProbeRefusal as P;
+    match res {
+        Err(r @ (P::BadUrl | P::NotHttp | P::PrivateAddress | P::Sensitive)) => ScanOutcome::Refused(r.spoken()),
+        Err(r) => ScanOutcome::Failed(r.spoken()),
+        Ok(report) if !report.thin.is_empty() => {
+            ScanOutcome::Thin(report.thin.iter().map(|t| t.spoken()).collect())
+        }
+        Ok(report) if report.detections.is_empty() => ScanOutcome::Thin(Vec::new()),
+        Ok(_) => ScanOutcome::Ok,
+    }
+}
+
+pub(crate) fn app_outcome(
+    res: &Result<crate::app_probe::AppReport, crate::app_probe::AppRefusal>,
+) -> ScanOutcome {
+    use crate::app_probe::AppRefusal as A;
+    match res {
+        Err(r @ (A::Sensitive | A::System)) => ScanOutcome::Refused(r.spoken().to_string()),
+        Err(r) => ScanOutcome::Failed(r.spoken().to_string()),
+        Ok(report) if report.detections.is_empty() => ScanOutcome::Thin(Vec::new()),
+        Ok(_) => ScanOutcome::Ok,
+    }
+}
+
+/// Refused targets are never captured or toured; everything else may be.
+pub(crate) fn tour_allowed(o: &ScanOutcome) -> bool {
+    !matches!(o, ScanOutcome::Refused(_))
+}
+
+/// The scan itself worked (the progress strip ends on "done", not "error").
+pub(crate) fn outcome_success(o: &ScanOutcome) -> bool {
+    matches!(o, ScanOutcome::Ok | ScanOutcome::Thin(_))
+}
+
+/// Spoken before a tour whose scan failed, so the user knows the cards are empty for a reason.
+pub(crate) const VISUAL_ONLY_LINE: &str = "I couldn't read the code, so this walkthrough is visual only, sir.";
+
+/// Spoken when the user moves the mouse or switches windows mid-tour.
+pub(crate) const TOOK_OVER_LINE: &str = "You took over, so I stopped the tour, sir.";
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    if n == 1 { format!("1 {one}") } else { format!("{n} {many}") }
+}
+
+/// The last line of a run, honest about how it went. None = say nothing more
+/// (a refusal was already spoken, or nothing useful happened).
+pub(crate) fn closing_line(outcome: &ScanOutcome, is_app: bool, sections: usize, techs: usize) -> Option<String> {
+    let sec = plural(sections, "section", "sections");
+    let tech = plural(techs, "technology", "technologies");
+    if *outcome == ScanOutcome::Ok && techs == 0 {
+        // Never say "found 0 technologies": nothing found is a thin result.
+        return closing_line(&ScanOutcome::Thin(Vec::new()), is_app, sections, techs);
+    }
+    match outcome {
+        ScanOutcome::Refused(_) => None,
+        ScanOutcome::Failed(_) => (sections > 0).then(|| {
+            format!("That's the visual walkthrough, sir. I covered {sec}, but I couldn't read the code behind it.")
+        }),
+        ScanOutcome::Thin(reasons) => {
+            if is_app {
+                return Some(if sections > 0 {
+                    "Walkthrough complete, sir. I couldn't identify the app's technologies from its install folder.".to_string()
+                } else {
+                    "I couldn't identify the app's technologies from its install folder, sir.".to_string()
+                });
+            }
+            let why = reasons.first().cloned().unwrap_or_else(|| {
+                "I couldn't identify its technologies from outside.".to_string()
+            });
+            Some(match (sections > 0, techs > 0) {
+                (true, true) => format!("Walkthrough complete, sir. I covered {sec} and found {tech}. {why}"),
+                (true, false) => format!("Walkthrough complete, sir. I covered {sec}. {why}"),
+                (false, true) => format!("I found {tech}, sir. {why}"),
+                (false, false) => format!("{why} Sorry, sir."),
+            })
+        }
+        ScanOutcome::Ok => Some(if is_app {
+            if sections > 0 {
+                format!("Walkthrough complete, sir. I looked at the window and found {tech}.")
+            } else {
+                format!("I found {tech}, sir, but I couldn't analyse the window itself.")
+            }
+        } else if sections > 0 {
+            format!("Walkthrough complete, sir. I covered {sec} and found {tech}.")
+        } else {
+            format!("I found {tech}, sir, but I couldn't walk through the page.")
+        }),
+    }
+}
+
+/// The capture area with NEXUS's own sidebar cut out: keeps the wider strip
+/// beside it. Hiding the sidebar from capture is unreliable under GDI, so the
+/// area is cropped instead. Pure.
+pub(crate) fn capture_region_excluding(
+    region: crate::screen_context::Region,
+    sidebar: Option<crate::screen_context::Region>,
+) -> crate::screen_context::Region {
+    let Some(sb) = sidebar else { return region };
+    let (r0, r1) = (region.x, region.x + region.w);
+    let (s0, s1) = (sb.x, sb.x + sb.w);
+    let v_overlap = sb.y < region.y + region.h && sb.y + sb.h > region.y;
+    if s1 <= r0 || s0 >= r1 || !v_overlap {
+        return region;
+    }
+    let left_w = (s0 - r0).max(0);
+    let right_w = (r1 - s1).max(0);
+    let (x, w) = if right_w >= left_w { (s1.max(r0), right_w) } else { (r0, left_w) };
+    if w < 200 {
+        return region;
+    }
+    crate::screen_context::Region { x, y: region.y, w, h: region.h }
+}
+
+/// Await `fut`, but give up (None) within ~100 ms of `cancel` being set.
+pub(crate) async fn cancellable<F: std::future::Future>(
+    fut: F,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Option<F::Output> {
+    tokio::pin!(fut);
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        tokio::select! {
+            out = &mut fut => return Some(out),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+        }
+    }
+}
+
+/// The exe file name of a path ("C:\...\slack.exe" -> "slack.exe").
+pub(crate) fn exe_file_name(path: &str) -> String {
+    path.rsplit(['\\', '/']).next().unwrap_or(path).to_string()
+}
+
+fn sections_markdown(sections: &[Section]) -> String {
+    let mut md = String::new();
+    for s in sections {
+        md.push_str(&format!("### {}. {}\n{}\n\n", s.idx + 1, s.title, s.summary));
+        if !s.stack_refs.is_empty() {
+            md.push_str(&format!("*Technologies used: {}*\n\n", s.stack_refs.join(", ")));
+        }
+    }
+    md
+}
+
+fn sections_json(sections: &[Section]) -> Vec<serde_json::Value> {
+    sections
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "idx": s.idx,
+                "title": s.title,
+                "summary": s.summary,
+                "stack_refs": s.stack_refs,
+            })
+        })
+        .collect()
+}
+
+/// Said in the report so the user knows what left the machine.
+const PRIVACY_FOOTNOTE: &str = "\n---\n*How this was made: one anonymous fetch of the public page (no cookies), \
+an optional hidden render of the same public page in an InPrivate browser window, screenshots of the visible page \
+sent to your Gemini key for the walkthrough, and the detected technologies' domains sent to Logo.dev for icons.*\n";
+
+/// The sidebar payload when the scan was refused or failed: keeps the reason
+/// and any walkthrough sections (they used to be dropped on this path).
+pub(crate) fn stack_payload_failed(
+    title: &str,
+    url: &str,
+    kind: &str,
+    reason: &str,
+    sections: &[Section],
+) -> serde_json::Value {
+    let mut p = scanning_payload_kind(title, url, kind);
+    p["scanning"] = serde_json::json!(false);
+    p["notes"] = serde_json::json!([reason]);
+    p["summary"] = serde_json::json!(reason);
+    p["sections"] = serde_json::json!(sections_json(sections));
+    let mut md = format!("## {title}\n\n{reason}\n");
+    if !sections.is_empty() {
+        md.push_str(if kind == "app" { "\n## App walkthrough\n\n" } else { "\n## Page walkthrough\n\n" });
+        md.push_str(&sections_markdown(sections));
+    }
+    p["markdown"] = serde_json::json!(md);
+    p
 }
 
 pub(crate) fn final_progress_phase(cancelled: bool, success: bool) -> &'static str {
@@ -603,21 +811,15 @@ pub(crate) async fn run<R: Runtime>(
     prompt: String,
 ) -> Result<crate::orchestrator::ProcessResult, String> {
     use crate::orchestrator::{
-        clear_active_request, emit, end_tour_fetch, install_new_request,
-        is_cancelled_pub, local_result, narrate_tour_script, speak_line,
-        OrchestratorEvent, OrchestratorState, Subsystem,
+        clear_active_request, emit, end_tour_fetch, install_new_request, is_cancelled_pub,
+        local_result, narrate_tour_script, speak_line, OrchestratorEvent, OrchestratorState,
+        Subsystem,
     };
-    use crate::reverse_scroll::{
-        estimate_scroll_shift, gray_from_jpeg_b64, max_viewports, plan_page_rect, rows_to_px,
-        ScrollController, ScrollDecision, SIDEBAR_W,
-    };
-    use crate::screen_tour::analyze_reverse_image;
+    use crate::reverse_scroll::{max_viewports, plan_page_rect_beside, StepDecision};
+    use crate::screen_tour::{analyze_reverse_image, RevTarget};
     use crate::window_tile::{PlaceResult, RealTileEnv, TileEnv};
-    use windows::Win32::Foundation::{HWND, RECT};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowRect, IsZoomed, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
-        SWP_NOZORDER, SW_MAXIMIZE, SW_RESTORE,
-    };
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
     let (rid, cancel) = install_new_request(Subsystem::LocalCommand);
     let (sw, sh) = crate::screen::primary_monitor_size().unwrap_or((1920, 1080));
@@ -629,270 +831,299 @@ pub(crate) async fn run<R: Runtime>(
         return Ok(local_result(rid, Subsystem::LocalCommand));
     }
 
-    let (orig_hwnd, orig_rect, was_zoomed) = unsafe {
-        let h = GetForegroundWindow();
-        let is_z = if h.0 != 0 { IsZoomed(h).as_bool() } else { false };
-        let mut r = RECT::default();
-        if h.0 != 0 {
-            let _ = GetWindowRect(h, &mut r);
-        }
-        (h, r, is_z)
-    };
+    // The window the command came from. It is never moved, resized or maximised: a website is scanned in a new
+    // window of its own (see `tour_hwnd`), so there is nothing to restore afterwards.
+    let orig_hwnd = unsafe { GetForegroundWindow() };
 
-    // If the foreground process is a browser and we don't have a URL yet,
-    // run the URL resolution ladder to try to get it.
+    // A browser with no URL yet: run the address-bar reading ladder.
     let app_exe_name = crate::browser_url::foreground_process_name().unwrap_or_default();
     if crate::browser_url::is_browser_process(&app_exe_name) && ctx.url.is_none() {
         if let Some(resolved) = crate::browser_url::resolve_foreground_url_for_command().await {
             ctx.url = Some(resolved);
         }
     }
+    let app_exe_path =
+        crate::browser_url::foreground_process_path().map(|p| p.to_string_lossy().to_string());
+    let target = classify_target(&app_exe_name, ctx.url.as_deref(), app_exe_path.as_deref());
 
-    let app_exe_path = crate::browser_url::foreground_process_path().map(|p| p.to_string_lossy().to_string());
-
-    let target = classify_target(
-        &app_exe_name,
-        ctx.url.as_deref(),
-        app_exe_path.as_deref(),
-    );
-
-    println!("[REVERSE] target: {}",
+    println!(
+        "[REVERSE] target: {}",
         match &target {
-            Target::Website(u) => format!("website {}", crate::browser_url::extract_host(u).unwrap_or(u.clone())),
-            Target::App(p) => format!("app {}", std::path::Path::new(p).file_name().and_then(|s| s.to_str()).unwrap_or(p)),
+            Target::Website(u) => format!(
+                "website {}",
+                crate::browser_url::extract_host(u).unwrap_or(u.clone())
+            ),
+            Target::App(p) => format!("app {}", exe_file_name(p)),
             Target::NeedUrl => "need-url".to_string(),
         }
     );
 
-    // Extract the URL and app path from the target for use in the branches
-    let target_url = match &target {
-        Target::Website(u) => Some(u.clone()),
-        _ => ctx.url.clone(),
-    };
-    let target_app_path = match &target {
-        Target::App(p) => Some(p.clone()),
-        _ => app_exe_path,
-    };
-
-    let is_website = matches!(&target, Target::Website(_));
-
-    match target {
+    let (target_url, target_app_path) = match &target {
+        Target::Website(u) => (Some(u.clone()), None),
+        Target::App(p) => (None, Some(p.clone())),
         Target::NeedUrl => {
             speak_line(
                 &app,
-                "I can't read this tab's address, sir. Click the address bar once and ask again.".to_string(),
+                "I can't read this tab's address, sir. Click the address bar once and ask again."
+                    .to_string(),
                 &rid,
             );
             clear_active_request(&rid);
             return Ok(local_result(rid, Subsystem::LocalCommand));
         }
-        Target::App(_) | Target::Website(_) => {
-            // Continue to the branches below
-        }
-    }
+    };
 
+    // In a meeting: no window move, no speech, no tour, no docked sidebar
+    // (it would be on the screen share). The result waits as a pending stack.
     let meeting = app.try_state::<Arc<crate::meeting_detect::MeetingState>>();
-    let quiet = meeting
-        .as_ref()
-        .map(|m| m.should_suppress_tts())
-        .unwrap_or(false);
+    let quiet = meeting.as_ref().map(|m| m.should_suppress_tts()).unwrap_or(false);
     let spoken = !quiet;
 
+    let mut loading_shown = false;
     if spoken {
         let seed = crate::network::uuid_v4().as_bytes()[0];
-        let ack_text = opening_line(seed);
         emit(
             &app,
-            &OrchestratorEvent::State {
-                state: OrchestratorState::Thinking,
-                request_id: rid.clone(),
-            },
+            &OrchestratorEvent::State { state: OrchestratorState::Thinking, request_id: rid.clone() },
         );
+        // The Ack event speaks the line (a speak_line Result would close the turn).
         emit(
             &app,
-            &OrchestratorEvent::Ack {
-                text: ack_text.to_string(),
-                request_id: rid.clone(),
-            },
+            &OrchestratorEvent::Ack { text: opening_line(seed).to_string(), request_id: rid.clone() },
         );
-        // The Ack event above speaks the line; a `speak_line` Result for it closed the turn (see run_screen_tour).
-        emit(
-            &app,
-            &OrchestratorEvent::Loading {
-                visible: true,
-                request_id: rid.clone(),
-            },
-        );
+        emit(&app, &OrchestratorEvent::Loading { visible: true, request_id: rid.clone() });
         crate::center::direct_ui(&app, crate::center::UiDirective::Loading(true));
+        loading_shown = true;
     }
     let _ = app.emit(
         "reverse:progress",
         progress_json("starting", "Preparing reverse engineering scan...", None, None),
     );
 
-    let mut moved = false;
+    // The window the scan and the tour act on: a new browser window beside the sidebar, or the original in place.
+    let mut tour_hwnd: isize = orig_hwnd.0 as isize;
     let mut sections: Vec<Section> = Vec::new();
     let mut summary_sentence = String::new();
-    let mut is_success = false;
     let mut total_techs = 0usize;
+    let mut outcome = ScanOutcome::Failed("The scan did not run.".to_string());
     let mut site_report_saved: Option<crate::site_probe::SiteReport> = None;
     let mut app_report_saved: Option<crate::app_probe::AppReport> = None;
+    // Title/url/kind/reason for the sidebar when there is no report.
+    let mut failed_view: Option<(String, String, &'static str, String)> = None;
+    let mut stop_line: Option<&'static str> = None;
 
-    // `is_website` / `target_url` / `target_app_path` come from classify_target above.
+    'work: {
+        if let Some(url) = target_url.clone() {
+            let scan_handle = tokio::spawn({
+                let u = url.clone();
+                async move { crate::site_probe::probe(&u).await }
+            });
 
-    if is_website {
-        let url = target_url.clone().unwrap_or_default();
-        let scan_handle = tokio::spawn({
-            let u = url.clone();
-            async move { crate::site_probe::probe(&u).await }
-        });
+            let scan_pay = scanning_payload_kind(&ctx.window_title, &url, "site");
+            set_pending_stack(&scan_pay);
+            // The sidebar goes first so the page window can be sized from its REAL edge (flush at any display scale).
+            if !quiet {
+                let _ = crate::commands::unified_show_sidebar(&app, "stack", Some("left")).await;
+            }
+            crate::commands::emit_logged(&app, "sidebar:show_stack", scan_pay);
 
-        if spoken {
-            if let Some(work_area) = RealTileEnv.work_area() {
-                if let Some(target_rect) = plan_page_rect(work_area, SIDEBAR_W) {
-                    let place_res = RealTileEnv.place(orig_hwnd.0, target_rect);
-                    match place_res {
-                        PlaceResult::Placed => {
-                            moved = true;
-                            println!("[REVERSE] place: {:?}", place_res);
-                        }
-                        PlaceResult::SkippedElevated
-                        | PlaceResult::SkippedGone
-                        | PlaceResult::Failed(_)
-                        | PlaceResult::Unsupported => {
-                            moved = false;
-                            println!("[REVERSE] place: {:?}", place_res);
+            // Open the page in a NEW window of the same browser and put it beside the sidebar. The original window
+            // stays exactly as it was (never resized, never made full screen). If anything fails the scan runs in
+            // place and moves nothing.
+            if spoken && crate::browser_url::is_browser_process(&app_exe_name) {
+                if let (Some(path), Some(sb), Some(work_area)) =
+                    (app_exe_path.clone(), sidebar_region(&app), RealTileEnv.work_area())
+                {
+                    match plan_page_rect_beside(work_area, sb.x + sb.w, 12) {
+                        None => println!("[REVERSE] place: skipped (screen too small to share)"),
+                        Some(rect) => {
+                            match crate::scan_window::open_new_window(std::path::Path::new(&path), &app_exe_name, &url).await {
+                                None => println!("[REVERSE] place: no new browser window appeared, scanning in place"),
+                                Some(h) => {
+                                    let res = RealTileEnv.place(h, rect);
+                                    println!("[REVERSE] place: new window {:?}", res);
+                                    if matches!(res, PlaceResult::Placed) {
+                                        tour_hwnd = h;
+                                        tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+                                        let _ = crate::live::commands::window::focus_window(HWND(h));
+                                        ctx = crate::screen_context::collect_target(sw, sh).await;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
-        }
 
-        let scan_pay = scanning_payload(&ctx.window_title, &url);
-        set_pending_stack(&scan_pay);
-        let _ = crate::commands::unified_show_sidebar(&app, "stack", Some("left")).await;
-        crate::commands::emit_logged(&app, "sidebar:show_stack", scan_pay);
+            let Some(joined) = cancellable(scan_handle, &cancel).await else { break 'work };
+            let mut scan_res = joined.unwrap_or_else(|e| {
+                Err(crate::site_probe::ProbeRefusal::Network(format!("scan task failed: {e}")))
+            });
 
-        if moved {
-            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-            ctx = crate::screen_context::collect_target(sw, sh).await;
-        }
-
-        let scan_res = match scan_handle.await {
-            Ok(r) => r,
-            Err(e) => Err(crate::site_probe::ProbeRefusal::Network(format!("scan task failed: {e}"))),
-        };
-
-        let (site_report_opt, stack_brief, top_techs) = match scan_res {
-            Ok(report) => {
-                total_techs = report.detections.len();
-                let brief_data: Vec<(String, String, f32)> = report
-                    .detections
-                    .iter()
-                    .map(|d| (d.id.clone(), d.name.clone(), d.confidence))
-                    .collect();
-                let (brief, top_ids) = tech_brief(&brief_data);
-                let sentence = summary_sentence_site(&report);
-                summary_sentence = sentence.clone();
-                let payload = stack_payload_for_site(&report, false, &[], &summary_sentence);
-                set_pending_stack(&payload);
-                crate::commands::emit_logged(&app, "sidebar:show_stack", payload);
-                // Logos arrive after the first paint (cached or Logo.dev, bounded):
-                // never blocks the scan; sent as a patch so nothing is overwritten.
-                {
-                    let app_logo = app.clone();
-                    let report_logo = report.clone();
-                    tokio::spawn(async move {
-                        let domains = logo_domains(&report_logo);
-                        if domains.is_empty() {
-                            return;
+            // Hidden render: the same public page in an invisible InPrivate
+            // window, so client-rendered apps are seen after they hydrate.
+            if let Ok(static_report) = scan_res.clone() {
+                if quiet {
+                    if let Ok(r) = scan_res.as_mut() {
+                        r.notes.push("Deeper render skipped during a meeting.".into());
+                    }
+                } else if static_report.final_url.starts_with("https://") {
+                    let mut pay = stack_payload_for_site(&static_report, false, &[], "");
+                    pay["rendering"] = serde_json::json!(true);
+                    set_pending_stack(&pay);
+                    crate::commands::emit_logged(&app, "sidebar:show_stack", pay);
+                    let _ = app.emit(
+                        "reverse:progress",
+                        progress_json("rendering", "Opening the page in a hidden window to look deeper...", None, None),
+                    );
+                    match crate::site_render::render(&app, &static_report.final_url, &cancel).await {
+                        crate::site_render::RenderResult::Page(page) => {
+                            println!(
+                                "[REVERSE] render: {} globals, {} dom, {} markers, {} resources",
+                                page.globals.len(),
+                                page.dom.len(),
+                                page.markers.len(),
+                                page.resources.len()
+                            );
+                            scan_res = Ok(crate::site_render::merge_rendered_signals(&static_report, &page));
                         }
-                        let got = tokio::time::timeout(
-                            std::time::Duration::from_secs(6),
-                            crate::brand_logo::logos_for_domains(&domains),
-                        )
-                        .await
-                        .unwrap_or_default();
-                        if !got.is_empty() {
-                            let _ = app_logo
-                                .emit("sidebar:stack_logos", logo_patch_json(&report_logo));
+                        crate::site_render::RenderResult::LoginRedirect => {
+                            let mut r = static_report;
+                            if !r.thin.contains(&crate::site_probe::ThinReason::LoginWall) {
+                                r.thin.push(crate::site_probe::ThinReason::LoginWall);
+                            }
+                            scan_res = Ok(r);
                         }
-                    });
+                        crate::site_render::RenderResult::Cancelled => break 'work,
+                        crate::site_render::RenderResult::Failed(e) => {
+                            println!("[REVERSE] render failed: {e}");
+                            if let Ok(r) = scan_res.as_mut() {
+                                r.notes.push("The deeper render did not finish, so this is the static scan only.".into());
+                            }
+                        }
+                    }
+                } else if let Ok(r) = scan_res.as_mut() {
+                    r.notes.push("Deeper render skipped: the site is not served over https.".into());
                 }
-                let _ = app.emit(
-                    "reverse:progress",
-                    progress_json("summary", &summary_sentence, None, None),
-                );
-                if spoken {
-                    speak_line(&app, summary_sentence.clone(), &rid);
-                }
-                (Some(report), brief, top_ids)
             }
-            Err(refusal) => {
-                let refusal_spoken = refusal.spoken();
-                let mut failed = scanning_payload(&ctx.window_title, &url);
-                failed["scanning"] = serde_json::json!(false);
-                failed["notes"] = serde_json::json!([refusal_spoken]);
-                failed["summary"] = serde_json::json!(refusal_spoken);
-                set_pending_stack(&failed);
-                crate::commands::emit_logged(&app, "sidebar:show_stack", failed);
-                if spoken {
-                    speak_line(&app, refusal_spoken.to_string(), &rid);
+
+            outcome = site_outcome(&scan_res);
+            let (stack_brief, top_techs) = match &scan_res {
+                Ok(report) => {
+                    total_techs = report.detections.len();
+                    let brief_data: Vec<(String, String, f32)> = report
+                        .detections
+                        .iter()
+                        .map(|d| (d.id.clone(), d.name.clone(), d.confidence))
+                        .collect();
+                    let (brief, top_ids) = tech_brief(&brief_data);
+                    summary_sentence = summary_sentence_site(report);
+                    let payload = stack_payload_for_site(report, false, &[], &summary_sentence);
+                    set_pending_stack(&payload);
+                    crate::commands::emit_logged(&app, "sidebar:show_stack", payload);
+                    {
+                        let all: Vec<String> = report.detections.iter().map(|d| d.id.clone()).collect();
+                        let none = ids_without_icon(&all);
+                        println!("[REVERSE] icons: {}/{} bundled, no logo for: {}", all.len() - none.len(), all.len(), if none.is_empty() { "-".to_string() } else { none.join(", ") });
+                    }
+                    // Logos arrive after the first paint (cached or Logo.dev, bounded),
+                    // as a patch so nothing emitted meanwhile is overwritten.
+                    {
+                        let app_logo = app.clone();
+                        let report_logo = report.clone();
+                        tokio::spawn(async move {
+                            let domains = logo_domains(&report_logo);
+                            if domains.is_empty() {
+                                return;
+                            }
+                            let got = tokio::time::timeout(
+                                std::time::Duration::from_secs(6),
+                                crate::brand_logo::logos_for_domains(&domains),
+                            )
+                            .await
+                            .unwrap_or_default();
+                            if !got.is_empty() {
+                                let _ = app_logo.emit("sidebar:stack_logos", logo_patch_json(&report_logo));
+                            }
+                        });
+                    }
+                    let _ = app.emit("reverse:progress", progress_json("summary", &summary_sentence, None, None));
+                    if spoken {
+                        speak_line(&app, summary_sentence.clone(), &rid);
+                    }
+                    (brief, top_ids)
                 }
-                (
-                    None,
-                    "unknown (the scan was refused or failed)".to_string(),
-                    Vec::new(),
-                )
-            }
-        };
-
-        site_report_saved = site_report_opt;
-
-        if !quiet {
-            let total = max_viewports(&prompt);
-            let region = if ctx.region.w > 0 && ctx.region.h > 0 {
-                ctx.region
-            } else {
-                crate::screen_context::Region {
-                    x: 0,
-                    y: 0,
-                    w: sw,
-                    h: sh,
+                Err(refusal) => {
+                    let reason = refusal.spoken();
+                    let failed = stack_payload_failed(&ctx.window_title, &url, "site", &reason, &[]);
+                    set_pending_stack(&failed);
+                    crate::commands::emit_logged(&app, "sidebar:show_stack", failed);
+                    failed_view = Some((ctx.window_title.clone(), url.clone(), "site", reason.clone()));
+                    if spoken {
+                        speak_line(&app, reason, &rid);
+                    }
+                    ("unknown (the code could not be read)".to_string(), Vec::new())
                 }
             };
-            let mut controller = ScrollController::new(region.h);
+            site_report_saved = scan_res.ok();
+
+            if quiet || !tour_allowed(&outcome) {
+                break 'work;
+            }
+            if matches!(outcome, ScanOutcome::Failed(_)) && spoken {
+                speak_line(&app, VISUAL_ONLY_LINE.to_string(), &rid);
+            }
+
+            let total = max_viewports(&prompt);
+            let window_region = if ctx.region.w > 0 && ctx.region.h > 0 {
+                ctx.region
+            } else {
+                crate::screen_context::Region { x: 0, y: 0, w: sw, h: sh }
+            };
+            let region = capture_region_excluding(window_region, sidebar_region(&app));
+            let hwnd_raw = tour_hwnd;
+            let doc = tokio::task::spawn_blocking(move || doc_rect_of(hwnd_raw)).await.ok().flatten();
+            let (mx, my, mw, mh) = crate::reverse_scroll::measure_region(doc, (region.x, region.y, region.w, region.h));
+            let measure = capture_region_excluding(
+                crate::screen_context::Region { x: mx, y: my, w: mw, h: mh },
+                sidebar_region(&app),
+            );
+            let baseline_tick = crate::memcore::resume::last_input_tick();
+            let mut our_send: Option<u32> = None;
+            let mut last_view = false;
 
             for i in 0..total {
                 if is_cancelled_pub(&cancel) {
                     break;
                 }
-
-                let frame_b64 = capture_frame(&app, &region).await;
-                let Some(b64) = frame_b64 else {
+                let Some(b64) = capture_frame(&app, &region).await else {
                     if i == 0 && spoken {
-                        speak_line(&app, "I couldn't read this page, sir.".to_string(), &rid);
+                        speak_line(&app, "I couldn't capture this page, sir.".to_string(), &rid);
                     }
                     break;
                 };
-
-                let prior_sections: Vec<String> =
-                    sections.iter().map(|s| s.title.clone()).collect();
+                let prior_sections: Vec<String> = sections.iter().map(|s| s.title.clone()).collect();
                 let context_block = ctx.prompt_block();
-                let analysed = analyze_reverse_image(
-                    &app,
-                    &prompt,
-                    &context_block,
-                    &stack_brief,
-                    &top_techs,
-                    i,
-                    total,
-                    &prior_sections,
-                    &b64,
-                    (region.x, region.y, region.w, region.h),
+                let Some(analysed) = cancellable(
+                    analyze_reverse_image(
+                        &app,
+                        &prompt,
+                        &context_block,
+                        &stack_brief,
+                        &top_techs,
+                        i,
+                        total,
+                        &prior_sections,
+                        &b64,
+                        (region.x, region.y, region.w, region.h),
+                        RevTarget::Site,
+                    ),
+                    &cancel,
                 )
-                .await;
-
+                .await
+                else {
+                    break;
+                };
                 let script = match analysed {
                     Ok(s) => s,
                     Err(e) => {
@@ -903,254 +1134,346 @@ pub(crate) async fn run<R: Runtime>(
                         break;
                     }
                 };
-
-                let end_reason =
-                    narrate_tour_script(&app, &rid, script.clone(), &cancel, (sw, sh)).await;
+                let end_reason = narrate_tour_script(&app, &rid, script.clone(), &cancel, (sw, sh)).await;
                 if end_reason == crate::screen_tour::EndReason::Cancelled {
                     break;
                 }
+                sections.push(section_from_script(i, &script));
+                emit_stack(&app, site_report_saved.as_ref(), None, failed_view.as_ref(), &sections, &summary_sentence);
+                let _ = app.emit(
+                    "reverse:progress",
+                    progress_json("touring", &format!("Touring section {} of {}", i + 1, total), Some(i + 1), Some(total)),
+                );
 
-                let mut stack_refs: Vec<String> = Vec::new();
-                for item in &script.items {
-                    for r in &item.stack_refs {
-                        if !stack_refs.contains(r) {
-                            stack_refs.push(r.clone());
-                        }
-                    }
+                if last_view || i + 1 >= total {
+                    break;
                 }
+                if user_has_taken_over(tour_hwnd, baseline_tick, our_send) {
+                    stop_line = Some(TOOK_OVER_LINE);
+                    break;
+                }
+                match scroll_one_viewport(&app, hwnd_raw, measure, &cancel, &mut our_send).await {
+                    StepDecision::Moved => {}
+                    StepDecision::LastView => last_view = true,
+                    StepDecision::NoMove | StepDecision::Stalled | StepDecision::Retry => break,
+                }
+            }
+        } else if let Some(exe_path) = target_app_path.clone() {
+            let exe_file = exe_file_name(&exe_path);
+            let scan_pay = scanning_payload_kind(&ctx.window_title, &exe_file, "app");
+            set_pending_stack(&scan_pay);
+            if !quiet {
+                let _ = crate::commands::unified_show_sidebar(&app, "stack", Some("left")).await;
+            }
+            crate::commands::emit_logged(&app, "sidebar:show_stack", scan_pay);
 
-                sections.push(Section {
-                    idx: i,
-                    title: script.title.clone(),
-                    summary: script.overview.clone(),
-                    stack_refs,
-                });
+            let probe_path = exe_path.clone();
+            let probe = tokio::time::timeout(
+                std::time::Duration::from_secs(APP_PROBE_TIMEOUT_SECS),
+                tokio::task::spawn_blocking(move || crate::app_probe::probe(&probe_path)),
+            );
+            let Some(joined) = cancellable(probe, &cancel).await else { break 'work };
+            let app_res = match joined {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => Err(crate::app_probe::AppRefusal::Unreadable(format!("scan task failed: {e}"))),
+                Err(_) => Err(crate::app_probe::AppRefusal::Unreadable("scan timed out".into())),
+            };
+            outcome = app_outcome(&app_res);
 
-                if let Some(report) = &site_report_saved {
-                    let payload =
-                        stack_payload_for_site(report, false, &sections, &summary_sentence);
+            match app_res {
+                Ok(report) => {
+                    total_techs = report.detections.len();
+                    let brief_data: Vec<(String, String, f32)> = report
+                        .detections
+                        .iter()
+                        .map(|d| (d.id.clone(), d.name.clone(), d.confidence))
+                        .collect();
+                    let (stack_brief, top_techs) = tech_brief(&brief_data);
+                    summary_sentence = summary_sentence_app(&report);
+                    let payload = stack_payload_for_app(&report, false, &[], &summary_sentence);
                     set_pending_stack(&payload);
                     crate::commands::emit_logged(&app, "sidebar:show_stack", payload);
-                }
-
-                let _ = app.emit(
-                    "reverse:progress",
-                    progress_json(
-                        "touring",
-                        &format!("Touring section {} of {}", i + 1, total),
-                        Some(i + 1),
-                        Some(total),
-                    ),
-                );
-
-                if i + 1 < total {
-                    let mid_x = region.x + region.w / 2;
-                    let mid_y = region.y + region.h / 2;
-                    let c = cancel.clone();
-                    let _ = crate::live::commands::mouse::move_eased(mid_x, mid_y, 150, move || {
-                        c.load(Ordering::Relaxed)
-                    });
-
-                    let mut prev_gray = gray_from_jpeg_b64(&b64);
-                    let mut total_shift = 0i32;
-                    let mut wheel_steps = 0;
-                    let target_shift = (0.60 * region.h as f64) as i32;
-                    let mut hit_end = false;
-
-                    while total_shift < target_shift && wheel_steps < 12 {
-                        if is_cancelled_pub(&cancel) {
-                            break;
-                        }
-                        let notches = controller.notches();
-                        wheel_steps += 1;
-                        let _ = crate::live::commands::mouse::scroll(notches);
-                        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
-
-                        let Some(probe_b64) = capture_frame(&app, &region).await else {
-                            break;
-                        };
-                        let Some(next_gray) = gray_from_jpeg_b64(&probe_b64) else {
-                            break;
-                        };
-                        let shift_rows = prev_gray
-                            .as_ref()
-                            .and_then(|pg| estimate_scroll_shift(pg, &next_gray));
-                        let shift_px =
-                            shift_rows.map(|r| rows_to_px(r, next_gray.h, region.h));
-                        let decision = controller.observe(shift_px);
-
-                        if let Some(px) = shift_px {
-                            total_shift += px;
-                            prev_gray = Some(next_gray);
-                        }
-
-                        if decision == ScrollDecision::AtEnd || decision == ScrollDecision::Stalled
-                        {
-                            hit_end = true;
-                            break;
-                        }
+                    let _ = app.emit("reverse:progress", progress_json("summary", &summary_sentence, None, None));
+                    if spoken {
+                        speak_line(&app, summary_sentence.clone(), &rid);
                     }
+                    app_report_saved = Some(report);
 
-                    if hit_end {
-                        break;
-                    }
-                }
-            }
-        }
-        is_success = true;
-    } else if let Some(exe_path) = target_app_path {
-        let probe_path = exe_path.clone();
-        let app_report_res = match tokio::task::spawn_blocking(move || crate::app_probe::probe(&probe_path)).await {
-            Ok(r) => r,
-            Err(e) => Err(crate::app_probe::AppRefusal::Unreadable(format!("scan task failed: {e}"))),
-        };
-
-        match app_report_res {
-            Ok(report) => {
-                total_techs = report.detections.len();
-                let brief_data: Vec<(String, String, f32)> = report
-                    .detections
-                    .iter()
-                    .map(|d| (d.id.clone(), d.name.clone(), d.confidence))
-                    .collect();
-                let (stack_brief, top_techs) = tech_brief(&brief_data);
-                summary_sentence = summary_sentence_app(&report);
-                let payload = stack_payload_for_app(&report, false, &[], &summary_sentence);
-                set_pending_stack(&payload);
-                let _ = crate::commands::unified_show_sidebar(&app, "stack", Some("left")).await;
-                crate::commands::emit_logged(&app, "sidebar:show_stack", payload);
-                let _ = app.emit(
-                    "reverse:progress",
-                    progress_json("summary", &summary_sentence, None, None),
-                );
-                if spoken {
-                    speak_line(&app, summary_sentence.clone(), &rid);
-                }
-
-                if !quiet {
-                    let region = if ctx.region.w > 0 && ctx.region.h > 0 {
-                        ctx.region
-                    } else {
-                        crate::screen_context::Region {
-                            x: 0,
-                            y: 0,
-                            w: sw,
-                            h: sh,
-                        }
-                    };
-
-                    if let Some(b64) = capture_frame(&app, &region).await {
-                        let context_block = ctx.prompt_block();
-                        let analysed = analyze_reverse_image(
-                            &app,
-                            &prompt,
-                            &context_block,
-                            &stack_brief,
-                            &top_techs,
-                            0,
-                            1,
-                            &[],
-                            &b64,
-                            (region.x, region.y, region.w, region.h),
-                        )
-                        .await;
-
-                        if let Ok(script) = analysed {
-                            let _ = narrate_tour_script(
-                                &app,
-                                &rid,
-                                script.clone(),
-                                &cancel,
-                                (sw, sh),
-                            )
-                            .await;
-
-                            let mut stack_refs: Vec<String> = Vec::new();
-                            for item in &script.items {
-                                for r in &item.stack_refs {
-                                    if !stack_refs.contains(r) {
-                                        stack_refs.push(r.clone());
-                                    }
+                    if !quiet {
+                        let window_region = if ctx.region.w > 0 && ctx.region.h > 0 {
+                            ctx.region
+                        } else {
+                            crate::screen_context::Region { x: 0, y: 0, w: sw, h: sh }
+                        };
+                        let region = capture_region_excluding(window_region, sidebar_region(&app));
+                        let analysed = match capture_frame(&app, &region).await {
+                            Some(b64) => {
+                                let context_block = ctx.prompt_block();
+                                let Some(r) = cancellable(
+                                    analyze_reverse_image(
+                                        &app,
+                                        &prompt,
+                                        &context_block,
+                                        &stack_brief,
+                                        &top_techs,
+                                        0,
+                                        1,
+                                        &[],
+                                        &b64,
+                                        (region.x, region.y, region.w, region.h),
+                                        RevTarget::App,
+                                    ),
+                                    &cancel,
+                                )
+                                .await
+                                else {
+                                    break 'work;
+                                };
+                                r
+                            }
+                            None => Err("capture failed".to_string()),
+                        };
+                        match analysed {
+                            Ok(script) => {
+                                let _ = narrate_tour_script(&app, &rid, script.clone(), &cancel, (sw, sh)).await;
+                                sections.push(section_from_script(0, &script));
+                            }
+                            Err(e) => {
+                                tracing::warn!("reverse_engineer: app window analysis failed: {e}");
+                                if spoken {
+                                    speak_line(&app, "I couldn't analyse the window itself, sir.".to_string(), &rid);
                                 }
                             }
-                            sections.push(Section {
-                                idx: 0,
-                                title: script.title.clone(),
-                                summary: script.overview.clone(),
-                                stack_refs,
-                            });
                         }
                     }
                 }
-                app_report_saved = Some(report);
-                is_success = true;
-            }
-            Err(refusal) => {
-                let mut failed = scanning_payload(&ctx.window_title, &exe_path);
-                failed["scanning"] = serde_json::json!(false);
-                failed["notes"] = serde_json::json!([refusal.spoken()]);
-                failed["summary"] = serde_json::json!(refusal.spoken());
-                set_pending_stack(&failed);
-                let _ = crate::commands::unified_show_sidebar(&app, "stack", Some("left")).await;
-                crate::commands::emit_logged(&app, "sidebar:show_stack", failed);
-                if spoken {
-                    speak_line(&app, refusal.spoken().to_string(), &rid);
+                Err(refusal) => {
+                    let reason = refusal.spoken().to_string();
+                    let failed = stack_payload_failed(&ctx.window_title, &exe_file, "app", &reason, &[]);
+                    set_pending_stack(&failed);
+                    crate::commands::emit_logged(&app, "sidebar:show_stack", failed);
+                    failed_view = Some((ctx.window_title.clone(), exe_file.clone(), "app", reason.clone()));
+                    if spoken {
+                        speak_line(&app, reason, &rid);
+                    }
                 }
             }
         }
     }
 
     // -----------------------------------------------------------------------
-    // Cleanup & finish (success, error, cancel all flow here)
+    // Cleanup & finish (success, refusal, failure and cancel all end here)
     // -----------------------------------------------------------------------
-    end_tour_fetch(&app, &rid, spoken);
-    crate::center::direct_ui(&app, crate::center::UiDirective::LoadingEnd(rid.clone()));
-
+    if loading_shown {
+        end_tour_fetch(&app, &rid, true);
+    }
     let was_cancelled = is_cancelled_pub(&cancel);
 
-    if needs_restore(moved, was_cancelled) && orig_hwnd.0 != 0 {
-        unsafe {
-            if was_zoomed {
-                let _ = ShowWindow(orig_hwnd, SW_MAXIMIZE);
-            } else {
-                let _ = ShowWindow(orig_hwnd, SW_RESTORE);
-                let _ = SetWindowPos(
-                    orig_hwnd,
-                    HWND(0),
-                    orig_rect.left,
-                    orig_rect.top,
-                    orig_rect.right - orig_rect.left,
-                    orig_rect.bottom - orig_rect.top,
-                    SWP_NOACTIVATE | SWP_NOZORDER,
-                );
-            }
-        }
-    }
+    emit_stack(
+        &app,
+        site_report_saved.as_ref(),
+        app_report_saved.as_ref(),
+        failed_view.as_ref(),
+        &sections,
+        &summary_sentence,
+    );
 
-    if let Some(report) = &site_report_saved {
-        let final_payload = stack_payload_for_site(report, false, &sections, &summary_sentence);
-        set_pending_stack(&final_payload);
-        crate::commands::emit_logged(&app, "sidebar:show_stack", final_payload);
-    } else if let Some(report) = &app_report_saved {
-        let final_payload = stack_payload_for_app(report, false, &sections, &summary_sentence);
-        set_pending_stack(&final_payload);
-        crate::commands::emit_logged(&app, "sidebar:show_stack", final_payload);
-    }
+    // Done: if the owner pushed the sidebar behind their windows to see the whole screen, bring it back in front.
+    crate::commands::raise_sidebar(&app);
 
-    let phase = final_progress_phase(was_cancelled, is_success);
+    let phase = final_progress_phase(was_cancelled, outcome_success(&outcome));
     let _ = app.emit(
         "reverse:progress",
         progress_json(phase, &format!("Reverse engineering {phase}"), None, None),
     );
 
-    if is_success && spoken && !was_cancelled {
-        speak_line(&app, closing_line(sections.len(), total_techs), &rid);
+    if spoken && !was_cancelled {
+        let line = stop_line.map(str::to_string).or_else(|| {
+            closing_line(&outcome, target_app_path.is_some(), sections.len(), total_techs)
+        });
+        if let Some(line) = line {
+            speak_line(&app, line, &rid);
+        }
     }
 
     emit(&app, &OrchestratorEvent::Done { request_id: rid.clone() });
     clear_active_request(&rid);
 
     Ok(local_result(rid, Subsystem::LocalCommand))
+}
+
+/// The app scanner reads a folder; it never needs longer than this.
+#[cfg(target_os = "windows")]
+const APP_PROBE_TIMEOUT_SECS: u64 = 8;
+
+fn section_from_script(idx: usize, script: &crate::screen_tour::TourScript) -> Section {
+    let mut stack_refs: Vec<String> = Vec::new();
+    for item in &script.items {
+        for r in &item.stack_refs {
+            if !stack_refs.contains(r) {
+                stack_refs.push(r.clone());
+            }
+        }
+    }
+    Section { idx, title: script.title.clone(), summary: script.overview.clone(), stack_refs }
+}
+
+/// Send the current sidebar payload: the site or app report when there is one,
+/// otherwise the refusal/failure view with any sections gathered so far.
+#[cfg(target_os = "windows")]
+fn emit_stack<R: Runtime>(
+    app: &AppHandle<R>,
+    site: Option<&crate::site_probe::SiteReport>,
+    app_report: Option<&crate::app_probe::AppReport>,
+    failed: Option<&(String, String, &'static str, String)>,
+    sections: &[Section],
+    summary: &str,
+) {
+    let payload = if let Some(r) = site {
+        stack_payload_for_site(r, false, sections, summary)
+    } else if let Some(r) = app_report {
+        stack_payload_for_app(r, false, sections, summary)
+    } else if let Some((title, url, kind, reason)) = failed {
+        stack_payload_failed(title, url, kind, reason, sections)
+    } else {
+        return;
+    };
+    set_pending_stack(&payload);
+    crate::commands::emit_logged(app, "sidebar:show_stack", payload);
+}
+
+/// Where NEXUS's own sidebar is on screen (physical px), if it is showing.
+#[cfg(target_os = "windows")]
+fn sidebar_region<R: Runtime>(app: &AppHandle<R>) -> Option<crate::screen_context::Region> {
+    let win = app.get_webview_window("sidebar")?;
+    if !win.is_visible().unwrap_or(false) {
+        return None;
+    }
+    let pos = win.outer_position().ok()?;
+    let size = win.outer_size().ok()?;
+    Some(crate::screen_context::Region {
+        x: pos.x,
+        y: pos.y,
+        w: size.width as i32,
+        h: size.height as i32,
+    })
+}
+
+/// The user moved the mouse, typed, or switched away from the toured window.
+#[cfg(target_os = "windows")]
+fn user_has_taken_over(orig_hwnd: isize, baseline_tick: Option<u32>, our_send: Option<u32>) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.0 as isize != orig_hwnd {
+        return true;
+    }
+    match (crate::memcore::resume::last_input_tick(), baseline_tick) {
+        (Some(last), Some(base)) => crate::reverse_scroll::user_took_over(last, base, our_send, OUR_INPUT_SLACK_MS),
+        _ => false,
+    }
+}
+
+/// Input this soon after our own PageDown is ours, not the user's.
+#[cfg(target_os = "windows")]
+const OUR_INPUT_SLACK_MS: u32 = 400;
+
+/// UI Automation document element of a top-level window. Blocking.
+#[cfg(target_os = "windows")]
+fn doc_element(hwnd: isize) -> Option<uiautomation::UIElement> {
+    use uiautomation::controls::ControlType;
+    use uiautomation::types::Handle;
+    use uiautomation::UIAutomation;
+    let automation = UIAutomation::new().ok()?;
+    let window = automation.element_from_handle(Handle::from(hwnd)).ok()?;
+    automation
+        .create_matcher()
+        .from(window)
+        .timeout(700)
+        .control_type(ControlType::Document)
+        .find_first()
+        .ok()
+}
+
+/// The page area of a browser window (no tab strip, no address bar). Blocking.
+#[cfg(target_os = "windows")]
+fn doc_rect_of(hwnd: isize) -> Option<(i32, i32, i32, i32)> {
+    let r = doc_element(hwnd)?.get_bounding_rectangle().ok()?;
+    let (x, y) = (r.get_left(), r.get_top());
+    Some((x, y, r.get_right() - x, r.get_bottom() - y))
+}
+
+/// The page's vertical scroll position in percent, when the browser reports it. Blocking.
+#[cfg(target_os = "windows")]
+fn doc_scroll_percent(hwnd: isize) -> Option<f64> {
+    use uiautomation::patterns::UIScrollPattern;
+    doc_element(hwnd)?
+        .get_pattern::<UIScrollPattern>()
+        .ok()?
+        .get_vertical_scroll_percent()
+        .ok()
+        .filter(|v| *v >= 0.0)
+}
+
+/// Scroll the page one screen down through UI Automation: no mouse, no keys,
+/// no focus change. False when the browser does not offer it. Blocking.
+#[cfg(target_os = "windows")]
+fn doc_scroll_page(hwnd: isize) -> bool {
+    use uiautomation::patterns::UIScrollPattern;
+    use uiautomation::types::ScrollAmount;
+    let Some(el) = doc_element(hwnd) else { return false };
+    let Ok(pattern) = el.get_pattern::<UIScrollPattern>() else { return false };
+    if !pattern.is_vertically_scrollable().unwrap_or(false) {
+        return false;
+    }
+    pattern.scroll(ScrollAmount::NoAmount, ScrollAmount::LargeIncrement).is_ok()
+}
+
+/// Move the page about one screen down and decide whether to tour the new view.
+/// UI Automation first (touches nothing the user uses); PageDown through the
+/// shortcut router (same-window check) when the browser does not offer it.
+#[cfg(target_os = "windows")]
+async fn scroll_one_viewport<R: Runtime>(
+    app: &AppHandle<R>,
+    hwnd: isize,
+    measure: crate::screen_context::Region,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+    our_send: &mut Option<u32>,
+) -> crate::reverse_scroll::StepDecision {
+    use crate::reverse_scroll::{estimate_scroll_shift, gray_from_jpeg_b64, rows_to_px, StepDecision, ViewportStepper};
+    let mut stepper = ViewportStepper::new(measure.h);
+    let mut prev = capture_frame(app, &measure).await.and_then(|b| gray_from_jpeg_b64(&b));
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return StepDecision::Stalled;
+        }
+        let pct_before = tokio::task::spawn_blocking(move || doc_scroll_percent(hwnd)).await.ok().flatten();
+        let via_uia = tokio::task::spawn_blocking(move || doc_scroll_page(hwnd)).await.unwrap_or(false);
+        if !via_uia {
+            let c = cancel.clone();
+            let out = tokio::task::spawn_blocking(move || {
+                crate::shortcuts::exec::do_action_cancelled(crate::shortcuts::map::Action::ScrollDown, None, &c)
+            })
+            .await;
+            *our_send = crate::memcore::resume::last_input_tick();
+            if !matches!(out, Ok(crate::shortcuts::router::Outcome::Sent { .. })) {
+                return StepDecision::Stalled;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+        let pct_after = tokio::task::spawn_blocking(move || doc_scroll_percent(hwnd)).await.ok().flatten();
+        let next = capture_frame(app, &measure).await.and_then(|b| gray_from_jpeg_b64(&b));
+        let shift_px = match (&prev, &next) {
+            (Some(p), Some(n)) => estimate_scroll_shift(p, n).map(|rows| rows_to_px(rows, n.h, measure.h)),
+            _ => None,
+        };
+        let decision = stepper.observe(shift_px, pct_before, pct_after);
+        if next.is_some() {
+            prev = next;
+        }
+        if decision != StepDecision::Retry {
+            return decision;
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1200,6 +1523,7 @@ mod tests {
                     confidence: 0.95,
                     status: crate::site_probe::Status::Detected,
                     evidence: vec!["_next".into()],
+                    version: None,
                 },
                 crate::site_probe::Detection {
                     id: "no-site".into(),
@@ -1209,6 +1533,7 @@ mod tests {
                     confidence: 0.5,
                     status: crate::site_probe::Status::Likely,
                     evidence: vec![],
+                    version: None,
                 },
             ],
             security: crate::site_probe::SecurityHeaders {
@@ -1221,7 +1546,16 @@ mod tests {
                 third_party_hosts: vec![],
             },
             notes: vec![],
+            thin: Vec::new(),
+            ctx: None,
         }
+    }
+
+    #[test]
+    fn ids_without_icon_reports_only_what_the_sidebar_cannot_draw() {
+        let got = ids_without_icon(&["react".into(), "csp".into(), "definitely-not-a-tech".into()]);
+        assert!(!got.contains(&"react".to_string()));
+        assert!(got.contains(&"definitely-not-a-tech".to_string()));
     }
 
     #[test]
@@ -1258,6 +1592,7 @@ mod tests {
                 confidence: 0.95,
                 status: crate::site_probe::Status::Detected,
                 evidence: vec!["_next/static in script src".into()],
+                version: None,
             },
             crate::site_probe::Detection {
                 id: "react".into(),
@@ -1267,6 +1602,7 @@ mod tests {
                 confidence: 0.90,
                 status: crate::site_probe::Status::Detected,
                 evidence: vec!["react in bundle".into()],
+                version: None,
             },
             crate::site_probe::Detection {
                 id: "tailwind".into(),
@@ -1276,6 +1612,7 @@ mod tests {
                 confidence: 0.85,
                 status: crate::site_probe::Status::Detected,
                 evidence: vec!["tailwind utility classes".into()],
+                version: None,
             },
             crate::site_probe::Detection {
                 id: "vercel".into(),
@@ -1285,6 +1622,7 @@ mod tests {
                 confidence: 0.95,
                 status: crate::site_probe::Status::Detected,
                 evidence: vec!["x-vercel-id header".into()],
+                version: None,
             },
             crate::site_probe::Detection {
                 id: "framer-motion".into(),
@@ -1294,6 +1632,7 @@ mod tests {
                 confidence: 0.65,
                 status: crate::site_probe::Status::Likely,
                 evidence: vec!["framer motion in js".into()],
+                version: None,
             },
             crate::site_probe::Detection {
                 id: "google-analytics".into(),
@@ -1303,6 +1642,7 @@ mod tests {
                 confidence: 0.40,
                 status: crate::site_probe::Status::Inferred,
                 evidence: vec!["gtag.js pattern".into()],
+                version: None,
             },
         ];
 
@@ -1333,6 +1673,8 @@ mod tests {
                 third_party_hosts: vec!["cdn.example.net".into()],
             },
             notes: vec!["note 1".into()],
+            thin: Vec::new(),
+            ctx: None,
         };
 
         let sections = vec![Section {
@@ -1485,7 +1827,8 @@ mod tests {
         }
 
         assert_eq!(json["title"], "Slack");
-        assert_eq!(json["url"], "C:\\Program Files\\Slack\\slack.exe");
+        assert_eq!(json["kind"], "app");
+        assert_eq!(json["url"], "slack.exe", "only the file name leaves the app");
         assert_eq!(json["status_code"], 0);
         assert_eq!(json["security"]["hsts"], false);
         assert_eq!(json["stats"]["html_bytes"], 0);
@@ -1500,13 +1843,16 @@ mod tests {
         assert_eq!(groups[0]["label"], "Application framework");
 
         let md = json["markdown"].as_str().unwrap();
-        assert!(md.contains("## Page walkthrough"));
+        assert!(md.contains("## App walkthrough"));
+        assert!(!md.contains("Page walkthrough"));
     }
 
     #[test]
     fn scanning_payload_shape() {
-        let p = scanning_payload("Scanning Target", "https://example.com");
+        let p = scanning_payload_kind("Scanning Target", "https://example.com", "site");
         assert_eq!(p["scanning"], true);
+        assert_eq!(p["kind"], "site");
+        assert_eq!(p["rendering"], false);
         assert_eq!(p["title"], "Scanning Target");
         assert_eq!(p["url"], "https://example.com");
         assert_eq!(p["detections"].as_array().unwrap().len(), 0);
@@ -1529,6 +1875,8 @@ mod tests {
             security: Default::default(),
             stats: Default::default(),
             notes: vec![],
+            thin: Vec::new(),
+            ctx: None,
         };
         assert_eq!(
             summary_sentence_site(&empty_report),
@@ -1551,6 +1899,7 @@ mod tests {
                     confidence: 0.95,
                     status: crate::site_probe::Status::Detected,
                     evidence: vec![],
+                    version: None,
                 },
                 crate::site_probe::Detection {
                     id: "vercel".into(),
@@ -1560,6 +1909,7 @@ mod tests {
                     confidence: 0.90,
                     status: crate::site_probe::Status::Detected,
                     evidence: vec![],
+                    version: None,
                 },
                 crate::site_probe::Detection {
                     id: "tailwind".into(),
@@ -1569,11 +1919,14 @@ mod tests {
                     confidence: 0.85,
                     status: crate::site_probe::Status::Detected,
                     evidence: vec![],
+                    version: None,
                 },
             ],
             security: Default::default(),
             stats: Default::default(),
             notes: vec![],
+            thin: Vec::new(),
+            ctx: None,
         };
         let s = summary_sentence_site(&full_report);
         assert!(s.contains("Next.js on Vercel, styled with Tailwind CSS"));
@@ -1675,17 +2028,187 @@ mod tests {
     #[test]
     fn closing_line_pluralises() {
         assert_eq!(
-            closing_line(1, 1),
+            closing_line(&ScanOutcome::Ok, false, 1, 1).unwrap(),
             "Walkthrough complete, sir. I covered 1 section and found 1 technology."
         );
         assert_eq!(
-            closing_line(3, 14),
+            closing_line(&ScanOutcome::Ok, false, 3, 14).unwrap(),
             "Walkthrough complete, sir. I covered 3 sections and found 14 technologies."
         );
-        assert_eq!(
-            closing_line(0, 0),
-            "Walkthrough complete, sir. I covered 0 sections and found 0 technologies."
-        );
+    }
+
+    #[test]
+    fn closing_line_is_honest_about_every_outcome() {
+        // A refusal was already spoken: nothing more, and never "complete".
+        assert_eq!(closing_line(&ScanOutcome::Refused("no".into()), false, 0, 0), None);
+        // A failed scan with no tour says nothing; with a tour it says visual only.
+        assert_eq!(closing_line(&ScanOutcome::Failed("timeout".into()), false, 0, 0), None);
+        let f = closing_line(&ScanOutcome::Failed("timeout".into()), false, 2, 0).unwrap();
+        assert!(f.contains("visual walkthrough") && f.contains("couldn't read the code"), "{f}");
+        // Thin: the reason is spoken, never a bare "found 0 technologies".
+        let t = closing_line(
+            &ScanOutcome::Thin(vec!["The site showed me a Cloudflare bot check, so I could only see its hosting.".into()]),
+            false,
+            3,
+            1,
+        )
+        .unwrap();
+        assert!(t.contains("Cloudflare bot check"), "{t}");
+        let t0 = closing_line(&ScanOutcome::Thin(vec![]), false, 0, 0).unwrap();
+        assert!(t0.contains("couldn't identify"), "{t0}");
+        // Ok without a walkthrough does not claim one.
+        let o = closing_line(&ScanOutcome::Ok, false, 0, 5).unwrap();
+        assert!(!o.contains("Walkthrough complete") && o.contains("5 technologies"), "{o}");
+        // App wording never mentions sections of a page.
+        let a = closing_line(&ScanOutcome::Ok, true, 1, 3).unwrap();
+        assert!(a.contains("window") && !a.contains("section"), "{a}");
+        for o in [ScanOutcome::Ok, ScanOutcome::Thin(vec![]), ScanOutcome::Failed("x".into())] {
+            for secs in [0, 1, 4] {
+                if let Some(line) = closing_line(&o, false, secs, 0) {
+                    assert!(!line.contains("found 0 technologies"), "{o:?}/{secs}: {line}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn refused_targets_are_never_toured() {
+        assert!(!tour_allowed(&ScanOutcome::Refused("I do not scan private or banking sites, sir.".into())));
+        assert!(tour_allowed(&ScanOutcome::Failed("The scan took too long, sir.".into())));
+        assert!(tour_allowed(&ScanOutcome::Thin(vec![])));
+        assert!(tour_allowed(&ScanOutcome::Ok));
+        assert!(!outcome_success(&ScanOutcome::Failed("x".into())));
+        assert!(!outcome_success(&ScanOutcome::Refused("x".into())));
+        assert!(outcome_success(&ScanOutcome::Thin(vec![])));
+    }
+
+    #[test]
+    fn site_outcome_maps_refusals_failures_and_thin_pages() {
+        use crate::site_probe::ProbeRefusal as P;
+        for r in [P::Sensitive, P::PrivateAddress, P::BadUrl, P::NotHttp] {
+            assert!(matches!(site_outcome(&Err(r)), ScanOutcome::Refused(_)));
+        }
+        for r in [P::Timeout, P::NotHtml, P::TooManyRedirects, P::Network("x".into())] {
+            assert!(matches!(site_outcome(&Err(r)), ScanOutcome::Failed(_)));
+        }
+        let mut thin = logo_test_report();
+        thin.thin = vec![crate::site_probe::ThinReason::LoginWall];
+        match site_outcome(&Ok(thin)) {
+            ScanOutcome::Thin(r) => assert!(r[0].contains("sign-in")),
+            o => panic!("{o:?}"),
+        }
+        let mut empty = logo_test_report();
+        empty.detections.clear();
+        assert_eq!(site_outcome(&Ok(empty)), ScanOutcome::Thin(vec![]));
+        assert_eq!(site_outcome(&Ok(logo_test_report())), ScanOutcome::Ok);
+    }
+
+    #[test]
+    fn app_outcome_refuses_system_and_sensitive_apps() {
+        use crate::app_probe::AppRefusal as A;
+        assert!(matches!(app_outcome(&Err(A::System)), ScanOutcome::Refused(_)));
+        assert!(matches!(app_outcome(&Err(A::Sensitive)), ScanOutcome::Refused(_)));
+        assert!(matches!(app_outcome(&Err(A::NotFound)), ScanOutcome::Failed(_)));
+    }
+
+    fn reg(x: i32, y: i32, w: i32, h: i32) -> crate::screen_context::Region {
+        crate::screen_context::Region { x, y, w, h }
+    }
+
+    #[test]
+    fn capture_region_crops_the_sidebar_out() {
+        let screen = reg(0, 0, 1920, 1040);
+        // sidebar docked left: keep the page on the right
+        assert_eq!(capture_region_excluding(screen, Some(reg(0, 0, 540, 1040))), reg(540, 0, 1380, 1040));
+        // sidebar docked right: keep the left
+        assert_eq!(capture_region_excluding(screen, Some(reg(1380, 0, 540, 1040))), reg(0, 0, 1380, 1040));
+        // no sidebar, or it does not overlap: unchanged
+        assert_eq!(capture_region_excluding(screen, None), screen);
+        let page = reg(560, 0, 1360, 1040);
+        assert_eq!(capture_region_excluding(page, Some(reg(0, 0, 540, 1040))), page);
+        // nothing sensible left beside it: keep the region rather than a sliver
+        assert_eq!(capture_region_excluding(reg(0, 0, 600, 800), Some(reg(0, 0, 540, 800))), reg(0, 0, 600, 800));
+    }
+
+    #[tokio::test]
+    async fn cancellable_gives_up_soon_after_cancel() {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let f2 = flag.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            f2.store(true, Ordering::Relaxed);
+        });
+        let start = std::time::Instant::now();
+        let out = cancellable(tokio::time::sleep(std::time::Duration::from_secs(30)), &flag).await;
+        assert!(out.is_none());
+        assert!(start.elapsed() < std::time::Duration::from_millis(400), "{:?}", start.elapsed());
+        let done = cancellable(async { 7 }, &std::sync::atomic::AtomicBool::new(false)).await;
+        assert_eq!(done, Some(7));
+    }
+
+    #[test]
+    fn failed_payload_keeps_the_reason_and_the_sections() {
+        let sections = vec![Section { idx: 0, title: "Hero".into(), summary: "Big banner".into(), stack_refs: vec![] }];
+        let p = stack_payload_failed("Shop", "https://shop.example.com/", "site", "The scan took too long, sir.", &sections);
+        assert_eq!(p["scanning"], false);
+        assert_eq!(p["kind"], "site");
+        assert_eq!(p["summary"], "The scan took too long, sir.");
+        assert_eq!(p["sections"].as_array().unwrap().len(), 1);
+        assert!(p["markdown"].as_str().unwrap().contains("Hero"));
+    }
+
+    #[test]
+    fn summary_wording_follows_confidence_and_explains_thin_results() {
+        let mut r = logo_test_report();
+        r.detections = vec![crate::site_probe::Detection {
+            id: "nextjs".into(),
+            name: "Next.js".into(),
+            category: "meta-framework".into(),
+            website: None,
+            confidence: 0.35,
+            status: crate::site_probe::Status::Inferred,
+            evidence: vec![],
+            version: None,
+        }];
+        let s = summary_sentence_site(&r);
+        assert!(s.contains("best guess is Next.js"), "{s}");
+        r.detections[0].confidence = 0.6;
+        r.detections[0].status = crate::site_probe::Status::Likely;
+        assert!(summary_sentence_site(&r).contains("This looks like Next.js"));
+        r.detections[0].confidence = 0.95;
+        r.detections[0].status = crate::site_probe::Status::Detected;
+        r.detections[0].version = Some("14.2".into());
+        assert!(summary_sentence_site(&r).contains("This is built with Next.js 14.2"));
+        r.thin = vec![crate::site_probe::ThinReason::Challenge("Cloudflare".into())];
+        assert!(summary_sentence_site(&r).contains("Cloudflare bot check"));
+        r.detections.clear();
+        let none = summary_sentence_site(&r);
+        assert!(none.contains("couldn't identify") && none.contains("Cloudflare"), "{none}");
+    }
+
+    /// Wiring pin: the first live run (build a3d6200b246d9b4a) showed the intent
+    /// parsed and routed, then dropped, because only the Ghost-session table in
+    /// `orchestrator.rs` dispatched it. Both tables must call the runner.
+    #[test]
+    fn orchestrator_dispatches_reverse_engineer_in_normal_and_ghost_mode() {
+        let src = include_str!("orchestrator.rs");
+        let arm = r#"if intent == "reverse_engineer" => {"#;
+        let ghost_start = src
+            .find("// ─── Ghost session routing")
+            .expect("ghost routing marker in orchestrator.rs");
+        let (normal, ghost) = src.split_at(ghost_start);
+        for (name, part) in [("normal", normal), ("ghost", ghost)] {
+            let at = part.find(arm).unwrap_or_else(|| panic!("{name}-mode table has no reverse_engineer arm"));
+            let body = &part[at..(at + 400).min(part.len())];
+            assert!(body.contains("crate::reverse_engineer::run("), "{name}-mode arm must call the runner");
+        }
+    }
+
+    #[test]
+    fn exe_file_name_hides_the_folder() {
+        assert_eq!(exe_file_name("C:\\Users\\someone\\AppData\\Local\\slack\\slack.exe"), "slack.exe");
+        assert_eq!(exe_file_name("/usr/bin/code"), "code");
+        assert_eq!(exe_file_name("plain.exe"), "plain.exe");
     }
 
     #[test]
@@ -1704,11 +2227,6 @@ mod tests {
 
     #[test]
     fn cleanup_decision_functions() {
-        assert_eq!(needs_restore(true, false), true);
-        assert_eq!(needs_restore(true, true), true);
-        assert_eq!(needs_restore(false, false), false);
-        assert_eq!(needs_restore(false, true), false);
-
         assert_eq!(final_progress_phase(true, true), "cancelled");
         assert_eq!(final_progress_phase(true, false), "cancelled");
         assert_eq!(final_progress_phase(false, false), "error");

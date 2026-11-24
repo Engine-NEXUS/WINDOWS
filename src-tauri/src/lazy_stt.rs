@@ -29,46 +29,30 @@ const STT_PORT: u16 = 39217;
 /// Get the STT server script path.
 fn stt_script_path() -> Option<std::path::PathBuf> {
     // Try several locations relative to the executable and project root
-    let candidates = [
-        // Development: src-tauri/target/release/../../../server/stt_server.py
-        //   current_exe = .../src-tauri/target/release/nexus.exe
-        //   parent() = .../target/release
-        //   parent() = .../target
-        //   parent() = .../src-tauri
-        //   parent() = .../ULTRON  (project root)
-        //   join("server/stt_server.py") = .../ULTRON/server/stt_server.py
-        std::env::current_exe()
-            .ok()?
-            .parent()?          // target/release
-            .parent()?          // target
-            .parent()?          // src-tauri
-            .parent()?          // project root (ULTRON)
-            .join("server")
-            .join("stt_server.py"),
-        // Fallback: src-tauri/target/release/../../server/stt_server.py
-        //   (in case the project root is src-tauri itself)
-        std::env::current_exe()
-            .ok()?
-            .parent()?          // target/release
-            .parent()?          // target
-            .parent()?          // src-tauri
-            .join("server")
-            .join("stt_server.py"),
-        // Production: <app_dir>/resources/server/stt_server.py
-        std::env::current_exe()
-            .ok()?
-            .parent()?
-            .join("resources")
-            .join("server")
-            .join("stt_server.py"),
-    ];
-
-    for path in &candidates {
-        if path.exists() {
-            return Some(path.clone());
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    // Each candidate is built independently: an app installed in a shallow folder (for example
+    // C:\NEXUS-Dev) has no great-grandparent directory, and the old `?` chain returned None for
+    // the whole function before the production location was ever tried.
+    let up = |n: usize| -> Option<std::path::PathBuf> {
+        let mut p = exe_dir.as_path();
+        for _ in 0..n {
+            p = p.parent()?;
         }
-    }
-    None
+        Some(p.to_path_buf())
+    };
+    let candidates: Vec<std::path::PathBuf> = [
+        // Development: src-tauri/target/release/../../../server/stt_server.py (project root)
+        up(3).map(|p| p.join("server").join("stt_server.py")),
+        // Fallback: the project root is src-tauri itself
+        up(2).map(|p| p.join("server").join("stt_server.py")),
+        // Production: <app_dir>/resources/server/stt_server.py
+        Some(exe_dir.join("resources").join("server").join("stt_server.py")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    candidates.into_iter().find(|path| path.exists())
 }
 
 /// Check if the STT server is already running (external or our child).
@@ -125,6 +109,13 @@ fn stt_child_env() -> Vec<(String, String)> {
 /// 2. Windows registry: HKCU/HKLM PythonCore\3.13, 3.12, 3.11, 3.10
 /// 3. Common per-user and system install locations
 pub fn find_python() -> Option<String> {
+    // Contributor binaries must never silently adopt a personal/system interpreter.
+    if cfg!(feature = "contributor") || option_env!("NEXUS_MANAGED_PYTHON").is_some() {
+        let path = option_env!("NEXUS_MANAGED_PYTHON")?;
+        let output = crate::no_window::command(path).arg("--version").output().ok()?;
+        return (output.status.success() && String::from_utf8_lossy(&output.stdout).trim().starts_with("Python 3.12."))
+            .then(|| path.to_string());
+    }
     // 1. Try PATH-based commands â€” verify each actually works
     for cmd in &["python", "python3", "py"] {
         if let Ok(output) = crate::no_window::command(cmd).arg("--version").output() {

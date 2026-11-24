@@ -299,7 +299,7 @@ pub async fn poll_sentinel_targets<R: Runtime>(app: &AppHandle<R>) {
     let app_data_dir = app
         .path()
         .app_data_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("com.nexus.assistant"));
+        .unwrap_or_else(|_| std::path::PathBuf::from(crate::app_dirs::APP_ID));
 
     let watches = crate::memory::load_mail_watches(&app_data_dir);
     let now_ms = std::time::SystemTime::now()

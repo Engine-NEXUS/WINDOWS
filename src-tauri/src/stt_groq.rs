@@ -130,9 +130,63 @@ pub(crate) fn decoder_prompt(prompt: Option<&'static str>) -> &'static str {
 pub(crate) fn decoder_bias_prompt(bias: DecoderBias) -> &'static str {
     match bias {
         DecoderBias::OwnerCommand => NEXUS_VOCABULARY,
-        DecoderBias::Commands => COMMAND_VOCABULARY,
+        DecoderBias::Commands => entity_decoder_prompt(),
         DecoderBias::Neutral => NEUTRAL_DECODER_PROMPT,
     }
+}
+
+/// Most names, and most characters, an app-list hint may carry. Whisper reads only the last 224 tokens of a prompt; a short list is
+/// also less likely to be echoed back on silence.
+const HINT_MAX_NAMES: usize = 12;
+const HINT_MAX_CHARS: usize = 180;
+
+/// Build the hint from app names: "Brave, Spotify, WhatsApp." Names are cleaned to letters, digits and a few joiners; an empty result means
+/// "send nothing special". A bare list (not command sentences) measured best: better names, no words invented on silence
+/// (`scripts/prompt_ab.py`, docs/changes/202).
+pub(crate) fn entity_prompt_text(names: &[String]) -> Option<String> {
+    let mut out = String::new();
+    let mut count = 0;
+    let mut seen = std::collections::HashSet::new();
+    for raw in names {
+        let name: String = raw
+            .chars()
+            .map(|c| if c.is_alphanumeric() || matches!(c, ' ' | '+' | '#' | '.' | '-') { c } else { ' ' })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if name.chars().filter(|c| c.is_alphanumeric()).count() < 2 || !seen.insert(name.to_lowercase()) {
+            continue;
+        }
+        let add = if out.is_empty() { name.len() } else { name.len() + 2 };
+        if count >= HINT_MAX_NAMES || out.len() + add + 1 > HINT_MAX_CHARS {
+            break;
+        }
+        if !out.is_empty() {
+            out.push_str(", ");
+        }
+        out.push_str(&name);
+        count += 1;
+    }
+    if out.is_empty() { None } else { out.push('.'); Some(out) }
+}
+
+/// The prompt for `DecoderBias::Commands`: the user's most-used apps, or the neutral instruction when none are known yet. The text is
+/// leaked once per distinct value (a few hundred bytes, and it only changes when the user's favourites change) so callers keep
+/// receiving `&'static str`.
+pub(crate) fn entity_decoder_prompt() -> &'static str {
+    static LAST: std::sync::Mutex<Option<(String, &'static str)>> = std::sync::Mutex::new(None);
+    let text = entity_prompt_text(&crate::app_registry::hint_names(HINT_MAX_NAMES));
+    let Some(text) = text else { return NEUTRAL_DECODER_PROMPT };
+    let mut g = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((t, p)) = g.as_ref() {
+        if *t == text {
+            return p;
+        }
+    }
+    let leaked: &'static str = Box::leak(text.clone().into_boxed_str());
+    *g = Some((text, leaked));
+    leaked
 }
 
 pub(crate) fn transcription_fields(
@@ -644,6 +698,32 @@ mod tests {
         assert_eq!(v.compression_ratio, 0.0);
     }
     #[test]
+    fn entity_prompt_is_a_short_clean_bare_list() {
+        let names: Vec<String> = ["Brave", "Spotify", "WhatsApp", "brave", "X", "Visual Studio Code!", "Notepad++", "  "].iter().map(|s| s.to_string()).collect();
+        let p = entity_prompt_text(&names).unwrap();
+        assert_eq!(p, "Brave, Spotify, WhatsApp, Visual Studio Code, Notepad++.");
+        assert!(!p.to_lowercase().contains("open "), "no command words");
+        assert_eq!(entity_prompt_text(&[]), None);
+        assert_eq!(entity_prompt_text(&["a".to_string(), "!".to_string()]), None);
+    }
+
+    #[test]
+    fn entity_prompt_respects_name_and_length_caps() {
+        let many: Vec<String> = (0..40).map(|i| format!("Application{i:02}")).collect();
+        let p = entity_prompt_text(&many).unwrap();
+        assert!(p.len() <= HINT_MAX_CHARS, "{}", p.len());
+        assert!(p.matches(',').count() < HINT_MAX_NAMES);
+        let long = vec!["Z".repeat(300)];
+        assert_eq!(entity_prompt_text(&long), None, "one oversized name is dropped, not truncated mid-word");
+    }
+
+    #[test]
+    fn commands_bias_falls_back_to_neutral_without_known_apps() {
+        // The registry is empty in unit tests: no used apps, so nothing special is sent.
+        assert_eq!(entity_decoder_prompt(), NEUTRAL_DECODER_PROMPT);
+    }
+
+    #[test]
     fn test_decoder_bias_for_turn() {
         use crate::voice_profile::TurnOwnership as T;
         // Default (hints off) = exactly the previous behaviour.
@@ -658,7 +738,7 @@ mod tests {
             assert_eq!(decoder_bias_for_turn(t, false), DecoderBias::Neutral);
         }
         assert_eq!(decoder_bias_label(DecoderBias::Commands), "commands");
-        assert_eq!(decoder_bias_prompt(DecoderBias::Commands), COMMAND_VOCABULARY);
+        assert_ne!(decoder_bias_prompt(DecoderBias::Commands), COMMAND_VOCABULARY, "the static sentences leaked words on silence");
     }
 
     #[test]

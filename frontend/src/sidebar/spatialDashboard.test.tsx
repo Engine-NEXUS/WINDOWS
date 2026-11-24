@@ -46,20 +46,19 @@ describe("SpatialDashboard and SpatialCard Kit Restyle", () => {
     items: MOCK_ITEMS,
   };
 
-  it("renders brand logo image when logo_data_url is set and monogram otherwise", () => {
+  it("renders a bundled brand logo for known software, whether or not a logo_data_url came with it", () => {
     const htmlWithLogo = renderToString(
       <SpatialCard item={MOCK_ITEMS[0]} active={false} onHover={() => {}} />,
     );
     expect(htmlWithLogo).toContain('data-mode="image"');
-    expect(htmlWithLogo).toContain('src="data:image/png;base64,VlNDT0RFX0xPR08="');
+    expect(htmlWithLogo).toContain('src="/tech-icons/vscode.svg"');
     expect(htmlWithLogo).toContain('alt="Visual Studio Code"');
 
     const htmlWithoutLogo = renderToString(
       <SpatialCard item={MOCK_ITEMS[1]} active={false} onHover={() => {}} />,
     );
-    expect(htmlWithoutLogo).toContain('data-mode="monogram"');
-    expect(htmlWithoutLogo).toContain('data-monogram="T"');
-    expect(htmlWithoutLogo).toContain(">T</span>");
+    expect(htmlWithoutLogo).toContain('data-mode="image"');
+    expect(htmlWithoutLogo).toContain('src="/tech-icons/terminal.svg"');
   });
 
   it("wraps the crop in Lens with hover magnifier and click zoom", () => {

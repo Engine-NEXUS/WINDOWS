@@ -6,6 +6,7 @@ export interface CardProps {
   trailing?: ReactNode;
   children: ReactNode;
   className?: string;
+  id?: string;
 }
 
 export function Card({
@@ -13,9 +14,10 @@ export function Card({
   trailing,
   children,
   className = "",
+  id,
 }: CardProps) {
   return (
-    <section className={`kit-card ${className}`}>
+    <section id={id} className={`kit-card ${className}`}>
       {(title || trailing) && (
         <div className="kit-card-header">
           {title && (

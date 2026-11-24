@@ -45,7 +45,17 @@ fn main() {
 async fn run(args: Vec<String>) -> i32 {
     let resources = arg(&args, "--resources").map(PathBuf::from);
     let threshold = arg(&args, "--threshold").and_then(|t| t.parse::<f32>().ok());
-    let mut engine = match ve::new_wake_engine(resources.as_deref()) {
+    let cohort = flag(&args, "--cohort-replay");
+    if cohort && (flag(&args, "--stage2") || resources.is_none()) {
+        eprintln!("--cohort-replay requires explicit resources and local-only inference");
+        return 2;
+    }
+    let engine = if cohort {
+        ve::new_cohort_wake_engine(resources.as_deref().expect("checked resources"))
+    } else {
+        ve::new_wake_engine(resources.as_deref())
+    };
+    let mut engine = match engine {
         Ok(e) => e,
         Err(e) => {
             eprintln!("cannot build the wake engine: {e}");
@@ -120,6 +130,9 @@ async fn run(args: Vec<String>) -> i32 {
             }
         };
         let mut res = Map::new();
+        if cohort {
+            res.insert("cohort_replay".into(), json!(true));
+        }
         res.insert("threshold".into(), json!(effective_thr));
         res.insert("dsp".into(), json!(dsp));
         res.insert("duration_ms".into(), json!(audio.len() as u64 * 1000 / ve::SR as u64));

@@ -16,10 +16,19 @@
 /* Windows High Contrast: stage chips and cards keep a visible edge using system colours only. */
 @media (forced-colors: active) {
   .speech-pill,
+  .action-receipt,
   .nx-task-chip {
     border: 1px solid CanvasText;
     background: Canvas;
     color: CanvasText;
     forced-color-adjust: none;
+  }
+}
+
+/* Reduced motion: disable transitions on stage indicators and cards */
+@media (prefers-reduced-motion: reduce) {
+  .action-receipt-container,
+  .action-receipt {
+    transition: none !important;
   }
 }

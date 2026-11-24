@@ -56,6 +56,13 @@ impl SelfNames {
         tokens.iter().all(|t| self.tokens.contains(*t))
     }
 
+    /// True only for one of the owner's own email addresses (a connected Google account), matched exactly.
+    /// Unlike `is_self` it never matches on name tokens, so "lakshya@other.com" is not the owner.
+    pub fn is_own_address(&self, email: &str) -> bool {
+        let e = email.trim().to_lowercase();
+        e.contains('@') && self.full_names.contains(&e)
+    }
+
     /// Pure constructor from a slice of name/email strings.
     pub fn from_parts(parts: &[String]) -> Self {
         let mut full_names = HashSet::new();
@@ -152,6 +159,11 @@ mod tests {
         assert!(sn.is_self("Chitkul"));
         assert!(sn.is_self("lakshya"));
         assert!(sn.is_self("chitkullakshya@gmail.com"));
+
+        // An own address matches exactly; a name-token lookalike address does not.
+        assert!(sn.is_own_address(" ChitkulLakshya@Gmail.com "));
+        assert!(!sn.is_own_address("lakshya@gmail.com"));
+        assert!(!sn.is_own_address("Chitkul Lakshya"));
 
         // Non-self must not match
         assert!(!sn.is_self("GitHub"));

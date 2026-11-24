@@ -2,9 +2,9 @@
 //!
 //! Watches an external coding-agent CLI (Claude Code, Gemini CLI, Codex,
 //! Aider, Hermes Agent, opencode — and any future tool via its own small
-//! adapter) and tells the user when it finishes, using only local process
-//! output pattern-matching. Zero network calls, zero API cost, works
-//! offline.
+//! adapter) and hands completion evidence to the shared lifecycle. Generic
+//! output words and file silence cannot finish desktop watches. Local hooks
+//! and process exits need no model/API call.
 //!
 //! The actual spawn-and-watch logic lives in the maintained, MIT-licensed
 //! `pty-manager` + `coding-agent-adapters` npm packages
@@ -399,8 +399,8 @@ pub async fn start_watch<R: tauri::Runtime>(
         .to_string();
 
     mark_activity();
-    let lease = crate::keep_awake::acquire_pinned(crate::keep_awake::MAX_WATCH_HOLD);
-    ACTIVE_WATCHES.lock().unwrap().push((id.clone(), lease));
+    crate::agent_lifecycle_runtime::owned(&app,&adapter_type,workdir.as_deref(),&id,crate::agent_lifecycle::Kind::Start,false);
+    ACTIVE_WATCHES.lock().unwrap().push((id.clone(), None));
 
     let poll_id = id.clone();
     let poll_adapter = adapter_type.clone();
@@ -411,74 +411,53 @@ pub async fn start_watch<R: tauri::Runtime>(
     Ok(id)
 }
 
-async fn poll_watch_until_done<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    id: String,
-    adapter_type: String,
-) {
-    let client = client();
-    let started = Instant::now();
+async fn poll_watch_until_done<R: tauri::Runtime>(app: tauri::AppHandle<R>, id: String, adapter_type: String) {
+    let client=client();
+    let started=Instant::now();
+    let mut last_status=String::new();
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
+        if !ACTIVE_WATCHES.lock().unwrap().iter().any(|(wid,_)|wid==&id) {break}
         mark_activity();
-
-        if started.elapsed() > MAX_WATCH_DURATION {
-            tracing::warn!("agent_watch: watch {id} exceeded max duration, giving up on it");
+        if started.elapsed()>MAX_WATCH_DURATION {break}
+        let phase=crate::agent_lifecycle_runtime::owned_phase(&adapter_type,&id);
+        if matches!(phase,Some(crate::agent_lifecycle::Phase::Complete|crate::agent_lifecycle::Phase::Failed|crate::agent_lifecycle::Phase::Expired|crate::agent_lifecycle::Phase::Cancelled)) {
+            let status=match phase {Some(crate::agent_lifecycle::Phase::Complete)=>"done",Some(crate::agent_lifecycle::Phase::Failed)=>"error",Some(crate::agent_lifecycle::Phase::Expired)=>"expired",_=>"stopped"};
+            let _=client.post(sidecar_url(&format!("/watch/{id}/observed"))).json(&serde_json::json!({"status":status})).send().await;
+            let payload=serde_json::json!({"id":id,"type":adapter_type,"status":status});
+            match status {
+                "done"=>{let _=app.emit("agent_watch:done",&payload);},
+                "error"=>{let _=app.emit("agent_watch:error",&payload);},
+                _=>{let _=app.emit("agent_watch:stopped",&payload);},
+            }
             break;
         }
-
-        let Ok(resp) = client.get(sidecar_url(&format!("/watch/{id}"))).send().await else {
-            continue; // sidecar hiccup — keep polling, the lease stays held
-        };
-        let Ok(json) = resp.json::<serde_json::Value>().await else {
-            continue;
-        };
-        let status = json.get("status").and_then(|v| v.as_str()).unwrap_or("working");
-
-        match status {
-            "done" => {
-                crate::proactive_policy::submit(
-                    &app,
-                    format!("agent_watch_done_{id}"),
-                    format!("Your {adapter_type} task just finished, sir."),
-                    AlertUrgency::High,
-                );
-                let _ = app.emit("agent_watch:done", &json);
-                break;
+        let Ok(resp)=client.get(sidecar_url(&format!("/watch/{id}"))).send().await else {continue};
+        if !resp.status().is_success() {continue}
+        let Ok(json)=resp.json::<serde_json::Value>().await else {continue};
+        let status=json.get("status").and_then(|v|v.as_str()).unwrap_or("unknown");
+        if status!=last_status {
+            match status {
+                "done"=>{
+                    if json.pointer("/detail/reason").and_then(|v|v.as_str())==Some("process_exit") {
+                        crate::agent_lifecycle_runtime::owned_exit(&app,&adapter_type,&id,false);
+                    } else {crate::agent_lifecycle_runtime::owned(&app,&adapter_type,None,&id,crate::agent_lifecycle::Kind::Stop,false);}
+                }
+                "error"=>crate::agent_lifecycle_runtime::owned(&app,&adapter_type,None,&id,crate::agent_lifecycle::Kind::Stop,true),
+                "stopped"=>{crate::agent_lifecycle_runtime::cancel_owned(&id);break},
+                "login_required"|"blocked"=>{
+                    crate::agent_lifecycle_runtime::owned(&app,&adapter_type,None,&id,crate::agent_lifecycle::Kind::Wait,false);
+                    let _=app.emit("agent_watch:login_required",&json);
+                    crate::proactive_policy::submit(&app,format!("agent_watch_wait_{id}"),format!("{adapter_type} needs your input before it can continue, sir."),AlertUrgency::High);
+                }
+                "working" if !last_status.is_empty()=>crate::agent_lifecycle_runtime::owned(&app,&adapter_type,None,&id,crate::agent_lifecycle::Kind::Start,false),
+                _=>{}
             }
-            "error" => {
-                let err = json.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
-                tracing::warn!("agent_watch {id} error: {err}");
-                crate::proactive_policy::submit(
-                    &app,
-                    format!("agent_watch_error_{id}"),
-                    format!("Your {adapter_type} session hit an error, sir."),
-                    AlertUrgency::High,
-                );
-                let _ = app.emit("agent_watch:error", &json);
-                break;
-            }
-            "login_required" => {
-                crate::proactive_policy::submit(
-                    &app,
-                    format!("agent_watch_login_{id}"),
-                    format!("{adapter_type} needs you to log in before it can continue, sir."),
-                    AlertUrgency::High,
-                );
-                let _ = app.emit("agent_watch:login_required", &json);
-                // Not terminal — keep polling, the user may sign in and it resumes.
-            }
-            "stopped" => {
-                let _ = app.emit("agent_watch:stopped", &json);
-                break;
-            }
-            _ => {
-                let _ = app.emit("agent_watch:progress", &json);
-            }
+            last_status=status.to_string();
         }
+        let _=app.emit("agent_watch:progress",&json);
     }
-
-    ACTIVE_WATCHES.lock().unwrap().retain(|(wid, _)| wid != &id);
+    ACTIVE_WATCHES.lock().unwrap().retain(|(wid,_)|wid!=&id);
 }
 
 /// Watch any desktop agent, IDE (Antigravity, Cursor, Trae, VS Code), or running terminal task.
@@ -488,13 +467,7 @@ pub async fn start_desktop_or_ide_watch<R: tauri::Runtime>(
     target_name: String,
     workdir: Option<String>,
 ) -> Result<String, String> {
-    let id = format!(
-        "ide_watch_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    );
+    let id = format!("ide_watch_{}",crate::network::uuid_v4());
 
     let lease = crate::keep_awake::acquire_pinned(crate::keep_awake::MAX_WATCH_HOLD);
     ACTIVE_WATCHES.lock().unwrap().push((id.clone(), lease));
@@ -510,85 +483,31 @@ pub async fn start_desktop_or_ide_watch<R: tauri::Runtime>(
     Ok(id)
 }
 
-async fn poll_desktop_task_quiescence<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    id: String,
-    target_name: String,
-    workdir: Option<String>,
-) {
-    let started = Instant::now();
-    let work_path = workdir.map(std::path::PathBuf::from);
-
-    // Initial grace delay so the user or agent has started processing
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    let mut last_activity = Instant::now();
-    let mut check_count = 0;
-
+async fn poll_desktop_task_quiescence<R: tauri::Runtime>(app: tauri::AppHandle<R>, id: String, target_name: String, workdir: Option<String>) {
+    let started=Instant::now();
+    let since=crate::agent_hooks::now_ms();
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
-        check_count += 1;
-
-        if started.elapsed() > MAX_WATCH_DURATION {
-            tracing::warn!("agent_watch: desktop watch {id} exceeded max duration");
+        if !ACTIVE_WATCHES.lock().unwrap().iter().any(|(wid,_)|wid==&id) {break}
+        if started.elapsed()>MAX_WATCH_DURATION {
+            crate::proactive_policy::submit(&app,format!("agent_watch_expired_{id}"),format!("I stopped watching {target_name}, sir. I could not confirm that it finished."),AlertUrgency::High);
             break;
         }
-
-        // Check if watch was canceled
-        let still_active = {
-            let active = ACTIVE_WATCHES.lock().unwrap();
-            active.iter().any(|(wid, _)| wid == &id)
-        };
-        if !still_active {
-            break;
-        }
-
-        // Check workspace file activity if path is available
-        let mut had_file_activity = false;
-        if let Some(ref path) = work_path {
-            if let Ok(entries) = std::fs::read_dir(path) {
-                for entry in entries.flatten() {
-                    if let Ok(meta) = entry.metadata() {
-                        if let Ok(mtime) = meta.modified() {
-                            if let Ok(elapsed) = mtime.elapsed() {
-                                if elapsed < Duration::from_secs(3) {
-                                    had_file_activity = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if had_file_activity {
-            last_activity = Instant::now();
-        } else if check_count >= 2 && last_activity.elapsed() >= Duration::from_secs(6) {
-            // Settled! The flurry of changes ceased.
-            crate::proactive_policy::submit(
-                &app,
-                format!("agent_watch_done_{id}"),
-                format!("Your {target_name} response is ready, sir. It has finished running."),
-                AlertUrgency::High,
-            );
-            let _ = app.emit(
-                "agent_watch:done",
-                serde_json::json!({
-                    "id": id,
-                    "type": target_name,
-                    "status": "done"
-                }),
-            );
+        if let Some(phase)=crate::agent_lifecycle_runtime::desktop_result(&target_name,workdir.as_deref(),since) {
+            let status=if phase==crate::agent_lifecycle::Phase::Complete {"done"} else {"error"};
+            let payload=serde_json::json!({"id":id,"type":target_name,"status":status});
+            if status=="done" {let _=app.emit("agent_watch:done",&payload);} else {let _=app.emit("agent_watch:error",&payload);}
+            // The shared lifecycle publishes the completion; filesystem silence cannot publish another one.
             break;
         }
     }
-
-    ACTIVE_WATCHES.lock().unwrap().retain(|(wid, _)| wid != &id);
+    ACTIVE_WATCHES.lock().unwrap().retain(|(wid,_)|wid!=&id);
 }
 
 /// Stop a watch and release its keep-awake lease immediately.
 pub async fn stop_watch(id: String) -> Result<(), String> {
+    crate::agent_lifecycle_runtime::cancel_owned(&id);
+    ACTIVE_WATCHES.lock().unwrap().retain(|(wid,_)|wid!=&id);
     if is_sidecar_responsive() {
         let client = client();
         let _ = client.post(sidecar_url(&format!("/watch/{id}/stop"))).send().await;
@@ -611,7 +530,20 @@ pub async fn list_watches() -> Result<serde_json::Value, String> {
         .send()
         .await
         .map_err(|e| format!("failed to reach agent-watch sidecar: {e}"))?;
-    resp.json().await.map_err(|e| format!("bad response: {e}"))
+    let mut json:serde_json::Value=resp.json().await.map_err(|e| format!("bad response: {e}"))?;
+    if let Some(watches)=json.get_mut("watches").and_then(|v|v.as_array_mut()) {
+        for watch in watches {
+            let phase=watch.get("type").and_then(|v|v.as_str()).zip(watch.get("id").and_then(|v|v.as_str()))
+                .and_then(|(agent,id)|crate::agent_lifecycle_runtime::owned_phase(agent,id));
+            if let Some(phase)=phase {
+                watch["status"]=serde_json::json!(match phase {
+                    crate::agent_lifecycle::Phase::Complete=>"done",crate::agent_lifecycle::Phase::Failed=>"error",
+                    crate::agent_lifecycle::Phase::Cancelled=>"stopped",crate::agent_lifecycle::Phase::Expired=>"expired",
+                    crate::agent_lifecycle::Phase::Waiting=>"blocked",crate::agent_lifecycle::Phase::Unknown=>"unknown",_=>"working"});
+            }
+        }
+    }
+    Ok(json)
 }
 
 // --- Tauri commands --------------------------------------------------

@@ -209,6 +209,22 @@ pub fn user_idle_secs() -> Option<u64> {
     None
 }
 
+/// `GetTickCount` millisecond stamp of the last mouse/keyboard input in this
+/// session (wraps every ~49 days; compare with wrapping arithmetic).
+#[cfg(target_os = "windows")]
+pub fn last_input_tick() -> Option<u32> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    let mut info = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+    // SAFETY: `info` is a valid, correctly sized LASTINPUTINFO.
+    let ok = unsafe { GetLastInputInfo(&mut info) };
+    ok.as_bool().then_some(info.dwTime)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn last_input_tick() -> Option<u32> {
+    None
+}
+
 /// Probe the foreground window now. Blocking (UI Automation for browsers).
 #[cfg(target_os = "windows")]
 pub fn probe() -> Option<Sample> {

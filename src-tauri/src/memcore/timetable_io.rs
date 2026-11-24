@@ -197,7 +197,7 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         let settings = std::path::PathBuf::from(std::env::var("APPDATA").unwrap())
-            .join("com.nexus.assistant")
+            .join(crate::app_dirs::APP_ID)
             .join("settings.json");
         let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(settings).unwrap()).unwrap();
         let key = json["geminiApiKey"].as_str().filter(|k| !k.is_empty()).expect("no geminiApiKey in settings.json").to_string();

@@ -49,6 +49,9 @@ pub enum Offer {
     /// "I couldn't find 'mummy chat' exactly - did you mean Google Chat?"
     /// A guess from the app registry: nothing launches until the user says yes.
     OpenApp { display_name: String, spoken: String },
+    /// "I heard 'x' - Notepad or Notion? Say one or two." Two apps sound equally close to what was heard; the answer
+    /// picks one (and teaches the match). Nothing launches until the user picks.
+    OpenAppPick { choices: Vec<String>, spoken: String },
     /// "Add a Stop hook to Claude Code's settings so I know when it stops?" (`agent` = agent_hooks::Agent::name).
     /// Nothing is written until the user says yes.
     HookSetup { agent: String },
@@ -69,7 +72,7 @@ impl Offer {
             | Offer::PlanFollowUp
             | Offer::ReopenSession => REPLY_WINDOW_HIGH,
             Offer::AddEvent { .. } | Offer::AddSlots { .. } | Offer::CodeRabbitReview { .. } => REPLY_WINDOW_MEDIUM,
-            Offer::Start { .. } | Offer::Choose { .. } | Offer::OpenApp { .. } => REPLY_WINDOW_LOW,
+            Offer::Start { .. } | Offer::Choose { .. } | Offer::OpenApp { .. } | Offer::OpenAppPick { .. } => REPLY_WINDOW_LOW,
         }
     }
 }
@@ -432,6 +435,62 @@ pub fn classify_for(offer: &Offer, text: &str) -> Reply {
     }
 }
 
+/// The spoken question for [`Offer::OpenAppPick`].
+pub fn pick_question(spoken: &str, choices: &[String]) -> String {
+    let heard = spoken.trim();
+    match choices {
+        [a, b] => format!("I heard '{heard}' — {a} or {b}? Say one or two."),
+        _ => format!("I couldn't tell which app '{heard}' meant, sir."),
+    }
+}
+
+const PICK_FILLER: &[&str] = &[
+    "the", "number", "option", "pick", "choose", "open", "please", "nexus", "sir", "it", "that", "go", "with", "i", "mean", "meant", "said", "want",
+];
+
+/// Which of `choices` did the user pick? Accepts "one"/"1"/"first" and "two"/"2"/"second" (also the usual mishearings
+/// "won", "to", "too" when the reply is only filler around them), or a word that belongs to exactly one name
+/// ("the notion one"). `None` when it is neither clear nor unique, so the caller can ask again instead of guessing.
+pub fn parse_pick(text: &str, choices: &[String]) -> Option<usize> {
+    let w = words(text);
+    if w.is_empty() || w.len() > MAX_REPLY_WORDS || choices.len() < 2 {
+        return None;
+    }
+    let ordinal = |x: &str| match x {
+        "one" | "1" | "first" | "1st" | "won" => Some(0usize),
+        "two" | "2" | "second" | "2nd" => Some(1),
+        _ => None,
+    };
+    // Only filler around the number: the reply IS the number.
+    let mut core: Vec<&String> = w.iter().filter(|x| !PICK_FILLER.contains(&x.as_str())).collect();
+    // "second one" / "first one": the "one" is a noun there, the other word decides.
+    if core.len() == 2 && core.iter().any(|x| x.as_str() == "one") {
+        core.retain(|x| x.as_str() != "one");
+    }
+    if core.len() == 1 {
+        if let Some(i) = ordinal(core[0]) {
+            return Some(i).filter(|i| *i < choices.len());
+        }
+        if matches!(core[0].as_str(), "to" | "too") {
+            return Some(1);
+        }
+    }
+    // A distinctive word of exactly one name.
+    let mut hit: Option<usize> = None;
+    for (i, c) in choices.iter().enumerate() {
+        let mine = words(c);
+        let others: Vec<Vec<String>> = choices.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, o)| words(o)).collect();
+        let said = w.iter().any(|x| x.len() >= 3 && mine.contains(x) && !others.iter().any(|o| o.contains(x)));
+        if said {
+            if hit.is_some() {
+                return None;
+            }
+            hit = Some(i);
+        }
+    }
+    hit
+}
+
 /// Slots read from an image but not yet confirmed. Kept for 10 minutes so
 /// "add those" still works after the short reply window has closed.
 const DRAFT_TTL: Duration = Duration::from_secs(10 * 60);
@@ -457,6 +516,48 @@ pub static TEST_GUARD: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn two() -> Vec<String> {
+        vec!["Notepad".to_string(), "Notion".to_string()]
+    }
+
+    #[test]
+    fn a_number_picks_one_of_two() {
+        let c = two();
+        for t in ["one", "1", "the first", "number one", "first one", "option 1", "Nexus one please", "won"] {
+            assert_eq!(parse_pick(t, &c), Some(0), "{t}");
+        }
+        for t in ["two", "2", "the second", "number two", "second one", "option 2", "to", "number to", "too"] {
+            assert_eq!(parse_pick(t, &c), Some(1), "{t}");
+        }
+    }
+
+    #[test]
+    fn a_distinctive_name_word_picks_one() {
+        let c = vec!["Google Chrome".to_string(), "Google Chat".to_string()];
+        assert_eq!(parse_pick("chrome", &c), Some(0));
+        assert_eq!(parse_pick("the chat one", &c), Some(1));
+        // "google" belongs to both: not a pick.
+        assert_eq!(parse_pick("google", &c), None);
+        assert_eq!(parse_pick("chrome chat", &c), None);
+    }
+
+    #[test]
+    fn anything_unclear_is_not_a_pick() {
+        let c = two();
+        for t in ["", "yes", "maybe", "what is the weather today in delhi please", "three", "open spotify"] {
+            assert_eq!(parse_pick(t, &c), None, "{t:?}");
+        }
+        // "to" inside a real command is not a pick.
+        assert_eq!(parse_pick("go to the settings page", &c), None);
+    }
+
+    #[test]
+    fn the_pick_question_names_both_and_says_how_to_answer() {
+        let q = pick_question("note pod", &two());
+        assert!(q.contains("Notepad") && q.contains("Notion") && q.contains("one or two"), "{q}");
+        assert_eq!(Offer::OpenAppPick { choices: two(), spoken: "x".into() }.reply_window(), REPLY_WINDOW_LOW);
+    }
 
     #[test]
     fn yes_family() {

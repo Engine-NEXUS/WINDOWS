@@ -1,0 +1,22 @@
+{
+  "id": "mail_then_whatsapp",
+  "description": "Check the mail, then send a WhatsApp message the user dictated to a saved contact (two independent actions).",
+  "enabled": true,
+  "signature": ["mail_check", "whatsapp_send"],
+  "examples": [
+    "check the email and send a test message to ravi on whatsapp",
+    "check my mail and message ravi on whatsapp saying test",
+    "read my inbox and send a message to priya on whatsapp saying i am late",
+    "check the email and whatsapp ravi saying hello",
+    "check the email and send ravi a message on whatsapp saying hi"
+  ],
+  "slots": [
+    { "name": "contact", "required": true },
+    { "name": "contact_number", "required": false },
+    { "name": "body", "required": true }
+  ],
+  "steps": [
+    { "id": "mail", "cap": "mail.check" },
+    { "id": "send", "cap": "whatsapp.send", "in": { "recipient": "$slot.contact", "number": "$slot.contact_number", "body": "$slot.body" } }
+  ]
+}

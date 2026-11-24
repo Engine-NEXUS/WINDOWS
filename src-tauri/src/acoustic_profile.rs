@@ -124,7 +124,7 @@ impl AcousticProfile {
         {
             if let Ok(appdata) = std::env::var("APPDATA") {
                 let path = PathBuf::from(appdata)
-                    .join("com.nexus.assistant")
+                    .join(crate::app_dirs::APP_ID)
                     .join("acoustic_profile.json");
                 return Self::try_load_from_path(&path);
             }
@@ -135,7 +135,7 @@ impl AcousticProfile {
             if let Ok(home) = std::env::var("HOME") {
                 let path = PathBuf::from(home)
                     .join(".config")
-                    .join("com.nexus.assistant")
+                    .join(crate::app_dirs::APP_ID)
                     .join("acoustic_profile.json");
                 return Self::try_load_from_path(&path);
             }
@@ -144,7 +144,7 @@ impl AcousticProfile {
         None
     }
 
-    fn try_load_from_path(path: &Path) -> Option<Self> {
+    pub(crate) fn try_load_from_path(path: &Path) -> Option<Self> {
         if !path.exists() {
             return None;
         }

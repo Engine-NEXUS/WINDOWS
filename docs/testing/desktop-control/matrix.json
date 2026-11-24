@@ -1,0 +1,425 @@
+{
+  "schema": 1,
+  "qualification_target": 0.99,
+  "core": [
+    {
+      "id": "edge-01",
+      "app": "edge",
+      "action": "focus",
+      "instruction": "Open/focus Microsoft Edge",
+      "expected": "foreground process is msedge.exe",
+      "repetitions": 10
+    },
+    {
+      "id": "edge-02",
+      "app": "edge",
+      "action": "new_tab",
+      "instruction": "Open a new tab",
+      "expected": "tab count increases by one",
+      "repetitions": 10
+    },
+    {
+      "id": "edge-03",
+      "app": "edge",
+      "action": "next_tab",
+      "instruction": "Switch to the next tab",
+      "expected": "the next tab is selected",
+      "repetitions": 10
+    },
+    {
+      "id": "edge-04",
+      "app": "edge",
+      "action": "tab_two",
+      "instruction": "Switch to tab two",
+      "expected": "tab two is selected",
+      "repetitions": 10
+    },
+    {
+      "id": "edge-05",
+      "app": "edge",
+      "action": "duplicate",
+      "instruction": "Click Open button; choose the second matching control",
+      "expected": "one selected candidate dispatch, no other candidate activated",
+      "repetitions": 10
+    },
+    {
+      "id": "edge-06",
+      "app": "edge",
+      "action": "toggle",
+      "instruction": "Click the fixture checkbox",
+      "expected": "toggle state changes to the expected state",
+      "repetitions": 10
+    },
+    {
+      "id": "edge-07",
+      "app": "edge",
+      "action": "delayed_menu",
+      "instruction": "Click Tools in the fixture",
+      "expected": "the named Tools menu appears after its delay",
+      "repetitions": 10
+    },
+    {
+      "id": "edge-08",
+      "app": "edge",
+      "action": "type",
+      "instruction": "Dictate into the fixture text field",
+      "expected": "exact insertion in the bound field; no submit",
+      "repetitions": 10
+    },
+    {
+      "id": "explorer-01",
+      "app": "explorer",
+      "action": "focus",
+      "instruction": "Focus File Explorer with only one folder window open",
+      "expected": "exact explorer.exe folder window is foreground",
+      "repetitions": 10
+    },
+    {
+      "id": "explorer-02",
+      "app": "explorer",
+      "action": "alpha",
+      "instruction": "Select Alpha in the fixture folder",
+      "expected": "Alpha list item reports selected",
+      "repetitions": 10
+    },
+    {
+      "id": "explorer-03",
+      "app": "explorer",
+      "action": "beta",
+      "instruction": "Select Beta in the fixture folder",
+      "expected": "Beta list item reports selected",
+      "repetitions": 10
+    },
+    {
+      "id": "explorer-04",
+      "app": "explorer",
+      "action": "one",
+      "instruction": "Select One.txt in the fixture folder",
+      "expected": "One.txt list item reports selected",
+      "repetitions": 10
+    },
+    {
+      "id": "explorer-05",
+      "app": "explorer",
+      "action": "two",
+      "instruction": "Select Two.txt in the fixture folder",
+      "expected": "Two.txt list item reports selected",
+      "repetitions": 10
+    },
+    {
+      "id": "explorer-06",
+      "app": "explorer",
+      "action": "scroll_down",
+      "instruction": "Scroll down the fixture folder pane",
+      "expected": "same pane vertical scroll position increases",
+      "repetitions": 10
+    },
+    {
+      "id": "explorer-07",
+      "app": "explorer",
+      "action": "scroll_up",
+      "instruction": "Scroll up the fixture folder pane",
+      "expected": "same pane vertical scroll position decreases",
+      "repetitions": 10
+    },
+    {
+      "id": "explorer-08",
+      "app": "explorer",
+      "action": "view",
+      "instruction": "Open the View menu",
+      "expected": "expected View menu becomes available",
+      "repetitions": 10
+    },
+    {
+      "id": "notepad-01",
+      "app": "notepad",
+      "action": "focus",
+      "instruction": "Focus Notepad with one scratch document",
+      "expected": "exact notepad.exe window is foreground",
+      "repetitions": 10
+    },
+    {
+      "id": "notepad-02",
+      "app": "notepad",
+      "action": "empty_type",
+      "instruction": "Dictate into the empty scratch document",
+      "expected": "exact insertion is observed",
+      "repetitions": 10
+    },
+    {
+      "id": "notepad-03",
+      "app": "notepad",
+      "action": "append",
+      "instruction": "Dictate another line at the caret",
+      "expected": "exact insertion is observed",
+      "repetitions": 10
+    },
+    {
+      "id": "notepad-04",
+      "app": "notepad",
+      "action": "punctuation",
+      "instruction": "Dictate punctuation and a new paragraph",
+      "expected": "cleaned text is inserted without extra submission",
+      "repetitions": 10
+    },
+    {
+      "id": "notepad-05",
+      "app": "notepad",
+      "action": "replacement",
+      "instruction": "Replace an operator-selected word with dictated text",
+      "expected": "exact replacement is observed",
+      "repetitions": 10
+    },
+    {
+      "id": "notepad-06",
+      "app": "notepad",
+      "action": "file_menu",
+      "instruction": "Click File menu",
+      "expected": "expected File menu is visible",
+      "repetitions": 10
+    },
+    {
+      "id": "notepad-07",
+      "app": "notepad",
+      "action": "edit_menu",
+      "instruction": "Click Edit menu",
+      "expected": "expected Edit menu is visible",
+      "repetitions": 10
+    },
+    {
+      "id": "notepad-08",
+      "app": "notepad",
+      "action": "view_menu",
+      "instruction": "Click View menu",
+      "expected": "expected View menu is visible",
+      "repetitions": 10
+    },
+    {
+      "id": "settings-01",
+      "app": "settings",
+      "action": "focus",
+      "instruction": "Focus Windows Settings",
+      "expected": "systemsettings.exe is foreground",
+      "repetitions": 10
+    },
+    {
+      "id": "settings-02",
+      "app": "settings",
+      "action": "system",
+      "instruction": "Select System navigation item",
+      "expected": "System item reports selected or matching page is observed",
+      "repetitions": 10
+    },
+    {
+      "id": "settings-03",
+      "app": "settings",
+      "action": "display",
+      "instruction": "Open Display page",
+      "expected": "Display document or heading is observed",
+      "repetitions": 10
+    },
+    {
+      "id": "settings-04",
+      "app": "settings",
+      "action": "return_system",
+      "instruction": "Return to System navigation item",
+      "expected": "System item reports selected",
+      "repetitions": 10
+    },
+    {
+      "id": "settings-05",
+      "app": "settings",
+      "action": "accessibility",
+      "instruction": "Select Accessibility navigation item",
+      "expected": "Accessibility item reports selected or matching page is observed",
+      "repetitions": 10
+    },
+    {
+      "id": "settings-06",
+      "app": "settings",
+      "action": "devices",
+      "instruction": "Select Bluetooth and devices navigation item",
+      "expected": "matching navigation item reports selected; no OS setting changed",
+      "repetitions": 10
+    }
+  ],
+  "held_out": [
+    {
+      "id": "held-01",
+      "scenario": "Extra whitespace and mnemonic marker in a label",
+      "expected_outcomes": [
+        "verified"
+      ]
+    },
+    {
+      "id": "held-02",
+      "scenario": "Duplicate label in two named panels",
+      "expected_outcomes": [
+        "verified"
+      ]
+    },
+    {
+      "id": "held-03",
+      "scenario": "Button and hyperlink share one label",
+      "expected_outcomes": [
+        "verified"
+      ]
+    },
+    {
+      "id": "held-04",
+      "scenario": "Control is disabled before selection",
+      "expected_outcomes": [
+        "blocked"
+      ]
+    },
+    {
+      "id": "held-05",
+      "scenario": "Control becomes covered during pointer motion",
+      "expected_outcomes": [
+        "blocked"
+      ]
+    },
+    {
+      "id": "held-06",
+      "scenario": "Control is removed after selection",
+      "expected_outcomes": [
+        "blocked"
+      ]
+    },
+    {
+      "id": "held-07",
+      "scenario": "App restarts while choices are visible",
+      "expected_outcomes": [
+        "blocked"
+      ]
+    },
+    {
+      "id": "held-08",
+      "scenario": "Window handle reused by a new process",
+      "expected_outcomes": [
+        "blocked"
+      ]
+    },
+    {
+      "id": "held-09",
+      "scenario": "Mixed-DPI monitor movement",
+      "expected_outcomes": [
+        "verified"
+      ]
+    },
+    {
+      "id": "held-10",
+      "scenario": "Negative-coordinate secondary monitor",
+      "expected_outcomes": [
+        "verified"
+      ]
+    },
+    {
+      "id": "held-11",
+      "scenario": "Dialog appears 750 ms after dispatch",
+      "expected_outcomes": [
+        "verified"
+      ]
+    },
+    {
+      "id": "held-12",
+      "scenario": "Dialog appears after verification deadline",
+      "expected_outcomes": [
+        "unconfirmed",
+        "blocked"
+      ]
+    },
+    {
+      "id": "held-13",
+      "scenario": "Unrelated window steals foreground after dispatch",
+      "expected_outcomes": [
+        "unconfirmed",
+        "blocked"
+      ]
+    },
+    {
+      "id": "held-14",
+      "scenario": "Focus changes during a slow observation",
+      "expected_outcomes": [
+        "unconfirmed",
+        "blocked"
+      ]
+    },
+    {
+      "id": "held-15",
+      "scenario": "Voice choice arrives after expiry",
+      "expected_outcomes": [
+        "blocked"
+      ]
+    },
+    {
+      "id": "held-16",
+      "scenario": "Two simultaneous clicks on the same choice",
+      "expected_outcomes": [
+        "blocked"
+      ]
+    },
+    {
+      "id": "held-17",
+      "scenario": "Voice Lock policy changes while choice is pending",
+      "expected_outcomes": [
+        "blocked"
+      ]
+    },
+    {
+      "id": "held-18",
+      "scenario": "Cancellation during native action verification",
+      "expected_outcomes": [
+        "stopped",
+        "blocked"
+      ]
+    },
+    {
+      "id": "held-19",
+      "scenario": "Typing replaces selected Unicode text",
+      "expected_outcomes": [
+        "verified"
+      ]
+    },
+    {
+      "id": "held-20",
+      "scenario": "Typing loses focus to another field",
+      "expected_outcomes": [
+        "unconfirmed",
+        "blocked"
+      ]
+    }
+  ],
+  "voice_case_ids": [
+    "edge-01",
+    "edge-02",
+    "edge-03",
+    "edge-04",
+    "edge-05",
+    "edge-06",
+    "edge-07",
+    "edge-08",
+    "explorer-01",
+    "explorer-02",
+    "explorer-03",
+    "explorer-04",
+    "explorer-05",
+    "explorer-06",
+    "explorer-07",
+    "explorer-08",
+    "notepad-01",
+    "notepad-02",
+    "notepad-03",
+    "notepad-04",
+    "notepad-05",
+    "notepad-06",
+    "notepad-07",
+    "notepad-08",
+    "settings-01",
+    "settings-02",
+    "settings-03",
+    "settings-04",
+    "settings-05",
+    "settings-06"
+  ]
+}

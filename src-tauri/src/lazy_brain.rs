@@ -80,6 +80,9 @@ fn is_brain_responsive() -> bool {
 
 /// Find a working Python interpreter (same logic as lazy_nlu.rs).
 fn find_python() -> Option<String> {
+    if option_env!("NEXUS_MANAGED_PYTHON").is_some() || cfg!(feature = "contributor") {
+        return crate::lazy_stt::find_python();
+    }
     // 1. Try PATH-based commands
     for cmd in &["python", "python3", "py"] {
         if let Ok(output) = crate::no_window::command(cmd).arg("--version").output() {

@@ -1,0 +1,236 @@
+/* ═══════════════════════════════════════════════════════════════
+   V3 — "Console" layout, monochrome (2026-11-16)
+   Built from the owner's references: deep charcoal canvas (or soft grey in light), rounded
+   cards with a hairline border, big numerals over tiny caps labels, KPI tiles, bars with the
+   value on the right, a filled-pill segmented control and an icon tab bar.
+   Colour lives ONLY in the technology logos; everything else is black, white and grey.
+   Every surface is solid (window-opacity registry); no scrollbars.
+   ═══════════════════════════════════════════════════════════════ */
+.stack-view {
+  container-type: inline-size;
+  background-color: var(--sv-bg);
+  color: var(--sv-text);
+  font-family: "Plus Jakarta Sans", "Poppins", "Inter", "Segoe UI Variable Text", "Segoe UI", -apple-system, Roboto, sans-serif;
+  font-feature-settings: "tnum", "cv11";
+  -webkit-font-smoothing: antialiased;
+}
+
+/* No scrollbars: scrolls like a phone (wheel, touch, trackpad). */
+.stack-view,
+.stack-view * {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+.stack-view *::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
+.stack-scroll-body {
+  scroll-behavior: smooth;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  scroll-padding-top: 12px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, var(--sv-mask-ink) 12px, var(--sv-mask-ink) calc(100% - 16px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, var(--sv-mask-ink) 12px, var(--sv-mask-ink) calc(100% - 16px), transparent 100%);
+}
+.stack-phone-col { max-width: none; padding: 16px 16px 24px; gap: 14px; }
+
+/* ── Header ─────────────────────────────────────────────────── */
+.stack-view .kit-app-bar {
+  background: var(--sv-bg);
+  border-bottom: 1px solid var(--sv-line);
+  padding: 16px 18px 14px;
+  min-height: 74px;
+}
+.stack-view .kit-app-bar-title { font-size: 18px; font-weight: 700; letter-spacing: -0.02em; color: var(--sv-text); }
+.stack-view .kit-app-bar-subtitle {
+  display: inline-block; align-self: flex-start; width: fit-content; max-width: 100%;
+  margin-top: 4px; padding: 2px 10px; border-radius: 999px;
+  background: var(--sv-card); border: 1px solid var(--sv-line);
+  font-size: 11.5px; font-weight: 600; color: var(--sv-dim);
+}
+.stack-view .kit-app-bar-logo .kit-logo-tile {
+  width: 46px !important; height: 46px !important; min-width: 46px !important; min-height: 46px !important;
+  border-radius: 15px; box-shadow: var(--sv-shadow);
+}
+.stack-view .kit-icon-btn, .stack-view .kit-app-bar-actions button { background: var(--sv-card); border: 1px solid var(--sv-line); }
+
+/* ── Cards ──────────────────────────────────────────────────── */
+.stack-view .kit-card {
+  background: var(--sv-card); border: 1px solid var(--sv-line);
+  border-radius: var(--sv-radius); padding: 18px; box-shadow: var(--sv-shadow);
+}
+.stack-view .kit-card-header { margin-bottom: 14px; }
+.stack-view .kit-card-title { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--sv-dim); }
+
+/* ── Hero ───────────────────────────────────────────────────── */
+.stack-view .stack-hero-card { padding: 20px; }
+.stack-avatars { display: flex; align-items: center; padding-left: 8px; }
+.stack-avatars .stack-avatar { margin-left: -8px; box-shadow: 0 0 0 3px var(--sv-card), 0 8px 16px -8px var(--sv-shadow-ink); }
+.stack-avatars .stack-avatar--more {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; border-radius: 999px;
+  background: var(--sv-card2); color: var(--sv-dim); font-size: 11.5px; font-weight: 700;
+  box-shadow: 0 0 0 3px var(--sv-card);
+}
+.stack-view .stack-hero-top-badge {
+  background: var(--sv-card2); border: 1px solid var(--sv-line2);
+  padding: 5px 12px 5px 6px; color: var(--sv-text); font-weight: 600;
+}
+.stack-view .stack-hero-top-badge .kit-chip { background: transparent; border: 1px solid var(--sv-line2); color: var(--sv-dim); }
+.stack-view .stack-hero-headline { font-size: 21px; font-weight: 700; letter-spacing: -0.025em; line-height: 1.27; color: var(--sv-text); }
+
+/* KPI tiles: tiny caps label, big numeral, quiet hint */
+.stack-stat-tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 2px; }
+.stack-stat-tile {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 14px; border-radius: 16px;
+  background: var(--sv-card2); border: 1px solid var(--sv-line);
+}
+.stack-stat-label { font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--sv-dim); }
+.stack-stat-num { font-size: 30px; font-weight: 800; letter-spacing: -0.04em; line-height: 1.05; color: var(--sv-text); font-variant-numeric: tabular-nums; }
+.stack-stat-hint { font-size: 11.5px; color: var(--sv-dim); font-weight: 500; }
+
+.stack-view .stack-hero-copy-link {
+  align-self: flex-start; padding: 9px 16px; border-radius: 999px; border: 0; cursor: pointer;
+  background: var(--sv-ink); color: var(--sv-ink-on); font-weight: 700; font-size: 12.5px;
+}
+.stack-view .stack-hero-copy-link:disabled { opacity: 0.45; cursor: default; }
+.stack-view .stack-progress-segment { height: 4px; border-radius: 4px; background: var(--sv-track); }
+.stack-view .stack-progress-segment--active { background: var(--sv-ink); }
+.stack-view .stack-progress-bar-wrap { height: 4px; border-radius: 4px; overflow: hidden; background: var(--sv-track); }
+.stack-view .stack-progress-bar-fill { background: var(--sv-ink); }
+
+/* ── Stack mix: donut + bar rows ────────────────────────────── */
+.stack-view .stack-mix-card .kit-card-body { display: grid; grid-template-columns: 124px minmax(0, 1fr); align-items: center; gap: 18px; }
+.stack-view .stack-mix-card .kit-donut { transform: scale(0.88); transform-origin: center; }
+.stack-view .stack-mix-legend { display: flex; flex-direction: column; gap: 12px; min-width: 0; margin-top: 0; }
+.stack-layer-row { --c: var(--sv-ink); display: grid; grid-template-columns: minmax(0, 1fr) auto; row-gap: 6px; column-gap: 8px; align-items: baseline; }
+.stack-layer-label { font-size: 12.5px; font-weight: 600; color: var(--sv-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stack-layer-count { font-size: 12px; font-weight: 700; color: var(--sv-dim); font-variant-numeric: tabular-nums; }
+.stack-layer-bar { grid-column: 1 / -1; height: 6px; border-radius: 6px; background: var(--sv-track); overflow: hidden; }
+.stack-layer-bar i { display: block; height: 100%; border-radius: 6px; background: var(--c); }
+@container (max-width: 380px) {
+  .stack-view .stack-mix-card .kit-card-body { grid-template-columns: 1fr; }
+}
+
+/* ── Security ───────────────────────────────────────────────── */
+.stack-sec-ring-row { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
+.stack-sec-ring {
+  --pct: 0%;
+  width: 76px; height: 76px; flex: 0 0 76px; border-radius: 50%;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: radial-gradient(closest-side, var(--sv-card) 79%, transparent 80% 100%), conic-gradient(var(--sv-ink) var(--pct), var(--sv-track) 0);
+}
+.stack-sec-ring-num { font-size: 24px; font-weight: 800; line-height: 1; letter-spacing: -0.04em; }
+.stack-sec-ring-of { font-size: 10px; color: var(--sv-dim); font-weight: 700; }
+.stack-sec-note { margin: 0; font-size: 13px; line-height: 1.5; color: var(--sv-dim); }
+.stack-view .stack-sec-grid { gap: 8px; }
+.stack-view .kit-minibar { background: var(--sv-card2); border: 1px solid var(--sv-line); border-radius: 14px; }
+.stack-view .kit-minibar-track { background: var(--sv-track); height: 6px; border-radius: 6px; }
+.stack-view .kit-minibar-fill--pass { background-color: var(--sv-ink); }
+.stack-view .kit-minibar-glyph--pass, .stack-view .kit-minibar-glyph--fail { color: var(--sv-dim); }
+
+/* ── Technologies ───────────────────────────────────────────── */
+.stack-view .stack-tech-controls { flex-direction: column; align-items: stretch; gap: 10px; margin-bottom: 4px; }
+.stack-view .stack-search-input {
+  flex: none; width: 100%; box-sizing: border-box; height: 44px; min-height: 44px;
+  padding: 0 14px 0 40px; border-radius: 14px; color: var(--sv-text); font-size: 13.5px; font-weight: 500;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238b909c' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E") 14px 50% / 16px no-repeat,
+    var(--sv-card2);
+  border: 1px solid var(--sv-line);
+}
+.stack-view .stack-search-input:focus { outline: none; border-color: var(--sv-ink); }
+.stack-seg {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; padding: 4px;
+  border-radius: 14px; background: var(--sv-card2); border: 1px solid var(--sv-line);
+}
+.stack-seg-btn {
+  height: 32px; border: 0; border-radius: 10px; background: transparent; color: var(--sv-dim);
+  font: inherit; font-size: 12.5px; font-weight: 700; cursor: pointer; transition: background 0.18s, color 0.18s;
+}
+.stack-seg-btn:hover { color: var(--sv-text); }
+.stack-seg-btn--on { background: var(--sv-ink); color: var(--sv-ink-on); }
+
+.stack-view .stack-tech-list { gap: 0; }
+.stack-tech-group { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
+.stack-tech-group-head { display: flex; align-items: center; gap: 8px; padding: 0 2px; }
+.stack-tech-group-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 7px; background: var(--sv-dim) !important; }
+.stack-tech-group-name { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--sv-dim); }
+.stack-tech-group-count {
+  margin-left: auto; min-width: 22px; padding: 1px 8px; border-radius: 999px;
+  background: var(--sv-card2); border: 1px solid var(--sv-line); font-size: 11px; font-weight: 700; text-align: center; color: var(--sv-dim);
+}
+/* each technology is its own rounded card, like the model cards in the reference */
+.stack-view .stack-tech-row {
+  padding: 12px 14px; border-radius: 18px;
+  background: var(--sv-card2); border: 1px solid var(--sv-line);
+  cursor: pointer; transition: border-color 0.16s, transform 0.16s;
+}
+.stack-view .stack-tech-row:hover { border-color: var(--sv-line2); transform: translateY(-1px); }
+.stack-view .stack-tech-row--focus { border-color: var(--sv-ink); background: var(--sv-card); box-shadow: 0 0 0 1px var(--sv-ink); }
+.stack-view .stack-tech-row-main { gap: 12px; align-items: center; }
+.stack-view .stack-tech-row .kit-logo-tile {
+  width: 42px !important; height: 42px !important; min-width: 42px !important; min-height: 42px !important; border-radius: 13px;
+}
+.stack-view .stack-tech-info { min-width: 0; flex: 1; }
+.stack-view .stack-tech-name { font-size: 14.5px; font-weight: 700; letter-spacing: -0.015em; color: var(--sv-text); }
+.stack-view .stack-tech-version {
+  margin-left: 6px; padding: 1px 7px; border-radius: 999px; background: var(--sv-card); border: 1px solid var(--sv-line);
+  font-size: 10.5px; font-weight: 700; color: var(--sv-dim);
+}
+.stack-view .stack-tech-cat {
+  display: block; margin-top: 2px; font-size: 11.5px; color: var(--sv-dim); font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* confidence: tiny caps label, thin bar, percent. Brightness, not colour, tells the level. */
+.stack-view .stack-conf-pill {
+  display: grid; grid-template-columns: auto auto; grid-template-rows: auto auto; column-gap: 8px; row-gap: 5px;
+  align-items: center; justify-items: end; width: 86px; padding: 0;
+  background: transparent !important; color: var(--sv-dim) !important;
+}
+.stack-conf-label { grid-column: 1; font-size: 9.5px; font-weight: 800; letter-spacing: 0.09em; text-transform: uppercase; justify-self: start; }
+.stack-conf-pct { grid-column: 2; grid-row: 1; font-size: 12px; font-weight: 800; color: var(--sv-text); font-variant-numeric: tabular-nums; }
+.stack-conf-bar { grid-column: 1 / -1; grid-row: 2; justify-self: stretch; height: 5px; border-radius: 5px; background: var(--sv-track); overflow: hidden; }
+.stack-conf-bar i { display: block; height: 100%; border-radius: 5px; background: var(--sv-ink); }
+.stack-conf-pill--likely .stack-conf-bar i { opacity: 0.62; }
+.stack-conf-pill--possible .stack-conf-bar i { opacity: 0.34; }
+.stack-view .stack-evidence-list {
+  margin: 12px 0 2px 54px; padding: 10px 12px 10px 26px; border-radius: 12px;
+  background: var(--sv-card); border: 1px solid var(--sv-line); font-size: 12px; color: var(--sv-dim);
+}
+
+/* ── Page weight ────────────────────────────────────────────── */
+.stack-view .stack-weight-figure-card { background: var(--sv-card2); border: 1px solid var(--sv-line); border-radius: var(--sv-radius-sm); padding: 14px; }
+.stack-view .stack-weight-figure-val { font-size: 26px; font-weight: 800; letter-spacing: -0.04em; color: var(--sv-text); }
+.stack-view .stack-host-chip, .stack-view .stack-section-tech-btn {
+  padding: 6px 11px; border-radius: 999px; background: var(--sv-card2); border: 1px solid var(--sv-line);
+  font-size: 12px; font-weight: 600; color: var(--sv-text);
+}
+.stack-view .stack-chip-icon { width: 16px; height: 16px; margin-right: 7px; border-radius: 5px; }
+.stack-view .kit-chip { background: var(--sv-card2); border: 1px solid var(--sv-line); color: var(--sv-text); }
+
+/* ── On this page ───────────────────────────────────────────── */
+.stack-view .stack-section-item { padding: 14px; border-radius: var(--sv-radius-sm); background: var(--sv-card2); border: 1px solid var(--sv-line); }
+.stack-view .stack-section-num { width: 24px; height: 24px; border-radius: 8px; background: var(--sv-ink); color: var(--sv-ink-on); font-weight: 800; }
+
+/* ── Footer + tab bar ───────────────────────────────────────── */
+.stack-view .stack-footer { padding-top: 6px; gap: 12px; }
+.stack-view .stack-btn--secondary { border-radius: 999px; padding: 9px 18px; font-weight: 700; background: var(--sv-card); border: 1px solid var(--sv-line2); color: var(--sv-text); }
+.stack-tabbar {
+  flex: none; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
+  padding: 8px 10px 10px; background: var(--sv-card); border-top: 1px solid var(--sv-line);
+}
+.stack-tab {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 6px 4px; border: 0; background: transparent; border-radius: 12px; cursor: pointer;
+  color: var(--sv-dim); font: inherit; font-size: 10.5px; font-weight: 700; transition: color 0.16s, background 0.16s;
+}
+.stack-tab svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.stack-tab:hover, .stack-tab:active { color: var(--sv-text); background: var(--sv-card2); }
+
+/* ── Empty state ────────────────────────────────────────────── */
+.stack-view--empty .stack-empty-icon {
+  display: grid; place-items: center; width: 76px; height: 76px; margin: 0 auto 16px;
+  border-radius: 26px; background: var(--sv-card); border: 1px solid var(--sv-line); font-size: 32px;
+}
+.stack-view--empty .stack-empty-content { color: var(--sv-dim); }

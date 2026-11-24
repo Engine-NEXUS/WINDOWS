@@ -47,7 +47,7 @@ static ADMIN_CONFIG: OnceLock<Option<AdminConfig>> = OnceLock::new();
 ///   2. server/admin/admin_config.json (dev fallback)
 fn admin_config_path() -> PathBuf {
     let base = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    let prod_path = base.join("com.nexus.assistant").join("admin.json");
+    let prod_path = base.join(crate::app_dirs::APP_ID).join("admin.json");
     if prod_path.exists() {
         return prod_path;
     }

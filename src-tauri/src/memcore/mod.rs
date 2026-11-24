@@ -16,6 +16,7 @@ pub mod briefing;
 pub mod corrections;
 pub mod curator;
 pub mod crypto;
+pub mod explain;
 pub mod google_io;
 pub mod health;
 pub mod hygiene;

@@ -9,6 +9,8 @@ export interface StackDetection {
   evidence: string[];
   website?: string | null;
   logo?: string | null;
+  /** Captured version ("14.2.3"), when a signal could read one. */
+  version?: string | null;
 }
 
 export interface StackGroup {
@@ -45,6 +47,12 @@ export interface StackSection {
 }
 
 export interface StackPayload {
+  /** "site" (default) or "app". */
+  kind?: "site" | "app";
+  /** The hidden render pass is running. */
+  rendering?: boolean;
+  /** Spoken reasons the scan saw less than the real page. */
+  thin?: string[];
   title: string;
   url: string;
   final_url: string;
@@ -66,6 +74,7 @@ export interface StackPayload {
 export type StackProgressPhase =
   | "starting"
   | "scanning"
+  | "rendering"
   | "layout"
   | "touring"
   | "summary"

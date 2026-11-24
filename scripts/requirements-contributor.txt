@@ -1,0 +1,12 @@
+# Python 3.12 runtime only. Training and Worker deployment are separate.
+-r ../server/nlu/requirements.txt
+-r requirements-contributor-lock.txt
+numpy==2.5.2
+onnxruntime==1.29.0
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.5
+transformers==4.57.6
+moonshine-voice==0.1.5
+python-multipart==0.0.32
+websockets==17.1
