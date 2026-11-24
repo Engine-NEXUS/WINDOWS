@@ -185,6 +185,8 @@ pub(crate) mod agent_followup;
 pub(crate) mod session_observer;
 pub(crate) mod watch_runner;
 pub(crate) mod battery_guard;
+#[cfg(debug_assertions)]
+pub(crate) mod debug_mic;
 pub(crate) mod agent_tracker;
 pub(crate) mod agent_outcomes;
 pub(crate) mod agent_attention;
@@ -950,6 +952,8 @@ pub fn run() {
             focus_throttle::spawn(app.handle());
             stt_stream::init(app.handle().clone());
             battery_guard::spawn(app.handle());
+            #[cfg(debug_assertions)]
+            debug_mic::start(); // test hook, debug builds only: inert unless NEXUS_FAKE_MIC_DIR is set
             if startup_flag("keepAwakePoller") {
                 keep_awake::start_working_poller(); // screen stays awake while a ghost drill/request is running
             }

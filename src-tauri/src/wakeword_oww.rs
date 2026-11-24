@@ -1616,6 +1616,9 @@ pub(crate) mod engine {
             st.carry.drain(0..consumed);
             st.frac = pos - consumed as f64;
         }
+        // Test hook (debug builds only, and only when NEXUS_FAKE_MIC_DIR is set): queued test speech replaces these samples.
+        #[cfg(debug_assertions)]
+        crate::debug_mic::overlay(&mut produced);
 
         // 3. Feed 1280-sample chunks to KWS engine
         //    Check meeting/privacy state — if suppressed, drain audio but
