@@ -141,8 +141,49 @@ pub fn reading_from_raw(ac_line: u8, battery_flag: u8, percent: u8) -> Option<Re
     Some(Reading { percent, on_ac: ac_line != 0 })
 }
 
-#[cfg(target_os = "windows")]
+/// TEST HOOK, debug builds only (not compiled into a release): when the environment variable
+/// `NEXUS_FAKE_BATTERY_FILE` names a file, its text is the battery reading ("4" = 4 percent on battery, "4,ac" = on the
+/// charger, anything else = no reading). Read again on every tick, so a test can move the level while the app runs. While it
+/// is in use the guard NEVER powers anything off (see `fake_battery_in_use`).
+#[cfg(debug_assertions)]
+fn fake_battery_file() -> Option<std::path::PathBuf> {
+    std::env::var_os("NEXUS_FAKE_BATTERY_FILE").map(std::path::PathBuf::from)
+}
+
+#[cfg(debug_assertions)]
+fn fake_battery_in_use() -> bool {
+    fake_battery_file().is_some()
+}
+#[cfg(not(debug_assertions))]
+fn fake_battery_in_use() -> bool {
+    false
+}
+
+#[cfg(debug_assertions)]
+fn read_fake_battery(path: &std::path::Path) -> Option<Reading> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let t = text.trim().to_ascii_lowercase();
+    let (num, ac) = match t.split_once(',') {
+        Some((n, rest)) => (n.trim().to_string(), rest.trim() == "ac"),
+        None => (t.clone(), false),
+    };
+    let percent: u8 = num.parse().ok()?;
+    if percent > 100 {
+        return None;
+    }
+    Some(Reading { percent, on_ac: ac })
+}
+
 pub fn read_battery() -> Option<Reading> {
+    #[cfg(debug_assertions)]
+    if let Some(p) = fake_battery_file() {
+        return read_fake_battery(&p);
+    }
+    read_real_battery()
+}
+
+#[cfg(target_os = "windows")]
+fn read_real_battery() -> Option<Reading> {
     use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
     let mut s = SYSTEM_POWER_STATUS { ACLineStatus: 255, BatteryFlag: 255, BatteryLifePercent: 255, SystemStatusFlag: 0, BatteryLifeTime: 0, BatteryFullLifeTime: 0 };
     // SAFETY: a plain out-pointer to a local struct.
@@ -154,7 +195,7 @@ pub fn read_battery() -> Option<Reading> {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn read_battery() -> Option<Reading> {
+fn read_real_battery() -> Option<Reading> {
     None
 }
 
@@ -650,6 +691,12 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
                     let heard_before = countdown.map_or(0, |(_, at)| at);
                     if let Some((g, _)) = countdown.take() {
                         crate::power_cmd::finish(g);
+                    }
+                    // a made-up test reading must never power a real laptop off
+                    if fake_battery_in_use() {
+                        println!("[BATTERY] test reading in use: the countdown ended, nothing is powered off");
+                        clear_stop_order();
+                        continue;
                     }
                     // last look: the setting must still say yes
                     if read_config(&app).mode != Mode::On {
