@@ -211,7 +211,7 @@ pub fn orb_rect<R: Runtime>(app: &AppHandle<R>) -> RectPayload {
 /// Register the orb's current rect as an interactive stage hitbox (so
 /// pointer events reach it instead of passing through to the desktop).
 fn set_orb_hitbox_interactive<R: Runtime>(_app: &AppHandle<R>, rect: RectPayload) {
-    crate::stage::set_hitbox_source(
+    crate::stage::set_hitbox_source_pinned(
         "orb",
         vec![crate::stage::StageRect { x: rect.x, y: rect.y, w: rect.w, h: rect.h }],
     );
@@ -245,10 +245,14 @@ pub fn emit_loading_rect<R: Runtime>(app: &AppHandle<R>) {
     crate::commands::emit_logged(app, "stage:loading_rect", rect);
 }
 
-/// Show the orb and make it interactive (rect + visible + hitbox). Does
-/// NOT trigger the frontend's wake sequence — callers that want that call
-/// `wake_orb` instead; Tier-3 command-detection shows+interacts but emits
-/// its OWN `command-detected` event rather than a normal wake.
+/// Show the orb (rect + position + visible). Does NOT trigger the frontend's wake sequence — callers that want that
+/// call `wake_orb` instead; Tier-3 command-detection shows the orb but emits its OWN `command-detected` event rather
+/// than a normal wake.
+///
+/// It no longer registers an interactive hitbox. The orb has nothing to click, and the old registration made a 200x200
+/// (logical) square at the top centre of the screen swallow every click, including Brave's tabs and address bar,
+/// until the frontend happened to clear it. The orb is only interactive during animation calibration (see
+/// `set_orb_interactive`).
 pub fn show_orb_interactive<R: Runtime>(app: &AppHandle<R>) {
     let rect = orb_rect(app);
     *LAST_ORB_RECT.lock() = Some(rect);
@@ -256,7 +260,6 @@ pub fn show_orb_interactive<R: Runtime>(app: &AppHandle<R>) {
     let (_, v, _) = read_orb_settings(app);
     crate::commands::emit_logged(app, "stage:orb_position", if v > 0.5 { "bottom" } else { "top" });
     crate::commands::emit_logged(app, "stage:orb_visible", true);
-    set_orb_hitbox_interactive(app, rect);
 }
 
 /// Wake source instrumented (P2 double-wake audit): every fire path
@@ -269,13 +272,20 @@ pub fn wake_orb_src<R: Runtime>(app: &AppHandle<R>, source: &str) {
     crate::commands::emit_logged(app, "orb:wake", serde_json::json!({ "source": source }));
 }
 
+/// Whether the orb may be an interactive stage hitbox right now. Only animation calibration needs it (drag and wheel
+/// resize); at any other time the orb is a picture, and an interactive orb rect blocks the user's screen under it.
+pub(crate) fn orb_hitbox_allowed(calibrating: bool) -> bool {
+    calibrating
+}
+
 /// IPC: orb interactivity (replaces `set_click_through`). The orb is a
 /// div inside the always-click-through `stage` overlay; "interactive"
 /// means its current rect becomes a stage hitbox so pointer events reach
 /// it — everywhere else on the fullscreen overlay stays click-through.
+/// A request to make it interactive outside a calibration session is refused (and any old hitbox cleared).
 #[tauri::command]
 pub fn set_orb_interactive<R: Runtime>(app: AppHandle<R>, interactive: bool) -> Result<(), String> {
-    if interactive {
+    if interactive && orb_hitbox_allowed(crate::calibration::is_active()) {
         let rect = orb_rect(&app);
         set_orb_hitbox_interactive(&app, rect);
     } else {

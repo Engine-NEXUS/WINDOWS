@@ -124,14 +124,14 @@ pub fn decide(ev: &LeaveEvent, eta_secs: i64, now: i64, address: Option<&str>) -
     let at = clock_label(ev.start_epoch);
     let trip = format!("It's about {eta_min} minute{} from home and starts at {at}.", if eta_min == 1 { "" } else { "s" });
     let (urgency, text) = if now >= ev.start_epoch - eta_secs {
-        (AlertUrgency::High, format!("You're running late for {}{tail}. {trip}", ev.summary))
+        (AlertUrgency::High, format!("You're running late for {}{tail}. {trip}", super::explain::short_title(&ev.summary)))
     } else if now >= leave_at {
-        (AlertUrgency::High, format!("Time to leave for {}{tail}. {trip}", ev.summary))
+        (AlertUrgency::High, format!("Time to leave for {}{tail}. {trip}", super::explain::short_title(&ev.summary)))
     } else {
         let mins = (((leave_at - now) + 59) / 60).max(1);
         (
             AlertUrgency::Medium,
-            format!("Leave in about {mins} minute{} for {}{tail}. {trip}", if mins == 1 { "" } else { "s" }, ev.summary),
+            format!("Leave in about {mins} minute{} for {}{tail}. {trip}", if mins == 1 { "" } else { "s" }, super::explain::short_title(&ev.summary)),
         )
     };
     Some(Reminder { key: format!("{}:{}", ev.id, ev.start_epoch), urgency, text })

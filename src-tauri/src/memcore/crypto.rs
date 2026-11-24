@@ -18,7 +18,7 @@ pub const MAGIC: &[u8; 4] = b"NXM1";
 pub const KEY_LEN: usize = 32;
 pub type Key = [u8; KEY_LEN];
 
-const KEYRING_SERVICE: &str = "com.nexus.assistant";
+const KEYRING_SERVICE: &str = crate::app_dirs::APP_ID;
 #[allow(dead_code)]
 const KEYRING_USER: &str = "memcore_data_key_v1";
 

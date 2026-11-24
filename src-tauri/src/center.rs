@@ -483,6 +483,8 @@ pub fn center_id_for(intent: &ParsedIntent) -> CenterId {
     match intent {
         ParsedIntent::OpenApp { .. }
         | ParsedIntent::OpenUrl { .. }
+        | ParsedIntent::SetAppWebPref { .. }
+        | ParsedIntent::ClearAppWebPref { .. }
         | ParsedIntent::CloseApp { .. }
         | ParsedIntent::OpenSettings
         | ParsedIntent::OpenGitHubDashboard { .. } => CenterId::App,

@@ -33,11 +33,16 @@ export function SpeechPill() {
   const [text, setText] = useState("");
   const [visible, setVisible] = useState(false);
   const [replyActive, setReplyActive] = useState(false);
+  // True once the turn's final transcript is in. Final text is shown as it is (no typing animation): with a
+  // cloud recogniser there are no live words, and typing a finished sentence out looked like pasted text.
+  const [isFinal, setIsFinal] = useState(false);
+  const listening = useAssistant((s) => s.state === "listening");
 
   const captionActive = useAssistant((s) => s.captionActive);
   const ttsActive = useAssistant((s) => s.ttsActive);
   const isReplying = replyActive || captionActive || ttsActive;
-  const typed = useTypedText(text, visible && !isReplying, useReducedMotion());
+  const typedLive = useTypedText(text, visible && !isReplying && !isFinal, useReducedMotion());
+  const typed = isFinal ? text : typedLive;
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pillRef = useRef<HTMLDivElement | null>(null);
@@ -77,6 +82,16 @@ export function SpeechPill() {
     };
   }, []);
 
+  // A new listening turn starts clean: no leftover sentence from the last one.
+  useEffect(() => {
+    if (listening) {
+      clearTimer();
+      setIsFinal(false);
+      setText("");
+      setVisible(false);
+    }
+  }, [listening]);
+
   // When TTS or response caption becomes active, hide the speech pill immediately
   useEffect(() => {
     if (isReplying) {
@@ -98,6 +113,7 @@ export function SpeechPill() {
         clearTimer();
         const formatted = formatPartialText(event.payload);
         if (formatted) {
+          setIsFinal(false);
           setText(formatted);
           setVisible(true);
         }
@@ -111,6 +127,7 @@ export function SpeechPill() {
           setText("");
           setVisible(false);
         } else {
+          setIsFinal(true);
           setText(formatted);
           setVisible(true);
           // Keep visible until reply starts or 4 s pass
@@ -179,7 +196,9 @@ export function SpeechPill() {
     applyPosition(pillRef.current);
   }, [rect, text, visible]);
 
-  if (!rect || !visible || !text.trim() || isReplying) {
+  // While you are talking and no words are available yet: three quiet dots, so it never looks stuck.
+  const showDots = Boolean(rect) && listening && !isReplying && !(visible && text.trim());
+  if (!showDots && (!rect || !visible || !text.trim() || isReplying)) {
     return null;
   }
 
@@ -208,7 +227,15 @@ export function SpeechPill() {
           <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
           <line x1="12" y1="19" x2="12" y2="22" />
         </svg>
-        <span className="speech-pill-text">{typed || text.slice(0, 1)}</span>
+        {showDots ? (
+          <span className="speech-pill-dots" aria-label="Listening">
+            <i />
+            <i />
+            <i />
+          </span>
+        ) : (
+          <span className={`speech-pill-text ${isFinal ? "speech-pill-text--final" : ""}`}>{typed || text.slice(0, 1)}</span>
+        )}
       </div>
     </div>
   );

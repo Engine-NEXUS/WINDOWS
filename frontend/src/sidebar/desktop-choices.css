@@ -1,0 +1,9 @@
+.desktop-choice-panel { position:relative;z-index:10;padding:16px;background:var(--ui-surface-card);color:var(--ui-text-primary);border-bottom:1px solid var(--ui-border-strong);flex-shrink:0;max-height:55vh;overflow:auto; }
+.desktop-choice-panel h2 {font-size:16px;margin:0 0 8px;}
+.desktop-choice-panel p,.desktop-choice-panel span {font-size:13px;line-height:1.5;}
+.desktop-choice-panel ol {list-style:none;padding:0;margin:12px 0;display:grid;gap:8px;}
+.desktop-choice-panel button {width:100%;padding:10px;text-align:left;border:1px solid currentColor;border-radius:8px;background:transparent;color:inherit;cursor:pointer;}
+.desktop-choice-panel button:focus-visible {outline:3px solid var(--ui-focus-ring);outline-offset:2px;}
+.desktop-choice-panel button:disabled {opacity:.65;cursor:wait;}
+.desktop-choice-panel strong,.desktop-choice-panel span {display:block;overflow-wrap:anywhere;}
+.desktop-choice-status {padding:12px 16px;color:var(--ui-text-primary);}

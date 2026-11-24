@@ -1522,7 +1522,7 @@ fn get_repos_cache_dir<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
     if let Ok(dir) = app.path().app_data_dir() {
         dir.join("repos")
     } else if let Some(dir) = dirs_next::data_dir() {
-        dir.join("com.nexus.assistant").join("repos")
+        dir.join(crate::app_dirs::APP_ID).join("repos")
     } else {
         std::env::temp_dir().join("nexus_repos")
     }

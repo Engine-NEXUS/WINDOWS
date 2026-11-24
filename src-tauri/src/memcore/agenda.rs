@@ -75,7 +75,10 @@ pub fn agenda_speech(items: &[AgendaItem], day_word: &str, address: Option<&str>
     let parts: Vec<String> = items
         .iter()
         .take(4)
-        .map(|i| if i.all_day { format!("{}, all day", i.summary) } else { format!("{} at {}", i.summary, i.when_label) })
+        .map(|i| {
+            let title = super::explain::short_title(&i.summary);
+            if i.all_day { format!("{title}, all day") } else { format!("{title} at {}", i.when_label) }
+        })
         .collect();
     let more = items.len().saturating_sub(4);
     let list = match parts.len() {

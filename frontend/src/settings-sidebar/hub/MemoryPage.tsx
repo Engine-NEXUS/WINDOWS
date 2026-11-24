@@ -99,10 +99,8 @@ export function MemoryPage({ onFlagChanged }: { onFlagChanged?: (flag: MemoryFla
     setBusy(true);
     setError(null);
     try {
-      const s = await invoke<Record<string, unknown>>("get_settings");
-      await invoke("save_settings", {
-        settings: { ...s, [flag]: on, groqApiKey: "", geminiApiKey: "", cerebrasApiKey: "" },
-      });
+      // Patch only this flag: writing the whole (possibly stale) settings object back could undo a change made elsewhere.
+      await invoke("settings_patch", { patch: { [flag]: on } });
       onFlagChanged?.(flag, on);
       await load();
     } catch (e) {

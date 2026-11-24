@@ -14,7 +14,7 @@ on:
 jobs:
   compile:
     name: cargo check · aarch64-apple-darwin + tests
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -27,7 +27,7 @@ jobs:
           workspaces: src-tauri
 
       - name: npm install (frontend)
-        run: npm --prefix frontend install
+        run: npm --prefix frontend ci
 
       # The port gate: typecheck-only for the Apple-Silicon target, catching
       # any unresolved-Windows-symbol regressions the static classifier

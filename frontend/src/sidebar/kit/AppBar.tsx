@@ -19,7 +19,7 @@ export function AppBar({
   className = "",
 }: AppBarProps) {
   return (
-    <header className={`kit-app-bar ${className}`} data-tauri-drag-region>
+    <header className={`kit-app-bar ${className}`} data-tauri-drag-region title="Arrow keys: ← → move the window · ↓ send behind · ↑ bring to front (anywhere: Ctrl+Alt+↓ / Ctrl+Alt+↑)">
       <div className="kit-app-bar-brand" data-tauri-drag-region>
         {logo && (
           <div className="kit-app-bar-logo" data-tauri-drag-region>

@@ -319,7 +319,7 @@ fn audit_call(server: McpServer, tool: &str, ok: bool, latency_ms: u64) {
 fn audit_call_inner(server: McpServer, tool: &str, ok: bool, latency_ms: u64) {
     let line = audit_line(server, tool, ok, latency_ms);
     let path = match dirs_next::data_dir() {
-        Some(d) => d.join("com.nexus.assistant").join("mcp_audit.jsonl"),
+        Some(d) => d.join(crate::app_dirs::APP_ID).join("mcp_audit.jsonl"),
         None => return,
     };
     if let Some(parent) = path.parent() {

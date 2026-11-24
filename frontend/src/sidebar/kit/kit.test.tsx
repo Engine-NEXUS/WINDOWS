@@ -10,25 +10,38 @@ describe("Kit Components", () => {
   describe("LogoTile", () => {
     it("renders image mode when valid src is provided", () => {
       const html = renderToString(
-        <LogoTile src="https://example.com/logo.png" name="Next.js" size={36} />,
+        <LogoTile src="https://example.com/logo.png" name="Zorblax" size={36} />,
       );
       expect(html).toContain('data-mode="image"');
       expect(html).toContain('<img');
       expect(html).toContain('src="https://example.com/logo.png"');
-      expect(html).toContain('alt="Next.js"');
+      expect(html).toContain('alt="Zorblax"');
       expect(html).toContain('width:36px;height:36px');
     });
 
     it("renders deterministic monogram fallback when src is missing", () => {
       const html = renderToString(
-        <LogoTile src={null} name="Stripe" size={36} />,
+        <LogoTile src={null} name="Zorblax" size={36} />,
       );
       expect(html).toContain('data-mode="monogram"');
-      expect(html).toContain('data-monogram="S"');
-      expect(html).toContain(">S</span>");
+      expect(html).toContain('data-monogram="Z"');
+      expect(html).toContain(">Z</span>");
 
-      const hue = hashHue("Stripe");
+      const hue = hashHue("Zorblax");
       expect(html).toContain(`hsl(${hue}, 65%, 40%)`);
+    });
+
+    it("uses a bundled local logo for a known technology, before any supplied logo", () => {
+      const html = renderToString(<LogoTile src="https://example.com/x.png" name="React 19" techId="react" size={32} />);
+      expect(html).toContain('src="/tech-icons/react.svg"');
+      expect(html).not.toContain("example.com");
+    });
+
+    it("draws a category glyph when no brand mark exists, and a letter only as the last resort", () => {
+      const glyph = renderToString(<LogoTile name="Zorblax" category="security" size={32} />);
+      expect(glyph).toContain('data-mode="glyph"');
+      const letter = renderToString(<LogoTile name="Zorblax" category="unknown-kind" size={32} />);
+      expect(letter).toContain('data-mode="monogram"');
     });
 
     it("computes deterministic hues for identical names", () => {

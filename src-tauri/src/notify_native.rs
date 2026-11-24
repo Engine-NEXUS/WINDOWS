@@ -64,7 +64,7 @@ pub fn toast_xml(event_id: &str, title: &str, body: &str, urgent: bool) -> Optio
 }
 
 /// The Windows identity toasts are shown under.
-pub const APP_ID: &str = "com.nexus.assistant";
+pub const APP_ID: &str = crate::app_dirs::APP_ID;
 
 /// Registry path (under HKCU) that gives the identity a display name so Windows shows the toast as "NEXUS".
 pub fn registration_path() -> String {
@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn the_registration_stays_inside_the_apps_own_key() {
         let p = registration_path();
-        assert_eq!(p, "Software\\Classes\\AppUserModelId\\com.nexus.assistant");
+        assert_eq!(p, format!("Software\\Classes\\AppUserModelId\\{}", crate::app_dirs::APP_ID));
         assert!(!p.contains(".."));
     }
 }

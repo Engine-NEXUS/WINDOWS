@@ -27,6 +27,15 @@ pub enum ParsedIntent {
     OpenApp { target: String },
     #[serde(rename = "open_url")]
     OpenUrl { target: String, url: String },
+    /// "Always open youtube in the browser" / "always open the youtube app"
+    #[serde(rename = "set_app_web_pref")]
+    SetAppWebPref {
+        target: String,
+        pref: crate::app_web_pref::Pref,
+    },
+    /// "Clear preference for youtube" / "reset preference for youtube"
+    #[serde(rename = "clear_app_web_pref")]
+    ClearAppWebPref { target: String },
     #[serde(rename = "close_app")]
     CloseApp { target: String },
     #[serde(rename = "whatsapp_chat")]
@@ -441,6 +450,8 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
     match intent {
         ParsedIntent::OpenApp { .. } => "open_app",
         ParsedIntent::OpenUrl { .. } => "open_url",
+        ParsedIntent::SetAppWebPref { .. } => "set_app_web_pref",
+        ParsedIntent::ClearAppWebPref { .. } => "clear_app_web_pref",
         ParsedIntent::CloseApp { .. } => "close_app",
         ParsedIntent::WhatsappChat { .. } => "whatsapp_chat",
         ParsedIntent::OpenArchitect => "open_architect",
@@ -1125,6 +1136,13 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
     // "cancel" and "never mind" are already handled by the greeting parser
     // above (they return a Greeting with "Very well, sir." which is appropriate).
     if let Some(result) = parse_live_command(&text) {
+        return Some(result);
+    }
+
+    // --- App vs Browser preference commands ---
+    // "always open youtube in the browser", "always open the youtube app",
+    // "from now on open youtube in the browser", "clear preference for youtube"
+    if let Some(result) = parse_app_web_pref_command(&text) {
         return Some(result);
     }
 
@@ -4573,15 +4591,28 @@ fn parse_screen_analysis_command(text: &str) -> Option<ParseResult> {
 fn parse_reverse_engineer_command(text: &str) -> Option<ParseResult> {
     for candidate in sentence_candidates(text) {
         let Some(trimmed) = review_command_candidate(&candidate) else { continue };
+        // Same normalisation as screen analysis: curly apostrophes and polite
+        // lead-ins, then "what's" -> "what is" so one pattern covers both.
+        let trimmed = trimmed.replace(['\u{2019}', '\u{2018}'], "'");
+        let trimmed = regex_captures(
+            &trimmed,
+            r"^(?:(?:hey|ok|okay)\s+)?(?:let'?s\s+|lets\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:i\s+(?:want|need)\s+you\s+to\s+)?(?:tell\s+me\s+)?(?:go\s+(?:and\s+)?)?(.*)$",
+        )
+        .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+        .unwrap_or(trimmed);
+        let trimmed = regex_captures(&trimmed, r"^what(?:'s|s)\s+(.*)$")
+            .and_then(|c| c.get(1).map(|m| format!("what is {}", m.as_str().trim())))
+            .unwrap_or(trimmed);
         if regex_captures(
             &trimmed,
-            r"\b(?:repo|repository|pull\s+request|pr|github|function|file|binary|exe|firmware|malware)\b",
+            r"\b(?:repo|repository|pull\s+request|pr|github|function|file|binary|exe|firmware|malware)\b|\b(?:app|play)\s+store\b",
         )
         .is_some()
         {
             continue;
         }
         const SITE: &str = r"(?:web\s*site|website|site|page|web\s*app|app|application)";
+        const NAMED: &str = r"(?:wordpress|shopify|react|next(?:\.?\s?js)?|nuxt|vue|angular|svelte|gatsby|wix|webflow|squarespace|drupal|joomla|magento|ghost)";
         let patterns = [
             // 1. The explicit verb (STT also hears "reverse and gineer").
             r"^(?:please\s+)?(?:nexus\s+)?reverse[\s-]*(?:engineer(?:ing)?|and\s+gin+eer?)\b.*$".to_string(),
@@ -4603,6 +4634,20 @@ fn parse_reverse_engineer_command(text: &str) -> Option<ParseResult> {
             // 6. "analyse the stack of this website" / "analyse this website's stack".
             format!(
                 r"^(?:analy[sz]e|scan|inspect|check)\b[^;]*(?:\b{SITE}\b[^;]*\bstack\b|\bstack\b[^;]*\b{SITE}\b).*$"
+            ),
+            // 6b. Indirect order: "(tell me) what this site is built with".
+            format!(
+                r"^what\s+(?:this|the|that)\s+{SITE}\s+(?:is|was)\s+(?:built|made|created|developed|coded)\s+(?:with|using|on|in)\b[^;]*$"
+            ),
+            // 7. "what's this built with" (no site word).
+            r"^(?:what|which)\s+(?:is|was)\s+this\s+(?:built|made|created|coded)\s+(?:with|using|on|in)\b[^;]*$".to_string(),
+            // 8. "what framework is this", "what cms does this use", "what stack is this site running".
+            format!(
+                r"^(?:what|which)\s+(?:tech(?:nology)?(?:\s+stack)?|technologies|stack|frameworks?|cms)\s+(?:is|does|did)\s+this(?:\s+{SITE})?(?:\s+(?:use|using|run|running|built\s+(?:with|on|in)))?\s*\??$"
+            ),
+            // 9. "is this wordpress?", "is this site built with shopify?".
+            format!(
+                r"^is\s+this(?:\s+{SITE})?(?:\s+(?:built|made|running)\s+(?:with|on|in))?\s+(?:a\s+|an\s+)?{NAMED}(?:\s+{SITE})?\s*\??$"
             ),
         ];
         if patterns.iter().any(|p| regex_captures(&trimmed, p).is_some()) {
@@ -7421,7 +7466,8 @@ fn parse_browser_force(text: &str) -> Option<ParseResult> {
 
     for &pat in patterns {
         if let Some(caps) = regex_captures(text, pat) {
-            let app_name = caps[1].trim();
+            let raw_name = caps[1].trim();
+            let app_name = raw_name.strip_prefix("the ").unwrap_or(raw_name).trim();
             // Check URL map
             for (key, url) in BROWSER_FORCE_URLS {
                 if *key == app_name {
@@ -7435,17 +7481,118 @@ fn parse_browser_force(text: &str) -> Option<ParseResult> {
                     });
                 }
             }
-            // Unknown app + "in browser" ΓåÆ construct URL if it looks like a domain
-            if app_name.contains('.') && !app_name.contains(' ') {
-                let url = if app_name.starts_with("http") {
-                    app_name.to_string()
-                } else {
-                    format!("https://{}", app_name)
-                };
+            if let Some(url) = crate::command_executor::url_fallback(app_name) {
                 return Some(ParseResult {
                     intent: ParsedIntent::OpenUrl {
                         target: app_name.to_string(),
                         url,
+                    },
+                    confidence: 1.0,
+                    source: "deterministic".to_string(),
+                });
+            }
+            let url = if app_name.starts_with("http") {
+                app_name.to_string()
+            } else if app_name.contains('.') && !app_name.contains(' ') {
+                format!("https://{}", app_name)
+            } else {
+                format!("https://{}.com", app_name.replace(' ', ""))
+            };
+            return Some(ParseResult {
+                intent: ParsedIntent::OpenUrl {
+                    target: app_name.to_string(),
+                    url,
+                },
+                confidence: 1.0,
+                source: "deterministic".to_string(),
+            });
+        }
+    }
+
+    None
+}
+
+fn parse_app_web_pref_command(text: &str) -> Option<ParseResult> {
+    use crate::app_web_pref::Pref;
+
+    // Clear / reset commands:
+    // "clear preference for youtube", "reset preference for youtube", "clear app preference for youtube"
+    let clear_patterns = &[
+        r"^(?:clear|reset)\s+(?:app\s+)?preference\s+for\s+(.+)$",
+        r"^(?:clear|reset)\s+(.+?)\s+preference$",
+    ];
+    for &pat in clear_patterns {
+        if let Some(caps) = regex_captures(text, pat) {
+            let target = caps[1].trim();
+            let target = target.strip_prefix("the ").unwrap_or(target).trim();
+            if !target.is_empty() {
+                return Some(ParseResult {
+                    intent: ParsedIntent::ClearAppWebPref {
+                        target: target.to_string(),
+                    },
+                    confidence: 1.0,
+                    source: "deterministic".to_string(),
+                });
+            }
+        }
+    }
+
+    // "always open ..." / "from now on open ..."
+    let text = text.trim();
+    let body = if let Some(rest) = text.strip_prefix("always ") {
+        rest.trim()
+    } else if let Some(rest) = text.strip_prefix("from now on ") {
+        rest.trim()
+    } else if let Some(rest) = text.strip_prefix("from now on, ") {
+        rest.trim()
+    } else if let Some(rest) = text.strip_prefix("remember to always ") {
+        rest.trim()
+    } else {
+        return None;
+    };
+
+    let inner = body.strip_prefix("open ").unwrap_or(body).trim();
+
+    // Web patterns:
+    // "youtube in the browser", "youtube in browser", "youtube website", "youtube on the web", "youtube on web", "youtube site"
+    let web_patterns = &[
+        r"^(.+?)\s+in\s+(?:the\s+)?browser$",
+        r"^(.+?)\s+website$",
+        r"^(.+?)\s+site$",
+        r"^(.+?)\s+on\s+(?:the\s+)?web$",
+        r"^(.+?)\s+web\s+version$",
+    ];
+    for &pat in web_patterns {
+        if let Some(caps) = regex_captures(inner, pat) {
+            let raw = caps[1].trim();
+            let target = raw.strip_prefix("the ").unwrap_or(raw).trim();
+            if !target.is_empty() {
+                return Some(ParseResult {
+                    intent: ParsedIntent::SetAppWebPref {
+                        target: target.to_string(),
+                        pref: Pref::Web,
+                    },
+                    confidence: 1.0,
+                    source: "deterministic".to_string(),
+                });
+            }
+        }
+    }
+
+    // App patterns:
+    // "the youtube app", "youtube app", "youtube desktop app", "the youtube desktop app"
+    let app_patterns = &[
+        r"^(?:the\s+)?(.+?)\s+(?:desktop\s+)?app(?:lication)?$",
+    ];
+    for &pat in app_patterns {
+        if let Some(caps) = regex_captures(inner, pat) {
+            let raw = caps[1].trim();
+            let target = raw.strip_prefix("the ").unwrap_or(raw).trim();
+            if !target.is_empty() {
+                return Some(ParseResult {
+                    intent: ParsedIntent::SetAppWebPref {
+                        target: target.to_string(),
+                        pref: Pref::App,
                     },
                     confidence: 1.0,
                     source: "deterministic".to_string(),
@@ -7810,10 +7957,13 @@ fn strip_leading_filler(text: &str) -> String {
 fn strip_trailing_app_words(s: &str) -> String {
     let s = s.trim();
     let s = s
-        .strip_suffix(" app")
+        .strip_suffix(" desktop app")
+        .or_else(|| s.strip_suffix(" app"))
         .or_else(|| s.strip_suffix(" application"))
         .or_else(|| s.strip_suffix(" for me"))
         .unwrap_or(s);
+    let s = s.trim();
+    let s = s.strip_prefix("the ").unwrap_or(s);
     s.trim().to_string()
 }
 
@@ -8151,6 +8301,51 @@ mod tests {
         assert!(result.is_some());
         let r = result.unwrap();
         assert!(matches!(r.intent, ParsedIntent::OpenApp { .. }));
+    }
+
+    #[test]
+    fn test_app_web_pref_voice_grammar() {
+        use crate::app_web_pref::Pref;
+
+        // 1. One-off browser force -> OpenUrl
+        let r = parse_deterministic("open youtube in the browser").expect("parse");
+        assert!(matches!(r.intent, ParsedIntent::OpenUrl { ref target, ref url } if target == "youtube" && url.contains("youtube.com")));
+
+        let r = parse_deterministic("open youtube in browser").expect("parse");
+        assert!(matches!(r.intent, ParsedIntent::OpenUrl { ref target, .. } if target == "youtube"));
+
+        let r = parse_deterministic("open youtube website").expect("parse");
+        assert!(matches!(r.intent, ParsedIntent::OpenUrl { ref target, .. } if target == "youtube"));
+
+        let r = parse_deterministic("open youtube on the web").expect("parse");
+        assert!(matches!(r.intent, ParsedIntent::OpenUrl { ref target, .. } if target == "youtube"));
+
+        // 2. One-off app force -> OpenApp
+        let r = parse_deterministic("open youtube app").expect("parse");
+        assert!(matches!(r.intent, ParsedIntent::OpenApp { ref target } if target == "youtube"));
+
+        let r = parse_deterministic("open the youtube app").expect("parse");
+        assert!(matches!(r.intent, ParsedIntent::OpenApp { ref target } if target == "youtube"));
+
+        let r = parse_deterministic("open youtube desktop app").expect("parse");
+        assert!(matches!(r.intent, ParsedIntent::OpenApp { ref target } if target == "youtube"));
+
+        // 3. Stored preferences (always / from now on) -> SetAppWebPref
+        let r = parse_deterministic("always open youtube in the browser").expect("parse");
+        assert!(matches!(r.intent, ParsedIntent::SetAppWebPref { ref target, pref: Pref::Web } if target == "youtube"));
+
+        let r = parse_deterministic("always open the youtube app").expect("parse");
+        assert!(matches!(r.intent, ParsedIntent::SetAppWebPref { ref target, pref: Pref::App } if target == "youtube"));
+
+        let r = parse_deterministic("from now on open youtube in the browser").expect("parse");
+        assert!(matches!(r.intent, ParsedIntent::SetAppWebPref { ref target, pref: Pref::Web } if target == "youtube"));
+
+        let r = parse_deterministic("from now on open the youtube app").expect("parse");
+        assert!(matches!(r.intent, ParsedIntent::SetAppWebPref { ref target, pref: Pref::App } if target == "youtube"));
+
+        // 4. Clear preference
+        let r = parse_deterministic("clear preference for youtube").expect("parse");
+        assert!(matches!(r.intent, ParsedIntent::ClearAppWebPref { ref target } if target == "youtube"));
     }
 
     #[test]
@@ -11208,6 +11403,22 @@ mod tests {
             "tear down this site",
             "analyse the tech stack of this website",
             "scan this website's stack",
+            // Added 2026-11-14 (audit §1.1 misses).
+            "what's this site built with",
+            "what\u{2019}s this website made with",
+            "whats this built with",
+            "what framework is this",
+            "what framework is this site using",
+            "what cms does this use",
+            "what stack is this app running",
+            "is this wordpress",
+            "is this site built with shopify?",
+            "is this a next.js site",
+            "can you tell me what this site is built with",
+            // Heard live on 2026-11-14 and dropped by the transcript filter.
+            "Let's reverse engineer this website.",
+            "lets reverse engineer this app",
+            "go reverse engineer this site",
         ] {
             let res = parse_deterministic(phrase);
             match res.map(|r| r.intent) {
@@ -11228,6 +11439,12 @@ mod tests {
             "analyse my screen",
             "what's on my screen",
             "please do not reverse engineer this website",
+            "what technologies does the app store use",
+            "is this react code correct",
+            "what framework is this repo using",
+            "what is this",
+            "is this okay",
+            "what's this built with in the file",
         ] {
             if let Some(ParsedIntent::NluResult { intent, .. }) = parse_deterministic(phrase).map(|r| r.intent) {
                 assert_ne!(intent, "reverse_engineer", "'{}' must not trigger reverse_engineer", phrase);

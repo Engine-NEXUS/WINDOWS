@@ -400,7 +400,7 @@ fn clarification_for(intent: &ParsedIntent) -> (String, String) {
 /// Speak a clarification prompt and keep the turn open for one bounded reply.
 /// Unlike `speak_prompt_and_finish`, this does not emit `Done` or clear the
 /// active request. The frontend auto-listens after TTS and cancels on timeout.
-async fn speak_prompt_and_hold<R: Runtime>(
+pub(crate) async fn speak_prompt_and_hold<R: Runtime>(
     app: &AppHandle<R>,
     prompt: String,
     expected_slot: String,
@@ -423,12 +423,33 @@ async fn speak_prompt_and_hold<R: Runtime>(
     })
 }
 
+/// Butler mode: whatever produced a result (local line, 9Router, Worker), the owner is addressed as "sir", never by
+/// name. The cloud prompts ask for it too, but a model can ignore a prompt; this guard cannot be ignored.
+fn enforce_butler_address<R: Runtime>(app: &AppHandle<R>, payload: &mut serde_json::Value) {
+    if crate::persona::is_friend(&crate::commands::read_persona_mode(app)) {
+        return;
+    }
+    let Some(text) = payload.get("text").and_then(|v| v.as_str()) else { return };
+    let Ok(dir) = app.path().app_data_dir() else { return };
+    let names: Vec<String> = ["name", "user_first_name", "user_name", "nickname"]
+        .iter()
+        .filter_map(|k| crate::memory::core_value(&dir, k))
+        .collect();
+    let fixed = crate::persona::enforce_address(text, &names);
+    if fixed != text {
+        payload["text"] = serde_json::Value::String(fixed);
+    }
+}
+
 /// Emit an orchestrator event to the frontend.
 pub(crate) fn emit<R: Runtime>(app: &AppHandle<R>, event: &OrchestratorEvent) {
     if matches!(event, OrchestratorEvent::Result { .. }) {
         crate::latency::mark(crate::latency::Stage::Answer);
     }
     let mut payload = serde_json::to_value(event).unwrap_or_default();
+    if matches!(event, OrchestratorEvent::Result { .. }) {
+        enforce_butler_address(app, &mut payload);
+    }
     if let Some(id) = payload.get("request_id").and_then(|v| v.as_str()) {
         let source = ACTIVE_REQUEST.try_lock().ok()
             .and_then(|guard| guard.as_ref().filter(|active| active.id == id)
@@ -742,6 +763,8 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         // Local commands — handled in Rust, no network
         ParsedIntent::OpenApp { .. }
         | ParsedIntent::OpenUrl { .. }
+        | ParsedIntent::SetAppWebPref { .. }
+        | ParsedIntent::ClearAppWebPref { .. }
         | ParsedIntent::CloseApp { .. }
         | ParsedIntent::WhatsappChat { .. }
         | ParsedIntent::MediaPlayPause
@@ -984,6 +1007,8 @@ async fn process_transcript_inner<R: Runtime>(
         });
     }
 
+    let desktop_selection=crate::ghost_center::parse(&transcript).is_some_and(|t|matches!(t.steps.as_slice(),[crate::ghost_center::GhostStep::Choose{..}]));
+    if !desktop_selection {crate::desktop_choices::clear();}
     // A question NEXUS just asked ("Shall I start?", "App or browser?",
     // "Add these slots?") owns the next short answer. Anything that is not a
     // clear answer drops the offer and is handled as a normal command.
@@ -1010,6 +1035,20 @@ async fn process_transcript_inner<R: Runtime>(
             Some(Offer::FileConfirm) if reply != Reply::Other => {
                 return run_file_confirm(app, reply, &transcript, origin).await;
             }
+            // "Notepad or Notion? Say one or two": a number or a distinctive name picks; "no" drops it; a bare "yes" asks again.
+            Some(Offer::OpenAppPick { ref choices, ref spoken })
+                if pick_route(choices, &transcript, reply) == PickRoute::AskAgain =>
+            {
+                let question = offer::pick_question(spoken, choices);
+                let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                offer::set(Offer::OpenAppPick { choices: choices.clone(), spoken: spoken.clone() }, true);
+                return say_and_finish(&app, request_id, format!("Which one, sir? {question}"));
+            }
+            Some(o @ Offer::OpenAppPick { .. })
+                if matches!(&o, Offer::OpenAppPick { choices, .. } if pick_route(choices, &transcript, reply) == PickRoute::Answer) =>
+            {
+                return run_offer_reply(app, o, reply, &transcript).await;
+            }
             Some(o @ Offer::Choose { .. }) if has_choice || reply != Reply::Other => {
                 return run_offer_reply(app, o, reply, &transcript).await;
             }
@@ -1022,7 +1061,11 @@ async fn process_transcript_inner<R: Runtime>(
                     && offer::reask_once()
                 {
                     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-                    return say_and_finish(&app, request_id, "Sorry sir, was that a yes or a no?".into());
+                    let again = match offer::peek() {
+                        Some(Offer::OpenAppPick { choices, spoken }) => format!("Sorry sir, which one? {}", offer::pick_question(&spoken, &choices)),
+                        _ => "Sorry sir, was that a yes or a no?".to_string(),
+                    };
+                    return say_and_finish(&app, request_id, again);
                 }
                 offer::clear();
                 crate::action_kernel::pending::clear();
@@ -1281,6 +1324,10 @@ async fn process_transcript_inner<R: Runtime>(
     let center_name = crate::center::center_id_for(&intent).as_str();
     let evidence = crate::center::command_evidence(&intent, &transcript, source);
     let turn = turn_context.unwrap_or_default();
+    // A multi-flow workflow asked a follow-up question ("What should the message say?"): this turn may answer it.
+    if let Some(handled) = crate::flows::live::try_fill_slot(&app, &transcript, turn.ownership).await {
+        return handled;
+    }
     let corrected_action = crate::center::correction_needs_repeat(&turn.raw_text, &transcript, &intent)
         || (turn.session != 0 && !turn.corrected_text.is_empty() && turn.corrected_text != transcript);
     let unknown_command = matches!(intent, ParsedIntent::Unknown { .. })
@@ -1449,8 +1496,10 @@ async fn process_transcript_inner<R: Runtime>(
         let outcome = tokio::task::spawn_blocking(move || crate::dictation::dictate(&raw_line, dictionary))
             .await
             .map_err(|e| e.to_string())?;
-        if let crate::dictation::Outcome::Refused(msg) = outcome {
-            speak_line(&app, msg, &request_id);
+        match outcome {
+            crate::dictation::Outcome::Refused(msg)=>speak_line(&app,msg,&request_id),
+            crate::dictation::Outcome::Unconfirmed=>speak_line(&app,"Text was sent once, but I couldn't verify it in the intended field. Please check it before repeating, sir.".into(),&request_id),
+            _=>{},
         }
         clear_active_request(&request_id);
         return Ok(ProcessResult {
@@ -1589,6 +1638,14 @@ async fn process_transcript_inner<R: Runtime>(
             ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_analysis" => {
                 let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("analyze the screen").to_string();
                 return run_screen_analysis(app, prompt).await;
+            }
+            // Normal-mode dispatch for "reverse engineer this website/app". Until
+            // 2026-11-14 this arm existed only in the Ghost-session table below, so
+            // outside Ghost Mode the intent fell through to a no-op LocalCommand
+            // (found in the first live run of build a3d6200b246d9b4a).
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "reverse_engineer" => {
+                let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("reverse engineer this website").to_string();
+                return crate::reverse_engineer::run(app, prompt).await;
             }
             ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_annotation" => {
                 let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("annotate the screen").to_string();
@@ -2188,6 +2245,10 @@ async fn process_transcript_inner<R: Runtime>(
     // routing. This must run BEFORE routing because a compound transcript
     // won't parse as a single intent anyway (the deterministic parser
     // would return Unknown or a wrong partial match).
+    // Multi-flow workflows (plan 193): runs for real when `flowsLive` is on, otherwise only logs what it would do.
+    if let Some(handled) = crate::flows::live::try_run(&app, &transcript, turn.ownership).await {
+        return handled;
+    }
     let request_id_probe = new_request_id();
     if let Some(plan) =
         crate::command_center::build_plan_with_brain(&transcript, &request_id_probe).await
@@ -2367,6 +2428,39 @@ async fn process_transcript_inner<R: Runtime>(
                 if is_cancelled(&cancel_flag) {
                     clear_active_request(&request_id);
                     return Ok(local_result(request_id, Subsystem::LocalCommand));
+                }
+                if let ParsedIntent::OpenUrl { target, url } = &intent {
+                    let verified = outcome.as_ref().map(|r| r.success).unwrap_or(false);
+                    let subject_input = if url.is_empty() { target } else { url };
+                    crate::action_receipt::emit(
+                        &app,
+                        &crate::action_receipt::ActionReceipt::for_open_site(subject_input, verified),
+                    );
+                } else if let (ParsedIntent::OpenApp { target }, true) =
+                    (&intent, outcome.as_ref().is_ok_and(|r| r.success))
+                {
+                    // Claim "Opened" only after the window is verified in front.
+                    let in_front = open_target_in_front(target.clone(), cancel_flag.clone()).await;
+                    crate::action_receipt::emit(
+                        &app,
+                        &crate::action_receipt::ActionReceipt::for_open_app(target, in_front),
+                    );
+                } else if outcome.as_ref().is_ok_and(|r| r.success) {
+                    match &intent {
+                        ParsedIntent::MediaPlayPause => {
+                            crate::action_receipt::emit(&app, &crate::action_receipt::ActionReceipt::for_media("play_pause"));
+                        }
+                        ParsedIntent::MediaNext => {
+                            crate::action_receipt::emit(&app, &crate::action_receipt::ActionReceipt::for_media("next"));
+                        }
+                        ParsedIntent::MediaPrevious => {
+                            crate::action_receipt::emit(&app, &crate::action_receipt::ActionReceipt::for_media("previous"));
+                        }
+                        ParsedIntent::MediaStop => {
+                            crate::action_receipt::emit(&app, &crate::action_receipt::ActionReceipt::for_media("stop"));
+                        }
+                        _ => {}
+                    }
                 }
                 let message = match outcome {
                     Ok(result) => result.message,
@@ -3380,7 +3474,10 @@ pub(crate) const BARGE_DAC_DRAIN_MS: u64 = 250;
 /// stop) — never duplicate these four lines elsewhere.
 pub(crate) fn request_barge_in(reason: &str) {
     let _ = crate::tts::stop_tts();
-    cancel_active();
+    if crate::desktop_choices::capture_preserves_choice(reason) {
+        crate::desktop_choices::cancel_running();
+        cancel_current_request();
+    } else { cancel_active(); }
     crate::wakeword_oww::clear_tts_playing();
     crate::ghost::drop_followups();
     tracing::info!("barge-in: audio cut + turn cancelled ({reason})");
@@ -3388,6 +3485,10 @@ pub(crate) fn request_barge_in(reason: &str) {
 
 /// Cancel the active request (if any). Called on barge-in or new wake.
 pub fn cancel_active() {
+    crate::desktop_choices::clear();
+    cancel_current_request();
+}
+fn cancel_current_request() {
     let mut guard = ACTIVE_REQUEST.lock().unwrap();
     if let Some(req) = guard.as_ref() {
         req.cancelled.store(true, Ordering::Relaxed);
@@ -5205,6 +5306,14 @@ async fn run_screen_tour<R: Runtime>(
             &OrchestratorEvent::Loading { visible: true, request_id: rid.clone() },
         );
         crate::center::direct_ui(app, crate::center::UiDirective::Loading(true));
+        // One burst of rings leaves the orb and covers the screen the moment NEXUS acknowledges (docs/features/195).
+        // It plays at once because the context gathering below takes seconds. The picture is never polluted: the stage is
+        // capture-excluded for the shot itself. Not in a meeting (the overlay would show in the screen share).
+        crate::commands::emit_logged(
+            app,
+            "screen:analyse_wave",
+            serde_json::json!({ "request_id": rid }),
+        );
     }
 
     // 2. Enrich the frozen target with local OCR and public video metadata
@@ -5845,6 +5954,30 @@ async fn start_activity<R: Runtime>(
     timetable_io::start_speech(title, &targets, &outcomes, youtube_missing)
 }
 
+/// How a reply to "A or B? Say one or two" is handled.
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum PickRoute {
+    /// A number, a distinctive name, "no" or "later": answer the question (a "no" drops it).
+    Answer,
+    /// A bare "yes" does not say which: ask again instead of guessing.
+    AskAgain,
+    /// Anything else is an ordinary command; the question is dropped.
+    NotAnAnswer,
+}
+
+fn pick_route(choices: &[String], transcript: &str, reply: crate::memcore::offer::Reply) -> PickRoute {
+    use crate::memcore::offer::{parse_pick, Reply};
+    if parse_pick(transcript, choices).is_some() {
+        PickRoute::Answer
+    } else if reply == Reply::Yes {
+        PickRoute::AskAgain
+    } else if reply != Reply::Other {
+        PickRoute::Answer
+    } else {
+        PickRoute::NotAnAnswer
+    }
+}
+
 /// The user answered a question NEXUS asked (see the intercept in
 /// `process_transcript`).
 async fn run_offer_reply<R: Runtime>(
@@ -6018,6 +6151,17 @@ async fn run_offer_reply<R: Runtime>(
             }
         }
         (Offer::OpenApp { .. }, _) => "Understood, sir. I won't open anything.".to_string(),
+        (Offer::OpenAppPick { choices, spoken }, _) => match offer::parse_pick(text, &choices).and_then(|i| choices.get(i).cloned()) {
+            Some(display_name) => {
+                // The pick is the training signal: next time this phrase goes straight to that app.
+                crate::app_registry::confirm_resolution(&spoken, &display_name);
+                match crate::command_executor::resolve_and_open_app(&display_name.to_lowercase()) {
+                    Ok(r) => r.message,
+                    Err(e) => e,
+                }
+            }
+            None => "Understood, sir. I won't open anything.".to_string(),
+        },
         (Offer::CodeRabbitReview { repo, pr }, Reply::Yes) => match crate::coderabbit_review::start_review(app.clone(), repo, pr).await {
             Ok(_) => crate::coderabbit_review::next_working_line().to_string(),
             Err(why) => why,
@@ -9104,6 +9248,7 @@ async fn run_browser_search<R: Runtime>(
         // Bracket the action (see run_ghost_open): mid-search speech
         // queues; the guard drops before the drain so dequeued steps
         // execute instead of re-queueing.
+        let query_receipt = query.clone();
         let outcome = {
             let _guard = crate::ghost::GhostDrillGuard::new();
             let r = tokio::task::spawn_blocking(move || {
@@ -9118,6 +9263,11 @@ async fn run_browser_search<R: Runtime>(
 
         if let Err(e) = outcome {
             tracing::warn!("browser search failed: {}", e);
+        } else {
+            crate::action_receipt::emit(
+                &app,
+                &crate::action_receipt::ActionReceipt::for_search(&query_receipt, "google.com"),
+            );
         }
     }
     clear_active_request(&request_id);
@@ -9159,6 +9309,11 @@ async fn run_browser_search_focus<R: Runtime>(
 
         if let Err(e) = outcome {
             tracing::warn!("browser focus_search_bar failed: {}", e);
+        } else {
+            crate::action_receipt::emit(
+                &app,
+                &crate::action_receipt::ActionReceipt::for_search("", "google.com"),
+            );
         }
         speak_line(&app, "Ready to search, sir.".to_string(), &request_id);
     }
@@ -9314,8 +9469,10 @@ async fn run_type_text<R: Runtime>(
             .await
             .map_err(|e| e.to_string())?;
 
-        if let crate::dictation::Outcome::Refused(msg) = outcome {
-            speak_line(&app, msg, &request_id);
+        match outcome {
+            crate::dictation::Outcome::Refused(msg)=>speak_line(&app,msg,&request_id),
+            crate::dictation::Outcome::Unconfirmed=>speak_line(&app,"Text was sent once, but I couldn't verify it in the intended field. Please check it before repeating, sir.".into(),&request_id),
+            _=>{},
         }
     }
     clear_active_request(&request_id);
@@ -9329,16 +9486,12 @@ async fn run_type_text<R: Runtime>(
 /// Focus an already-running app/window by (partial, case-insensitive)
 /// title. Local, instant, no network — see doc 07 P2.
 async fn run_focus_app<R: Runtime>(app: AppHandle<R>, target: String) -> Result<ProcessResult, String> {
-    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let (request_id, cancel_flag) = install_new_request(Subsystem::LocalCommand);
     if target.trim().is_empty() {
         speak_line(&app, "Which app should I focus, sir?".to_string(), &request_id);
     } else {
         let target_clone = target.clone();
-        let found = tokio::task::spawn_blocking(move || {
-            crate::live::commands::window::focus_app_by_title(&target_clone)
-        })
-        .await
-        .unwrap_or(false);
+        let found = open_target_in_front(target_clone,cancel_flag).await;
         let reply = if found {
             "Ok sir.".to_string()
         } else {
@@ -9680,7 +9833,7 @@ async fn run_watch_screen_email<R: Runtime>(
     let app_data_dir = app
         .path()
         .app_data_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("com.nexus.assistant"));
+        .unwrap_or_else(|_| std::path::PathBuf::from(crate::app_dirs::APP_ID));
 
     // Resolve matching connected Google account for this active email
     let connected_accounts = crate::auth_vault::get_google_accounts();
@@ -10099,21 +10252,36 @@ async fn run_ghost_center_task<R: Runtime>(
     app: AppHandle<R>,
     task: crate::ghost_center::GhostTask,
 ) -> Result<ProcessResult, String> {
+    let total_requested=task.steps.len();
+    let lock_at_start=crate::commands::read_speaker_verification(&app);
     let (request_id, cancel_flag) = install_new_request(Subsystem::LocalCommand);
     let guard = crate::ghost::GhostDrillGuard::new();
     let worker_cancel = cancel_flag.clone();
     let store_dir = app.path().app_data_dir().ok();
-    let receipts = tokio::task::spawn_blocking(move || {
-        crate::ghost_center::execute_with_store(&task, &worker_cancel, store_dir.as_deref())
-    }).await.map_err(|e| e.to_string())?;
+    let is_selection = matches!(task.steps.as_slice(), [crate::ghost_center::GhostStep::Choose {..}]);
+    let worker = tokio::task::spawn_blocking(move || {
+        if let [crate::ghost_center::GhostStep::Choose{number}]=task.steps.as_slice(){crate::desktop_choices::choose_voice_with_lock(*number,&worker_cancel,lock_at_start)}
+        else{crate::ghost_center::execute_authorized(&task, worker_cancel, store_dir.as_deref())}
+    });
+    let receipts = match tokio::time::timeout(std::time::Duration::from_secs(20), worker).await {
+        Ok(result) => result.map_err(|e| e.to_string())?,
+        Err(_) => {
+            cancel_flag.store(true, Ordering::Relaxed);
+            crate::desktop_choices::clear();
+            drop(guard);
+            return say_and_finish(&app, request_id, "Desktop observation timed out. I will not repeat the action; please check the application, sir.".into());
+        }
+    };
     let stopped_in_run = crate::ghost::stop_requested() || is_cancelled(&cancel_flag);
+    if !is_selection {crate::desktop_choices::bind(&cancel_flag, lock_at_start);}
+    if !stopped_in_run {crate::desktop_choices::publish(&app).await;}
     drop(guard);
     let reply = match receipts.last() {
         Some(receipt) if receipts.len() > 1 && receipt.outcome == crate::ghost_center::Outcome::Verified =>
             format!("Completed all {} Ghost steps, sir.", receipts.len()),
         Some(receipt) if receipts.len() > 1 =>
             format!("Completed {} of {} Ghost steps. {}",
-                receipts.len() - 1, receipts.len(), receipt.spoken()),
+                receipts.len() - 1, total_requested.max(receipts.len()), receipt.spoken()),
         Some(receipt) => receipt.spoken(),
         None => "I couldn't start that Ghost task, sir.".into(),
     };
@@ -10178,6 +10346,7 @@ fn may_answer_offer(
                 | Offer::HookSetup { .. }
                 | Offer::FileConfirm
                 | Offer::OpenApp { .. }
+                | Offer::OpenAppPick { .. }
                 | Offer::AddEvent { .. }
                 | Offer::ClearTimetable
                 | Offer::ReopenSession
@@ -10237,29 +10406,37 @@ fn opened_message(in_front: bool) -> String {
     }
 }
 
-/// Wait for `target`'s window to come to the front (title match, then the foreground process name
-/// as a second opinion for apps whose title does not contain their name).
-async fn open_target_in_front(target: String) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        tokio::task::spawn_blocking(move || {
-            if crate::live::commands::window::wait_and_focus_app(&target, 2500) {
-                return true;
+/// Resolve an exact executable identity and verify its window becomes foreground.
+/// Titles never authorize app focus; activation is requested at most once.
+async fn open_target_in_front(target: String, cancel: Arc<AtomicBool>) -> bool {
+    #[cfg(target_os="windows")] {
+        tokio::task::spawn_blocking(move||{
+            if let Some(entry) = crate::app_registry::lookup_strict(&target) {
+                if let crate::app_registry::LaunchMethod::Aumid { ref aumid } = entry.launch {
+                    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+                    let start = std::time::Instant::now();
+                    while start.elapsed().as_millis() <= 3000 {
+                        if cancel.load(std::sync::atomic::Ordering::Relaxed) || crate::ghost::stop_requested() {
+                            return false;
+                        }
+                        let fg = unsafe { GetForegroundWindow() };
+                        if fg.0 != 0 {
+                            if let Some(w_aumid) = crate::app_registry::window_aumid(fg.0) {
+                                if w_aumid.eq_ignore_ascii_case(aumid) {
+                                    return true;
+                                }
+                            }
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    return false;
+                }
             }
-            let want: String = target.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
-            !want.is_empty()
-                && crate::browser_url::foreground_process_name()
-                    .map(|p| p.to_lowercase().contains(&want))
-                    .unwrap_or(false)
-        })
-        .await
-        .unwrap_or(false)
+            let exe=crate::desktop_control::expected_executable(&target).map(str::to_string).or_else(||crate::app_registry::lookup_strict(&target).and_then(|entry|match entry.launch{crate::app_registry::LaunchMethod::Exe{path}=>std::path::Path::new(&path).file_name().map(|v|v.to_string_lossy().to_lowercase()),_=>None}));
+            exe.is_some_and(|exe|crate::desktop_native::focus_executable(&exe,&cancel))
+        }).await.unwrap_or(false)
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = target;
-        true
-    }
+    #[cfg(not(target_os="windows"))]{let _=(target,cancel);false}
 }
 
 async fn run_ghost_open<R: Runtime>(
@@ -10282,7 +10459,7 @@ async fn run_ghost_open<R: Runtime>(
         let (request_id, _) = install_new_request(Subsystem::LocalCommand);
         return finish(&app, request_id, msg);
     }
-    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let (request_id, cancel_flag) = install_new_request(Subsystem::LocalCommand);
     if crate::ghost::stop_requested() || !crate::ghost::session_active() {
         return finish(&app, request_id, "Stopped, sir.".to_string());
     }
@@ -10297,16 +10474,11 @@ async fn run_ghost_open<R: Runtime>(
             // speak the refusal — never drill, never claim success.
             Ok(res) if !res.success => res.message,
             Ok(_) => {
-                let focused = open_target_in_front(target_clone).await;
+                let focused = open_target_in_front(target_clone,cancel_flag.clone()).await;
+                crate::action_receipt::emit(&app, &crate::action_receipt::ActionReceipt::for_open_app(&target, focused));
                 opened_message(focused)
             }
-            Err(_) => match crate::live::commands::launcher::open_app_via_search(&target) {
-                Ok(()) => {
-                    let focused = open_target_in_front(target_clone).await;
-                    opened_message(focused)
-                }
-                Err(e) => e,
-            },
+            Err(_) => "I couldn't confirm the app launch. I won't retry it automatically; check the desktop first, sir.".into(),
         };
         // Read the stop BEFORE the guard drops: ending the last drill consumes it.
         let stopped = crate::ghost::stop_requested();
@@ -10587,8 +10759,8 @@ pub async fn orchestrator_process<R: Runtime>(
 
 /// IPC: Cancel the active orchestrator request (barge-in / new wake / dismiss).
 #[tauri::command]
-pub async fn orchestrator_cancel() -> Result<(), String> {
-    request_barge_in("ipc-cancel");
+pub async fn orchestrator_cancel(for_capture: Option<bool>) -> Result<(), String> {
+    request_barge_in(if for_capture == Some(true) { "barge" } else { "ipc-cancel" });
     Ok(())
 }
 
@@ -10854,6 +11026,10 @@ pub async fn orchestrator_mcp_confirm<R: Runtime>(
     use crate::mcp_client::{call_tool, extract_text, McpServer};
 
     if !confirmed {
+        // A paused multi-flow workflow waits in Rust under its token: a "no" forgets it.
+        if pending["server"].as_str() == Some(crate::flows::live::CONFIRM_SERVER) {
+            crate::flows::live::discard(pending["params"]["nonce"].as_str().unwrap_or(""));
+        }
         emit(
             &app,
             &OrchestratorEvent::Result {
@@ -10880,6 +11056,11 @@ pub async fn orchestrator_mcp_confirm<R: Runtime>(
         .as_str()
         .ok_or("invalid pending payload: missing tool")?;
     let params = pending["params"].clone();
+
+    // A multi-flow workflow (plan 193) asked for this confirmation: it resumes itself.
+    if server_name == crate::flows::live::CONFIRM_SERVER {
+        return crate::flows::live::resume(&app, request_id, params).await;
+    }
 
     let server = match server_name {
         "swiggy-food" => McpServer::SwiggyFood,
@@ -11204,6 +11385,22 @@ mod tests {
     }
 
     #[test]
+    fn replies_to_the_numbered_app_question_are_routed_safely() {
+        use super::{pick_route, PickRoute};
+        use crate::memcore::offer::{classify, Reply};
+        let c = vec!["Clock".to_string(), "Block".to_string()];
+        let route = |t: &str| pick_route(&c, t, classify(t));
+        assert_eq!(route("one"), PickRoute::Answer);
+        assert_eq!(route("the second one"), PickRoute::Answer);
+        assert_eq!(route("clock"), PickRoute::Answer);
+        assert_eq!(route("no"), PickRoute::Answer, "a no drops the question");
+        assert_eq!(route("not now"), PickRoute::Answer);
+        assert_eq!(route("yes"), PickRoute::AskAgain, "yes does not say which");
+        assert_eq!(route("what is the weather today"), PickRoute::NotAnAnswer);
+        assert_eq!(pick_route(&c, "maybe", Reply::Other), PickRoute::NotAnAnswer);
+    }
+
+    #[test]
     fn who_may_answer_an_offer() {
         use super::may_answer_offer as ok;
         use crate::memcore::offer::Offer;
@@ -11211,6 +11408,8 @@ mod tests {
         let power = Offer::Power { kind: "shutdown".into() };
         let open = Offer::OpenApp { display_name: "Google Chat".into(), spoken: "mummy chat".into() };
         let start = Offer::Start { title: "DSA".into(), activity: "dsa".into() };
+        let pick = Offer::OpenAppPick { choices: vec!["Clock".into(), "Block".into()], spoken: "lock".into() };
+        assert!(ok(Verified, &pick) && !ok(Rejected, &pick) && !ok(Uncertain, &pick), "an app launch is never answered by an uncertain voice");
         // The owner (or an unenrolled setup) may answer anything.
         for o in [&power, &open, &start] {
             assert!(ok(Verified, o));

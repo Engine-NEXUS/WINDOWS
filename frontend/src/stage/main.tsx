@@ -7,7 +7,9 @@ import { OrbFrame } from "./OrbFrame";
 import { LoadingIndicator } from "./LoadingIndicator";
 import { ResponseCaption } from "./ResponseCaption";
 import { SpeechPill } from "./SpeechPill";
+import { ActionReceipt } from "./ActionReceipt";
 import { TourOverlay } from "./TourOverlay";
+import { AnalyseWave } from "./AnalyseWave";
 import { HandOverlay } from "./HandOverlay";
 import { NotifyExpand } from "./NotifyExpand";
 import { BackgroundTaskChip } from "./BackgroundTaskChip";
@@ -372,6 +374,7 @@ function StageApp() {
         {guideLabel}
       </div>
       <SpatialAnnotationLayer />
+      <AnalyseWave />
       <TourOverlay />
       <HandOverlay />
       <NotifyExpand />
@@ -381,6 +384,7 @@ function StageApp() {
       <BackgroundTaskChip />
       <ResponseCaption />
       <SpeechPill />
+      <ActionReceipt />
       <CaptionLiveRegion />
     </div>
   );

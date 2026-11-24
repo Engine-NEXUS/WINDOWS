@@ -1,70 +1,14 @@
 #!/usr/bin/env bash
-# scripts/build.sh — Unix (Linux & macOS) build helper.
-# Usage:
-#   ./scripts/build.sh              # build frontend + tauri (release)
-#   ./scripts/build.sh --target aarch64-apple-darwin
-#   ./scripts/build.sh --fast        # cargo build --release --features custom-protocol
-
-set -e
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(dirname "$SCRIPT_DIR")"
-cd "$ROOT_DIR"
-
-FAST_BUILD=false
-TARGET=""
-BUNDLES=""
-
+# Compatibility wrapper. All setup/build behavior lives in the shared Node CLI.
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+command_name=package
+args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --fast)
-      FAST_BUILD=true
-      shift
-      ;;
-    --target)
-      TARGET="$2"
-      shift 2
-      ;;
-    --bundles)
-      BUNDLES="$2"
-      shift 2
-      ;;
-    *)
-      echo "Unknown option: $1"
-      exit 1
-      ;;
+    --fast) command_name=build; shift ;;
+    *) args+=("$1"); shift ;;
   esac
 done
-
-echo -e "\033[0;36m==> Installing frontend dependencies\033[0m"
-npm --prefix frontend install
-
-echo -e "\033[0;36m==> Building frontend\033[0m"
-npm --prefix frontend run build
-
-if [ "$FAST_BUILD" = true ]; then
-  echo -e "\033[0;36m==> Compiling release binary (cargo build)\033[0m"
-  cd src-tauri
-  cargo build --release --features custom-protocol
-  cd ..
-  echo -e "\033[0;32m==> Binary built: src-tauri/target/release/nexus\033[0m"
-else
-  echo -e "\033[0;36m==> Building Tauri app (tauri build)\033[0m"
-  cd src-tauri
-  CARGO_ARGS=("tauri" "build")
-  if [ -n "$TARGET" ]; then
-    CARGO_ARGS+=("--target" "$TARGET")
-  fi
-  if [ -n "$BUNDLES" ]; then
-    CARGO_ARGS+=("--bundles" "$BUNDLES")
-  fi
-  
-  if ! command -v cargo-tauri &> /dev/null && ! npm --prefix ../frontend exec tauri --version &> /dev/null; then
-    echo -e "\033[0;33m==> Installing tauri-cli\033[0m"
-    cargo install tauri-cli --version "^2" --locked
-  fi
-  
-  cargo "${CARGO_ARGS[@]}"
-  cd ..
-  echo -e "\033[0;32m==> Artifacts in src-tauri/target/release/bundle/\033[0m"
-fi
+if [[ "$command_name" == package ]]; then args=(--profile personal "${args[@]}"); fi
+exec node "$root/nexus.mjs" "$command_name" "${args[@]}"

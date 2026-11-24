@@ -24,6 +24,7 @@ import { DockIcon } from "../sidebar/kit/DockButtons";
 import { applyThemePreference, normalizePreference, resolveThemeMode, type ThemePreference } from "../sidebar/theme";
 import "./hub/hub.css";
 import { HubHome, type HubPage } from "./hub/HubHome";
+import { FeaturesPage } from "./hub/FeaturesPage";
 import { ApiKeysPage } from "./hub/ApiKeysPage";
 import { MemoryPage } from "./hub/MemoryPage";
 import { WAKE_SOUNDS, clampWakeVolume, normalizeWakeSound } from "./wakeSounds";
@@ -258,6 +259,7 @@ const DEFAULT_SETTINGS: Settings = {
 const PAGE_TITLES: Record<HubPage, string> = {
   home: "Command Hub",
   keys: "API Keys",
+  features: "Features",
   memory: "Memory",
   actions: "Actions & Permissions",
   alerts: "Alerts",
@@ -475,6 +477,7 @@ export function SettingsSidebarApp({ onDock: _onDock = () => {} }: { onDock?: (d
             <HubHome acc={acc} insights={insights} themeMode={themeMode} onTheme={handleTheme} onOpen={setPage} />
           )}
           {page === "keys" && <ApiKeysPage onChanged={() => setInsightsKey((k) => k + 1)} />}
+          {page === "features" && <FeaturesPage />}
           {page === "memory" && <MemoryPage onFlagChanged={(flag, on) => update(flag, on)} />}
           {page === "actions" && <ActionsPage />}
           {page === "alerts" && <AlertsPage onSettingChanged={(k, v) => update(k as any, v as any)} />}

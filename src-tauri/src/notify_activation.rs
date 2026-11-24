@@ -5,7 +5,10 @@
 //! The id is then resolved through the validated ledger like a card click, so an unknown, expired or forged
 //! activation shows the read-only "unavailable" view and never opens another account, repo or the newest PR.
 
+#[cfg(not(feature = "contributor"))]
 const PREFIX: &str = "nexus://notify/open?event=";
+#[cfg(feature = "contributor")]
+const PREFIX: &str = "nexus-dev://notify/open?event=";
 
 /// The event id of a valid activation URL, or None. A single trailing `/` (added by some launchers) is tolerated.
 pub fn parse_activation(url: &str) -> Option<String> {

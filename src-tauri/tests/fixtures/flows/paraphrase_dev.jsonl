@@ -1,0 +1,30 @@
+{"phrase":"look at my inbox and drop a whatsapp to ravi saying hi","flow":"mail_then_whatsapp"}
+{"phrase":"check my email then ping ravi on whatsapp saying call me","flow":"mail_then_whatsapp"}
+{"phrase":"go through my mail and text ravi on whatsapp saying running late","flow":"mail_then_whatsapp"}
+{"phrase":"any new emails? then message priya on whatsapp saying hello","flow":"mail_then_whatsapp"}
+{"phrase":"read my emails and shoot a whatsapp message to ravi saying ok","flow":"mail_then_whatsapp"}
+{"phrase":"check the inbox and whatsapp priya saying i am on my way","flow":"mail_then_whatsapp"}
+{"phrase":"check mail, also send ravi a whatsapp saying done","flow":"mail_then_whatsapp"}
+{"phrase":"open my email and send a whatsapp to ravi saying meeting moved","flow":"mail_then_whatsapp"}
+{"phrase":"please check my email and then send ravi a message on whatsapp saying hi","flow":"mail_then_whatsapp"}
+{"phrase":"check my gmail and text ravi on whatsapp saying hi","flow":"mail_then_whatsapp"}
+{"phrase":"check my mail and take me to the place in that email","flow":"mail_then_maps"}
+{"phrase":"read the latest email and give me directions to the address in it","flow":"mail_then_maps"}
+{"phrase":"check my inbox then navigate to the location in the email","flow":"mail_then_maps"}
+{"phrase":"check the email and show me the route to the venue in it","flow":"mail_then_maps"}
+{"phrase":"go through my mail and open the map link from the email","flow":"mail_then_maps"}
+{"phrase":"check my emails, then get directions to the address from that email","flow":"mail_then_maps"}
+{"phrase":"check my mail and open the location from the last email in google maps","flow":"mail_then_maps"}
+{"phrase":"look at my email and navigate to the place mentioned in it","flow":"mail_then_maps"}
+{"phrase":"check the mail and the parcel","flow":"none"}
+{"phrase":"search and rescue team near me","flow":"none"}
+{"phrase":"tell me about maps and email history","flow":"none"}
+{"phrase":"look and feel of the inbox app","flow":"none"}
+{"phrase":"go and get some milk","flow":"none"}
+{"phrase":"take me home and call mom","flow":"none"}
+{"phrase":"check whatsapp and email settings","flow":"none"}
+{"phrase":"send me the email and maps documentation","flow":"none"}
+{"phrase":"drop it and run","flow":"none"}
+{"phrase":"open maps and check traffic","flow":"none"}
+{"phrase":"check the email and send a message","flow":"none"}
+{"phrase":"any news and weather?","flow":"none"}

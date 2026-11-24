@@ -1872,6 +1872,9 @@ mod tests {
             "Thank you. Open Chrome.",
             "Say goodbye.",
             "Good morning.",
+            // Live run 2026-11-14: dropped by the dictionary gate before the fix.
+            "Let's reverse engineer this website.",
+            "Reverse engineer this website.",
         ] {
             assert_eq!(apply_hallucination_filter(real), normalized(real), "'{real}' must pass");
         }
