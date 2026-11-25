@@ -1,0 +1,112 @@
+{
+  "owner_clips": 819,
+  "other_clips": 2000,
+  "other_speakers": 2000,
+  "embedding_failures": 0,
+  "sessions": [
+    {
+      "enroll_session": "owner-2026-09-22",
+      "threshold": 0.9217232,
+      "calibration_error": null,
+      "owner_trials": 494,
+      "owner_rejected": 0,
+      "frr": 0.0,
+      "other_trials": 2000,
+      "other_accepted": 1984,
+      "far": 0.992
+    },
+    {
+      "enroll_session": "owner-2026-09-23",
+      "threshold": 0.92537975,
+      "calibration_error": null,
+      "owner_trials": 786,
+      "owner_rejected": 1,
+      "frr": 0.001272264631043257,
+      "other_trials": 2000,
+      "other_accepted": 1990,
+      "far": 0.995
+    },
+    {
+      "enroll_session": "owner-2026-09-24",
+      "threshold": 0.9175366,
+      "calibration_error": null,
+      "owner_trials": 734,
+      "owner_rejected": 0,
+      "frr": 0.0,
+      "other_trials": 2000,
+      "other_accepted": 2000,
+      "far": 1.0
+    },
+    {
+      "enroll_session": "owner-2026-09-25",
+      "threshold": 0.92345995,
+      "calibration_error": null,
+      "owner_trials": 807,
+      "owner_rejected": 1,
+      "frr": 0.0012391573729863693,
+      "other_trials": 2000,
+      "other_accepted": 2000,
+      "far": 1.0
+    },
+    {
+      "enroll_session": "owner-2026-09-26",
+      "threshold": 0.92703414,
+      "calibration_error": null,
+      "owner_trials": 652,
+      "owner_rejected": 1,
+      "frr": 0.0015337423312883436,
+      "other_trials": 2000,
+      "other_accepted": 1997,
+      "far": 0.9985
+    },
+    {
+      "enroll_session": "owner-2026-10-01",
+      "threshold": 0.9263701,
+      "calibration_error": null,
+      "owner_trials": 711,
+      "owner_rejected": 3,
+      "frr": 0.004219409282700422,
+      "other_trials": 2000,
+      "other_accepted": 1995,
+      "far": 0.9975
+    }
+  ],
+  "pooled_eer": 0.20898255258126194,
+  "pooled_eer_threshold": 0.9599999,
+  "owner_score_median": 0.971549,
+  "other_score_median": 0.95229554,
+  "worst_other_speakers": [
+    [
+      "sc:00176480",
+      1.0
+    ],
+    [
+      "sc:004ae714",
+      1.0
+    ],
+    [
+      "sc:00761705",
+      1.0
+    ],
+    [
+      "sc:00970ce1",
+      1.0
+    ],
+    [
+      "sc:00b01445",
+      1.0
+    ],
+    [
+      "sc:00f0204f",
+      1.0
+    ],
+    [
+      "sc:012187a4",
+      1.0
+    ],
+    [
+      "sc:012c8314",
+      1.0
+    ]
+  ]
+}

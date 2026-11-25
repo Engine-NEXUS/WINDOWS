@@ -41,6 +41,7 @@
       "resources/smart_turn/*",
       "resources/server/stt_server.py",
       "resources/server/nlu_server.py",
+      "resources/server/requirements-installer.txt",
       "resources/server/nlu/requirements.txt",
       "resources/server/nlu/model/nexus_nlu.onnx",
       "resources/server/nlu/model/nexus_nlu.onnx.data",
@@ -83,8 +84,9 @@
     },
     "copyright": "© 2026 NEXUS",
     "category": "Productivity",
-    "shortDescription": "Floating desktop AI assistant (thin client)",
-    "longDescription": "A cross-platform floating AI assistant that bridges to a remote n8n/Ollama backend."
+    "publisher": "NEXUS",
+    "shortDescription": "Voice-first desktop assistant for Windows",
+    "longDescription": "NEXUS is a voice-first desktop assistant for Windows. Say the wake word to open apps, read mail and calendar, search, dictate and manage your coding agents. It runs on your own free API keys, and your settings and memory stay on this computer."
   },
   "plugins": {
     "deep-link": {

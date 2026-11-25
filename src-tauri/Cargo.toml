@@ -31,6 +31,11 @@ path = "dev_tools/wake_replay.rs"
 name = "site_capture"
 path = "dev_tools/site_capture.rs"
 
+# Offline Voice Lock measurement: owner vs other voices through the real speaker check (wake_eval.rs).
+[[example]]
+name = "speaker_probe"
+path = "dev_tools/speaker_probe.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 serde_json = "1"

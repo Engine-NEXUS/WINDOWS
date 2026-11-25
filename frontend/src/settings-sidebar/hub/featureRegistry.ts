@@ -104,6 +104,7 @@ export const FEATURES: Feature[] = [
   bool({ id: "mem-routines", group: "Memory and proactive", title: "Routine suggestions", what: "Offers to save app sequences you repeat.", key: "memcoreRoutines", def: true, dependsOn: "memcore" }),
   bool({ id: "mem-timetable", group: "Memory and proactive", title: "Timetable reminders", what: "Reminds you of your timetable slots.", key: "memcoreTimetable", def: true, dependsOn: "memcore" }),
   bool({ id: "mem-leaveby", group: "Memory and proactive", title: "Leave-by reminders", what: "\"Time to leave\" from calendar events and traffic.", key: "memcoreLeaveBy", def: true, dependsOn: "memcore" }),
+  bool({ id: "mem-reminder-countdown", group: "Memory and proactive", title: "Reminder countdown chip", what: "Shows a countdown chip beside the orb while a reminder is waiting.", key: "reminderCountdown", def: true }),
   bool({ id: "mem-session", group: "Memory and proactive", title: "Session restore", what: "Offers to reopen your apps after a restart.", key: "memcoreSession", def: true, dependsOn: "memcore" }),
   bool({ id: "mem-health", group: "Memory and proactive", title: "Health notes", what: "Mentions problems NEXUS notices with itself.", key: "memcoreHealth", def: true, dependsOn: "memcore" }),
   bool({ id: "mem-redact", group: "Memory and proactive", title: "Hide names from the cloud", what: "Swaps known names for Person A, B before cloud requests.", key: "memcoreRedactNames", def: false, dependsOn: "memcore", safety: true }),
@@ -119,7 +120,6 @@ export const FEATURES: Feature[] = [
   bool({ id: "notify-native", group: "Notifications", title: "Windows notifications", what: "Shows alerts in the Windows notification area.", key: "notifyNative", def: true }),
   bool({ id: "notify-toast", group: "Notifications", title: "NEXUS toast", what: "The small NEXUS card for alerts.", key: "notifyToast", def: true }),
   bool({ id: "notify-urgent", group: "Notifications", title: "Urgent alerts break through", what: "Critical alerts are spoken even when busy.", key: "notifyUrgent", def: true }),
-  bool({ id: "reminder-countdown", group: "Notifications", title: "Reminder countdown chip", what: "Keeps a small countdown chip beside the orb until a reminder fires.", key: "reminderCountdown", def: true }),
   bool({ id: "cr-open", group: "Notifications", title: "CodeRabbit: open failing review", what: "Opens the review when a PR check fails.", key: "coderabbitAutoOpen", def: true }),
   bool({ id: "cr-review", group: "Notifications", title: "CodeRabbit: review automatically", what: "Runs a review on new PRs. Sends the diff to a review service.", key: "coderabbitAutoReview", def: false, risk: "cloud" }),
 

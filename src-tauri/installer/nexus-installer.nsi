@@ -661,6 +661,13 @@ SectionEnd
 ; ─── NEXUS: Python installation function ──────────────────────────────────
 ; Downloads and installs Python 3.12 silently if not already present,
 ; then installs moonshine-voice + NLU pip packages.
+; Python installer pin (plan 194, P2). scripts/check-installer-pins.mjs validates this block;
+; release builds use --strict, which refuses "UNSET". Fill the hash with:
+;   certutil -hashfile python-3.12.7-amd64.exe SHA256   (file from the URL below)
+; Pinned 2026-11-16: 26,538,304 bytes, Authenticode "Valid", signer Python Software Foundation.
+!define PYTHON_VERSION "3.12.7"
+!define PYTHON_URL "https://www.python.org/ftp/python/${PYTHON_VERSION}/python-${PYTHON_VERSION}-amd64.exe"
+!define PYTHON_SHA256 "1206721601a62c925d4e4a0dcfc371e88f2ddbe8c0c07962ebb2be9b5bde4570"
 Var PythonExe
 Function InstallPythonAndDeps
   StrCpy $PythonExe ""
@@ -723,18 +730,33 @@ Function InstallPythonAndDeps
     Goto install_pip_deps
   ${EndIf}
 
-  ; 4. Download Python 3.12 installer via curl or PowerShell
-  DetailPrint "Downloading Python 3.12 installer..."
+  ; 4. Download the pinned Python installer (https only, fail on HTTP errors, bounded time).
+  DetailPrint "Downloading Python ${PYTHON_VERSION} installer..."
   Delete "$TEMP\python-3.12-installer.exe"
-  nsExec::ExecToLog 'curl.exe -L -o "$TEMP\python-3.12-installer.exe" "https://www.python.org/ftp/python/3.12.7/python-3.12.7-amd64.exe"'
+  nsExec::ExecToLog 'curl.exe -sS -L -f --proto "=https" --proto-redir "=https" --max-time 900 --retry 2 -o "$TEMP\python-3.12-installer.exe" "${PYTHON_URL}"'
   Pop $0
   ${If} $0 != 0
-    ; Fallback to powershell if curl failed
-    nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object Net.WebClient).DownloadFile(\"https://www.python.org/ftp/python/3.12.7/python-3.12.7-amd64.exe\", \"$TEMP\python-3.12-installer.exe\")"'
+    ; Fallback to powershell if curl failed (drop any partial file first)
+    Delete "$TEMP\python-3.12-installer.exe"
+    nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object Net.WebClient).DownloadFile(\"${PYTHON_URL}\", \"$TEMP\python-3.12-installer.exe\")"'
     Pop $0
   ${EndIf}
 
   ${If} ${FileExists} "$TEMP\python-3.12-installer.exe"
+    !if "${PYTHON_SHA256}" != "UNSET"
+      ; Never run a download that does not match the pin.
+      nsExec::ExecToLog 'cmd.exe /c certutil -hashfile "$TEMP\python-3.12-installer.exe" SHA256 | findstr /i /c:"${PYTHON_SHA256}" >nul'
+      Pop $0
+      ${If} $0 != 0
+        DetailPrint "Python installer did not match its pinned SHA-256 - it was NOT run"
+        Delete "$TEMP\python-3.12-installer.exe"
+        MessageBox MB_ICONEXCLAMATION|MB_OK "The downloaded Python installer did not match its expected checksum, so it was not run.$\r$\n$\r$\nSTT and NLU features will not work until Python 3.12+ is installed from python.org.$\r$\nNEXUS itself is installed." /SD IDOK
+        Return
+      ${EndIf}
+      DetailPrint "Python installer checksum verified"
+    !else
+      DetailPrint "WARNING: this build does not pin the Python installer checksum (dev build)"
+    !endif
     DetailPrint "Python installer downloaded, installing silently..."
     ; Install Python silently: InstallAllUsers=0 (per-user), PrependPath=1, Quiet=1
     ExecWait '"$TEMP\python-3.12-installer.exe" /quiet InstallAllUsers=0 PrependPath=1 Include_pip=1' $1
@@ -766,12 +788,12 @@ Function InstallPythonAndDeps
       ${EndIf}
     ${Else}
       DetailPrint "Python installation failed (exit code $1) — STT/NLU will not work"
-      MessageBox MB_ICONEXCLAMATION|MB_OK "Python installation failed.$\r$\n$\r$\nSTT and NLU features will not work.$\r$\nPlease install Python 3.12+ manually from python.org and run:$\r$\n  pip install moonshine-voice fastapi uvicorn python-multipart$\r$\n  pip install numpy onnxruntime fastapi uvicorn pydantic transformers"
+      MessageBox MB_ICONEXCLAMATION|MB_OK "Python installation failed.$\r$\n$\r$\nSTT and NLU features will not work.$\r$\nPlease install Python 3.12+ manually from python.org and run:$\r$\n  pip install -r $\"$INSTDIR\resources\server\requirements-installer.txt$\""
       Return
     ${EndIf}
   ${Else}
     DetailPrint "Failed to download Python installer — STT/NLU will not work"
-    MessageBox MB_ICONEXCLAMATION|MB_OK "Could not download Python.$\r$\n$\r$\nSTT and NLU features will not work.$\r$\nPlease install Python 3.12+ manually from python.org and run:$\r$\n  pip install moonshine-voice fastapi uvicorn python-multipart$\r$\n  pip install numpy onnxruntime fastapi uvicorn pydantic transformers"
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Could not download Python.$\r$\n$\r$\nSTT and NLU features will not work.$\r$\nPlease install Python 3.12+ manually from python.org and run:$\r$\n  pip install -r $\"$INSTDIR\resources\server\requirements-installer.txt$\""
     Return
   ${EndIf}
 
@@ -781,74 +803,29 @@ Function InstallPythonAndDeps
     Return
   ${EndIf}
 
-  ; Install pip packages for STT and NLU servers
+  ; Install pip packages for the STT and NLU servers from ONE bundled, version-bounded file
+  ; (plan 194, P2). No unqualified "pip install <name>" is allowed in this template:
+  ; scripts/check-installer-pins.mjs fails the build if one appears.
+  ${IfNot} ${FileExists} "$INSTDIR\resources\server\requirements-installer.txt"
+    DetailPrint "requirements-installer.txt is missing from the install - skipping pip install"
+    Goto pip_done
+  ${EndIf}
   DetailPrint "Installing Python packages for STT/NLU using: $PythonExe..."
-
-  ; Upgrade pip first to ensure wheel installation succeeds
-  ExecWait '"$PythonExe" -m pip install --upgrade pip --quiet' $1
-
-  ; Install STT dependencies
-  DetailPrint "  Installing moonshine-voice, fastapi, uvicorn, python-multipart..."
-  ExecWait '"$PythonExe" -m pip install --quiet moonshine-voice fastapi uvicorn python-multipart' $1
+  ExecWait '"$PythonExe" -m pip install --disable-pip-version-check --quiet -r "$INSTDIR\resources\server\requirements-installer.txt"' $1
   ${If} $1 == 0
-    DetailPrint "  STT dependencies installed"
+    DetailPrint "  STT and NLU dependencies installed"
   ${Else}
-    DetailPrint "  STT pip install failed (exit code $1)"
+    DetailPrint "  pip install failed (exit code $1) - STT/NLU may not work until it is retried"
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Some Python packages could not be installed (pip exit code $1).$\r$\n$\r$\nNEXUS is installed. Speech and understanding features may be limited until you run:$\r$\n  pip install -r $\"$INSTDIR\resources\server\requirements-installer.txt$\"" /SD IDOK
   ${EndIf}
-
-  ; Install NLU dependencies
-  DetailPrint "  Installing numpy, onnxruntime, transformers, pydantic..."
-  ExecWait '"$PythonExe" -m pip install --quiet numpy onnxruntime fastapi uvicorn pydantic transformers' $1
-  ${If} $1 == 0
-    DetailPrint "  NLU dependencies installed"
-  ${Else}
-    DetailPrint "  NLU pip install failed (exit code $1)"
-  ${EndIf}
+  pip_done:
 
   DetailPrint "Python setup complete"
 FunctionEnd
 
-; ─── NEXUS: Pre-cache Kokoro TTS voice model files ────────────────────────
-Function InstallKokoroModel
-  ${If} ${FileExists} "$PROFILE\.cache\k\0.onnx"
-  ${AndIf} ${FileExists} "$PROFILE\.cache\k\0.bin"
-    DetailPrint "Kokoro TTS models already cached in $PROFILE\.cache\k"
-    Return
-  ${EndIf}
-
-  DetailPrint "Setting up Kokoro TTS voice model..."
-  CreateDirectory "$PROFILE\.cache\k"
-
-  ${IfNot} ${FileExists} "$PROFILE\.cache\k\0.bin"
-    DetailPrint "Downloading Kokoro voice embeddings (27 MB)..."
-    nsExec::ExecToLog 'curl.exe -L -s -o "$PROFILE\.cache\k\0.bin" "https://github.com/8b-is/kokoro-tiny/raw/main/models/0.bin"'
-    Pop $0
-    ${If} $0 != 0
-      nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object Net.WebClient).DownloadFile(\"https://github.com/8b-is/kokoro-tiny/raw/main/models/0.bin\", \"$PROFILE\.cache\k\0.bin\")"'
-      Pop $0
-    ${EndIf}
-    ${If} ${FileExists} "$PROFILE\.cache\k\0.bin"
-      DetailPrint "Kokoro voice embeddings downloaded successfully"
-    ${Else}
-      DetailPrint "Kokoro voices will download automatically on first launch"
-    ${EndIf}
-  ${EndIf}
-
-  ${IfNot} ${FileExists} "$PROFILE\.cache\k\0.onnx"
-    DetailPrint "Downloading Kokoro ONNX model (310 MB)..."
-    nsExec::ExecToLog 'curl.exe -L -s -o "$PROFILE\.cache\k\0.onnx" "https://github.com/8b-is/kokoro-tiny/raw/main/models/0.onnx"'
-    Pop $0
-    ${If} $0 != 0
-      nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object Net.WebClient).DownloadFile(\"https://github.com/8b-is/kokoro-tiny/raw/main/models/0.onnx\", \"$PROFILE\.cache\k\0.onnx\")"'
-      Pop $0
-    ${EndIf}
-    ${If} ${FileExists} "$PROFILE\.cache\k\0.onnx"
-      DetailPrint "Kokoro ONNX model downloaded successfully"
-    ${Else}
-      DetailPrint "Kokoro model will download automatically on first launch"
-    ${EndIf}
-  ${EndIf}
-FunctionEnd
+; NEXUS: the old Kokoro pre-cache step was removed (plan 194). It downloaded ~337 MB from an unpinned
+; third-party branch into %USERPROFILE%\.cache\k, a folder the app no longer reads. The offline voice is
+; fetched by the app itself (tts_swap.rs) from a pinned revision with SHA-256 checks.
 
 Section Install
   SetOutPath $INSTDIR
@@ -879,9 +856,6 @@ Section Install
   ; Checks if Python is available; if not, downloads and installs Python 3.12
   ; silently, then installs moonshine-voice and NLU dependencies.
   Call InstallPythonAndDeps
-
-  ; ─── NEXUS: Pre-cache Kokoro TTS voice model ────────────────────────────
-  Call InstallKokoroModel
 
   ; Create file associations
   {{#each file_associations as |association| ~}}
@@ -1082,6 +1056,13 @@ Section Uninstall
   ${If} $UpdateMode <> 1
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}"
 
+    ; Older installers pre-cached two Kokoro files here (unused since the Kokoro swap code). Remove exactly
+    ; those two files, then the folder only if it is empty. Python and its packages are left in place
+    ; because other programs may use them.
+    Delete "$PROFILE\.cache\k\0.bin"
+    Delete "$PROFILE\.cache\k\0.onnx"
+    RMDir "$PROFILE\.cache\k"
+
     ; Also remove the NEXUS Scheduled Task (used for auto-start with --background)
     ; This prevents the app from launching on next login after uninstall.
     nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -Command "Unregister-ScheduledTask -TaskName ''NEXUS'' -Confirm:$false -ErrorAction SilentlyContinue"'
@@ -1148,6 +1129,17 @@ Function CreateOrUpdateStartMenuShortcut
   !insertmacro IsShortcutTarget "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\$OldMainBinaryName"
   Pop $0
   ${If} $0 = 1
+    !insertmacro SetShortcutTarget "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    StrCpy $R0 1
+  ${EndIf}
+
+  ; NEXUS (plan 194, P1): an existing shortcut that points anywhere else (an older install folder, a
+  ; copied build) is repointed at THIS install, so the Start menu never launches a stale exe.
+  ${If} ${FileExists} "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk"
+    !insertmacro SetShortcutTarget "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    StrCpy $R0 1
+  ${EndIf}
+  ${If} ${FileExists} "$SMPROGRAMS\${PRODUCTNAME}.lnk"
     !insertmacro SetShortcutTarget "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
     StrCpy $R0 1
   ${EndIf}
