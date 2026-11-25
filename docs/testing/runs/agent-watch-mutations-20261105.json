@@ -35,11 +35,11 @@
     "agent_lifecycle.rs": "cc8a6afad8ea9c201caa28654ca855d68486e21aff20c8ee438616ffaf10b4fb",
     "power_thread.rs": "866490af6d570df23b3ddd9cf47f41d7ffb8274be2ca3df70d656544583d4290",
     "pii_filter.rs": "0936b19b74529fb4f0826bf1eee8a8e7f7553d09fbf150d1f199a6ea623ea378",
-    "session_verdict.rs": "a67690aec2829c6a81973577e0624661d154ef08e15234cbac756aba82980644",
+    "session_verdict.rs": "0312e0e5798822361832f91e4636195a5edea816958e2ba6c0d2de41137a90a8",
     "agent_tracker.rs": "41cfab3037f5704b0254dbcc55ae42d8d9006324214851c41db99454765f2e58",
-    "session_observer.rs": "6b4a90d65a406f6c84babda14fc11ef3ff396818ff6a3caf08043cd255c564ec",
+    "session_observer.rs": "89ad466d45dbf65a66bc17d53b96a4e9f4df93b3a5ae24d2ef1719ba9215a1cc",
     "watch_runner.rs": "afc41ed747f844496140a59ca214847e1287ea2122bc9878bf9e0de28cc62e31",
-    "agent_lifecycle_runtime.rs": "01da36975c8ffde2dbd35762061a2a8c724040ba43d0307b688bcfbb0b507ccd",
-    "agent_hooks.rs": "aabfe3c8be6fd0c393501c238386de027352a40036dadced094db9cafbd3210b"
+    "agent_lifecycle_runtime.rs": "6c79fe8f552e9d551f120646ffa89999b231b9a6422588abfd7866035d8b7cb6",
+    "agent_hooks.rs": "b490b09821b9a9188916bbd9143d8fdd6e9906c566a95132bad3326a6c93c886"
   }
 }
