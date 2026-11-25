@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, Component, type ErrorInfo } from "react";
 import { OrbDesignsSection } from "./OrbDesignsSection";
 import { HandModeSection } from "./HandModeSection";
+import { ReminderSection } from "./ReminderSection";
 import { AgentWatchSection } from "./AgentWatchSection";
 import { AgentIslandSection } from "./AgentIslandSection";
 import { RoutingSection } from "./RoutingSection";
@@ -152,6 +153,7 @@ interface Settings {
   handGestures?: boolean;
   handGesturesDesktop?: boolean;
   handFocusMode?: boolean;
+  reminderCountdown?: boolean;
   handFocusLowerApps?: boolean;
   handSensitivity?: number;
   // Ghost waves placement (ghost sessions reposition the orb window to this rect)
@@ -240,6 +242,7 @@ const DEFAULT_SETTINGS: Settings = {
   handGestures: true,
   handGesturesDesktop: false,
   handFocusMode: true,
+  reminderCountdown: true,
   handFocusLowerApps: true,
   handSensitivity: 0,
   wavesHorizontalPct: 0.5,
@@ -877,6 +880,8 @@ function AudioTab({ settings, update, voiceLock }: {
       </div>
 
       <HandModeSection settings={settings} update={update} />
+
+      <ReminderSection settings={settings} update={update} />
 
       <div className="settings-section">
         <div className="settings-section-title">Personality & Tone</div>

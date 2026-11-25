@@ -13,6 +13,7 @@ import { AnalyseWave } from "./AnalyseWave";
 import { HandOverlay } from "./HandOverlay";
 import { NotifyExpand } from "./NotifyExpand";
 import { BackgroundTaskChip } from "./BackgroundTaskChip";
+import { ReminderRoll } from "./ReminderRoll";
 import { CaptionLiveRegion } from "./CaptionLiveRegion";
 import { initThemeSync } from "../sidebar/theme";
 
@@ -382,6 +383,7 @@ function StageApp() {
       <OrbFrame />
       <LoadingIndicator />
       <BackgroundTaskChip />
+      <ReminderRoll />
       <ResponseCaption />
       <SpeechPill />
       <ActionReceipt />
