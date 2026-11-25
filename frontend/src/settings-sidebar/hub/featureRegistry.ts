@@ -120,7 +120,6 @@ export const FEATURES: Feature[] = [
   bool({ id: "notify-native", group: "Notifications", title: "Windows notifications", what: "Shows alerts in the Windows notification area.", key: "notifyNative", def: true }),
   bool({ id: "notify-toast", group: "Notifications", title: "NEXUS toast", what: "The small NEXUS card for alerts.", key: "notifyToast", def: true }),
   bool({ id: "notify-urgent", group: "Notifications", title: "Urgent alerts break through", what: "Critical alerts are spoken even when busy.", key: "notifyUrgent", def: true }),
-  bool({ id: "reminder-countdown", group: "Notifications", title: "Reminder countdown chip", what: "Keeps a small countdown chip beside the orb until a reminder fires.", key: "reminderCountdown", def: true }),
   bool({ id: "cr-open", group: "Notifications", title: "CodeRabbit: open failing review", what: "Opens the review when a PR check fails.", key: "coderabbitAutoOpen", def: true }),
   bool({ id: "cr-review", group: "Notifications", title: "CodeRabbit: review automatically", what: "Runs a review on new PRs. Sends the diff to a review service.", key: "coderabbitAutoReview", def: false, risk: "cloud" }),
 
