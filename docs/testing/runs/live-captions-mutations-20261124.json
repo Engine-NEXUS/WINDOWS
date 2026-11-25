@@ -1,0 +1,56 @@
+{
+  "file": "src-tauri/src/stt_stream.rs",
+  "test": "--lib --features custom-protocol,admin-brain -- --test-threads=1 stt_stream:: stt_groq:: debug_mic::",
+  "results": [
+    {
+      "name": "audio fed before the plan is decided is thrown away again",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:976:9: assertion `left == right` failed: every sample fed reached the server: [2560]"
+    },
+    {
+      "name": "the pre-roll is unbounded",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:990:9: assertion `left == right` failed: 200 chunks fed, only 4 seconds are kept"
+    },
+    {
+      "name": "the pre-roll is not sent when the stream is armed",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:976:9: assertion `left == right` failed: every sample fed reached the server: [2560]"
+    },
+    {
+      "name": "a turn with no stream keeps its waiting audio",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:1005:9: an off turn keeps nothing"
+    },
+    {
+      "name": "the end of a turn leaves its pre-roll behind",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:991:9: the end of the turn frees it"
+    },
+    {
+      "name": "a new turn inherits the old turn's confirmed words",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:957:9: assertion `left == right` failed: a new turn forgets the old one even with the same words"
+    },
+    {
+      "name": "case and punctuation count as a change in the confirmed words",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:954:9: assertion `left == right` failed: case and punctuation do not count as a change"
+    },
+    {
+      "name": "the interim request goes to the turbo model",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_groq.rs:573:9: and never the turbo model"
+    },
+    {
+      "name": "a bad key is reported as something else",
+      "status": "BAD_SPEC",
+      "detail": "find text occurs 3 times"
+    },
+    {
+      "name": "the fake microphone accepts any sample rate",
+      "status": "KILLED",
+      "detail": "panicked at src\\debug_mic.rs:128:9: assertion failed: wav_to_samples(&wav(44100, 1, 16, &[0])).is_err()"
+    }
+  ]
+}

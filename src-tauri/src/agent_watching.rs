@@ -163,7 +163,7 @@ pub(crate) fn session_window(s: &SessionRef, procs: &[ProcSnap], wins: &[TopWin]
         other => other,
     };
     wins.iter()
-        .find(|w| matches!(s.agent.as_str(), "antigravity" | "cursor" | "windsurf" | "trae" | "vscode") && (w.exe.contains(word) || w.title.to_lowercase().contains(word)))
+        .find(|w| matches!(s.agent.as_str(), "antigravity" | "cursor" | "windsurf" | "trae" | "kiro" | "vscode") && (w.exe.contains(word) || w.title.to_lowercase().contains(word)))
         .map(|w| w.hwnd)
 }
 

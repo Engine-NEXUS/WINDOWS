@@ -5,17 +5,17 @@ Which runtime processes and threads each feature depends on, and what Focus Mode
 | Feature | Processes / threads | Under Hand Mode Focus Mode |
 |---|---|---|
 | Speaker verification / owner check | wake receiver thread, enrollment pipeline (Setup/Hub), keychain key | keeps running |
-| Focus Mode (Hand Mode load control) | hand WebView2 renderer (camera + MediaPipe), hand-out thread, 80 ms watchdog, GPU shared with the stage WebView2 | owner of Focus Mode |
 | Reverse engineer website/app | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
+| Focus Mode (Hand Mode load control) | hand WebView2 renderer (camera + MediaPipe), hand-out thread, 80 ms watchdog, GPU shared with the stage WebView2 | owner of Focus Mode |
 | GitHub by voice without owner (repo, PR list, PR number search) | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | Notification brain: state machine and GitHub Actions / deploy watchers | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | WhatsApp priority people (read-only) | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
-| Vision-grounded click | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | Agent watch sidecar (spawn + watch CLIs) | agent hooks webhook (port 39220), agent_watch Node sidecar (39222, lazy), watch_runner (3 s) | keeps running |
 | Window theming (solid panels) | stage WebView2 (fullscreen overlay), hitbox thread (30-250 ms), stage watchdog (2 s), WebGL orb loop | never paused (a starved heartbeat destroys the stage) |
 | Leave-by reminders | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Boot hello / shutdown flow / resume hello | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Wake-up sound | on-demand rodio stream (closed 20 s after use), hotkey/wake callbacks | keeps running |
+| Vision-grounded click | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | Profile, corrections, routines, review, curator | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Track all agents (announce each, summary) | agent hooks webhook (port 39220), agent_watch Node sidecar (39222, lazy), watch_runner (3 s) | keeps running |
 | Important-mail watcher + triage | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
@@ -46,6 +46,7 @@ Which runtime processes and threads each feature depends on, and what Focus Mode
 | Orb UI and turn lifecycle | stage WebView2 (fullscreen overlay), hitbox thread (30-250 ms), stage watchdog (2 s), WebGL orb loop | never paused (a starved heartbeat destroys the stage) |
 | Ghost mode (voice drives the PC) | ghost session state, hot-mic loop, drill runner, Esc shortcut | keeps running |
 | Mishearing normaliser + learned corrections | regex tier in-process; BERT-Mini NLU sidecar (39218, lazy, 60 s idle); 9Router HTTP | on demand |
+| Live captions while you speak (local / Groq / Deepgram) | Edge TTS connection, Kokoro ONNX (lazy), rodio playback, volume lease watchdog | cache refresh, voice sync and swap downloads deferred |
 | Local STT fallback (Moonshine) | stt-capture-rx thread, Groq HTTP client; Moonshine Python sidecar (port 39217, lazy, killed after 60 s idle) | sidecar is lazy; diagnostics sweep paused |
 | Maps / Places / Directions | media keys / deep links / Routes API | on demand |
 | Voice personas + offline twin swap | Edge TTS connection, Kokoro ONNX (lazy), rodio playback, volume lease watchdog | cache refresh, voice sync and swap downloads deferred |

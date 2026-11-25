@@ -56,9 +56,12 @@ impl Counter {
     /// Totals for `date` and all time. Pure.
     pub fn snapshot(&self, date: &str) -> UsageSnapshot {
         let today_by_kind = self.days.get(date).cloned().unwrap_or_default();
+        // Live-caption requests ("stt_interim") are listed by kind but are not counted as "requests": they would make the
+        // headline figure two or three times the commands actually given.
+        let headline = |m: &BTreeMap<String, u64>| -> u64 { m.iter().filter(|(k, _)| !k.starts_with("stt_interim")).map(|(_, v)| *v).sum() };
         UsageSnapshot {
-            today: today_by_kind.values().sum(),
-            all_time: self.all.values().sum(),
+            today: headline(&today_by_kind),
+            all_time: headline(&self.all),
             today_by_kind,
             all_by_kind: self.all.clone(),
             date: date.to_string(),
@@ -164,5 +167,23 @@ mod tests {
         // Old/partial files load (serde defaults).
         let partial: Counter = serde_json::from_str("{}").unwrap();
         assert_eq!(partial, Counter::default());
+    }
+}
+
+#[cfg(test)]
+mod interim_tests {
+    use super::*;
+
+    #[test]
+    fn live_caption_requests_are_listed_by_kind_but_not_in_the_headline_total() {
+        let mut c = Counter::default();
+        c.bump("2026-11-24", "stt");
+        c.bump("2026-11-24", "stt_interim");
+        c.bump("2026-11-24", "stt_interim");
+        c.bump("2026-11-24", "router");
+        let s = c.snapshot("2026-11-24");
+        assert_eq!(s.today, 2, "one transcript and one router call; the two caption requests are not commands");
+        assert_eq!(s.all_time, 2);
+        assert_eq!(s.today_by_kind["stt_interim"], 2, "but they are still visible by kind");
     }
 }

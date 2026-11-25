@@ -16,8 +16,8 @@ pub mod hook_parser { include!(concat!(env!("OUT_DIR"),"/hook_parser.rs")); }
 // Boundary enums only; the actual countdown/observer/verdict/tracker policy is compiled above.
 pub mod power_cmd {
     #[derive(Debug,Clone,Copy,PartialEq,Eq)]
-    pub enum PowerKind{Shutdown,Restart,Sleep,Lock,SignOut}
-    impl PowerKind{pub fn as_str(self)->&'static str{match self{Self::Shutdown=>"shutdown",Self::Restart=>"restart",Self::Sleep=>"sleep",Self::Lock=>"lock",Self::SignOut=>"signout"}}}
+    pub enum PowerKind{Shutdown,Restart,Sleep,Hibernate,Lock,SignOut}
+    impl PowerKind{pub fn as_str(self)->&'static str{match self{Self::Shutdown=>"shutdown",Self::Restart=>"restart",Self::Sleep=>"sleep",Self::Hibernate=>"hibernate",Self::Lock=>"lock",Self::SignOut=>"signout"}}}
 }
 pub mod power_plan {
     #[derive(Debug,Clone,Copy,PartialEq,Eq)]

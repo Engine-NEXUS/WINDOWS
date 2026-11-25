@@ -1,0 +1,68 @@
+{
+  "file": "src-tauri/src/stt_stream.rs",
+  "cwd": "src-tauri",
+  "targetDir": "D:/nexus-screen-target",
+  "testArgs": ["--lib", "--features", "custom-protocol,admin-brain", "--", "--test-threads=1", "stt_stream::", "stt_groq::", "debug_mic::"],
+  "mutations": [
+    {
+      "name": "audio fed before the plan is decided is thrown away again",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "                if self.shared.wanted.load(Ordering::SeqCst) && pre.len() < PREROLL_CAP {",
+      "replace": "                if false && pre.len() < PREROLL_CAP {"
+    },
+    {
+      "name": "the pre-roll is unbounded",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "&& pre.len() < PREROLL_CAP {",
+      "replace": "&& pre.len() < PREROLL_CAP * 1000 {"
+    },
+    {
+      "name": "the pre-roll is not sent when the stream is armed",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "                    for c in std::mem::take(&mut *pre).chunks(1280) {",
+      "replace": "                    for c in Vec::<i16>::new().chunks(1280) {"
+    },
+    {
+      "name": "a turn with no stream keeps its waiting audio",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "                    shared.wanted.store(false, Ordering::SeqCst); // no stream this turn: stop keeping its audio",
+      "replace": "                    // (mutated) keeps keeping its audio"
+    },
+    {
+      "name": "the end of a turn leaves its pre-roll behind",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "        self.shared.wanted.store(false, Ordering::SeqCst);\n        self.shared.active_gen.store(0, Ordering::SeqCst);\n        self.shared.clear_preroll();",
+      "replace": "        self.shared.wanted.store(false, Ordering::SeqCst);\n        self.shared.active_gen.store(0, Ordering::SeqCst);"
+    },
+    {
+      "name": "a new turn inherits the old turn's confirmed words",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "            self.prev.clear(); // a new turn starts with nothing confirmed",
+      "replace": "            // (mutated) the old turn is kept"
+    },
+    {
+      "name": "case and punctuation count as a change in the confirmed words",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "w.chars().filter(|c| c.is_alphanumeric() || *c == '\\'').collect::<String>().to_lowercase()",
+      "replace": "w.to_string()"
+    },
+    {
+      "name": "the interim request goes to the turbo model",
+      "file": "src-tauri/src/stt_groq.rs",
+      "find": "transcribe_plain(samples, api_key, client, None, GROQ_MODEL_LARGE, \"stt_interim\")",
+      "replace": "transcribe_plain(samples, api_key, client, None, GROQ_MODEL, \"stt_interim\")"
+    },
+    {
+      "name": "a bad key is reported as something else",
+      "file": "src-tauri/src/stt_groq.rs",
+      "find": "        if status.as_u16() == 401 {\n            return Err(\"Groq API key invalid — check Settings\".to_string());\n        }",
+      "replace": ""
+    },
+    {
+      "name": "the fake microphone accepts any sample rate",
+      "file": "src-tauri/src/debug_mic.rs",
+      "find": "if tag != 1 || ch != 1 || rate != 16000 || bits != 16 {",
+      "replace": "if tag != 1 || ch != 1 || bits != 16 {"
+    }
+  ]
+}

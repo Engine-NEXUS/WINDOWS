@@ -35,12 +35,14 @@ Models (CPU, ONNX Runtime):
 from __future__ import annotations
 
 import os
+import sys
 import logging
 import time
 import io
 import struct
 import wave
 import array
+import asyncio
 import json
 
 from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
@@ -136,6 +138,7 @@ async def health() -> JSONResponse:
         "model": f"moonshine-{_model_arch_name}",
         "language": LANGUAGE,
         "engine": "moonshine-voice (ONNX Runtime)",
+        "model_loaded": _transcriber is not None,
     })
 
 
@@ -232,11 +235,19 @@ async def stream(websocket: WebSocket) -> None:
     transcriber = _get_transcriber()
     stream_handle = transcriber.create_stream()
     pending_texts: list[str] = []
+    # Moonshine reports ONE line at a time and starts a new line after a pause. A caption that showed only the current
+    # line would drop everything said before the pause, so keep every line (by id, in order) and send them all joined:
+    # the text only ever grows.
+    lines_by_id: dict[int, str] = {}
+
+    def _running_text() -> str:
+        return " ".join(t for _, t in sorted(lines_by_id.items()) if t).strip()
 
     def _on_event(event) -> None:
         from moonshine_voice import LineTextChanged
         if isinstance(event, LineTextChanged):
-            pending_texts.append(event.line.text)
+            lines_by_id[event.line.line_id] = (event.line.text or "").strip()
+            pending_texts.append(_running_text())
 
     stream_handle.add_listener(_on_event)
     stream_handle.start()
@@ -251,7 +262,7 @@ async def stream(websocket: WebSocket) -> None:
                 try:
                     samples = array.array("h", audio_bytes)
                     float_samples = [s / 32768.0 for s in samples]
-                    stream_handle.add_audio(float_samples, sample_rate=16000)
+                    await asyncio.to_thread(stream_handle.add_audio, float_samples, 16000)
                 except Exception as e:
                     log.warning("stream: add_audio failed — %s", e)
                 for text in pending_texts:
@@ -276,7 +287,7 @@ async def stream(websocket: WebSocket) -> None:
             # LineTextChanged/LineCompleted events into pending_texts via
             # _on_event — without flushing those here, the LAST (often most
             # complete) partial would be silently dropped.
-            stream_handle.stop()
+            await asyncio.to_thread(stream_handle.stop)
         except Exception:
             pass
         try:
@@ -343,6 +354,13 @@ async def _startup():
 
 
 if __name__ == "__main__":
+    if "--prefetch" in sys.argv:
+        # Download the model files into the cache and exit (no server, no model in memory). NEXUS runs this in the
+        # background from the Command Hub so the first spoken command never waits for a 250 MB download.
+        from moonshine_voice import get_model_for_language
+        _p, _a = get_model_for_language(LANGUAGE)
+        print("READY", _p, flush=True)
+        sys.exit(0)
     import uvicorn
     port = int(os.environ.get("NEXUS_STT_PORT", "39217"))
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

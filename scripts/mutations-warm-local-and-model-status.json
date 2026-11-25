@@ -1,0 +1,56 @@
+{
+  "file": "src-tauri/src/stt_stream.rs",
+  "cwd": "src-tauri",
+  "targetDir": "D:/nexus-screen-target",
+  "testArgs": ["--lib", "--features", "custom-protocol,admin-brain", "--", "--test-threads=1", "stt_stream::", "stt_model::"],
+  "mutations": [
+    {
+      "name": "a warm local server is no longer preferred over Groq",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "    if g.local_warm {\n        return Plan::Local;\n    }",
+      "replace": "    if false {\n        return Plan::Local;\n    }"
+    },
+    {
+      "name": "a warm local server beats a streaming key the owner added",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "    if g.has_cloud_key {\n        return Plan::Cloud; // the owner added a streaming key on purpose\n    }",
+      "replace": "    if g.has_cloud_key && !g.local_warm {\n        return Plan::Cloud; // the owner added a streaming key on purpose\n    }"
+    },
+    {
+      "name": "the warm check is skipped when the gate is built",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "        local_warm: crate::lazy_stt::is_stt_responsive(),",
+      "replace": "        local_warm: false,"
+    },
+    {
+      "name": "a model with a partial file is called ready",
+      "file": "src-tauri/src/stt_model.rs",
+      "find": "    let state = if complete && !partial {",
+      "replace": "    let state = if complete {"
+    },
+    {
+      "name": "a truncated file counts as complete",
+      "file": "src-tauri/src/stt_model.rs",
+      "find": "map_or(false, |m| m.len() >= *min));",
+      "replace": "map_or(false, |m| m.len() >= 1));"
+    },
+    {
+      "name": "the spelling model is taken for the speech model",
+      "file": "src-tauri/src/stt_model.rs",
+      "find": "if !name.ends_with(\"-en\") || name.starts_with(\"spelling\") || !model.path().is_dir() {",
+      "replace": "if !name.ends_with(\"-en\") || !model.path().is_dir() {"
+    },
+    {
+      "name": "a running fetch with nothing on disk is called missing",
+      "file": "src-tauri/src/stt_model.rs",
+      "find": "state: if fetching { State::Downloading } else { State::Missing }, downloaded_mb: 0",
+      "replace": "state: State::Missing, downloaded_mb: 0"
+    },
+    {
+      "name": "progress can pass the expected size",
+      "file": "src-tauri/src/stt_model.rs",
+      "find": "downloaded_mb: mb(total).min(EXPECTED_MB), expected_mb",
+      "replace": "downloaded_mb: mb(total), expected_mb"
+    }
+  ]
+}

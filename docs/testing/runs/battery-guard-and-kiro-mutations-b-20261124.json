@@ -1,0 +1,36 @@
+{
+  "file": "src-tauri/src/battery_guard.rs",
+  "test": "--lib --features custom-protocol,admin-brain -- --test-threads=1 battery_guard the_pretool_hook agent_hooks:: power_cmd::",
+  "results": [
+    {
+      "name": "a connected charger no longer stands the guard down",
+      "status": "KILLED",
+      "detail": "panicked at src\\battery_guard.rs:839:9: assertion failed: a.contains(&Action::ClearStop)"
+    },
+    {
+      "name": "saying cancel no longer cancels",
+      "status": "KILLED",
+      "detail": "panicked at src\\battery_guard.rs:1021:9: a blip is not a recharge"
+    },
+    {
+      "name": "the stop order never expires",
+      "status": "KILLED",
+      "detail": "panicked at src\\battery_guard.rs:915:9: assertion `left == right` failed: an order never outlives five minutes"
+    },
+    {
+      "name": "the power call skips the last look at the setting",
+      "status": "KILLED",
+      "detail": "panicked at src\\battery_guard.rs:1006:65: called `Option::unwrap()` on a `None` value"
+    },
+    {
+      "name": "the hook script no longer prints the answer for a tool call",
+      "status": "KILLED",
+      "detail": "panicked at src\\battery_guard.rs:1168:9: @echo off "
+    },
+    {
+      "name": "the webhook never answers pretool with the stop order",
+      "status": "KILLED",
+      "detail": "panicked at src\\webhook.rs:505:9: assertion `left == right` failed"
+    }
+  ]
+}

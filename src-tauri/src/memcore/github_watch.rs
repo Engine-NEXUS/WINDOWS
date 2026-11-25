@@ -16,9 +16,14 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use crate::notify_brain::{Fact, Kind, Obs};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Run {
     pub id: u64,
+    /// The workflow this run belongs to. A repo has several (CI, docs, release...): one passing must never
+    /// hide another that is failing.
+    pub workflow_id: u64,
+    /// The branch the run was for. A failing feature branch is not a failing build of the project.
+    pub head_branch: String,
     pub event: String,
     pub conclusion: Option<String>,
     pub status: String,
@@ -59,6 +64,8 @@ pub fn parse_runs(json: &str) -> Vec<Run> {
             .map(|s| s.to_string());
         runs.push(Run {
             id,
+            workflow_id: item.get("workflow_id").and_then(|v| v.as_u64()).unwrap_or(0),
+            head_branch: item.get("head_branch").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             event: event.to_string(),
             conclusion,
             status: status.to_string(),
@@ -83,26 +90,57 @@ fn bucket(event: &str) -> Kind {
     }
 }
 
+#[cfg(test)]
 pub fn facts_for_repo(repo_name: &str, runs: &[Run], now_ms: i64) -> Vec<Fact> {
+    facts_for_repo_on(repo_name, runs, now_ms, None)
+}
+
+/// One fact per kind (Build, Pr) for a repo.
+///
+/// A repo has many workflows and many branches, so "the newest run" is the wrong question (2026-11-24 audit: a passing
+/// docs workflow announced "green again" while CI was still red, and a failing feature branch announced "build
+/// failed"). Instead: take the newest decided run of EACH (workflow, branch) pair; the kind is failing while any of
+/// those is red, and fixed only when every one is green. Builds count only on the repo's default branch when it is
+/// known. Cancelled, skipped and neutral runs decide nothing, as before.
+pub fn facts_for_repo_on(repo_name: &str, runs: &[Run], now_ms: i64, default_branch: Option<&str>) -> Vec<Fact> {
     const MAX_AGE_MS: i64 = 48 * 3600 * 1000;
     let mut facts = Vec::new();
     for target_kind in [Kind::Build, Kind::Pr] {
-        let candidate = runs
-            .iter()
-            .filter(|r| bucket(&r.event) == target_kind)
-            .filter(|r| r.status == "completed")
-            .filter(|r| r.updated_at_ms > 0 && now_ms - r.updated_at_ms <= MAX_AGE_MS)
-            .filter_map(|r| {
-                let obs = r.conclusion.as_deref().and_then(obs_of)?;
-                Some((r, obs))
-            })
-            .max_by(|(a, _), (b, _)| {
-                a.updated_at_ms
-                    .cmp(&b.updated_at_ms)
-                    .then_with(|| a.id.cmp(&b.id))
-            });
-
-        if let Some((run, obs)) = candidate {
+        // newest decided run per (workflow, branch)
+        let mut latest: HashMap<(u64, &str), (&Run, Obs)> = HashMap::new();
+        for r in runs {
+            if bucket(&r.event) != target_kind || r.status != "completed" {
+                continue;
+            }
+            if r.updated_at_ms <= 0 || now_ms - r.updated_at_ms > MAX_AGE_MS {
+                continue;
+            }
+            if target_kind == Kind::Build {
+                if let Some(def) = default_branch {
+                    if !r.head_branch.is_empty() && r.head_branch != def {
+                        continue;
+                    }
+                }
+            }
+            let Some(obs) = r.conclusion.as_deref().and_then(obs_of) else { continue };
+            let key = (r.workflow_id, r.head_branch.as_str());
+            let newer = latest
+                .get(&key)
+                .map(|(cur, _)| (r.updated_at_ms, r.id) > (cur.updated_at_ms, cur.id))
+                .unwrap_or(true);
+            if newer {
+                latest.insert(key, (r, obs));
+            }
+        }
+        let newest_of = |want: Obs| {
+            latest
+                .values()
+                .filter(|(_, o)| *o == want)
+                .map(|(r, _)| *r)
+                .max_by(|a, b| a.updated_at_ms.cmp(&b.updated_at_ms).then_with(|| a.id.cmp(&b.id)))
+        };
+        let pick = newest_of(Obs::Failed).map(|r| (r, Obs::Failed)).or_else(|| newest_of(Obs::Fixed).map(|r| (r, Obs::Fixed)));
+        if let Some((run, obs)) = pick {
             facts.push(Fact {
                 service: "github",
                 project: repo_name.to_string(),
@@ -123,6 +161,23 @@ fn next_delay_secs(fails: u32, rate_limited: bool, remaining: Option<u32>) -> u6
         return 120;
     }
     (120u64.saturating_mul(1u64 << fails.min(6))).min(30 * 60)
+}
+
+/// full_name -> default branch, from the same repo list.
+fn default_branches_of(json: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if let Ok(serde_json::Value::Array(arr)) = serde_json::from_str::<serde_json::Value>(json) {
+        for item in arr {
+            let (Some(full), Some(def)) = (
+                item.get("full_name").and_then(|v| v.as_str()),
+                item.get("default_branch").and_then(|v| v.as_str()),
+            ) else { continue };
+            if !def.trim().is_empty() {
+                out.insert(full.trim().to_string(), def.trim().to_string());
+            }
+        }
+    }
+    out
 }
 
 fn pick_repos(json: &str, max: usize) -> Vec<(String, String)> {
@@ -219,6 +274,7 @@ async fn poll_once(
 
     let repos_json = resp.text().await.map_err(|e| PollError::Other(e.to_string()))?;
     let repos = pick_repos(&repos_json, 5);
+    let default_branches = default_branches_of(&repos_json);
 
     let mut out = Vec::new();
     for (full_name, name) in repos {
@@ -274,7 +330,7 @@ async fn poll_once(
 
         let runs_json = resp.text().await.map_err(|e| PollError::Other(e.to_string()))?;
         let runs = parse_runs(&runs_json);
-        let facts = facts_for_repo(&name, &runs, now_ms);
+        let facts = facts_for_repo_on(&name, &runs, now_ms, default_branches.get(&full_name).map(String::as_str));
 
         let is_first_time = !state.seen_repos.contains(&full_name);
         if is_first_time {
@@ -630,6 +686,8 @@ mod tests {
         let now = 1_000_000_000;
         let runs = vec![
             Run {
+                workflow_id: 1,
+                head_branch: "main".into(),
                 id: 1,
                 event: "push".into(),
                 conclusion: Some("failure".into()),
@@ -637,6 +695,8 @@ mod tests {
                 updated_at_ms: now - 3600 * 1000,
             },
             Run {
+                workflow_id: 1,
+                head_branch: "main".into(),
                 id: 2,
                 event: "push".into(),
                 conclusion: Some("success".into()),
@@ -657,6 +717,8 @@ mod tests {
         let now = 1_000_000_000;
         let runs = vec![
             Run {
+                workflow_id: 1,
+                head_branch: "main".into(),
                 id: 1,
                 event: "push".into(),
                 conclusion: Some("failure".into()),
@@ -664,6 +726,8 @@ mod tests {
                 updated_at_ms: now - 3600 * 1000,
             },
             Run {
+                workflow_id: 1,
+                head_branch: "main".into(),
                 id: 2,
                 event: "push".into(),
                 conclusion: Some("cancelled".into()),
@@ -683,6 +747,8 @@ mod tests {
         let now = 1_000_000_000;
         let runs = vec![
             Run {
+                workflow_id: 1,
+                head_branch: "main".into(),
                 id: 10,
                 event: "push".into(),
                 conclusion: Some("success".into()),
@@ -690,6 +756,8 @@ mod tests {
                 updated_at_ms: now - 1000,
             },
             Run {
+                workflow_id: 1,
+                head_branch: "main".into(),
                 id: 20,
                 event: "pull_request".into(),
                 conclusion: Some("failure".into()),
@@ -713,6 +781,8 @@ mod tests {
         let now = 1_000_000_000;
         let stale_ms = 49 * 3600 * 1000; // > 48h
         let runs = vec![Run {
+            workflow_id: 1,
+            head_branch: "main".into(),
             id: 1,
             event: "push".into(),
             conclusion: Some("failure".into()),
@@ -735,6 +805,8 @@ mod tests {
         let ts = now - 1000;
         let runs = vec![
             Run {
+                workflow_id: 1,
+                head_branch: "main".into(),
                 id: 10,
                 event: "push".into(),
                 conclusion: Some("failure".into()),
@@ -742,6 +814,8 @@ mod tests {
                 updated_at_ms: ts,
             },
             Run {
+                workflow_id: 1,
+                head_branch: "main".into(),
                 id: 20,
                 event: "push".into(),
                 conclusion: Some("success".into()),
@@ -1023,5 +1097,110 @@ mod link_tests {
         assert_eq!(run_pr_and_branch(run), (Some(34), Some("feat/x".to_string())));
         assert_eq!(run_pr_and_branch(r#"{"head_branch":"main","pull_requests":[]}"#), (None, Some("main".to_string())));
         assert_eq!(run_pr_and_branch("{}"), (None, None));
+    }
+}
+
+/// The GitHub watcher took the newest run of ANY workflow or branch, so a passing docs workflow said "green again" while
+/// CI was red, and a failing feature branch said "build failed" (2026-11-24 audit). Real payload: a public repo's
+/// Actions list captured unauthenticated (tests/fixtures/github/actions_runs_public_tokio.json).
+#[cfg(test)]
+mod grouping_tests {
+    use super::*;
+
+    const NOW: i64 = 1_800_000_000_000;
+    const MIN: i64 = 60_000;
+
+    fn run(id: u64, workflow: u64, branch: &str, event: &str, conclusion: &str, age_min: i64) -> Run {
+        Run {
+            id,
+            workflow_id: workflow,
+            head_branch: branch.into(),
+            event: event.into(),
+            conclusion: Some(conclusion.into()),
+            status: "completed".into(),
+            updated_at_ms: NOW - age_min * MIN,
+        }
+    }
+    fn only(facts: &[Fact], kind: Kind) -> Option<&Fact> {
+        facts.iter().find(|f| f.kind == kind)
+    }
+
+    #[test]
+    fn a_passing_docs_workflow_does_not_hide_a_failing_ci_workflow() {
+        // CI failed 30 min ago; the docs workflow passed 5 min ago. The old code said Fixed.
+        let runs = vec![run(1, 10, "main", "push", "failure", 30), run(2, 20, "main", "push", "success", 5)];
+        let f = facts_for_repo_on("zync", &runs, NOW, Some("main"));
+        let b = only(&f, Kind::Build).expect("a build fact");
+        assert_eq!(b.obs, Obs::Failed, "CI is still red");
+        assert_eq!(b.run_ref, "1", "and the failing run is the one named");
+    }
+
+    #[test]
+    fn it_is_fixed_only_when_every_workflow_is_green() {
+        let runs = vec![
+            run(1, 10, "main", "push", "failure", 60),
+            run(3, 10, "main", "push", "success", 20), // CI re-run passed
+            run(2, 20, "main", "push", "success", 5),
+        ];
+        let f = facts_for_repo_on("zync", &runs, NOW, Some("main"));
+        assert_eq!(only(&f, Kind::Build).unwrap().obs, Obs::Fixed);
+        assert_eq!(only(&f, Kind::Build).unwrap().run_ref, "2", "the newest green run");
+    }
+
+    #[test]
+    fn a_failing_feature_branch_is_not_a_failing_build_of_the_project() {
+        let runs = vec![run(1, 10, "feature/x", "push", "failure", 10), run(2, 10, "main", "push", "success", 40)];
+        let f = facts_for_repo_on("zync", &runs, NOW, Some("main"));
+        assert_eq!(only(&f, Kind::Build).unwrap().obs, Obs::Fixed, "main is green");
+        // with no default branch known nothing is dropped (the safe, older behaviour)
+        let g = facts_for_repo_on("zync", &runs, NOW, None);
+        assert_eq!(only(&g, Kind::Build).unwrap().obs, Obs::Failed);
+    }
+
+    #[test]
+    fn a_pr_check_is_failing_while_any_open_pr_branch_is_red() {
+        let runs = vec![run(1, 10, "fix/a", "pull_request", "failure", 20), run(2, 10, "fix/b", "pull_request", "success", 5)];
+        let f = facts_for_repo_on("zync", &runs, NOW, Some("main"));
+        assert_eq!(only(&f, Kind::Pr).unwrap().obs, Obs::Failed, "PR b passing does not fix PR a");
+        assert!(only(&f, Kind::Build).is_none(), "PR runs never count as the build");
+    }
+
+    #[test]
+    fn cancelled_skipped_and_neutral_runs_decide_nothing() {
+        let runs = vec![
+            run(1, 10, "main", "push", "failure", 30),
+            run(2, 10, "main", "push", "cancelled", 5),
+            run(3, 10, "main", "push", "skipped", 4),
+            run(4, 10, "main", "push", "neutral", 3),
+        ];
+        let f = facts_for_repo_on("zync", &runs, NOW, Some("main"));
+        assert_eq!(only(&f, Kind::Build).unwrap().obs, Obs::Failed, "the earlier failure still stands");
+        assert!(facts_for_repo_on("zync", &runs[1..], NOW, Some("main")).is_empty(), "only undecided runs: no fact");
+    }
+
+    #[test]
+    fn the_real_captured_payload_parses_completely_and_decides_sensibly() {
+        let json = include_str!("../../tests/fixtures/github/actions_runs_public_tokio.json");
+        let runs = parse_runs(json);
+        assert_eq!(runs.len(), 15, "every run in a real GitHub payload parses");
+        assert!(runs.iter().all(|r| r.workflow_id != 0 && !r.head_branch.is_empty()), "workflow and branch come through");
+        let workflows: std::collections::HashSet<u64> = runs.iter().map(|r| r.workflow_id).collect();
+        assert!(workflows.len() >= 2, "the sample really has several workflows: {workflows:?}");
+        let newest = runs.iter().map(|r| r.updated_at_ms).max().unwrap();
+        let now = newest + 5 * MIN;
+        let f = facts_for_repo_on("tokio", &runs, now, None);
+        assert!(f.iter().all(|x| x.obs == Obs::Fixed), "this sample is all green: nothing may be reported as failed");
+        // turn ONE real run red: the repo must now be failing, whichever other workflows pass after it
+        let mut red = runs.clone();
+        let victim = red.iter_mut().filter(|r| r.event == "push" && r.conclusion.as_deref() == Some("success")).min_by_key(|r| r.updated_at_ms).unwrap();
+        victim.conclusion = Some("failure".into());
+        let (wf, br, id) = (victim.workflow_id, victim.head_branch.clone(), victim.id);
+        let latest_same = red.iter().filter(|r| r.workflow_id == wf && r.head_branch == br && r.id != id && r.updated_at_ms > red.iter().find(|x| x.id == id).unwrap().updated_at_ms).count();
+        let g = facts_for_repo_on("tokio", &red, now, None);
+        if latest_same == 0 {
+            assert_eq!(only(&g, Kind::Build).unwrap().obs, Obs::Failed, "the red run is the newest of its workflow and branch");
+        } else {
+            assert_eq!(only(&g, Kind::Build).unwrap().obs, Obs::Fixed, "a later run of the same workflow and branch passed, so it is fixed");
+        }
     }
 }

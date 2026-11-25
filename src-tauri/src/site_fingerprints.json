@@ -9994,6 +9994,104 @@
       "implies": [],
       "source": "library-detector",
       "website": "https://www.sliderrevolution.com/"
+    },
+    {
+      "id": "vitepress",
+      "name": "VitePress",
+      "category": "meta-framework",
+      "website": "https://vitepress.dev",
+      "signals": [
+        {
+          "kind": "meta",
+          "name": "generator",
+          "contains": "VitePress",
+          "weight": 0.95,
+          "evidence": "VitePress generator meta"
+        },
+        {
+          "kind": "html",
+          "contains": "class=\"VPApp\"",
+          "weight": 0.8,
+          "evidence": "VPApp root element"
+        },
+        {
+          "kind": "html",
+          "contains": "VPNav",
+          "weight": 0.5,
+          "evidence": "VitePress navigation component classes"
+        }
+      ],
+      "implies": []
+    },
+    {
+      "id": "docusaurus",
+      "name": "Docusaurus",
+      "category": "meta-framework",
+      "website": "https://docusaurus.io",
+      "signals": [
+        {
+          "kind": "meta",
+          "name": "generator",
+          "contains": "Docusaurus",
+          "weight": 0.95,
+          "evidence": "Docusaurus generator meta"
+        },
+        {
+          "kind": "html",
+          "contains": "__docusaurus",
+          "weight": 0.85,
+          "evidence": "__docusaurus root element"
+        }
+      ],
+      "implies": []
+    },
+    {
+      "id": "hugo",
+      "name": "Hugo",
+      "category": "meta-framework",
+      "website": "https://gohugo.io",
+      "signals": [
+        {
+          "kind": "meta",
+          "name": "generator",
+          "contains": "Hugo",
+          "weight": 0.95,
+          "evidence": "Hugo generator meta"
+        }
+      ],
+      "implies": []
+    },
+    {
+      "id": "jekyll",
+      "name": "Jekyll",
+      "category": "meta-framework",
+      "website": "https://jekyllrb.com",
+      "signals": [
+        {
+          "kind": "meta",
+          "name": "generator",
+          "contains": "Jekyll",
+          "weight": 0.95,
+          "evidence": "Jekyll generator meta"
+        }
+      ],
+      "implies": []
+    },
+    {
+      "id": "mkdocs",
+      "name": "MkDocs",
+      "category": "meta-framework",
+      "website": "https://www.mkdocs.org",
+      "signals": [
+        {
+          "kind": "meta",
+          "name": "generator",
+          "contains": "mkdocs",
+          "weight": 0.95,
+          "evidence": "MkDocs generator meta"
+        }
+      ],
+      "implies": []
     }
   ]
 }

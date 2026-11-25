@@ -1489,6 +1489,9 @@ fn client_for(url: &Url, pinned: IpAddr) -> Result<Client, ProbeRefusal> {
     let host = host_raw.trim_start_matches('[').trim_end_matches(']').to_string();
     let port = url.port_or_known_default().unwrap_or(80);
     Client::builder()
+        // The address was checked and is pinned below. A system or environment proxy would resolve the name ITSELF
+        // (ignoring the pin) and could reach private addresses on the proxy's side of the network: never use one.
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(HOP_TIMEOUT_SECS))
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
@@ -2758,5 +2761,20 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+/// The scanner takes any address the user speaks, so its SSRF guard (public addresses only, DNS pinned after the check)
+/// must hold under a system proxy too (audit 2026-11-24).
+#[cfg(test)]
+mod no_proxy_tests {
+    #[test]
+    fn the_pinned_client_never_uses_a_system_or_environment_proxy() {
+        let src = include_str!("site_probe.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let client = prod.split("fn client_for(").nth(1).unwrap().split("
+async fn send_get").next().unwrap();
+        assert!(client.contains(".no_proxy()"), "client_for must call no_proxy()");
+        assert!(client.contains(".resolve("), "and keep the DNS pin");
     }
 }

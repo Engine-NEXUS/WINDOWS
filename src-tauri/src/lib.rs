@@ -184,6 +184,10 @@ pub(crate) mod session_verdict;
 pub(crate) mod agent_followup;
 pub(crate) mod session_observer;
 pub(crate) mod watch_runner;
+pub(crate) mod battery_guard;
+pub(crate) mod stt_model;
+#[cfg(debug_assertions)]
+pub(crate) mod debug_mic;
 pub(crate) mod agent_tracker;
 pub(crate) mod agent_outcomes;
 pub(crate) mod agent_attention;
@@ -947,6 +951,10 @@ pub fn run() {
                 tracing::info!("webhook listener off (Features page)");
             }
             focus_throttle::spawn(app.handle());
+            stt_stream::init(app.handle().clone());
+            battery_guard::spawn(app.handle());
+            #[cfg(debug_assertions)]
+            debug_mic::start(); // test hook, debug builds only: inert unless NEXUS_FAKE_MIC_DIR is set
             if startup_flag("keepAwakePoller") {
                 keep_awake::start_working_poller(); // screen stays awake while a ghost drill/request is running
             }
@@ -1321,6 +1329,8 @@ pub fn run() {
             ghost::ghost_exit,
             ghost::ghost_abort,
             ghost::get_pending_ghost_session,
+            stt_model::stt_model_status,
+            stt_model::stt_model_prefetch,
             ghost::ghost_drill_running,
             calibration::show_calibration_hud,
             calibration::preview_companion_hud,
@@ -1465,9 +1475,6 @@ pub fn run() {
             stt::stt_filter_stats,
             stt_diagnostics::stt_diagnostics_list,
             stt_diagnostics::stt_diagnostics_delete,
-            stt_stream::stt_stream_start,
-            stt_stream::stt_stream_push_chunk,
-            stt_stream::stt_stream_stop,
             tts::speak_text,
             commands::follow_up_window_secs,
             tts::speak_cached,

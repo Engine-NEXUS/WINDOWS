@@ -9,9 +9,10 @@ use serde::Deserialize;
 
 const DEEPGRAM_LISTEN_URL: &str = "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&punctuate=true";
 
-/// Feature 99 P2: domain keyterms boost Nova-2 beam-search probabilities
-/// (+30-40%) on NEXUS vocabulary — proper nouns and command verbs that
-/// otherwise collapse into homophones ("ghost mode" → "post mode").
+/// Domain terms to bias Nova-2 toward NEXUS vocabulary: proper nouns and command verbs that otherwise collapse into
+/// homophones ("ghost mode" -> "post mode"). Sent as `keywords=`: Deepgram documents `keyterm=` for Nova-3 and Flux only
+/// and `keywords=` for Nova-2 (2026-11-24 audit). The "+30-40 %" gain once claimed here was never measured. Whether this
+/// helps on the owner's voice needs the owner's key and a before/after run.
 const DEEPGRAM_KEYTERMS: &[&str] = &[
     "NEXUS",
     "ghost mode",
@@ -96,13 +97,13 @@ pub async fn transcribe_with_deepgram(
     Ok(text)
 }
 
-/// Feature 99 P2: build the listen URL with keyterm boosts appended.
+/// Build the listen URL with the vocabulary terms appended (as `keywords=`, the Nova-2 parameter).
 /// Pure + unit-tested.
 pub(crate) fn deepgram_listen_url() -> String {
     let mut url = DEEPGRAM_LISTEN_URL.to_string();
     for term in DEEPGRAM_KEYTERMS {
         let encoded = term.replace(' ', "+");
-        url.push_str(&format!("&keyterm={encoded}"));
+        url.push_str(&format!("&keywords={encoded}"));
     }
     url
 }
@@ -112,17 +113,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn listen_url_includes_nova2_and_keyterms() {
+    fn listen_url_uses_the_nova2_keywords_parameter_not_the_nova3_keyterm_one() {
         let url = deepgram_listen_url();
         assert!(url.starts_with("https://api.deepgram.com/v1/listen?model=nova-2"));
         assert!(url.contains("smart_format=true"));
         for term in ["NEXUS", "ghost+mode", "servx", "zync", "whatsapp", "memory+audit"] {
             assert!(
-                url.contains(&format!("keyterm={term}")),
-                "url missing keyterm={term}: {url}"
+                url.contains(&format!("keywords={term}")),
+                "url missing keywords={term}: {url}"
             );
         }
-        assert_eq!(url.matches("keyterm=").count(), DEEPGRAM_KEYTERMS.len());
+        assert_eq!(url.matches("keywords=").count(), DEEPGRAM_KEYTERMS.len());
+        assert!(!url.contains("keyterm="), "keyterm is a Nova-3 parameter; this URL asks for nova-2");
+        assert!(url.contains("model=nova-2"), "if the model is ever changed to nova-3 the parameter must change back to keyterm");
     }
 
     #[test]

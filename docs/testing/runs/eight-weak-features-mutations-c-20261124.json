@@ -1,0 +1,56 @@
+{
+  "file": "src-tauri/src/stt_stream.rs",
+  "test": "--lib --features custom-protocol,admin-brain -- --test-threads=1 stt_stream",
+  "results": [
+    {
+      "name": "progressive captions run in privacy mode",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:642:9: assertion `left == right` failed: localSttOnly means the audio stays on this machine"
+    },
+    {
+      "name": "progressive beats a real streaming server",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:907:9: assertion `left == right` failed: a real streaming server beats the progressive one"
+    },
+    {
+      "name": "requests start before enough audio exists",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:1004:9: 1000 samples is too little to ask"
+    },
+    {
+      "name": "two requests can be in flight",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:1030:9: assertion `left == right` failed: never two requests in flight"
+    },
+    {
+      "name": "silence is sent to the recogniser",
+      "status": "SURVIVED",
+      "detail": ""
+    },
+    {
+      "name": "the per-minute budget is ignored",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:1105:9: assertion failed: fake.calls.lock().unwrap().is_empty()"
+    },
+    {
+      "name": "an error does not stop further requests",
+      "status": "SURVIVED",
+      "detail": ""
+    },
+    {
+      "name": "silence hallucinations are shown",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:1116:9: a known silence hallucination is filtered"
+    },
+    {
+      "name": "a finished turn still shows its late answer",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:1122:9: nothing shows after the turn ended"
+    },
+    {
+      "name": "the whole turn is sent however long it is",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:1134:9: assertion `left == right` failed: only the last window is sent"
+    }
+  ]
+}

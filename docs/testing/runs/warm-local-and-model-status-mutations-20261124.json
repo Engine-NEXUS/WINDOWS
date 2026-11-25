@@ -1,0 +1,46 @@
+{
+  "file": "src-tauri/src/stt_stream.rs",
+  "test": "--lib --features custom-protocol,admin-brain -- --test-threads=1 stt_stream:: stt_model::",
+  "results": [
+    {
+      "name": "a warm local server is no longer preferred over Groq",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:754:9: assertion `left == right` failed: warm: free, private, true streaming"
+    },
+    {
+      "name": "a warm local server beats a streaming key the owner added",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:755:9: assertion `left == right` failed: a streaming key the owner added wins"
+    },
+    {
+      "name": "the warm check is skipped when the gate is built",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:762:9: assertion failed: src.contains(\"local_warm: crate::lazy_stt::is_stt_responsive()\")"
+    },
+    {
+      "name": "a model with a partial file is called ready",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_model.rs:232:9: assertion `left == right` failed"
+    },
+    {
+      "name": "a truncated file counts as complete",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_model.rs:241:9: assertion `left == right` failed: an incomplete file is not a model"
+    },
+    {
+      "name": "the spelling model is taken for the speech model",
+      "status": "SURVIVED",
+      "detail": ""
+    },
+    {
+      "name": "a running fetch with nothing on disk is called missing",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_model.rs:206:9: assertion `left == right` failed"
+    },
+    {
+      "name": "progress can pass the expected size",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_model.rs:259:9: assertion `left == right` failed"
+    }
+  ]
+}

@@ -3380,3 +3380,38 @@ mod tests {
         assert!(json.contains("\"run_id\":42"));
     }
 }
+
+/// A destructive command spoken with a bare repo name ("merge PR 5 in zinc") is resolved to owner/repo BEFORE the
+/// confirmation prompt is built, so the user always hears the full name that will really be acted on, even when the
+/// name was matched loosely (prefix or edit distance). Audit 2026-11-24.
+#[cfg(test)]
+mod confirmation_names_the_resolved_repo_tests {
+    use super::*;
+
+    #[test]
+    fn the_prompt_reads_back_the_full_owner_and_repo_after_a_loose_match() {
+        for bare in ["zinc", "zyn", "zync"] {
+            let spoken = GitHubCommand::MergePr { repo: bare.into(), pr_number: 5, method: MergeMethod::Squash };
+            let resolved = with_resolved_repo(&spoken, "Engine-NEXUS/zync".to_string());
+            let prompt = resolved.confirmation_prompt().expect("merge is destructive and has a prompt");
+            assert!(prompt.contains("Engine-NEXUS/zync"), "{bare}: the prompt names what will be merged: {prompt}");
+            assert!(!prompt.contains(&format!(" in {bare}?")) || bare == "zync", "{bare}: not the loosely heard word");
+        }
+        for cmd in [
+            GitHubCommand::ClosePr { repo: "zinc".into(), pr_number: 2 },
+            GitHubCommand::RevertPr { repo: "zinc".into(), pr_number: 2, title: None },
+        ] {
+            let p = with_resolved_repo(&cmd, "Engine-NEXUS/zync".to_string()).confirmation_prompt().unwrap();
+            assert!(p.contains("Engine-NEXUS/zync"), "{p}");
+        }
+    }
+
+    #[test]
+    fn execute_command_resolves_before_it_builds_the_prompt() {
+        let src = include_str!("github_cmd.rs");
+        let body = src.split("pub async fn execute_command(").nth(1).unwrap().split("// ─── Tests").next().unwrap();
+        let resolve = body.find("resolve_name(bare_repo)").expect("resolves bare names");
+        let prompt = body.find("confirmation_prompt()").expect("builds the prompt");
+        assert!(resolve < prompt, "resolution comes first");
+    }
+}

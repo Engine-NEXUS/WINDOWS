@@ -1,0 +1,11 @@
+{
+  "file": "src-tauri/src/stt_stream.rs",
+  "test": "--lib --features custom-protocol,admin-brain -- --test-threads=1 stt_stream:: stt_model::",
+  "results": [
+    {
+      "name": "the spelling model is taken for the speech model",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_model.rs:248:9: assertion `left == right` failed"
+    }
+  ]
+}

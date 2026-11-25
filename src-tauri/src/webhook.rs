@@ -218,11 +218,27 @@ fn handle_conn(
         // An agent's Stop hook says "claude stopped". Its own token (never the /trigger one), a body of two
         // words, and nothing that can run a command: see agent_hooks.
         let ok = req.method == "POST" && bearer_ok(&req.auth, agent_token);
+        if !ok && crate::agent_monitor::query_value(&req.query, "event") == Some("pretool") {
+            // the hook script prints this reply to the agent: keep it a plain {} (the status is still 401)
+            respond(&mut stream, 401, "{}");
+            return None;
+        }
         if ok {
             // the agent monitor (island, screen hold) sees every event, including the ones only it uses
             crate::agent_monitor::ingest(&req.query, &req.body);
             if crate::agent_monitor::is_monitor_only(&req.query) {
-                respond(&mut stream, 200, r#"{"ok":true}"#);
+                // A "pretool" hook prints this reply as its own answer to the agent. While the battery guard has a stop
+                // order, Claude Code's hook gets the order (stop, with the reason); otherwise the neutral reply.
+                let reply = if crate::agent_monitor::query_value(&req.query, "event") == Some("pretool") {
+                    crate::battery_guard::stop_reply_for(
+                        crate::agent_monitor::query_value(&req.query, "agent").unwrap_or(""),
+                        crate::agent_hooks::now_ms(),
+                    )
+                } else {
+                    None
+                };
+                let neutral = if crate::agent_monitor::query_value(&req.query, "event") == Some("pretool") { "{}" } else { r#"{"ok":true}"# };
+                respond(&mut stream, 200, reply.as_deref().unwrap_or(neutral));
                 return None;
             }
         }
@@ -472,6 +488,35 @@ mod agent_event_http_tests {
         client.read_to_string(&mut out).unwrap();
         server.join().unwrap();
         assert!(out.contains("200") && out.contains("allow"), "{out}");
+    }
+
+    /// The battery guard's stop order travels through the same door as every tool-call hook: while it is active the
+    /// answer to Claude Code's "pretool" hook is the stop order (the script prints it), otherwise a neutral `{}`.
+    #[test]
+    fn the_pretool_hook_is_answered_with_the_battery_stop_order_only_while_one_is_active() {
+        crate::battery_guard::clear_stop_order();
+        let ask = |agent: &str| call(post(&format!("/agent-event?agent={agent}&event=pretool"), "agent-token", r#"{"tool_name":"Bash","session_id":"s1"}"#));
+        let (code, body) = ask("claude");
+        assert_eq!((code, body.trim()), (200, "{}"), "no order: a neutral answer the agent ignores");
+        crate::battery_guard::set_stop_order("The battery is at 5 percent and the laptop is about to power off.", crate::agent_hooks::now_ms());
+        let (code, body) = ask("claude");
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_str(body.trim()).expect("the answer is JSON");
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(v["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("5 percent"), "the agent is told why");
+        assert!(v.get("continue").is_none(), "the first answers only tell the agent; the hard stop comes 15 seconds later");
+        let (_, other) = ask("cursor");
+        assert_eq!(other.trim(), "{}", "an agent whose stop is not verified is never answered with it");
+        // a posttool event, with the order active, is still a plain acknowledgement
+        let (_, post_body) = call(post("/agent-event?agent=claude&event=posttool", "agent-token", "{}"));
+        assert_eq!(post_body.trim(), r#"{"ok":true}"#);
+        // a wrong token never sees the order
+        let (code, denied) = call(post("/agent-event?agent=claude&event=pretool", "trigger-token", "{}"));
+        assert_eq!(code, 401);
+        assert_eq!(denied.trim(), "{}", "an unauthorised tool-call hook gets a plain empty object, never an error body or the order");
+        crate::battery_guard::clear_stop_order();
+        let (_, after) = ask("claude");
+        assert_eq!(after.trim(), "{}", "cleared: neutral again");
     }
 
     #[test]

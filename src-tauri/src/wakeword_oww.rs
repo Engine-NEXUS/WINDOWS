@@ -1616,6 +1616,9 @@ pub(crate) mod engine {
             st.carry.drain(0..consumed);
             st.frac = pos - consumed as f64;
         }
+        // Test hook (debug builds only, and only when NEXUS_FAKE_MIC_DIR is set): queued test speech replaces these samples.
+        #[cfg(debug_assertions)]
+        crate::debug_mic::overlay(&mut produced);
 
         // 3. Feed 1280-sample chunks to KWS engine
         //    Check meeting/privacy state — if suppressed, drain audio but
@@ -1667,6 +1670,8 @@ pub(crate) mod engine {
                         let mut cap = super::STT_CAPTURE_BUFFER.lock();
                         cap.extend(chunk.iter().copied());
                     }
+                    // Live captions: the same samples the batch STT will see. An atomic read when off; never waits.
+                    crate::stt_stream::feed(&chunk);
 
                     // RMS-based VAD on this 1280-sample (80ms) chunk.
                     // Hysteresis: high threshold to START speech (rejects
@@ -1746,6 +1751,7 @@ pub(crate) mod engine {
 
                     if should_stop {
                         super::STT_CAPTURING.store(false, Ordering::Relaxed);
+                        crate::stt_stream::end();
                         super::STT_NO_SPEECH_LIMIT_OVERRIDE.store(0, Ordering::Relaxed);
                         if speech_detected {
                             let now_ms = super::mono_ms_nonzero();
@@ -3450,6 +3456,11 @@ fn start_stt_capture_inner(origin: crate::directed::Origin, seed: Option<(Vec<f3
         samples.len()
     });
     STT_CAPTURING.store(true, std::sync::atomic::Ordering::Release);
+    crate::stt_stream::begin(); // live captions: the dispatcher decides (setting, privacy, meeting, Ghost, own voice)
+    if let Some((samples, _)) = &seed {
+        // the words already spoken after the detection point are in the command audio, so they belong in the caption too
+        crate::stt_stream::feed(samples);
+    }
     match seeded {
         Some(n) => tracing::info!(
             "stt-capture: started (session={session}, seeded {n} samples = {}ms after the detection point)",
@@ -3692,6 +3703,7 @@ pub fn abort_stt_capture() -> SttAbortResult {
     clear_held_turn();
     crate::admin_privilege::invalidate_captured_turns();
     let was_capturing = STT_CAPTURING.swap(false, Ordering::SeqCst);
+    crate::stt_stream::end();
     let voiced = STT_VOICED_CHUNKS.load(Ordering::Relaxed);
     let total = STT_TOTAL_CHUNKS.load(Ordering::Relaxed);
     // 80ms chunks (1280 samples @ 16kHz).

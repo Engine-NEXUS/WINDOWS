@@ -7,6 +7,7 @@ import {
   FINAL_LINGER_MS,
   formatFinalText,
   formatPartialText,
+  partialStableChars,
 } from "./speechPillModel";
 import { useReducedMotion } from "../avatar/dotted/theme";
 import { useTypedText } from "./useTypedText";
@@ -28,6 +29,8 @@ interface OrbRect {
  * - Hides when the response caption or TTS starts, and on `orb:cancel`.
  * - Shares the caption slot family (layoutSlots.ts), yielding to the response caption.
  */
+const PARTIAL_STALE_MS = 6000;
+
 export function SpeechPill() {
   const [rect, setRect] = useState<OrbRect | null>(null);
   const [text, setText] = useState("");
@@ -36,6 +39,8 @@ export function SpeechPill() {
   // True once the turn's final transcript is in. Final text is shown as it is (no typing animation): with a
   // cloud recogniser there are no live words, and typing a finished sentence out looked like pasted text.
   const [isFinal, setIsFinal] = useState(false);
+  // How many leading characters of the live text the recogniser has confirmed; the rest is still a guess and is drawn dimmer.
+  const [stableChars, setStableChars] = useState(Number.MAX_SAFE_INTEGER);
   const listening = useAssistant((s) => s.state === "listening");
 
   const captionActive = useAssistant((s) => s.captionActive);
@@ -114,8 +119,15 @@ export function SpeechPill() {
         const formatted = formatPartialText(event.payload);
         if (formatted) {
           setIsFinal(false);
+          setStableChars(partialStableChars(event.payload));
           setText(formatted);
           setVisible(true);
+          // A partial that is never followed by a final (the turn was cancelled, the stream died) must not leave the
+          // pill on screen for ever: hide it if nothing else arrives.
+          timerRef.current = setTimeout(() => {
+            setVisible(false);
+            timerRef.current = null;
+          }, PARTIAL_STALE_MS);
         }
       });
 
@@ -234,7 +246,14 @@ export function SpeechPill() {
             <i />
           </span>
         ) : (
-          <span className={`speech-pill-text ${isFinal ? "speech-pill-text--final" : ""}`}>{typed || text.slice(0, 1)}</span>
+          <span className={`speech-pill-text ${isFinal ? "speech-pill-text--final" : ""}`}>
+            {isFinal ? (typed || text.slice(0, 1)) : (
+              <>
+                {(typed || text.slice(0, 1)).slice(0, stableChars)}
+                <span className="speech-pill-tail">{(typed || text.slice(0, 1)).slice(stableChars)}</span>
+              </>
+            )}
+          </span>
         )}
       </div>
     </div>

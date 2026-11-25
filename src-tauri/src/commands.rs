@@ -1646,6 +1646,9 @@ pub struct NexusSettings {
     pub meeting_mode_auto: bool,
     pub suppress_tts_in_meetings: bool,
     pub local_stt_only: bool,
+    /// Live partial captions while you speak (off by default; never in privacy mode toward the cloud). See stt_stream.rs.
+    #[serde(default)]
+    pub stt_live_captions: bool,
     pub server_url: String,
     pub user_id: String,
     pub device_id: String,
@@ -2000,6 +2003,19 @@ pub struct NexusSettings {
     /// Anything else is read as "off". Changed by voice ("allow unattended shutdown").
     #[serde(default = "default_watch_power")]
     pub watch_power: String,
+    /// Battery guard (battery_guard.rs): "off" (default), "dry" (practice) or "on": at the chosen percent on battery, ask
+    /// the coding agents to stop, then shut down or hibernate after a 30 second cancellable countdown.
+    #[serde(default = "default_watch_power")]
+    pub battery_guard: String,
+    /// The trigger level in percent (3 to 20).
+    #[serde(default = "default_battery_guard_percent")]
+    pub battery_guard_percent: u32,
+    /// "shutdown" (default) or "hibernate".
+    #[serde(default = "default_battery_guard_action")]
+    pub battery_guard_action: String,
+    /// Ask coding agents to stop before powering off (Claude Code only; the others are told aloud).
+    #[serde(default = "default_true")]
+    pub battery_guard_stop_agents: bool,
     /// Agent Island: show running coding agents as logos at the top of the screen, with live tracking and Allow / Deny
     /// cards (agent_monitor.rs). Also keeps the screen awake while an agent works.
     #[serde(default = "default_memcore")]
@@ -2140,6 +2156,14 @@ fn default_follow_up_window_secs() -> u32 {
 
 fn default_watch_power() -> String {
     "off".to_string()
+}
+
+fn default_battery_guard_percent() -> u32 {
+    5
+}
+
+fn default_battery_guard_action() -> String {
+    "shutdown".to_string()
 }
 
 fn default_agent_monitor_display() -> String {
@@ -2371,6 +2395,7 @@ impl Default for NexusSettings {
             meeting_mode_auto: true,
             suppress_tts_in_meetings: true,
             local_stt_only: DEFAULT_LOCAL_STT_ONLY,
+            stt_live_captions: false,
             server_url: option_env!("NEXUS_SERVER_URL")
                 .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev")
                 .to_string(),
@@ -2466,6 +2491,10 @@ impl Default for NexusSettings {
             flows_cloud_chooser: false,
             memcore_review: false,
             watch_power: default_watch_power(),
+            battery_guard: default_watch_power(),
+            battery_guard_percent: default_battery_guard_percent(),
+            battery_guard_action: default_battery_guard_action(),
+            battery_guard_stop_agents: true,
             agent_monitor: true,
             agent_monitor_hover: true,
             agent_monitor_display: default_agent_monitor_display(),
@@ -2949,6 +2978,16 @@ pub fn read_local_stt_only<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool
     let Ok(content) = std::fs::read_to_string(&path) else { return DEFAULT_LOCAL_STT_ONLY; };
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return DEFAULT_LOCAL_STT_ONLY; };
     local_stt_only_from_json(&json)
+}
+
+/// Live partial captions (`sttLiveCaptions`), off unless the owner turned them on.
+pub fn read_stt_live_captions<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return false; };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("sttLiveCaptions").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
 }
 
 /// Read `wakeSensitivity` ("low" | "medium" | "high") from settings.json.

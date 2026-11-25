@@ -120,6 +120,7 @@ fn gerund(kind: PowerKind) -> &'static str {
         PowerKind::Shutdown => "shutting down your laptop",
         PowerKind::Restart => "restarting your laptop",
         PowerKind::Sleep => "putting your laptop to sleep",
+        PowerKind::Hibernate => "hibernating your laptop",
         PowerKind::Lock => "locking your screen",
         PowerKind::SignOut => "signing you out",
     }
@@ -831,6 +832,7 @@ fn window_spec(agent: Agent) -> Option<crate::window_tile::AgentSpec> {
         Agent::Cursor => &["cursor"],
         Agent::Windsurf => &["windsurf"],
         Agent::Trae => &["trae"],
+        Agent::Kiro => &["kiro"],
         _ => return None,
     };
     let w: Vec<String> = words.iter().map(|s| s.to_string()).collect();

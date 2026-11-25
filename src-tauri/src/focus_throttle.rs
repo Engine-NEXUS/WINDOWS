@@ -1232,3 +1232,157 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
+
+/// Real Win32 proof on a process this test spawns itself (never one of the owner's apps): lowering really changes the
+/// scheduling class and EcoQoS state, restoring really puts both back, and the guards (already low, reused pid, dead
+/// process) refuse. The pure tests above cannot show any of this.
+#[cfg(all(test, target_os = "windows"))]
+mod real_process_tests {
+    use super::*;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        GetPriorityClass, GetProcessInformation, OpenProcess, ProcessPowerThrottling, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_STATE, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    const NORMAL: u32 = 0x20;
+    const BELOW_NORMAL: u32 = 0x4000;
+
+    /// A harmless child that just waits (ping to localhost), killed when the guard drops.
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    fn spawn_idle_child() -> Child {
+        use std::os::windows::process::CommandExt;
+        let c = std::process::Command::new("ping.exe")
+            .args(["-n", "120", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .stdin(std::process::Stdio::null())
+            .creation_flags(0x0800_0000 | 0x0000_0020) // CREATE_NO_WINDOW + NORMAL_PRIORITY_CLASS (a child of a below-normal parent, such as a CI runner, otherwise inherits that class)
+            .spawn()
+            .expect("ping.exe must exist on Windows");
+        Child(c)
+    }
+    /// An elevated test process (the GitHub Windows runner is an administrator) starts elevated children, and lower() refuses
+    /// elevated processes on purpose, so the three tests that lower a real child cannot run there; they run on a normal user.
+    fn elevated_here() -> bool {
+        let yes = unsafe { process_token_elevated(windows::Win32::System::Threading::GetCurrentProcess()) };
+        if yes {
+            eprintln!("note: the test process is elevated, so its children are too and lower() refuses them by design; test skipped");
+        }
+        yes
+    }
+    fn class_of(pid: u32) -> u32 {
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).expect("open child");
+            let c = GetPriorityClass(h);
+            let _ = CloseHandle(h);
+            c
+        }
+    }
+    fn eco_of(pid: u32) -> (u32, u32) {
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).expect("open child");
+            let mut st = PROCESS_POWER_THROTTLING_STATE { Version: 1, ControlMask: 0, StateMask: 0 };
+            let ok = GetProcessInformation(
+                h,
+                ProcessPowerThrottling,
+                &mut st as *mut _ as *mut std::ffi::c_void,
+                std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+            );
+            let _ = CloseHandle(h);
+            assert!(ok.as_bool(), "GetProcessInformation must work on the child");
+            (st.ControlMask, st.StateMask)
+        }
+    }
+
+    #[test]
+    fn lowering_a_real_process_changes_it_and_restoring_puts_it_back_exactly() {
+        if elevated_here() {
+            return;
+        }
+        let child = spawn_idle_child();
+        let pid = child.0.id();
+        assert_eq!(class_of(pid), NORMAL, "a fresh child starts at normal priority");
+        let before_eco = eco_of(pid);
+        assert_eq!(before_eco.1 & PROCESS_POWER_THROTTLING_EXECUTION_SPEED, 0, "not throttled at the start");
+
+        let lowered = lower(pid).expect("a same-user, non-elevated child can be lowered");
+        assert_eq!(lowered.pid, pid);
+        assert_eq!(lowered.orig_priority, NORMAL);
+        assert!(lowered.exe.contains("ping"), "identity records the exe: {}", lowered.exe);
+        assert_eq!(class_of(pid), BELOW_NORMAL, "the scheduling class really dropped");
+        let during = eco_of(pid);
+        assert_ne!(during.1 & PROCESS_POWER_THROTTLING_EXECUTION_SPEED, 0, "EcoQoS (efficiency mode) is really on");
+
+        // lowering something already lowered must refuse (restore would otherwise "restore" our own change)
+        assert!(lower(pid).is_none(), "an already-below-normal process is left alone");
+
+        assert!(restore(&lowered), "restore succeeds on the same process");
+        assert_eq!(class_of(pid), NORMAL, "the priority class is back to exactly what it was");
+        assert_eq!(eco_of(pid), before_eco, "the efficiency state is back to exactly what it was");
+    }
+
+    #[test]
+    fn restore_refuses_a_reused_pid_and_never_touches_the_wrong_process() {
+        if elevated_here() {
+            return;
+        }
+        let child = spawn_idle_child();
+        let pid = child.0.id();
+        let mut lowered = lower(pid).expect("lowerable");
+        assert_eq!(class_of(pid), BELOW_NORMAL);
+        // pretend the pid was recycled: the recorded creation time no longer matches
+        lowered.created ^= 1;
+        assert!(!restore(&lowered), "a different creation time means a different process: refuse");
+        assert_eq!(class_of(pid), BELOW_NORMAL, "and the process was not changed");
+    }
+
+    #[test]
+    fn a_dead_process_cannot_be_lowered_or_restored_and_nothing_panics() {
+        if elevated_here() {
+            return;
+        }
+        let child = spawn_idle_child();
+        let pid = child.0.id();
+        let lowered = lower(pid).expect("lowerable while alive");
+        // dropping the guard kills the child AND closes our handle (a process object lingers while any handle is open)
+        drop(child);
+        // Windows removes the process object a moment after exit, and anything else holding a handle (a virus scanner)
+        // can keep it longer: wait until it is really gone before asserting what "gone" means.
+        let mut gone = false;
+        for _ in 0..60 {
+            if get_proc_identity(pid).is_none() {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if gone {
+            assert!(!restore(&lowered), "restoring a process that has gone reports false");
+            assert!(lower(pid).is_none(), "lowering a process that has gone reports none");
+        } else {
+            eprintln!("note: the exited child's process object lingered for 3 s (another handle holds it); dead-process assertions skipped");
+        }
+        assert!(lower(0).is_none() && lower(std::process::id()).is_none(), "pid 0 and NEXUS itself are never lowered");
+    }
+
+    #[test]
+    fn the_real_process_list_never_proposes_nexus_or_its_own_children() {
+        let child = spawn_idle_child();
+        let samples = sample_processes();
+        let me = std::process::id();
+        assert!(samples.iter().any(|s| s.pid == me), "the sampler sees this process");
+        let cfg = Config { cpu_threshold: 0.0, max_targets: 1000, nexus_pid: me };
+        let picked = decide(&samples, &cfg, false);
+        assert!(!picked.contains(&me), "NEXUS is never a target");
+        assert!(!picked.contains(&child.0.id()), "a child of NEXUS is part of the NEXUS family and is never a target");
+        let none = decide(&samples, &cfg, true);
+        assert!(none.is_empty(), "during a meeting nothing is lowered");
+    }
+}

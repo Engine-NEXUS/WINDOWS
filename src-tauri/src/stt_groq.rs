@@ -10,6 +10,19 @@
 use reqwest::Client;
 
 const GROQ_STT_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
+
+/// Where the plain (non-segment) transcription request goes. A test can point it at a stand-in server on this machine;
+/// the real build always uses Groq's address.
+#[cfg(test)]
+static TEST_STT_URL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+#[cfg(test)]
+fn stt_url() -> String {
+    TEST_STT_URL.lock().unwrap().clone().unwrap_or_else(|| GROQ_STT_URL.to_string())
+}
+#[cfg(not(test))]
+fn stt_url() -> &'static str {
+    GROQ_STT_URL
+}
 const GROQ_MODEL: &str = "whisper-large-v3-turbo";
 /// Slower, more accurate sibling of the production model. NOT used by the app;
 /// it exists so the evaluator can answer "is turbo costing us command accuracy?"
@@ -245,6 +258,25 @@ pub async fn transcribe_with_groq(
     client: &Client,
     prompt: Option<&'static str>,
 ) -> Result<String, String> {
+    transcribe_plain(samples, api_key, client, prompt, GROQ_MODEL, "stt").await
+}
+
+/// Provisional text for LIVE CAPTIONS while the user is still speaking. Differs from the final transcript on purpose:
+/// the larger model (Groq lists limits per model, so these requests are meant not to spend the final transcript's
+/// turbo allowance; unverified for free-tier keys, see docs/research/eight-weak-features/04), neutral decoding, and a
+/// separate usage-counter kind so the Command Hub's "requests today" is not inflated by captions.
+pub async fn transcribe_interim_with_groq(samples: &[i16], api_key: &str, client: &Client) -> Result<String, String> {
+    transcribe_plain(samples, api_key, client, None, GROQ_MODEL_LARGE, "stt_interim").await
+}
+
+async fn transcribe_plain(
+    samples: &[i16],
+    api_key: &str,
+    client: &Client,
+    prompt: Option<&'static str>,
+    model: &'static str,
+    counter: &'static str,
+) -> Result<String, String> {
     if api_key.is_empty() {
         return Err("No Groq API key provided".to_string());
     }
@@ -256,14 +288,15 @@ pub async fn transcribe_with_groq(
         samples.len() / 16
     );
 
-    let fields = transcription_fields("audio.wav", "audio/wav", prompt, false);
+    let mut fields = transcription_fields("audio.wav", "audio/wav", prompt, false);
+    fields.model = model;
     let form = groq_transcription_form(wav_bytes, &fields)?;
 
     let start = std::time::Instant::now();
 
-    crate::usage_counter::bump("stt");
+    crate::usage_counter::bump(counter);
     let resp = client
-        .post(GROQ_STT_URL)
+        .post(stt_url())
         .bearer_auth(api_key)
         .multipart(form)
         .timeout(std::time::Duration::from_secs(15))
@@ -278,7 +311,7 @@ pub async fn transcribe_with_groq(
         let body = resp.text().await.unwrap_or_default();
         // Check for rate limit (429) or auth error (401) for better error messages
         if status.as_u16() == 429 {
-            return Err("Groq rate limit hit (2,000 req/day free tier)".to_string());
+            return Err("Groq rate limit hit (free-tier request limit)".to_string());
         }
         if status.as_u16() == 401 {
             return Err("Groq API key invalid — check Settings".to_string());
@@ -508,6 +541,70 @@ pub async fn transcribe_with_groq_verbose_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── the real interim request, against a stand-in server on this machine (nothing reaches Groq) ──
+    static MOCK_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn tiny_audio() -> Vec<i16> {
+        (0..800).map(|i| ((i as f32 / 8.0).sin() * 3000.0) as i16).collect()
+    }
+
+    fn client() -> Client {
+        Client::builder().no_proxy().build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_interim_request_goes_to_the_large_model_with_the_key_and_returns_the_trimmed_text() {
+        let _g = MOCK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let (base, requests, stop) = crate::memcore::test_http::start_mock_server(|_| {
+            (200, vec![("Content-Type", "application/json".to_string())], r#"{"text":"  open the command hub  "}"#.to_string())
+        });
+        *TEST_STT_URL.lock().unwrap() = Some(format!("{base}/openai/v1/audio/transcriptions"));
+        let out = transcribe_interim_with_groq(&tiny_audio(), "gsk_test_key", &client()).await;
+        *TEST_STT_URL.lock().unwrap() = None;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(out.as_deref(), Ok("open the command hub"), "the text comes back trimmed");
+        let reqs = requests.lock().unwrap();
+        assert_eq!(reqs.len(), 1, "exactly one request per interim");
+        let r = &reqs[0];
+        assert!(r.starts_with("POST /openai/v1/audio/transcriptions"), "{}", &r[..60.min(r.len())]);
+        assert!(r.to_ascii_lowercase().contains("authorization: bearer gsk_test_key"), "the user's key is sent as a bearer token");
+        assert!(r.contains(GROQ_MODEL_LARGE), "the interim request asks for the large model, not the final transcript's turbo");
+        assert!(!r.contains(GROQ_MODEL), "and never the turbo model");
+        assert!(r.contains("multipart/form-data"), "audio goes as a multipart upload");
+    }
+
+    #[tokio::test]
+    async fn an_interim_request_reports_a_rate_limit_and_a_bad_key_in_plain_words() {
+        let _g = MOCK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        for (status, needle) in [(429u16, "rate limit"), (401, "invalid")] {
+            let (base, _requests, stop) = crate::memcore::test_http::start_mock_server(move |_| (status, vec![], r#"{"error":"x"}"#.to_string()));
+            *TEST_STT_URL.lock().unwrap() = Some(format!("{base}/x"));
+            let out = transcribe_interim_with_groq(&tiny_audio(), "gsk_test_key", &client()).await;
+            *TEST_STT_URL.lock().unwrap() = None;
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let err = out.expect_err("a failed request is an error, never empty text");
+            assert!(err.to_lowercase().contains(needle), "{status}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_interim_request_with_no_key_sends_nothing_and_a_dead_server_is_an_error() {
+        let _g = MOCK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let (base, requests, stop) = crate::memcore::test_http::start_mock_server(|_| (200, vec![], r#"{"text":"x"}"#.to_string()));
+        *TEST_STT_URL.lock().unwrap() = Some(format!("{base}/x"));
+        assert!(transcribe_interim_with_groq(&tiny_audio(), "", &client()).await.is_err());
+        assert!(requests.lock().unwrap().is_empty(), "no key: nothing is sent");
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        // a port nobody listens on
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = dead.local_addr().unwrap().port();
+        drop(dead);
+        *TEST_STT_URL.lock().unwrap() = Some(format!("http://127.0.0.1:{port}/x"));
+        let out = transcribe_interim_with_groq(&tiny_audio(), "gsk_test_key", &client()).await;
+        *TEST_STT_URL.lock().unwrap() = None;
+        assert!(out.is_err_and(|e| e.contains("request failed")));
+    }
 
     #[test]
     fn test_groq_url_constant() {

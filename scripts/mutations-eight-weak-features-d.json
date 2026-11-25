@@ -1,0 +1,27 @@
+{
+  "file": "src-tauri/src/stt_stream.rs",
+  "cwd": "src-tauri",
+  "targetDir": "D:/nexus-screen-target",
+  "testArgs": [
+    "--lib",
+    "--features",
+    "custom-protocol,admin-brain",
+    "--",
+    "--test-threads=1",
+    "stt_stream"
+  ],
+  "mutations": [
+    {
+      "name": "silence is sent to the recogniser (both quiet-audio gates removed; each alone is covered by the other)",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "        if peak(&audio[asked_at_len..]) < limits.min_peak {\n            continue; // the new audio is silence or room noise\n        }\n        if limits.tail_samples > 0 && peak(&audio[audio.len().saturating_sub(limits.tail_samples)..]) < limits.min_peak {\n            continue; // the speaker has just stopped: the final request is coming, an interim would duplicate it\n        }\n",
+      "replace": ""
+    },
+    {
+      "name": "a request is made while the speaker has just stopped (tail gate removed)",
+      "file": "src-tauri/src/stt_stream.rs",
+      "find": "        if limits.tail_samples > 0 && peak(&audio[audio.len().saturating_sub(limits.tail_samples)..]) < limits.min_peak {\n            continue; // the speaker has just stopped: the final request is coming, an interim would duplicate it\n        }\n",
+      "replace": ""
+    }
+  ]
+}

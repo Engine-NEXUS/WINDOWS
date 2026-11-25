@@ -1,0 +1,141 @@
+{
+  "file": "src-tauri/src/orchestrator.rs",
+  "test": "--lib --features custom-protocol,admin-brain -- --test-threads=1 vision_click_gate brain_gate github_watch stt_stream focus_throttle honest_wording no_proxy_tests site_eval stt_deepgram confirmation_names",
+  "results": [
+    {
+      "name": "vision click does not vet the window before sending the screen",
+      "status": "KILLED",
+      "detail": "panicked at src\\orchestrator.rs:12508:66: missing `capture_block_reason(` in run_click_element"
+    },
+    {
+      "name": "vision click does not recheck the window before clicking",
+      "status": "KILLED",
+      "detail": "panicked at src\\orchestrator.rs:12508:66: missing `foreground_still_matches(` in run_click_element"
+    },
+    {
+      "name": "vision click claims a confirmed press",
+      "status": "KILLED",
+      "detail": "panicked at src\\orchestrator.rs:12521:9: vision-found clicks say where it appears to be"
+    },
+    {
+      "name": "brain floor can go below the old fixed gate",
+      "status": "KILLED",
+      "detail": "panicked at src\\orchestrator.rs:12554:9: assertion `left == right` failed: a low config cannot open the gate below 0.5"
+    },
+    {
+      "name": "brain gate does not cap known-invented labels",
+      "status": "KILLED",
+      "detail": "panicked at src\\orchestrator.rs:12567:9: an ML-only window open is capped"
+    },
+    {
+      "name": "single brain path ignores the configured floor",
+      "status": "KILLED",
+      "detail": "panicked at src\\orchestrator.rs:12582:9: assertion failed: body.contains(\"brain_floor(crate::admin_config::min_confidence())\")"
+    },
+    {
+      "name": "compound steps skip the brain gate",
+      "status": "KILLED",
+      "detail": "panicked at src\\orchestrator.rs:12590:9: every compound step goes through the shared gate"
+    },
+    {
+      "name": "brain phrasing generation has no admin check",
+      "status": "KILLED",
+      "detail": "panicked at src\\orchestrator.rs:12596:9: phrasing generation is admin-only like classification"
+    },
+    {
+      "name": "brain start is not claimed atomically",
+      "status": "KILLED",
+      "detail": "panicked at src\\orchestrator.rs:12598:9: the start is claimed atomically"
+    },
+    {
+      "name": "github watcher ignores workflow and branch (newest run of anything)",
+      "status": "KILLED",
+      "detail": "panicked at src\\memcore\\github_watch.rs:1134:9: assertion `left == right` failed: CI is still red"
+    },
+    {
+      "name": "github watcher counts feature branches as the build",
+      "status": "KILLED",
+      "detail": "panicked at src\\memcore\\github_watch.rs:1154:9: assertion `left == right` failed: main is green"
+    },
+    {
+      "name": "github watcher prefers a green run over a red one",
+      "status": "KILLED",
+      "detail": "panicked at src\\memcore\\github_watch.rs:1157:9: assertion `left == right` failed"
+    },
+    {
+      "name": "stream uses the cloud in privacy mode",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:410:9: assertion `left == right` failed: localSttOnly means the audio stays on this machine"
+    },
+    {
+      "name": "stream runs in a meeting",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:418:9: assertion failed: matches!(plan_for(&Gates { meeting: true, ..on }), Plan::Off(_))"
+    },
+    {
+      "name": "stream runs in the Ghost hot mic",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:419:9: assertion failed: matches!(plan_for(&Gates { ghost: true, ..on }), Plan::Off(_))"
+    },
+    {
+      "name": "stale text of an older turn is emitted",
+      "status": "SURVIVED",
+      "detail": ""
+    },
+    {
+      "name": "a second start leaves the first stream open",
+      "status": "SURVIVED",
+      "detail": ""
+    },
+    {
+      "name": "only the latest segment is shown",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:446:9: assertion `left == right` failed"
+    },
+    {
+      "name": "deepgram is never told to close",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:609:9: the first socket was closed properly: [Connected(1), Audio(2560), Text(\"{\\\"cmd\\\":\\\"stop\\\"}\"), Connected(2), Audio(2560)]"
+    },
+    {
+      "name": "the microphone chunk is not fed to the stream",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_stream.rs:650:13: wakeword_oww.rs must call crate::stt_stream::feed("
+    },
+    {
+      "name": "deepgram nova-2 gets the nova-3 keyterm parameter again",
+      "status": "KILLED",
+      "detail": "panicked at src\\stt_deepgram.rs:121:13: url missing keywords=NEXUS: https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&punctuate=true&keyterm=NEXUS&keyterm=ghost+mode&keyterm=ghost+cont"
+    },
+    {
+      "name": "scanner client uses a system proxy again",
+      "status": "KILLED",
+      "detail": "panicked at src\\site_probe.rs:2776:9: client_for must call no_proxy()"
+    },
+    {
+      "name": "VitePress is missing from the fingerprint table",
+      "status": "KILLED",
+      "detail": "panicked at src\\site_eval.rs:314:13: meta-framework: F1 fell from 1.000 to 0.800"
+    },
+    {
+      "name": "restore touches a reused pid",
+      "status": "KILLED",
+      "detail": "panicked at src\\focus_throttle.rs:1327:9: a different creation time means a different process: refuse"
+    },
+    {
+      "name": "lowering an already-lowered process is allowed",
+      "status": "KILLED",
+      "detail": "panicked at src\\focus_throttle.rs:1312:9: an already-below-normal process is left alone"
+    },
+    {
+      "name": "restore does not put the priority class back",
+      "status": "KILLED",
+      "detail": "panicked at src\\focus_throttle.rs:1315:9: assertion `left == right` failed: the priority class is back to exactly what it was"
+    },
+    {
+      "name": "whatsapp text promises no blue ticks again",
+      "status": "KILLED",
+      "detail": "panicked at src\\memcore\\wa.rs:1198:9: an unverified guarantee"
+    }
+  ]
+}

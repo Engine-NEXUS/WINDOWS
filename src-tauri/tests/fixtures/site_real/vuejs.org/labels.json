@@ -1,0 +1,13 @@
+{
+  "_note": "Real capture 2026-11-24 (https://vuejs.org). VitePress was MISSING from the fingerprint table when this was captured: this fixture is the regression for that gap (found by this very page), so it is a tuned fixture, not held out.",
+  "synthetic": false,
+  "bucket": "static",
+  "must": ["vue", "vitepress"],
+  "may": ["netlify", "hsts", "vue-router"],
+  "must_not": ["nextjs", "nuxt", "wordpress", "shopify", "angular", "react", "sveltekit"],
+  "expect_thin": [],
+  "sources": {
+    "vue": "https://github.com/vuejs/docs (the Vue documentation site)",
+    "vitepress": "https://github.com/vuejs/docs README: built with VitePress; the page's own generator meta says VitePress v2"
+  }
+}

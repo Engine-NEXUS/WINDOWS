@@ -761,6 +761,8 @@
   0%, 80%, 100% { opacity: 0.3; transform: translateY(0); }
   40% { opacity: 1; transform: translateY(-3px); }
 }
+/* words the recogniser has not confirmed yet: shown at once, but dimmer, so a later correction reads as settling, not as flicker */
+.speech-pill-tail { opacity: 0.55; transition: opacity 180ms ease-out; }
 .speech-pill-text--final { animation: speech-pill-fade 160ms ease-out both; }
 @keyframes speech-pill-fade { from { opacity: 0; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {

@@ -46,9 +46,11 @@ pub enum Agent {
     Copilot,
     /// ByteDance's Trae IDE: no hook mechanism exists. It can only be observed (processes, window title).
     Trae,
+    /// AWS Kiro (IDE and CLI): a hook file of its own in `~/.kiro/hooks/` (read by the CLI v3 in every workspace).
+    Kiro,
 }
 
-pub const ALL_AGENTS: [Agent; 12] = [
+pub const ALL_AGENTS: [Agent; 13] = [
     Agent::Claude,
     Agent::Codex,
     Agent::Antigravity,
@@ -61,13 +63,14 @@ pub const ALL_AGENTS: [Agent; 12] = [
     Agent::Kilo,
     Agent::Copilot,
     Agent::Trae,
+    Agent::Kiro,
 ];
 
 impl Agent {
     /// An IDE: its process tree (renderers, language server, file watchers) is never quiet, so process activity
     /// cannot say whether it is working.
     pub fn is_ide(self) -> bool {
-        matches!(self, Agent::Antigravity | Agent::Cursor | Agent::Windsurf | Agent::Trae)
+        matches!(self, Agent::Antigravity | Agent::Cursor | Agent::Windsurf | Agent::Trae | Agent::Kiro)
     }
 
     /// No hook mechanism exists for it: only its processes can be watched, so it can never count as "finished
@@ -90,6 +93,7 @@ impl Agent {
             Agent::Kilo => "kilo",
             Agent::Copilot => "copilot",
             Agent::Trae => "trae",
+            Agent::Kiro => "kiro",
         }
     }
 
@@ -107,6 +111,7 @@ impl Agent {
             Agent::Kilo => "Kilo Code",
             Agent::Copilot => "GitHub Copilot CLI",
             Agent::Trae => "Trae",
+            Agent::Kiro => "Kiro",
         }
     }
 
@@ -125,6 +130,8 @@ impl Agent {
             "kilo" | "kilo code" | "kilocode" => Some(Agent::Kilo),
             "copilot" | "github copilot" | "copilot cli" => Some(Agent::Copilot),
             "trae" => Some(Agent::Trae),
+            // the speech engine hears "Kiro" (KEE-ro) as several things
+            "kiro" | "kyro" | "kiro cli" | "kiro-cli" | "kiro ide" => Some(Agent::Kiro),
             _ => None,
         }
     }
@@ -153,6 +160,7 @@ impl Agent {
             Agent::Kilo => "Restart Kilo so it loads the plugin.",
             Agent::Copilot => "Start a new Copilot CLI session for it to take effect.",
             Agent::Trae => "Trae has no hook to install.",
+            Agent::Kiro => "Start a new Kiro CLI session. The hook file is global for the CLI (version 3 and later); the Kiro IDE reads hooks from a project's .kiro/hooks folder, which I did not touch.",
         }
     }
 }
@@ -243,15 +251,21 @@ set EV=%~2\r\n\
 if \"%EV%\"==\"\" set EV=stop\r\n\
 if /i \"%AG%\"==\"aider\" goto aider\r\n\
 if /i \"%EV%\"==\"permission\" goto perm\r\n\
+if /i \"%EV%\"==\"pretool\" goto pre\r\n\
 curl.exe -s -m 3 -X POST \"http://127.0.0.1:@PORT@/agent-event?agent=%AG%&event=%EV%&watch=%NEXUS_WATCH_ID%\" -H \"Authorization: Bearer @TOKEN@\" -H \"Content-Type: application/json\" --data-binary @- >nul 2>&1\r\n\
 goto out\r\n\
 :perm\r\n\
 rem a permission request is held open until the Agent Island answers; curl prints the reply the agent expects\r\n\
 curl.exe -s -m 112 -X POST \"http://127.0.0.1:@PORT@/agent-approval?agent=%AG%\" -H \"Authorization: Bearer @TOKEN@\" -H \"Content-Type: application/json\" --data-binary @-\r\n\
 exit /b 0\r\n\
+:pre\r\n\
+rem before each tool call: curl prints NEXUS's answer: {} normally, or the battery guard's order to stop\r\n\
+curl.exe -s -m 3 -X POST \"http://127.0.0.1:@PORT@/agent-event?agent=%AG%&event=%EV%&watch=%NEXUS_WATCH_ID%\" -H \"Authorization: Bearer @TOKEN@\" -H \"Content-Type: application/json\" --data-binary @-\r\n\
+exit /b 0\r\n\
 :aider\r\n\
 curl.exe -s -m 3 -X POST \"http://127.0.0.1:@PORT@/agent-event?agent=%AG%&event=%EV%&watch=%NEXUS_WATCH_ID%\" -H \"Authorization: Bearer @TOKEN@\" --data-urlencode \"cwd=%CD%\" >nul 2>&1\r\n\
 :out\r\n\
+if /i \"%AG%\"==\"kiro\" exit /b 0\r\n\
 if /i \"%AG%\"==\"cursor\" goto cursor\r\n\
 echo {}\r\n\
 exit /b 0\r\n\
@@ -265,6 +279,10 @@ const SCRIPT_TEMPLATE: &str = "#!/bin/sh\n\
 AG=\"$1\"\n\
 EV=\"${2:-stop}\"\n\
 URL=\"http://127.0.0.1:@PORT@/agent-event?agent=$AG&event=$EV&watch=${NEXUS_WATCH_ID:-}\"\n\
+if [ \"$EV\" = \"pretool\" ]; then\n\
+  curl -s -m 3 -X POST \"$URL\" -H \"Authorization: Bearer @TOKEN@\" -H \"Content-Type: application/json\" --data-binary @-\n\
+  exit 0\n\
+fi\n\
 if [ \"$EV\" = \"permission\" ]; then\n\
   curl -s -m 112 -X POST \"http://127.0.0.1:@PORT@/agent-approval?agent=$AG\" -H \"Authorization: Bearer @TOKEN@\" -H \"Content-Type: application/json\" --data-binary @-\n\
   exit 0\n\
@@ -274,6 +292,7 @@ if [ \"$AG\" = \"aider\" ]; then\n\
 else\n\
   curl -s -m 3 -X POST \"$URL\" -H \"Authorization: Bearer @TOKEN@\" -H \"Content-Type: application/json\" --data-binary @- >/dev/null 2>&1\n\
 fi\n\
+if [ \"$AG\" = \"kiro\" ]; then exit 0; fi\n\
 if [ \"$AG\" = \"cursor\" ]; then echo '{\"continue\":true}'; else echo '{}'; fi\n\
 exit 0\n";
 
@@ -379,7 +398,7 @@ fn unquoted_script(script: &Path) -> Result<String, HookError> {
 
 /// The command written into an agent's hook file: `<script> <agent> <kind>`.
 fn command_line(script: &Path, agent: &str, kind: &str) -> Result<String, HookError> {
-    if agent == "antigravity" || agent == "windsurf" {
+    if agent == "antigravity" || agent == "windsurf" || agent == "kiro" {
         // The 8.3 short path has no "nexus-agent-event" in it, so the marker rides along as a trailing argument
         // (the script reads only its first two): without it NEXUS could not recognise its own hook afterwards.
         return Ok(format!("{} {agent} {kind} {MARKER}", unquoted_script(script)?));
@@ -912,6 +931,30 @@ pub fn copilot_hook_text(script: &Path) -> Result<String, HookError> {
     }))
 }
 
+/// Kiro (CLI v3 and the IDE) reads `*.json` files in `.kiro/hooks/`; the CLI also reads `~/.kiro/hooks/` for every
+/// workspace. Schema (kiro.dev/docs/hooks): `{ "version": "v1", "hooks": [ { name, trigger, action: { type: "command",
+/// command }, timeout } ] }`. `Stop` fires when the agent finishes responding (it cannot block), `UserPromptSubmit`
+/// when a new prompt starts. The stop payload is JSON on stdin (`cwd`, `session_id`, and `assistant_response` per the
+/// CLI documentation; read best effort). NOT run against a real Kiro yet.
+pub fn kiro_hook_text(script: &Path) -> Result<String, HookError> {
+    let entry = |name: &str, trigger: &str, kind: &str| -> Result<Value, HookError> {
+        Ok(json!({
+            "name": name,
+            "trigger": trigger,
+            "action": { "type": "command", "command": command_line(script, "kiro", kind)? },
+            "timeout": 10,
+            "enabled": true
+        }))
+    };
+    pretty(&json!({
+        "version": "v1",
+        "hooks": [
+            entry("nexus-agent-event-stop", "Stop", "stop")?,
+            entry("nexus-agent-event-start", "UserPromptSubmit", "start")?
+        ]
+    }))
+}
+
 fn opencode_install(plugin: &Path, t: &HookTarget) -> Result<Installed, HookError> {
     owned_file_install(plugin, &opencode_plugin_text(t.token, t.port))
 }
@@ -964,6 +1007,7 @@ pub fn agents_present_in(home: &Path) -> Vec<Agent> {
             Agent::Copilot => dir(".copilot"),
             Agent::Devin => dir(".config/devin") || dir("AppData/Roaming/devin"),
             Agent::Trae => dir(".trae") || dir("AppData/Roaming/Trae"),
+            Agent::Kiro => dir(".kiro"),
         })
         .collect()
 }
@@ -980,6 +1024,7 @@ fn cli_names(a: Agent) -> &'static [&'static str] {
         Agent::OpenCode => &["opencode"],
         Agent::Kilo => &["kilo", "kilocode"],
         Agent::Copilot => &["copilot"],
+        Agent::Kiro => &["kiro-cli", "kiro"],
         _ => &[],
     }
 }
@@ -1047,6 +1092,7 @@ pub fn config_path(agent: Agent) -> Option<PathBuf> {
             let base = std::env::var_os("COPILOT_HOME").map(PathBuf::from).or_else(|| home().map(|h| h.join(".copilot")))?;
             Some(base.join("hooks").join("nexus-agent-event.json"))
         }
+        Agent::Kiro => Some(home()?.join(".kiro").join("hooks").join("nexus-agent-event.json")),
         Agent::Trae => None,
     }
 }
@@ -1104,6 +1150,7 @@ pub fn install(agent: Agent, cfg: &Path, target: &HookTarget) -> Result<Installe
         Agent::OpenCode => return opencode_install(cfg, target),
         Agent::Kilo => return owned_file_install(cfg, &kilo_plugin_text(target.token, target.port)),
         Agent::Copilot => return owned_file_install(cfg, &copilot_hook_text(target.script)?),
+        Agent::Kiro => return owned_file_install(cfg, &kiro_hook_text(target.script)?),
         Agent::Trae => return Err(HookError::NoHookMechanism),
         _ => {}
     }
@@ -1117,7 +1164,7 @@ pub fn install(agent: Agent, cfg: &Path, target: &HookTarget) -> Result<Installe
         Agent::Gemini => gemini_add_hook(&existing, script)?,
         Agent::Cursor => cursor_add_hook(&existing, script)?,
         Agent::Aider => aider_add_notify(&existing, script)?,
-        Agent::OpenCode | Agent::Kilo | Agent::Copilot | Agent::Trae => unreachable!("handled above"),
+        Agent::OpenCode | Agent::Kilo | Agent::Copilot | Agent::Kiro | Agent::Trae => unreachable!("handled above"),
     };
     if updated == existing {
         return Ok(Installed { backup: None });
@@ -1134,7 +1181,7 @@ pub fn uninstall(agent: Agent, cfg: &Path) -> Result<bool, HookError> {
     if matches!(agent, Agent::Devin | Agent::Trae) {
         return Ok(false);
     }
-    if matches!(agent, Agent::OpenCode | Agent::Kilo | Agent::Copilot) {
+    if matches!(agent, Agent::OpenCode | Agent::Kilo | Agent::Copilot | Agent::Kiro) {
         let text = read_or_empty(cfg)?;
         if !text.contains(MARKER) {
             return Ok(false);
@@ -1151,7 +1198,7 @@ pub fn uninstall(agent: Agent, cfg: &Path) -> Result<bool, HookError> {
         Agent::Gemini => gemini_remove_hook(&existing)?,
         Agent::Cursor => cursor_remove_hook(&existing)?,
         Agent::Aider => aider_remove_notify(&existing),
-        Agent::OpenCode | Agent::Kilo | Agent::Copilot | Agent::Devin | Agent::Trae => unreachable!("handled above"),
+        Agent::OpenCode | Agent::Kilo | Agent::Copilot | Agent::Kiro | Agent::Devin | Agent::Trae => unreachable!("handled above"),
     };
     if removed {
         write_with_backup(cfg, &updated)?;
@@ -1170,7 +1217,7 @@ pub fn is_installed(agent: Agent, cfg: &Path) -> bool {
         Agent::Gemini => gemini_has_hook(&text),
         Agent::Cursor => cursor_has_hook(&text),
         Agent::Aider => aider_has_notify(&text),
-        Agent::OpenCode | Agent::Kilo | Agent::Copilot => text.contains(MARKER),
+        Agent::OpenCode | Agent::Kilo | Agent::Copilot | Agent::Kiro => text.contains(MARKER),
     }
 }
 
@@ -1231,7 +1278,8 @@ fn final_message(v: &Value, kind: EventKind) -> Option<String> {
     if let Some(r) = v.get("tool_info").and_then(|t| t.get("response")).and_then(|x| x.as_str()) {
         return Some(r.to_string());
     }
-    let mut keys = vec!["last_assistant_message", "last-assistant-message", "prompt_response"];
+    // `assistant_response`: the Kiro CLI's stop payload
+    let mut keys = vec!["last_assistant_message", "last-assistant-message", "prompt_response", "assistant_response"];
     if kind == EventKind::Message {
         keys.push("text");
     }
@@ -1726,7 +1774,7 @@ fn norm(text: &str) -> String {
 
 const HOOK_VOCAB: &[&str] = &[
     "connect", "hook", "hooks", "up", "set", "setup", "install", "add", "enable", "the", "stop", "to", "nexus", "claude", "codex", "code",
-    "antigravity", "agy", "opencode", "gemini", "cursor", "aider", "devin", "windsurf", "kilo", "copilot", "trae",
+    "antigravity", "agy", "opencode", "gemini", "cursor", "aider", "devin", "windsurf", "kilo", "copilot", "trae", "kiro",
     "let", "know", "when", "stops", "finishes", "is", "done", "with", "notifications", "notification", "signal", "for", "my", "me", "a",
     "disconnect", "remove", "uninstall", "delete", "disable", "unhook", "take", "out", "of", "from", "connected", "installed", "status",
     "has", "reported", "yet", "been", "hooked", "on", "in", "set-up", "tell",
@@ -1778,6 +1826,9 @@ fn parse_command_sentence(text: &str) -> Option<(HookAction, Agent)> {
         .replace(" github copilot ", " copilot ")
         .replace(" copilot cli ", " copilot ")
         .replace(" devin cli ", " devin ")
+        .replace(" kiro cli ", " kiro ")
+        .replace(" kiro-cli ", " kiro ")
+        .replace(" kyro ", " kiro ")
         .replace(" devin desktop ", " windsurf ")
         .trim()
         .to_string();
@@ -2279,7 +2330,7 @@ mod tests {
             assert_eq!(Agent::from_name(said), Some(want), "{said}");
         }
         let list = Agent::spoken_list();
-        assert!(list.starts_with("Claude Code, Codex") && list.contains("Kilo Code") && list.ends_with(" or Trae"), "{list}");
+        assert!(list.starts_with("Claude Code, Codex") && list.contains("Kilo Code") && list.contains("Trae") && list.ends_with(" or Kiro"), "{list}");
     }
 
     #[test]
@@ -2346,6 +2397,67 @@ mod tests {
         assert_eq!(uninstall(Agent::Copilot, &cp), Ok(true));
         std::fs::write(&cp, "{}").unwrap();
         assert!(matches!(install(Agent::Copilot, &cp, &t), Err(HookError::Unreadable(_))), "a hook file of the user's with that name");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Kiro (added 2026-11-24): a hook file of its own in ~/.kiro/hooks with the documented schema (version "v1",
+    /// hooks[] of name / trigger / action.command / timeout). Not run against a real Kiro.
+    #[test]
+    fn kiro_gets_a_hook_file_of_its_own_in_the_documented_schema_and_is_found_parsed_and_removed() {
+        let d = tmp("kiro");
+        let t = HookTarget { script: &script(), token: "tok", port: 39220 };
+        let cfg = d.join(".kiro").join("hooks").join("nexus-agent-event.json");
+        install(Agent::Kiro, &cfg, &t).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(v["version"], "v1");
+        let hooks = v["hooks"].as_array().unwrap();
+        let by_trigger = |trig: &str| hooks.iter().find(|h| h["trigger"] == trig).unwrap_or_else(|| panic!("no {trig} hook"));
+        for (trigger, kind) in [("Stop", "stop"), ("UserPromptSubmit", "start")] {
+            let h = by_trigger(trigger);
+            assert_eq!(h["action"]["type"], "command");
+            let cmd = h["action"]["command"].as_str().unwrap();
+            assert!(cmd.contains(" kiro ") && cmd.contains(&format!(" kiro {kind} ")) && cmd.ends_with(MARKER), "{cmd}");
+            assert!(!cmd.contains('"'), "no quotes: the same command must run in cmd and in PowerShell: {cmd}");
+            assert!(h["timeout"].as_u64().unwrap() <= 10 && h["enabled"] == true);
+            assert!(h["name"].as_str().unwrap().starts_with("nexus-agent-event"));
+        }
+        assert!(is_installed(Agent::Kiro, &cfg));
+        assert!(install(Agent::Kiro, &cfg, &t).is_ok(), "idempotent");
+        assert_eq!(uninstall(Agent::Kiro, &cfg), Ok(true));
+        assert!(!cfg.exists());
+        // a hook file of the user's with that name is never overwritten or removed
+        std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+        std::fs::write(&cfg, r#"{"version":"v1","hooks":[]}"#).unwrap();
+        assert!(matches!(install(Agent::Kiro, &cfg, &t), Err(HookError::Unreadable(_))));
+        assert_eq!(uninstall(Agent::Kiro, &cfg), Ok(false));
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), r#"{"version":"v1","hooks":[]}"#);
+        // names the speech engine and people use
+        for n in ["kiro", "kyro", "kiro cli", "kiro-cli"] {
+            assert_eq!(Agent::from_name(n), Some(Agent::Kiro), "{n}");
+        }
+        assert_eq!(Agent::Kiro.label(), "Kiro");
+        assert!(!Agent::Kiro.observe_only(), "it has a hook, so a finish can be seen for certain");
+        assert!(ALL_AGENTS.contains(&Agent::Kiro) && ALL_AGENTS.len() == 13);
+        // the stop payload: session, folder and the reply text (`assistant_response`, per the CLI documentation)
+        let ev = parse_event(
+            "agent=kiro&event=stop",
+            r#"{"hook_event_name":"stop","cwd":"C:\\proj","session_id":"s-1","assistant_response":"Refactored the parser.\nAll tests pass."}"#,
+        )
+        .unwrap();
+        assert_eq!((ev.agent, ev.kind), (Agent::Kiro, EventKind::Stop));
+        assert_eq!(ev.cwd.as_deref(), Some(r"C:\proj"));
+        assert_eq!(ev.identity.session.as_deref(), Some("s-1"));
+        assert_eq!(ev.tail.as_deref(), Some("Refactored the parser.
+All tests pass."));
+        let start = parse_event("agent=kiro&event=start", r#"{"hook_event_name":"UserPromptSubmit","cwd":"C:\\proj","session_id":"s-1"}"#).unwrap();
+        assert_eq!((start.agent, start.kind), (Agent::Kiro, EventKind::Start));
+        // found on the machine by its folder, and by its command
+        std::fs::create_dir_all(d.join(".kiro")).unwrap();
+        assert!(agents_present_in(&d).contains(&Agent::Kiro));
+        let bin = d.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("kiro-cli.exe"), "").unwrap();
+        assert!(agents_on_path_in(std::ffi::OsStr::new(bin.to_str().unwrap())).contains(&Agent::Kiro));
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -2433,9 +2545,12 @@ mod tests {
             ("hook up devin desktop", Agent::Windsurf),
             ("hook up windsurf", Agent::Windsurf),
             ("hook up trae", Agent::Trae),
+            ("hook up kiro", Agent::Kiro),
+            ("hook up kiro cli", Agent::Kiro),
         ] {
             assert_eq!(parse_command(t), Some((HookAction::Connect, agent)), "{t}");
         }
+        assert_eq!(parse_command("remove the kiro hook"), Some((HookAction::Disconnect, Agent::Kiro)));
         assert_eq!(parse_command("remove the kilo hook"), Some((HookAction::Disconnect, Agent::Kilo)));
         assert_eq!(parse_command("is the windsurf hook installed"), Some((HookAction::Status, Agent::Windsurf)));
         assert_eq!(parse_command("hook up kilo and devin"), None, "two agents in one sentence");
