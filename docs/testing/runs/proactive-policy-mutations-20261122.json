@@ -1,0 +1,76 @@
+{
+  "file": "src-tauri/src/proactive_policy.rs",
+  "test": "--lib proactive_policy:: -- --test-threads=1",
+  "results": [
+    {
+      "name": "High speaks over the user",
+      "status": "KILLED",
+      "detail": "panicked at src\\proactive_policy.rs:993:37: High spoke over the user"
+    },
+    {
+      "name": "High speaks over NEXUS itself",
+      "status": "KILLED",
+      "detail": "panicked at src\\proactive_policy.rs:818:9: assertion failed: e.tick(5_000, &s, &CFG).is_empty()"
+    },
+    {
+      "name": "High ignores a meeting",
+      "status": "KILLED",
+      "detail": "panicked at src\\proactive_policy.rs:993:37: High spoke in a meeting"
+    },
+    {
+      "name": "Critical never waits politely",
+      "status": "KILLED",
+      "detail": "panicked at src\\proactive_policy.rs:896:9: assertion failed: e.submit(alert(\"c\", AlertUrgency::Critical), 0, &talking, &CFG).is_empty()"
+    },
+    {
+      "name": "Critical waits forever for speech",
+      "status": "KILLED",
+      "detail": "panicked at src\\proactive_policy.rs:899:9: assertion `left == right` failed"
+    },
+    {
+      "name": "Critical in a meeting forgets the mute override",
+      "status": "KILLED",
+      "detail": "panicked at src\\proactive_policy.rs:871:9: assertion `left == right` failed"
+    },
+    {
+      "name": "Medium ignores the idle requirement",
+      "status": "KILLED",
+      "detail": "panicked at src\\proactive_policy.rs:911:9: assertion failed: e.submit(alert(\"m\", AlertUrgency::Medium), 0, &recent, &CFG).is_empty()"
+    },
+    {
+      "name": "Medium ignores focus mode",
+      "status": "KILLED",
+      "detail": "panicked at src\\proactive_policy.rs:1013:9: assertion failed: e.submit(alert(\"m1\", AlertUrgency::Medium), 0, &focused, &CFG).is_empty()"
+    },
+    {
+      "name": "Hourly cap off by one",
+      "status": "KILLED",
+      "detail": "panicked at src\\proactive_policy.rs:949:9: assertion `left == right` failed"
+    },
+    {
+      "name": "Minimum gap between lines removed",
+      "status": "KILLED",
+      "detail": "panicked at src\\proactive_policy.rs:773:9: assertion `left == right` failed"
+    },
+    {
+      "name": "Several lines in one tick",
+      "status": "KILLED",
+      "detail": "panicked at src\\proactive_policy.rs:1219:17: two lines in one tick at 1958000"
+    },
+    {
+      "name": "Low alerts become speakable",
+      "status": "KILLED",
+      "detail": "panicked at src\\proactive_policy.rs:990:37: assertion failed: matches!(v, Verdict::Card(_))"
+    },
+    {
+      "name": "Expired alerts are dropped silently",
+      "status": "KILLED",
+      "detail": "panicked at src\\proactive_policy.rs:743:9: assertion `left == right` failed"
+    },
+    {
+      "name": "Snooze does not hold alerts",
+      "status": "KILLED",
+      "detail": "panicked at src\\proactive_policy.rs:959:9: assertion failed: e.submit(alert(\"h\", AlertUrgency::High), 1_000, &s, &CFG).is_empty()"
+    }
+  ]
+}

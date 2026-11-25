@@ -1,0 +1,33 @@
+{
+  "file": "src-tauri/src/screen_tour.rs",
+  "cwd": "src-tauri",
+  "targetDir": "D:/nexus-screen-target",
+  "testArgs": [
+    "--lib",
+    "--",
+    "--test-threads=1",
+    "screen_tour::",
+    "screen_context::",
+    "vision::tour_ladder_tests"
+  ],
+  "mutations": [
+    {
+      "name": "any failure marks the day's quota used",
+      "file": "src-tauri/src/vision.rs",
+      "find": "if ladder_end(c.n_429, c.n_auth + c.n_5xx + c.n_net + c.n_other) {",
+      "replace": "if c.n_429 > 0 {"
+    },
+    {
+      "name": "a mixed failure is reported as a rejected key",
+      "file": "src-tauri/src/vision.rs",
+      "find": "} else if c.n_auth > 0 && c.n_429 + c.n_5xx + c.n_net + c.n_other == 0 {",
+      "replace": "} else if c.n_auth > 0 {"
+    },
+    {
+      "name": "changed page address fingerprint ignored before capture",
+      "file": "src-tauri/src/screen_context.rs",
+      "find": "        && expected.url_fingerprint == current.url_fingerprint\n",
+      "replace": ""
+    }
+  ]
+}

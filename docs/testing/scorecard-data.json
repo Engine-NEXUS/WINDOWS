@@ -303,13 +303,13 @@
     {
         "area": "Desktop control",
         "feature": "Screen analysis / narrated tour",
-        "tests": "60 Rust tour tests, 11 drawing styles previewed in a browser harness",
+        "tests": "60 Rust tour tests (+2), 12 frontend tour-flow tests (+4), 14/14 mutations killed on the tour engine, failure lines, ladder classification and capture re-checks",
         "B": 96,
-        "T": 80,
+        "T": 88,
         "L": 30,
-        "S": 78,
+        "S": 84,
         "I": 55,
-        "note": "Vision call now has a 20 s per-request limit (was 4 s, which made every tour fall back to OCR); text-only fallback explains the screen instead of reading junk; the model picks how to draw each item and states the intent; sidebar screenshots zoom. NOT run live: real Gemini latency, 125/150% scaling alignment, speech/callout timing."
+        "note": "2026-11-22: vision failures are spoken with their real cause (no key, quota, rejected key, 503, offline, timeout) instead of one generic line; ladder classification and every safety rule mutation-checked (docs/testing/runs/screen-tour-failures-20261122.md). Vision call has a 20 s per-request limit; text-only fallback explains the screen. NOT run live (owner NEXUS running, harness would stop it): Gemini latency, 125/150% scaling alignment, speech/callout timing, answer quality. Owner script part A."
     },
     {
         "area": "Desktop control",
@@ -534,13 +534,13 @@
     {
         "area": "Memory and proactive",
         "feature": "Proactive-speech policy",
-        "tests": "15 tests",
+        "tests": "29 policy tests incl. 300 replayed 2-hour timelines (checked on every spoken line), 14/14 mutations killed",
         "B": 90,
-        "T": 70,
+        "T": 88,
         "L": 10,
         "S": 85,
         "I": 55,
-        "note": "Thresholds are hypotheses; nothing emits a Critical alert yet."
+        "note": "Replay of 1,000 generated timelines measured: Critical p95 8 s, Medium p50 20 s, 84 % of Medium and 86 % of High alerts spoken (docs/testing/runs/proactive-policy-timeline-20261122.md); the timelines are generated, not recorded, so thresholds are still hypotheses and I is unchanged. Nothing emits a Critical alert yet. Not run live (meeting, Focus Mode): owner script part C."
     },
     {
         "area": "Memory and proactive",
@@ -758,13 +758,13 @@
     {
         "area": "Platform and quality",
         "feature": "Window theming (solid panels)",
-        "tests": "guard script over 11 CSS files + self-test",
+        "tests": "gate self-test (16 fixtures), 10/10 mutations on the real stylesheets, registry over 17 CSS files + blur scan of all panel CSS",
         "B": 90,
-        "T": 70,
+        "T": 85,
         "L": 0,
-        "S": 70,
+        "S": 78,
         "I": 60,
-        "note": "About 20 translucent or blurred layers removed from panel windows; a guard script fails CI if they return. Not seen in the real app yet; the guard only covers the surfaces it lists."
+        "note": "About 20 translucent or blurred layers removed from panel windows. Gate hardened 2026-11-22: resolves CSS variables across all themes, catches slash-alpha / transparent / color-mix, scans every panel stylesheet for blur, registers the hub, setup and stack roots (docs/testing/runs/window-opacity-gate-20261122.md). Still not seen in the real app: no screenshot of any panel in either theme; owner steps in four-star-screen-tour-owner-script.md part B."
     },
     {
         "area": "Desktop control",

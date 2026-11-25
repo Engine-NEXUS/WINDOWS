@@ -1111,6 +1111,30 @@ pub const TOUR_TOTAL_TIMEOUT_SECS: u64 = 25;
 /// Speak one reassurance line if the model has not answered by then.
 pub const SLOW_NOTICE_AFTER_SECS: u64 = 6;
 
+// Stable failure texts of the tour's vision pass. `failure_speech` maps them to the honest spoken line,
+// so a 429, a 503, a rejected key, a timeout and being offline are never reported as the same thing.
+pub const ERR_NO_KEY: &str = "No Gemini key configured";
+pub const ERR_QUOTA: &str = "Gemini quota exhausted";
+pub const ERR_TIMEOUT: &str = "Vision model timed out";
+pub const ERR_REJECTED: &str = "Gemini rejected the key";
+pub const ERR_BUSY: &str = "Gemini service busy";
+pub const ERR_OFFLINE: &str = "Vision service unreachable";
+pub const ERR_MISS: &str = "No usable tour script from the vision model";
+
+/// What to say aloud when the tour's vision pass failed with `err`. Always names the real cause and says
+/// what happens next; unknown text gets the generic line (never an empty one). Pure.
+pub fn failure_speech(err: &str) -> &'static str {
+    match err {
+        ERR_NO_KEY => "There is no Gemini key set, sir, so I can't point things out. Reading the visible text on your screen instead.",
+        ERR_QUOTA => "Today's Gemini allowance is used up, sir. Reading the visible text on your screen instead.",
+        ERR_TIMEOUT => "The vision service took too long, sir. Reading the visible text on your screen instead.",
+        ERR_REJECTED => "Gemini rejected the key, sir. Check it in Command Hub, Accounts. Reading the visible text on your screen instead.",
+        ERR_BUSY => "Gemini is overloaded right now, sir. Reading the visible text on your screen instead.",
+        ERR_OFFLINE => "I can't reach the vision service, sir. Are we offline? Reading the visible text on your screen instead.",
+        _ => "I'm having trouble with the vision service, sir. Reading the visible text on your screen instead.",
+    }
+}
+
 /// Shared Gemini pass for a tour script: key/quota gates, model ladder, own
 /// pooled client, whole-ladder timeout, quota bookkeeping, `region` stamped on
 /// the script. The caller supplies the prompt and the validator.
@@ -1123,14 +1147,14 @@ async fn analyze_tour_script<R: Runtime>(
 ) -> Result<TourScript, String> {
     let key = crate::commands::read_api_key(app, "gemini");
     if key.is_empty() {
-        return Err("No Gemini key configured".to_string());
+        return Err(ERR_NO_KEY.to_string());
     }
     let usage_dir = app
         .path()
         .app_data_dir()
         .map_err(|e: tauri::Error| e.to_string())?;
     if crate::vision::exhausted(&usage_dir, "gemini") {
-        return Err("Gemini quota exhausted".to_string());
+        return Err(ERR_QUOTA.to_string());
     }
     let settings = std::fs::read_to_string(usage_dir.join("settings.json")).ok();
     let models = crate::vision::tour_model_ladder(tour_model_setting(settings.as_deref()).as_deref());
@@ -1148,7 +1172,7 @@ async fn analyze_tour_script<R: Runtime>(
     );
     let step = tokio::time::timeout(std::time::Duration::from_secs(TOUR_TOTAL_TIMEOUT_SECS), call)
         .await
-        .map_err(|_| "Vision model timed out".to_string())?;
+        .map_err(|_| ERR_TIMEOUT.to_string())?;
     match step {
         crate::vision::JsonStep::Found(mut script) => {
             script.region = region;
@@ -1158,9 +1182,12 @@ async fn analyze_tour_script<R: Runtime>(
         }
         crate::vision::JsonStep::Quota => {
             crate::vision::mark_exhausted(&usage_dir, "gemini");
-            Err("Gemini quota exhausted".to_string())
+            Err(ERR_QUOTA.to_string())
         }
-        crate::vision::JsonStep::Miss => Err("No usable tour script from the vision model".to_string()),
+        crate::vision::JsonStep::Rejected => Err(ERR_REJECTED.to_string()),
+        crate::vision::JsonStep::Busy => Err(ERR_BUSY.to_string()),
+        crate::vision::JsonStep::Offline => Err(ERR_OFFLINE.to_string()),
+        crate::vision::JsonStep::Miss => Err(ERR_MISS.to_string()),
     }
 }
 
@@ -1217,6 +1244,40 @@ pub async fn analyze_reverse_image<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_vision_failure_has_its_own_honest_spoken_line() {
+        let all = [ERR_NO_KEY, ERR_QUOTA, ERR_TIMEOUT, ERR_REJECTED, ERR_BUSY, ERR_OFFLINE, ERR_MISS];
+        let lines: Vec<&str> = all.iter().map(|e| failure_speech(e)).collect();
+        // The generic line is only for unknown text, never for a known cause.
+        let generic = failure_speech("something else entirely");
+        for (e, l) in all.iter().zip(&lines) {
+            if *e != ERR_MISS {
+                assert_ne!(*l, generic, "{e} fell to the generic line");
+            }
+            assert!(l.ends_with("instead."), "{e}: must say what happens next");
+            assert!(l.len() < 160, "{e}: too long to speak");
+        }
+        // A known cause is named, and causes are not confused with each other.
+        assert!(failure_speech(ERR_NO_KEY).contains("no Gemini key"));
+        assert!(failure_speech(ERR_QUOTA).contains("allowance"));
+        assert!(failure_speech(ERR_REJECTED).contains("rejected"));
+        assert!(failure_speech(ERR_BUSY).contains("overloaded"));
+        assert!(failure_speech(ERR_OFFLINE).contains("offline"));
+        assert!(failure_speech(ERR_TIMEOUT).contains("too long"));
+        let mut uniq = lines.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert!(uniq.len() >= 6, "causes must not share a line");
+    }
+
+    #[test]
+    fn failure_texts_are_what_the_vision_pass_returns() {
+        // analyze_tour_script maps ladder outcomes onto these constants; a rename of one must be deliberate.
+        assert_eq!(ERR_NO_KEY, "No Gemini key configured");
+        assert_eq!(ERR_QUOTA, "Gemini quota exhausted");
+        assert_eq!(ERR_TIMEOUT, "Vision model timed out");
+    }
 
     #[test]
     fn slow_notice_comes_before_the_cap() {

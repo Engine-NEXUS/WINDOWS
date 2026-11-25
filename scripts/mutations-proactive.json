@@ -1,0 +1,22 @@
+{
+  "file": "src-tauri/src/proactive_policy.rs",
+  "cwd": "src-tauri",
+  "targetDir": "D:/nexus-screen-target",
+  "testArgs": ["--lib", "proactive_policy::", "--", "--test-threads=1"],
+  "mutations": [
+    { "name": "High speaks over the user", "find": "if s.user_speaking || s.nexus_speaking || working_blocks {", "replace": "if s.nexus_speaking || working_blocks {" },
+    { "name": "High speaks over NEXUS itself", "find": "if s.user_speaking || s.nexus_speaking || working_blocks {", "replace": "if s.user_speaking || working_blocks {" },
+    { "name": "High ignores a meeting", "find": "            if s.meeting {\n                return if waited_ms >= HIGH_MEETING_EXPIRE_MS { Verdict::Card(\"meeting_too_long\") } else { Verdict::Wait };\n            }\n            if active_ms >= HIGH_EXPIRE_MS {", "replace": "            if active_ms >= HIGH_EXPIRE_MS {" },
+    { "name": "Critical never waits politely", "find": "let polite = waited_ms < CRITICAL_WAIT_MS;", "replace": "let polite = false;" },
+    { "name": "Critical waits forever for speech", "find": "let polite = waited_ms < CRITICAL_WAIT_MS;", "replace": "let polite = true;" },
+    { "name": "Critical in a meeting forgets the mute override", "find": "Verdict::Speak { override_meeting: s.meeting }", "replace": "Verdict::Speak { override_meeting: false }" },
+    { "name": "Medium ignores the idle requirement", "find": "if busy || s.idle_ms < MEDIUM_IDLE_MS {", "replace": "if busy {" },
+    { "name": "Medium ignores focus mode", "find": "let busy = s.meeting || s.focus || s.user_speaking", "replace": "let busy = s.meeting || s.user_speaking" },
+    { "name": "Hourly cap off by one", "find": "if self.spoken.len() >= MAX_PER_HOUR {", "replace": "if self.spoken.len() > MAX_PER_HOUR {" },
+    { "name": "Minimum gap between lines removed", "find": "matches!(self.last_spoken_ms, Some(t) if now_ms.saturating_sub(t) < MIN_GAP_MS)", "replace": "matches!(self.last_spoken_ms, Some(t) if now_ms.saturating_sub(t) < 0)" },
+    { "name": "Several lines in one tick", "find": "                    if spoke {\n                        keep.push(p);\n                        continue;\n                    }", "replace": "" },
+    { "name": "Low alerts become speakable", "find": "AlertUrgency::Low => Verdict::Card(\"low_urgency\"),", "replace": "AlertUrgency::Low => Verdict::Speak { override_meeting: false }," },
+    { "name": "Expired alerts are dropped silently", "find": "                    self.release_key(&p.alert);\n                    actions.push(Action::Card { id: p.alert.id.clone(), reason })", "replace": "                    self.release_key(&p.alert);" },
+    { "name": "Snooze does not hold alerts", "find": "                        if now_ms < self.snoozed_until_ms {\n                            keep.push(p);\n                            continue;\n                        }", "replace": "" }
+  ]
+}

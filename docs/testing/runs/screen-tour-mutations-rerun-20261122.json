@@ -1,0 +1,21 @@
+{
+  "file": "src-tauri/src/screen_tour.rs",
+  "test": "--lib -- --test-threads=1 screen_tour:: screen_context:: vision::tour_ladder_tests",
+  "results": [
+    {
+      "name": "any failure marks the day's quota used",
+      "status": "KILLED",
+      "detail": "panicked at src\\vision.rs:3191:9: assertion failed: matches!(ladder_outcome::<()>(c(1, 0, 1, 0, 0)), JsonStep::Miss)"
+    },
+    {
+      "name": "a mixed failure is reported as a rejected key",
+      "status": "KILLED",
+      "detail": "panicked at src\\vision.rs:3192:9: assertion failed: matches!(ladder_outcome::<()>(c(0, 1, 0, 1, 0)), JsonStep::Miss)"
+    },
+    {
+      "name": "changed page address fingerprint ignored before capture",
+      "status": "KILLED",
+      "detail": "panicked at src\\screen_context.rs:791:9: assertion failed: !same_capture_target(&expected, &query_changed)"
+    }
+  ]
+}

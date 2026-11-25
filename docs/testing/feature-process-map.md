@@ -9,29 +9,29 @@ Which runtime processes and threads each feature depends on, and what Focus Mode
 | Reverse engineer website/app | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | GitHub by voice without owner (repo, PR list, PR number search) | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | Notification brain: state machine and GitHub Actions / deploy watchers | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
-| Window theming (solid panels) | stage WebView2 (fullscreen overlay), hitbox thread (30-250 ms), stage watchdog (2 s), WebGL orb loop | never paused (a starved heartbeat destroys the stage) |
 | WhatsApp priority people (read-only) | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Vision-grounded click | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | Agent watch sidecar (spawn + watch CLIs) | agent hooks webhook (port 39220), agent_watch Node sidecar (39222, lazy), watch_runner (3 s) | keeps running |
+| Window theming (solid panels) | stage WebView2 (fullscreen overlay), hitbox thread (30-250 ms), stage watchdog (2 s), WebGL orb loop | never paused (a starved heartbeat destroys the stage) |
 | Leave-by reminders | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
-| Proactive-speech policy | proactive_policy engine + 2 s ticker | Medium alerts held, not dropped |
 | Boot hello / shutdown flow / resume hello | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Wake-up sound | on-demand rodio stream (closed 20 s after use), hotkey/wake callbacks | keeps running |
 | Profile, corrections, routines, review, curator | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Track all agents (announce each, summary) | agent hooks webhook (port 39220), agent_watch Node sidecar (39222, lazy), watch_runner (3 s) | keeps running |
 | Important-mail watcher + triage | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
+| Proactive-speech policy | proactive_policy engine + 2 s ticker | Medium alerts held, not dropped |
 | NLU fallback (BERT-Mini ONNX) | regex tier in-process; BERT-Mini NLU sidecar (39218, lazy, 60 s idle); 9Router HTTP | on demand |
 | Endpointing / VAD / turn detection | capture loop, VAD, turn-detect ONNX | keeps running |
 | Device Links (phone / laptop pairing) | OAuth loopback listener, vault monitor (90 s), Worker HTTPS | vault monitor paused |
 | Installer / release pipeline | build scripts / Hub WebView2 | n/a |
 | Boot briefing + resume points | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Session snapshot / restore | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
-| Screen analysis / narrated tour | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | Overnight record + morning briefing | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Live mode: WhatsApp / browser flows | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Timetable from an image + reminders | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Calendar read / add | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | TTS offline (Kokoro-82M) | Edge TTS connection, Kokoro ONNX (lazy), rodio playback, volume lease watchdog | cache refresh, voice sync and swap downloads deferred |
+| Screen analysis / narrated tour | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | Music control (Spotify / Apple Music) | media keys / deep links / Routes API | on demand |
 | Directed-speech gate (TV / side-talk filter) | capture loop, VAD, turn-detect ONNX | keeps running |
 | Compound commands ("X then Y") | regex tier in-process; BERT-Mini NLU sidecar (39218, lazy, 60 s idle); 9Router HTTP | on demand |

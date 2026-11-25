@@ -2363,7 +2363,7 @@ async fn spatial_gemini_with_image(
             SpatialStep::Found(p)
         }
         JsonStep::Quota => SpatialStep::Quota(RateLimitKind::Daily),
-        JsonStep::Miss => SpatialStep::Miss,
+        JsonStep::Miss | JsonStep::Rejected | JsonStep::Busy | JsonStep::Offline => SpatialStep::Miss,
     }
 }
 
@@ -2372,6 +2372,12 @@ pub(crate) enum JsonStep<T> {
     Found(T),
     Miss,
     Quota,
+    /// Every model refused the key (401/403).
+    Rejected,
+    /// The service answered with 5xx (503 overloaded, 500, ...) and nothing else worked.
+    Busy,
+    /// No model could be reached at all (connect error / DNS / timeout on every attempt).
+    Offline,
 }
 
 /// The long-standing spatial/grounding ladder: lite model, then fallbacks.
@@ -2419,6 +2425,32 @@ pub(crate) fn ladder_end(n_429: usize, n_other_fail: usize) -> bool {
     n_429 > 0 && n_other_fail == 0
 }
 
+/// Failure counts of one walk down the model ladder.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LadderCounts {
+    pub n_429: usize,
+    pub n_auth: usize,
+    pub n_5xx: usize,
+    pub n_net: usize,
+    pub n_other: usize,
+}
+
+/// Why a ladder that produced no answer ended. A single cause is named only when every failure had it;
+/// quota needs every failure to be a 429 (a 404 on a retired model id must not burn the day's quota). Pure.
+pub(crate) fn ladder_outcome<T>(c: LadderCounts) -> JsonStep<T> {
+    if ladder_end(c.n_429, c.n_auth + c.n_5xx + c.n_net + c.n_other) {
+        JsonStep::Quota
+    } else if c.n_auth > 0 && c.n_429 + c.n_5xx + c.n_net + c.n_other == 0 {
+        JsonStep::Rejected
+    } else if c.n_net > 0 && c.n_429 + c.n_auth + c.n_5xx + c.n_other == 0 {
+        JsonStep::Offline
+    } else if c.n_5xx > 0 && c.n_429 + c.n_auth + c.n_net + c.n_other == 0 {
+        JsonStep::Busy
+    } else {
+        JsonStep::Miss
+    }
+}
+
 /// Generic Gemini vision pass: generateContent with the JSON response mime
 /// type, walking `models` in order. A 404 (unknown id) advances silently; a
 /// 429 advances to the next model (Google limits per model per project, so
@@ -2448,7 +2480,7 @@ pub(crate) async fn gemini_json_with_image<T>(
             "response_mime_type": "application/json",
         },
     });
-    let (mut n_429, mut n_other) = (0usize, 0usize);
+    let mut counts = LadderCounts::default();
     for model in models {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -2461,15 +2493,29 @@ pub(crate) async fn gemini_json_with_image<T>(
             .await
         {
             Ok(r) => r,
-            Err(_) => {
-                n_other += 1;
+            Err(e) => {
+                if e.is_connect() || e.is_timeout() || e.is_request() {
+                    counts.n_net += 1;
+                } else {
+                    counts.n_other += 1;
+                }
                 continue;
             }
         };
         let status = resp.status().as_u16();
         if status == 429 {
             tracing::warn!("vision: {model} rate-limited (429) — trying the next model");
-            n_429 += 1;
+            counts.n_429 += 1;
+            continue;
+        }
+        if status == 401 || status == 403 {
+            tracing::warn!("vision: {model} refused the key (HTTP {status})");
+            counts.n_auth += 1;
+            continue;
+        }
+        if (500..600).contains(&status) {
+            tracing::warn!("vision: {model} HTTP {status} (service busy) — trying the next model");
+            counts.n_5xx += 1;
             continue;
         }
         if status == 404 {
@@ -2478,13 +2524,13 @@ pub(crate) async fn gemini_json_with_image<T>(
         }
         if !resp.status().is_success() {
             tracing::warn!("vision: {model} HTTP {status} — trying the next model");
-            n_other += 1;
+            counts.n_other += 1;
             continue;
         }
         let json: serde_json::Value = match resp.json().await {
             Ok(j) => j,
             Err(_) => {
-                n_other += 1;
+                counts.n_other += 1;
                 continue;
             }
         };
@@ -2503,13 +2549,9 @@ pub(crate) async fn gemini_json_with_image<T>(
             return JsonStep::Found(v);
         }
         tracing::warn!("vision: {model} returned an unusable answer — trying the next model");
-        n_other += 1;
+        counts.n_other += 1;
     }
-    if ladder_end(n_429, n_other) {
-        JsonStep::Quota
-    } else {
-        JsonStep::Miss
-    }
+    ladder_outcome(counts)
 }
 
 /// Spatial screen analysis (Feature 86): capture the gridded screenshot,
@@ -3136,6 +3178,20 @@ mod tour_ladder_tests {
         assert_eq!(l[1], "gemini-3.5-flash");
         assert_eq!(l[2], "gemini-flash-lite-latest");
         assert_eq!(l.len(), 1 + GEMINI_VISION_FALLBACKS.len());
+    }
+
+    #[test]
+    fn ladder_outcome_names_the_real_reason() {
+        let c = |a, b, d, e, f| LadderCounts { n_429: a, n_auth: b, n_5xx: d, n_net: e, n_other: f };
+        assert!(matches!(ladder_outcome::<()>(c(2, 0, 0, 0, 0)), JsonStep::Quota));
+        assert!(matches!(ladder_outcome::<()>(c(0, 3, 0, 0, 0)), JsonStep::Rejected));
+        assert!(matches!(ladder_outcome::<()>(c(0, 0, 2, 0, 0)), JsonStep::Busy));
+        assert!(matches!(ladder_outcome::<()>(c(0, 0, 0, 4, 0)), JsonStep::Offline));
+        // Mixed failures never claim a single cause, and never burn the day's quota.
+        assert!(matches!(ladder_outcome::<()>(c(1, 0, 1, 0, 0)), JsonStep::Miss));
+        assert!(matches!(ladder_outcome::<()>(c(0, 1, 0, 1, 0)), JsonStep::Miss));
+        assert!(matches!(ladder_outcome::<()>(c(0, 0, 0, 0, 0)), JsonStep::Miss));
+        assert!(matches!(ladder_outcome::<()>(c(0, 0, 0, 1, 1)), JsonStep::Miss));
     }
 
     #[test]

@@ -1099,3 +1099,217 @@ mod tests {
         assert_eq!(heads_up_ms("mail_deadline_7"), HEADS_UP_MS);
     }
 }
+
+/// Replayed timelines: many scripted hours of changing signals and arriving alerts through the real
+/// `Engine`, checking the policy's promises on every spoken line and measuring its timing. The
+/// timelines are generated from a fixed seed (not recorded from a person); the numbers in
+/// `docs/testing/runs/proactive-policy-timeline-20261122.md` come from `timeline_metrics` below.
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+        /// True with probability `per_10k / 10_000`.
+        fn chance(&mut self, per_10k: u64) -> bool {
+            self.below(10_000) < per_10k
+        }
+    }
+
+    const TICK_MS: u64 = 2_000;
+
+    #[derive(Default)]
+    struct Stats {
+        alerts: [u64; 4],
+        spoken: [u64; 4],
+        carded: [u64; 4],
+        latency_ms: [Vec<u64>; 4],
+        timelines: u64,
+        speaks: u64,
+    }
+
+    fn tier(u: AlertUrgency) -> usize {
+        match u {
+            AlertUrgency::Low => 0,
+            AlertUrgency::Medium => 1,
+            AlertUrgency::High => 2,
+            AlertUrgency::Critical => 3,
+        }
+    }
+
+    /// Run `n` timelines of `hours` each; panics on the first broken promise.
+    fn replay(n: u64, hours: u64, seed: u64, cfg: Config) -> Stats {
+        let mut st = Stats::default();
+        for t in 0..n {
+            let mut rng = Lcg(seed ^ (t + 1).wrapping_mul(0x9E3779B97F4A7C15));
+            let mut eng = Engine::new();
+            let mut sig = Signals { idle_ms: 120_000, ..Default::default() };
+            let mut live: std::collections::HashMap<String, (AlertUrgency, u64)> = Default::default();
+            let mut spoken_at: Vec<(u64, bool)> = Vec::new(); // (time, critical)
+            let total = hours * 3_600_000;
+            let mut now = 0u64;
+            let (mut meet_left, mut speak_left, mut nex_left, mut work_left, mut focus_left) = (0u64, 0u64, 0u64, 0u64, 0u64);
+            let mut next_id = 0u64;
+            while now < total + 2 * 3_600_000 {
+                let draining = now >= total;
+                let dec = |x: &mut u64| *x = x.saturating_sub(TICK_MS);
+                dec(&mut meet_left);
+                dec(&mut speak_left);
+                dec(&mut nex_left);
+                dec(&mut work_left);
+                dec(&mut focus_left);
+                if !draining {
+                    if meet_left == 0 && rng.chance(3) {
+                        meet_left = (5 + rng.below(26)) * 60_000;
+                    }
+                    if speak_left == 0 && rng.chance(150) {
+                        speak_left = (3 + rng.below(20)) * 1_000;
+                    }
+                    if nex_left == 0 && rng.chance(100) {
+                        nex_left = (3 + rng.below(25)) * 1_000;
+                    }
+                    if work_left == 0 && rng.chance(30) {
+                        work_left = (10 + rng.below(240)) * 1_000;
+                    }
+                    if focus_left == 0 && rng.chance(3) {
+                        focus_left = (2 + rng.below(11)) * 60_000;
+                    }
+                    if rng.chance(400) {
+                        sig.idle_ms = 0
+                    } else {
+                        sig.idle_ms = sig.idle_ms.saturating_add(TICK_MS)
+                    }
+                } else {
+                    sig.idle_ms = sig.idle_ms.saturating_add(TICK_MS);
+                }
+                sig.meeting = meet_left > 0;
+                sig.user_speaking = speak_left > 0;
+                sig.nexus_speaking = nex_left > 0;
+                sig.working = work_left > 0;
+                sig.focus = focus_left > 0;
+
+                let mut actions = Vec::new();
+                if !draining && rng.chance(30) {
+                    let u = match rng.below(100) {
+                        0..=9 => AlertUrgency::Low,
+                        10..=49 => AlertUrgency::Medium,
+                        50..=84 => AlertUrgency::High,
+                        _ => AlertUrgency::Critical,
+                    };
+                    next_id += 1;
+                    let id = format!("a{t}_{next_id}");
+                    live.insert(id.clone(), (u, now));
+                    st.alerts[tier(u)] += 1;
+                    let key = if rng.chance(3_000) { Some(format!("k{}", rng.below(4))) } else { None };
+                    actions.extend(eng.submit(
+                        Alert { id, text: "Sir, x".into(), urgency: u, event_key: key },
+                        now,
+                        &sig,
+                        &cfg,
+                    ));
+                } else {
+                    actions.extend(eng.tick(now, &sig, &cfg));
+                }
+
+                let speaks = actions.iter().filter(|a| matches!(a, Action::Speak { .. })).count();
+                assert!(speaks <= 1, "two lines in one tick at {now}");
+                for a in &actions {
+                    match a {
+                        Action::Speak { id, override_meeting, lead_in, .. } => {
+                            let (u, at) = live.remove(id).unwrap_or_else(|| panic!("{id} spoken twice or never submitted"));
+                            let waited = now - at;
+                            st.spoken[tier(u)] += 1;
+                            st.speaks += 1;
+                            st.latency_ms[tier(u)].push(waited);
+                            assert_ne!(u, AlertUrgency::Low, "a Low alert was spoken");
+                            assert_eq!(lead_in.is_some(), u == AlertUrgency::Critical, "only Critical says Urgent");
+                            if u == AlertUrgency::Critical {
+                                if sig.user_speaking || sig.nexus_speaking {
+                                    assert!(waited >= CRITICAL_WAIT_MS, "Critical talked over someone after only {waited} ms");
+                                }
+                                assert_eq!(*override_meeting, sig.meeting, "meeting override must match the meeting state");
+                                if sig.meeting {
+                                    assert!(cfg.critical_in_meeting, "Critical spoken in a meeting with the override off");
+                                }
+                                spoken_at.push((now, true));
+                            } else {
+                                assert!(!sig.meeting, "a {u:?} alert was spoken in a meeting");
+                                assert!(!sig.user_speaking && !sig.nexus_speaking, "{u:?} spoken over speech");
+                                assert!(!*override_meeting);
+                                if u == AlertUrgency::Medium {
+                                    assert!(!sig.focus && !sig.working, "Medium spoken during focus/work");
+                                    assert!(sig.idle_ms >= MEDIUM_IDLE_MS, "Medium spoken after only {} ms idle", sig.idle_ms);
+                                }
+                                let non_crit: Vec<u64> = spoken_at.iter().filter(|(_, c)| !c).map(|(t, _)| *t).collect();
+                                if let Some(last) = non_crit.last() {
+                                    assert!(now - last >= MIN_GAP_MS, "gap {} < {MIN_GAP_MS}", now - last);
+                                }
+                                let in_hour = non_crit.iter().filter(|t| now - **t < HOUR_MS).count();
+                                assert!(in_hour < MAX_PER_HOUR, "more than {MAX_PER_HOUR} non-critical lines in an hour");
+                                spoken_at.push((now, false));
+                            }
+                        }
+                        Action::Card { id, .. } => {
+                            let (u, _) = live.remove(id).unwrap_or_else(|| panic!("{id} carded twice or never submitted"));
+                            st.carded[tier(u)] += 1;
+                            if u == AlertUrgency::Critical {
+                                assert!(!cfg.critical_in_meeting, "Critical may only become a card when the meeting override is off");
+                            }
+                        }
+                    }
+                }
+                now += TICK_MS;
+            }
+            assert!(live.is_empty(), "{} alerts were neither spoken nor carded", live.len());
+            assert_eq!(eng.pending_len(), 0);
+            st.timelines += 1;
+        }
+        st
+    }
+
+    fn pct(v: &mut Vec<u64>, p: f64) -> u64 {
+        if v.is_empty() {
+            return 0;
+        }
+        v.sort_unstable();
+        v[((v.len() as f64 - 1.0) * p).round() as usize]
+    }
+
+    #[test]
+    fn every_promise_holds_on_300_replayed_timelines() {
+        let mut st = replay(300, 2, 0x4E45_5855_53, Config::default());
+        assert_eq!(st.timelines, 300);
+        assert!(st.speaks > 1_000, "the simulation must actually speak, got {}", st.speaks);
+        let p95 = pct(&mut st.latency_ms[3], 0.95);
+        assert!(p95 <= CRITICAL_WAIT_MS + 3 * TICK_MS, "Critical p95 {p95} ms");
+    }
+
+    #[test]
+    fn with_the_meeting_override_off_critical_waits_like_high() {
+        let st = replay(100, 2, 0xBEEF, Config { critical_in_meeting: false });
+        assert!(st.speaks > 300);
+    }
+
+    /// Prints the table recorded in docs/testing/runs.
+    /// `cargo test --lib timeline_metrics -- --nocapture --ignored`
+    #[test]
+    #[ignore = "prints the measurement for the run record"]
+    fn timeline_metrics() {
+        let mut st = replay(1_000, 2, 0x4E45_5855_53, Config::default());
+        println!("timelines={} simulated_hours={} lines_spoken={}", st.timelines, st.timelines * 2, st.speaks);
+        for (i, name) in ["Low", "Medium", "High", "Critical"].iter().enumerate() {
+            let (a, s, c) = (st.alerts[i], st.spoken[i], st.carded[i]);
+            let p50 = pct(&mut st.latency_ms[i], 0.5);
+            let p95 = pct(&mut st.latency_ms[i], 0.95);
+            let mx = st.latency_ms[i].iter().copied().max().unwrap_or(0);
+            println!("{name}: alerts={a} spoken={s} carded={c} wait_ms p50={p50} p95={p95} max={mx}");
+        }
+    }
+}

@@ -1,0 +1,56 @@
+{
+  "file": "frontend/src/sidebar/unified.css",
+  "test": "node scripts/check-window-opacity.mjs",
+  "results": [
+    {
+      "name": "light theme shell becomes slash-alpha (token)",
+      "status": "KILLED",
+      "detail": ""
+    },
+    {
+      "name": "sidebar card base becomes rgba (token)",
+      "status": "KILLED",
+      "detail": ""
+    },
+    {
+      "name": "blur added to an unregistered rule in a panel file",
+      "status": "KILLED",
+      "detail": ""
+    },
+    {
+      "name": "hub background becomes transparent (token)",
+      "status": "KILLED",
+      "detail": ""
+    },
+    {
+      "name": "architect surface becomes 8-digit hex (token)",
+      "status": "KILLED",
+      "detail": ""
+    },
+    {
+      "name": "stage surface token becomes hsla",
+      "status": "KILLED",
+      "detail": ""
+    },
+    {
+      "name": "companion hud surface becomes color-mix with transparent",
+      "status": "KILLED",
+      "detail": ""
+    },
+    {
+      "name": "github dashboard background becomes transparent",
+      "status": "KILLED",
+      "detail": ""
+    },
+    {
+      "name": "setup window root becomes translucent (token shared by all panels)",
+      "status": "KILLED",
+      "detail": ""
+    },
+    {
+      "name": "stack view background becomes translucent",
+      "status": "KILLED",
+      "detail": ""
+    }
+  ]
+}
