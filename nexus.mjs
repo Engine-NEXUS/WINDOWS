@@ -4,8 +4,8 @@
 // ==============================================================================
 // One entry point for Windows, macOS, and Linux.
 //
-//   node nexus.mjs install — install prerequisites + build + global 'nexus' command
-//   node nexus.mjs setup   — install prerequisites + build (no global command)
+//   node nexus.mjs install — prepare environment + global 'nexus' command
+//   node nexus.mjs setup   — prepare prerequisites and dependencies (no global command)
 //   node nexus.mjs build   — build frontend + Rust release binary
 //   node nexus.mjs dev     — tauri dev (hot reload via Vite)
 //   node nexus.mjs start   — launch the built release binary (alias: run)
@@ -28,7 +28,7 @@ import { existsSync, mkdirSync, rmSync, statSync, writeFileSync, copyFileSync, r
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { platform, arch } from "node:os";
-import { sourceHash, recordBuild, verifyBuild } from "./scripts/build-provenance.mjs";
+import { runContributor } from "./scripts/contributor-cli.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const ROOT = resolve(dirname(__filename));
@@ -123,525 +123,6 @@ function hasCargo() { return has("cargo"); }
 function hasPython() { return has("python") || has("python3"); }
 function pythonCmd() { return has("python") ? "python" : "python3"; }
 
-// ─── OS-specific prerequisite installation ───────────────────────────────────
-
-function installWindows() {
-  info("Installing prerequisites on Windows...");
-
-  // Node.js
-  if (!hasNpm()) {
-    info("Installing Node.js via winget...");
-    run("winget", ["install", "-e", "--id", "OpenJS.NodeJS", "--accept-source-agreements", "--accept-package-agreements"],
-      { hint: "If winget fails, download from https://nodejs.org/" });
-    // Refresh PATH for this session
-    process.env.PATH = execSync('powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable(\'PATH\', \'User\')"', { encoding: "utf-8" }).trim() + ";" + process.env.PATH;
-  }
-
-  // Rust
-  if (!hasCargo()) {
-    info("Installing Rust via rustup...");
-    run("winget", ["install", "-e", "--id", "Rustlang.Rustup", "--accept-source-agreements", "--accept-package-agreements"],
-      { hint: "If winget fails, run https://win.rustup.rs/x86_64" });
-    process.env.PATH = process.env.USERPROFILE + "\\.cargo\\bin;" + process.env.PATH;
-  }
-
-  // Python
-  if (!hasPython()) {
-    info("Installing Python 3.12 via winget...");
-    run("winget", ["install", "-e", "--id", "Python.Python.3.12", "--accept-source-agreements", "--accept-package-agreements"],
-      { hint: "If winget fails, download from https://python.org/" });
-    process.env.PATH = process.env.LOCALAPPDATA + "\\Programs\\Python\\Python312;" + process.env.PATH;
-  }
-
-  // LLVM/libclang (needed for bindgen-based crates)
-  if (!process.env.LIBCLANG_PATH || !existsSync(process.env.LIBCLANG_PATH + "\\libclang.dll")) {
-    const llvmCandidates = [
-      "C:\\Program Files\\LLVM\\bin",
-      "C:\\LLVM\\bin",
-    ];
-    let found = llvmCandidates.find(p => existsSync(p + "\\libclang.dll"));
-    if (!found) {
-      info("Installing LLVM via winget (for libclang)...");
-      run("winget", ["install", "-e", "--id", "LLVM.LLVM", "--accept-source-agreements", "--accept-package-agreements"],
-        { allowFail: true, hint: "If winget fails, install from https://github.com/llvm/llvm-project/releases" });
-      found = "C:\\Program Files\\LLVM\\bin";
-    }
-    if (existsSync(found + "\\libclang.dll")) {
-      process.env.LIBCLANG_PATH = found;
-      ok(`LIBCLANG_PATH=${found}`);
-    } else {
-      warn("libclang.dll not found — Rust build may fail. Install LLVM manually.");
-    }
-  }
-
-  // MSVC C++ Build Tools
-  if (!has("link")) {
-    warn("MSVC C++ Build Tools (link.exe) not found in PATH.");
-    warn("If the Rust build fails, install via:");
-    warn('  winget install Microsoft.VisualStudio.2022.BuildTools --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools"');
-  }
-}
-
-function installMacOS() {
-  info("Installing prerequisites on macOS...");
-
-  // Homebrew
-  if (!has("brew")) {
-    info("Installing Homebrew...");
-    run("/bin/bash", ["-c", 'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'],
-      { hint: "See https://brew.sh" });
-  }
-
-  // Node.js
-  if (!hasNpm()) {
-    info("Installing Node.js via brew...");
-    run("brew", ["install", "node"], { hint: "Or download from https://nodejs.org/" });
-  }
-
-  // Rust
-  if (!hasCargo()) {
-    info("Installing Rust via rustup...");
-    run("curl", ["--proto", "=https", "--tlsv1.2", "-sSf", "https://sh.rustup.rs", "-o", "/tmp/rustup-init.sh"],
-      { stdio: "ignore" });
-    run("sh", ["/tmp/rustup-init.sh", "-y"], { hint: "Or visit https://rustup.rs" });
-    process.env.PATH = process.env.HOME + "/.cargo/bin:" + process.env.PATH;
-  }
-
-  // Python
-  if (!hasPython()) {
-    info("Installing Python 3.12 via brew...");
-    run("brew", ["install", "python@3.12"], { hint: "Or download from https://python.org/" });
-  }
-
-  // Xcode Command Line Tools (needed for C/C++ compilation)
-  if (!existsSync("/Library/Developer/CommandLineTools/usr/bin/clang")) {
-    info("Installing Xcode Command Line Tools...");
-    run("xcode-select", ["--install"], { allowFail: true, hint: "This opens a GUI installer — click Install." });
-    warn("After the GUI installer finishes, re-run: nexus setup");
-  }
-}
-
-function installLinux() {
-  info("Installing prerequisites on Linux...");
-
-  // Detect package manager
-  let pm, pmInstall;
-  if (has("apt-get")) {
-    pm = "apt-get"; pmInstall = ["install", "-y"];
-  } else if (has("dnf")) {
-    pm = "dnf"; pmInstall = ["install", "-y"];
-  } else if (has("yum")) {
-    pm = "yum"; pmInstall = ["install", "-y"];
-  } else if (has("pacman")) {
-    pm = "pacman"; pmInstall = ["-S", "--noconfirm"];
-  } else if (has("zypper")) {
-    pm = "zypper"; pmInstall = ["install", "-y"];
-  } else {
-    err("No supported package manager found (apt/dnf/yum/pacman/zypper).");
-    err("Install Rust, Node.js, Python 3.12, and the Tauri system deps manually.");
-    err("See: https://tauri.app/start/prerequisites/");
-    process.exit(1);
-  }
-
-  // System libraries for Tauri on Linux (webkit2gtk-4.1)
-  const sysDeps = {
-    "apt-get": ["libwebkit2gtk-4.1-dev", "libgtk-3-dev", "libayatana-appindicator3-dev", "librsvg2-dev", "libasound2-dev", "libssl-dev", "pkg-config"],
-    "dnf":     ["webkit2gtk4.1-devel", "gtk3-devel", "libappindicator-gtk3-devel", "librsvg2-devel", "alsa-lib-devel", "openssl-devel", "pkgconf-pkg-config"],
-    "yum":     ["webkit2gtk4.1-devel", "gtk3-devel", "libappindicator-gtk3-devel", "librsvg2-devel", "alsa-lib-devel", "openssl-devel", "pkgconfig"],
-    "pacman":  ["webkit2gtk-4.1", "gtk3", "libappindicator-gtk3", "librsvg", "alsa-lib", "openssl", "pkgconf"],
-    "zypper":  ["webkit2gtk4-devel", "gtk3-devel", "libappindicator3-devel", "librsvg2-devel", "alsa-devel", "libopenssl-devel", "pkg-config"],
-  };
-
-  info(`Installing system libraries via ${pm}...`);
-  if (pm === "apt-get") run("sudo", [pm, "update"]);
-  run("sudo", [pm, ...pmInstall, ...sysDeps[pm]],
-    { hint: "If this fails, install the packages manually." });
-
-  // Node.js
-  if (!hasNpm()) {
-    if (pm === "pacman") {
-      run("sudo", [pm, ...pmInstall, "nodejs", "npm"]);
-    } else {
-      // Use NodeSource for a recent version
-      info("Installing Node.js 20.x via NodeSource...");
-      run("sudo", ["bash", "-c",
-        `curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && ${pm} ${pmInstall.join(" ")} nodejs`],
-        { shell: true, allowFail: true, hint: "Or download from https://nodejs.org/" });
-    }
-  }
-
-  // Rust
-  if (!hasCargo()) {
-    info("Installing Rust via rustup...");
-    run("curl", ["--proto", "=https", "--tlsv1.2", "-sSf", "https://sh.rustup.rs", "-o", "/tmp/rustup-init.sh"],
-      { stdio: "ignore" });
-    run("sh", ["/tmp/rustup-init.sh", "-y"], { hint: "Or visit https://rustup.rs" });
-    process.env.PATH = process.env.HOME + "/.cargo/bin:" + process.env.PATH;
-  }
-
-  // Python
-  if (!hasPython()) {
-    const pyPkg = pm === "pacman" ? "python" : "python3";
-    run("sudo", [pm, ...pmInstall, pyPkg, "python3-pip"], { hint: "Or download from https://python.org/" });
-  }
-}
-
-// ─── Commands ────────────────────────────────────────────────────────────────
-
-/// Verify the Moonshine STT Python package is installed.
-/// The STT server (server/stt_server.py) uses Moonshine Streaming
-/// (ONNX Runtime; auto-downloads the model on first transcription).
-function checkMoonshine() {
-  const result = spawnSync(IS_WIN ? "python" : "python3", ["-c", "import moonshine_voice; print('ok')"], {
-    stdio: "pipe",
-    encoding: "utf-8",
-    shell: IS_WIN,
-  });
-
-  if (result.status === 0 && result.stdout?.trim() === "ok") {
-    ok("moonshine-voice installed (STT server ready)");
-  } else {
-    warn("moonshine-voice not installed — installing now...");
-    try {
-      execSync(`${IS_WIN ? "python" : "python3"} -m pip install moonshine-voice fastapi uvicorn python-multipart websockets`, {
-        stdio: "inherit",
-        encoding: "utf-8",
-        shell: IS_WIN,
-      });
-      ok("moonshine-voice installed successfully");
-    } catch {
-      warn("Failed to install moonshine-voice — STT will not work. Run: pip install moonshine-voice fastapi uvicorn python-multipart websockets");
-    }
-  }
-
-  // `websockets` (or `wsproto`) is uvicorn's actual WebSocket implementation
-  // — neither fastapi nor uvicorn depends on it directly, so an existing
-  // install (moonshine_voice already present, the branch above skipped)
-  // can still be missing it. Needed for the Phase 4 live-caption /stream
-  // endpoint only — its absence degrades silently (no live caption), but
-  // check for it separately so a fresh `nexus setup` actually enables it.
-  const wsResult = spawnSync(IS_WIN ? "python" : "python3", ["-c", "import websockets; print('ok')"], {
-    stdio: "pipe",
-    encoding: "utf-8",
-    shell: IS_WIN,
-  });
-  if (wsResult.status === 0 && wsResult.stdout?.trim() === "ok") {
-    ok("websockets installed (live caption stream ready)");
-  } else {
-    warn("websockets not installed — installing now (live caption stream)...");
-    try {
-      execSync(`${IS_WIN ? "python" : "python3"} -m pip install websockets`, {
-        stdio: "inherit",
-        encoding: "utf-8",
-        shell: IS_WIN,
-      });
-      ok("websockets installed successfully");
-    } catch {
-      warn("Failed to install websockets — live caption will stay disabled (batch STT unaffected). Run: pip install websockets");
-    }
-  }
-}
-
-function cmdSetup() {
-  console.log(`\n${C.bold}${C.cyan}╔═══════════════════════════════════════════════════════════╗${C.reset}`);
-  console.log(`${C.bold}${C.cyan}║         NEXUS — Cross-Platform Setup & Build               ║${C.reset}`);
-  console.log(`${C.bold}${C.cyan}╚═══════════════════════════════════════════════════════════╝${C.reset}\n`);
-
-  // 1. Install OS prerequisites
-  if (IS_WIN) installWindows();
-  else if (IS_MAC) installMacOS();
-  else if (IS_LINUX) installLinux();
-  else { err(`Unsupported platform: ${platform()}`); process.exit(1); }
-
-  // 2. Verify tools
-  info("Verifying installed tools...");
-  const checks = [
-    ["npm", hasNpm, "Node.js"],
-    ["cargo", hasCargo, "Rust"],
-    ["python", hasPython, "Python"],
-  ];
-  let allOk = true;
-  for (const [cmd, check, name] of checks) {
-    if (check()) { ok(`${name} found`); }
-    else { err(`${name} NOT found — install it manually and re-run`); allOk = false; }
-  }
-  if (!allOk) {
-    err("Prerequisites missing. Please install them and re-run: nexus setup");
-    process.exit(1);
-  }
-
-  // 3. Install frontend dependencies
-  info("Installing frontend dependencies...");
-  run("npm", ["--prefix", "frontend", "install"]);
-
-  // 4. Install Worker dependencies (optional, for self-deploy)
-  if (existsSync(join(ROOT, "server", "worker", "package.json"))) {
-    info("Installing Cloudflare Worker dependencies...");
-    run("npm", ["--prefix", "server/worker", "install"], { allowFail: true });
-  }
-
-  // 5. Install NLU Python dependencies
-  info("Installing NLU server Python dependencies...");
-  const nluReq = join(ROOT, "server", "nlu", "requirements.txt");
-  if (existsSync(nluReq)) {
-    run(pythonCmd(), ["-m", "pip", "install", "-r", nluReq],
-      { allowFail: true, hint: "If pip fails, create a venv: python -m venv .venv && activate it" });
-  }
-
-  // 6. Verify NLU model is present (either in server/nlu/model/ or resources/)
-  const nluModelLocal = join(ROOT, "server", "nlu", "model", "nexus_nlu.onnx");
-  const nluModelResources = join(ROOT, "src-tauri", "resources", "server", "nlu", "model", "nexus_nlu.onnx");
-  if (existsSync(nluModelLocal)) {
-    ok("NLU model found (local training output)");
-  } else if (existsSync(nluModelResources)) {
-    ok("NLU model found (committed in resources)");
-  } else {
-    warn("NLU model not found — NLU server will fail. Run: cd server/nlu && python train.py && python export_onnx.py");
-  }
-
-  // 7. Verify moonshine-voice is installed (STT server dependency)
-  checkMoonshine();
-
-  // 8. Build
-  info("Building NEXUS...");
-  cmdBuild();
-
-  console.log(`\n${C.bold}${C.green}═════════════════════════════════════════════════════════════${C.reset}`);
-  ok("NEXUS is set up and ready!");
-  console.log(`${C.green}  • Start: ${IS_WIN ? "nexus start" : "./nexus start"}${C.reset}`);
-  console.log(`${C.green}  • Dev:   ${IS_WIN ? "nexus dev" : "./nexus dev"}${C.reset}`);
-  console.log(`${C.green}  • Hotkey: Ctrl+Shift+Space  •  Wake word: "NEXUS"${C.reset}`);
-  console.log(`${C.bold}${C.green}═════════════════════════════════════════════════════════════${C.reset}\n`);
-}
-
-// ─── Global command installation ─────────────────────────────────────────────
-// Makes `nexus` available from any directory (not just the repo root).
-
-function cmdInstallGlobal() {
-  info("Installing global 'nexus' command...");
-
-  if (IS_WIN) {
-    // Windows: create nexus.cmd in a directory that's already on PATH.
-    // Prefer %USERPROFILE%\.local\bin (created if needed), fall back to
-    // %LOCALAPPDATA%\Microsoft\WindowsApps (always on PATH on Win10+).
-    const localBin = join(process.env.USERPROFILE || "", ".local", "bin");
-    if (!existsSync(localBin)) mkdirSync(localBin, { recursive: true });
-
-    const shimPath = join(localBin, "nexus.cmd");
-    const shimContent = `@echo off\r\nnode "${join(ROOT, "nexus.mjs")}" %*\r\n`;
-    writeFileSync(shimPath, shimContent);
-    ok(`Created ${shimPath}`);
-
-    // Add to user PATH if not already there
-    const pathVar = execSync(
-      'powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable(\'PATH\',\'User\')"',
-      { encoding: "utf-8" }
-    ).trim();
-    if (!pathVar.split(";").includes(localBin)) {
-      info(`Adding ${localBin} to user PATH...`);
-      execSync(
-        `powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('PATH','${pathVar};${localBin}','User')"`,
-        { stdio: "ignore" }
-      );
-      ok(`Added ${localBin} to user PATH (restart your terminal to pick it up)`);
-    } else {
-      ok(`${localBin} already on user PATH`);
-    }
-    warn("Restart your terminal for the global 'nexus' command to take effect.");
-
-  } else {
-    // Unix (macOS + Linux): symlink to /usr/local/bin/nexus (needs sudo)
-    // Fall back to ~/.local/bin/nexus if no sudo.
-    const target = join(ROOT, "nexus.mjs");
-    const globalPaths = ["/usr/local/bin/nexus", "/opt/homebrew/bin/nexus"];
-    let installed = false;
-
-    for (const binPath of globalPaths) {
-      if (existsSync(dirname(binPath)) || has("sudo")) {
-        info(`Symlinking ${binPath} -> ${target}...`);
-        const args = ["ln", "-sf", target, binPath];
-        if (!has("sudo")) {
-          run("ln", ["-sf", target, binPath], { allowFail: true });
-        } else {
-          run("sudo", args, { allowFail: true });
-        }
-        if (existsSync(binPath)) {
-          ok(`Created ${binPath}`);
-          installed = true;
-          break;
-        }
-      }
-    }
-
-    if (!installed) {
-      // Fall back to ~/.local/bin
-      const localBin = join(process.env.HOME || "", ".local", "bin");
-      if (!existsSync(localBin)) mkdirSync(localBin, { recursive: true });
-      const shimPath = join(localBin, "nexus");
-      run("ln", ["-sf", target, shimPath]);
-      ok(`Created ${shimPath}`);
-      warn(`Add ${localBin} to your PATH if not already there:`);
-      warn(`  echo 'export PATH="${localBin}:$PATH"' >> ~/.bashrc  (or ~/.zshrc)`);
-    }
-  }
-
-  ok("Global 'nexus' command installed. You can now run 'nexus' from any directory.");
-}
-
-function cmdInstall() {
-  // Full install: setup (prerequisites + build) + global command
-  cmdSetup();
-  cmdInstallGlobal();
-
-  console.log(`\n${C.bold}${C.green}═════════════════════════════════════════════════════════════${C.reset}`);
-  ok("NEXUS installed! The 'nexus' command is now available globally.");
-  console.log(`${C.green}  • Start:    nexus start${C.reset}`);
-  console.log(`${C.green}  • Dev:      nexus dev${C.reset}`);
-  console.log(`${C.green}  • Rebuild:  nexus build${C.reset}`);
-  console.log(`${C.green}  • Diagnostics: nexus check${C.reset}`);
-  console.log(`${C.green}  • Hotkey: Ctrl+Shift+Space  •  Wake word: "NEXUS"${C.reset}`);
-  console.log(`${C.bold}${C.green}═════════════════════════════════════════════════════════════${C.reset}\n`);
-}
-
-// Kill any running NEXUS process so cargo can replace the binary.
-// On Windows, cargo build fails with "Access is denied (os error 5)" if
-// nexus.exe is still running. On Unix, the linker may also fail.
-function killRunningNexus() {
-  if (IS_WIN) {
-    try {
-      execSync("taskkill /F /IM nexus.exe", { stdio: "pipe", encoding: "utf-8" });
-      warn("Killed running nexus.exe — needed to rebuild the binary");
-      // Give Windows time to release the file lock
-      setTimeout(() => {}, 1000);
-    } catch {
-      // No nexus.exe running — good
-    }
-  } else {
-    try {
-      execSync("pkill -f nexus", { stdio: "pipe", encoding: "utf-8" });
-      warn("Killed running nexus process");
-    } catch {
-      // No nexus process running — good
-    }
-  }
-}
-
-/// Sync the NLU model from server/nlu/model/ to src-tauri/resources/server/nlu/model/.
-/// This ensures the installer always bundles the latest trained ONNX model,
-/// labels.json, and tokenizer. Called before every build.
-/// If the source model doesn't exist (fresh clone, no training done yet),
-/// the existing resources copy is kept (it's committed to git).
-function syncNluModel() {
-  const srcDir = join(ROOT, "server", "nlu", "model");
-  const dstDir = join(ROOT, "src-tauri", "resources", "server", "nlu", "model");
-
-  // Files to sync (only if they exist in source)
-  const files = [
-    "nexus_nlu.onnx",
-    "nexus_nlu.onnx.data",
-    "labels.json",
-  ];
-
-  let synced = 0;
-  for (const file of files) {
-    const src = join(srcDir, file);
-    const dst = join(dstDir, file);
-    if (existsSync(src)) {
-      copyFileSync(src, dst);
-      synced++;
-    }
-  }
-
-  // Sync tokenizer dir
-  const srcTok = join(srcDir, "tokenizer");
-  const dstTok = join(dstDir, "tokenizer");
-  if (existsSync(srcTok)) {
-    mkdirSync(dstTok, { recursive: true });
-    for (const f of readdirSync(srcTok)) {
-      copyFileSync(join(srcTok, f), join(dstTok, f));
-      synced++;
-    }
-  }
-
-  if (synced > 0) {
-    ok(`NLU model synced to resources (${synced} file(s))`);
-  } else {
-    info("NLU model: using existing resources copy (no local training output found)");
-  }
-}
-
-/// Sync the server entrypoints (nlu_server.py, stt_server.py) from server/
-/// into src-tauri/resources/server/. The installer and production lazy_* loaders
-/// run the resources/ copies — without this sync they silently shipped stale
-/// pre-Moonshine/pre-OTA code (audit C3). Called before every build alongside
-/// syncNluModel().
-function syncServerScripts() {
-  const files = ["nlu_server.py", "stt_server.py"];
-  let synced = 0;
-  for (const f of files) {
-    const src = join(ROOT, "server", f);
-    const dst = join(ROOT, "src-tauri", "resources", "server", f);
-    if (existsSync(src)) {
-      copyFileSync(src, dst);
-      synced++;
-    }
-  }
-  if (synced > 0) {
-    ok(`Server scripts synced to resources (${synced} file(s))`);
-  }
-}
-
-function cmdBuild() {
-  // Kill any running instance first — cargo can't replace a running binary
-  killRunningNexus();
-
-  // Sync the NLU model from server/nlu/model/ to src-tauri/resources/server/nlu/model/
-  // This ensures the installer always bundles the latest trained model.
-  // The NLU server reads from resources/ in production (no server/ dir in installed builds).
-  syncNluModel();
-  // Also sync the server entrypoints so production never ships stale
-  // nlu_server.py / stt_server.py copies (audit: OTA + Moonshine never reached prod).
-  syncServerScripts();
-
-  info("Building frontend (Vite)...");
-  run("npm", ["--prefix", "frontend", "install"], { allowFail: true, stdio: "ignore" });
-  // Hand mode: MediaPipe wasm + hand model into frontend/public/hand (git-ignored, ~17 MB).
-  run("node", ["scripts/sync-hand-assets.mjs"], { allowFail: true });
-  const buildSource = sourceHash();
-  run("npm", ["--prefix", "frontend", "run", "build"]);
-
-  info("Building Rust release binary (custom-protocol + admin-brain)...");
-  const cargoEnv = {};
-  if (IS_WIN && process.env.LIBCLANG_PATH) cargoEnv.LIBCLANG_PATH = process.env.LIBCLANG_PATH;
-  // admin-brain: enables the Qwen brain (admin-only, runtime-gated by admin.json).
-  // The brain code is compiled in but does nothing unless admin.json has is_admin=true.
-  // Normal users never have admin.json, so the brain is dormant in their builds.
-  run("cargo", ["build", "--release", "--features", "custom-protocol,admin-brain"],
-    { cwd: join(ROOT, "src-tauri"), env: cargoEnv,
-      hint: "Make sure LIBCLANG_PATH is set (Windows) or LLVM is installed" });
-
-  // Report binary location
-  const ext = IS_WIN ? ".exe" : "";
-  const binPath = join(ROOT, "src-tauri", "target", "release", `nexus${ext}`);
-  if (existsSync(binPath)) {
-    const sizeMB = (statSync(binPath).size / 1024 / 1024).toFixed(1);
-    const identity = recordBuild(buildSource);
-    ok(`Binary built: ${binPath} (${sizeMB} MB)`);
-    ok(`Build identity: ${identity.identity}`);
-  } else {
-    throw new Error(`Release build reported success but executable is missing: ${binPath}`);
-  }
-}
-
-function cmdDev() {
-  info("Starting Tauri dev mode (hot reload via Vite)...");
-  // tauri dev runs the Vite dev server + the Rust app with devUrl
-  // We need the tauri CLI — check for cargo-tauri or npx tauri
-  const tauriCli = has("cargo-tauri") ? ["cargo", "tauri", "dev"]
-    : ["npx", "--prefix", join(ROOT, "frontend"), "tauri", "dev"];
-  run(tauriCli[0], tauriCli.slice(1), { cwd: join(ROOT, "src-tauri") });
-}
-
 // `nexus notify <scenario>`: run one notification scenario in the RUNNING NEXUS (second launch with a private flag;
 // the running instance picks it up through its single-instance callback). Starts/stops/rebuilds nothing.
 // Keep in sync with SCENARIOS in src-tauri/src/notify_selftest.rs (a Rust test checks every name appears here).
@@ -686,136 +167,6 @@ function cmdNotify() {
   info(`Sending scenario '${name}' to the running NEXUS (watch its console for [NOTIFY-TEST] lines)`);
   const child = spawn(binPath, ["--notify-test", name], { detached: true, stdio: "ignore" });
   child.unref();
-}
-
-function cmdRun() {
-  const buildRequested = process.argv.includes("--build") || process.argv.includes("-Build");
-  if (buildRequested) cmdBuild();
-  const ext = IS_WIN ? ".exe" : "";
-  const binPath = join(ROOT, "src-tauri", "target", "release", `nexus${ext}`);
-  if (!existsSync(binPath)) {
-    err("Release binary not found. Run: nexus build");
-    process.exit(1);
-  }
-  let buildIdentity;
-  try { buildIdentity = verifyBuild({ warnStale: true }); }
-  catch (error) { err(error.message); process.exit(1); }
-  for (const w of buildIdentity.warnings || []) warn(`REMINDER: ${w} (launching the last build anyway)`);
-  info(`Release identity ${buildIdentity.identity} (${buildIdentity.builtAt})`);
-  info(`Executable: ${binPath}`);
-
-  if (IS_WIN) {
-    // Windows: use run.ps1 for the unified color-coded console experience.
-    // It kills old instances, clears logs, launches nexus.exe, and tails
-    // all logs (Rust wake-word, audio, frontend CDP) in one stream.
-    const runScript = join(ROOT, "scripts", "run.ps1");
-    if (existsSync(runScript)) {
-      info("Launching NEXUS via unified console (run.ps1)...");
-      // Pass through any extra args (e.g. -Build, -Debug)
-      const extraArgs = process.argv.slice(3).filter(a => !a.startsWith("-"));
-      const psArgs = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", runScript];
-      // Check for --debug or -Debug flag
-      if (process.argv.includes("--debug") || process.argv.includes("-Debug")) {
-        psArgs.push("-Debug");
-      }
-      if (process.argv.includes("--verbose") || process.argv.includes("-Verbose") || process.argv.includes("-v") || process.argv.includes("--watch-debug")) {
-        psArgs.push("-VerboseLogs");
-      }
-      run("pwsh", psArgs, { shell: false });
-      return;
-    }
-    // Fall back to direct launch if run.ps1 doesn't exist
-    info(`Launching NEXUS: ${binPath}`);
-    run(binPath, [], { stdio: "ignore" });
-  } else {
-    // Unix: launch directly (no run.ps1 equivalent)
-    info(`Launching NEXUS: ${binPath}`);
-    run(binPath, [], { stdio: "ignore" });
-  }
-}
-
-function cmdCheck() {
-  console.log(`\n${C.bold}${C.cyan}NEXUS Diagnostics${C.reset}\n`);
-  let pass = 0, fail = 0;
-
-  function check(name, fn) {
-    try {
-      const result = fn();
-      if (result) { ok(name); pass++; }
-      else { err(name); fail++; }
-    } catch (e) {
-      err(`${name}: ${e.message}`); fail++;
-    }
-  }
-
-  // Tools
-  check("Node.js / npm", () => hasNpm());
-  check("Rust / cargo", () => hasCargo());
-  check("Python", () => hasPython());
-
-  // Frontend
-  check("frontend/node_modules", () => existsSync(join(ROOT, "frontend", "node_modules")));
-  check("frontend/dist", () => existsSync(join(ROOT, "frontend", "dist")));
-
-  // Rust
-  check("Rust release binary", () => {
-    const ext = IS_WIN ? ".exe" : "";
-    return existsSync(join(ROOT, "src-tauri", "target", "release", `nexus${ext}`));
-  });
-
-  // NLU — check either local training output or committed resources copy
-  const nluModelLocal = join(ROOT, "server", "nlu", "model", "nexus_nlu.onnx");
-  const nluModelResources = join(ROOT, "src-tauri", "resources", "server", "nlu", "model", "nexus_nlu.onnx");
-  check("NLU model present", () => existsSync(nluModelLocal) || existsSync(nluModelResources));
-  check("NLU requirements.txt", () => existsSync(join(ROOT, "server", "nlu", "requirements.txt")));
-
-  // Worker
-  check("Worker package.json", () => existsSync(join(ROOT, "server", "worker", "package.json")));
-
-  // Wake word model
-  check("Wake word ONNX model", () => existsSync(join(ROOT, "src-tauri", "resources", "oww", "nexus.onnx")));
-
-  // MCP bridges (P3.3): live probe of the local bridges + hosted servers
-  // via the existing read-only checker. Bridge DOWN lines carry the fix
-  // command. Doesn't fail the tool check (bridges are optional) —
-  // reported separately below.
-  if (hasPython()) {
-    const probe = spawnSync(pythonCmd(), [join(ROOT, "scripts", "mcp_check.py")], {
-      encoding: "utf-8",
-      timeout: 60000,
-    });
-    const out = (probe.stdout || "").trim();
-    if (out) {
-      console.log(out);
-      const down = (out.match(/DOWN/g) || []).length;
-      if (down > 0) {
-        console.log(`${C.yellow}  ${down} bridge/server(s) down — fix hints above. Optional: run 'nexus mcp check' for the full end-to-end probe.${C.reset}`);
-      }
-    } else {
-      warn("MCP bridge probe produced no output (run: nexus mcp check)");
-    }
-  } else {
-    warn("Python missing — skipped MCP bridge probe (run: nexus mcp check)");
-  }
-
-  console.log(`\n${C.bold}${pass > 0 && fail === 0 ? C.green : C.yellow}${pass} passed, ${fail} failed${C.reset}\n`);
-  if (fail > 0) process.exit(1);
-}
-
-function cmdClean() {
-  info("Cleaning build artifacts...");
-  const targets = [
-    join(ROOT, "frontend", "dist"),
-    join(ROOT, "src-tauri", "target"),
-    join(ROOT, "target"),
-  ];
-  for (const t of targets) {
-    if (existsSync(t)) {
-      rmSync(t, { recursive: true, force: true });
-      ok(`Removed ${t}`);
-    }
-  }
-  ok("Clean complete.");
 }
 
 function cmdWorker() {
@@ -1305,14 +656,14 @@ ${C.cyan}Usage:${C.reset}
   ${IS_WIN ? "nexus" : "./nexus"} <command> [options]
 
 ${C.cyan}Commands:${C.reset}
-  ${C.green}install${C.reset}  Install prerequisites + build + global 'nexus' command (first time)
-  ${C.green}setup${C.reset}    Install prerequisites + build (no global command)
-  ${C.green}build${C.reset}    Build frontend + Rust release binary (custom-protocol)
+  ${C.green}install${C.reset}  Prepare environment + register a user-local command
+  ${C.green}setup${C.reset}    Prepare environment only (no build or launch)
+  ${C.green}build${C.reset}    Prepare + compile an isolated contributor release
   ${C.green}dev${C.reset}      Start Tauri dev mode (hot reload via Vite dev server)
   ${C.green}start${C.reset}    Launch the built release binary (alias for 'run')
   ${C.green}run${C.reset}      Launch the built release binary
-  ${C.green}check${C.reset}    Run diagnostics (tools, frontend, Rust, NLU, Worker)
-  ${C.green}clean${C.reset}    Remove build artifacts (target/, dist/)
+  ${C.green}check${C.reset}    Read-only prerequisite and capability report (alias for doctor)
+  ${C.green}clean${C.reset}    Remove only the selected profile output (no process termination)
   ${C.green}worker${C.reset}   Deploy the Cloudflare Worker (optional, self-host backend)
   ${C.green}train${C.reset}    Retrain the BERT-Mini NLU model (clean → generate → train → export)
   ${C.green}audit${C.reset}    Audit NLU data/model quality, coverage, leakage, slots, and OOS behavior
@@ -1341,6 +692,15 @@ ${C.cyan}Examples:${C.reset}
   ${IS_WIN ? "nexus" : "./nexus"} data nlu validate
   ${IS_WIN ? "nexus" : "./nexus"} data wake validate
 
+${C.cyan}Contributor workflow:${C.reset}
+  doctor/check       Read-only prerequisites and capability report
+  test               Contributor CLI, frontend and Rust tests
+  package            Create installers with the pinned Tauri CLI
+  --profile contributor|personal   Default: contributor (separate data/output)
+  --admin-brain      Opt-in, personal builds only
+  --yes              Approve prerequisite installations (for unattended setup)
+  --target / --bundles  Packaging options only
+
 ${C.cyan}Environment:${C.reset}
   NEXUS_SERVER_URL   Cloudflare Worker URL (default: baked at build time)
   LIBCLANG_PATH      Path to LLVM bin (Windows, for bindgen)
@@ -1364,16 +724,28 @@ function cmdTestWatch() {
 
 const command = process.argv[2] || "help";
 
+try {
 switch (command) {
-  case "install": cmdInstall(); break;
-  case "setup":   cmdSetup(); break;
-  case "build":   cmdBuild(); break;
-  case "dev":     cmdDev(); break;
+  case "doctor":
+  case "test":
+  case "package":
+    process.exitCode = await runContributor(process.argv[2], process.argv.slice(3)); break;
+  case "install":
+    process.exitCode = await runContributor("install", process.argv.slice(3)); break;
+  case "setup":
+    process.exitCode = await runContributor("setup", process.argv.slice(3)); break;
+  case "build":
+    process.exitCode = await runContributor("build", process.argv.slice(3)); break;
+  case "dev":
+    process.exitCode = await runContributor("dev", process.argv.slice(3)); break;
   case "start":
-  case "run":     cmdRun(); break;
+  case "run":
+    process.exitCode = await runContributor("start", process.argv.slice(3)); break;
   case "test-watch": cmdTestWatch(); break;
-  case "check":   cmdCheck(); break;
-  case "clean":   cmdClean(); break;
+  case "check":
+    process.exitCode = await runContributor("check", process.argv.slice(3)); break;
+  case "clean":
+    process.exitCode = await runContributor("clean", process.argv.slice(3)); break;
   case "worker":  cmdWorker(); break;
   case "train":   cmdTrain(); break;
   case "audit":   cmdAudit(); break;
@@ -1400,3 +772,4 @@ switch (command) {
     cmdHelp();
     process.exit(1);
 }
+} catch (error) { err(error.message); process.exitCode = 1; }

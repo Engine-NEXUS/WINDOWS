@@ -1,0 +1,132 @@
+{
+  "started_utc": "2026-11-05T18:19:06.958724+00:00",
+  "scope": "offline helpers and mocked boundaries; no application build or runtime operations",
+  "source_sha256": {
+    "src-tauri/src/agent_lifecycle.rs": "cc8a6afad8ea9c201caa28654ca855d68486e21aff20c8ee438616ffaf10b4fb",
+    "src-tauri/src/agent_lifecycle_runtime.rs": "01da36975c8ffde2dbd35762061a2a8c724040ba43d0307b688bcfbb0b507ccd",
+    "src-tauri/src/agent_attention.rs": "901b82a5aba651ef3100fe373e4eb08e2715c9e81496f86254c2ecc89226d254",
+    "src-tauri/src/agent_hooks.rs": "aabfe3c8be6fd0c393501c238386de027352a40036dadced094db9cafbd3210b",
+    "src-tauri/src/agent_watch.rs": "05830a192fb8a37afd5725c5d040de538dccc31a32a606b23a5e65cb3ae35b91",
+    "src-tauri/src/keep_awake.rs": "1f72cb198bada8fccab5dce4a94b407e2712cdcedfdd13e2e4288d654ba9d5f0",
+    "src-tauri/src/power_thread.rs": "866490af6d570df23b3ddd9cf47f41d7ffb8274be2ca3df70d656544583d4290",
+    "src-tauri/src/notify_hub.rs": "4155839dd18bf6597a46696cdde0a01410bbbee3ee61c789bae6e63d04cfcdff",
+    "src-tauri/src/watch_runner.rs": "afc41ed747f844496140a59ca214847e1287ea2122bc9878bf9e0de28cc62e31",
+    "src-tauri/src/webhook.rs": "f41bc2d8766987d611041a41b7cdd4dce204b5b4a6484196b15c9a41ebe4b67e",
+    "src-tauri/src/lib.rs": "929c080f685d9e9c38eeb73a881fbd4c9037fd3208afeac412f48930f41fc9ae",
+    "src-tauri/resources/agent_watch_sidecar/server.cjs": "637464e18e2b4bf0ca54d1f42423f92d21380e22dbf52208e542b1acbbb704d4",
+    "src-tauri/resources/agent_watch_sidecar/lifecycle.test.cjs": "36d723e4014479c3e571da258000f6e5e896f76269b1998b0326185af401cb39",
+    "scripts/agent-watch-contract.test.mjs": "a361c0d249b22d6caffeafab5454abb550d216198a15e968a5ba130b8031f05e",
+    "scripts/agent-watch-mutations.py": "1cada14460a9018d8e53a17a65aabeb32b96852db92e7c260f4f7457121107b2",
+    "scripts/verify-agent-watch.py": "bbd6a83e27daa201466e1aefee82982558e17f13648b61b2b29a532823043ffa",
+    "scripts/agent-watch-harness/build.rs": "2686287d295580a29f8b55eea438810d18cacbc988149f8b2126682bf1a1747c",
+    "scripts/agent-watch-harness/Cargo.lock": "cde485c7b455d282615feb8c45ebb0c483b609694ffee07b0957a2e16e848109",
+    "scripts/agent-watch-harness/Cargo.toml": "c3e2c3443d3ad2f1011fa933886da152a26b029c529a3c21c0008d03c758e824",
+    "scripts/agent-watch-harness/lib.rs": "03f40ce4d91869b6d6d4c2edbc908aaf37dc63096d069d72ac6287b0bd9d8b7f",
+    "scripts/agent-watch-harness/runtime_shim.rs": "bc5981c605983a949fb239480cdb420f3c7f2b304b2c40297d776a1d542e9c82",
+    "scripts/agent-watch-harness/tests.rs": "4e5e343d334a66a22c1c16bf024017e316624c8c49cfdca4c74dacd3d7def7d9"
+  },
+  "passes": [
+    {
+      "pass": 1,
+      "results": [
+        {
+          "check": "native_policy_and_glue_shim",
+          "exit_code": 0,
+          "summary": "test result: ok. 118 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+        },
+        {
+          "check": "source_and_sidecar",
+          "exit_code": 0,
+          "summary": "\u2139 tests 15\n\u2139 pass 15\n\u2139 fail 0"
+        },
+        {
+          "check": "frontend",
+          "exit_code": 0,
+          "summary": " Test Files  92 passed (92)\n      Tests  846 passed (846)\n   Duration  16.83s (transform 9.03s, setup 1.22s, collect 25.45s, tests 2.47s, environment 40ms, prepare 40.40s)"
+        },
+        {
+          "check": "worker",
+          "exit_code": 0,
+          "summary": " Test Files  11 passed (11)\n      Tests  145 passed (145)\n   Duration  1.15s (transform 1.98s, setup 0ms, import 2.81s, tests 327ms, environment 3ms)"
+        },
+        {
+          "check": "frontend_types",
+          "exit_code": 0,
+          "summary": ""
+        },
+        {
+          "check": "worker_types",
+          "exit_code": 0,
+          "summary": ""
+        },
+        {
+          "check": "ipc",
+          "exit_code": 1,
+          "summary": "ipc contract FAILED:\n  one-sided events: 2 NEW:\n    + listened-never-emitted barge:duck\n    + listened-never-emitted barge:resume"
+        },
+        {
+          "check": "turn_ends",
+          "exit_code": 0,
+          "summary": "turn-end gate OK (167 files scanned, 6 required files present)"
+        },
+        {
+          "check": "hygiene",
+          "exit_code": 0,
+          "summary": "repo hygiene OK (1989 tracked files, 1947 text files scanned, 0 exceptions)"
+        }
+      ]
+    },
+    {
+      "pass": 2,
+      "results": [
+        {
+          "check": "native_policy_and_glue_shim",
+          "exit_code": 0,
+          "summary": "test result: ok. 118 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+        },
+        {
+          "check": "source_and_sidecar",
+          "exit_code": 0,
+          "summary": "\u2139 tests 15\n\u2139 pass 15\n\u2139 fail 0"
+        },
+        {
+          "check": "frontend",
+          "exit_code": 0,
+          "summary": " Test Files  92 passed (92)\n      Tests  846 passed (846)\n   Duration  11.77s (transform 7.72s, setup 1.16s, collect 21.41s, tests 2.35s, environment 33ms, prepare 28.07s)"
+        },
+        {
+          "check": "worker",
+          "exit_code": 0,
+          "summary": " Test Files  11 passed (11)\n      Tests  145 passed (145)\n   Duration  1.27s (transform 2.41s, setup 0ms, import 3.42s, tests 423ms, environment 4ms)"
+        },
+        {
+          "check": "frontend_types",
+          "exit_code": 0,
+          "summary": ""
+        },
+        {
+          "check": "worker_types",
+          "exit_code": 0,
+          "summary": ""
+        },
+        {
+          "check": "ipc",
+          "exit_code": 1,
+          "summary": "ipc contract FAILED:\n  one-sided events: 2 NEW:\n    + listened-never-emitted barge:duck\n    + listened-never-emitted barge:resume"
+        },
+        {
+          "check": "turn_ends",
+          "exit_code": 0,
+          "summary": "turn-end gate OK (167 files scanned, 6 required files present)"
+        },
+        {
+          "check": "hygiene",
+          "exit_code": 0,
+          "summary": "repo hygiene OK (1989 tracked files, 1947 text files scanned, 0 exceptions)"
+        }
+      ]
+    }
+  ],
+  "source_unchanged_during_checks": true,
+  "finished_utc": "2026-11-05T18:20:33.197286+00:00"
+}

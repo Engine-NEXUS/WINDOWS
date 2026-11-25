@@ -15,6 +15,8 @@ struct LearnedControl {
     automation_id: String,
     control_type: String,
     name_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    container_hash: Option<String>,
 }
 
 fn store_path(dir: &Path) -> std::path::PathBuf {
@@ -182,6 +184,12 @@ mod win {
             automation_id: id,
             control_type: format!("{kind:?}"),
             name_hash: name_hash(&name),
+            container_hash: automation
+                .get_control_view_walker()
+                .and_then(|w| w.get_parent(&el))
+                .and_then(|p| p.get_name())
+                .ok()
+                .map(|v| name_hash(&v)),
         });
         save(dir, &controls)?;
         Ok(format!("Learned {alias} for this app"))
@@ -228,6 +236,16 @@ mod win {
             return Err("The learned control is no longer safe to use.".into());
         }
         let name = el.get_name().map_err(|e| e.to_string())?;
+        if rule.container_hash.as_ref().is_some_and(|expected| {
+            automation
+                .get_control_view_walker()
+                .and_then(|w| w.get_parent(el))
+                .and_then(|p| p.get_name())
+                .ok()
+                .is_none_or(|v| name_hash(&v) != *expected)
+        }) {
+            return Err("The learned control moved to another panel; please teach it again.".into());
+        }
         if name_hash(&name) != rule.name_hash
             || crate::ghost_center::is_risky_target(&name)
             || crate::ghost_center::is_ambiguous_target(&name)
@@ -273,6 +291,13 @@ pub fn forget(_dir: &Path, _alias: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_records_keep_build_identity_and_default_optional_context() {
+        let v:LearnedControl=serde_json::from_str(r#"{"alias":"open","exe":"fixture.exe","app_path_hash":"h","app_size":1,"app_modified_secs":2,"automation_id":"id","control_type":"Button","name_hash":"n"}"#).unwrap();
+        assert!(v.container_hash.is_none());
+        assert_eq!(v.app_modified_secs, 2);
+        assert_eq!(v.app_path_hash, "h");
+    }
 
     #[test]
     fn damaged_store_fails_closed() {
@@ -293,6 +318,7 @@ mod tests {
             std::process::id()
         ));
         let rule = LearnedControl {
+            container_hash: None,
             alias: "settings".into(),
             exe: "notepad.exe".into(),
             app_path_hash: "app-path-hash".into(),

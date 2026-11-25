@@ -1,0 +1,17 @@
+/* "Analyse my screen" wave (stage/AnalyseWave.tsx). One fullscreen canvas, click-through, shown only while the burst plays.
+   Layout only here: the stage CSP drops inline `style` props, and the colours are drawn on the canvas itself. */
+.analyse-wave {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  /* above the page, below the orb capsule (9999) and the tour layers (99990+) */
+  z-index: 9990;
+  display: none;
+}
+
+.analyse-wave--on {
+  display: block;
+}

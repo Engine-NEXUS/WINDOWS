@@ -1,0 +1,9 @@
+{
+  "_about": "Boolean settings that are deliberately NOT a switch on the Features page, each with the reason. scripts/check-feature-registry.mjs reads this file.",
+  "internal": {
+    "wakeWordEnabled": "dead: no Rust code reads it (only the field and its default, checked 2026-11-13); the old Settings window still shows a switch. Wire a reader or remove the field, then drop this line",
+    "meetingModeAuto": "dead: no Rust code reads it (checked 2026-11-13); meeting detection is set through set_meeting_detection",
+    "suppressTtsInMeetings": "dead: no Rust code reads it (checked 2026-11-13)"
+  },
+  "loose": {}
+}

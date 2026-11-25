@@ -143,6 +143,8 @@ The stopping rule is demonstrated performance, not an epoch count: agreed recall
 
 ## Immediate next step
 
+Phase 1 implementation is available in the [cohort pilot runbook](04-cohort-pilot.md). Start with the calibration roster and a real capture on two assigned laptops, then replay the collected clips with the updated evaluator.
+
 Complete provenance and fresh baseline before scheduling a large training run. The first coordinated action is recruiting and assigning the participant/device partitions, then preparing a reviewed contributor recording checklist based on the existing [runbook](02-runbook-record-score-fix-retrain.md). The owner prepares the evaluation executable manually. The runbook is owner-centric and is not yet a complete distributed collection tool; split enforcement, consent/export handling and per-device reporting must be reviewed or implemented before collection. That older runbook contains build, download, training, setting-write and promotion commands; they are **not authorized to run automatically** by this research request. Current project build/runtime restrictions still apply.
 
 Research references above were checked on 2026-11-06. Local report dates and identities were inspected independently; source metadata is not a new device measurement.

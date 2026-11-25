@@ -2,7 +2,7 @@
 // Release identity shared by `nexus start` and the direct Windows launcher.
 // A missing or mismatched record fails closed before either launcher stops the app.
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync, renameSync, realpathSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,7 +10,7 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const binary = join(root, "src-tauri", "target", "release", process.platform === "win32" ? "nexus.exe" : "nexus");
 const recordPath = join(root, "src-tauri", "target", "release", "nexus-build.json");
 const sourceRoots = ["src-tauri/src", "src-tauri/resources/server", "frontend/src", "frontend/public", "scripts"];
-const sourceFiles = ["nexus.mjs", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "src-tauri/build.rs", "src-tauri/tauri.conf.json", "frontend/package.json", "frontend/package-lock.json", "frontend/index.html", "frontend/tsconfig.json", "frontend/tsconfig.node.json", "frontend/vite.config.ts",
+const sourceFiles = ["nexus.mjs", "rust-toolchain.toml", ".nvmrc", "server/stt_server.py", "server/nlu_server.py", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "src-tauri/build.rs", "src-tauri/tauri.conf.json", "src-tauri/Info.plist", "src-tauri/Info.contributor.plist", "frontend/package.json", "frontend/package-lock.json", "frontend/index.html", "frontend/tsconfig.json", "frontend/tsconfig.node.json", "frontend/vite.config.ts",
   ...["melspectrogram.onnx", "embedding_model.onnx", "nexus.onnx", "model_manifest.json", "acoustic_profile.json", "comfort_embedding.npy", "nexus_config.yaml"].map(name => `src-tauri/resources/oww/${name}`)];
 const excludedDirs = new Set(["node_modules", "target", "dist", "hand", ".git", "__pycache__", ".pytest_cache"]);
 
@@ -46,23 +46,29 @@ export function frontendHash() {
   if (!files.length) throw new Error("frontend/dist is missing; run nexus build");
   return treeHash(files);
 }
-export function recordBuild(expectedSource = sourceHash()) {
+function paths(directory) {
+  return directory ? { binary: join(directory, process.platform === 'win32' ? 'nexus.exe' : 'nexus'), recordPath: join(directory, 'nexus-build.json') } : { binary, recordPath };
+}
+export function recordBuild(expectedSource = sourceHash(), { directory, metadata } = {}) {
+  const { binary, recordPath } = paths(directory);
   if (!existsSync(binary)) throw new Error(`release executable missing: ${binary}`);
   const actualSource = sourceHash();
   if (actualSource !== expectedSource) throw new Error("source changed during build; rebuild after edits finish");
-  const record = { schema: 1, builtAt: new Date().toISOString(), source: actualSource,
+  const record = { schema: metadata ? 2 : 1, ...(metadata ? { metadata } : {}), builtAt: new Date().toISOString(), source: actualSource,
     frontend: frontendHash(), executable: hashFile(binary), executablePath: binary };
-  record.identity = createHash("sha256").update(`${record.source}:${record.frontend}:${record.executable}`).digest("hex").slice(0, 16);
+  record.identity = createHash("sha256").update(`${record.source}:${record.frontend}:${record.executable}:${JSON.stringify(metadata || null)}`).digest("hex").slice(0, 16);
   const temp = `${recordPath}.${process.pid}.tmp`;
   writeFileSync(temp, JSON.stringify(record, null, 2) + "\n");
   renameSync(temp, recordPath);
   return record;
 }
-export function verifyBuild({ warnStale = false } = {}) {
+export function verifyBuild({ warnStale = false, directory, metadata } = {}) {
+  const { binary, recordPath } = paths(directory);
   if (!existsSync(recordPath)) throw new Error("release build record missing; run nexus build or nexus start --build");
   if (!existsSync(binary)) throw new Error(`release executable missing: ${binary}`);
   const record = JSON.parse(readFileSync(recordPath, "utf8"));
-  if (record.schema !== 1 || record.executablePath !== binary || !record.identity) throw new Error("release build record invalid; run nexus build");
+  if (record.schema !== (metadata ? 2 : 1) || record.executablePath !== binary || !record.identity) throw new Error("release build record invalid; run nexus build");
+  if (metadata && JSON.stringify(record.metadata) !== JSON.stringify(metadata)) throw new Error('release profile/toolchain/architecture metadata mismatch; run nexus build');
   const warnings = [];
   const stale = (message) => { if (!warnStale) throw new Error(message); warnings.push(message); };
   if (record.source !== sourceHash()) stale("release source changed since build; run nexus build or nexus start --build");
@@ -71,7 +77,10 @@ export function verifyBuild({ warnStale = false } = {}) {
   return warnings.length ? { ...record, warnings } : record;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Compare real paths: on macOS a temp folder is reached through a symlink (/var -> /private/var), and a plain string
+// comparison made the command-line entry silently do nothing there.
+const sameFile = (a, b) => { try { return realpathSync(a) === realpathSync(b); } catch { return resolve(a) === resolve(b); } };
+if (process.argv[1] && sameFile(resolve(process.argv[1]), fileURLToPath(import.meta.url))) {
   try {
     const op = process.argv[2];
     if (op === "source") console.log(sourceHash());

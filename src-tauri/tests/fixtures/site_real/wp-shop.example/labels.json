@@ -1,0 +1,9 @@
+{
+  "synthetic": true,
+  "bucket": "cms",
+  "must": ["wordpress", "woocommerce"],
+  "may": ["jquery", "php", "nginx", "mysql"],
+  "must_not": ["shopify", "nextjs", "react", "vercel"],
+  "expect_thin": [],
+  "sources": {}
+}

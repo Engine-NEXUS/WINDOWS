@@ -1,0 +1,2 @@
+# Keep only the bounded offline-check output for this assessment reviewable.
+!*.log

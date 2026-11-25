@@ -38,6 +38,7 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+.nexus/
 venv/
 env/
 
@@ -220,3 +221,10 @@ frontend/public/hand/
 **/.dev.vars
 .wrangler/
 eval_set/
+
+# Profile-specific contributor/local-personal build output.
+src-tauri/target-contributor/
+src-tauri/target-personal/
+
+# merge leftovers
+docs/testing/runs/desktop-control-offline-20261106/*.log

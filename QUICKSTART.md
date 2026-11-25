@@ -9,13 +9,13 @@ NEXUS is pre-release software for Windows 10/11. This guide gets a development o
 **From source:**
 
 ```bash
-npm --prefix frontend install
+node nexus.mjs doctor    # read-only prerequisite report
 node nexus.mjs build     # frontend + Rust release build
 node nexus.mjs start     # run it (unified console on Windows)
 node nexus.mjs check     # diagnostics for tools, Python/Node, the Worker and models
 ```
 
-You need Node.js 20+, Rust 1.77+, and WebView2. Python 3.11/3.12 is used for the local speech and NLU helpers and is started only when needed; Node is needed only for the coding-agent watcher.
+From source, start with Git and Node 22 (24 also accepted). Approved setup prepares the native prerequisites, pinned Rust and Python 3.12 environment. These commands default to an isolated contributor profile, not your personal installation. See [CONTRIBUTING.md](CONTRIBUTING.md) for platform limits and verification status.
 
 ## 2. First launch
 

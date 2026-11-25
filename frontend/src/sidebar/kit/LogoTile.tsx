@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import "./kit.css";
+import { categoryGlyph, techIconFor } from "./techIcon";
 
 export interface LogoTileProps {
   src?: string | null;
@@ -7,6 +8,10 @@ export interface LogoTileProps {
   size?: number; // default 36
   rounded?: "lg" | "full"; // default "lg"
   className?: string;
+  /** Detection id (e.g. "nextjs"): resolves a bundled local logo before anything else. */
+  techId?: string | null;
+  /** Detection category: picks a glyph when no brand mark exists. */
+  category?: string | null;
 }
 
 /**
@@ -28,14 +33,24 @@ export function LogoTile({
   size = 36,
   rounded = "lg",
   className = "",
+  techId,
+  category,
 }: LogoTileProps) {
   const [hasError, setHasError] = useState(false);
+  // A logo that is already one of the app's own files ("/activity-logos/..") is kept as given.
+  const ownFile = Boolean(src && src.startsWith("/"));
+  const local = ownFile ? null : techIconFor(techId, name);
+  // a bundled mark first (instant, offline), then a supplied logo
+  const [localFailed, setLocalFailed] = useState(false);
+  const imgSrc = local && !localFailed ? local.src : src;
+  const tone = local && !localFailed ? local.tone : "light";
 
   useEffect(() => {
     setHasError(false);
-  }, [src]);
+    setLocalFailed(false);
+  }, [src, techId, name]);
 
-  const showImage = Boolean(src && !hasError);
+  const showImage = Boolean(imgSrc && !hasError);
   const roundedClass = rounded === "full" ? "kit-logo-tile--full" : "kit-logo-tile--lg";
 
   if (showImage) {
@@ -44,15 +59,39 @@ export function LogoTile({
         className={`kit-logo-tile kit-logo-tile--image ${roundedClass} ${className}`}
         style={{ width: size, height: size, minWidth: size, minHeight: size }}
         data-mode="image"
+        data-tone={tone}
         title={name}
       >
         <img
-          src={src!}
+          src={imgSrc!}
           alt={name}
           className="kit-logo-img"
-          onError={() => setHasError(true)}
+          onError={() => (local && !localFailed ? setLocalFailed(true) : setHasError(true))}
           loading="lazy"
         />
+      </div>
+    );
+  }
+
+  const glyph = categoryGlyph(category, techId);
+  if (glyph) {
+    return (
+      <div
+        className={`kit-logo-tile kit-logo-tile--glyph ${roundedClass} ${className}`}
+        style={{
+          width: size,
+          height: size,
+          minWidth: size,
+          minHeight: size,
+          color: `hsl(${glyph.hue}, 72%, 62%)`,
+          backgroundColor: `hsla(${glyph.hue}, 60%, 50%, 0.16)`,
+        }}
+        data-mode="glyph"
+        title={`${name} · ${glyph.label}`}
+      >
+        <span className="kit-logo-glyph" style={{ width: size * 0.58, height: size * 0.58 }}>
+          {glyph.svg}
+        </span>
       </div>
     );
   }

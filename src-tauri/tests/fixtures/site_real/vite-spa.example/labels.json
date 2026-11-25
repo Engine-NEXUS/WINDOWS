@@ -1,0 +1,9 @@
+{
+  "synthetic": true,
+  "bucket": "spa",
+  "must": ["react", "netlify"],
+  "may": ["vite"],
+  "must_not": ["nextjs", "nuxt", "vue", "angular", "wordpress"],
+  "expect_thin": [],
+  "sources": {}
+}

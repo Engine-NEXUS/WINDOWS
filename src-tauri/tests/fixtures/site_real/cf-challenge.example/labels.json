@@ -1,0 +1,9 @@
+{
+  "synthetic": true,
+  "bucket": "challenge",
+  "must": ["cloudflare-cdn"],
+  "may": ["cloudflare-bot-management", "cloudflare-turnstile"],
+  "must_not": ["nextjs", "wordpress", "react", "shopify"],
+  "expect_thin": ["challenge"],
+  "sources": {}
+}

@@ -1,0 +1,212 @@
+{
+  "scope": "isolated offline helpers and source checks; no NEXUS build, input or launch",
+  "head": "131f0db42f7d20f3263d5d0a27af6dd0dee531fd",
+  "dirty_worktree": true,
+  "source_manifest_sha256": "bf825a2782496565399dab2ce6d7acc66197a1e710c5bdfd9c58e4e6ce45cd57",
+  "files": {
+    ".github/workflows/desktop-control-offline.yml": "372c4b3284dd7824b239a8f8da61dbf1a76e0fe92fa9636fdbff1da38a5fdc07",
+    "docs/testing/desktop-control/fixture.html": "976b03bcff5739d12aca75b59085153bcb85c951d80cea7f38de5b49ad2f0592",
+    "docs/testing/desktop-control/matrix.json": "5b8aab2f5dc9dc3db2bcd7aef6dcef4b3cd4fe3dddf341f73b05ea051ac34f78",
+    "frontend/src/audio/recorder.ts": "1634f7f339b1533fb80869dbd7417911b8c43a4ef4423bfc182f886b582056a3",
+    "frontend/src/net/orchestrator.test.ts": "c81d7dc6d8d2a4af2162fbf4a79f022f727e6ecc0dd87a09d92f537b40dddd39",
+    "frontend/src/net/orchestrator.ts": "4dafeb1523c6159c207c22d0abe71089694dbab7ede2548cb10f0bd6f9c9f286",
+    "frontend/src/sidebar/DesktopChoices.tsx": "104757159c86399ee6e0c395bae5ae886be86161eefb896aa40081dfa1837bbf",
+    "frontend/src/sidebar/UnifiedSidebar.tsx": "2809e8aca2f7b9a3cc1c625d2cfeaf75812813925f0b84129d9e6946d4a04e95",
+    "frontend/src/sidebar/desktop-choices.css": "2e8baeaf9a22363389aa41159ac7c0eb5e652cee336252f66ffb2c55626e995f",
+    "frontend/src/sidebar/desktopChoiceModel.test.ts": "6e90f5365236522b096d2f3458881a2510055a6f61892fad769df1014f7819c8",
+    "frontend/src/sidebar/desktopChoiceModel.ts": "fd33693796120455d00c5df37e9667c1d1d18d1cc2f0df067cc98572292bdf05",
+    "frontend/src/stage/orbRuntime.ts": "37351ba7d5c628ea7a42df4210821e50757b55faa2775c5e1c56cc80bc8ba79c",
+    "scripts/desktop-control-contract.test.mjs": "c089ae353eb193b272bcbe7da2961ae2398abda487f9e25931785089a3bd9a94",
+    "scripts/desktop-control-harness/Cargo.lock": "4a8361d065eee6ab8f01f496b22915b4ca7e91a3e9894847badf5376c4559e1e",
+    "scripts/desktop-control-harness/Cargo.toml": "6b056faf4351e06044f063f5a443ae2a1d65219ca6a1a25d72f63fd747d45f0a",
+    "scripts/desktop-control-harness/build.rs": "5eee8f8730e53e612bbf102b02cc617a702174ef89bd6095f6bab06af43f900c",
+    "scripts/desktop-control-harness/choice_boundary.rs": "87ee25a2a71f07dce3465bfd12e95c21d477e6d358f25ae5b4ba7e29f3aaff88",
+    "scripts/desktop-control-harness/lib.rs": "7355638a5dad2a6a74c3c1ddf2fa9f2cdeb776159dc66d820958bc9faf3369d2",
+    "scripts/desktop-control-harness/live/mod.rs": "a1fc196fb09dc79d3f521ab97c9830407e34c7bf602803e0b29f6064ff08bb4e",
+    "scripts/desktop-control-harness/orchestration_boundary.rs": "b6b58c09b3ef11f969a4226ecbd4db1490a271b9f51563be609f19ca31dc141e",
+    "scripts/desktop-control-harness/shortcuts/mod.rs": "29c673457ceb6b0951649edaf1b488c3daf9da2da648f22629e81e1c5d38c374",
+    "scripts/desktop-control-mutations.py": "6555082c8e3aa6f1793dcf9ca441db2fb3092ab3679c4dcb841817237f266062",
+    "scripts/desktop_control_trials.py": "3cda1be1a83dab0b1a35ba9ac7ccbd96fc3b3992670269e9c56e5026b4d9af04",
+    "scripts/test_desktop_control_trials.py": "e00be9c35d77f75628c8b54e0961940bff609d347b28fc589558eecce19f9f68",
+    "scripts/verify-desktop-control.py": "db2c983cc4153d5c6159baff2fff2dc59b55b9dec319662836306190b41694f7",
+    "src-tauri/src/commands.rs": "038f25514ac64518042be8c72d2cc9db5ec35acefb64d3320bb9be5df1b4e996",
+    "src-tauri/src/desktop_choices.rs": "a659f7a7de28a41feb1fc14060e7ab3ace8325bc45903c3e90827c38b6b1b285",
+    "src-tauri/src/desktop_control.rs": "8f5a836dce39d601a3cf99fe26b20916b74a2e58082edbcebb03a5bae309ec11",
+    "src-tauri/src/desktop_native.rs": "db7492d0203dda4ccb9ec3170ffe1ff9c6c2540807e5c4b40686ad97e1c45c64",
+    "src-tauri/src/dictation.rs": "85401dea6bc26d638789183d599652b4ee0ac6e85af7977c85c1c248266c08a9",
+    "src-tauri/src/ghost.rs": "a01485f638c37551655175b1dc3f465d51e7b5cc341f9131fcc8f2466102b175",
+    "src-tauri/src/ghost_center.rs": "17ec1b161bda052be613620fa459813d455a936d04a0971490f94967e68fccd8",
+    "src-tauri/src/ghost_learning.rs": "c29a18b109b6150589d609cb06bb213856bcd301c084594abd9726268091bec5",
+    "src-tauri/src/lib.rs": "b3e08c5a1f407d417503a7955f82c2619ea5533389c637b2e8a93dbfbdb15f00",
+    "src-tauri/src/orchestrator.rs": "a7bf6c09910a4fc11a21e5832af864440a62dff50aa2cedb419c3c4dac3b44d6",
+    "src-tauri/src/shortcuts/exec.rs": "a6ca92a7cde810f6a3cffc2421fda87f869bac223860d670d1dc0a2cda1d9db3",
+    "src-tauri/src/shortcuts/router.rs": "e94c10fcc89f11f336b99951466989b82fbb64507e590d6ffcc2e6eeda7cb271"
+  },
+  "source_unchanged": true,
+  "checks": [
+    {
+      "pass": 1,
+      "check": "rust_offline",
+      "exit_code": 0,
+      "seconds": 3.844
+    },
+    {
+      "pass": 1,
+      "check": "trial_reporter",
+      "exit_code": 0,
+      "seconds": 0.422
+    },
+    {
+      "pass": 1,
+      "check": "wiring_contracts",
+      "exit_code": 0,
+      "seconds": 0.391
+    },
+    {
+      "pass": 1,
+      "check": "frontend_types",
+      "exit_code": 0,
+      "seconds": 27.578
+    },
+    {
+      "pass": 1,
+      "check": "frontend",
+      "exit_code": 0,
+      "seconds": 19.156
+    },
+    {
+      "pass": 1,
+      "check": "worker",
+      "exit_code": 0,
+      "seconds": 2.453
+    },
+    {
+      "pass": 1,
+      "check": "ipc",
+      "exit_code": 0,
+      "seconds": 1.719
+    },
+    {
+      "pass": 1,
+      "check": "turn_ends",
+      "exit_code": 0,
+      "seconds": 0.406
+    },
+    {
+      "pass": 1,
+      "check": "hygiene",
+      "exit_code": 0,
+      "seconds": 1.594
+    },
+    {
+      "pass": 1,
+      "check": "colors",
+      "exit_code": 0,
+      "seconds": 0.25
+    },
+    {
+      "pass": 1,
+      "check": "opacity",
+      "exit_code": 0,
+      "seconds": 0.265
+    },
+    {
+      "pass": 1,
+      "check": "contrast",
+      "exit_code": 0,
+      "seconds": 0.25
+    },
+    {
+      "pass": 1,
+      "check": "whitespace",
+      "exit_code": 0,
+      "seconds": 0.5
+    },
+    {
+      "pass": 2,
+      "check": "rust_offline",
+      "exit_code": 0,
+      "seconds": 1.813
+    },
+    {
+      "pass": 2,
+      "check": "trial_reporter",
+      "exit_code": 0,
+      "seconds": 1.078
+    },
+    {
+      "pass": 2,
+      "check": "wiring_contracts",
+      "exit_code": 0,
+      "seconds": 0.688
+    },
+    {
+      "pass": 2,
+      "check": "frontend_types",
+      "exit_code": 0,
+      "seconds": 29.281
+    },
+    {
+      "pass": 2,
+      "check": "frontend",
+      "exit_code": 0,
+      "seconds": 21.547
+    },
+    {
+      "pass": 2,
+      "check": "worker",
+      "exit_code": 0,
+      "seconds": 3.531
+    },
+    {
+      "pass": 2,
+      "check": "ipc",
+      "exit_code": 0,
+      "seconds": 0.953
+    },
+    {
+      "pass": 2,
+      "check": "turn_ends",
+      "exit_code": 0,
+      "seconds": 0.297
+    },
+    {
+      "pass": 2,
+      "check": "hygiene",
+      "exit_code": 0,
+      "seconds": 1.359
+    },
+    {
+      "pass": 2,
+      "check": "colors",
+      "exit_code": 0,
+      "seconds": 0.375
+    },
+    {
+      "pass": 2,
+      "check": "opacity",
+      "exit_code": 0,
+      "seconds": 0.235
+    },
+    {
+      "pass": 2,
+      "check": "contrast",
+      "exit_code": 0,
+      "seconds": 0.187
+    },
+    {
+      "pass": 2,
+      "check": "whitespace",
+      "exit_code": 0,
+      "seconds": 0.266
+    }
+  ],
+  "not_run": [
+    "full application native library/integration",
+    "compile-dependent dead-code guard",
+    "release build/provenance",
+    "real device matrix",
+    "real owner voice pass",
+    "remote CI"
+  ]
+}

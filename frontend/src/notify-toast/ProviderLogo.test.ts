@@ -10,6 +10,9 @@ describe("ProviderLogo pure helpers", () => {
       expect(logoSrc("GitHub")).toBe("/activity-logos/github.svg");
       expect(logoSrc("claude")).toBe("/activity-logos/claude.svg");
       expect(logoSrc("gemini")).toBe("/activity-logos/gemini.svg");
+      expect(logoSrc("youtube")).toBe("/activity-logos/youtube.svg");
+      expect(logoSrc("notepad")).toBe("/activity-logos/notepad.svg");
+      expect(logoSrc("vscode")).toBe("/activity-logos/vscode.svg");
     });
 
     it("returns null for unknown id", () => {

@@ -83,6 +83,8 @@ pub struct Obs {
 pub enum Action {
     /// Tell the user (through the proactive-speech policy: it waits for a breakpoint).
     Say(String),
+    /// Completion/progress wording, delivered only through the shared task receipts.
+    Report(String),
     /// Tell the user and keep a strict "yes" ready for "shut down anyway?".
     SayAndAsk(String, PowerKind),
     /// Start the cancellable countdown (and announce it). `lead` = what is said before "I'm shutting down in 30 seconds".
@@ -190,7 +192,7 @@ impl Engine {
             let mut out = Vec::new();
             // agents that finished while others work are told one by one
             if !o.finished_now.is_empty() && !o.working.is_empty() {
-                out.push(Action::Say(progress_line(&o.finished_now, &o.working)));
+                out.push(Action::Report(progress_line(&o.finished_now, &o.working)));
             }
             if o.nothing_running && !self.nothing_told {
                 self.nothing_told = true;
@@ -223,7 +225,7 @@ impl Engine {
         if plan.track_only {
             let mut said = final_summary(&o.outcomes);
             said.push_str(&note_clause(&o.note));
-            let mut out = vec![Action::Say(said), Action::TidyUp];
+            let mut out = vec![Action::Report(said), Action::TidyUp];
             out.extend(self.end("tracked"));
             return out;
         }
@@ -258,7 +260,7 @@ impl Engine {
             } else {
                 format!("{}{} You asked me only to tell you, so I haven't touched your laptop.", final_summary(&o.outcomes), note_clause(&o.note))
             };
-            let mut out = vec![Action::Say(said)];
+            let mut out = vec![Action::Report(said)];
             out.extend(self.end("notify only"));
             return out;
         }
@@ -493,6 +495,8 @@ async fn look_at<R: Runtime>(app: &AppHandle<R>, t: &mut Track, snaps: &[ProcSna
         ignore_process_activity: agent.is_ide(),
     });
 
+    // One busy sibling session must veto a finish inferred from another session's latest hook.
+    if crate::agent_lifecycle_runtime::busy_since(agent.name(),created_ms) { ev.still_busy=true; }
     let (ended, verdict, note) = if agent.observe_only() {
         // no hook: only "went quiet" can be seen, never "finished and perfect"
         let quiet = ev.signals.contains(&crate::session_verdict::Signal::ProcessIdle) && !ev.still_busy;
@@ -686,14 +690,7 @@ async fn run_loop<R: Runtime>(app: AppHandle<R>) {
             *g = agg.outcomes.clone();
         }
         let finished_now = announcer.step(now_ms, &snapshots);
-        // while the user is away every finish is also kept for the moment they are back
-        if !finished_now.is_empty() && user_idle_ms().map_or(false, |i| i >= crate::agent_attention::AWAY_MS) {
-            if let Ok(dir) = app.path().app_data_dir() {
-                for o in &finished_now {
-                    crate::agent_attention::remember(&dir, &o.label, &crate::agent_tracker::outcome_line(o));
-                }
-            }
-        }
+        // Completion/away delivery belongs to agent_lifecycle_runtime; a plan must not enqueue another copy.
         // "... and commit and raise a PR": per finished agent, only after the user said yes, once per plan
         if stored.plan.followup && stored.followup_ok {
             for o in &finished_now {
@@ -910,6 +907,11 @@ async fn carry_out<R: Runtime>(app: &AppHandle<R>, actions: Vec<Action>, countdo
     let mut over = false;
     for action in actions {
         match action {
+            Action::Report(_text) => {
+                // The lifecycle already knows the exact sessions. Do not invent timestamp ids for the same completion.
+                let labels: Vec<String> = LAST_OUTCOMES.lock().map(|g|g.iter().map(|o|o.label.clone()).collect()).unwrap_or_default();
+                crate::agent_lifecycle_runtime::deliver_labels(app,&labels);
+            }
             Action::Say(text) => {
                 println!("[WATCH-POWER] say: {text}");
                 crate::proactive_policy::submit(app, format!("watchpower_{}", agent_hooks::now_ms()), text, crate::google::types::AlertUrgency::High);
@@ -1070,9 +1072,9 @@ mod tests {
         let mut e = Engine::new(0);
         let acts = run(&mut e, 0, 600_000, |t| obs(t, WatchPowerMode::Dry));
         assert!(!fired(&acts) && began(&acts).is_none());
-        let said: Vec<&Action> = acts.iter().map(|(_, a)| a).filter(|a| matches!(a, Action::Say(_))).collect();
+        let said: Vec<&Action> = acts.iter().map(|(_, a)| a).filter(|a| matches!(a, Action::Say(_) | Action::Report(_))).collect();
         assert_eq!(said.len(), 1);
-        assert!(matches!(said[0], Action::Say(t) if t.contains("Practice run") && t.contains("Nothing was changed")));
+        assert!(matches!(said[0], Action::Say(t) | Action::Report(t) if t.contains("Practice run") && t.contains("Nothing was changed")));
         assert!(e.finished());
     }
 
@@ -1085,7 +1087,7 @@ mod tests {
             o
         });
         assert!(!fired(&acts) && began(&acts).is_none());
-        assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(t) if t.contains("only to tell you"))));
+        assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(t) | Action::Report(t) if t.contains("only to tell you"))));
         // and it still tells the user when the setting is off, because that is what was asked
         let mut e = Engine::new(0);
         let acts = run(&mut e, 0, 600_000, |t| {
@@ -1093,7 +1095,7 @@ mod tests {
             o.plan.as_mut().unwrap().notify_only = true;
             o
         });
-        assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(_))) && !fired(&acts));
+        assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(_) | Action::Report(_))) && !fired(&acts));
     }
 
     #[test]
@@ -1148,7 +1150,7 @@ mod tests {
             let ask = acts.iter().any(|(_, a)| matches!(a, Action::SayAndAsk(..)));
             assert_eq!(ask, asks, "{mode:?} notify={notify}");
             let said = acts.iter().find_map(|(_, a)| match a {
-                Action::Say(t) | Action::SayAndAsk(t, _) => Some(t.clone()),
+                Action::Say(t) | Action::Report(t) | Action::SayAndAsk(t, _) => Some(t.clone()),
                 _ => None,
             });
             let said = said.expect("it tells the user");
@@ -1169,7 +1171,7 @@ mod tests {
                 o
             });
             assert!(!fired(&acts) && began(&acts).is_none());
-            assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(t) if t.contains("stopped waiting") && t.contains("left your laptop on"))), "{limit:?}");
+            assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(t) | Action::Report(t) if t.contains("stopped waiting") && t.contains("left your laptop on"))), "{limit:?}");
             assert!(e.finished());
         }
     }
@@ -1212,7 +1214,7 @@ mod tests {
             _ => None,
         });
         assert!(end.map_or(false, |r| r.starts_with("cancelled")), "{why}: ended with {end:?}");
-        assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(t) if t.contains("didn't touch your laptop"))), "{why}: it did not say so");
+        assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(t) | Action::Report(t) if t.contains("didn't touch your laptop"))), "{why}: it did not say so");
     }
 
     #[test]
@@ -1443,7 +1445,7 @@ mod tests {
         // Antigravity: busy tree for the whole run, Stop at 20 s, nothing after it
         let (acts, _) = timeline_with(true, WatchPowerMode::Dry, PERFECT, Some(20_000), None, None, None);
         let said = acts.iter().find_map(|(t, a)| match a {
-            Action::Say(s) => Some((*t, s.clone())),
+            Action::Say(s) | Action::Report(s) => Some((*t, s.clone())),
             _ => None,
         });
         let (at, text) = said.expect("it reports the finish instead of staying silent");
@@ -1459,7 +1461,7 @@ mod tests {
     fn end_to_end_an_ide_agent_that_asks_a_question_is_held_and_told() {
         let (acts, _) = timeline_with(true, WatchPowerMode::Dry, "Implemented it.\nWould you like me to run the tests?", Some(20_000), None, None, None);
         assert!(!fired(&acts));
-        assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(t) if t.contains("not perfect") && t.contains("question"))), "{acts:?}");
+        assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(t) | Action::Report(t) if t.contains("not perfect") && t.contains("question"))), "{acts:?}");
     }
 
     #[test]
@@ -1468,7 +1470,7 @@ mod tests {
         // practice run
         let mut e = Engine::new(0);
         let acts = run(&mut e, 0, 120_000, |t| Obs { note: note.clone(), ..obs(t, WatchPowerMode::Dry) });
-        assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(t) if t.contains("looks perfect") && t.contains("3 failing") && t.contains("finding"))), "{acts:?}");
+        assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(t) | Action::Report(t) if t.contains("looks perfect") && t.contains("3 failing") && t.contains("finding"))), "{acts:?}");
         // just tell me
         let mut e = Engine::new(0);
         let acts = run(&mut e, 0, 120_000, |t| {
@@ -1476,7 +1478,7 @@ mod tests {
             o.plan.as_mut().unwrap().notify_only = true;
             o
         });
-        assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(t) if t.contains("3 failing"))), "{acts:?}");
+        assert!(acts.iter().any(|(_, a)| matches!(a, Action::Say(t) | Action::Report(t) if t.contains("3 failing"))), "{acts:?}");
         // the countdown announcement carries it
         let mut e = Engine::new(0);
         let acts = run(&mut e, 0, 120_000, |t| Obs { note: note.clone(), ..obs(t, WatchPowerMode::On) });
@@ -1489,7 +1491,7 @@ mod tests {
         // no override, no mention
         let mut e = Engine::new(0);
         let acts = run(&mut e, 0, 120_000, |t| obs(t, WatchPowerMode::Dry));
-        assert!(acts.iter().all(|(_, a)| !matches!(a, Action::Say(t) if t.contains("finding"))));
+        assert!(acts.iter().all(|(_, a)| !matches!(a, Action::Say(t) | Action::Report(t) if t.contains("finding"))));
     }
 
     fn out(label: &str, verdict: Verdict) -> Outcome {
@@ -1503,7 +1505,7 @@ mod tests {
     fn says(acts: &[(u64, Action)]) -> Vec<String> {
         acts.iter()
             .filter_map(|(_, a)| match a {
-                Action::Say(t) | Action::SayAndAsk(t, _) => Some(t.clone()),
+                Action::Say(t) | Action::Report(t) | Action::SayAndAsk(t, _) => Some(t.clone()),
                 _ => None,
             })
             .collect()
@@ -1542,7 +1544,7 @@ mod tests {
             assert!(acts.iter().any(|(_, a)| matches!(a, Action::End("tracked"))), "{mode:?}");
             assert_eq!(acts.iter().filter(|(_, a)| matches!(a, Action::TidyUp)).count(), 1, "windows are arranged once, after the summary ({mode:?})");
             let tidy_at = acts.iter().position(|(_, a)| matches!(a, Action::TidyUp)).unwrap();
-            let summary_at = acts.iter().position(|(_, a)| matches!(a, Action::Say(t) if t.starts_with("All 3"))).unwrap();
+            let summary_at = acts.iter().position(|(_, a)| matches!(a, Action::Say(t) | Action::Report(t) if t.starts_with("All 3"))).unwrap();
             assert!(summary_at < tidy_at);
             assert!(!fired(&acts) && began(&acts).is_none(), "tracking never counts down or powers off ({mode:?})");
             assert!(e.finished());
@@ -1688,10 +1690,10 @@ mod tests {
             o.stop_age_ms = if t >= 10_000 { Some(t - 10_000) } else { None };
             o
         });
-        let notices: Vec<&(u64, Action)> = acts.iter().filter(|(_, a)| matches!(a, Action::Say(_))).collect();
+        let notices: Vec<&(u64, Action)> = acts.iter().filter(|(_, a)| matches!(a, Action::Say(_) | Action::Report(_))).collect();
         assert_eq!(notices.len(), 1, "{acts:?}");
         assert!(notices[0].0 >= 10_000 + STALL_NOTICE_MS && notices[0].0 < 10_000 + STALL_NOTICE_MS + 2 * TICK_MS);
-        assert!(matches!(&notices[0].1, Action::Say(t) if t.contains("stopped a while ago") && t.contains("something still looks busy") && t.contains("haven't touched")));
+        assert!(matches!(&notices[0].1, Action::Say(t) | Action::Report(t) if t.contains("stopped a while ago") && t.contains("something still looks busy") && t.contains("haven't touched")));
         assert!(!e.finished() && !fired(&acts), "it keeps watching and never acts on a doubt");
         // no stop, no notice: a session that is simply working says nothing
         let mut e = Engine::new(0);

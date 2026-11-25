@@ -133,6 +133,33 @@
   line-height: 1.3;
 }
 
+/* Why the scan saw less than the real page (bot check, sign-in, empty shell). */
+.stack-thin-list {
+  margin: 4px 0 0;
+  padding: 8px 10px 8px 26px;
+  border-radius: 8px;
+  border: 1px solid var(--hub-border);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--hub-text);
+}
+
+.stack-thin-list li + li {
+  margin-top: 4px;
+}
+
+.stack-rendering-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--hub-text-dim);
+  font-style: italic;
+}
+
+.stack-tech-version {
+  font-weight: 400;
+  color: var(--hub-text-dim);
+}
+
 .stack-hero-copy-link {
   background: transparent;
   border: none;
@@ -571,3 +598,18 @@
   color: var(--hub-text-faint);
   margin-top: 2px;
 }
+
+/* Small brand mark inside a chip (host chips, "In this window" tech buttons). */
+.stack-chip-icon {
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+  border-radius: 3px;
+  background: var(--sv-white);
+  padding: 1px;
+  margin-right: 6px;
+  vertical-align: -3px;
+  flex-shrink: 0;
+}
+.stack-chip-icon[data-tone="dark"] { background: var(--ui-tile-dark); }
+.stack-host-chip, .stack-section-tech-btn { display: inline-flex; align-items: center; }

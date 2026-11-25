@@ -1,0 +1,17 @@
+{
+  "initial_url": "https://wp-shop.example/",
+  "final_url": "https://wp-shop.example/",
+  "status": 200,
+  "headers": [
+    ["content-type", "text/html; charset=UTF-8"],
+    ["server", "nginx"],
+    ["x-powered-by", "PHP/8.2.12"],
+    ["set-cookie", "woocommerce_cart_hash="]
+  ],
+  "html": "<!DOCTYPE html><html lang=\"en-US\"><head><meta charset=\"UTF-8\"><meta name=\"generator\" content=\"WordPress 6.4.2\"><meta name=\"generator\" content=\"WooCommerce 8.4.0\"><title>Handmade Mugs &#8211; Wp Shop</title><link rel=\"stylesheet\" href=\"https://wp-shop.example/wp-content/themes/storefront/style.css?ver=4.5\"><script src=\"https://wp-shop.example/wp-includes/js/jquery/jquery.min.js?ver=3.7.1\"></script></head><body class=\"home woocommerce-page\"><header><h1>Wp Shop</h1></header><main><ul class=\"products\"><li class=\"product\">Blue mug</li><li class=\"product\">Green mug</li></ul><p>Every mug is thrown, glazed and fired by hand in our small studio. Free shipping on orders over fifty dollars, and returns within thirty days.</p></main><script>var wc_add_to_cart_params = {\"ajax_url\":\"\\/wp-admin\\/admin-ajax.php\",\"i18n_view_cart\":\"View cart\"};</script></body></html>",
+  "scripts": [],
+  "styles": [],
+  "redirect_hosts": ["wp-shop.example"],
+  "truncated": false,
+  "skipped": 0
+}

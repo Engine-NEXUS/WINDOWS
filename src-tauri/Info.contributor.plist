@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>NEXUS listens for your wake word and voice commands.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>NEXUS reads hand gestures from the camera for cursor control.</string>
+    <key>NSScreenRecordingUsageDescription</key>
+    <string>NEXUS analyses the screen you are looking at to answer "what's on my screen" and to ground clicks by name.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>NEXUS asks your browser for the URL of the tab you are viewing and controls media playback.</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.nexus.assistant</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>nexus-dev</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>
