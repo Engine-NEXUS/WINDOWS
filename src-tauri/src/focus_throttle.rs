@@ -1263,7 +1263,7 @@ mod real_process_tests {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .stdin(std::process::Stdio::null())
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .creation_flags(0x0800_0000 | 0x0000_0020) // CREATE_NO_WINDOW + NORMAL_PRIORITY_CLASS (a child of a below-normal parent, such as a CI runner, otherwise inherits that class)
             .spawn()
             .expect("ping.exe must exist on Windows");
         Child(c)
