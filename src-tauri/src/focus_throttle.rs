@@ -1268,6 +1268,15 @@ mod real_process_tests {
             .expect("ping.exe must exist on Windows");
         Child(c)
     }
+    /// An elevated test process (the GitHub Windows runner is an administrator) starts elevated children, and lower() refuses
+    /// elevated processes on purpose, so the three tests that lower a real child cannot run there; they run on a normal user.
+    fn elevated_here() -> bool {
+        let yes = unsafe { process_token_elevated(windows::Win32::System::Threading::GetCurrentProcess()) };
+        if yes {
+            eprintln!("note: the test process is elevated, so its children are too and lower() refuses them by design; test skipped");
+        }
+        yes
+    }
     fn class_of(pid: u32) -> u32 {
         unsafe {
             let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).expect("open child");
@@ -1294,6 +1303,9 @@ mod real_process_tests {
 
     #[test]
     fn lowering_a_real_process_changes_it_and_restoring_puts_it_back_exactly() {
+        if elevated_here() {
+            return;
+        }
         let child = spawn_idle_child();
         let pid = child.0.id();
         assert_eq!(class_of(pid), NORMAL, "a fresh child starts at normal priority");
@@ -1318,6 +1330,9 @@ mod real_process_tests {
 
     #[test]
     fn restore_refuses_a_reused_pid_and_never_touches_the_wrong_process() {
+        if elevated_here() {
+            return;
+        }
         let child = spawn_idle_child();
         let pid = child.0.id();
         let mut lowered = lower(pid).expect("lowerable");
@@ -1330,6 +1345,9 @@ mod real_process_tests {
 
     #[test]
     fn a_dead_process_cannot_be_lowered_or_restored_and_nothing_panics() {
+        if elevated_here() {
+            return;
+        }
         let child = spawn_idle_child();
         let pid = child.0.id();
         let lowered = lower(pid).expect("lowerable while alive");
