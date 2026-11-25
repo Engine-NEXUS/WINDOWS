@@ -51,6 +51,8 @@ pub mod proactive_policy{
  pub fn link_alert(_:&str,_:&str){}
  pub fn submit_event<R:super::Runtime>(_:&super::AppHandle<R>,id:String,_:String,_:super::google::types::AlertUrgency,_:Option<String>){super::CALLS.lock().unwrap().push(format!("speech:{id}"));}
 }
+// Boundary only: the real rule lives in agent_attention.rs (needs the whole app); a lifecycle receipt is never suppressed here.
+pub mod agent_attention{pub fn receipt_already_told(_complete:bool,_agent:&str,_stop_ms:Option<u64>)->bool{false}}
 pub mod notify_hub{
  pub fn publish_agent_task<R:super::Runtime>(_:&super::AppHandle<R>,_:&str,_:&str,_:Option<&str>,receipt:&str,_:&str)->Option<String>{super::CALLS.lock().unwrap().push(format!("notice:{receipt}"));Some(receipt.into())}
 }
