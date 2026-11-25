@@ -26,6 +26,8 @@ const PILL_MIN_W: f64 = 64.0;
 const PANEL_W: f64 = 760.0;
 const PANEL_H: f64 = 430.0;
 const TOP_GAP: f64 = 6.0;
+/// Extra width of the pill while it says "<agent> finished" (the page's FINISH_W).
+pub const FINISH_W: f64 = 156.0;
 /// Cursor margin around the drawn island that still counts as "on the island", logical px. The same zone decides hover
 /// (expand) and which clicks the island takes, so it is kept small: the island sits at the top centre of the screen,
 /// where a browser's tab strip and address bar are, and a wide invisible halo there swallowed clicks meant for them
@@ -138,10 +140,15 @@ impl Sm {
 
 /// Logical size of what is DRAWN for a mode, a number of distinct agent logos and the size setting.
 pub fn size_for(mode: Mode, logos: usize, scale: f64) -> (f64, f64) {
+    size_for_notice(mode, logos, false, scale)
+}
+
+/// `size_for`, with the pill widened while it carries the "<agent> finished" text.
+pub fn size_for_notice(mode: Mode, logos: usize, finished: bool, scale: f64) -> (f64, f64) {
     let s = clamp_scale(scale);
     match mode {
         Mode::Expanded => (PANEL_W * s, PANEL_H * s),
-        _ => ((PILL_PAD * 2.0 + LOGO_W * logos.clamp(1, 8) as f64).max(PILL_MIN_W) * s, PILL_H * s),
+        _ => (((PILL_PAD * 2.0 + LOGO_W * logos.clamp(1, 8) as f64).max(PILL_MIN_W) + if finished { FINISH_W } else { 0.0 }) * s, PILL_H * s),
     }
 }
 
@@ -151,8 +158,9 @@ pub fn window_size(scale: f64) -> (f64, f64) {
 }
 
 /// The drawn island's rectangle inside the window, in the same units as the inputs: horizontally centred, at the top.
-pub fn drawn_rect(win_x: f64, win_y: f64, win_w: f64, mode: Mode, logos: usize, scale: f64, dpi: f64) -> (f64, f64, f64, f64) {
-    let (lw, lh) = size_for(mode, logos, scale);
+#[allow(clippy::too_many_arguments)]
+pub fn drawn_rect_notice(win_x: f64, win_y: f64, win_w: f64, mode: Mode, logos: usize, finished: bool, scale: f64, dpi: f64) -> (f64, f64, f64, f64) {
+    let (lw, lh) = size_for_notice(mode, logos, finished, scale);
     let (w, h) = (lw * dpi, lh * dpi);
     (win_x + (win_w - w) / 2.0, win_y, w, h)
 }
@@ -247,13 +255,15 @@ pub struct Island {
     sm: Sm,
     shown: Mode,
     logos: usize,
+    /// Every agent on the pill has just finished: the pill is wider, it carries the text.
+    finished: bool,
     scale: f64,
     hidden_since: Option<u64>,
     ignoring: Option<bool>,
     hot: bool,
     was_inside: bool,
     /// The last snapshot summary, so the 33 ms hover tick can run without rebuilding the snapshot.
-    last: Option<(bool, usize, usize)>,
+    last: Option<(bool, usize, usize, bool)>,
     /// Current slide below the wake orb, logical px.
     y_off: f64,
 }
@@ -273,16 +283,17 @@ impl Island {
     /// A new snapshot (already without the agents the user is watching).
     pub fn update(&mut self, app: &AppHandle, snap: &Snapshot, hover: bool, scale: f64) {
         let wanted = !snap.sessions.is_empty() || !snap.approvals.is_empty();
-        self.last = Some((wanted, snap.approvals.len(), distinct_agents(snap)));
+        let finished = !snap.sessions.is_empty() && snap.sessions.iter().all(|s| s.state == crate::agent_monitor::State::Done);
+        self.last = Some((wanted, snap.approvals.len(), distinct_agents(snap), finished));
         self.tick(app, hover, scale);
     }
 
     /// The cheap part that must run often: the cursor, the hover state machine, the window's click-through state.
     pub fn tick(&mut self, app: &AppHandle, hover: bool, scale: f64) {
-        let Some((wanted, approvals, logos)) = self.last else { return };
+        let Some((wanted, approvals, logos, finished)) = self.last else { return };
         let scale = clamp_scale(scale);
         let now = crate::agent_hooks::now_ms();
-        let inside = self.shown != Mode::Hidden && cursor_inside(app, self.shown, logos, scale);
+        let inside = self.shown != Mode::Hidden && cursor_inside(app, self.shown, logos, finished, scale);
         let mode = self.sm.step(&In { now_ms: now, wanted, approvals, inside, hover });
         let hot = inside && mode == Mode::Collapsed;
         if inside != self.was_inside {
@@ -293,7 +304,7 @@ impl Island {
             tracing::info!("agent island: {:?} -> {:?} (cursor inside = {inside}, scale {scale})", self.shown, mode);
         }
         let payload = ModePayload { mode, by_approval: self.sm.by_approval(), scale, hot };
-        let changed = mode != self.shown || (scale - self.scale).abs() > f64::EPSILON || logos != self.logos || hot != self.hot;
+        let changed = mode != self.shown || (scale - self.scale).abs() > f64::EPSILON || logos != self.logos || finished != self.finished || hot != self.hot;
         if changed {
             self.hot = hot;
             *CURRENT.lock().unwrap_or_else(|e| e.into_inner()) = payload;
@@ -317,6 +328,7 @@ impl Island {
             }
             self.shown = mode;
             self.logos = logos;
+            self.finished = finished;
             self.scale = scale;
             let _ = app.emit_to(LABEL, "agent_island:mode", payload);
         } else if mode == Mode::Hidden {
@@ -448,7 +460,7 @@ fn set_click_through(win: &tauri::WebviewWindow, through: bool) -> Result<(), St
 }
 
 #[cfg(target_os = "windows")]
-fn cursor_inside(app: &AppHandle, mode: Mode, logos: usize, scale: f64) -> bool {
+fn cursor_inside(app: &AppHandle, mode: Mode, logos: usize, finished: bool, scale: f64) -> bool {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
     let Some(win) = app.get_webview_window(LABEL) else { return false };
@@ -459,17 +471,22 @@ fn cursor_inside(app: &AppHandle, mode: Mode, logos: usize, scale: f64) -> bool 
     if !unsafe { GetCursorPos(&mut pt) }.as_bool() {
         return false;
     }
-    let rect = drawn_rect(p.x as f64, p.y as f64, s.width as f64, mode, logos, scale, dpi);
+    let rect = drawn_rect_notice(p.x as f64, p.y as f64, s.width as f64, mode, logos, finished, scale, dpi);
     near(rect, pt.x as f64, pt.y as f64, MARGIN * dpi)
 }
 
 #[cfg(not(target_os = "windows"))]
-fn cursor_inside(_app: &AppHandle, _mode: Mode, _logos: usize, _scale: f64) -> bool {
+fn cursor_inside(_app: &AppHandle, _mode: Mode, _logos: usize, _finished: bool, _scale: f64) -> bool {
     false
 }
 
 #[cfg(test)]
 mod tests {
+    /// The pill without the finished text.
+    fn drawn_rect(win_x: f64, win_y: f64, win_w: f64, mode: Mode, logos: usize, scale: f64, dpi: f64) -> (f64, f64, f64, f64) {
+        drawn_rect_notice(win_x, win_y, win_w, mode, logos, false, scale, dpi)
+    }
+
     use super::*;
 
     fn input(now: u64, wanted: bool, approvals: usize, inside: bool) -> In {
@@ -562,6 +579,18 @@ mod tests {
         assert_eq!(clamp_scale(f64::NAN), DEFAULT_SCALE);
         assert_eq!(clamp_scale(1.2), 1.2);
         assert_eq!(size_for(Mode::Collapsed, 1, 99.0), size_for(Mode::Collapsed, 1, MAX_SCALE), "never beyond the limit");
+    }
+
+    #[test]
+    fn the_pill_is_wider_by_the_finished_text_and_only_then() {
+        let plain = size_for_notice(Mode::Collapsed, 2, false, 1.0);
+        let said = size_for_notice(Mode::Collapsed, 2, true, 1.0);
+        assert_eq!(plain, size_for(Mode::Collapsed, 2, 1.0));
+        assert_eq!(said.0, plain.0 + FINISH_W);
+        assert_eq!(said.1, plain.1);
+        assert_eq!(size_for_notice(Mode::Expanded, 2, true, 1.0), size_for(Mode::Expanded, 2, 1.0), "the panel is the same size");
+        assert!((size_for_notice(Mode::Collapsed, 2, true, 1.5).0 - said.0 * 1.5).abs() < 1e-9, "the size setting scales it");
+        assert!(PANEL_W > PILL_MIN_W + FINISH_W + LOGO_W * 8.0, "the widest pill still fits in the window");
     }
 
     #[test]

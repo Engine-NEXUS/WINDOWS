@@ -11,7 +11,8 @@ test('a finish is announced only once the shared lifecycle no longer sees the ag
  // a raw Stop hook is not an end: the loop defers while the lifecycle still sees work in progress
  const gate=s.indexOf('agent_lifecycle_runtime::busy_since(a.name(), started)');
  assert.ok(gate>0);
- assert.ok(gate<s.indexOf('stops.insert(a.name(), stop)'));
+ // (an earlier insert exists only for a finish already told by finish_now; the one that lets a finish be announced is the last)
+ assert.ok(gate<s.lastIndexOf('stops.insert(a.name(), stop)'));
  // and nothing is announced before that gate
  assert.ok(gate<s.indexOf('finished_line(a.label())'));
 });

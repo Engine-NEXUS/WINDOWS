@@ -1,0 +1,11 @@
+{
+  "file": "src-tauri/src/agent_watching.rs",
+  "test": "--lib -- --test-threads=1 agent_watching:: agent_monitor:: agent_attention:: agent_island::",
+  "results": [
+    {
+      "name": "a running session is given a finish notice",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1613:9: assertion `left == right` failed: a running session keeps no notice time"
+    }
+  ]
+}

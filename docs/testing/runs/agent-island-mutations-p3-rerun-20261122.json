@@ -1,0 +1,11 @@
+{
+  "file": "src-tauri/src/agent_watching.rs",
+  "test": "--lib -- --test-threads=1 agent_watching:: agent_monitor::",
+  "results": [
+    {
+      "name": "a closed connection is read as open",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1725:9: a hang-up was never noticed"
+    }
+  ]
+}

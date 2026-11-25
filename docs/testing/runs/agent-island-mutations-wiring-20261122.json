@@ -1,0 +1,41 @@
+{
+  "file": "src-tauri/src/agent_monitor.rs",
+  "test": "--lib -- --test-threads=1 agent_monitor:: agent_attention::",
+  "results": [
+    {
+      "name": "the loop sleeps a second while the island is up",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1772:9: assertion `left == right` failed: the island is up: the hover test"
+    },
+    {
+      "name": "an idle loop wakes every 150 ms",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1775:9: assertion `left == right` failed: idle"
+    },
+    {
+      "name": "a new permission card does not make the loop look at the windows",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1784:9: assertion failed: WindowsLook { approvals_changed: true, ..quiet }.due()"
+    },
+    {
+      "name": "a session never seen before is not looked at",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1783:9: assertion failed: WindowsLook { fresh_session: true, ..quiet }.due()"
+    },
+    {
+      "name": "the safety net never fires",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1788:9: the safety net: once a second even with no event"
+    },
+    {
+      "name": "a failed turn receipt is silenced as already told",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_attention.rs:731:9: a failure or an expired watch is still told"
+    },
+    {
+      "name": "the receipt is never silenced",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_attention.rs:730:9: assertion failed: receipt_already_told(true, \"receipttest\", Some(2_000_100))"
+    }
+  ]
+}

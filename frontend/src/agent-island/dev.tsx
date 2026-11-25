@@ -122,14 +122,15 @@ function Preview() {
       const i = cur.findIndex((s) => s.state !== "done");
       if (i < 0) return cur;
       const key = cur[i].key;
-      window.setTimeout(() => setSessions((c) => c.filter((s) => s.key !== key)), 1500);
+      window.setTimeout(() => setSessions((c) => c.filter((s) => s.key !== key)), 4000);
       return cur.map((s, j) =>
         j === i ? { ...s, state: "done" as AgentState, tool: null, steps: [...s.steps.map((x) => ({ ...x, state: "done" as const })), { tool: "Done", detail: null, state: "done" as const }] } : s,
       );
     });
   };
 
-  const request = (question: boolean) => {
+  const request = (kind: "bash" | "question" | "plan") => {
+    const question = kind === "question";
     const t = Date.now();
     const agent = sessions.find((s) => s.state !== "done")?.agent ?? "claude";
     if (!sessions.some((s) => s.state !== "done")) start(agent);
@@ -139,8 +140,8 @@ function Preview() {
         id: nextId++,
         agent,
         label: LABELS[agent] ?? agent,
-        tool: question ? "AskUserQuestion" : "Bash",
-        summary: question ? "" : "git push --force origin main && rm -rf node_modules",
+        tool: question ? "AskUserQuestion" : kind === "plan" ? "ExitPlanMode" : "Bash",
+        summary: question ? "" : kind === "plan" ? PLAN : "git push --force origin main && rm -rf node_modules",
         question: question
           ? { questions: [{ question: "Which database should I use?", options: [{ label: "Postgres" }, { label: "SQLite" }] }, { question: "Extras?", multiSelect: true, options: [{ label: "Migrations" }, { label: "Seed data" }, { label: "Tests" }] }] }
           : null,
@@ -188,8 +189,9 @@ function Preview() {
             + {LABELS[a]}
           </button>
         ))}
-        <button onClick={() => request(false)}>Permission request</button>
-        <button onClick={() => request(true)}>Question</button>
+        <button onClick={() => request("bash")}>Permission request</button>
+        <button onClick={() => request("plan")}>Plan to approve</button>
+        <button onClick={() => request("question")}>Question</button>
         <button onClick={finish}>Finish one agent</button>
         <button onClick={() => { setSessions([]); setApprovals([]); setExpanded(false); setWatched(new Set()); }}>Clear</button>
         <button
@@ -207,5 +209,29 @@ function Preview() {
     </>
   );
 }
+
+const PLAN = [
+  "# Plan: show the finish on the bar",
+  "",
+  "## Steps",
+  "1. Keep the **finished** session on the bar for 4 s",
+  "2. Say it once, with no toast",
+  "   - covers a failed turn",
+  "   - covers `fully_idle: false`",
+  "",
+  "| File | Change |",
+  "|------|--------|",
+  "| agent_monitor.rs | linger per session |",
+  "| AgentIslandApp.tsx | finished text |",
+  "",
+  "```rust",
+  "pub const FINISH_SHOW_MS: u64 = 4_000;",
+  "```",
+  "",
+  "> Risk: the pill is wider for a moment",
+  "",
+  "- [x] tests",
+  "- [ ] live check",
+].join(String.fromCharCode(10));
 
 createRoot(document.getElementById("root")!).render(<Preview />);

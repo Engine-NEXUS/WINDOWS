@@ -207,7 +207,10 @@ fn handle_conn(
             respond(&mut stream, 401, r#"{"error":"unauthorized"}"#);
             return None;
         }
-        let line = crate::agent_monitor::handle_approval(&req.query, &req.body);
+        // the agent stops its hook when the question is answered in the agent itself: the closed connection clears the card
+        let probe = stream.try_clone().ok();
+        let alive = move || probe.as_ref().is_none_or(|p| !crate::agent_monitor::peer_closed(p));
+        let line = crate::agent_monitor::handle_approval(&req.query, &req.body, &alive);
         respond(&mut stream, 200, &line);
         return None;
     }
@@ -419,6 +422,56 @@ mod agent_event_http_tests {
             "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         )
+    }
+
+    /// A real permission request over a real socket, the way the agent hook sends it.
+    fn approval_conn(session: &str) -> (std::thread::JoinHandle<Option<String>>, std::net::TcpStream) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_conn(stream, "trigger-token", "agent-token", |_| {})
+        });
+        let mut c = std::net::TcpStream::connect(addr).unwrap();
+        let body = format!(r#"{{"session_id":"{session}","tool_name":"Bash","tool_input":{{"command":"ls"}}}}"#);
+        c.write_all(post("/agent-approval?agent=claude", "agent-token", &body).as_bytes()).unwrap();
+        (server, c)
+    }
+
+    fn pending_for(session: &str) -> Option<u64> {
+        crate::agent_monitor::snapshot_now().approvals.iter().find(|a| a.agent == "claude" && a.summary == "ls" && crate::agent_monitor::approval_session_is(a.id, session)).map(|a| a.id)
+    }
+
+    fn wait_pending(session: &str) -> u64 {
+        for _ in 0..200 {
+            if let Some(id) = pending_for(session) {
+                return id;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the request never reached the bar");
+    }
+
+    #[test]
+    fn a_card_goes_when_the_agent_hangs_up_its_hook_and_the_agent_is_told_nothing() {
+        let (server, client) = approval_conn("hangup-1");
+        let id = wait_pending("hangup-1");
+        let t0 = std::time::Instant::now();
+        drop(client); // the agent was answered in its own terminal and stopped its hook
+        assert_eq!(server.join().unwrap(), None);
+        assert!(t0.elapsed() < std::time::Duration::from_secs(3), "gone at once, not after the 108 s wait");
+        assert!(!crate::agent_monitor::snapshot_now().approvals.iter().any(|a| a.id == id), "the card left the bar");
+    }
+
+    #[test]
+    fn a_click_on_the_bar_still_reaches_the_agent_through_the_same_door() {
+        let (server, mut client) = approval_conn("click-1");
+        let id = wait_pending("click-1");
+        assert!(crate::agent_monitor::agent_approval_decide(id, "allow".into()));
+        let mut out = String::new();
+        client.read_to_string(&mut out).unwrap();
+        server.join().unwrap();
+        assert!(out.contains("200") && out.contains("allow"), "{out}");
     }
 
     #[test]

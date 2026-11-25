@@ -15,8 +15,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
-/// A finished agent stays in the snapshot this long so the page can fade its logo out.
-pub const DONE_LINGER_MS: u64 = 1_500;
+/// A finished agent stays in the snapshot this long, only so the page can fade its logo out (it was 1,500 ms).
+pub const DONE_LINGER_MS: u64 = 300;
+/// An agent that finished while you were NOT looking at it stays on the bar this long, with a check and "<agent> finished":
+/// the bar is the notice, no toast is shown for it.
+pub const FINISH_SHOW_MS: u64 = 4_000;
 /// A "running" session that has said nothing for this long is treated as lost (a Stop that never arrived).
 pub const STALE_MS: u64 = 15 * 60_000;
 /// How long a permission request waits for a click before the agent is left to ask in its own terminal.
@@ -114,6 +117,10 @@ pub struct Session {
     pub started_ms: u64,
     pub updated_ms: u64,
     pub ended_ms: Option<u64>,
+    /// How long a finished session stays on the bar (the fade, or the "finished" notice).
+    pub linger_ms: u64,
+    /// The turn ended with an error.
+    pub failed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -288,6 +295,8 @@ impl Monitor {
             started_ms: now,
             updated_ms: now,
             ended_ms: None,
+            linger_ms: DONE_LINGER_MS,
+            failed: false,
         });
         self.sessions.len() - 1
     }
@@ -360,6 +369,8 @@ impl Monitor {
                     s.steps.remove(0);
                 }
                 s.ended_ms = Some(now);
+                s.linger_ms = DONE_LINGER_MS;
+                s.failed = false;
                 self.approvals.retain(|a| a.session_key != key);
             }
             Kind::End => unreachable!("handled above"),
@@ -412,20 +423,35 @@ impl Monitor {
     }
 
     /// Ids of the pending requests of `session_key` that an event proves were answered in the agent itself: every one when the
-    /// session starts a new turn, stops or ends; only the one for the same tool when that tool reports it finished.
+    /// session starts a new turn, stops, ends or starts its next tool call; only the one for the same tool when that tool
+/// reports it finished.
     pub fn answered_elsewhere(&self, session_key: &str, kind: &Kind, finished_tool: Option<&str>) -> Vec<u64> {
         let mine = self.approvals.iter().filter(|a| a.session_key == session_key);
         match kind {
             Kind::Prompt | Kind::Stop | Kind::End => mine.map(|a| a.id).collect(),
+            // A tool call starts only after the permission for the one before it was decided (one session asks one request at a
+            // time, and a call's own request comes AFTER its PreToolUse), so any card still pending was answered in the agent.
+            Kind::PreTool(_) => mine.map(|a| a.id).collect(),
             Kind::PostTool => mine.filter(|a| finished_tool.map(|t| t == a.tool).unwrap_or(true)).map(|a| a.id).collect(),
             _ => Vec::new(),
+        }
+    }
+
+    /// A session that has just stopped stays on the bar for `linger_ms`, drawn as finished (or failed).
+    pub fn show_finish(&mut self, key: &str, linger_ms: u64, failed: bool) {
+        if let Some(i) = self.index(key) {
+            let s = &mut self.sessions[i];
+            if !s.state.running() {
+                s.linger_ms = linger_ms;
+                s.failed = failed;
+            }
         }
     }
 
     pub fn prune(&mut self, now: u64) {
         let pending: Vec<String> = self.approvals.iter().map(|a| a.session_key.clone()).collect();
         self.sessions.retain(|s| match s.ended_ms {
-            Some(t) if !s.state.running() => now.saturating_sub(t) < DONE_LINGER_MS,
+            Some(t) if !s.state.running() => now.saturating_sub(t) < s.linger_ms,
             _ => pending.contains(&s.key) || now.saturating_sub(s.updated_ms) < STALE_MS,
         });
         self.approvals.retain(|a| now < a.deadline_ms + 5_000);
@@ -458,6 +484,7 @@ impl Monitor {
                     edit: s.edit.clone(),
                     started_ms: s.started_ms,
                     updated_ms: s.updated_ms,
+                    failed: s.failed && !s.state.running(),
                 })
                 .collect(),
             approvals: self
@@ -496,6 +523,7 @@ pub struct SessionView {
     pub edit: Option<EditView>,
     pub started_ms: u64,
     pub updated_ms: u64,
+    pub failed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -678,9 +706,35 @@ static MONITOR: Mutex<Monitor> = Mutex::new(Monitor::new());
 static WAITERS: Mutex<Vec<(u64, Arc<Slot>)>> = Mutex::new(Vec::new());
 static DIRTY: AtomicBool = AtomicBool::new(true);
 
+/// Wakes the loop at once instead of letting it finish its sleep (a hook event, a window event, a preview).
+static WAKE: OnceLock<tokio::sync::Notify> = OnceLock::new();
+fn wake() -> &'static tokio::sync::Notify {
+    WAKE.get_or_init(tokio::sync::Notify::new)
+}
+/// The windows changed (foreground, minimise, move): the watched set must be looked at again.
+static WINDOWS_DIRTY: AtomicBool = AtomicBool::new(true);
+/// What to do the moment an agent's turn ends. Set by `start` (it closes over the app handle); never set in unit tests, so
+/// nothing in a test run reaches the window-system code behind it.
+type FinishHook = Box<dyn Fn(Agent, String, u64, bool, bool) + Send + Sync>;
+static ON_FINISH: OnceLock<FinishHook> = OnceLock::new();
+
 /// Ask the loop for an immediate rebuild of the snapshot (the island preview uses it).
 pub fn mark_dirty() {
     DIRTY.store(true, Ordering::Relaxed);
+    wake().notify_one();
+}
+
+/// Called from the Win32 event hook: cheap, never blocks.
+pub fn poke_windows() {
+    WINDOWS_DIRTY.store(true, Ordering::Relaxed);
+    DIRTY.store(true, Ordering::Relaxed);
+    wake().notify_one();
+}
+
+/// Has this session started working again (a new prompt or tool) - so a Stop was not the end after all?
+pub fn session_resumed(key: &str) -> bool {
+    let m = lock_monitor();
+    m.index(key).is_some_and(|i| m.sessions[i].state.running())
 }
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
@@ -698,18 +752,85 @@ pub fn ingest(query: &str, body: &str) {
     if let Some(ev) = parse(query, body) {
         let tool = serde_json::from_str::<Value>(body).ok().and_then(|v| v.get("tool_name").and_then(|t| t.as_str()).map(|t| clean_token(t, 40)));
         let key = format!("{}:{}", ev.agent.name(), ev.session_id);
-        let answered = {
+        let now = crate::agent_hooks::now_ms();
+        // what the agent says about this stop (an error; background work still running): only a Stop carries it
+        let (failed, fully_idle) = if matches!(ev.kind, Kind::Stop) {
+            crate::agent_hooks::parse_event(query, body).map_or((false, None), |p| (p.info.ok == Some(false), p.info.fully_idle))
+        } else {
+            (false, None)
+        };
+        let finishing = matches!(ev.kind, Kind::Stop) && finish_is_immediate(&ev.agent, &ev.kind, true, fully_idle);
+        let watched = is_watched_agent(ev.agent.name());
+        let (answered, was_running) = {
             let mut m = lock_monitor();
             let ids = m.answered_elsewhere(&key, &ev.kind, tool.as_deref());
-            m.apply(&ev, crate::agent_hooks::now_ms());
-            ids
+            let was_running = m.index(&key).is_some_and(|i| m.sessions[i].state.running());
+            m.apply(&ev, now);
+            // an agent you were not looking at keeps its logo on the bar with the finish written next to it
+            if finishing && was_running && !watched {
+                m.show_finish(&key, FINISH_SHOW_MS, failed);
+            }
+            (ids, was_running)
         };
         // the user answered in the agent's own window: take the card off the bar and let the waiting hook go (it prints nothing)
         for id in answered {
             release_waiter(id);
         }
+        // a turn that was running just stopped: the bar drops it now and the finish is told now (see `agent_attention::finish_now`)
+        if finishing && was_running {
+            if let Some(hook) = ON_FINISH.get() {
+                hook(ev.agent, key.clone(), now, watched, failed);
+            }
+        }
         DIRTY.store(true, Ordering::Relaxed);
+        wake().notify_one();
     }
+}
+
+/// How long the loop sleeps (ms): fast while the island is up (the hover test) or a change waits out its guard time,
+/// the normal pace while something is running, and slow when idle. Hook and window events wake it sooner than any of these.
+pub(crate) fn tick_ms(island_visible: bool, change_waiting: bool, busy: bool) -> u64 {
+    if island_visible || change_waiting {
+        33
+    } else if busy {
+        150
+    } else {
+        1000
+    }
+}
+
+/// Everything that makes the loop look at the windows again. Looking costs a window list, so it is done only for one of these.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct WindowsLook {
+    /// Windows reported a foreground, minimise or move event.
+    pub windows_changed: bool,
+    /// A session the loop has not seen before (its window is found before the bar may show it).
+    pub fresh_session: bool,
+    /// A permission card appeared or went (a card for the agent you are in is handed back).
+    pub approvals_changed: bool,
+    /// A change is waiting out its guard time (the 100 ms show guard, the 400 ms hand-back).
+    pub change_waiting: bool,
+    pub since_last_look_ms: u64,
+}
+
+impl WindowsLook {
+    /// The safety net: even with no event the windows are looked at once a second.
+    pub(crate) const SAFETY_NET_MS: u64 = 1_000;
+
+    pub(crate) fn due(&self) -> bool {
+        self.windows_changed || self.fresh_session || self.approvals_changed || self.change_waiting || self.since_last_look_ms >= Self::SAFETY_NET_MS
+    }
+}
+
+/// Pure: does this event end a turn that the user was waiting for? A Stop of a session that was running, for any coding
+/// agent whose hook says the turn is over: Antigravity's Stop ends one invocation, so it counts only when the agent says
+/// it is fully idle; any agent that says background work is still running (`fully_idle` false) has not finished. A Stop
+/// for a session that never started, or a second Stop for the same turn, says nothing.
+pub(crate) fn finish_is_immediate(agent: &Agent, kind: &Kind, was_running: bool, fully_idle: Option<bool>) -> bool {
+    if !(matches!(kind, Kind::Stop) && was_running) || fully_idle == Some(false) {
+        return false;
+    }
+    *agent != Agent::Antigravity || fully_idle == Some(true)
 }
 
 /// The sentinel decision of a request that was answered somewhere else. Never accepted from the island's buttons.
@@ -726,6 +847,17 @@ fn release_waiter(id: u64) {
     }
 }
 
+/// Does this pending request belong to session `session_id` of Claude Code? (Test helper for the webhook round trip.)
+#[cfg(test)]
+pub fn approval_session_is(id: u64, session_id: &str) -> bool {
+    lock_monitor().approvals.iter().any(|a| a.id == id && a.session_key == format!("claude:{session_id}"))
+}
+
+/// (approval id, session key) of every request still waiting.
+fn pending_approvals() -> Vec<(u64, String)> {
+    lock_monitor().approvals.iter().map(|a| (a.id, a.session_key.clone())).collect()
+}
+
 pub fn snapshot_now() -> Snapshot {
     let now = crate::agent_hooks::now_ms();
     let mut m = lock_monitor();
@@ -734,6 +866,43 @@ pub fn snapshot_now() -> Snapshot {
 }
 
 /// Wait for the slot to be filled, up to `timeout`. Returns the decision, or `None` on timeout.
+/// How often a waiting request looks whether the agent has hung up (it was answered in the agent's own prompt).
+const ALIVE_CHECK: Duration = Duration::from_millis(150);
+
+/// `wait_for`, and it also returns (as answered elsewhere) the moment `alive` says the agent hung up on its hook: an
+/// agent that is answered in its own terminal stops its hook, and that closes the connection this request came in on.
+fn wait_for_alive(slot: &Slot, timeout: Duration, alive: &dyn Fn() -> bool) -> Option<String> {
+    let started = std::time::Instant::now();
+    loop {
+        let left = timeout.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            return slot.decision.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        }
+        if let Some(d) = wait_for(slot, left.min(ALIVE_CHECK)) {
+            return Some(d);
+        }
+        if !alive() {
+            return Some(ANSWERED_ELSEWHERE.to_string());
+        }
+    }
+}
+
+/// Has the other end of this connection gone away? (A peek that reads nothing: zero bytes or an error other than "would
+/// block" means closed.) The socket is put back to blocking mode at once, the reply is written on it later.
+pub fn peer_closed(stream: &std::net::TcpStream) -> bool {
+    if stream.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let mut one = [0u8; 1];
+    let closed = match stream.peek(&mut one) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+    };
+    let _ = stream.set_nonblocking(false);
+    closed
+}
+
 fn wait_for(slot: &Slot, timeout: Duration) -> Option<String> {
     let guard = slot.decision.lock().unwrap_or_else(|e| e.into_inner());
     let (guard, _) = slot.cv.wait_timeout_while(guard, timeout, |d| d.is_none()).unwrap_or_else(|e| e.into_inner());
@@ -751,7 +920,13 @@ pub struct ApprovalRequest {
 
 /// Show a permission request on the island and block until it is answered or `timeout` passes. `None` means
 /// "nobody decided": the caller prints nothing and the agent asks in its own terminal.
+#[cfg(test)]
 pub fn request_approval(req: ApprovalRequest, timeout: Duration) -> Option<String> {
+    request_approval_alive(req, timeout, &|| true)
+}
+
+/// As `request_approval`; `alive` is asked while it waits and says whether the agent is still holding its hook open.
+pub fn request_approval_alive(req: ApprovalRequest, timeout: Duration, alive: &dyn Fn() -> bool) -> Option<String> {
     if !ENABLED.load(Ordering::Relaxed) {
         return None;
     }
@@ -760,7 +935,7 @@ pub fn request_approval(req: ApprovalRequest, timeout: Duration) -> Option<Strin
     let slot = Arc::new(Slot { decision: Mutex::new(None), cv: Condvar::new() });
     lock_waiters().push((id, slot.clone()));
     DIRTY.store(true, Ordering::Relaxed);
-    let decision = wait_for(&slot, timeout);
+    let decision = wait_for_alive(&slot, timeout, alive);
     lock_waiters().retain(|(i, _)| *i != id);
     lock_monitor().remove_approval(id, crate::agent_hooks::now_ms());
     DIRTY.store(true, Ordering::Relaxed);
@@ -785,7 +960,7 @@ fn note_unanswered(label: &str) {
 
 /// The webhook's `/agent-approval` handler: the hook's stdin JSON in, the line the agent expects on stdout out
 /// (empty = print nothing).
-pub fn handle_approval(query: &str, body: &str) -> String {
+pub fn handle_approval(query: &str, body: &str, alive: &dyn Fn() -> bool) -> String {
     let Some(agent) = query_value(query, "agent").and_then(Agent::from_name) else { return String::new() };
     let reply_name = crate::agent_approval_reply::reply_agent(agent.name());
     if !crate::agent_approval_reply::takes_decisions(reply_name) {
@@ -803,7 +978,7 @@ pub fn handle_approval(query: &str, body: &str) -> String {
         tool,
         question: question.clone(),
     };
-    let decision = request_approval(req, APPROVAL_WAIT);
+    let decision = request_approval_alive(req, APPROVAL_WAIT, alive);
     crate::agent_approval_reply::stdout(reply_name, "PermissionRequest", decision.as_deref(), question.as_ref()).unwrap_or_default()
 }
 
@@ -885,6 +1060,7 @@ fn demo_snapshot(now: u64) -> Snapshot {
         edit: None,
         started_ms: now.saturating_sub(95_000),
         updated_ms: now,
+        failed: false,
     };
     let sessions = vec![
         s("demo:claude", "claude", "Claude Code", "zync", State::Working, Some("Edit")),
@@ -904,6 +1080,11 @@ pub fn start(app: tauri::AppHandle) {
     if let Ok(dir) = app.path().app_data_dir() {
         let _ = DIR.set(dir);
     }
+    {
+        let handle = app.clone();
+        let _ = ON_FINISH.set(Box::new(move |agent, key, stop_ms, watched, failed| crate::agent_attention::finish_now(handle.clone(), agent, key, stop_ms, watched, failed)));
+    }
+    crate::agent_watching::start_window_events();
     tauri::async_runtime::spawn(async move {
         let mut power = Power::default();
         let mut lease: Option<crate::keep_awake::KeepAwakeLease> = None;
@@ -915,16 +1096,32 @@ pub fn start(app: tauri::AppHandle) {
         let mut full_at = 0u64;
         let mut watch_at = 0u64;
         let mut procs_at = 0u64;
-        let mut procs: Vec<crate::session_observer::ProcSnap> = vec![];
+        // The process list is refreshed off the loop (every 3 s, or at once for a session never seen before), so the
+        // loop itself never waits for it between two window events.
+        let procs: Arc<Mutex<Vec<crate::session_observer::ProcSnap>>> = Arc::new(Mutex::new(vec![]));
+        let mut known_keys: std::collections::BTreeSet<String> = Default::default();
         let sampler = Arc::new(Mutex::new(crate::session_observer::ProcSampler::new()));
         let mut debounce = crate::agent_watching::Debounce::default();
+        let mut focus_hold = crate::agent_watching::FocusHold::default();
+        let mut last_approvals = 0usize;
         let mut watched: std::collections::BTreeSet<String> = Default::default();
         let own_pid = std::process::id();
         loop {
-            let busy = DIRTY.load(Ordering::Relaxed) || lock_monitor().running() > 0 || island.visible();
-            // the hover test needs a fast tick while the island is up; everything else keeps the old cadence
-            let tick = if island.visible() { 33 } else if busy { 150 } else { 1000 };
-            tokio::time::sleep(Duration::from_millis(tick)).await;
+            let running = lock_monitor().running();
+            // window events matter only while an agent session exists
+            crate::agent_watching::HOOK_WANTED.store(running > 0, Ordering::Relaxed);
+            let busy = DIRTY.load(Ordering::Relaxed) || running > 0 || island.visible();
+            // the hover test needs a fast tick while the island is up, and so does a window change that is waiting out
+            // its short guard time; everything else keeps the old cadence and is woken by events instead
+            let tick = tick_ms(island.visible(), debounce.pending() || focus_hold.waiting(), busy);
+            let woken = tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(tick)) => false,
+                _ = wake().notified() => true,
+            };
+            if woken {
+                // a burst of window events (a drag sends dozens) is answered once
+                tokio::time::sleep(Duration::from_millis(12)).await;
+            }
             let now = crate::agent_hooks::now_ms();
             if now.saturating_sub(settings_at) > 2_000 {
                 if let Some(dir) = DIR.get() {
@@ -949,16 +1146,36 @@ pub fn start(app: tauri::AppHandle) {
             };
             DIRTY.store(false, Ordering::Relaxed);
 
-            // which agents the user is already looking at (windows twice a second, processes every 3 s)
+            // which agents the user is already looking at: the windows are looked at again when Windows reports a change
+            // (foreground, minimise, move), while a change waits out its guard time, and once a second as a safety net;
+            // the process list is refreshed off the loop every 3 s
+            let windows_changed = WINDOWS_DIRTY.swap(false, Ordering::Relaxed);
             if cfg.hide_watched && !preview && !snap.sessions.is_empty() {
-                if now.saturating_sub(procs_at) >= 3_000 {
+                let keys_now: std::collections::BTreeSet<String> = snap.sessions.iter().map(|s| s.key.clone()).collect();
+                let fresh = keys_now.iter().any(|k| !known_keys.contains(k));
+                if fresh {
+                    // a session never seen before: its window can only be found with a current process list, so the
+                    // first look waits for one (the bar must not flash for an agent you are already in)
                     procs_at = now;
                     let sampler = sampler.clone();
                     if let Ok(p) = tauri::async_runtime::spawn_blocking(move || sampler.lock().map(|mut g| g.sample()).unwrap_or_default()).await {
-                        procs = p;
+                        *procs.lock().unwrap_or_else(|e| e.into_inner()) = p;
                     }
+                } else if now.saturating_sub(procs_at) >= 3_000 {
+                    procs_at = now;
+                    let (sampler, cache) = (sampler.clone(), procs.clone());
+                    tauri::async_runtime::spawn(async move {
+                        if let Ok(p) = tauri::async_runtime::spawn_blocking(move || sampler.lock().map(|mut g| g.sample()).unwrap_or_default()).await {
+                            *cache.lock().unwrap_or_else(|e| e.into_inner()) = p;
+                            WINDOWS_DIRTY.store(true, Ordering::Relaxed);
+                        }
+                    });
                 }
-                if now.saturating_sub(watch_at) >= 500 {
+                known_keys = keys_now;
+                let approvals_changed = snap.approvals.len() != last_approvals;
+                last_approvals = snap.approvals.len();
+                let look = WindowsLook { windows_changed, fresh_session: fresh, approvals_changed, change_waiting: debounce.pending() || focus_hold.waiting(), since_last_look_ms: now.saturating_sub(watch_at) };
+                if look.due() {
                     watch_at = now;
                     let refs: Vec<crate::agent_watching::SessionRef> = snap
                         .sessions
@@ -966,13 +1183,18 @@ pub fn start(app: tauri::AppHandle) {
                         .map(|s| crate::agent_watching::SessionRef { key: s.key.clone(), agent: s.agent.clone(), folder: s.folder.clone() })
                         .collect();
                     let keys: Vec<String> = refs.iter().map(|r| r.key.clone()).collect();
-                    let procs_now = procs.clone();
-                    let raw = tauri::async_runtime::spawn_blocking(move || {
+                    let procs_now = procs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let (raw, focused) = tauri::async_runtime::spawn_blocking(move || {
                         let (placed, screens, fg) = crate::agent_watching::snapshot_windows();
-                        crate::agent_watching::watched_now(&refs, &procs_now, &placed, &screens, fg, own_pid)
+                        (crate::agent_watching::watched_now(&refs, &procs_now, &placed, &screens, fg, own_pid), crate::agent_watching::focused_now(&refs, &procs_now, &placed, fg, own_pid))
                     })
                     .await
                     .unwrap_or_default();
+                    // a permission card for the agent you are typing in is handed back to it: it asks in its own terminal now
+                    for id in focus_hold.step(now, &focused, &pending_approvals()) {
+                        tracing::info!("agent island: you are in that agent's window, request {id} handed back to its own prompt");
+                        release_waiter(id);
+                    }
                     let next = debounce.step(now, &raw, &keys);
                     if next != watched {
                         tracing::info!("agent island: watching {:?}; showing {:?}", next, keys.iter().filter(|k| !next.contains(*k)).collect::<Vec<_>>());
@@ -982,6 +1204,9 @@ pub fn start(app: tauri::AppHandle) {
                 }
             } else {
                 watched.clear();
+                focus_hold = crate::agent_watching::FocusHold::default();
+                known_keys.clear();
+                WATCHED_NOW.lock().unwrap_or_else(|e| e.into_inner()).clear();
                 debounce = crate::agent_watching::Debounce::default();
             }
             let view = island_view(&snap, &watched);
@@ -1411,5 +1636,192 @@ mod tests {
         assert_eq!(decision, None, "the hook prints nothing: the agent already has its answer");
         assert!(t0.elapsed() < Duration::from_secs(3), "released at once, not after the timeout");
         assert!(!lock_monitor().approvals.iter().any(|a| a.session_key == "claude:elsewhere1"));
+    }
+}
+
+#[cfg(test)]
+mod finish_tests {
+    use super::*;
+
+    #[test]
+    fn a_stop_of_a_running_session_is_a_finish_for_every_coding_agent() {
+        for a in [Agent::Claude, Agent::Codex, Agent::OpenCode, Agent::Devin] {
+            assert!(finish_is_immediate(&a, &Kind::Stop, true, None), "{a:?}");
+        }
+        assert!(!finish_is_immediate(&Agent::Claude, &Kind::Stop, false, None), "a Stop for a session that was not running says nothing");
+        assert!(!finish_is_immediate(&Agent::Claude, &Kind::Prompt, true, None));
+    }
+
+    #[test]
+    fn background_work_still_running_is_not_a_finish_and_antigravity_must_say_it_is_idle() {
+        assert!(!finish_is_immediate(&Agent::Claude, &Kind::Stop, true, Some(false)), "the agent says work is still running");
+        assert!(!finish_is_immediate(&Agent::Antigravity, &Kind::Stop, true, None), "one invocation ended, not the task");
+        assert!(finish_is_immediate(&Agent::Antigravity, &Kind::Stop, true, Some(true)));
+    }
+
+    #[test]
+    fn an_agent_you_were_not_looking_at_stays_on_the_bar_as_finished_then_leaves() {
+        let mut m = Monitor::new();
+        let ev = |kind| Ev { agent: Agent::Codex, session_id: "c1".into(), cwd: None, kind };
+        m.apply(&ev(Kind::Prompt), 1_000_000);
+        m.apply(&ev(Kind::Stop), 1_000_100);
+        m.show_finish("codex:c1", FINISH_SHOW_MS, false);
+        let s = m.snapshot(1_000_200).sessions;
+        assert_eq!((s.len(), s[0].state, s[0].failed), (1, State::Done, false));
+        m.prune(1_000_100 + FINISH_SHOW_MS - 1);
+        assert_eq!(m.snapshot(1_000_100 + FINISH_SHOW_MS).sessions.len(), 1, "still on the bar");
+        m.prune(1_000_100 + FINISH_SHOW_MS);
+        assert!(m.snapshot(1_000_100 + FINISH_SHOW_MS).sessions.is_empty(), "gone after the notice");
+    }
+
+    #[test]
+    fn a_failed_turn_is_drawn_as_failed_and_a_new_prompt_clears_the_notice() {
+        let mut m = Monitor::new();
+        let ev = |kind| Ev { agent: Agent::Claude, session_id: "f1".into(), cwd: None, kind };
+        m.apply(&ev(Kind::Prompt), 2_000_000);
+        m.apply(&ev(Kind::Stop), 2_000_100);
+        m.show_finish("claude:f1", FINISH_SHOW_MS, true);
+        assert!(m.snapshot(2_000_200).sessions[0].failed);
+        m.apply(&ev(Kind::Prompt), 2_000_300);
+        let s = m.snapshot(2_000_400).sessions;
+        assert!(!s[0].failed && s[0].state == State::Thinking, "a running session is never shown as failed");
+    }
+
+    #[test]
+    fn only_an_agent_you_were_not_looking_at_keeps_its_logo_on_the_bar() {
+        let q = |e: &str| format!("agent=claude&event={e}");
+        let body = |id: &str| format!(r#"{{"session_id":"{id}","cwd":"C:/work/zync"}}"#);
+        let linger_of = |id: &str| lock_monitor().sessions.iter().find(|s| s.key == format!("claude:{id}")).map(|s| s.linger_ms);
+        // you are looking at it: it leaves with the finish
+        *WATCHED_NOW.lock().unwrap_or_else(|e| e.into_inner()) = vec!["claude:seen1".to_string()];
+        ingest(&q("start"), &body("seen1"));
+        ingest(&q("stop"), &body("seen1"));
+        assert_eq!(linger_of("seen1"), Some(DONE_LINGER_MS));
+        // you are elsewhere: it stays, written as finished
+        WATCHED_NOW.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        ingest(&q("start"), &body("away1"));
+        ingest(&q("stop"), &body("away1"));
+        assert_eq!(linger_of("away1"), Some(FINISH_SHOW_MS));
+        assert!(FINISH_SHOW_MS >= 3_000 && FINISH_SHOW_MS <= 6_000, "long enough to read, short enough to leave");
+        for id in ["seen1", "away1"] {
+            ingest(&q("end"), &body(id));
+        }
+    }
+
+    #[test]
+    fn the_next_tool_call_proves_an_earlier_card_was_answered_in_the_agent() {
+        let mut m = Monitor::new();
+        m.apply(&Ev { agent: Agent::Claude, session_id: "p1".into(), cwd: None, kind: Kind::Prompt }, 4_000_000);
+        let id = m.add_approval(Agent::Claude, "p1", None, "Bash".into(), "ls".into(), None, 4_000_001, APPROVAL_WAIT).unwrap();
+        assert_eq!(m.answered_elsewhere("claude:p1", &Kind::PreTool(ToolUse::named("Read")), Some("Read")), vec![id]);
+        assert!(m.answered_elsewhere("claude:other", &Kind::PreTool(ToolUse::named("Read")), Some("Read")).is_empty(), "another session says nothing");
+    }
+
+    #[test]
+    fn a_waiting_request_ends_when_the_agent_hangs_up() {
+        let slot = Slot { decision: Mutex::new(None), cv: Condvar::new() };
+        let t0 = std::time::Instant::now();
+        let hung_up = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|sc| {
+            sc.spawn(|| {
+                std::thread::sleep(Duration::from_millis(300));
+                hung_up.store(true, Ordering::Relaxed);
+            });
+            let d = wait_for_alive(&slot, Duration::from_secs(20), &|| !hung_up.load(Ordering::Relaxed));
+            assert_eq!(d.as_deref(), Some(ANSWERED_ELSEWHERE));
+        });
+        assert!(t0.elapsed() < Duration::from_secs(3), "released at once, not after the 20 s wait");
+        // a click still wins, and an agent that keeps holding on waits the whole time
+        *slot.decision.lock().unwrap() = Some("allow".into());
+        assert_eq!(wait_for_alive(&slot, Duration::from_secs(5), &|| true).as_deref(), Some("allow"));
+        let idle = Slot { decision: Mutex::new(None), cv: Condvar::new() };
+        assert_eq!(wait_for_alive(&idle, Duration::from_millis(350), &|| true), None);
+    }
+
+    #[test]
+    fn a_closed_connection_is_seen_and_an_open_one_is_not() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        assert!(!peer_closed(&server), "the agent is still holding its hook");
+        client.write_all(b"x").unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!peer_closed(&server), "data waiting is not a hang-up");
+        let mut s2 = server.try_clone().unwrap();
+        assert!(s2.write_all(b"reply").is_ok(), "the socket is back in blocking mode for the reply");
+        // the agent reads its reply and closes cleanly (a FIN, read as zero bytes), not with unread data (a reset)
+        let mut got = [0u8; 5];
+        std::io::Read::read_exact(&mut client, &mut got).unwrap();
+        assert_eq!(&got, b"reply");
+        // the byte it sent was never read by the server: read it so the close below is clean on this side too
+        let mut sink = [0u8; 1];
+        std::io::Read::read_exact(&mut &server, &mut sink).unwrap();
+        drop(client);
+        for _ in 0..50 {
+            if peer_closed(&server) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("a hang-up was never noticed");
+    }
+
+    #[test]
+    fn the_loop_sleeps_short_only_when_something_needs_a_quick_look() {
+        assert_eq!(tick_ms(true, false, true), 33, "the island is up: the hover test");
+        assert_eq!(tick_ms(false, true, true), 33, "a change waits out its guard time");
+        assert_eq!(tick_ms(false, false, true), 150, "an agent is running, window events wake it sooner");
+        assert_eq!(tick_ms(false, false, false), 1000, "idle");
+    }
+
+    #[test]
+    fn the_windows_are_looked_at_for_a_reason_and_never_for_none() {
+        let quiet = WindowsLook::default();
+        assert!(!quiet.due(), "nothing happened");
+        assert!(WindowsLook { windows_changed: true, ..quiet }.due());
+        assert!(WindowsLook { fresh_session: true, ..quiet }.due());
+        assert!(WindowsLook { approvals_changed: true, ..quiet }.due());
+        assert!(WindowsLook { change_waiting: true, ..quiet }.due());
+        let net = WindowsLook::SAFETY_NET_MS;
+        assert!(!WindowsLook { since_last_look_ms: net - 1, ..quiet }.due());
+        assert!(WindowsLook { since_last_look_ms: net, ..quiet }.due(), "the safety net: once a second even with no event");
+        assert!(net <= 1_000);
+    }
+
+    #[test]
+    fn a_session_still_running_is_never_given_a_finish_notice() {
+        let mut m = Monitor::new();
+        m.apply(&Ev { agent: Agent::Claude, session_id: "r1".into(), cwd: None, kind: Kind::Prompt }, 3_000_000);
+        m.show_finish("claude:r1", FINISH_SHOW_MS, true);
+        assert!(!m.snapshot(3_000_100).sessions[0].failed);
+        assert_eq!(m.sessions[0].linger_ms, DONE_LINGER_MS, "a running session keeps no notice time");
+        assert!(!m.sessions[0].failed);
+    }
+
+    #[test]
+    fn a_stop_followed_by_a_new_prompt_is_not_a_finish() {
+        let body = r#"{"session_id":"resume1","cwd":"C:/work/zync"}"#;
+        ingest("agent=claude&event=start", body);
+        assert!(session_resumed("claude:resume1"), "working");
+        ingest("agent=claude&event=stop", body);
+        assert!(!session_resumed("claude:resume1"), "stopped: nothing started it again");
+        ingest("agent=claude&event=start", body);
+        assert!(session_resumed("claude:resume1"), "a queued message started the next turn within the grace time");
+        ingest("agent=claude&event=end", body);
+        assert!(!session_resumed("claude:resume1"));
+        assert!(!session_resumed("claude:never-seen"));
+    }
+
+    #[test]
+    fn the_bar_drops_a_finished_agent_within_a_third_of_a_second() {
+        assert!(DONE_LINGER_MS <= 400);
+        let mut m = Monitor::new();
+        let ev = |kind| Ev { agent: Agent::Claude, session_id: "s1".into(), cwd: None, kind };
+        m.apply(&ev(Kind::Prompt), 1_000_000);
+        m.apply(&ev(Kind::Stop), 1_000_100);
+        assert_eq!(m.snapshot(1_000_101).sessions.len(), 1, "still there for the fade");
+        m.prune(1_000_100 + DONE_LINGER_MS);
+        assert!(m.snapshot(1_000_100 + DONE_LINGER_MS).sessions.is_empty());
     }
 }

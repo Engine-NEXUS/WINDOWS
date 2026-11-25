@@ -1,0 +1,121 @@
+{
+  "file": "src-tauri/src/agent_watching.rs",
+  "test": "--lib -- --test-threads=1 agent_watching:: agent_monitor:: agent_attention:: agent_island::",
+  "results": [
+    {
+      "name": "bar waits half a second before leaving when you open the window",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_watching.rs:498:9: hidden at once"
+    },
+    {
+      "name": "bar waits a second and a half before returning",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_watching.rs:509:9: the guard is a flicker filter, not a delay"
+    },
+    {
+      "name": "every move of a caret or child control wakes the monitor",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_watching.rs:520:9: the cursor and the caret move constantly"
+    },
+    {
+      "name": "window events wake the monitor with no agent running",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_watching.rs:520:9: with no agent running every event is ignored"
+    },
+    {
+      "name": "a change waiting out its guard time is not reported as pending",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_watching.rs:502:9: the caller is told to look again"
+    },
+    {
+      "name": "a finish is spoken to a user who is away",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_attention.rs:687:9: assertion `left == right` failed: away: the away log tells it on return, the settled path stays in charge"
+    },
+    {
+      "name": "a finish is spoken to a user looking at that agent",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_attention.rs:689:9: assertion `left == right` failed: watching: they saw it end, no line and no toast either"
+    },
+    {
+      "name": "a repeated Stop is spoken twice",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_attention.rs:694:9: assertion failed: !finish_now_plan(false, false, Some(FINISH_DUP_MS - 1)).speak"
+    },
+    {
+      "name": "a finish the user saw is still toasted by the settled path",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_attention.rs:689:9: assertion `left == right` failed: watching: they saw it end, no line and no toast either"
+    },
+    {
+      "name": "an agent that stopped with an error is told as finished",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_attention.rs:709:9: assertion `left == right` failed"
+    },
+    {
+      "name": "the grace before a finish is told is fifteen seconds",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_attention.rs:723:9: assertion failed: FINISH_GRACE_MS < 1_000"
+    },
+    {
+      "name": "the settled path and the receipt do not know a finish was told",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_attention.rs:729:9: assertion failed: fast_told_near(\"testagent\", 1_000_000)"
+    },
+    {
+      "name": "background work still running counts as a finish",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1553:9: the agent says work is still running"
+    },
+    {
+      "name": "an Antigravity invocation Stop counts as a finish",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1554:9: one invocation ended, not the task"
+    },
+    {
+      "name": "a Stop of a session that was not running is a finish",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1547:9: a Stop for a session that was not running says nothing"
+    },
+    {
+      "name": "a finished agent lingers on the bar for a second and a half",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1631:9: assertion failed: DONE_LINGER_MS <= 400"
+    },
+    {
+      "name": "the finished notice lasts a third of a second",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1601:9: long enough to read, short enough to leave"
+    },
+    {
+      "name": "the bar ignores the per-session notice time",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1568:9: assertion `left == right` failed: still on the bar"
+    },
+    {
+      "name": "a running session is drawn as failed",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1583:9: a running session is never shown as failed"
+    },
+    {
+      "name": "a running session is given a finish notice",
+      "status": "SURVIVED",
+      "detail": ""
+    },
+    {
+      "name": "an agent you are looking at keeps its logo on the bar",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1595:9: assertion `left == right` failed"
+    },
+    {
+      "name": "a session that started again after a Stop is not noticed",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_monitor.rs:1619:9: working"
+    },
+    {
+      "name": "the pill is not wider for the finished text",
+      "status": "KILLED",
+      "detail": "panicked at src\\agent_island.rs:562:9: assertion `left == right` failed"
+    }
+  ]
+}

@@ -13,10 +13,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// At least this share of a window must be visible for its agent to count as watched.
 pub(crate) const MIN_VISIBLE: f64 = 0.5;
-/// A newly watched agent leaves the island after this long (so passing through a window does not flash the bar).
-pub(crate) const WATCH_ON_MS: u64 = 500;
-/// A no-longer-watched agent appears on the island after this long (alt-tab and back must not flash it).
-pub(crate) const WATCH_OFF_MS: u64 = 1_500;
+/// A newly watched agent leaves the island at once: you opened its window, the bar has nothing to tell you.
+pub(crate) const WATCH_ON_MS: u64 = 0;
+/// A no-longer-watched agent appears on the island after this long. Only a guard against one frame of flicker while the
+/// foreground window changes twice in a row (alt-tab through a window). It was 1,500 ms.
+pub(crate) const WATCH_OFF_MS: u64 = 100;
 
 /// A top-level window with where it is, topmost first in the list that carries it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,7 +130,10 @@ pub(crate) fn is_agent_process(p: &ProcSnap, words: &[&str]) -> bool {
             cmd.split_once(' ').map_or("", |(_, r)| r)
         };
         let script = rest.split_whitespace().find(|a| !a.starts_with('-')).unwrap_or("").trim_matches('"');
-        return direct(script);
+        // A hidden folder in the path (`.claude`, `.codex`: where worktrees, settings and caches live) is not the agent: a dev
+        // server run from a `.claude` worktree is not Claude Code. Only the visible parts of the path are read.
+        let visible: Vec<&str> = script.split([std::path::MAIN_SEPARATOR, '/']).filter(|c| !c.starts_with('.')).collect();
+        return direct(&visible.join("/"));
     }
     false
 }
@@ -184,6 +188,51 @@ pub(crate) fn watched_now(
         .collect()
 }
 
+/// Session keys whose window is the FOREGROUND window right now: the user is typing in that agent.
+pub(crate) fn focused_now(sessions: &[SessionRef], procs: &[ProcSnap], placed: &[Placed], foreground: Option<isize>, own_pid: u32) -> BTreeSet<String> {
+    let Some(fg) = foreground else { return BTreeSet::new() };
+    let wins: Vec<TopWin> = placed.iter().map(|p| p.win.clone()).collect();
+    sessions.iter().filter(|s| session_window(s, procs, &wins, own_pid) == Some(fg)).map(|s| s.key.clone()).collect()
+}
+
+/// How long the user must stay in an agent's window before a permission card for that agent is handed back to it
+/// (alt-tab passing through the window must not take the card away).
+pub(crate) const FOCUS_RELEASE_MS: u64 = 400;
+
+/// A pending permission card whose agent window the user has been in for `FOCUS_RELEASE_MS` is handed back: the hook is
+/// released with no answer, so the agent asks in its own terminal at once, right where the user is, and the card leaves
+/// the bar. Safe in both cases of how the agent shows its own prompt (beside the hook or after it).
+#[derive(Debug, Default)]
+pub(crate) struct FocusHold {
+    since: BTreeMap<String, u64>,
+    waiting: bool,
+}
+
+impl FocusHold {
+    /// `focused` = sessions whose window is in front; `pending` = (approval id, session key). Returns the ids to hand back.
+    pub(crate) fn step(&mut self, now_ms: u64, focused: &BTreeSet<String>, pending: &[(u64, String)]) -> Vec<u64> {
+        self.since.retain(|k, _| focused.contains(k));
+        for k in focused {
+            self.since.entry(k.clone()).or_insert(now_ms);
+        }
+        let mut out = Vec::new();
+        self.waiting = false;
+        for (id, key) in pending {
+            match self.since.get(key) {
+                Some(s) if now_ms.saturating_sub(*s) >= FOCUS_RELEASE_MS => out.push(*id),
+                Some(_) => self.waiting = true,
+                None => {}
+            }
+        }
+        out
+    }
+
+    /// A card is waiting out its 400 ms: the caller must look again soon.
+    pub(crate) fn waiting(&self) -> bool {
+        self.waiting
+    }
+}
+
 /// Debounce: a session changes between watched and not watched only after the new state held for a while. A session
 /// seen for the first time takes its raw state at once (a freshly started agent appears without a delay).
 #[derive(Debug, Default)]
@@ -192,6 +241,11 @@ pub(crate) struct Debounce {
 }
 
 impl Debounce {
+    /// A change is waiting out its guard time, so the caller must look again soon even if no window event arrives.
+    pub(crate) fn pending(&self) -> bool {
+        self.state.values().any(|(_, since)| since.is_some())
+    }
+
     pub(crate) fn step(&mut self, now_ms: u64, raw: &BTreeSet<String>, keys: &[String]) -> BTreeSet<String> {
         self.state.retain(|k, _| keys.contains(k));
         for k in keys {
@@ -260,6 +314,72 @@ pub(crate) fn snapshot_windows() -> (Vec<Placed>, Vec<Rect>, Option<isize>) {
 pub(crate) fn snapshot_windows() -> (Vec<Placed>, Vec<Rect>, Option<isize>) {
     (vec![], vec![], None)
 }
+
+// ─── Window events: nothing is polled, the answer is recomputed when Windows says the windows changed ────────────────
+
+/// The monitor sets this while at least one agent session exists; with none, window events are ignored entirely.
+pub(crate) static HOOK_WANTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// How many of the three window event hooks Windows accepted (0 until the thread has tried).
+pub(crate) static HOOKS_INSTALLED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Pure: should this window event wake the monitor? A foreground change, a minimise or restore, and a move or resize of
+/// a top-level window (`id_object` 0 is the window itself; the caret, the cursor and every child control also send
+/// location events, thousands a second) - and only while something is watching.
+pub(crate) fn event_wakes(event: u32, id_object: i32, has_window: bool, wanted: bool) -> bool {
+    const FOREGROUND: u32 = 0x0003;
+    const MINIMIZE_START: u32 = 0x0016;
+    const MINIMIZE_END: u32 = 0x0017;
+    const LOCATION_CHANGE: u32 = 0x800B;
+    if !wanted {
+        return false;
+    }
+    match event {
+        FOREGROUND | MINIMIZE_START | MINIMIZE_END => true,
+        LOCATION_CHANGE => id_object == 0 && has_window,
+        _ => false,
+    }
+}
+
+/// Install the event hooks on a thread of their own (a hook needs a message loop). Windows only; call once.
+#[cfg(target_os = "windows")]
+pub(crate) fn start_window_events() {
+    use windows::Win32::Foundation::{HWND, HINSTANCE};
+    use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, GetMessageW, TranslateMessage, EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
+        EVENT_SYSTEM_MINIMIZESTART, MSG, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    };
+
+    // SAFETY: a WinEvent callback runs on the thread that installed it, between its GetMessage calls. It reads one
+    // atomic and calls `poke_windows`, which never blocks.
+    unsafe extern "system" fn on_event(_h: HWINEVENTHOOK, event: u32, hwnd: HWND, id_object: i32, _id_child: i32, _thread: u32, _time: u32) {
+        let wanted = HOOK_WANTED.load(std::sync::atomic::Ordering::Relaxed);
+        if event_wakes(event, id_object, hwnd.0 != 0, wanted) {
+            crate::agent_monitor::poke_windows();
+        }
+    }
+
+    let spawned = std::thread::Builder::new().name("agent-win-events".into()).spawn(|| unsafe {
+        let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
+        let a = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, HINSTANCE(0), Some(on_event), 0, 0, flags);
+        let b = SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, HINSTANCE(0), Some(on_event), 0, 0, flags);
+        let c = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, HINSTANCE(0), Some(on_event), 0, 0, flags);
+        tracing::info!("agent island: window event hooks installed (foreground {}, minimise {}, move {})", a.0 != 0, b.0 != 0, c.0 != 0);
+        HOOKS_INSTALLED.store([a.0, b.0, c.0].iter().filter(|h| **h != 0).count() as u8 + 1, std::sync::atomic::Ordering::Relaxed);
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, HWND(0), 0, 0).as_bool() {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("agent island: could not start the window event thread: {e}");
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn start_window_events() {}
 
 #[cfg(test)]
 mod tests {
@@ -395,6 +515,38 @@ mod tests {
     }
 
     #[test]
+    fn only_the_window_in_front_is_focused_not_one_that_is_merely_visible() {
+        let procs = vec![proc(10, 1, "windowsterminal.exe", ""), proc(11, 10, "node.exe", "node claude"), proc(20, 1, "code.exe", ""), proc(21, 20, "node.exe", "node codex")];
+        let p = vec![placed(1, 10, "windowsterminal.exe", "claude", r(0, 0, 960, 1080)), placed(2, 20, "code.exe", "codex", r(960, 0, 1920, 1080))];
+        let ss = vec![sess("claude:a", "claude", None), sess("codex:a", "codex", None)];
+        // a split screen: both are watched (visible), only the one in front is focused
+        assert_eq!(watched_now(&ss, &procs, &p, &[SCREEN], Some(2), 999).len(), 2);
+        let f = focused_now(&ss, &procs, &p, Some(2), 999);
+        assert!(f.contains("codex:a") && !f.contains("claude:a"), "{f:?}");
+        assert!(focused_now(&ss, &procs, &p, None, 999).is_empty());
+    }
+
+    #[test]
+    fn a_card_is_handed_back_after_the_user_stayed_in_the_agent_window() {
+        let mut h = FocusHold::default();
+        let focused: BTreeSet<String> = ["claude:a".to_string()].into();
+        let none: BTreeSet<String> = BTreeSet::new();
+        let pending = vec![(7u64, "claude:a".to_string()), (8u64, "codex:a".to_string())];
+        assert!(h.step(1_000, &focused, &pending).is_empty(), "just arrived");
+        assert!(h.waiting());
+        assert!(h.step(1_000 + FOCUS_RELEASE_MS - 1, &focused, &pending).is_empty());
+        assert_eq!(h.step(1_000 + FOCUS_RELEASE_MS, &focused, &pending), vec![7], "only the card of the agent you are in");
+        assert!(!h.waiting() || pending.len() == 2);
+        // passing through the window (alt-tab) and leaving restarts the clock
+        assert!(h.step(5_000, &none, &pending).is_empty());
+        assert!(h.step(5_100, &focused, &pending).is_empty());
+        assert!(h.step(5_100 + FOCUS_RELEASE_MS - 1, &focused, &pending).is_empty());
+        // nothing pending, nothing to hand back
+        assert!(h.step(9_000, &focused, &[]).is_empty());
+        assert!(!h.waiting());
+    }
+
+    #[test]
     fn a_split_screen_watches_both_agents() {
         let procs = vec![
             proc(10, 1, "windowsterminal.exe", ""),
@@ -418,23 +570,56 @@ mod tests {
     }
 
     #[test]
-    fn debounce_hides_after_half_a_second_and_shows_after_a_second_and_a_half() {
+    fn the_bar_leaves_the_moment_you_open_the_window_and_returns_within_a_tenth_of_a_second() {
         let mut d = Debounce::default();
         let keys = vec!["a".to_string()];
         let none: BTreeSet<String> = BTreeSet::new();
         let a: BTreeSet<String> = ["a".to_string()].into();
         // a brand-new session takes its raw state at once: unwatched = it shows right away
         assert!(d.step(0, &none, &keys).is_empty());
-        // the user opens its window: still shown until the watch has held WATCH_ON_MS
-        assert!(d.step(100, &a, &keys).is_empty());
-        assert!(d.step(100 + WATCH_ON_MS - 1, &a, &keys).is_empty());
-        assert!(d.step(100 + WATCH_ON_MS, &a, &keys).contains("a"));
+        assert!(!d.pending());
+        // the user opens its window: it is gone in the same step, no waiting
+        assert!(d.step(100, &a, &keys).contains("a"), "hidden at once");
+        assert_eq!(WATCH_ON_MS, 0);
         // an alt-tab away and back inside WATCH_OFF_MS never shows it
         assert!(d.step(2_000, &none, &keys).contains("a"));
+        assert!(d.pending(), "the caller is told to look again");
         assert!(d.step(2_000 + WATCH_OFF_MS - 1, &a, &keys).contains("a"));
+        assert!(!d.pending());
         assert!(d.step(2_000 + WATCH_OFF_MS, &none, &keys).contains("a"), "the timer restarted when it was watched again");
-        // staying away long enough shows it
-        assert!(d.step(2_000 + 2 * WATCH_OFF_MS + 1, &none, &keys).is_empty());
+        // leaving for good shows it after the short guard, not after a second and a half
+        assert!(d.step(2_000 + 2 * WATCH_OFF_MS - 1, &none, &keys).contains("a"));
+        assert!(d.step(2_000 + 2 * WATCH_OFF_MS, &none, &keys).is_empty(), "back on the bar after {WATCH_OFF_MS} ms");
+        assert!(WATCH_OFF_MS <= 150, "the guard is a flicker filter, not a delay");
+    }
+
+    /// The real thing: Windows accepts the three hooks (no desktop input is sent, nothing on screen changes).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_accepts_the_three_window_event_hooks() {
+        start_window_events();
+        for _ in 0..200 {
+            if HOOKS_INSTALLED.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // stored as installed + 1 so that 0 can mean "not tried yet"
+        assert_eq!(HOOKS_INSTALLED.load(std::sync::atomic::Ordering::Relaxed), 4, "foreground, minimise and move hooks");
+    }
+
+    #[test]
+    fn only_the_window_events_that_can_change_what_you_see_wake_the_monitor() {
+        const FOREGROUND: u32 = 0x0003;
+        const LOCATION: u32 = 0x800B;
+        const NAME_CHANGE: u32 = 0x800C;
+        assert!(event_wakes(FOREGROUND, 0, true, true));
+        assert!(event_wakes(0x0016, 0, true, true) && event_wakes(0x0017, 0, true, true), "minimise and restore");
+        assert!(event_wakes(LOCATION, 0, true, true), "a window moved or resized");
+        assert!(!event_wakes(LOCATION, -2, true, true), "the cursor and the caret move constantly");
+        assert!(!event_wakes(LOCATION, 0, false, true), "no window");
+        assert!(!event_wakes(NAME_CHANGE, 0, true, true), "a title change is not a layout change");
+        assert!(!event_wakes(FOREGROUND, 0, true, false), "with no agent running every event is ignored");
     }
 
     #[test]
@@ -454,6 +639,16 @@ mod tests {
         assert!(is_agent_process(&proc(7, 1, "codex.exe", r"c:\tools\codex.exe --flag"), words));
         assert!(is_agent_process(&proc(8, 1, "node.exe", r#""c:\program files\nodejs\node.exe" c:\npm\node_modules\@openai\codex\bin\codex.js exec"#), words));
         assert!(!is_agent_process(&proc(9, 1, "node.exe", "node.exe server.js --name codex"), words));
+    }
+
+    #[test]
+    fn a_dev_server_run_from_a_dot_claude_worktree_is_not_claude_code() {
+        // found by the live probe on the owner's laptop: this vite server was taken for the agent
+        let words = crate::session_observer::agent_words("claude");
+        let vite = proc(10, 1, "node.exe", r"node d:\windows\.claude\worktrees\screen-tour\frontend\node_modules\.bin\..\vite\bin\vite.js --port 5174");
+        assert!(!is_agent_process(&vite, words));
+        let cli = proc(11, 1, "node.exe", r#""c:\program files\nodejs\node.exe" c:\users\me\appdata\roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js"#);
+        assert!(is_agent_process(&cli, words), "the real Claude Code script still counts");
     }
 
     #[test]

@@ -1,0 +1,56 @@
+{
+  "file": "src-tauri/src/agent_monitor.rs",
+  "cwd": "src-tauri",
+  "targetDir": "D:/nexus-screen-target",
+  "testArgs": [
+    "--lib",
+    "--",
+    "--test-threads=1",
+    "agent_monitor::",
+    "agent_attention::"
+  ],
+  "mutations": [
+    {
+      "name": "the loop sleeps a second while the island is up",
+      "file": "src-tauri/src/agent_monitor.rs",
+      "find": "    if island_visible || change_waiting {\n        33",
+      "replace": "    if change_waiting {\n        33"
+    },
+    {
+      "name": "an idle loop wakes every 150 ms",
+      "file": "src-tauri/src/agent_monitor.rs",
+      "find": "    } else {\n        1000\n    }",
+      "replace": "    } else {\n        150\n    }"
+    },
+    {
+      "name": "a new permission card does not make the loop look at the windows",
+      "file": "src-tauri/src/agent_monitor.rs",
+      "find": "self.windows_changed || self.fresh_session || self.approvals_changed || self.change_waiting",
+      "replace": "self.windows_changed || self.fresh_session || self.change_waiting"
+    },
+    {
+      "name": "a session never seen before is not looked at",
+      "file": "src-tauri/src/agent_monitor.rs",
+      "find": "self.windows_changed || self.fresh_session ||",
+      "replace": "self.windows_changed ||"
+    },
+    {
+      "name": "the safety net never fires",
+      "file": "src-tauri/src/agent_monitor.rs",
+      "find": "|| self.since_last_look_ms >= Self::SAFETY_NET_MS",
+      "replace": "|| false"
+    },
+    {
+      "name": "a failed turn receipt is silenced as already told",
+      "file": "src-tauri/src/agent_attention.rs",
+      "find": "    complete && stop_ms.is_some_and(|s| fast_told_near(agent_name, s))",
+      "replace": "    stop_ms.is_some_and(|s| fast_told_near(agent_name, s))"
+    },
+    {
+      "name": "the receipt is never silenced",
+      "file": "src-tauri/src/agent_attention.rs",
+      "find": "    complete && stop_ms.is_some_and(|s| fast_told_near(agent_name, s))",
+      "replace": "    complete && stop_ms.is_some_and(|_| false)"
+    }
+  ]
+}
