@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Analyse Wave — NEXUS design review</title>
+<!-- Dev playground (served by `npm run dev` only, like reminder-showcase.html).
+     The "analyse my screen" wave: one burst of rings leaves the orb and covers the whole screen.
+     Review it here first; nothing in the app uses it yet. Black, white and grey only, like the orb. -->
+<style>
+  :root {
+    --capsule: #000;
+    --edge: rgba(255, 255, 255, .16);
+    --ease-orb: cubic-bezier(.22, 1, .36, 1);
+    --ui: "Segoe UI", system-ui, sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; font-family: var(--ui); background: #111; color: #eee; }
+
+  /* ---- the "desktop" the wave travels over (stands in for whatever is on the user's screen) ---- */
+  #desk { position: fixed; inset: 0; transition: background .4s; }
+  body[data-bg="light"] #desk { background: linear-gradient(135deg, #ececec, #d9d9d9); }
+  body[data-bg="dark"]  #desk { background: linear-gradient(135deg, #15171b, #0b0c0e); }
+  body[data-bg="busy"]  #desk { background: #f4f4f4; }
+  .win { position: absolute; border-radius: 10px; background: #fff; box-shadow: 0 10px 40px rgba(0,0,0,.18), 0 0 0 1px rgba(0,0,0,.08); display: none; overflow: hidden; }
+  body[data-bg="busy"] .win { display: block; }
+  .win i { display: block; height: 28px; background: #e8e8e8; border-bottom: 1px solid #d6d6d6; }
+  .win b { display: block; height: 8px; margin: 14px 16px 0; background: #dedede; border-radius: 4px; }
+  .win b:nth-child(odd) { width: 70%; } .win b:nth-child(3n) { width: 42%; background: #cfcfcf; }
+  #w1 { left: 5%; top: 22%; width: 38%; height: 56%; }
+  #w2 { left: 46%; top: 30%; width: 28%; height: 40%; }
+  #w3 { right: 3%; top: 18%; width: 20%; height: 62%; background: #1b1d22; }
+  #w3 b { background: #34373f; }
+
+  canvas#wave { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5; }
+
+  /* ---- orb capsule: obsidian #000, 10px corners, 1px edge, deep shadow (same as the real one) ---- */
+  #capsule {
+    position: fixed; left: 50%; top: 0; width: 220px; height: 104px; margin-left: -110px;
+    background: var(--capsule); border: 1px solid var(--edge); border-top: 0;
+    border-radius: 0 0 10px 10px; box-shadow: 0 14px 36px rgba(0,0,0,.45); z-index: 8;
+    display: grid; place-items: center;
+  }
+  body[data-pos="bottom"] #capsule { top: auto; bottom: 0; border-top: 1px solid var(--edge); border-bottom: 0; border-radius: 10px 10px 0 0; }
+  #orb { width: 76px; height: 76px; transform-origin: 50% 50%; }
+
+  /* ---- control panel ---- */
+  #panel {
+    position: fixed; right: 16px; bottom: 16px; width: 312px; z-index: 20; padding: 14px;
+    background: rgba(14,14,16,.92); border: 1px solid rgba(255,255,255,.14); border-radius: 12px;
+    backdrop-filter: blur(14px); font-size: 13px; line-height: 1.35; color: #e8e8e8;
+  }
+  body[data-pos="bottom"] #panel { top: 16px; bottom: auto; }
+  #panel h1 { font-size: 13px; margin: 0 0 2px; letter-spacing: .04em; text-transform: uppercase; }
+  #panel p.sub { margin: 0 0 12px; color: #9a9a9a; font-size: 12px; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 9px 0; }
+  .row label { width: 78px; color: #9a9a9a; flex: none; }
+  .row input[type=range] { flex: 1; accent-color: #fff; }
+  .row output { width: 46px; text-align: right; font-family: var(--mono); font-size: 12px; }
+  .seg { display: flex; flex: 1; border: 1px solid rgba(255,255,255,.18); border-radius: 8px; overflow: hidden; }
+  .seg button { flex: 1; padding: 6px 4px; border: 0; background: transparent; color: #bbb; font: inherit; font-size: 12px; cursor: pointer; }
+  .seg button[aria-pressed=true] { background: #fff; color: #000; font-weight: 600; }
+  #go { width: 100%; margin-top: 6px; padding: 11px; border: 0; border-radius: 9px; background: #fff; color: #000; font: inherit; font-weight: 700; font-size: 14px; cursor: pointer; }
+  #go:active { transform: scale(.985); }
+  #go:focus-visible, .seg button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+  #timeline { display: flex; gap: 4px; margin: 12px 0 2px; }
+  #timeline span { flex: 1; text-align: center; padding: 5px 0; font-size: 11px; border-radius: 6px; background: rgba(255,255,255,.07); color: #8a8a8a; transition: background .15s, color .15s; }
+  #timeline span.on { background: #fff; color: #000; font-weight: 600; }
+  #stats { font-family: var(--mono); font-size: 11px; color: #8a8a8a; margin-top: 8px; }
+  .hint { color: #7d7d7d; font-size: 11px; margin-top: 8px; }
+  kbd { font-family: var(--mono); font-size: 11px; background: rgba(255,255,255,.12); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body data-bg="busy" data-pos="top">
+<div id="desk">
+  <div class="win" id="w1"><i></i><b></b><b></b><b></b><b></b><b></b><b></b><b></b></div>
+  <div class="win" id="w2"><i></i><b></b><b></b><b></b><b></b></div>
+  <div class="win" id="w3"><i></i><b></b><b></b><b></b><b></b><b></b></div>
+</div>
+
+<canvas id="wave" aria-hidden="true"></canvas>
+
+<div id="capsule"><canvas id="orb" width="152" height="152"></canvas></div>
+
+<section id="panel" aria-label="Wave controls">
+  <h1>Analyse wave</h1>
+  <p class="sub">Say "analyse my screen": one burst leaves the orb and covers the screen.</p>
+
+  <div class="row"><label>Style</label>
+    <div class="seg" id="style">
+      <button data-v="rings" aria-pressed="true">Rings</button>
+      <button data-v="scan" aria-pressed="false">Scan</button>
+      <button data-v="glow" aria-pressed="false">Rings + edge</button>
+    </div></div>
+  <div class="row"><label>Backdrop</label>
+    <div class="seg" id="bg">
+      <button data-v="light" aria-pressed="false">Light</button>
+      <button data-v="dark" aria-pressed="false">Dark</button>
+      <button data-v="busy" aria-pressed="true">Busy</button>
+    </div></div>
+  <div class="row"><label>Orb dock</label>
+    <div class="seg" id="pos">
+      <button data-v="top" aria-pressed="true">Top</button>
+      <button data-v="bottom" aria-pressed="false">Bottom</button>
+    </div></div>
+  <div class="row"><label>Duration</label><input id="dur" type="range" min="700" max="2600" step="50" value="1400"><output id="durO">1400</output></div>
+  <div class="row"><label>Rings</label><input id="n" type="range" min="1" max="5" step="1" value="3"><output id="nO">3</output></div>
+  <div class="row"><label>Strength</label><input id="amp" type="range" min="20" max="100" step="5" value="80"><output id="ampO">80</output></div>
+  <div class="row"><label>Speed</label>
+    <div class="seg" id="speed">
+      <button data-v="1" aria-pressed="true">1×</button>
+      <button data-v="0.5" aria-pressed="false">0.5×</button>
+      <button data-v="0.25" aria-pressed="false">0.25×</button>
+    </div></div>
+  <div class="row"><label>Reduced</label>
+    <div class="seg" id="rm">
+      <button data-v="0" aria-pressed="true">Off</button>
+      <button data-v="1" aria-pressed="false">On (no travel)</button>
+    </div></div>
+
+  <button id="go">Analyse my screen</button>
+  <div id="timeline"><span id="p0">Capture</span><span id="p1">Wave</span><span id="p2">Analysing</span><span id="p3">Tour</span></div>
+  <div id="stats">frame –</div>
+  <div class="hint"><kbd>Space</kbd> replays · <kbd>B</kbd> backdrop · <kbd>T</kbd> dock</div>
+</section>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const wave = $("wave"), wctx = wave.getContext("2d");
+  const orb = $("orb"), octx = orb.getContext("2d");
+  const state = { style: "rings", dur: 1400, n: 3, amp: 0.8, speed: 1, reduced: false, t0: -1, hold: false };
+  const ease = (u) => 1 - Math.pow(1 - u, 3);            // easeOutCubic: fast start, long soft landing
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  let W = 0, H = 0, dpr = 1;
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    wave.width = Math.round(W * dpr); wave.height = Math.round(H * dpr);
+    wctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  addEventListener("resize", resize); resize();
+
+  /* The wave leaves from the orb's centre. */
+  const origin = () => ({ x: W / 2, y: document.body.dataset.pos === "bottom" ? H - 52 : 52 });
+  const farthest = (o) => Math.hypot(Math.max(o.x, W - o.x), Math.max(o.y, H - o.y)) * 1.04;
+
+  /* ---- the orb: a small white particle sphere (stand-in for the real WebGL orb) ---- */
+  const dots = Array.from({ length: 260 }, (_, i) => {
+    const y = 1 - (i / 259) * 2, r = Math.sqrt(1 - y * y), th = i * 2.399963;
+    return { x: Math.cos(th) * r, y, z: Math.sin(th) * r };
+  });
+  function drawOrb(now, pulse) {
+    octx.clearRect(0, 0, 152, 152);
+    const a = now / 1000 * 0.5, ca = Math.cos(a), sa = Math.sin(a), s = 62 * (1 - 0.1 * pulse);
+    octx.fillStyle = "#fff";
+    for (const d of dots) {
+      const x = d.x * ca - d.z * sa, z = d.x * sa + d.z * ca;
+      const k = 0.55 + 0.45 * ((z + 1) / 2);
+      octx.globalAlpha = k * (0.55 + 0.45 * pulse);
+      octx.beginPath(); octx.arc(76 + x * s, 76 + d.y * s, 1.3 * k + 0.4 * pulse, 0, 6.2832); octx.fill();
+    }
+    octx.globalAlpha = 1;
+  }
+
+  /* One ring: a thin front with a white core and a dark rim on both sides, so it reads on a light AND a dark screen. */
+  function ring(o, r, thick, alpha) {
+    if (alpha <= 0.003 || r < 1) return;
+    const inner = Math.max(0, r - thick * 1.6), outer = r + thick * 1.6;
+    const g = wctx.createRadialGradient(o.x, o.y, inner, o.x, o.y, outer);
+    const c = (a) => `rgba(255,255,255,${(a * alpha).toFixed(3)})`;
+    const d = (a) => `rgba(0,0,0,${(a * alpha).toFixed(3)})`;
+    g.addColorStop(0, "rgba(0,0,0,0)");
+    g.addColorStop(0.18, d(0.22));
+    g.addColorStop(0.42, c(0.55));
+    g.addColorStop(0.5, c(1));
+    g.addColorStop(0.58, c(0.55));
+    g.addColorStop(0.82, d(0.18));
+    g.addColorStop(1, "rgba(0,0,0,0)");
+    wctx.fillStyle = g;
+    wctx.beginPath(); wctx.arc(o.x, o.y, outer, 0, 6.2832); wctx.arc(o.x, o.y, inner, 0, 6.2832, true); wctx.fill("evenodd");
+  }
+
+  /* "Scan" style: a faint dot grid is revealed behind the front, then fades. */
+  function scanGrid(o, front, fade, amp) {
+    const step = 28, rad = 1.35;
+    wctx.save();
+    wctx.beginPath(); wctx.arc(o.x, o.y, front, 0, 6.2832); wctx.clip();
+    for (let y = step / 2; y < H; y += step) for (let x = step / 2; x < W; x += step) {
+      const dist = Math.hypot(x - o.x, y - o.y);
+      const near = clamp(1 - (front - dist) / 260, 0, 1);       // brightest right behind the front
+      const a = near * near * fade * amp;
+      if (a < 0.01) continue;
+      wctx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
+      wctx.fillRect(x - rad - 0.8, y - rad - 0.8, (rad + 0.8) * 2, (rad + 0.8) * 2);   // dark halo, for light screens
+      wctx.fillStyle = `rgba(0,0,0,${(a * 0.35).toFixed(3)})`;
+      wctx.beginPath(); wctx.arc(x, y, rad + 1.1, 0, 6.2832); wctx.fill();
+      wctx.fillStyle = `rgba(255,255,255,${Math.min(1, a * 1.6).toFixed(3)})`;
+      wctx.beginPath(); wctx.arc(x, y, rad, 0, 6.2832); wctx.fill();
+    }
+    wctx.restore();
+  }
+
+  /* Hold state for "Rings + edge": the screen border breathes softly while the model is thinking. */
+  function edgeGlow(strength) {
+    if (strength <= 0.003) return;
+    const m = 70, mk = (x0, y0, x1, y1, rx, ry, rw, rh) => {
+      const g = wctx.createLinearGradient(x0, y0, x1, y1);
+      g.addColorStop(0, `rgba(255,255,255,${(0.34 * strength).toFixed(3)})`);
+      g.addColorStop(1, "rgba(255,255,255,0)");
+      wctx.fillStyle = g; wctx.fillRect(rx, ry, rw, rh);
+    };
+    mk(0, 0, m, 0, 0, 0, m, H); mk(W, 0, W - m, 0, W - m, 0, m, H);
+    mk(0, 0, 0, m, 0, 0, W, m); mk(0, H, 0, H - m, 0, H - m, W, m);
+    wctx.strokeStyle = `rgba(0,0,0,${(0.22 * strength).toFixed(3)})`; wctx.lineWidth = 1;
+    wctx.strokeRect(0.5, 0.5, W - 1, H - 1);
+  }
+
+  const phases = [$("p0"), $("p1"), $("p2"), $("p3")];
+  const setPhase = (i) => phases.forEach((p, k) => p.classList.toggle("on", k === i));
+
+  function play() {
+    state.t0 = performance.now(); state.hold = false;
+    setPhase(0);
+  }
+
+  let last = 0, ema = 16;
+  function frame(now) {
+    ema += ((now - last) - ema) * 0.1; last = now;
+    wctx.clearRect(0, 0, W, H);
+    const o = origin();
+    let pulse = 0;
+
+    if (state.t0 >= 0) {
+      const spd = state.speed;
+      const e = (now - state.t0) * spd;                                // elapsed, in animation ms
+      const D = state.dur, lead = 140;                                 // orb "inhales" for 140 ms, then the wave leaves
+      pulse = e < lead ? e / lead : clamp(1 - (e - lead) / 380, 0, 1); // orb squeeze, then a soft release
+      setPhaseByTime(e, D);
+
+      if (state.reduced) {
+        // Reduced motion: no travelling wave. One calm wash that fades in and out.
+        const u = clamp((e - lead) / 600, 0, 1);
+        const a = Math.sin(u * Math.PI) * 0.16 * state.amp / 0.8;
+        if (a > 0) { wctx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`; wctx.fillRect(0, 0, W, H); }
+        if (e > lead + 650 && !state.hold) endBurst();
+      } else {
+        const Rmax = farthest(o), stagger = 110;
+        let alive = false;
+        for (let i = 0; i < state.n; i++) {
+          const u = (e - lead - i * stagger) / D;
+          if (u < 0) { alive = true; continue; }
+          if (u >= 1) continue;
+          alive = true;
+          const r = Rmax * ease(u);
+          const thick = 20 - 13 * u;                                    // the front thins as it travels
+          const a = Math.pow(1 - u, 1.35) * state.amp * (1 - i * 0.2);  // later rings are fainter
+          ring(o, r, thick, a);
+          if (i === 0 && state.style !== "rings") {
+            if (state.style === "scan") scanGrid(o, r, Math.pow(1 - u, 0.9), state.amp);
+          }
+        }
+        if (state.style === "glow") {
+          const t = (e - lead) / D;                                     // edge fades in as the first ring reaches the border
+          const k = clamp((t - 0.55) / 0.35, 0, 1);
+          const breath = 0.78 + 0.22 * Math.sin(now / 420);
+          edgeGlow(k * breath * state.amp / 0.8 * (state.hold ? 1 : 1));
+        }
+        if (!alive && !(state.style === "glow")) endBurst();
+        if (!alive && state.style === "glow") state.hold = true;        // keep the edge breathing until "Finish"
+      }
+    }
+    drawOrb(now, pulse);
+    document.getElementById("capsule").style.transform = `scale(${(1 - 0.03 * pulse).toFixed(4)})`;
+    $("stats").textContent = `frame ${ema.toFixed(1)} ms · ${(1000 / ema).toFixed(0)} fps · canvas ${wave.width}×${wave.height}`;
+    requestAnimationFrame(frame);
+  }
+
+  function setPhaseByTime(e, D) {
+    if (e < 140) setPhase(0);
+    else if (e < 140 + D) setPhase(1);
+    else setPhase(2);
+  }
+  function endBurst() { state.t0 = -1; setPhase(2); setTimeout(() => setPhase(3), 600); setTimeout(() => setPhase(-1), 1500); }
+
+  /* ---- controls ---- */
+  function seg(id, fn) {
+    const box = $(id);
+    box.addEventListener("click", (ev) => {
+      const b = ev.target.closest("button"); if (!b) return;
+      box.querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+      fn(b.dataset.v);
+    });
+  }
+  seg("style", (v) => { state.style = v; play(); });
+  seg("bg", (v) => { document.body.dataset.bg = v; });
+  seg("pos", (v) => { document.body.dataset.pos = v; play(); });
+  seg("speed", (v) => { state.speed = parseFloat(v); play(); });
+  seg("rm", (v) => { state.reduced = v === "1"; play(); });
+  const bind = (id, key, fmt) => $(id).addEventListener("input", (e) => {
+    const v = parseFloat(e.target.value); state[key] = fmt ? fmt(v) : v; $(id + "O").textContent = e.target.value; play();
+  });
+  bind("dur", "dur"); bind("n", "n"); bind("amp", "amp", (v) => v / 100);
+  $("go").addEventListener("click", play);
+  addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT") return;
+    if (e.code === "Space") { e.preventDefault(); play(); }
+    if (e.key === "b" || e.key === "B") { const o = ["light", "dark", "busy"]; document.body.dataset.bg = o[(o.indexOf(document.body.dataset.bg) + 1) % 3]; }
+    if (e.key === "t" || e.key === "T") { document.body.dataset.pos = document.body.dataset.pos === "top" ? "bottom" : "top"; play(); }
+  });
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) { state.reduced = true; seg; document.querySelectorAll("#rm button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === "1"))); }
+
+  requestAnimationFrame((t) => { last = t; frame(t); });
+  setTimeout(play, 500);                                                 // one burst on load so the page is never empty
+  window.__wave = { play, state };
+})();
+</script>
+</body>
+</html>
