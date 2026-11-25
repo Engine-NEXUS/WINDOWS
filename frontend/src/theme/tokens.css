@@ -173,6 +173,14 @@
   --stage-shadow-lg:     0 10px 34px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.14);
   /* The Agent Island code pane: a darker well with a small fixed syntax palette and diff colours (always dark,
      like every stage surface). */
+  /* the reminder card is black and white in every theme */
+  --stage-white-12: rgba(255, 255, 255, 0.12);
+  --stage-white-16: rgba(255, 255, 255, 0.16);
+  --stage-white-20: rgba(255, 255, 255, 0.2);
+  --stage-white-25: rgba(255, 255, 255, 0.25);
+  --stage-white-60: rgba(255, 255, 255, 0.6);
+  --stage-black-20: rgba(0, 0, 0, 0.2);
+  --stage-black-35: rgba(0, 0, 0, 0.35);
   --stage-code-bg:       #0d0e12;
   --stage-linenum:       #4b5160;
   --stage-syn-kw:        #c792ea;

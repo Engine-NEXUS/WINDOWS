@@ -137,6 +137,29 @@ pub fn decide(ev: &LeaveEvent, eta_secs: i64, now: i64, address: Option<&str>) -
     Some(Reminder { key: format!("{}:{}", ev.id, ev.start_epoch), urgency, text })
 }
 
+/// The countdown chip for a calendar event: kind "calendar", at the moment NEXUS will speak (the lead before the leave
+/// time). `None` when the trip time is not believable or the moment has already come (then `decide` speaks). Pure.
+pub fn leave_chip(ev: &LeaveEvent, eta_secs: i64, now: i64) -> Option<crate::reminder::ReminderEvent> {
+    if eta_secs <= 0 || eta_secs > MAX_ETA_SECS {
+        return None;
+    }
+    let alert_at = ev.start_epoch - eta_secs - BUFFER_SECS - LEAD_SECS;
+    if alert_at <= now {
+        return None;
+    }
+    let title: String = format!("Leave for {}", ev.summary).chars().take(crate::reminder::MAX_TITLE_CHARS).collect();
+    Some(crate::reminder::ReminderEvent {
+        id: format!("cal_{}", event_key(ev)).chars().take(64).collect(),
+        kind: "calendar".to_string(),
+        title,
+        at_ms: alert_at * 1000,
+        spoken: String::new(),
+        alert: format!("Time to leave for {}, sir.", ev.summary).chars().take(240).collect(),
+        source: "calendar".to_string(),
+        display: crate::reminder::Display::default(),
+    })
+}
+
 /// Stable per event and start time: a moved event reminds again, a re-read of the same event does not.
 pub fn event_key(ev: &LeaveEvent) -> String {
     format!("{}:{}", ev.id, ev.start_epoch)
@@ -220,6 +243,7 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
         let mut etas: HashMap<String, (i64, Instant)> = HashMap::new();
         let mut failed: HashMap<String, Instant> = HashMap::new();
         let mut fired: HashSet<String> = HashSet::new();
+        let mut chips: Vec<String> = vec![];
         loop {
             tokio::time::sleep(Duration::from_secs(TICK_SECS)).await;
             let Ok(dir) = app.path().app_data_dir() else { continue };
@@ -235,6 +259,9 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
             )
             .is_some()
             {
+                for id in std::mem::take(&mut chips) {
+                    crate::reminder::cancel(&app, &id);
+                }
                 continue;
             }
             let (Some(home), Some(acct)) = (home, acct) else { continue };
@@ -283,6 +310,23 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
                 let reminded = |k: &str| fired.contains(k) || already_fired(&dir, k);
                 due_reminders(&events, now, |id| etas.get(id).map(|(s, _)| *s), reminded, address.as_deref())
             };
+            // countdown chips for events whose leave time is known and still ahead; a moved or removed event loses its chip
+            let mut wanted: Vec<String> = vec![];
+            for ev in &events {
+                if fired.contains(&event_key(ev)) || ev.start_epoch - now > ETA_WINDOW_SECS {
+                    continue;
+                }
+                if let Some(chip) = etas.get(&ev.id).and_then(|(s, _)| leave_chip(ev, *s, now)) {
+                    wanted.push(chip.id.clone());
+                    crate::reminder::track(&app, chip);
+                }
+            }
+            for id in std::mem::take(&mut chips) {
+                if !wanted.contains(&id) {
+                    crate::reminder::cancel(&app, &id);
+                }
+            }
+            chips = wanted;
             for (k, r) in due {
                 fired.insert(k.clone());
                 mark_fired(&dir, &k);
@@ -294,6 +338,14 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
                 } else {
                     None
                 };
+                if let Some(ev) = events.iter().find(|e| event_key(e) == k) {
+                    if let Some(chip) = leave_chip(ev, 1, 0) {
+                        // only the id and wording matter here; the time is now
+                        let mut chip = chip;
+                        chip.at_ms = now * 1000;
+                        crate::reminder::fire_now(&app, chip, &r.text);
+                    }
+                }
                 crate::proactive_policy::submit(&app, alert_id.clone(), r.text.clone(), r.urgency);
                 if let Some(ev_id) = event_id {
                     crate::proactive_policy::link_alert(&alert_id, &ev_id);
@@ -333,6 +385,34 @@ mod tests {
             html_link: None,
             meet_url: None,
         }
+    }
+
+    #[test]
+    fn a_calendar_event_gets_a_chip_at_the_moment_nexus_will_speak() {
+        // starts in 60 min, 20 min trip: leave at 60-20-5 = 35 min, speak 5 min earlier = 30 min from now
+        let c = leave_chip(&ev(60 * 60), 20 * 60, NOW).unwrap();
+        assert_eq!(c.at_ms, (NOW + 30 * 60) * 1000);
+        assert_eq!((c.kind.as_str(), c.title.as_str(), c.source.as_str()), ("calendar", "Leave for Dentist", "calendar"));
+        assert_eq!(c.alert, "Time to leave for Dentist, sir.");
+        assert!(c.id.starts_with("cal_e1:"));
+        assert_eq!(crate::reminder::validate(&c, NOW * 1000, true), Ok(()));
+        // the same event with a longer trip speaks earlier, so its chip moves
+        assert!(leave_chip(&ev(60 * 60), 30 * 60, NOW).unwrap().at_ms < c.at_ms);
+        // when the moment has come `decide` speaks instead; no chip
+        assert!(leave_chip(&ev(30 * 60), 20 * 60, NOW).is_none());
+        // a wrong geocode or no trip time gives no chip
+        assert!(leave_chip(&ev(60 * 60), 0, NOW).is_none());
+        assert!(leave_chip(&ev(10 * 3600), MAX_ETA_SECS + 1, NOW).is_none());
+    }
+
+    #[test]
+    fn a_long_event_title_is_cut_for_the_chip_never_refused() {
+        let mut e = ev(3600);
+        e.summary = "x".repeat(200);
+        e.id = "y".repeat(100);
+        let c = leave_chip(&e, 600, NOW).unwrap();
+        assert_eq!((c.id.chars().count(), c.title.chars().count()), (64, 60));
+        assert_eq!(crate::reminder::validate(&c, NOW * 1000, true), Ok(()));
     }
 
     #[test]

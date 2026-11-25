@@ -672,3 +672,25 @@ mod tests {
         assert!(silent.iter().all(|f| f.is_none()));
     }
 }
+
+// ── Speaker check (Voice Lock) measurement ──────────────────────────────────
+
+/// Speaker embeddings from the live Voice Lock pipeline (same window, models and pooling as
+/// enrollment and the turn check), one per clip; `None` where a clip yields none.
+pub fn speaker_embeddings(clips: &[Vec<f32>]) -> anyhow::Result<Vec<Option<Vec<f32>>>> {
+    let resources = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+    crate::wakeword_oww::speaker_embeddings_each(&resources, clips)
+}
+
+/// The threshold enrollment would store for these clips (the app's own calibration rule).
+pub fn speaker_threshold(enrolled: &[Vec<f32>], held_out: &[Vec<f32>]) -> anyhow::Result<f32> {
+    crate::voice_profile::calibrate_owner_threshold(enrolled, held_out)
+}
+
+/// The score Voice Lock compares with the threshold: best cosine against the enrolled vectors.
+pub fn speaker_score(enrolled: &[Vec<f32>], embedding: &[f32]) -> f32 {
+    enrolled
+        .iter()
+        .map(|v| crate::voice_profile::cosine_similarity(v, embedding))
+        .fold(f32::NEG_INFINITY, f32::max)
+}

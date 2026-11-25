@@ -466,6 +466,18 @@ pub(crate) fn not_locked_now() -> bool {
 }
 
 /// Start the thread when this is the logon launch. Cheap and never blocks `run()`.
+/// Is the session locked right now? Windows only; false elsewhere. (Plan 193 will move this to `session_state.rs`.)
+pub(crate) fn is_session_locked() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        win::session_locked()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
 pub fn start_if_logon() {
     let Some(dir) = crate::app_dirs::nexus_data_dir() else { return };
     let cfg = read_settings(&dir);

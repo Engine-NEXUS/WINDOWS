@@ -736,13 +736,13 @@
     {
         "area": "Platform and quality",
         "feature": "Installer / release pipeline",
-        "tests": "-",
-        "B": 70,
-        "T": 30,
-        "L": 35,
-        "S": 60,
+        "tests": "19 node tests + 14 mutations (version sync, download pins); 34-check silent install/uninstall smoke script passed once in a clean Windows 11 Sandbox",
+        "B": 85,
+        "T": 55,
+        "L": 55,
+        "S": 65,
         "I": 50,
-        "note": "NSIS broken locally; MSI built; start-menu shortcut points at a stale exe."
+        "note": "2026-11-16 source pass (plan 194, change 198): family build by default, one Windows release workflow with checksums and a draft release, Python download pinned in the template (SHA-256 set, signature checked), unpinned 337 MB model download removed, shortcut repointing. 2026-11-17: the admin-variant installer (74,991,120 bytes, SHA-256 d3e4906e..., unsigned) installed and uninstalled cleanly in a fresh Windows Sandbox: 34 of 34 checks (files, Add/Remove entry, Publisher, nexus:// link, Start-menu shortcut, real Python 3.12, 9 pip packages, nothing left after uninstall). A first run crashed after the Python download (fixed by quiet curl output) and a second stalled while the Sandbox session was disconnected, so the 40-minute install time is NOT representative. Still open: app never launched after install, no upgrade-over-old-version test, family build not compiled, no signing or updater, pip packages are ranges (no exact lock), install time unmeasured."
     },
     {
         "area": "Desktop control",

@@ -415,6 +415,27 @@ pub fn decide_trip(t: &Trip, now: i64, address: Option<&str>) -> Option<String> 
     })
 }
 
+/// The moment NEXUS speaks this trip's reminder (5 minutes before the leave time), epoch milliseconds. Pure.
+pub fn trip_alert_at_ms(t: &Trip) -> i64 {
+    (t.arrive_epoch - t.eta_secs - TRIP_BUFFER_SECS - TRIP_LEAD_SECS) * 1000
+}
+
+/// The trip as the generic reminder event the stage draws. `now_ms` keeps a reminder that is due within seconds valid.
+/// `spoken` is what NEXUS said when it was set (empty when a reminder is restored after a restart). Pure.
+pub fn trip_event(t: &Trip, spoken: &str, now_ms: i64) -> crate::reminder::ReminderEvent {
+    let title: String = format!("Leave for {}", t.destination).chars().take(crate::reminder::MAX_TITLE_CHARS).collect();
+    crate::reminder::ReminderEvent {
+        id: t.id.clone(),
+        kind: "trip".to_string(),
+        title,
+        at_ms: trip_alert_at_ms(t).max(now_ms + 5_000),
+        spoken: spoken.chars().take(240).collect(),
+        alert: format!("Time to leave for {}, sir.", t.destination).chars().take(240).collect(),
+        source: "directions".to_string(),
+        display: crate::reminder::Display::default(),
+    }
+}
+
 /// Drop reminders whose arrival time is long past. Pure.
 pub fn prune_trips(trips: Vec<Trip>, now: i64) -> Vec<Trip> {
     trips.into_iter().filter(|t| t.arrive_epoch + TRIP_KEEP_SECS > now).take(MAX_TRIPS).collect()
@@ -765,23 +786,29 @@ pub async fn trip_reminder<R: Runtime>(app: AppHandle<R>, destination: String, a
         return say_and_finish(&app, request_id, format!("{destination} is about {} away, sir, so you'd be late if you're leaving for {} now. You'd need to leave right now.", minutes_phrase(mins), clock_of(arrive_epoch)));
     }
     let mut trips = prune_trips(load_trips(&path), now);
+    let replaced: Vec<String> = trips.iter().filter(|t| t.destination.eq_ignore_ascii_case(&dest)).map(|t| t.id.clone()).collect();
     trips.retain(|t| !t.destination.eq_ignore_ascii_case(&dest));
-    trips.push(Trip { id: format!("trip_{now}"), destination: dest.clone(), arrive_epoch, eta_secs, eta_at: now });
+    let trip = Trip { id: format!("trip_{now}"), destination: dest.clone(), arrive_epoch, eta_secs, eta_at: now };
+    trips.push(trip.clone());
     if let Err(e) = save_trips(&path, &trips) {
         tracing::warn!("directions: could not save the trip reminder: {e}");
         return say_and_finish(&app, request_id, "I couldn't save that reminder, sir.".into());
     }
-    say_and_finish(
-        &app,
-        request_id,
-        format!(
-            "Okay, sir. {destination} is about {} away, so leave by {} to be there at {}. I'll remind you {} minutes before.",
-            minutes_phrase(mins),
-            clock_of(leave_at),
-            clock_of(arrive_epoch),
-            TRIP_LEAD_SECS / 60
-        ),
-    )
+    let said = format!(
+        "Okay, sir. {destination} is about {} away, so leave by {} to be there at {}. I'll remind you {} minutes before.",
+        minutes_phrase(mins),
+        clock_of(leave_at),
+        clock_of(arrive_epoch),
+        TRIP_LEAD_SECS / 60
+    );
+    // The on-screen reminder is the universal one (crate::reminder): this feature only says what it is and when.
+    for id in replaced {
+        crate::reminder::cancel(&app, &id);
+    }
+    if let Err(e) = crate::reminder::announce(&app, trip_event(&trip, &said, now * 1000)) {
+        tracing::warn!("directions: the reminder was saved but could not be shown: {e}");
+    }
+    say_and_finish(&app, request_id, said)
 }
 
 /// Travel time in seconds from `here`: the Routes API with a key, otherwise the keyless estimate.
@@ -798,6 +825,15 @@ async fn trip_eta_secs<R: Runtime>(app: &AppHandle<R>, dest: &str, here: Fix) ->
 /// The once-a-minute check of saved trip reminders. Idle (one small file read) when there are none.
 pub fn start<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
+        // Chips for reminders set before this start come back without the roll animation.
+        if let Some(path) = trips_path(&app) {
+            let now = chrono::Utc::now().timestamp();
+            for t in prune_trips(load_trips(&path), now) {
+                if let Err(e) = crate::reminder::restore(&app, trip_event(&t, "", now * 1000)) {
+                    tracing::debug!("directions: not restoring {}: {e}", t.id);
+                }
+            }
+        }
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
             let Some(path) = trips_path(&app) else { continue };
@@ -807,6 +843,9 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
                 continue;
             }
             let mut trips = prune_trips(loaded.clone(), now);
+            for gone in loaded.iter().filter(|l| !trips.iter().any(|t| t.id == l.id)) {
+                crate::reminder::cancel(&app, &gone.id);
+            }
             let address = crate::memcore::wa::speak_address(&app);
             let mut fired: Vec<String> = vec![];
             for t in trips.iter_mut() {
@@ -817,11 +856,13 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
                         if let Some(secs) = trip_eta_secs(&app, &t.destination, here).await {
                             t.eta_secs = secs;
                             t.eta_at = now;
+                            crate::reminder::retime(&app, &t.id, trip_alert_at_ms(t));
                         }
                     }
                 }
                 if let Some(text) = decide_trip(t, now, address.as_deref()) {
                     tracing::info!("directions: trip reminder for {}", t.destination);
+                    crate::reminder::fired(&app, &t.id, Some(&text));
                     crate::proactive_policy::submit(&app, format!("tripreminder_{}", t.id), text, AlertUrgency::High);
                     fired.push(t.id.clone());
                 }
@@ -1020,6 +1061,28 @@ mod tests {
         assert!(late.starts_with("You're running late for the airport."), "{late}");
         assert_eq!(decide_trip(&t, NOW + 61 * 60, None), None);
         assert_eq!(decide_trip(&trip(3600, 0), NOW + 40 * 60, None), None);
+    }
+
+    #[test]
+    fn a_trip_is_shown_through_the_generic_reminder_event() {
+        const NOW: i64 = 1_800_000_000;
+        // arrive in 60 min, trip 20 min, buffer 5, lead 5: NEXUS speaks at +30 min
+        let t = trip(3600, 1200);
+        assert_eq!(trip_alert_at_ms(&t), (NOW + 30 * 60) * 1000);
+        let e = trip_event(&t, "Okay, sir.", NOW * 1000);
+        assert_eq!((e.kind.as_str(), e.source.as_str(), e.title.as_str()), ("trip", "directions", "Leave for the airport"));
+        assert_eq!((e.id.as_str(), e.spoken.as_str(), e.at_ms), ("t1", "Okay, sir.", (NOW + 30 * 60) * 1000));
+        assert_eq!(e.alert, "Time to leave for the airport, sir.");
+        assert_eq!(crate::reminder::validate(&e, NOW * 1000, true), Ok(()));
+        // a reminder due within seconds is still valid (the chip waits a few seconds instead of being refused)
+        let soon = trip(60, 1200);
+        let e2 = trip_event(&soon, "", NOW * 1000);
+        assert_eq!(e2.at_ms, NOW * 1000 + 5_000);
+        assert_eq!(crate::reminder::validate(&e2, NOW * 1000, true), Ok(()));
+        // a long destination cannot break the 60 character title limit
+        let mut long = trip(3600, 1200);
+        long.destination = "x".repeat(100);
+        assert_eq!(crate::reminder::validate(&trip_event(&long, "", NOW * 1000), NOW * 1000, true), Ok(()));
     }
 
     #[test]

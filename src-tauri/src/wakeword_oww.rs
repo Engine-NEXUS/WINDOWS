@@ -2514,6 +2514,10 @@ static WAKE_ENGINE_GLOBAL: once_cell::sync::Lazy<parking_lot::Mutex<Option<std::
 /// thread can monitor without accessing function-local statics.
 static CALLBACK_COUNT_GLOBAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static LAST_NONSILENT_FOR_RECOVERY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Number of microphone callbacks so far (read-only; used by the locked-screen probe, plan 193 L0).
+pub(crate) fn mic_callback_count() -> u64 {
+    CALLBACK_COUNT_GLOBAL.load(std::sync::atomic::Ordering::Relaxed)
+}
 static LAST_CALLBACK_FOR_RECOVERY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Tracks how many times the silence-recovery has restarted the stream.
@@ -4916,6 +4920,20 @@ pub(crate) fn enrollment_embeddings(resource_dir: &std::path::Path, clips: &[Vec
         extract_speaker_embedding(&mut features, clip)
             .ok_or_else(|| anyhow::anyhow!("Could not extract speaker embedding for clip {}", index + 1))
     }).collect()
+}
+
+/// One embedding per clip, `None` where a clip yields none (offline speaker probe; same path as Voice Lock).
+#[cfg(not(feature = "mock-wake"))]
+pub(crate) fn speaker_embeddings_each(resource_dir: &std::path::Path, clips: &[Vec<f32>]) -> anyhow::Result<Vec<Option<Vec<f32>>>> {
+    let oww_dir = engine::resolve_oww_dir(resource_dir)
+        .ok_or_else(|| anyhow::anyhow!("OWW models not found"))?;
+    let mut features = engine::AudioFeatures::new(&oww_dir)?;
+    Ok(clips.iter().map(|clip| extract_speaker_embedding(&mut features, clip)).collect())
+}
+
+#[cfg(feature = "mock-wake")]
+pub(crate) fn speaker_embeddings_each(_resource_dir: &std::path::Path, _clips: &[Vec<f32>]) -> anyhow::Result<Vec<Option<Vec<f32>>>> {
+    anyhow::bail!("Speaker embeddings are unavailable in a mock-wake build")
 }
 
 #[cfg(feature = "mock-wake")]

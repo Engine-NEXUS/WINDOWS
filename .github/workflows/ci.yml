@@ -66,6 +66,13 @@ jobs:
       - name: Sidebar view scope gate
         run: node ../scripts/check-sidebar-scopes.mjs --selftest && node ../scripts/check-sidebar-scopes.mjs
 
+      # Installer pipeline gates (plan 194): one version in three files, only allow-listed installer downloads.
+      - name: Installer gates (version sync, download pins) + their tests
+        run: |
+          node ../scripts/sync-version.mjs --check
+          node ../scripts/check-installer-pins.mjs
+          node --test ../scripts/sync-version.test.mjs ../scripts/check-installer-pins.test.mjs
+
       # The feature work cards are generated from scorecard-data.json; a hand edit or a stale card fails.
       - name: Work-card drift gate
         run: node ../scripts/make-work-cards.mjs --check
@@ -133,7 +140,7 @@ jobs:
 
   windows-installer:
     runs-on: windows-latest
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/phase-1')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
 
@@ -164,22 +171,43 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-      - name: Build Windows installer (.exe + .msi)
-        run: npx --yes @tauri-apps/cli build
+      # Same recipe as release.yml (scripts/build.ps1, family build) so a broken installer template is
+      # found on main, before a release tag.
+      - name: Build Windows installer (.exe + .msi), same recipe as release.yml
+        shell: pwsh
         env:
-          # NSIS installer + MSI installer both produced
-          TAURI_BUNDLE: "nsis,msi"
+          NEXUS_SERVER_URL: https://nexus-worker.chitkullakshya.workers.dev
+        run: pwsh ./scripts/build.ps1 -Bundles "nsis,msi"
 
       - name: Verify installers were created
         run: |
-          Get-ChildItem src-tauri\target\release\bundle\nsis\*.exe -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "NSIS: $($_.Name) — $([math]::Round($_.Length/1MB,1)) MB" }
-          Get-ChildItem src-tauri\target\release\bundle\msi\*.msi -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "MSI: $($_.Name) — $([math]::Round($_.Length/1MB,1)) MB" }
+          Get-ChildItem src-tauri\target-personal\release\bundle\nsis\*.exe -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "NSIS: $($_.Name) — $([math]::Round($_.Length/1MB,1)) MB" }
+          Get-ChildItem src-tauri\target-personal\release\bundle\msi\*.msi -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "MSI: $($_.Name) — $([math]::Round($_.Length/1MB,1)) MB" }
+
+      # Silent install, checks and uninstall on the runner (plan 194, P4). Informational (continue-on-error)
+      # until it has passed once on a real runner; then remove that line so a regression fails the build.
+      - name: Installer smoke test (silent install and uninstall)
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $i = Get-ChildItem src-tauri\target-personal\release\bundle\nsis\*.exe | Select-Object -First 1
+          powershell -ExecutionPolicy Bypass -File scripts\installer-smoke.ps1 -Installer $i.FullName -ReportPath installer-smoke-report.json
+          exit $LASTEXITCODE
+
+      - name: Upload installer smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-smoke-report
+          path: installer-smoke-report.json
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload Windows NSIS installer
         uses: actions/upload-artifact@v4
         with:
           name: nexus-windows-exe
-          path: src-tauri/target/release/bundle/nsis/*.exe
+          path: src-tauri/target-personal/release/bundle/nsis/*.exe
           if-no-files-found: warn
           retention-days: 7
 
@@ -187,7 +215,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: nexus-windows-msi
-          path: src-tauri/target/release/bundle/msi/*.msi
+          path: src-tauri/target-personal/release/bundle/msi/*.msi
           if-no-files-found: warn
           retention-days: 7
 
@@ -230,6 +258,11 @@ jobs:
       - name: Cargo check (shipped features, ALL targets incl. tests, examples, dev_tools)
         working-directory: src-tauri
         run: cargo check --all-targets --features custom-protocol,admin-brain
+
+      # The public installer is the FAMILY build (no admin-brain); it must compile and type-check on its own.
+      - name: Cargo check (family build features)
+        working-directory: src-tauri
+        run: cargo check --lib --features custom-protocol
 
       # rustc --force-warn dead_code sees through #[allow(dead_code)]; lib.rs only
       # publishes the modules in scripts/baselines/external-api.txt so unused pub
