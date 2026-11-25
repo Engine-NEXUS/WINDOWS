@@ -48,7 +48,7 @@ export function generalSystem(persona?: string): string {
       " Friend tone: use the user's first name when known, contractions, short warm replies, gentle situational lightness. Never say 'sir'."
     );
   }
-  return base;
+  return base + " Address the user as 'sir' when you address them at all, never by their name, even if memory contains it.";
 }
 
 /** Max chars of device memory a prompt may carry (Rust budget is 2000 + contract/tone lines). */

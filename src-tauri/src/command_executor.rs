@@ -953,6 +953,15 @@ pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String
             );
             return Ok(CommandResult { success: false, message });
         }
+        crate::app_registry::OpenAssessment::Pick { entries } => {
+            let choices: Vec<String> = entries.iter().map(|e| e.display_name.clone()).collect();
+            let message = crate::memcore::offer::pick_question(target, &choices);
+            crate::memcore::offer::set(
+                crate::memcore::offer::Offer::OpenAppPick { choices, spoken: target.trim().to_string() },
+                true,
+            );
+            return Ok(CommandResult { success: false, message });
+        }
         // Confident match: name it in the trace so the next live log
         // shows exactly which entry the gate approved before launching.
         crate::app_registry::OpenAssessment::Proceed(entry) => {
@@ -993,6 +1002,7 @@ pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String
 
         // PRIORITY 1: Focus existing window if app is already running
         if app_registry::try_focus_existing(&entry) {
+            app_registry::count_use(&entry);
             app_registry::record_usage(target);
             return Ok(CommandResult {
                 success: true,
@@ -1019,6 +1029,7 @@ pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String
         match app_registry::launch(&entry) {
             Ok(()) => {
                 app_registry::note_launched(&entry);
+                app_registry::count_use(&entry);
                 app_registry::record_usage(target);
                 return Ok(CommandResult {
                     success: true,

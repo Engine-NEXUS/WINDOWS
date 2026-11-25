@@ -91,6 +91,9 @@ export const FEATURES: Feature[] = [
   bool({ id: "hand-gestures-desktop", group: "Desktop control", title: "Hand Mode: desktop gestures", what: "Four-finger gestures for virtual desktops. Off until its threshold is checked.", key: "handGesturesDesktop", def: false, risk: "desktop", dependsOn: "handMode" }),
   bool({ id: "hand-focus", group: "Desktop control", title: "Hand Mode: Focus Mode", what: "Pauses background loops while Hand Mode runs.", key: "handFocusMode", def: true, dependsOn: "handMode" }),
   bool({ id: "hand-focus-apps", group: "Desktop control", title: "Hand Mode: lower heavy apps", what: "Lowers the priority of up to six heavy apps while Hand Mode runs.", key: "handFocusLowerApps", def: true, dependsOn: "handFocusMode" }),
+  bool({ id: "flows-live", group: "Desktop control", title: "Multi-step workflows", what: "Runs sentences like \"check the email and send a message on WhatsApp\". Asks once before anything is sent or opened. Off: only logs what it would do.", key: "flowsLive", def: false, risk: "desktop" }),
+  bool({ id: "flows-and-split", group: "Desktop control", title: "Treat \"and\" as a step break", what: "Lets \"check the email and send a message\" be two steps. Off: only \"then\" and \"after that\" split a command.", key: "flowsAndSplit", def: true, dependsOn: "flowsLive" }),
+  bool({ id: "flows-cloud-chooser", group: "Desktop control", title: "Understand reworded workflow requests (cloud)", what: "When a sentence mentions mail plus WhatsApp or Maps but the local check cannot place it, your own Groq or Gemini key picks the workflow. Only that sentence is sent.", key: "flowsCloudChooser", def: false, risk: "cloud", dependsOn: "flowsLive" }),
 
   // ── Memory and proactive ──
   bool({ id: "memcore", group: "Memory and proactive", title: "Memory Core", what: "The sealed memory store everything below builds on.", key: "memcore", def: true }),
@@ -117,6 +120,7 @@ export const FEATURES: Feature[] = [
   bool({ id: "notify-native", group: "Notifications", title: "Windows notifications", what: "Shows alerts in the Windows notification area.", key: "notifyNative", def: true }),
   bool({ id: "notify-toast", group: "Notifications", title: "NEXUS toast", what: "The small NEXUS card for alerts.", key: "notifyToast", def: true }),
   bool({ id: "notify-urgent", group: "Notifications", title: "Urgent alerts break through", what: "Critical alerts are spoken even when busy.", key: "notifyUrgent", def: true }),
+  bool({ id: "reminder-countdown", group: "Notifications", title: "Reminder countdown chip", what: "Keeps a small countdown chip beside the orb until a reminder fires.", key: "reminderCountdown", def: true }),
   bool({ id: "cr-open", group: "Notifications", title: "CodeRabbit: open failing review", what: "Opens the review when a PR check fails.", key: "coderabbitAutoOpen", def: true }),
   bool({ id: "cr-review", group: "Notifications", title: "CodeRabbit: review automatically", what: "Runs a review on new PRs. Sends the diff to a review service.", key: "coderabbitAutoReview", def: false, risk: "cloud" }),
 

@@ -1,0 +1,12 @@
+{"phrase":"have a look at my mail and then whatsapp ravi saying see you soon","flow":"mail_then_whatsapp"}
+{"phrase":"check for new emails and send priya a text on whatsapp saying hi","flow":"mail_then_whatsapp"}
+{"phrase":"scan my inbox and ping priya on whatsapp saying ok","flow":"mail_then_whatsapp"}
+{"phrase":"check email and send whatsapp to ravi saying test","flow":"mail_then_whatsapp"}
+{"phrase":"could you check my mail and message ravi on whatsapp saying hi","flow":"mail_then_whatsapp"}
+{"phrase":"check my mail and then show me where the venue in that email is on maps","flow":"mail_then_maps"}
+{"phrase":"read my email and open directions to the address in it","flow":"mail_then_maps"}
+{"phrase":"check the latest email and navigate to the address it mentions","flow":"mail_then_maps"}
+{"phrase":"send and receive emails on whatsapp web","flow":"none"}
+{"phrase":"check the email and maps apps are installed","flow":"none"}
+{"phrase":"read and write emails","flow":"none"}
+{"phrase":"ping and traceroute","flow":"none"}

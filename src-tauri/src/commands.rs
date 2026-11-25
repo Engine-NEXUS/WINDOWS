@@ -1985,6 +1985,16 @@ pub struct NexusSettings {
     /// Notice command sequences the user repeats and offer to save them as a one-phrase routine.
     #[serde(default = "default_memcore")]
     pub memcore_routines: bool,
+    /// Run multi-step workflows ("check the email and send ... on WhatsApp") for real. Off: the router only logs what it would do.
+    #[serde(default)]
+    pub flows_live: bool,
+    /// Treat "and" between two commands as a step break for workflows ("check the email and send ..."). Off: only "then" / "after that" split.
+    #[serde(default = "default_true")]
+    pub flows_and_split: bool,
+    /// When a reworded sentence touches two workflow areas but the local router cannot place it, ask the user's own
+    /// cloud model (Groq/Gemini key) which workflow it means. Only the sentence is sent; its answer is checked against it.
+    #[serde(default)]
+    pub flows_cloud_chooser: bool,
     /// Unattended shutdown after a watched coding session ends perfectly: "off" (default; nothing is ever powered off
     /// by itself), "dry" (practice: says what it would do, never does it) or "on" (a 30 second cancellable countdown).
     /// Anything else is read as "off". Changed by voice ("allow unattended shutdown").
@@ -2366,7 +2376,7 @@ impl Default for NexusSettings {
                 .to_string(),
             user_id: String::new(),
             device_id: String::new(),
-            tts_voice: "af_sky".to_string(),
+            tts_voice: "en-US-AvaNeural".to_string(),
             speech_rate: 1.15,
             tts_provider: "kokoro".to_string(),
             tts_volume: 75,
@@ -2451,6 +2461,9 @@ impl Default for NexusSettings {
             memcore_profile: default_memcore(),
             memcore_account_seed: default_memcore(),
             memcore_routines: default_memcore(),
+            flows_live: false,
+            flows_and_split: true,
+            flows_cloud_chooser: false,
             memcore_review: false,
             watch_power: default_watch_power(),
             agent_monitor: true,

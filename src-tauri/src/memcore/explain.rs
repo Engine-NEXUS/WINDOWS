@@ -85,6 +85,156 @@ pub fn extract_body_text(msg: &Value, max: usize) -> String {
     joined.chars().take(max).collect()
 }
 
+/// The decoded text/plain and text/html parts of a Gmail `format=full` message, untouched (links kept).
+fn message_parts(msg: &Value) -> (String, String) {
+    fn walk(p: &Value, plain: &mut String, html: &mut String) {
+        let mime = p.get("mimeType").and_then(|x| x.as_str()).unwrap_or("");
+        if let Some(data) = p.pointer("/body/data").and_then(|d| d.as_str()) {
+            if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(data.trim_end_matches('=')) {
+                let text = String::from_utf8_lossy(&bytes).to_string();
+                if mime == "text/plain" {
+                    plain.push_str(&text);
+                    plain.push('\n');
+                } else if mime == "text/html" {
+                    html.push_str(&text);
+                    html.push('\n');
+                }
+            }
+        }
+        if let Some(parts) = p.get("parts").and_then(|x| x.as_array()) {
+            for part in parts {
+                walk(part, plain, html);
+            }
+        }
+    }
+    let (mut plain, mut html) = (String::new(), String::new());
+    if let Some(payload) = msg.get("payload") {
+        walk(payload, &mut plain, &mut html);
+    }
+    (plain, html)
+}
+
+/// Words that mark a mail's footer (company address, legal lines). A Maps link there is the sender's office, not
+/// the place the mail is about (seen live: a Vercel notification's footer address).
+const FOOTER_MARKERS: &[&str] = &[
+    "unsubscribe", "all rights reserved", "\u{a9}", "&copy;", "privacy policy", "you are receiving", "you received this",
+    "manage preferences", "email preferences", "notification settings", "view in browser",
+];
+
+/// True when the text around `start..end` of `src` (600 bytes each side) carries footer markers.
+fn near_footer(src: &str, start: usize, end: usize) -> bool {
+    let mut lo = start.saturating_sub(600);
+    while lo > 0 && !src.is_char_boundary(lo) {
+        lo -= 1;
+    }
+    let mut hi = (end + 600).min(src.len());
+    while hi < src.len() && !src.is_char_boundary(hi) {
+        hi += 1;
+    }
+    let window = src[lo..hi].to_lowercase();
+    FOOTER_MARKERS.iter().any(|m| window.contains(m))
+}
+
+/// The place a mail points to: the first Google Maps link (links are read BEFORE the markup is stripped, because
+/// the link usually lives in an `href`), else a `Location:` / `Venue:` / `Address:` line. The result is
+/// untrusted text: the caller must still pass it through the Maps sink rule. Held in memory only.
+pub fn place_from_parts(plain: &str, html: &str) -> Option<String> {
+    static URL: Lazy<Regex> = Lazy::new(|| Regex::new(r#"https://[^\s"'<>)\]]+"#).unwrap());
+    for src in [html, plain] {
+        for m in URL.find_iter(src) {
+            let url = m.as_str().replace("&amp;", "&");
+            let url = url.trim_end_matches(['.', ',', ';']);
+            if crate::flows::is_allowed_maps_url(url).is_ok() && !near_footer(src, m.start(), m.end()) {
+                return Some(url.to_string());
+            }
+        }
+    }
+    let flat = strip_html(html);
+    for src in [plain, flat.as_str()] {
+        let mut offset = 0;
+        for raw_line in src.split_inclusive('\n') {
+            let line_start = offset;
+            offset += raw_line.len();
+            if near_footer(src, line_start, offset) {
+                continue;
+            }
+            let line = raw_line.trim();
+        let lower = line.to_lowercase();
+        for label in ["location:", "venue:", "address:", "where:", "place:"] {
+            if lower.starts_with(label) {
+                let value = line[label.len()..].trim();
+                let count = value.chars().count();
+                if (3..=120).contains(&count) && !value.contains("http") {
+                    return Some(value.to_string());
+                }
+            }
+        }
+        }
+    }
+    None
+}
+
+/// One header of a Gmail message ("From", "Subject"), e.g. to say where a piece of text came from.
+pub fn header_value(msg: &Value, name: &str) -> Option<String> {
+    msg.pointer("/payload/headers")?
+        .as_array()?
+        .iter()
+        .find(|h| h.get("name").and_then(|n| n.as_str()).map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false))
+        .and_then(|h| h.get("value").and_then(|v| v.as_str()))
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+pub fn extract_place(msg: &Value) -> Option<String> {
+    let (plain, html) = message_parts(msg);
+    place_from_parts(&plain, &html)
+}
+
+#[cfg(test)]
+mod place_tests {
+    use super::*;
+
+    #[test]
+    fn a_maps_link_inside_an_href_is_found_before_markup_is_stripped() {
+        let html = r#"<p>Join us <a href="https://maps.app.goo.gl/AbC123?g_st=ic">here</a> at 6.</p>"#;
+        assert_eq!(place_from_parts("", html).as_deref(), Some("https://maps.app.goo.gl/AbC123?g_st=ic"));
+        let amp = r#"<a href="https://www.google.com/maps/place/Hitech+City?a=1&amp;b=2">map</a>"#;
+        assert_eq!(place_from_parts("", amp).as_deref(), Some("https://www.google.com/maps/place/Hitech+City?a=1&b=2"));
+    }
+
+    #[test]
+    fn a_maps_link_in_the_footer_is_the_senders_office_not_the_place() {
+        let footer = "<p>Your deployment failed.</p><footer>Vercel Inc. <a href=\"https://www.google.com/maps/search/?api=1&amp;query=440+N+Barranca+Ave\">440 N Barranca Ave</a> &copy; 2026 All rights reserved. <a href=\"https://x.example/unsub\">Unsubscribe</a></footer>";
+        assert_eq!(place_from_parts("", footer), None);
+        let body = format!(
+            "<p>The meetup is at <a href=\"https://maps.app.goo.gl/Venue1\">the venue</a> on Friday.</p>{}{}",
+            "<p>filler text so the footer is far away from the invitation.</p>".repeat(20),
+            footer
+        );
+        assert_eq!(place_from_parts("", &body).as_deref(), Some("https://maps.app.goo.gl/Venue1"));
+        let plain = format!("Location: Hitech City, Hyderabad\n{}\nAcme Inc, Address: 1 Market St\nUnsubscribe here", "x\n".repeat(400));
+        assert_eq!(place_from_parts(&plain, "").as_deref(), Some("Hitech City, Hyderabad"));
+        assert_eq!(place_from_parts("Acme Inc. Address: 1 Market St. Unsubscribe | Privacy policy", ""), None);
+    }
+
+    #[test]
+    fn a_header_is_read_case_insensitively() {
+        let msg = serde_json::json!({"payload": {"headers": [{"name": "FROM", "value": " Acme <a@b.example> "}, {"name": "Subject", "value": ""}]}});
+        assert_eq!(header_value(&msg, "From").as_deref(), Some("Acme <a@b.example>"));
+        assert_eq!(header_value(&msg, "Subject"), None);
+        assert_eq!(header_value(&serde_json::json!({}), "From"), None);
+    }
+
+    #[test]
+    fn other_links_are_ignored_and_a_location_line_is_the_fallback() {
+        let html = r#"<a href="https://evil.example/maps">x</a>"#;
+        assert_eq!(place_from_parts("", html), None);
+        assert_eq!(place_from_parts("Hello\nLocation: Hitech City, Hyderabad\nBye", "").as_deref(), Some("Hitech City, Hyderabad"));
+        assert_eq!(place_from_parts("Venue: http://x.example/y", ""), None);
+        assert_eq!(place_from_parts("no place here", ""), None);
+    }
+}
+
 fn words_of(s: &str) -> Vec<String> {
     s.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(|w| w.to_lowercase()).collect()
 }

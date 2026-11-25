@@ -151,7 +151,7 @@ fn apply_main<R: Runtime>(app: &AppHandle<R>, d: Draft) {
     crate::window_manager::note_orb_rect(rect);
     let _ = app.emit("stage:orb_rect", rect);
     let _ = app.emit("stage:orb_visible", true);
-    crate::stage::set_hitbox_source(
+    crate::stage::set_hitbox_source_pinned(
         "orb",
         vec![crate::stage::StageRect { x: rect.x, y: rect.y, w: rect.w, h: rect.h }],
     );
@@ -164,7 +164,7 @@ fn apply_loading<R: Runtime>(app: &AppHandle<R>, d: Draft) {
     crate::window_manager::note_loading_rect(rect);
     let _ = app.emit("stage:loading_rect", rect);
     let _ = app.emit("stage:loading_visible", true);
-    crate::stage::set_hitbox_source(
+    crate::stage::set_hitbox_source_pinned(
         "loading",
         vec![crate::stage::StageRect { x: rect.x, y: rect.y, w: rect.w, h: rect.h }],
     );

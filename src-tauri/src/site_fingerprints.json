@@ -4237,8 +4237,8 @@
         {
           "kind": "script_text",
           "contains": "auth0",
-          "weight": 0.7,
-          "evidence": "auth0 in bundle"
+          "weight": 0.28,
+          "evidence": "auth0 in bundle (weak hint: needs a second signal)"
         },
         {
           "kind": "cookie",
@@ -5875,16 +5875,10 @@
       "website": "https://web.dev/progressive-web-apps",
       "signals": [
         {
-          "kind": "html",
-          "contains": "manifest.json",
-          "weight": 0.6,
-          "evidence": "manifest.json link"
-        },
-        {
           "kind": "link_href",
           "contains": "manifest.json",
-          "weight": 0.7,
-          "evidence": "manifest.json in link href"
+          "weight": 0.3,
+          "evidence": "manifest.json in link href (weak hint: a manifest alone is not an installable app)"
         },
         {
           "kind": "script_text",
