@@ -13,6 +13,7 @@
 import { useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ConfirmationData, useSidebar } from "./sidebarStore";
+import { ActionBar, Pill, SvButton, SvCard, SvChip, SvIcon } from "./kit/system";
 
 interface ConfirmationPanelProps {
   data: ConfirmationData;
@@ -92,142 +93,81 @@ export function ConfirmationPanel({ data, onClose }: ConfirmationPanelProps) {
 
   // Determine button label
   let confirmLabel = "Confirm";
-  if (isWhatsApp) confirmLabel = "Send Message";
-  else if (isSwiggy) confirmLabel = "Confirm Order";
-  else if (isGitHub) confirmLabel = "Confirm Action";
+  if (isWhatsApp) confirmLabel = "Send message";
+  else if (isSwiggy) confirmLabel = "Confirm order";
+  else if (isGitHub) confirmLabel = "Confirm action";
+
+  const appName = isWhatsApp ? "WhatsApp" : isSwiggy ? "Swiggy" : isAmazon ? "Amazon" : isGitHub ? "GitHub" : "Action";
+  const headline = isWhatsApp
+    ? `Send this message to ${params.recipient || "this contact"}?`
+    : isSwiggy
+    ? "Place this Swiggy request?"
+    : isGitHub
+    ? "Run this GitHub action?"
+    : "Confirm this action?";
 
   return (
-    <div className="confirmation-panel">
-      {/* ── Card Header ── */}
-      <div className="confirmation-header">
-        <div className="confirmation-badge">
-          {isWhatsApp ? (
-            <span className="badge-whatsapp">WhatsApp</span>
-          ) : isSwiggy ? (
-            <span className="badge-swiggy">Swiggy</span>
-          ) : isAmazon ? (
-            <span className="badge-amazon">Amazon</span>
-          ) : isGitHub ? (
-            <span className="badge-github">GitHub</span>
-          ) : (
-            <span className="badge-general">Action</span>
-          )}
-          <span className="badge-req">Approval Required</span>
+    <>
+      <SvCard>
+        <div className="sv-row" style={{ marginBottom: 12 }}>
+          <Pill tone="solid" icon={isWhatsApp ? "chat" : isGitHub ? "pr" : "shield"}>{appName}</Pill>
+          <Pill tone="outline" icon="shield">Approval required</Pill>
         </div>
-        <h3 className="confirmation-title">
-          {isWhatsApp
-            ? "Send WhatsApp Message"
-            : isSwiggy
-            ? "Swiggy Order Request"
-            : isGitHub
-            ? "GitHub Action Request"
-            : "Confirm Action"}
-        </h3>
-        <p className="confirmation-prompt">{data.prompt}</p>
-      </div>
+        <h2 className="sv-h">{headline}</h2>
+        {data.prompt ? <p className="sv-p" style={{ margin: "10px 0 14px" }}>{data.prompt}</p> : null}
 
-      {/* ── Structured Details ── */}
-      <div className="confirmation-details">
         {isWhatsApp && (
           <>
-            <div className="confirmation-field">
-              <span className="field-label">Recipient</span>
-              <span className="field-value field-recipient">{params.recipient || "Unknown Contact"}</span>
-            </div>
-            <div className="confirmation-field message-field">
-              <span className="field-label">Message</span>
-              <div className="field-message-bubble">
-                {params.message || "(empty message)"}
-              </div>
+            <div className="sv-bubble">{params.message || "(empty message)"}</div>
+            <div className="sv-row" style={{ marginTop: 14 }}>
+              <Pill icon="chat">To: {params.recipient || "Unknown contact"}</Pill>
             </div>
           </>
         )}
 
         {isGitHub && (
-          <>
-            {cmd.repo && (
-              <div className="confirmation-field">
-                <span className="field-label">Repository</span>
-                <span className="field-value font-mono">{cmd.repo}</span>
-              </div>
-            )}
-            {cmd.pr_number !== undefined && (
-              <div className="confirmation-field">
-                <span className="field-label">Pull Request</span>
-                <span className="field-value font-mono">#{cmd.pr_number}</span>
-              </div>
-            )}
-            {cmd.branch && (
-              <div className="confirmation-field">
-                <span className="field-label">Branch</span>
-                <span className="field-value font-mono">{cmd.branch}</span>
-              </div>
-            )}
-          </>
+          <div className="sv-row" style={{ marginTop: 6 }}>
+            {cmd.repo && <SvChip icon="repo">{cmd.repo}</SvChip>}
+            {cmd.pr_number !== undefined && <SvChip icon="pr">#{cmd.pr_number}</SvChip>}
+            {cmd.branch && <SvChip>{cmd.branch}</SvChip>}
+          </div>
         )}
 
         {isSwiggy && (
-          <div className="confirmation-field">
-            <span className="field-label">Action</span>
-            <span className="field-value">{tool.replace(/_/g, " ")}</span>
+          <div className="sv-row" style={{ marginTop: 6 }}>
+            <Pill>{tool.replace(/_/g, " ")}</Pill>
           </div>
         )}
 
         {!isWhatsApp && !isGitHub && !isSwiggy && (
-          <div className="confirmation-field">
-            <span className="field-label">Target</span>
-            <span className="field-value">{server ? `${server} / ${tool}` : "System Operation"}</span>
+          <div className="sv-row" style={{ marginTop: 6 }}>
+            <Pill>{server ? `${server} / ${tool}` : "System operation"}</Pill>
           </div>
         )}
-      </div>
 
-      {/* ── Status Message if any ── */}
-      {actionStatus && (
-        <div className="confirmation-status">{actionStatus}</div>
-      )}
+        {actionStatus && (
+          <p className="sv-p" role="status" style={{ marginTop: 14 }}>
+            {actionStatus}
+          </p>
+        )}
+        <p className="sv-p" style={{ marginTop: 14, display: "flex", gap: 6, alignItems: "center" }}>
+          <span style={{ width: 13, height: 13, display: "inline-flex" }}><SvIcon name="mic" /></span>
+          <span>
+            Say <strong>“yes”</strong> or <strong>“cancel”</strong>, or use the buttons below
+          </span>
+        </p>
+      </SvCard>
 
-      {/* ── Action Buttons ── */}
-      <div className="confirmation-actions">
-        <button
-          type="button"
-          className="btn-confirmation btn-confirm"
-          onClick={handleConfirm}
-          disabled={submitting}
-        >
-          {submitting ? (
-            <span className="btn-spinner" />
-          ) : (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <polyline points="20 6 9 17 4 12" />
-            </svg>
-          )}
-          <span>{confirmLabel}</span>
-        </button>
-
-        <button
-          type="button"
-          className="btn-confirmation btn-cancel"
-          onClick={handleCancel}
-          disabled={submitting}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <line x1="18" y1="6" x2="6" y2="18" />
-            <line x1="6" y1="6" x2="18" y2="18" />
-          </svg>
-          <span>Cancel</span>
-        </button>
-      </div>
-
-      {/* ── Spoken Voice Guidance Hint ── */}
-      <div className="confirmation-hint">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
-          <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-          <line x1="12" y1="19" x2="12" y2="22" />
-        </svg>
-        <span>Say <strong>"Yes"</strong> or <strong>"Cancel"</strong>, or click an option above</span>
-      </div>
-    </div>
+      <ActionBar sticky>
+        <SvButton onClick={handleCancel} disabled={submitting}>
+          <SvIcon name="x" />
+          Cancel
+        </SvButton>
+        <SvButton primary onClick={handleConfirm} disabled={submitting}>
+          <SvIcon name="check" />
+          {submitting ? "Working…" : confirmLabel}
+        </SvButton>
+      </ActionBar>
+    </>
   );
-}
-// NOTE: default export removed (audit M5) — SidebarApp uses the named import.
+}// NOTE: default export removed (audit M5) — SidebarApp uses the named import.

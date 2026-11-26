@@ -62,6 +62,10 @@ jobs:
       - name: Window opacity gate
         run: node ../scripts/check-window-opacity.mjs
 
+      # Every sidebar view (frontend/src/sidebar/views/<name>/) styles only itself: each selector starts with .view-<name>.
+      - name: Sidebar view scope gate
+        run: node ../scripts/check-sidebar-scopes.mjs --selftest && node ../scripts/check-sidebar-scopes.mjs
+
       # Installer pipeline gates (plan 194): one version in three files, only allow-listed installer downloads.
       - name: Installer gates (version sync, download pins) + their tests
         run: |

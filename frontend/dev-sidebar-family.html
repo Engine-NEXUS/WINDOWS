@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NEXUS sidebar family — design review</title>
+<!-- Dev playground (served by `npm run dev` only). Renders the real WhatsApp, Gmail and screen time views with sample data. -->
+<link rel="stylesheet" href="/src/theme/tokens.css">
+<style>
+  body { margin: 0; font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; background: #050507; color: #fff; }
+  .bar { display: flex; gap: 10px; padding: 12px 16px; align-items: center; }
+  .bar button { padding: 6px 14px; border-radius: 999px; border: 1px solid #333; background: #111; color: #fff; cursor: pointer; }
+  .row { display: flex; gap: 16px; padding: 0 16px 24px; align-items: flex-start; flex-wrap: wrap; }
+  .win { width: 420px; height: 760px; border-radius: 22px; overflow: hidden; display: flex; flex-direction: column; background: var(--sv-bg); }
+</style>
+</head>
+<body>
+<div class="bar"><button id="theme">Toggle light / dark</button><span>WhatsApp · Gmail · Screen time</span></div>
+<div class="row" id="root"></div>
+<script type="module" src="/src/dev/sidebarFamily.tsx"></script>
+</body>
+</html>

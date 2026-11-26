@@ -15,6 +15,16 @@ import { useArrowDock } from "./dockKeys";
 const EMPTY_CODERABBIT = { mode: "pr_list", activePrs: [] } as const;
 import { topicTitle } from "./spatialShared";
 import { ZoomViewer } from "./ZoomViewer";
+import { SvBar } from "./kit/system";
+import { assistantHeader, assistantKind } from "./assistantMeta";
+import { WhatsAppView } from "./views/whatsapp/WhatsAppView";
+import { isWaPayload } from "./views/whatsapp/model";
+import { GmailView } from "./views/gmail/GmailView";
+import { isMailPayload } from "./views/gmail/model";
+import { ScreenTimeView } from "./views/screentime/ScreenTimeView";
+import { isStPayload } from "./views/screentime/model";
+import "./views/research/research.css";
+import "./assistant-system.css";
 
 /**
  * NEXUS Response Sidebar
@@ -316,23 +326,45 @@ export function SidebarApp({ onDock, active = true }: SidebarAppProps) {
 
   // Left/Right arrows move the window (assistant and alert views sit right, the CodeRabbit list centred).
   useArrowDock(isEventDetail ? "right" : isCodeRabbit ? "center" : "right", onDock, active);
+  // The header of the shared sidebar system: which kind of content this is, and the icon, title and subtitle that go with it.
+  const kind = assistantKind({
+    conflict: Boolean(conflictData),
+    confirmation: Boolean(confirmationData),
+    analysis: analysisData,
+    codeRabbit: codeRabbitData,
+    research: Boolean(showCopy && response && topicTitleText),
+  });
+  // Views with their own identity (WhatsApp chat, Gmail briefing, screen time ledger) bring their own header.
+  const ownView =
+    kind === "whatsapp" && isWaPayload(analysisData) ? <WhatsAppView data={analysisData} />
+    : kind === "mail" && isMailPayload(analysisData) ? <GmailView data={analysisData} />
+    : kind === "screentime" && isStPayload(analysisData) ? <ScreenTimeView data={analysisData} />
+    : null;
+  const cmdApp = (() => {
+    const c = (confirmationData?.command ?? {}) as Record<string, unknown>;
+    if (c.kind === "mcp") {
+      const s = String(c.server ?? "");
+      return s === "whatsapp" ? "WhatsApp" : s.startsWith("swiggy") ? "Swiggy" : s === "amazon" ? "Amazon" : s || "Action";
+    }
+    return c.repo || c.pr_number !== undefined ? "GitHub" : "Action";
+  })();
+  const review = (codeRabbitData ?? analysisData) as { repo?: string | null; prNumber?: number } | null;
+  const header = assistantHeader(kind, {
+    topic: topicTitleText || undefined,
+    repo: kind === "conflict" ? conflictData?.repo : (analysisData as { repo?: string } | null)?.repo ?? review?.repo ?? undefined,
+    prNumber: review?.prNumber,
+    app: cmdApp,
+  });
 
   return (
     <div id="sidebar-app" className={visible ? "sidebar--visible" : "sidebar--hidden"}>
-        <div className={`sidebar-card ${confirmationData ? "mode--confirmation" : ""} ${isCodeRabbit ? "mode--coderabbit" : ""} font-size--${fontSize}`}>
-          {/* No title bar and no dock buttons: drag the window by this strip, or click it and press the arrow keys. */}
-          <div className="sidebar-drag-strip" data-tauri-drag-region />
-
-          {/* ── Topic title — ONLY for research / analyse responses ────── */}
-          {/* The search/research topic heads the information block here;
-              this is also the only response class that shows Copy Code. */}
-          {showCopy && response && topicTitleText && !codeRabbitData && !isCodeRabbit ? (
-            <div className="sidebar-topic-title">{topicTitleText}</div>
-          ) : null}
-
+        <div className={`sidebar-card sv sv-view ${kind === "research" || kind === "answer" ? "view-research" : ""} ${confirmationData ? "mode--confirmation" : ""} ${isCodeRabbit ? "mode--coderabbit" : ""} font-size--${fontSize}`}>
+          {/* The header is also the drag handle. No dock arrows and no close button: the arrow keys move the window and Esc closes it. */}
+          {ownView ? null : <SvBar icon={header.icon} title={header.title} subtitle={header.subtitle} />}
+          {ownView}
           {/* ── Response Body ─────────────────────────────────────────── */}
           {/* Priority: conflict panel > confirmation panel > CodeRabbit twin > analysis dashboard > markdown */}
-          <div className="sidebar-response" ref={responseScrollRef} onScroll={handleScroll}>
+          <div className="sidebar-response" ref={responseScrollRef} onScroll={handleScroll} hidden={Boolean(ownView)}>
             {conflictData ? (
               <GitHubConflictPanel
                 prNumber={conflictData.prNumber}

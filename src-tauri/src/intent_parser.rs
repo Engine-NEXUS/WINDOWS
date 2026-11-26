@@ -254,6 +254,9 @@ pub enum ParsedIntent {
     /// "That's not important" — mute the sender of the last alert.
     #[serde(rename = "mail_mute")]
     MailMute,
+    /// "Show my screen time" — today's active time, the week and the top apps from the local Activity Manager.
+    #[serde(rename = "screen_time")]
+    ScreenTime,
     /// "Open the last alert" / "show me the last notification".
     #[serde(rename = "alert_open_last")]
     AlertOpenLast,
@@ -512,6 +515,7 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::StudyPref { .. } => "study_pref",
         ParsedIntent::MailDigest => "mail_digest",
         ParsedIntent::MailMute => "mail_mute",
+        ParsedIntent::ScreenTime => "screen_time",
         ParsedIntent::AlertOpenLast => "alert_open_last",
         ParsedIntent::AlertRead => "alert_read",
         ParsedIntent::AlertDismiss { .. } => "alert_dismiss",
@@ -4010,6 +4014,16 @@ fn parse_mail_calendar_command(text: &str) -> Option<ParseResult> {
         || t.contains("anything important in my mail")
     {
         return mk(ParsedIntent::MailDigest);
+    }
+    if matches!(
+        t.as_str(),
+        "screen time" | "my screen time" | "show screen time" | "show my screen time" | "open screen time"
+            | "how much screen time" | "how much screen time today" | "how long have i been on my laptop"
+            | "how long have i used my laptop" | "how long was i on my laptop today"
+    ) || t.contains("how much time have i spent on my laptop")
+        || t.contains("how much have i used my laptop")
+    {
+        return mk(ParsedIntent::ScreenTime);
     }
     if crate::memcore::agenda::is_calendar_add(&t) {
         return mk(ParsedIntent::CalendarAdd { text: t });
@@ -12090,6 +12104,16 @@ mod tests {
                 "'{p}' wrongly parsed as {got}"
             );
         }
+    }
+
+    #[test]
+    fn screen_time_phrases_parse_and_neighbours_do_not() {
+        let dbg = |p: &str| format!("{:?}", parse_deterministic(p).map(|r| r.intent));
+        assert_eq!(dbg("show my screen time"), "Some(ScreenTime)");
+        assert_eq!(dbg("screen time"), "Some(ScreenTime)");
+        assert_eq!(dbg("how much time have I spent on my laptop today"), "Some(ScreenTime)");
+        assert_ne!(dbg("analyse my screen"), "Some(ScreenTime)");
+        assert_ne!(dbg("any important emails"), "Some(ScreenTime)");
     }
 
     #[test]

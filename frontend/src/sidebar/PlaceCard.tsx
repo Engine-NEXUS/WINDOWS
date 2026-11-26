@@ -73,10 +73,6 @@ export function PlaceCard() {
     if (!isTauri()) return;
     void import("@tauri-apps/api/core").then(({ invoke }) => invoke("place_card_open", { kind: "site" }).catch(() => {}));
   };
-  const close = () => {
-    if (!isTauri()) return;
-    void import("@tauri-apps/api/core").then(({ invoke }) => invoke("close_place_card").catch(() => {}));
-  };
   const copy = (what: string, text: string) => {
     void navigator.clipboard
       ?.writeText(text)
@@ -97,9 +93,6 @@ export function PlaceCard() {
   return (
     <div className="place-card" role="region" aria-label={`Place: ${card.name}`}>
       <div className="sidebar-drag-strip" data-tauri-drag-region />
-      <button className="place-close" onClick={close} aria-label="Close place card" title="Close (Esc)">
-        <Icon name="x" size={16} />
-      </button>
       <div className="place-scroll">
         {photo && (
           <figure className="place-photo">

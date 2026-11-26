@@ -73,6 +73,7 @@ export type Intent =
   | { action: "timetable_commit" }
   | { action: "study_pref"; activity: string; choice: string }
   | { action: "mail_digest" }
+  | { action: "screen_time" }
   | { action: "mail_mute" }
   | { action: "directions"; destination: string; origin?: string | null; mode: string }
   | { action: "places_search"; query: string; near?: string | null }

@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NEXUS sidebar v2 — GitHub dashboard inspired</title>
+<!-- Dev playground (served by `npm run dev` only). v2 of the sidebar system, built from what makes the GitHub dashboard sidebar work:
+     a contribution heatmap, an activity breakdown, a Quick Access tile grid with count badges, feed cards with a type tag, a repo tag
+     and an attribution row, drill-down pages with a back header, a footer bar with the keys, and a thin loading bar.
+     Two palettes: "GitHub" (the dashboard's own light and dark dimmed palettes) and "Mono" (black, white, grey). Mock data only. -->
+<style>
+  :root { --font: "Segoe UI Variable Text", "Segoe UI", -apple-system, "Inter", system-ui, sans-serif; --mono: ui-monospace, "Cascadia Mono", Consolas, monospace; --ease: cubic-bezier(.22,1,.36,1); --r: 12px; }
+  /* palettes */
+  [data-pal="gh"][data-theme="dark"]  { --bg:#0d1117; --sf:#161b22; --sf2:#21262d; --bd:#30363d; --bd2:#21262d; --tx:#e6edf3; --tx2:#8b949e; --tx3:#6e7681; --ac:#4493f8; --acs:rgba(56,139,253,.15); --ok:#3fb950; --err:#f85149; --warn:#d29922; --h0:#161b22; --h1:#0e4429; --h2:#006d32; --h3:#26a641; --h4:#39d353; --on-ac:#fff; --sh:0 1px 4px rgba(0,0,0,.5); color-scheme:dark; }
+  [data-pal="gh"][data-theme="light"] { --bg:#f6f8fa; --sf:#ffffff; --sf2:#f1f3f5; --bd:#d0d7de; --bd2:#eaeef2; --tx:#1f2328; --tx2:#656d76; --tx3:#8c959f; --ac:#0969da; --acs:rgba(9,105,218,.1); --ok:#1a7f37; --err:#cf222e; --warn:#9a6700; --h0:#ebedf0; --h1:#9be9a8; --h2:#40c463; --h3:#30a14e; --h4:#216e39; --on-ac:#fff; --sh:0 1px 3px rgba(31,35,40,.08); color-scheme:light; }
+  [data-pal="mono"][data-theme="dark"]  { --bg:#0b0b0d; --sf:#151519; --sf2:#1d1d22; --bd:rgba(255,255,255,.1); --bd2:rgba(255,255,255,.06); --tx:#f5f5f7; --tx2:rgba(255,255,255,.64); --tx3:rgba(255,255,255,.42); --ac:#ffffff; --acs:rgba(255,255,255,.1); --ok:#ffffff; --err:#ffffff; --warn:#ffffff; --h0:#1d1d22; --h1:#3a3a40; --h2:#6b6b73; --h3:#a6a6ad; --h4:#ffffff; --on-ac:#000; --sh:0 10px 30px -16px rgba(0,0,0,.8); color-scheme:dark; }
+  [data-pal="mono"][data-theme="light"] { --bg:#eeeef0; --sf:#ffffff; --sf2:#f3f3f5; --bd:rgba(0,0,0,.1); --bd2:rgba(0,0,0,.06); --tx:#0b0b0d; --tx2:rgba(0,0,0,.62); --tx3:rgba(0,0,0,.4); --ac:#0b0b0d; --acs:rgba(0,0,0,.07); --ok:#0b0b0d; --err:#0b0b0d; --warn:#0b0b0d; --h0:#e4e4e8; --h1:#bdbdc4; --h2:#8a8a92; --h3:#4b4b52; --h4:#0b0b0d; --on-ac:#fff; --sh:0 10px 26px -18px rgba(0,0,0,.35); color-scheme:light; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0a0a0c; color: #e8e8ea; font-family: var(--font); -webkit-font-smoothing: antialiased; }
+  body { display: grid; grid-template-columns: 290px 1fr; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  button:focus-visible { outline: 2px solid var(--ac); outline-offset: 2px; }
+  *::-webkit-scrollbar { display: none; } * { scrollbar-width: none; }
+
+  /* ── lab ── */
+  #lab { padding: 20px 16px; border-right: 1px solid #26262b; overflow-y: auto; background: #101012; }
+  #lab h1 { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 4px; }
+  #lab .sub { margin: 0 0 14px; color: #9a9aa2; font-size: 12px; line-height: 1.45; }
+  #lab h2 { font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: #6f6f78; margin: 16px 0 8px; }
+  .nav button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; margin-bottom: 3px; background: transparent; border: 1px solid transparent; border-radius: 9px; text-align: left; font-size: 13px; color: #b4b4bb; }
+  .nav button[aria-pressed=true] { background: #f2f2f4; color: #0b0b0d; font-weight: 600; }
+  .nav .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; opacity: .5; flex: none; }
+  .seg { display: flex; border: 1px solid #2c2c32; border-radius: 9px; overflow: hidden; }
+  .seg button { flex: 1; padding: 7px 4px; border: 0; background: transparent; font-size: 12px; color: #a4a4ac; }
+  .seg button[aria-pressed=true] { background: #f2f2f4; color: #0b0b0d; font-weight: 600; }
+  #notes { margin-top: 4px; padding: 12px; border: 1px solid #2c2c32; border-radius: 12px; font-size: 12px; line-height: 1.5; color: #a4a4ac; }
+  #notes b { color: #f2f2f4; display: block; margin-bottom: 4px; } #notes ul { margin: 6px 0 0; padding-left: 16px; } #notes li { margin: 3px 0; }
+
+  /* ── stage and frame ── */
+  #stage { display: grid; place-items: center; padding: 22px; background: #202024; min-width: 0; }
+  body[data-theme="light"] #stage { background: #c8c9ce; }
+  #frame { width: var(--w, 420px); height: min(960px, calc(100vh - 44px)); display: flex; flex-direction: column; position: relative; background: var(--bg); color: var(--tx); border: 1px solid var(--bd); border-radius: 14px; overflow: hidden; box-shadow: 0 30px 80px -20px rgba(0,0,0,.6); container-type: inline-size; transition: width .35s var(--ease); }
+  #loadbar { position: absolute; top: 0; left: 0; right: 0; height: 2px; overflow: hidden; z-index: 5; pointer-events: none; }
+  #loadbar i { position: absolute; inset: 0 auto 0 0; width: 35%; background: var(--ac); opacity: 0; }
+  #loadbar.on i { opacity: 1; animation: sweep .7s var(--ease) 1; }
+  @keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+
+  /* header: icon, title, subtitle chip. No dock arrows, no close (arrow keys and Esc do that). */
+  .hdr { display: flex; align-items: center; gap: 12px; padding: 15px 16px 13px; background: var(--sf); border-bottom: 1px solid var(--bd); flex: none; }
+  .hdr .lg { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: var(--acs); color: var(--ac); flex: none; }
+  .hdr .lg svg { width: 20px; height: 20px; }
+  .hdr .tt { flex: 1; min-width: 0; } .hdr .tt b { display: block; font-size: 16px; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hdr .tt span { display: block; font-size: 12px; color: var(--tx2); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .back { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px 5px 8px; border-radius: 8px; border: 1px solid var(--bd); background: var(--sf2); color: var(--tx2); font-size: 12px; font-weight: 600; }
+  .back svg { width: 14px; height: 14px; transform: scaleX(-1); }
+
+  #body { flex: 1; overflow-y: auto; padding: 14px; display: grid; gap: 12px; align-content: start; scroll-behavior: smooth; }
+  .foot { flex: none; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 9px 12px; background: var(--sf); border-top: 1px solid var(--bd); font-size: 11.5px; color: var(--tx3); }
+  .foot kbd, .k { font: 600 10.5px var(--mono); padding: 2px 6px; border-radius: 6px; background: var(--sf2); border: 1px solid var(--bd); color: var(--tx2); }
+  .pin-actions { flex: none; display: flex; gap: 10px; padding: 11px 14px; background: var(--sf); border-top: 1px solid var(--bd); }
+
+  /* ── building blocks ── */
+  .sec { margin-top: 2px; }
+  .sec-t { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--tx2); margin: 4px 2px 8px; display: flex; justify-content: space-between; align-items: center; }
+  .card { background: var(--sf); border: 1px solid var(--bd); border-radius: var(--r); padding: 16px; box-shadow: var(--sh); animation: rise .4s var(--ease) both; min-width: 0; }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  .card.hover { transition: transform .18s var(--ease), border-color .18s; } .card.hover:hover { transform: translateY(-2px); border-color: var(--ac); }
+  h2.h { margin: 0; font-size: 19px; letter-spacing: -.02em; line-height: 1.28; } p { margin: 0; line-height: 1.55; font-size: 13.5px; }
+  .tx2 { color: var(--tx2); } .tx3 { color: var(--tx3); } .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; } .grow { flex: 1; min-width: 0; }
+  .tag { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600; background: var(--acs); color: var(--ac); white-space: nowrap; }
+  .tag.gray { background: var(--sf2); color: var(--tx2); border: 1px solid var(--bd); } .tag.solid { background: var(--ac); color: var(--on-ac); }
+  .tag.ok { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); } .tag.err { background: color-mix(in srgb, var(--err) 16%, transparent); color: var(--err); } .tag.warn { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+  [data-pal="mono"] .tag.ok, [data-pal="mono"] .tag.err, [data-pal="mono"] .tag.warn { background: var(--sf2); color: var(--tx); border: 1px solid var(--tx); }
+  .tag svg { width: 12px; height: 12px; } .chip { display: inline-flex; padding: 4px 10px; border-radius: 8px; background: var(--sf2); border: 1px solid var(--bd); font: 12px var(--mono); color: var(--tx2); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .av { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 10px; font-weight: 800; color: #fff; flex: none; } .av.lg { width: 44px; height: 44px; font-size: 16px; border-radius: 12px; }
+  .btn { padding: 8px 14px; border-radius: 8px; border: 1px solid var(--bd); background: var(--sf2); font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
+  .btn.p { background: var(--ac); border-color: var(--ac); color: var(--on-ac); } .btn.f { flex: 1; padding: 11px 14px; } .btn:active { transform: scale(.985); } .btn svg { width: 15px; height: 15px; }
+  .btn.ghost { background: transparent; }
+  .seg2 { display: flex; padding: 3px; border-radius: 10px; background: var(--sf2); border: 1px solid var(--bd); gap: 2px; }
+  .seg2 button { flex: 1; padding: 6px 10px; border: 0; border-radius: 8px; background: transparent; font-size: 12.5px; font-weight: 600; color: var(--tx2); }
+  .seg2 button[aria-pressed=true] { background: var(--sf); color: var(--tx); box-shadow: var(--sh); }
+  .kpis { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; } @container (min-width: 600px) { .kpis { grid-template-columns: repeat(4, 1fr); } .two { grid-template-columns: 1fr 1fr !important; } }
+  .kpi { background: var(--sf); border: 1px solid var(--bd); border-radius: var(--r); padding: 13px; } .kpi .l { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; font-weight: 700; color: var(--tx2); } .kpi .v { font-size: 26px; font-weight: 800; letter-spacing: -.03em; margin-top: 6px; line-height: 1; } .kpi small { display: block; margin-top: 5px; font-size: 11.5px; color: var(--tx3); }
+  .quick { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .qc { display: flex; align-items: center; gap: 12px; padding: 14px; background: var(--sf); border: 1px solid var(--bd); border-radius: var(--r); text-align: left; box-shadow: var(--sh); position: relative; transition: transform .18s var(--ease), border-color .18s; }
+  .qc:hover { transform: translateY(-2px); border-color: var(--ac); } .qc .ic { width: 38px; height: 38px; border-radius: 10px; background: var(--acs); color: var(--ac); display: grid; place-items: center; flex: none; } .qc .ic svg { width: 19px; height: 19px; }
+  .qc b { display: block; font-size: 13.5px; } .qc small { color: var(--tx2); font-size: 11.5px; } .qc .bd { position: absolute; top: 8px; right: 9px; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 99px; background: var(--ac); color: var(--on-ac); font-size: 11px; font-weight: 800; display: grid; place-items: center; }
+  .dashed { border: 1.5px dashed var(--bd); border-radius: var(--r); padding: 16px; text-align: center; color: var(--tx2); font-size: 12.5px; }
+  .dashed button { margin-top: 10px; background: none; border: 0; color: var(--ac); font-weight: 800; letter-spacing: .06em; font-size: 12px; }
+  .bars { display: grid; gap: 11px; } .br { display: grid; grid-template-columns: 1fr auto; gap: 5px 10px; align-items: center; font-size: 13px; } .br .v { font-weight: 700; font-variant-numeric: tabular-nums; } .br .t { grid-column: 1/-1; height: 7px; border-radius: 99px; background: var(--sf2); overflow: hidden; } .br .f { height: 100%; border-radius: 99px; background: var(--ac); transform-origin: left; animation: grow .8s var(--ease) both; } @keyframes grow { from { transform: scaleX(0); } }
+  .br .f.ok { background: var(--ok); } .br .f.err { background: var(--err); } .br .f.warn { background: var(--warn); } .br .f.gray { background: var(--tx3); }
+  .heat { display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 1fr); gap: 3px; } .heat i { aspect-ratio: 1; border-radius: 3px; background: var(--h0); animation: pop .5s var(--ease) both; } @keyframes pop { from { opacity: 0; transform: scale(.4); } }
+  .heat i[data-l="1"] { background: var(--h1); } .heat i[data-l="2"] { background: var(--h2); } .heat i[data-l="3"] { background: var(--h3); } .heat i[data-l="4"] { background: var(--h4); }
+  .legend { display: flex; align-items: center; gap: 4px; justify-content: flex-end; font-size: 11px; color: var(--tx3); margin-top: 8px; } .legend i { width: 11px; height: 11px; border-radius: 3px; background: var(--h0); } .legend i:nth-child(2) { background: var(--h1); } .legend i:nth-child(3) { background: var(--h2); } .legend i:nth-child(4) { background: var(--h3); } .legend i:nth-child(5) { background: var(--h4); }
+  .months { display: grid; grid-auto-flow: column; font-size: 11px; color: var(--tx3); margin-bottom: 6px; }
+  .feed { display: grid; gap: 10px; } .gday { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--tx3); margin: 6px 2px 0; }
+  .fc { display: grid; gap: 9px; } .fc .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; } .fc .ttl { font-weight: 700; font-size: 14px; letter-spacing: -.01em; line-height: 1.35; } .fc .attr { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--tx2); } .fc .acts { display: flex; gap: 8px; margin-top: 2px; }
+  .diff { display: flex; gap: 2px; } .diff i { width: 10px; height: 10px; border-radius: 2px; background: var(--ok); } .diff i.r { background: var(--err); } .diff i.g { background: var(--bd); }
+  .seglang { display: flex; height: 9px; border-radius: 99px; overflow: hidden; gap: 2px; } .seglang i { height: 100%; animation: grow .8s var(--ease) both; transform-origin: left; }
+  .li { display: flex; gap: 12px; align-items: flex-start; padding: 12px 0; border-top: 1px solid var(--bd2); } .li:first-child { border-top: 0; padding-top: 2px; } .li b { display: block; font-size: 13.5px; margin-bottom: 2px; } .li p { color: var(--tx2); font-size: 12.5px; }
+  .num { width: 24px; height: 24px; border-radius: 50%; background: var(--ac); color: var(--on-ac); display: grid; place-items: center; font-size: 12px; font-weight: 800; flex: none; margin-top: 1px; transition: transform .15s; }
+  .li.active .num, .li:hover .num { transform: scale(1.18); } .li.active { background: var(--acs); margin: 0 -8px; padding-left: 8px; padding-right: 8px; border-radius: 8px; }
+  .shot { aspect-ratio: 16/9; border-radius: 10px; background: var(--sf2); border: 1px solid var(--bd); position: relative; overflow: hidden; } .shot .w { position: absolute; background: var(--sf); border: 1px solid var(--bd); border-radius: 6px; } .shot .ln { position: absolute; height: 5px; border-radius: 3px; background: var(--bd); }
+  .shot .dim { position: absolute; inset: 0; background: rgba(0,0,0,.0); transition: background .2s; } .shot.focus .dim { background: rgba(0,0,0,.42); }
+  .shot .pin { position: absolute; width: 24px; height: 24px; border-radius: 50%; background: var(--ac); color: var(--on-ac); display: grid; place-items: center; font-size: 11px; font-weight: 800; box-shadow: 0 0 0 5px var(--acs); transform: translate(-50%,-50%); transition: transform .18s var(--ease), box-shadow .18s; z-index: 2; }
+  .shot .pin.on { transform: translate(-50%,-50%) scale(1.3); box-shadow: 0 0 0 8px var(--acs); } .shot .spot { position: absolute; border: 2px solid var(--ac); border-radius: 8px; opacity: 0; transition: opacity .2s; z-index: 1; box-shadow: 0 0 0 999px rgba(0,0,0,.0); } .shot .spot.on { opacity: 1; }
+  pre.code { margin: 0; padding: 12px; background: var(--sf2); border: 1px solid var(--bd); border-radius: 10px; font: 12.5px/1.6 var(--mono); overflow-x: auto; position: relative; } .copy { position: absolute; top: 7px; right: 7px; padding: 3px 9px; border-radius: 7px; border: 1px solid var(--bd); background: var(--sf); font-size: 11px; font-weight: 600; color: var(--tx2); }
+  .co { display: flex; gap: 11px; padding: 12px; border-radius: 10px; background: var(--sf2); border: 1px solid var(--bd); border-left: 3px solid var(--ac); } .co svg { width: 17px; height: 17px; flex: none; margin-top: 1px; color: var(--ac); } .co b { display: block; font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 3px; } .co p { color: var(--tx2); font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; } th { text-align: left; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--tx2); padding: 0 0 8px; } td { padding: 9px 0; border-top: 1px solid var(--bd2); } td:last-child, th:last-child { text-align: right; }
+  .src { display: grid; grid-template-columns: auto 1fr; gap: 12px; padding: 12px 0; border-top: 1px solid var(--bd2); } .src:first-child { border-top: 0; padding-top: 2px; } .fav { width: 32px; height: 32px; border-radius: 9px; background: var(--sf2); border: 1px solid var(--bd); display: grid; place-items: center; font-weight: 800; font-size: 12.5px; }
+  .cite { display: inline-grid; place-items: center; min-width: 17px; height: 17px; margin: 0 1px; border-radius: 6px; background: var(--acs); color: var(--ac); font-size: 10px; font-weight: 800; vertical-align: 2px; }
+  .ring { position: relative; display: grid; place-items: center; flex: none; } .ring svg { transform: rotate(-90deg); } .ring .c { position: absolute; text-align: center; line-height: 1.1; } .ring .c b { font-size: 22px; letter-spacing: -.03em; display: block; } .ring .c small { font-size: 10.5px; color: var(--tx2); text-transform: uppercase; letter-spacing: .08em; }
+  .ring circle.t { stroke: var(--sf2); } .ring circle.v { stroke: var(--ac); stroke-linecap: round; animation: ringin 1s var(--ease) both; } @keyframes ringin { from { stroke-dashoffset: var(--len); } }
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; } .tl { padding: 11px 8px; border: 1px solid var(--bd); border-radius: 10px; background: var(--sf2); text-align: center; font-size: 11.5px; font-weight: 600; } .tl .lt { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; margin: 0 auto 6px; color: #fff; font-weight: 800; } .tl small { display: block; color: var(--tx3); font-weight: 500; margin-top: 2px; }
+  .bubble { padding: 11px 13px; border-radius: 14px 14px 14px 5px; background: var(--sf2); border: 1px solid var(--bd); font-size: 14px; line-height: 1.5; }
+  .choice { display: flex; align-items: center; gap: 13px; padding: 13px; border: 1px solid var(--bd); border-radius: 12px; background: var(--sf2); width: 100%; text-align: left; margin-bottom: 8px; transition: border-color .15s, transform .15s; } .choice:hover { border-color: var(--ac); transform: translateX(2px); } .choice .num { width: 28px; height: 28px; font-size: 14px; margin: 0; }
+  .checks { display: grid; gap: 0; } .ck { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid var(--bd2); font-size: 13px; } .ck:first-child { border-top: 0; } .ck .st { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; flex: none; } .ck .st svg { width: 11px; height: 11px; } .ck .st.ok { background: var(--ok); color: var(--bg); } .ck .st.run { border: 2px solid var(--warn); border-top-color: transparent; animation: spin .9s linear infinite; } .ck .st.no { background: var(--err); color: var(--bg); } @keyframes spin { to { transform: rotate(360deg); } }
+  [data-pal="mono"] .ck .st.ok, [data-pal="mono"] .ck .st.no { background: var(--tx); }
+  svg.radar text { fill: var(--tx2); font-size: 10.5px; font-weight: 600; } svg.radar .grid { fill: none; stroke: var(--bd); } svg.radar .area { fill: var(--acs); stroke: var(--ac); stroke-width: 2; animation: rise .8s var(--ease) both; } svg.radar circle.p { fill: var(--ac); }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+</style>
+</head>
+<body data-theme="dark" data-pal="gh">
+
+<aside id="lab">
+  <h1>Sidebar v2</h1>
+  <p class="sub">Inspired by the GitHub dashboard sidebar. Same system for every view; mock data. Header has no dock or close buttons.</p>
+  <h2>View</h2><div class="nav" id="nav"></div>
+  <h2>Palette</h2><div class="seg" id="pal"><button data-v="gh" aria-pressed="true">GitHub</button><button data-v="mono" aria-pressed="false">Mono</button></div>
+  <h2>Theme</h2><div class="seg" id="theme"><button data-v="dark" aria-pressed="true">Dark</button><button data-v="light" aria-pressed="false">Light</button></div>
+  <h2>Window width</h2><div class="seg" id="width"><button data-v="420" aria-pressed="true">420</button><button data-v="520" aria-pressed="false">520</button><button data-v="720" aria-pressed="false">720</button></div>
+  <h2>About this view</h2><div id="notes"></div>
+</aside>
+
+<main id="stage"><section id="frame" aria-label="Sidebar preview"><div id="loadbar"><i></i></div><header class="hdr" id="hdr"></header><div id="body"></div><div class="pin-actions" id="pins" hidden></div><footer class="foot"><span><kbd>Esc</kbd> to close</span>·<span><kbd>←</kbd> <kbd>→</kbd> move</span>·<span><kbd>↑</kbd> <kbd>↓</kbd> depth</span></footer></section></main>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (s, r = document) => r.querySelector(s); const html = String.raw;
+  const P = { home:'<path d="m3 11 9-8 9 8v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>', pr:'<circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V10a3 3 0 0 0-3-3h-3m0 0 2.5-2.5M12 7l2.5 2.5"/>', repo:'<path d="M4 5a2 2 0 0 1 2-2h12v15H6a2 2 0 0 0-2 2z"/><path d="M4 20a2 2 0 0 0 2 2h12"/>', monitor:'<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>', globe:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>', layers:'<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>', spark:'<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/>', shield:'<path d="M12 3 5 6v6c0 4.5 3 7.5 7 9 4-1.5 7-4.5 7-9V6z"/><path d="m9 12 2 2 4-4"/>', mic:'<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>', star:'<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/>', org:'<rect x="3" y="3" width="8" height="18" rx="1"/><rect x="13" y="9" width="8" height="12" rx="1"/>', check:'<path d="m5 12 4.5 4.5L19 7"/>', x:'<path d="M6 6l12 12M18 6 6 18"/>', info:'<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>', alert:'<path d="M12 4 3 20h18z"/><path d="M12 10v4M12 17h.01"/>', arrow:'<path d="M5 12h14M13 6l6 6-6 6"/>', merge:'<circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M6 8.5v7M8.5 6C14 6 16 8 16 10"/>', copy:'<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>', file:'<path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/>' };
+  const ic = (n) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[n] || ''}</svg>`;
+  const rng = (s) => () => { s |= 0; s = (s + 0x6D2B79F5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const heat = (weeks, seed, bias = .55) => { const r = rng(seed); let h = ''; for (let w = 0; w < weeks; w++) for (let d = 0; d < 7; d++) { const v = r(); const l = v < bias - .1 ? 0 : v < bias + .1 ? 1 : v < bias + .25 ? 2 : v < bias + .36 ? 3 : 4; h += `<i data-l="${l}" style="animation-delay:${(w * 12 + d * 6)}ms"></i>`; } return `<div class="heat" style="grid-template-columns:repeat(${weeks},1fr)">${h}</div><div class="legend">Less<i></i><i></i><i></i><i></i><i></i>More</div>`; };
+  const bar = (l, p, v, c = '') => `<div class="br"><span>${l}</span><span class="v">${v}</span><div class="t"><div class="f ${c}" style="width:${p}%"></div></div></div>`;
+  const av = (t, c, big) => `<span class="av${big ? ' lg' : ''}" style="background:${c}">${t}</span>`;
+  const tag = (t, c = '', i = '') => `<span class="tag ${c}">${i ? ic(i) : ''}${t}</span>`;
+  const ring = (pct, label, size = 92, stroke = 8) => { const r = (size - stroke) / 2, len = 2 * Math.PI * r; return `<div class="ring" style="width:${size}px;height:${size}px"><svg width="${size}" height="${size}"><circle class="t" cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke-width="${stroke}"/><circle class="v" cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke-width="${stroke}" stroke-dasharray="${len}" stroke-dashoffset="${len * (1 - pct / 100)}" style="--len:${len}"/></svg><div class="c"><b>${pct}%</b><small>${label}</small></div></div>`; };
+  const radar = (vals, labels) => { const n = vals.length, R = 62, cx = 100, cy = 84; const pt = (i, k) => { const a = -Math.PI / 2 + i * 2 * Math.PI / n; return [cx + Math.cos(a) * R * k, cy + Math.sin(a) * R * k]; }; const ring = (k) => vals.map((_, i) => pt(i, k).join(',')).join(' '); const poly = vals.map((v, i) => pt(i, v / 100).join(',')).join(' '); return `<svg class="radar" viewBox="0 0 200 170" width="100%" height="170" role="img" aria-label="Review radar">${[.33, .66, 1].map((k) => `<polygon class="grid" points="${ring(k)}"/>`).join('')}${vals.map((_, i) => { const [x, y] = pt(i, 1); return `<line class="grid" x1="${cx}" y1="${cy}" x2="${x}" y2="${y}"/>`; }).join('')}<polygon class="area" points="${poly}"/>${vals.map((v, i) => { const [x, y] = pt(i, v / 100); return `<circle class="p" cx="${x}" cy="${y}" r="3"/>`; }).join('')}${labels.map((l, i) => { const [x, y] = pt(i, 1.3); return `<text x="${x}" y="${y + 3}" text-anchor="middle">${l}</text>`; }).join('')}</svg>`; };
+  const copy = '<button class="copy" type="button">Copy</button>';
+
+  const V = {};
+  V.home = { label: 'Home (dashboard)', icon: 'home', title: 'Today', sub: 'Your NEXUS activity', notes: ['From the dashboard: the contribution heatmap, the activity breakdown, the Quick Access grid with count badges, Favorites with the dashed add button.', 'New: a Home for the whole sidebar. Heatmap = NEXUS commands per day; breakdown = voice, screen, PR, research; Quick Access opens the last result of each kind.'],
+    render: () => html`
+      <section class="card"><div class="row" style="margin-bottom:12px">${av('LC', '#6e5cff', 1)}<div class="grow"><b style="font-size:15px">Lakshya</b><div class="tx2" style="font-size:12px">842 commands in 2026 · 14 day streak</div></div>${tag('Online', 'ok')}</div>
+        <div class="months"><span>Jun</span><span>Jul</span><span>Aug</span><span>Sep</span><span>Oct</span><span>Nov</span></div>${heat(26, 11)}</section>
+      <section class="card"><div class="sec-t" style="margin-top:0">Activity breakdown</div><div class="bars">${bar('Voice commands', 41, '41 %')}${bar('Screen analysis', 22, '22 %', 'ok')}${bar('Pull requests', 19, '19 %', 'warn')}${bar('Research', 12, '12 %', 'gray')}</div></section>
+      <div class="sec"><div class="sec-t">Quick access</div><div class="quick">
+        <button class="qc" type="button" data-go="screen"><span class="ic">${ic('monitor')}</span><span><b>Screen</b><small>Last read 2 min ago</small></span><span class="bd">3</span></button>
+        <button class="qc" type="button" data-go="prlist"><span class="ic">${ic('pr')}</span><span><b>PR's</b><small>2 need review</small></span><span class="bd">4</span></button>
+        <button class="qc" type="button" data-go="repo"><span class="ic">${ic('repo')}</span><span><b>Repos</b><small>zync · nexus</small></span><span class="bd">4</span></button>
+        <button class="qc" type="button" data-go="research"><span class="ic">${ic('globe')}</span><span><b>Research</b><small>3 sources</small></span><span class="bd">2</span></button></div></div>
+      <div class="sec"><div class="sec-t">Favorites</div><div class="dashed">Pin the things you open often, for quick access at any time.<br><button type="button">+ ADD FAVORITES</button></div></div>`
+  };
+  V.prlist = { label: 'PR list (feed)', icon: 'pr', title: 'Pull requests', sub: '4 open · 2 need attention', notes: ['The dashboard feed, kept: segmented All / Organizations / Personal, day groups, a card with type tag, repo tag, title, time, attribution row and the two actions.', 'New: a diff-stat strip on each card (green and red squares like GitHub), a check state, and the hover lift.'],
+    render: () => html`
+      <div class="seg2" role="group"><button type="button" aria-pressed="true">All</button><button type="button" aria-pressed="false">Organizations</button><button type="button" aria-pressed="false">Personal</button></div>
+      <div class="gday">11:25 AM</div>
+      <article class="card hover fc" data-go="pr"><div class="top"><div class="row">${tag('PR #34', '', 'pr')}${tag('zync', 'gray', 'repo')}</div><span class="tx3" style="font-size:11.5px">11:25 AM</span></div><div class="ttl">Make the island window layered so click-through works</div><div class="attr">${av('CL', '#2da44e')}<span>@chitkul · Engine-NEXUS</span><span class="grow"></span><span class="diff"><i></i><i></i><i></i><i class="r"></i><i class="g"></i></span></div><div class="row">${tag('Checks passed', 'ok', 'check')}${tag('Changes requested', 'warn', 'alert')}</div><div class="acts"><button class="btn p" type="button">${ic('spark')}Analyse</button><button class="btn" type="button">${ic('merge')}Merge PR</button></div></article>
+      <div class="gday">10:25 AM</div>
+      <article class="card hover fc"><div class="top"><div class="row">${tag('PR #12', '', 'pr')}${tag('design-system', 'gray', 'repo')}</div><span class="tx3" style="font-size:11.5px">10:25 AM</span></div><div class="ttl">Add focus rings to the tab strip</div><div class="attr">${av('AB', '#bf3989')}<span>@asha · Team A</span><span class="grow"></span><span class="diff"><i></i><i></i><i class="g"></i><i class="g"></i><i class="g"></i></span></div><div class="row">${tag('Checks running', 'warn', 'info')}</div><div class="acts"><button class="btn p" type="button">${ic('spark')}Analyse</button><button class="btn" type="button">${ic('merge')}Merge PR</button></div></article>
+      <div class="gday">Yesterday</div>
+      <article class="card hover fc"><div class="top"><div class="row">${tag('PR #9', '', 'pr')}${tag('frontend-app', 'gray', 'repo')}</div><span class="tx3" style="font-size:11.5px">Yesterday</span></div><div class="ttl">Cache the weekly report</div><div class="attr">${av('RK', '#0969da')}<span>@raj · Team B</span><span class="grow"></span><span class="diff"><i></i><i class="r"></i><i class="r"></i><i class="g"></i><i class="g"></i></span></div><div class="acts"><button class="btn p" type="button">${ic('spark')}Analyse</button><button class="btn" type="button">${ic('merge')}Merge PR</button></div></article>`
+  };
+  V.pr = { label: 'PR analysis', icon: 'pr', title: 'PR #34', sub: 'Engine-NEXUS / zync', back: 'prlist', actions: 'pr', notes: ['The back header and type / repo tags come from the dashboard sub-pages.', 'New: a verdict ring, a review radar (correctness, security, tests, style, docs), the diff squares, findings with a copy button, checks as a live list. Actions stay pinned.'],
+    render: () => html`
+      <section class="card"><div class="row" style="gap:16px;flex-wrap:nowrap">${ring(72, 'Score', 92)}<div class="grow"><div class="row" style="margin-bottom:8px">${tag('Changes requested', 'warn', 'alert')}</div><h2 class="h" style="font-size:16px">Make the island window layered so click-through works</h2><div class="attr row tx2" style="margin-top:8px;font-size:12px">${av('CL', '#2da44e')}@chitkul · 4 commits · 2 h ago</div></div></div></section>
+      <section class="card"><div class="sec-t" style="margin-top:0">Review radar</div>${radar([86, 64, 58, 80, 70], ['Correct', 'Security', 'Tests', 'Style', 'Docs'])}</section>
+      <div class="kpis"><div class="kpi"><div class="l">Files</div><div class="v">6</div><small>+2 new</small></div><div class="kpi"><div class="l">Added</div><div class="v" style="color:var(--ok)">+184</div><small class="diff" style="margin-top:8px"><i></i><i></i><i></i><i></i><i class="g"></i></small></div><div class="kpi"><div class="l">Removed</div><div class="v" style="color:var(--err)">−41</div><small class="diff" style="margin-top:8px"><i class="r"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i></small></div><div class="kpi"><div class="l">Findings</div><div class="v">4</div><small>1 high</small></div></div>
+      <section class="card"><div class="sec-t" style="margin-top:0">Findings ${tag('4', 'solid')}</div><div class="seg2" role="group" style="margin-bottom:10px"><button type="button" aria-pressed="true">All 4</button><button type="button" aria-pressed="false">High 1</button><button type="button" aria-pressed="false">Medium 2</button><button type="button" aria-pressed="false">Low 1</button></div>
+        <div class="li"><div class="grow"><div class="row" style="margin-bottom:6px">${tag('▲ High', 'err')}<span class="chip">agent_island.rs:402</span></div><b>Style applied only on a change</b><p>Repair the style on every tick, not only when the cursor state flips.</p><pre class="code" style="margin-top:8px">${copy}<span style="color:var(--tx3)">// before</span>
+if self.ignoring != Some(want) {
+    set_click_through(&amp;w, want);
+}</pre></div></div>
+        <div class="li"><div class="grow"><div class="row" style="margin-bottom:6px">${tag('◆ Medium', 'warn')}<span class="chip">agent_island.rs:31</span></div><b>Zone margin is wide</b><p>24 px covers a browser tab strip. Suggest 8.</p></div></div>
+        <div class="li"><div class="grow"><div class="row" style="margin-bottom:6px">${tag('● Low', 'gray')}<span class="chip">docs/changes/206</span></div><b>Comment wording</b><p>Clarify which window the numbers describe.</p></div></div></section>
+      <section class="card"><div class="sec-t" style="margin-top:0">Checks</div><div class="checks"><div class="ck"><span class="st ok">${ic('check')}</span><span class="grow">frontend-check</span><span class="tx3">47 s</span></div><div class="ck"><span class="st run"></span><span class="grow">rust-check-windows</span><span class="tx3">running</span></div><div class="ck"><span class="st ok">${ic('check')}</span><span class="grow">offline-contracts</span><span class="tx3">23 s</span></div></div></section>`
+  };
+  V.repo = { label: 'Repo analysis', icon: 'repo', title: 'zync', sub: 'Engine-NEXUS · public', notes: ['The repo header, avatar and count tiles follow the dashboard Repos page.', 'New: a GitHub style language bar, the repo heatmap (commits per week), structure bars and quality checks as a checklist.'],
+    render: () => html`
+      <section class="card"><div class="row" style="gap:14px;flex-wrap:nowrap">${av('Z', '#6e5cff', 1)}<div class="grow"><h2 class="h">Engine-NEXUS / zync</h2><p class="tx2" style="margin-top:4px">Voice-first desktop assistant: wake word, local parser, cloud reasoning.</p></div></div><div class="row" style="margin-top:12px">${tag('Public', '', 'globe')}${tag('main', 'gray')}${tag('Rust', 'gray')}${tag('TypeScript', 'gray')}</div></section>
+      <div class="kpis"><div class="kpi"><div class="l">Stars</div><div class="v">1.2k</div></div><div class="kpi"><div class="l">Forks</div><div class="v">184</div></div><div class="kpi"><div class="l">Files</div><div class="v">2.8k</div></div><div class="kpi"><div class="l">Open PRs</div><div class="v">4</div></div></div>
+      <section class="card"><div class="sec-t" style="margin-top:0">Languages</div><div class="seglang"><i style="width:48%;background:#dea584"></i><i style="width:32%;background:#3178c6"></i><i style="width:14%;background:#3572a5"></i><i style="width:6%;background:var(--tx3)"></i></div><div class="row" style="margin-top:10px;font-size:12px">${['Rust 48 %|#dea584', 'TypeScript 32 %|#3178c6', 'Python 14 %|#3572a5', 'Other 6 %|var(--tx3)'].map((x) => { const [t, c] = x.split('|'); return `<span class="row" style="gap:5px"><i style="width:9px;height:9px;border-radius:50%;background:${c}"></i>${t}</span>`; }).join('')}</div></section>
+      <section class="card"><div class="sec-t" style="margin-top:0">Commit activity</div>${heat(26, 5, .45)}</section>
+      <section class="card"><div class="sec-t" style="margin-top:0">Structure</div><div class="bars">${bar('src-tauri/src', 100, '205 files')}${bar('frontend/src', 78, '160 files')}${bar('docs', 64, '131 files', 'gray')}</div></section>
+      <section class="card"><div class="sec-t" style="margin-top:0">Quality</div><div class="checks"><div class="ck"><span class="st ok">${ic('check')}</span><span class="grow">Tests</span><span class="tx3">yes</span></div><div class="ck"><span class="st ok">${ic('check')}</span><span class="grow">CI</span><span class="tx3">GitHub Actions</span></div><div class="ck"><span class="st no">${ic('x')}</span><span class="grow">Docker</span><span class="tx3">no</span></div></div></section>`
+  };
+  V.screen = { label: 'Screen analysis', icon: 'monitor', title: 'Screen analysis', sub: 'Brave · read in 3.7 s', notes: ['New, interactive: hover a finding and the screenshot dims around its region with the pin enlarged; hover a pin and the finding lights up. The numbers on the screen, in the tour and in this list are the same numbers.'],
+    render: () => html`
+      <section class="card"><div class="shot" id="shot"><div class="w" style="left:6%;top:12%;width:58%;height:70%"></div><div class="w" style="left:68%;top:12%;width:26%;height:38%"></div><i class="ln" style="left:10%;top:20%;width:40%"></i><i class="ln" style="left:10%;top:28%;width:48%"></i><i class="ln" style="left:10%;top:36%;width:34%"></i><i class="ln" style="left:72%;top:22%;width:18%"></i>
+        <div class="dim"></div><span class="spot" data-s="1" style="left:6%;top:12%;width:58%;height:18%"></span><span class="spot" data-s="2" style="left:6%;top:50%;width:58%;height:32%"></span><span class="spot" data-s="3" style="left:68%;top:12%;width:26%;height:38%"></span>
+        <span class="pin" data-p="1" style="left:10%;top:18%">1</span><span class="pin" data-p="2" style="left:52%;top:64%">2</span><span class="pin" data-p="3" style="left:81%;top:30%">3</span></div>
+        <div class="row" style="margin-top:12px">${tag('Brave', '', 'globe')}${tag('gemini-3.5-flash-lite', 'gray')}${tag('No sensitive content', 'ok', 'shield')}</div><p style="margin-top:10px;font-weight:500">A browser new-tab page with a search box, a shortcuts row and one open notification.</p></section>
+      <section class="card"><div class="sec-t" style="margin-top:0">Parts of the screen ${tag('3', 'solid')}</div><div id="items"><div class="li" data-i="1"><span class="num">1</span><div><b>Search box</b><p>Type here to search or enter an address. Focused, ready for input.</p></div></div><div class="li" data-i="2"><span class="num">2</span><div><b>Shortcuts row</b><p>Eight saved sites. The last one adds another.</p></div></div><div class="li" data-i="3"><span class="num">3</span><div><b>Notification</b><p>A permission prompt is waiting for a choice.</p></div></div></div></section>
+      <section class="card"><div class="sec-t" style="margin-top:0">Foreground review</div><div class="bars">${bar('Readable text', 92, '92 %', 'ok')}${bar('Sensitive content', 8, 'none found', 'gray')}</div></section>`
+  };
+  V.research = { label: 'Research', icon: 'globe', title: 'Research', sub: '3 sources · checked just now', notes: ['New: a TL;DR with numbered citations that match the source list, an agreement ring, and source rows with a favicon tile and the domain. Follow-up chips ask the next question.'],
+    render: () => html`
+      <section class="card"><div class="row" style="gap:14px;flex-wrap:nowrap"><div class="grow"><div class="tx3" style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:700">Topic</div><h2 class="h" style="font-size:17px;margin-top:4px">Does a transparent window click through without a layered style?</h2></div>${ring(88, 'Agree', 78, 7)}</div>
+        <p style="margin-top:12px;font-size:14.5px;font-weight:500">Not reliably. The click-through flag only takes effect on a layered window<span class="cite">1</span>, so a transparent window that is not layered keeps receiving the mouse<span class="cite">2</span>. Layering it and setting full alpha fixes it<span class="cite">1</span>.</p><div class="row" style="margin-top:12px">${tag('3 sources', '', 'globe')}${tag('Checked just now', 'gray')}</div></section>
+      <section class="card"><div class="sec-t" style="margin-top:0">Key points</div><div class="li"><span class="num">1</span><div><b>The flag needs layering</b><p>Click-through is a property of layered windows.</p></div></div><div class="li"><span class="num">2</span><div><b>Alpha must be set</b><p>A layered window draws nothing until its alpha is set.</p></div></div></section>
+      <section class="card"><div class="sec-t" style="margin-top:0">Sources</div><div class="src"><span class="fav">M</span><div><b>Extended window styles <span class="cite">1</span></b><div class="tx3" style="font-size:11.5px">learn.microsoft.com</div><p class="tx2" style="font-size:12.5px;margin-top:3px">TRANSPARENT and LAYERED together make hit testing skip the window.</p></div></div><div class="src"><span class="fav">S</span><div><b>Click-through overlay windows <span class="cite">2</span></b><div class="tx3" style="font-size:11.5px">stackoverflow.com</div><p class="tx2" style="font-size:12.5px;margin-top:3px">Without LAYERED the window still receives the mouse.</p></div></div><div class="src"><span class="fav">T</span><div><b>tao: set_cursor_hittest <span class="cite">3</span></b><div class="tx3" style="font-size:11.5px">github.com/tauri-apps/tao</div><p class="tx2" style="font-size:12.5px;margin-top:3px">Adds the layered flag when ignoring cursor events.</p></div></div></section>
+      <div class="row">${['Show me the fix', 'Is it safe with WebView2?', 'Compare with a region'].map((t) => `<button class="btn" type="button">${ic('arrow')}${t}</button>`).join('')}</div>`
+  };
+  V.stack = { label: 'Reverse engineer', icon: 'layers', title: 'Tech stack', sub: 'example.com · 11 technologies', notes: ['The stack view, in this style: a confidence ring, a tile grid of technologies with their own colour logos, header checks as a checklist.'],
+    render: () => html`
+      <section class="card"><div class="row" style="gap:16px;flex-wrap:nowrap">${ring(87, 'Sure', 92)}<div class="grow"><h2 class="h" style="font-size:16px">A React site on Next.js, served by Vercel behind Cloudflare.</h2><div class="row" style="margin-top:10px">${tag('11 found', '', 'layers')}${tag('5 / 7 headers', 'warn', 'shield')}</div></div></div></section>
+      <section class="card"><div class="sec-t" style="margin-top:0">Technologies</div><div class="tiles">${[['R', '#2f9fd1', 'React', '96 %'], ['N', '#111', 'Next.js', '88 %'], ['V', '#222', 'Vercel', '84 %'], ['C', '#f6821f', 'Cloudflare', '74 %'], ['T', '#06b6d4', 'Tailwind', '70 %'], ['G', '#e37400', 'Analytics', '58 %']].map(([l, c, n, p]) => `<div class="tl"><div class="lt" style="background:${c}">${l}</div>${n}<small>${p}</small></div>`).join('')}</div></section>
+      <section class="card"><div class="sec-t" style="margin-top:0">Security headers</div><div class="checks"><div class="ck"><span class="st ok">${ic('check')}</span><span class="grow">Strict-Transport-Security</span><span class="tx3">present</span></div><div class="ck"><span class="st ok">${ic('check')}</span><span class="grow">Content-Security-Policy</span><span class="tx3">present</span></div><div class="ck"><span class="st no">${ic('x')}</span><span class="grow">X-Frame-Options</span><span class="tx3">missing</span></div></div></section>
+      <section class="card"><div class="sec-t" style="margin-top:0">Page weight</div><div class="bars">${bar('Scripts', 62, '0.9 MB')}${bar('Images', 28, '0.4 MB', 'gray')}${bar('Other', 10, '0.1 MB', 'gray')}</div></section>`
+  };
+  V.answer = { label: 'Answer', icon: 'spark', title: 'Answer', sub: 'Nexus', actions: 'answer', notes: ['New: a TL;DR card first, then the detail. Table, callouts and code in the same system; Read aloud and Copy pinned at the bottom.'],
+    render: () => html`
+      <section class="card" style="border-left:3px solid var(--ac)"><div class="tx3" style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;margin-bottom:6px">TL;DR</div><p style="font-size:15px;font-weight:600">The wake word heard you every time; the second check failed three times because the network dropped.</p></section>
+      <section class="card"><h2 class="h">What the log shows</h2><table style="margin-top:12px"><thead><tr><th>Cause</th><th>Seen</th></tr></thead><tbody><tr><td>Speech check timed out</td><td><b>3×</b></td></tr><tr><td>Local server not found</td><td><b>2×</b></td></tr><tr><td>Mic silent at start</td><td><b>1×</b></td></tr></tbody></table></section>
+      <div class="co">${ic('info')}<div><b>Note</b><p>The wake model scored 0.71 to 0.99 against a 0.68 threshold.</p></div></div>
+      <div class="co" style="border-left-color:var(--warn)">${ic('alert')}<div><b style="color:var(--warn)">Important</b><p>If Groq is unreachable, the offline server must be ready within 15 seconds.</p></div></div>
+      <section class="card"><pre class="code">${copy}<span style="color:var(--tx3)">// try every candidate, not only the first</span>
+candidates.into_iter().find(|p| p.exists())</pre></section>`
+  };
+  V.confirm = { label: 'Confirmation', icon: 'shield', title: 'Approval needed', sub: 'WhatsApp', actions: 'confirm', notes: ['New: the exact message as it will be sent, and the voice window as a ring that counts down 5 seconds (say “yes” or “cancel”).'],
+    render: () => html`
+      <section class="card"><div class="row" style="margin-bottom:12px">${tag('WhatsApp', 'solid', 'spark')}${tag('Approval required', 'warn', 'shield')}</div><h2 class="h">Send this message to Mummy?</h2><p class="tx2" style="margin:8px 0 14px">It goes out as soon as you confirm and cannot be unsent from here.</p><div class="bubble">Reached the hostel. I will call after dinner.</div><div class="row" style="margin-top:14px;gap:16px;flex-wrap:nowrap">${ring(100, 'sec', 70, 6).replace('<b>100%</b>', '<b id="cd">5</b>')}<div class="tx2" style="font-size:12.5px;line-height:1.45">${ic('mic').replace('<svg', '<svg style="width:13px;height:13px;vertical-align:-2px"')} Say <b style="color:var(--tx)">“yes”</b> or <b style="color:var(--tx)">“cancel”</b>.<br>The window closes in 5 seconds; the buttons stay.</div></div></section>`
+  };
+  V.choices = { label: 'Which one?', icon: 'mic', title: 'Which one?', sub: 'Say one, two or three', notes: ['Large numbered rows that are exactly what can be said. Used for app names that sound alike and for desktop controls.'],
+    render: () => html`
+      <section class="card"><h2 class="h" style="margin-bottom:6px">Which Chrome?</h2><p class="tx2" style="margin-bottom:14px">Two apps sound alike. Say the number.</p>
+        <button class="choice" type="button"><span class="num">1</span><div class="grow"><b style="font-size:14.5px">Google Chrome</b><div class="tx3" style="font-size:12px">Installed · used 14 times</div></div>${ic('arrow').replace('<svg', '<svg style="width:16px;height:16px"')}</button>
+        <button class="choice" type="button"><span class="num">2</span><div class="grow"><b style="font-size:14.5px">Chrome Remote Desktop</b><div class="tx3" style="font-size:12px">Installed · used once</div></div>${ic('arrow').replace('<svg', '<svg style="width:16px;height:16px"')}</button>
+        <button class="choice" type="button"><span class="num">3</span><div class="grow"><b style="font-size:14.5px">Neither</b><div class="tx3" style="font-size:12px">Cancel this request</div></div>${ic('x').replace('<svg', '<svg style="width:16px;height:16px"')}</button></section>`
+  };
+
+  const ORDER = ['home', 'prlist', 'pr', 'repo', 'screen', 'research', 'stack', 'answer', 'confirm', 'choices'];
+  const PINS = { pr: `<button class="btn f" type="button">Comment</button><button class="btn f" type="button">Approve</button><button class="btn p f" type="button">${ic('merge')}Merge <span class="k">M</span></button>`, answer: `<button class="btn f" type="button">${ic('mic')}Read aloud</button><button class="btn f" type="button">${ic('copy')}Copy</button>`, confirm: `<button class="btn f" type="button">${ic('x')}Cancel</button><button class="btn p f" type="button">${ic('check')}Send message</button>` };
+  const nav = $('#nav'); nav.innerHTML = ORDER.map((id) => `<button type="button" data-id="${id}" aria-pressed="false"><span class="dot"></span>${V[id].label}</button>`).join('');
+  let cur = 'home', cdTimer = null;
+  function show(id) {
+    cur = id; const v = V[id];
+    nav.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.id === id)));
+    $('#hdr').innerHTML = `<div class="lg">${ic(v.icon)}</div><div class="tt"><b>${v.title}</b><span>${v.sub}</span></div>${v.back ? `<button class="back" type="button" data-go="${v.back}">${ic('arrow')}Back</button>` : ''}`;
+    $('#body').innerHTML = v.render(); $('#body').scrollTop = 0;
+    const p = $('#pins'); if (v.actions) { p.innerHTML = PINS[v.actions]; p.hidden = false; } else { p.hidden = true; p.innerHTML = ''; }
+    $('#notes').innerHTML = `<b>${v.label}</b><ul>${v.notes.map((n) => `<li>${n}</li>`).join('')}</ul>`;
+    const lb = $('#loadbar'); lb.classList.remove('on'); void lb.offsetWidth; lb.classList.add('on'); history.replaceState(null, '', '#' + id);
+    clearInterval(cdTimer); if (id === 'confirm') { let n = 5; cdTimer = setInterval(() => { n = n <= 1 ? 5 : n - 1; const e = $('#cd'); if (e) e.textContent = n; }, 1000); }
+    wire();
+  }
+  function wire() {
+    const shot = $('#shot'); if (shot) {
+      const set = (i) => { shot.classList.toggle('focus', !!i); shot.querySelectorAll('.pin').forEach((p) => p.classList.toggle('on', p.dataset.p === String(i))); shot.querySelectorAll('.spot').forEach((s) => s.classList.toggle('on', s.dataset.s === String(i))); document.querySelectorAll('#items .li').forEach((l) => l.classList.toggle('active', l.dataset.i === String(i))); };
+      document.querySelectorAll('#items .li').forEach((l) => { l.addEventListener('mouseenter', () => set(l.dataset.i)); l.addEventListener('mouseleave', () => set(0)); });
+      shot.querySelectorAll('.pin').forEach((p) => { p.addEventListener('mouseenter', () => set(p.dataset.p)); p.addEventListener('mouseleave', () => set(0)); });
+    }
+  }
+  document.addEventListener('click', (e) => {
+    const g = e.target.closest('[data-go]'); if (g && V[g.dataset.go]) { show(g.dataset.go); return; }
+    const sp = e.target.closest('.seg2 button'); if (sp) sp.parentElement.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', String(x === sp)));
+    const cp = e.target.closest('.copy'); if (cp) { const t = cp.textContent; cp.textContent = 'Copied'; setTimeout(() => { cp.textContent = t; }, 1100); }
+    const nb = e.target.closest('#nav button'); if (nb) show(nb.dataset.id);
+  });
+  function bind(id, fn) { $(id).addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; $(id).querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', String(x === b))); fn(b.dataset.v); }); }
+  bind('#pal', (v) => { document.body.dataset.pal = v; }); bind('#theme', (v) => { document.body.dataset.theme = v; }); bind('#width', (v) => { $('#frame').style.setProperty('--w', v + 'px'); });
+  addEventListener('keydown', (e) => { const i = ORDER.indexOf(cur); if (e.key === 'ArrowDown') { e.preventDefault(); show(ORDER[(i + 1) % ORDER.length]); } if (e.key === 'ArrowUp') { e.preventDefault(); show(ORDER[(i + ORDER.length - 1) % ORDER.length]); } if (e.key === 't' || e.key === 'T') { const d = document.body.dataset.theme === 'dark' ? 'light' : 'dark'; document.body.dataset.theme = d; $('#theme').querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.v === d))); } if (e.key === 'p' || e.key === 'P') { const d = document.body.dataset.pal === 'gh' ? 'mono' : 'gh'; document.body.dataset.pal = d; $('#pal').querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.v === d))); } });
+  show(ORDER.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'home');
+  window.__v2 = { show, V, ORDER };
+})();
+</script>
+</body>
+</html>

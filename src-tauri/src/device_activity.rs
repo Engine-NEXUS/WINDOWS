@@ -413,6 +413,59 @@ fn status_of(runtime: &ActivityRuntime) -> ActivityStatus {
     }
 }
 
+fn minutes_phrase(minutes: u32) -> String {
+    let (h, m) = (minutes / 60, minutes % 60);
+    match (h, m) {
+        (0, m) => format!("{m} minute{}", if m == 1 { "" } else { "s" }),
+        (h, 0) => format!("{h} hour{}", if h == 1 { "" } else { "s" }),
+        (h, m) => format!("{h} hour{} {m} minute{}", if h == 1 { "" } else { "s" }, if m == 1 { "" } else { "s" }),
+    }
+}
+
+/// The screen-time sidebar payload (`analysis.kind == "screentime"`, oldest day first, today always last) and the one spoken line.
+fn card_from_status(status: &ActivityStatus, today: &str) -> (serde_json::Value, String) {
+    let mut days: Vec<serde_json::Value> = status.days.iter().rev().take(7).map(|d| {
+        let apps: Vec<serde_json::Value> = d.apps.iter().map(|a| serde_json::json!({ "app": a.app, "minutes": a.minutes })).collect();
+        serde_json::json!({ "day": d.day, "minutes": d.active_minutes, "apps": apps })
+    }).collect();
+    if days.last().and_then(|d| d["day"].as_str()) != Some(today) {
+        days.push(serde_json::json!({ "day": today, "minutes": 0, "apps": [] }));
+        if days.len() > 7 { days.remove(0); }
+    }
+    let sites: Vec<serde_json::Value> = status.site_days.iter().find(|d| d.day == today).map(|d| {
+        d.sites.iter().map(|s| serde_json::json!({ "domain": s.domain, "minutes": s.seconds / 60 })).collect()
+    }).unwrap_or_default();
+    let payload = serde_json::json!({
+        "kind": "screentime",
+        "enabled": status.enabled,
+        "days": days,
+        "sites": sites,
+        "sitesEnabled": status.sites_enabled,
+    });
+    let spoken = if !status.enabled {
+        "Activity history is switched off, sir. You can turn it on in the Command Hub.".to_string()
+    } else {
+        let t = status.days.iter().find(|d| d.day == today);
+        match t {
+            Some(d) if d.active_minutes > 0 => {
+                let top = d.apps.first().map(|a| a.app.trim_end_matches(".exe").to_string());
+                match top {
+                    Some(app) => format!("You've been active for {} today, sir, mostly in {app}. The details are in the sidebar.", minutes_phrase(d.active_minutes)),
+                    None => format!("You've been active for {} today, sir.", minutes_phrase(d.active_minutes)),
+                }
+            }
+            _ => "I haven't recorded any activity yet today, sir.".to_string(),
+        }
+    };
+    (payload, spoken)
+}
+
+/// Today's screen-time card from the live store.
+pub fn screen_time_card() -> (serde_json::Value, String) {
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    card_from_status(&current_status(), &today)
+}
+
 #[tauri::command]
 pub fn device_activity_status<R: Runtime>(app: AppHandle<R>) -> Result<ActivityStatus, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -520,6 +573,61 @@ pub fn device_activity_clear<R: Runtime>(app: AppHandle<R>) -> Result<ActivitySt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn status(enabled: bool, days: Vec<DayActivity>, site_days: Vec<DaySites>) -> ActivityStatus {
+        ActivityStatus {
+            supported: true, can_clear: true, enabled, sites_enabled: !site_days.is_empty(),
+            days, site_days, browser_connected: false, sharing_available: false,
+        }
+    }
+    fn day(d: &str, minutes: u32, apps: &[(&str, u32)]) -> DayActivity {
+        DayActivity {
+            day: d.into(), active_minutes: minutes, active_seconds: minutes * 60,
+            apps: apps.iter().map(|(a, m)| AppMinutes { app: (*a).into(), minutes: *m, seconds: m * 60 }).collect(),
+        }
+    }
+
+    #[test]
+    fn screen_time_card_has_oldest_first_days_with_today_last_and_a_spoken_line() {
+        // `status_of` lists newest first.
+        let s = status(true, vec![day("2026-11-22", 135, &[("Brave.exe", 90), ("Code", 45)]), day("2026-11-21", 60, &[("Code", 60)])], vec![]);
+        let (p, spoken) = card_from_status(&s, "2026-11-22");
+        assert_eq!(p["kind"], "screentime");
+        assert_eq!(p["days"][0]["day"], "2026-11-21");
+        assert_eq!(p["days"][1]["day"], "2026-11-22");
+        assert_eq!(p["days"][1]["apps"][0]["app"], "Brave.exe");
+        assert!(spoken.contains("2 hours 15 minutes") && spoken.contains("Brave"), "{spoken}");
+        assert!(!spoken.contains(".exe"));
+    }
+
+    #[test]
+    fn screen_time_card_adds_an_empty_today_and_says_so() {
+        let s = status(true, vec![day("2026-11-21", 60, &[("Code", 60)])], vec![]);
+        let (p, spoken) = card_from_status(&s, "2026-11-22");
+        assert_eq!(p["days"].as_array().unwrap().len(), 2);
+        assert_eq!(p["days"][1]["day"], "2026-11-22");
+        assert_eq!(p["days"][1]["minutes"], 0);
+        assert!(spoken.contains("haven't recorded"), "{spoken}");
+    }
+
+    #[test]
+    fn screen_time_card_when_history_is_off_points_to_the_command_hub() {
+        let (p, spoken) = card_from_status(&status(false, vec![], vec![]), "2026-11-22");
+        assert_eq!(p["enabled"], false);
+        assert!(spoken.contains("Command Hub"));
+    }
+
+    #[test]
+    fn screen_time_card_keeps_only_seven_days_and_todays_sites() {
+        let days: Vec<DayActivity> = (10..=22).rev().map(|d| day(&format!("2026-11-{d:02}"), 10, &[])).collect();
+        let sites = vec![DaySites { day: "2026-11-22".into(), sites: vec![SiteSeconds { domain: "github.com".into(), seconds: 600 }] }];
+        let (p, _) = card_from_status(&status(true, days, sites), "2026-11-22");
+        assert_eq!(p["days"].as_array().unwrap().len(), 7);
+        assert_eq!(p["days"][6]["day"], "2026-11-22");
+        assert_eq!(p["sites"][0]["domain"], "github.com");
+        assert_eq!(p["sites"][0]["minutes"], 10);
+        assert_eq!(p["sitesEnabled"], true);
+    }
 
     #[test]
     fn opt_in_app_only_and_thirty_day_boundary() {

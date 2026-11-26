@@ -219,7 +219,7 @@ pub fn is_side_effect(intent: &ParsedIntent) -> bool {
         | ParsedIntent::Greeting { .. } | ParsedIntent::NeedMoreInfo { .. }
         | ParsedIntent::Unknown { .. } | ParsedIntent::MemoryAudit
         | ParsedIntent::Briefing | ParsedIntent::TimetableShow
-        | ParsedIntent::MailDigest | ParsedIntent::WhatsappRead { .. }
+        | ParsedIntent::MailDigest | ParsedIntent::ScreenTime | ParsedIntent::WhatsappRead { .. }
         | ParsedIntent::AlertOpenLast | ParsedIntent::AlertRead
         | ParsedIntent::AlertDismiss { .. } | ParsedIntent::AlertMuteSource { .. }
         | ParsedIntent::PeopleList | ParsedIntent::CalendarAgenda { .. }
@@ -571,6 +571,7 @@ pub fn center_id_for(intent: &ParsedIntent) -> CenterId {
         | ParsedIntent::TimetableCommit
         | ParsedIntent::StudyPref { .. }
         | ParsedIntent::MailDigest
+        | ParsedIntent::ScreenTime
         | ParsedIntent::MailMute
         | ParsedIntent::CalendarAgenda { .. }
         | ParsedIntent::CalendarAdd { .. }

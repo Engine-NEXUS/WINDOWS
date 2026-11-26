@@ -508,6 +508,18 @@ pub fn read_aloud(name: &str, msgs: &[ChatMsg]) -> String {
 }
 
 /// Sidebar card with the recent conversation (both directions).
+/// The structured payload for the WhatsApp chat view (`analysis.kind == "whatsapp"`), newest 10 messages.
+pub fn card_payload(name: &str, msgs: &[ChatMsg]) -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = msgs
+        .iter()
+        .rev()
+        .take(10)
+        .rev()
+        .map(|m| serde_json::json!({ "id": m.id, "ts": m.ts, "text": m.text, "fromMe": m.from_me }))
+        .collect();
+    serde_json::json!({ "kind": "whatsapp", "name": name, "messages": rows })
+}
+
 pub fn card_markdown(name: &str, msgs: &[ChatMsg]) -> String {
     let esc = |s: &str| {
         s.chars()
@@ -763,6 +775,21 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    #[test]
+    fn card_payload_keeps_the_newest_ten_in_order_with_camel_case_keys() {
+        let msgs: Vec<ChatMsg> = (0..14).map(|i| ChatMsg { id: format!("m{i}"), ts: 1000 + i, text: format!("t{i}"), from_me: i % 2 == 0 }).collect();
+        let p = card_payload("Asha", &msgs);
+        assert_eq!(p["kind"], "whatsapp");
+        assert_eq!(p["name"], "Asha");
+        let rows = p["messages"].as_array().unwrap();
+        assert_eq!(rows.len(), 10);
+        assert_eq!(rows[0]["id"], "m4");
+        assert_eq!(rows[9]["id"], "m13");
+        assert_eq!(rows[9]["fromMe"], false);
+        assert_eq!(rows[8]["fromMe"], true);
+        assert!(rows[0].get("from_me").is_none());
+    }
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 

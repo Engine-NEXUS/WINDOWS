@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NEXUS sidebar system — design review</title>
+<!-- Dev playground (served by `npm run dev` only, like dev-analyse-wave.html). One design language for every sidebar view,
+     drawn with mock data so it can be judged and then ported into the React kit. Nothing in the app uses it yet.
+     Rules kept from the app: solid surfaces (no blur or transparency on a window), no scrollbars, black / white / grey
+     with colour only inside logos, container queries instead of window-size media queries. -->
+<style>
+  :root {
+    --font: "Plus Jakarta Sans", "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+    --ease: cubic-bezier(.22, 1, .36, 1);
+    --r: 18px; --r-sm: 12px;
+  }
+  /* Tokens: dark is a deep charcoal canvas, light is a soft grey one. Every surface is solid. */
+  [data-theme="dark"]  { --bg:#0b0b0d; --card:#151519; --card2:#1d1d22; --line:rgba(255,255,255,.09); --text:#f5f5f7; --dim:rgba(255,255,255,.64); --faint:rgba(255,255,255,.42); --ink:#ffffff; --on-ink:#000000; --shadow:0 1px 0 rgba(255,255,255,.04) inset, 0 10px 30px -14px rgba(0,0,0,.7); --lab:#101012; --lab-line:rgba(255,255,255,.1); color-scheme: dark; }
+  [data-theme="light"] { --bg:#eeeef0; --card:#ffffff; --card2:#f3f3f5; --line:rgba(0,0,0,.08);       --text:#0b0b0d; --dim:rgba(0,0,0,.62);       --faint:rgba(0,0,0,.4);        --ink:#0b0b0d; --on-ink:#ffffff; --shadow:0 1px 2px rgba(0,0,0,.05), 0 10px 26px -16px rgba(0,0,0,.25); --lab:#ffffff; --lab-line:rgba(0,0,0,.1); color-scheme: light; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: var(--font); background: var(--lab); color: var(--text); -webkit-font-smoothing: antialiased; font-feature-settings: "tnum", "cv11"; }
+  body { display: grid; grid-template-columns: 300px 1fr; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  button:focus-visible, a:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+  *::-webkit-scrollbar { display: none; } * { scrollbar-width: none; }
+
+  /* ───────── review lab (left) ───────── */
+  #lab { padding: 20px 16px; border-right: 1px solid var(--lab-line); overflow-y: auto; background: var(--lab); }
+  #lab h1 { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 4px; }
+  #lab p.sub { margin: 0 0 16px; color: var(--dim); font-size: 12px; line-height: 1.4; }
+  #lab h2 { font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--faint); margin: 18px 0 8px; }
+  .nav button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px; margin-bottom: 4px; background: transparent; border: 1px solid transparent; border-radius: 10px; text-align: left; font-size: 13px; color: var(--dim); }
+  .nav button svg { width: 16px; height: 16px; flex: none; }
+  .nav button[aria-pressed=true] { background: var(--ink); color: var(--on-ink); font-weight: 600; }
+  .seg { display: flex; border: 1px solid var(--lab-line); border-radius: 10px; overflow: hidden; }
+  .seg button { flex: 1; padding: 7px 4px; border: 0; background: transparent; font-size: 12px; color: var(--dim); }
+  .seg button[aria-pressed=true] { background: var(--ink); color: var(--on-ink); font-weight: 600; }
+  #notes { margin-top: 6px; padding: 12px; border: 1px solid var(--lab-line); border-radius: 12px; font-size: 12px; line-height: 1.5; color: var(--dim); }
+  #notes b { color: var(--text); display: block; margin-bottom: 4px; font-size: 12px; }
+  #notes ul { margin: 6px 0 0; padding-left: 16px; } #notes li { margin: 3px 0; }
+
+  /* ───────── stage ───────── */
+  #stage { display: grid; place-items: center; padding: 24px; background: #26262b; min-width: 0; }
+  [data-theme="light"] #stage { background: #c9c9ce; }
+  #frame { width: var(--w, 420px); height: min(940px, calc(100vh - 48px)); display: flex; flex-direction: column; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; box-shadow: 0 30px 80px -20px rgba(0,0,0,.6); container-type: inline-size; transition: width .35s var(--ease); }
+
+  /* ───────── the kit: app bar ───────── */
+  .bar { display: flex; align-items: center; gap: 12px; padding: 16px 16px 14px; border-bottom: 1px solid var(--line); background: var(--bg); min-height: 74px; }
+  .bar .logo { width: 44px; height: 44px; border-radius: 14px; display: grid; place-items: center; background: var(--ink); color: var(--on-ink); flex: none; }
+  .bar .logo svg { width: 22px; height: 22px; }
+  .bar .ttl { min-width: 0; flex: 1; }
+  .bar .ttl b { display: block; font-size: 17px; letter-spacing: -.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar .ttl span { display: inline-block; margin-top: 4px; padding: 2px 10px; border-radius: 999px; background: var(--card); border: 1px solid var(--line); font-size: 11.5px; font-weight: 600; color: var(--dim); }
+  .ibtn { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 10px; background: var(--card); border: 1px solid var(--line); color: var(--dim); }
+  .ibtn svg { width: 15px; height: 15px; }
+  .ibtn:hover { color: var(--text); }
+  .docks { display: flex; gap: 6px; }
+
+  #body { flex: 1; overflow-y: auto; padding: 14px 16px 22px; display: grid; gap: 12px; align-content: start; scroll-behavior: smooth; overscroll-behavior: contain;
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 10px, #000 calc(100% - 14px), transparent 100%); mask-image: linear-gradient(to bottom, transparent 0, #000 10px, #000 calc(100% - 14px), transparent 100%); }
+
+  /* cards */
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--r); padding: 18px; box-shadow: var(--shadow); animation: rise .38s var(--ease) both; }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  .card > .hd { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+  .cap { font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+  .big { font-size: 34px; font-weight: 800; letter-spacing: -.03em; line-height: 1; }
+  .dim { color: var(--dim); } .faint { color: var(--faint); }
+  p { margin: 0; line-height: 1.55; font-size: 14px; }
+  .lead { font-size: 15px; line-height: 1.5; font-weight: 500; }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .grow { flex: 1; min-width: 0; }
+
+  /* pills, chips, badges */
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--card2); font-size: 11.5px; font-weight: 600; color: var(--dim); white-space: nowrap; }
+  .pill svg { width: 12px; height: 12px; }
+  .pill.solid { background: var(--ink); color: var(--on-ink); border-color: var(--ink); }
+  .pill.outline { background: transparent; color: var(--text); border-color: var(--text); }
+  .pill.dash { background: transparent; border-style: dashed; color: var(--dim); }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: 10px; background: var(--card2); border: 1px solid var(--line); font-size: 12px; font-family: var(--mono); color: var(--dim); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .segpill { display: flex; padding: 3px; border-radius: 999px; background: var(--card2); border: 1px solid var(--line); gap: 2px; overflow-x: auto; }
+  .segpill button { flex: none; padding: 6px 13px; border: 0; border-radius: 999px; background: transparent; font-size: 12px; font-weight: 600; color: var(--dim); }
+  .segpill button[aria-pressed=true] { background: var(--ink); color: var(--on-ink); }
+
+  /* KPI tiles */
+  .kpis { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  @container (min-width: 600px) { .kpis { grid-template-columns: repeat(4, 1fr); } .two { grid-template-columns: 1fr 1fr !important; } }
+  .kpi { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px; box-shadow: var(--shadow); }
+  .kpi .cap { font-size: 10px; }
+  .kpi .big { font-size: 28px; margin-top: 8px; }
+  .kpi small { display: block; margin-top: 6px; font-size: 11.5px; color: var(--faint); }
+
+  /* bars */
+  .bars { display: grid; gap: 12px; }
+  .bar2 { display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; align-items: center; font-size: 13px; }
+  .bar2 .v { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .bar2 .track { grid-column: 1 / -1; height: 7px; border-radius: 99px; background: var(--card2); overflow: hidden; }
+  .bar2 .fill { height: 100%; width: var(--p); border-radius: 99px; background: var(--ink); transform-origin: left; animation: grow .7s var(--ease) both; }
+  @keyframes grow { from { transform: scaleX(0); } }
+  .bar2 .fill.mid { background: var(--dim); } .bar2 .fill.low { background: var(--faint); }
+
+  /* donut (conic) */
+  .donut { width: 112px; height: 112px; border-radius: 50%; background: conic-gradient(var(--ink) 0 var(--a), var(--dim) var(--a) var(--b), var(--faint) var(--b) var(--c), var(--card2) var(--c) 100%); display: grid; place-items: center; flex: none; }
+  .donut::after { content: attr(data-c); width: 76px; height: 76px; border-radius: 50%; background: var(--card); display: grid; place-items: center; font-weight: 800; font-size: 18px; letter-spacing: -.02em; }
+
+  /* logo tiles (the only place colour is allowed) */
+  .logo-t { width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center; font-weight: 800; font-size: 15px; color: #fff; flex: none; box-shadow: 0 6px 14px -8px rgba(0,0,0,.6); }
+  .avatars { display: flex; padding-left: 8px; } .avatars .logo-t { margin-left: -8px; box-shadow: 0 0 0 3px var(--card); }
+
+  /* lists */
+  .list { display: grid; gap: 0; }
+  .li { display: flex; gap: 12px; align-items: flex-start; padding: 13px 0; border-top: 1px solid var(--line); }
+  .li:first-child { border-top: 0; padding-top: 2px; }
+  .num { width: 26px; height: 26px; border-radius: 50%; background: var(--ink); color: var(--on-ink); display: grid; place-items: center; font-size: 12px; font-weight: 800; flex: none; margin-top: 1px; }
+  .li b { font-size: 14px; display: block; margin-bottom: 3px; letter-spacing: -.01em; }
+  .li p { font-size: 13px; color: var(--dim); }
+
+  /* code, tables, callouts */
+  pre.code { margin: 0; padding: 14px; background: var(--card2); border: 1px solid var(--line); border-radius: var(--r-sm); font: 12.5px/1.6 var(--mono); overflow-x: auto; position: relative; }
+  .copy { position: absolute; top: 8px; right: 8px; padding: 4px 9px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); font-size: 11px; font-weight: 600; color: var(--dim); }
+  .tk { color: var(--text); font-weight: 700; } .tc { color: var(--faint); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); padding: 0 0 8px; }
+  td { padding: 10px 0; border-top: 1px solid var(--line); } td:last-child, th:last-child { text-align: right; }
+  .callout { display: flex; gap: 12px; padding: 14px; border-radius: var(--r-sm); background: var(--card2); border: 1px solid var(--line); border-left: 3px solid var(--ink); }
+  .callout svg { width: 18px; height: 18px; flex: none; margin-top: 1px; } .callout b { display: block; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
+  .callout p { font-size: 13px; color: var(--dim); }
+  h3.h { font-size: 20px; letter-spacing: -.02em; margin: 0; line-height: 1.25; }
+
+  /* screenshot mock */
+  .shot { aspect-ratio: 16/9; border-radius: var(--r-sm); background: var(--card2); border: 1px solid var(--line); position: relative; overflow: hidden; }
+  .shot .w { position: absolute; background: var(--card); border: 1px solid var(--line); border-radius: 6px; }
+  .shot .pin { position: absolute; width: 22px; height: 22px; border-radius: 50%; background: var(--ink); color: var(--on-ink); display: grid; place-items: center; font-size: 11px; font-weight: 800; box-shadow: 0 0 0 4px color-mix(in srgb, var(--ink) 22%, transparent); animation: pop .5s var(--ease) both; }
+  @keyframes pop { from { transform: scale(.3); opacity: 0; } }
+  .shot .ln { position: absolute; height: 5px; border-radius: 3px; background: var(--line); }
+
+  /* sources */
+  .src { display: grid; grid-template-columns: auto 1fr; gap: 12px; padding: 13px 0; border-top: 1px solid var(--line); }
+  .src:first-child { border-top: 0; padding-top: 2px; }
+  .fav { width: 34px; height: 34px; border-radius: 10px; background: var(--card2); border: 1px solid var(--line); display: grid; place-items: center; font-weight: 800; font-size: 13px; }
+  .src b { font-size: 13.5px; display: block; letter-spacing: -.01em; } .src small { color: var(--faint); font-size: 11.5px; } .src p { font-size: 12.5px; color: var(--dim); margin-top: 3px; }
+  sup.cite { display: inline-grid; place-items: center; min-width: 17px; height: 17px; margin: 0 1px; border-radius: 6px; background: var(--card2); border: 1px solid var(--line); font-size: 10px; font-weight: 800; vertical-align: 2px; }
+
+  /* action bar */
+  .actions { padding: 12px 16px 14px; border-top: 1px solid var(--line); background: var(--bg); display: flex; gap: 10px; }
+  .btn { flex: 1; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); font-weight: 700; font-size: 14px; display: flex; align-items: center; justify-content: center; gap: 8px; }
+  .btn.primary { background: var(--ink); color: var(--on-ink); border-color: var(--ink); }
+  .btn kbd { font: 600 10.5px var(--mono); padding: 2px 6px; border-radius: 6px; background: color-mix(in srgb, currentColor 14%, transparent); }
+  .btn:active { transform: scale(.985); }
+  .timer { height: 3px; background: var(--card2); border-radius: 3px; overflow: hidden; margin-top: 12px; }
+  .timer i { display: block; height: 100%; width: 100%; background: var(--ink); transform-origin: left; animation: drain 5s linear forwards; }
+  @keyframes drain { to { transform: scaleX(0); } }
+  .bubble { padding: 12px 14px; border-radius: 16px 16px 16px 6px; background: var(--card2); border: 1px solid var(--line); font-size: 14px; line-height: 1.5; }
+  .choice { display: flex; align-items: center; gap: 14px; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--card2); width: 100%; text-align: left; margin-bottom: 8px; }
+  .choice:hover { border-color: var(--text); }
+  .choice .num { width: 30px; height: 30px; font-size: 14px; margin: 0; }
+
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+</style>
+</head>
+<body data-theme="dark">
+
+<aside id="lab">
+  <h1>Sidebar system</h1>
+  <p class="sub">One design language for every sidebar view, with mock data. No dock or close buttons in the header: the arrow keys dock the window and Esc closes it. Comfortable density only.</p>
+
+  <h2>View</h2>
+  <div class="nav" id="nav"></div>
+
+  <h2>Theme</h2>
+  <div class="seg" id="theme"><button data-v="dark" aria-pressed="true">Dark</button><button data-v="light" aria-pressed="false">Light</button></div>
+  <h2>Window width</h2>
+  <div class="seg" id="width"><button data-v="420" aria-pressed="true">Dock 420</button><button data-v="520" aria-pressed="false">520</button><button data-v="740" aria-pressed="false">Modal 740</button></div>
+
+  <h2>About this view</h2>
+  <div id="notes"></div>
+</aside>
+
+<main id="stage">
+  <section id="frame" class="sv" aria-label="Sidebar preview">
+    <header class="bar" id="bar"></header>
+    <div id="body"></div>
+    <footer class="actions" id="actions" hidden></footer>
+  </section>
+</main>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (s, r = document) => r.querySelector(s);
+  const html = String.raw;
+
+  /* ── tiny stroke icon set ── */
+  const P = {
+    monitor: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
+    pr: '<circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V10a3 3 0 0 0-3-3h-3m0 0 2.5-2.5M12 7l2.5 2.5"/>',
+    repo: '<path d="M4 5a2 2 0 0 1 2-2h12v15H6a2 2 0 0 0-2 2z"/><path d="M4 20a2 2 0 0 0 2 2h12"/>',
+    layers: '<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>',
+    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+    chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/>',
+    shield: '<path d="M12 3 5 6v6c0 4.5 3 7.5 7 9 4-1.5 7-4.5 7-9V6z"/><path d="m9 12 2 2 4-4"/>',
+    check: '<path d="m5 12 4.5 4.5L19 7"/>', x: '<path d="M6 6l12 12M18 6 6 18"/>',
+    copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>',
+    left: '<path d="m14 6-6 6 6 6"/>', right: '<path d="m10 6 6 6-6 6"/>', mid: '<rect x="7" y="5" width="10" height="14" rx="2"/>',
+    sparkle: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/>',
+    info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>', alert: '<path d="M12 4 3 20h18z"/><path d="M12 10v4M12 17h.01"/>',
+    star: '<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/>',
+    file: '<path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/>', link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+    mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>', arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>'
+  };
+  const ic = (n) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[n] || ''}</svg>`;
+
+  /* ── kit helpers (these become the React kit components) ── */
+  const card = (title, inner, right = '') => `<section class="card">${title ? `<div class="hd"><span class="cap">${title}</span>${right}</div>` : ''}${inner}</section>`;
+  const kpi = (l, v, s = '') => `<div class="kpi"><span class="cap">${l}</span><div class="big">${v}</div>${s ? `<small>${s}</small>` : ''}</div>`;
+  const bar = (l, p, v, cls = '') => `<div class="bar2"><span>${l}</span><span class="v">${v}</span><div class="track"><div class="fill ${cls}" style="--p:${p}%"></div></div></div>`;
+  const logo = (t, c) => `<span class="logo-t" style="background:${c}" aria-hidden="true">${t}</span>`;
+  const pill = (t, cls = '', i = '') => `<span class="pill ${cls}">${i ? ic(i) : ''}${t}</span>`;
+  const seg = (items, active = 0) => `<div class="segpill" role="group">${items.map((t, i) => `<button type="button" aria-pressed="${i === active}">${t}</button>`).join('')}</div>`;
+
+  /* ── the views ── */
+  const V = {};
+
+  V.screen = {
+    label: 'Screen analysis', icon: 'monitor', title: 'Screen analysis', sub: 'Brave · New Tab',
+    notes: ['Today: a tour overview plus a plain list.', 'Now: the picture leads, numbered pins match the numbered findings, and one line says what it is looking at.', 'The numbers on the pins are the same numbers as on the findings, so the voice tour, the callouts and this list all agree.'],
+    render: () => html`
+      ${card('', `
+        <div class="shot" aria-label="Screenshot with 3 numbered findings">
+          <div class="w" style="left:6%;top:12%;width:58%;height:70%"></div><div class="w" style="left:68%;top:12%;width:26%;height:38%"></div>
+          <i class="ln" style="left:10%;top:20%;width:40%"></i><i class="ln" style="left:10%;top:28%;width:48%"></i><i class="ln" style="left:10%;top:36%;width:34%"></i>
+          <i class="ln" style="left:72%;top:22%;width:18%"></i><i class="ln" style="left:72%;top:30%;width:14%"></i>
+          <span class="pin" style="left:8%;top:14%">1</span><span class="pin" style="left:56%;top:44%">2</span><span class="pin" style="left:84%;top:40%">3</span>
+        </div>
+        <div class="row" style="margin-top:14px">${pill('Brave', '', 'globe')}${pill('Read in 3.7 s', '', 'sparkle')}${pill('gemini-3.5-flash-lite', 'dash')}</div>
+        <p class="lead" style="margin-top:12px">A browser new-tab page with a search box, a shortcuts row and one open notification.</p>`)}
+      ${card('Findings', `<div class="list">
+        <div class="li"><span class="num">1</span><div><b>Search box</b><p>Type here to search or enter an address. Focused, ready for input.</p></div></div>
+        <div class="li"><span class="num">2</span><div><b>Shortcuts row</b><p>Eight saved sites. The last one is a plus button to add another.</p></div></div>
+        <div class="li"><span class="num">3</span><div><b>Notification</b><p>A permission prompt is open in the top right; it is waiting for a choice.</p></div></div></div>`, pill('3', 'solid'))}
+      ${card('Foreground review', `<div class="bars">${bar('Readable text', 92, '92 %')}${bar('Sensitive content', 8, 'None found', 'low')}</div><p class="dim" style="margin-top:12px;font-size:12.5px">Nothing on this page was sent anywhere except the screenshot for this one reading.</p>`)}`
+  };
+
+  V.pr = {
+    label: 'PR analysis', icon: 'pr', title: 'PR #34', sub: 'Engine-NEXUS / zync', actions: 'pr',
+    notes: ['Today: a long text summary and cards in a column.', 'Now: a verdict first, four numbers, a severity filter (every severity has a shape and a word, never colour alone), findings grouped by file, and the actions pinned at the bottom.', 'The suggested code can be copied with one tap, and the action bar stays reachable while you scroll.'],
+    render: () => html`
+      ${card('', `
+        <div class="row" style="margin-bottom:10px">${pill('Changes requested', 'solid', 'alert')}${pill('feat/island → main', '', 'pr')}</div>
+        <h3 class="h">Make the island window layered so click-through works</h3>
+        <div class="row dim" style="margin-top:10px;font-size:12.5px">by <b style="color:var(--text)">chitkul</b> · opened 2 h ago · 4 commits</div>`)}
+      <div class="kpis">${kpi('Files', '6', '+ 2 new')}${kpi('Added', '+184', 'lines')}${kpi('Removed', '−41', 'lines')}${kpi('Findings', '4', '1 high')}</div>
+      ${card('Findings', `
+        <div style="margin-bottom:12px">${seg(['All 4', 'High 1', 'Medium 2', 'Low 1'])}</div>
+        <div class="list">
+          <div class="li"><span class="pill solid" style="margin-top:2px">▲ High</span><div class="grow"><b>Style applied only on a change</b><div class="chip" style="margin:4px 0 6px">${ic('file')}agent_island.rs:402</div><p>Repair the style on every tick, not only when the cursor state flips.</p>
+            <pre class="code" style="margin-top:10px"><button class="copy" type="button">Copy</button><span class="tc">// before</span>
+<span class="tk">if</span> self.ignoring != Some(want) {
+    set_click_through(&w, want);
+}</pre></div></div>
+          <div class="li"><span class="pill outline" style="margin-top:2px">◆ Medium</span><div class="grow"><b>Zone margin is wide</b><div class="chip" style="margin:4px 0 6px">${ic('file')}agent_island.rs:31</div><p>24 px covers a browser tab strip. Suggest 8.</p></div></div>
+          <div class="li"><span class="pill outline" style="margin-top:2px">◆ Medium</span><div class="grow"><b>Missing test for APPWINDOW</b><div class="chip" style="margin:4px 0 6px">${ic('file')}agent_island.rs:640</div><p>Cover a style that starts with none of the bits.</p></div></div>
+          <div class="li"><span class="pill dash" style="margin-top:2px">● Low</span><div class="grow"><b>Comment wording</b><div class="chip" style="margin:4px 0 6px">${ic('file')}docs/changes/206</div><p>Clarify which window the numbers describe.</p></div></div>
+        </div>`)}
+      ${card('Checks', `<div class="bars">${bar('frontend-check', 100, 'passed')}${bar('rust-check-windows', 62, 'running', 'mid')}${bar('offline-contracts', 100, 'passed')}</div>`)}`
+  };
+
+  V.repo = {
+    label: 'Repo analysis', icon: 'repo', title: 'zync', sub: 'Engine-NEXUS · public',
+    notes: ['Today: a grid of badges, a pie chart and text blocks.', 'Now: the same facts in the console layout: four number tiles, a language donut with a legend, structure bars with the value on the right.'],
+    render: () => html`
+      <div class="kpis">${kpi('Stars', '1.2k')}${kpi('Forks', '184')}${kpi('Files', '2,801')}${kpi('Branch', 'main')}</div>
+      ${card('About', `<p class="lead">Voice-first desktop assistant: wake word, local parser, cloud reasoning.</p><div class="row" style="margin-top:12px">${pill('Rust', '', 'file')}${pill('TypeScript', '', 'file')}${pill('Tauri v2', '', 'layers')}</div>`)}
+      ${card('Languages', `<div class="row" style="gap:18px;flex-wrap:nowrap"><div class="donut" style="--a:48%;--b:80%;--c:94%" data-c="4"></div><div class="bars grow" style="gap:9px">${bar('Rust', 48, '48 %')}${bar('TypeScript', 32, '32 %', 'mid')}${bar('Python', 14, '14 %', 'low')}${bar('Other', 6, '6 %', 'low')}</div></div>`)}
+      ${card('Structure', `<div class="bars">${bar('src-tauri/src', 100, '205 files')}${bar('frontend/src', 78, '160 files', 'mid')}${bar('docs', 64, '131 files', 'mid')}${bar('scripts', 22, '44 files', 'low')}</div>`)}`
+  };
+
+  V.research = {
+    label: 'Research', icon: 'globe', title: 'Research', sub: '3 sources · checked just now',
+    notes: ['Today: the answer is a block of text; sources are links inside it.', 'Now: the topic leads, the answer is short with numbered citations that match a source list, then follow-up chips for the next question.', 'Every claim carries a number, so you can tell what is sourced and what is the model talking.'],
+    render: () => html`
+      ${card('', `<span class="cap">Topic</span><h3 class="h" style="margin:6px 0 12px">Does a transparent window click through without a layered style?</h3>
+        <p class="lead">Not reliably. The click-through flag only takes effect on a layered window<sup class="cite">1</sup>, so a transparent window that is not layered keeps receiving the mouse<sup class="cite">2</sup>. Layering it and setting full alpha fixes it<sup class="cite">1</sup>.</p>
+        <div class="row" style="margin-top:14px">${pill('High agreement', 'solid', 'check')}${pill('3 sources', '', 'link')}${pill('Checked just now', 'dash')}</div>`)}
+      ${card('Key points', `<div class="list">
+        <div class="li"><span class="num">1</span><div><b>The flag needs layering</b><p>Click-through is a property of layered windows.</p></div></div>
+        <div class="li"><span class="num">2</span><div><b>Alpha must be set</b><p>A layered window draws nothing until its alpha is set.</p></div></div></div>`)}
+      ${card('Sources', `
+        <div class="src"><span class="fav">M</span><div><b>Extended window styles <sup class="cite">1</sup></b><small>learn.microsoft.com</small><p>WS_EX_TRANSPARENT and WS_EX_LAYERED together make hit testing skip the window.</p></div></div>
+        <div class="src"><span class="fav">S</span><div><b>Click-through overlay windows <sup class="cite">2</sup></b><small>stackoverflow.com</small><p>Without WS_EX_LAYERED the window still receives the mouse.</p></div></div>
+        <div class="src"><span class="fav">T</span><div><b>tao: set_cursor_hittest <sup class="cite">3</sup></b><small>github.com/tauri-apps/tao</small><p>Adds the layered flag when ignoring cursor events.</p></div></div>`)}
+      ${card('Ask next', `<div class="row"><button class="pill" type="button">${ic('arrow')}Show me the fix</button><button class="pill" type="button">${ic('arrow')}Is it safe with WebView2?</button><button class="pill" type="button">${ic('arrow')}Compare with a region</button></div>`)}`
+  };
+
+  V.stack = {
+    label: 'Reverse engineer', icon: 'layers', title: 'Tech stack', sub: 'Web reverse engineer',
+    notes: ['This is the newest design (from your reference images); it is the model for the rest. It is kept as it is, so every other view can be compared to it.', 'Colour appears only inside the technology logos.'],
+    render: () => html`
+      ${card('', `<div class="row"><div class="avatars">${logo('R', '#61dafb')}${logo('N', '#000')}${logo('V', '#111')}${logo('C', '#f6821f')}</div><span class="pill">+3 more</span></div>
+        <div class="big" style="margin:16px 0 4px">11</div><div class="cap">Technologies found</div><p class="dim" style="margin-top:10px;font-size:13px">example.com is a React site on Next.js, served by Vercel behind Cloudflare.</p>`)}
+      <div class="kpis">${kpi('Confidence', '87 %')}${kpi('Headers', '5 / 7')}${kpi('Page weight', '1.4 MB')}${kpi('Scripts', '18')}</div>
+      ${card('Stack mix', `<div class="bars">${bar('Frameworks', 70, '4')}${bar('Hosting / CDN', 45, '3', 'mid')}${bar('Analytics', 30, '2', 'low')}${bar('Other', 20, '2', 'low')}</div>`)}
+      ${card('Technologies', `<div class="list">
+        <div class="li">${logo('R', '#61dafb')}<div class="grow"><b>React 18.3</b><div class="bars" style="margin-top:6px">${bar('', 96, '96 %')}</div></div></div>
+        <div class="li">${logo('N', '#000')}<div class="grow"><b>Next.js 14</b><div class="bars" style="margin-top:6px">${bar('', 88, '88 %')}</div></div></div>
+        <div class="li">${logo('C', '#f6821f')}<div class="grow"><b>Cloudflare</b><div class="bars" style="margin-top:6px">${bar('', 74, '74 %', 'mid')}</div></div></div></div>`)}
+      ${card('Security headers', `<div class="bars">${bar('Strict-Transport-Security', 100, 'present')}${bar('Content-Security-Policy', 100, 'present')}${bar('X-Frame-Options', 0, 'missing', 'low')}</div>`)}`
+  };
+
+  V.answer = {
+    label: 'Answer', icon: 'sparkle', title: 'Answer', sub: 'Nexus', actions: 'answer',
+    notes: ['Today: rendered markdown in one frosted card.', 'Now: the same markdown, but with a clear type scale, table rows that scan, code that copies in one tap, callouts that carry an icon and a word (not only a colour), and read-aloud and copy pinned at the bottom.'],
+    render: () => html`
+      ${card('', `<h3 class="h">Why the wake word missed</h3><p class="dim" style="margin-top:8px">Three things in the log, in order of impact.</p>
+        <div style="margin-top:14px"><table><thead><tr><th>Cause</th><th>Seen</th></tr></thead><tbody>
+          <tr><td>Speech check timed out</td><td><b>3×</b></td></tr><tr><td>Local server not found</td><td><b>2×</b></td></tr><tr><td>Mic silent at start</td><td><b>1×</b></td></tr></tbody></table></div>`)}
+      <div class="callout">${ic('info')}<div><b>Note</b><p>The wake model heard you every time (0.71 to 0.99); the second check was what failed.</p></div></div>
+      <div class="callout" style="border-left-color:var(--dim)">${ic('alert')}<div><b>Important</b><p>If Groq is unreachable, the offline speech server has to be ready within 15 seconds.</p></div></div>
+      ${card('Fix', `<pre class="code"><button class="copy" type="button">Copy</button><span class="tc">// try every candidate, not only the first</span>
+<span class="tk">let</span> up = |n| { <span class="tc">…</span> };
+candidates.into_iter().find(|p| p.exists())</pre>`)}`
+  };
+
+  V.confirm = {
+    label: 'Confirmation', icon: 'shield', title: 'Approval needed', sub: 'WhatsApp', actions: 'confirm',
+    notes: ['Today: a card with a badge and two buttons.', 'Now: what will happen is the headline; the exact message is shown as it will be sent; the five-second voice window is a thin bar that drains; the keys ("Enter", "Esc") are on the buttons; it works with the voice answer "yes" or "cancel".'],
+    render: () => html`
+      ${card('', `<div class="row" style="margin-bottom:12px">${pill('WhatsApp', 'solid', 'chat')}${pill('Approval required', 'outline', 'shield')}</div>
+        <h3 class="h">Send this message to Mummy?</h3>
+        <p class="dim" style="margin:10px 0 14px">It goes out as soon as you confirm. It cannot be unsent from here.</p>
+        <div class="bubble">Reached the hostel. I will call after dinner.</div>
+        <div class="row" style="margin-top:14px">${pill('To: Mummy', '', 'chat')}${pill('Now', 'dash')}</div>
+        <div class="timer" aria-hidden="true"><i></i></div>
+        <p class="faint" style="font-size:12px;margin-top:8px">${ic('mic').replace('<svg', '<svg style="width:12px;height:12px;vertical-align:-2px"')} Listening for “yes” or “cancel” for 5 seconds</p>`)}`
+  };
+
+  V.choices = {
+    label: 'Which one?', icon: 'mic', title: 'Which one?', sub: 'Say one, two or three',
+    notes: ['Today: a plain list of desktop controls.', 'Now: large numbered rows that match what you can say; the numbers are the answer. Used for app names that sound alike and for desktop controls.'],
+    render: () => html`
+      ${card('', `<h3 class="h" style="margin-bottom:6px">Which Chrome?</h3><p class="dim" style="margin-bottom:14px">Two apps sound alike. Say the number.</p>
+        <button class="choice" type="button"><span class="num">1</span><div class="grow"><b style="font-size:15px">Google Chrome</b><div class="faint" style="font-size:12px">Installed · used 14 times</div></div>${ic('arrow').replace('<svg', '<svg style="width:16px;height:16px"')}</button>
+        <button class="choice" type="button"><span class="num">2</span><div class="grow"><b style="font-size:15px">Chrome Remote Desktop</b><div class="faint" style="font-size:12px">Installed · used once</div></div>${ic('arrow').replace('<svg', '<svg style="width:16px;height:16px"')}</button>
+        <button class="choice" type="button"><span class="num">3</span><div class="grow"><b style="font-size:15px">Neither</b><div class="faint" style="font-size:12px">Cancel this request</div></div>${ic('x').replace('<svg', '<svg style="width:16px;height:16px"')}</button>`)}`
+  };
+
+  const ORDER = ['screen', 'pr', 'repo', 'research', 'stack', 'answer', 'confirm', 'choices'];
+  const ACTIONS = {
+    pr: `<button class="btn" type="button">Comment</button><button class="btn" type="button">Approve</button><button class="btn primary" type="button">Merge <kbd>M</kbd></button>`,
+    answer: `<button class="btn" type="button">${ic('mic').replace('<svg', '<svg style="width:16px;height:16px"')}Read aloud</button><button class="btn" type="button">${ic('copy').replace('<svg', '<svg style="width:16px;height:16px"')}Copy</button>`,
+    confirm: `<button class="btn" type="button">Cancel <kbd>Esc</kbd></button><button class="btn primary" type="button">Confirm <kbd>Enter</kbd></button>`
+  };
+
+  /* ── shell ── */
+  const nav = $('#nav');
+  nav.innerHTML = ORDER.map((id) => `<button type="button" data-id="${id}" aria-pressed="false">${ic(V[id].icon)}${V[id].label}</button>`).join('');
+  let current = 'screen';
+
+  function show(id) {
+    current = id; const v = V[id];
+    nav.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.id === id)));
+    $('#bar').innerHTML = `<div class="logo">${ic(v.icon)}</div><div class="ttl"><b>${v.title}</b><span>${v.sub}</span></div>`;
+    $('#body').innerHTML = v.render(); $('#body').scrollTop = 0;
+    const a = $('#actions'); if (v.actions) { a.innerHTML = ACTIONS[v.actions]; a.hidden = false; } else { a.hidden = true; a.innerHTML = ''; }
+    $('#notes').innerHTML = `<b>${v.label}</b><ul>${v.notes.map((n) => `<li>${n}</li>`).join('')}</ul>`;
+    history.replaceState(null, '', '#' + id);
+  }
+  nav.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) show(b.dataset.id); });
+  function bind(id, fn) { $(id).addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; $(id).querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', String(x === b))); fn(b.dataset.v); }); }
+  bind('#theme', (v) => { document.body.dataset.theme = v; });
+  bind('#width', (v) => { $('#frame').style.setProperty('--w', v + 'px'); });
+
+  /* small interactions: filters, copy, choices */
+  document.addEventListener('click', (e) => {
+    const sp = e.target.closest('.segpill button');
+    if (sp) sp.parentElement.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', String(x === sp)));
+    const cp = e.target.closest('.copy');
+    if (cp) { const t = cp.textContent; cp.textContent = 'Copied'; setTimeout(() => { cp.textContent = t; }, 1100); }
+  });
+  addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    const i = ORDER.indexOf(current);
+    if (e.key === 'ArrowDown') { e.preventDefault(); show(ORDER[(i + 1) % ORDER.length]); }
+    if (e.key === 'ArrowUp') { e.preventDefault(); show(ORDER[(i + ORDER.length - 1) % ORDER.length]); }
+    if (e.key === 't' || e.key === 'T') { const d = document.body.dataset.theme === 'dark' ? 'light' : 'dark'; document.body.dataset.theme = d; $('#theme').querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.v === d))); }
+  });
+  show(ORDER.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'screen');
+  window.__sys = { show, V };
+})();
+</script>
+</body>
+</html>

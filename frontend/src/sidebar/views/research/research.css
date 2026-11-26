@@ -1,0 +1,50 @@
+/* Research "Briefing" skin: an editorial reading column for answers and research. Scoped to .view-research, colours from the shared --sv tokens. */
+.view-research .nexus-markdown-body {
+  max-width: 62ch;
+  margin: 0 auto;
+  padding: 8px 6px 24px;
+  font-size: 15px;
+  line-height: 1.7;
+}
+.view-research .nexus-markdown-body > p:first-of-type {
+  font-size: 17px;
+  line-height: 1.6;
+  font-weight: 600;
+  color: var(--sv-text);
+}
+.view-research .nexus-markdown-body h1,
+.view-research .nexus-markdown-body h2 {
+  margin: 26px 0 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--sv-line);
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sv-dim);
+}
+.view-research .nexus-markdown-body h1:first-child,
+.view-research .nexus-markdown-body h2:first-child {
+  margin-top: 4px;
+  padding-top: 0;
+  border-top: 0;
+}
+.view-research .nexus-markdown-body blockquote {
+  margin: 14px 0;
+  padding: 2px 0 2px 16px;
+  border-left: 3px solid var(--sv-line2);
+  color: var(--sv-dim);
+}
+.view-research .nexus-markdown-body ul,
+.view-research .nexus-markdown-body ol {
+  padding-left: 22px;
+}
+.view-research .nexus-markdown-body li {
+  margin: 6px 0;
+}
+.view-research .nexus-markdown-body a {
+  color: var(--sv-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--sv-line2);
+}

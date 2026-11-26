@@ -838,6 +838,7 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         | ParsedIntent::TimetableCommit
         | ParsedIntent::StudyPref { .. }
         | ParsedIntent::MailDigest
+        | ParsedIntent::ScreenTime
         | ParsedIntent::MailMute
         | ParsedIntent::AlertOpenLast
         | ParsedIntent::AlertRead
@@ -1712,6 +1713,9 @@ async fn process_transcript_inner<R: Runtime>(
             ParsedIntent::MailDigest => {
                 return run_mail_digest(app).await;
             }
+            ParsedIntent::ScreenTime => {
+                return run_screen_time(app).await;
+            }
             ParsedIntent::MailMute => {
                 return run_mail_mute(app).await;
             }
@@ -2067,6 +2071,9 @@ async fn process_transcript_inner<R: Runtime>(
             }
             ParsedIntent::MailDigest => {
                 return run_mail_digest(app).await;
+            }
+            ParsedIntent::ScreenTime => {
+                return run_screen_time(app).await;
             }
             ParsedIntent::MailMute => {
                 return run_mail_mute(app).await;
@@ -6239,7 +6246,8 @@ async fn run_mail_digest<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult,
         md.push_str(&format!("- {}\n", briefing::mail_line(m).replace(['*', '_', '[', ']', '<', '>', '`', '#', '|'], "")));
     }
     md.push_str("\n---\nSay *that's not important* right after an alert to stop alerts from that sender.\n");
-    if let Err(e) = crate::commands::show_sidebar_with_content(app.clone(), "Important email".to_string(), md).await {
+    let _ = md; // kept as the plain-text fallback; the view reads the structured payload
+    if let Err(e) = crate::commands::show_sidebar_with_analysis(app.clone(), "Important email".to_string(), String::new(), briefing::mail_payload(&items)).await {
         tracing::warn!("mail card: could not open sidebar: {e}");
     }
     let first = briefing::mail_line(&items[0]);
@@ -6249,6 +6257,16 @@ async fn run_mail_digest<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult,
         format!("You have {} important emails, sir. The most urgent is {first}. The rest are in the sidebar.", items.len())
     };
     say_and_finish(&app, request_id, line)
+}
+
+/// "Show my screen time" — the Activity Manager's history as a ledger in the sidebar, one line spoken.
+async fn run_screen_time<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let (payload, spoken) = crate::device_activity::screen_time_card();
+    if let Err(e) = crate::commands::show_sidebar_with_analysis(app.clone(), "Screen time".to_string(), String::new(), payload).await {
+        tracing::warn!("screen time card: could not open sidebar: {e}");
+    }
+    say_and_finish(&app, request_id, spoken)
 }
 
 /// "That's not important" — mute the sender of the alert just spoken.
@@ -7080,7 +7098,7 @@ async fn run_whatsapp_read<R: Runtime>(app: AppHandle<R>, name: Option<String>) 
         Err(_) => return say_and_finish(&app, request_id, "WhatsApp took too long to answer, sir.".into()),
     };
     let md = wa::card_markdown(&display, &msgs);
-    if let Err(e) = crate::commands::show_sidebar_with_content(app.clone(), format!("WhatsApp - {display}"), md).await {
+    if let Err(e) = crate::commands::show_sidebar_with_analysis(app.clone(), format!("WhatsApp - {display}"), md, wa::card_payload(&display, &msgs)).await {
         tracing::warn!("whatsapp card: could not open sidebar: {e}");
     }
     let line = if crate::memcore::flag(&dir, "memcoreWhatsappSpeak", false) {
