@@ -78,7 +78,16 @@ pub struct Scores {
     pub false_positives: Vec<String>,
     /// "host: id" for every "must" that was not found.
     pub misses: Vec<String>,
+    /// "host: id" for every DETECTED technology in a single-valued category (meta-framework, CMS, e-commerce) that
+    /// contradicts a labelled technology of the same category (the closest thing to a wrong answer when the labels
+    /// are deliberately minimal: a site has one CMS, not two).
+    pub conflicts: Vec<String>,
+    /// How many Detected answers sat in a single-valued category on a site that has a label in that category.
+    pub conflict_checked: u32,
 }
+
+/// Categories where a site normally has exactly one answer, so a second answer is a contradiction.
+pub const SINGLE_VALUED: &[&str] = &["meta-framework", "cms", "ecommerce"];
 
 /// Score one site's detections `(id, category, status)` against its labels.
 /// `category_of` gives the table category of a labelled id that was missed. Pure.
@@ -107,6 +116,12 @@ pub fn score_site(
         }
         if labels.must_not.contains(id) {
             scores.must_not_hits.push(format!("{host}: {id}"));
+        }
+        if status == "detected" && SINGLE_VALUED.contains(&cat.as_str()) && labels.must.iter().any(|m| category_of(m) == *cat) {
+            scores.conflict_checked += 1;
+            if !labels.must.contains(id) && !labels.may.contains(id) {
+                scores.conflicts.push(format!("{host}: {id}"));
+            }
         }
     }
     for id in &labels.must {
@@ -227,6 +242,90 @@ pub fn report_page_json(page_json: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// 95 % Wilson score interval for `k` successes in `n` trials (the repo's rule for any rate it reports).
+pub fn wilson95(k: u32, n: u32) -> (f64, f64) {
+    if n == 0 {
+        return (0.0, 1.0);
+    }
+    let (k, n) = (k as f64, n as f64);
+    let z = 1.959_963_984_540_054_f64;
+    let p = k / n;
+    let denom = 1.0 + z * z / n;
+    let centre = (p + z * z / (2.0 * n)) / denom;
+    let half = z * ((p * (1.0 - p) / n) + z * z / (4.0 * n * n)).sqrt() / denom;
+    ((centre - half).max(0.0), (centre + half).min(1.0))
+}
+
+/// The numbers a reader needs from a replay: recall of every labelled "must" with its interval, headline-category
+/// precision/recall/F1, hard errors (a must-not that appeared), thin-reason misses and the list of misses.
+pub fn summary(scores: &Scores) -> String {
+    let (mut tp, mut fnn) = (0u32, 0u32);
+    for c in scores.per_category.values() {
+        tp += c.tp;
+        fnn += c.fn_;
+    }
+    let (lo, hi) = wilson95(tp, tp + fnn);
+    let mut out = format!(
+        "{} sites, {} labelled technologies: {} found, {} missed -> recall {:.1}% (95% CI {:.1}% to {:.1}%)\n",
+        scores.sites,
+        tp + fnn,
+        tp,
+        fnn,
+        100.0 * tp as f64 / (tp + fnn).max(1) as f64,
+        100.0 * lo,
+        100.0 * hi
+    );
+    // Labels list only what a source states, so "found but not labelled" is NOT an error and precision cannot be
+    // read from them: the per-category lines show recall only (found of labelled).
+    let (mut htp, mut hfn) = (0u32, 0u32);
+    for cat in HEADLINE_CATEGORIES {
+        let c = scores.per_category.get(*cat).copied().unwrap_or_default();
+        if c.tp + c.fn_ == 0 {
+            continue;
+        }
+        htp += c.tp;
+        hfn += c.fn_;
+        out.push_str(&format!("  {cat:<19} found {:>3} of {:>3} labelled (recall {:.2})\n", c.tp, c.tp + c.fn_, c.recall()));
+    }
+    let (rlo, rhi) = wilson95(htp, htp + hfn);
+    out.push_str(&format!(
+        "headline categories together: recall {:.1}% (CI {:.1}-{:.1}) over {} labelled\n",
+        100.0 * htp as f64 / (htp + hfn).max(1) as f64,
+        100.0 * rlo,
+        100.0 * rhi,
+        htp + hfn
+    ));
+    out.push_str(&format!("must-not hits (hard errors): {}\n", scores.must_not_hits.len()));
+    for m in &scores.must_not_hits {
+        out.push_str(&format!("  ! {m}\n"));
+    }
+    out.push_str(&format!("expected thin reasons missing: {}\n", scores.thin_misses.len()));
+    for m in &scores.thin_misses {
+        out.push_str(&format!("  ? {m}\n"));
+    }
+    // Labels are minimal on purpose (only what the site's own sources state), so "found but not labelled" is not
+    // an error. The wrong answers that CAN be told are contradictions inside a single-valued category.
+    let ok = scores.conflict_checked.saturating_sub(scores.conflicts.len() as u32);
+    let (clo, chi) = wilson95(ok, scores.conflict_checked);
+    out.push_str(&format!(
+        "contradictions in single-valued categories: {} of {} detected answers ({:.1}% consistent, CI {:.1}-{:.1})\n",
+        scores.conflicts.len(),
+        scores.conflict_checked,
+        100.0 * ok as f64 / scores.conflict_checked.max(1) as f64,
+        100.0 * clo,
+        100.0 * chi
+    ));
+    for c in &scores.conflicts {
+        out.push_str(&format!("  x {c}\n"));
+    }
+    out.push_str("misses:\n");
+    for m in &scores.misses {
+        out.push_str(&format!("  - {m}\n"));
+    }
+    out.push_str(&format!("detections neither must nor may: {}\n", scores.false_positives.len()));
+    out
+}
+
 /// A `labels.json` template for a freshly captured site.
 pub fn labels_template(url: &str) -> String {
     let t = serde_json::json!({
@@ -245,6 +344,35 @@ pub fn labels_template(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wilson_interval_matches_known_values_and_stays_inside_0_1() {
+        // 8 of 10: Wilson 95 % is about 49.0 % to 94.3 %
+        let (lo, hi) = wilson95(8, 10);
+        assert!((lo - 0.490).abs() < 0.005 && (hi - 0.943).abs() < 0.005, "{lo} {hi}");
+        let (lo, hi) = wilson95(0, 0);
+        assert_eq!((lo, hi), (0.0, 1.0));
+        let (lo, hi) = wilson95(50, 50);
+        assert!(lo > 0.92 && hi <= 1.0, "{lo} {hi}");
+        let (lo, hi) = wilson95(0, 20);
+        assert!(lo == 0.0 && hi < 0.17, "{lo} {hi}");
+    }
+
+    #[test]
+    fn summary_states_recall_with_its_interval_and_lists_hard_errors() {
+        let mut s = Scores::default();
+        let labels = Labels { must: vec!["nextjs".into(), "vercel".into()], must_not: vec!["nuxt".into()], ..Labels::default() };
+        let dets = vec![
+            ("nextjs".to_string(), "meta-framework".to_string(), "detected".to_string()),
+            ("nuxt".to_string(), "meta-framework".to_string(), "inferred".to_string()),
+        ];
+        score_site("a.test", &labels, &dets, &|_| "hosting".to_string(), &mut s);
+        let text = summary(&s);
+        assert!(text.contains("1 sites, 2 labelled technologies: 1 found, 1 missed"), "{text}");
+        assert!(text.contains("95% CI"), "{text}");
+        assert!(text.contains("! a.test: nuxt"), "a must-not hit is shown: {text}");
+        assert!(text.contains("- a.test: vercel"), "a miss is shown: {text}");
+    }
 
     fn fixtures_dir() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/site_real")

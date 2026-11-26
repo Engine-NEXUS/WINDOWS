@@ -25,6 +25,17 @@ fn main() {
         }
         return;
     }
+    // `--eval <dir>`: replay every folder holding page.json + labels.json and print recall, precision and the hard errors.
+    if let Some(dir) = args.iter().position(|a| a == "--eval").and_then(|i| args.get(i + 1)) {
+        match nexus_lib::site_eval::evaluate_dir(std::path::Path::new(dir)) {
+            Ok(scores) => println!("{}", nexus_lib::site_eval::summary(&scores)),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let Some(url) = args.iter().find(|a| a.starts_with("http")).cloned() else {
         eprintln!("usage: site_capture <https://site> [--out <dir>]");
         std::process::exit(2);
