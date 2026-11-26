@@ -76,3 +76,13 @@ $cmdline = 'cmd.exe /c ""' + $exeFull + '" > "' + $Log + '" 2>&1"'
 $procId = [IsolatedDesktop]::Start($cmdline, (Split-Path $exeFull), "NexusIsolatedTest")
 Set-Content -Path $pidFile -Value $procId
 Write-Output "isolated NEXUS (contributor profile) started on hidden desktop 'NexusIsolatedTest', pid $procId, debug port $Port, quiet mode, log $Log"
+# This script holds the only handle to the new desktop until the app attaches to it. Leaving at once let Windows destroy
+# the desktop while a slow-loading exe (the first start after a rebuild) was still starting, and the app died with
+# 0xC0000142 and an empty log. So wait until the app answers on its debug port (it is attached by then) or has exited.
+$deadline = (Get-Date).AddSeconds(120)
+while ((Get-Date) -lt $deadline) {
+    try { $t = Invoke-RestMethod "http://127.0.0.1:$Port/json/list" -TimeoutSec 2; if ($t.url -match 'stage.html') { Write-Output "the app is up"; return } } catch {}
+    if (-not (Get-Process -Id $procId -ErrorAction SilentlyContinue)) { throw "the isolated app exited during start-up; see $Log" }
+    Start-Sleep -Milliseconds 1000
+}
+throw "the isolated app did not answer within 120 s; see $Log"
