@@ -7,6 +7,8 @@
 //!     hides the orb. If the agent is idle, calls the agent (plays the wake
 //!     cue, starts STT capture, and wakes the orb). Windows (settings, sidebar,
 //!     setup) are closed by Escape, never by this hotkey.
+//!     Tap: silence ends the turn. Hold and talk: it listens until the key
+//!     comes up (60 s at most), then ends at once.
 //!   - `CommandOrControl+Shift+S`: Opens the Command Hub settings sidebar directly.
 //!   - `CommandOrControl+Alt+X`: Stage kill switch: destroys and disables the
 //!     fullscreen overlay for the session as an escape hatch even if the renderer
@@ -29,6 +31,40 @@ const HOTKEYS: &[&str] = &[
     "CommandOrControl+Alt+Down",
     "CommandOrControl+Alt+Up",
 ];
+
+/// Ctrl+Space held at least this long is "listen while I hold it"; anything shorter is a tap.
+const HELD_AFTER_MS: u128 = 400;
+/// A released capture that is still open this much later has no microphone audio arriving.
+const STUCK_AFTER: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// When the Ctrl+Space press that called NEXUS went down.
+static CALL_DOWN: parking_lot::Mutex<Option<std::time::Instant>> = parking_lot::Mutex::new(None);
+
+/// Was this a hold (end the turn now) rather than a tap (let silence end it)? Pure.
+pub(crate) fn was_held(held_ms: u128) -> bool {
+    held_ms >= HELD_AFTER_MS
+}
+
+fn call_key_released<R: Runtime>(app: &AppHandle<R>) {
+    let Some(down) = CALL_DOWN.lock().take() else { return };
+    let _ = tauri::Emitter::emit(app, "orb:key_held", false);
+    let held = down.elapsed().as_millis();
+    if !was_held(held) {
+        crate::wakeword_oww::unhold_capture();
+        return;
+    }
+    tracing::info!("hotkey: Ctrl+Space released after {held} ms, ending the turn");
+    if let Some(session) = crate::wakeword_oww::release_hold_capture() {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(STUCK_AFTER);
+            if crate::wakeword_oww::drop_stuck_hold(session) {
+                let _ = tauri::Emitter::emit(&app, "orb:hold_end", ());
+                tracing::warn!("hotkey: no microphone audio arrived, capture dropped");
+            }
+        });
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AgentState {
@@ -79,6 +115,9 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
 
         let handle = app.clone();
         if let Err(e) = app.global_shortcut().on_shortcut(sc, move |_app, _shortcut, event| {
+            if event.state() == ShortcutState::Released && hk == "CommandOrControl+Space" {
+                call_key_released(&handle);
+            }
             if event.state() == ShortcutState::Pressed {
                 let state = AgentState {
                     capturing: crate::wakeword_oww::stt_capturing(),
@@ -183,8 +222,11 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                         // "I heard you" sound (skipped in meetings / when switched off), then capture.
                         crate::wake_cue::play_for_wake(&handle);
 
-                        // Start Rust-side STT capture (same as wake word path).
-                        crate::wakeword_oww::start_stt_capture();
+                        // Start Rust-side STT capture. While the key stays down silence does not end it; a tap
+                        // turns it back into an ordinary capture on release.
+                        *CALL_DOWN.lock() = Some(std::time::Instant::now());
+                        crate::wakeword_oww::start_hold_capture(false);
+                        let _ = tauri::Emitter::emit(&handle, "orb:key_held", true);
                         crate::window_manager::wake_orb_src(&handle, "hotkey");
                     }
                 }
@@ -202,6 +244,14 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_short_press_is_a_tap_and_a_long_one_is_a_hold() {
+        assert!(!was_held(0));
+        assert!(!was_held(HELD_AFTER_MS - 1));
+        assert!(was_held(HELD_AFTER_MS));
+        assert!(was_held(30_000));
+    }
 
     #[test]
     fn ctrl_space_decision_matrix_all_16_states() {

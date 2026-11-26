@@ -132,6 +132,7 @@ fn press<R: Runtime>(app: &AppHandle<R>, kind: Kind) {
                 // show the listening orb without the wake handler, which would abort a capture that is already open
                 crate::window_manager::show_orb_interactive(app);
                 let _ = tauri::Emitter::emit(app, "orb:hold", ());
+                let _ = tauri::Emitter::emit(app, "orb:key_held", true);
             }
             tracing::info!("[HOLD] listening ({kind:?})");
         }
@@ -141,6 +142,9 @@ fn press<R: Runtime>(app: &AppHandle<R>, kind: Kind) {
 fn release<R: Runtime>(app: &AppHandle<R>, kind: Kind) {
     if HELD_COMMAND.load(Ordering::SeqCst) != (kind == Kind::Command) {
         return;
+    }
+    if kind == Kind::Command {
+        let _ = tauri::Emitter::emit(app, "orb:key_held", false);
     }
     let at = PRESSED_AT_MS.swap(0, Ordering::SeqCst);
     let held = (at != 0).then(|| now_ms().saturating_sub(at));

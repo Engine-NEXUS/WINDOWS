@@ -3210,6 +3210,19 @@ pub(crate) fn start_hold_capture(types: bool) {
     }
 }
 
+/// A tap, not a hold: the open capture goes back to ending on silence like any other.
+#[cfg(not(feature = "mock-wake"))]
+pub(crate) fn unhold_capture() {
+    use std::sync::atomic::Ordering;
+    let current = CAPTURE_SESSION_ID.load(Ordering::SeqCst);
+    // only the capture still open: a held capture that already ended keeps its mark for the receiver
+    if STT_CAPTURING.load(Ordering::SeqCst) {
+        let _ = HOLD_SESSION.compare_exchange(current, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
+}
+#[cfg(feature = "mock-wake")]
+pub(crate) fn unhold_capture() {}
+
 /// The key is up: the next audio chunk ends the capture. Returns the session being ended.
 #[cfg(not(feature = "mock-wake"))]
 pub(crate) fn release_hold_capture() -> Option<u64> {

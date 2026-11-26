@@ -281,6 +281,10 @@ async function setupOrbWakeListener() {
       s.setVisible(true);
       s.setState("listening");
     });
+    // While a key is held the user may talk for up to a minute: the stuck-listening timeouts must not end it.
+    await listen<boolean>("orb:key_held", (event) => {
+      useAssistant.getState().setKeyHeld(event.payload === true);
+    });
     await listen("orb:hold_end", () => {
       const s = useAssistant.getState();
       if (s.state !== "listening" || s.ghostActive) return;
