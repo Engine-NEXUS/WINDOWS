@@ -1719,7 +1719,7 @@ pub(crate) mod engine {
                     // Adaptive endpoint: 240ms in Ghost Mode, 400ms normally,
                     // relaxing to patient thresholds once mid-turn pauses are detected.
                     let pauses = super::STT_PAUSE_COUNT.load(Ordering::Relaxed);
-                    let silence_limit = if crate::ghost::session_active() {
+                    let silence_limit = if crate::ghost::session_active() || crate::listen_session::active() {
                         if pauses >= 1 {
                             super::STT_SILENCE_CHUNK_LIMIT_GHOST_PATIENT
                         } else {
@@ -1740,14 +1740,22 @@ pub(crate) mod engine {
                     // longer when the model says the speaker is not finished. Off => unchanged.
                     let (smart_end, silence_limit) =
                         super::smart_turn_poll(speech_detected, voiced, silence, silence_limit);
-                    let should_stop = smart_end
-                        || super::should_stop_capture(
-                            speech_detected,
-                            voiced,
-                            silence,
-                            silence_limit,
-                            total,
-                        );
+                    let hold = active_capture
+                        .as_ref()
+                        .is_some_and(|(s, _)| *s == super::HOLD_SESSION.load(Ordering::SeqCst));
+                    let should_stop = if hold {
+                        // hold-to-talk: only the key release (or the 60 s cap) ends it
+                        super::hold_should_stop(super::HOLD_RELEASED_AT.lock().is_some(), total)
+                    } else {
+                        smart_end
+                            || super::should_stop_capture(
+                                speech_detected,
+                                voiced,
+                                silence,
+                                silence_limit,
+                                total,
+                            )
+                    };
 
                     if should_stop {
                         super::STT_CAPTURING.store(false, Ordering::Relaxed);
@@ -1773,7 +1781,16 @@ pub(crate) mod engine {
                             "stt-capture: stopping (total={} chunks, speech={}, silence={} chunks, voiced={} chunks, {} samples)",
                             total, speech_detected, silence, voiced, buffer.len()
                         );
-                        crate::latency::begin(); // docs/features/134 P0: per-turn latency clock (try_lock, never blocks)
+                        // docs/features/134 P0: per-turn latency clock (try_lock, never blocks). It starts at the end of
+                        // SPEECH: the trailing silence (or the time since the key came up) is part of the wait.
+                        let since_speech = if hold {
+                            super::HOLD_RELEASED_AT.lock().map_or(std::time::Duration::ZERO, |t| t.elapsed())
+                        } else if speech_detected {
+                            std::time::Duration::from_millis((silence as u64).saturating_mul(80))
+                        } else {
+                            std::time::Duration::ZERO
+                        };
+                        crate::latency::begin(since_speech);
 
                         // Spawn transcription thread (don't block the audio callback).
                         // Tag the buffer with the current capture session so
@@ -1793,7 +1810,9 @@ pub(crate) mod engine {
                             rms_mean,
                             voiced_chunks: voiced,
                             total_chunks: total,
-                            endpoint: if smart_end {
+                            endpoint: if hold {
+                                "hold_release"
+                            } else if smart_end {
                                 "smart_turn"
                             } else {
                                 super::endpoint_reason(
@@ -3140,6 +3159,91 @@ const STT_SILENCE_CHUNK_LIMIT_GHOST: u32 = 3;
 const STT_SILENCE_CHUNK_LIMIT_GHOST_PATIENT: u32 = 6;
 
 
+/// Longest hold-to-talk dictation: 750 chunks = 60 s (the key, not silence, ends a held capture).
+const HOLD_MAX_CHUNKS: u32 = 750;
+
+/// A held capture stops when the key is up or at the 60 s cap, never on silence. Pure.
+fn hold_should_stop(released: bool, total: u32) -> bool {
+    released || total >= HOLD_MAX_CHUNKS
+}
+
+/// The capture session opened by the hold-to-talk key (0 = none) and when its key was let go.
+#[cfg(not(feature = "mock-wake"))]
+static HOLD_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "mock-wake"))]
+static HOLD_RELEASED_AT: parking_lot::Mutex<Option<std::time::Instant>> = parking_lot::Mutex::new(None);
+/// The held capture is dictation (typed), not a command.
+#[cfg(not(feature = "mock-wake"))]
+static HOLD_TYPES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The capture opened by a listening session (0 = none).
+#[cfg(not(feature = "mock-wake"))]
+static LISTEN_CAPTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Open the next capture of a listening session: an open microphone, so the directed-speech gate applies.
+#[cfg(not(feature = "mock-wake"))]
+pub(crate) fn start_listen_capture() {
+    use std::sync::atomic::Ordering;
+    let expected = CAPTURE_SESSION_ID.load(Ordering::SeqCst) + 1;
+    LISTEN_CAPTURE.store(expected, Ordering::SeqCst);
+    start_stt_capture_with_origin(crate::directed::Origin::HotMic);
+    if !STT_CAPTURING.load(Ordering::SeqCst) || CAPTURE_SESSION_ID.load(Ordering::SeqCst) != expected {
+        LISTEN_CAPTURE.store(0, Ordering::SeqCst);
+    }
+}
+#[cfg(feature = "mock-wake")]
+pub(crate) fn start_listen_capture() {}
+
+/// Open a capture that only the key release (or the 60 s cap) ends.
+#[cfg(not(feature = "mock-wake"))]
+pub(crate) fn start_hold_capture(types: bool) {
+    use std::sync::atomic::Ordering;
+    *HOLD_RELEASED_AT.lock() = None;
+    HOLD_TYPES.store(types, Ordering::SeqCst);
+    // mark the session BEFORE the capture is armed, so the audio callback can never treat it as an ordinary turn
+    let expected = CAPTURE_SESSION_ID.load(Ordering::SeqCst) + 1;
+    HOLD_SESSION.store(expected, Ordering::SeqCst);
+    LAST_CAPTURE_START_MS.store(0, Ordering::Relaxed);
+    start_stt_capture();
+    // refused (the frontend holds the microphone): a later capture must not inherit the mark
+    if !STT_CAPTURING.load(Ordering::SeqCst) || CAPTURE_SESSION_ID.load(Ordering::SeqCst) != expected {
+        HOLD_SESSION.store(0, Ordering::SeqCst);
+    }
+}
+
+/// The key is up: the next audio chunk ends the capture. Returns the session being ended.
+#[cfg(not(feature = "mock-wake"))]
+pub(crate) fn release_hold_capture() -> Option<u64> {
+    use std::sync::atomic::Ordering;
+    let session = HOLD_SESSION.load(Ordering::SeqCst);
+    if session == 0 || session != CAPTURE_SESSION_ID.load(Ordering::SeqCst) {
+        return None;
+    }
+    *HOLD_RELEASED_AT.lock() = Some(std::time::Instant::now());
+    Some(session)
+}
+
+/// A released capture that is still open has no audio arriving: abort it. True when something was dropped.
+#[cfg(not(feature = "mock-wake"))]
+pub(crate) fn drop_stuck_hold(session: u64) -> bool {
+    use std::sync::atomic::Ordering;
+    let stuck = STT_CAPTURING.load(Ordering::SeqCst) && CAPTURE_SESSION_ID.load(Ordering::SeqCst) == session;
+    if stuck {
+        abort_stt_capture();
+    }
+    stuck
+}
+
+#[cfg(feature = "mock-wake")]
+pub(crate) fn start_hold_capture(_types: bool) {}
+#[cfg(feature = "mock-wake")]
+pub(crate) fn release_hold_capture() -> Option<u64> {
+    None
+}
+#[cfg(feature = "mock-wake")]
+pub(crate) fn drop_stuck_hold(_session: u64) -> bool {
+    false
+}
+
 /// Maximum capture duration in chunks. 125 chunks = 10s.
 /// 10 seconds is plenty for any voice command. The previous value of
 /// 200 (16s) allowed Groq to hallucinate on extended noise captures.
@@ -4353,6 +4457,9 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                         continue;
                     }
                     audit.finish(Outcome::EmptyBuffer);
+                    if session == LISTEN_CAPTURE.load(std::sync::atomic::Ordering::SeqCst) {
+                        continue; // a listening session never nags about silence
+                    }
                     tracing::warn!("stt-capture: empty buffer received");
                     crate::commands::emit_logged(&app_for_stt, "stt:transcript", "");
                     stats.endpoint = "empty_buffer";
@@ -4379,6 +4486,9 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                         continue;
                     }
                     audit.finish(Outcome::Phantom);
+                    if session == LISTEN_CAPTURE.load(std::sync::atomic::Ordering::SeqCst) {
+                        continue; // silence or a click in an open mic: nothing to answer
+                    }
                     tracing::info!(
                         "stt-capture: phantom capture ({} samples, <{} voiced chunks) — skipping Groq",
                         buffer.len(),
@@ -4407,13 +4517,18 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                 // (created in process_transcript); the frontend applies
                 // bare state events directly, and the transcript flow
                 // re-syncs everything on arrival ( ack → loading → result).
-                crate::commands::emit_logged(&app_for_stt, 
-                    "orchestrator:event",
-                    &crate::orchestrator::OrchestratorEvent::State {
-                        state: crate::orchestrator::OrchestratorState::Thinking,
-                        request_id: String::new(),
-                    },
-                );
+                // (a dictation has no "thinking" orb, and speech a listening session ignores must not leave one behind)
+                let dictation = session == HOLD_SESSION.load(std::sync::atomic::Ordering::SeqCst)
+                    && HOLD_TYPES.load(std::sync::atomic::Ordering::SeqCst);
+                if !dictation && session != LISTEN_CAPTURE.load(std::sync::atomic::Ordering::SeqCst) {
+                    crate::commands::emit_logged(&app_for_stt,
+                        "orchestrator:event",
+                        &crate::orchestrator::OrchestratorEvent::State {
+                            state: crate::orchestrator::OrchestratorState::Thinking,
+                            request_id: String::new(),
+                        },
+                    );
+                }
 
                 // Turn ownership is decided before any cloud STT call. Verified
                 // owner audio uses the same neutral decoder policy; every other turn
@@ -4477,6 +4592,39 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     crate::stt_diagnostics::save_capture(&app_for_stt, session, &samples, "", &stats);
                     crate::stt_diagnostics::update_decision(&app_for_stt, session, "", "none", "ambient_drop");
                     crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
+                    continue;
+                }
+
+                // Hold-to-talk dictation: the words are typed, never routed as a command. It shares everything above
+                // (phantom guard, owner check) and the same speech-to-text choice.
+                if dictation {
+                    let released = HOLD_RELEASED_AT.lock().take().unwrap_or_else(std::time::Instant::now);
+                    rt.block_on(async {
+                        audit.stage("transcribing");
+                        let client = crate::stt::shared_client();
+                        crate::stt::reset_turn_markers();
+                        let vocabulary = Some(crate::stt_groq::decoder_bias_prompt(bias_choice));
+                        let transcript = crate::stt::transcribe_samples(&samples, &client, Some(&app_for_stt), vocabulary).await;
+                        stats.stt_path = crate::stt::last_stt_path_str();
+                        // a cancel (Ctrl+Space) while the cloud call was in flight types nothing
+                        if is_stale_session(session, CAPTURE_SESSION_ID.load(std::sync::atomic::Ordering::SeqCst)) {
+                            stats.filter = "stale_session";
+                            audit.finish(Outcome::Stale);
+                        } else {
+                            match transcript {
+                                Ok(text) => {
+                                    audit.finish(if text.trim().is_empty() { Outcome::EmptyTranscript } else { Outcome::Delivered });
+                                    crate::hold_to_talk::deliver(&app_for_stt, &text, released);
+                                }
+                                Err(e) => {
+                                    tracing::warn!("[HOLD] speech-to-text failed: {e}");
+                                    stats.filter = "stt_error";
+                                    audit.finish(Outcome::SttError);
+                                }
+                            }
+                        }
+                        crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
+                    });
                     continue;
                 }
 
@@ -4584,6 +4732,14 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     let pre_parsed = parsed.as_ref().and_then(|p| serde_json::to_value(p).ok());
 
                     tracing::info!("stt-capture: transcript = '{}', intent = {:?}", text, intent_label);
+                    if session == LISTEN_CAPTURE.load(std::sync::atomic::Ordering::SeqCst)
+                        && crate::listen_session::drops(&app_for_stt, &text)
+                    {
+                        stats.filter = "listen_ignored";
+                        audit.finish(Outcome::Filtered);
+                        crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
+                        return;
+                    }
                     crate::latency::mark(crate::latency::Stage::Transcript);
                     let final_payload = SttTranscript {
                         session,
@@ -4605,7 +4761,10 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     let now_ms = mono_ms_nonzero();
                     let ms_since_speech_end = now_ms.saturating_sub(speech_end_ms);
 
-                    if crate::turn_complete::may_hold(
+                    // The key (or the session's own re-opening) already says where a turn ends: no continuation hold.
+                    let explicit_end = session == HOLD_SESSION.load(std::sync::atomic::Ordering::SeqCst)
+                        || session == LISTEN_CAPTURE.load(std::sync::atomic::Ordering::SeqCst);
+                    if !explicit_end && crate::turn_complete::may_hold(
                         hold_ms,
                         ghost_active,
                         origin,

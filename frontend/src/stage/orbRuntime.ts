@@ -274,6 +274,20 @@ async function setupOrbWakeListener() {
       s.setVisible(true);
       s.setState("listening");
     });
+    // A held command key or a listening session opened a capture in Rust. Show the listening form only: the wake
+    // handler would treat a listening orb as a second press and abort the capture.
+    await listen("orb:hold", () => {
+      const s = useAssistant.getState();
+      s.setVisible(true);
+      s.setState("listening");
+    });
+    await listen("orb:hold_end", () => {
+      const s = useAssistant.getState();
+      if (s.state !== "listening" || s.ghostActive) return;
+      s.setVisible(false);
+      // turn-end:keep-raw the key slipped or the listening session ended: nothing was heard, nothing to relisten
+      s.reset();
+    });
     await listen("barge:resume", () => {
       const s = useAssistant.getState();
       console.log("[TURN] barge resume: not for NEXUS, continuing speech");

@@ -90,6 +90,13 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                     has_request: crate::orchestrator::has_active_request() || crate::turn_pending::is_pending(),
                     ghost: crate::ghost::session_active(),
                 };
+                // between two captures a listening session looks idle: Ctrl+Space must still end it, not call NEXUS
+                if hk == "CommandOrControl+Space" && crate::listen_session::active() {
+                    crate::listen_session::end(&handle, "Ctrl+Space");
+                    if !(state.speaking || state.has_request) {
+                        return;
+                    }
+                }
 
                 match decide(hk, state) {
                     Press::OpenSettings => {
@@ -133,6 +140,9 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                         crate::orchestrator::cancel_active();
                         // ... and the turn that is still on its way from speech-to-text, if any
                         crate::turn_pending::cancel();
+
+                        // ... and a listening session, which would otherwise re-open the microphone
+                        crate::listen_session::end(&handle, "Ctrl+Space");
 
                         // 3. Abort STT capture
                         crate::wakeword_oww::abort_stt_capture();

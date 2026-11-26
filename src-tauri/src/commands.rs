@@ -1649,6 +1649,15 @@ pub struct NexusSettings {
     /// Live partial captions while you speak (off by default; never in privacy mode toward the cloud). See stt_stream.rs.
     #[serde(default)]
     pub stt_live_captions: bool,
+    /// Hold Ctrl+Alt+D, speak, let go: the words are typed into the window in front (see hold_to_talk.rs).
+    #[serde(default)]
+    pub hold_to_talk: bool,
+    /// Hold Ctrl+Alt+Enter, say a command, let go (see hold_to_talk.rs).
+    #[serde(default)]
+    pub hold_to_command: bool,
+    /// Ctrl+Alt+L opens a session where commands need no wake word (see listen_session.rs).
+    #[serde(default)]
+    pub listen_session: bool,
     pub server_url: String,
     pub user_id: String,
     pub device_id: String,
@@ -2403,6 +2412,9 @@ impl Default for NexusSettings {
             suppress_tts_in_meetings: true,
             local_stt_only: DEFAULT_LOCAL_STT_ONLY,
             stt_live_captions: false,
+            hold_to_talk: false,
+            hold_to_command: false,
+            listen_session: false,
             server_url: option_env!("NEXUS_SERVER_URL")
                 .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev")
                 .to_string(),
@@ -3608,6 +3620,16 @@ pub fn read_stt_command_hints<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> b
         .ok()
         .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
         .and_then(|j| j.get("sttCommandHints").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
+
+/// A boolean in settings.json that is off unless the user turned it on.
+pub fn read_flag<R: tauri::Runtime>(app: &tauri::AppHandle<R>, key: &str) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return false; };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get(key).and_then(|v| v.as_bool()))
         .unwrap_or(false)
 }
 

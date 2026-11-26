@@ -2475,6 +2475,7 @@ async fn process_transcript_inner<R: Runtime>(
                 {
                     // Claim "Opened" only after the window is verified in front.
                     let in_front = open_target_in_front(target.clone(), cancel_flag.clone()).await;
+                    crate::latency::action_done("open_app", in_front);
                     crate::action_receipt::emit(
                         &app,
                         &crate::action_receipt::ActionReceipt::for_open_app(target, in_front),
@@ -2496,6 +2497,8 @@ async fn process_transcript_inner<R: Runtime>(
                         _ => {}
                     }
                 }
+                // every other local command: measured when its adapter returned (a no-op after the open_app line)
+                crate::latency::action_done("command", outcome.as_ref().is_ok_and(|r| r.success));
                 let message = match outcome {
                     Ok(result) => result.message,
                     Err(error) => format!("I couldn't complete that command: {error}"),
