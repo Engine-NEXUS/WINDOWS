@@ -54,6 +54,7 @@ pub(crate) mod brand_logo;
 pub(crate) mod github_profile;
 pub(crate) mod screen_tour;
 pub(crate) mod site_probe;
+pub(crate) mod render_proxy;
 pub(crate) mod site_render;
 pub mod site_eval;
 pub(crate) mod reverse_scroll;

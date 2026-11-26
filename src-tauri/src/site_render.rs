@@ -21,11 +21,10 @@
 //!   resource timing, script URLs without query strings. A static test bans
 //!   network, navigation, eval and DOM-writing APIs from it. Output is capped.
 //!
-//! Known leftover risk: WebView2 resolves DNS itself, so the static probe's
-//! DNS pinning does not apply here. The request filter blocks private IP
-//! literals and local names; a public name that rebinds to a private address
-//! is not caught. Mitigation: anonymous InPrivate session, short life, and the
-//! page is the one the user already has open.
+//! DNS rebinding: WebView2 resolves names itself, so the static probe's pin does not reach it. The window is
+//! therefore started with `--proxy-server` pointing at `render_proxy` (loopback, CONNECT 443 only, every resolved
+//! address must be public), and the request filter above stays as a second layer. Untested against a real
+//! WebView2 until the isolated live run (see docs/changes/209-*).
 
 use crate::site_probe::{self, SiteReport, ThinReason};
 use serde::Deserialize;
@@ -527,13 +526,26 @@ pub(crate) async fn render<R: tauri::Runtime>(
     cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> RenderResult {
     let deadline = std::time::Duration::from_millis(RENDER_TOTAL_MS);
-    match tokio::time::timeout(deadline, render_inner(app, url, cancel)).await {
+    // Every request of the page leaves through the guard proxy (public addresses only, port 443, resolved and checked
+    // here, not by WebView2), which closes the DNS-rebinding gap. If the guard cannot start, nothing is rendered.
+    let proxy = match crate::render_proxy::start(crate::render_proxy::Policy::production()).await {
+        Ok(p) => p,
+        Err(e) => return RenderResult::Failed(format!("network guard could not start: {e}")),
+    };
+    let proxy_url = proxy.url();
+    let profile = std::env::temp_dir().join(format!("nexus-stack-render-{}", std::process::id()));
+    let result = match tokio::time::timeout(deadline, render_inner(app, url, cancel, &proxy_url, &profile)).await {
         Ok(r) => r,
         Err(_) => {
             destroy(app);
             RenderResult::Failed("render timed out".into())
         }
-    }
+    };
+    tracing::info!("[REVERSE] render guard: {} tunnels, {} refused", proxy.tunnelled(), proxy.refused());
+    proxy.stop();
+    // the throwaway profile (its own WebView2 environment, because the proxy is a browser argument) is removed again
+    let _ = std::fs::remove_dir_all(&profile);
+    result
 }
 
 #[cfg(target_os = "windows")]
@@ -549,6 +561,8 @@ async fn render_inner<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     url: &str,
     cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    proxy_url: &str,
+    profile: &std::path::Path,
 ) -> RenderResult {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -563,6 +577,10 @@ async fn render_inner<R: tauri::Runtime>(
         Err(e) => return RenderResult::Failed(format!("bad url: {e}")),
     };
     destroy(app);
+    let proxy: tauri::Url = match proxy_url.parse() {
+        Ok(u) => u,
+        Err(e) => return RenderResult::Failed(format!("guard address: {e}")),
+    };
 
     let navs = Arc::new(AtomicUsize::new(0));
     let login = Arc::new(AtomicBool::new(false));
@@ -583,6 +601,10 @@ async fn render_inner<R: tauri::Runtime>(
         .always_on_top(true)
         .focused(false)
         .incognito(true)
+        // A proxy is a WebView2 browser argument, which belongs to the environment, so this window gets its own
+        // throwaway profile folder (the main windows keep theirs untouched).
+        .data_directory(profile.to_path_buf())
+        .proxy_url(proxy)
         .on_navigation(move |u| {
             let n = navs_cb.fetch_add(1, Ordering::SeqCst);
             match render_nav_allowed(u.as_str(), n) {
