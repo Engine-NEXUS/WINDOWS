@@ -51,6 +51,8 @@ export interface StackPayload {
   kind?: "site" | "app";
   /** The hidden render pass is running. */
   rendering?: boolean;
+  /** The scan was refused or failed: nothing was measured, only `summary` (the reason) means anything. */
+  failed?: boolean;
   /** Spoken reasons the scan saw less than the real page. */
   thin?: string[];
   title: string;
