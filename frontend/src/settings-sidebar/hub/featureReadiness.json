@@ -97,7 +97,7 @@
   },
   "maps-embed": {
     "feature": "Maps / Places / Directions",
-    "live": 55
+    "live": 60
   },
   "cr-review": {
     "feature": "GitHub commands (PRs, merge, review)",

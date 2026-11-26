@@ -2,7 +2,7 @@
 
 Generated from `docs/testing/scorecard-data.json` by `scripts/make-work-cards.mjs`. Do not edit by hand: put findings in the run records and the live-proof ledger, then update the scorecard data and regenerate.
 
-Area: Agent control. Queue position 46 of 68. Raw score **74.0%** (production needs ≥ 90% and every axis gate).
+Area: Agent control. Queue position 46 of 69. Raw score **74.0%** (production needs ≥ 90% and every axis gate).
 
 | Axis | Now | Gate | Status |
 |---|---:|---:|---|

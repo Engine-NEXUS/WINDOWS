@@ -609,13 +609,13 @@
     {
         "area": "Integrations",
         "feature": "Maps / Places / Directions",
-        "tests": "20",
+        "tests": "71 focused tests + 17 mutations + live run",
         "B": 95,
-        "T": 75,
-        "L": 55,
-        "S": 80,
-        "I": 68,
-        "note": "Fixed: # and % and non-ASCII were not encoded in map URLs (apartment #4 truncated the query); empty/long addresses and HTTP errors now give speakable errors."
+        "T": 85,
+        "L": 60,
+        "S": 85,
+        "I": 74,
+        "note": "2026-11-25: keyless open-map routes with steps (OSRM / Nominatim), location problems named, private places never sent; 19-turn live run in the isolated build. Voice, location refused, a reminder firing and live traffic NOT run. Record: docs/changes/208, 209."
     },
     {
         "area": "Integrations",
@@ -745,13 +745,13 @@
     {
         "area": "Desktop control",
         "feature": "Reverse engineer website/app",
-        "tests": "140 focused tests + 3 real-site fixtures + 8 safety mutations",
-        "B": 85,
-        "T": 70,
-        "L": 0,
-        "S": 85,
-        "I": 40,
-        "note": "2026-11-24: 8 real public sites replayed offline: headline stack right on 6; found VitePress missing from the table (added, with Docusaurus / Hugo / Jekyll / MkDocs); scanner client now ignores system proxies so the SSRF pin cannot be bypassed. n=3 real fixtures is not a measurement; no live scan yet. Change 197 (source only): honest outcomes (no tour after a refusal, no 'found 0'), cancel everywhere, hidden InPrivate render for SPAs, bot-wall/sign-in/SPA-shell reasons, mouse-free UIA scrolling that stops when the user takes over, table cleanup, offline accuracy harness. Live 2026-11-15 on bb04c8bb: voice dispatch works after the normal-mode arm fix, but the tab address could not be read (likely a full-screen browser); source now leaves full screen with F11 to read it, accepts Brave's location bar class and logs a [REVERSE] url diag line. Table 243 -> 364 with Retire.js (Apache-2.0) and Library Detector (MIT) fingerprints; Wappalyzer forks are GPL-3.0 and not used. Still no successful live scan: needs a rebuild and the owner walkthrough (Next.js, WordPress, Cloudflare-protected site, one desktop app) and the 50-site capture."
+        "tests": "353 focused tests + 12 mutations + 55 tuned and 29 unseen real sites + live run",
+        "B": 90,
+        "T": 80,
+        "L": 45,
+        "S": 90,
+        "I": 55,
+        "note": "2026-11-25: first successful live scans (isolated build): hidden render through a new guard proxy, named sites, refusals. Unseen-site recall 25/33 (75.8%, CI 59-87) vs 24/33 before; tuned sites 70/78. Tour, browser hand-off, app scan and voice NOT run live. Record: docs/changes/209."
     },
     {
         "area": "Platform and quality",
