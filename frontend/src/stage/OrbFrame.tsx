@@ -329,6 +329,7 @@ export function OrbFrame() {
   const assistantVisible = useAssistant((s) => s.visible);
   const state = useAssistant((s) => s.state);
   const ghostActive = useAssistant((s) => s.ghostActive);
+  const keyHeld = useAssistant((s) => s.keyHeld);
   const orbPosition = useAssistant((s) => s.orbPosition || "top");
   const capsuleStyle = useAssistant((s) => s.orbCapsuleStyle || "pebble");
   const wakeupMode = useAssistant((s) => s.orbWakeupMode || 1);
@@ -562,7 +563,8 @@ export function OrbFrame() {
           ghostActive: s.ghostActive,
           captionActive: s.captionActive,
           ttsActive: s.ttsActive,
-          awaitingInput: s.awaitingInput,
+          // a held talk key is input still arriving
+          awaitingInput: s.awaitingInput || s.keyHeld,
           pendingGithubCommand: !!s.pendingGithubCommand,
           loadingVisible: s.loadingVisible,
           calibrating: !!s.calibrationTarget,
@@ -586,7 +588,7 @@ export function OrbFrame() {
   // No-input timeout: 8s of `listening` with no voice detected and the
   // orb hides itself (Rust owns the turn end if voice IS underway).
   useEffect(() => {
-    if (!visible || state !== "listening" || ghostActive) return;
+    if (!visible || state !== "listening" || ghostActive || keyHeld) return;
     const t = setTimeout(() => {
       void import("@tauri-apps/api/core").then(async ({ invoke }) => {
         try {
@@ -608,7 +610,7 @@ export function OrbFrame() {
       }).catch(() => {});
     }, 8000);
     return () => clearTimeout(t);
-  }, [visible, state, ghostActive]);
+  }, [visible, state, ghostActive, keyHeld]);
 
   // Speaking failsafe: force a reset if 60s pass in `speaking` with no
   // audio actually playing (genuinely long replies re-arm instead).

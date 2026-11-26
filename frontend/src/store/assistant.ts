@@ -35,6 +35,9 @@ interface AssistantStore {
    *  steady "waiting" glow instead of a frozen loop or a dead orb. */
   awaitingInput: boolean;
   setAwaitingInput: (v: boolean) => void;
+  /** A talk key is held down, or hands-free typing is listening. */
+  keyHeld: boolean;
+  setKeyHeld: (v: boolean) => void;
   /** True while a ghost cursor session is live (mic hot, waves on). */
   ghostActive: boolean;
   setGhostActive: (v: boolean) => void;
@@ -232,6 +235,8 @@ export const useAssistant = create<AssistantStore>((set) => ({
   setSpeakSeq: (n) => set({ speakSeq: n }),
   setTtsActive: (v) => set({ ttsActive: v }),
   setAwaitingInput: (v) => set({ awaitingInput: v }),
+  keyHeld: false,
+  setKeyHeld: (v) => set({ keyHeld: v }),
   setGhostActive: (v) => set((st) => {
       console.log(`[ORB] setGhostActive(${v}) from:${st.ghostActive} visible:${st.visible} state:${st.state}`);
       return { ghostActive: v, visible: v ? true : st.visible };
@@ -248,6 +253,7 @@ export const useAssistant = create<AssistantStore>((set) => ({
       micLevel: 0,
       ttsActive: false,
       awaitingInput: false,
+      keyHeld: false,
       visible: st.ghostActive ? true : st.visible,
     }));
   },

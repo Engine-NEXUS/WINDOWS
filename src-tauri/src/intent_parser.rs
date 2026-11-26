@@ -4789,9 +4789,32 @@ impl ParseResult {
     }
 }
 
+/// A dictation request without its politeness and punctuation: "Can you type for me, please?" -> "type for me".
+fn bare_dictation_phrase(text: &str) -> String {
+    let lower = text.to_lowercase().replace([',', '.', '!', '?'], " ");
+    let mut words: Vec<&str> = lower.split_whitespace().collect();
+    loop {
+        match words.as_slice() {
+            ["can" | "could" | "will" | "would", "you", ..] => {
+                words.drain(..2);
+            }
+            ["please" | "hey" | "okay" | "ok", ..] => {
+                words.remove(0);
+            }
+            [.., "please" | "now" | "sir"] => {
+                words.pop();
+            }
+            _ => break,
+        }
+    }
+    words.join(" ")
+}
+
 fn parse_dictation_command(text: &str) -> Option<ParseResult> {
-    let t = text.trim().to_lowercase();
-    if t == "start typing"
+    let t = bare_dictation_phrase(text);
+    if t == "type for me"
+        || t == "start typing for me"
+        || t == "start typing"
         || t == "type whatever i say"
         || t == "type whatever i am saying"
         || t == "type what i say"
@@ -5806,7 +5829,7 @@ fn parse_search_product(text: &str) -> Option<ParseResult> {
 ///
 /// Triggers: "ghostwriter", "ghost writer", "take a letter",
 /// "take dictation", "write this down", "start writing", "note this down",
-/// "scribe", "type for me" — optionally "for <contact> [on whatsapp]".
+/// "scribe" and the other writer words — optionally "for <contact> [on whatsapp]".
 /// Contact is optional; the room asks when missing.
 fn parse_ghostwriter_entry(text: &str) -> Option<ParseResult> {
     // Ordered longest-first: "ghostwriter mode" must match before the
@@ -5831,7 +5854,6 @@ fn parse_ghostwriter_entry(text: &str) -> Option<ParseResult> {
         "ghostwriter on",
         "ghostwriter",
         "ghost writer",
-        "type for me",
         "scribe mode",
         "scribe",
     ];
@@ -13244,5 +13266,37 @@ mod power_and_session_tests {
                 other => panic!("{phrase} expected OpenGitHubDashboard starred, got {other:?}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod type_for_me_tests {
+    use super::*;
+
+    fn intent(t: &str) -> Option<ParsedIntent> {
+        parse_deterministic(t).map(|p| p.intent)
+    }
+
+    #[test]
+    fn type_for_me_starts_dictation_however_politely_it_is_said() {
+        for t in [
+            "type for me",
+            "Nexus, type for me.",
+            "type for me please",
+            "Can you type for me?",
+            "hey nexus could you type for me now",
+            "start typing for me",
+            "please start typing",
+        ] {
+            assert!(matches!(intent(t), Some(ParsedIntent::StartDictation)), "{t}: {:?}", intent(t));
+        }
+        assert!(matches!(intent("stop typing please"), Some(ParsedIntent::StopDictation)));
+    }
+
+    #[test]
+    fn typing_words_and_the_writer_page_keep_working() {
+        assert!(matches!(intent("type hello there"), Some(ParsedIntent::NluResult { ref intent, .. }) if intent == "type_text"));
+        assert!(matches!(intent("ghostwriter"), Some(ParsedIntent::EnterGhostwriter { .. })));
+        assert!(matches!(intent("take a letter"), Some(ParsedIntent::EnterGhostwriter { .. })));
     }
 }

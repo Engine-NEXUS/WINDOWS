@@ -274,6 +274,24 @@ async function setupOrbWakeListener() {
       s.setVisible(true);
       s.setState("listening");
     });
+    // Hands-free typing opened a capture in Rust. Show the listening form only: the wake
+    // handler would treat a listening orb as a second press and abort the capture.
+    await listen("orb:hold", () => {
+      const s = useAssistant.getState();
+      s.setVisible(true);
+      s.setState("listening");
+    });
+    // While a key is held the user may talk for up to a minute: the stuck-listening timeouts must not end it.
+    await listen<boolean>("orb:key_held", (event) => {
+      useAssistant.getState().setKeyHeld(event.payload === true);
+    });
+    await listen("orb:hold_end", () => {
+      const s = useAssistant.getState();
+      if (s.state !== "listening" || s.ghostActive) return;
+      s.setVisible(false);
+      // turn-end:keep-raw typed words or the end of typing: no command follows, nothing to relisten
+      s.reset();
+    });
     await listen("barge:resume", () => {
       const s = useAssistant.getState();
       console.log("[TURN] barge resume: not for NEXUS, continuing speech");

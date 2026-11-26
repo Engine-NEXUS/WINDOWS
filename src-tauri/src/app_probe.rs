@@ -107,10 +107,12 @@ fn is_system_path(path: &Path) -> bool {
     init_system_lists();
     let canonical = path.canonicalize().ok();
     if let Some(canonical) = canonical {
-        let canonical_str = canonical.to_string_lossy().to_lowercase();
+        // `canonicalize` answers with the `\\?\` form, which never began with "c:\windows": without stripping it no
+        // system file was ever refused (Notepad was scanned in the 2026-11-26 live run).
+        let canonical_str = plain_lowercase(&canonical);
         for sys_folder in SYSTEM_FOLDERS.get().unwrap() {
-            let sys_str = sys_folder.to_string_lossy().to_lowercase();
-            if canonical_str.starts_with(&sys_str) {
+            let sys_str = plain_lowercase(sys_folder);
+            if canonical_str == sys_str || canonical_str.starts_with(&format!("{sys_str}\\")) {
                 return true;
             }
         }
@@ -122,6 +124,12 @@ fn is_system_path(path: &Path) -> bool {
         }
     }
     false
+}
+
+/// A path as lowercase text without the Windows `\\?\` prefix. Pure.
+fn plain_lowercase(path: &Path) -> String {
+    let s = path.to_string_lossy().to_lowercase();
+    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
 }
 
 /// Resolve real path, stripping \\?\ prefix
@@ -346,6 +354,12 @@ pub fn analyse_files(exe_name: &str, facts: &FileFacts) -> Vec<AppDetection> {
     // Helper to add detection with confidence combination
     let mut add_detection = |id: &str, name: &str, category: &str, confidence: f32, evidence: Vec<String>| {
         if confidence >= 0.4 {
+            // the same technology found twice (implied and seen) is one entry with the surer confidence
+            if let Some(d) = detections.iter_mut().find(|d: &&mut AppDetection| d.id == id) {
+                d.confidence = d.confidence.max(confidence);
+                d.evidence.extend(evidence);
+                return;
+            }
             detections.push(AppDetection {
                 id: id.to_string(),
                 name: name.to_string(),
@@ -363,16 +377,19 @@ pub fn analyse_files(exe_name: &str, facts: &FileFacts) -> Vec<AppDetection> {
 
     // --- Electron ---
     let mut electron_signals = Vec::new();
-    if has_file(names, "resources/app.asar") {
+    // the walk lists bare file names, so the archive is "app.asar"
+    if has_file(names, "resources/app.asar") || has_exact_file(names, "app.asar") {
         electron_signals.push(0.95);
     }
+    // A full Chromium browser (chrome.dll) ships the same resource files as Electron and CEF and is neither.
+    let browser = has_exact_file(names, "chrome.dll");
     if has_exact_file(names, "electron.exe") {
         electron_signals.push(0.9);
     }
-    if has_file(names, "chrome_100_percent.pak") && has_file(names, "icudtl.dat") && has_file(names, "v8_context_snapshot.bin") {
+    if !browser && has_file(names, "chrome_100_percent.pak") && has_file(names, "icudtl.dat") && has_file(names, "v8_context_snapshot.bin") {
         electron_signals.push(0.9);
     }
-    if exe_head_contains(exe_head, "electron") {
+    if !browser && exe_head_contains(exe_head, "electron") {
         electron_signals.push(0.5);
     }
     if !electron_signals.is_empty() {
@@ -440,7 +457,7 @@ pub fn analyse_files(exe_name: &str, facts: &FileFacts) -> Vec<AppDetection> {
     if has_file(names, "libcef.dll") {
         cef_signals.push(0.95);
     }
-    if has_file(names, "cef.pak") || has_file(names, "chrome_elf.dll") {
+    if has_file(names, "cef.pak") || (!browser && has_file(names, "chrome_elf.dll")) {
         cef_signals.push(0.8);
     }
     if !cef_signals.is_empty() {
@@ -934,6 +951,40 @@ pub fn report_markdown(r: &AppReport) -> String {
     }
 
     md
+}
+
+#[cfg(test)]
+mod live_run_fix_tests {
+    use super::*;
+
+    fn ids(names: &[&str], head: &str) -> Vec<String> {
+        let facts = FileFacts { names: names.iter().map(|n| n.to_string()).collect(), exe_head: head.as_bytes().to_vec() };
+        analyse_files("app.exe", &facts).into_iter().map(|d| d.id).collect()
+    }
+
+    #[test]
+    fn a_full_browser_is_not_electron_or_cef() {
+        let got = ids(&["chrome.dll", "chrome_elf.dll", "chrome_100_percent.pak", "icudtl.dat", "v8_context_snapshot.bin"], "electron");
+        assert_eq!(got, vec!["chromium".to_string()], "{got:?}");
+    }
+
+    #[test]
+    fn an_electron_app_is_found_by_its_archive_and_listed_once_per_technology() {
+        let got = ids(&["resources/", "app.asar", "node_modules/", "chrome_100_percent.pak", "icudtl.dat", "v8_context_snapshot.bin"], "");
+        for want in ["electron", "chromium", "nodejs"] {
+            assert_eq!(got.iter().filter(|g| *g == want).count(), 1, "{want} in {got:?}");
+        }
+        assert!(ids(&["app.asar"], "").contains(&"electron".to_string()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_system_program_is_refused() {
+        let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:/Windows".into());
+        let notepad = Path::new(&windir).join("System32").join("notepad.exe");
+        assert!(matches!(probe(&notepad.to_string_lossy()), Err(AppRefusal::System)));
+        assert!(!is_system_path(Path::new(env!("CARGO_MANIFEST_DIR"))));
+    }
 }
 
 #[cfg(test)]

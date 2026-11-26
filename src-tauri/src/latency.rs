@@ -20,6 +20,10 @@ pub enum Stage {
 #[derive(Default, Clone, Debug)]
 pub(crate) struct Turn {
     pub speech_end: Option<Instant>,
+    /// When the capture ended (after the silence wait).
+    pub stopped: Option<Instant>,
+    /// The `[LAT-ACT]` line was printed.
+    pub acted: bool,
     pub transcript: Option<Instant>,
     pub parsed: Option<Instant>,
     pub answer: Option<Instant>,
@@ -32,11 +36,51 @@ static TURN: Mutex<Option<Turn>> = Mutex::new(None);
 /// A turn older than this when the first audio arrives is not a reply to it (proactive speech, a stale mark).
 const MAX_TURN_AGE: Duration = Duration::from_secs(60);
 
-/// The user stopped speaking (capture ended).
-pub fn begin() {
+/// The capture ended, `since_speech` after the user stopped speaking.
+pub fn begin(since_speech: Duration) {
     if let Ok(mut g) = TURN.try_lock() {
-        *g = Some(Turn { speech_end: Some(Instant::now()), ..Default::default() });
+        let now = Instant::now();
+        *g = Some(Turn {
+            speech_end: Some(now.checked_sub(since_speech).unwrap_or(now)),
+            stopped: Some(now),
+            ..Default::default()
+        });
     }
+}
+
+/// A local command has taken effect (`kind` is a fixed word, never what was said): print the `[LAT-ACT]` line once.
+/// `confirmed` says whether the effect was seen (for an app: its window in front).
+pub fn action_done(kind: &str, confirmed: bool) {
+    let line = TURN.try_lock().ok().and_then(|mut g| {
+        let t = g.as_mut()?;
+        if t.acted {
+            return None;
+        }
+        t.acted = true;
+        format_action_line(t, kind, confirmed, Instant::now())
+    });
+    if let Some(line) = line {
+        println!("{line}");
+    }
+}
+
+/// `[LAT-ACT] open_app confirmed | endwait 400ms | stt 300ms | parse 40ms | act 600ms | total 1340ms`
+pub(crate) fn format_action_line(t: &Turn, kind: &str, confirmed: bool, now: Instant) -> Option<String> {
+    let start = t.speech_end?;
+    if now.saturating_duration_since(start) > MAX_TURN_AGE {
+        return None;
+    }
+    let mut parts = vec![format!("{kind} {}", if confirmed { "confirmed" } else { "unconfirmed" })];
+    let mut prev = start;
+    for (label, at) in [("endwait", t.stopped), ("stt", t.transcript), ("parse", t.parsed)] {
+        if let Some(at) = at {
+            parts.push(format!("{label} {}ms", ms(prev, at)));
+            prev = at;
+        }
+    }
+    parts.push(format!("act {}ms", ms(prev, now)));
+    parts.push(format!("total {}ms", ms(start, now)));
+    Some(format!("[LAT-ACT] {}", parts.join(" | ")))
 }
 
 /// Record the first time `stage` is reached in the current turn.
@@ -88,7 +132,7 @@ pub(crate) fn format_line(t: &Turn, now: Instant) -> Option<String> {
     }
     let mut parts: Vec<String> = Vec::new();
     let mut prev = start;
-    for (label, at) in [("stt", t.transcript), ("parse", t.parsed), ("answer", t.answer)] {
+    for (label, at) in [("endwait", t.stopped), ("stt", t.transcript), ("parse", t.parsed), ("answer", t.answer)] {
         if let Some(at) = at {
             parts.push(format!("{label} {}ms", ms(prev, at)));
             prev = at;
@@ -141,6 +185,24 @@ mod tests {
         t.mem = Some(Duration::from_millis(7));
         let line = format_line(&t, at(b, 1500)).unwrap();
         assert!(line.ends_with("| total 1500ms | mem 7ms"), "{line}");
+    }
+
+    #[test]
+    fn an_action_line_counts_from_the_end_of_speech_including_the_silence_wait() {
+        let b = Instant::now();
+        let t = Turn {
+            speech_end: Some(b),
+            stopped: Some(at(b, 400)),
+            transcript: Some(at(b, 700)),
+            parsed: Some(at(b, 740)),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_action_line(&t, "open_app", true, at(b, 1340)).unwrap(),
+            "[LAT-ACT] open_app confirmed | endwait 400ms | stt 300ms | parse 40ms | act 600ms | total 1340ms"
+        );
+        assert!(format_action_line(&t, "command", false, at(b, 800)).unwrap().starts_with("[LAT-ACT] command unconfirmed |"));
+        assert!(format_action_line(&t, "command", true, at(b, 61_000)).is_none());
     }
 
     #[test]

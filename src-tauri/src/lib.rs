@@ -66,6 +66,7 @@ pub(crate) mod reverse_engineer;
 pub(crate) mod tts_kokoro;
 #[cfg(not(target_os = "linux"))]
 mod hotkey;
+mod typing;
 // wakeword-oww (default): openWakeWord via tract-onnx (pure Rust, no C++ deps)
 #[cfg(feature = "wakeword-oww")]
 mod wakeword_oww;

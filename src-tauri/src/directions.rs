@@ -434,6 +434,17 @@ pub fn arrive_epoch_for(now: chrono::DateTime<chrono::Local>, arrive_min: u16) -
     (tomorrow - now.timestamp() <= 12 * 3600).then_some(tomorrow)
 }
 
+/// The answer when a trip reminder is asked for after its leave time: whether the arrival can still be made is said
+/// as it is (the buffer for parking may be gone while the drive still fits). Pure.
+fn leave_now_line(destination: &str, mins: u32, arrive: &str, late: bool) -> String {
+    let start = format!("{} is about {} away, sir", cap_first(destination), minutes_phrase(mins));
+    if late {
+        format!("{start}, so you'd be late for {arrive}. Leave right now.")
+    } else {
+        format!("{start}, so to be there by {arrive} you need to leave right now.")
+    }
+}
+
 /// Speak now? From 5 minutes before the leave time until the arrival time; never after. Pure.
 pub fn decide_trip(t: &Trip, now: i64, address: Option<&str>) -> Option<String> {
     if t.eta_secs <= 0 || now >= t.arrive_epoch {
@@ -927,7 +938,8 @@ pub async fn trip_reminder<R: Runtime>(app: AppHandle<R>, destination: String, a
     let leave_at = arrive_epoch - eta_secs - TRIP_BUFFER_SECS;
     let mins = ((eta_secs + 59) / 60).max(1) as u32;
     if leave_at <= now {
-        return say_and_finish(&app, request_id, format!("{destination} is about {} away, sir, so you'd be late if you're leaving for {} now. You'd need to leave right now.", minutes_phrase(mins), clock_of(arrive_epoch)));
+        let late = now + eta_secs > arrive_epoch;
+        return say_and_finish(&app, request_id, leave_now_line(&destination, mins, &clock_of(arrive_epoch), late));
     }
     let mut trips = prune_trips(load_trips(&path), now);
     let replaced: Vec<String> = trips.iter().filter(|t| t.destination.eq_ignore_ascii_case(&dest)).map(|t| t.id.clone()).collect();
@@ -1119,6 +1131,15 @@ mod tests {
         let mut avoid = input("T-Hub", None);
         avoid.opts_spoken = "avoiding tolls".into();
         assert_eq!(route_line(&avoid), "Opening the route to T-Hub, avoiding tolls, sir.");
+    }
+
+    #[test]
+    fn a_late_trip_reminder_says_whether_the_arrival_still_fits() {
+        assert_eq!(
+            leave_now_line("charminar", 29, "8:07 PM", false),
+            "Charminar is about 29 minutes away, sir, so to be there by 8:07 PM you need to leave right now."
+        );
+        assert_eq!(leave_now_line("charminar", 29, "7:40 PM", true), "Charminar is about 29 minutes away, sir, so you'd be late for 7:40 PM. Leave right now.");
     }
 
     #[test]

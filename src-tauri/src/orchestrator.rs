@@ -240,6 +240,11 @@ static DICTATION_ACTIVE: AtomicBool = AtomicBool::new(false);
 fn start_dictation_session<R: Runtime>(app: &AppHandle<R>) {
     set_dictation_active(true);
     crate::dictation::begin_session();
+    if !crate::ghost::session_active() {
+        // hands free: the microphone stays open between sentences (typing.rs). Ghost mode has its own open mic.
+        crate::typing::start_stream(app);
+        return;
+    }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         loop {
@@ -1785,7 +1790,7 @@ async fn process_transcript_inner<R: Runtime>(
             ParsedIntent::StartDictation => {
                 start_dictation_session(&app);
                 let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-                speak_line(&app, "Dictation started, sir. Say new line for a line break, or scratch that to undo.".to_string(), &request_id);
+                speak_line(&app, "Typing, sir. Say done when you have finished.".to_string(), &request_id);
                 clear_active_request(&request_id);
                 return Ok(ProcessResult {
                     request_id,
@@ -2166,7 +2171,7 @@ async fn process_transcript_inner<R: Runtime>(
             ParsedIntent::StartDictation => {
                 start_dictation_session(&app);
                 let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-                speak_line(&app, "Dictation started, sir. Say new line for a line break, or scratch that to undo.".to_string(), &request_id);
+                speak_line(&app, "Typing, sir. Say done when you have finished.".to_string(), &request_id);
                 clear_active_request(&request_id);
                 return Ok(ProcessResult {
                     request_id,
@@ -2475,6 +2480,7 @@ async fn process_transcript_inner<R: Runtime>(
                 {
                     // Claim "Opened" only after the window is verified in front.
                     let in_front = open_target_in_front(target.clone(), cancel_flag.clone()).await;
+                    crate::latency::action_done("open_app", in_front);
                     crate::action_receipt::emit(
                         &app,
                         &crate::action_receipt::ActionReceipt::for_open_app(target, in_front),
@@ -2496,6 +2502,8 @@ async fn process_transcript_inner<R: Runtime>(
                         _ => {}
                     }
                 }
+                // every other local command: measured when its adapter returned (a no-op after the open_app line)
+                crate::latency::action_done("command", outcome.as_ref().is_ok_and(|r| r.success));
                 let message = match outcome {
                     Ok(result) => result.message,
                     Err(error) => format!("I couldn't complete that command: {error}"),
@@ -9829,6 +9837,13 @@ async fn run_open_github_dashboard<R: Runtime>(
         subsystem: Subsystem::LocalCommand,
         handled_locally: true,
     })
+}
+
+/// A short notice that is nobody's reply (hands-free typing).
+pub(crate) fn announce<R: Runtime>(app: &AppHandle<R>, line: &str) {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    speak_line(app, line.to_string(), &request_id);
+    clear_active_request(&request_id);
 }
 
 /// Speak a short line (Result event channel the frontend already speaks).
