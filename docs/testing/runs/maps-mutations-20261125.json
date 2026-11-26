@@ -1,0 +1,182 @@
+{
+ "date": "2026-11-25",
+ "what": "Maps work (open_routing, directions, location): one rule removed at a time, the focused tests must fail",
+ "results": [
+  {
+   "rule": "private places are never sent (spoken_is_private)",
+   "file": "open_routing.rs",
+   "killed_by_assertion": true,
+   "failing_tests": [
+    "test directions::tests::home_work_and_my_places_keep_the_open_services_out ... FAILED",
+    "test open_routing::tests::own_places_are_private ... FAILED",
+    "test open_routing::tests::the_users_own_address_never_reaches_the_geocoder ... FAILED"
+   ],
+   "compile_error": false,
+   "seconds": 102
+  },
+  {
+   "rule": "refuse before any lookup (plan up-front check)",
+   "file": "open_routing.rs",
+   "killed_by_assertion": true,
+   "failing_tests": [
+    "test open_routing::tests::the_users_own_address_never_reaches_the_geocoder ... FAILED"
+   ],
+   "compile_error": false,
+   "seconds": 133
+  },
+  {
+   "rule": "the OSRM demo is car-only (profile_path)",
+   "file": "open_routing.rs",
+   "killed_by_assertion": true,
+   "failing_tests": [
+    "test open_routing::tests::the_route_address_has_longitude_first_and_the_right_profile ... FAILED"
+   ],
+   "compile_error": false,
+   "seconds": 305
+  },
+  {
+   "rule": "geocodes are cached",
+   "file": "open_routing.rs",
+   "killed_by_assertion": true,
+   "failing_tests": [
+    "test open_routing::tests::a_place_is_found_sent_with_an_app_name_and_cached ... FAILED",
+    "test open_routing::tests::an_unknown_place_is_not_found_and_not_asked_again_at_once ... FAILED"
+   ],
+   "compile_error": false,
+   "seconds": 171
+  },
+  {
+   "rule": "a refusal pauses the service",
+   "file": "open_routing.rs",
+   "killed_by_assertion": true,
+   "failing_tests": [
+    "test open_routing::tests::a_pause_is_capped ... FAILED",
+    "test open_routing::tests::http_429_pauses_the_service_and_the_pause_is_kept ... FAILED"
+   ],
+   "compile_error": false,
+   "seconds": 60
+  },
+  {
+   "rule": "the answer size is capped",
+   "file": "open_routing.rs",
+   "killed_by_assertion": true,
+   "failing_tests": [
+    "test open_routing::tests::a_chunked_answer_with_no_length_is_cut_off_while_it_streams ... FAILED"
+   ],
+   "compile_error": false,
+   "seconds": 49
+  },
+  {
+   "rule": "the query is percent-encoded",
+   "file": "open_routing.rs",
+   "killed_by_assertion": true,
+   "failing_tests": [
+    "test open_routing::tests::places_are_percent_encoded_byte_for_byte ... FAILED"
+   ],
+   "compile_error": false,
+   "seconds": 59
+  },
+  {
+   "rule": "one request a second (throttle)",
+   "file": "open_routing.rs",
+   "killed_by_assertion": true,
+   "failing_tests": [
+    "test open_routing::tests::the_gap_between_requests_is_kept ... FAILED"
+   ],
+   "compile_error": false,
+   "seconds": 134
+  },
+  {
+   "rule": "Retry-After is honoured",
+   "file": "open_routing.rs",
+   "killed_by_assertion": true,
+   "failing_tests": [
+    "test open_routing::tests::http_429_pauses_the_service_and_the_pause_is_kept ... FAILED"
+   ],
+   "compile_error": false,
+   "seconds": 59
+  },
+  {
+   "rule": "avoid options the open map cannot do are reported",
+   "file": "open_routing.rs",
+   "killed_by_assertion": true,
+   "failing_tests": [
+    "test open_routing::tests::avoid_options_are_reported_as_ignored_for_driving_only ... FAILED"
+   ],
+   "compile_error": false,
+   "seconds": 54
+  },
+  {
+   "rule": "a route without road distance is refused (parse_route)",
+   "file": "open_routing.rs",
+   "killed_by_assertion": true,
+   "failing_tests": [
+    "test open_routing::tests::bad_answers_are_refused_not_guessed ... FAILED"
+   ],
+   "compile_error": false,
+   "seconds": 51
+  },
+  {
+   "rule": "no traffic is said for a car on the open map",
+   "file": "directions.rs",
+   "killed_by_assertion": true,
+   "failing_tests": [
+    "test directions::tests::a_measured_open_route_says_about_and_names_the_missing_traffic ... FAILED"
+   ],
+   "compile_error": false,
+   "seconds": 57
+  },
+  {
+   "rule": "a private stop switches the open route off",
+   "file": "directions.rs",
+   "killed_by_assertion": true,
+   "failing_tests": [
+    "test directions::tests::home_work_and_my_places_keep_the_open_services_out ... FAILED"
+   ],
+   "compile_error": false,
+   "seconds": 51
+  },
+  {
+   "rule": "home and work keep the open services out (open_path_allowed)",
+   "file": "directions.rs",
+   "killed_by_assertion": true,
+   "failing_tests": [
+    "test directions::tests::home_work_and_my_places_keep_the_open_services_out ... FAILED"
+   ],
+   "compile_error": false,
+   "seconds": 47
+  },
+  {
+   "rule": "attribution is shown with open steps",
+   "file": "directions.rs",
+   "killed_by_assertion": true,
+   "failing_tests": [
+    "test directions::tests::the_step_list_carries_its_attribution_only_from_the_open_map ... FAILED"
+   ],
+   "compile_error": false,
+   "seconds": 51
+  },
+  {
+   "rule": "a refusal by Windows is named (location::classify)",
+   "file": "location.rs",
+   "killed_by_assertion": true,
+   "failing_tests": [
+    "test location::tests::a_location_failure_is_named_not_guessed ... FAILED"
+   ],
+   "compile_error": false,
+   "seconds": 52
+  },
+  {
+   "rule": "an old trip reminder loads as not private (serde default)",
+   "file": "directions.rs",
+   "killed_by_assertion": true,
+   "failing_tests": [
+    "test directions::tests::a_trip_to_your_own_place_remembers_it_is_private ... FAILED"
+   ],
+   "compile_error": false,
+   "seconds": 147
+  }
+ ],
+ "killed": 17,
+ "total": 17
+}

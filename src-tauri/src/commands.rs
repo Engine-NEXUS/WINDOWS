@@ -1840,6 +1840,13 @@ pub struct NexusSettings {
     /// Address of your own routing server (see server/routing). Empty = none.
     #[serde(default)]
     pub routing_server_url: String,
+    /// Address of the place-lookup service for directions (empty = OpenStreetMap's public Nominatim). The public service's
+    /// policy asks that an app can switch it without a new release; only `https://` or a private-network address is used.
+    #[serde(default)]
+    pub open_geocoder_url: String,
+    /// Address of the open route service (empty = routing.openstreetmap.de). A plain OSRM server of your own works too.
+    #[serde(default)]
+    pub open_routing_url: String,
     /// Wake-word front-end chain: "legacy" (the original runtime chain, default)
     /// or "aligned" (identical to the chain the classifier was trained with).
     /// Compare with `wake_eval --dsp` on your recordings before switching.
@@ -2448,6 +2455,8 @@ impl Default for NexusSettings {
             maps_embed: true,
             routing_mode: default_routing_mode(),
             routing_server_url: String::new(),
+            open_geocoder_url: String::new(),
+            open_routing_url: String::new(),
             wake_dsp_profile: default_wake_dsp_profile(),
             ghost_step_timeout_ms: 15000,
             ghost_turn_gap_ms: 1000,
@@ -4619,6 +4628,22 @@ mod nexus_settings_tests {
         assert!(parsed.webhook_listener && parsed.keep_awake_poller && parsed.stt_prewarm);
         let back = serde_json::to_value(&parsed).unwrap();
         assert_eq!(back.get("sttPrewarm"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn open_service_addresses_default_empty_and_survive_a_save() {
+        let mut raw = serde_json::to_value(NexusSettings::default()).unwrap();
+        let o = raw.as_object_mut().unwrap();
+        o.remove("openGeocoderUrl");
+        o.remove("openRoutingUrl");
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("old settings files still load");
+        assert!(parsed.open_geocoder_url.is_empty() && parsed.open_routing_url.is_empty());
+        let mut set = parsed;
+        set.open_geocoder_url = "https://geo.example".into();
+        set.open_routing_url = "http://127.0.0.1:5000".into();
+        let back: NexusSettings = serde_json::from_value(serde_json::to_value(&set).unwrap()).unwrap();
+        assert_eq!(back.open_geocoder_url, "https://geo.example");
+        assert_eq!(back.open_routing_url, "http://127.0.0.1:5000");
     }
 
     #[test]

@@ -284,6 +284,25 @@ export function StackView({
     );
   }
 
+  // A refused or failed scan measured nothing: showing "0 of 6 security headers" or an empty weight chart would read
+  // as findings about the site (seen in the 2026-11-25 live run). Show only the reason. A visual-only walkthrough
+  // that did produce sections keeps the normal view.
+  if (stackData.failed && !stackData.sections?.length) {
+    return (
+      <div className="stack-view stack-view--empty">
+        <AppBar
+          logo={<LogoTile name={host || "Nexus"} size={36} rounded="lg" />}
+          title={stackData.title || host || "Tech Stack"}
+          subtitle="Not scanned"
+        />
+        <div className="stack-empty-content" role="status">
+          <div className="stack-empty-icon">⚠️</div>
+          {stackData.summary || "The scan did not run."}
+        </div>
+      </div>
+    );
+  }
+
   const isScanning = Boolean(stackData.scanning) || Boolean(stackData.rendering);
   const thin = Array.isArray(stackData.thin) ? stackData.thin : [];
   const thirdPartyHosts = stackData.stats?.third_party_hosts || [];

@@ -199,6 +199,25 @@ describe("StackView component rendering (Phone Layout)", () => {
     expect(withoutLogosHtml).not.toContain("Logos by Logo.dev");
   });
 
+  it("a refused scan shows only the reason, never empty security or weight findings", () => {
+    const refused: StackPayload = {
+      ...SAMPLE_PAYLOAD,
+      failed: true,
+      detections: [],
+      sections: [],
+      summary: "I do not scan private or banking sites, sir.",
+    };
+    const html = renderToString(<StackView payload={refused} />);
+    expect(html).toContain("I do not scan private or banking sites, sir.");
+    expect(html).toContain("Not scanned");
+    expect(html).not.toContain("headers set");
+    expect(html).not.toContain("Page weight");
+    expect(html).not.toContain("Stack mix");
+    // a visual-only walkthrough that has sections keeps the normal view
+    const visual = renderToString(<StackView payload={{ ...refused, sections: SAMPLE_PAYLOAD.sections }} />);
+    expect(visual).not.toContain("Not scanned");
+  });
+
   it("renders scanning state with status dot and skeleton headline", () => {
     const html = renderToString(
       <StackView

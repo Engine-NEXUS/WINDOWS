@@ -157,6 +157,10 @@ const CATEGORY_GLYPH: Record<string, keyof typeof GLYPHS> = {
   cms: "globe",
   "headless-cms": "globe",
   search: "globe",
+  "web-application": "globe",
+  generator: "gear",
+  routing: "code",
+  "framework-feature": "code",
 };
 
 /** Headers, protocols and browser hints have no brand: each gets a glyph that says what it is. */

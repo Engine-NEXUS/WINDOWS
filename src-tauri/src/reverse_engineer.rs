@@ -4,6 +4,7 @@
 //! unified sidebar on the left with the technology stack breakdown, and tours
 //! the visible sections of the UI using vision and narrated callouts.
 
+use regex::Regex;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -46,6 +47,51 @@ pub(crate) fn classify_target(app_exe_name: &str, url: Option<&str>, app_path: O
     } else {
         Target::NeedUrl
     }
+}
+
+/// Top-level domains accepted when a site is NAMED in the sentence ("reverse engineer nextjs.org"). A short list on
+/// purpose: "next.js", "node.js", "vue.js" and file names must never be taken for a website.
+pub(crate) const NAMED_TLDS: &[&str] = &[
+    "com", "org", "net", "io", "dev", "app", "co", "ai", "in", "edu", "gov", "me", "tv", "so", "sh", "xyz", "tech", "cloud",
+    "uk", "de", "fr", "jp", "ca", "au", "nl", "se", "no", "es", "it", "br", "ru", "info", "site", "online", "store", "page",
+    "blog", "news", "wiki", "design", "studio", "run", "build",
+];
+
+/// A website named in the spoken or typed command, as an `https` address, or `None` when the sentence names none.
+/// Accepts `https://example.org/path`, `example.org`, `www.example.org` and the spoken form `example dot org`.
+/// Never returns an address with credentials, an IP literal, or a name whose last label is not a known TLD; the
+/// scanner's own guard (`site_probe::guard_url`) still runs on whatever this returns.
+pub(crate) fn named_target(prompt: &str) -> Option<String> {
+    let lower = prompt.to_lowercase().replace(['\u{2019}', '\u{2018}'], "'");
+    // spoken dots: "nextjs dot org" -> "nextjs.org" (only between word characters)
+    let spoken = Regex::new(r"([a-z0-9-])\s+dot\s+([a-z0-9-])").ok()?;
+    let mut text = lower.clone();
+    for _ in 0..4 {
+        let next = spoken.replace_all(&text, "${1}.${2}").into_owned();
+        if next == text {
+            break;
+        }
+        text = next;
+    }
+    let re = Regex::new(r"(?:https?://)?((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z]{2,24}))(?::\d{1,5})?(/[^\s,;!?]*)?").ok()?;
+    for caps in re.captures_iter(&text) {
+        let whole = caps.get(0)?.as_str();
+        let host = caps.get(1)?.as_str();
+        let tld = caps.get(2)?.as_str();
+        if !NAMED_TLDS.contains(&tld) {
+            continue;
+        }
+        // "something@example.com" is an address, not a site
+        let start = caps.get(0)?.start();
+        if start > 0 && text.as_bytes()[start - 1] == b'@' {
+            continue;
+        }
+        let path = caps.get(3).map(|m| m.as_str().trim_end_matches(['.', ':'])).filter(|p| !p.is_empty()).unwrap_or("/");
+        let rebuilt = format!("https://{host}{path}");
+        let _ = whole;
+        return Some(rebuilt);
+    }
+    None
 }
 
 static PENDING_STACK: Mutex<Option<serde_json::Value>> = Mutex::new(None);
@@ -628,6 +674,12 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 { format!("1 {one}") } else { format!("{n} {many}") }
 }
 
+/// Whether a closing line follows the run. Not when the tour was skipped on purpose and nothing was toured: the scan's
+/// own summary has just been spoken, and a second line milliseconds later cuts it off (live run 2026-11-25).
+pub(crate) fn speaks_closing_line(spoken: bool, cancelled: bool, tour_skipped: bool, sections: usize) -> bool {
+    spoken && !cancelled && !(tour_skipped && sections == 0)
+}
+
 /// The last line of a run, honest about how it went. None = say nothing more
 /// (a refusal was already spoken, or nothing useful happened).
 pub(crate) fn closing_line(outcome: &ScanOutcome, is_app: bool, sections: usize, techs: usize) -> Option<String> {
@@ -760,6 +812,8 @@ pub(crate) fn stack_payload_failed(
 ) -> serde_json::Value {
     let mut p = scanning_payload_kind(title, url, kind);
     p["scanning"] = serde_json::json!(false);
+    // nothing was measured: the sidebar shows the reason, never empty security or weight "findings"
+    p["failed"] = serde_json::json!(true);
     p["notes"] = serde_json::json!([reason]);
     p["summary"] = serde_json::json!(reason);
     p["sections"] = serde_json::json!(sections_json(sections));
@@ -824,8 +878,11 @@ pub(crate) async fn run<R: Runtime>(
     let (rid, cancel) = install_new_request(Subsystem::LocalCommand);
     let (sw, sh) = crate::screen::primary_monitor_size().unwrap_or((1920, 1080));
     let mut ctx = crate::screen_context::collect_target(sw, sh).await;
+    // A site named in the sentence ("reverse engineer nextjs.org") wins over whatever is in front, and the scan of it
+    // needs no foreground window at all (the tour of it does: see `tour_ok_for_named`).
+    let named = named_target(&prompt);
 
-    if let Some(reason) = crate::screen_context::capture_block_reason(&ctx) {
+    if let Some(reason) = crate::screen_context::capture_block_reason(&ctx).filter(|_| named.is_none()) {
         speak_line(&app, reason.to_string(), &rid);
         clear_active_request(&rid);
         return Ok(local_result(rid, Subsystem::LocalCommand));
@@ -837,14 +894,17 @@ pub(crate) async fn run<R: Runtime>(
 
     // A browser with no URL yet: run the address-bar reading ladder.
     let app_exe_name = crate::browser_url::foreground_process_name().unwrap_or_default();
-    if crate::browser_url::is_browser_process(&app_exe_name) && ctx.url.is_none() {
+    if named.is_none() && crate::browser_url::is_browser_process(&app_exe_name) && ctx.url.is_none() {
         if let Some(resolved) = crate::browser_url::resolve_foreground_url_for_command().await {
             ctx.url = Some(resolved);
         }
     }
     let app_exe_path =
         crate::browser_url::foreground_process_path().map(|p| p.to_string_lossy().to_string());
-    let target = classify_target(&app_exe_name, ctx.url.as_deref(), app_exe_path.as_deref());
+    let target = match &named {
+        Some(u) => Target::Website(u.clone()),
+        None => classify_target(&app_exe_name, ctx.url.as_deref(), app_exe_path.as_deref()),
+    };
 
     println!(
         "[REVERSE] target: {}",
@@ -911,6 +971,9 @@ pub(crate) async fn run<R: Runtime>(
     // Title/url/kind/reason for the sidebar when there is no report.
     let mut failed_view: Option<(String, String, &'static str, String)> = None;
     let mut stop_line: Option<&'static str> = None;
+    // A named site that is not in front is scanned but not toured: its summary was already spoken, and a closing line
+    // straight after it would cut that summary off (seen in the first live run).
+    let mut tour_skipped = false;
 
     'work: {
         if let Some(url) = target_url.clone() {
@@ -1067,7 +1130,17 @@ pub(crate) async fn run<R: Runtime>(
             };
             site_report_saved = scan_res.ok();
 
-            if quiet || !tour_allowed(&outcome) {
+            // A named site is toured only when that very site is already in the front browser window: otherwise the
+            // screenshots would be of whatever else is in front (never of a page the user did not ask about).
+            let tour_ok_for_named = match &named {
+                None => true,
+                Some(n) => {
+                    let want = crate::browser_url::extract_host(n);
+                    want.is_some() && ctx.url.as_deref().and_then(crate::browser_url::extract_host) == want
+                }
+            };
+            tour_skipped = !tour_ok_for_named && site_report_saved.is_some();
+            if quiet || !tour_allowed(&outcome) || !tour_ok_for_named {
                 break 'work;
             }
             if matches!(outcome, ScanOutcome::Failed(_)) && spoken {
@@ -1287,7 +1360,7 @@ pub(crate) async fn run<R: Runtime>(
         progress_json(phase, &format!("Reverse engineering {phase}"), None, None),
     );
 
-    if spoken && !was_cancelled {
+    if speaks_closing_line(spoken, was_cancelled, tour_skipped, sections.len()) {
         let line = stop_line.map(str::to_string).or_else(|| {
             closing_line(&outcome, target_app_path.is_some(), sections.len(), total_techs)
         });
@@ -1505,6 +1578,59 @@ async fn capture_frame<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_closing_line_never_follows_the_summary_when_the_tour_was_skipped() {
+        assert!(!speaks_closing_line(true, false, true, 0), "skipped tour: the summary was the last word");
+        assert!(speaks_closing_line(true, false, false, 0), "a tour that failed says so");
+        assert!(speaks_closing_line(true, false, true, 2), "sections exist: close them");
+        assert!(!speaks_closing_line(false, false, false, 2), "quiet run stays quiet");
+        assert!(!speaks_closing_line(true, true, false, 2), "a cancelled run says nothing more");
+    }
+
+    #[test]
+    fn a_named_site_is_found_in_typed_and_spoken_forms() {
+        let cases = [
+            ("reverse engineer nextjs.org", "https://nextjs.org/"),
+            ("Nexus, reverse engineer https://github.com/features", "https://github.com/features"),
+            ("what is www.stripe.com built with", "https://www.stripe.com/"),
+            ("reverse engineer tailwindcss dot com", "https://tailwindcss.com/"),
+            ("reverse engineer vercel dot com slash pricing", "https://vercel.com/"),
+            ("what tech stack does Svelte.dev use?", "https://svelte.dev/"),
+            ("reverse engineer docs.rust-lang.org/book.", "https://docs.rust-lang.org/book"),
+        ];
+        for (said, want) in cases {
+            assert_eq!(named_target(said).as_deref(), Some(want), "{said}");
+        }
+    }
+
+    #[test]
+    fn things_that_look_like_sites_but_are_not_are_never_taken() {
+        for said in [
+            "reverse engineer this website",
+            "what is this built with",
+            "reverse engineer next.js",
+            "reverse engineer node.js",
+            "send it to bob@example.com",
+            "open readme.md",
+            "version 1.2.3 of the app",
+            "reverse engineer 10.0.0.5",
+            "reverse engineer localhost",
+            "reverse engineer intranet.corp.internal",
+        ] {
+            assert_eq!(named_target(said), None, "{said}");
+        }
+    }
+
+    #[test]
+    fn a_named_private_or_sensitive_site_still_meets_the_scanner_guard() {
+        // named_target only finds a candidate; the scanner's own guard refuses unsafe ones.
+        for said in ["reverse engineer 127.0.0.1", "reverse engineer paypal.com/myaccount"] {
+            if let Some(u) = named_target(said) {
+                assert!(crate::site_probe::guard_url(&u).is_err(), "{said} -> {u} must be refused by the guard");
+            }
+        }
+    }
 
     fn logo_test_report() -> crate::site_probe::SiteReport {
         crate::site_probe::SiteReport {

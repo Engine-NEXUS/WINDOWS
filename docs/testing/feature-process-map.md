@@ -5,7 +5,6 @@ Which runtime processes and threads each feature depends on, and what Focus Mode
 | Feature | Processes / threads | Under Hand Mode Focus Mode |
 |---|---|---|
 | Speaker verification / owner check | wake receiver thread, enrollment pipeline (Setup/Hub), keychain key | keeps running |
-| Reverse engineer website/app | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | Focus Mode (Hand Mode load control) | hand WebView2 renderer (camera + MediaPipe), hand-out thread, 80 ms watchdog, GPU shared with the stage WebView2 | owner of Focus Mode |
 | GitHub by voice without owner (repo, PR list, PR number search) | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | Notification brain: state machine and GitHub Actions / deploy watchers | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
@@ -38,6 +37,7 @@ Which runtime processes and threads each feature depends on, and what Focus Mode
 | Activity Manager (app-only history) | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | CI gates: dead code, IPC, turn-end, hygiene | build scripts / Hub WebView2 | n/a |
 | Hand mode (camera pointer) | hand WebView2 renderer (camera + MediaPipe), hand-out thread, 80 ms watchdog, GPU shared with the stage WebView2 | owner of Focus Mode |
+| Reverse engineer website/app | GitHub REST/Worker calls, repo index cache (10 min), Gemini/Groq vision calls | on demand |
 | MCP connect system (Swiggy, Amazon, WhatsApp) | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Google accounts + OAuth | OAuth loopback listener, vault monitor (90 s), Worker HTTPS | vault monitor paused |
 | Captions (word-by-word, black capsule) | Edge TTS connection, Kokoro ONNX (lazy), rodio playback, volume lease watchdog | cache refresh, voice sync and swap downloads deferred |
@@ -48,7 +48,6 @@ Which runtime processes and threads each feature depends on, and what Focus Mode
 | Mishearing normaliser + learned corrections | regex tier in-process; BERT-Mini NLU sidecar (39218, lazy, 60 s idle); 9Router HTTP | on demand |
 | Live captions while you speak (local / Groq / Deepgram) | Edge TTS connection, Kokoro ONNX (lazy), rodio playback, volume lease watchdog | cache refresh, voice sync and swap downloads deferred |
 | Local STT fallback (Moonshine) | stt-capture-rx thread, Groq HTTP client; Moonshine Python sidecar (port 39217, lazy, killed after 60 s idle) | sidecar is lazy; diagnostics sweep paused |
-| Maps / Places / Directions | media keys / deep links / Routes API | on demand |
 | Voice personas + offline twin swap | Edge TTS connection, Kokoro ONNX (lazy), rodio playback, volume lease watchdog | cache refresh, voice sync and swap downloads deferred |
 | Agent hooks (Claude, Codex, Antigravity, Cursor, Gemini, OpenCode, Aider, Devin, Windsurf, Kilo, Copilot) | agent hooks webhook (port 39220), agent_watch Node sidecar (39222, lazy), watch_runner (3 s) | keeps running |
 | TTS volume lease / restore | Edge TTS connection, Kokoro ONNX (lazy), rodio playback, volume lease watchdog | cache refresh, voice sync and swap downloads deferred |
@@ -61,6 +60,7 @@ Which runtime processes and threads each feature depends on, and what Focus Mode
 | Main centre / 17 sub-centres validation | regex tier in-process; BERT-Mini NLU sidecar (39218, lazy, 60 s idle); 9Router HTTP | on demand |
 | Security: keychain, PII filter, sealed memory | OAuth loopback listener, vault monitor (90 s), Worker HTTPS | vault monitor paused |
 | Shortcut map + action router | foreground/UI Automation calls, SendInput, keep-awake poller (3 s) | keep-awake never paused |
+| Maps / Places / Directions | media keys / deep links / Routes API | on demand |
 | Keep-awake | foreground/UI Automation calls, SendInput, keep-awake poller (3 s) | keep-awake never paused |
 | Memory core (encrypted store, ranked recall, context pack) | memcore pollers (30-60 s ticks), session snapshot (60 s), resume sampler (30 s), activity sampler (2 s), sealed SQLite store | snapshot, resume, activity, curator, review, routines paused; mail/WhatsApp/leave-by keep polling and their speech is held |
 | Open / close / focus apps | foreground/UI Automation calls, SendInput, keep-awake poller (3 s) | keep-awake never paused |

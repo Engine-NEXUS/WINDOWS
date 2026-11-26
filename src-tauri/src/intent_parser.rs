@@ -4631,8 +4631,20 @@ fn parse_reverse_engineer_command(text: &str) -> Option<ParseResult> {
         let trimmed = regex_captures(&trimmed, r"^what(?:'s|s)\s+(.*)$")
             .and_then(|c| c.get(1).map(|m| format!("what is {}", m.as_str().trim())))
             .unwrap_or(trimmed);
+        // A website named in the sentence: a dotted name ending in a known top-level domain (or spoken "dot").
+        let host_only = format!(
+            r"(?:https?://)?[a-z0-9][a-z0-9-]*(?:(?:\.|\s+dot\s+)[a-z0-9-]+)*(?:\.|\s+dot\s+)(?:{tlds})",
+            tlds = crate::reverse_engineer::NAMED_TLDS.join("|")
+        );
+        let domain = format!(r"{host_only}(?:/\S*)?");
+        // "github.com" is a website here, not a repository command: the code-word check ignores the bare site name
+        // (a path such as /user/repo is kept, so "reverse engineer github.com/user/repo" still goes to the repo handler).
+        let without_site = match regex::Regex::new(&host_only) {
+            Ok(re) => re.replace_all(&trimmed, " site ").into_owned(),
+            Err(_) => trimmed.clone(),
+        };
         if regex_captures(
-            &trimmed,
+            &without_site,
             r"\b(?:repo|repository|pull\s+request|pr|github|function|file|binary|exe|firmware|malware)\b|\b(?:app|play)\s+store\b",
         )
         .is_some()
@@ -4676,6 +4688,16 @@ fn parse_reverse_engineer_command(text: &str) -> Option<ParseResult> {
             // 9. "is this wordpress?", "is this site built with shopify?".
             format!(
                 r"^is\s+this(?:\s+{SITE})?(?:\s+(?:built|made|running)\s+(?:with|on|in))?\s+(?:a\s+|an\s+)?{NAMED}(?:\s+{SITE})?\s*\??$"
+            ),
+            // 10. A site named in the sentence: "what is nextjs.org built with", "how was stripe dot com built",
+            //     "what tech stack does github.com use". The runner reads the address from the sentence itself.
+            format!(
+                r"^(?:what|which)\s+(?:is|was)\s+{domain}\s+(?:built|made|created|developed|coded)\s+(?:with|using|on|in)\b[^;]*$"
+            ),
+            format!(r"^how\s+(?:was|is)\s+{domain}\s+(?:built|made|created|developed|coded)\b[^;]*$"),
+            format!(r"^how\s+did\s+(?:they|someone|people)\s+(?:build|make|create|code)\s+{domain}\b[^;]*$"),
+            format!(
+                r"^(?:what|which)\s+(?:tech(?:nology)?(?:\s+stack)?|technologies|stack|frameworks?|cms)\s+(?:is|does|did)\s+{domain}\s+(?:use|using|run|running|built)\b[^;]*$"
             ),
         ];
         if patterns.iter().any(|p| regex_captures(&trimmed, p).is_some()) {
@@ -11413,6 +11435,26 @@ mod tests {
     }
 
     #[test]
+    fn a_named_site_question_that_is_not_about_a_site_stays_out_of_reverse_engineer() {
+        for phrase in [
+            "what is node.js built with",
+            "how is google.com doing today",
+            "how was the movie.md file made",
+            "what is localhost built with",
+            "what is 10.0.0.5 built with",
+            "what framework is next.js",
+            // a repository path keeps its code wording even though the host is a named site
+            "reverse engineer github.com/acme/repo",
+        ] {
+            if let Some(r) = parse_deterministic(phrase) {
+                if let ParsedIntent::NluResult { intent, .. } = r.intent {
+                    assert_ne!(intent, "reverse_engineer", "'{phrase}' must not start a scan");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_reverse_engineer_phrases() {
         for phrase in [
             "reverse engineer this website",
@@ -11447,6 +11489,14 @@ mod tests {
             "Let's reverse engineer this website.",
             "lets reverse engineer this app",
             "go reverse engineer this site",
+            // A site named in the sentence (2026-11-25).
+            "reverse engineer nextjs.org",
+            "what is stripe.com built with",
+            "what is github dot com built with",
+            "how was vercel.com built",
+            "how did they build linear.app",
+            "what tech stack does svelte.dev use",
+            "which framework is tailwindcss.com using",
         ] {
             let res = parse_deterministic(phrase);
             match res.map(|r| r.intent) {

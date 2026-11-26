@@ -20,7 +20,7 @@ use crate::fares::Fare;
 use crate::location::Fix;
 use crate::panel_layout::Panel;
 
-const USER_AGENT: &str = "NEXUS-Assistant/1.0 (desktop voice assistant; https://github.com/Engine-NEXUS/WINDOWS)";
+pub(crate) const USER_AGENT: &str = "NEXUS-Assistant/1.0 (desktop voice assistant; https://github.com/Engine-NEXUS/WINDOWS)";
 const MAX_IMAGE_BYTES: usize = 700_000;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -106,15 +106,6 @@ pub fn parse_routes(body: &str) -> Option<(f64, u32)> {
     let r = v.get("routes")?.get(0)?;
     let m = r.get("distanceMeters")?.as_f64()?;
     let s = parse_duration_s(r.get("duration")?)?;
-    (m > 0.0).then_some((m / 1000.0, secs_to_min(s)))
-}
-
-/// OSRM answer -> (km, minutes). Pure.
-pub fn parse_osrm(body: &str) -> Option<(f64, u32)> {
-    let v: serde_json::Value = serde_json::from_str(body).ok()?;
-    let r = v.get("routes")?.get(0)?;
-    let m = r.get("distance")?.as_f64()?;
-    let s = r.get("duration")?.as_f64()?;
     (m > 0.0).then_some((m / 1000.0, secs_to_min(s)))
 }
 
@@ -342,7 +333,7 @@ pub fn map_image_url(lat: f64, lon: f64) -> String {
     )
 }
 
-fn enc(s: &str) -> String {
+pub(crate) fn enc(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
@@ -393,13 +384,16 @@ async fn google_lookup(c: &reqwest::Client, key: &str, query: &str, here: Option
     parse_google_place(&r.text().await.ok()?)
 }
 
-async fn nominatim_lookup(c: &reqwest::Client, query: &str) -> Option<Found> {
-    let url = format!("https://nominatim.openstreetmap.org/search?q={}&format=jsonv2&limit=1&accept-language=en&extratags=1", enc(query));
-    let r = c.get(url).send().await.ok()?;
-    if !r.status().is_success() {
-        return None;
+/// One place by name from OpenStreetMap's Nominatim, through the shared cache and one-request-a-second limiter in
+/// `open_routing`. Callers keep the user's own addresses away from here (see `directions::wants_photo_card`).
+async fn nominatim_lookup(_c: &reqwest::Client, query: &str) -> Option<Found> {
+    match crate::open_routing::geocode(&crate::open_routing::endpoints(), query).await {
+        Ok(f) => Some(f),
+        Err(e) => {
+            tracing::debug!("place card: place lookup gave nothing ({e})");
+            None
+        }
     }
-    parse_nominatim(&r.text().await.ok()?)
 }
 
 pub struct Route {
@@ -496,14 +490,14 @@ async fn google_full_route(c: &reqwest::Client, key: &str, from: (f64, f64), to:
     Some(Route { km, car_min: car, bike_min, bike_approx, travel_approx: false })
 }
 
-async fn open_route(c: &reqwest::Client, from: (f64, f64), to: (f64, f64)) -> Route {
-    let url = format!("https://router.project-osrm.org/route/v1/driving/{:.6},{:.6};{:.6},{:.6}?overview=false", from.1, from.0, to.1, to.0);
-    if let Ok(r) = c.get(url).send().await {
-        if r.status().is_success() {
-            if let Some((km, car)) = r.text().await.ok().as_deref().and_then(parse_osrm) {
-                return Route { km, car_min: car, bike_min: bike_from_car(car), bike_approx: true, travel_approx: true };
-            }
+async fn open_route(_c: &reqwest::Client, from: (f64, f64), to: (f64, f64)) -> Route {
+    use crate::google::types::TravelMode;
+    match crate::open_routing::route(&crate::open_routing::endpoints(), TravelMode::Driving, &[from, to]).await {
+        Ok(r) => {
+            let km = r.meters as f64 / 1000.0;
+            return Route { km, car_min: r.minutes, bike_min: bike_from_car(r.minutes), bike_approx: true, travel_approx: true };
         }
+        Err(e) => tracing::debug!("place card: open route gave nothing ({e}); using a straight-line estimate"),
     }
     let km = haversine_km(from, to) * 1.3;
     let car = secs_to_min(km / 25.0 * 3600.0);
@@ -836,9 +830,8 @@ mod tests {
     }
 
     #[test]
-    fn routes_and_osrm_answers_parse() {
+    fn routes_answers_parse() {
         assert_eq!(parse_routes(r#"{"routes":[{"distanceMeters":22600,"duration":"2880s"}]}"#), Some((22.6, 48)));
-        assert_eq!(parse_osrm(r#"{"routes":[{"distance":8200.5,"duration":1100.0}]}"#), Some((8.2005, 18)));
         for bad in ["{}", r#"{"routes":[]}"#, "nope", r#"{"routes":[{"distanceMeters":0,"duration":"5s"}]}"#] {
             assert!(parse_routes(bad).is_none(), "{bad}");
         }

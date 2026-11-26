@@ -280,6 +280,9 @@ pub(crate) enum ThinReason {
 impl ThinReason {
     pub(crate) fn spoken(&self) -> String {
         match self {
+            ThinReason::Challenge(who) if who == "a script check" => {
+                "The site only showed me a browser check page, so I could not see what it is built with.".to_string()
+            }
             ThinReason::Challenge(who) => {
                 format!("The site showed me a {who} bot check, so I could only see its hosting.")
             }
@@ -886,7 +889,99 @@ pub(crate) fn score_ctx(ctx: &MatchCtx) -> Vec<Detection> {
         });
     }
     apply_implies(&mut detections);
+    suppress_conflicting_implied_frameworks(&mut detections);
+    add_unlisted_generators(&mut detections, &ctx.metas);
     detections
+}
+
+fn is_implied_only(d: &Detection) -> bool {
+    !d.evidence.is_empty() && d.evidence.iter().all(|e| e.starts_with("implied by"))
+}
+
+/// A framework that was only IMPLIED (never seen on the page) is dropped when a different frontend framework is
+/// already found with real evidence: shadcn-svelte's data attributes imply React for shadcn/ui, but the page is
+/// plainly Svelte. A page with two real frameworks keeps both, because each has its own evidence.
+pub(crate) fn suppress_conflicting_implied_frameworks(detections: &mut Vec<Detection>) {
+    let real: Vec<(String, f32)> = detections
+        .iter()
+        .filter(|d| d.category == "frontend-framework" && !is_implied_only(d))
+        .map(|d| (d.id.clone(), d.confidence))
+        .collect();
+    let implied_strong: Vec<String> = detections
+        .iter()
+        .filter(|d| d.category == "frontend-framework" && is_implied_only(d) && d.confidence >= IMPLY_MIN_PARENT)
+        .map(|d| d.id.clone())
+        .collect();
+    detections.retain(|d| {
+        if d.category != "frontend-framework" || !is_implied_only(d) || d.confidence >= IMPLY_MIN_PARENT {
+            return true;
+        }
+        // weakly implied: keep only when nothing else (real, or strongly implied like Svelte by SvelteKit) is a frontend framework
+        let other_real = real.iter().any(|(id, c)| id != &d.id && *c >= IMPLY_MIN_PARENT);
+        let other_strong = implied_strong.iter().any(|id| id != &d.id);
+        !(other_real || other_strong)
+    });
+}
+
+/// `<meta name="generator" content="Eleventy v3.0.0">` states what built the page. When the table has no entry for
+/// it the generator is still reported, by the name and version the page gives, so an unknown static-site generator
+/// or CMS is never silently missing.
+pub(crate) fn add_unlisted_generators(detections: &mut Vec<Detection>, metas: &[(String, String)]) {
+    for (name, content) in metas {
+        if name != "generator" {
+            continue;
+        }
+        let content = content.trim();
+        if content.is_empty() || content.len() > 80 {
+            continue;
+        }
+        let lower = content.to_ascii_lowercase();
+        let (product, version) = split_generator(content);
+        let product_l = product.to_ascii_lowercase();
+        if product_l.len() < 3 {
+            continue;
+        }
+        let known = detections.iter().any(|d| {
+            let n = d.name.to_ascii_lowercase();
+            let i = d.id.to_ascii_lowercase();
+            lower.contains(&n) || lower.contains(&i) || n.contains(&product_l) || i == product_l.replace(' ', "-")
+        }) || TABLE.iter().any(|t| {
+            let n = t.name.to_ascii_lowercase();
+            product_l == n || product_l == t.id || lower.starts_with(&n)
+        });
+        if known {
+            continue;
+        }
+        let id = format!(
+            "generator-{}",
+            product_l.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>().trim_matches('-')
+        );
+        if detections.iter().any(|d| d.id == id) {
+            continue;
+        }
+        detections.push(Detection {
+            id,
+            name: product,
+            category: "generator".to_string(),
+            website: None,
+            confidence: 0.85,
+            status: Status::from_conf(0.85),
+            evidence: vec![format!("generator meta: {content}")],
+            version,
+        });
+    }
+}
+
+/// "Eleventy (Build Awesome) v4.0.0" -> ("Eleventy (Build Awesome)", Some("4.0.0")); "Hugo 0.121.2" -> ("Hugo", ...).
+fn split_generator(content: &str) -> (String, Option<String>) {
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(.*?)[\s,/-]*v?(\d+(?:\.\d+){0,3}[0-9A-Za-z.\-]*)\s*$").unwrap());
+    if let Some(c) = RE.captures(content) {
+        let name = c.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+        if name.len() >= 3 {
+            return (name.to_string(), c.get(2).map(|m| m.as_str().to_string()));
+        }
+    }
+    (content.to_string(), None)
 }
 
 /// `implies`, two levels deep: only from parents at >= 0.50; an implied
@@ -980,6 +1075,20 @@ pub(crate) fn page_health(
         && header("server").is_some_and(|s| s.contains("akamai"))
     {
         Some("Akamai")
+    } else if text_len < 400
+        && [
+            "checking your browser",
+            "verify you are human",
+            "are you a robot",
+            "enable javascript and cookies to continue",
+            "try using a different browser",
+            "ddos protection by",
+        ]
+        .iter()
+        .any(|m| html_lower.contains(m))
+    {
+        // A tiny page that only asks for a script check (served with a normal 200, so the status gives no hint).
+        Some("a script check")
     } else {
         None
     };
@@ -1209,6 +1318,10 @@ fn category_label(category: &str) -> String {
         "cookie-consent" => "Cookie Consent".into(),
         "icons" => "Icons".into(),
         "programming-language" => "Programming Language".into(),
+        "web-application" => "Web Application".into(),
+        "framework-feature" => "Framework Feature".into(),
+        "routing" => "Routing".into(),
+        "generator" => "Site Generator".into(),
         other => {
             let mut out = String::new();
             for (i, ch) in other.chars().enumerate() {
@@ -2761,6 +2874,91 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+/// Fixes from the 2026-11-25 real-site evaluation (docs/research/reverse-engineer-4-star-2026-11-25.md).
+#[cfg(test)]
+mod evaluation_fix_tests {
+    use super::*;
+
+    fn scan(headers: &[(&str, &str)], html: &str) -> Vec<Detection> {
+        let url = Url::parse("https://example.test/").unwrap();
+        let headers: Vec<(String, String)> = headers.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        let (ctx, _) = build_ctx(&url, &headers, html, &[], &[]);
+        score_ctx(&ctx)
+    }
+
+    fn det<'a>(d: &'a [Detection], id: &str) -> Option<&'a Detection> {
+        d.iter().find(|x| x.id == id)
+    }
+
+    fn implied(id: &str, conf: f32) -> Detection {
+        Detection { id: id.into(), name: id.into(), category: "frontend-framework".into(), website: None, confidence: conf, status: Status::from_conf(conf), evidence: vec!["implied by shadcn/ui".into()], version: None }
+    }
+
+    #[test]
+    fn a_weakly_implied_framework_is_dropped_next_to_another_real_one() {
+        let mut real = implied("svelte", 0.8);
+        real.evidence = vec!["implied by SvelteKit".into()];
+        let mut d = vec![real, implied("react", 0.48)];
+        suppress_conflicting_implied_frameworks(&mut d);
+        assert!(det(&d, "react").is_none(), "React was only implied by a UI library on a Svelte site");
+        assert!(det(&d, "svelte").is_some());
+    }
+
+    #[test]
+    fn a_framework_seen_on_the_page_or_the_only_one_is_never_dropped() {
+        // the only frontend framework, even weakly implied, stays
+        let mut only = vec![implied("react", 0.48)];
+        suppress_conflicting_implied_frameworks(&mut only);
+        assert_eq!(only.len(), 1);
+        // two frameworks with their own evidence both stay
+        let mut a = implied("react", 0.9);
+        a.evidence = vec!["react-dom banner".into()];
+        let mut b = implied("vue", 0.4);
+        b.evidence = vec!["data-v- attributes".into()];
+        let mut both = vec![a, b];
+        suppress_conflicting_implied_frameworks(&mut both);
+        assert_eq!(both.len(), 2);
+    }
+
+    #[test]
+    fn an_unlisted_generator_is_reported_with_its_version_and_a_known_one_is_not_repeated() {
+        let d = scan(&[], r#"<html><head><meta name="generator" content="Zorblax Press v4.2.1"></head></html>"#);
+        let g = d.iter().find(|x| x.category == "generator").expect("reported");
+        assert_eq!((g.name.as_str(), g.version.as_deref()), ("Zorblax Press", Some("4.2.1")));
+        assert!(g.evidence[0].contains("Zorblax Press v4.2.1"));
+        let wp = scan(&[], r#"<meta name="generator" content="WordPress 6.8"><link href="/wp-content/x.css">"#);
+        assert!(wp.iter().all(|x| x.category != "generator"), "WordPress is in the table already");
+        assert!(scan(&[], r#"<meta name="generator" content="">"#).iter().all(|x| x.category != "generator"));
+    }
+
+    #[test]
+    fn the_patched_entries_detect_what_the_real_pages_expose() {
+        let woo = scan(&[("x-powered-by", "WordPress VIP <https://wpvip.com>")], r#"<meta name="generator" content="WooCommerce 11.5.0-dev">"#);
+        assert_eq!(det(&woo, "woocommerce").and_then(|x| x.version.as_deref()), Some("11.5.0"));
+        assert!(det(&woo, "wordpress-vip").is_some() && det(&woo, "wordpress").is_some());
+        assert!(det(&scan(&[("server", "Framer/010e668")], "<html></html>"), "framer").is_some());
+        assert!(det(&scan(&[("x-powered-by", "Statamic")], ""), "statamic").is_some());
+        assert!(det(&scan(&[], r#"<meta name="generator" content="TYPO3 CMS">"#), "typo3").is_some());
+        assert!(det(&scan(&[], r#"<meta name="generator" content="Eleventy (Build Awesome) v4.0.0">"#), "eleventy").is_some());
+        assert!(det(&scan(&[("via", "1.1 varnish")], ""), "varnish").is_some());
+        let php = scan(&[], r#"<a href="/manual/index.php">x</a>"#);
+        assert!(det(&php, "php").is_some());
+        assert!(det(&scan(&[], "<p>I love php.net</p>"), "php").is_none(), "a mention is not a .php link");
+        let jq = scan(&[], r#"<script src="/js/jquery-3.7.1.min.js"></script>"#);
+        assert_eq!(det(&jq, "jquery").map(|x| x.category.as_str()), Some("js-library"));
+    }
+
+    #[test]
+    fn a_tiny_browser_check_page_served_with_200_is_reported_not_guessed() {
+        let wall = "<html><body><div>please turn off blockers, or try using a different browser.</div></body></html>";
+        let r = page_health(200, &[], wall, "Client Challenge", 60, "/", &[]);
+        assert!(r.iter().any(|t| matches!(t, ThinReason::Challenge(w) if w == "a script check")), "{r:?}");
+        assert!(r[0].spoken().contains("browser check page"));
+        let big = format!("<html><body>{}</body></html>", "We help you try using a different browser. ".repeat(20));
+        assert!(page_health(200, &[], &big.to_lowercase(), "Docs", 900, "/", &[]).is_empty(), "a real page that mentions it is not a wall");
     }
 }
 

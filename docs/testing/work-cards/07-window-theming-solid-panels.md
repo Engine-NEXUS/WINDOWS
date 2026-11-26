@@ -2,21 +2,21 @@
 
 Generated from `docs/testing/scorecard-data.json` by `scripts/make-work-cards.mjs`. Do not edit by hand: put findings in the run records and the live-proof ledger, then update the scorecard data and regenerate.
 
-Area: Platform and quality. Queue position 7 of 68. Raw score **51.5%** (production needs ≥ 90% and every axis gate).
+Area: Platform and quality. Queue position 7 of 69. Raw score **55.7%** (production needs ≥ 90% and every axis gate).
 
 | Axis | Now | Gate | Status |
 |---|---:|---:|---|
 | B | 90 | 90 | met |
-| T | 70 | 70 | met |
+| T | 85 | 70 | met |
 | L | 0 | 70 | **gap 70** |
-| S | 70 | 80 | **gap 10** |
+| S | 78 | 80 | **gap 2** |
 | I | 60 | 60 | met |
 
-Evidence today: guard script over 11 CSS files + self-test.
+Evidence today: gate self-test (16 fixtures), 10/10 mutations on the real stylesheets, registry over 17 CSS files + blur scan of all panel CSS.
 
 ## Known gap (from the scorecard)
 
-About 20 translucent or blurred layers removed from panel windows; a guard script fails CI if they return. Not seen in the real app yet; the guard only covers the surfaces it lists.
+About 20 translucent or blurred layers removed from panel windows. Gate hardened 2026-11-22: resolves CSS variables across all themes, catches slash-alpha / transparent / color-mix, scans every panel stylesheet for blur, registers the hub, setup and stack roots (docs/testing/runs/window-opacity-gate-20261122.md). Still not seen in the real app: no screenshot of any panel in either theme; owner steps in four-star-screen-tour-owner-script.md part B.
 
 ## Runs as (processes, for contention and Focus Mode)
 
@@ -26,7 +26,7 @@ About 20 translucent or blurred layers removed from panel windows; a guard scrip
 ## How to close each gap
 
 - **L** (0 → 70): Run it on the real app and hardware with a fresh release (`nexus build` + provenance verify), follow the live script below, and record logs under `docs/testing/runs/` and a line in `live-proof-ledger.md`.
-- **S** (70 → 80): List every way it can act wrongly or leak (wrong window, stale state, secrets, privacy), make each fail closed, say failures honestly aloud, and add a regression test per item.
+- **S** (78 → 80): List every way it can act wrongly or leak (wrong window, stale state, secrets, privacy), make each fail closed, say failures honestly aloud, and add a regression test per item.
 
 ## Shared gates (must pass on the assessed revision)
 

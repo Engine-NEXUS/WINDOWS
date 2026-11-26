@@ -1,0 +1,91 @@
+{
+ "date": "2026-11-25",
+ "killed": 12,
+ "total": 12,
+ "results": [
+  {
+   "rule": "guard proxy: every resolved address must be public",
+   "applied": true,
+   "killed_by_assertion": true,
+   "compile_error": false,
+   "filter": "render_proxy"
+  },
+  {
+   "rule": "guard proxy: only port 443",
+   "applied": true,
+   "killed_by_assertion": true,
+   "compile_error": false,
+   "filter": "render_proxy"
+  },
+  {
+   "rule": "guard proxy: scanner URL guard on the target",
+   "applied": true,
+   "killed_by_assertion": true,
+   "compile_error": false,
+   "filter": "render_proxy"
+  },
+  {
+   "rule": "named site: known top-level domain only",
+   "applied": true,
+   "killed_by_assertion": true,
+   "compile_error": false,
+   "filter": "reverse_engineer::tests"
+  },
+  {
+   "rule": "named site: e-mail address is not a site",
+   "applied": true,
+   "killed_by_assertion": true,
+   "compile_error": false,
+   "filter": "reverse_engineer::tests"
+  },
+  {
+   "rule": "closing line skipped after a skipped tour",
+   "applied": true,
+   "killed_by_assertion": true,
+   "compile_error": false,
+   "filter": "reverse_engineer::tests"
+  },
+  {
+   "rule": "weakly implied framework dropped",
+   "applied": true,
+   "killed_by_assertion": true,
+   "compile_error": false,
+   "filter": "evaluation_fix_tests"
+  },
+  {
+   "rule": "unlisted generator not repeated when known",
+   "applied": true,
+   "killed_by_assertion": true,
+   "compile_error": false,
+   "filter": "evaluation_fix_tests"
+  },
+  {
+   "rule": "browser-check page only when the page is tiny",
+   "applied": true,
+   "killed_by_assertion": true,
+   "compile_error": false,
+   "filter": "evaluation_fix_tests"
+  },
+  {
+   "rule": "open route never claims an ignored avoid",
+   "applied": true,
+   "killed_by_assertion": true,
+   "compile_error": false,
+   "filter": "directions::tests"
+  },
+  {
+   "rule": "guard proxy: only CONNECT",
+   "applied": true,
+   "killed_by_assertion": true,
+   "compile_error": false,
+   "filter": "render_proxy"
+  },
+  {
+   "rule": "repo wording inside a named site path stays a repo command",
+   "applied": true,
+   "killed_by_assertion": true,
+   "compile_error": false,
+   "filter": "intent_parser::tests::"
+  }
+ ]
+}

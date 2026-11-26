@@ -38,14 +38,88 @@ pub fn parse_network_fix(body: &str) -> Option<Fix> {
     valid(lat, lon).then_some(Fix { lat, lon, approximate: true })
 }
 
+/// Why Windows gave no exact position. Said to the user in words, never guessed: each case has its own sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Problem {
+    /// Windows refused this app (Settings > Privacy > Location, "Let desktop apps access your location" is off).
+    Denied,
+    /// The Windows location switch is off.
+    Off,
+    /// This computer reports no location sensor or service.
+    NoSensor,
+    /// Location is on but no fix arrived (no Wi-Fi scan, indoors, still starting).
+    NoFix,
+}
+
+/// The Windows location states that matter here, mirrored so the decision can be tested without Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WinStatus {
+    Disabled,
+    NotAvailable,
+    Other,
+}
+
+const E_ACCESSDENIED: i32 = 0x8007_0005_u32 as i32;
+
+/// The failed position request's error code and the locator's status -> what to tell the user. Pure.
+pub fn classify(error_code: Option<i32>, status: WinStatus) -> Problem {
+    if error_code == Some(E_ACCESSDENIED) {
+        return Problem::Denied;
+    }
+    match status {
+        WinStatus::Disabled => Problem::Off,
+        WinStatus::NotAvailable => Problem::NoSensor,
+        WinStatus::Other => Problem::NoFix,
+    }
+}
+
+/// The sentence for "I only have an approximate position". Pure.
+pub fn approximate_sentence(p: Option<Problem>) -> &'static str {
+    match p {
+        Some(Problem::Denied) => "Windows is blocking location for desktop apps, sir, so I'm using your network address, which is only accurate to the city. Allow it in Settings, Privacy, Location.",
+        Some(Problem::Off) => "Location is turned off in Windows, sir, so I'm using your network address, which is only accurate to the city. Turn it on in Settings, Privacy, Location.",
+        Some(Problem::NoSensor) => "This computer has no location service, sir, so I'm using your network address, which is only accurate to the city.",
+        Some(Problem::NoFix) | None => "Windows couldn't get a location fix, sir, so I'm using your network address, which is only accurate to the city.",
+    }
+}
+
+/// The sentence for "I have no position at all". Pure.
+pub fn no_position_sentence(p: Option<Problem>) -> &'static str {
+    match p {
+        Some(Problem::Denied) => "Windows is blocking location for desktop apps and I couldn't use your network address either, sir.",
+        Some(Problem::Off) => "Location is turned off in Windows and I couldn't use your network address either, sir.",
+        _ => "I couldn't tell where you are, sir.",
+    }
+}
+
 #[cfg(target_os = "windows")]
-fn windows_fix() -> Option<Fix> {
-    use windows::Devices::Geolocation::{Geolocator, PositionAccuracy};
-    let g = Geolocator::new().ok()?;
-    g.SetDesiredAccuracy(PositionAccuracy::Default).ok()?;
-    let p = g.GetGeopositionAsync().ok()?.get().ok()?;
-    let c = p.Coordinate().ok()?.Point().ok()?.Position().ok()?;
-    valid(c.Latitude, c.Longitude).then_some(Fix { lat: c.Latitude, lon: c.Longitude, approximate: false })
+fn windows_fix() -> Result<Fix, Problem> {
+    use windows::Devices::Geolocation::{Geolocator, PositionAccuracy, PositionStatus};
+    let g = Geolocator::new().map_err(|_| Problem::NoSensor)?;
+    let _ = g.SetDesiredAccuracy(PositionAccuracy::Default);
+    let fail = |code: Option<i32>| {
+        let status = match g.LocationStatus() {
+            Ok(s) if s == PositionStatus::Disabled => WinStatus::Disabled,
+            Ok(s) if s == PositionStatus::NotAvailable => WinStatus::NotAvailable,
+            _ => WinStatus::Other,
+        };
+        classify(code, status)
+    };
+    let op = g.GetGeopositionAsync().map_err(|e| fail(Some(e.code().0)))?;
+    let p = op.get().map_err(|e| fail(Some(e.code().0)))?;
+    let c = p.Coordinate().and_then(|c| c.Point()).and_then(|pt| pt.Position()).map_err(|_| Problem::NoFix)?;
+    if valid(c.Latitude, c.Longitude) {
+        Ok(Fix { lat: c.Latitude, lon: c.Longitude, approximate: false })
+    } else {
+        Err(Problem::NoFix)
+    }
+}
+
+static LAST_PROBLEM: Mutex<Option<Problem>> = Mutex::new(None);
+
+/// Why the last exact position failed, if it did.
+pub fn problem() -> Option<Problem> {
+    *LAST_PROBLEM.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 async fn network_fix() -> Option<Fix> {
@@ -62,7 +136,17 @@ pub async fn current() -> Option<Fix> {
         }
     }
     #[cfg(target_os = "windows")]
-    let exact = tokio::task::spawn_blocking(windows_fix).await.ok().flatten();
+    let exact = match tokio::task::spawn_blocking(windows_fix).await {
+        Ok(Ok(f)) => {
+            *LAST_PROBLEM.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            Some(f)
+        }
+        Ok(Err(p)) => {
+            *LAST_PROBLEM.lock().unwrap_or_else(|e| e.into_inner()) = Some(p);
+            None
+        }
+        Err(_) => None,
+    };
     #[cfg(not(target_os = "windows"))]
     let exact: Option<Fix> = None;
     let fix = match exact {
@@ -103,6 +187,23 @@ mod tests {
         assert!(f.approximate && (f.lat - 17.385).abs() < 1e-9);
         assert!(parse_network_fix("{}").is_none() && parse_network_fix("not json").is_none());
         assert!(parse_network_fix(r#"{"latitude":0,"longitude":0}"#).is_none());
+    }
+
+    #[test]
+    fn a_location_failure_is_named_not_guessed() {
+        assert_eq!(classify(Some(E_ACCESSDENIED), WinStatus::Other), Problem::Denied);
+        assert_eq!(classify(Some(E_ACCESSDENIED), WinStatus::Disabled), Problem::Denied, "a refusal wins over the status");
+        assert_eq!(classify(Some(-1), WinStatus::Disabled), Problem::Off);
+        assert_eq!(classify(None, WinStatus::NotAvailable), Problem::NoSensor);
+        assert_eq!(classify(Some(-1), WinStatus::Other), Problem::NoFix);
+        for p in [Problem::Denied, Problem::Off, Problem::NoSensor, Problem::NoFix] {
+            assert!(approximate_sentence(Some(p)).contains("network address") && approximate_sentence(Some(p)).contains("city"));
+            assert!(!no_position_sentence(Some(p)).is_empty());
+        }
+        assert!(approximate_sentence(Some(Problem::Denied)).contains("blocking"));
+        assert!(approximate_sentence(Some(Problem::Off)).contains("turned off"));
+        assert!(no_position_sentence(Some(Problem::Off)).contains("turned off"));
+        assert_eq!(approximate_sentence(None), approximate_sentence(Some(Problem::NoFix)));
     }
 
     #[test]
