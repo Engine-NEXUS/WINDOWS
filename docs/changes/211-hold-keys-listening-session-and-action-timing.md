@@ -1,5 +1,7 @@
 # 211: Hold keys, a listening session, and timing from speech to action (2026-11-26)
 
+> **Superseded in part by 213:** the three extra keys and their switches were removed. The `[LAT-ACT]` timing stays.
+
 First two steps of `docs/research/jarvis-speed/02-reel-and-plan-201-analysis-2026-11-26.md` ("measure first, then the
 cheap speed wins"). All three switches are **off by default**, need a restart, and are in Command Hub > Voice.
 

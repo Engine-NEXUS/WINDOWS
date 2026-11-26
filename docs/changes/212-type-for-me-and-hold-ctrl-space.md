@@ -1,5 +1,7 @@
 # 212: "Type for me" and hold Ctrl+Space (2026-11-26)
 
+> **Changed by 213:** a hold now types when the cursor is in a text box, and "type for me" keeps the microphone open.
+
 Phases T0 and T1 of `docs/research/jarvis-speed/03-hands-free-typing-plan-2026-11-26.md`.
 
 ## "Type for me"

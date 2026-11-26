@@ -305,6 +305,11 @@ fn dictate_inner(raw: &str, dictionary: Vec<(String, String)>, oneshot: bool) ->
 
 static AT_SENTENCE_START_AFTER_BREAK: AtomicBool = AtomicBool::new(false);
 
+/// Why the window in front may not be typed into (or sent from) right now.
+pub fn refusal_now() -> Option<String> {
+    refusal(&foreground_target())
+}
+
 #[cfg(target_os = "windows")]
 fn foreground_target() -> Target {
     let title = crate::browser_url::foreground_window_title().unwrap_or_default();

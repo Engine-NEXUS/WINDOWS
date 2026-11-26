@@ -35,7 +35,7 @@ interface AssistantStore {
    *  steady "waiting" glow instead of a frozen loop or a dead orb. */
   awaitingInput: boolean;
   setAwaitingInput: (v: boolean) => void;
-  /** A talk key is held down (Ctrl+Space or the command key). */
+  /** A talk key is held down, or hands-free typing is listening. */
   keyHeld: boolean;
   setKeyHeld: (v: boolean) => void;
   /** True while a ghost cursor session is live (mic hot, waves on). */

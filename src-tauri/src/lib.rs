@@ -66,8 +66,7 @@ pub(crate) mod reverse_engineer;
 pub(crate) mod tts_kokoro;
 #[cfg(not(target_os = "linux"))]
 mod hotkey;
-mod hold_to_talk;
-mod listen_session;
+mod typing;
 // wakeword-oww (default): openWakeWord via tract-onnx (pure Rust, no C++ deps)
 #[cfg(feature = "wakeword-oww")]
 mod wakeword_oww;
@@ -1050,8 +1049,6 @@ pub fn run() {
             // Global hotkey → wake event (not available on Linux).
             #[cfg(not(target_os = "linux"))]
             hotkey::init(app.handle())?;
-            hold_to_talk::init(app.handle());
-            listen_session::init(app.handle());
 
             // Wake-word engine — runs on a DEDICATED OS THREAD, not tokio.
             // tract-onnx model optimization is CPU-heavy blocking work that

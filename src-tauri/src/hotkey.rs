@@ -7,8 +7,9 @@
 //!     hides the orb. If the agent is idle, calls the agent (plays the wake
 //!     cue, starts STT capture, and wakes the orb). Windows (settings, sidebar,
 //!     setup) are closed by Escape, never by this hotkey.
-//!     Tap: silence ends the turn. Hold and talk: it listens until the key
-//!     comes up (60 s at most), then ends at once.
+//!     Tap: silence ends the turn and the words are a command. Hold and talk: it
+//!     listens until the key comes up (60 s at most); with the cursor in a text
+//!     box the words are typed there, otherwise they are a command.
 //!   - `CommandOrControl+Shift+S`: Opens the Command Hub settings sidebar directly.
 //!   - `CommandOrControl+Alt+X`: Stage kill switch: destroys and disables the
 //!     fullscreen overlay for the session as an escape hatch even if the renderer
@@ -53,17 +54,19 @@ fn call_key_released<R: Runtime>(app: &AppHandle<R>) {
         crate::wakeword_oww::unhold_capture();
         return;
     }
-    tracing::info!("hotkey: Ctrl+Space released after {held} ms, ending the turn");
-    if let Some(session) = crate::wakeword_oww::release_hold_capture() {
-        let app = app.clone();
-        std::thread::spawn(move || {
+    let app = app.clone();
+    // off the shortcut thread: looking for the text box may take a moment
+    std::thread::spawn(move || {
+        let types = crate::typing::box_at_press();
+        tracing::info!("hotkey: Ctrl+Space released after {held} ms, {}", if types { "typing" } else { "command" });
+        if let Some(session) = crate::wakeword_oww::release_hold_capture(types) {
             std::thread::sleep(STUCK_AFTER);
             if crate::wakeword_oww::drop_stuck_hold(session) {
                 let _ = tauri::Emitter::emit(&app, "orb:hold_end", ());
                 tracing::warn!("hotkey: no microphone audio arrived, capture dropped");
             }
-        });
-    }
+        }
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,9 +132,9 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                     has_request: crate::orchestrator::has_active_request() || crate::turn_pending::is_pending(),
                     ghost: crate::ghost::session_active(),
                 };
-                // between two captures a listening session looks idle: Ctrl+Space must still end it, not call NEXUS
-                if hk == "CommandOrControl+Space" && crate::listen_session::active() {
-                    crate::listen_session::end(&handle, "Ctrl+Space");
+                // between two sentences hands-free typing looks idle: Ctrl+Space must end it, not call NEXUS
+                if hk == "CommandOrControl+Space" && crate::typing::active() {
+                    crate::typing::end(&handle, "Ctrl+Space");
                     if !(state.speaking || state.has_request) {
                         return;
                     }
@@ -180,8 +183,8 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                         // ... and the turn that is still on its way from speech-to-text, if any
                         crate::turn_pending::cancel();
 
-                        // ... and a listening session, which would otherwise re-open the microphone
-                        crate::listen_session::end(&handle, "Ctrl+Space");
+                        // ... and hands-free typing, which would otherwise re-open the microphone
+                        crate::typing::end(&handle, "Ctrl+Space");
 
                         // 3. Abort STT capture
                         crate::wakeword_oww::abort_stt_capture();
@@ -225,7 +228,8 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                         // Start Rust-side STT capture. While the key stays down silence does not end it; a tap
                         // turns it back into an ordinary capture on release.
                         *CALL_DOWN.lock() = Some(std::time::Instant::now());
-                        crate::wakeword_oww::start_hold_capture(false);
+                        crate::typing::note_key_down();
+                        crate::wakeword_oww::start_hold_capture();
                         let _ = tauri::Emitter::emit(&handle, "orb:key_held", true);
                         crate::window_manager::wake_orb_src(&handle, "hotkey");
                     }
