@@ -22,6 +22,7 @@ use crate::google::maps::{MapsService, RouteEta, RouteOpts};
 use crate::google::types::{AlertUrgency, TravelMode};
 use crate::location::Fix;
 use crate::maps_panel::MapsTarget;
+use crate::open_routing::{self, OpenError, OpenRoute, PlanRequest};
 use crate::orchestrator::{install_new_request, say_and_finish, ProcessResult, Subsystem};
 
 /// How long the last route stays open for follow-ups.
@@ -67,6 +68,11 @@ pub struct Current {
     pub step_idx: usize,
     /// (km, car minutes, bike minutes, approximate) from the keyless lookup, kept so a change of mode can re-estimate.
     pub base: Option<(f64, u32, u32, bool)>,
+    /// False when the destination, the start or a stop is the user's own place (home, work, "my X"): nothing about it is
+    /// sent to the open place and route services. The Google Routes API (with a key) and the map link still work.
+    pub open_ok: bool,
+    /// True when `steps` came from the open route service (so the list carries its attribution).
+    pub steps_open: bool,
     pub at: Instant,
 }
 
@@ -153,10 +159,12 @@ pub struct Facts {
     pub via: Option<String>,
     /// True for the Routes API (traffic-aware); false for the keyless estimate.
     pub exact: bool,
+    /// True for a route measured on the open map (real roads and paths for the mode, no live traffic).
+    pub open: bool,
 }
 
 pub fn facts_from_eta(e: &RouteEta) -> Facts {
-    Facts { meters: e.meters, minutes: Some(e.minutes), via: e.via.clone(), exact: true }
+    Facts { meters: e.meters, minutes: Some(e.minutes), via: e.via.clone(), exact: true, open: false }
 }
 
 /// The keyless estimate for a mode. Walking is 5 km/h; public transport has no estimate (distance only). Pure.
@@ -168,7 +176,12 @@ pub fn facts_from_estimate(mode: TravelMode, km: f64, car_min: u32, bike_min: u3
         TravelMode::Transit => None,
     };
     // Only a measured driving time from the Google route counts as exact; everything else is an estimate.
-    Facts { meters: (km * 1000.0).round() as u64, minutes, via: None, exact: !approx && mode == TravelMode::Driving }
+    Facts { meters: (km * 1000.0).round() as u64, minutes, via: None, exact: !approx && mode == TravelMode::Driving, open: false }
+}
+
+/// A route measured on the open map: real distance and time for the mode, no live traffic. Pure.
+pub fn facts_from_open(r: &OpenRoute) -> Facts {
+    Facts { meters: r.meters, minutes: Some(r.minutes), via: r.via.clone(), exact: false, open: true }
 }
 
 /// Everything the spoken answer is made from.
@@ -187,6 +200,8 @@ pub struct LineInput<'a> {
     pub hint: bool,
     /// What a follow-up just did ("Switched to walking"), said instead of "The route to X is open".
     pub update: Option<String>,
+    /// Extra sentences said after the answer (what failed, what could not be honoured, where the start came from).
+    pub notes: Vec<String>,
 }
 
 /// The first letter upper-case ("charminar" -> "Charminar"). Pure.
@@ -211,6 +226,11 @@ pub fn update_phrase(action: &str, value: Option<&str>, mode: TravelMode) -> Str
     }
 }
 
+/// "avoiding tolls, with a stop at X" -> "with a stop at X". Pure.
+fn without_avoid_clause(spoken: &str) -> String {
+    spoken.split(", ").filter(|p| !p.starts_with("avoiding ")).collect::<Vec<_>>().join(", ")
+}
+
 /// The sentence NEXUS speaks for a route. Says what is known and what is not. Pure.
 pub fn route_line(i: &LineInput) -> String {
     let mut line = match &i.facts {
@@ -218,20 +238,26 @@ pub fn route_line(i: &LineInput) -> String {
             let dist = km_phrase(f.meters);
             let mut detail = String::new();
             if let Some(min) = f.minutes {
-                detail.push_str(&format!(", {} {} {}", if f.exact { "about" } else { "roughly" }, minutes_phrase(min), mode_phrase(i.mode)));
+                detail.push_str(&format!(", {} {} {}", if f.exact || f.open { "about" } else { "roughly" }, minutes_phrase(min), mode_phrase(i.mode)));
                 if let Some(v) = f.via.as_deref().filter(|v| !v.trim().is_empty()) {
                     detail.push_str(&format!(" via {v}"));
                 }
+                // A route measured on the open map has real roads but no live traffic: say so for a car.
+                if f.open && i.mode == TravelMode::Driving {
+                    detail.push_str(", without live traffic");
+                }
             }
-            if !i.opts_spoken.is_empty() {
-                detail.push_str(&format!(", {}", i.opts_spoken));
+            // The open route ignores avoid options (the note says so), so the distance line must not claim them.
+            let opts = if f.open { without_avoid_clause(&i.opts_spoken) } else { i.opts_spoken.clone() };
+            if !opts.is_empty() {
+                detail.push_str(&format!(", {opts}"));
             }
             if let (Some(min), Some(now)) = (f.minutes, i.now_min) {
                 detail.push_str(&format!(", arriving around {}", arrival_clock(now, min)));
             }
             if i.question {
                 format!("{} is {dist} away{detail}, sir.", cap_first(i.dest))
-            } else if let Some(u) = i.update.as_deref() {
+            } else if let Some(u) = i.update.as_deref().filter(|u| !(f.open && u.starts_with("Avoiding "))) {
                 format!("{u}, sir. It's {dist}{detail}.")
             } else {
                 format!("The route to {} is open, sir. It's {dist}{detail}.", i.dest)
@@ -245,8 +271,12 @@ pub fn route_line(i: &LineInput) -> String {
     if !i.origin_known {
         line.push_str(" I couldn't tell where you are, so choose your start on the map.");
     }
-    if i.time_failed && i.facts.as_ref().is_none_or(|f| !f.exact) {
+    if i.time_failed && i.facts.as_ref().is_none_or(|f| !f.exact && !f.open) {
         line.push_str(" I couldn't get the live travel time.");
+    }
+    for n in i.notes.iter().filter(|n| !n.trim().is_empty()) {
+        line.push(' ');
+        line.push_str(n.trim());
     }
     if i.hint {
         line.push_str(" Add a Maps key in the Command Hub for live traffic times.");
@@ -311,6 +341,10 @@ pub fn apply_follow_up(cur: &mut Current, action: &str, value: Option<&str>) -> 
             if cur.opts.stops.iter().any(|s| s.eq_ignore_ascii_case(v)) {
                 return Change::Say(format!("{v} is already a stop, sir."));
             }
+            if open_routing::spoken_is_private(v) {
+                // your own place as a stop: the open services never see it, so the open route is switched off for this trip
+                cur.open_ok = false;
+            }
             cur.opts.stops.push(v.to_string());
             cur.steps.clear();
             cur.step_idx = 0;
@@ -349,10 +383,13 @@ pub fn read_steps(steps: &[String], from: usize, count: usize) -> (String, usize
 }
 
 /// The numbered list for the sidebar. Pure.
-pub fn steps_markdown(dest: &str, steps: &[String]) -> String {
+pub fn steps_markdown(dest: &str, steps: &[String], open_source: bool) -> String {
     let mut s = format!("## Directions to {dest}\n\n");
     for (i, st) in steps.iter().enumerate() {
         s.push_str(&format!("{}. {}\n", i + 1, st));
+    }
+    if open_source {
+        s.push_str(&format!("\n_{}_\n", open_routing::ATTRIBUTION));
     }
     s
 }
@@ -369,6 +406,10 @@ pub struct Trip {
     /// The latest travel time (seconds) and when it was measured.
     pub eta_secs: i64,
     pub eta_at: i64,
+    /// The destination is the user's own place (home, work, "my X"): the open place and route services are never asked
+    /// about it, now or when the time is measured again.
+    #[serde(default)]
+    pub private: bool,
 }
 
 fn clock_of(epoch: i64) -> String {
@@ -480,6 +521,13 @@ pub fn wants_photo_card(spoken_destination: &str) -> bool {
     !d.is_empty() && crate::orchestrator::saved_place_kind(&d).is_none() && !d.starts_with("my ")
 }
 
+/// Whether the open place and route services may be used for this trip: not when the destination or the start is the user's
+/// own place (home, work, "my X"). A private place never reaches them; the map link and the Routes API (with a key) still
+/// work. Pure.
+pub fn open_path_allowed(spoken_destination: &str, spoken_origin: Option<&str>) -> bool {
+    !open_routing::spoken_is_private(spoken_destination) && spoken_origin.is_none_or(|o| !open_routing::spoken_is_private(o))
+}
+
 enum Card {
     /// Build the card for the destination (and close a stale one when none is found).
     Build,
@@ -495,9 +543,13 @@ async fn present<R: Runtime>(app: &AppHandle<R>, cur: &mut Current, card: Card, 
         tracing::warn!("directions: could not open Maps window: {e}");
         return Err("I couldn't open the map window, sir.".into());
     }
+    open_routing::configure(app);
+    let ep = open_routing::endpoints();
     let key = crate::commands::read_api_key(app, "google_maps");
     let origin = cur.origin.clone().filter(|o| !o.trim().is_empty());
     let (dest, mode, opts) = (cur.destination.clone(), cur.mode, cur.opts.clone());
+    let open_ok = cur.open_ok;
+    let stops = cur.opts.stops.clone();
     let routes_task = async {
         match (key.is_empty(), origin.as_deref()) {
             (false, Some(o)) => Some(MapsService::compute_route_with(&client(4), &key, o, &dest, mode, &opts, true).await),
@@ -511,15 +563,21 @@ async fn present<R: Runtime>(app: &AppHandle<R>, cur: &mut Current, card: Card, 
         }
         tokio::time::timeout(Duration::from_secs(6), place_card::build(app, &dest, here)).await.ok().flatten()
     };
-    // Without a Routes key the distance and time come from a keyless estimate. It is fetched on its own, so a slow photo
-    // never costs the answer its numbers. Not for an own-address destination (that never reaches the lookup sources).
-    let estimate_task = async {
-        match here {
-            Some(h) if want_card && key.is_empty() => tokio::time::timeout(Duration::from_secs(5), place_card::quick_route(app, &dest, h)).await.ok().flatten(),
+    // Without a Routes key the route comes from the open map (real roads, real time for the mode, turn-by-turn steps, no
+    // live traffic). Never for the user's own address: `open_ok` is false then, and nothing about it leaves the machine.
+    let open_task = async {
+        match (key.is_empty(), origin.as_deref()) {
+            (true, Some(o)) => Some(open_routing::plan(&ep, &PlanRequest { origin: o, destination: &dest, stops: &stops, mode, opts: &opts, lookups_allowed: open_ok }).await),
             _ => None,
         }
     };
-    let (routes, built, quick) = tokio::join!(routes_task, card_task, estimate_task);
+    let (routes, built, mut open_res) = tokio::join!(routes_task, card_task, open_task);
+    // A Routes key that failed still gets the open route as a second chance.
+    if open_res.is_none() && matches!(routes, Some(Err(_))) {
+        if let Some(o) = origin.as_deref() {
+            open_res = Some(open_routing::plan(&ep, &PlanRequest { origin: o, destination: &dest, stops: &stops, mode, opts: &opts, lookups_allowed: open_ok }).await);
+        }
+    }
 
     if want_card {
         match built.as_ref() {
@@ -541,16 +599,13 @@ async fn present<R: Runtime>(app: &AppHandle<R>, cur: &mut Current, card: Card, 
         }
     }
 
-    if cur.base.is_none() {
-        if let Some(q) = quick {
-            cur.base = Some((q.km, q.car_min, q.bike_min, q.approx));
-        }
-    }
+    let mut notes: Vec<String> = vec![];
     let mut time_failed = false;
     let mut facts = match routes {
         Some(Ok(eta)) => {
             cur.steps = eta.steps.clone();
             cur.step_idx = 0;
+            cur.steps_open = false;
             Some(facts_from_eta(&eta))
         }
         Some(Err(e)) => {
@@ -561,10 +616,42 @@ async fn present<R: Runtime>(app: &AppHandle<R>, cur: &mut Current, card: Card, 
         None => None,
     };
     if facts.is_none() {
+        match open_res {
+            Some(Ok(r)) => {
+                cur.steps = r.steps.clone();
+                cur.step_idx = 0;
+                cur.steps_open = true;
+                notes.extend(open_routing::ignored_sentence(&r.ignored));
+                facts = Some(facts_from_open(&r));
+            }
+            Some(Err(e)) => {
+                tracing::debug!("directions: open route: {e}");
+                notes.push(e.speak(cur.mode, &cur.destination));
+            }
+            None => {}
+        }
+    }
+    // The last resort: the estimate from the card's lookup (or, when the card was not built, a quick one).
+    if facts.is_none() && cur.base.is_none() && want_card && key.is_empty() {
+        if let Some(h) = here {
+            if let Some(q) = tokio::time::timeout(Duration::from_secs(5), place_card::quick_route(app, &dest, h)).await.ok().flatten() {
+                cur.base = Some((q.km, q.car_min, q.bike_min, q.approx));
+            }
+        }
+    }
+    if facts.is_none() {
         facts = cur.base.map(|(km, car, bike, approx)| facts_from_estimate(cur.mode, km, car, bike, approx));
     }
     let hint = facts.as_ref().is_some_and(|f| !f.exact) && key.is_empty() && !HINTED.swap(true, Ordering::Relaxed);
-    let mut line = route_line(&LineInput {
+    if here.as_ref().is_some_and(|h| h.approximate) {
+        notes.push("That's measured from your approximate position.".into());
+    }
+    if here.as_ref().is_some_and(crate::location::should_tell_about_exact_location) {
+        notes.push(crate::location::approximate_sentence(crate::location::problem()).into());
+    } else if here.is_none() && cur.origin.as_deref().is_none_or(|o| o.trim().is_empty()) && matches!(crate::location::problem(), Some(crate::location::Problem::Denied | crate::location::Problem::Off)) {
+        notes.push(crate::location::no_position_sentence(crate::location::problem()).into());
+    }
+    let line = route_line(&LineInput {
         dest: &cur.destination,
         mode: cur.mode,
         facts,
@@ -575,10 +662,8 @@ async fn present<R: Runtime>(app: &AppHandle<R>, cur: &mut Current, card: Card, 
         question,
         hint,
         update,
+        notes,
     });
-    if here.as_ref().is_some_and(crate::location::should_tell_about_exact_location) {
-        line.push_str(" For an exact starting point, turn on location in Windows settings, sir.");
-    }
     cur.at = Instant::now();
     set_current(cur.clone());
     Ok(line)
@@ -589,6 +674,7 @@ pub async fn run<R: Runtime>(app: AppHandle<R>, req: Request) -> Result<ProcessR
     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
     let travel = crate::commands::parse_travel_mode(Some(&req.mode));
     let photo_card = wants_photo_card(&req.destination);
+    let open_ok = open_path_allowed(&req.destination, req.origin.as_deref());
     let (destination, origin) = match crate::orchestrator::resolve_saved_places(&app, &req.destination, req.origin.as_deref()) {
         Ok(r) => r,
         Err(line) => return say_and_finish(&app, request_id, line),
@@ -608,6 +694,8 @@ pub async fn run<R: Runtime>(app: AppHandle<R>, req: Request) -> Result<ProcessR
         steps: vec![],
         step_idx: 0,
         base: None,
+        open_ok,
+        steps_open: false,
         at: Instant::now(),
     };
     // Home / work / "my X": nothing about the user's own address goes to the photo sources, but a stale card is closed.
@@ -663,11 +751,13 @@ pub async fn follow_up<R: Runtime>(app: AppHandle<R>, action: String, value: Opt
 
 /// "How long now": measure again from where the user is now.
 async fn status_line<R: Runtime>(app: &AppHandle<R>, cur: &mut Current) -> String {
+    open_routing::configure(app);
     let key = crate::commands::read_api_key(app, "google_maps");
     let here = if cur.origin_is_here { crate::location::current().await } else { None };
     let origin = here.map(|f| f.as_point()).or_else(|| cur.origin.clone()).filter(|o| !o.trim().is_empty());
     let mut facts = None;
     let mut failed = false;
+    let mut notes: Vec<String> = vec![];
     if let (false, Some(o)) = (key.is_empty(), origin.as_deref()) {
         match MapsService::compute_route_with(&client(4), &key, o, &cur.destination, cur.mode, &cur.opts, false).await {
             Ok(e) => facts = Some(facts_from_eta(&e)),
@@ -678,6 +768,18 @@ async fn status_line<R: Runtime>(app: &AppHandle<R>, cur: &mut Current) -> Strin
         }
     }
     if facts.is_none() {
+        if let Some(o) = origin.as_deref() {
+            let req = PlanRequest { origin: o, destination: &cur.destination, stops: &cur.opts.stops, mode: cur.mode, opts: &cur.opts, lookups_allowed: cur.open_ok };
+            match open_routing::plan(&open_routing::endpoints(), &req).await {
+                Ok(r) => {
+                    notes.extend(open_routing::ignored_sentence(&r.ignored));
+                    facts = Some(facts_from_open(&r));
+                }
+                Err(e) => notes.push(e.speak(cur.mode, &cur.destination)),
+            }
+        }
+    }
+    if facts.is_none() && cur.open_ok {
         if let Some(h) = here {
             if let Some(q) = crate::place_card::quick_route(app, &cur.destination, h).await {
                 facts = Some(facts_from_estimate(cur.mode, q.km, q.car_min, q.bike_min, q.approx));
@@ -698,27 +800,45 @@ async fn status_line<R: Runtime>(app: &AppHandle<R>, cur: &mut Current) -> Strin
             question: true,
             hint: false,
             update: None,
+            notes,
         }),
-        None => "I can only update the time with a Maps key and a start point, sir.".into(),
+        None if origin.is_none() => format!("{} Say where to start, sir, or turn on location.", crate::location::no_position_sentence(crate::location::problem())),
+        None => format!("I couldn't update the time, sir. {}", notes.join(" ")).trim().to_string(),
     }
 }
 
 /// "Read the steps" / "next step" / "repeat that step".
 async fn steps_line<R: Runtime>(app: &AppHandle<R>, cur: &mut Current, action: &str) -> String {
+    let mut why: Option<OpenError> = None;
     if cur.steps.is_empty() {
         let key = crate::commands::read_api_key(app, "google_maps");
-        if let (false, Some(o)) = (key.is_empty(), cur.origin.clone().filter(|o| !o.trim().is_empty())) {
-            if let Ok(e) = MapsService::compute_route_with(&client(4), &key, &o, &cur.destination, cur.mode, &cur.opts, true).await {
+        let origin = cur.origin.clone().filter(|o| !o.trim().is_empty());
+        if let (false, Some(o)) = (key.is_empty(), origin.as_deref()) {
+            if let Ok(e) = MapsService::compute_route_with(&client(4), &key, o, &cur.destination, cur.mode, &cur.opts, true).await {
                 cur.steps = e.steps;
+                cur.steps_open = false;
+            }
+        }
+        if cur.steps.is_empty() {
+            if let Some(o) = origin.as_deref() {
+                open_routing::configure(app);
+                let req = PlanRequest { origin: o, destination: &cur.destination, stops: &cur.opts.stops, mode: cur.mode, opts: &cur.opts, lookups_allowed: cur.open_ok };
+                match open_routing::plan(&open_routing::endpoints(), &req).await {
+                    Ok(r) => {
+                        cur.steps = r.steps;
+                        cur.steps_open = true;
+                    }
+                    Err(e) => why = Some(e),
+                }
             }
         }
     }
     if cur.steps.is_empty() {
-        return "I don't have the turn-by-turn steps, sir. They need a Maps key; the map shows them.".into();
+        return no_steps_line(cur.mode, cur.open_ok, cur.origin.as_deref().is_some_and(|o| !o.trim().is_empty()), why.as_ref());
     }
     let (line, idx) = match action {
         "steps" => {
-            let md = steps_markdown(&cur.destination, &cur.steps);
+            let md = steps_markdown(&cur.destination, &cur.steps, cur.steps_open);
             let a = app.clone();
             let q = format!("Directions to {}", cur.destination);
             tauri::async_runtime::spawn(async move {
@@ -748,6 +868,23 @@ async fn steps_line<R: Runtime>(app: &AppHandle<R>, cur: &mut Current, action: &
     line
 }
 
+/// What to say when there are no turn-by-turn steps, and why. Pure.
+pub fn no_steps_line(mode: TravelMode, open_ok: bool, has_start: bool, why: Option<&OpenError>) -> String {
+    if mode == TravelMode::Transit {
+        return "Turn-by-turn steps for public transport need a Maps key, sir; the map shows them.".into();
+    }
+    if !has_start {
+        return "I don't have a start point for this route, sir, so I can't read the steps. Say where to start, or turn on location.".into();
+    }
+    if !open_ok {
+        return "Steps for your own address need a Maps key, sir; I don't send it to the open map. The map shows them.".into();
+    }
+    match why {
+        Some(e) => format!("I couldn't get the turn-by-turn steps, sir. {} The map shows them.", e.speak(mode, "that place")),
+        None => "I don't have the turn-by-turn steps, sir. The map shows them.".into(),
+    }
+}
+
 // ── trip reminders ───────────────────────────────────────────────────────────
 
 /// "Remind me to leave for X at 5 pm".
@@ -762,15 +899,22 @@ pub async fn trip_reminder<R: Runtime>(app: AppHandle<R>, destination: String, a
     let Some(arrive_epoch) = arrive_epoch_for(chrono::Local::now(), arrive_min) else {
         return say_and_finish(&app, request_id, "That time has already passed today, sir.".into());
     };
+    let private = open_routing::spoken_is_private(&destination);
     let (dest, _) = match crate::orchestrator::resolve_saved_places(&app, &destination, None) {
         Ok(r) => r,
         Err(line) => return say_and_finish(&app, request_id, line),
     };
     let Some(here) = crate::location::current().await else {
-        return say_and_finish(&app, request_id, "I can't tell where you are, sir, so I can't work out when to leave. Turn on location in Windows settings.".into());
+        let why = crate::location::no_position_sentence(crate::location::problem());
+        return say_and_finish(&app, request_id, format!("{why} I can't work out when to leave without it, sir. Turn on location in Windows settings."));
     };
-    let Some(eta_secs) = trip_eta_secs(&app, &dest, here).await else {
-        return say_and_finish(&app, request_id, format!("I couldn't work out how long {destination} takes from here, sir."));
+    let Some(eta_secs) = trip_eta_secs(&app, &dest, here, private).await else {
+        let line = if private && crate::commands::read_api_key(&app, "google_maps").is_empty() {
+            format!("I need a Maps key to time a trip to {destination}, sir, because I don't send your own address to the open map.")
+        } else {
+            format!("I couldn't work out how long {destination} takes from here, sir.")
+        };
+        return say_and_finish(&app, request_id, line);
     };
     if !trip_eta_plausible(eta_secs) {
         return say_and_finish(
@@ -788,7 +932,7 @@ pub async fn trip_reminder<R: Runtime>(app: AppHandle<R>, destination: String, a
     let mut trips = prune_trips(load_trips(&path), now);
     let replaced: Vec<String> = trips.iter().filter(|t| t.destination.eq_ignore_ascii_case(&dest)).map(|t| t.id.clone()).collect();
     trips.retain(|t| !t.destination.eq_ignore_ascii_case(&dest));
-    let trip = Trip { id: format!("trip_{now}"), destination: dest.clone(), arrive_epoch, eta_secs, eta_at: now };
+    let trip = Trip { id: format!("trip_{now}"), destination: dest.clone(), arrive_epoch, eta_secs, eta_at: now, private };
     trips.push(trip.clone());
     if let Err(e) = save_trips(&path, &trips) {
         tracing::warn!("directions: could not save the trip reminder: {e}");
@@ -811,13 +955,17 @@ pub async fn trip_reminder<R: Runtime>(app: AppHandle<R>, destination: String, a
     say_and_finish(&app, request_id, said)
 }
 
-/// Travel time in seconds from `here`: the Routes API with a key, otherwise the keyless estimate.
-async fn trip_eta_secs<R: Runtime>(app: &AppHandle<R>, dest: &str, here: Fix) -> Option<i64> {
+/// Travel time in seconds from `here`: the Routes API with a key, otherwise a route measured on the open map. A trip to the
+/// user's own place is only timed with a key: that address is never sent to the open services.
+async fn trip_eta_secs<R: Runtime>(app: &AppHandle<R>, dest: &str, here: Fix, private: bool) -> Option<i64> {
     let key = crate::commands::read_api_key(app, "google_maps");
     if !key.is_empty() {
         if let Ok(e) = MapsService::compute_route(&client(4), &key, &here.as_point(), dest, TravelMode::Driving).await {
             return Some(e.minutes as i64 * 60);
         }
+    }
+    if private {
+        return None;
     }
     crate::place_card::quick_route(app, dest, here).await.map(|q| q.car_min as i64 * 60)
 }
@@ -853,7 +1001,7 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
                 let near = now >= t.arrive_epoch - t.eta_secs - TRIP_BUFFER_SECS - TRIP_LEAD_SECS - 40 * 60;
                 if near && now - t.eta_at >= 600 {
                     if let Some(here) = crate::location::current().await {
-                        if let Some(secs) = trip_eta_secs(&app, &t.destination, here).await {
+                        if let Some(secs) = trip_eta_secs(&app, &t.destination, here, t.private).await {
                             t.eta_secs = secs;
                             t.eta_at = now;
                             crate::reminder::retime(&app, &t.id, trip_alert_at_ms(t));
@@ -891,6 +1039,8 @@ mod tests {
             steps: vec!["a".into()],
             step_idx: 1,
             base: None,
+            open_ok: true,
+            steps_open: false,
             at: Instant::now(),
         }
     }
@@ -930,22 +1080,22 @@ mod tests {
     }
 
     fn input<'a>(dest: &'a str, facts: Option<Facts>) -> LineInput<'a> {
-        LineInput { dest, mode: TravelMode::Driving, facts, opts_spoken: String::new(), now_min: Some(16 * 60 + 13), origin_known: true, time_failed: false, question: false, hint: false, update: None }
+        LineInput { dest, mode: TravelMode::Driving, facts, opts_spoken: String::new(), now_min: Some(16 * 60 + 13), origin_known: true, time_failed: false, question: false, hint: false, update: None, notes: vec![] }
     }
 
     #[test]
     fn the_line_says_exactly_what_is_known() {
-        let exact = Facts { meters: 5300, minutes: Some(22), via: Some("Road No. 1".into()), exact: true };
+        let exact = Facts { meters: 5300, minutes: Some(22), via: Some("Road No. 1".into()), exact: true, open: false };
         let l = route_line(&input("T-Hub", Some(exact.clone())));
         assert!(l.starts_with("The route to T-Hub is open, sir. It's 5.3 kilometres, about 22 minutes by car via Road No. 1, arriving around "), "{l}");
         let mut q = input("T-Hub", Some(exact));
         q.question = true;
         assert!(route_line(&q).starts_with("T-Hub is 5.3 kilometres away, about 22 minutes by car via Road No. 1, arriving around "));
         // an estimate says "roughly"
-        let est = Facts { meters: 5300, minutes: Some(22), via: None, exact: false };
+        let est = Facts { meters: 5300, minutes: Some(22), via: None, exact: false, open: false };
         assert!(route_line(&input("T-Hub", Some(est))).contains(", roughly 22 minutes by car"));
         // distance only (public transport)
-        let far = Facts { meters: 5300, minutes: None, via: None, exact: false };
+        let far = Facts { meters: 5300, minutes: None, via: None, exact: false, open: false };
         let l = route_line(&input("T-Hub", Some(far)));
         assert!(l.contains("5.3 kilometres.") && !l.contains("minutes") && !l.contains("arriving"), "{l}");
     }
@@ -963,12 +1113,30 @@ mod tests {
         let l = route_line(&i);
         assert!(l.contains("I couldn't tell where you are") && l.contains("I couldn't get the live travel time") && l.contains("Maps key"), "{l}");
         // an exact time makes a failed second lookup irrelevant
-        let mut ok = input("T-Hub", Some(Facts { meters: 1000, minutes: Some(3), via: None, exact: true }));
+        let mut ok = input("T-Hub", Some(Facts { meters: 1000, minutes: Some(3), via: None, exact: true, open: false }));
         ok.time_failed = true;
         assert!(!route_line(&ok).contains("couldn't get"));
         let mut avoid = input("T-Hub", None);
         avoid.opts_spoken = "avoiding tolls".into();
         assert_eq!(route_line(&avoid), "Opening the route to T-Hub, avoiding tolls, sir.");
+    }
+
+    #[test]
+    fn the_open_route_never_claims_an_avoid_option_it_ignores() {
+        assert_eq!(without_avoid_clause("avoiding tolls, with a stop at X"), "with a stop at X");
+        assert_eq!(without_avoid_clause("avoiding tolls and highways"), "");
+        assert_eq!(without_avoid_clause("with 2 stops"), "with 2 stops");
+        let mut i = input("charminar", Some(Facts { meters: 22_000, minutes: Some(29), via: None, exact: false, open: true }));
+        i.opts_spoken = "avoiding tolls, with a stop at gachibowli".into();
+        i.update = Some("Avoiding tolls".into());
+        i.notes = vec!["The open route can't avoid tolls, sir, so this one ignores that; the map shows the choice.".into()];
+        let line = route_line(&i);
+        assert!(!line.contains("avoiding") && !line.starts_with("Avoiding"), "{line}");
+        assert!(line.contains("with a stop at gachibowli") && line.contains("can't avoid tolls"), "{line}");
+        // a keyed (exact) route really does avoid them and may say so
+        let mut k = input("charminar", Some(Facts { meters: 22_000, minutes: Some(29), via: None, exact: true, open: false }));
+        k.opts_spoken = "avoiding tolls".into();
+        assert!(route_line(&k).contains("avoiding tolls"));
     }
 
     #[test]
@@ -978,13 +1146,13 @@ mod tests {
         assert_eq!(update_phrase("mode", Some("walking"), TravelMode::Walking), "Switched to walking");
         assert_eq!(update_phrase("avoid", Some("tolls"), TravelMode::Driving), "Avoiding tolls");
         assert_eq!(update_phrase("stop", Some("ATM"), TravelMode::Driving), "Added ATM as a stop");
-        let mut i = input("T-Hub", Some(Facts { meters: 5300, minutes: Some(22), via: None, exact: false }));
+        let mut i = input("T-Hub", Some(Facts { meters: 5300, minutes: Some(22), via: None, exact: false, open: false }));
         i.update = Some("Switched to walking".into());
         assert!(route_line(&i).starts_with("Switched to walking, sir. It's 5.3 kilometres, roughly 22 minutes by car"), "{}", route_line(&i));
         let mut none = input("T-Hub", None);
         none.update = Some("Removed the stops".into());
         assert_eq!(route_line(&none), "Removed the stops, sir.");
-        let mut q = input("charminar", Some(Facts { meters: 900, minutes: None, via: None, exact: false }));
+        let mut q = input("charminar", Some(Facts { meters: 900, minutes: None, via: None, exact: false, open: false }));
         q.question = true;
         assert!(route_line(&q).starts_with("Charminar is 900 metres away"), "{}", route_line(&q));
     }
@@ -1030,7 +1198,7 @@ mod tests {
         let (t, i) = read_steps(&steps, 2, 1);
         assert_eq!((t.as_str(), i), ("Step 3: Arrive at T-Hub. That's the last step.", 3));
         assert_eq!(read_steps(&[], 0, 3), (String::new(), 0));
-        let md = steps_markdown("T-Hub", &steps);
+        let md = steps_markdown("T-Hub", &steps, false);
         assert!(md.starts_with("## Directions to T-Hub\n\n1. Head north on Main St.\n2. Turn left"), "{md}");
     }
 
@@ -1044,7 +1212,7 @@ mod tests {
     }
 
     fn trip(arrive_in: i64, eta: i64) -> Trip {
-        Trip { id: "t1".into(), destination: "the airport".into(), arrive_epoch: 1_800_000_000 + arrive_in, eta_secs: eta, eta_at: 1_800_000_000 }
+        Trip { id: "t1".into(), destination: "the airport".into(), arrive_epoch: 1_800_000_000 + arrive_in, eta_secs: eta, eta_at: 1_800_000_000, private: false }
     }
 
     #[test]
@@ -1144,5 +1312,85 @@ mod tests {
         set_current(old);
         // only meaningful where the clock allows subtracting; otherwise the route simply stays
         let _ = current();
+    }
+
+    // ── the open map path ───────────────────────────────────────────────────
+
+    fn open_route(minutes: u32, via: Option<&str>) -> OpenRoute {
+        OpenRoute { meters: 5160, minutes, via: via.map(str::to_string), steps: vec!["Head east on A".into(), "Arrive at your destination".into()], ignored: vec![] }
+    }
+
+    #[test]
+    fn a_measured_open_route_says_about_and_names_the_missing_traffic() {
+        let f = facts_from_open(&open_route(8, Some("Charminar Road")));
+        assert!(f.open && !f.exact && f.minutes == Some(8));
+        let l = route_line(&input("Charminar", Some(f.clone())));
+        assert!(l.contains("5.2 kilometres, about 8 minutes by car via Charminar Road, without live traffic, arriving around "), "{l}");
+        assert!(!l.contains("roughly"), "{l}");
+        // on foot there is no traffic to mention
+        let mut walk = input("Charminar", Some(f));
+        walk.mode = TravelMode::Walking;
+        let l = route_line(&walk);
+        assert!(l.contains("about 8 minutes on foot") && !l.contains("traffic"), "{l}");
+        // a failed live lookup does not matter when the open route measured the time
+        let mut ok = input("Charminar", Some(facts_from_open(&open_route(8, None))));
+        ok.time_failed = true;
+        assert!(!route_line(&ok).contains("couldn't get"));
+    }
+
+    #[test]
+    fn notes_are_said_after_the_answer_and_blank_ones_are_dropped() {
+        let mut i = input("T-Hub", Some(facts_from_open(&open_route(8, None))));
+        i.notes = vec!["The open route can't avoid tolls, sir, so this one ignores that; the map shows the choice.".into(), "  ".into(), "That's measured from your approximate position.".into()];
+        let l = route_line(&i);
+        assert!(l.ends_with("That's measured from your approximate position."), "{l}");
+        assert!(l.contains("can't avoid tolls") && !l.contains("  "), "{l}");
+        let mut none = input("T-Hub", None);
+        none.notes = vec!["The open map services are busy, sir; I'll leave them alone for a minute.".into()];
+        assert!(route_line(&none).ends_with("I'll leave them alone for a minute."));
+    }
+
+    #[test]
+    fn home_work_and_my_places_keep_the_open_services_out() {
+        assert!(open_path_allowed("Charminar", None));
+        assert!(open_path_allowed("Charminar", Some("T-Hub")));
+        for own in ["home", "my home", "work", "office", "my college"] {
+            assert!(!open_path_allowed(own, None), "{own} as a destination");
+            assert!(!open_path_allowed("Charminar", Some(own)), "{own} as a start");
+        }
+        // an own place added as a stop switches the open route off for the whole trip
+        let mut c = cur(TravelMode::Driving);
+        assert_eq!(apply_follow_up(&mut c, "stop", Some("Cafe Bahar")), Change::Reopen);
+        assert!(c.open_ok);
+        assert_eq!(apply_follow_up(&mut c, "stop", Some("my gym")), Change::Reopen);
+        assert!(!c.open_ok, "a private stop must never be geocoded");
+    }
+
+    #[test]
+    fn missing_steps_say_why() {
+        use crate::open_routing::OpenError;
+        assert!(no_steps_line(TravelMode::Transit, true, true, None).contains("public transport"));
+        assert!(no_steps_line(TravelMode::Driving, true, false, None).contains("start point"));
+        assert!(no_steps_line(TravelMode::Driving, false, true, None).contains("your own address"));
+        assert!(no_steps_line(TravelMode::Walking, true, true, Some(&OpenError::Offline)).contains("couldn't reach the open map"));
+        assert!(no_steps_line(TravelMode::Walking, true, true, Some(&OpenError::NoRoute)).contains("walking route"));
+        assert!(no_steps_line(TravelMode::Driving, true, true, None).contains("don't have the turn-by-turn steps"));
+    }
+
+    #[test]
+    fn the_step_list_carries_its_attribution_only_from_the_open_map() {
+        let steps = vec!["Head east on A".to_string()];
+        assert!(steps_markdown("T-Hub", &steps, true).contains("OpenStreetMap contributors"));
+        assert!(!steps_markdown("T-Hub", &steps, false).contains("OpenStreetMap"));
+    }
+
+    #[test]
+    fn a_trip_to_your_own_place_remembers_it_is_private() {
+        let t = Trip { id: "t".into(), destination: "12 Some Street".into(), arrive_epoch: 1, eta_secs: 60, eta_at: 0, private: true };
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(serde_json::from_str::<Trip>(&json).unwrap(), t);
+        // reminders saved before this field existed load as not private
+        let old = r#"{"id":"t","destination":"X","arrive_epoch":1,"eta_secs":60,"eta_at":0}"#;
+        assert!(!serde_json::from_str::<Trip>(old).unwrap().private);
     }
 }

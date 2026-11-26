@@ -215,6 +215,7 @@ pub(crate) mod location;
 pub(crate) mod no_window;
 pub(crate) mod fares;
 pub(crate) mod directions;
+pub(crate) mod open_routing;
 pub(crate) mod reminder;
 pub(crate) mod voice_reminders;
 pub(crate) mod quiet;
