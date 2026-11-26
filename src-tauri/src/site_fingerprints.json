@@ -961,7 +961,7 @@
     {
       "id": "jquery",
       "name": "jQuery",
-      "category": "frontend-framework",
+      "category": "js-library",
       "website": "https://jquery.com",
       "signals": [
         {
@@ -2228,6 +2228,14 @@
           "name": "woocommerce_",
           "weight": 0.8,
           "evidence": "woocommerce_ cookie prefix"
+        },
+        {
+          "kind": "meta",
+          "name": "generator",
+          "regex": "(?i)woocommerce\\s+([0-9][0-9a-z.-]*)",
+          "version": true,
+          "weight": 0.95,
+          "evidence": "WooCommerce generator meta"
         }
       ]
     },
@@ -3165,6 +3173,12 @@
           "regex": "\\.azurewebsites\\.net$",
           "weight": 0.9,
           "evidence": ".azurewebsites.net domain"
+        },
+        {
+          "kind": "cookie",
+          "name": "ARRAffinity",
+          "weight": 0.85,
+          "evidence": "ARRAffinity cookie (Azure App Service)"
         }
       ],
       "implies": []
@@ -3357,6 +3371,12 @@
           "name": "PHPSESSID",
           "weight": 0.8,
           "evidence": "PHPSESSID cookie"
+        },
+        {
+          "kind": "html",
+          "regex": "(?i)href=[\"'][^\"'#?]+\\.php(?:[?#\"'])",
+          "weight": 0.5,
+          "evidence": "links to .php pages"
         }
       ],
       "implies": []
@@ -5150,7 +5170,7 @@
     {
       "id": "lodash",
       "name": "Lodash",
-      "category": "programming-language",
+      "category": "js-library",
       "website": "https://lodash.com",
       "signals": [
         {
@@ -5206,7 +5226,7 @@
     {
       "id": "momentjs",
       "name": "Moment.js",
-      "category": "programming-language",
+      "category": "js-library",
       "website": "https://momentjs.com",
       "signals": [
         {
@@ -5276,7 +5296,7 @@
     {
       "id": "polyfill-io",
       "name": "Polyfill.io",
-      "category": "programming-language",
+      "category": "js-library",
       "website": "https://polyfill.io",
       "signals": [
         {
@@ -5320,7 +5340,7 @@
     {
       "id": "next-image",
       "name": "Next.js Image Optimization",
-      "category": "meta-framework",
+      "category": "framework-feature",
       "website": "https://nextjs.org/docs/api-reference/next/image",
       "implies": [
         "nextjs"
@@ -5913,7 +5933,7 @@
     {
       "id": "core-js",
       "name": "core-js",
-      "category": "programming-language",
+      "category": "js-library",
       "website": "https://github.com/zloirock/core-js",
       "signals": [
         {
@@ -5934,7 +5954,7 @@
     {
       "id": "regenerator-runtime",
       "name": "regenerator-runtime",
-      "category": "programming-language",
+      "category": "js-library",
       "website": "https://github.com/facebook/regenerator",
       "signals": [
         {
@@ -5949,7 +5969,7 @@
     {
       "id": "babel-polyfill",
       "name": "@babel/polyfill (legacy)",
-      "category": "programming-language",
+      "category": "js-library",
       "website": "https://babeljs.io/docs/en/babel-polyfill",
       "signals": [
         {
@@ -6038,7 +6058,7 @@
     {
       "id": "zod",
       "name": "Zod",
-      "category": "programming-language",
+      "category": "js-library",
       "website": "https://zod.dev",
       "signals": [
         {
@@ -6059,7 +6079,7 @@
     {
       "id": "yup",
       "name": "Yup",
-      "category": "programming-language",
+      "category": "js-library",
       "website": "https://github.com/jquense/yup",
       "signals": [
         {
@@ -6189,7 +6209,7 @@
     {
       "id": "react-router",
       "name": "React Router",
-      "category": "frontend-framework",
+      "category": "routing",
       "website": "https://reactrouter.com",
       "implies": [
         "react"
@@ -6212,7 +6232,7 @@
     {
       "id": "vue-router",
       "name": "Vue Router",
-      "category": "frontend-framework",
+      "category": "routing",
       "website": "https://router.vuejs.org",
       "implies": [
         "vue"
@@ -6235,7 +6255,7 @@
     {
       "id": "svelte-routing",
       "name": "Svelte Routing",
-      "category": "frontend-framework",
+      "category": "routing",
       "website": "https://github.com/EmilTholin/svelte-routing",
       "implies": [
         "svelte"
@@ -6252,7 +6272,7 @@
     {
       "id": "tanstack-router",
       "name": "TanStack Router",
-      "category": "frontend-framework",
+      "category": "routing",
       "website": "https://tanstack.com/router",
       "implies": [
         "react"
@@ -6269,7 +6289,7 @@
     {
       "id": "remix-router",
       "name": "Remix Router",
-      "category": "frontend-framework",
+      "category": "routing",
       "website": "https://remix.run/docs/en/main/router",
       "implies": [
         "remix"
@@ -6286,7 +6306,7 @@
     {
       "id": "next-router",
       "name": "Next.js Router (App Router)",
-      "category": "meta-framework",
+      "category": "framework-feature",
       "website": "https://nextjs.org/docs/app/building-your-application/routing",
       "implies": [
         "nextjs"
@@ -6303,7 +6323,7 @@
     {
       "id": "astro-routes",
       "name": "Astro File-based Routing",
-      "category": "meta-framework",
+      "category": "framework-feature",
       "website": "https://docs.astro.build/en/core-concepts/routing",
       "implies": [
         "astro"
@@ -9825,7 +9845,7 @@
     {
       "id": "framer",
       "name": "Framer",
-      "category": "js-library",
+      "category": "cms",
       "signals": [
         {
           "kind": "js",
@@ -9839,6 +9859,26 @@
           "weight": 0.9,
           "evidence": "Framer.Version.build global (rendered) [Library Detector]",
           "version": true
+        },
+        {
+          "kind": "meta",
+          "name": "generator",
+          "contains": "framer",
+          "weight": 0.95,
+          "evidence": "Framer generator meta"
+        },
+        {
+          "kind": "header",
+          "name": "server",
+          "contains": "framer/",
+          "weight": 0.9,
+          "evidence": "Server: Framer"
+        },
+        {
+          "kind": "html",
+          "contains": "made in framer",
+          "weight": 0.85,
+          "evidence": "Made in Framer comment"
         }
       ],
       "implies": [],
@@ -10089,6 +10129,192 @@
           "contains": "mkdocs",
           "weight": 0.95,
           "evidence": "MkDocs generator meta"
+        },
+        {
+          "kind": "script_text",
+          "contains": "\"help\": 191",
+          "weight": 0.85,
+          "evidence": "MkDocs theme shortcut keys"
+        },
+        {
+          "kind": "html",
+          "contains": "data-md-component",
+          "weight": 0.8,
+          "evidence": "Material for MkDocs component attribute"
+        }
+      ],
+      "implies": []
+    },
+    {
+      "id": "eleventy",
+      "name": "Eleventy",
+      "category": "meta-framework",
+      "website": "https://www.11ty.dev",
+      "signals": [
+        {
+          "kind": "meta",
+          "name": "generator",
+          "regex": "(?i)eleventy[^0-9]*v?([0-9][0-9.]*)",
+          "version": true,
+          "weight": 0.95,
+          "evidence": "Eleventy generator meta"
+        }
+      ],
+      "implies": []
+    },
+    {
+      "id": "docsify",
+      "name": "Docsify",
+      "category": "meta-framework",
+      "website": "https://docsify.js.org",
+      "signals": [
+        {
+          "kind": "script_src",
+          "regex": "(?i)docsify(?:@[0-9.]+)?/(?:lib|dist)/",
+          "weight": 0.9,
+          "evidence": "docsify script from a CDN"
+        },
+        {
+          "kind": "script_text",
+          "contains": "$docsify",
+          "weight": 0.9,
+          "evidence": "window.$docsify configuration"
+        }
+      ],
+      "implies": []
+    },
+    {
+      "id": "typo3",
+      "name": "TYPO3",
+      "category": "cms",
+      "website": "https://typo3.org",
+      "signals": [
+        {
+          "kind": "meta",
+          "name": "generator",
+          "contains": "typo3",
+          "weight": 0.95,
+          "evidence": "TYPO3 generator meta"
+        },
+        {
+          "kind": "html",
+          "contains": "typo3conf/",
+          "weight": 0.8,
+          "evidence": "typo3conf path in HTML"
+        },
+        {
+          "kind": "html",
+          "contains": "typo3temp/",
+          "weight": 0.8,
+          "evidence": "typo3temp path in HTML"
+        }
+      ],
+      "implies": [
+        "php"
+      ]
+    },
+    {
+      "id": "statamic",
+      "name": "Statamic",
+      "category": "cms",
+      "website": "https://statamic.com",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-powered-by",
+          "contains": "statamic",
+          "weight": 0.95,
+          "evidence": "X-Powered-By: Statamic"
+        },
+        {
+          "kind": "meta",
+          "name": "generator",
+          "contains": "statamic",
+          "weight": 0.95,
+          "evidence": "Statamic generator meta"
+        }
+      ],
+      "implies": [
+        "laravel",
+        "php"
+      ]
+    },
+    {
+      "id": "craft-cms",
+      "name": "Craft CMS",
+      "category": "cms",
+      "website": "https://craftcms.com",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-powered-by",
+          "contains": "craft cms",
+          "weight": 0.95,
+          "evidence": "X-Powered-By: Craft CMS"
+        },
+        {
+          "kind": "cookie",
+          "name": "CraftSessionId",
+          "weight": 0.85,
+          "evidence": "CraftSessionId cookie"
+        }
+      ],
+      "implies": [
+        "php"
+      ]
+    },
+    {
+      "id": "wordpress-vip",
+      "name": "WordPress VIP",
+      "category": "hosting",
+      "website": "https://wpvip.com",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-powered-by",
+          "contains": "wordpress vip",
+          "weight": 0.95,
+          "evidence": "X-Powered-By: WordPress VIP"
+        }
+      ],
+      "implies": [
+        "wordpress"
+      ]
+    },
+    {
+      "id": "varnish",
+      "name": "Varnish",
+      "category": "cdn",
+      "website": "https://varnish-cache.org",
+      "signals": [
+        {
+          "kind": "header",
+          "name": "x-varnish",
+          "weight": 0.9,
+          "evidence": "X-Varnish header"
+        },
+        {
+          "kind": "header",
+          "name": "via",
+          "contains": "varnish",
+          "weight": 0.8,
+          "evidence": "Via: varnish"
+        }
+      ],
+      "implies": []
+    },
+    {
+      "id": "super-so",
+      "name": "Super",
+      "category": "cms",
+      "website": "https://super.so",
+      "signals": [
+        {
+          "kind": "meta",
+          "name": "generator",
+          "regex": "(?i)^super$",
+          "weight": 0.9,
+          "evidence": "Super generator meta"
         }
       ],
       "implies": []
