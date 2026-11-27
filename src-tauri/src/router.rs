@@ -375,6 +375,139 @@ async fn call_gemini(
     Ok((text, GEMINI_MODEL.to_string()))
 }
 
+// ─── Caller-supplied system prompt (Reverse Lab) ───────────────────────
+
+/// Request body for an OpenAI-compatible chat completion with a caller-supplied
+/// system prompt. `json` asks for a JSON object (Groq/Cerebras `response_format`).
+pub fn openai_body_with_system(system: &str, user: &str, model: &str, max_tokens: u32, json: bool) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": user },
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.2,
+    });
+    if json {
+        body["response_format"] = serde_json::json!({ "type": "json_object" });
+    }
+    body
+}
+
+/// Request body for Gemini `generateContent` with a caller-supplied system prompt
+/// (`systemInstruction`) and optional JSON mode (`responseMimeType`).
+pub fn gemini_body_with_system(system: &str, user: &str, max_tokens: u32, json: bool) -> serde_json::Value {
+    let mut gen = serde_json::json!({ "maxOutputTokens": max_tokens, "temperature": 0.2 });
+    if json {
+        gen["responseMimeType"] = serde_json::json!("application/json");
+    }
+    serde_json::json!({
+        "systemInstruction": { "parts": [{ "text": system }] },
+        "contents": [{ "role": "user", "parts": [{ "text": user }] }],
+        "generationConfig": gen,
+    })
+}
+
+async fn post_for_text(
+    req: reqwest::RequestBuilder,
+    body: &serde_json::Value,
+    pick: fn(&serde_json::Value) -> Option<String>,
+) -> Result<String, String> {
+    let resp = req
+        .header("Content-Type", "application/json")
+        .json(body)
+        .timeout(Duration::from_secs(45))
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(match status.as_u16() {
+            429 => "rate limit hit".to_string(),
+            401 | 403 => "invalid API key".to_string(),
+            _ => format!("HTTP {}: {}", status, truncate(&text, 200)),
+        });
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| format!("response parse error: {}", e))?;
+    match pick(&json) {
+        Some(t) if !t.trim().is_empty() => Ok(t.trim().to_string()),
+        _ => Err("empty response".into()),
+    }
+}
+
+fn pick_openai(j: &serde_json::Value) -> Option<String> {
+    j["choices"][0]["message"]["content"].as_str().map(str::to_string)
+}
+
+fn pick_gemini(j: &serde_json::Value) -> Option<String> {
+    j["candidates"][0]["content"]["parts"][0]["text"].as_str().map(str::to_string)
+}
+
+/// Like [`route_question`] but the CALLER owns the system prompt, output budget and JSON mode.
+/// Same Groq (3 models) -> Gemini -> Cerebras cascade and BYOK keys. Returns `None` when no
+/// key is configured or every provider failed - the caller then simply skips the LLM step.
+/// The caller is responsible for redacting `user` BEFORE this call; nothing is added here.
+pub async fn route_with_system(
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+    json: bool,
+    keys: &ProviderKeys,
+    client: &reqwest::Client,
+) -> Option<RouterResponse> {
+    let start = std::time::Instant::now();
+    if !keys.groq.is_empty() {
+        for model in GROQ_MODELS {
+            let body = openai_body_with_system(system, user, model, max_tokens, json);
+            let req = client.post(GROQ_URL).header("Authorization", format!("Bearer {}", keys.groq));
+            match post_for_text(req, &body, pick_openai).await {
+                Ok(text) => {
+                    return Some(RouterResponse {
+                        text,
+                        provider: Provider::Groq,
+                        model: (*model).to_string(),
+                        latency_ms: start.elapsed().as_millis() as u64,
+                    })
+                }
+                Err(e) => tracing::warn!("route_with_system: Groq {} failed: {}", model, e),
+            }
+        }
+    }
+    if !keys.gemini.is_empty() {
+        let body = gemini_body_with_system(system, user, max_tokens, json);
+        let req = client.post(GEMINI_URL).header("x-goog-api-key", keys.gemini.clone());
+        match post_for_text(req, &body, pick_gemini).await {
+            Ok(text) => {
+                return Some(RouterResponse {
+                    text,
+                    provider: Provider::Gemini,
+                    model: GEMINI_MODEL.to_string(),
+                    latency_ms: start.elapsed().as_millis() as u64,
+                })
+            }
+            Err(e) => tracing::warn!("route_with_system: Gemini failed: {}", e),
+        }
+    }
+    if !keys.cerebras.is_empty() {
+        let body = openai_body_with_system(system, user, CEREBRAS_MODEL, max_tokens, json);
+        let req = client.post(CEREBRAS_URL).header("Authorization", format!("Bearer {}", keys.cerebras));
+        match post_for_text(req, &body, pick_openai).await {
+            Ok(text) => {
+                return Some(RouterResponse {
+                    text,
+                    provider: Provider::Cerebras,
+                    model: CEREBRAS_MODEL.to_string(),
+                    latency_ms: start.elapsed().as_millis() as u64,
+                })
+            }
+            Err(e) => tracing::warn!("route_with_system: Cerebras failed: {}", e),
+        }
+    }
+    None
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 /// Build the prompt for the AI provider. If dialog context exists,
@@ -618,6 +751,30 @@ pub fn can_route(transcript: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_system_prompt_bodies_carry_caller_prompt_budget_and_json_mode() {
+        let b = openai_body_with_system("SYS", "USR", "m", 1234, true);
+        assert_eq!(b["messages"][0]["content"], "SYS");
+        assert_eq!(b["messages"][1]["content"], "USR");
+        assert_eq!(b["max_tokens"], 1234);
+        assert_eq!(b["response_format"]["type"], "json_object");
+        assert!(openai_body_with_system("S", "U", "m", 10, false).get("response_format").is_none());
+
+        let g = gemini_body_with_system("SYS", "USR", 900, true);
+        assert_eq!(g["systemInstruction"]["parts"][0]["text"], "SYS");
+        assert_eq!(g["contents"][0]["parts"][0]["text"], "USR");
+        assert_eq!(g["generationConfig"]["maxOutputTokens"], 900);
+        assert_eq!(g["generationConfig"]["responseMimeType"], "application/json");
+        assert!(gemini_body_with_system("S", "U", 10, false)["generationConfig"].get("responseMimeType").is_none());
+    }
+
+    #[test]
+    fn test_route_with_system_without_keys_is_none_and_makes_no_request() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let out = rt.block_on(route_with_system("s", "u", 10, false, &ProviderKeys::default(), &reqwest::Client::new()));
+        assert!(out.is_none());
+    }
 
     #[test]
     fn test_can_route_general_question() {

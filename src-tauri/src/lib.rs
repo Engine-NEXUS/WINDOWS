@@ -85,6 +85,7 @@ pub mod center;
 pub mod diary;
 pub mod ghost;
 pub mod google;
+pub mod reverse;
 mod improve;
 pub mod memory;
 pub mod profile;

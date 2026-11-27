@@ -194,3 +194,7 @@ scripts/kaggle_kernel/
 *.yaml
 !src-tauri/resources/**/*.yaml
 eval_set/
+
+# Reverse Lab measurement corpus (real third-party binaries downloaded from PyPI wheels; local only, never committed)
+reverse_corpus/
+reverse_results.json

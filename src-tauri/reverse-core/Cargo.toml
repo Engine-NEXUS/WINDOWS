@@ -1,0 +1,26 @@
+[package]
+name = "nexus_reverse"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+description = "NEXUS Reverse Lab core: static, never-executing analysis of PE/.NET/Electron programs and HAR captures"
+license = "MIT"
+
+# Standalone root: `cargo test` here builds only these few crates (no Tauri, no ONNX).
+[workspace]
+
+[dependencies]
+# Pure-Rust PE reader (MIT). Only the PE parsers are compiled.
+goblin = { version = "0.10", default-features = false, features = ["std", "alloc", "endian_fd", "pe32", "pe64"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+regex = "1"
+sha2 = "0.10"
+
+[lib]
+name = "nexus_reverse"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3

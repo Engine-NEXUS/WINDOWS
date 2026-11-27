@@ -1,0 +1,96 @@
+{
+  "rows": [
+    {
+      "key": "r1",
+      "label": "PE parse fidelity vs pefile + LIEF",
+      "weight": 20,
+      "stars": 0,
+      "note": "not measured (needs >= 200 real PE files and >= 2000 compared fields)"
+    },
+    {
+      "key": "r2",
+      "label": "Malformed-input robustness",
+      "weight": 15,
+      "stars": 0,
+      "note": "not measured (needs >= 2000 mutants)"
+    },
+    {
+      "key": "r3",
+      "label": "Capability detection",
+      "weight": 15,
+      "stars": 0,
+      "note": "not measured (needs >= 50 recall cases, >= 100 benign files, >= 1 rule)"
+    },
+    {
+      "key": "r4",
+      "label": "Packing / obfuscation honesty",
+      "weight": 10,
+      "stars": 0,
+      "note": "not measured (needs >= 20 packed fixtures, >= 100 clean files)"
+    },
+    {
+      "key": "r5",
+      "label": "HAR -> OpenAPI accuracy",
+      "weight": 15,
+      "stars": 0,
+      "note": "not measured (needs >= 40 ground-truth endpoints)"
+    },
+    {
+      "key": "r6",
+      "label": "Evidence-bound explanation",
+      "weight": 10,
+      "stars": 0,
+      "note": "not measured (needs >= 200 adversarial LLM outputs)"
+    },
+    {
+      "key": "r7",
+      "label": "Speed and footprint",
+      "weight": 5,
+      "stars": 0,
+      "note": "not measured (needs >= 30 timed files)"
+    },
+    {
+      "key": "r8",
+      "label": "Voice / UX and non-regression",
+      "weight": 10,
+      "stars": 0,
+      "note": "not measured (needs >= 40 phrases incl. near-misses)"
+    }
+  ],
+  "gates": [
+    {
+      "key": "never_executes",
+      "label": "target is never executed or loaded",
+      "ok": false,
+      "measured": false
+    },
+    {
+      "key": "secrets_redacted",
+      "label": "HAR secrets never reach output, logs or LLM prompts",
+      "ok": false,
+      "measured": false
+    },
+    {
+      "key": "no_upload",
+      "label": "binary / HAR never uploaded (capped redacted summary only)",
+      "ok": false,
+      "measured": false
+    },
+    {
+      "key": "banner",
+      "label": "authorization banner on every report",
+      "ok": false,
+      "measured": false
+    },
+    {
+      "key": "refusal",
+      "label": "refusal line for crack / keygen / licence-bypass / exploit requests",
+      "ok": false,
+      "measured": false
+    }
+  ],
+  "average": 0.0,
+  "lowest": 0,
+  "unmeasured": 8,
+  "passed": false
+}

@@ -112,6 +112,9 @@ tree-sitter-python = "0.23"
 tree-sitter-go = "0.23"
 # SHA-256 for content hashing in symbol extraction
 sha2 = "0.10"
+# Reverse Lab: pure static-analysis core (PE/.NET/asar/HAR) lives in its own crate so it builds and tests in seconds
+# without the Tauri/ONNX stack. See reverse-core/ and docs/features/91-reverse-lab.md.
+nexus_reverse = { path = "reverse-core" }
 
 # GitHub API client for the GitHub sub-command system (Phase 2A).
 # octocrab provides a typed semantic API + low-level HTTP fallback.
