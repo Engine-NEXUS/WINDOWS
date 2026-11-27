@@ -579,6 +579,8 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         | ParsedIntent::BrowserSearch { .. }
         | ParsedIntent::BrowserSearchFocus
         | ParsedIntent::WatchScreenEmail
+        | ParsedIntent::ReverseLab { .. }
+        | ParsedIntent::ReverseHar { .. }
         | ParsedIntent::StartDictation
         | ParsedIntent::StopDictation => Subsystem::LocalCommand,
 
@@ -882,6 +884,12 @@ pub async fn process_transcript<R: Runtime>(
             ParsedIntent::WatchScreenEmail => {
                 return run_watch_screen_email(app).await;
             }
+            ParsedIntent::ReverseLab { target } => {
+                return run_reverse_lab(app, target.clone(), false).await;
+            }
+            ParsedIntent::ReverseHar { target } => {
+                return run_reverse_lab(app, target.clone(), true).await;
+            }
             ParsedIntent::NluResult { intent, slots, .. } if intent == "youtube_search" => {
                 let query = slots.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 return run_youtube_search(app, query).await;
@@ -1103,6 +1111,12 @@ pub async fn process_transcript<R: Runtime>(
             }
             ParsedIntent::WatchScreenEmail => {
                 return run_watch_screen_email(app).await;
+            }
+            ParsedIntent::ReverseLab { target } => {
+                return run_reverse_lab(app, target.clone(), false).await;
+            }
+            ParsedIntent::ReverseHar { target } => {
+                return run_reverse_lab(app, target.clone(), true).await;
             }
             ParsedIntent::ScreenClick { ordinal } => {
                 return run_screen_click(app, *ordinal).await;
@@ -4319,6 +4333,50 @@ async fn run_watch_screen_email<R: Runtime>(
     })
 }
 
+/// Reverse Lab: static triage of a program (`har_mode = false`) or HAR -> OpenAPI (`har_mode = true`).
+/// `target == "refuse"` is a request for cracking / keygens / licence bypass / exploits: answered with the
+/// fixed refusal line and nothing else happens.
+async fn run_reverse_lab<R: Runtime>(
+    app: AppHandle<R>,
+    target: String,
+    har_mode: bool,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if target == "refuse" {
+        speak_line(&app, nexus_reverse::report::REFUSAL.to_string(), &request_id);
+        clear_active_request(&request_id);
+        return Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true });
+    }
+    // Validate through the real sub-center registry (a missing target would be asked for, not guessed).
+    let action = if har_mode { "reverse_har" } else { "reverse_lab" };
+    if let Some(center) = crate::center::sub_center_for("ReverseCenter") {
+        if let crate::center::Validity::NeedSlot { prompt, .. } = center.validate(action, &serde_json::json!({ "target": target })) {
+            speak_line(&app, prompt, &request_id);
+            clear_active_request(&request_id);
+            return Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true });
+        }
+    }
+    speak_line(&app, nexus_reverse::report::ACK_STATIC.to_string(), &request_id);
+    let outcome = if har_mode {
+        crate::reverse::runner::run_har(&app, &target).await
+    } else {
+        crate::reverse::runner::run_program(&app, &target).await
+    };
+    match outcome {
+        Ok(o) => {
+            if let Err(e) = crate::commands::show_sidebar_with_content(app.clone(), o.title.clone(), o.markdown.clone()).await {
+                tracing::warn!("reverse_lab: could not open the sidebar: {e}");
+            }
+            speak_line(&app, o.spoken, &request_id);
+        }
+        Err(spoken) => {
+            speak_line(&app, spoken, &request_id);
+        }
+    }
+    clear_active_request(&request_id);
+    Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true })
+}
+
 /// Enter the Ghostwriter room: start session + card + spoken reply.
 async fn run_ghostwriter_enter<R: Runtime>(
     app: AppHandle<R>,
@@ -5379,6 +5437,13 @@ mod tests {
             raw: "blah".to_string(),
         });
         assert!(ack.ends_with("sir."), "{ack}");
+    }
+
+    #[test]
+    fn test_route_reverse_lab_is_local_and_never_touches_the_worker() {
+        for i in [ParsedIntent::ReverseLab { target: "app".into() }, ParsedIntent::ReverseLab { target: "refuse".into() }, ParsedIntent::ReverseHar { target: "latest".into() }] {
+            assert_eq!(route_intent(&i), Subsystem::LocalCommand, "{i:?}");
+        }
     }
 
     #[test]

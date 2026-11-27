@@ -15,6 +15,8 @@ R3  capability rules: self-tests, recall of rule examples through the REAL pipel
 R4  packing honesty: genuine UPX output (+ name-scrubbed variants) and built-in synthetic fixtures vs. the clean corpus.
 R6  evidence-bound explanation: adversarial mock-LLM outputs vs the claim validator (also feeds R4's
     "a packed file never gets an unqualified explanation" check).
+R8  voice/UX: the phrase matrix (positives, refusals, near-misses) and non-regression of the existing suites,
+    run through `cargo test` in src-tauri (needs the crate to build: on Linux that means the CI/scaffold setup).
 R7  speed + footprint over the corpus: p95 parse time for files <= 50 MB and peak RSS growth.
 """
 
@@ -325,6 +327,53 @@ def run_explain(corpus, binary):
     return {"r6": r6, "_unqualified": {"unqualified": d["unqualified"], "packed_checked": d["packed_checked"]}}
 
 
+def _cargo_test(args, env):
+    p = subprocess.run(["cargo", "test", "--lib"] + args + ["--", "--test-threads=1", "--nocapture"], cwd=str(ROOT / "src-tauri"),
+                       capture_output=True, text=True, env=env)
+    out = p.stdout + p.stderr
+    passed = failed = 0
+    for line in out.splitlines():
+        if line.startswith("test result:"):
+            parts = line.split()
+            passed += int(parts[3])
+            failed += int(parts[5])
+    return out, passed, failed
+
+
+def run_voice():
+    """R8 + gate 5: phrase matrix and existing-suite regressions, measured by cargo test."""
+    import os
+    import re
+    env = dict(os.environ)
+    env.setdefault("ORT_PREFER_DYNAMIC_LINK", "1")
+    out, _, mf = _cargo_test(["reverse_"], env)
+    m = re.search(r"REVERSE_MATRIX (\d+) (\d+)", out)
+    r = re.search(r"REVERSE_REFUSAL (\d+) (\d+)", out)
+    sp = re.search(r"REVERSE_SECOND_PASS pos (\d+)/(\d+) neg_ok (\d+)/(\d+)", out)
+    if not m:
+        return {"r8": {"error": "matrix did not run", "tail": out[-500:]}}
+    suites = {}
+    regress = 0
+    for name in ("intent_parser", "center", "orchestrator"):
+        _, p, f = _cargo_test([name], env)
+        suites[name] = [p, f]
+        regress += f
+    e2e = subprocess.run(["cargo", "test", "--test", "e2e_voice_fixture"], cwd=str(ROOT / "src-tauri"), capture_output=True, text=True, env=env)
+    e2e_ok = e2e.returncode == 0
+    if not e2e_ok:
+        regress += 1
+    r8 = {"matrix_k": int(m.group(1)), "matrix_n": int(m.group(2)), "regressions": regress, "reverse_test_failures": mf, "suites": suites,
+          "e2e_fixture_ok": e2e_ok,
+          "refusal_k": int(r.group(1)) if r else 0, "refusal_n": int(r.group(2)) if r else 0}
+    # Historical, measured during development BEFORE the parser was widened (recorded so the matrix score is not
+    # read as generalisation): fresh natural phrasings the parser had never seen.
+    r8["first_pass_unseen"] = {"set1_positives": [10, 18], "set2_positives": [11, 14], "set2_false_captures": 1,
+                               "note": "caught/total on phrasings written after the first matrix passed; parser widened afterwards"}
+    if sp:
+        r8["second_pass"] = {"positives": [int(sp.group(1)), int(sp.group(2))], "near_misses_ok": [int(sp.group(3)), int(sp.group(4))]}
+    return {"r8": r8}
+
+
 def merge(out_path, new):
     p = Path(out_path)
     cur = json.loads(p.read_text()) if p.exists() else {}
@@ -335,7 +384,7 @@ def merge(out_path, new):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["pe", "fuzz", "rules", "packed", "explain", "all"])
+    ap.add_argument("cmd", choices=["pe", "fuzz", "rules", "packed", "explain", "voice", "all"])
     ap.add_argument("--corpus", default=str(ROOT / "reverse_corpus"))
     ap.add_argument("--bin", default=str(DEFAULT_BIN))
     ap.add_argument("--out", default=str(ROOT / "reverse_results.json"))
@@ -373,6 +422,8 @@ def main(argv=None):
             r4["unqualified"] = uq["unqualified"]
             r4["unqualified_checked"] = uq["packed_checked"]
             res["r4"] = r4
+    if args.cmd in ("voice", "all"):
+        res.update(run_voice())
     merge(args.out, res)
     print(json.dumps(res, indent=2, default=list))
     return 0

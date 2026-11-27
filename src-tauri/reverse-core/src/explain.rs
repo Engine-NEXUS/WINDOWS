@@ -548,9 +548,9 @@ fn deterministic_summary(a: &Analysis) -> String {
     };
     let caps: Vec<&str> = a.capabilities.iter().filter(|h| h.severity >= crate::rules::Severity::Medium).map(|h| h.name.as_str()).take(4).collect();
     if caps.is_empty() {
-        format!("A {kind} with no notable capability flagged by the built-in rules.")
+        format!("{kind}: no notable capability flagged by the built-in rules.")
     } else {
-        format!("A {kind} whose static evidence shows: {}.", caps.join("; "))
+        format!("{kind}: static evidence shows {}.", caps.join("; "))
     }
 }
 
@@ -561,7 +561,7 @@ pub fn deterministic(a: &Analysis) -> Explanation {
         let rule_id = a.evidence.items().iter().find(|e| e.kind == EvKind::Rule && e.value == h.name).map(|e| e.id.clone());
         let mut ids: Vec<String> = rule_id.into_iter().collect();
         ids.extend(h.evidence_ids.iter().take(4).cloned());
-        claims.push(Claim { text: format!("Can {} ({}).", h.name, h.description.trim_end_matches('.')), evidence: ids });
+        claims.push(Claim { text: format!("Evidence indicates: {} ({}).", h.name, h.description.trim_end_matches('.')), evidence: ids });
     }
     Explanation { summary: deterministic_summary(a), claims, dropped: Vec::new(), not_determined: fixed_not_determined(a), limitations: limitations(a), source: "deterministic" }
 }

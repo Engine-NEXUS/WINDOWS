@@ -161,6 +161,14 @@ pub enum ParsedIntent {
     /// Watch an email on screen for deadline changes or updates.
     #[serde(rename = "watch_screen_email")]
     WatchScreenEmail,
+    /// Reverse Lab: static triage of a program on this PC. `target` is "app" (foreground program),
+    /// "download" (newest download), "clipboard" (path on the clipboard) or "path:<file>".
+    #[serde(rename = "reverse_lab")]
+    ReverseLab { target: String },
+    /// Reverse Lab: turn a captured HAR file into an inferred OpenAPI document. `target` is "latest",
+    /// "clipboard" or "path:<file>".
+    #[serde(rename = "reverse_har")]
+    ReverseHar { target: String },
     #[serde(rename = "unknown")]
     Unknown { raw: String },
 }
@@ -221,6 +229,8 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::StartDictation => "start_dictation",
         ParsedIntent::StopDictation => "stop_dictation",
         ParsedIntent::WatchScreenEmail => "watch_screen_email",
+        ParsedIntent::ReverseLab { .. } => "reverse_lab",
+        ParsedIntent::ReverseHar { .. } => "reverse_har",
         ParsedIntent::GitHubCommand { command } => match command {
             GitHubCommand::MergePr { .. } => "merge_pr",
             GitHubCommand::ApprovePr { .. } => "approve_pr",
@@ -450,6 +460,13 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
     // "annotate my screen", "draw on the screen", "create architecture diagram"
     // Must precede parse_analyse_command so "draw architecture..." stays local.
     if let Some(result) = parse_screen_annotation_command(&text) {
+        return Some(result);
+    }
+
+    // --- Reverse Lab (static triage of a program / HAR -> OpenAPI) ---
+    // Must precede parse_analyse_command so "analyse this app" is not read as a repo name.
+    // Near-misses ("analyse repo servx", "analyse the pr", "analyse the screen") are guarded inside.
+    if let Some(result) = parse_reverse_lab_command(&text) {
         return Some(result);
     }
 
@@ -1998,6 +2015,123 @@ fn parse_browser_search_command(text: &str) -> Option<ParseResult> {
         }
     }
 
+    None
+}
+
+/// Reverse Lab phrases. Deliberately narrow: the object must be a PROGRAM-like noun (app, exe, installer,
+/// "the file I just downloaded" ...) or a HAR/capture, and anything about repos, PRs, the screen or the
+/// codebase is left to the existing parsers (the Architecture Mapper stays the SOURCE-code engine).
+fn parse_reverse_lab_command(text: &str) -> Option<ParseResult> {
+    let t = text.trim().to_lowercase().replace(['\u{2019}', '\u{2018}'], "'");
+    let t = t.trim_end_matches(['.', ',', '!', '?']).trim().to_string();
+    let t = regex_captures(
+        &t,
+        r"^(?:(?:hey|ok|okay|so|right|alright)\s+)*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:i\s+(?:want|need)\s+you\s+to\s+)?(.*?)(?:\s+please)?$",
+    )
+    .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+    .unwrap_or(t);
+    if t.is_empty() {
+        return None;
+    }
+    // Requests for cracking / keygens / licence bypass / exploit writing get ONE fixed refusal (target "refuse").
+    if regex_captures(
+        &t,
+        r"\b(?:crack(?:ing)?|key\s*gen(?:erator)?|serial\s+generator|licen[cs]e\s+bypass|bypass(?:ing)?\s+(?:the\s+)?(?:licen[cs]e|activation|drm|trial|paywall|protection)|remove\s+(?:the\s+)?(?:drm|licen[cs]e\s+check|watermark|protection)|patch(?:ing)?\s+(?:out\s+)?(?:the\s+)?(?:licen[cs]e|activation)|write\s+(?:an?\s+)?exploit|exploit\s+(?:this|that|the|it))\b",
+    )
+    .is_some()
+        && regex_captures(&t, r"\b(?:app|application|program|software|exe|executable|binary|game|installer|dll|file|licen[cs]e|trial|drm|activation|this|that|it)\b").is_some()
+    {
+        return Some(ParseResult {
+            intent: ParsedIntent::ReverseLab { target: "refuse".to_string() },
+            confidence: 1.0,
+            source: "deterministic-reverse-lab".to_string(),
+        });
+    }
+    // Things other parsers own.
+    if regex_captures(
+        &t,
+        r"\b(?:repo|repos|repository|repositories|pr|prs|pull\s*requests?|branch|branches|commit|commits|screen|codebase|architecture|issues?|diagram|code\s*base|github)\b",
+    )
+    .is_some()
+    {
+        return None;
+    }
+    let mk = |target: String| ParseResult { intent: ParsedIntent::ReverseLab { target }, confidence: 1.0, source: "deterministic-reverse-lab".to_string() };
+    let mk_har = |target: String| ParseResult { intent: ParsedIntent::ReverseHar { target }, confidence: 1.0, source: "deterministic-reverse-lab".to_string() };
+
+    let clip = regex_captures(&t, r"\b(?:clipboard|copied)\b").is_some();
+    let har_noun = r"(?:har(?:\s+file)?|http\s+archive|network\s+capture|capture\s+file)";
+
+    // ── HAR -> OpenAPI ──
+    let har_target = || -> String {
+        if clip {
+            "clipboard".to_string()
+        } else if let Some(c) = regex_captures(&t, r"([a-z]:\\[^\s]+\.har)\b") {
+            format!("path:{}", &c[1])
+        } else {
+            "latest".to_string()
+        }
+    };
+    let har_verb = r"(?:turn|convert|generate|make|build|create|write|extract|derive|produce|reverse[- ]?engineer|document|analy[sz]e|parse|read|inspect|give\s+me|get\s+me|show\s+me)";
+    if regex_captures(&t, &format!(r"\b{har_verb}\b[^;]*\b{har_noun}\b")).is_some()
+        || regex_captures(&t, &format!(r"\b{har_noun}\b[^;]*\b(?:into|to|as)\s+(?:an?\s+)?(?:openapi|swagger|api\s+(?:spec|specification|docs?|documentation))\b")).is_some()
+    {
+        return Some(mk_har(har_target()));
+    }
+    if regex_captures(
+        &t,
+        r"\b(?:generate|make|create|build|write|extract|derive)\s+(?:me\s+)?(?:an?\s+)?(?:openapi|swagger|api)\s+(?:spec|specification|docs?|documentation|schema|document)\s+(?:from|of|for)\s+(?:this|the|my|that)\s+(?:(?:latest|last|newest|recent|new)\s+)?(?:capture|traffic|recording|session|network\s+log)\b",
+    )
+    .is_some()
+    {
+        return Some(mk_har(har_target()));
+    }
+
+    // ── program triage ──
+    let noun = r"(?:app|application|program|software|exe|executable|binary|installer|setup\s+file|dll|driver|file|download|downloaded\s+file|(?:thing|stuff|file|program|app|exe|installer)\s+(?:that\s+)?i\s+(?:just\s+)?(?:downloaded|got|grabbed)|(?:app|program|software)\s+i(?:'m|\s+am)\s+(?:using|running|in))";
+    let det = r"(?:this|that|the|my|current|a)";
+    let recent = r"(?:(?:latest|last|newest|recent|new)\s+)?";
+    let target_of = |t: &str| -> String {
+        if regex_captures(t, r"\b(?:just\s+downloaded|i\s+downloaded|downloaded|latest\s+download|newest\s+download|last\s+download|recent\s+download|my\s+downloads?|the\s+download)\b").is_some() {
+            "download".to_string()
+        } else if regex_captures(t, r"\b(?:clipboard|copied)\b").is_some() {
+            "clipboard".to_string()
+        } else {
+            "app".to_string()
+        }
+    };
+    // explicit program path / file name with a verb: "analyse C:\\x\\foo.exe", "what does setup.exe do"
+    let ext = r"(?:exe|dll|sys|msi|asar|ocx|scr)";
+    let verb = r"(?:analy[sz]e|reverse[- ]?engineer|reverse|inspect|triage|examine|investigate|statically\s+analy[sz]e|break\s+down|dissect|pick\s+apart|take\s+apart|take\s+a\s+look\s+at|have\s+a\s+look\s+at|look\s+at|scan|walk\s+me\s+through)";
+    if let Some(c) = regex_captures(&t, &format!(r"\b{verb}\b\s+([a-z]:\\[^\s]+\.{ext})\b")) {
+        return Some(mk(format!("path:{}", &c[1])));
+    }
+    if regex_captures(&t, &format!(r"^(?:{verb})\s+(?:the\s+)?(?:file\s+)?[\w.\-]+\.{ext}$")).is_some() {
+        // bare file name: resolve in Downloads later
+        let name = t.split_whitespace().last().unwrap_or("").to_string();
+        return Some(mk(format!("path:{name}")));
+    }
+    // "reverse engineer this app", "analyse the file I just downloaded", "inspect this exe"
+    if regex_captures(&t, &format!(r"^{verb}\s+(?:{det}\s+)?{recent}{noun}\b")).is_some() {
+        return Some(mk(target_of(&t)));
+    }
+    // "static analysis of this app", "do a static analysis on the file i just downloaded"
+    if regex_captures(&t, &format!(r"^(?:(?:do|give\s+me|run|perform)\s+)?(?:a\s+)?(?:static\s+analysis|triage)\s+(?:of|on|for)\s+(?:{det}\s+)?{recent}{noun}\b")).is_some() {
+        return Some(mk(target_of(&t)));
+    }
+    // "what does this app do", "what is this program doing", "what does the file i just downloaded do"
+    let adv = r"(?:\s+(?:actually|really|exactly|even|just|here|right\s+now))*";
+    if regex_captures(&t, &format!(r"^(?:(?:tell|show)\s+me\s+|explain\s+|describe\s+|(?:do\s+you\s+know\s+)|(?:can\s+you\s+)?tell\s+me\s+)?what(?:'s|\s+is|\s+does|\s+do)\s+(?:{det}\s+)?{recent}{noun}{adv}\s+(?:do|does|doing|about)\b")).is_some() {
+        return Some(mk(target_of(&t)));
+    }
+    // indirect question: "tell me what this application is doing", "explain what this software does"
+    if regex_captures(&t, &format!(r"^(?:(?:tell|show)\s+me\s+|explain\s+|describe\s+|(?:can\s+you\s+)?tell\s+me\s+)what\s+(?:{det}\s+)?{recent}{noun}{adv}\s+(?:is\s+doing|does|do|is\s+up\s+to)\b")).is_some() {
+        return Some(mk(target_of(&t)));
+    }
+    // "is this app safe / a virus" -> triage (the report says plainly that it gives leads, not a verdict)
+    if regex_captures(&t, &format!(r"^is\s+(?:{det}\s+)?{recent}{noun}\b[^;]*\b(?:safe|a\s+virus|malware|malicious|legit|legitimate|dangerous)\b")).is_some() {
+        return Some(mk(target_of(&t)));
+    }
     None
 }
 
@@ -7397,6 +7531,137 @@ mod tests {
                 phrase
             );
         }
+    }
+
+    fn reverse_kind(phrase: &str) -> &'static str {
+        match parse_deterministic(phrase).map(|r| r.intent) {
+            Some(ParsedIntent::ReverseLab { target }) if target == "refuse" => "refuse",
+            Some(ParsedIntent::ReverseLab { .. }) => "lab",
+            Some(ParsedIntent::ReverseHar { .. }) => "har",
+            _ => "other",
+        }
+    }
+
+    /// R8: Reverse Lab phrase matrix (positives, refusals and near-misses that must NOT be captured).
+    /// Prints `REVERSE_MATRIX <passed> <total>` for scripts/reverse_eval.py.
+    #[test]
+    fn reverse_phrase_matrix() {
+        let cases: &[(&str, &str)] = &[
+            // program triage
+            ("reverse engineer this app", "lab"),
+            ("reverse engineer this program", "lab"),
+            ("reverse engineer the file I just downloaded", "lab"),
+            ("Reverse engineer this exe.", "lab"),
+            ("what does this app do", "lab"),
+            ("what does this program do?", "lab"),
+            ("what does this file do", "lab"),
+            ("what is this exe doing", "lab"),
+            ("what does the file I just downloaded do", "lab"),
+            ("analyse this app", "lab"),
+            ("analyze this program", "lab"),
+            ("analyse the file I just downloaded", "lab"),
+            ("inspect this exe", "lab"),
+            ("triage this installer", "lab"),
+            ("investigate this binary", "lab"),
+            ("static analysis of this app", "lab"),
+            ("do a static analysis on the latest download", "lab"),
+            ("can you please analyse this program", "lab"),
+            ("is this file safe", "lab"),
+            ("is this app a virus", "lab"),
+            ("analyse the file on my clipboard", "lab"),
+            ("analyse c:\\users\\me\\downloads\\tool.exe", "lab"),
+            // HAR -> OpenAPI
+            ("turn this har into an api spec", "har"),
+            ("convert the latest har file to openapi", "har"),
+            ("generate an openapi spec from the latest har", "har"),
+            ("analyse the latest har file", "har"),
+            ("reverse engineer the api from the har file", "har"),
+            ("make an openapi spec from my capture", "har"),
+            ("parse the har file on my clipboard", "har"),
+            ("document the api from this har", "har"),
+            // refusals (fixed refusal line, never analysis)
+            ("crack this app", "refuse"),
+            ("make a keygen for this program", "refuse"),
+            ("bypass the license check in this app", "refuse"),
+            ("write an exploit for this program", "refuse"),
+            ("remove the drm from this file", "refuse"),
+            // near-misses: other parsers own these
+            ("analyse repo servx", "other"),
+            ("analyse pr 23 in servx", "other"),
+            ("analyse the pr in zync", "other"),
+            ("analyse the screen", "other"),
+            ("analyse servx", "other"),
+            ("what does this repo do", "other"),
+            ("what does this pr do", "other"),
+            ("reverse engineer the architecture of servx", "other"),
+            ("open the architecture mapper", "other"),
+            ("analyse the latest pr", "other"),
+            ("is this repo safe", "other"),
+            ("what is the weather", "other"),
+            ("open chrome", "other"),
+            ("turn the volume up", "other"),
+            ("what does this button do", "other"),
+            ("search for how to crack an egg", "other"),
+            ("describe my screen", "other"),
+        ];
+        let mut ok = 0usize;
+        let mut bad: Vec<String> = Vec::new();
+        for (phrase, want) in cases {
+            let got = reverse_kind(phrase);
+            if got == *want {
+                ok += 1;
+            } else {
+                bad.push(format!("{phrase:?}: want {want}, got {got}"));
+            }
+        }
+        println!("REVERSE_MATRIX {} {}", ok, cases.len());
+        let refusals: Vec<&(&str, &str)> = cases.iter().filter(|c| c.1 == "refuse").collect();
+        let refusals_ok = refusals.iter().filter(|c| reverse_kind(c.0) == "refuse").count();
+        println!("REVERSE_REFUSAL {} {}", refusals_ok, refusals.len());
+        assert!(cases.len() >= 40);
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    /// Phrasings first tried AFTER the initial matrix passed (a fresh set, written independently). They found a
+    /// real false capture ("what does the file system do") and two missed forms, which are fixed and pinned here.
+    #[test]
+    fn reverse_phrase_second_pass() {
+        let pos = [
+            "tell me what this application is doing", "what does the program I'm using actually do", "walk me through this exe",
+            "reverse engineer the installer I just downloaded", "take apart this dll", "scan this binary", "dissect the app I'm in",
+            "explain what this software does", "what's the file I grabbed doing", "run a static analysis on this installer",
+            "convert the har on my clipboard into an openapi document", "give me an api spec from the latest har file",
+            "extract the endpoints from this har", "reverse engineer this website's api from the har",
+            "tell me what this app does", "explain what this program does", "break down this exe", "take a look at this installer",
+            "reverse this binary", "give me a static analysis of this dll", "what does the thing I just downloaded do",
+            "okay so analyse this program please", "can you tell me what this program is doing",
+        ];
+        let neg = [
+            "analyse the repo", "what does this function do", "explain this code", "reverse engineer the architecture", "take a look at the pr",
+            "look at my screen", "scan the screen", "what does this error mean", "break down the pull request", "what is a binary tree",
+            "what does the file system do", "walk me through the repository", "crack open the settings", "dissect this repo",
+            "what does the file menu do", "what does this program's website say",
+        ];
+        let miss: Vec<&str> = pos.iter().copied().filter(|p| !matches!(reverse_kind(p), "lab" | "har")).collect();
+        let false_hits: Vec<&str> = neg.iter().copied().filter(|p| matches!(reverse_kind(p), "lab" | "har" | "refuse")).collect();
+        println!("REVERSE_SECOND_PASS pos {}/{} neg_ok {}/{}", pos.len() - miss.len(), pos.len(), neg.len() - false_hits.len(), neg.len());
+        assert!(false_hits.is_empty(), "false captures: {false_hits:?}");
+        assert!(miss.is_empty(), "missed: {miss:?}");
+    }
+
+    #[test]
+    fn reverse_lab_targets_are_resolved_from_the_words() {
+        let t = |p: &str| match parse_deterministic(p).map(|r| r.intent) {
+            Some(ParsedIntent::ReverseLab { target }) | Some(ParsedIntent::ReverseHar { target }) => target,
+            other => panic!("{p}: {other:?}"),
+        };
+        assert_eq!(t("what does this app do"), "app");
+        assert_eq!(t("analyse the file I just downloaded"), "download");
+        assert_eq!(t("analyse the file on my clipboard"), "clipboard");
+        assert_eq!(t("analyse the latest har file"), "latest");
+        assert_eq!(t("parse the har file on my clipboard"), "clipboard");
+        assert_eq!(t("analyse c:\\tools\\a.exe"), "path:c:\\tools\\a.exe");
+        assert_eq!(t("crack this app"), "refuse");
     }
 
     #[test]

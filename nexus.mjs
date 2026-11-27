@@ -1244,6 +1244,7 @@ ${C.cyan}Commands:${C.reset}
   ${C.green}wake${C.reset}     Record wake word audio samples for wake model training (nexus wake record 300)
   ${C.green}stats${C.reset}    Inspect dataset category coverage, voice health, and training recommendations
   ${C.green}data${C.reset}     Validate NLU provenance/evaluation locks and wake data/model manifests (structural only - no accuracy; use "wake score")
+  ${C.green}reverse${C.reset}  Static program triage / HAR -> OpenAPI (nexus reverse analyse <file> | har <file> | score)
   ${C.green}mcp check${C.reset} Verify every registered MCP server end to end (read-only, no sends)
   ${C.green}help${C.reset}     Show this help
 
@@ -1277,6 +1278,46 @@ ${C.cyan}Notes:${C.reset}
 `);
 }
 
+/// nexus reverse analyse <exe|dll|asar>   markdown report (static analysis only - nothing is run)
+/// nexus reverse har <file.har>           inferred OpenAPI 3.0 YAML (credentials dropped, no example values)
+/// nexus reverse score                    measure Reverse Lab and print the scorecard
+function cmdReverse() {
+  const sub = process.argv[3];
+  const core = join(ROOT, "src-tauri", "reverse-core");
+  const bin = join(core, "target", "release", IS_WIN ? "nexus-reverse.exe" : "nexus-reverse");
+  const py = pythonCmd();
+  const ensureBin = () => {
+    if (!existsSync(bin)) {
+      info("Building nexus-reverse (one-time, a few seconds)...");
+      run("cargo", ["build", "--release", "--manifest-path", join(core, "Cargo.toml")], { cwd: ROOT });
+    }
+  };
+  if ((sub === "analyse" || sub === "analyze") && process.argv[4]) {
+    ensureBin();
+    run(bin, ["report", process.argv[4]], { cwd: ROOT, allowFail: true });
+    return;
+  }
+  if (sub === "har" && process.argv[4]) {
+    ensureBin();
+    run(bin, ["openapi", process.argv[4]], { cwd: ROOT, allowFail: true });
+    return;
+  }
+  if (sub === "score") {
+    ensureBin();
+    const corpus = join(ROOT, "reverse_corpus");
+    if (!existsSync(corpus)) {
+      warn("No measurement corpus yet. Build it once with: python scripts/reverse_corpus.py fetch && python scripts/reverse_corpus.py pack");
+    }
+    run(py, [join(ROOT, "scripts", "reverse_eval.py"), "all"], { cwd: ROOT, allowFail: true });
+    run(py, [join(ROOT, "scripts", "reverse_har_bench.py"), "official"], { cwd: ROOT, allowFail: true });
+    run(py, [join(ROOT, "scripts", "reverse_gates.py")], { cwd: ROOT, allowFail: true });
+    run(py, [join(ROOT, "scripts", "reverse_scorecard.py"), "--results", join(ROOT, "reverse_results.json")], { cwd: ROOT, allowFail: true });
+    return;
+  }
+  err("Usage: nexus reverse analyse <program.exe|.dll|app.asar> | nexus reverse har <capture.har> | nexus reverse score");
+  process.exit(1);
+}
+
 function cmdTestWatch() {
   const script = join(ROOT, "scripts", "test_watch_live.ps1");
   const args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, ...process.argv.slice(3)];
@@ -1302,6 +1343,7 @@ switch (command) {
   case "audit":   cmdAudit(); break;
   case "collect": cmdCollect(); break;
   case "wake":    cmdWake(); break;
+  case "reverse": cmdReverse(); break;
   // TEMPORARY: ghost voice-entry tracer (see cmdTraceGhost).
   case "trace-ghost": cmdTraceGhost(); break;
   case "stats":

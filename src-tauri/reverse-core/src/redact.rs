@@ -21,6 +21,8 @@ fn rx(cell: &'static OnceLock<Vec<(Regex, &'static str)>>) -> &'static Vec<(Rege
             (r"\bAIza[0-9A-Za-z_-]{35}\b", "[REDACTED:GOOGLE_KEY]"),
             (r"\bsk-[A-Za-z0-9_-]{20,}", "[REDACTED:API_KEY]"),
             (r"\bgsk_[A-Za-z0-9]{20,}", "[REDACTED:API_KEY]"),
+            // credentials embedded in a URL: scheme://user:password@host
+            (r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@", "${1}[REDACTED]@"),
             // Authorization / Cookie style headers and bearer tokens
             (r"(?i)\b(authorization|proxy-authorization|x-api-key|x-auth-token|x-csrf-token)\s*[:=]\s*[^\r\n]+", "$1: [REDACTED]"),
             (r"(?i)\b(set-cookie|cookie)\s*[:=]\s*[^\r\n]+", "$1: [REDACTED]"),
@@ -146,5 +148,13 @@ mod tests {
         assert!(!looks_like_secret_value("550e8400-e29b-41d4-a716-446655440000")); // UUID
         assert!(!looks_like_secret_value("hello world"));
         assert!(!looks_like_secret_value("12345"));
+    }
+
+    #[test]
+    fn credentials_inside_urls_are_removed_but_the_host_stays() {
+        let t = redact_text("see https://admin:s3cr3tPassw0rd@db.example.test:5432/app and ftp://u:p@host/x");
+        assert!(!t.contains("s3cr3tPassw0rd") && !t.contains("u:p@"), "{t}");
+        assert!(t.contains("db.example.test") && t.contains("[REDACTED]@"), "{t}");
+        assert_eq!(redact_text("https://example.test/a:b@c"), "https://example.test/a:b@c", "an @ in the PATH is not userinfo");
     }
 }

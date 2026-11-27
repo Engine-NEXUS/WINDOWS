@@ -1560,6 +1560,16 @@ pub struct NexusSettings {
     /// depth reaches 2+. Default: true. Plans D5/D6.
     #[serde(default = "default_ghost_depth_ack")]
     pub ghost_depth_ack: bool,
+    /// Reverse Lab (static triage of programs / HAR -> OpenAPI). Master switch.
+    #[serde(default = "default_true_setting")]
+    pub reverse_lab_enabled: bool,
+    /// Ask the user's own LLM key to explain the findings (capped, redacted evidence summary only; every
+    /// statement is validated against the evidence). Ignored when no key exists.
+    #[serde(default = "default_true_setting")]
+    pub reverse_lab_explain: bool,
+    /// Largest file Reverse Lab will read, in MB.
+    #[serde(default = "default_reverse_lab_max_file_mb")]
+    pub reverse_lab_max_file_mb: u64,
     /// Drop Groq transcripts whose own segment statistics (avg_logprob /
     /// compression_ratio) mark them as unreliable. Off by default: enable it
     /// only after `voice_scorecard.py` shows a threshold that catches
@@ -1674,6 +1684,14 @@ fn default_ghost_depth_ack() -> bool {
     true
 }
 
+fn default_true_setting() -> bool {
+    true
+}
+
+fn default_reverse_lab_max_file_mb() -> u64 {
+    512
+}
+
 fn default_ghost_step_timeout_ms() -> u64 {
     15000
 }
@@ -1759,6 +1777,9 @@ impl Default for NexusSettings {
             mic_keep_alive: true,
             telegram_chat_id: String::new(),
             ghost_depth_ack: true,
+            reverse_lab_enabled: true,
+            reverse_lab_explain: true,
+            reverse_lab_max_file_mb: 512,
             stt_confidence_gate: false,
             stt_command_hints: false,
             wake_seed_offset_ms: 0,
@@ -2500,6 +2521,20 @@ pub fn read_stt_confidence_gate<R: tauri::Runtime>(app: &tauri::AppHandle<R>) ->
         .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
         .and_then(|j| j.get("sttConfidenceGate").and_then(|v| v.as_bool()))
         .unwrap_or(false)
+}
+
+/// Reverse Lab for the sidebar / settings UI: statically analyse a file the user pointed at and return the
+/// markdown report. Read-only; the file is never executed.
+#[tauri::command]
+pub async fn reverse_analyze_path<R: tauri::Runtime>(app: tauri::AppHandle<R>, path: String) -> Result<String, String> {
+    let st = crate::reverse::runner::read_settings(&app);
+    if !st.enabled {
+        return Err("Reverse Lab is switched off in settings.".to_string());
+    }
+    let p = std::path::PathBuf::from(path.trim().trim_matches('"'));
+    crate::reverse::target::validate_file(&p, st.max_mb.saturating_mul(1 << 20)).map_err(|e| e.spoken())?;
+    let out = crate::reverse::runner::analyse_resolved(&app, p, "given path", st.explain).await?;
+    Ok(out.markdown)
 }
 
 /// Read the ghostDepthAck flag (ghost FIFO queue depth-ACK, D5/D6).

@@ -3691,6 +3691,7 @@ dependencies = [
 name = "nexus_reverse"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "goblin",
  "regex",
  "serde",

@@ -168,6 +168,14 @@ def score_r8(d):
     if d.get("regressions", 0):
         st = min(st, 2)
         note += f"; {d['regressions']} existing-test REGRESSION(S)"
+    fp = d.get("first_pass_unseen")
+    if fp:
+        k = fp["set1_positives"][0] + fp["set2_positives"][0]
+        t = fp["set1_positives"][1] + fp["set2_positives"][1]
+        note += f"; on fresh phrasings the first try caught {k}/{t} ({k / t * 100:.0f}%) and {fp['set2_false_captures']} false capture(s), then the parser was widened"
+        if k / t < 0.8:
+            st = min(st, 4)  # the matrix was written with the parser; generalisation to fresh wording is unproven
+            note += " (capped at 4 until re-measured on new phrasings)"
     return st, note
 
 

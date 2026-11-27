@@ -18,5 +18,6 @@ pub mod packer;
 pub mod pe;
 pub mod rules;
 pub mod redact;
+pub mod report;
 pub mod strings;
 pub mod synth;

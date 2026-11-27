@@ -1055,6 +1055,7 @@ pub fn run() {
             commands::show_sidebar_with_confirmation,
             commands::hide_sidebar,
             commands::get_pending_sidebar_content,
+            commands::reverse_analyze_path,
             commands::show_sidebar_view,
             commands::set_sidebar_dock,
             commands::get_pending_sidebar_view,

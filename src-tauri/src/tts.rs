@@ -186,6 +186,8 @@ const CACHED_PHRASES: &[&str] = &[
     "Stopped typing, sir",
     "Opening Command Hub, sir",
     "Annotation ready, sir",
+    nexus_reverse::report::ACK_STATIC,
+    nexus_reverse::report::REFUSAL,
 ];
 
 /// Pre-synthesize cached phrases using edge-tts at boot.

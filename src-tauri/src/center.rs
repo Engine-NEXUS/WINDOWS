@@ -60,6 +60,7 @@ fn source_strength(source: &str) -> u8 {
                 | "deterministic-dictation"
                 | "deterministic-screen-analysis"
                 | "deterministic-screen-annotation"
+                | "deterministic-reverse-lab"
         )
     {
         3
@@ -94,6 +95,8 @@ pub fn is_side_effect(intent: &ParsedIntent) -> bool {
             | ParsedIntent::BrowserSearch { .. }
             | ParsedIntent::BrowserSearchFocus
             | ParsedIntent::WatchScreenEmail
+            | ParsedIntent::ReverseLab { .. }
+            | ParsedIntent::ReverseHar { .. }
             | ParsedIntent::StartDictation
             | ParsedIntent::StopDictation
             | ParsedIntent::NluResult { .. }
@@ -251,6 +254,15 @@ pub trait SubCenter: Send + Sync {
     fn confirm_kind(&self, action: &str, slots: &Value) -> ConfirmKind;
 }
 
+/// Look a sub-center up by the name `center_for` returned. Only centers that implement `SubCenter` are listed.
+pub fn sub_center_for(name: &str) -> Option<Box<dyn SubCenter>> {
+    match name {
+        "ReverseCenter" => Some(Box::new(crate::reverse::ReverseCenter)),
+        "GoogleCenter" => Some(Box::new(crate::google::GoogleCenter::new())),
+        _ => None,
+    }
+}
+
 /// Route parsed intent to its corresponding sub-center name (Feature 74 registry decision tree).
 pub fn center_for(intent: &ParsedIntent) -> &'static str {
     match intent {
@@ -298,6 +310,9 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
         | ParsedIntent::NeedMoreInfo { .. } => "GreetingCenter",
 
         ParsedIntent::WatchScreenEmail => "GoogleCenter",
+
+        ParsedIntent::ReverseLab { .. }
+        | ParsedIntent::ReverseHar { .. } => "ReverseCenter",
 
         ParsedIntent::NluResult { intent: name, .. } => {
             if name.starts_with("youtube_") {
@@ -387,6 +402,8 @@ pub fn validate(intent: &ParsedIntent, transcript: &str, has_dialog_context: boo
             slot: "more_info",
             prompt: prompt.clone(),
         },
+        ParsedIntent::ReverseLab { target } => crate::reverse::ReverseCenter.validate("reverse_lab", &serde_json::json!({ "target": target })),
+        ParsedIntent::ReverseHar { target } => crate::reverse::ReverseCenter.validate("reverse_har", &serde_json::json!({ "target": target })),
         ParsedIntent::NluResult { intent: name, slots, .. } if name == "youtube_search" => {
             let query = slots.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
             if query.is_empty() {
@@ -459,6 +476,37 @@ pub fn direct_ui<R: tauri::Runtime>(app: &tauri::AppHandle<R>, d: UiDirective) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reverse_lab_routes_to_its_own_center_and_needs_a_target() {
+        let lab = ParsedIntent::ReverseLab { target: "app".into() };
+        let har = ParsedIntent::ReverseHar { target: "latest".into() };
+        assert_eq!(center_for(&lab), "ReverseCenter");
+        assert_eq!(center_for(&har), "ReverseCenter");
+        assert!(is_side_effect(&lab) && is_side_effect(&har));
+        assert!(matches!(validate(&ParsedIntent::ReverseLab { target: " ".into() }, "analyse this app", false), Validity::NeedSlot { slot: "target", .. }));
+        assert_eq!(validate(&lab, "analyse this app", false), Validity::Ok);
+        let c = sub_center_for("ReverseCenter").expect("registered");
+        assert_eq!(c.name(), "ReverseCenter");
+        assert!(sub_center_for("NoSuchCenter").is_none());
+    }
+
+    #[test]
+    fn reverse_lab_from_ambient_speech_is_not_executed_in_ghost_mode() {
+        let lab = ParsedIntent::ReverseLab { target: "app".into() };
+        assert_eq!(
+            action_disposition(&lab, "analyse this app", "deterministic-reverse-lab", TurnOwnership::Unenrolled, true),
+            ActionDisposition::Allow
+        );
+        assert_eq!(
+            action_disposition(&lab, "analyse this app", "deterministic-reverse-lab", TurnOwnership::Uncertain, true),
+            ActionDisposition::AmbientDrop
+        );
+        assert_eq!(
+            action_disposition(&lab, "analyse this app", "deterministic-reverse-lab", TurnOwnership::Rejected, false),
+            ActionDisposition::AmbientDrop
+        );
+    }
+
     use super::*;
 
     #[test]

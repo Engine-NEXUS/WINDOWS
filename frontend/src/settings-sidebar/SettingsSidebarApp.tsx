@@ -69,6 +69,10 @@ interface Settings {
   telegramChatId?: string;
   // Ghost FIFO queue: speak "Queued, sir." once per session at depth 2+ (D5/D6)
   ghostDepthAck?: boolean;
+  // Reverse Lab (static program triage, HAR -> OpenAPI)
+  reverseLabEnabled?: boolean;
+  reverseLabExplain?: boolean;
+  reverseLabMaxFileMb?: number;
   sttConfidenceGate?: boolean;
   sttCommandHints?: boolean;
   wakeSeedOffsetMs?: number;
@@ -123,6 +127,9 @@ const DEFAULT_SETTINGS: Settings = {
   visionRace: "sequential",
   telegramChatId: "",
   ghostDepthAck: true,
+  reverseLabEnabled: true,
+  reverseLabExplain: true,
+  reverseLabMaxFileMb: 512,
   sttConfidenceGate: false,
   sttCommandHints: false,
   wakeSeedOffsetMs: 0,
@@ -663,6 +670,30 @@ function AudioTab({ settings, update }: {
             <div
               className={`settings-toggle ${settings.sttCommandHints ? "settings-toggle--on" : ""}`}
               onClick={() => update("sttCommandHints", !settings.sttCommandHints)}
+            />
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Reverse Lab</div>
+            <div className="setting-desc">Say "reverse engineer this app" or "turn the latest HAR into an API spec". Static analysis only: nothing is run, and files never leave this PC. Use only on software and traffic you are allowed to analyse.</div>
+          </div>
+          <div className="setting-control">
+            <div
+              className={`settings-toggle ${settings.reverseLabEnabled !== false ? "settings-toggle--on" : ""}`}
+              onClick={() => update("reverseLabEnabled", settings.reverseLabEnabled === false)}
+            />
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Reverse Lab: explain with my AI key</div>
+            <div className="setting-desc">Sends only a short, redacted list of findings (never the file) to your Groq/Gemini key, and keeps only statements the evidence supports. Off = rule-based explanation only.</div>
+          </div>
+          <div className="setting-control">
+            <div
+              className={`settings-toggle ${settings.reverseLabExplain !== false ? "settings-toggle--on" : ""}`}
+              onClick={() => update("reverseLabExplain", settings.reverseLabExplain === false)}
             />
           </div>
         </div>

@@ -1,6 +1,8 @@
 //! `nexus-reverse` - command-line front end for the Reverse Lab core and its measurement harness.
 //!
 //!   nexus-reverse analyse <file>            full analysis as JSON (nothing is executed)
+//!   nexus-reverse report <file>             the same markdown report the sidebar shows (rule-based explanation, no model)
+//!   nexus-reverse openapi <file.har>        inferred OpenAPI 3.0 YAML only
 //!   nexus-reverse batch <dir> [--full] [--max-mb N]
 //!                                           one JSON line per file: facts + ms (R1); --full = whole pipeline, files <= N MB (R7)
 //!   nexus-reverse fuzz <dir> [--mutants N] [--seed S] [--inject panic|slow|alloc]   (--inject = harness self-test)
@@ -108,6 +110,33 @@ fn cmd_analyse(path: &str) -> i32 {
     let a = analyze_bytes(&bytes, name);
     println!("{}", serde_json::to_string_pretty(&a).unwrap());
     0
+}
+
+fn cmd_report(path: &str) -> i32 {
+    match nexus_reverse::analyze::analyze_path(Path::new(path)) {
+        Ok(a) => {
+            let (_, md) = nexus_reverse::report::explain_and_report(&a, "given path", None);
+            println!("{md}");
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            2
+        }
+    }
+}
+
+fn cmd_openapi(path: &str) -> i32 {
+    match std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| nexus_reverse::har::analyze_har(&b)) {
+        Ok(r) => {
+            print!("{}", r.openapi_yaml);
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            2
+        }
+    }
 }
 
 fn cmd_har(path: &str) -> i32 {
@@ -876,6 +905,8 @@ fn main() {
         ),
         Some("rules") if args.iter().any(|a| a == "--selftest") => cmd_rules_selftest(),
         Some("har") if args.len() >= 2 => cmd_har(&args[1]),
+        Some("report") if args.len() >= 2 => cmd_report(&args[1]),
+        Some("openapi") if args.len() >= 2 => cmd_openapi(&args[1]),
         Some("explain-eval") if args.len() >= 2 => cmd_explain_eval(&args[1], opt("--packed").as_deref()),
         Some("recall") => cmd_recall(),
         Some("benign") if args.len() >= 2 => cmd_benign(&args[1], opt("--max-mb").and_then(|v| v.parse().ok()).unwrap_or(50)),

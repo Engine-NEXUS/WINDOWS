@@ -64,6 +64,40 @@ jobs:
           python -m unittest scripts/test_wake_data_fetch.py
           python -m unittest scripts/test_wake_data_synth.py
 
+  reverse-lab:
+    # Reverse Lab core is a standalone crate (no Tauri, no ONNX): unit tests, rule self-tests, the "never executes
+    # the target" grep gate, and the stdlib tests of the scorecard / evaluation tools.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Reverse Lab unit tests (PE / .NET / asar / rules / packer / HAR / explain / report)
+        working-directory: src-tauri/reverse-core
+        run: cargo test --lib
+
+      - name: Capability rule self-tests (every rule carries a passing example)
+        working-directory: src-tauri/reverse-core
+        run: cargo run --release --bin nexus-reverse -- rules --selftest
+
+      - name: Reverse Lab rule recall through the real pipeline
+        working-directory: src-tauri/reverse-core
+        run: cargo run --release --bin nexus-reverse -- recall
+
+      - name: Hard gates that need no measured data (never executes the target, no upload)
+        run: python scripts/reverse_gates.py --no-cargo --only never_executes,no_upload
+
+      - name: Scorecard + evaluation tool tests (stdlib)
+        run: |
+          python -m unittest scripts/test_reverse_scorecard.py
+          python -m unittest scripts/test_reverse_eval.py
+          python -m unittest scripts/test_reverse_har_bench.py
+
   windows-installer:
     runs-on: windows-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/phase-1')
