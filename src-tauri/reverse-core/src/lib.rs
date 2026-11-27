@@ -12,6 +12,7 @@ pub mod analyze;
 pub mod dotnet;
 pub mod electron;
 pub mod evidence;
+pub mod har;
 pub mod packer;
 pub mod pe;
 pub mod rules;

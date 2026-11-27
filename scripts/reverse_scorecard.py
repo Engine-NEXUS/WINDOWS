@@ -124,7 +124,7 @@ def score_r5(d):
     f1, ta, fr = d.get("f1", 0), d.get("template_acc", 0), d.get("field_recall", 0)
     worst = min(f1, ta)
     st = 5 if (worst >= 0.95 and fr >= 0.90) else 4 if (worst >= 0.90 and fr >= 0.80) else 3 if worst >= 0.80 else 2 if worst >= 0.60 else 1
-    return st, f"endpoint+method F1 {f1:.3f}, path-template accuracy {ta:.3f}, schema-field recall {fr:.3f} over {n} endpoints"
+    return st, f"endpoint+method F1 {f1:.3f}, path-template accuracy {ta:.3f}, schema-field recall {fr:.3f} over {n} ground-truth endpoints x {d.get('captures', 1)} capture(s), {d.get('requests', '?')} requests; mock APIs, not production traffic"
 
 
 def score_r6(d):

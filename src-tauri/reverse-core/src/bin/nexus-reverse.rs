@@ -8,6 +8,7 @@
 //!   nexus-reverse rules --selftest          run every rule's own examples (R3 gate)
 //!   nexus-reverse recall                    rule examples -> synthetic PEs -> the REAL pipeline; recall + negatives (R3)
 //!   nexus-reverse benign <dir> [--max-mb N] known-benign files: high-severity rule hits + packer false flags (R3, R4)
+//!   nexus-reverse har <file.har>            HAR -> inferred OpenAPI + endpoint summary as JSON (R5)
 //!   nexus-reverse packed <dir>              packed fixtures (real UPX output etc. + built-in synthetic ones): flag rate (R4)
 
 use nexus_reverse::analyze::{analyze_bytes, Analysis};
@@ -104,6 +105,19 @@ fn cmd_analyse(path: &str) -> i32 {
     let a = analyze_bytes(&bytes, name);
     println!("{}", serde_json::to_string_pretty(&a).unwrap());
     0
+}
+
+fn cmd_har(path: &str) -> i32 {
+    match std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| nexus_reverse::har::analyze_har(&b)) {
+        Ok(r) => {
+            println!("{}", serde_json::to_string(&r).unwrap());
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            2
+        }
+    }
 }
 
 fn cmd_batch(dir: &str, full: bool, max_mb: u64) -> i32 {
@@ -556,11 +570,12 @@ fn main() {
             opt("--inject").as_deref(),
         ),
         Some("rules") if args.iter().any(|a| a == "--selftest") => cmd_rules_selftest(),
+        Some("har") if args.len() >= 2 => cmd_har(&args[1]),
         Some("recall") => cmd_recall(),
         Some("benign") if args.len() >= 2 => cmd_benign(&args[1], opt("--max-mb").and_then(|v| v.parse().ok()).unwrap_or(50)),
         Some("packed") if args.len() >= 2 => cmd_packed(&args[1]),
         _ => {
-            eprintln!("usage: nexus-reverse analyse <file> | batch <dir> | fuzz <dir> [--mutants N] [--seed S] | rules --selftest | recall | benign <dir> | packed <dir>");
+            eprintln!("usage: nexus-reverse analyse <file> | batch <dir> | fuzz <dir> [--mutants N] [--seed S] | rules --selftest | recall | benign <dir> | packed <dir> | har <file.har>");
             2
         }
     };
