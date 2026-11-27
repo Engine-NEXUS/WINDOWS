@@ -188,7 +188,13 @@ pub fn program_report(a: &Analysis, how: &str, e: &Explanation) -> String {
 pub fn har_report(r: &HarResult, how: &str) -> String {
     let mut s = String::from(BANNER);
     s.push_str("# Reverse Lab - API from captured traffic\n\n");
-    s.push_str(&format!("Source: {how}. {} requests analysed ({} static assets and {} other entries skipped).\n\n", r.entries - r.skipped_static - r.skipped_other, r.skipped_static, r.skipped_other));
+    s.push_str(&format!(
+        "Source: {how}. {} requests analysed ({} static assets, {} analytics/telemetry and {} other entries skipped).\n\n",
+        r.entries.saturating_sub(r.skipped_static + r.skipped_other + r.skipped_telemetry),
+        r.skipped_static,
+        r.skipped_telemetry,
+        r.skipped_other
+    ));
     s.push_str(&format!("**{} endpoint(s)** inferred. Credentials, cookies and identifiers were dropped before inference ({} sensitive values seen); the OpenAPI document contains **no example values**.\n\n", r.endpoints.len(), r.redactions));
     if !r.endpoints.is_empty() {
         s.push_str("| Method | Path | Requests | Auth | Notes |\n|---|---|---|---|---|\n");

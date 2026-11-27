@@ -33,7 +33,7 @@
       "label": "HAR -> OpenAPI accuracy",
       "weight": 15,
       "stars": 5,
-      "note": "endpoint+method F1 0.989, path-template accuracy 0.995, schema-field recall 0.998 over 44 ground-truth endpoints x 10 capture(s), 1644 requests; mock APIs, not production traffic"
+      "note": "endpoint+method F1 0.997, path-template accuracy 0.999, schema-field recall 0.998 over 44 ground-truth endpoints x 10 capture(s), 1644 requests; mock APIs, not production traffic"
     },
     {
       "key": "r6",

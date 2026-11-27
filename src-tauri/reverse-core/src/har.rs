@@ -56,6 +56,8 @@ pub struct HarResult {
     pub entries: usize,
     pub skipped_static: usize,
     pub skipped_other: usize,
+    /// Analytics / telemetry / CDN-infrastructure requests that are not the application's API.
+    pub skipped_telemetry: usize,
     /// How many credential-bearing headers / params / body fields / values were seen and dropped.
     pub redactions: usize,
     pub warnings: Vec<String>,
@@ -108,13 +110,49 @@ fn id_kind(seg: &str) -> Option<IdKind> {
     if seg.len() >= 8 && seg.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Some(IdKind::Opaque);
     }
-    if alnum && seg.len() >= 6 && digits >= 1 && seg.bytes().any(|b| b.is_ascii_alphabetic()) {
+    // words that merely contain a version digit (`rest_v1`, `oauth2`, `sha256`, `base64`) are names, not ids:
+    // an id is mostly digits, or long and mixed
+    static NAME_VER: OnceLock<Regex> = OnceLock::new();
+    if re(&NAME_VER, r"^[A-Za-z]{3,}\d{1,3}$").is_match(seg) {
+        return None; // sha256, base64, oauth2, utf8, http2, ipv4
+    }
+    let mostly_digits = digits * 10 >= seg.len() * 3;
+    let long_mixed = seg.len() >= 12 && digits >= 2;
+    if alnum && seg.len() >= 6 && digits >= 1 && seg.bytes().any(|b| b.is_ascii_alphabetic()) && (mostly_digits || long_mixed) {
         return Some(IdKind::Opaque);
     }
     if redact::looks_like_secret_value(seg) {
         return Some(IdKind::Opaque);
     }
     None
+}
+
+/// Well-known analytics / error-reporting / CDN-infrastructure traffic that rides along in every browser capture.
+fn is_telemetry(origin: &str, path: &str) -> bool {
+    let host = origin.split("://").nth(1).unwrap_or("").split(':').next().unwrap_or("");
+    const HOSTS: &[&str] = &[
+        "google-analytics.com", "googletagmanager.com", "doubleclick.net", "googlesyndication.com", "facebook.net", "facebook.com", "hotjar.com",
+        "segment.io", "segment.com", "sentry.io", "clarity.ms", "mixpanel.com", "amplitude.com", "datadoghq.com", "newrelic.com", "nr-data.net",
+        "cloudflareinsights.com", "fullstory.com", "intercom.io", "optimizely.com", "taboola.com", "scorecardresearch.com", "quantserve.com",
+        "bugsnag.com", "logrocket.com", "heapanalytics.com", "posthog.com", "stats.g.doubleclick.net", "analytics.google.com",
+    ];
+    HOSTS.iter().any(|h| host == *h || host.ends_with(&format!(".{h}")))
+        || path.starts_with("/cdn-cgi/")
+        || path == "/g/collect"
+        || path == "/j/collect"
+        || path.starts_with("/__/") && path.contains("firebase")
+}
+
+/// `OL45804W.json` -> ("OL45804W", ".json"): data-file suffixes are part of the route, not of the id.
+fn split_data_ext(seg: &str) -> (&str, &str) {
+    for ext in [".json", ".xml", ".csv", ".txt", ".yaml", ".yml", ".html", ".php", ".aspx"] {
+        if let Some(stem) = seg.strip_suffix(ext) {
+            if !stem.is_empty() {
+                return (stem, ext);
+            }
+        }
+    }
+    (seg, "")
 }
 
 fn is_apikey_name(n: &str) -> bool {
@@ -441,13 +479,39 @@ fn extract_req(entry: &Value, redactions: &mut usize, warnings: &mut Vec<String>
     let url = rq["url"].as_str().ok_or("no url")?;
     let method = rq["method"].as_str().unwrap_or("GET").to_ascii_uppercase();
     let (origin, path, query) = split_url(url).ok_or("bad url")?;
+    if is_telemetry(&origin, &path) {
+        return Err("telemetry");
+    }
     let resp = &entry["response"];
     let status = resp["status"].as_u64().unwrap_or(0) as u16;
     let rmime = mime_base(resp["content"]["mimeType"].as_str().unwrap_or(""));
     if origin.starts_with("ws") || entry.get("_webSocketMessages").is_some() {
         return Ok(None);
     }
-    if is_static(&path, &rmime) {
+    // Browsers tell us what a request was FOR: Playwright / Chrome HARs carry `_resourceType`, and every Chromium
+    // request carries `Sec-Fetch-Dest`. Trust that over guessing from the content type (an API that answers with
+    // an empty `text/html` body, or an HTML rate-limit page, is still an API call).
+    let rtype = entry["_resourceType"].as_str().map(|x| x.to_ascii_lowercase());
+    let dest = headers(&rq["headers"]).into_iter().find(|(n, _)| n.eq_ignore_ascii_case("sec-fetch-dest")).map(|(_, v)| v.to_ascii_lowercase());
+    let by_type_api = matches!(rtype.as_deref(), Some("fetch") | Some("xhr")) || dest.as_deref() == Some("empty");
+    let by_type_asset = matches!(rtype.as_deref(), Some("document") | Some("stylesheet") | Some("script") | Some("image") | Some("font") | Some("media") | Some("manifest") | Some("texttrack") | Some("eventsource"))
+        || matches!(dest.as_deref(), Some("document") | Some("iframe") | Some("script") | Some("style") | Some("image") | Some("font") | Some("audio") | Some("video") | Some("worker") | Some("sharedworker") | Some("manifest") | Some("track"));
+    let ext_asset = {
+        let p = path.to_ascii_lowercase();
+        p.contains('.') && matches!(p.rsplit('.').next().unwrap_or(""), "js" | "mjs" | "css" | "map" | "png" | "jpg" | "jpeg" | "gif" | "svg" | "ico" | "woff" | "woff2" | "ttf" | "otf" | "webp" | "mp4" | "webm" | "mp3" | "wasm")
+    };
+    let static_req = if by_type_api {
+        ext_asset
+    } else if by_type_asset {
+        true
+    } else {
+        // no browser hint (Firefox / mitmproxy exports): fall back to the content type, but an HTML ERROR page on an
+        // API-looking path (rate limit, 404) is still an API call
+        let api_path = path.starts_with("/api") || path.contains("/api/") || path.ends_with(".json") || Regex::new(r"/v\d+(/|$)").map_or(false, |r| r.is_match(&path));
+        let html_error = rmime == "text/html" && status >= 400 && api_path;
+        is_static(&path, &rmime) && !html_error
+    };
+    if static_req {
         return Err("static");
     }
     if method == "OPTIONS" || method == "HEAD" || status == 0 {
@@ -457,11 +521,13 @@ fn extract_req(entry: &Value, redactions: &mut usize, warnings: &mut Vec<String>
 
     // path -> (literal, id kind); secret-looking segments are templated, never kept
     for seg in path.split('/').filter(|s| !s.is_empty()) {
-        let k = id_kind(seg);
-        if k.is_some() && redact::looks_like_secret_value(seg) {
+        let (stem, ext) = split_data_ext(seg);
+        let k = id_kind(stem);
+        if k.is_some() && redact::looks_like_secret_value(stem) {
             *redactions += 1;
         }
-        r.segs.push((if k.is_some() { String::new() } else { seg.to_string() }, k));
+        // an id keeps only its data-file suffix (`{id}.json`); a name keeps the whole segment
+        r.segs.push((if k.is_some() { ext.to_string() } else { seg.to_string() }, k));
     }
     // query: names + value type only
     for pair in query.split('&').filter(|p| !p.is_empty()) {
@@ -593,6 +659,8 @@ struct Hit {
     method: String,
     status: u16,
     resp_keys: BTreeSet<String>,
+    /// lowercase query-parameter names (minus generic paging/format ones): routes differ in what they accept
+    query: BTreeSet<String>,
     req: usize, // index into the request list
 }
 
@@ -607,6 +675,33 @@ struct Node {
 }
 
 const PARAM: &str = "{}";
+
+/// Query names that say nothing about WHICH route was called.
+const GENERIC_QUERY: &[&str] = &["page", "limit", "offset", "per_page", "perpage", "size", "skip", "take", "cursor", "callback", "format", "pretty", "key", "apikey", "api_key", "token", "_", "v", "lang", "locale", "fields", "sort", "order"];
+
+fn deep_query(n: &Node) -> BTreeSet<String> {
+    let mut q = own_query(n);
+    for c in n.children.values() {
+        q.extend(deep_query(c));
+    }
+    q
+}
+
+fn own_query(n: &Node) -> BTreeSet<String> {
+    n.hits.iter().flat_map(|h| h.query.iter().cloned()).collect()
+}
+
+/// Two route words are only the same parameter if they accept the same kind of query (`search.php?s=`,
+/// `lookup.php?i=`, `filter.php?c=` are three routes even when they all answer `{"meals": ...}`).
+fn query_compatible(a: &BTreeSet<String>, b: &BTreeSet<String>) -> bool {
+    if a.is_empty() && b.is_empty() {
+        return true;
+    }
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    a.intersection(b).count() as f64 / a.union(b).count() as f64 >= 0.5
+}
 
 fn merge_nodes(into: &mut Node, from: Node) {
     into.hits.extend(from.hits);
@@ -657,13 +752,13 @@ fn deep_methods(n: &Node, out: &mut BTreeSet<String>) {
 ///     near-identical shapes (`/user/starred/{org}/{repo}`).
 /// Runs TOP-DOWN so that a folded parent exposes its (now pooled) children to the next level.
 fn collapse(node: &mut Node) {
-    let words: Vec<String> = node.children.keys().filter(|k| k.as_str() != PARAM).cloned().collect();
+    let words: Vec<String> = node.children.keys().filter(|k| !k.starts_with(PARAM)).cloned().collect();
     if words.len() >= 3 {
         let mut fold: BTreeSet<String> = BTreeSet::new();
         // A
         let mut cont: BTreeMap<String, usize> = BTreeMap::new();
         for w in &words {
-            for k in node.children[w].children.keys().filter(|k| k.as_str() != PARAM) {
+            for k in node.children[w].children.keys().filter(|k| !k.starts_with(PARAM)) {
                 *cont.entry(k.clone()).or_default() += 1;
             }
         }
@@ -680,8 +775,13 @@ fn collapse(node: &mut Node) {
             let shaped: Vec<(&String, BTreeSet<String>)> = leaves.iter().filter_map(|w| node_resp_keys(&node.children[*w], method).map(|k| (*w, k))).collect();
             if shaped.len() >= 3 {
                 let mut best: Vec<&String> = Vec::new();
-                for (_, k0) in &shaped {
-                    let g: Vec<&String> = shaped.iter().filter(|(_, k)| resp_similarity(k0, k) >= 0.8).map(|(w, _)| *w).collect();
+                for (w0, k0) in &shaped {
+                    let q0 = own_query(&node.children[*w0]);
+                    let g: Vec<&String> = shaped
+                        .iter()
+                        .filter(|(w, k)| resp_similarity(k0, k) >= 0.8 && query_compatible(&q0, &own_query(&node.children[*w])))
+                        .map(|(w, _)| *w)
+                        .collect();
                     if g.len() > best.len() {
                         best = g;
                     }
@@ -691,12 +791,13 @@ fn collapse(node: &mut Node) {
                 }
             }
         }
-        // C
+        // C: words that only continue with leaves (word or id) and whose answers, per method, share a JSON shape.
+        //    Needs real evidence: >= 3 words, each with at least one comparable (non-empty) shape, none contradicting.
         let c_words: Vec<&String> = words
             .iter()
             .filter(|w| {
                 let n = &node.children[*w];
-                !n.children.is_empty() && n.hits.is_empty() && n.children.iter().all(|(k, c)| k.as_str() != PARAM && c.children.is_empty())
+                !n.children.is_empty() && n.hits.is_empty() && n.children.values().all(|c| c.children.is_empty())
             })
             .collect();
         if c_words.len() >= 3 {
@@ -706,16 +807,24 @@ fn collapse(node: &mut Node) {
             }
             let mut good: Vec<&String> = Vec::new();
             for w0 in &c_words {
+                let q0 = deep_query(&node.children[*w0]);
                 let g: Vec<&String> = c_words
                     .iter()
                     .filter(|w| {
-                        methods.iter().all(|m| {
+                        let mut compared = 0;
+                        for m in &methods {
                             let (mut a, mut b) = (BTreeSet::new(), BTreeSet::new());
                             deep_resp(&node.children[*w0], m, &mut a);
                             deep_resp(&node.children[**w], m, &mut b);
-                            // a method seen under only one of the two words is no evidence either way
-                            a.is_empty() || b.is_empty() || resp_similarity(&a, &b) >= 0.8
-                        })
+                            if a.is_empty() || b.is_empty() {
+                                continue; // no evidence either way for this method
+                            }
+                            if resp_similarity(&a, &b) < 0.8 {
+                                return false;
+                            }
+                            compared += 1;
+                        }
+                        compared >= 1 && query_compatible(&q0, &deep_query(&node.children[**w]))
                     })
                     .copied()
                     .collect();
@@ -728,18 +837,97 @@ fn collapse(node: &mut Node) {
             }
         }
         if fold.len() >= 3 {
-            let mut target = node.children.remove(PARAM).unwrap_or_default();
+            let exts: BTreeSet<&str> = fold.iter().map(|w| split_data_ext(w).1).collect();
+            let ext = if exts.len() == 1 { exts.iter().next().copied().unwrap_or("") } else { "" };
+            let key = format!("{PARAM}{ext}");
+            let mut target = node.children.remove(&key).unwrap_or_default();
             for w in fold {
                 if let Some(c) = node.children.remove(&w) {
                     target.words.insert(w);
                     merge_nodes(&mut target, c);
                 }
             }
-            node.children.insert(PARAM.to_string(), target);
+            node.children.insert(key, target);
         }
     }
+    fold_lone_words(node);
     for c in node.children.values_mut() {
         collapse(c);
+    }
+}
+
+/// Route words that are never parameter VALUES.
+const RESERVED: &[&str] = &[
+    "me", "self", "current", "latest", "new", "search", "all", "list", "count", "summary", "status", "health", "healthz", "login", "logout",
+    "register", "add", "create", "edit", "delete", "update", "categories", "popular", "top", "recent", "random", "export", "import", "batch",
+    "bulk", "stats", "metrics", "config", "info", "version", "ping", "whoami", "session", "sessions", "token", "refresh", "verify", "upload",
+];
+
+fn own_hits_by_method(n: &Node) -> BTreeMap<&str, Vec<&Hit>> {
+    let mut m: BTreeMap<&str, Vec<&Hit>> = BTreeMap::new();
+    for h in &n.hits {
+        m.entry(h.method.as_str()).or_default().push(h);
+    }
+    m
+}
+
+/// A single leftover word next to an existing `{}` parameter (`/type/3`, `/type/4`, `/type/fire`) belongs to that
+/// parameter when everything it returned is compatible with what the parameter returned: same methods, and for
+/// successful JSON bodies a near-identical shape (error-only or empty responses carry no evidence against).
+fn fold_lone_words(node: &mut Node) {
+    let Some(param) = node.children.get(PARAM) else { return };
+    if param.hits.len() < 2 && param.words.len() < 3 && param.children.is_empty() {
+        return;
+    }
+    let pm = own_hits_by_method(param);
+    let mut fold: Vec<String> = Vec::new();
+    let established = param.words.len() >= 3 || param.hits.len() >= 3;
+    let pq = own_query(param);
+    for (w, c) in &node.children {
+        if w.starts_with(PARAM) || RESERVED.contains(&w.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        if !c.children.is_empty() {
+            // a word that continues with the SAME sub-routes the established parameter has (`/breed/bulldog/list`
+            // next to `/breed/{}/list`) is one more value of it
+            let lits: Vec<&String> = c.children.keys().filter(|k| !k.starts_with(PARAM)).collect();
+            if established && !lits.is_empty() && lits.len() == c.children.len() && lits.iter().all(|k| param.children.contains_key(*k)) {
+                fold.push(w.clone());
+            }
+            continue;
+        }
+        if c.hits.is_empty() || param.hits.len() < 2 || !query_compatible(&own_query(c), &pq) {
+            continue;
+        }
+        let wm = own_hits_by_method(c);
+        let compatible = wm.iter().all(|(method, hits)| {
+            let Some(phits) = pm.get(method) else { return false };
+            // a word that only ever returned errors (404 for an unknown username) joins the parameter only if it was
+            // seen ONCE - the same literal hit repeatedly is far more likely a real route that happens to fail
+            // (the same goes for a word whose successful answers are all empty: no shape, no evidence)
+            let shapeless = |h: &&Hit| !(200..300).contains(&h.status) || h.resp_keys.is_empty();
+            if hits.len() > 1 && hits.iter().any(|h| shapeless(&h)) {
+                return false;
+            }
+            hits.iter().all(|h| {
+                if !(200..300).contains(&h.status) || h.resp_keys.is_empty() {
+                    return true;
+                }
+                let shaped: Vec<&&Hit> = phits.iter().filter(|p| (200..300).contains(&p.status) && !p.resp_keys.is_empty()).collect();
+                shaped.is_empty() || shaped.iter().any(|p| resp_similarity(&h.resp_keys, &p.resp_keys) >= 0.8)
+            })
+        });
+        if compatible {
+            fold.push(w.clone());
+        }
+    }
+    for w in fold {
+        if let Some(c) = node.children.remove(&w) {
+            if let Some(t) = node.children.get_mut(PARAM) {
+                t.words.insert(w);
+                merge_nodes(t, c);
+            }
+        }
     }
 }
 
@@ -759,7 +947,8 @@ fn walk(node: &Node, origin: &str, segs: &mut Vec<String>, names: &mut Vec<Strin
         out.push(Endpoint { host: origin.to_string(), method: m.to_string(), path: format!("/{}", segs.join("/")), hit_reqs: reqs });
     }
     for (k, c) in &node.children {
-        if k == PARAM {
+        if k.starts_with(PARAM) {
+            let suffix = &k[PARAM.len()..];
             let prev = segs.last().cloned().unwrap_or_default();
             let numeric_like = c.words.is_empty();
             let base = if prev.is_empty() || prev.starts_with('{') { "id".to_string() } else { camel(&singular(&prev)) };
@@ -770,7 +959,7 @@ fn walk(node: &Node, origin: &str, segs: &mut Vec<String>, names: &mut Vec<Strin
                 n += 1;
             }
             names.push(name.clone());
-            segs.push(format!("{{{name}}}"));
+            segs.push(format!("{{{name}}}{suffix}"));
             walk(c, origin, segs, names, out);
             segs.pop();
             names.pop();
@@ -818,6 +1007,7 @@ pub fn analyze_har(bytes: &[u8]) -> Result<HarResult, String> {
                 }
             }
             Err("static") => res.skipped_static += 1,
+            Err("telemetry") => res.skipped_telemetry += 1,
             Err(_) => res.skipped_other += 1,
         }
     }
@@ -834,13 +1024,19 @@ pub fn analyze_har(bytes: &[u8]) -> Result<HarResult, String> {
     for (i, r) in reqs.iter().enumerate() {
         let mut n = tries.entry(r.origin.clone()).or_default();
         for (lit, kind) in &r.segs {
-            let key = if kind.is_some() { PARAM.to_string() } else { lit.clone() };
+            let key = if kind.is_some() { format!("{PARAM}{lit}") } else { lit.clone() };
             n = n.children.entry(key).or_default();
             if let Some(k) = kind {
                 n.kinds.insert(*k);
             }
         }
-        n.hits.push(Hit { method: r.method.clone(), status: r.status, resp_keys: r.resp_keys.clone(), req: i });
+        n.hits.push(Hit {
+            method: r.method.clone(),
+            status: r.status,
+            resp_keys: r.resp_keys.clone(),
+            query: r.query.iter().map(|(k, _)| k.to_ascii_lowercase()).filter(|k| !GENERIC_QUERY.contains(&k.as_str())).collect(),
+            req: i,
+        });
     }
     // root-level hits (path "/") live on the origin node itself
     let mut eps: Vec<Endpoint> = Vec::new();
@@ -1356,5 +1552,120 @@ mod tests {
             assert!(doc.get(k).is_some(), "missing {k}");
         }
         assert_eq!(doc["components"]["securitySchemes"]["basicAuth"]["scheme"], "basic");
+    }
+
+    #[test]
+    fn browser_resource_type_decides_what_is_an_api_call() {
+        let mut fetch_html = entry("GET", "https://api.test/status/200", 200, &[], None, None);
+        fetch_html["_resourceType"] = json!("fetch");
+        fetch_html["response"]["content"]["mimeType"] = json!("text/html; charset=utf-8");
+        let mut doc = entry("GET", "https://api.test/about", 200, &[], None, Some("{}"));
+        doc["_resourceType"] = json!("document");
+        let mut script = entry("GET", "https://api.test/api/data", 200, &[], None, Some("{}"));
+        script["request"]["headers"] = json!([{"name": "Sec-Fetch-Dest", "value": "script"}]);
+        let r = analyze_har(&har(vec![fetch_html, doc, script])).unwrap();
+        let paths: Vec<&str> = r.endpoints.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["/status/{statusId}"], "{paths:?}");
+        assert_eq!(r.skipped_static, 2);
+    }
+
+    #[test]
+    fn html_error_page_on_an_api_path_is_still_an_api_call_without_browser_hints() {
+        let mut e = entry("GET", "https://api.test/api/v1/limited", 429, &[], None, None);
+        e["response"]["content"]["mimeType"] = json!("text/html");
+        let r = analyze_har(&har(vec![e])).unwrap();
+        assert_eq!(r.endpoints.len(), 1);
+    }
+
+    #[test]
+    fn version_words_are_names_not_ids() {
+        for w in ["rest_v1", "oauth2", "sha256", "base64", "api_v2", "utf8"] {
+            assert_eq!(id_kind(w), None, "{w}");
+        }
+        for w in ["8863", "a1b2c3d4e5f6", "order42x7", "3f2504e0-4f89-11d3-9a0c-0305e82c3301"] {
+            assert!(id_kind(w).is_some(), "{w}");
+        }
+    }
+
+    #[test]
+    fn a_lone_word_joins_an_existing_parameter_only_when_its_responses_agree() {
+        let ok = |m: &str, u: &str, body: &str| entry(m, u, 200, &[], None, Some(body));
+        let shape = |n: u32| format!(r#"{{"id":{n},"name":"x","power":3}}"#);
+        let r = analyze_har(&har(vec![
+            ok("GET", "https://api.test/type/3", &shape(3)),
+            ok("GET", "https://api.test/type/4", &shape(4)),
+            ok("GET", "https://api.test/type/fire", &shape(5)),
+            ok("GET", "https://api.test/type/search", r#"{"results":[],"total":0}"#),
+            ok("GET", "https://api.test/type/me", &shape(6)),
+        ]))
+        .unwrap();
+        let mut paths: Vec<&str> = r.endpoints.iter().map(|e| e.path.as_str()).collect();
+        paths.sort();
+        // `fire` joins {type}; `search` (different shape) and `me` (reserved route word) stay literal
+        assert_eq!(paths, vec!["/type/me", "/type/search", "/type/{type}"], "{paths:?}");
+    }
+
+    #[test]
+    fn a_repeated_erroring_word_is_a_route_not_a_parameter_value() {
+        let ok = |u: &str, n: u32| entry("GET", u, 200, &[], None, Some(&format!(r#"{{"id":{n},"name":"x"}}"#)));
+        let err = |u: &str| entry("GET", u, 500, &[], None, None);
+        let r = analyze_har(&har(vec![
+            ok("https://api.test/pet/1", 1),
+            ok("https://api.test/pet/2", 2),
+            err("https://api.test/pet/findByTags?tags=a"),
+            err("https://api.test/pet/findByTags?tags=b"),
+            err("https://api.test/pet/findByTags?tags=c"),
+            err("https://api.test/pet/ghost"),
+        ]))
+        .unwrap();
+        let mut paths: Vec<&str> = r.endpoints.iter().map(|e| e.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["/pet/findByTags", "/pet/{pet}"], "{paths:?}");
+    }
+
+    #[test]
+    fn ids_and_folded_words_keep_their_data_file_suffix() {
+        let ok = |u: &str, n: u32| entry("GET", u, 200, &[], None, Some(&format!(r#"{{"key":"k{n}","title":"t"}}"#)));
+        let r = analyze_har(&har(vec![
+            ok("https://api.test/works/OL45804W.json", 1),
+            ok("https://api.test/works/OL893415W.json", 2),
+            ok("https://api.test/subjects/love.json", 3),
+            ok("https://api.test/subjects/science.json", 4),
+            ok("https://api.test/subjects/history.json", 5),
+        ]))
+        .unwrap();
+        let mut paths: Vec<&str> = r.endpoints.iter().map(|e| e.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["/subjects/{subject}.json", "/works/{workId}.json"], "{paths:?}");
+    }
+
+    #[test]
+    fn a_word_continuing_with_the_same_subroutes_joins_an_established_parameter() {
+        let ok = |u: &str| entry("GET", u, 200, &[], None, Some(r#"{"message":["x"],"status":"success"}"#));
+        let r = analyze_har(&har(vec![
+            ok("https://api.test/breed/hound/images"),
+            ok("https://api.test/breed/beagle/images"),
+            ok("https://api.test/breed/poodle/images"),
+            ok("https://api.test/breed/hound/list"),
+            ok("https://api.test/breed/terrier/list"),
+            ok("https://api.test/breed/bulldog/list"),
+        ]))
+        .unwrap();
+        let mut paths: Vec<&str> = r.endpoints.iter().map(|e| e.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["/breed/{breed}/images", "/breed/{breed}/list"], "{paths:?}");
+    }
+
+    #[test]
+    fn analytics_and_cdn_telemetry_are_not_endpoints() {
+        let r = analyze_har(&har(vec![
+            entry("POST", "https://api.test/cdn-cgi/rum?x=1", 204, &[], Some("{}"), None),
+            entry("GET", "https://www.google-analytics.com/g/collect?v=2", 204, &[], None, None),
+            entry("POST", "https://o123.ingest.sentry.io/api/1/envelope/", 200, &[], Some("{}"), None),
+            entry("GET", "https://api.test/real", 200, &[], None, Some("{}")),
+        ]))
+        .unwrap();
+        assert_eq!(r.endpoints.len(), 1);
+        assert_eq!(r.skipped_telemetry, 3);
     }
 }
