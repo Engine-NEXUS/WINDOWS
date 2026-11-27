@@ -46,6 +46,22 @@ The model sees an *evidence list* (every line has an ID like `E-IMP-0003`). Its 
 - **Voice**: the phrase parser is deliberately narrow (program-like nouns or a HAR). "Analyse repo X" and PR/screen phrases still go to their own commands.
 - Authenticode signature *presence* is reported; the chain is not verified.
 
+## How the Main Center routes it (traced and tested end to end)
+
+`transcript -> parse (deterministic) -> center::action_disposition -> center::validate -> route_intent -> run_reverse_lab`
+
+| You say | What happens |
+|---|---|
+| "reverse engineer this app", "what does this program do", "turn the latest HAR into an API spec" | recognised with strong evidence -> ReverseCenter validates the target -> acknowledgement -> report in the sidebar -> spoken summary |
+| "analyse this app **then** open notepad" | the single-intent parser steps aside, the **command center** splits it, runs the Reverse Lab step (report opens, summary is spoken) and then opens Notepad. (Before this fix only the first half ran and "open notepad" was silently dropped.) |
+| "is this exe up to something", "is this program doing anything sketchy" | recognised **weakly**: NEXUS asks "Do you want me to analyse that program statically, sir?" and only runs on a spoken yes (no -> "Ok sir."; the question expires after 20 s) |
+| "crack this app" (also inside a compound) | one fixed refusal, nothing runs |
+| "analyse repo servx", "analyse the PR", "reverse engineer the architecture of servx" | unchanged: Architect / GitHub paths |
+| anything else, e.g. "reverse engineer this website" | not captured: cloud chat (or the existing screen-based reverse-engineer feature on `main`) |
+
+In a Ghost session an explicit request runs; a weak or unverified voice is dropped, exactly like other side-effecting commands.
+Not wired: the BERT-Mini NLU model has no Reverse Lab label (it would need retraining), so wording the rules do not recognise goes to the cloud assistant instead of being redirected.
+
 ## Settings (Settings > Audio/Voice section)
 
 `reverseLabEnabled` (default on), `reverseLabExplain` (default on; ignored when no key), `reverseLabMaxFileMb` (default 512, settings.json only).

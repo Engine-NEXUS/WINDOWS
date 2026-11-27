@@ -30,7 +30,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;use tauri::{AppHandle, Emitter, Manager, Runtime};
 
@@ -221,8 +221,30 @@ fn ack_for(intent: &ParsedIntent) -> String {
     }
 }
 
+/// A weakly-matched Reverse Lab request ("is this exe sketchy") waiting for a spoken yes/no (target, asked-at).
+static PENDING_REVERSE: std::sync::Mutex<Option<(String, bool, Instant)>> = std::sync::Mutex::new(None);
+const REVERSE_CONFIRM_WINDOW: Duration = Duration::from_secs(20);
+
+fn is_yes(t: &str) -> bool {
+    let t = t.trim().trim_end_matches(['.', '!', ',']).to_lowercase();
+    matches!(t.as_str(), "yes" | "yeah" | "yep" | "yup" | "sure" | "ok" | "okay" | "please" | "do it" | "go ahead" | "yes please" | "correct" | "affirmative" | "proceed")
+}
+
+fn is_no(t: &str) -> bool {
+    let t = t.trim().trim_end_matches(['.', '!', ',']).to_lowercase();
+    matches!(t.as_str(), "no" | "nope" | "nah" | "cancel" | "never mind" | "nevermind" | "stop" | "don't" | "no thanks")
+}
+
 fn clarification_for(intent: &ParsedIntent) -> (String, String) {
     match intent {
+        ParsedIntent::ReverseLab { .. } => (
+            "Do you want me to analyse that program statically, sir? Nothing will be run.".to_string(),
+            "reverse_confirm".to_string(),
+        ),
+        ParsedIntent::ReverseHar { .. } => (
+            "Do you want me to turn that capture into an API spec, sir?".to_string(),
+            "reverse_confirm".to_string(),
+        ),
         ParsedIntent::AnalyseRepo { .. }
         | ParsedIntent::AnalysePr { .. }
         | ParsedIntent::AnalyseLatestPr { .. }
@@ -657,6 +679,24 @@ pub async fn process_transcript<R: Runtime>(
         transcript.chars().take(80).collect::<String>()
     );
 
+    // 0. A pending "analyse that program?" question gets its yes/no answer here, before any parsing.
+    {
+        let pending = PENDING_REVERSE.lock().unwrap().take();
+        if let Some((target, har_mode, at)) = pending {
+            if at.elapsed() < REVERSE_CONFIRM_WINDOW {
+                if is_yes(&transcript) {
+                    return run_reverse_lab(app, target, har_mode).await;
+                }
+                if is_no(&transcript) {
+                    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                    speak_line(&app, "Ok sir.".to_string(), &request_id);
+                    clear_active_request(&request_id);
+                    return Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true });
+                }
+            }
+        }
+    }
+
     // 1. Parse intent: deterministic (fast, <1ms) → brain (admin) → NLU → Unknown
     // The full pipeline ensures that phrases trained in BERT-Mini or classified
     // by the Qwen brain are actually used for routing, not just observed.
@@ -745,6 +785,15 @@ pub async fn process_transcript<R: Runtime>(
             });
         }
         crate::center::ActionDisposition::Clarify => {
+            match &intent {
+                ParsedIntent::ReverseLab { target } if target != "refuse" => {
+                    *PENDING_REVERSE.lock().unwrap() = Some((target.clone(), false, Instant::now()));
+                }
+                ParsedIntent::ReverseHar { target } => {
+                    *PENDING_REVERSE.lock().unwrap() = Some((target.clone(), true, Instant::now()));
+                }
+                _ => {}
+            }
             let (prompt, slot) = clarification_for(&intent);
             return speak_prompt_and_hold(&app, prompt, slot).await;
         }
@@ -5437,6 +5486,77 @@ mod tests {
             raw: "blah".to_string(),
         });
         assert!(ack.ends_with("sir."), "{ack}");
+    }
+
+    /// The whole Main-Center decision for a spoken line, minus audio: parse -> disposition -> route / plan.
+    fn decide(p: &str, own: crate::voice_profile::TurnOwnership, ghost: bool) -> (ParsedIntent, crate::center::ActionDisposition, Option<Vec<String>>) {
+        let parsed = parse_deterministic(p);
+        let src = parsed.as_ref().map(|r| r.source.clone()).unwrap_or_default();
+        let intent = parsed.map(|r| r.intent).unwrap_or(ParsedIntent::Unknown { raw: p.into() });
+        let disp = crate::center::action_disposition(&intent, p, &src, own, ghost);
+        let plan = crate::command_center::build_plan(p, "t").map(|pl| pl.steps.iter().map(|s| crate::intent_parser::intent_to_label(&s.intent).to_string()).collect());
+        (intent, disp, plan)
+    }
+
+    #[test]
+    fn main_center_redirects_explicit_reverse_requests_and_asks_about_loose_ones() {
+        use crate::center::ActionDisposition::*;
+        use crate::voice_profile::TurnOwnership::Unenrolled;
+        for p in ["reverse engineer this app", "reverse engineering this app", "nexus what does this program do", "turn the latest har into an api spec"] {
+            let (i, d, _) = decide(p, Unenrolled, false);
+            assert!(matches!(i, ParsedIntent::ReverseLab { .. } | ParsedIntent::ReverseHar { .. }), "{p}: {i:?}");
+            assert_eq!(d, Allow, "{p}");
+            assert_eq!(route_intent(&i), Subsystem::LocalCommand);
+        }
+        // loose wording: recognised, but only a question is asked - nothing runs without a yes
+        for p in ["is this exe up to something", "can you tell me if this program is doing anything sketchy", "i think this installer is shady"] {
+            let (i, d, _) = decide(p, Unenrolled, false);
+            assert!(matches!(i, ParsedIntent::ReverseLab { .. }), "{p}: {i:?}");
+            assert_eq!(d, Clarify, "{p}");
+        }
+        // near-misses stay with their own owners
+        for p in ["analyse repo servx", "is this repo sketchy", "reverse engineer the architecture of servx"] {
+            let (i, _, _) = decide(p, Unenrolled, false);
+            assert!(!matches!(i, ParsedIntent::ReverseLab { .. } | ParsedIntent::ReverseHar { .. }), "{p}: {i:?}");
+        }
+    }
+
+    #[test]
+    fn compound_requests_reach_the_command_center_with_a_reverse_step() {
+        use crate::voice_profile::TurnOwnership::Unenrolled;
+        for (p, want) in [
+            ("analyse this app then open notepad", vec!["reverse_lab", "open_app"]),
+            ("reverse engineer this app and then open chrome", vec!["reverse_lab", "open_app"]),
+            ("open chrome then analyse this app", vec!["open_app", "reverse_lab"]),
+            ("turn the latest har into an api spec then open vs code", vec!["reverse_har", "open_app"]),
+        ] {
+            let (i, _, plan) = decide(p, Unenrolled, false);
+            // the single-intent path must NOT swallow the compound (it used to execute only the first half)
+            assert!(!matches!(i, ParsedIntent::ReverseLab { .. } | ParsedIntent::ReverseHar { .. }), "{p}: single-intent parse stole it: {i:?}");
+            assert_eq!(plan.unwrap_or_default(), want, "{p}");
+        }
+        // the refusal still wins inside a compound
+        let (i, _, _) = decide("crack this app then open chrome", Unenrolled, false);
+        assert!(matches!(i, ParsedIntent::ReverseLab { ref target } if target == "refuse"), "{i:?}");
+    }
+
+    #[test]
+    fn reverse_steps_are_supported_by_the_command_center_executor() {
+        // `to_local_intent` has no mapping for them: they must be handled before it, in execute_step
+        assert!(crate::command_center::to_local_intent(&ParsedIntent::ReverseLab { target: "app".into() }).is_none());
+        let src = include_str!("command_center.rs");
+        assert!(src.contains("ParsedIntent::ReverseLab { target } | ParsedIntent::ReverseHar { target }"));
+    }
+
+    #[test]
+    fn yes_and_no_words_for_the_pending_reverse_question() {
+        for y in ["yes", "Yeah.", "sure", "go ahead", "yes please"] {
+            assert!(is_yes(y) && !is_no(y), "{y}");
+        }
+        for n in ["no", "Nope.", "cancel", "never mind"] {
+            assert!(is_no(n) && !is_yes(n), "{n}");
+        }
+        assert!(!is_yes("open chrome") && !is_no("open chrome"));
     }
 
     #[test]

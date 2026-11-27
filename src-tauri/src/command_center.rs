@@ -525,6 +525,26 @@ pub(crate) async fn execute_step<R: Runtime>(
 
     match step.subsystem {
         Subsystem::LocalCommand => {
+            // Reverse Lab steps ("analyse this app, then open notepad") run through the same runner as the
+            // single-intent path; the report opens in the sidebar and the spoken summary joins the merged result.
+            if let ParsedIntent::ReverseLab { target } | ParsedIntent::ReverseHar { target } = &step.intent {
+                let har_mode = matches!(step.intent, ParsedIntent::ReverseHar { .. });
+                if target == "refuse" {
+                    return StepOutcome::Done(mk(StepStatus::Failed, nexus_reverse::report::REFUSAL.to_string(), Some("refused".to_string())));
+                }
+                let res = if har_mode {
+                    crate::reverse::runner::run_har(app, target).await
+                } else {
+                    crate::reverse::runner::run_program(app, target).await
+                };
+                return match res {
+                    Ok(o) => {
+                        let _ = crate::commands::show_sidebar_with_content(app.clone(), o.title.clone(), o.markdown.clone()).await;
+                        StepOutcome::Done(mk(StepStatus::Succeeded, o.spoken, None))
+                    }
+                    Err(spoken) => StepOutcome::Done(mk(StepStatus::Failed, spoken.clone(), Some(spoken))),
+                };
+            }
             let Some(local) = to_local_intent(&step.intent) else {
                 return StepOutcome::Done(mk(
                     StepStatus::Unsupported,

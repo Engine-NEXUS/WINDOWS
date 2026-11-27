@@ -2047,6 +2047,11 @@ fn parse_reverse_lab_command(text: &str) -> Option<ParseResult> {
             source: "deterministic-reverse-lab".to_string(),
         });
     }
+    // "X then Y" belongs to the command center, which splits it and parses each half (this parser would
+    // otherwise match the first half by prefix and silently drop the rest).
+    if crate::command_center::split_compound(&t).len() >= 2 {
+        return None;
+    }
     // Things other parsers own.
     if regex_captures(
         &t,
@@ -2102,7 +2107,7 @@ fn parse_reverse_lab_command(text: &str) -> Option<ParseResult> {
     };
     // explicit program path / file name with a verb: "analyse C:\\x\\foo.exe", "what does setup.exe do"
     let ext = r"(?:exe|dll|sys|msi|asar|ocx|scr)";
-    let verb = r"(?:analy[sz]e|reverse[- ]?engineer|reverse|inspect|triage|examine|investigate|statically\s+analy[sz]e|break\s+down|dissect|pick\s+apart|take\s+apart|take\s+a\s+look\s+at|have\s+a\s+look\s+at|look\s+at|scan|walk\s+me\s+through)";
+    let verb = r"(?:analy[sz]e|reverse[- ]?engineer(?:ing)?|reverse|inspect|triage|examine|investigate|statically\s+analy[sz]e|break\s+down|dissect|pick\s+apart|take\s+apart|take\s+a\s+look\s+at|have\s+a\s+look\s+at|look\s+at|scan|walk\s+me\s+through)";
     if let Some(c) = regex_captures(&t, &format!(r"\b{verb}\b\s+([a-z]:\\[^\s]+\.{ext})\b")) {
         return Some(mk(format!("path:{}", &c[1])));
     }
@@ -2131,6 +2136,18 @@ fn parse_reverse_lab_command(text: &str) -> Option<ParseResult> {
     // "is this app safe / a virus" -> triage (the report says plainly that it gives leads, not a verdict)
     if regex_captures(&t, &format!(r"^is\s+(?:{det}\s+)?{recent}{noun}\b[^;]*\b(?:safe|a\s+virus|malware|malicious|legit|legitimate|dangerous)\b")).is_some() {
         return Some(mk(target_of(&t)));
+    }
+    // Looser phrasings ("is this exe up to something", "can you tell me if this program is doing anything
+    // sketchy") are recognised but weakly: source "deterministic-fuzzy" means the Main Center asks "analyse that
+    // program?" and waits for a yes before doing anything.
+    if regex_captures(&t, &format!(r"\b(?:this|that|the|my)\s+(?:{recent})?{noun}\b")).is_some()
+        && regex_captures(
+            &t,
+            r"\b(?:sketchy|suspicious|shady|fishy|spying|spy|hiding|malicious|dangerous|risky|trojan|virus|malware|up\s+to|behav\w+|really\s+does|actually\s+does|phones?\s+home|tracking\s+me|what\s+it\s+does|how\s+it\s+works|doing\s+anything|is\s+it\s+safe)\b",
+        )
+        .is_some()
+    {
+        return Some(ParseResult { intent: ParsedIntent::ReverseLab { target: target_of(&t) }, confidence: 0.6, source: "deterministic-fuzzy".to_string() });
     }
     None
 }
