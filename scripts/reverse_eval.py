@@ -13,6 +13,8 @@ R2  mutation fuzzing (truncations, bit flips, header lies) of real files: panics
 R3  capability rules: self-tests, recall of rule examples through the REAL pipeline (synthetic PEs), and the
     high-severity false-positive rate over the real (benign) corpus.
 R4  packing honesty: genuine UPX output (+ name-scrubbed variants) and built-in synthetic fixtures vs. the clean corpus.
+R6  evidence-bound explanation: adversarial mock-LLM outputs vs the claim validator (also feeds R4's
+    "a packed file never gets an unqualified explanation" check).
 R7  speed + footprint over the corpus: p95 parse time for files <= 50 MB and peak RSS growth.
 """
 
@@ -312,6 +314,17 @@ def run_packed(corpus, binary, clean):
     }}
 
 
+def run_explain(corpus, binary):
+    cmd = [str(binary), "explain-eval", str(Path(corpus) / "pe")]
+    if (Path(corpus) / "packed").exists():
+        cmd += ["--packed", str(Path(corpus) / "packed")]
+    d = _json_line(subprocess.run(cmd, capture_output=True, text=True))
+    r6 = {k: d[k] for k in ("outputs", "files", "unsupported_n", "dropped_k", "supported_n", "supported_kept", "uncited_kept", "families")}
+    r6["unsupported_kept"] = d["unsupported_kept"]
+    r6["wrongly_dropped_examples"] = d["wrongly_dropped"][:8]
+    return {"r6": r6, "_unqualified": {"unqualified": d["unqualified"], "packed_checked": d["packed_checked"]}}
+
+
 def merge(out_path, new):
     p = Path(out_path)
     cur = json.loads(p.read_text()) if p.exists() else {}
@@ -322,7 +335,7 @@ def merge(out_path, new):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["pe", "fuzz", "rules", "packed", "all"])
+    ap.add_argument("cmd", choices=["pe", "fuzz", "rules", "packed", "explain", "all"])
     ap.add_argument("--corpus", default=str(ROOT / "reverse_corpus"))
     ap.add_argument("--bin", default=str(DEFAULT_BIN))
     ap.add_argument("--out", default=str(ROOT / "reverse_results.json"))
@@ -349,6 +362,17 @@ def main(argv=None):
             if prev.get("unqualified") is not None:
                 r4["r4"]["unqualified"] = prev["unqualified"]
             res.update(r4)
+    if args.cmd in ("explain", "all"):
+        ex = run_explain(args.corpus, args.bin)
+        uq = ex.pop("_unqualified")
+        res.update(ex)
+        prev = json.loads(Path(args.out).read_text()) if Path(args.out).exists() else {}
+        r4 = res.get("r4") or prev.get("r4")
+        if r4 is not None:
+            r4 = dict(r4)
+            r4["unqualified"] = uq["unqualified"]
+            r4["unqualified_checked"] = uq["packed_checked"]
+            res["r4"] = r4
     merge(args.out, res)
     print(json.dumps(res, indent=2, default=list))
     return 0

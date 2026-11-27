@@ -65,10 +65,18 @@ class Card(unittest.TestCase):
         self.assertEqual(S.score_r2({"mutants": 5000})[0], 5)
 
     def test_honesty_rows_are_harsh(self):
-        self.assertEqual(S.score_r6({"unsupported_n": 300, "dropped_k": 299, "uncited_kept": 0})[0], 1)
+        self.assertEqual(S.score_r6({"unsupported_n": 300, "dropped_k": 280, "uncited_kept": 0})[0], 1)
         self.assertEqual(S.score_r6({"unsupported_n": 300, "dropped_k": 300, "uncited_kept": 1})[0], 1)
         st, _ = S.score_r4({"packed_k": 25, "packed_n": 25, "clean_flag_k": 0, "clean_n": 200, "unqualified": 1})
         self.assertEqual(st, 2)
+
+    def test_r6_is_graded_and_penalises_a_validator_that_deletes_everything(self):
+        base = {"unsupported_n": 2000, "uncited_kept": 0, "outputs": 480}
+        self.assertEqual(S.score_r6({**base, "dropped_k": 2000})[0], 5)
+        self.assertEqual(S.score_r6({**base, "dropped_k": 1995})[0], 4)
+        self.assertEqual(S.score_r6({**base, "dropped_k": 1985})[0], 3)
+        self.assertEqual(S.score_r6({**base, "dropped_k": 2000, "supported_n": 500, "supported_kept": 100})[0], 3)
+        self.assertEqual(S.score_r6({**base, "dropped_k": 2000, "outputs": 100})[0], 0)
 
     def test_r4_unmeasured_explanation_gate_caps_at_four(self):
         st, note = S.score_r4({"packed_k": 25, "packed_n": 25, "clean_flag_k": 0, "clean_n": 200, "unqualified": None})

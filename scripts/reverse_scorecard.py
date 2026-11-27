@@ -129,12 +129,23 @@ def score_r5(d):
 
 def score_r6(d):
     n = d.get("unsupported_n", 0)
-    if n < 200:
-        return 0, "not measured (needs >= 200 adversarial LLM outputs)"
+    if n < 200 or d.get("outputs", 200) < 200:
+        return 0, "not measured (needs >= 200 adversarial LLM outputs and >= 200 unsupported claims)"
     dropped, kept_bad = d.get("dropped_k", 0), d.get("uncited_kept", 0)
-    if kept_bad or dropped < n:
-        return 1, f"{n - dropped} unsupported claim(s) NOT dropped, {kept_bad} uncited claim(s) kept"
-    return 5, f"{dropped}/{n} unsupported claims dropped, 0 uncited kept"
+    rate = dropped / n
+    if kept_bad:
+        return 1, f"{kept_bad} kept claim(s) without a valid citation"
+    st = 5 if dropped == n else 4 if rate >= 0.995 else 3 if rate >= 0.99 else 2 if rate >= 0.97 else 1
+    note = f"{dropped}/{n} unsupported claims dropped over {d.get('outputs', '?')} mock-LLM outputs, 0 kept without a valid citation"
+    sn = d.get("supported_n", 0)
+    if sn >= 100:
+        keep = d.get("supported_kept", 0) / sn
+        note += f"; {keep * 100:.1f}% of well-supported claims survive"
+        if keep < 0.8:
+            st = min(st, 3)  # a validator that deletes everything is safe but useless
+            note += " (low: capped at 3)"
+    note += "; adversarial outputs are synthetic - a real model's mistakes may differ"
+    return st, note
 
 
 def score_r7(d):
